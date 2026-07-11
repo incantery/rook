@@ -155,13 +155,22 @@ async function main() {
             run: async () => {
                 const id = tabs.activeId;
                 if (!id) return;
-                const cwd = await api.sessionCwd(id);
-                if (!cwd) return;
-                await api.createWorkspace(tabs.workspace, cwd); // upsert keeps everything else
-                // inline confirmation where the breadcrumb lives
-                const prev = wsLabel.textContent;
-                wsLabel.textContent = `root → ${cwd}`;
-                setTimeout(() => (wsLabel.textContent = prev), 2500);
+                // failures must be VISIBLE: this flow once died silently on
+                // a stale daemon 404ing the cwd endpoint
+                const flash = (msg: string) => {
+                    const prev = tabs.workspace;
+                    wsLabel.textContent = msg;
+                    setTimeout(() => (wsLabel.textContent = prev), 2500);
+                };
+                try {
+                    const cwd = await api.sessionCwd(id);
+                    if (!cwd) throw new Error("host couldn't resolve the shell's cwd");
+                    await api.createWorkspace(tabs.workspace, cwd); // upsert keeps everything else
+                    flash(`root → ${cwd}`);
+                } catch (err) {
+                    console.error("set-root failed", err);
+                    flash("set-root failed — see console");
+                }
             },
         },
     );

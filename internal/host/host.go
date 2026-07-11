@@ -26,7 +26,9 @@ import (
 const (
 	// Version gates client/daemon compatibility: on drift, the daemon is
 	// replaced (sessions die with it — the tmux server-upgrade reality).
-	Version = 2
+	// BUMP THIS with any host API or storage change: a stale daemon
+	// answering health checks 404s new endpoints silently.
+	Version = 3
 	ringCap = 512 * 1024
 )
 

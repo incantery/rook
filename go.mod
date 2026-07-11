@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
+	github.com/mattn/go-sqlite3 v1.14.47
 	github.com/wailsapp/wails/v3 v3.0.0-alpha2.117
 )
 
