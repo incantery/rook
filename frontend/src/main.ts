@@ -109,6 +109,7 @@ async function main() {
     // ~/.config/rook/config; re-read on every page reload (cmd+r applies
     // edits without an app restart).
     const cfg = await Config.Get();
+    console.info("config loaded:", JSON.stringify(cfg));
     const font = `"${cfg.fontFamily}", Menlo, ui-monospace, monospace`;
 
     document.body.style.background = `rgba(15, 17, 26, ${cfg.backgroundOpacity})`;
@@ -161,8 +162,10 @@ async function main() {
     // cmd+shift+, reloads the page — ghostty's reload_config binding. The
     // whole frontend re-runs, so Config.Get() picks up file edits. Caveat
     // until the PTY host split: the shell session restarts with it.
+    // e.code, not e.key: shift+comma *is* "<" on a US layout, so matching
+    // e.key === "," can never fire with shift held.
     window.addEventListener("keydown", (e) => {
-        if (e.metaKey && e.shiftKey && e.key === ",") {
+        if (e.metaKey && e.shiftKey && e.code === "Comma") {
             e.preventDefault();
             location.reload();
         }
