@@ -196,13 +196,15 @@ tasks:
     dir: build
     sources:
       - "appicon.png"
+      - "appicon.icon"
     generates:
       - "darwin/icons.icns"
       - "windows/icon.ico"
     cmds:
-      # No -iconcomposerinput: the rook icon is a finished, pre-composed
-      # PNG, not Icon Composer layers — icns only, no Assets.car.
-      - wails3 generate icons -input appicon.png -macfilename darwin/icons.icns -windowsfilename windows/icon.ico
+      # appicon.icon wraps the same art as a full-bleed Icon Composer layer
+      # so Assets.car gets built — without it, Tahoe shrinks the icns onto
+      # a white plate (Assets.car outranks icns when present).
+      - wails3 generate icons -input appicon.png -macfilename darwin/icons.icns -windowsfilename windows/icon.ico -iconcomposerinput appicon.icon -macassetdir darwin
 
   dev:frontend:
     summary: Runs the frontend in development mode
