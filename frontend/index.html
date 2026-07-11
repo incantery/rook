@@ -12,14 +12,16 @@
         background: #0f111a;
         overflow: hidden;
       }
-      /* Side/bottom padding matches ghostty's window-padding 4px. Top padding
-         matches InvisibleTitleBarHeight in main.go: that strip is the window
-         drag region, and keeps row 0 clear of the traffic lights. */
+      /* Insets, NOT padding: the fit addon derives the grid from this
+         element's computed height and only subtracts padding on xterm's own
+         element — container padding silently inflates the grid past the
+         visible area and clips the bottom row(s). Side/bottom insets match
+         ghostty's window-padding 4px; the top inset matches
+         InvisibleTitleBarHeight in main.go (window drag region, keeps row 0
+         clear of the traffic lights). */
       #terminal {
         position: absolute;
-        inset: 0;
-        padding: 34px 4px 4px;
-        box-sizing: border-box;
+        inset: 34px 4px 4px;
       }
     </style>
   </head>
