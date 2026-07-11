@@ -8,13 +8,17 @@ import {Service as Session} from "../bindings/github.com/incantery/rook/internal
 // window resizes, so the DOM renderer is the default until that's understood.
 // In devtools: localStorage.setItem("rook.renderer", "webgl"); location.reload()
 const useWebgl = localStorage.getItem("rook.renderer") === "webgl";
+// localStorage.setItem("rook.debug", "1") logs the first PTY chunks per
+// session — the tool for "where did that stray glyph come from" questions.
+const debug = localStorage.getItem("rook.debug") === "1";
 
 // Theme + font mirror the ghostty config (Material Ocean, Hack Nerd Font
 // Mono 18, 4px padding) — the parity bar is muscle memory, eyes included.
+const FONT = '"Hack Nerd Font Mono", Menlo, ui-monospace, monospace';
 const term = new Terminal({
     allowProposedApi: true,
     cursorBlink: true,
-    fontFamily: '"Hack Nerd Font Mono", Menlo, ui-monospace, monospace',
+    fontFamily: FONT,
     fontSize: 18,
     scrollback: 10_000,
     macOptionIsMeta: true,
@@ -41,46 +45,57 @@ const term = new Terminal({
         brightWhite: "#ffffff",
     },
 });
-
 const fit = new FitAddon();
 term.loadAddon(fit);
-term.open(document.getElementById("terminal")!);
-if (useWebgl) {
-    try {
-        const webgl = new WebglAddon();
-        webgl.onContextLoss(() => webgl.dispose());
-        term.loadAddon(webgl);
-        console.info("renderer: webgl");
-    } catch (err) {
-        console.warn("WebGL addon failed, falling back to DOM renderer", err);
-    }
-} else {
-    console.info("renderer: dom (set localStorage rook.renderer=webgl to A/B)");
-}
-fit.fit();
 
-// PTY bytes flow over a localhost WebSocket (binary frames, TCP ordering) —
-// the Wails event bus drops messages under flood and a terminal can't
-// tolerate that. Bindings carry only low-rate control: spawn and resize.
 let ws: WebSocket | null = null;
 let sessionId: string | null = null;
 let spawnedAt = 0;
+let lastSentSize = "";
+
+// The single authority on terminal size. fit() derives the grid from the
+// container and *measured* cell metrics; the PTY is then told, explicitly.
+// Relying on term.onResize dropped syncs in two ways: resizes while the
+// socket was still connecting were discarded, and a PTY spawned from stale
+// (fallback-font) metrics never re-synced because xterm's own size hadn't
+// changed. Divergence looks like: fzf "full screen" ending mid-window
+// (PTY rows < grid rows), zsh's PROMPT_SP % mark surviving on its own line
+// (PTY cols > grid cols).
+function syncSize(force = false) {
+    fit.fit();
+    if (sessionId === null) return;
+    const key = `${sessionId}:${term.cols}x${term.rows}`;
+    if (!force && key === lastSentSize) return;
+    lastSentSize = key;
+    Session.Resize(sessionId, term.cols, term.rows).catch((err) => {
+        console.error("resize failed", err);
+    });
+}
 
 async function spawn() {
     sessionId = null;
     spawnedAt = Date.now();
     const endpoint = await Session.Endpoint();
     const id = await Session.Spawn(term.cols, term.rows);
+    let debugChunks = debug ? 3 : 0;
 
     const socket = new WebSocket(`${endpoint}/session/${id}`);
     socket.binaryType = "arraybuffer";
     socket.onopen = () => {
         sessionId = id;
         ws = socket;
+        // Authoritative size sync: the window may have resized while the
+        // socket was connecting, and spawn-time metrics may have been stale.
+        syncSize(true);
         term.focus();
     };
     socket.onmessage = (e: MessageEvent<ArrayBuffer>) => {
-        term.write(new Uint8Array(e.data));
+        const bytes = new Uint8Array(e.data);
+        if (debugChunks > 0) {
+            debugChunks--;
+            console.debug(`pty[${id}] chunk:`, JSON.stringify(new TextDecoder().decode(bytes)));
+        }
+        term.write(bytes);
     };
     socket.onclose = () => {
         if (sessionId !== id) return; // superseded by a newer session
@@ -100,10 +115,34 @@ term.onData((data) => {
     ws?.send(data);
 });
 
-term.onResize(({cols, rows}) => {
-    if (sessionId !== null) void Session.Resize(sessionId, cols, rows);
-});
+async function main() {
+    // Measure with the real font: fit() before the Nerd Font loads would
+    // compute the grid from fallback-font cell metrics and spawn the PTY
+    // with the wrong size.
+    try {
+        await document.fonts.load(`18px ${FONT}`);
+    } catch {
+        // fall through — worst case the onopen sync corrects the grid
+    }
 
-window.addEventListener("resize", () => fit.fit());
+    const container = document.getElementById("terminal")!;
+    term.open(container);
+    if (useWebgl) {
+        try {
+            const webgl = new WebglAddon();
+            webgl.onContextLoss(() => webgl.dispose());
+            term.loadAddon(webgl);
+            console.info("renderer: webgl");
+        } catch (err) {
+            console.warn("WebGL addon failed, falling back to DOM renderer", err);
+        }
+    } else {
+        console.info("renderer: dom (set localStorage rook.renderer=webgl to A/B)");
+    }
+    fit.fit();
 
-void spawn();
+    new ResizeObserver(() => syncSize()).observe(container);
+    await spawn();
+}
+
+void main();
