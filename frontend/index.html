@@ -5,7 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>rook</title>
     <style>
-      html,
+      /* html must stay transparent: the tint lives on body ALONE. With a
+         background on both, the config's body override sat on top of a
+         second 0.95 layer on html and opacity changes barely showed. */
+      html {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+      }
       body {
         margin: 0;
         height: 100%;
