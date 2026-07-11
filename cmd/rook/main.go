@@ -29,17 +29,21 @@ func main() {
 		Width:           1100,
 		Height:          700,
 		DevToolsEnabled: true,
+		// Per the frameless/transparent docs: BackgroundType plus an alpha-0
+		// colour make the page's pixels the window's pixels.
+		BackgroundType: application.BackgroundTypeTranslucent,
 		Mac: application.MacWindow{
 			// Matches the top padding in the frontend: the invisible bar is
 			// the drag region, and terminal row 0 starts below the traffic
 			// lights.
 			InvisibleTitleBarHeight: 34,
-			// Translucent (NSVisualEffectView), not Transparent: a fully
-			// transparent backdrop discards the native window shape —
-			// rounded corners, shadow, the lot. The 0.95 Material Ocean
-			// tint is painted full-bleed by the page; the slight vibrancy
-			// vs ghostty's plain alpha is invisible at 0.95.
-			Backdrop: application.MacBackdropTranslucent,
+			// Transparent = clear NSWindow + non-drawing webview: the page's
+			// full-bleed rgba(15,17,26,0.95) is what you see — ghostty-style
+			// plain alpha. Translucent instead injects an NSVisualEffectView,
+			// frosted blur that reads as opaque black in dark mode with no
+			// actual see-through. The window is still titled, so macOS keeps
+			// the rounded-corner clip and shadow.
+			Backdrop: application.MacBackdropTransparent,
 			TitleBar: application.MacTitleBarHiddenInset,
 		},
 		BackgroundColour: application.NewRGBA(0, 0, 0, 0),
