@@ -2,6 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 	<dict>
+		<!-- Spotlight's app search matches the display name; without this key
+		     the app never appears in cmd+space results. Re-add if
+		     `wails3 task common:update:build-assets` regenerates this file. -->
+		<key>CFBundleDisplayName</key>
+		<string>rook</string>
 		<key>CFBundleExecutable</key>
 		<string>rook</string>
 		<key>CFBundleGetInfoString</key>
