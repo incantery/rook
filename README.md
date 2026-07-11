@@ -7,7 +7,8 @@ The name works twice: rooks are the clever corvids — tool-users and the classi
 witch's familiar, which is exactly the built-in-agent story — and the chess rook
 is the castle, the home base you retreat into. Part of the
 [incantery](https://github.com/incantery) suite, but deliberately its own thing:
-it does not depend on, and is not depended on by, the other tools.
+nothing depends on rook, and rook's only planned sibling dependency is
+[sigil](https://github.com/incantery/sigil) as the frontend language (below).
 
 ## What it is
 
@@ -32,10 +33,14 @@ in those configs doesn't exist for MVP.
 
 ## Architecture decisions
 
-1. **Don't write a terminal emulator.** xterm.js (WebGL addon) in the Wails
-   frontend, `creack/pty` in the Go backend — the VS Code terminal
-   architecture. Honest tradeoff: input latency will match VS Code, not
-   ghostty. The bet is that the AI-native experience outweighs it.
+1. **xterm.js is scaffolding, not the destination.** For the kill test and
+   early parity work: xterm.js in the Wails frontend, `creack/pty` in the Go
+   backend — the VS Code terminal architecture, fastest path to a working
+   shell. The endgame (decision 7) replaces it: the PTY host owns a VT state
+   machine (a Go vt library — still not writing an emulator by hand) and
+   streams styled grid rows to the frontend. Honest tradeoff either way:
+   input latency will match VS Code, not ghostty. The bet is that the
+   AI-native experience outweighs it.
 
 2. **Separate PTY host process from day one.** A small Go process that owns
    the PTYs and speaks to the UI over a unix socket. This is the tmux server:
@@ -64,6 +69,19 @@ in those configs doesn't exist for MVP.
    fits subscription billing; the engine can swap to Agent SDK + API later
    without the app changing.
 
+7. **Frontend endgame: sigil, zero node/npm in the repo.** The UI will be
+   written in [sigil](https://github.com/incantery/sigil) — typed, reactive,
+   compiled by a Go toolchain to one self-contained bundle. Sigil's host
+   boundary (`window.__sigilHost`, see sigil's `docs/host-boundary.md`) is
+   the integration contract, and its `echoterm` example is the proto-rook:
+   grid rows stream from the host (`term/grid`), keystrokes flow down
+   (`term/key`), reattach is snapshot-on-boot (`term/snapshot`). Terminal
+   emulation lives host-side in Go; sigil renders the grid. Sigil has no
+   foreign-JS seam, so xterm.js cannot come along — the xterm.js long tail
+   (selection, IME, mouse reporting, OSC 52) moves in-house when this lands.
+   The TS/Vite scaffold and xterm.js are explicitly interim; npm dies with
+   them.
+
 ## Week one is a kill test, not a milestone
 
 Wails v3 + xterm.js + creack/pty, one pane, then spend a real hour working in
@@ -91,6 +109,11 @@ while living in it. Agent work starts after the switch.
 
 ## Open questions
 
+- **Sigil grid throughput**: can sigil's fine-grained DOM updates survive
+  flood output (`yes`, full-screen vim redraws) at key-echo latency? This is
+  the kill-test question for decision 7, and it runs in the *sigil* repo —
+  grow echoterm against a flood host, no Wails required. Until it passes,
+  xterm.js stays.
 - **Remote sessions**: is ssh + attach part of the daily flow? Local-only
   keeps the PTY host trivial; remote attach is a much bigger design surface.
   Current lean: punt — keep tmux for remote until rook earns it locally.
