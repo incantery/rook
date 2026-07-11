@@ -1,7 +1,7 @@
 [Desktop Entry]
 Version=1.0
-Name=My Product
-Comment=A rook application
+Name=rook
+Comment=An AI-native terminal for the agent age
 # The Exec line includes %u to pass the URL to the application
 Exec=/usr/local/bin/rook %u
 Terminal=false
