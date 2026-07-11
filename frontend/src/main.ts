@@ -17,13 +17,15 @@ const debug = localStorage.getItem("rook.debug") === "1";
 const FONT = '"Hack Nerd Font Mono", Menlo, ui-monospace, monospace';
 const term = new Terminal({
     allowProposedApi: true,
+    allowTransparency: true,
     cursorBlink: true,
     fontFamily: FONT,
     fontSize: 18,
     scrollback: 10_000,
     macOptionIsMeta: true,
     theme: {
-        background: "#0f111a",
+        // Material Ocean at ghostty's background-opacity 0.95 (f2 ≈ 0.95).
+        background: "#0f111af2",
         foreground: "#8f93a2",
         cursor: "#ffcc00",
         selectionBackground: "#717cb4",
