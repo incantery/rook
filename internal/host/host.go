@@ -29,11 +29,14 @@ const (
 )
 
 type SessionInfo struct {
-	ID      string    `json:"id"`
-	Name    string    `json:"name"`
-	Cols    int       `json:"cols"`
-	Rows    int       `json:"rows"`
-	Created time.Time `json:"created"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Workspace groups sessions the way tmux sessions group windows; the
+	// host only tags and reports it, grouping is a client concern.
+	Workspace string    `json:"workspace"`
+	Cols      int       `json:"cols"`
+	Rows      int       `json:"rows"`
+	Created   time.Time `json:"created"`
 }
 
 type session struct {
@@ -69,7 +72,10 @@ func (h *Host) Token() string { return h.token }
 
 // ---- session lifecycle ----
 
-func (h *Host) spawn(cols, rows int, cwd string) (*session, error) {
+func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
+	if workspace == "" {
+		workspace = "main"
+	}
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/zsh"
@@ -91,11 +97,12 @@ func (h *Host) spawn(cols, rows int, cwd string) (*session, error) {
 	h.nextID++
 	s := &session{
 		info: SessionInfo{
-			ID:      fmt.Sprintf("s%d", h.nextID),
-			Name:    fmt.Sprintf("%s — %d", filepath.Base(shell), h.nextID),
-			Cols:    cols,
-			Rows:    rows,
-			Created: time.Now(),
+			ID:        fmt.Sprintf("s%d", h.nextID),
+			Name:      fmt.Sprintf("%s — %d", filepath.Base(shell), h.nextID),
+			Workspace: workspace,
+			Cols:      cols,
+			Rows:      rows,
+			Created:   time.Now(),
 		},
 		pty: f,
 		cmd: cmd,
@@ -241,6 +248,7 @@ func (h *Host) handleSessions(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Cols, Rows int
 			CwdFrom    string // inherit the working directory of this session's shell
+			Workspace  string
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if req.Cols <= 0 || req.Cols > 1000 {
@@ -253,7 +261,7 @@ func (h *Host) handleSessions(w http.ResponseWriter, r *http.Request) {
 		if from := h.get(req.CwdFrom); from != nil {
 			cwd = cwdOf(from.cmd.Process.Pid)
 		}
-		s, err := h.spawn(req.Cols, req.Rows, cwd)
+		s, err := h.spawn(req.Cols, req.Rows, cwd, req.Workspace)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

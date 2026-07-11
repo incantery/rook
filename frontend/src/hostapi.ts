@@ -5,6 +5,7 @@
 export interface SessionInfo {
     id: string;
     name: string;
+    workspace: string;
     cols: number;
     rows: number;
     created: string;
@@ -31,11 +32,11 @@ export class HostAPI {
 
     /** cwdFrom: inherit the working directory of that session's shell
      *  (tmux `new-window -c "#{pane_current_path}"`). */
-    async create(cols: number, rows: number, cwdFrom?: string): Promise<SessionInfo> {
+    async create(cols: number, rows: number, cwdFrom?: string, workspace?: string): Promise<SessionInfo> {
         return (
             await this.req("/sessions", {
                 method: "POST",
-                body: JSON.stringify({cols, rows, cwdFrom}),
+                body: JSON.stringify({cols, rows, cwdFrom, workspace}),
             })
         ).json();
     }

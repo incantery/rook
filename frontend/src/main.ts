@@ -9,6 +9,7 @@ import {HostAPI} from "./hostapi";
 import {Tabs} from "./tabs";
 import {Registry} from "./registry";
 import {Palette} from "./palette";
+import {WorkspacePicker} from "./picker";
 
 // Renderer A/B switch: WebGL showed stale-frame artifacts in WKWebView, so
 // the DOM renderer is the default until that's re-judged.
@@ -104,6 +105,15 @@ async function main() {
 
     const registry = new Registry();
     const palette = new Palette(registry, () => tabs.focusActive());
+    const picker = new WorkspacePicker(tabs, () => tabs.focusActive());
+
+    // Titlebar breadcrumb: current workspace, click to switch (design's
+    // workspace switcher affordance).
+    const wsLabel = document.getElementById("ws-label")!;
+    tabs.onChange = () => {
+        wsLabel.textContent = tabs.workspace;
+    };
+    wsLabel.addEventListener("click", () => picker.open());
     registry.register(
         {id: "palette.toggle", title: "Command palette", category: "View", keys: "⌘K", run: () => palette.toggle()},
         {id: "session.new", title: "New window (inherits cwd)", category: "Session", keys: "` c", run: () => tabs.newSession()},
@@ -111,6 +121,7 @@ async function main() {
         {id: "session.next", title: "Next window", category: "Session", keys: "⌘⇧]", run: () => tabs.next()},
         {id: "session.prev", title: "Previous window", category: "Session", keys: "⌘⇧[", run: () => tabs.prev()},
         {id: "config.reload", title: "Reload config", category: "Config", keys: "` r", run: () => location.reload()},
+        {id: "workspace.switch", title: "Switch workspace…", category: "Workspace", keys: "` s", run: () => picker.open()},
     );
     document.getElementById("palette-btn")!.addEventListener("click", () => registry.run("palette.toggle"));
 
@@ -138,6 +149,7 @@ async function main() {
                 }
                 return; // palette's own input handles the rest
             }
+            if (picker.visible) return; // picker's own input handles keys
 
             if (prefixArmed) {
                 if (e.key === "Shift" || e.key === "Meta" || e.key === "Alt" || e.key === "Control") return;
@@ -149,6 +161,7 @@ async function main() {
                 else if (e.key === "x") registry.run("session.close");
                 else if (e.key === "r") registry.run("config.reload");
                 else if (e.key === "k") registry.run("palette.toggle");
+                else if (e.key === "s") registry.run("workspace.switch");
                 else if (/^[1-9]$/.test(e.key)) tabs.switchTo(Number(e.key) - 1);
                 // anything else: prefix consumed, key ignored — tmux behavior
                 return;

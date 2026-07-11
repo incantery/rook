@@ -1,35 +1,42 @@
-// Command palette (⌘K), per the Rook.dc.html design: overlay, fuzzy-ish
-// filter, arrow navigation, enter to run. Purely a view over the Registry.
+// Workspace switcher (` s) — tmux choose-session. Lists workspaces with
+// window counts; typing filters, and a name that matches nothing offers
+// "create workspace" (tmux new-session). Reuses the palette's styling.
 
-import type {Command, Registry} from "./registry";
+import type {Tabs} from "./tabs";
 
-export class Palette {
+interface Item {
+    label: string;
+    detail: string;
+    create: boolean;
+}
+
+export class WorkspacePicker {
     private overlay: HTMLElement;
     private input: HTMLInputElement;
     private listEl: HTMLElement;
     private sel = 0;
-    private current: Command[] = [];
+    private items: Item[] = [];
 
     constructor(
-        private registry: Registry,
+        private tabs: Tabs,
         private onClose: () => void,
     ) {
         this.overlay = document.createElement("div");
-        this.overlay.id = "palette";
+        this.overlay.id = "ws-picker";
         this.overlay.className = "overlay";
         this.overlay.hidden = true;
         this.overlay.innerHTML = `
           <div class="pal-panel">
             <div class="pal-inputrow">
               <span class="pal-chevron">›</span>
-              <input class="pal-input" placeholder="Run a command…" spellcheck="false" />
+              <input class="pal-input" placeholder="Switch workspace — or type a new name…" spellcheck="false" />
               <span class="pal-esc">esc</span>
             </div>
             <div class="pal-list"></div>
             <div class="pal-footer">
-              <span>↑↓ navigate</span><span>↵ run</span>
+              <span>↑↓ navigate</span><span>↵ switch / create</span>
               <span class="pal-spacer"></span>
-              <span>humans + agents share this registry</span>
+              <span>workspace = tmux session</span>
             </div>
           </div>`;
         document.body.appendChild(this.overlay);
@@ -46,7 +53,7 @@ export class Palette {
         this.input.addEventListener("keydown", (e) => {
             if (e.key === "ArrowDown") {
                 e.preventDefault();
-                this.sel = Math.min(this.sel + 1, this.current.length - 1);
+                this.sel = Math.min(this.sel + 1, this.items.length - 1);
                 this.render();
             } else if (e.key === "ArrowUp") {
                 e.preventDefault();
@@ -54,11 +61,7 @@ export class Palette {
                 this.render();
             } else if (e.key === "Enter") {
                 e.preventDefault();
-                const cmd = this.current[this.sel];
-                if (cmd) {
-                    this.close();
-                    this.registry.run(cmd.id);
-                }
+                this.pick(this.items[this.sel]);
             } else if (e.key === "Escape") {
                 e.preventDefault();
                 e.stopPropagation();
@@ -85,33 +88,41 @@ export class Palette {
         this.onClose();
     }
 
-    toggle(): void {
-        this.visible ? this.close() : this.open();
+    private pick(item: Item | undefined): void {
+        if (!item) return;
+        this.close();
+        if (item.create) void this.tabs.newWorkspace(item.label);
+        else this.tabs.switchWorkspace(item.label);
     }
 
     private render(): void {
-        const q = this.input.value.trim().toLowerCase();
-        this.current = this.registry
-            .all()
-            .filter((c) => !q || c.title.toLowerCase().includes(q) || c.category.toLowerCase().includes(q));
+        const q = this.input.value.trim();
+        const ql = q.toLowerCase();
+        const existing = this.tabs.workspaces();
+        this.items = existing
+            .filter((w) => !ql || w.name.toLowerCase().includes(ql))
+            .map((w) => ({
+                label: w.name,
+                detail:
+                    `${w.count} window${w.count === 1 ? "" : "s"}` +
+                    (w.name === this.tabs.workspace ? " · current" : ""),
+                create: false,
+            }));
+        if (q && !existing.some((w) => w.name.toLowerCase() === ql)) {
+            this.items.push({label: q, detail: "create workspace", create: true});
+        }
         this.listEl.innerHTML = "";
-        this.current.forEach((cmd, i) => {
+        this.items.forEach((item, i) => {
             const row = document.createElement("div");
             row.className = "pal-item" + (i === this.sel ? " sel" : "");
-            row.innerHTML = `
-              <span class="pal-title"></span>
-              <span class="pal-cat"></span>
-              <span class="pal-keys"></span>`;
-            row.querySelector(".pal-title")!.textContent = cmd.title;
-            row.querySelector(".pal-cat")!.textContent = cmd.category;
-            row.querySelector(".pal-keys")!.textContent = cmd.keys ?? "";
+            row.innerHTML = `<span class="pal-title"></span><span class="pal-cat"></span>`;
+            row.querySelector(".pal-title")!.textContent = (item.create ? "＋ " : "") + item.label;
+            row.querySelector(".pal-cat")!.textContent = item.detail;
             row.addEventListener("mousedown", (e) => {
                 e.preventDefault();
-                this.close();
-                this.registry.run(cmd.id);
+                this.pick(item);
             });
             this.listEl.appendChild(row);
         });
-        this.listEl.querySelector(".sel")?.scrollIntoView({block: "nearest"});
     }
 }

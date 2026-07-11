@@ -78,6 +78,22 @@
       .tab-new {
         font-size: 14px;
       }
+      #ws-label {
+        position: absolute;
+        left: 84px;
+        top: 0;
+        bottom: 0;
+        display: flex;
+        align-items: center;
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--lo);
+        cursor: pointer;
+        padding: 0 6px;
+      }
+      #ws-label:hover {
+        color: var(--dim);
+      }
       #prefix-pill {
         align-self: center;
         margin-right: 10px;
@@ -148,8 +164,8 @@
         background-color: transparent !important;
       }
 
-      /* ==== command palette (Rook.dc.html) ==== */
-      #palette {
+      /* ==== command palette + workspace picker overlays ==== */
+      .overlay {
         position: fixed;
         inset: 0;
         background: rgba(8, 10, 16, 0.55);
@@ -159,7 +175,7 @@
         padding-top: 12vh;
         z-index: 50;
       }
-      #palette[hidden] {
+      .overlay[hidden] {
         display: none;
       }
       .pal-panel {
@@ -260,6 +276,7 @@
   </head>
   <body>
     <div id="titlebar">
+      <span id="ws-label" style="--wails-draggable: no-drag" title="Switch workspace (` s)"></span>
       <div id="tabs"></div>
       <span id="prefix-pill" hidden>prefix</span>
       <button id="palette-btn" style="--wails-draggable: no-drag">
