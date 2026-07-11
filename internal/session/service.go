@@ -18,9 +18,12 @@ import (
 
 // DataEvent carries one chunk of PTY output. Data is base64 because chunks
 // can split UTF-8 sequences mid-rune and JSON cannot carry invalid UTF-8;
-// xterm.js decodes the raw bytes with its own stream-safe decoder.
+// xterm.js decodes the raw bytes with its own stream-safe decoder. Seq is
+// per-session and lets the frontend detect dropped or reordered chunks —
+// either corrupts the escape-sequence stream and garbles the screen.
 type DataEvent struct {
 	ID   string `json:"id"`
+	Seq  uint64 `json:"seq"`
 	Data string `json:"data"`
 }
 
@@ -77,11 +80,14 @@ func (s *Service) Spawn(cols, rows int) (string, error) {
 func (s *Service) readLoop(id string, sess *session) {
 	app := application.Get()
 	buf := make([]byte, 32*1024)
+	var seq uint64
 	for {
 		n, err := sess.pty.Read(buf)
 		if n > 0 {
+			seq++
 			app.Event.Emit("pty:data", DataEvent{
 				ID:   id,
+				Seq:  seq,
 				Data: base64.StdEncoding.EncodeToString(buf[:n]),
 			})
 		}

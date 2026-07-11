@@ -25,9 +25,10 @@ func main() {
 	})
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:  "rook",
-		Width:  1100,
-		Height: 700,
+		Title:           "rook",
+		Width:           1100,
+		Height:          700,
+		DevToolsEnabled: true,
 		Mac: application.MacWindow{
 			// Matches the top padding in the frontend: the invisible bar is
 			// the drag region, and terminal row 0 starts below the traffic
@@ -36,7 +37,8 @@ func main() {
 			Backdrop:                application.MacBackdropTranslucent,
 			TitleBar:                application.MacTitleBarHiddenInset,
 		},
-		BackgroundColour: application.NewRGB(6, 7, 15),
+		// Material Ocean background, matching the ghostty theme.
+		BackgroundColour: application.NewRGB(15, 17, 26),
 		URL:              "/",
 	})
 

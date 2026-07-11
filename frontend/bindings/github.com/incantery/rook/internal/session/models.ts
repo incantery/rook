@@ -4,10 +4,13 @@
 /**
  * DataEvent carries one chunk of PTY output. Data is base64 because chunks
  * can split UTF-8 sequences mid-rune and JSON cannot carry invalid UTF-8;
- * xterm.js decodes the raw bytes with its own stream-safe decoder.
+ * xterm.js decodes the raw bytes with its own stream-safe decoder. Seq is
+ * per-session and lets the frontend detect dropped or reordered chunks —
+ * either corrupts the escape-sequence stream and garbles the screen.
  */
 export interface DataEvent {
     "id": string;
+    "seq": number;
     "data": string;
 }
 
