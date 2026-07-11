@@ -21,6 +21,9 @@ dev:
 	wails3 dev
 
 package:
+	@# The bundle task only adds files into an existing .app — a stale
+	@# bundle keeps files the build no longer produces (e.g. Assets.car).
+	rm -rf bin/rook.app
 	wails3 task package
 
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
