@@ -45,6 +45,12 @@ export class HostAPI {
         await this.req(`/sessions/${id}`, {method: "DELETE"});
     }
 
+    /** The shell's live working directory (host resolves via lsof). */
+    async sessionCwd(id: string): Promise<string> {
+        const r = await this.req(`/sessions/${id}/cwd`);
+        return ((await r.json()) as {cwd: string}).cwd;
+    }
+
     async resize(id: string, cols: number, rows: number): Promise<void> {
         await this.req(`/sessions/${id}/resize`, {
             method: "POST",

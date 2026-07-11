@@ -72,6 +72,18 @@ export class Home {
         this.renderGrid();
     }
 
+    /** Surface a failure on the manager instead of a blank screen. */
+    showError(msg: string): void {
+        let el = this.el.querySelector<HTMLElement>("#home-error");
+        if (!el) {
+            el = document.createElement("div");
+            el.id = "home-error";
+            this.grid.parentElement!.insertBefore(el, this.grid);
+        }
+        el.textContent = msg;
+        setTimeout(() => el?.remove(), 6000);
+    }
+
     private renderBanner(): void {
         const live = this.workspaces.filter((w) => w.sessions > 0);
         this.banner.innerHTML = "";

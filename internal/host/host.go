@@ -76,6 +76,22 @@ func (h *Host) Token() string { return h.token }
 
 // ---- session lifecycle ----
 
+// expandPath resolves a leading ~; returns "" for paths that don't exist so
+// callers fall back rather than failing the spawn.
+func expandPath(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		p = filepath.Join(home, strings.TrimPrefix(p[1:], "/"))
+	}
+	if st, err := os.Stat(p); err != nil || !st.IsDir() {
+		return ""
+	}
+	return p
+}
+
 func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
 	if workspace == "" {
 		workspace = "main"
@@ -85,7 +101,9 @@ func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
 		shell = "/bin/zsh"
 	}
 	cmd := exec.Command(shell, "-l")
-	if cwd != "" {
+	// A bad cwd (typo'd root, deleted dir) must not fail the spawn — fall
+	// back to home.
+	if cwd = expandPath(cwd); cwd != "" {
 		cmd.Dir = cwd
 	} else if home, err := os.UserHomeDir(); err == nil {
 		cmd.Dir = home
@@ -246,6 +264,12 @@ func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name required", http.StatusBadRequest)
 			return
 		}
+		// store roots tilde-expanded; existence is checked at spawn time
+		if req.Root == "~" || strings.HasPrefix(req.Root, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				req.Root = filepath.Join(home, strings.TrimPrefix(req.Root[1:], "/"))
+			}
+		}
 		writeJSON(w, h.reg.upsert(req.Name, req.Root, req.Scratch))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -380,6 +404,10 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 	case action == "" && r.Method == http.MethodDelete:
 		h.kill(id)
 		w.WriteHeader(http.StatusNoContent)
+	case action == "cwd" && r.Method == http.MethodGet:
+		// the shell's live working directory — feeds "set workspace root
+		// to here" and anything else that wants where the user actually is
+		writeJSON(w, map[string]string{"cwd": cwdOf(s.cmd.Process.Pid)})
 	case action == "resize" && r.Method == http.MethodPost:
 		var req struct{ Cols, Rows int }
 		json.NewDecoder(r.Body).Decode(&req)

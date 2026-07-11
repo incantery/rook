@@ -198,6 +198,10 @@ export class Tabs {
         this.active?.term.focus();
     }
 
+    get activeId(): string | null {
+        return this.active?.id ?? null;
+    }
+
     sendToActive(data: string): void {
         if (this.active?.ws?.readyState === WebSocket.OPEN) this.active.ws.send(data);
     }

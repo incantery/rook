@@ -475,6 +475,16 @@
         background: rgba(255, 203, 107, 0.12);
         color: #ffcb6b;
       }
+      #home-error {
+        margin: 0 0 14px;
+        padding: 10px 14px;
+        border: 1px solid rgba(255, 83, 112, 0.4);
+        border-radius: 8px;
+        background: rgba(255, 83, 112, 0.08);
+        color: #ff5370;
+        font-size: 12px;
+        font-family: var(--mono);
+      }
       .home-empty {
         grid-column: 1 / -1;
         padding: 40px;
@@ -566,7 +576,7 @@
         <div class="ws-modal-title">New workspace</div>
         <div class="ws-form">
           <label><span>Name</span><input id="ws-modal-name" placeholder="e.g. rook-core" spellcheck="false" /></label>
-          <label><span>Directory (optional — first shell starts here)</span><input id="ws-modal-root" placeholder="~/go/src/github.com/incantery/rook" spellcheck="false" /></label>
+          <label><span>Directory (optional — or set it later from inside the workspace: cd anywhere, then ` .)</span><input id="ws-modal-root" placeholder="~/go/src/github.com/incantery/rook" spellcheck="false" /></label>
         </div>
         <div class="ws-modal-foot">
           <button id="ws-modal-cancel" class="home-btn">Cancel</button>

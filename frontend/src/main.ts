@@ -106,7 +106,13 @@ async function main() {
     async function showWorkspace(name: string): Promise<void> {
         home.hide();
         appScreen.hidden = false; // visible before openWorkspace: fit needs real dimensions
-        await tabs.openWorkspace(name);
+        try {
+            await tabs.openWorkspace(name);
+        } catch (err) {
+            console.error("failed to open workspace", name, err);
+            showHome();
+            home.showError(`Couldn't open "${name}": ${err}`);
+        }
     }
     function showHome(): void {
         appScreen.hidden = true;
@@ -141,6 +147,23 @@ async function main() {
         {id: "workspace.switch", title: "Switch workspace…", category: "Workspace", keys: "` s", run: () => picker.open()},
         {id: "workspace.manager", title: "Workspace manager", category: "Workspace", keys: "` h", run: showHome},
         {id: "workspace.scratch", title: "New scratch shell", category: "Workspace", run: () => home.scratch()},
+        {
+            id: "workspace.set-root",
+            title: "Set workspace root to shell's directory",
+            category: "Workspace",
+            keys: "` .",
+            run: async () => {
+                const id = tabs.activeId;
+                if (!id) return;
+                const cwd = await api.sessionCwd(id);
+                if (!cwd) return;
+                await api.createWorkspace(tabs.workspace, cwd); // upsert keeps everything else
+                // inline confirmation where the breadcrumb lives
+                const prev = wsLabel.textContent;
+                wsLabel.textContent = `root → ${cwd}`;
+                setTimeout(() => (wsLabel.textContent = prev), 2500);
+            },
+        },
     );
     document.getElementById("palette-btn")!.addEventListener("click", () => registry.run("palette.toggle"));
 
@@ -191,6 +214,7 @@ async function main() {
                 else if (e.key === "k") registry.run("palette.toggle");
                 else if (e.key === "s") registry.run("workspace.switch");
                 else if (e.key === "h") registry.run("workspace.manager");
+                else if (e.key === ".") registry.run("workspace.set-root");
                 else if (/^[1-9]$/.test(e.key)) tabs.switchTo(Number(e.key) - 1);
                 // anything else: prefix consumed, key ignored — tmux behavior
                 return;
