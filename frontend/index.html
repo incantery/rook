@@ -9,10 +9,11 @@
       body {
         margin: 0;
         height: 100%;
-        /* The one place the background tint is painted: Material Ocean at
-           ghostty's background-opacity 0.95, full-bleed so the titlebar
-           strip and edge margins are tinted too. xterm's own background is
-           fully transparent — tinting there as well would double-apply. */
+        /* The one place the background tint is painted: full-bleed, so the
+           titlebar strip and edge margins are tinted too. This value is the
+           pre-JS default; main.ts overwrites it from the rook config's
+           background-opacity. xterm's own background is fully transparent —
+           tinting there as well would double-apply. */
         background: rgba(15, 17, 26, 0.95);
         overflow: hidden;
       }
@@ -26,6 +27,12 @@
       #terminal {
         position: absolute;
         inset: 34px 4px 4px;
+      }
+      /* xterm v6 ships `.xterm-viewport { background-color: #000 }` on a
+         bare div that ignores theme.background entirely — it would paint an
+         opaque black box over the translucent body tint. */
+      .xterm .xterm-viewport {
+        background-color: transparent !important;
       }
     </style>
   </head>

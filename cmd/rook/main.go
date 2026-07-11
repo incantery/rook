@@ -6,6 +6,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"github.com/incantery/rook/frontend"
+	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/session"
 )
 
@@ -15,6 +16,7 @@ func main() {
 		Description: "An AI-native terminal for the agent age",
 		Services: []application.Service{
 			application.NewService(&session.Service{}),
+			application.NewService(&config.Service{}),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(frontend.Assets),
@@ -46,6 +48,9 @@ func main() {
 			Backdrop: application.MacBackdropTransparent,
 			TitleBar: application.MacTitleBarHiddenInset,
 		},
+		// Alpha here is moot on macOS: MacBackdropTransparent overrides the
+		// window colour with clearColor and the webview doesn't draw its
+		// background — the page CSS is the only layer that paints.
 		BackgroundColour: application.NewRGBA(0, 0, 0, 0),
 		URL:              "/",
 	})

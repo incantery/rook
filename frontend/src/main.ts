@@ -3,6 +3,7 @@ import {FitAddon} from "@xterm/addon-fit";
 import {WebglAddon} from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import {Service as Session} from "../bindings/github.com/incantery/rook/internal/session";
+import {Service as Config} from "../bindings/github.com/incantery/rook/internal/config";
 
 // Renderer A/B switch: WebGL showed stale-frame artifacts in WKWebView after
 // window resizes, so the DOM renderer is the default until that's understood.
@@ -12,45 +13,35 @@ const useWebgl = localStorage.getItem("rook.renderer") === "webgl";
 // session — the tool for "where did that stray glyph come from" questions.
 const debug = localStorage.getItem("rook.debug") === "1";
 
-// Theme + font mirror the ghostty config (Material Ocean, Hack Nerd Font
-// Mono 18, 4px padding) — the parity bar is muscle memory, eyes included.
-const FONT = '"Hack Nerd Font Mono", Menlo, ui-monospace, monospace';
-const term = new Terminal({
-    allowProposedApi: true,
-    allowTransparency: true,
-    cursorBlink: true,
-    fontFamily: FONT,
-    fontSize: 18,
-    scrollback: 10_000,
-    macOptionIsMeta: true,
-    theme: {
-        // Fully transparent: the page body paints the Material Ocean tint
-        // (once, full-bleed); xterm only paints non-default cell backgrounds.
-        background: "#00000000",
-        foreground: "#8f93a2",
-        cursor: "#ffcc00",
-        selectionBackground: "#717cb4",
-        black: "#546e7a",
-        red: "#ff5370",
-        green: "#c3e88d",
-        yellow: "#ffcb6b",
-        blue: "#82aaff",
-        magenta: "#c792ea",
-        cyan: "#89ddff",
-        white: "#eeffff",
-        brightBlack: "#546e7a",
-        brightRed: "#ff5370",
-        brightGreen: "#c3e88d",
-        brightYellow: "#ffcb6b",
-        brightBlue: "#82aaff",
-        brightMagenta: "#c792ea",
-        brightCyan: "#89ddff",
-        brightWhite: "#ffffff",
-    },
-});
-const fit = new FitAddon();
-term.loadAddon(fit);
+// Material Ocean, matching the ghostty theme. The background is fully
+// transparent: the page body paints the tint (once, full-bleed, with the
+// config's background-opacity); xterm only paints non-default cell
+// backgrounds over it.
+const THEME = {
+    background: "#00000000",
+    foreground: "#8f93a2",
+    cursor: "#ffcc00",
+    selectionBackground: "#717cb4",
+    black: "#546e7a",
+    red: "#ff5370",
+    green: "#c3e88d",
+    yellow: "#ffcb6b",
+    blue: "#82aaff",
+    magenta: "#c792ea",
+    cyan: "#89ddff",
+    white: "#eeffff",
+    brightBlack: "#546e7a",
+    brightRed: "#ff5370",
+    brightGreen: "#c3e88d",
+    brightYellow: "#ffcb6b",
+    brightBlue: "#82aaff",
+    brightMagenta: "#c792ea",
+    brightCyan: "#89ddff",
+    brightWhite: "#ffffff",
+};
 
+let term!: Terminal;
+let fit!: FitAddon;
 let ws: WebSocket | null = null;
 let sessionId: string | null = null;
 let spawnedAt = 0;
@@ -114,21 +105,40 @@ async function spawn() {
     };
 }
 
-term.onData((data) => {
-    ws?.send(data);
-});
-
 async function main() {
-    // Measure with the real font: fit() before the Nerd Font loads would
-    // compute the grid from fallback-font cell metrics and spawn the PTY
-    // with the wrong size.
+    // ~/.config/rook/config; re-read on every page reload (cmd+r applies
+    // edits without an app restart).
+    const cfg = await Config.Get();
+    const font = `"${cfg.fontFamily}", Menlo, ui-monospace, monospace`;
+
+    document.body.style.background = `rgba(15, 17, 26, ${cfg.backgroundOpacity})`;
+
+    const container = document.getElementById("terminal")!;
+    // Top inset stays fixed: it's the drag region under the traffic lights
+    // (InvisibleTitleBarHeight in main.go), not user padding.
+    container.style.inset = `34px ${cfg.windowPaddingX}px ${cfg.windowPaddingY}px`;
+
+    // Measure with the real font: fit() before it loads would compute the
+    // grid from fallback-font cell metrics and spawn the PTY at the wrong
+    // size.
     try {
-        await document.fonts.load(`18px ${FONT}`);
+        await document.fonts.load(`${cfg.fontSize}px ${font}`);
     } catch {
         // fall through — worst case the onopen sync corrects the grid
     }
 
-    const container = document.getElementById("terminal")!;
+    term = new Terminal({
+        allowProposedApi: true,
+        allowTransparency: true,
+        cursorBlink: true,
+        fontFamily: font,
+        fontSize: cfg.fontSize,
+        scrollback: 10_000,
+        macOptionIsMeta: true,
+        theme: THEME,
+    });
+    fit = new FitAddon();
+    term.loadAddon(fit);
     term.open(container);
     if (useWebgl) {
         try {
@@ -143,6 +153,10 @@ async function main() {
         console.info("renderer: dom (set localStorage rook.renderer=webgl to A/B)");
     }
     fit.fit();
+
+    term.onData((data) => {
+        ws?.send(data);
+    });
 
     new ResizeObserver(() => syncSize()).observe(container);
     await spawn();
