@@ -28,6 +28,7 @@ export class Tabs {
     private current = "main";
     private lastActive = new Map<string, Tab>();
     private dashActive = false;
+    private attention = new Set<string>();
     /** Strip number of the dashboard (config dashboard-tab); shell
      *  windows display as dashTab+1, dashTab+2, … */
     dashTab = 1;
@@ -174,6 +175,14 @@ export class Tabs {
         this.renderStrip();
     }
 
+    /** Session ids whose agent is waiting on the user — their window
+     *  numbers pulse (tmux monitor-activity, but for claude). */
+    setAttention(ids: Set<string>): void {
+        if (ids.size === this.attention.size && [...ids].every((id) => this.attention.has(id))) return;
+        this.attention = ids;
+        this.renderStrip();
+    }
+
     /** Fit the active grid to its container and tell the PTY, deduped. */
     syncSize(force = false): void {
         const tab = this.active;
@@ -257,7 +266,10 @@ export class Tabs {
         this.stripEl.appendChild(dash);
         this.wsTabs().forEach((tab, i) => {
             const btn = document.createElement("button");
-            btn.className = "tab" + (tab === this.active && !this.dashActive ? " active" : "");
+            let cls = "tab" + (tab === this.active && !this.dashActive ? " active" : "");
+            // the window you're looking at doesn't need to flag you down
+            if (this.attention.has(tab.id) && (tab !== this.active || this.dashActive)) cls += " attn";
+            btn.className = cls;
             btn.style.setProperty("--wails-draggable", "no-drag");
             btn.textContent = String(this.dashTab + 1 + i);
             btn.title = tab.name;

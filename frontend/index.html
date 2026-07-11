@@ -82,6 +82,16 @@
         color: var(--acc);
         font-weight: 700;
       }
+      /* a claude session in this window is waiting on you */
+      .tab.attn {
+        color: #ffcb6b;
+        animation: attn-pulse 1.6s ease-in-out infinite;
+      }
+      @keyframes attn-pulse {
+        50% {
+          opacity: 0.45;
+        }
+      }
       #ws-label {
         position: absolute;
         left: 84px;
@@ -299,6 +309,35 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      .dash-agent {
+        margin-top: 9px;
+        padding-top: 8px;
+        border-top: 1px solid var(--line);
+      }
+      .dash-agent-chip {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--dim);
+      }
+      .dash-agent.working .dash-agent-chip {
+        color: var(--grn);
+      }
+      .dash-agent.needs_input .dash-agent-chip {
+        color: #ffcb6b;
+      }
+      .dash-agent.quiet .dash-agent-chip {
+        color: var(--lo);
+      }
+      .dash-agent-text {
+        margin-top: 5px;
+        font-size: 11px;
+        color: var(--dim);
+        line-height: 1.45;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
       }
       .dash-actions {
         display: flex;

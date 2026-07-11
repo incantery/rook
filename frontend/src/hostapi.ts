@@ -101,9 +101,24 @@ export interface GitInfo {
     behind: number;
 }
 
+/** Transcript-derived state of a claude session (via agentmon). */
+export interface AgentStatus {
+    sessionId: string;
+    cwd: string;
+    state: "working" | "needs_input" | "quiet";
+    title?: string;
+    ask?: string;
+    tool?: string;
+    model?: string;
+    costUsd?: number;
+    since: string;
+    lastEvent: string;
+}
+
 export interface SessionStatus extends SessionInfo {
     fg: string;
     cwd: string;
+    agent?: AgentStatus;
 }
 
 export interface WorkspaceStatus {
@@ -112,4 +127,5 @@ export interface WorkspaceStatus {
     scratch?: boolean;
     git?: GitInfo;
     sessions: SessionStatus[];
+    attention: number;
 }

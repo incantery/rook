@@ -45,6 +45,39 @@ burn claude-session time — see the escalation gate.
   terminal. Reliability of a nano-tier model goes way up when the input is
   events.
 
+## Amendment (2026-07-11): agentmon covers interactive sessions
+
+stream-json only helps sessions the agent spawns. The sessions that
+actually need watching are the interactive ones the user runs — and
+agentmon (github.com/incantery/agentmon) already derives structured events
+from their transcripts (`~/.claude/projects/**/*.jsonl`): session
+lifecycle, prompts, tool calls, turn completions, idle detection, cost.
+
+So rook-host consumes `agentmon watch --dry-run` (NDJSON over stdout,
+nothing written to disk) and reduces it to one state per claude session —
+`internal/host/agentwatch.go`:
+
+- `turn_completed` → **needs_input** (claude finished; the last assistant
+  text is the question waiting for an answer)
+- any transcript event → **working**
+- `session_idle` mid-turn → **quiet** (long tool run or a permission
+  prompt; the transcript can't distinguish them, so rook reports the tool
+  and the silence, not a guess)
+
+Correlation to rook windows is mechanical: fg process == "claude" (the
+host already senses it) + working-directory match. Consequences:
+
+- **Milestone 1 (attention router) ships with zero LLM calls.** Classify
+  is a state machine over events; surface is the dashboard, the pulsing
+  window number, and the workspace cards. Nano's first real job is step
+  2+ (drafting replies), not classification.
+- **OSC 133 blocks drop off the agent's critical path.** Still wanted —
+  command history, non-claude awareness — but the agent doesn't wait on
+  them.
+- The division of labor is permanent: agentmon stays a dumb, reusable
+  sensor (no LLM, no rook knowledge); rook owns correlation, state, and
+  everything that acts.
+
 ## The escalation gate (load-bearing)
 
 "Reply to a claude session" spans two difficulty tiers:

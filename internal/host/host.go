@@ -29,7 +29,7 @@ const (
 	// replaced (sessions die with it — the tmux server-upgrade reality).
 	// BUMP THIS with any host API or storage change: a stale daemon
 	// answering health checks 404s new endpoints silently.
-	Version = 4
+	Version = 5
 	ringCap = 512 * 1024
 )
 
@@ -61,6 +61,15 @@ type Host struct {
 	nextID   int
 	token    string
 	reg      *registry
+	aw       *agentWatch
+
+	cwdMu    sync.Mutex
+	cwdCache map[int]cwdEntry
+}
+
+type cwdEntry struct {
+	cwd string
+	at  time.Time
 }
 
 func New() *Host {
@@ -68,11 +77,31 @@ func New() *Host {
 	if _, err := rand.Read(b); err != nil {
 		panic(err)
 	}
-	return &Host{
+	h := &Host{
 		sessions: make(map[string]*session),
 		token:    hex.EncodeToString(b),
 		reg:      loadRegistry(),
+		aw:       newAgentWatch(),
+		cwdCache: make(map[int]cwdEntry),
 	}
+	go h.aw.run(context.Background())
+	return h
+}
+
+// cachedCwdOf is cwdOf behind a short TTL: the status endpoint gets polled
+// every few seconds and lsof is ~100ms per pid — cache, don't multiply.
+func (h *Host) cachedCwdOf(pid int) string {
+	h.cwdMu.Lock()
+	e, ok := h.cwdCache[pid]
+	h.cwdMu.Unlock()
+	if ok && time.Since(e.at) < 8*time.Second {
+		return e.cwd
+	}
+	cwd := cwdOf(pid)
+	h.cwdMu.Lock()
+	h.cwdCache[pid] = cwdEntry{cwd, time.Now()}
+	h.cwdMu.Unlock()
+	return cwd
 }
 
 func (h *Host) Token() string { return h.token }
@@ -226,6 +255,11 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/sessions/", h.handleSession)
 	mux.HandleFunc("/workspaces", h.handleWorkspaces)
 	mux.HandleFunc("/workspaces/", h.handleWorkspace)
+	// every live claude session agentwatch knows about, uncorrelated —
+	// debugging surface now, the nano tier's read surface later
+	mux.HandleFunc("/agents", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, h.aw.snapshot())
+	})
 	return h.cors(h.auth(mux))
 }
 
@@ -313,11 +347,13 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 
 // sessionStatus is SessionInfo plus what's live inside the window right
 // now. The dashboard renders it, and the attention router (docs/agent.md)
-// will read the same struct — Fg is how rook knows a window runs claude.
+// reads the same struct — Fg is how rook knows a window runs claude, and
+// Agent is that claude session's transcript-derived state.
 type sessionStatus struct {
 	SessionInfo
-	Fg  string `json:"fg"`
-	Cwd string `json:"cwd"`
+	Fg    string       `json:"fg"`
+	Cwd   string       `json:"cwd"`
+	Agent *AgentStatus `json:"agent,omitempty"`
 }
 
 type workspaceStatus struct {
@@ -326,6 +362,33 @@ type workspaceStatus struct {
 	Scratch  bool            `json:"scratch,omitempty"`
 	Git      *GitInfo        `json:"git,omitempty"`
 	Sessions []sessionStatus `json:"sessions"`
+	// Attention counts sessions whose agent is waiting on the user.
+	Attention int `json:"attention"`
+}
+
+// correlate pairs rook windows running claude with agentwatch's transcript
+// sessions, by working directory: exact cwd when the watcher saw the
+// session start, the (path-decoded) project otherwise. Two claude sessions
+// in the same dir are disambiguated by recency only — an accepted v1 limit
+// (transcripts carry no pid).
+func correlate(sessions []sessionStatus, states []*AgentStatus) {
+	sort.Slice(states, func(i, j int) bool { return states[i].LastEvent.After(states[j].LastEvent) })
+	used := make(map[string]bool)
+	for i := range sessions {
+		if sessions[i].Fg != "claude" || sessions[i].Cwd == "" {
+			continue
+		}
+		for _, st := range states {
+			if used[st.SessionID] {
+				continue
+			}
+			if st.CWD == sessions[i].Cwd || st.Project == sessions[i].Cwd {
+				sessions[i].Agent = st
+				used[st.SessionID] = true
+				break
+			}
+		}
+	}
 }
 
 func (h *Host) handleWorkspaceStatus(w http.ResponseWriter, name string) {
@@ -354,7 +417,7 @@ func (h *Host) handleWorkspaceStatus(w http.ResponseWriter, name string) {
 			info := s.info
 			s.mu.Unlock()
 			pid := s.cmd.Process.Pid
-			out.Sessions[i] = sessionStatus{SessionInfo: info, Fg: fgOf(s.pty, pid), Cwd: cwdOf(pid)}
+			out.Sessions[i] = sessionStatus{SessionInfo: info, Fg: fgOf(s.pty, pid), Cwd: h.cachedCwdOf(pid)}
 		}(i, s)
 	}
 	wg.Wait()
@@ -365,6 +428,12 @@ func (h *Host) handleWorkspaceStatus(w http.ResponseWriter, name string) {
 		dir = out.Sessions[0].Cwd
 	}
 	out.Git = gitInfo(dir)
+	correlate(out.Sessions, h.aw.snapshot())
+	for _, s := range out.Sessions {
+		if s.Agent != nil && s.Agent.State == "needs_input" {
+			out.Attention++
+		}
+	}
 	writeJSON(w, out)
 }
 

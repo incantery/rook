@@ -275,6 +275,22 @@ async function main() {
 
     new ResizeObserver(() => tabs.syncSize()).observe(document.getElementById("terminals")!);
 
+    // Attention poll: while a workspace is on screen, ask the host who's
+    // waiting on the user and pulse those window numbers. This is the
+    // attention router's first surface (docs/agent.md milestone 1) — pure
+    // plumbing, no model anywhere.
+    setInterval(async () => {
+        if (home.visible) return;
+        try {
+            const st = await api.workspaceStatus(tabs.workspace);
+            tabs.setAttention(
+                new Set(st.sessions.filter((s) => s.agent?.state === "needs_input").map((s) => s.id)),
+            );
+        } catch {
+            // host briefly unreachable — keep the last known strip state
+        }
+    }, 5000);
+
     try {
         await tabs.init(); // attach live sessions (background-warm)
     } catch (err) {

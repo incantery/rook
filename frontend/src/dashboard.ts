@@ -4,9 +4,35 @@
 // reports, which is the same context the attention router (docs/agent.md)
 // will consume — if the dashboard can't show it, the agent can't know it.
 
-import type {HostAPI, WorkspaceStatus} from "./hostapi";
+import type {AgentStatus, HostAPI, WorkspaceStatus} from "./hostapi";
 import type {Tabs} from "./tabs";
 import {ago} from "./home";
+
+/** One line of agent state on a window card: what claude is doing, and —
+ *  at needs_input — what it's asking. */
+function agentLine(a: AgentStatus): HTMLElement {
+    const el = document.createElement("div");
+    el.className = "dash-agent " + a.state;
+    const label =
+        a.state === "needs_input"
+            ? "◉ needs you"
+            : a.state === "quiet"
+              ? `◌ quiet${a.tool ? " — " + a.tool : ""}`
+              : `● working${a.tool ? " — " + a.tool : ""}`;
+    const chip = document.createElement("span");
+    chip.className = "dash-agent-chip";
+    chip.textContent = label + (a.costUsd ? ` · $${a.costUsd.toFixed(2)}` : "");
+    el.appendChild(chip);
+    const text = a.state === "needs_input" ? a.ask || a.title : a.title;
+    if (text) {
+        const t = document.createElement("div");
+        t.className = "dash-agent-text";
+        t.textContent = text;
+        t.title = text;
+        el.appendChild(t);
+    }
+    return el;
+}
 
 function tilde(p: string): string {
     return p.replace(/^\/Users\/[^/]+/, "~");
@@ -115,13 +141,14 @@ export class Dashboard {
             card.querySelector(".dash-num")!.textContent = String(this.tabs.dashTab + 1 + i);
             const fg = card.querySelector(".dash-fg")!;
             fg.textContent = s.fg || "?";
-            // agent sessions get the accent — the attention router's future
+            // agent sessions get the accent — the attention router's
             // targets, visible at a glance
             if (s.fg === "claude") fg.classList.add("agent");
             card.querySelector(".dash-when")!.textContent = ago(s.created);
             const cwd = card.querySelector<HTMLElement>(".dash-cwd")!;
             cwd.textContent = squeeze(tilde(s.cwd || "")) || "—";
             cwd.title = s.cwd;
+            if (s.agent) card.appendChild(agentLine(s.agent));
             card.addEventListener("click", () => this.onJump(i));
             grid.appendChild(card);
         });
