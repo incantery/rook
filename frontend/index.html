@@ -265,6 +265,273 @@
         flex: 1;
       }
 
+      /* ==== home: the workspace manager (landing screen) ==== */
+      #home {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      #home[hidden], #app-screen[hidden] {
+        display: none;
+      }
+      #app-screen {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      #home-strip {
+        flex: 0 0 52px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 22px 0 84px;
+        --wails-draggable: drag;
+      }
+      #home-strip .brand {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--fg);
+      }
+      #home-strip .brand-sub {
+        font-size: 11px;
+        color: var(--lo);
+        font-family: var(--mono);
+      }
+      #home-scroll {
+        flex: 1;
+        overflow-y: auto;
+        padding: 8px 26px 60px;
+      }
+      #home-inner {
+        max-width: 980px;
+        margin: 0 auto;
+      }
+      .resume {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 16px 20px;
+        border: 1px solid rgba(130, 170, 255, 0.3);
+        border-radius: 12px;
+        background: rgba(130, 170, 255, 0.06);
+        margin: 14px 0 28px;
+      }
+      .resume[hidden] {
+        display: none;
+      }
+      .resume-text {
+        flex: 1;
+        min-width: 0;
+      }
+      .resume-kicker {
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--acc);
+        margin-bottom: 5px;
+      }
+      .resume-body {
+        font-size: 13.5px;
+        color: var(--fg);
+        line-height: 1.5;
+      }
+      .resume-btn {
+        flex: 0 0 auto;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 10px 18px;
+        border-radius: 9px;
+        background: var(--acc);
+        border: none;
+        color: #10131c;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      .resume-btn:hover {
+        filter: brightness(1.1);
+      }
+      .home-head {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 4px 0 16px;
+      }
+      .home-head h2 {
+        font-size: 15px;
+        font-weight: 700;
+        color: var(--fg);
+        margin: 0;
+      }
+      .home-spacer {
+        flex: 1;
+      }
+      .home-btn {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 6px 12px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--line);
+        color: var(--fg);
+        cursor: pointer;
+        font-family: inherit;
+      }
+      .home-btn:hover {
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .home-btn .plus {
+        color: var(--acc);
+        font-size: 14px;
+        line-height: 0;
+      }
+      #home-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+        gap: 12px;
+      }
+      .ws-card {
+        border: 1px solid var(--line);
+        border-left: 2px solid var(--acc);
+        border-radius: 11px;
+        background: rgba(255, 255, 255, 0.025);
+        padding: 14px 15px;
+        cursor: pointer;
+        transition: border-color 0.15s ease, transform 0.12s ease;
+      }
+      .ws-card:hover {
+        border-color: rgba(140, 150, 180, 0.4);
+        transform: translateY(-1px);
+      }
+      .ws-card-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 7px;
+      }
+      .ws-card-name {
+        font-size: 13.5px;
+        font-weight: 700;
+        color: var(--fg);
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .ws-card-del {
+        appearance: none;
+        background: none;
+        border: none;
+        color: transparent;
+        font-size: 11px;
+        cursor: pointer;
+        padding: 2px 4px;
+      }
+      .ws-card:hover .ws-card-del {
+        color: var(--lo);
+      }
+      .ws-card-del:hover {
+        color: #ff5370 !important;
+      }
+      .ws-card-when {
+        font-size: 10.5px;
+        color: var(--lo);
+        font-family: var(--mono);
+        white-space: nowrap;
+      }
+      .ws-card-root {
+        font-size: 11px;
+        color: var(--lo);
+        font-family: var(--mono);
+        margin-bottom: 11px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .ws-card-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .ws-tag {
+        font-size: 10.5px;
+        font-family: var(--mono);
+        padding: 2px 7px;
+        border-radius: 5px;
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--dim);
+      }
+      .ws-tag.live {
+        background: rgba(195, 232, 141, 0.12);
+        color: var(--grn);
+      }
+      .ws-tag.scratch {
+        background: rgba(255, 203, 107, 0.12);
+        color: #ffcb6b;
+      }
+      .home-empty {
+        grid-column: 1 / -1;
+        padding: 40px;
+        text-align: center;
+        color: var(--lo);
+        font-size: 13px;
+      }
+
+      /* new-workspace modal (reuses overlay + pal-panel) */
+      .ws-form {
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 15px;
+      }
+      .ws-form label span {
+        display: block;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--dim);
+        margin-bottom: 6px;
+      }
+      .ws-form input {
+        width: 100%;
+        box-sizing: border-box;
+        background: rgba(10, 12, 20, 0.8);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 9px 11px;
+        color: var(--fg);
+        font-family: var(--mono);
+        font-size: 12.5px;
+        outline: none;
+      }
+      .ws-form input:focus {
+        border-color: var(--acc);
+      }
+      .ws-modal-title {
+        padding: 15px 18px;
+        border-bottom: 1px solid var(--line);
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--fg);
+      }
+      .ws-modal-foot {
+        display: flex;
+        justify-content: flex-end;
+        gap: 9px;
+        padding: 14px 18px;
+        border-top: 1px solid var(--line);
+      }
+      .ws-modal-foot .home-btn.primary {
+        background: var(--acc);
+        color: #10131c;
+        border: none;
+      }
+
       #fatal {
         color: #ff5370;
         font-family: var(--mono);
@@ -275,6 +542,40 @@
     </style>
   </head>
   <body>
+    <div id="home" hidden>
+      <div id="home-strip">
+        <span class="brand">Rook</span>
+        <span class="brand-sub">workspace manager</span>
+      </div>
+      <div id="home-scroll">
+        <div id="home-inner">
+          <div id="home-resume" class="resume" hidden></div>
+          <div class="home-head">
+            <h2>Workspaces</h2>
+            <span class="home-spacer"></span>
+            <button id="home-scratch" class="home-btn" style="--wails-draggable: no-drag" title="One-off shell; discarded when it exits">scratch shell</button>
+            <button id="home-new" class="home-btn" style="--wails-draggable: no-drag"><span class="plus">+</span> New workspace</button>
+          </div>
+          <div id="home-grid"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="ws-modal" class="overlay" hidden>
+      <div class="pal-panel">
+        <div class="ws-modal-title">New workspace</div>
+        <div class="ws-form">
+          <label><span>Name</span><input id="ws-modal-name" placeholder="e.g. rook-core" spellcheck="false" /></label>
+          <label><span>Directory (optional — first shell starts here)</span><input id="ws-modal-root" placeholder="~/go/src/github.com/incantery/rook" spellcheck="false" /></label>
+        </div>
+        <div class="ws-modal-foot">
+          <button id="ws-modal-cancel" class="home-btn">Cancel</button>
+          <button id="ws-modal-create" class="home-btn primary">Create workspace</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="app-screen" hidden>
     <div id="titlebar">
       <span id="ws-label" style="--wails-draggable: no-drag" title="Switch workspace (` s)"></span>
       <div id="tabs"></div>
@@ -284,6 +585,7 @@
       </button>
     </div>
     <div id="terminals"></div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

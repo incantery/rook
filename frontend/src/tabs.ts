@@ -27,8 +27,9 @@ export class Tabs {
     private current = "main";
     private lastActive = new Map<string, Tab>();
 
-    /** Called when the last session anywhere ends — the client ends. */
-    onEmpty: () => void = () => {};
+    /** Called when the active workspace loses its last window — the
+     *  manager (home) takes over, VS Code-style. */
+    onWorkspaceGone: () => void = () => {};
     /** Called whenever the current workspace (or its tab set) changes. */
     onChange: () => void = () => {};
 
@@ -57,17 +58,25 @@ export class Tabs {
         return this.tabs.filter((t) => t.workspace === ws);
     }
 
+    /** Attach every live session (background-warm); activation waits for
+     *  openWorkspace — the manager screen decides what to open. */
     async init(): Promise<void> {
         const sessions = await this.api.list();
         for (const s of sessions) this.addTab(s);
-        if (this.tabs.length === 0) {
-            await this.newSession();
+    }
+
+    /** Enter a workspace: activate its remembered window, or spawn its
+     *  first shell (the host seeds cwd from the workspace root). */
+    async openWorkspace(name: string): Promise<void> {
+        this.current = name;
+        localStorage.setItem("rook.workspace", name);
+        const target = this.lastActive.get(name) ?? this.wsTabs(name)[0];
+        if (target) {
+            this.activate(target);
             return;
         }
-        const remembered = localStorage.getItem("rook.workspace");
-        const names = this.workspaces().map((w) => w.name);
-        this.current = remembered && names.includes(remembered) ? remembered : names[0];
-        this.activate(this.lastActive.get(this.current) ?? this.wsTabs()[0]);
+        const s = await this.api.create(100, 30, undefined, name);
+        this.activate(this.addTab(s));
     }
 
     private addTab(s: SessionInfo): Tab {
@@ -133,20 +142,6 @@ export class Tabs {
         const from = this.lastActive.get(this.current) ?? this.active ?? undefined;
         const s = await this.api.create(from?.term.cols ?? 100, from?.term.rows ?? 30, from?.id, this.current);
         this.activate(this.addTab(s));
-    }
-
-    /** tmux new-session: first window of a fresh workspace, from $HOME. */
-    async newWorkspace(name: string): Promise<void> {
-        name = name.trim();
-        if (!name) return;
-        this.current = name;
-        const s = await this.api.create(this.active?.term.cols ?? 100, this.active?.term.rows ?? 30, undefined, name);
-        this.activate(this.addTab(s));
-    }
-
-    switchWorkspace(name: string): void {
-        const target = this.lastActive.get(name) ?? this.wsTabs(name)[0];
-        if (target) this.activate(target);
     }
 
     activate(tab: Tab): void {
@@ -220,11 +215,9 @@ export class Tabs {
         const sameWs = this.wsTabs(tab.workspace);
         if (sameWs.length > 0) {
             this.activate(sameWs[0]);
-        } else if (this.tabs.length > 0) {
-            // workspace died with its last window; fall back to another one
-            this.activate(this.tabs[0]);
         } else {
-            this.onEmpty();
+            // workspace died with its last window → back to the manager
+            this.onWorkspaceGone();
         }
     }
 

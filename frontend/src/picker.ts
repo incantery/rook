@@ -19,6 +19,8 @@ export class WorkspacePicker {
 
     constructor(
         private tabs: Tabs,
+        private onPick: (name: string) => void,
+        private onManager: () => void,
         private onClose: () => void,
     ) {
         this.overlay = document.createElement("div");
@@ -34,6 +36,7 @@ export class WorkspacePicker {
             </div>
             <div class="pal-list"></div>
             <div class="pal-footer">
+              <button class="home-btn pal-manager-btn">workspace manager</button>
               <span>↑↓ navigate</span><span>↵ switch / create</span>
               <span class="pal-spacer"></span>
               <span>workspace = tmux session</span>
@@ -45,6 +48,10 @@ export class WorkspacePicker {
 
         this.overlay.addEventListener("mousedown", (e) => {
             if (e.target === this.overlay) this.close();
+        });
+        this.overlay.querySelector(".pal-manager-btn")!.addEventListener("click", () => {
+            this.close();
+            this.onManager();
         });
         this.input.addEventListener("input", () => {
             this.sel = 0;
@@ -91,8 +98,7 @@ export class WorkspacePicker {
     private pick(item: Item | undefined): void {
         if (!item) return;
         this.close();
-        if (item.create) void this.tabs.newWorkspace(item.label);
-        else this.tabs.switchWorkspace(item.label);
+        this.onPick(item.label); // create and switch are the same door
     }
 
     private render(): void {

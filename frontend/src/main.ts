@@ -2,7 +2,6 @@ import {Terminal} from "@xterm/xterm";
 import {FitAddon} from "@xterm/addon-fit";
 import {WebglAddon} from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
-import {Window} from "@wailsio/runtime";
 import {Service as Config} from "../bindings/github.com/incantery/rook/internal/config";
 import {Service as Host} from "../bindings/github.com/incantery/rook/internal/hostclient";
 import {HostAPI} from "./hostapi";
@@ -10,6 +9,7 @@ import {Tabs} from "./tabs";
 import {Registry} from "./registry";
 import {Palette} from "./palette";
 import {WorkspacePicker} from "./picker";
+import {Home} from "./home";
 
 // Renderer A/B switch: WebGL showed stale-frame artifacts in WKWebView, so
 // the DOM renderer is the default until that's re-judged.
@@ -99,13 +99,30 @@ async function main() {
     }
 
     const tabs = new Tabs(document.getElementById("tabs")!, document.getElementById("terminals")!, api, mkTerm);
-    // Last session ended → the client ends, like tmux. Shell exits fully
-    // discard their session; nothing respawns behind your back.
-    tabs.onEmpty = () => void Window.Close();
+    const appScreen = document.getElementById("app-screen")!;
+
+    // ==== screens: home (workspace manager) ⇄ workspace terminals ====
+    const home = new Home(api, (name) => void showWorkspace(name));
+    async function showWorkspace(name: string): Promise<void> {
+        home.hide();
+        appScreen.hidden = false; // visible before openWorkspace: fit needs real dimensions
+        await tabs.openWorkspace(name);
+    }
+    function showHome(): void {
+        appScreen.hidden = true;
+        void home.show();
+    }
+    // A workspace's last shell exiting lands you back in the manager.
+    tabs.onWorkspaceGone = showHome;
 
     const registry = new Registry();
     const palette = new Palette(registry, () => tabs.focusActive());
-    const picker = new WorkspacePicker(tabs, () => tabs.focusActive());
+    const picker = new WorkspacePicker(
+        tabs,
+        (name) => void showWorkspace(name),
+        showHome,
+        () => tabs.focusActive(),
+    );
 
     // Titlebar breadcrumb: current workspace, click to switch (design's
     // workspace switcher affordance).
@@ -122,6 +139,8 @@ async function main() {
         {id: "session.prev", title: "Previous window", category: "Session", keys: "⌘⇧[", run: () => tabs.prev()},
         {id: "config.reload", title: "Reload config", category: "Config", keys: "` r", run: () => location.reload()},
         {id: "workspace.switch", title: "Switch workspace…", category: "Workspace", keys: "` s", run: () => picker.open()},
+        {id: "workspace.manager", title: "Workspace manager", category: "Workspace", keys: "` h", run: showHome},
+        {id: "workspace.scratch", title: "New scratch shell", category: "Workspace", run: () => home.scratch()},
     );
     document.getElementById("palette-btn")!.addEventListener("click", () => registry.run("palette.toggle"));
 
@@ -150,6 +169,15 @@ async function main() {
                 return; // palette's own input handles the rest
             }
             if (picker.visible) return; // picker's own input handles keys
+            if (home.visible) {
+                // no terminal on screen: only the palette chord and the
+                // workspace switcher make sense here
+                if (e.metaKey && e.code === "KeyK") {
+                    e.preventDefault();
+                    registry.run("palette.toggle");
+                }
+                return;
+            }
 
             if (prefixArmed) {
                 if (e.key === "Shift" || e.key === "Meta" || e.key === "Alt" || e.key === "Control") return;
@@ -162,6 +190,7 @@ async function main() {
                 else if (e.key === "r") registry.run("config.reload");
                 else if (e.key === "k") registry.run("palette.toggle");
                 else if (e.key === "s") registry.run("workspace.switch");
+                else if (e.key === "h") registry.run("workspace.manager");
                 else if (/^[1-9]$/.test(e.key)) tabs.switchTo(Number(e.key) - 1);
                 // anything else: prefix consumed, key ignored — tmux behavior
                 return;
@@ -198,10 +227,14 @@ async function main() {
     new ResizeObserver(() => tabs.syncSize()).observe(document.getElementById("terminals")!);
 
     try {
-        await tabs.init();
+        await tabs.init(); // attach live sessions (background-warm)
     } catch (err) {
         fatal(`failed to open sessions:\n${err}`);
+        return;
     }
+    // Land on the manager — the app opens to an overview of your work,
+    // not into a shell.
+    showHome();
 }
 
 void main();

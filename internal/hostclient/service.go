@@ -24,7 +24,13 @@ type Service struct{}
 
 func (s *Service) Info() (Info, error) {
 	if st, err := host.ReadState(); err == nil && st.Healthy() {
-		return Info{Endpoint: st.Endpoint(), Token: st.Token}, nil
+		if st.Version == host.Version {
+			return Info{Endpoint: st.Endpoint(), Token: st.Token}, nil
+		}
+		// Version drift: the running daemon lacks this build's API.
+		// Replace it — its sessions die with it, the one upgrade cost.
+		syscall.Kill(st.PID, syscall.SIGTERM)
+		time.Sleep(300 * time.Millisecond)
 	}
 	if err := spawnHost(); err != nil {
 		return Info{}, err

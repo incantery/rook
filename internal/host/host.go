@@ -24,7 +24,9 @@ import (
 )
 
 const (
-	Version = 1
+	// Version gates client/daemon compatibility: on drift, the daemon is
+	// replaced (sessions die with it — the tmux server-upgrade reality).
+	Version = 2
 	ringCap = 512 * 1024
 )
 
@@ -55,6 +57,7 @@ type Host struct {
 	sessions map[string]*session
 	nextID   int
 	token    string
+	reg      *registry
 }
 
 func New() *Host {
@@ -65,6 +68,7 @@ func New() *Host {
 	return &Host{
 		sessions: make(map[string]*session),
 		token:    hex.EncodeToString(b),
+		reg:      loadRegistry(),
 	}
 }
 
@@ -147,7 +151,19 @@ func (h *Host) readPump(s *session) {
 	s.pty.Close()
 	h.mu.Lock()
 	delete(h.sessions, s.info.ID)
+	remaining := 0
+	for _, o := range h.sessions {
+		if o.info.Workspace == s.info.Workspace {
+			remaining++
+		}
+	}
 	h.mu.Unlock()
+	// scratch workspaces are ephemeral: gone with their last session
+	if remaining == 0 {
+		if w := h.reg.get(s.info.Workspace); w != nil && w.Scratch {
+			h.reg.remove(s.info.Workspace)
+		}
+	}
 	s.mu.Lock()
 	c := s.attach
 	s.attach = nil
@@ -187,7 +203,76 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/health", h.handleHealth)
 	mux.HandleFunc("/sessions", h.handleSessions)
 	mux.HandleFunc("/sessions/", h.handleSession)
+	mux.HandleFunc("/workspaces", h.handleWorkspaces)
+	mux.HandleFunc("/workspaces/", h.handleWorkspace)
 	return h.cors(h.auth(mux))
+}
+
+// workspaceListItem is a WorkspaceInfo plus live-session count.
+type workspaceListItem struct {
+	WorkspaceInfo
+	Sessions int `json:"sessions"`
+}
+
+func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		counts := map[string]int{}
+		h.mu.Lock()
+		for _, s := range h.sessions {
+			counts[s.info.Workspace]++
+		}
+		h.mu.Unlock()
+		list := h.reg.list()
+		out := make([]workspaceListItem, 0, len(list))
+		for _, ws := range list {
+			out = append(out, workspaceListItem{WorkspaceInfo: *ws, Sessions: counts[ws.Name]})
+			delete(counts, ws.Name)
+		}
+		// live sessions in unregistered workspaces (pre-registry hosts)
+		for name, n := range counts {
+			out = append(out, workspaceListItem{WorkspaceInfo: WorkspaceInfo{Name: name}, Sessions: n})
+		}
+		writeJSON(w, out)
+	case http.MethodPost:
+		var req struct {
+			Name    string
+			Root    string
+			Scratch bool
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		req.Name = strings.TrimSpace(req.Name)
+		if req.Name == "" {
+			http.Error(w, "name required", http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, h.reg.upsert(req.Name, req.Root, req.Scratch))
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleWorkspace routes DELETE /workspaces/{name}: kills the workspace's
+// live sessions and removes it from the registry.
+func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/workspaces/")
+	if r.Method != http.MethodDelete || name == "" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	h.mu.Lock()
+	var ids []string
+	for id, s := range h.sessions {
+		if s.info.Workspace == name {
+			ids = append(ids, id)
+		}
+	}
+	h.mu.Unlock()
+	for _, id := range ids {
+		h.kill(id)
+	}
+	h.reg.remove(name)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Host) cors(next http.Handler) http.Handler {
@@ -257,11 +342,21 @@ func (h *Host) handleSessions(w http.ResponseWriter, r *http.Request) {
 		if req.Rows <= 0 || req.Rows > 1000 {
 			req.Rows = 30
 		}
+		ws := req.Workspace
+		if ws == "" {
+			ws = "main"
+		}
+		// register/touch the workspace; a workspace root seeds the first
+		// shell's cwd when there's no session to inherit from
+		wsInfo := h.reg.upsert(ws, "", false)
 		cwd := ""
 		if from := h.get(req.CwdFrom); from != nil {
 			cwd = cwdOf(from.cmd.Process.Pid)
 		}
-		s, err := h.spawn(req.Cols, req.Rows, cwd, req.Workspace)
+		if cwd == "" && wsInfo.Root != "" {
+			cwd = wsInfo.Root
+		}
+		s, err := h.spawn(req.Cols, req.Rows, cwd, ws)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

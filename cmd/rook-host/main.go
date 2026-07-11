@@ -10,14 +10,21 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/incantery/rook/internal/host"
 )
 
 func main() {
 	if st, err := host.ReadState(); err == nil && st.Healthy() {
-		fmt.Printf("rook-host already running (pid %d, port %d)\n", st.PID, st.Port)
-		return
+		if st.Version == host.Version {
+			fmt.Printf("rook-host already running (pid %d, port %d)\n", st.PID, st.Port)
+			return
+		}
+		fmt.Printf("replacing outdated rook-host (v%d, pid %d)\n", st.Version, st.PID)
+		syscall.Kill(st.PID, syscall.SIGTERM)
+		time.Sleep(300 * time.Millisecond)
 	}
 
 	dir := host.StateDir()

@@ -1,0 +1,173 @@
+// The workspace manager — the app's landing screen, per the Rook.dc.html
+// home design: workspace cards (persistent, VS Code-style), a resume banner
+// when shells are live, scratch workspaces for one-off tasks, and a
+// new-workspace modal (name + root directory). Branch/services/attention
+// from the design arrive when git/process awareness exists.
+
+import type {HostAPI, WorkspaceInfo} from "./hostapi";
+
+function ago(iso: string): string {
+    const ms = Date.now() - new Date(iso).getTime();
+    if (ms < 90_000) return "just now";
+    const m = Math.floor(ms / 60_000);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 48) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+}
+
+export class Home {
+    private el: HTMLElement;
+    private grid: HTMLElement;
+    private banner: HTMLElement;
+    private modal: HTMLElement;
+    private nameInput: HTMLInputElement;
+    private rootInput: HTMLInputElement;
+    private workspaces: WorkspaceInfo[] = [];
+
+    constructor(
+        private api: HostAPI,
+        private onOpen: (name: string) => void,
+    ) {
+        this.el = document.getElementById("home")!;
+        this.grid = this.el.querySelector("#home-grid")!;
+        this.banner = this.el.querySelector("#home-resume")!;
+        this.modal = document.getElementById("ws-modal")!;
+        this.nameInput = this.modal.querySelector("#ws-modal-name")!;
+        this.rootInput = this.modal.querySelector("#ws-modal-root")!;
+
+        this.el.querySelector("#home-new")!.addEventListener("click", () => this.openModal());
+        this.el.querySelector("#home-scratch")!.addEventListener("click", () => void this.scratch());
+        this.modal.addEventListener("mousedown", (e) => {
+            if (e.target === this.modal) this.closeModal();
+        });
+        this.modal.querySelector("#ws-modal-cancel")!.addEventListener("click", () => this.closeModal());
+        this.modal.querySelector("#ws-modal-create")!.addEventListener("click", () => void this.createFromModal());
+        this.modal.addEventListener("keydown", (e: KeyboardEvent) => {
+            if (e.key === "Enter") void this.createFromModal();
+            else if (e.key === "Escape") {
+                e.stopPropagation();
+                this.closeModal();
+            }
+        });
+    }
+
+    get visible(): boolean {
+        return !this.el.hidden;
+    }
+
+    async show(): Promise<void> {
+        this.el.hidden = false;
+        await this.refresh();
+    }
+
+    hide(): void {
+        this.el.hidden = true;
+        this.closeModal();
+    }
+
+    async refresh(): Promise<void> {
+        this.workspaces = await this.api.listWorkspaces();
+        this.renderBanner();
+        this.renderGrid();
+    }
+
+    private renderBanner(): void {
+        const live = this.workspaces.filter((w) => w.sessions > 0);
+        this.banner.innerHTML = "";
+        if (live.length === 0) {
+            this.banner.hidden = true;
+            return;
+        }
+        this.banner.hidden = false;
+        const total = live.reduce((n, w) => n + w.sessions, 0);
+        const target = live[0]; // list is lastUsed-desc
+        const text = document.createElement("div");
+        text.className = "resume-text";
+        text.innerHTML = `<div class="resume-kicker">Resume where you left off</div><div class="resume-body"></div>`;
+        text.querySelector(".resume-body")!.textContent =
+            `${total} shell${total === 1 ? "" : "s"} still running across ` +
+            `${live.length} workspace${live.length === 1 ? "" : "s"} — most recently ${target.name}.`;
+        const btn = document.createElement("button");
+        btn.className = "resume-btn";
+        btn.textContent = "Resume →";
+        btn.addEventListener("click", () => this.onOpen(target.name));
+        this.banner.append(text, btn);
+    }
+
+    private renderGrid(): void {
+        this.grid.innerHTML = "";
+        for (const ws of this.workspaces) {
+            const card = document.createElement("div");
+            card.className = "ws-card";
+            card.innerHTML = `
+              <div class="ws-card-head">
+                <span class="ws-card-name"></span>
+                <button class="ws-card-del" title="Delete workspace (kills its shells)">✕</button>
+                <span class="ws-card-when"></span>
+              </div>
+              <div class="ws-card-root"></div>
+              <div class="ws-card-tags"></div>`;
+            card.querySelector(".ws-card-name")!.textContent = ws.name;
+            card.querySelector(".ws-card-when")!.textContent = ago(ws.lastUsed || ws.created);
+            card.querySelector(".ws-card-root")!.textContent = ws.root || "~";
+            const tags = card.querySelector(".ws-card-tags")!;
+            const status = document.createElement("span");
+            status.className = "ws-tag " + (ws.sessions > 0 ? "live" : "idle");
+            status.textContent = ws.sessions > 0 ? `● ${ws.sessions} live` : "idle";
+            tags.appendChild(status);
+            if (ws.scratch) {
+                const s = document.createElement("span");
+                s.className = "ws-tag scratch";
+                s.textContent = "scratch";
+                tags.appendChild(s);
+            }
+            card.addEventListener("click", () => this.onOpen(ws.name));
+            card.querySelector(".ws-card-del")!.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                await this.api.deleteWorkspace(ws.name);
+                await this.refresh();
+            });
+            this.grid.appendChild(card);
+        }
+        if (this.workspaces.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "home-empty";
+            empty.textContent = "No workspaces yet — create one, or grab a scratch shell.";
+            this.grid.appendChild(empty);
+        }
+    }
+
+    /** One-off task: auto-named ephemeral workspace, straight into a shell.
+     *  The host discards it when its last session exits. */
+    async scratch(): Promise<void> {
+        const taken = new Set(this.workspaces.map((w) => w.name));
+        let n = 1;
+        while (taken.has(`scratch-${n}`)) n++;
+        const name = `scratch-${n}`;
+        await this.api.createWorkspace(name, "", true);
+        this.onOpen(name);
+    }
+
+    openModal(): void {
+        this.modal.hidden = false;
+        this.nameInput.value = "";
+        this.rootInput.value = "";
+        this.nameInput.focus();
+    }
+
+    closeModal(): void {
+        this.modal.hidden = true;
+    }
+
+    private async createFromModal(): Promise<void> {
+        const name = this.nameInput.value.trim();
+        if (!name) {
+            this.nameInput.focus();
+            return;
+        }
+        await this.api.createWorkspace(name, this.rootInput.value.trim(), false);
+        this.closeModal();
+        this.onOpen(name);
+    }
+}

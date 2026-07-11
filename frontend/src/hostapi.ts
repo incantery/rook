@@ -56,4 +56,28 @@ export class HostAPI {
         const ws = this.endpoint.replace(/^http/, "ws");
         return new WebSocket(`${ws}/sessions/${id}/attach?token=${this.token}`);
     }
+
+    async listWorkspaces(): Promise<WorkspaceInfo[]> {
+        return (await this.req("/workspaces")).json();
+    }
+
+    async createWorkspace(name: string, root = "", scratch = false): Promise<void> {
+        await this.req("/workspaces", {
+            method: "POST",
+            body: JSON.stringify({name, root, scratch}),
+        });
+    }
+
+    async deleteWorkspace(name: string): Promise<void> {
+        await this.req(`/workspaces/${encodeURIComponent(name)}`, {method: "DELETE"});
+    }
+}
+
+export interface WorkspaceInfo {
+    name: string;
+    root?: string;
+    scratch?: boolean;
+    created: string;
+    lastUsed: string;
+    sessions: number;
 }
