@@ -158,6 +158,16 @@ async function main() {
         ws?.send(data);
     });
 
+    // cmd+shift+, reloads the page — ghostty's reload_config binding. The
+    // whole frontend re-runs, so Config.Get() picks up file edits. Caveat
+    // until the PTY host split: the shell session restarts with it.
+    window.addEventListener("keydown", (e) => {
+        if (e.metaKey && e.shiftKey && e.key === ",") {
+            e.preventDefault();
+            location.reload();
+        }
+    });
+
     new ResizeObserver(() => syncSize()).observe(container);
     await spawn();
 }
