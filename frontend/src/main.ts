@@ -24,8 +24,9 @@ const term = new Terminal({
     scrollback: 10_000,
     macOptionIsMeta: true,
     theme: {
-        // Material Ocean at ghostty's background-opacity 0.95 (f2 ≈ 0.95).
-        background: "#0f111af2",
+        // Fully transparent: the page body paints the Material Ocean tint
+        // (once, full-bleed); xterm only paints non-default cell backgrounds.
+        background: "#00000000",
         foreground: "#8f93a2",
         cursor: "#ffcc00",
         selectionBackground: "#717cb4",

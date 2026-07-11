@@ -9,10 +9,11 @@
       body {
         margin: 0;
         height: 100%;
-        /* Transparent so the see-through window shows the desktop; the
-           tinted background is painted by xterm (Material Ocean @ 0.95,
-           matching ghostty's background-opacity). */
-        background: transparent;
+        /* The one place the background tint is painted: Material Ocean at
+           ghostty's background-opacity 0.95, full-bleed so the titlebar
+           strip and edge margins are tinted too. xterm's own background is
+           fully transparent — tinting there as well would double-apply. */
+        background: rgba(15, 17, 26, 0.95);
         overflow: hidden;
       }
       /* Insets, NOT padding: the fit addon derives the grid from this

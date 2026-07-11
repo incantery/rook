@@ -34,10 +34,12 @@ func main() {
 			// the drag region, and terminal row 0 starts below the traffic
 			// lights.
 			InvisibleTitleBarHeight: 34,
-			// Transparent, not Translucent: ghostty's background-opacity is
-			// plain alpha compositing, no vibrancy blur. The visible
-			// background comes from xterm's theme (Material Ocean at 0.95).
-			Backdrop: application.MacBackdropTransparent,
+			// Translucent (NSVisualEffectView), not Transparent: a fully
+			// transparent backdrop discards the native window shape —
+			// rounded corners, shadow, the lot. The 0.95 Material Ocean
+			// tint is painted full-bleed by the page; the slight vibrancy
+			// vs ghostty's plain alpha is invisible at 0.95.
+			Backdrop: application.MacBackdropTranslucent,
 			TitleBar: application.MacTitleBarHiddenInset,
 		},
 		BackgroundColour: application.NewRGBA(0, 0, 0, 0),
