@@ -23,9 +23,15 @@ dev:
 package:
 	wails3 task package
 
+LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+
 install: package
 	rm -rf $(APP)
 	cp -R bin/rook.app $(APP)
+	@# A bare cp skips the registration Finder/installers do — without this,
+	@# Spotlight won't offer the app.
+	$(LSREGISTER) -f $(APP)
+	mdimport $(APP)
 	@echo "installed $(APP) — quit + relaunch rook to pick it up"
 
 clean:
