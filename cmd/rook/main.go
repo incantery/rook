@@ -7,7 +7,7 @@ import (
 
 	"github.com/incantery/rook/frontend"
 	"github.com/incantery/rook/internal/config"
-	"github.com/incantery/rook/internal/session"
+	"github.com/incantery/rook/internal/hostclient"
 )
 
 func main() {
@@ -15,7 +15,7 @@ func main() {
 		Name:        "rook",
 		Description: "An AI-native terminal for the agent age",
 		Services: []application.Service{
-			application.NewService(&session.Service{}),
+			application.NewService(&hostclient.Service{}),
 			application.NewService(&config.Service{}),
 		},
 		Assets: application.AssetOptions{
@@ -35,10 +35,9 @@ func main() {
 		// colour make the page's pixels the window's pixels.
 		BackgroundType: application.BackgroundTypeTranslucent,
 		Mac: application.MacWindow{
-			// Matches the top padding in the frontend: the invisible bar is
-			// the drag region, and terminal row 0 starts below the traffic
-			// lights.
-			InvisibleTitleBarHeight: 34,
+			// Matches the titlebar height in the frontend; tabs and buttons
+			// inside it opt out via --wails-draggable: no-drag.
+			InvisibleTitleBarHeight: 38,
 			// Transparent = clear NSWindow + non-drawing webview: the page's
 			// full-bleed rgba(15,17,26,0.95) is what you see — ghostty-style
 			// plain alpha. Translucent instead injects an NSVisualEffectView,

@@ -2,21 +2,20 @@ import {Terminal} from "@xterm/xterm";
 import {FitAddon} from "@xterm/addon-fit";
 import {WebglAddon} from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
-import {Service as Session} from "../bindings/github.com/incantery/rook/internal/session";
 import {Service as Config} from "../bindings/github.com/incantery/rook/internal/config";
+import {Service as Host} from "../bindings/github.com/incantery/rook/internal/hostclient";
+import {HostAPI} from "./hostapi";
+import {Tabs} from "./tabs";
+import {Registry} from "./registry";
+import {Palette} from "./palette";
 
-// Renderer A/B switch: WebGL showed stale-frame artifacts in WKWebView after
-// window resizes, so the DOM renderer is the default until that's understood.
-// In devtools: localStorage.setItem("rook.renderer", "webgl"); location.reload()
+// Renderer A/B switch: WebGL showed stale-frame artifacts in WKWebView, so
+// the DOM renderer is the default until that's re-judged.
+// devtools: localStorage.setItem("rook.renderer", "webgl"); location.reload()
 const useWebgl = localStorage.getItem("rook.renderer") === "webgl";
-// localStorage.setItem("rook.debug", "1") logs the first PTY chunks per
-// session — the tool for "where did that stray glyph come from" questions.
-const debug = localStorage.getItem("rook.debug") === "1";
 
-// Material Ocean, matching the ghostty theme. The background is fully
-// transparent: the page body paints the tint (once, full-bleed, with the
-// config's background-opacity); xterm only paints non-default cell
-// backgrounds over it.
+// Material Ocean, matching the ghostty theme. Background fully transparent:
+// the page body paints the tint once, full-bleed, at the config's opacity.
 const THEME = {
     background: "#00000000",
     foreground: "#8f93a2",
@@ -40,139 +39,118 @@ const THEME = {
     brightWhite: "#ffffff",
 };
 
-let term!: Terminal;
-let fit!: FitAddon;
-let ws: WebSocket | null = null;
-let sessionId: string | null = null;
-let spawnedAt = 0;
-let lastSentSize = "";
-
-// The single authority on terminal size. fit() derives the grid from the
-// container and *measured* cell metrics; the PTY is then told, explicitly.
-// Relying on term.onResize dropped syncs in two ways: resizes while the
-// socket was still connecting were discarded, and a PTY spawned from stale
-// (fallback-font) metrics never re-synced because xterm's own size hadn't
-// changed. Divergence looks like: fzf "full screen" ending mid-window
-// (PTY rows < grid rows), zsh's PROMPT_SP % mark surviving on its own line
-// (PTY cols > grid cols).
-function syncSize(force = false) {
-    fit.fit();
-    if (sessionId === null) return;
-    const key = `${sessionId}:${term.cols}x${term.rows}`;
-    if (!force && key === lastSentSize) return;
-    lastSentSize = key;
-    Session.Resize(sessionId, term.cols, term.rows).catch((err) => {
-        console.error("resize failed", err);
-    });
-}
-
-async function spawn() {
-    sessionId = null;
-    spawnedAt = Date.now();
-    const endpoint = await Session.Endpoint();
-    const id = await Session.Spawn(term.cols, term.rows);
-    let debugChunks = debug ? 3 : 0;
-
-    const socket = new WebSocket(`${endpoint}/session/${id}`);
-    socket.binaryType = "arraybuffer";
-    socket.onopen = () => {
-        sessionId = id;
-        ws = socket;
-        // Authoritative size sync: the window may have resized while the
-        // socket was connecting, and spawn-time metrics may have been stale.
-        syncSize(true);
-        term.focus();
-    };
-    socket.onmessage = (e: MessageEvent<ArrayBuffer>) => {
-        const bytes = new Uint8Array(e.data);
-        if (debugChunks > 0) {
-            debugChunks--;
-            console.debug(`pty[${id}] chunk:`, JSON.stringify(new TextDecoder().decode(bytes)));
-        }
-        term.write(bytes);
-    };
-    socket.onclose = () => {
-        if (sessionId !== id) return; // superseded by a newer session
-        sessionId = null;
-        ws = null;
-        // Instant exit means the shell itself is broken — don't respawn-loop.
-        if (Date.now() - spawnedAt < 1000) {
-            term.writeln("\r\n\x1b[31m[shell exited immediately — not restarting]\x1b[0m");
-            return;
-        }
-        term.writeln("\r\n\x1b[90m[shell exited — restarting]\x1b[0m");
-        void spawn();
-    };
+function fatal(msg: string): void {
+    const el = document.createElement("div");
+    el.id = "fatal";
+    el.textContent = msg;
+    document.getElementById("terminals")!.appendChild(el);
 }
 
 async function main() {
-    // ~/.config/rook/config; re-read on every page reload (cmd+r applies
-    // edits without an app restart).
     const cfg = await Config.Get();
     console.info("config loaded:", JSON.stringify(cfg));
     const font = `"${cfg.fontFamily}", Menlo, ui-monospace, monospace`;
-
     document.body.style.background = `rgba(15, 17, 26, ${cfg.backgroundOpacity})`;
 
-    const container = document.getElementById("terminal")!;
-    // Top inset stays fixed: it's the drag region under the traffic lights
-    // (InvisibleTitleBarHeight in main.go), not user padding.
-    container.style.inset = `34px ${cfg.windowPaddingX}px ${cfg.windowPaddingY}px`;
-
-    // Measure with the real font: fit() before it loads would compute the
-    // grid from fallback-font cell metrics and spawn the PTY at the wrong
-    // size.
+    // Measure with the real font: a grid computed from fallback-font cell
+    // metrics spawns PTYs at the wrong size.
     try {
         await document.fonts.load(`${cfg.fontSize}px ${font}`);
     } catch {
-        // fall through — worst case the onopen sync corrects the grid
+        // onopen size sync corrects the grid if this races
     }
 
-    term = new Terminal({
-        allowProposedApi: true,
-        allowTransparency: true,
-        cursorBlink: true,
-        fontFamily: font,
-        fontSize: cfg.fontSize,
-        scrollback: 10_000,
-        macOptionIsMeta: true,
-        theme: THEME,
-    });
-    fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(container);
-    if (useWebgl) {
-        try {
-            const webgl = new WebglAddon();
-            webgl.onContextLoss(() => webgl.dispose());
-            term.loadAddon(webgl);
-            console.info("renderer: webgl");
-        } catch (err) {
-            console.warn("WebGL addon failed, falling back to DOM renderer", err);
+    const mkTerm = () => {
+        const term = new Terminal({
+            allowProposedApi: true,
+            allowTransparency: true,
+            cursorBlink: true,
+            fontFamily: font,
+            fontSize: cfg.fontSize,
+            scrollback: 10_000,
+            macOptionIsMeta: true,
+            theme: THEME,
+        });
+        const fit = new FitAddon();
+        term.loadAddon(fit);
+        if (useWebgl) {
+            try {
+                const webgl = new WebglAddon();
+                webgl.onContextLoss(() => webgl.dispose());
+                term.loadAddon(webgl);
+            } catch (err) {
+                console.warn("WebGL addon failed, DOM renderer", err);
+            }
         }
-    } else {
-        console.info("renderer: dom (set localStorage rook.renderer=webgl to A/B)");
+        return {term, fit};
+    };
+
+    // The host daemon owns the shells; the app only discovers it. Sessions
+    // (and your scrollback tail) survive app restarts and config reloads.
+    let api: HostAPI;
+    try {
+        const info = await Host.Info();
+        api = new HostAPI(info.endpoint, info.token);
+    } catch (err) {
+        fatal(`rook-host unavailable:\n${err}`);
+        return;
     }
-    fit.fit();
 
-    term.onData((data) => {
-        ws?.send(data);
-    });
+    const tabs = new Tabs(document.getElementById("tabs")!, document.getElementById("terminals")!, api, mkTerm);
 
-    // cmd+shift+, reloads the page — ghostty's reload_config binding. The
-    // whole frontend re-runs, so Config.Get() picks up file edits. Caveat
-    // until the PTY host split: the shell session restarts with it.
-    // e.code, not e.key: shift+comma *is* "<" on a US layout, so matching
-    // e.key === "," can never fire with shift held.
-    window.addEventListener("keydown", (e) => {
-        if (e.metaKey && e.shiftKey && e.code === "Comma") {
-            e.preventDefault();
-            location.reload();
-        }
-    });
+    const registry = new Registry();
+    const palette = new Palette(registry, () => tabs.focusActive());
+    registry.register(
+        {id: "palette.toggle", title: "Command palette", category: "View", keys: "⌘K", run: () => palette.toggle()},
+        {id: "session.new", title: "New session", category: "Session", keys: "⌘T", run: () => tabs.newSession()},
+        {id: "session.close", title: "Close session", category: "Session", run: () => tabs.closeActive()},
+        {id: "session.next", title: "Next session", category: "Session", keys: "⌘⇧]", run: () => tabs.next()},
+        {id: "session.prev", title: "Previous session", category: "Session", keys: "⌘⇧[", run: () => tabs.prev()},
+        {id: "config.reload", title: "Reload config", category: "Config", keys: "⌘⇧,", run: () => location.reload()},
+    );
+    document.getElementById("palette-btn")!.addEventListener("click", () => registry.run("palette.toggle"));
 
-    new ResizeObserver(() => syncSize()).observe(container);
-    await spawn();
+    // Keybindings dispatch commands — nothing acts directly. e.code for
+    // physical keys (shift+comma is "<", shift+] is "}" in e.key terms).
+    window.addEventListener(
+        "keydown",
+        (e) => {
+            if (palette.visible) {
+                if (e.metaKey && e.code === "KeyK") {
+                    e.preventDefault();
+                    palette.close();
+                }
+                return; // palette's own input handles the rest
+            }
+            if (!e.metaKey) return;
+            let id: string | null = null;
+            if (e.code === "KeyK" && !e.shiftKey) id = "palette.toggle";
+            else if (e.code === "KeyT" && !e.shiftKey) id = "session.new";
+            else if (e.code === "BracketRight" && e.shiftKey) id = "session.next";
+            else if (e.code === "BracketLeft" && e.shiftKey) id = "session.prev";
+            else if (e.code === "Comma" && e.shiftKey) id = "config.reload";
+            else if (/^Digit[1-9]$/.test(e.code) && !e.shiftKey) {
+                e.preventDefault();
+                e.stopPropagation();
+                tabs.switchTo(Number(e.code.slice(5)) - 1);
+                return;
+            }
+            if (id) {
+                e.preventDefault();
+                e.stopPropagation();
+                registry.run(id);
+            }
+        },
+        {capture: true},
+    );
+
+    new ResizeObserver(() => tabs.syncSize()).observe(document.getElementById("terminals")!);
+
+    try {
+        await tabs.init();
+    } catch (err) {
+        fatal(`failed to open sessions:\n${err}`);
+    }
 }
 
 void main();
