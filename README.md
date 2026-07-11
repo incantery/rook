@@ -120,3 +120,7 @@ while living in it. Agent work starts after the switch.
 - **Relationship to the incantery fabric tool**: rook's PTY host overlaps
   conceptually with the planned workspace/session fabric. Deliberately
   ignored for MVP; revisit only if a real seam appears.
+
+## License
+
+[MIT](LICENSE)
