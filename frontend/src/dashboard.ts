@@ -112,7 +112,7 @@ export class Dashboard {
                 <span class="dash-when"></span>
               </div>
               <div class="dash-cwd"></div>`;
-            card.querySelector(".dash-num")!.textContent = String(i + 1);
+            card.querySelector(".dash-num")!.textContent = String(this.tabs.dashTab + 1 + i);
             const fg = card.querySelector(".dash-fg")!;
             fg.textContent = s.fg || "?";
             // agent sessions get the accent — the attention router's future

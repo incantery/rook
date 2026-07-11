@@ -18,6 +18,9 @@ type Config struct {
 	BackgroundOpacity float64 `json:"backgroundOpacity"`
 	WindowPaddingX    int     `json:"windowPaddingX"`
 	WindowPaddingY    int     `json:"windowPaddingY"`
+	// DashboardTab is the strip number the dashboard occupies; shell
+	// windows number from the next one up (` <n> follows along).
+	DashboardTab int `json:"dashboardTab"`
 }
 
 func Default() Config {
@@ -27,6 +30,7 @@ func Default() Config {
 		BackgroundOpacity: 0.95,
 		WindowPaddingX:    4,
 		WindowPaddingY:    4,
+		DashboardTab:      1,
 	}
 }
 
@@ -86,6 +90,10 @@ func Load() Config {
 		case "window-padding-y":
 			if n, err := strconv.Atoi(value); err == nil && n >= 0 {
 				cfg.WindowPaddingY = n
+			}
+		case "dashboard-tab":
+			if n, err := strconv.Atoi(value); err == nil && n >= 0 && n <= 8 {
+				cfg.DashboardTab = n
 			}
 		}
 	}

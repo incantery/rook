@@ -7,4 +7,10 @@ export interface Config {
     "backgroundOpacity": number;
     "windowPaddingX": number;
     "windowPaddingY": number;
+
+    /**
+     * DashboardTab is the strip number the dashboard occupies; shell
+     * windows number from the next one up (` <n> follows along).
+     */
+    "dashboardTab": number;
 }

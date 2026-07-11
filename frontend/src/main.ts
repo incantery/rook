@@ -100,6 +100,10 @@ async function main() {
     }
 
     const tabs = new Tabs(document.getElementById("tabs")!, document.getElementById("terminals")!, api, mkTerm);
+    // Where the dashboard sits in the strip (config dashboard-tab, default
+    // 1); shell windows number from the next slot, and ` <n> / ⌘<n> follow.
+    const dashTab = cfg.dashboardTab;
+    tabs.dashTab = dashTab;
     const appScreen = document.getElementById("app-screen")!;
 
     // ==== screens: home (workspace manager) ⇄ workspace terminals ====
@@ -233,8 +237,8 @@ async function main() {
                 else if (e.key === "s") registry.run("workspace.switch");
                 else if (e.key === "h") registry.run("workspace.manager");
                 else if (e.key === ".") registry.run("workspace.set-root");
-                else if (e.key === "d" || e.key === "0") registry.run("workspace.dashboard");
-                else if (/^[1-9]$/.test(e.key)) tabs.switchTo(Number(e.key) - 1);
+                else if (e.key === "d" || e.key === String(dashTab)) registry.run("workspace.dashboard");
+                else if (/^[0-9]$/.test(e.key) && Number(e.key) > dashTab) tabs.switchTo(Number(e.key) - dashTab - 1);
                 // anything else: prefix consumed, key ignored — tmux behavior
                 return;
             }
@@ -252,10 +256,12 @@ async function main() {
             else if (e.code === "BracketRight" && e.shiftKey) id = "session.next";
             else if (e.code === "BracketLeft" && e.shiftKey) id = "session.prev";
             else if (e.code === "Comma" && e.shiftKey) id = "config.reload";
-            else if (/^Digit[1-9]$/.test(e.code) && !e.shiftKey) {
+            else if (/^Digit[0-9]$/.test(e.code) && !e.shiftKey) {
                 e.preventDefault();
                 e.stopPropagation();
-                tabs.switchTo(Number(e.code.slice(5)) - 1);
+                const n = Number(e.code.slice(5));
+                if (n === dashTab) registry.run("workspace.dashboard");
+                else if (n > dashTab) tabs.switchTo(n - dashTab - 1);
                 return;
             }
             if (id) {

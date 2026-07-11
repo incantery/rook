@@ -1,6 +1,7 @@
 // Workspace-aware session tabs, tmux-shaped: workspace = tmux session,
-// window = host session (tab), numbered 1-based per workspace. Every tab in
-// every workspace stays attached (the host keeps producing into rings
+// window = host session (tab). The dashboard sits at `dashTab` (config
+// dashboard-tab) and shell windows number from the next one up. Every tab
+// in every workspace stays attached (the host keeps producing into rings
 // either way); the strip renders only the current workspace, so switching
 // is instant and background workspaces stay warm.
 
@@ -27,6 +28,9 @@ export class Tabs {
     private current = "main";
     private lastActive = new Map<string, Tab>();
     private dashActive = false;
+    /** Strip number of the dashboard (config dashboard-tab); shell
+     *  windows display as dashTab+1, dashTab+2, … */
+    dashTab = 1;
 
     /** Called when the active workspace loses its last window — the
      *  manager (home) takes over, VS Code-style. */
@@ -239,15 +243,15 @@ export class Tabs {
         }
     }
 
-    /** tmux-style strip: bare 1-based window numbers within the current
-     *  workspace (window-status-format ' #{window_index} ' — no names). */
+    /** tmux-style strip: bare window numbers within the current workspace
+     *  (window-status-format ' #{window_index} ' — no names). */
     private renderStrip(): void {
         this.stripEl.innerHTML = "";
-        // window 0: the workspace dashboard
+        // the workspace dashboard's slot
         const dash = document.createElement("button");
         dash.className = "tab tab-dash" + (this.dashActive ? " active" : "");
         dash.style.setProperty("--wails-draggable", "no-drag");
-        dash.textContent = "0";
+        dash.textContent = String(this.dashTab);
         dash.title = "Dashboard (` d)";
         dash.addEventListener("click", () => this.onDashboard());
         this.stripEl.appendChild(dash);
@@ -255,7 +259,7 @@ export class Tabs {
             const btn = document.createElement("button");
             btn.className = "tab" + (tab === this.active && !this.dashActive ? " active" : "");
             btn.style.setProperty("--wails-draggable", "no-drag");
-            btn.textContent = String(i + 1);
+            btn.textContent = String(this.dashTab + 1 + i);
             btn.title = tab.name;
             btn.addEventListener("click", () => this.activate(tab));
             this.stripEl.appendChild(btn);
