@@ -2,7 +2,6 @@ import {Terminal} from "@xterm/xterm";
 import {FitAddon} from "@xterm/addon-fit";
 import {WebglAddon} from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
-import {Events} from "@wailsio/runtime";
 import {Service as Session} from "../bindings/github.com/incantery/rook/internal/session";
 
 // Renderer A/B switch: WebGL showed stale-frame artifacts in WKWebView after
@@ -60,65 +59,45 @@ if (useWebgl) {
 }
 fit.fit();
 
-// PTY output is base64-encoded raw bytes (chunks can split UTF-8 mid-rune);
-// xterm's own decoder reassembles them.
-const decode = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-
-interface DataEvent {
-    id: string;
-    seq: number;
-    data: string;
-}
-
+// PTY bytes flow over a localhost WebSocket (binary frames, TCP ordering) —
+// the Wails event bus drops messages under flood and a terminal can't
+// tolerate that. Bindings carry only low-rate control: spawn and resize.
+let ws: WebSocket | null = null;
 let sessionId: string | null = null;
 let spawnedAt = 0;
-let lastSeq = 0;
-// Output emitted between Spawn() returning in Go and the id landing here
-// would race past the filter below — hold it until the id is known.
-let preSpawn: DataEvent[] = [];
-
-function onData(e: DataEvent) {
-    if (e.id !== sessionId) return;
-    // A gap or reorder here corrupts the escape-sequence stream — if the
-    // screen ever garbles, this console line is the first thing to check.
-    if (e.seq !== lastSeq + 1) {
-        console.error(`pty:data sequence break: expected ${lastSeq + 1}, got ${e.seq}`);
-    }
-    lastSeq = e.seq;
-    term.write(decode(e.data));
-}
 
 async function spawn() {
     sessionId = null;
-    preSpawn = [];
-    lastSeq = 0;
     spawnedAt = Date.now();
-    sessionId = await Session.Spawn(term.cols, term.rows);
-    preSpawn.forEach(onData);
-    preSpawn = [];
+    const endpoint = await Session.Endpoint();
+    const id = await Session.Spawn(term.cols, term.rows);
+
+    const socket = new WebSocket(`${endpoint}/session/${id}`);
+    socket.binaryType = "arraybuffer";
+    socket.onopen = () => {
+        sessionId = id;
+        ws = socket;
+        term.focus();
+    };
+    socket.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+        term.write(new Uint8Array(e.data));
+    };
+    socket.onclose = () => {
+        if (sessionId !== id) return; // superseded by a newer session
+        sessionId = null;
+        ws = null;
+        // Instant exit means the shell itself is broken — don't respawn-loop.
+        if (Date.now() - spawnedAt < 1000) {
+            term.writeln("\r\n\x1b[31m[shell exited immediately — not restarting]\x1b[0m");
+            return;
+        }
+        term.writeln("\r\n\x1b[90m[shell exited — restarting]\x1b[0m");
+        void spawn();
+    };
 }
 
-Events.On("pty:data", (e: {data: DataEvent}) => {
-    if (sessionId === null) {
-        preSpawn.push(e.data);
-        return;
-    }
-    onData(e.data);
-});
-
-Events.On("pty:exit", (e: {data: {id: string}}) => {
-    if (e.data.id !== sessionId) return;
-    // Instant exit means the shell itself is broken — don't respawn-loop.
-    if (Date.now() - spawnedAt < 1000) {
-        term.writeln("\r\n\x1b[31m[shell exited immediately — not restarting]\x1b[0m");
-        return;
-    }
-    term.writeln("\r\n\x1b[90m[shell exited — restarting]\x1b[0m");
-    void spawn();
-});
-
 term.onData((data) => {
-    if (sessionId !== null) void Session.Write(sessionId, data);
+    ws?.send(data);
 });
 
 term.onResize(({cols, rows}) => {
@@ -127,4 +106,4 @@ term.onResize(({cols, rows}) => {
 
 window.addEventListener("resize", () => fit.fit());
 
-void spawn().then(() => term.focus());
+void spawn();

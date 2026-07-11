@@ -5,6 +5,13 @@
 // @ts-ignore: Unused imports
 import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wailsio/runtime";
 
+/**
+ * Endpoint returns the WebSocket base URL; the frontend appends /session/{id}.
+ */
+export function Endpoint(): $CancellablePromise<string> {
+    return $Call.ByID(2519454032);
+}
+
 export function Kill(id: string): $CancellablePromise<void> {
     return $Call.ByID(3412555821, id);
 }
@@ -15,8 +22,4 @@ export function Resize(id: string, cols: number, rows: number): $CancellableProm
 
 export function Spawn(cols: number, rows: number): $CancellablePromise<string> {
     return $Call.ByID(450212180, cols, rows);
-}
-
-export function Write(id: string, data: string): $CancellablePromise<void> {
-    return $Call.ByID(1080792000, id, data);
 }
