@@ -10,6 +10,7 @@ import {Registry} from "./registry";
 import {Palette} from "./palette";
 import {WorkspacePicker} from "./picker";
 import {Home} from "./home";
+import {Dashboard} from "./dashboard";
 
 // Renderer A/B switch: WebGL showed stale-frame artifacts in WKWebView, so
 // the DOM renderer is the default until that's re-judged.
@@ -115,6 +116,7 @@ async function main() {
         }
     }
     function showHome(): void {
+        dash.hide();
         appScreen.hidden = true;
         void home.show();
     }
@@ -122,6 +124,12 @@ async function main() {
     tabs.onWorkspaceGone = showHome;
 
     const registry = new Registry();
+    // Window 0 of every workspace: the dashboard. Activating any real
+    // window dismisses it.
+    const dash = new Dashboard(api, tabs, (id) => void registry.run(id));
+    dash.onJump = (i) => tabs.switchTo(i);
+    tabs.onActivate = () => dash.hide();
+    tabs.onDashboard = () => dash.toggle();
     const palette = new Palette(registry, () => tabs.focusActive());
     const picker = new WorkspacePicker(
         tabs,
@@ -146,6 +154,7 @@ async function main() {
         {id: "config.reload", title: "Reload config", category: "Config", keys: "` r", run: () => location.reload()},
         {id: "workspace.switch", title: "Switch workspace…", category: "Workspace", keys: "` s", run: () => picker.open()},
         {id: "workspace.manager", title: "Workspace manager", category: "Workspace", keys: "` h", run: showHome},
+        {id: "workspace.dashboard", title: "Workspace dashboard", category: "Workspace", keys: "` d", run: () => dash.toggle()},
         {id: "workspace.scratch", title: "New scratch shell", category: "Workspace", run: () => home.scratch()},
         {
             id: "workspace.set-root",
@@ -224,6 +233,7 @@ async function main() {
                 else if (e.key === "s") registry.run("workspace.switch");
                 else if (e.key === "h") registry.run("workspace.manager");
                 else if (e.key === ".") registry.run("workspace.set-root");
+                else if (e.key === "d" || e.key === "0") registry.run("workspace.dashboard");
                 else if (/^[1-9]$/.test(e.key)) tabs.switchTo(Number(e.key) - 1);
                 // anything else: prefix consumed, key ignored — tmux behavior
                 return;

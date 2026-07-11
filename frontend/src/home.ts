@@ -6,7 +6,7 @@
 
 import type {HostAPI, WorkspaceInfo} from "./hostapi";
 
-function ago(iso: string): string {
+export function ago(iso: string): string {
     const ms = Date.now() - new Date(iso).getTime();
     if (ms < 90_000) return "just now";
     const m = Math.floor(ms / 60_000);

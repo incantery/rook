@@ -26,12 +26,17 @@ export class Tabs {
     private active: Tab | null = null;
     private current = "main";
     private lastActive = new Map<string, Tab>();
+    private dashActive = false;
 
     /** Called when the active workspace loses its last window — the
      *  manager (home) takes over, VS Code-style. */
     onWorkspaceGone: () => void = () => {};
     /** Called whenever the current workspace (or its tab set) changes. */
     onChange: () => void = () => {};
+    /** Called when a window is activated — dismisses overlays (dashboard). */
+    onActivate: () => void = () => {};
+    /** The strip's window-0 button — toggles the workspace dashboard. */
+    onDashboard: () => void = () => {};
 
     constructor(
         private stripEl: HTMLElement,
@@ -154,6 +159,15 @@ export class Tabs {
         this.syncSize(true);
         tab.term.focus();
         this.onChange();
+        this.onActivate();
+    }
+
+    /** Strip state for the dashboard: window 0 lights up, the active
+     *  window number dims (tmux current-window semantics). */
+    setDashboardActive(v: boolean): void {
+        if (this.dashActive === v) return;
+        this.dashActive = v;
+        this.renderStrip();
     }
 
     /** Fit the active grid to its container and tell the PTY, deduped. */
@@ -229,9 +243,17 @@ export class Tabs {
      *  workspace (window-status-format ' #{window_index} ' — no names). */
     private renderStrip(): void {
         this.stripEl.innerHTML = "";
+        // window 0: the workspace dashboard
+        const dash = document.createElement("button");
+        dash.className = "tab tab-dash" + (this.dashActive ? " active" : "");
+        dash.style.setProperty("--wails-draggable", "no-drag");
+        dash.textContent = "0";
+        dash.title = "Dashboard (` d)";
+        dash.addEventListener("click", () => this.onDashboard());
+        this.stripEl.appendChild(dash);
         this.wsTabs().forEach((tab, i) => {
             const btn = document.createElement("button");
-            btn.className = "tab" + (tab === this.active ? " active" : "");
+            btn.className = "tab" + (tab === this.active && !this.dashActive ? " active" : "");
             btn.style.setProperty("--wails-draggable", "no-drag");
             btn.textContent = String(i + 1);
             btn.title = tab.name;

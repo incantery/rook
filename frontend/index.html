@@ -78,6 +78,10 @@
       .tab-new {
         font-size: 14px;
       }
+      .tab-dash.active {
+        color: var(--acc);
+        font-weight: 700;
+      }
       #ws-label {
         position: absolute;
         left: 84px;
@@ -162,6 +166,144 @@
          the translucent body tint. */
       .xterm .xterm-viewport {
         background-color: transparent !important;
+      }
+
+      /* ==== workspace dashboard: window 0, frosted over the terminals so
+         the window's translucency survives ==== */
+      #dashboard {
+        position: absolute;
+        inset: 0;
+        z-index: 10;
+        overflow-y: auto;
+        background: rgba(15, 17, 26, 0.72);
+        backdrop-filter: blur(22px);
+        -webkit-backdrop-filter: blur(22px);
+      }
+      #dashboard[hidden] {
+        display: none;
+      }
+      #dash-inner {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 28px 26px 60px;
+      }
+      .dash-head {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        margin-bottom: 24px;
+      }
+      .dash-head-text {
+        flex: 1;
+        min-width: 0;
+      }
+      .dash-name {
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--fg);
+      }
+      .dash-root {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--lo);
+        margin-top: 5px;
+      }
+      .dash-pills {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        flex-wrap: wrap;
+      }
+      .dash-pill {
+        font-family: var(--mono);
+        font-size: 11px;
+        padding: 3px 9px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--dim);
+        white-space: nowrap;
+      }
+      .dash-pill.branch {
+        color: var(--acc);
+        background: rgba(130, 170, 255, 0.1);
+      }
+      .dash-pill.dirty {
+        color: #ffcb6b;
+        background: rgba(255, 203, 107, 0.1);
+      }
+      .dash-pill.clean {
+        color: var(--grn);
+        background: rgba(195, 232, 141, 0.1);
+      }
+      .dash-pill.sync {
+        color: var(--dim);
+      }
+      .dash-sec {
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--lo);
+        margin: 0 0 10px;
+      }
+      #dash-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        gap: 10px;
+        margin-bottom: 26px;
+      }
+      .dash-card {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.03);
+        padding: 12px 14px;
+        cursor: pointer;
+        transition: border-color 0.15s ease;
+      }
+      .dash-card:hover {
+        border-color: rgba(140, 150, 180, 0.4);
+      }
+      .dash-card-top {
+        display: flex;
+        align-items: baseline;
+        gap: 9px;
+        margin-bottom: 7px;
+      }
+      .dash-num {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--lo);
+      }
+      .dash-fg {
+        font-family: var(--mono);
+        font-size: 13.5px;
+        font-weight: 700;
+        color: var(--fg);
+      }
+      .dash-fg.agent {
+        color: var(--grn);
+      }
+      .dash-spacer {
+        flex: 1;
+      }
+      .dash-when {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--lo);
+        white-space: nowrap;
+      }
+      .dash-cwd {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--lo);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .dash-actions {
+        display: flex;
+        gap: 9px;
+        flex-wrap: wrap;
       }
 
       /* ==== command palette + workspace picker overlays ==== */
@@ -594,7 +736,26 @@
         commands <kbd>⌘K</kbd>
       </button>
     </div>
-    <div id="terminals"></div>
+    <div id="terminals">
+      <div id="dashboard" hidden>
+        <div id="dash-inner">
+          <div class="dash-head">
+            <div class="dash-head-text">
+              <div class="dash-name"></div>
+              <div class="dash-root"></div>
+            </div>
+            <div class="dash-pills"></div>
+          </div>
+          <div class="dash-sec">Windows</div>
+          <div id="dash-grid"></div>
+          <div class="dash-actions">
+            <button class="home-btn" data-cmd="session.new"><span class="plus">+</span> New window</button>
+            <button class="home-btn" data-cmd="workspace.set-root">Set root to shell's cwd</button>
+            <button class="home-btn" data-cmd="workspace.manager">Workspace manager</button>
+          </div>
+        </div>
+      </div>
+    </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

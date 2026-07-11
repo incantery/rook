@@ -77,6 +77,12 @@ export class HostAPI {
     async deleteWorkspace(name: string): Promise<void> {
         await this.req(`/workspaces/${encodeURIComponent(name)}`, {method: "DELETE"});
     }
+
+    /** Live workspace status: per-session foreground process + cwd, repo
+     *  state. The dashboard's data — and the future agent's context. */
+    async workspaceStatus(name: string): Promise<WorkspaceStatus> {
+        return (await this.req(`/workspaces/${encodeURIComponent(name)}/status`)).json();
+    }
 }
 
 export interface WorkspaceInfo {
@@ -86,4 +92,24 @@ export interface WorkspaceInfo {
     created: string;
     lastUsed: string;
     sessions: number;
+}
+
+export interface GitInfo {
+    branch: string;
+    dirty: number;
+    ahead: number;
+    behind: number;
+}
+
+export interface SessionStatus extends SessionInfo {
+    fg: string;
+    cwd: string;
+}
+
+export interface WorkspaceStatus {
+    name: string;
+    root?: string;
+    scratch?: boolean;
+    git?: GitInfo;
+    sessions: SessionStatus[];
 }

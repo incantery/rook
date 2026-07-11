@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +29,7 @@ const (
 	// replaced (sessions die with it — the tmux server-upgrade reality).
 	// BUMP THIS with any host API or storage change: a stale daemon
 	// answering health checks 404s new endpoints silently.
-	Version = 3
+	Version = 4
 	ringCap = 512 * 1024
 )
 
@@ -278,27 +279,93 @@ func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleWorkspace routes DELETE /workspaces/{name}: kills the workspace's
-// live sessions and removes it from the registry.
+// handleWorkspace routes /workspaces/{name} (DELETE: kill its sessions and
+// drop it from the registry) and /workspaces/{name}/status (GET: the
+// dashboard payload).
 func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/workspaces/")
-	if r.Method != http.MethodDelete || name == "" {
+	rest := strings.TrimPrefix(r.URL.Path, "/workspaces/")
+	name, action, _ := strings.Cut(rest, "/")
+	if name == "" {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	switch {
+	case action == "status" && r.Method == http.MethodGet:
+		h.handleWorkspaceStatus(w, name)
+	case action == "" && r.Method == http.MethodDelete:
+		h.mu.Lock()
+		var ids []string
+		for id, s := range h.sessions {
+			if s.info.Workspace == name {
+				ids = append(ids, id)
+			}
+		}
+		h.mu.Unlock()
+		for _, id := range ids {
+			h.kill(id)
+		}
+		h.reg.remove(name)
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+// sessionStatus is SessionInfo plus what's live inside the window right
+// now. The dashboard renders it, and the attention router (docs/agent.md)
+// will read the same struct — Fg is how rook knows a window runs claude.
+type sessionStatus struct {
+	SessionInfo
+	Fg  string `json:"fg"`
+	Cwd string `json:"cwd"`
+}
+
+type workspaceStatus struct {
+	Name     string          `json:"name"`
+	Root     string          `json:"root,omitempty"`
+	Scratch  bool            `json:"scratch,omitempty"`
+	Git      *GitInfo        `json:"git,omitempty"`
+	Sessions []sessionStatus `json:"sessions"`
+}
+
+func (h *Host) handleWorkspaceStatus(w http.ResponseWriter, name string) {
 	h.mu.Lock()
-	var ids []string
-	for id, s := range h.sessions {
+	var sess []*session
+	for _, s := range h.sessions {
 		if s.info.Workspace == name {
-			ids = append(ids, id)
+			sess = append(sess, s)
 		}
 	}
 	h.mu.Unlock()
-	for _, id := range ids {
-		h.kill(id)
+	// creation order matches the strip's window numbering
+	sort.Slice(sess, func(i, j int) bool { return sess[i].info.Created.Before(sess[j].info.Created) })
+
+	out := workspaceStatus{Name: name, Sessions: make([]sessionStatus, len(sess))}
+	if ws := h.reg.get(name); ws != nil {
+		out.Root, out.Scratch = ws.Root, ws.Scratch
 	}
-	h.reg.remove(name)
-	w.WriteHeader(http.StatusNoContent)
+	// lsof runs ~100ms a call — probe every session concurrently
+	var wg sync.WaitGroup
+	for i, s := range sess {
+		wg.Add(1)
+		go func(i int, s *session) {
+			defer wg.Done()
+			s.mu.Lock()
+			info := s.info
+			s.mu.Unlock()
+			pid := s.cmd.Process.Pid
+			out.Sessions[i] = sessionStatus{SessionInfo: info, Fg: fgOf(s.pty, pid), Cwd: cwdOf(pid)}
+		}(i, s)
+	}
+	wg.Wait()
+	// repo status from the root — or from wherever the first shell is, for
+	// rootless (scratch) workspaces
+	dir := out.Root
+	if dir == "" && len(out.Sessions) > 0 {
+		dir = out.Sessions[0].Cwd
+	}
+	out.Git = gitInfo(dir)
+	writeJSON(w, out)
 }
 
 func (h *Host) cors(next http.Handler) http.Handler {
