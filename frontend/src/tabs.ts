@@ -88,10 +88,12 @@ export class Tabs {
         };
     }
 
+    /** New session, inheriting the active shell's cwd — every window/split
+     *  binding in the tmux config carries `-c "#{pane_current_path}"`. */
     async newSession(): Promise<void> {
         const cols = this.active?.term.cols ?? 100;
         const rows = this.active?.term.rows ?? 30;
-        const s = await this.api.create(cols, rows);
+        const s = await this.api.create(cols, rows, this.active?.id);
         const tab = this.addTab(s);
         this.activate(tab);
     }
@@ -145,6 +147,14 @@ export class Tabs {
         this.active?.term.focus();
     }
 
+    sendToActive(data: string): void {
+        if (this.active?.ws?.readyState === WebSocket.OPEN) this.active.ws.send(data);
+    }
+
+    /** Called when the last session ends — tmux ends the client when the
+     *  last window dies. Wired to Window.Close in main.ts. */
+    onEmpty: () => void = () => {};
+
     private removeTab(tab: Tab): void {
         const idx = this.tabs.indexOf(tab);
         if (idx === -1) return;
@@ -156,26 +166,28 @@ export class Tabs {
             this.active = null;
             const next = this.tabs[Math.min(idx, this.tabs.length - 1)];
             if (next) this.activate(next);
-            else void this.newSession(); // never leave a dead window
+            else this.onEmpty();
         }
     }
 
+    /** tmux-style strip: bare 1-based window numbers (the tmux config's
+     *  window-status-format is ' #{window_index} ' — no names). */
     private renderStrip(): void {
         this.stripEl.innerHTML = "";
-        for (const tab of this.tabs) {
+        this.tabs.forEach((tab, i) => {
             const btn = document.createElement("button");
             btn.className = "tab" + (tab === this.active ? " active" : "");
             btn.style.setProperty("--wails-draggable", "no-drag");
-            btn.innerHTML = `<span class="dot"></span><span class="tab-name"></span>`;
-            btn.querySelector(".tab-name")!.textContent = tab.name;
+            btn.textContent = String(i + 1);
+            btn.title = tab.name;
             btn.addEventListener("click", () => this.activate(tab));
             this.stripEl.appendChild(btn);
-        }
+        });
         const plus = document.createElement("button");
         plus.className = "tab tab-new";
         plus.style.setProperty("--wails-draggable", "no-drag");
         plus.textContent = "+";
-        plus.title = "New session (⌘T)";
+        plus.title = "New session (` c)";
         plus.addEventListener("click", () => void this.newSession());
         this.stripEl.appendChild(plus);
     }

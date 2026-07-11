@@ -37,7 +37,7 @@ func main() {
 		Mac: application.MacWindow{
 			// Matches the titlebar height in the frontend; tabs and buttons
 			// inside it opt out via --wails-draggable: no-drag.
-			InvisibleTitleBarHeight: 38,
+			InvisibleTitleBarHeight: 44,
 			// Transparent = clear NSWindow + non-drawing webview: the page's
 			// full-bleed rgba(15,17,26,0.95) is what you see — ghostty-style
 			// plain alpha. Translucent instead injects an NSVisualEffectView,

@@ -2,6 +2,7 @@ import {Terminal} from "@xterm/xterm";
 import {FitAddon} from "@xterm/addon-fit";
 import {WebglAddon} from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import {Window} from "@wailsio/runtime";
 import {Service as Config} from "../bindings/github.com/incantery/rook/internal/config";
 import {Service as Host} from "../bindings/github.com/incantery/rook/internal/hostclient";
 import {HostAPI} from "./hostapi";
@@ -97,21 +98,36 @@ async function main() {
     }
 
     const tabs = new Tabs(document.getElementById("tabs")!, document.getElementById("terminals")!, api, mkTerm);
+    // Last session ended → the client ends, like tmux. Shell exits fully
+    // discard their session; nothing respawns behind your back.
+    tabs.onEmpty = () => void Window.Close();
 
     const registry = new Registry();
     const palette = new Palette(registry, () => tabs.focusActive());
     registry.register(
         {id: "palette.toggle", title: "Command palette", category: "View", keys: "⌘K", run: () => palette.toggle()},
-        {id: "session.new", title: "New session", category: "Session", keys: "⌘T", run: () => tabs.newSession()},
-        {id: "session.close", title: "Close session", category: "Session", run: () => tabs.closeActive()},
-        {id: "session.next", title: "Next session", category: "Session", keys: "⌘⇧]", run: () => tabs.next()},
-        {id: "session.prev", title: "Previous session", category: "Session", keys: "⌘⇧[", run: () => tabs.prev()},
-        {id: "config.reload", title: "Reload config", category: "Config", keys: "⌘⇧,", run: () => location.reload()},
+        {id: "session.new", title: "New window (inherits cwd)", category: "Session", keys: "` c", run: () => tabs.newSession()},
+        {id: "session.close", title: "Kill window", category: "Session", keys: "` x", run: () => tabs.closeActive()},
+        {id: "session.next", title: "Next window", category: "Session", keys: "⌘⇧]", run: () => tabs.next()},
+        {id: "session.prev", title: "Previous window", category: "Session", keys: "⌘⇧[", run: () => tabs.prev()},
+        {id: "config.reload", title: "Reload config", category: "Config", keys: "` r", run: () => location.reload()},
     );
     document.getElementById("palette-btn")!.addEventListener("click", () => registry.run("palette.toggle"));
 
-    // Keybindings dispatch commands — nothing acts directly. e.code for
-    // physical keys (shift+comma is "<", shift+] is "}" in e.key terms).
+    // ==== keybindings — two layers, both dispatching registry commands ====
+    //
+    // 1. The backtick prefix, straight from the tmux config (`set -g
+    //    prefix \``): ` arms, the next key acts. `` sends a literal
+    //    backtick (tmux `bind \` send-prefix`). `c new window (cwd
+    //    inherited), `r reload config, `1-9 select window.
+    // 2. macOS chords (⌘K palette etc.) as a native-feeling complement.
+    const pill = document.getElementById("prefix-pill")!;
+    let prefixArmed = false;
+    const setPrefix = (v: boolean) => {
+        prefixArmed = v;
+        pill.hidden = !v;
+    };
+
     window.addEventListener(
         "keydown",
         (e) => {
@@ -122,6 +138,28 @@ async function main() {
                 }
                 return; // palette's own input handles the rest
             }
+
+            if (prefixArmed) {
+                if (e.key === "Shift" || e.key === "Meta" || e.key === "Alt" || e.key === "Control") return;
+                e.preventDefault();
+                e.stopPropagation();
+                setPrefix(false);
+                if (e.key === "`") tabs.sendToActive("`");
+                else if (e.key === "c") registry.run("session.new");
+                else if (e.key === "x") registry.run("session.close");
+                else if (e.key === "r") registry.run("config.reload");
+                else if (e.key === "k") registry.run("palette.toggle");
+                else if (/^[1-9]$/.test(e.key)) tabs.switchTo(Number(e.key) - 1);
+                // anything else: prefix consumed, key ignored — tmux behavior
+                return;
+            }
+            if (e.key === "`" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+                e.preventDefault();
+                e.stopPropagation();
+                setPrefix(true);
+                return;
+            }
+
             if (!e.metaKey) return;
             let id: string | null = null;
             if (e.code === "KeyK" && !e.shiftKey) id = "palette.toggle";

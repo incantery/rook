@@ -69,13 +69,15 @@ func (h *Host) Token() string { return h.token }
 
 // ---- session lifecycle ----
 
-func (h *Host) spawn(cols, rows int) (*session, error) {
+func (h *Host) spawn(cols, rows int, cwd string) (*session, error) {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/zsh"
 	}
 	cmd := exec.Command(shell, "-l")
-	if home, err := os.UserHomeDir(); err == nil {
+	if cwd != "" {
+		cmd.Dir = cwd
+	} else if home, err := os.UserHomeDir(); err == nil {
 		cmd.Dir = home
 	}
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
@@ -236,7 +238,10 @@ func (h *Host) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, list)
 	case http.MethodPost:
-		var req struct{ Cols, Rows int }
+		var req struct {
+			Cols, Rows int
+			CwdFrom    string // inherit the working directory of this session's shell
+		}
 		json.NewDecoder(r.Body).Decode(&req)
 		if req.Cols <= 0 || req.Cols > 1000 {
 			req.Cols = 100
@@ -244,7 +249,11 @@ func (h *Host) handleSessions(w http.ResponseWriter, r *http.Request) {
 		if req.Rows <= 0 || req.Rows > 1000 {
 			req.Rows = 30
 		}
-		s, err := h.spawn(req.Cols, req.Rows)
+		cwd := ""
+		if from := h.get(req.CwdFrom); from != nil {
+			cwd = cwdOf(from.cmd.Process.Pid)
+		}
+		s, err := h.spawn(req.Cols, req.Rows, cwd)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

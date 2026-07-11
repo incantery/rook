@@ -29,11 +29,13 @@ export class HostAPI {
         return (await this.req("/sessions")).json();
     }
 
-    async create(cols: number, rows: number): Promise<SessionInfo> {
+    /** cwdFrom: inherit the working directory of that session's shell
+     *  (tmux `new-window -c "#{pane_current_path}"`). */
+    async create(cols: number, rows: number, cwdFrom?: string): Promise<SessionInfo> {
         return (
             await this.req("/sessions", {
                 method: "POST",
-                body: JSON.stringify({cols, rows}),
+                body: JSON.stringify({cols, rows, cwdFrom}),
             })
         ).json();
     }

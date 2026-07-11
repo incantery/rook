@@ -32,18 +32,27 @@
         --mono: "Hack Nerd Font Mono", Menlo, ui-monospace, monospace;
       }
 
-      /* ==== titlebar: drag region, session tabs (Rook.dc.html chrome) ==== */
+      /* ==== titlebar: drag region; tab strip is centered bare window
+         numbers, straight from the tmux config (status-justify centre,
+         window-status-format ' #{window_index} '). 44px centers content on
+         the hidden-inset traffic lights. ==== */
       #titlebar {
-        flex: 0 0 38px;
+        position: relative;
+        flex: 0 0 44px;
         display: flex;
-        align-items: stretch;
-        padding-left: 84px; /* traffic lights (hidden-inset titlebar) */
-        padding-right: 10px;
+        align-items: center;
+        justify-content: flex-end;
+        padding: 0 10px 0 84px;
         background: var(--raise);
         border-bottom: 1px solid var(--line);
         --wails-draggable: drag;
       }
       #tabs {
+        position: absolute;
+        left: 50%;
+        top: 0;
+        bottom: 0;
+        transform: translateX(-50%);
         display: flex;
         align-items: stretch;
       }
@@ -51,37 +60,38 @@
         appearance: none;
         background: none;
         border: none;
-        border-bottom: 2px solid transparent;
         display: flex;
         align-items: center;
-        gap: 7px;
-        padding: 0 12px;
-        font-size: 12px;
-        font-family: inherit;
-        color: var(--dim);
+        padding: 0 13px;
+        font-size: 13px;
+        font-family: var(--mono);
+        color: var(--lo);
         cursor: pointer;
       }
       .tab:hover {
-        color: var(--fg);
+        color: var(--dim);
       }
       .tab.active {
-        color: var(--fg);
-        font-weight: 600;
-        border-bottom-color: var(--acc);
-      }
-      .tab .dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: var(--grn);
+        color: #ffffff;
+        font-weight: 700;
       }
       .tab-new {
         font-size: 14px;
-        color: var(--lo);
-        padding: 0 10px;
       }
-      #bar-spacer {
-        flex: 1;
+      #prefix-pill {
+        align-self: center;
+        margin-right: 10px;
+        padding: 2px 9px;
+        border-radius: 10px;
+        font-family: var(--mono);
+        font-size: 10.5px;
+        font-weight: 600;
+        color: #ffcb6b;
+        background: rgba(255, 203, 107, 0.12);
+        border: 1px solid rgba(255, 203, 107, 0.35);
+      }
+      #prefix-pill[hidden] {
+        display: none;
       }
       #palette-btn {
         appearance: none;
@@ -251,7 +261,7 @@
   <body>
     <div id="titlebar">
       <div id="tabs"></div>
-      <div id="bar-spacer"></div>
+      <span id="prefix-pill" hidden>prefix</span>
       <button id="palette-btn" style="--wails-draggable: no-drag">
         commands <kbd>⌘K</kbd>
       </button>
