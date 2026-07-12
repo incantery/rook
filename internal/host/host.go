@@ -831,17 +831,24 @@ func (h *Host) handleAttach(w http.ResponseWriter, r *http.Request, s *session) 
 	}
 
 	// One client per session: a new attach replaces the old (page reload).
+	//
+	// Gap-free replay: the ring copy and the attach swap happen in ONE
+	// critical section, with wmu held across the swap AND the replay. A
+	// pty chunk landing during replay sees the new socket and parks its
+	// live write on wmu until the replay is out — every byte reaches the
+	// client exactly once, in order. (The old shape set attach only after
+	// replaying; bytes arriving in between reached the ring but never
+	// this client — silent scrollback loss under output.)
+	s.wmu.Lock()
 	s.mu.Lock()
 	if old := s.attach; old != nil {
-		s.attach = nil
 		go old.Close(websocket.StatusPolicyViolation, "replaced")
 	}
 	ring := make([]byte, len(s.ring))
 	copy(ring, s.ring)
+	s.attach = c
 	s.mu.Unlock()
 
-	// Replay before going live; wmu keeps the pump from interleaving.
-	s.wmu.Lock()
 	ok := true
 	for off := 0; off < len(ring); off += 32 * 1024 {
 		end := min(off+32*1024, len(ring))
@@ -852,12 +859,10 @@ func (h *Host) handleAttach(w http.ResponseWriter, r *http.Request, s *session) 
 	}
 	s.wmu.Unlock()
 	if !ok {
+		s.detach(c)
 		c.CloseNow()
 		return
 	}
-	s.mu.Lock()
-	s.attach = c
-	s.mu.Unlock()
 
 	// Client → PTY. Detach on any read error; the session lives on.
 	for {

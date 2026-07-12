@@ -1,3 +1,7 @@
+# Up Next
+
+- [ ] Fix the attach replay gap: handleAttach copies the ring, replays, THEN sets s.attach — pty bytes arriving during replay never reach that client. Silent scrollback loss on reload today; constant loss once detach/reattach becomes routine (CHATGPTFEEDBACK.md). Step zero of the background-session detach work.
+
 # Workspace Switcher
 
 - [x] Vim key-binds (^j/^k + ^n/^p in switcher and palette — bare j/k would type into the filter; bare j/k in the inbox)
