@@ -11,12 +11,10 @@
     let listEl: HTMLElement;
 
     const current = $derived(
-        registry
-            .all()
-            .filter((c) => {
-                const q = query.trim().toLowerCase();
-                return !q || c.title.toLowerCase().includes(q) || c.category.toLowerCase().includes(q);
-            }),
+        registry.all().filter((c) => {
+            const q = query.trim().toLowerCase();
+            return !q || c.title.toLowerCase().includes(q) || c.category.toLowerCase().includes(q);
+        }),
     );
 
     function run(id: string) {
@@ -54,7 +52,12 @@
     });
 </script>
 
-<div id="palette" class="overlay" onmousedown={(e) => e.target === e.currentTarget && onclose()} role="presentation">
+<div
+    id="palette"
+    class="overlay"
+    onmousedown={(e) => e.target === e.currentTarget && onclose()}
+    role="presentation"
+>
     <div class="pal-panel">
         <div class="pal-inputrow">
             <span class="pal-chevron">›</span>

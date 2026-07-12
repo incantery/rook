@@ -17,7 +17,12 @@
     // Empty query means items mirror workspaces order, so the active
     // workspace's index is a valid starting selection.
     // svelte-ignore state_referenced_locally — deliberately the initial value
-    let sel = $state(Math.max(0, workspaces.findIndex((w) => w.name === current)));
+    let sel = $state(
+        Math.max(
+            0,
+            workspaces.findIndex((w) => w.name === current),
+        ),
+    );
 
     interface Item {
         label: string;
@@ -31,7 +36,9 @@
             .filter((w) => !ql || w.name.toLowerCase().includes(ql))
             .map((w) => ({
                 label: w.name,
-                detail: `${w.count} window${w.count === 1 ? "" : "s"}` + (w.name === current ? " · current" : ""),
+                detail:
+                    `${w.count} window${w.count === 1 ? "" : "s"}` +
+                    (w.name === current ? " · current" : ""),
                 create: false,
             }));
         if (q && !workspaces.some((w) => w.name.toLowerCase() === ql)) {
@@ -75,7 +82,12 @@
     });
 </script>
 
-<div id="ws-picker" class="overlay" onmousedown={(e) => e.target === e.currentTarget && onclose()} role="presentation">
+<div
+    id="ws-picker"
+    class="overlay"
+    onmousedown={(e) => e.target === e.currentTarget && onclose()}
+    role="presentation"
+>
     <div class="pal-panel">
         <div class="pal-inputrow">
             <span class="pal-chevron">›</span>

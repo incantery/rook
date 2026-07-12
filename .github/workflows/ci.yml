@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Scope: ./... would hit the build/ios scaffold (doesn't compile) and
+      # cmd/rook, the wails GUI binary, which can't even typecheck on Linux
+      # without the GTK4/webkitgtk dev headers (a 1-2 min install). cmd/rook
+      # is a thin wiring main exercised by every local `make dev` build on
+      # macOS; everything it wires lives in internal/, which is covered.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.7.2
+          args: ./internal/... ./cmd/rook-host/... ./cmd/rook-agent/... ./cmd/rookctl/...
+
+      - name: Test
+        run: go test ./internal/... ./cmd/rook-host/... ./cmd/rook-agent/... ./cmd/rookctl/...
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # node 24 ships npm 11, which wrote the lockfile; npm 10 rejects it
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Type check
+        run: npm run check
+
+      - name: Build
+        run: npm run build

@@ -1,27 +1,33 @@
 {
-  "name": "frontend",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build:dev": "vite build --minify false --mode development",
-    "build": "vite build --mode production",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "@wailsio/runtime": "latest",
-    "@xterm/addon-fit": "^0.11.0",
-    "@xterm/addon-webgl": "^0.19.0",
-    "@xterm/xterm": "^6.0.0"
-  },
-  "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^7.2.0",
-    "@tailwindcss/vite": "^4.3.2",
-    "svelte": "^5.56.4",
-    "svelte-check": "^4.7.2",
-    "tailwindcss": "^4.3.2",
-    "typescript": "^5.9.3",
-    "vite": "^8.0.5"
-  }
+    "name": "frontend",
+    "private": true,
+    "version": "0.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build:dev": "vite build --minify false --mode development",
+        "build": "vite build --mode production",
+        "preview": "vite preview",
+        "check": "svelte-check",
+        "lint": "oxlint --deny-warnings",
+        "format": "oxfmt",
+        "format:check": "oxfmt --check ."
+    },
+    "dependencies": {
+        "@wailsio/runtime": "latest",
+        "@xterm/addon-fit": "^0.11.0",
+        "@xterm/addon-webgl": "^0.19.0",
+        "@xterm/xterm": "^6.0.0"
+    },
+    "devDependencies": {
+        "@sveltejs/vite-plugin-svelte": "^7.2.0",
+        "@tailwindcss/vite": "^4.3.2",
+        "oxfmt": "^0.58.0",
+        "oxlint": "^1.73.0",
+        "svelte": "^5.56.4",
+        "svelte-check": "^4.7.2",
+        "tailwindcss": "^4.3.2",
+        "typescript": "^5.9.3",
+        "vite": "^8.0.5"
+    }
 }

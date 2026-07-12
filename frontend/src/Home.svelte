@@ -21,13 +21,16 @@
 
     const attnCounts = $derived.by(() => {
         const counts = new Map<string, number>();
-        for (const it of app.attention) counts.set(it.workspace, (counts.get(it.workspace) ?? 0) + 1);
+        for (const it of app.attention)
+            counts.set(it.workspace, (counts.get(it.workspace) ?? 0) + 1);
         return counts;
     });
     const liveWs = $derived(workspaces.filter((w) => w.sessions > 0));
     const liveShells = $derived(liveWs.reduce((n, w) => n + w.sessions, 0));
     const worstUsage = $derived(
-        app.usage && app.usage.windows.length ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a)) : null,
+        app.usage && app.usage.windows.length
+            ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a))
+            : null,
     );
 
     export async function refresh(): Promise<void> {
@@ -119,17 +122,24 @@
                 id="home-usage"
                 class:warn={worstUsage.pct >= 70 && worstUsage.pct < 90}
                 class:hot={worstUsage.pct >= 90}
-                title={app.usage.windows.map((w) => `${w.label}: ${w.pct}% — resets ${w.resets}`).join("\n")}
+                title={app.usage.windows
+                    .map((w) => `${w.label}: ${w.pct}% — resets ${w.resets}`)
+                    .join("\n")}
             >
                 {app.usage.windows.map((w) => `${shortWindow(w.label)} ${w.pct}%`).join(" · ")}
             </span>
         {/if}
         {#if app.costs}
-            <span id="home-costs" title="What claude usage would cost on API billing — absorbed by the subscription">
+            <span
+                id="home-costs"
+                title="What claude usage would cost on API billing — absorbed by the subscription"
+            >
                 {[
                     `claude $${app.costs.todayUsd.toFixed(2)} today`,
                     `$${app.costs.weekUsd.toFixed(2)} 7d`,
-                    ...(app.costs.drafterTodayUsd > 0 ? [`drafter $${app.costs.drafterTodayUsd.toFixed(2)}`] : []),
+                    ...(app.costs.drafterTodayUsd > 0
+                        ? [`drafter $${app.costs.drafterTodayUsd.toFixed(2)}`]
+                        : []),
                 ].join(" · ")}
             </span>
         {/if}
@@ -145,10 +155,13 @@
                         <div class="resume-kicker">Resume where you left off</div>
                         <div class="resume-body">
                             {liveShells} shell{liveShells === 1 ? "" : "s"} still running across {liveWs.length}
-                            workspace{liveWs.length === 1 ? "" : "s"} — most recently {liveWs[0].name}.
+                            workspace{liveWs.length === 1 ? "" : "s"} — most recently {liveWs[0]
+                                .name}.
                         </div>
                     </div>
-                    <button class="resume-btn" onclick={() => onopen(liveWs[0].name)}>Resume →</button>
+                    <button class="resume-btn" onclick={() => onopen(liveWs[0].name)}
+                        >Resume →</button
+                    >
                 </div>
             {/if}
             <div class="home-head">
@@ -185,14 +198,22 @@
                         </div>
                         <div class="ws-card-root">{ws.root || "~"}</div>
                         <div class="ws-card-tags">
-                            <span class="ws-tag" class:live={ws.sessions > 0} class:idle={ws.sessions === 0}>
+                            <span
+                                class="ws-tag"
+                                class:live={ws.sessions > 0}
+                                class:idle={ws.sessions === 0}
+                            >
                                 {ws.sessions > 0 ? `● ${ws.sessions} live` : "idle"}
                             </span>
                             {#if attnCounts.get(ws.name)}
-                                <span class="ws-tag attn">◉ {attnCounts.get(ws.name)} needs you</span>
+                                <span class="ws-tag attn"
+                                    >◉ {attnCounts.get(ws.name)} needs you</span
+                                >
                             {/if}
                             {#if burn >= 0.01}
-                                <span class="ws-tag cost" title="live claude sessions here, priced as API tokens"
+                                <span
+                                    class="ws-tag cost"
+                                    title="live claude sessions here, priced as API tokens"
                                     >${burn.toFixed(2)}</span
                                 >
                             {/if}
@@ -200,28 +221,43 @@
                                 <span class="ws-tag scratch">scratch</span>
                             {/if}
                             {#if ws.worktreeOf}
-                                <span class="ws-tag worktree" title="git worktree of {ws.worktreeOf}">⎇ {ws.branch}</span>
+                                <span
+                                    class="ws-tag worktree"
+                                    title="git worktree of {ws.worktreeOf}">⎇ {ws.branch}</span
+                                >
                             {/if}
                             {#if ws.issueRef}
-                                <span class="ws-tag issue" title="spawned for {ws.issueRef.tracker} issue {ws.issueRef.key}"
-                                    >{ws.issueRef.key}</span
+                                <span
+                                    class="ws-tag issue"
+                                    title="spawned for {ws.issueRef.tracker} issue {ws.issueRef
+                                        .key}">{ws.issueRef.key}</span
                                 >
                             {/if}
                             {#if ws.pr?.state === "merged"}
                                 <button
                                     class="ws-tag pr-merged"
-                                    title="PR #{ws.pr.number} merged — remove the worktree and delete {ws.branch} (kills its shells)"
+                                    title="PR #{ws.pr
+                                        .number} merged — remove the worktree and delete {ws.branch} (kills its shells)"
                                     onclick={(e) => {
                                         e.stopPropagation();
                                         void cleanup(ws.name);
                                     }}>⇅ merged — clean up</button
                                 >
                             {:else if ws.pr?.state === "open"}
-                                <span class="ws-tag pr-open" title={ws.pr.url}>PR #{ws.pr.number}</span>
+                                <span class="ws-tag pr-open" title={ws.pr.url}
+                                    >PR #{ws.pr.number}</span
+                                >
                             {:else if ws.pr?.state === "closed"}
-                                <span class="ws-tag pr-closed" title="PR #{ws.pr.number} closed without merging">PR #{ws.pr.number} closed</span>
+                                <span
+                                    class="ws-tag pr-closed"
+                                    title="PR #{ws.pr.number} closed without merging"
+                                    >PR #{ws.pr.number} closed</span
+                                >
                             {:else if ws.pr?.state === "none" && (ws.pr.ahead ?? 0) > 0}
-                                <span class="ws-tag pr-none" title="{ws.pr.ahead} commit(s) on {ws.branch} with no PR — open one from the tree"
+                                <span
+                                    class="ws-tag pr-none"
+                                    title="{ws.pr
+                                        .ahead} commit(s) on {ws.branch} with no PR — open one from the tree"
                                     >no PR yet</span
                                 >
                             {/if}
@@ -229,7 +265,9 @@
                     </div>
                 {/each}
                 {#if workspaces.length === 0}
-                    <div class="home-empty">No workspaces yet — create one, or grab a scratch shell.</div>
+                    <div class="home-empty">
+                        No workspaces yet — create one, or grab a scratch shell.
+                    </div>
                 {/if}
             </div>
         </div>
@@ -253,9 +291,19 @@
         <div class="pal-panel">
             <div class="ws-modal-title">New workspace</div>
             <div class="ws-form">
-                <label><span>Name</span><input placeholder="e.g. rook-core" spellcheck="false" bind:value={modalName} bind:this={nameEl} /></label>
                 <label
-                    ><span>Directory (optional — or set it later from inside the workspace: cd anywhere, then ` .)</span><input
+                    ><span>Name</span><input
+                        placeholder="e.g. rook-core"
+                        spellcheck="false"
+                        bind:value={modalName}
+                        bind:this={nameEl}
+                    /></label
+                >
+                <label
+                    ><span
+                        >Directory (optional — or set it later from inside the workspace: cd
+                        anywhere, then ` .)</span
+                    ><input
                         placeholder="~/go/src/github.com/incantery/rook"
                         spellcheck="false"
                         bind:value={modalRoot}
@@ -264,7 +312,9 @@
             </div>
             <div class="ws-modal-foot">
                 <button class="home-btn" onclick={() => (modalOpen = false)}>Cancel</button>
-                <button class="home-btn primary" onclick={() => void createFromModal()}>Create workspace</button>
+                <button class="home-btn primary" onclick={() => void createFromModal()}
+                    >Create workspace</button
+                >
             </div>
         </div>
     </div>

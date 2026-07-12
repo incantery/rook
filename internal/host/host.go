@@ -450,7 +450,7 @@ func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string,
 	}
 	ws, err := h.reg.createWorktreeWS(name, dir, from, branch, issue)
 	if err != nil {
-		worktreeRemove(dir, true) // roll back the checkout; nothing is in it yet
+		_ = worktreeRemove(dir, true) // roll back the checkout; nothing is in it yet
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

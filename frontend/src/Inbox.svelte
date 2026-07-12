@@ -107,7 +107,8 @@
                 break;
             case "Enter":
                 if (!it) break;
-                if (it.draft?.action === "draft" || it.draft?.action === "spawn") void decide(it, "approve");
+                if (it.draft?.action === "draft" || it.draft?.action === "spawn")
+                    void decide(it, "approve");
                 else jump(it);
                 break;
             case "e":
@@ -154,7 +155,12 @@
     }
 </script>
 
-<div id="inbox" class="overlay" onmousedown={(e) => e.target === e.currentTarget && onclose()} role="presentation">
+<div
+    id="inbox"
+    class="overlay"
+    onmousedown={(e) => e.target === e.currentTarget && onclose()}
+    role="presentation"
+>
     <div class="pal-panel">
         <div class="pal-inputrow">
             <span class="inbox-title">Attention</span>
@@ -178,7 +184,9 @@
                     role="presentation"
                 >
                     <div class="inbox-head">
-                        <span class="inbox-chip">{it.workspace} · window {dashTab + 1 + it.window}</span>
+                        <span class="inbox-chip"
+                            >{it.workspace} · window {dashTab + 1 + it.window}</span
+                        >
                         <span class="inbox-age">{ago(it.since)}</span>
                     </div>
                     {#if it.ask}
@@ -187,19 +195,29 @@
                     <div
                         class="inbox-draft"
                         class:escalate={it.interactive || it.draft?.action === "escalate"}
-                        class:ready={!it.interactive && (it.draft?.action === "draft" || it.draft?.action === "spawn") && editingKey !== key(it)}
+                        class:ready={!it.interactive &&
+                            (it.draft?.action === "draft" || it.draft?.action === "spawn") &&
+                            editingKey !== key(it)}
                         class:pending={!it.interactive && !it.draft}
                     >
                         {#if editingKey === key(it) && (it.draft?.action === "draft" || it.draft?.action === "spawn")}
-                            <textarea class="inbox-edit" rows="2" spellcheck="false" bind:value={editText} bind:this={editEl}
-                            ></textarea>
+                            <textarea
+                                class="inbox-edit"
+                                rows="2"
+                                spellcheck="false"
+                                bind:value={editText}
+                                bind:this={editEl}></textarea>
                             <div class="inbox-edit-hint">↵ send edited · esc cancel</div>
                         {:else if it.interactive}
                             ⌨ pick an option in the window — ↵ jumps
                         {:else if it.draft?.action === "draft" || it.draft?.action === "spawn"}
-                            {@const pct = it.draft.confidence ? ` ${Math.round(it.draft.confidence * 100)}%` : ""}
+                            {@const pct = it.draft.confidence
+                                ? ` ${Math.round(it.draft.confidence * 100)}%`
+                                : ""}
                             {@const why = it.draft.reason ? `\n${it.draft.reason}` : ""}
-                            <span title={`${it.draft.action}${pct} — ↵ approve, e edit, x reject${why}`}>
+                            <span
+                                title={`${it.draft.action}${pct} — ↵ approve, e edit, x reject${why}`}
+                            >
                                 {it.draft.action === "spawn" ? "▶ new session:" : "✎"}
                                 {it.draft.reply ?? ""}
                             </span>

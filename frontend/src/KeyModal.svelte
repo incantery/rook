@@ -74,7 +74,14 @@
             <div class="key-status" class:ok={statusOk}>{status}</div>
             <label>
                 <span>Stored in the macOS login keychain (service “rook”), not in a file</span>
-                <input type="password" placeholder="sk-…" spellcheck="false" autocomplete="off" bind:value={key} bind:this={inputEl} />
+                <input
+                    type="password"
+                    placeholder="sk-…"
+                    spellcheck="false"
+                    autocomplete="off"
+                    bind:value={key}
+                    bind:this={inputEl}
+                />
             </label>
             <div class="key-error" hidden={!error}>{error}</div>
         </div>
@@ -82,7 +89,9 @@
             <button class="home-btn key-clear" onclick={() => void clear()}>Remove key</button>
             <span class="home-spacer"></span>
             <button class="home-btn key-cancel" onclick={onclose}>Cancel</button>
-            <button class="home-btn primary key-save" onclick={() => void save()}>Save to keychain</button>
+            <button class="home-btn primary key-save" onclick={() => void save()}
+                >Save to keychain</button
+            >
         </div>
     </div>
 </div>

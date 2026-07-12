@@ -31,7 +31,9 @@ class AppState {
     dashTab = 1;
 
     get anyOverlayOpen(): boolean {
-        return this.paletteOpen || this.pickerOpen || this.inboxOpen || this.spawnOpen || this.keyOpen;
+        return (
+            this.paletteOpen || this.pickerOpen || this.inboxOpen || this.spawnOpen || this.keyOpen
+        );
     }
 
     closeOverlays(): void {
