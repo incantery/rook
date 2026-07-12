@@ -57,6 +57,8 @@ func main() {
 	// The drafter (rook-agent) is a supervised child, not a third daemon —
 	// absent binary just means the feature is off.
 	go h.SuperviseAgent(context.Background(), fmt.Sprintf("http://127.0.0.1:%d", port))
+	// Subscription usage windows, probed on a cost-weighted cadence.
+	go h.WatchUsage(context.Background())
 	if err := http.Serve(ln, h.Handler()); err != nil {
 		log.Fatal(err)
 	}

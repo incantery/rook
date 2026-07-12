@@ -89,6 +89,11 @@ export class HostAPI {
         return (await this.req("/attention")).json();
     }
 
+    /** Subscription usage windows, cached by the host's cost-weighted prober. */
+    async usage(): Promise<UsageSnapshot> {
+        return (await this.req("/usage")).json();
+    }
+
     /** Raw bytes into a session's pty; append "\r" to submit. */
     async sendInput(id: string, data: string): Promise<void> {
         await this.req(`/sessions/${id}/input`, {
@@ -108,6 +113,18 @@ export class HostAPI {
     async rejectDraft(id: number): Promise<void> {
         await this.req(`/drafts/${id}/reject`, {method: "POST", body: "{}"});
     }
+}
+
+/** One "Current …: N% used" line from claude's /usage, host-scraped. */
+export interface UsageWindow {
+    label: string;
+    pct: number;
+    resets: string;
+}
+
+export interface UsageSnapshot {
+    windows: UsageWindow[];
+    capturedAt: string;
 }
 
 /** An open judgment from the drafter on one ask (docs/agent.md). */

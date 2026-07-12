@@ -562,6 +562,34 @@
       #attn-chip[hidden] {
         display: none;
       }
+      /* titlebar usage chip: the tightest subscription window (hover for all) */
+      #usage-chip {
+        appearance: none;
+        align-self: center;
+        margin-right: 8px;
+        padding: 2px 9px;
+        border-radius: 10px;
+        font-family: var(--mono);
+        font-size: 10.5px;
+        font-weight: 600;
+        color: #7d8590;
+        background: rgba(125, 133, 144, 0.1);
+        border: 1px solid rgba(125, 133, 144, 0.3);
+        cursor: default;
+      }
+      #usage-chip.warn {
+        color: #ffcb6b;
+        background: rgba(255, 203, 107, 0.12);
+        border-color: rgba(255, 203, 107, 0.35);
+      }
+      #usage-chip.hot {
+        color: #f07178;
+        background: rgba(240, 113, 120, 0.12);
+        border-color: rgba(240, 113, 120, 0.35);
+      }
+      #usage-chip[hidden] {
+        display: none;
+      }
       .ws-tag.attn {
         background: rgba(255, 203, 107, 0.12);
         color: #ffcb6b;
@@ -906,6 +934,7 @@
       <span id="ws-label" style="--wails-draggable: no-drag" title="Switch workspace (` s)"></span>
       <div id="tabs"></div>
       <span id="prefix-pill" hidden>prefix</span>
+      <button id="usage-chip" style="--wails-draggable: no-drag" hidden></button>
       <button id="attn-chip" style="--wails-draggable: no-drag" title="Attention inbox (` a)" hidden></button>
       <button id="palette-btn" style="--wails-draggable: no-drag">
         commands <kbd>⌘K</kbd>

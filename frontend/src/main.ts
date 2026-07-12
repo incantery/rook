@@ -359,6 +359,34 @@ async function main() {
         for (const k of seenAsks) if (!live.has(k)) seenAsks.delete(k);
     }, 5000);
 
+    // Usage chip: the tightest subscription window, from the host's
+    // cost-weighted prober. The chip shows the worst number; hover for all
+    // windows and their reset times. Hidden until the first probe lands
+    // (or forever, on API billing / no claude on PATH).
+    const usageChip = document.getElementById("usage-chip")!;
+    const shortWindow = (label: string) =>
+        label === "session" ? "5h" : label.startsWith("week (all") ? "wk" : label.replace(/^week \((.+)\)$/i, "$1").toLowerCase();
+    const pollUsage = async () => {
+        let u;
+        try {
+            u = await api.usage();
+        } catch {
+            return; // host briefly unreachable — keep the last known chip
+        }
+        if (!u.windows.length) {
+            usageChip.hidden = true;
+            return;
+        }
+        const worst = u.windows.reduce((a, b) => (b.pct > a.pct ? b : a));
+        usageChip.hidden = false;
+        usageChip.textContent = `${worst.pct}% ${shortWindow(worst.label)}`;
+        usageChip.title = u.windows.map((w) => `${w.label}: ${w.pct}% — resets ${w.resets}`).join("\n");
+        usageChip.classList.toggle("warn", worst.pct >= 70 && worst.pct < 90);
+        usageChip.classList.toggle("hot", worst.pct >= 90);
+    };
+    void pollUsage();
+    setInterval(pollUsage, 60_000);
+
     try {
         await tabs.init(); // attach live sessions (background-warm)
     } catch (err) {

@@ -177,6 +177,9 @@ func (a *agentWatch) apply(ev *agentmonEvent) {
 	if ev.AgentID != "" {
 		return // subagent transcripts don't change the main session's state
 	}
+	if ev.Project == usageProbeDir() {
+		return // the usage prober's own headless runs are not sessions
+	}
 	now := ev.TS
 	if now.IsZero() {
 		now = time.Now()

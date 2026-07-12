@@ -31,7 +31,7 @@ const (
 	// replaced (sessions die with it — the tmux server-upgrade reality).
 	// BUMP THIS with any host API or storage change: a stale daemon
 	// answering health checks 404s new endpoints silently.
-	Version = 10
+	Version = 11
 	ringCap = 512 * 1024
 )
 
@@ -81,6 +81,9 @@ type Host struct {
 	// just the "current open draft" index over it.
 	draftMu sync.Mutex
 	drafts  map[string]draftInfo
+
+	// um caches subscription usage windows (WatchUsage).
+	um *usageMon
 }
 
 type cwdEntry struct {
@@ -102,6 +105,7 @@ func New() *Host {
 		claims:   make(map[string]string),
 		binds:    make(map[string]string),
 		drafts:   make(map[string]draftInfo),
+		um:       newUsageMon(),
 	}
 	// Manual-attribution + stale-ask hooks: the transcript is the ground
 	// truth for what actually got answered (see onUserReply).
@@ -307,6 +311,11 @@ func (h *Host) Handler() http.Handler {
 	})
 	mux.HandleFunc("/agents/", h.handleAgent)
 	mux.HandleFunc("/attention", h.handleAttention)
+	// subscription usage windows, cached from the cost-weighted prober —
+	// {windows: []} until the first probe lands (or claude is absent)
+	mux.HandleFunc("/usage", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, h.um.current())
+	})
 	mux.HandleFunc("/drafts/", h.handleDraftDecide)
 	mux.HandleFunc("/agent/spend", h.handleSpend)
 	mux.HandleFunc("/decisions", h.handleDecisions)

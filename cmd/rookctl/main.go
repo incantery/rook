@@ -7,6 +7,7 @@
 //	rookctl ls --json     the same, as the raw status payloads
 //	rookctl agents        every claude session agentwatch sees (raw JSON)
 //	rookctl attention     who's waiting on you, cross-workspace (text inbox)
+//	rookctl usage         subscription usage windows (host-cached)
 //	rookctl send          type into a window: rookctl send s3 yes
 //	rookctl approve       send a draft (optionally edited) into its window
 //	rookctl reject        decline a draft
@@ -87,6 +88,8 @@ func main() {
 		err = runAgents()
 	case "attention":
 		err = runAttention()
+	case "usage":
+		err = runUsage()
 	case "send":
 		err = runSend(os.Args[2:])
 	case "approve":
@@ -110,7 +113,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -328,6 +331,37 @@ func runAttention() error {
 			}
 		}
 	}
+	return nil
+}
+
+func runUsage() error {
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	raw, err := c.req("GET", "/usage", nil)
+	if err != nil {
+		return err
+	}
+	var snap struct {
+		Windows []struct {
+			Label  string `json:"label"`
+			Pct    int    `json:"pct"`
+			Resets string `json:"resets"`
+		} `json:"windows"`
+		CapturedAt time.Time `json:"capturedAt"`
+	}
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return err
+	}
+	if len(snap.Windows) == 0 {
+		fmt.Println("no usage data yet (first probe pending, or API billing)")
+		return nil
+	}
+	for _, w := range snap.Windows {
+		fmt.Printf("%-22s %3d%%  resets %s\n", w.Label, w.Pct, w.Resets)
+	}
+	fmt.Printf("as of %s\n", snap.CapturedAt.Local().Format("3:04pm"))
 	return nil
 }
 
