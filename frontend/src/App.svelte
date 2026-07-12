@@ -167,11 +167,69 @@
             run: () => void mgr.newSession(),
         },
         {
+            // id unchanged (rebinds survive); it kills the FOCUSED PANE —
+            // a single-pane window still leaves the strip with it
             id: "session.close",
-            title: "Kill window",
+            title: "Kill pane",
             category: "Session",
             keys: keymap.display("session.close"),
             run: () => void mgr.closeActive(),
+        },
+        {
+            id: "pane.split-right",
+            title: "Split pane right (inherits cwd)",
+            category: "Pane",
+            keys: keymap.display("pane.split-right"),
+            run: () => void mgr.splitFocused("row"),
+        },
+        {
+            id: "pane.split-down",
+            title: "Split pane down (inherits cwd)",
+            category: "Pane",
+            keys: keymap.display("pane.split-down"),
+            run: () => void mgr.splitFocused("col"),
+        },
+        {
+            id: "pane.next",
+            title: "Next pane",
+            category: "Pane",
+            keys: keymap.display("pane.next"),
+            run: () => mgr.cyclePane(),
+        },
+        {
+            id: "pane.focus-left",
+            title: "Focus pane left",
+            category: "Pane",
+            keys: keymap.display("pane.focus-left"),
+            run: () => mgr.focusPane("left"),
+        },
+        {
+            id: "pane.focus-right",
+            title: "Focus pane right",
+            category: "Pane",
+            keys: keymap.display("pane.focus-right"),
+            run: () => mgr.focusPane("right"),
+        },
+        {
+            id: "pane.focus-up",
+            title: "Focus pane up",
+            category: "Pane",
+            keys: keymap.display("pane.focus-up"),
+            run: () => mgr.focusPane("up"),
+        },
+        {
+            id: "pane.focus-down",
+            title: "Focus pane down",
+            category: "Pane",
+            keys: keymap.display("pane.focus-down"),
+            run: () => mgr.focusPane("down"),
+        },
+        {
+            id: "pane.zoom",
+            title: "Zoom pane (toggle)",
+            category: "Pane",
+            keys: keymap.display("pane.zoom"),
+            run: () => mgr.toggleZoom(),
         },
         {
             id: "session.next",
@@ -265,7 +323,7 @@
             category: "Workspace",
             keys: keymap.display("workspace.set-root"),
             run: async () => {
-                const id = mgr.activeId;
+                const id = mgr.focusedSessionId;
                 if (!id) return;
                 // failures must be VISIBLE: this flow once died silently on
                 // a stale daemon 404ing the cwd endpoint
@@ -406,6 +464,10 @@
             if (seenAsks.has(k)) continue;
             seenAsks.add(k); // an ask first seen while focused stays silent
             if (!document.hasFocus()) {
+                // "window N" is the host's per-workspace creation index —
+                // once windows hold panes it can drift from the strip slot.
+                // Accepted: the label orients, the jump (by session id) is
+                // what must stay correct.
                 void notify(
                     `${it.workspace} window ${dashTab + 1 + it.window} needs you`,
                     it.ask?.replace(/\n/g, " ") ?? "",
@@ -511,7 +573,7 @@
         {#if app.dashVisible}
             <Dashboard
                 {api}
-                onjump={(i) => mgr.switchTo(i)}
+                onjump={(id) => mgr.switchToId(id)}
                 runCmd={(id) => registry.run(id)}
                 onwork={workIssue}
             />

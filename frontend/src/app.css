@@ -214,19 +214,107 @@ body {
     color: var(--lo);
 }
 
-/* ==== terminal area: one wrap per session, only .active shown ==== */
+/* ==== terminal area: one .window per strip entry, only .active shown;
+   inside, a projected tree of .split/.pane cells (term/view.ts) ==== */
 #terminals {
     flex: 1;
     position: relative;
     min-height: 0;
 }
-.term-wrap {
+.window {
     position: absolute;
     inset: 0;
     display: none;
 }
-.term-wrap.active {
+.window.active {
     display: block;
+}
+/* the tree root fills the window (block context, not a flex child) */
+.window > .pane,
+.window > .split {
+    width: 100%;
+    height: 100%;
+}
+/* splits stay position:static so .pane.zoom resolves against .window */
+.split {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+}
+.split-row {
+    flex-direction: row;
+}
+.split-col {
+    flex-direction: column;
+}
+/* cells share the axis by flex-grow (the projected weights): basis must
+   be 0 or content size skews the ratio */
+.split > .pane,
+.split > .split {
+    flex-basis: 0;
+    flex-shrink: 1;
+}
+.pane {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+/* divider: 6px hit area, 1px visible line, drag to resize */
+.divider {
+    flex: none;
+    position: relative;
+    z-index: 2;
+    touch-action: none;
+}
+.split-row > .divider {
+    width: 6px;
+    cursor: col-resize;
+}
+.split-col > .divider {
+    height: 6px;
+    cursor: row-resize;
+}
+.divider::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--line);
+}
+.split-row > .divider::after {
+    left: 2.5px;
+    right: 2.5px;
+}
+.split-col > .divider::after {
+    top: 2.5px;
+    bottom: 2.5px;
+}
+.divider:hover::after,
+.divider.dragging::after {
+    background: var(--acc);
+}
+/* the focused pane's accent — only meaningful with siblings to lose to */
+.window.multi .pane.focused {
+    outline: 1px solid rgba(130, 170, 255, 0.4);
+    outline-offset: -1px;
+}
+/* zoom: visibility, not display — hidden siblings keep their dimensions
+   so fit stays truthful; splits stay static so .zoom resolves against
+   .window (see .split above) */
+.window.zoomed .pane:not(.zoom) {
+    visibility: hidden;
+}
+.window.zoomed .divider {
+    visibility: hidden;
+}
+.window.zoomed .pane.zoom {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+}
+.term-wrap {
+    position: absolute;
+    inset: 0;
 }
 /* Insets, NOT padding: the fit addon derives the grid from this
    element's computed height and container padding silently inflates

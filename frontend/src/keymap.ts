@@ -39,6 +39,18 @@ const DEFAULTS: [string, string][] = [
     ["cmd+shift+]", "session.next"],
     ["cmd+shift+[", "session.prev"],
     ["cmd+shift+,", "config.reload"],
+    // panes — tmux-faithful: % splits right, " splits down, o cycles,
+    // arrows move focus, z zooms; ⌘D/⌘⇧D as the native-feeling chords
+    ["%", "pane.split-right"],
+    ['"', "pane.split-down"],
+    ["o", "pane.next"],
+    ["left", "pane.focus-left"],
+    ["right", "pane.focus-right"],
+    ["up", "pane.focus-up"],
+    ["down", "pane.focus-down"],
+    ["z", "pane.zoom"],
+    ["cmd+d", "pane.split-right"],
+    ["cmd+shift+d", "pane.split-down"],
 ];
 
 interface Bind {
@@ -137,10 +149,29 @@ function parseChord(trigger: string): Bind | null {
     return {layer: "chord", key: sig, command: "", disp};
 }
 
+// Named prefix keys: the trigger name → the e.key the prefix branch
+// matches on. Arrows only for now — other named keys (enter, tab, …)
+// stay chord-only until a binding wants them.
+const PREFIX_NAMED: Record<string, string> = {
+    up: "ArrowUp",
+    down: "ArrowDown",
+    left: "ArrowLeft",
+    right: "ArrowRight",
+};
+
 function parseTrigger(trigger: string): Bind | null {
     // "+" itself stays a bindable prefix key; anything longer with a "+"
     // reads as a chord
     if (trigger.includes("+") && trigger !== "+") return parseChord(trigger);
+    const named = PREFIX_NAMED[trigger.toLowerCase()];
+    if (named) {
+        return {
+            layer: "prefix",
+            key: named,
+            command: "",
+            disp: "` " + KEY_DISP[trigger.toLowerCase()],
+        };
+    }
     if (trigger.length !== 1) return null;
     return {layer: "prefix", key: trigger, command: "", disp: "` " + trigger};
 }
