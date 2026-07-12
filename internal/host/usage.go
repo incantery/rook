@@ -117,12 +117,16 @@ func (m *usageMon) current() UsageSnapshot {
 func (h *Host) WatchUsage(ctx context.Context) {
 	t := time.NewTicker(usageTick)
 	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
+	for first := true; ; first = false {
+		if !first {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
 		}
+		// first iteration runs immediately: a fresh start should have
+		// usage on screen in seconds, not after a tick
 		now := time.Now()
 		if delta := h.um.accumulate(h.aw.snapshot()); delta > 0 {
 			// one shared sampler: the same deltas that pace the usage

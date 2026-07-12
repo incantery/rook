@@ -4,7 +4,8 @@
 // reports, which is the same context the attention router (docs/agent.md)
 // will consume — if the dashboard can't show it, the agent can't know it.
 
-import type {AgentStatus, AttentionItem, HostAPI, WorkspaceStatus} from "./hostapi";
+import type {AgentStatus, AttentionItem, CostsSnapshot, HostAPI, UsageSnapshot, WorkspaceStatus} from "./hostapi";
+import {shortWindow} from "./hostapi";
 import type {Tabs} from "./tabs";
 import {ago} from "./home";
 
@@ -47,6 +48,9 @@ export class Dashboard {
     private el: HTMLElement;
     private timer: number | null = null;
     private attention: AttentionItem[] = [];
+    private usage: UsageSnapshot | null = null;
+    private costs: CostsSnapshot | null = null;
+    private moneyAt = 0; // last usage/costs fetch (they move slowly)
 
     onJump: (index: number) => void = () => {};
 
@@ -102,6 +106,13 @@ export class Dashboard {
         let st: WorkspaceStatus;
         try {
             st = await this.api.workspaceStatus(this.tabs.workspace);
+            // usage/costs ride the same poll, throttled — they move on
+            // minutes, the fg/git state moves on seconds
+            if (Date.now() - this.moneyAt > 30_000) {
+                this.moneyAt = Date.now();
+                this.usage = await this.api.usage();
+                this.costs = await this.api.costs();
+            }
         } catch (err) {
             console.error("dashboard refresh failed", err);
             return;
@@ -130,6 +141,15 @@ export class Dashboard {
             else pill("✓ clean", "clean");
             if (st.git.ahead > 0) pill(`↑${st.git.ahead}`, "sync");
             if (st.git.behind > 0) pill(`↓${st.git.behind}`, "sync");
+        }
+        // the fresh-start pills: usage + cost render even at zero — the
+        // dashboard should say "nothing burning", not say nothing
+        if (this.usage?.windows.length) {
+            const worst = this.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a));
+            pill(`◔ ${worst.pct}% ${shortWindow(worst.label)}`, worst.pct >= 90 ? "dirty" : "");
+        }
+        if (this.costs) {
+            pill(`$${this.costs.todayUsd.toFixed(2)} today`, "");
         }
 
         const grid = this.el.querySelector("#dash-grid")!;

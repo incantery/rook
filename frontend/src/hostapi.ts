@@ -132,6 +132,14 @@ export interface UsageSnapshot {
     capturedAt: string;
 }
 
+/** Compact usage-window label: session → 5h, week (all models) → wk,
+ *  week (Fable) → fable. Unknown labels pass through lowercased. */
+export function shortWindow(label: string): string {
+    if (label === "session") return "5h";
+    if (label.startsWith("week (all")) return "wk";
+    return label.replace(/^week \((.+)\)$/i, "$1").toLowerCase();
+}
+
 /** GET /costs — what claude usage would cost on API billing. */
 export interface CostsSnapshot {
     todayUsd: number;

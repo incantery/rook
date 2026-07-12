@@ -4,7 +4,8 @@
 // new-workspace modal (name + root directory). Branch/services/attention
 // from the design arrive when git/process awareness exists.
 
-import type {CostsSnapshot, HostAPI, WorkspaceInfo} from "./hostapi";
+import type {CostsSnapshot, HostAPI, UsageSnapshot, WorkspaceInfo} from "./hostapi";
+import {shortWindow} from "./hostapi";
 
 export function ago(iso: string): string {
     const ms = Date.now() - new Date(iso).getTime();
@@ -95,8 +96,9 @@ export class Home {
         if (!same && this.visible) this.renderGrid();
     }
 
-    /** The strip's cost line + per-card live tags (NOTES: total cost
-     *  tracking on the manager). Raw-inference pricing of subscription use. */
+    /** The strip's status line — usage windows + cost picture + per-card
+     *  live tags (NOTES: app-wide status on the manager). Zeros render:
+     *  "$0.00 today" on a fresh start is information, not absence. */
     private async refreshCosts(): Promise<void> {
         let c: CostsSnapshot;
         try {
@@ -104,12 +106,31 @@ export class Home {
         } catch {
             return; // host briefly unreachable — keep the last known line
         }
+        let u: UsageSnapshot | null = null;
+        try {
+            u = await this.api.usage();
+        } catch {
+            // usage is garnish here — the cost line still renders
+        }
         this.costs = c;
+        const usageEl = this.el.querySelector<HTMLElement>("#home-usage")!;
+        if (u && u.windows.length) {
+            usageEl.hidden = false;
+            usageEl.textContent = u.windows
+                .map((w) => `${shortWindow(w.label)} ${w.pct}%`)
+                .join(" · ");
+            usageEl.title = u.windows.map((w) => `${w.label}: ${w.pct}% — resets ${w.resets}`).join("\n");
+            const worst = Math.max(...u.windows.map((w) => w.pct));
+            usageEl.classList.toggle("warn", worst >= 70 && worst < 90);
+            usageEl.classList.toggle("hot", worst >= 90);
+        } else {
+            usageEl.hidden = true; // first probe pending, or API billing
+        }
         const el = this.el.querySelector<HTMLElement>("#home-costs")!;
         const parts = [`claude $${c.todayUsd.toFixed(2)} today`, `$${c.weekUsd.toFixed(2)} 7d`];
         if (c.drafterTodayUsd > 0) parts.push(`drafter $${c.drafterTodayUsd.toFixed(2)}`);
         el.textContent = parts.join(" · ");
-        el.hidden = c.todayUsd === 0 && c.weekUsd === 0 && c.drafterTodayUsd === 0;
+        el.hidden = false;
         if (this.visible) this.renderGrid();
     }
 

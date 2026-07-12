@@ -590,13 +590,31 @@
       #usage-chip[hidden] {
         display: none;
       }
-      /* manager strip: today's raw-inference cost picture */
-      #home-costs {
+      /* manager strip: subscription windows + today's raw-inference cost */
+      #home-costs,
+      #home-usage {
         font-family: var(--mono);
         font-size: 11px;
         color: #7d8590;
       }
-      #home-costs[hidden] {
+      #home-usage {
+        padding: 2px 9px;
+        border-radius: 10px;
+        background: rgba(125, 133, 144, 0.1);
+        border: 1px solid rgba(125, 133, 144, 0.3);
+      }
+      #home-usage.warn {
+        color: #ffcb6b;
+        background: rgba(255, 203, 107, 0.12);
+        border-color: rgba(255, 203, 107, 0.35);
+      }
+      #home-usage.hot {
+        color: #f07178;
+        background: rgba(240, 113, 120, 0.12);
+        border-color: rgba(240, 113, 120, 0.35);
+      }
+      #home-costs[hidden],
+      #home-usage[hidden] {
         display: none;
       }
       /* workspace card: live claude burn in this workspace */
@@ -915,6 +933,7 @@
         <span class="brand">Rook</span>
         <span class="brand-sub">workspace manager</span>
         <span class="home-spacer"></span>
+        <span id="home-usage" hidden></span>
         <span id="home-costs" title="What claude usage would cost on API billing — absorbed by the subscription" hidden></span>
       </div>
       <div id="home-scroll">

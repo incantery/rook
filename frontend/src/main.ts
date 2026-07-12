@@ -5,7 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import {Call} from "@wailsio/runtime";
 import {Service as Config} from "../bindings/github.com/incantery/rook/internal/config";
 import {Service as Host} from "../bindings/github.com/incantery/rook/internal/hostclient";
-import {HostAPI} from "./hostapi";
+import {HostAPI, shortWindow} from "./hostapi";
 import {Tabs} from "./tabs";
 import {Registry} from "./registry";
 import {Palette} from "./palette";
@@ -364,8 +364,6 @@ async function main() {
     // windows and their reset times. Hidden until the first probe lands
     // (or forever, on API billing / no claude on PATH).
     const usageChip = document.getElementById("usage-chip")!;
-    const shortWindow = (label: string) =>
-        label === "session" ? "5h" : label.startsWith("week (all") ? "wk" : label.replace(/^week \((.+)\)$/i, "$1").toLowerCase();
     const pollUsage = async () => {
         let u;
         try {
