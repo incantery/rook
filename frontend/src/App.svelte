@@ -44,7 +44,10 @@
     async function showWorkspace(name: string): Promise<void> {
         try {
             await initDone;
-            app.screen = "app"; // visible before openWorkspace: fit needs real dimensions
+            app.screen = "app";
+            // Flush the hidden attr: openWorkspace's activate() fits and
+            // focuses, and both silently no-op on a display:none subtree.
+            await tick();
             await mgr.openWorkspace(name);
         } catch (err) {
             console.error("failed to open workspace", name, err);
@@ -67,6 +70,7 @@
 
     async function spawn(task: string, workspace: string): Promise<void> {
         app.screen = "app";
+        await tick(); // spawnIn activates: fit/focus need a visible DOM
         const id = await mgr.spawnIn(workspace);
         // let the shell come up before typing the command
         setTimeout(() => {
@@ -351,8 +355,9 @@
     <Inbox
         {api}
         {dashTab}
-        onjump={(sessionId) => {
+        onjump={async (sessionId) => {
             app.screen = "app";
+            await tick(); // switchToId activates: fit/focus need a visible DOM
             if (!mgr.switchToId(sessionId)) console.warn("inbox jump: window is gone", sessionId);
         }}
         onclose={() => {
