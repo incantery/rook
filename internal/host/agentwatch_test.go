@@ -98,6 +98,45 @@ func TestAskSeq(t *testing.T) {
 	}
 }
 
+// onTurnFinished is the workflow engine's stage-completion signal, and its
+// whole contract is discipline: genuine turn ends ONLY. AskUserQuestion and
+// permission notifies also invalidate asks (onTurnCompleted fires for
+// them — that's ITS contract), but an agent asking a question has not
+// finished its stage.
+func TestOnTurnFinishedDiscipline(t *testing.T) {
+	a := newAgentWatch()
+	id := "s-wf"
+	var finished, completed int
+	a.onTurnFinished = func(string) { finished++ }
+	a.onTurnCompleted = func(string, int) { completed++ }
+
+	a.apply(ev(t, "user_prompt", id, "/r", map[string]any{"text": "go"}))
+	a.apply(ev(t, "tool_call", id, "", map[string]any{
+		"name":  "AskUserQuestion",
+		"input": `{"questions":[{"question":"which?","options":[{"label":"a"},{"label":"b"}]}]}`,
+	}))
+	if finished != 0 {
+		t.Fatalf("AskUserQuestion fired onTurnFinished %d time(s) — a question is not a finished stage", finished)
+	}
+	if completed != 1 {
+		t.Fatalf("AskUserQuestion must still invalidate prior asks, completed=%d", completed)
+	}
+
+	// permission prompt (Notification hook) mid-turn: same rule
+	a.apply(ev(t, "tool_result", id, "", map[string]any{"ok": true}))
+	a.apply(ev(t, "tool_call", id, "", map[string]any{"name": "Bash", "input": "rm -rf build"}))
+	a.notify(id, "Claude needs your permission to use Bash")
+	if finished != 0 {
+		t.Fatalf("permission notify fired onTurnFinished %d time(s)", finished)
+	}
+
+	a.apply(ev(t, "tool_result", id, "", map[string]any{"ok": true}))
+	a.apply(ev(t, "turn_completed", id, "", map[string]any{}))
+	if finished != 1 {
+		t.Fatalf("turn_completed must fire onTurnFinished exactly once, got %d", finished)
+	}
+}
+
 // The history ring: bounded at histCap, oldest dropped first, text capped,
 // and the onUserReply hook sees what the user actually typed.
 func TestHistoryRing(t *testing.T) {

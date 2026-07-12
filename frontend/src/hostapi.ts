@@ -299,6 +299,16 @@ export interface OverviewAgent {
     tool?: string;
 }
 
+/** One row of a work item's checklist: the synthetic coding stage, then
+ *  the persisted review stages. needsInput is live agent state decorated
+ *  at read time — the stage's window is waiting on the user. */
+export interface StageInfo {
+    name: string;
+    status: "pending" | "running" | "done" | "error";
+    needsInput?: boolean;
+    detail?: string;
+}
+
 /** One workspace row of GET /overview. The rollup fields only exist on
  *  workspaces with live sessions — idle ones are bare list items. */
 export interface OverviewItem extends WorkspaceInfo {
@@ -308,6 +318,9 @@ export interface OverviewItem extends WorkspaceInfo {
     /** correlated agent states, needs_input first */
     agents?: OverviewAgent[];
     attention?: number;
+    /** staged-workflow checklist (worktrees with a workflow configured);
+     *  present even on idle workspaces so errored pipelines stay visible */
+    stages?: StageInfo[];
 }
 
 export interface GitInfo {

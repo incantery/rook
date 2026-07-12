@@ -46,6 +46,15 @@ type Config struct {
 	// drafts, the conflict-resolve chip, workflow stages). claude unless
 	// overridden.
 	Coder string `json:"coder"`
+	// Workflow is the staged review pipeline run after a worktree's coding
+	// agent opens its PR: slash commands, comma-separated (`workflow =
+	// /security-review, /review`), each spawned sequentially in its own
+	// window. Empty = feature off. Workflows carries per-workspace
+	// overrides (`workflow-<ws> = ...`); an explicitly empty value there
+	// is a non-nil empty list — that workspace opts out of the global
+	// pipeline.
+	Workflow  []string            `json:"workflow"`
+	Workflows map[string][]string `json:"workflows"`
 }
 
 func Default() Config {
@@ -114,6 +123,16 @@ func Load() Config {
 			cfg.BranchPrefixes[ws] = value
 			continue
 		}
+		// unlike the other dynamic keys, an EMPTY value is meaningful here:
+		// `workflow-<ws> =` stores an empty non-nil list — that workspace
+		// explicitly opts out of the global workflow.
+		if ws, ok := strings.CutPrefix(key, "workflow-"); ok && ws != "" {
+			if cfg.Workflows == nil {
+				cfg.Workflows = map[string][]string{}
+			}
+			cfg.Workflows[ws] = splitList(value)
+			continue
+		}
 		switch key {
 		case "font-family":
 			if value != "" {
@@ -159,9 +178,24 @@ func Load() Config {
 			if value != "" {
 				cfg.Coder = value
 			}
+		case "workflow":
+			cfg.Workflow = splitList(value)
 		}
 	}
 	return cfg
+}
+
+// splitList parses a comma-separated config value: items trimmed, empties
+// dropped. Always non-nil — "" is an empty list, not absence.
+func splitList(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 type Service struct{}

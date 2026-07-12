@@ -1093,6 +1093,44 @@ button.ws-tag.pr-conflicts:hover {
     background: rgba(255, 255, 255, 0.05);
     color: var(--lo);
 }
+/* the staged-workflow checklist: ✓ done ✗ error ◉ needs-you ● running
+   ○ pending — same palette as the agent chips and PR tags */
+.ws-stages {
+    margin-top: 9px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+}
+.ws-stage {
+    font-size: 10.5px;
+    font-family: var(--mono);
+    color: var(--lo);
+    white-space: nowrap;
+}
+.ws-stage.done {
+    color: var(--grn);
+}
+.ws-stage.error {
+    color: #ff5370;
+}
+.ws-stage.running {
+    color: var(--grn);
+    animation: stage-pulse 2.2s ease-in-out infinite;
+}
+.ws-stage.running.needs {
+    color: #ffcb6b;
+    animation: attn-pulse 1.6s ease-in-out infinite;
+}
+@keyframes stage-pulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.55;
+    }
+}
+
 /* what the lead agent is asking (or doing) — one clamped line */
 .ws-agent-line {
     margin-top: 9px;

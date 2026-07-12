@@ -102,6 +102,9 @@ func (h *Host) pollPRs() {
 			continue
 		}
 		seen[ws.Name] = true
+		// workflow reconciliation rides the poll: a running stage whose
+		// window died must not spin forever
+		h.reconcileStage(ws.Name)
 		if gitInfo(ws.Root) == nil {
 			continue // checkout gone or broken; keep any last-known snapshot
 		}
@@ -122,7 +125,15 @@ func (h *Host) pollPRs() {
 		// Unknown risk reads as 0 here — this feeds a nudge, not the
 		// deletion guard, which re-derives risk itself at delete time.
 		snap.Dirty, snap.Ahead, _ = worktreeRisk(ws.Root, ws.Branch)
+		prev := h.prm.get(ws.Name)
 		h.prm.set(ws.Name, snap)
+		// The staged-workflow trigger: coding is done when the PR appears.
+		// OBSERVED transition only — after a restart prm is empty, so
+		// already-open PRs never mass-trigger on upgrade. (A PR opened
+		// while the host was down never auto-starts; accepted.)
+		if prev != nil && prev.State == "none" && snap.State == "open" {
+			go h.maybeStartWorkflow(ws)
+		}
 	}
 	h.prm.keepOnly(seen)
 }

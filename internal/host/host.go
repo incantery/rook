@@ -90,6 +90,9 @@ type Host struct {
 	// signal on workspace cards.
 	prm *prMon
 
+	// wfMu serializes workflow advancement (see advanceWorkflow).
+	wfMu sync.Mutex
+
 	// Lifecycle root for supervised children (agentmon, and rook-agent via
 	// SuperviseAgent when callers pass Done()'s context). Shutdown cancels
 	// it — child processes must die with the host, or every daemon
@@ -125,6 +128,13 @@ func New() *Host {
 	// truth for what actually got answered (see onUserReply).
 	h.aw.onUserReply = h.onUserReply
 	h.aw.onTurnCompleted = h.onTurnCompleted
+	// The workflow engine's stage-completion sensor — genuine turn ends
+	// only, never AskUserQuestion/notify (see agentwatch.onTurnFinished).
+	h.aw.onTurnFinished = h.onTurnFinished
+	// Restart reconciliation: running stages lost their windows with the
+	// old host. ✗ + detail is the honest surface — no auto-respawn, no
+	// surprise spend.
+	h.reg.failRunningStages("host restarted — window lost")
 	go h.aw.run(h.ctx)
 	return h
 }
@@ -583,6 +593,7 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		}
 		h.reg.remove(name)
 		h.prm.forget(name)
+		h.reg.deleteStages(name)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)

@@ -9,7 +9,7 @@
      windows + the raw-inference cost picture (zeros render — "$0.00 today"
      on a fresh start is information, not absence). -->
 <script lang="ts">
-    import type {HostAPI, IssueInfo, IssuesResult, OverviewItem} from "./hostapi";
+    import type {HostAPI, IssueInfo, IssuesResult, OverviewItem, StageInfo} from "./hostapi";
     import {shortWindow} from "./hostapi";
     import {app} from "./state.svelte";
     import {ago, tilde} from "./util";
@@ -134,6 +134,15 @@
         const a = w.agents?.[0];
         if (!a) return "";
         return (a.state === "needs_input" ? a.ask || a.title : a.title) ?? "";
+    }
+
+    /** Checklist glyphs: ✓ done, ✗ error, ◉ running-but-needs-you,
+     *  ● running, ○ pending. */
+    function stageGlyph(s: StageInfo): string {
+        if (s.status === "done") return "✓";
+        if (s.status === "error") return "✗";
+        if (s.status === "running") return s.needsInput ? "◉" : "●";
+        return "○";
     }
 
     // interactive shells matter (nvim, make, …); bare prompts and the agent
@@ -443,6 +452,18 @@
             {/each}
             {@render wsTags(w, nested)}
         </div>
+        {#if w.stages?.length}
+            <!-- the work item's pipeline at a glance: coding → review stages -->
+            <div class="ws-stages">
+                {#each w.stages as s, si (si)}
+                    <span
+                        class="ws-stage {s.status}"
+                        class:needs={s.needsInput}
+                        title={s.detail || s.name}>{stageGlyph(s)} {s.name}</span
+                    >
+                {/each}
+            </div>
+        {/if}
         {#if line}
             <div class="ws-agent-line" title={line}>{line}</div>
         {/if}
