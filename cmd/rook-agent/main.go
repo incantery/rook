@@ -14,11 +14,19 @@ import (
 
 	"github.com/incantery/rook/internal/agent"
 	"github.com/incantery/rook/internal/config"
+	"github.com/incantery/rook/internal/version"
 )
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("rook-agent: ")
+	log.Printf("%s (build %s)", version.Version, version.Build)
+
+	// Supervised (env-credentialed) agents must not outlive their host:
+	// the endpoint/token in env die with the daemon, so retrying them
+	// forever just leaks an orphan. Exit instead — respawning with fresh
+	// credentials is the supervisor's job (agentproc.go).
+	supervised := os.Getenv("ROOK_HOST_ENDPOINT") != ""
 
 	for {
 		cfg := config.Load()
@@ -35,6 +43,10 @@ func main() {
 		}
 		host, err := agent.Connect()
 		if err != nil {
+			if supervised {
+				log.Printf("host: %v; exiting for respawn", err)
+				os.Exit(0)
+			}
 			log.Printf("host: %v; retrying in 15s", err)
 			time.Sleep(15 * time.Second)
 			continue
@@ -42,10 +54,10 @@ func main() {
 		a := agent.New(host, agent.NewOpenAI(key, cfg.AgentModel), cfg.AgentDailyCapUSD)
 		log.Printf("drafting with %s (daily cap $%.2f) against %s", cfg.AgentModel, cfg.AgentDailyCapUSD, host.Endpoint)
 		err = a.Run(context.Background())
-		if errors.Is(err, agent.ErrHostGone) {
-			// replaced daemon: exit clean, the supervisor respawns us with
-			// fresh credentials
-			log.Println("host gone; exiting for respawn")
+		if supervised || errors.Is(err, agent.ErrHostGone) {
+			// dead or replaced daemon: exit clean, the supervisor (if any)
+			// respawns us with fresh credentials
+			log.Printf("run ended: %v; exiting for respawn", err)
 			os.Exit(0)
 		}
 		log.Printf("run ended: %v; restarting in 15s", err)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/incantery/rook/internal/host"
+	"github.com/incantery/rook/internal/version"
 )
 
 type Info struct {
@@ -24,10 +25,16 @@ type Service struct{}
 
 func (s *Service) Info() (Info, error) {
 	if st, err := host.ReadState(); err == nil && st.Healthy() {
-		if st.Version == host.Version {
+		// Compatibility is build identity: binaries from one make run
+		// match exactly, so after install + relaunch the daemon is
+		// guaranteed replaced — no protocol number to remember to bump.
+		// Unstamped builds (wails3 dev, go run) never replace the daemon:
+		// the hacking instance rides the daily driver's host, and the
+		// frontend's fail-open posture absorbs any skew.
+		if st.Build == version.Build || version.Build == "dev" {
 			return Info{Endpoint: st.Endpoint(), Token: st.Token}, nil
 		}
-		// Version drift: the running daemon lacks this build's API.
+		// Build drift: the running daemon is not what's installed.
 		// Replace it — its sessions die with it, the one upgrade cost.
 		syscall.Kill(st.PID, syscall.SIGTERM)
 		time.Sleep(300 * time.Millisecond)

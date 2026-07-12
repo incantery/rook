@@ -12,10 +12,16 @@ import (
 // State is how clients find a running host: written next to the host's log
 // in the state dir, verified with a health check before trust.
 type State struct {
-	Port    int    `json:"port"`
-	Token   string `json:"token"`
-	PID     int    `json:"pid"`
-	Version int    `json:"version"`
+	Port  int    `json:"port"`
+	Token string `json:"token"`
+	PID   int    `json:"pid"`
+	// Release is the daemon's semver (version.Version), for humans.
+	Release string `json:"release,omitempty"`
+	// Build is the daemon's build id (version.Build) — THE compatibility
+	// key: clients built together with the daemon match it exactly. A
+	// pre-Build daemon's state file yields "", which never matches a
+	// stamped client, so upgrading past this scheme replaces the daemon.
+	Build string `json:"build,omitempty"`
 }
 
 func StateDir() string {

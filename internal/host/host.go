@@ -24,16 +24,15 @@ import (
 
 	"github.com/coder/websocket"
 	cpty "github.com/creack/pty"
+
+	"github.com/incantery/rook/internal/version"
 )
 
-const (
-	// Version gates client/daemon compatibility: on drift, the daemon is
-	// replaced (sessions die with it — the tmux server-upgrade reality).
-	// BUMP THIS with any host API or storage change: a stale daemon
-	// answering health checks 404s new endpoints silently.
-	Version = 13
-	ringCap = 512 * 1024
-)
+// Client/daemon compatibility is version.Build equality — binaries built
+// together agree by construction; on drift the daemon is replaced and its
+// sessions die with it (the tmux server-upgrade reality). There is no
+// hand-bumped protocol number to forget. See internal/hostclient.
+const ringCap = 512 * 1024
 
 type SessionInfo struct {
 	ID   string `json:"id"`
@@ -84,6 +83,13 @@ type Host struct {
 
 	// um caches subscription usage windows (WatchUsage).
 	um *usageMon
+
+	// Lifecycle root for supervised children (agentmon, and rook-agent via
+	// SuperviseAgent when callers pass Done()'s context). Shutdown cancels
+	// it — child processes must die with the host, or every daemon
+	// replacement leaks orphans.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 type cwdEntry struct {
@@ -107,13 +113,22 @@ func New() *Host {
 		drafts:   make(map[string]draftInfo),
 		um:       newUsageMon(),
 	}
+	h.ctx, h.cancel = context.WithCancel(context.Background())
 	// Manual-attribution + stale-ask hooks: the transcript is the ground
 	// truth for what actually got answered (see onUserReply).
 	h.aw.onUserReply = h.onUserReply
 	h.aw.onTurnCompleted = h.onTurnCompleted
-	go h.aw.run(context.Background())
+	go h.aw.run(h.ctx)
 	return h
 }
+
+// Context is the host's lifecycle root: run supervised work under it so
+// Shutdown reaches everything.
+func (h *Host) Context() context.Context { return h.ctx }
+
+// Shutdown kills the host's supervised children (agentmon, rook-agent).
+// Call it on the way out — SIGTERM from a replacing daemon included.
+func (h *Host) Shutdown() { h.cancel() }
 
 // cachedCwdOf is cwdOf behind a short TTL: the status endpoint gets polled
 // every few seconds and lsof is ~100ms per pid — cache, don't multiply.
@@ -679,7 +694,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 func (h *Host) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"ok": true, "version": Version, "pid": os.Getpid()})
+	writeJSON(w, map[string]any{"ok": true, "release": version.Version, "build": version.Build, "pid": os.Getpid()})
 }
 
 func (h *Host) handleSessions(w http.ResponseWriter, r *http.Request) {

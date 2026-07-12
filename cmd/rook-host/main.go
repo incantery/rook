@@ -1,15 +1,15 @@
 // rook-host is the PTY host daemon: it owns shell sessions so the rook UI
 // can restart, rebuild, and reload without killing shells. Idempotent — if a
-// healthy host is already running it exits immediately.
+// healthy host of the same build is already running it exits immediately.
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -20,11 +20,14 @@ import (
 
 func main() {
 	if st, err := host.ReadState(); err == nil && st.Healthy() {
-		if st.Version == host.Version {
-			fmt.Printf("rook-host already running (pid %d, port %d)\n", st.PID, st.Port)
+		// Same compatibility rule as internal/hostclient: build identity,
+		// and an unstamped build (go run, wails3 dev) never replaces a
+		// stamped daemon — it rides it.
+		if st.Build == version.Build || version.Build == "dev" {
+			fmt.Printf("rook-host already running (pid %d, port %d, build %s)\n", st.PID, st.Port, st.Build)
 			return
 		}
-		fmt.Printf("replacing outdated rook-host (v%d, pid %d)\n", st.Version, st.PID)
+		fmt.Printf("replacing rook-host build %s (pid %d) with %s\n", st.Build, st.PID, version.Build)
 		syscall.Kill(st.PID, syscall.SIGTERM)
 		time.Sleep(300 * time.Millisecond)
 	}
@@ -48,17 +51,45 @@ func main() {
 		Port:    port,
 		Token:   h.Token(),
 		PID:     os.Getpid(),
-		Version: host.Version,
+		Release: version.Version,
+		Build:   version.Build,
 	}); err != nil {
 		log.Fatal(err)
 	}
 
-	log.Printf("rook-host %s (protocol v%d) listening on 127.0.0.1:%d (pid %d)", version.Version, host.Version, port, os.Getpid())
+	log.Printf("rook-host %s (build %s) listening on 127.0.0.1:%d (pid %d)", version.Version, version.Build, port, os.Getpid())
+
+	// Everything supervised runs under the host's lifecycle context, so
+	// one Shutdown reaches agentmon and rook-agent alike.
+	ctx := h.Context()
 	// The drafter (rook-agent) is a supervised child, not a third daemon —
 	// absent binary just means the feature is off.
-	go h.SuperviseAgent(context.Background(), fmt.Sprintf("http://127.0.0.1:%d", port))
+	agentDone := make(chan struct{})
+	go func() {
+		h.SuperviseAgent(ctx, fmt.Sprintf("http://127.0.0.1:%d", port))
+		close(agentDone)
+	}()
 	// Subscription usage windows, probed on a cost-weighted cadence.
-	go h.WatchUsage(context.Background())
+	go h.WatchUsage(ctx)
+
+	// Die clean on replacement: SIGTERM (hostclient/rook-host upgrading
+	// past us) must take the supervised children down too — before this,
+	// every daemon replacement leaked an orphaned rook-agent + agentmon.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
+	go func() {
+		s := <-sig
+		log.Printf("rook-host: %v — shutting down (children included)", s)
+		h.Shutdown()
+		select {
+		case <-agentDone:
+		case <-time.After(2 * time.Second):
+		}
+		// agentmon's kill is asynchronous (CommandContext) — give it a beat
+		time.Sleep(300 * time.Millisecond)
+		os.Exit(0)
+	}()
+
 	if err := http.Serve(ln, h.Handler()); err != nil {
 		log.Fatal(err)
 	}

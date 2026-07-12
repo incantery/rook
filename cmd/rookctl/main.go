@@ -49,6 +49,13 @@ func connect() (*client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rook-host not running? (%v)", err)
 	}
+	// Fail open on build skew, but never silently: a stale daemon 404s
+	// endpoints this rookctl expects (a claim once vanished that way),
+	// and this warning is the only trace. Hooks capture stderr.
+	if st.Build != version.Build {
+		fmt.Fprintf(os.Stderr, "rookctl: warning: rookctl build %s ≠ rook-host build %s — relaunch rook to replace the daemon\n",
+			version.Build, st.Build)
+	}
 	return &client{endpoint: st.Endpoint(), token: st.Token}, nil
 }
 
@@ -109,7 +116,10 @@ func main() {
 	case "install-hooks":
 		err = runInstallHooks()
 	case "version":
-		fmt.Println(version.Version)
+		fmt.Printf("%s (build %s)\n", version.Version, version.Build)
+		if st, err := host.ReadState(); err == nil {
+			fmt.Printf("rook-host: %s (build %s)\n", st.Release, st.Build)
+		}
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
