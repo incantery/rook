@@ -72,6 +72,13 @@ export class HostAPI {
         return (await this.req("/workspaces")).json();
     }
 
+    /** Mission control's poll: every workspace in one call, live ones
+     *  carrying their dashboard rollup (agents, attention, git, fg). 404s
+     *  on old daemons — callers fall back to listWorkspaces (fail open). */
+    async overview(): Promise<OverviewItem[]> {
+        return (await this.req("/overview")).json();
+    }
+
     async createWorkspace(name: string, root = "", scratch = false): Promise<void> {
         await this.req("/workspaces", {
             method: "POST",
@@ -259,6 +266,25 @@ export interface WorkspaceInfo {
     created: string;
     lastUsed: string;
     sessions: number;
+}
+
+/** One agent's card-sized state inside an overview item. */
+export interface OverviewAgent {
+    state: "working" | "needs_input" | "quiet";
+    title?: string;
+    ask?: string;
+    tool?: string;
+}
+
+/** One workspace row of GET /overview. The rollup fields only exist on
+ *  workspaces with live sessions — idle ones are bare list items. */
+export interface OverviewItem extends WorkspaceInfo {
+    git?: GitInfo;
+    /** distinct foreground commands across the workspace's windows */
+    fg?: string[];
+    /** correlated agent states, needs_input first */
+    agents?: OverviewAgent[];
+    attention?: number;
 }
 
 export interface GitInfo {

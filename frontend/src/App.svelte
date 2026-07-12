@@ -40,7 +40,7 @@
     // workspace before that could double-create its window
     let initDone: Promise<void> = Promise.resolve();
 
-    // ==== screens: home (workspace manager) ⇄ workspace terminals ====
+    // ==== screens: home (mission control) ⇄ workspace terminals ====
     async function showWorkspace(name: string): Promise<void> {
         try {
             await initDone;
@@ -83,15 +83,15 @@
         }, 400);
     }
 
-    // The issue→worktree→session loop, dashboard-invoked: isolate in a
+    // The issue→worktree→session loop, invoked from the dashboard (current
+    // workspace) or mission control (any workspace's queue): isolate in a
     // fresh worktree when the workspace has a repo, else land in the
     // workspace itself — the queue must work for non-repo roots too.
-    async function workIssue(issue: IssueInfo): Promise<void> {
-        let workspace = app.workspace;
+    async function workIssue(issue: IssueInfo, from = app.workspace): Promise<void> {
+        let workspace = from;
         try {
-            workspace = (
-                await api.createWorktree(workspace, {tracker: issue.tracker, key: issue.key})
-            ).name;
+            workspace = (await api.createWorktree(from, {tracker: issue.tracker, key: issue.key}))
+                .name;
         } catch (err) {
             console.warn("worktree isolation unavailable — spawning in the workspace", err);
         }
@@ -169,7 +169,7 @@
         },
         {
             id: "workspace.manager",
-            title: "Workspace manager",
+            title: "Mission control",
             category: "Workspace",
             keys: "` h",
             run: showHome,
@@ -406,7 +406,12 @@
 </script>
 
 {#if app.screen === "home"}
-    <Home {api} bind:this={home} onopen={(name) => void showWorkspace(name)} />
+    <Home
+        {api}
+        bind:this={home}
+        onopen={(name) => void showWorkspace(name)}
+        onwork={(ws, issue) => workIssue(issue, ws)}
+    />
 {/if}
 
 <!-- always mounted: terminals live here; visibility is CSS, never {#if} -->

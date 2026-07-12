@@ -325,6 +325,8 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/sessions/", h.handleSession)
 	mux.HandleFunc("/workspaces", h.handleWorkspaces)
 	mux.HandleFunc("/workspaces/", h.handleWorkspace)
+	// cross-workspace status in one call — mission control's poll
+	mux.HandleFunc("/overview", h.handleOverview)
 	// every live claude session agentwatch knows about, uncorrelated —
 	// debugging surface now, the drafter's read surface via /agents/{id}
 	mux.HandleFunc("/agents", func(w http.ResponseWriter, r *http.Request) {
@@ -353,26 +355,32 @@ type workspaceListItem struct {
 	PR       *PRSnapshot `json:"pr,omitempty"`
 }
 
+// workspaceList assembles the workspace list with live-session counts and
+// PR snapshots — GET /workspaces verbatim, and /overview's base layer.
+func (h *Host) workspaceList() []workspaceListItem {
+	counts := map[string]int{}
+	h.mu.Lock()
+	for _, s := range h.sessions {
+		counts[s.info.Workspace]++
+	}
+	h.mu.Unlock()
+	list := h.reg.list()
+	out := make([]workspaceListItem, 0, len(list))
+	for _, ws := range list {
+		out = append(out, workspaceListItem{WorkspaceInfo: *ws, Sessions: counts[ws.Name], PR: h.prm.get(ws.Name)})
+		delete(counts, ws.Name)
+	}
+	// live sessions in unregistered workspaces (pre-registry hosts)
+	for name, n := range counts {
+		out = append(out, workspaceListItem{WorkspaceInfo: WorkspaceInfo{Name: name}, Sessions: n})
+	}
+	return out
+}
+
 func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		counts := map[string]int{}
-		h.mu.Lock()
-		for _, s := range h.sessions {
-			counts[s.info.Workspace]++
-		}
-		h.mu.Unlock()
-		list := h.reg.list()
-		out := make([]workspaceListItem, 0, len(list))
-		for _, ws := range list {
-			out = append(out, workspaceListItem{WorkspaceInfo: *ws, Sessions: counts[ws.Name], PR: h.prm.get(ws.Name)})
-			delete(counts, ws.Name)
-		}
-		// live sessions in unregistered workspaces (pre-registry hosts)
-		for name, n := range counts {
-			out = append(out, workspaceListItem{WorkspaceInfo: WorkspaceInfo{Name: name}, Sessions: n})
-		}
-		writeJSON(w, out)
+		writeJSON(w, h.workspaceList())
 	case http.MethodPost:
 		var req struct {
 			Name    string
