@@ -104,6 +104,24 @@ in those configs doesn't exist for MVP.
    would tax every UI PR. If sigil proves itself in its own repo, the
    terminal runtime's mount seam is where a sigil/host-VT renderer could
    arrive — rook doesn't wait for it and may never use it.
+   Styling: Tailwind v4 (theme + utilities, no preflight) for layout,
+   spacing, color, and typography; Svelte scoped styles for the genuinely
+   component-local bits. The hand-tuned CSS in app.css stays authoritative
+   until a surface is touched — convert opportunistically, never as a
+   sweep.
+
+8. **Extensibility: out-of-process, API-first — no plugin side doors.**
+   (Starting posture, 2026-07-12 — expect refinement.) A rook plugin is a
+   process speaking the authenticated host API and dispatching registry
+   commands, exactly like rook-agent, agentmon, and rookctl already do —
+   the Neovim/tmux model, not Hyper's inject-components-into-the-tree
+   model, which fossilized its internals. Decision 3's "no agent-only side
+   doors" generalizes: no plugin-only side doors either. If UI extension
+   is ever demanded, plugins contribute **data contracts** (a dashboard
+   tile shape, host-mediated) or at most a sandboxed webview with message
+   passing — never components in rook's tree. Before anything third-party
+   ships, the token model grows per-plugin scopes (read-status and
+   send-input are very different powers).
 
 ## Week one is a kill test, not a milestone
 
