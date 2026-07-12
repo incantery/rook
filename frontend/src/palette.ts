@@ -44,11 +44,14 @@ export class Palette {
             this.render();
         });
         this.input.addEventListener("keydown", (e) => {
-            if (e.key === "ArrowDown") {
+            // vim/fzf motions — bare j/k must keep typing into the filter
+            const down = e.key === "ArrowDown" || (e.ctrlKey && (e.key === "j" || e.key === "n"));
+            const up = e.key === "ArrowUp" || (e.ctrlKey && (e.key === "k" || e.key === "p"));
+            if (down) {
                 e.preventDefault();
                 this.sel = Math.min(this.sel + 1, this.current.length - 1);
                 this.render();
-            } else if (e.key === "ArrowUp") {
+            } else if (up) {
                 e.preventDefault();
                 this.sel = Math.max(this.sel - 1, 0);
                 this.render();

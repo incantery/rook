@@ -37,7 +37,7 @@ export class WorkspacePicker {
             <div class="pal-list"></div>
             <div class="pal-footer">
               <button class="home-btn pal-manager-btn">workspace manager</button>
-              <span>↑↓ navigate</span><span>↵ switch / create</span>
+              <span>↑↓ / ^j ^k navigate</span><span>↵ switch / create</span>
               <span class="pal-spacer"></span>
               <span>workspace = tmux session</span>
             </div>
@@ -58,11 +58,14 @@ export class WorkspacePicker {
             this.render();
         });
         this.input.addEventListener("keydown", (e) => {
-            if (e.key === "ArrowDown") {
+            // vim/fzf motions — bare j/k must keep typing into the filter
+            const down = e.key === "ArrowDown" || (e.ctrlKey && (e.key === "j" || e.key === "n"));
+            const up = e.key === "ArrowUp" || (e.ctrlKey && (e.key === "k" || e.key === "p"));
+            if (down) {
                 e.preventDefault();
                 this.sel = Math.min(this.sel + 1, this.items.length - 1);
                 this.render();
-            } else if (e.key === "ArrowUp") {
+            } else if (up) {
                 e.preventDefault();
                 this.sel = Math.max(this.sel - 1, 0);
                 this.render();
@@ -84,7 +87,12 @@ export class WorkspacePicker {
     open(): void {
         this.overlay.hidden = false;
         this.input.value = "";
-        this.sel = 0;
+        // Empty query means items mirror workspaces() order, so the active
+        // workspace's index is valid here.
+        this.sel = Math.max(
+            0,
+            this.tabs.workspaces().findIndex((w) => w.name === this.tabs.workspace),
+        );
         this.render();
         this.input.focus();
     }
@@ -130,5 +138,6 @@ export class WorkspacePicker {
             });
             this.listEl.appendChild(row);
         });
+        this.listEl.querySelector(".sel")?.scrollIntoView({block: "nearest"});
     }
 }
