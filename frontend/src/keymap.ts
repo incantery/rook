@@ -51,6 +51,7 @@ const DEFAULTS: [string, string][] = [
     ["z", "pane.zoom"],
     // the Monaco panes: review diff and read-only file viewer
     ["g", "review.changes"],
+    ["e", "file.open"],
     ["cmd+d", "pane.split-right"],
     ["cmd+shift+d", "pane.split-down"],
 ];

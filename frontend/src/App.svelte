@@ -17,6 +17,7 @@
     import Home from "./Home.svelte";
     import Palette from "./Palette.svelte";
     import Picker from "./Picker.svelte";
+    import FilePicker from "./FilePicker.svelte";
     import Inbox from "./Inbox.svelte";
     import SpawnModal from "./SpawnModal.svelte";
     import KeyModal from "./KeyModal.svelte";
@@ -363,6 +364,15 @@
             run: () => void openEditorPane("review"),
         },
         {
+            id: "file.open",
+            title: "Open file (read-only)",
+            category: "View",
+            keys: keymap.display("file.open"),
+            run: () => {
+                app.filePickerOpen = true;
+            },
+        },
+        {
             id: "workspace.set-root",
             title: "Set workspace root to shell's directory",
             category: "Workspace",
@@ -400,7 +410,7 @@
             }
             return; // palette's own input handles the rest
         }
-        if (app.pickerOpen) return; // picker's own input handles keys
+        if (app.pickerOpen || app.filePickerOpen) return; // pickers' own inputs handle keys
         if (app.screen === "home") {
             // the prefix works here too, so ` h toggles back to the
             // workspace you left — but never while typing in a modal input
@@ -636,6 +646,16 @@
         onmanager={showHome}
         onclose={() => {
             app.pickerOpen = false;
+            focusBack();
+        }}
+    />
+{/if}
+{#if app.filePickerOpen}
+    <FilePicker
+        {api}
+        onopen={(path) => void openEditorPane("file", path)}
+        onclose={() => {
+            app.filePickerOpen = false;
             focusBack();
         }}
     />
