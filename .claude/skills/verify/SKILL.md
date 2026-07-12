@@ -52,8 +52,8 @@ GitHub remote — a scratch repo with
 ## Gotchas
 
 - `go build ./...` fails on `build/ios` (no main — build stub) and on
-  `frontend/frontend.go` until `cd frontend && npm run build` produces
+  `frontend/frontend.go` until `cd frontend && pnpm run build` produces
   `dist/`. Scope to `./internal/... ./cmd/...`.
-- Frontend check: `cd frontend && npx svelte-check --threshold error`.
+- Frontend check: `cd frontend && pnpm exec svelte-check --threshold error`.
 - Registry migrations are `ALTER TABLE` statements run on every load;
   "duplicate column" is the expected steady-state error.

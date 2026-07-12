@@ -25,6 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgtk-4-dev libwebkitgtk-6.0-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# pnpm: the frontend's package manager (see frontend/package.json packageManager)
+RUN npm install -g pnpm@9.10.0
+
 RUN go install mvdan.cc/garble@${GARBLE_VERSION}
 
 # Install Zig - automatically selects correct binary for host architecture.
@@ -185,7 +188,7 @@ export CGO_CFLAGS="-w"
 
 # Build frontend if exists and not already built (host may have built it)
 if [ -d "frontend" ] && [ -f "frontend/package.json" ] && [ ! -d "frontend/dist" ]; then
-    (cd frontend && npm install --silent && npm run build --silent)
+    (cd frontend && pnpm install --frozen-lockfile --silent && pnpm run --silent build)
 fi
 
 # Build
