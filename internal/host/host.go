@@ -369,9 +369,17 @@ func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 			Name    string
 			Root    string
 			Scratch bool
+			// WorktreeFrom carves a new git worktree off this source
+			// workspace's repo instead of pointing at an existing path;
+			// Name is optional (auto: <source>-t<n>).
+			WorktreeFrom string
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		req.Name = strings.TrimSpace(req.Name)
+		if req.WorktreeFrom != "" {
+			h.createWorktreeWorkspace(w, req.Name, req.WorktreeFrom)
+			return
+		}
 		if req.Name == "" {
 			http.Error(w, "name required", http.StatusBadRequest)
 			return
@@ -388,6 +396,52 @@ func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// createWorktreeWorkspace is POST /workspaces {worktreeFrom}: a fresh
+// `git worktree add` off the source workspace's repo, on branch
+// rook/<name>, registered as a workspace rooted at the new checkout. The
+// spawner's isolation rung — parallel agent sessions get a tree each.
+func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string) {
+	src := h.reg.get(from)
+	if src == nil || src.Root == "" {
+		http.Error(w, fmt.Sprintf("workspace %q has no root to branch from", from), http.StatusBadRequest)
+		return
+	}
+	if gitInfo(src.Root) == nil {
+		http.Error(w, fmt.Sprintf("%s is not a git repo", src.Root), http.StatusBadRequest)
+		return
+	}
+	if name == "" {
+		// auto-names must also step past branches left behind by deleted
+		// worktrees — the branch outliving its tree is the design
+		for n := 1; ; n++ {
+			name = fmt.Sprintf("%s-t%d", from, n)
+			if _, err := os.Stat(worktreeDir(name)); os.IsNotExist(err) &&
+				h.reg.get(name) == nil && !branchExists(src.Root, "rook/"+name) {
+				break
+			}
+		}
+	} else if h.reg.get(name) != nil {
+		http.Error(w, fmt.Sprintf("workspace %q already exists", name), http.StatusConflict)
+		return
+	} else if branchExists(src.Root, "rook/"+name) {
+		http.Error(w, fmt.Sprintf("branch rook/%s already exists (left by an earlier worktree) — pick another name or delete the branch", name), http.StatusConflict)
+		return
+	}
+	dir := worktreeDir(name)
+	branch := "rook/" + name
+	if err := worktreeAdd(src.Root, dir, branch); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	ws, err := h.reg.createWorktreeWS(name, dir, from, branch)
+	if err != nil {
+		worktreeRemove(dir, true) // roll back the checkout; nothing is in it yet
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, ws)
+}
+
 // handleWorkspace routes /workspaces/{name} (DELETE: kill its sessions and
 // drop it from the registry) and /workspaces/{name}/status (GET: the
 // dashboard payload).
@@ -402,6 +456,25 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	case action == "status" && r.Method == http.MethodGet:
 		h.handleWorkspaceStatus(w, name)
 	case action == "" && r.Method == http.MethodDelete:
+		force := r.URL.Query().Get("force") == "1"
+		ws := h.reg.get(name)
+		// Worktree workspaces guard their checkout: refuse BEFORE any side
+		// effect (sessions stay alive on refusal) when removal would lose
+		// work — dirty files, or commits no other ref reaches. Unknown
+		// state counts as risky. The branch survives removal either way.
+		if ws != nil && ws.WorktreeOf != "" && !force {
+			if _, err := os.Stat(ws.Root); err == nil {
+				dirty, unmerged, err := worktreeRisk(ws.Root, ws.Branch)
+				if err != nil {
+					http.Error(w, fmt.Sprintf("can't prove the worktree is safe to remove (%v) — force to discard", err), http.StatusConflict)
+					return
+				}
+				if dirty > 0 || unmerged > 0 {
+					http.Error(w, fmt.Sprintf("worktree has %d dirty file(s) and %d unmerged commit(s) on %s — force to discard the tree (the branch survives)", dirty, unmerged, ws.Branch), http.StatusConflict)
+					return
+				}
+			}
+		}
 		h.mu.Lock()
 		var ids []string
 		for id, s := range h.sessions {
@@ -412,6 +485,14 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.mu.Unlock()
 		for _, id := range ids {
 			h.kill(id)
+		}
+		if ws != nil && ws.WorktreeOf != "" {
+			if _, err := os.Stat(ws.Root); err == nil {
+				if err := worktreeRemove(ws.Root, force); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
 		}
 		h.reg.remove(name)
 		w.WriteHeader(http.StatusNoContent)

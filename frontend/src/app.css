@@ -871,6 +871,37 @@ body {
   background: rgba(255, 203, 107, 0.12);
   color: #ffcb6b;
 }
+/* workspace card: this root is a git worktree rook carved off a repo */
+.ws-tag.worktree {
+  background: rgba(130, 170, 255, 0.12);
+  color: #82aaff;
+}
+/* the ✕ armed by a "would lose work" refusal — next click forces */
+.ws-card:hover .ws-card-del.armed,
+.ws-card-del.armed {
+  color: #ff5370;
+}
+/* spawn modal: the worktree-isolation toggle. The .ws-form field rules
+   (100%-wide inputs, block caption spans) are for text fields — undo both
+   or the checkbox stretches full-width and shoves its text off-panel. */
+.spawn-wt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.ws-form .spawn-wt input {
+  width: auto;
+  margin: 0;
+  accent-color: #82aaff;
+}
+.ws-form .spawn-wt span {
+  display: inline;
+  margin-bottom: 0;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--dim);
+}
 #home-error {
   margin: 0 0 14px;
   padding: 10px 14px;

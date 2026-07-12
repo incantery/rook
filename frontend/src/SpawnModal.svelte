@@ -5,7 +5,7 @@
 <script lang="ts">
     interface Props {
         currentWorkspace: string;
-        onspawn: (task: string, workspace: string) => Promise<void>;
+        onspawn: (task: string, workspace: string, worktree: boolean) => Promise<void>;
         onclose: () => void;
     }
     let {currentWorkspace, onspawn, onclose}: Props = $props();
@@ -13,6 +13,7 @@
     let task = $state("");
     // svelte-ignore state_referenced_locally — prefill, user edits from here
     let ws = $state(currentWorkspace);
+    let worktree = $state(false);
     let error = $state("");
     let taskEl: HTMLTextAreaElement;
 
@@ -27,15 +28,19 @@
             return;
         }
         try {
-            await onspawn(t, ws.trim() || currentWorkspace);
+            await onspawn(t, ws.trim() || currentWorkspace, worktree);
             onclose();
         } catch (err) {
             error = `spawn failed: ${err}`;
         }
     }
 
+    // Window-level, not overlay-level: clicking non-focusable modal chrome
+    // moves focus to <body>, and keydown from there never bubbles through
+    // the overlay — ESC must work no matter where focus wandered.
     function onKeydown(e: KeyboardEvent) {
-        if (e.key === "Enter" && !e.shiftKey) {
+        // buttons keep native Enter (a focused Cancel must cancel, not submit)
+        if (e.key === "Enter" && !e.shiftKey && !(e.target instanceof HTMLButtonElement)) {
             e.preventDefault();
             void go();
         } else if (e.key === "Escape") onclose();
@@ -43,11 +48,12 @@
     }
 </script>
 
+<svelte:window onkeydown={onKeydown} />
+
 <div
     id="spawn-modal"
     class="overlay"
     onmousedown={(e) => e.target === e.currentTarget && onclose()}
-    onkeydown={onKeydown}
     role="presentation"
 >
     <div class="pal-panel">
@@ -65,6 +71,10 @@
                 ></textarea>
             </label>
             <label><span>Workspace</span><input class="spawn-ws" spellcheck="false" bind:value={ws} /></label>
+            <label class="spawn-wt" title="git worktree off the workspace's repo — parallel sessions stop sharing one checkout">
+                <input type="checkbox" bind:checked={worktree} />
+                <span>Isolate in a new worktree (branch <code>rook/…</code>)</span>
+            </label>
             <div class="key-error" hidden={!error}>{error}</div>
         </div>
         <div class="ws-modal-foot">

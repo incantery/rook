@@ -11,7 +11,7 @@
 //	rookctl send          type into a window: rookctl send s3 yes
 //	rookctl approve       send a draft (optionally edited) into its window
 //	rookctl reject        decline a draft
-//	rookctl spawn         start a claude session: rookctl spawn [-w ws] <task…>
+//	rookctl spawn         start a claude session: rookctl spawn [-w ws] [--worktree] <task…>
 //	rookctl set-openai-key store the drafter's API key in the keychain
 //	rookctl claim         claude SessionStart hook body (stdin → host)
 //	rookctl unclaim       claude SessionEnd hook body
@@ -123,7 +123,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -492,22 +492,47 @@ func runUpdate(args []string) error {
 // runSpawn is the user-invoked half of the spawner (docs/agent.md step 4):
 // a fresh window in the workspace, with claude started on the task. Inside
 // a rook window it inherits your workspace and cwd; -w overrides.
+// --worktree carves a fresh git worktree (branch rook/<name>) off the
+// workspace's repo first and lands the session there — parallel sessions
+// stop sharing one checkout.
 func runSpawn(args []string) error {
 	ws := os.Getenv("ROOK_WORKSPACE")
-	if len(args) >= 2 && args[0] == "-w" {
-		ws, args = args[1], args[2:]
+	worktree := false
+	for len(args) > 0 {
+		if args[0] == "-w" && len(args) >= 2 {
+			ws, args = args[1], args[2:]
+		} else if args[0] == "--worktree" {
+			worktree, args = true, args[1:]
+		} else {
+			break
+		}
 	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: rookctl spawn [-w workspace] <task…>")
+		return fmt.Errorf("usage: rookctl spawn [-w workspace] [--worktree] <task…>")
 	}
 	task := strings.Join(args, " ")
 	c, err := connect()
 	if err != nil {
 		return err
 	}
+	cwdFrom := os.Getenv("ROOK_SESSION")
+	if worktree {
+		raw, err := c.req("POST", "/workspaces", map[string]any{"worktreeFrom": ws})
+		if err != nil {
+			return err
+		}
+		var created struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &created); err != nil {
+			return err
+		}
+		// the fresh workspace's root must seed the shell, not our cwd
+		ws, cwdFrom = created.Name, ""
+	}
 	raw, err := c.req("POST", "/sessions", map[string]any{
 		"cols": 100, "rows": 30, "workspace": ws,
-		"cwdFrom": os.Getenv("ROOK_SESSION"),
+		"cwdFrom": cwdFrom,
 	})
 	if err != nil {
 		return err

@@ -3,6 +3,7 @@ package host
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -22,6 +23,12 @@ type WorkspaceInfo struct {
 	Scratch  bool      `json:"scratch,omitempty"`
 	Created  time.Time `json:"created"`
 	LastUsed time.Time `json:"lastUsed"`
+	// WorktreeOf names the source workspace this one was carved from
+	// (git worktree under DataDir); Branch is its rook/<name> branch.
+	// Deleting a worktree workspace removes the checkout (guarded by
+	// worktreeRisk) — the branch always survives.
+	WorktreeOf string `json:"worktreeOf,omitempty"`
+	Branch     string `json:"branch,omitempty"`
 }
 
 // registry is backed by SQLite (~/.local/share/rook/rook.db). The host is
@@ -88,6 +95,8 @@ CREATE TABLE IF NOT EXISTS costs (
 // is the expected steady-state error.
 var migrations = []string{
 	`ALTER TABLE decisions ADD COLUMN reason TEXT`,
+	`ALTER TABLE workspaces ADD COLUMN worktree_of TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE workspaces ADD COLUMN branch TEXT NOT NULL DEFAULT ''`,
 }
 
 func loadRegistry() *registry {
@@ -140,10 +149,12 @@ func (r *registry) migrateJSON() {
 	log.Printf("registry: migrated %d workspaces from json", len(list))
 }
 
+const workspaceCols = `name, root, scratch, worktree_of, branch, created_at, last_used`
+
 func scanWorkspace(row interface{ Scan(...any) error }) (*WorkspaceInfo, error) {
 	var w WorkspaceInfo
 	var created, used string
-	if err := row.Scan(&w.Name, &w.Root, &w.Scratch, &created, &used); err != nil {
+	if err := row.Scan(&w.Name, &w.Root, &w.Scratch, &w.WorktreeOf, &w.Branch, &created, &used); err != nil {
 		return nil, err
 	}
 	w.Created, _ = time.Parse(time.RFC3339Nano, created)
@@ -178,11 +189,27 @@ func (r *registry) get(name string) *WorkspaceInfo {
 		return nil
 	}
 	w, err := scanWorkspace(r.db.QueryRow(
-		`SELECT name, root, scratch, created_at, last_used FROM workspaces WHERE name = ?`, name))
+		`SELECT `+workspaceCols+` FROM workspaces WHERE name = ?`, name))
 	if err != nil {
 		return nil
 	}
 	return w
+}
+
+// createWorktreeWS registers a worktree workspace. Strict insert, no upsert
+// semantics — a name collision is the caller's error, not a refresh.
+func (r *registry) createWorktreeWS(name, root, source, branch string) (*WorkspaceInfo, error) {
+	if r.db == nil {
+		return nil, fmt.Errorf("no registry db; workspaces cannot persist")
+	}
+	now := time.Now().Format(time.RFC3339Nano)
+	if _, err := r.db.Exec(
+		`INSERT INTO workspaces (name, root, scratch, worktree_of, branch, created_at, last_used)
+		 VALUES (?, ?, 0, ?, ?, ?, ?)`,
+		name, root, source, branch, now, now); err != nil {
+		return nil, err
+	}
+	return r.get(name), nil
 }
 
 func (r *registry) remove(name string) {
@@ -225,7 +252,7 @@ func (r *registry) list() []*WorkspaceInfo {
 		return nil
 	}
 	rows, err := r.db.Query(
-		`SELECT name, root, scratch, created_at, last_used FROM workspaces ORDER BY last_used DESC`)
+		`SELECT ` + workspaceCols + ` FROM workspaces ORDER BY last_used DESC`)
 	if err != nil {
 		log.Printf("registry: list: %v", err)
 		return nil

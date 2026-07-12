@@ -39,6 +39,24 @@
         setTimeout(() => (error = ""), 6000);
     }
 
+    // Two-step worktree deletion: the host 409s when removal would lose
+    // work; the refusal arms this card's ✕ so the NEXT click forces. The
+    // arm never survives a click elsewhere.
+    let forceArmed = $state("");
+
+    async function del(name: string): Promise<void> {
+        const force = forceArmed === name;
+        forceArmed = "";
+        try {
+            await api.deleteWorkspace(name, force);
+        } catch (err) {
+            showError(String(err));
+            if (String(err).includes("force to discard")) forceArmed = name;
+            return;
+        }
+        await refresh();
+    }
+
     $effect(() => {
         void refresh();
         const t = setInterval(() => void refresh(), 15_000);
@@ -141,12 +159,14 @@
                             <span class="ws-card-name">{ws.name}</span>
                             <button
                                 class="ws-card-del"
-                                title="Delete workspace (kills its shells)"
-                                onclick={async (e) => {
+                                class:armed={forceArmed === ws.name}
+                                title={forceArmed === ws.name
+                                    ? "Delete anyway — discards the worktree (branch survives)"
+                                    : "Delete workspace (kills its shells)"}
+                                onclick={(e) => {
                                     e.stopPropagation();
-                                    await api.deleteWorkspace(ws.name);
-                                    await refresh();
-                                }}>✕</button
+                                    void del(ws.name);
+                                }}>{forceArmed === ws.name ? "✕!" : "✕"}</button
                             >
                             <span class="ws-card-when">{ago(ws.lastUsed || ws.created)}</span>
                         </div>
@@ -165,6 +185,9 @@
                             {/if}
                             {#if ws.scratch}
                                 <span class="ws-tag scratch">scratch</span>
+                            {/if}
+                            {#if ws.worktreeOf}
+                                <span class="ws-tag worktree" title="git worktree of {ws.worktreeOf}">⎇ {ws.branch}</span>
                             {/if}
                         </div>
                     </div>

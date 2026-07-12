@@ -68,7 +68,10 @@
 
     const focusBack = () => mgr.focusActive();
 
-    async function spawn(task: string, workspace: string): Promise<void> {
+    async function spawn(task: string, workspace: string, worktree: boolean): Promise<void> {
+        // worktree isolation: carve a fresh checkout+branch off the target
+        // workspace's repo and land the session there instead
+        if (worktree) workspace = (await api.createWorktree(workspace)).name;
         app.screen = "app";
         await tick(); // spawnIn activates: fit/focus need a visible DOM
         const id = await mgr.spawnIn(workspace);

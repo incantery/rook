@@ -74,8 +74,21 @@ export class HostAPI {
         });
     }
 
-    async deleteWorkspace(name: string): Promise<void> {
-        await this.req(`/workspaces/${encodeURIComponent(name)}`, {method: "DELETE"});
+    /** New git worktree off `from`'s repo (branch rook/<name>), registered
+     *  as a workspace — the isolation rung under parallel agent sessions. */
+    async createWorktree(from: string): Promise<WorkspaceInfo> {
+        return (
+            await this.req("/workspaces", {
+                method: "POST",
+                body: JSON.stringify({worktreeFrom: from}),
+            })
+        ).json();
+    }
+
+    /** Worktree workspaces 409 when deletion would lose work (dirty tree,
+     *  unmerged commits) — force discards the tree; the branch survives. */
+    async deleteWorkspace(name: string, force = false): Promise<void> {
+        await this.req(`/workspaces/${encodeURIComponent(name)}${force ? "?force=1" : ""}`, {method: "DELETE"});
     }
 
     /** Live workspace status: per-session foreground process + cwd, repo
@@ -182,6 +195,10 @@ export interface WorkspaceInfo {
     name: string;
     root?: string;
     scratch?: boolean;
+    /** source workspace this one was carved from (git worktree) */
+    worktreeOf?: string;
+    /** the worktree's rook/<name> branch */
+    branch?: string;
     created: string;
     lastUsed: string;
     sessions: number;
