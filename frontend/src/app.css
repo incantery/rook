@@ -62,10 +62,24 @@ body {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding: 0 10px 0 84px;
+  gap: 8px;
+  padding: 0 14px 0 84px;
   background: var(--raise);
   border-bottom: 1px solid var(--line);
   --wails-draggable: drag;
+}
+/* every pill in the bar shares one height so the three clusters sit on
+   a single vertical center line */
+#ws-label,
+#prefix-pill,
+#usage-chip,
+#attn-chip,
+#palette-btn {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  height: 24px;
+  box-sizing: border-box;
 }
 #tabs {
   position: absolute;
@@ -112,27 +126,45 @@ body {
     opacity: 0.45;
   }
 }
+/* workspace chip: a stateful "you are here", not an app title — accent
+   pill so a workspace switch is instantly visible */
 #ws-label {
+  appearance: none;
   position: absolute;
   left: 84px;
-  top: 0;
-  bottom: 0;
-  display: flex;
-  align-items: center;
+  top: 50%;
+  transform: translateY(-50%);
+  gap: 7px;
+  max-width: 240px;
+  padding: 0 11px;
+  border-radius: 999px;
   font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--lo);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--acc);
+  background: rgba(130, 170, 255, 0.1);
+  border: 1px solid rgba(130, 170, 255, 0.3);
   cursor: pointer;
-  padding: 0 6px;
+}
+#ws-label .ws-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+#ws-label .ws-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 #ws-label:hover {
-  color: var(--dim);
+  background: rgba(130, 170, 255, 0.18);
+  border-color: rgba(130, 170, 255, 0.5);
 }
 #prefix-pill {
-  align-self: center;
-  margin-right: 10px;
-  padding: 2px 9px;
-  border-radius: 10px;
+  padding: 0 10px;
+  border-radius: 999px;
   font-family: var(--mono);
   font-size: 10.5px;
   font-weight: 600;
@@ -145,11 +177,8 @@ body {
 }
 #palette-btn {
   appearance: none;
-  align-self: center;
-  display: flex;
-  align-items: center;
   gap: 8px;
-  padding: 4px 8px 4px 10px;
+  padding: 0 8px 0 10px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--line);
@@ -623,11 +652,8 @@ body {
 /* titlebar count chip: how many sessions are waiting on you */
 #attn-chip {
   appearance: none;
-  border: none;
-  align-self: center;
-  margin-right: 10px;
-  padding: 2px 9px;
-  border-radius: 10px;
+  padding: 0 10px;
+  border-radius: 999px;
   font-family: var(--mono);
   font-size: 10.5px;
   font-weight: 600;
@@ -642,10 +668,8 @@ body {
 /* titlebar usage chip: the tightest subscription window (hover for all) */
 #usage-chip {
   appearance: none;
-  align-self: center;
-  margin-right: 8px;
-  padding: 2px 9px;
-  border-radius: 10px;
+  padding: 0 10px;
+  border-radius: 999px;
   font-family: var(--mono);
   font-size: 10.5px;
   font-weight: 600;

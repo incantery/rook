@@ -38,8 +38,8 @@
 </script>
 
 <div id="titlebar">
-    <span id="ws-label" style="--wails-draggable: no-drag" title="Switch workspace (` s)" onclick={onpicker} role="presentation"
-        >{app.workspace}</span
+    <button id="ws-label" style="--wails-draggable: no-drag" title="Switch workspace (` s)" onclick={onpicker}
+        ><span class="ws-dot"></span><span class="ws-name">{app.workspace}</span></button
     >
     <div id="tabs">
         <button
