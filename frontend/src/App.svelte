@@ -90,7 +90,11 @@
         let workspace = app.workspace;
         try {
             workspace = (
-                await api.createWorktree(workspace, {tracker: issue.tracker, key: issue.key})
+                await api.createWorktree(workspace, {
+                    tracker: issue.tracker,
+                    key: issue.key,
+                    title: issue.title,
+                })
             ).name;
         } catch (err) {
             console.warn("worktree isolation unavailable — spawning in the workspace", err);

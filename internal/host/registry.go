@@ -24,7 +24,8 @@ type WorkspaceInfo struct {
 	Created  time.Time `json:"created"`
 	LastUsed time.Time `json:"lastUsed"`
 	// WorktreeOf names the source workspace this one was carved from
-	// (git worktree under DataDir); Branch is its rook/<name> branch.
+	// (git worktree under DataDir); Branch is its branch, rook/<name>
+	// unless the source workspace configures a branch-prefix.
 	// Deleting a worktree workspace removes the checkout (guarded by
 	// worktreeRisk) — the branch always survives.
 	WorktreeOf string `json:"worktreeOf,omitempty"`
