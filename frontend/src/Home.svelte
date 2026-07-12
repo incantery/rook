@@ -12,7 +12,6 @@
 
     let {api, onopen}: {api: HostAPI; onopen: (name: string) => void} = $props();
 
-    let workspaces = $state<WorkspaceInfo[]>([]);
     let error = $state("");
     let modalOpen = $state(false);
     let modalName = $state("");
@@ -25,7 +24,28 @@
             counts.set(it.workspace, (counts.get(it.workspace) ?? 0) + 1);
         return counts;
     });
-    const liveWs = $derived(workspaces.filter((w) => w.sessions > 0));
+    const liveWs = $derived(app.workspaces.filter((w) => w.sessions > 0));
+    // Task trees group under the workspace they were carved from — they're
+    // work surfaces for one task, not peers. One level of nesting only:
+    // a tree carved from another tree (▶ work inside one does this) hangs
+    // under the topmost listed ancestor. A tree whose source is gone falls
+    // back to the top level (fail open, lineage on the card).
+    const groups = $derived.by(() => {
+        const all = app.workspaces;
+        const byName = new Map(all.map((w) => [w.name, w]));
+        const anchorOf = (w: WorkspaceInfo): WorkspaceInfo => {
+            const seen = new Set<string>();
+            let cur = w;
+            while (cur.worktreeOf && byName.has(cur.worktreeOf) && !seen.has(cur.name)) {
+                seen.add(cur.name);
+                cur = byName.get(cur.worktreeOf)!;
+            }
+            return cur;
+        };
+        return all
+            .filter((w) => anchorOf(w) === w)
+            .map((w) => ({ws: w, trees: all.filter((t) => t !== w && anchorOf(t) === w)}));
+    });
     const liveShells = $derived(liveWs.reduce((n, w) => n + w.sessions, 0));
     const worstUsage = $derived(
         app.usage && app.usage.windows.length
@@ -34,7 +54,7 @@
     );
 
     export async function refresh(): Promise<void> {
-        workspaces = await api.listWorkspaces();
+        app.workspaces = await api.listWorkspaces();
     }
 
     export function showError(msg: string): void {
@@ -73,10 +93,10 @@
         await refresh();
     }
 
+    // refresh once on mount for immediacy; App's 15s workspaces poll
+    // keeps the shared snapshot fresh from there
     $effect(() => {
         void refresh();
-        const t = setInterval(() => void refresh(), 15_000);
-        return () => clearInterval(t);
     });
 
     $effect(() => {
@@ -97,7 +117,7 @@
     /** One-off task: auto-named ephemeral workspace, straight into a shell.
      *  The host discards it when its last session exits. */
     export async function scratch(): Promise<void> {
-        const taken = new Set(workspaces.map((w) => w.name));
+        const taken = new Set(app.workspaces.map((w) => w.name));
         let n = 1;
         while (taken.has(`scratch-${n}`)) n++;
         const name = `scratch-${n}`;
@@ -111,6 +131,91 @@
         modalOpen = true;
     }
 </script>
+
+{#snippet card(ws: WorkspaceInfo, nested: boolean)}
+    {@const burn = app.costs?.live.find((l) => l.workspace === ws.name)?.usd ?? 0}
+    <div
+        class="ws-card"
+        class:tasktree={ws.worktreeOf}
+        onclick={() => onopen(ws.name)}
+        role="presentation"
+    >
+        <div class="ws-card-head">
+            <span class="ws-card-name">{ws.name}</span>
+            <button
+                class="ws-card-del"
+                class:armed={forceArmed === ws.name}
+                title={forceArmed === ws.name
+                    ? "Delete anyway — discards the task tree (branch survives)"
+                    : "Delete workspace (kills its shells)"}
+                onclick={(e) => {
+                    e.stopPropagation();
+                    void del(ws.name);
+                }}>{forceArmed === ws.name ? "✕!" : "✕"}</button
+            >
+            <span class="ws-card-when">{ago(ws.lastUsed || ws.created)}</span>
+        </div>
+        <div class="ws-card-root">{ws.root || "~"}</div>
+        <div class="ws-card-tags">
+            <span class="ws-tag" class:live={ws.sessions > 0} class:idle={ws.sessions === 0}>
+                {ws.sessions > 0 ? `● ${ws.sessions} live` : "idle"}
+            </span>
+            {#if attnCounts.get(ws.name)}
+                <span class="ws-tag attn">◉ {attnCounts.get(ws.name)} needs you</span>
+            {/if}
+            {#if burn >= 0.01}
+                <span class="ws-tag cost" title="live claude sessions here, priced as API tokens"
+                    >${burn.toFixed(2)}</span
+                >
+            {/if}
+            {#if ws.scratch}
+                <span class="ws-tag scratch">scratch</span>
+            {/if}
+            {#if ws.worktreeOf}
+                <!-- nested under its source: the branch is the missing fact.
+                     floated to the top level (source gone): say the lineage. -->
+                <span
+                    class="ws-tag worktree"
+                    title="task tree of {ws.worktreeOf} — a git worktree on branch {ws.branch}"
+                    >{nested
+                        ? `⎇ ${ws.branch}`
+                        : `task tree of ${ws.worktreeOf} · ⎇ ${ws.branch}`}</span
+                >
+            {/if}
+            {#if ws.issueRef}
+                <span
+                    class="ws-tag issue"
+                    title="spawned for {ws.issueRef.tracker} issue {ws.issueRef.key}"
+                    >{ws.issueRef.key}</span
+                >
+            {/if}
+            {#if ws.pr?.state === "merged"}
+                <button
+                    class="ws-tag pr-merged"
+                    title="PR #{ws.pr
+                        .number} merged — remove the task tree and delete {ws.branch} (kills its shells)"
+                    onclick={(e) => {
+                        e.stopPropagation();
+                        void cleanup(ws.name);
+                    }}>⇅ merged — clean up</button
+                >
+            {:else if ws.pr?.state === "open"}
+                <span class="ws-tag pr-open" title={ws.pr.url}>PR #{ws.pr.number}</span>
+            {:else if ws.pr?.state === "closed"}
+                <span class="ws-tag pr-closed" title="PR #{ws.pr.number} closed without merging"
+                    >PR #{ws.pr.number} closed</span
+                >
+            {:else if ws.pr?.state === "none" && (ws.pr.ahead ?? 0) > 0}
+                <span
+                    class="ws-tag pr-none"
+                    title="{ws.pr
+                        .ahead} commit(s) on {ws.branch} with no PR — open one from the tree"
+                    >no PR yet</span
+                >
+            {/if}
+        </div>
+    </div>
+{/snippet}
 
 <div id="home">
     <div id="home-strip">
@@ -178,93 +283,19 @@
                 >
             </div>
             <div id="home-grid">
-                {#each workspaces as ws (ws.name)}
-                    {@const burn = app.costs?.live.find((l) => l.workspace === ws.name)?.usd ?? 0}
-                    <div class="ws-card" onclick={() => onopen(ws.name)} role="presentation">
-                        <div class="ws-card-head">
-                            <span class="ws-card-name">{ws.name}</span>
-                            <button
-                                class="ws-card-del"
-                                class:armed={forceArmed === ws.name}
-                                title={forceArmed === ws.name
-                                    ? "Delete anyway — discards the worktree (branch survives)"
-                                    : "Delete workspace (kills its shells)"}
-                                onclick={(e) => {
-                                    e.stopPropagation();
-                                    void del(ws.name);
-                                }}>{forceArmed === ws.name ? "✕!" : "✕"}</button
-                            >
-                            <span class="ws-card-when">{ago(ws.lastUsed || ws.created)}</span>
-                        </div>
-                        <div class="ws-card-root">{ws.root || "~"}</div>
-                        <div class="ws-card-tags">
-                            <span
-                                class="ws-tag"
-                                class:live={ws.sessions > 0}
-                                class:idle={ws.sessions === 0}
-                            >
-                                {ws.sessions > 0 ? `● ${ws.sessions} live` : "idle"}
-                            </span>
-                            {#if attnCounts.get(ws.name)}
-                                <span class="ws-tag attn"
-                                    >◉ {attnCounts.get(ws.name)} needs you</span
-                                >
-                            {/if}
-                            {#if burn >= 0.01}
-                                <span
-                                    class="ws-tag cost"
-                                    title="live claude sessions here, priced as API tokens"
-                                    >${burn.toFixed(2)}</span
-                                >
-                            {/if}
-                            {#if ws.scratch}
-                                <span class="ws-tag scratch">scratch</span>
-                            {/if}
-                            {#if ws.worktreeOf}
-                                <span
-                                    class="ws-tag worktree"
-                                    title="git worktree of {ws.worktreeOf}">⎇ {ws.branch}</span
-                                >
-                            {/if}
-                            {#if ws.issueRef}
-                                <span
-                                    class="ws-tag issue"
-                                    title="spawned for {ws.issueRef.tracker} issue {ws.issueRef
-                                        .key}">{ws.issueRef.key}</span
-                                >
-                            {/if}
-                            {#if ws.pr?.state === "merged"}
-                                <button
-                                    class="ws-tag pr-merged"
-                                    title="PR #{ws.pr
-                                        .number} merged — remove the worktree and delete {ws.branch} (kills its shells)"
-                                    onclick={(e) => {
-                                        e.stopPropagation();
-                                        void cleanup(ws.name);
-                                    }}>⇅ merged — clean up</button
-                                >
-                            {:else if ws.pr?.state === "open"}
-                                <span class="ws-tag pr-open" title={ws.pr.url}
-                                    >PR #{ws.pr.number}</span
-                                >
-                            {:else if ws.pr?.state === "closed"}
-                                <span
-                                    class="ws-tag pr-closed"
-                                    title="PR #{ws.pr.number} closed without merging"
-                                    >PR #{ws.pr.number} closed</span
-                                >
-                            {:else if ws.pr?.state === "none" && (ws.pr.ahead ?? 0) > 0}
-                                <span
-                                    class="ws-tag pr-none"
-                                    title="{ws.pr
-                                        .ahead} commit(s) on {ws.branch} with no PR — open one from the tree"
-                                    >no PR yet</span
-                                >
-                            {/if}
-                        </div>
+                {#each groups as g (g.ws.name)}
+                    <div class="ws-group">
+                        {@render card(g.ws, false)}
+                        {#if g.trees.length > 0}
+                            <div class="ws-trees">
+                                {#each g.trees as t (t.name)}
+                                    {@render card(t, true)}
+                                {/each}
+                            </div>
+                        {/if}
                     </div>
                 {/each}
-                {#if workspaces.length === 0}
+                {#if app.workspaces.length === 0}
                     <div class="home-empty">
                         No workspaces yet — create one, or grab a scratch shell.
                     </div>
