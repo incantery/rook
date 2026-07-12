@@ -31,7 +31,7 @@ const (
 	// replaced (sessions die with it — the tmux server-upgrade reality).
 	// BUMP THIS with any host API or storage change: a stale daemon
 	// answering health checks 404s new endpoints silently.
-	Version = 6
+	Version = 7
 	ringCap = 512 * 1024
 )
 
@@ -68,9 +68,12 @@ type Host struct {
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
 
-	// binds pins transcript session ids to rook session ids once ring-
-	// content matching has proven the pairing (see correlate).
+	// Two tiers of transcript↔window pairing (see correlate): claims are
+	// authoritative (a SessionStart hook inside the claude process told us,
+	// via `rookctl claim`); binds are heuristic (proven by ring content).
+	// Both map transcript session id → rook session id.
 	bindMu sync.Mutex
+	claims map[string]string
 	binds  map[string]string
 }
 
@@ -90,6 +93,7 @@ func New() *Host {
 		reg:      loadRegistry(),
 		aw:       newAgentWatch(),
 		cwdCache: make(map[int]cwdEntry),
+		claims:   make(map[string]string),
 		binds:    make(map[string]string),
 	}
 	go h.aw.run(context.Background())
@@ -136,6 +140,12 @@ func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
 	if workspace == "" {
 		workspace = "main"
 	}
+	h.mu.Lock()
+	h.nextID++
+	id := fmt.Sprintf("s%d", h.nextID)
+	num := h.nextID
+	h.mu.Unlock()
+
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/zsh"
@@ -148,7 +158,12 @@ func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
 	} else if home, err := os.UserHomeDir(); err == nil {
 		cmd.Dir = home
 	}
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
+	// ROOK_SESSION makes the window identity a first-class fact inside the
+	// shell (tmux's $TMUX_PANE): scripts can ask "which window am I", and
+	// claude's SessionStart hook uses it to claim the window (rookctl).
+	cmd.Env = append(os.Environ(),
+		"TERM=xterm-256color", "COLORTERM=truecolor",
+		"ROOK_SESSION="+id, "ROOK_WORKSPACE="+workspace)
 
 	f, err := cpty.StartWithSize(cmd, &cpty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
@@ -156,11 +171,10 @@ func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
 	}
 
 	h.mu.Lock()
-	h.nextID++
 	s := &session{
 		info: SessionInfo{
-			ID:        fmt.Sprintf("s%d", h.nextID),
-			Name:      fmt.Sprintf("%s — %d", filepath.Base(shell), h.nextID),
+			ID:        id,
+			Name:      fmt.Sprintf("%s — %d", filepath.Base(shell), num),
 			Workspace: workspace,
 			Cols:      cols,
 			Rows:      rows,
@@ -211,6 +225,11 @@ func (h *Host) readPump(s *session) {
 	for tid, sid := range h.binds {
 		if sid == s.info.ID {
 			delete(h.binds, tid)
+		}
+	}
+	for tid, sid := range h.claims {
+		if sid == s.info.ID {
+			delete(h.claims, tid)
 		}
 	}
 	h.bindMu.Unlock()
@@ -366,9 +385,13 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 // Agent is that claude session's transcript-derived state.
 type sessionStatus struct {
 	SessionInfo
-	Fg    string       `json:"fg"`
-	Cwd   string       `json:"cwd"`
-	Agent *AgentStatus `json:"agent,omitempty"`
+	Fg  string `json:"fg"`
+	Cwd string `json:"cwd"`
+	// AgentSession is the claude transcript id claimed for this window
+	// (set even while the agent isn't foreground); Agent is that
+	// session's live state when one is paired.
+	AgentSession string       `json:"agentSession,omitempty"`
+	Agent        *AgentStatus `json:"agent,omitempty"`
 }
 
 type workspaceStatus struct {
@@ -428,7 +451,9 @@ func (s *session) normRing() []byte {
 // sessions can share one dir (including ones running outside rook), so
 // within a dir the evidence hierarchy is:
 //
-//  1. sticky bindings — pairs proven earlier stay paired
+//  0. claims — the claude session said so itself (SessionStart hook via
+//     rookctl); a claimed transcript never falls through to heuristics
+//  1. sticky bindings — pairs proven earlier by ring content stay paired
 //  2. ring content — at needs_input, claude's ask text is on exactly one
 //     window's PTY; a unique match proves the pair and binds it
 //  3. recency — last resort, never binds (guesses must not stick)
@@ -438,6 +463,15 @@ func (h *Host) correlate(sessions []sessionStatus, live []*session, states []*Ag
 	sort.Slice(states, func(i, j int) bool { return states[i].LastEvent.After(states[j].LastEvent) })
 	h.bindMu.Lock()
 	defer h.bindMu.Unlock()
+
+	// surface claims regardless of what's foreground right now
+	rookToClaim := make(map[string]string, len(h.claims))
+	for tid, sid := range h.claims {
+		rookToClaim[sid] = tid
+	}
+	for i := range sessions {
+		sessions[i].AgentSession = rookToClaim[sessions[i].ID]
+	}
 
 	var windows []int // claude windows, still unassigned
 	for i := range sessions {
@@ -460,6 +494,18 @@ func (h *Host) correlate(sessions []sessionStatus, live []*session, states []*Ag
 
 	var unbound []*AgentStatus
 	for _, st := range states {
+		// tier 0: claimed transcripts belong to their window, period —
+		// even when that window's claude isn't foreground (suspended,
+		// shelled out), the state must not drift to another window.
+		if id := h.claims[st.SessionID]; id != "" {
+			for _, i := range windows {
+				if sessions[i].ID == id {
+					assign(st, i)
+					break
+				}
+			}
+			continue
+		}
 		if id := h.binds[st.SessionID]; id != "" {
 			bound := false
 			for _, i := range windows {
@@ -674,6 +720,37 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 		// the shell's live working directory — feeds "set workspace root
 		// to here" and anything else that wants where the user actually is
 		writeJSON(w, map[string]string{"cwd": cwdOf(s.cmd.Process.Pid)})
+	case action == "claim" && r.Method == http.MethodPost:
+		// A claude session announcing which window it lives in — sent by
+		// `rookctl claim` from a SessionStart hook (ROOK_SESSION names the
+		// window, the hook's stdin names the transcript). Authoritative:
+		// it displaces heuristic evidence for both parties.
+		var req struct {
+			AgentSession string
+			Release      bool
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.AgentSession == "" {
+			http.Error(w, "agentSession required", http.StatusBadRequest)
+			return
+		}
+		h.bindMu.Lock()
+		if req.Release {
+			if h.claims[req.AgentSession] == id {
+				delete(h.claims, req.AgentSession)
+			}
+		} else {
+			// one live claude per window: a new claim evicts older ones
+			for tid, sid := range h.claims {
+				if sid == id {
+					delete(h.claims, tid)
+				}
+			}
+			h.claims[req.AgentSession] = id
+			delete(h.binds, req.AgentSession)
+		}
+		h.bindMu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
 	case action == "resize" && r.Method == http.MethodPost:
 		var req struct{ Cols, Rows int }
 		json.NewDecoder(r.Body).Decode(&req)

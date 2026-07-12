@@ -35,7 +35,10 @@ install: package
 	@# Spotlight won't offer the app.
 	$(LSREGISTER) -f $(APP)
 	mdimport $(APP)
-	@echo "installed $(APP) — quit + relaunch rook to pick it up"
+	@# The CLI (tmux's scripting surface): rookctl ls / agents, plus the
+	@# claim hooks claude runs. Lives on PATH, not in the bundle.
+	go build -o $(shell go env GOPATH)/bin/rookctl ./cmd/rookctl
+	@echo "installed $(APP) + rookctl — quit + relaunch rook to pick it up"
 
 clean:
 	rm -rf bin frontend/dist

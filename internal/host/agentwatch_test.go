@@ -131,6 +131,47 @@ func TestCorrelateByRingContent(t *testing.T) {
 	}
 }
 
+// A claim (SessionStart hook) outranks every heuristic — even a ring
+// match pointing the other way — and a claimed transcript never drifts to
+// another window while its own isn't claude-foreground.
+func TestCorrelateClaims(t *testing.T) {
+	now := time.Now()
+	ask := "Want me to also update the integration test fixtures to match?"
+	sessions := []sessionStatus{
+		{SessionInfo: SessionInfo{ID: "w2"}, Fg: "claude", Cwd: "/repo"},
+		{SessionInfo: SessionInfo{ID: "w3"}, Fg: "zsh", Cwd: "/repo"}, // its claude is suspended
+	}
+	// w2's ring happens to contain the ask text (user catted a log, say)
+	live := []*session{{ring: []byte(ask)}, {ring: []byte("")}}
+	states := []*AgentStatus{
+		{SessionID: "t-claimed", Project: "/repo", State: "needs_input", Ask: ask, LastEvent: now},
+		{SessionID: "t-other", Project: "/repo", State: "working", LastEvent: now.Add(-time.Second)},
+	}
+	h := &Host{claims: map[string]string{"t-claimed": "w3"}, binds: map[string]string{}}
+	h.correlate(sessions, live, states)
+
+	if sessions[0].Agent == nil || sessions[0].Agent.SessionID != "t-other" {
+		t.Errorf("w2 should get the unclaimed state despite the ring match, got %+v", sessions[0].Agent)
+	}
+	if sessions[1].Agent != nil {
+		t.Errorf("w3 isn't claude-fg; its claimed state must wait, not display: %+v", sessions[1].Agent)
+	}
+	if sessions[1].AgentSession != "t-claimed" {
+		t.Errorf("w3 should surface its claim, got %q", sessions[1].AgentSession)
+	}
+	if h.binds["t-claimed"] != "" {
+		t.Errorf("claimed transcript must not acquire heuristic binds: %v", h.binds)
+	}
+
+	// claude back in the foreground on w3 → its state comes home
+	sessions[0].Agent, sessions[1].Agent = nil, nil
+	sessions[1].Fg = "claude"
+	h.correlate(sessions, live, states)
+	if sessions[1].Agent == nil || sessions[1].Agent.SessionID != "t-claimed" {
+		t.Errorf("claimed state should land on w3, got %+v", sessions[1].Agent)
+	}
+}
+
 // Ambiguous evidence must not bind: identical text on two windows.
 func TestCorrelateAmbiguousRing(t *testing.T) {
 	ask := "Ready for the next step whenever you are, just say the word."
