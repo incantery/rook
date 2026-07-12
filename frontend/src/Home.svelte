@@ -189,6 +189,11 @@
                             {#if ws.worktreeOf}
                                 <span class="ws-tag worktree" title="git worktree of {ws.worktreeOf}">⎇ {ws.branch}</span>
                             {/if}
+                            {#if ws.issueRef}
+                                <span class="ws-tag issue" title="spawned for {ws.issueRef.tracker} issue {ws.issueRef.key}"
+                                    >{ws.issueRef.key}</span
+                                >
+                            {/if}
                         </div>
                     </div>
                 {/each}

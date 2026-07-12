@@ -373,11 +373,14 @@ func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 			// workspace's repo instead of pointing at an existing path;
 			// Name is optional (auto: <source>-t<n>).
 			WorktreeFrom string
+			// Issue stamps the tracker issue this worktree is spawned
+			// for (work-on-issue flow); only meaningful with WorktreeFrom.
+			Issue *IssueRef
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		req.Name = strings.TrimSpace(req.Name)
 		if req.WorktreeFrom != "" {
-			h.createWorktreeWorkspace(w, req.Name, req.WorktreeFrom)
+			h.createWorktreeWorkspace(w, req.Name, req.WorktreeFrom, req.Issue)
 			return
 		}
 		if req.Name == "" {
@@ -400,7 +403,7 @@ func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 // `git worktree add` off the source workspace's repo, on branch
 // rook/<name>, registered as a workspace rooted at the new checkout. The
 // spawner's isolation rung — parallel agent sessions get a tree each.
-func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string) {
+func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string, issue *IssueRef) {
 	src := h.reg.get(from)
 	if src == nil || src.Root == "" {
 		http.Error(w, fmt.Sprintf("workspace %q has no root to branch from", from), http.StatusBadRequest)
@@ -433,7 +436,10 @@ func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	ws, err := h.reg.createWorktreeWS(name, dir, from, branch)
+	if issue != nil && issue.Key == "" {
+		issue = nil // an empty ref is no ref
+	}
+	ws, err := h.reg.createWorktreeWS(name, dir, from, branch, issue)
 	if err != nil {
 		worktreeRemove(dir, true) // roll back the checkout; nothing is in it yet
 		http.Error(w, err.Error(), http.StatusInternalServerError)
