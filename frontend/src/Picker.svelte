@@ -1,13 +1,15 @@
-<!-- Workspace switcher (` s) — tmux choose-session. Lists workspaces with
-     window counts; typing filters, and a name that matches nothing offers
-     "create workspace" (tmux new-session). Reuses the palette's styling. -->
+<!-- Workspace switcher (` s) — tmux choose-session. Lists every registered
+     workspace with live window counts; typing filters, and a name that
+     matches nothing offers "create workspace" (tmux new-session). Reuses
+     the palette's styling. -->
 <script lang="ts">
     import {app} from "./state.svelte";
 
     interface Props {
+        /** workspaces with attached windows (the manager's projection) */
         workspaces: {name: string; count: number}[];
         current: string;
-        onpick: (name: string) => void;
+        onpick: (name: string, create: boolean) => void;
         onmanager: () => void;
         onclose: () => void;
     }
@@ -17,11 +19,22 @@
     let inputEl: HTMLInputElement;
     let listEl: HTMLElement;
 
-    /** Live workspaces reordered to mirror the manager's grouping: each
+    /** Live workspaces plus every registered one (the host list App polls
+     *  into the store) at count 0 — switching to a workspace mustn't
+     *  require it to already have a session. Live ones keep their
+     *  attachment order; session-less ones follow in registry order. */
+    const merged = $derived.by((): {name: string; count: number}[] => {
+        const out = workspaces.map((w) => ({...w}));
+        for (const w of app.workspaces) {
+            if (!out.some((x) => x.name === w.name)) out.push({name: w.name, count: 0});
+        }
+        return out;
+    });
+
+    /** The merged list reordered to mirror the manager's grouping: each
      *  source workspace followed by its task trees (one level — a tree
-     *  carved from a tree hangs under the topmost live ancestor). A tree
-     *  whose source has no live windows stays top-level, lineage in its
-     *  detail. */
+     *  carved from a tree hangs under the topmost listed ancestor). A tree
+     *  whose source isn't listed stays top-level, lineage in its detail. */
     interface LiveWs {
         name: string;
         count: number;
@@ -30,17 +43,17 @@
     }
     const ordered = $derived.by((): LiveWs[] => {
         const lineage = new Map(app.workspaces.map((w) => [w.name, w.worktreeOf ?? null]));
-        const live = new Set(workspaces.map((w) => w.name));
+        const listed = new Set(merged.map((w) => w.name));
         const anchorOf = (name: string): string => {
             const seen = new Set<string>([name]);
             let anchor = name;
             for (let cur = lineage.get(name); cur && !seen.has(cur); cur = lineage.get(cur)) {
                 seen.add(cur);
-                if (live.has(cur)) anchor = cur;
+                if (listed.has(cur)) anchor = cur;
             }
             return anchor;
         };
-        const anno = workspaces.map((w) => ({
+        const anno = merged.map((w) => ({
             ...w,
             treeOf: lineage.get(w.name) ?? null,
             nested: false,
@@ -82,13 +95,13 @@
                 label: w.name,
                 detail:
                     (w.treeOf ? `⎇ task tree of ${w.treeOf} · ` : "") +
-                    `${w.count} window${w.count === 1 ? "" : "s"}` +
+                    (w.count ? `${w.count} window${w.count === 1 ? "" : "s"}` : "no windows") +
                     (w.name === current ? " · current" : ""),
                 create: false,
                 // a filtered list loses the parent row — flatten it
                 nested: w.nested && !q,
             }));
-        if (q && !workspaces.some((w) => w.name.toLowerCase() === ql)) {
+        if (q && !merged.some((w) => w.name.toLowerCase() === ql)) {
             out.push({label: q, detail: "create workspace", create: true, nested: false});
         }
         return out;
@@ -97,7 +110,9 @@
     function pick(item: Item | undefined) {
         if (!item) return;
         onclose();
-        onpick(item.label); // create and switch are the same door
+        // create spawns a first shell; switch lands wherever the workspace
+        // is (a window, or its dashboard when it has none)
+        onpick(item.label, item.create);
     }
 
     function onKeydown(e: KeyboardEvent) {

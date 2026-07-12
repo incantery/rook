@@ -105,18 +105,23 @@ export class TermManager {
         for (const s of sessions) this.addTab(s);
     }
 
-    /** Enter a workspace: activate its remembered window, or spawn its
-     *  first shell (the host seeds cwd from the workspace root). */
-    async openWorkspace(name: string): Promise<void> {
+    /** Enter a workspace: activate its remembered window. Returns false
+     *  when it has no windows — the caller picks the landing (dashboard);
+     *  switching must not force a shell into a session-less workspace. */
+    openWorkspace(name: string): boolean {
         this.current = name;
         localStorage.setItem("rook.workspace", name);
         const target = this.lastActive.get(name) ?? this.wsTabs(name)[0];
         if (target) {
             this.activate(target);
-            return;
+            return true;
         }
-        const s = await this.api.create(100, 30, undefined, name);
-        this.activate(this.addTab(s));
+        // clear the stage so the previous workspace's terminal doesn't
+        // linger behind the dashboard, and re-project the (empty) strip
+        for (const t of this.tabs) t.wrap.classList.remove("active");
+        this.active = null;
+        this.events.changed();
+        return false;
     }
 
     private addTab(s: SessionInfo): Tab {

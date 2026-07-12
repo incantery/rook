@@ -48,12 +48,31 @@
             // Flush the hidden attr: openWorkspace's activate() fits and
             // focuses, and both silently no-op on a display:none subtree.
             await tick();
-            await mgr.openWorkspace(name);
+            // a session-less workspace lands on its dashboard, ready to
+            // open a window (` c) — switching mustn't force a shell in
+            if (!mgr.openWorkspace(name)) app.dashVisible = true;
         } catch (err) {
             console.error("failed to open workspace", name, err);
             showHome();
             await tick(); // Home remounts before it can show the error
             home?.showError(`Couldn't open "${name}": ${err}`);
+        }
+    }
+
+    /** The create doors (picker's new name, scratch shells, the create
+     *  modal) still go straight into a first shell — the host registers
+     *  the workspace on spawn and seeds cwd from its root. */
+    async function spawnShell(workspace: string): Promise<void> {
+        try {
+            await initDone;
+            app.screen = "app";
+            await tick(); // spawnIn activates: fit/focus need a visible DOM
+            await mgr.spawnIn(workspace);
+        } catch (err) {
+            console.error("failed to open workspace", workspace, err);
+            showHome();
+            await tick(); // Home remounts before it can show the error
+            home?.showError(`Couldn't open "${workspace}": ${err}`);
         }
     }
     function showHome(): void {
@@ -215,7 +234,9 @@
                 let n = 1;
                 while (taken.has(`scratch-${n}`)) n++;
                 await api.createWorkspace(`scratch-${n}`, "", true);
-                void showWorkspace(`scratch-${n}`);
+                // a shell must exist — the host discards a scratch
+                // workspace when its last session exits
+                void spawnShell(`scratch-${n}`);
             },
         },
         {
@@ -428,6 +449,7 @@
         {api}
         bind:this={home}
         onopen={(name) => void showWorkspace(name)}
+        onspawn={(name) => void spawnShell(name)}
         onwork={(ws, issue) => workIssue(issue, ws)}
     />
 {/if}
@@ -470,7 +492,7 @@
     <Picker
         workspaces={mgr.workspaces()}
         current={app.workspace}
-        onpick={(name) => void showWorkspace(name)}
+        onpick={(name, create) => void (create ? spawnShell(name) : showWorkspace(name))}
         onmanager={showHome}
         onclose={() => {
             app.pickerOpen = false;

@@ -17,10 +17,13 @@
     interface Props {
         api: HostAPI;
         onopen: (name: string) => void;
+        /** open the workspace with a fresh first shell — the create flows
+         *  (scratch, modal) need one to exist, not a dashboard landing */
+        onspawn: (name: string) => void;
         /** start claude on this issue off that workspace — App owns the flow */
         onwork: (workspace: string, issue: IssueInfo) => Promise<void>;
     }
-    let {api, onopen, onwork}: Props = $props();
+    let {api, onopen, onspawn, onwork}: Props = $props();
 
     let items = $state<OverviewItem[]>([]);
     let error = $state("");
@@ -271,7 +274,7 @@
         }
         await api.createWorkspace(name, modalRoot.trim(), false);
         modalOpen = false;
-        onopen(name);
+        onspawn(name);
     }
 
     /** One-off task: auto-named ephemeral workspace, straight into a shell.
@@ -282,7 +285,7 @@
         while (taken.has(`scratch-${n}`)) n++;
         const name = `scratch-${n}`;
         await api.createWorkspace(name, "", true);
-        onopen(name);
+        onspawn(name);
     }
 
     export function openModal(): void {
