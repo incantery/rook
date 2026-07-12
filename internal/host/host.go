@@ -523,6 +523,8 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleWorkspaceStatus(w, name)
 	case action == "issues" && r.Method == http.MethodGet:
 		h.handleWorkspaceIssues(w, r, name)
+	case action == "spawn" && r.Method == http.MethodPost:
+		h.handleWorkspaceSpawn(w, r, name)
 	case action == "" && r.Method == http.MethodDelete:
 		force := r.URL.Query().Get("force") == "1"
 		// prune also deletes the worktree's local branch — the close-the-

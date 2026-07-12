@@ -42,6 +42,10 @@ type Config struct {
 	// `branch-prefix-<workspace> = seth/`. The value is used verbatim
 	// (bring your own trailing separator); unset means rook/.
 	BranchPrefixes map[string]string `json:"branchPrefixes"`
+	// Coder is the CLI the host types into spawned task windows (spawn
+	// drafts, the conflict-resolve chip, workflow stages). claude unless
+	// overridden.
+	Coder string `json:"coder"`
 }
 
 func Default() Config {
@@ -55,6 +59,7 @@ func Default() Config {
 		Agent:             false,
 		AgentModel:        "gpt-5.4-nano",
 		AgentDailyCapUSD:  1.00,
+		Coder:             "claude",
 	}
 }
 
@@ -150,6 +155,10 @@ func Load() Config {
 			cfg.JiraEmail = value
 		case "jira-jql":
 			cfg.JiraJQL = value
+		case "coder":
+			if value != "" {
+				cfg.Coder = value
+			}
 		}
 	}
 	return cfg

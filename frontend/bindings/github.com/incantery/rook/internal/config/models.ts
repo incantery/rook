@@ -33,4 +33,18 @@ export interface Config {
     "jiraEmail": string;
     "jiraJql": string;
     "jiraProjects": { [_ in string]?: string } | null;
+
+    /**
+     * BranchPrefixes maps a workspace to its worktree-branch prefix,
+     * `branch-prefix-<workspace> = seth/`. The value is used verbatim
+     * (bring your own trailing separator); unset means rook/.
+     */
+    "branchPrefixes": { [_ in string]?: string } | null;
+
+    /**
+     * Coder is the CLI the host types into spawned task windows (spawn
+     * drafts, the conflict-resolve chip, workflow stages). claude unless
+     * overridden.
+     */
+    "coder": string;
 }

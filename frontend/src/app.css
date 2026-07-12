@@ -1034,6 +1034,22 @@ button.ws-tag.pr-merged {
 button.ws-tag.pr-merged:hover {
     background: rgba(199, 146, 234, 0.32);
 }
+/* the conflicts nudge — amber warning (needs_input's palette); the button
+   spawns a resolver agent in the tree, the span is its passive debounce */
+.ws-tag.pr-conflicts {
+    background: rgba(255, 203, 107, 0.14);
+    color: #ffcb6b;
+}
+button.ws-tag.pr-conflicts {
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    font-size: 10.5px;
+    font-family: var(--mono);
+}
+button.ws-tag.pr-conflicts:hover {
+    background: rgba(255, 203, 107, 0.28);
+}
 /* the ✕ armed by a "would lose work" refusal — next click forces */
 .ws-card:hover .ws-card-del.armed,
 .ws-card-del.armed {

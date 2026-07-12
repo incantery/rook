@@ -28,6 +28,36 @@ func TestParsePR(t *testing.T) {
 	}
 }
 
+// Mergeability rides the same JSON: CONFLICTING is the only value that may
+// ever read as conflicted — UNKNOWN (GitHub still computing) and absent
+// (older gh) fail open to "fine".
+func TestParsePRMergeable(t *testing.T) {
+	pr, err := parsePR([]byte(`{"number": 16, "state": "OPEN", "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.Mergeable != "CONFLICTING" || pr.MergeStateStatus != "DIRTY" {
+		t.Fatalf("mergeability must parse: %+v", pr)
+	}
+
+	pr, err = parsePR([]byte(`{"number": 17, "state": "OPEN", "mergeable": "UNKNOWN"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.Mergeable != "UNKNOWN" {
+		t.Fatalf("bad UNKNOWN: %+v", pr)
+	}
+
+	// absent fields (older gh JSON) must parse to empty, not error
+	pr, err = parsePR([]byte(`{"number": 18, "state": "OPEN"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.Mergeable != "" || pr.MergeStateStatus != "" {
+		t.Fatalf("absent mergeability must stay empty: %+v", pr)
+	}
+}
+
 func TestBuildTaskClosesLoop(t *testing.T) {
 	task := BuildTask(Issue{Tracker: "github", Key: "#3", Title: "close the loop"})
 	if !strings.Contains(task, "Closes #3") {
