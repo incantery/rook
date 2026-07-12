@@ -14,8 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -24,7 +24,7 @@ jobs:
       # without the GTK4/webkitgtk dev headers (a 1-2 min install). cmd/rook
       # is a thin wiring main exercised by every local `make dev` build on
       # macOS; everything it wires lives in internal/, which is covered.
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.7.2
           args: ./internal/... ./cmd/rook-host/... ./cmd/rook-agent/... ./cmd/rookctl/...
@@ -39,12 +39,12 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Reads the pnpm version from frontend/package.json's packageManager field
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: frontend/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: pnpm
