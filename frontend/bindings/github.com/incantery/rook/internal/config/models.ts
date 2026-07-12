@@ -47,4 +47,16 @@ export interface Config {
      * overridden.
      */
     "coder": string;
+
+    /**
+     * Workflow is the staged review pipeline run after a worktree's coding
+     * agent opens its PR: slash commands, comma-separated (`workflow =
+     * /security-review, /review`), each spawned sequentially in its own
+     * window. Empty = feature off. Workflows carries per-workspace
+     * overrides (`workflow-<ws> = ...`); an explicitly empty value there
+     * is a non-nil empty list — that workspace opts out of the global
+     * pipeline.
+     */
+    "workflow": string[] | null;
+    "workflows": { [_ in string]?: string[] | null } | null;
 }

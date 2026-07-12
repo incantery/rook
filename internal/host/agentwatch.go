@@ -35,6 +35,12 @@ type agentWatch struct {
 	// open drafts and expire them — agentwatch itself stays a pure sensor.
 	onUserReply     func(sessionID, text string)
 	onTurnCompleted func(sessionID string, askSeq int)
+	// onTurnFinished fires ONLY on a genuine turn_completed event — never
+	// for AskUserQuestion or a permission notify, which also route through
+	// onTurnCompleted (its contract is ask-invalidation, not "turn done").
+	// The workflow engine keys stage completion on this distinction: an
+	// agent asking a question has NOT finished its stage.
+	onTurnFinished func(sessionID string)
 }
 
 // histMsg is one entry of a session's recent-conversation ring: the context
@@ -220,7 +226,7 @@ func (a *agentWatch) apply(ev *agentmonEvent) {
 	}
 	// deferred so hooks run after the lock drops — they call back into
 	// host state that must never nest inside agentwatch's mutex
-	var userReplied, turnDone bool
+	var userReplied, turnDone, turnFinished bool
 	var userReply string
 
 	switch ev.Type {
@@ -297,6 +303,7 @@ func (a *agentWatch) apply(ev *agentmonEvent) {
 		st.Interactive = false
 		st.AskSeq++
 		turnDone = true
+		turnFinished = true
 	case "session_idle":
 		if st.State == "working" {
 			setState("quiet")
@@ -310,6 +317,9 @@ func (a *agentWatch) apply(ev *agentmonEvent) {
 	}
 	if turnDone && a.onTurnCompleted != nil {
 		a.onTurnCompleted(ev.SessionID, askSeq)
+	}
+	if turnFinished && a.onTurnFinished != nil {
+		a.onTurnFinished(ev.SessionID)
 	}
 }
 

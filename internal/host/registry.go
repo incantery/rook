@@ -100,6 +100,19 @@ CREATE TABLE IF NOT EXISTS costs (
 	day TEXT PRIMARY KEY, -- local date, 2006-01-02
 	usd REAL NOT NULL DEFAULT 0 -- claude raw-inference $, host-observed
 );
+CREATE TABLE IF NOT EXISTS stages (
+	id           INTEGER PRIMARY KEY,
+	workspace    TEXT NOT NULL,
+	idx          INTEGER NOT NULL,
+	name         TEXT NOT NULL,                     -- the slash command
+	status       TEXT NOT NULL DEFAULT 'pending',   -- pending|running|done|error
+	rook_session TEXT NOT NULL DEFAULT '',          -- attribution key: the stage's window
+	detail       TEXT NOT NULL DEFAULT '',
+	created_at   TEXT NOT NULL,
+	started_at   TEXT,
+	finished_at  TEXT,
+	UNIQUE(workspace, idx)
+);
 `
 
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS
