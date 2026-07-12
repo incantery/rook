@@ -664,19 +664,24 @@ func runWork(args []string) error {
 	if err != nil {
 		return err
 	}
-	var task string
-	for _, i := range res.Issues {
+	var issue *issueRow
+	for idx, i := range res.Issues {
 		if i.Key == key || strings.TrimPrefix(i.Key, "#") == key {
-			task = i.Task
+			issue = &res.Issues[idx]
 			break
 		}
 	}
-	if task == "" {
+	if issue == nil {
 		return fmt.Errorf("%s is not in %s's queue (rookctl issues to see it)", key, ws)
 	}
+	task := issue.Task
 	target, cwdFrom := ws, os.Getenv("ROOK_SESSION")
 	if worktree {
-		raw, err := c.req("POST", "/workspaces", map[string]any{"worktreeFrom": ws})
+		// stamp provenance: the workspace records which issue spawned it
+		raw, err := c.req("POST", "/workspaces", map[string]any{
+			"worktreeFrom": ws,
+			"issue":        map[string]string{"tracker": issue.Tracker, "key": issue.Key},
+		})
 		if err != nil {
 			return err
 		}

@@ -163,6 +163,68 @@ func TestWorktreeRefusesToLoseWork(t *testing.T) {
 	}
 }
 
+func TestWorktreeIssueStamp(t *testing.T) {
+	h, srv, _ := newWorktreeHost(t)
+	c := &wtClient{srv.URL, h.Token()}
+
+	// work-on-issue create: provenance stamped and returned
+	code, body := c.do(t, "POST", "/workspaces", map[string]any{
+		"worktreeFrom": "src",
+		"issue":        map[string]string{"tracker": "github", "key": "#2"},
+	})
+	if code != 200 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var ws WorkspaceInfo
+	json.Unmarshal([]byte(body), &ws)
+	if ws.IssueRef == nil || ws.IssueRef.Tracker != "github" || ws.IssueRef.Key != "#2" {
+		t.Fatalf("issue ref not stamped: %+v", ws.IssueRef)
+	}
+
+	// survives the registry round-trip: the list endpoint carries it
+	code, body = c.do(t, "GET", "/workspaces", nil)
+	if code != 200 {
+		t.Fatalf("list: %d %s", code, body)
+	}
+	var list []WorkspaceInfo
+	json.Unmarshal([]byte(body), &list)
+	found := false
+	for _, item := range list {
+		if item.Name == ws.Name {
+			found = true
+			if item.IssueRef == nil || item.IssueRef.Key != "#2" || item.IssueRef.Tracker != "github" {
+				t.Fatalf("list lost the issue ref: %+v", item.IssueRef)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("%s missing from list", ws.Name)
+	}
+
+	// plain worktrees (and empty refs) stay unstamped
+	code, body = c.do(t, "POST", "/workspaces", map[string]any{"worktreeFrom": "src"})
+	if code != 200 {
+		t.Fatalf("plain create: %d %s", code, body)
+	}
+	var plain WorkspaceInfo
+	json.Unmarshal([]byte(body), &plain)
+	if plain.IssueRef != nil {
+		t.Fatalf("plain worktree should have no issue ref: %+v", plain.IssueRef)
+	}
+	code, body = c.do(t, "POST", "/workspaces", map[string]any{
+		"worktreeFrom": "src",
+		"issue":        map[string]string{"tracker": "github", "key": ""},
+	})
+	if code != 200 {
+		t.Fatalf("empty-ref create: %d %s", code, body)
+	}
+	var empty WorkspaceInfo
+	json.Unmarshal([]byte(body), &empty)
+	if empty.IssueRef != nil {
+		t.Fatalf("empty issue ref should not be stamped: %+v", empty.IssueRef)
+	}
+}
+
 func TestWorktreeCreateErrors(t *testing.T) {
 	h, srv, _ := newWorktreeHost(t)
 	c := &wtClient{srv.URL, h.Token()}

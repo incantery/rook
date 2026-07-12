@@ -933,6 +933,11 @@ body {
   background: rgba(130, 170, 255, 0.12);
   color: #82aaff;
 }
+/* workspace card: the tracker issue this workspace was spawned for */
+.ws-tag.issue {
+  background: rgba(199, 146, 234, 0.12);
+  color: #c792ea;
+}
 /* the ✕ armed by a "would lose work" refusal — next click forces */
 .ws-card:hover .ws-card-del.armed,
 .ws-card-del.armed {

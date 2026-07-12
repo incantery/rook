@@ -89,7 +89,7 @@
     async function workIssue(issue: IssueInfo): Promise<void> {
         let workspace = app.workspace;
         try {
-            workspace = (await api.createWorktree(workspace)).name;
+            workspace = (await api.createWorktree(workspace, {tracker: issue.tracker, key: issue.key})).name;
         } catch (err) {
             console.warn("worktree isolation unavailable — spawning in the workspace", err);
         }
