@@ -38,7 +38,8 @@ func (r *registry) insertStages(workspace string, names []string) (bool, error) 
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	// rollback after commit is a harmless ErrTxDone; this is the no-op path
+	defer func() { _ = tx.Rollback() }()
 	var n int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM stages WHERE workspace = ?`, workspace).Scan(&n); err != nil {
 		return false, err
