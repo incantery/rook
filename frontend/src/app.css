@@ -162,6 +162,20 @@ body {
     background: rgba(130, 170, 255, 0.18);
     border-color: rgba(130, 170, 255, 0.5);
 }
+/* inside a task tree the chip reads lineage: dim source ▸ bright tree */
+#ws-label.tasktree {
+    max-width: 330px;
+}
+#ws-label .ws-parent {
+    opacity: 0.62;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+#ws-label .ws-sep {
+    flex: none;
+    opacity: 0.5;
+}
 #prefix-pill {
     padding: 0 10px;
     border-radius: 999px;
@@ -260,6 +274,13 @@ body {
     font-size: 20px;
     font-weight: 700;
     color: var(--fg);
+}
+/* kicker above the name: this surface is a task tree, not a peer workspace */
+.dash-lineage {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--acc);
+    margin-bottom: 4px;
 }
 .dash-root {
     font-family: var(--mono);
@@ -519,6 +540,10 @@ body {
 .pal-item:hover,
 .pal-item.sel {
     background: rgba(130, 170, 255, 0.16);
+}
+/* picker: a task tree listed under its source workspace */
+.pal-item.nested {
+    padding-left: 26px;
 }
 .pal-title {
     flex: 1;
@@ -870,6 +895,27 @@ body {
     grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
     gap: 12px;
 }
+/* one grid cell: a workspace and the task trees carved from it */
+.ws-group {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    align-self: start;
+}
+/* the lineage rail — task trees hang indented under their source */
+.ws-trees {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    margin-left: 13px;
+    padding-left: 11px;
+    border-left: 1px solid rgba(130, 170, 255, 0.28);
+}
+/* a task tree is a temporary work surface, not a peer — dashed edge */
+.ws-card.tasktree {
+    border-left: 2px dashed rgba(130, 170, 255, 0.6);
+    background: rgba(130, 170, 255, 0.035);
+}
 .ws-card {
     border: 1px solid var(--line);
     border-left: 2px solid var(--acc);
@@ -1053,49 +1099,6 @@ button.ws-tag.pr-merged:hover {
 /* non-shell foreground processes (nvim, make, …) in the workspace */
 .ws-tag.fg {
     color: var(--dim);
-}
-/* task trees nested under their source workspace's card */
-.ws-trees {
-    margin-top: 11px;
-    padding-top: 4px;
-    border-top: 1px solid var(--line);
-    display: flex;
-    flex-direction: column;
-}
-.ws-tree {
-    padding: 7px 2px 6px;
-    border-radius: 7px;
-    cursor: pointer;
-}
-.ws-tree:hover {
-    background: rgba(255, 255, 255, 0.04);
-}
-.ws-tree + .ws-tree {
-    border-top: 1px solid rgba(255, 255, 255, 0.04);
-}
-.ws-tree-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-}
-.ws-tree-name {
-    font-size: 11.5px;
-    font-weight: 600;
-    font-family: var(--mono);
-    color: #82aaff;
-    white-space: nowrap;
-}
-.ws-tree:hover .ws-card-del {
-    color: var(--lo);
-}
-.ws-tree-line {
-    margin-top: 4px;
-    font-size: 10.5px;
-    color: var(--lo);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
 }
 /* section headers below the grid — dash-sec's look, with air above */
 .home-sec {

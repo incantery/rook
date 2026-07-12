@@ -32,6 +32,7 @@ func newWorktreeHost(t *testing.T) (h *Host, srv *httptest.Server, repo string) 
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // the user's branch-prefix must not leak in
 	repo = t.TempDir()
 	gitT(t, repo, "init", "-b", "main")
 	if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("hello\n"), 0o644); err != nil {
@@ -222,6 +223,84 @@ func TestWorktreeIssueStamp(t *testing.T) {
 	json.Unmarshal([]byte(body), &empty)
 	if empty.IssueRef != nil {
 		t.Fatalf("empty issue ref should not be stamped: %+v", empty.IssueRef)
+	}
+}
+
+func TestWorktreeIssueNames(t *testing.T) {
+	h, srv, _ := newWorktreeHost(t)
+	c := &wtClient{srv.URL, h.Token()}
+
+	mk := func(key, title string) WorkspaceInfo {
+		t.Helper()
+		code, body := c.do(t, "POST", "/workspaces", map[string]any{
+			"worktreeFrom": "src",
+			"issue":        map[string]string{"tracker": "github", "key": key, "title": title},
+		})
+		if code != 200 {
+			t.Fatalf("create %s: %d %s", key, code, body)
+		}
+		var ws WorkspaceInfo
+		json.Unmarshal([]byte(body), &ws)
+		return ws
+	}
+
+	// the name comes from the issue, not the counter
+	ws := mk("#1", "Top bar alignment")
+	if ws.Name != "1-top-bar-alignment" || ws.Branch != "rook/1-top-bar-alignment" {
+		t.Fatalf("derived name: %+v", ws)
+	}
+
+	// working the same issue again steps past the live workspace
+	if ws = mk("#1", "Top bar alignment"); ws.Name != "1-top-bar-alignment-2" {
+		t.Fatalf("collision step: %+v", ws)
+	}
+
+	// jira keys keep their case; punctuation in titles collapses away
+	if ws = mk("PROJ-42", "Fix (the) login flow!"); ws.Name != "PROJ-42-fix-the-login-flow" {
+		t.Fatalf("jira name: %+v", ws)
+	}
+
+	// long titles truncate at a word boundary, keeping the name readable
+	ws = mk("#9", "Meaningful worktree names: derive from the issue, configurable branch prefix")
+	if ws.Name != "9-meaningful-worktree-names" {
+		t.Fatalf("truncated name: %+v", ws)
+	}
+
+	// a title with nothing slug-safe still names off the key
+	if ws = mk("#3", "«…»"); ws.Name != "3" {
+		t.Fatalf("key-only name: %+v", ws)
+	}
+}
+
+func TestWorktreeBranchPrefix(t *testing.T) {
+	h, srv, repo := newWorktreeHost(t)
+	c := &wtClient{srv.URL, h.Token()}
+	cfgDir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "rook")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config"), []byte("branch-prefix-src = seth/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := c.do(t, "POST", "/workspaces", map[string]any{"worktreeFrom": "src"})
+	if code != 200 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var ws WorkspaceInfo
+	json.Unmarshal([]byte(body), &ws)
+	if ws.Branch != "seth/src-t1" {
+		t.Fatalf("branch = %q, want seth/src-t1", ws.Branch)
+	}
+	if got := gitT(t, ws.Root, "rev-parse", "--abbrev-ref", "HEAD"); got != "seth/src-t1" {
+		t.Fatalf("checkout on %q", got)
+	}
+
+	// explicit-name 409s check the configured prefix, not rook/
+	gitT(t, repo, "branch", "seth/left-behind")
+	code, body = c.do(t, "POST", "/workspaces", map[string]any{"worktreeFrom": "src", "name": "left-behind"})
+	if code != 409 || !strings.Contains(body, "seth/left-behind") {
+		t.Fatalf("prefixed branch collision: %d %s", code, body)
 	}
 }
 

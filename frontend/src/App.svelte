@@ -90,8 +90,13 @@
     async function workIssue(issue: IssueInfo, from = app.workspace): Promise<void> {
         let workspace = from;
         try {
-            workspace = (await api.createWorktree(from, {tracker: issue.tracker, key: issue.key}))
-                .name;
+            workspace = (
+                await api.createWorktree(from, {
+                    tracker: issue.tracker,
+                    key: issue.key,
+                    title: issue.title,
+                })
+            ).name;
         } catch (err) {
             console.warn("worktree isolation unavailable — spawning in the workspace", err);
         }
@@ -351,6 +356,16 @@
         for (const k of seenAsks) if (!live.has(k)) seenAsks.delete(k);
     }
 
+    /** Registry snapshot into the store — the lineage data (worktreeOf /
+     *  branch) behind the task-tree treatment on every surface. */
+    async function pollWorkspaces(): Promise<void> {
+        try {
+            app.workspaces = await api.listWorkspaces();
+        } catch {
+            // host briefly unreachable — keep the last known state
+        }
+    }
+
     async function pollMoney(): Promise<void> {
         try {
             app.usage = await api.usage();
@@ -381,8 +396,10 @@
 
         void pollAttention();
         void pollMoney();
+        void pollWorkspaces();
         const attnTimer = setInterval(() => void pollAttention(), 5000);
         const moneyTimer = setInterval(() => void pollMoney(), 30_000);
+        const wsTimer = setInterval(() => void pollWorkspaces(), 15_000);
 
         initDone = (async () => {
             try {
@@ -401,6 +418,7 @@
             ro.disconnect();
             clearInterval(attnTimer);
             clearInterval(moneyTimer);
+            clearInterval(wsTimer);
         };
     });
 </script>

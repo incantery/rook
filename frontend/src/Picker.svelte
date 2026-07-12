@@ -2,6 +2,8 @@
      window counts; typing filters, and a name that matches nothing offers
      "create workspace" (tmux new-session). Reuses the palette's styling. -->
 <script lang="ts">
+    import {app} from "./state.svelte";
+
     interface Props {
         workspaces: {name: string; count: number}[];
         current: string;
@@ -14,13 +16,54 @@
     let query = $state("");
     let inputEl: HTMLInputElement;
     let listEl: HTMLElement;
-    // Empty query means items mirror workspaces order, so the active
+
+    /** Live workspaces reordered to mirror the manager's grouping: each
+     *  source workspace followed by its task trees (one level — a tree
+     *  carved from a tree hangs under the topmost live ancestor). A tree
+     *  whose source has no live windows stays top-level, lineage in its
+     *  detail. */
+    interface LiveWs {
+        name: string;
+        count: number;
+        treeOf: string | null;
+        nested: boolean;
+    }
+    const ordered = $derived.by((): LiveWs[] => {
+        const lineage = new Map(app.workspaces.map((w) => [w.name, w.worktreeOf ?? null]));
+        const live = new Set(workspaces.map((w) => w.name));
+        const anchorOf = (name: string): string => {
+            const seen = new Set<string>([name]);
+            let anchor = name;
+            for (let cur = lineage.get(name); cur && !seen.has(cur); cur = lineage.get(cur)) {
+                seen.add(cur);
+                if (live.has(cur)) anchor = cur;
+            }
+            return anchor;
+        };
+        const anno = workspaces.map((w) => ({
+            ...w,
+            treeOf: lineage.get(w.name) ?? null,
+            nested: false,
+        }));
+        const out: LiveWs[] = [];
+        for (const w of anno) {
+            if (anchorOf(w.name) !== w.name) continue; // listed under its anchor
+            out.push(w);
+            for (const t of anno) {
+                if (t.name !== w.name && anchorOf(t.name) === w.name)
+                    out.push({...t, nested: true});
+            }
+        }
+        return out;
+    });
+
+    // Empty query means items mirror the ordered list, so the active
     // workspace's index is a valid starting selection.
     // svelte-ignore state_referenced_locally — deliberately the initial value
     let sel = $state(
         Math.max(
             0,
-            workspaces.findIndex((w) => w.name === current),
+            ordered.findIndex((w) => w.name === current),
         ),
     );
 
@@ -28,21 +71,25 @@
         label: string;
         detail: string;
         create: boolean;
+        nested: boolean;
     }
     const items = $derived.by((): Item[] => {
         const q = query.trim();
         const ql = q.toLowerCase();
-        const out: Item[] = workspaces
+        const out: Item[] = ordered
             .filter((w) => !ql || w.name.toLowerCase().includes(ql))
             .map((w) => ({
                 label: w.name,
                 detail:
+                    (w.treeOf ? `⎇ task tree of ${w.treeOf} · ` : "") +
                     `${w.count} window${w.count === 1 ? "" : "s"}` +
                     (w.name === current ? " · current" : ""),
                 create: false,
+                // a filtered list loses the parent row — flatten it
+                nested: w.nested && !q,
             }));
         if (q && !workspaces.some((w) => w.name.toLowerCase() === ql)) {
-            out.push({label: q, detail: "create workspace", create: true});
+            out.push({label: q, detail: "create workspace", create: true, nested: false});
         }
         return out;
     });
@@ -107,13 +154,16 @@
                 <div
                     class="pal-item"
                     class:sel={i === sel}
+                    class:nested={item.nested}
                     onmousedown={(e) => {
                         e.preventDefault();
                         pick(item);
                     }}
                     role="presentation"
                 >
-                    <span class="pal-title">{(item.create ? "＋ " : "") + item.label}</span>
+                    <span class="pal-title"
+                        >{(item.create ? "＋ " : item.nested ? "└ " : "") + item.label}</span
+                    >
                     <span class="pal-cat">{item.detail}</span>
                 </div>
             {/each}

@@ -2,7 +2,7 @@
 // The terminal runtime (term/manager.ts) writes projections INTO this via
 // its events; terminal output itself never passes through here.
 
-import type {AttentionItem, CostsSnapshot, UsageSnapshot} from "./hostapi";
+import type {AttentionItem, CostsSnapshot, UsageSnapshot, WorkspaceInfo} from "./hostapi";
 import type {TabInfo} from "./term/manager";
 
 class AppState {
@@ -26,6 +26,15 @@ class AppState {
     attention = $state<AttentionItem[]>([]);
     usage = $state<UsageSnapshot | null>(null);
     costs = $state<CostsSnapshot | null>(null);
+    /** registry snapshot — lineage (worktreeOf/branch) for every surface
+     *  that names a workspace; Home refreshes it eagerly after mutations */
+    workspaces = $state<WorkspaceInfo[]>([]);
+
+    /** the current workspace's registry entry — undefined until the
+     *  workspaces poll lands (surfaces must fail open to a bare name) */
+    get workspaceInfo(): WorkspaceInfo | undefined {
+        return this.workspaces.find((w) => w.name === this.workspace);
+    }
 
     /** strip slot of the dashboard (config dashboard-tab) */
     dashTab = 1;

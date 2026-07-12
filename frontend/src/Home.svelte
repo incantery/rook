@@ -1,13 +1,13 @@
 <!-- Mission control — the app's landing screen (issue #12): the answer to
-     "what is going on across everything right now". Task trees group under
-     their source workspace, whatever needs the human floats to the top,
-     idle workspaces compress to one-line rows, and the issue queues of
-     every repo surface here — work waiting to start, cross-workspace.
-     Data is GET /overview (one call, live rollups); on an old daemon it
-     fails open to the bare /workspaces list and renders what it has.
-     The strip carries the app-wide status line: subscription usage windows
-     + the raw-inference cost picture (zeros render — "$0.00 today" on a
-     fresh start is information, not absence). -->
+     "what is going on across everything right now". Task trees hang under
+     their source workspace on the lineage rail, whatever needs the human
+     floats to the top, idle groups compress to one-line rows, and the
+     issue queues of every repo surface here — work waiting to start,
+     cross-workspace. Data is GET /overview (one call, live rollups); on an
+     old daemon it fails open to the bare /workspaces list and renders what
+     it has. The strip carries the app-wide status line: subscription usage
+     windows + the raw-inference cost picture (zeros render — "$0.00 today"
+     on a fresh start is information, not absence). -->
 <script lang="ts">
     import type {HostAPI, IssueInfo, IssuesResult, OverviewItem} from "./hostapi";
     import {shortWindow} from "./hostapi";
@@ -43,8 +43,11 @@
     const workingOf = (w: OverviewItem) =>
         (w.agents ?? []).filter((a) => a.state === "working").length;
 
-    /** One group per top-level workspace, its task trees under it. A tree
-     *  whose source workspace is gone stands on its own. */
+    /** One group per source workspace, its task trees under it — they're
+     *  work surfaces for one task, not peers. One level of nesting only:
+     *  a tree carved from another tree (▶ work inside one does this) hangs
+     *  under the topmost listed ancestor, and a tree whose source is gone
+     *  stands on its own (fail open, lineage on the card). */
     interface Group {
         ws: OverviewItem;
         trees: OverviewItem[];
@@ -56,30 +59,32 @@
     }
 
     const groups = $derived.by(() => {
-        const names = new Set(items.map((w) => w.name));
-        const kids = new Map<string, OverviewItem[]>();
-        const tops: OverviewItem[] = [];
-        for (const w of items) {
-            if (w.worktreeOf && names.has(w.worktreeOf)) {
-                const list = kids.get(w.worktreeOf) ?? [];
-                list.push(w);
-                kids.set(w.worktreeOf, list);
-            } else tops.push(w);
-        }
-        const gs: Group[] = tops.map((ws) => {
-            const trees = (kids.get(ws.name) ?? [])
-                .slice()
-                .sort((a, b) => attnOf(b) - attnOf(a) || b.sessions - a.sessions);
-            const all = [ws, ...trees];
-            return {
-                ws,
-                trees,
-                attention: all.reduce((n, w) => n + attnOf(w), 0),
-                working: all.reduce((n, w) => n + workingOf(w), 0),
-                live: all.reduce((n, w) => n + w.sessions, 0),
-                actionable: all.some((w) => w.pr?.state === "merged"),
-            };
-        });
+        const byName = new Map(items.map((w) => [w.name, w]));
+        const anchorOf = (w: OverviewItem): OverviewItem => {
+            const seen = new Set<string>();
+            let cur = w;
+            while (cur.worktreeOf && byName.has(cur.worktreeOf) && !seen.has(cur.name)) {
+                seen.add(cur.name);
+                cur = byName.get(cur.worktreeOf)!;
+            }
+            return cur;
+        };
+        const gs: Group[] = items
+            .filter((w) => anchorOf(w) === w)
+            .map((ws) => {
+                const trees = items
+                    .filter((t) => t !== ws && anchorOf(t) === ws)
+                    .sort((a, b) => attnOf(b) - attnOf(a) || b.sessions - a.sessions);
+                const all = [ws, ...trees];
+                return {
+                    ws,
+                    trees,
+                    attention: all.reduce((n, w) => n + attnOf(w), 0),
+                    working: all.reduce((n, w) => n + workingOf(w), 0),
+                    live: all.reduce((n, w) => n + w.sessions, 0),
+                    actionable: all.some((w) => w.pr?.state === "merged"),
+                };
+            });
         // attention-first: the human's queue, then live work, then recency
         gs.sort(
             (a, b) =>
@@ -142,6 +147,9 @@
             console.warn("overview unavailable — falling back to /workspaces", err);
             items = await api.listWorkspaces();
         }
+        // overview items are a superset of the registry snapshot — keep the
+        // shared lineage store (Titlebar/Picker/Dashboard) fresh from here
+        app.workspaces = items;
     }
 
     export function showError(msg: string): void {
@@ -187,7 +195,7 @@
     });
 
     // ==== the cross-workspace queue: work waiting to start ====
-    // One issues fetch per repo-rooted top-level workspace; the host caches
+    // One issues fetch per repo-rooted source workspace; the host caches
     // ~60s per workspace, so this stays cheap. Rows are deduped (two
     // workspaces on one repo see the same issues) and issues already in
     // flight — some workspace carries their issueRef — drop out.
@@ -289,7 +297,7 @@
         class="ws-card-del"
         class:armed={forceArmed === name}
         title={forceArmed === name
-            ? "Delete anyway — discards the worktree (branch survives)"
+            ? "Delete anyway — discards the task tree (branch survives)"
             : "Delete workspace (kills its shells)"}
         onclick={(e) => {
             e.stopPropagation();
@@ -298,7 +306,7 @@
     >
 {/snippet}
 
-{#snippet wsTags(w: OverviewItem)}
+{#snippet wsTags(w: OverviewItem, nested: boolean)}
     {@const burn = app.costs?.live.find((l) => l.workspace === w.name)?.usd ?? 0}
     {#if burn >= 0.01}
         <span class="ws-tag cost" title="live claude sessions here, priced as API tokens"
@@ -307,6 +315,15 @@
     {/if}
     {#if w.scratch}
         <span class="ws-tag scratch">scratch</span>
+    {/if}
+    {#if w.worktreeOf}
+        <!-- nested under its source: the branch is the missing fact.
+             floated to the top level (source gone): say the lineage. -->
+        <span
+            class="ws-tag worktree"
+            title="task tree of {w.worktreeOf} — a git worktree on branch {w.branch}"
+            >{nested ? `⎇ ${w.branch}` : `task tree of ${w.worktreeOf} · ⎇ ${w.branch}`}</span
+        >
     {/if}
     {#if w.issueRef}
         <span class="ws-tag issue" title="spawned for {w.issueRef.tracker} issue {w.issueRef.key}"
@@ -317,7 +334,7 @@
         <button
             class="ws-tag pr-merged"
             title="PR #{w.pr
-                .number} merged — remove the worktree and delete {w.branch} (kills its shells)"
+                .number} merged — remove the task tree and delete {w.branch} (kills its shells)"
             onclick={(e) => {
                 e.stopPropagation();
                 void cleanup(w.name);
@@ -336,6 +353,59 @@
             >no PR yet</span
         >
     {/if}
+{/snippet}
+
+{#snippet card(w: OverviewItem, nested: boolean)}
+    {@const chips = agentChips(w)}
+    {@const line = agentLine(w)}
+    <div
+        class="ws-card"
+        class:tasktree={w.worktreeOf}
+        class:attn={attnOf(w) > 0}
+        onclick={() => onopen(w.name)}
+        role="presentation"
+    >
+        <div class="ws-card-head">
+            <span class="ws-card-name">{w.name}</span>
+            {@render delBtn(w.name)}
+            <span class="ws-card-when">{ago(w.lastUsed || w.created)}</span>
+        </div>
+        <div class="ws-card-root">{tilde(w.root || "") || "~"}</div>
+        <div class="ws-card-tags">
+            <span class="ws-tag" class:live={w.sessions > 0} class:idle={w.sessions === 0}>
+                {w.sessions > 0 ? `● ${w.sessions} live` : "idle"}
+            </span>
+            {#each chips as c (c.cls)}
+                <span class="ws-agent {c.cls}">{c.text}</span>
+            {/each}
+            {#if w.git}
+                <!-- a task tree's branch already sits on its lineage tag -->
+                {#if !w.worktreeOf}
+                    <span class="ws-tag git">⎇ {w.git.branch}</span>
+                {/if}
+                {#if w.git.dirty > 0}
+                    <span class="ws-tag dirty">● {w.git.dirty} modified</span>
+                {/if}
+                {#if w.git.ahead > 0 || w.git.behind > 0}
+                    <span class="ws-tag">
+                        {[
+                            w.git.ahead > 0 ? `↑${w.git.ahead}` : "",
+                            w.git.behind > 0 ? `↓${w.git.behind}` : "",
+                        ]
+                            .filter(Boolean)
+                            .join(" ")}
+                    </span>
+                {/if}
+            {/if}
+            {#each fgTools(w) as f (f)}
+                <span class="ws-tag fg">{f}</span>
+            {/each}
+            {@render wsTags(w, nested)}
+        </div>
+        {#if line}
+            <div class="ws-agent-line" title={line}>{line}</div>
+        {/if}
+    </div>
 {/snippet}
 
 <div id="home">
@@ -395,84 +465,12 @@
             </div>
             <div id="home-grid">
                 {#each active as g (g.ws.name)}
-                    {@const chips = agentChips(g.ws)}
-                    {@const line = agentLine(g.ws)}
-                    <div
-                        class="ws-card"
-                        class:attn={g.attention > 0}
-                        onclick={() => onopen(g.ws.name)}
-                        role="presentation"
-                    >
-                        <div class="ws-card-head">
-                            <span class="ws-card-name">{g.ws.name}</span>
-                            {@render delBtn(g.ws.name)}
-                            <span class="ws-card-when">{ago(g.ws.lastUsed || g.ws.created)}</span>
-                        </div>
-                        <div class="ws-card-root">{tilde(g.ws.root || "") || "~"}</div>
-                        <div class="ws-card-tags">
-                            <span
-                                class="ws-tag"
-                                class:live={g.ws.sessions > 0}
-                                class:idle={g.ws.sessions === 0}
-                            >
-                                {g.ws.sessions > 0 ? `● ${g.ws.sessions} live` : "idle"}
-                            </span>
-                            {#each chips as c (c.cls)}
-                                <span class="ws-agent {c.cls}">{c.text}</span>
-                            {/each}
-                            {#if g.ws.git}
-                                <span class="ws-tag git">⎇ {g.ws.git.branch}</span>
-                                {#if g.ws.git.dirty > 0}
-                                    <span class="ws-tag dirty">● {g.ws.git.dirty} modified</span>
-                                {/if}
-                                {#if g.ws.git.ahead > 0 || g.ws.git.behind > 0}
-                                    <span class="ws-tag">
-                                        {[
-                                            g.ws.git.ahead > 0 ? `↑${g.ws.git.ahead}` : "",
-                                            g.ws.git.behind > 0 ? `↓${g.ws.git.behind}` : "",
-                                        ]
-                                            .filter(Boolean)
-                                            .join(" ")}
-                                    </span>
-                                {/if}
-                            {/if}
-                            {#each fgTools(g.ws) as f (f)}
-                                <span class="ws-tag fg">{f}</span>
-                            {/each}
-                            {@render wsTags(g.ws)}
-                        </div>
-                        {#if line}
-                            <div class="ws-agent-line" title={line}>{line}</div>
-                        {/if}
+                    <div class="ws-group">
+                        {@render card(g.ws, false)}
                         {#if g.trees.length > 0}
                             <div class="ws-trees">
                                 {#each g.trees as t (t.name)}
-                                    {@const tChips = agentChips(t)}
-                                    {@const tLine = agentLine(t)}
-                                    <div
-                                        class="ws-tree"
-                                        onclick={(e) => {
-                                            e.stopPropagation();
-                                            onopen(t.name);
-                                        }}
-                                        role="presentation"
-                                    >
-                                        <div class="ws-tree-head">
-                                            <span class="ws-tree-name">⎇ {t.name}</span>
-                                            {#if t.sessions > 0 && tChips.length === 0}
-                                                <span class="ws-tag live">● {t.sessions} live</span>
-                                            {/if}
-                                            {#each tChips as c (c.cls)}
-                                                <span class="ws-agent {c.cls}">{c.text}</span>
-                                            {/each}
-                                            {@render wsTags(t)}
-                                            <span class="home-spacer"></span>
-                                            {@render delBtn(t.name)}
-                                        </div>
-                                        {#if tLine}
-                                            <div class="ws-tree-line" title={tLine}>{tLine}</div>
-                                        {/if}
-                                    </div>
+                                    {@render card(t, true)}
                                 {/each}
                             </div>
                         {/if}
@@ -488,17 +486,17 @@
                 <div class="home-sec">Idle</div>
                 <div id="home-idle">
                     {#each idle as g (g.ws.name)}
-                        {#each [g.ws, ...g.trees] as w (w.name)}
+                        {#each [g.ws, ...g.trees] as w, wi (w.name)}
                             <div
                                 class="idle-row"
-                                class:tree={!!w.worktreeOf}
+                                class:tree={wi > 0}
                                 onclick={() => onopen(w.name)}
                                 role="presentation"
                             >
                                 <span class="idle-name"
                                     >{w.worktreeOf ? `⎇ ${w.name}` : w.name}</span
                                 >
-                                {@render wsTags(w)}
+                                {@render wsTags(w, wi > 0)}
                                 <span class="idle-root">{tilde(w.root || "")}</span>
                                 <span class="home-spacer"></span>
                                 <span class="ws-card-when">{ago(w.lastUsed || w.created)}</span>
@@ -523,7 +521,7 @@
                             <span class="dash-issue-ws" title="from {r.ws}'s queue">{r.ws}</span>
                             <button
                                 class="home-btn dash-issue-go"
-                                title="Start claude on this issue in a fresh worktree off {r.ws}"
+                                title="Start claude on this issue in a fresh task tree of {r.ws}"
                                 disabled={starting !== ""}
                                 onclick={() => void work(r.ws, r.issue)}
                                 >{starting === r.issue.key ? "…" : "▶ work"}</button
