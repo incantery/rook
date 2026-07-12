@@ -46,21 +46,39 @@ func TestUsageBurnAccumulation(t *testing.T) {
 	m := newUsageMon()
 
 	// First sight baselines — a session already $2 deep is not fresh burn.
-	m.accumulate([]*AgentStatus{{SessionID: "a", CostUSD: 2.00}})
-	if m.burn != 0 {
-		t.Fatalf("baseline counted as burn: %v", m.burn)
+	if d := m.accumulate([]*AgentStatus{{SessionID: "a", CostUSD: 2.00}}); d != 0 {
+		t.Fatalf("baseline returned delta %v", d)
 	}
-	// Growth counts.
-	m.accumulate([]*AgentStatus{{SessionID: "a", CostUSD: 2.10}})
+	// Growth counts, and the return is the per-call delta.
+	if d := m.accumulate([]*AgentStatus{{SessionID: "a", CostUSD: 2.10}}); d < 0.099 || d > 0.101 {
+		t.Fatalf("delta = %v, want 0.10", d)
+	}
 	m.accumulate([]*AgentStatus{{SessionID: "a", CostUSD: 2.30}})
 	if m.burn < 0.299 || m.burn > 0.301 {
 		t.Fatalf("burn = %v, want 0.30", m.burn)
 	}
 	// A dead session is pruned; its return (host restart) re-baselines.
 	m.accumulate(nil)
-	m.accumulate([]*AgentStatus{{SessionID: "a", CostUSD: 5.00}})
-	if m.burn > 0.301 {
-		t.Fatalf("re-baselined session counted as burn: %v", m.burn)
+	if d := m.accumulate([]*AgentStatus{{SessionID: "a", CostUSD: 5.00}}); d != 0 {
+		t.Fatalf("re-baselined session returned delta %v", d)
+	}
+}
+
+func TestDailyCostLedger(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	reg := loadRegistry()
+	if reg.db == nil {
+		t.Fatal("no test db")
+	}
+	reg.addDailyCost("2026-07-11", 1.50)
+	reg.addDailyCost("2026-07-12", 0.25)
+	reg.addDailyCost("2026-07-12", 0.25) // same day accumulates
+	reg.addDailyCost("2026-07-12", -1)   // negative deltas never land
+	if got := reg.costSince("2026-07-12"); got < 0.499 || got > 0.501 {
+		t.Fatalf("today = %v, want 0.50", got)
+	}
+	if got := reg.costSince("2026-07-06"); got < 1.999 || got > 2.001 {
+		t.Fatalf("week = %v, want 2.00", got)
 	}
 }
 

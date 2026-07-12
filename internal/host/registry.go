@@ -77,6 +77,10 @@ CREATE TABLE IF NOT EXISTS decisions (
 	decided_at    TEXT,
 	UNIQUE(agent_session, ask_seq)
 );
+CREATE TABLE IF NOT EXISTS costs (
+	day TEXT PRIMARY KEY, -- local date, 2006-01-02
+	usd REAL NOT NULL DEFAULT 0 -- claude raw-inference $, host-observed
+);
 `
 
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS
@@ -188,6 +192,32 @@ func (r *registry) remove(name string) {
 	if _, err := r.db.Exec(`DELETE FROM workspaces WHERE name = ?`, name); err != nil {
 		log.Printf("registry: remove %q: %v", name, err)
 	}
+}
+
+// addDailyCost folds a raw-inference cost delta into today's row — the
+// durable side of the usage monitor's burn sampling. What the subscription
+// absorbs, priced as if it were API tokens.
+func (r *registry) addDailyCost(day string, usd float64) {
+	if r.db == nil || usd <= 0 {
+		return
+	}
+	if _, err := r.db.Exec(
+		`INSERT INTO costs (day, usd) VALUES (?, ?)
+		 ON CONFLICT(day) DO UPDATE SET usd = usd + excluded.usd`, day, usd); err != nil {
+		log.Printf("registry: cost: %v", err)
+	}
+}
+
+func (r *registry) costSince(day string) float64 {
+	if r.db == nil {
+		return 0
+	}
+	var usd float64
+	if err := r.db.QueryRow(
+		`SELECT COALESCE(SUM(usd),0) FROM costs WHERE day >= ?`, day).Scan(&usd); err != nil {
+		log.Printf("registry: cost sum: %v", err)
+	}
+	return usd
 }
 
 func (r *registry) list() []*WorkspaceInfo {

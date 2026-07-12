@@ -85,7 +85,9 @@ func TestDraftApproveFlow(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("draft post: %d %s", w.Code, w.Body)
 	}
-	var res struct{ ID int64 `json:"id"` }
+	var res struct {
+		ID int64 `json:"id"`
+	}
 	json.Unmarshal(w.Body.Bytes(), &res)
 
 	// same ask, second draft → 409 (UNIQUE guard)

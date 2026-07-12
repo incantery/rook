@@ -94,6 +94,11 @@ export class HostAPI {
         return (await this.req("/usage")).json();
     }
 
+    /** Raw-inference cost picture: daily ledger + live burn per workspace. */
+    async costs(): Promise<CostsSnapshot> {
+        return (await this.req("/costs")).json();
+    }
+
     /** Raw bytes into a session's pty; append "\r" to submit. */
     async sendInput(id: string, data: string): Promise<void> {
         await this.req(`/sessions/${id}/input`, {
@@ -125,6 +130,15 @@ export interface UsageWindow {
 export interface UsageSnapshot {
     windows: UsageWindow[];
     capturedAt: string;
+}
+
+/** GET /costs — what claude usage would cost on API billing. */
+export interface CostsSnapshot {
+    todayUsd: number;
+    weekUsd: number;
+    drafterTodayUsd: number;
+    /** Live burn by workspace; "" = claude sessions outside rook windows. */
+    live: {workspace: string; usd: number}[];
 }
 
 /** An open judgment from the drafter on one ask (docs/agent.md). */

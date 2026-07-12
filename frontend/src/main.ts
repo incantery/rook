@@ -380,7 +380,16 @@ async function main() {
         const worst = u.windows.reduce((a, b) => (b.pct > a.pct ? b : a));
         usageChip.hidden = false;
         usageChip.textContent = `${worst.pct}% ${shortWindow(worst.label)}`;
-        usageChip.title = u.windows.map((w) => `${w.label}: ${w.pct}% — resets ${w.resets}`).join("\n");
+        let title = u.windows.map((w) => `${w.label}: ${w.pct}% — resets ${w.resets}`).join("\n");
+        try {
+            const c = await api.costs();
+            if (c.todayUsd > 0 || c.weekUsd > 0) {
+                title += `\nraw-inference value: $${c.todayUsd.toFixed(2)} today · $${c.weekUsd.toFixed(2)} 7d`;
+            }
+        } catch {
+            // costs are garnish on this tooltip — usage still renders
+        }
+        usageChip.title = title;
         usageChip.classList.toggle("warn", worst.pct >= 70 && worst.pct < 90);
         usageChip.classList.toggle("hot", worst.pct >= 90);
     };

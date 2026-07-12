@@ -31,7 +31,7 @@ const (
 	// replaced (sessions die with it — the tmux server-upgrade reality).
 	// BUMP THIS with any host API or storage change: a stale daemon
 	// answering health checks 404s new endpoints silently.
-	Version = 12
+	Version = 13
 	ringCap = 512 * 1024
 )
 
@@ -316,6 +316,7 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/usage", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, h.um.current())
 	})
+	mux.HandleFunc("/costs", h.handleCosts)
 	mux.HandleFunc("/drafts/", h.handleDraftDecide)
 	mux.HandleFunc("/agent/spend", h.handleSpend)
 	mux.HandleFunc("/decisions", h.handleDecisions)

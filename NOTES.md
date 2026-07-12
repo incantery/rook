@@ -10,7 +10,7 @@
 
 # Rook App
 
-- [ ] Better total cost tracking in a sort of app wide status bar with more details on the main "workspace manager" screen
+- [x] Better total cost tracking in a sort of app wide status bar with more details on the main "workspace manager" screen
 - [x] Baked in claude code usage. We still track total "cost" when using a claude subscription, but we want to also keep track of remaining usage for the period for subscription accounts
 
 # Issue Tracking

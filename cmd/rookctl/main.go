@@ -134,10 +134,10 @@ type wsItem struct {
 }
 
 type wsStatus struct {
-	Name     string `json:"name"`
-	Root     string `json:"root"`
-	Scratch  bool   `json:"scratch"`
-	Git      *struct {
+	Name    string `json:"name"`
+	Root    string `json:"root"`
+	Scratch bool   `json:"scratch"`
+	Git     *struct {
 		Branch string `json:"branch"`
 		Dirty  int    `json:"dirty"`
 		Ahead  int    `json:"ahead"`
@@ -367,6 +367,22 @@ func runUsage() error {
 		fmt.Printf("%-22s %3d%%  resets %s\n", w.Label, w.Pct, w.Resets)
 	}
 	fmt.Printf("as of %s\n", snap.CapturedAt.Local().Format("3:04pm"))
+	// the other half of the picture: what this usage would cost on API
+	// billing (host-observed raw-inference pricing)
+	if raw, err := c.req("GET", "/costs", nil); err == nil {
+		var costs struct {
+			TodayUSD        float64 `json:"todayUsd"`
+			WeekUSD         float64 `json:"weekUsd"`
+			DrafterTodayUSD float64 `json:"drafterTodayUsd"`
+		}
+		if json.Unmarshal(raw, &costs) == nil && (costs.TodayUSD > 0 || costs.WeekUSD > 0) {
+			fmt.Printf("raw-inference value: $%.2f today · $%.2f 7d", costs.TodayUSD, costs.WeekUSD)
+			if costs.DrafterTodayUSD > 0 {
+				fmt.Printf(" · drafter $%.2f today", costs.DrafterTodayUSD)
+			}
+			fmt.Println()
+		}
+	}
 	return nil
 }
 

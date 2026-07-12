@@ -4,7 +4,7 @@
 // new-workspace modal (name + root directory). Branch/services/attention
 // from the design arrive when git/process awareness exists.
 
-import type {HostAPI, WorkspaceInfo} from "./hostapi";
+import type {CostsSnapshot, HostAPI, WorkspaceInfo} from "./hostapi";
 
 export function ago(iso: string): string {
     const ms = Date.now() - new Date(iso).getTime();
@@ -25,6 +25,8 @@ export class Home {
     private rootInput: HTMLInputElement;
     private workspaces: WorkspaceInfo[] = [];
     private attention = new Map<string, number>();
+    private costs: CostsSnapshot | null = null;
+    private costTimer: number | null = null;
 
     constructor(
         private api: HostAPI,
@@ -59,11 +61,21 @@ export class Home {
 
     async show(): Promise<void> {
         this.el.hidden = false;
+        // the cost picture refreshes while the manager is on screen — it's
+        // the "app wide status" surface, not a per-open snapshot
+        void this.refreshCosts();
+        if (this.costTimer === null) {
+            this.costTimer = window.setInterval(() => void this.refreshCosts(), 30_000);
+        }
         await this.refresh();
     }
 
     hide(): void {
         this.el.hidden = true;
+        if (this.costTimer !== null) {
+            clearInterval(this.costTimer);
+            this.costTimer = null;
+        }
         this.closeModal();
     }
 
@@ -81,6 +93,24 @@ export class Home {
             [...counts].every(([k, v]) => this.attention.get(k) === v);
         this.attention = counts;
         if (!same && this.visible) this.renderGrid();
+    }
+
+    /** The strip's cost line + per-card live tags (NOTES: total cost
+     *  tracking on the manager). Raw-inference pricing of subscription use. */
+    private async refreshCosts(): Promise<void> {
+        let c: CostsSnapshot;
+        try {
+            c = await this.api.costs();
+        } catch {
+            return; // host briefly unreachable — keep the last known line
+        }
+        this.costs = c;
+        const el = this.el.querySelector<HTMLElement>("#home-costs")!;
+        const parts = [`claude $${c.todayUsd.toFixed(2)} today`, `$${c.weekUsd.toFixed(2)} 7d`];
+        if (c.drafterTodayUsd > 0) parts.push(`drafter $${c.drafterTodayUsd.toFixed(2)}`);
+        el.textContent = parts.join(" · ");
+        el.hidden = c.todayUsd === 0 && c.weekUsd === 0 && c.drafterTodayUsd === 0;
+        if (this.visible) this.renderGrid();
     }
 
     /** Surface a failure on the manager instead of a blank screen. */
@@ -145,6 +175,14 @@ export class Home {
                 a.className = "ws-tag attn";
                 a.textContent = `◉ ${attn} needs you`;
                 tags.appendChild(a);
+            }
+            const burn = this.costs?.live.find((l) => l.workspace === ws.name)?.usd ?? 0;
+            if (burn >= 0.01) {
+                const c = document.createElement("span");
+                c.className = "ws-tag cost";
+                c.textContent = `$${burn.toFixed(2)}`;
+                c.title = "live claude sessions here, priced as API tokens";
+                tags.appendChild(c);
             }
             if (ws.scratch) {
                 const s = document.createElement("span");

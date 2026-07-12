@@ -16,15 +16,15 @@ var errNoDB = errors.New("decisions unavailable: registry has no database")
 // agent proposes over HTTP, the user (or their manual reply) closes it.
 // Verdict counts are the dogfood metric that eventually earns autoreply.
 type Decision struct {
-	ID           int64      `json:"id"`
-	AgentSession string     `json:"agentSession"`
-	AskSeq       int        `json:"askSeq"`
-	Workspace    string     `json:"workspace,omitempty"`
-	RookSession  string     `json:"rookSession,omitempty"`
-	CWD          string     `json:"cwd,omitempty"`
-	Ask          string     `json:"ask"`
-	Action       string     `json:"action"` // draft | escalate
-	Draft        string     `json:"draft,omitempty"`
+	ID           int64  `json:"id"`
+	AgentSession string `json:"agentSession"`
+	AskSeq       int    `json:"askSeq"`
+	Workspace    string `json:"workspace,omitempty"`
+	RookSession  string `json:"rookSession,omitempty"`
+	CWD          string `json:"cwd,omitempty"`
+	Ask          string `json:"ask"`
+	Action       string `json:"action"` // draft | escalate
+	Draft        string `json:"draft,omitempty"`
 	// Reason is nano's own why, verbatim — what makes an escalation legible
 	// ("touches release signing") and a draft auditable.
 	Reason       string     `json:"reason,omitempty"`

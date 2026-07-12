@@ -60,13 +60,13 @@ type AgentStatus struct {
 	// Project is the session's project path as agentmon reports it. CWD
 	// is only present when the watcher saw session_started (pre-existing
 	// transcripts are fast-forwarded), so correlation falls back to this.
-	Project   string    `json:"project,omitempty"`
-	State     string    `json:"state"` // working | needs_input | quiet
-	Title     string    `json:"title,omitempty"`
-	Ask       string    `json:"ask,omitempty"`
-	Tool      string    `json:"tool,omitempty"` // last tool requested
-	Model     string    `json:"model,omitempty"`
-	CostUSD   float64   `json:"costUsd,omitempty"`
+	Project string  `json:"project,omitempty"`
+	State   string  `json:"state"` // working | needs_input | quiet
+	Title   string  `json:"title,omitempty"`
+	Ask     string  `json:"ask,omitempty"`
+	Tool    string  `json:"tool,omitempty"` // last tool requested
+	Model   string  `json:"model,omitempty"`
+	CostUSD float64 `json:"costUsd,omitempty"`
 	// AskSeq increments on every ask — turn_completed, or an interactive
 	// prompt appearing mid-turn: it is the identity of "this ask". Drafts,
 	// decisions, notifications, and invalidation all key on (sessionId,
@@ -76,10 +76,10 @@ type AgentStatus struct {
 	// text prompt — it wants arrows/numbers in the window, so the drafter
 	// skips it and the host refuses to type into it. Surface + jump only.
 	Interactive bool      `json:"interactive,omitempty"`
-	Since     time.Time `json:"since"`     // when State last changed
-	LastEvent time.Time `json:"lastEvent"` // any activity
-	askDraft  string    // last assistant text, promoted to Ask on turn end
-	history   []histMsg // recent-conversation ring (histCap entries)
+	Since       time.Time `json:"since"`     // when State last changed
+	LastEvent   time.Time `json:"lastEvent"` // any activity
+	askDraft    string    // last assistant text, promoted to Ask on turn end
+	history     []histMsg // recent-conversation ring (histCap entries)
 }
 
 // agentmonEvent mirrors the envelope of agentmon's derived events. Payload

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -58,17 +60,20 @@ func newUsageMon() *usageMon {
 	return &usageMon{perSess: make(map[string]float64)}
 }
 
-// accumulate folds the latest agentwatch costs into the burn counter.
-// Deltas are per-session and monotonic; a session first seen mid-flight is
-// baselined, not counted (its past burn predates our last probe's answer).
-func (m *usageMon) accumulate(states []*AgentStatus) {
+// accumulate folds the latest agentwatch costs into the burn counter and
+// returns the delta it added — the caller persists that into the daily
+// costs ledger. Deltas are per-session and monotonic; a session first seen
+// mid-flight is baselined, not counted (its past burn predates our last
+// probe's answer, and predates this host's ledger watch).
+func (m *usageMon) accumulate(states []*AgentStatus) float64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var delta float64
 	live := make(map[string]bool, len(states))
 	for _, s := range states {
 		live[s.SessionID] = true
 		if prev, seen := m.perSess[s.SessionID]; seen && s.CostUSD > prev {
-			m.burn += s.CostUSD - prev
+			delta += s.CostUSD - prev
 		}
 		m.perSess[s.SessionID] = s.CostUSD
 	}
@@ -77,6 +82,8 @@ func (m *usageMon) accumulate(states []*AgentStatus) {
 			delete(m.perSess, id)
 		}
 	}
+	m.burn += delta
+	return delta
 }
 
 // due says whether the cached answer is stale enough to spend a probe on.
@@ -116,11 +123,56 @@ func (h *Host) WatchUsage(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		h.um.accumulate(h.aw.snapshot())
-		if h.um.due(time.Now()) {
+		now := time.Now()
+		if delta := h.um.accumulate(h.aw.snapshot()); delta > 0 {
+			// one shared sampler: the same deltas that pace the usage
+			// probes are the durable daily cost ledger
+			h.reg.addDailyCost(now.Format("2006-01-02"), delta)
+		}
+		if h.um.due(now) {
 			h.um.probe(ctx)
 		}
 	}
+}
+
+// handleCosts is GET /costs: what claude usage would have cost on API
+// billing — the number the subscription absorbs. today/week come from the
+// daily ledger (host-observed: burn while the host is down is not seen);
+// live is the running total per workspace across live transcript sessions.
+func (h *Host) handleCosts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	now := time.Now()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	drafter, _ := h.reg.spendSince(midnight)
+	type wsCost struct {
+		Workspace string  `json:"workspace"` // "" = not in a rook window
+		USD       float64 `json:"usd"`
+	}
+	perWS := make(map[string]float64)
+	for _, st := range h.aw.snapshot() {
+		if st.CostUSD <= 0 {
+			continue
+		}
+		ws := ""
+		if s := h.pairedSession(st.SessionID, false); s != nil {
+			ws = s.info.Workspace
+		}
+		perWS[ws] += st.CostUSD
+	}
+	live := []wsCost{}
+	for ws, usd := range perWS {
+		live = append(live, wsCost{ws, usd})
+	}
+	sort.Slice(live, func(i, j int) bool { return live[i].USD > live[j].USD })
+	writeJSON(w, map[string]any{
+		"todayUsd":        h.reg.costSince(now.Format("2006-01-02")),
+		"weekUsd":         h.reg.costSince(now.AddDate(0, 0, -6).Format("2006-01-02")),
+		"drafterTodayUsd": drafter,
+		"live":            live,
+	})
 }
 
 func (m *usageMon) probe(ctx context.Context) {
