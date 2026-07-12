@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/incantery/rook/internal/host"
+	"github.com/incantery/rook/internal/version"
 )
 
 func main() {
@@ -52,7 +53,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Printf("rook-host listening on 127.0.0.1:%d (pid %d)", port, os.Getpid())
+	log.Printf("rook-host %s (protocol v%d) listening on 127.0.0.1:%d (pid %d)", version.Version, host.Version, port, os.Getpid())
 	// The drafter (rook-agent) is a supervised child, not a third daemon —
 	// absent binary just means the feature is off.
 	go h.SuperviseAgent(context.Background(), fmt.Sprintf("http://127.0.0.1:%d", port))

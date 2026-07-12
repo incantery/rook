@@ -16,6 +16,8 @@
 //	rookctl unclaim       claude SessionEnd hook body
 //	rookctl notify-hook   claude Notification hook body (permission prompts)
 //	rookctl install-hooks add the claim hooks to ~/.claude/settings.json
+//	rookctl version       release version of this install
+//	rookctl update        fetch + install the latest release (--check to look)
 package main
 
 import (
@@ -32,6 +34,8 @@ import (
 
 	"github.com/incantery/rook/internal/host"
 	"github.com/incantery/rook/internal/keychain"
+	"github.com/incantery/rook/internal/selfupdate"
+	"github.com/incantery/rook/internal/version"
 )
 
 type client struct {
@@ -101,8 +105,12 @@ func main() {
 		err = runNotifyHook()
 	case "install-hooks":
 		err = runInstallHooks()
+	case "version":
+		fmt.Println(version.Version)
+	case "update":
+		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|set-openai-key|claim|unclaim|install-hooks]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -372,6 +380,46 @@ func runReject(args []string) error {
 	}
 	_, err = c.req("POST", "/drafts/"+args[0]+"/reject", map[string]string{})
 	return err
+}
+
+// ---- update ----
+
+func runUpdate(args []string) error {
+	checkOnly, force := false, false
+	for _, a := range args {
+		switch a {
+		case "--check":
+			checkOnly = true
+		case "--force":
+			force = true
+		default:
+			return fmt.Errorf("usage: rookctl update [--check] [--force]")
+		}
+	}
+	rel, err := selfupdate.Latest()
+	if err != nil {
+		return err
+	}
+	cur := version.Version
+	if !rel.NewerThan(cur) {
+		fmt.Printf("up to date (%s)\n", cur)
+		return nil
+	}
+	if checkOnly {
+		fmt.Printf("update available: %s → %s (rookctl update to install)\n", cur, rel.Tag)
+		return nil
+	}
+	// A dev install is `make install` output — newer than any release, and
+	// blindly "updating" it would roll the daily driver back.
+	if cur == "dev" && !force {
+		return fmt.Errorf("this is a dev build; latest release is %s — rookctl update --force to overwrite it", rel.Tag)
+	}
+	fmt.Printf("updating %s → %s…\n", cur, rel.Tag)
+	if err := selfupdate.Apply(rel); err != nil {
+		return err
+	}
+	fmt.Println("done — quit + relaunch rook to pick it up")
+	return nil
 }
 
 // ---- spawn ----

@@ -10,6 +10,24 @@ is the castle, the home base you retreat into. Part of the
 nothing depends on rook, and rook's only planned sibling dependency is
 [sigil](https://github.com/incantery/sigil) as the frontend language (below).
 
+## Install
+
+macOS (Apple Silicon):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/incantery/rook/main/install.sh | sh
+```
+
+Installs `/Applications/rook.app` and the `rookctl` CLI from the latest
+[release](https://github.com/incantery/rook/releases). Upgrades are
+self-managed after that: `rookctl update` (and `rookctl update --check` to
+just look). Use the script or `rookctl`, not a browser download — curl skips
+the quarantine attribute, so the ad-hoc-signed app launches without
+Gatekeeper ceremony.
+
+From source: `make install` (needs Go, node, and the wails3 CLI).
+Maintainers cut releases with `make release VERSION=vX.Y.Z`.
+
 ## What it is
 
 A desktop terminal app with a built-in agent as the primary driver. The agent
