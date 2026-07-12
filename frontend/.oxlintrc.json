@@ -1,0 +1,18 @@
+{
+    "$schema": "./node_modules/oxlint/configuration_schema.json",
+    "ignorePatterns": ["dist", "bindings"],
+    "rules": {
+        // Terminal emulator: matching control sequences in regexes is the domain.
+        "no-control-regex": "off"
+    },
+    "overrides": [
+        {
+            "files": ["**/*.svelte"],
+            "rules": {
+                // bind:this refs are assigned by the template, which oxlint
+                // doesn't see (script blocks only).
+                "no-unassigned-vars": "off"
+            }
+        }
+    ]
+}

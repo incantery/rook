@@ -20,7 +20,7 @@ export class HostAPI {
     private async req(path: string, init?: RequestInit): Promise<Response> {
         const r = await fetch(`${this.endpoint}${path}`, {
             ...init,
-            headers: {Authorization: `Bearer ${this.token}`, ...(init?.headers ?? {})},
+            headers: {Authorization: `Bearer ${this.token}`, ...init?.headers},
         });
         if (!r.ok) throw new Error(`host ${path}: ${r.status} ${await r.text()}`);
         return r;

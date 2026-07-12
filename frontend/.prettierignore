@@ -1,4 +1,0 @@
-# build output and generated wails bindings
-dist
-bindings
-package-lock.json

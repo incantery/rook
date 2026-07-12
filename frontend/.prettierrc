@@ -1,7 +1,0 @@
-{
-    "printWidth": 100,
-    "tabWidth": 4,
-    "bracketSpacing": false,
-    "plugins": ["prettier-plugin-svelte"],
-    "overrides": [{"files": "*.svelte", "options": {"parser": "svelte"}}]
-}
