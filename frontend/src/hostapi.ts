@@ -87,9 +87,11 @@ export class HostAPI {
     }
 
     /** Worktree workspaces 409 when deletion would lose work (dirty tree,
-     *  unmerged commits) — force discards the tree; the branch survives. */
-    async deleteWorkspace(name: string, force = false): Promise<void> {
-        await this.req(`/workspaces/${encodeURIComponent(name)}${force ? "?force=1" : ""}`, {method: "DELETE"});
+     *  unmerged commits) — force discards the tree; the branch survives
+     *  unless prune deletes it too (the merged-PR cleanup path). */
+    async deleteWorkspace(name: string, force = false, prune = false): Promise<void> {
+        const q = [force ? "force=1" : "", prune ? "prune=1" : ""].filter(Boolean).join("&");
+        await this.req(`/workspaces/${encodeURIComponent(name)}${q ? `?${q}` : ""}`, {method: "DELETE"});
     }
 
     /** Live workspace status: per-session foreground process + cwd, repo
@@ -222,6 +224,19 @@ export interface IssueRef {
     key: string;
 }
 
+/** Host-polled PR state for a worktree's branch — the close-the-loop
+ *  signal. Absent on the workspace = unknown (gh missing, offline);
+ *  state "none" = checked, no PR exists. */
+export interface PRInfo {
+    state: "none" | "open" | "merged" | "closed";
+    number?: number;
+    url?: string;
+    /** commits only this branch has — work with no PR yet */
+    ahead?: number;
+    dirty?: number;
+    checkedAt: string;
+}
+
 export interface WorkspaceInfo {
     name: string;
     root?: string;
@@ -232,6 +247,8 @@ export interface WorkspaceInfo {
     branch?: string;
     /** the issue this workspace was spawned for — absent otherwise */
     issueRef?: IssueRef;
+    /** PR state of the worktree's branch — absent when unknown */
+    pr?: PRInfo;
     created: string;
     lastUsed: string;
     sessions: number;

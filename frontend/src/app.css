@@ -962,6 +962,32 @@ body {
   background: rgba(199, 146, 234, 0.12);
   color: #c792ea;
 }
+/* workspace card: close-the-loop PR state, host-polled from gh */
+.ws-tag.pr-open {
+  background: rgba(195, 232, 141, 0.12);
+  color: var(--grn);
+}
+.ws-tag.pr-closed {
+  background: rgba(255, 83, 112, 0.12);
+  color: #ff5370;
+}
+.ws-tag.pr-none {
+  background: rgba(255, 203, 107, 0.1);
+  color: #ffcb6b;
+}
+/* the merged nudge is a button — GitHub's merged purple, click to clean up */
+button.ws-tag.pr-merged {
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10.5px;
+  font-family: var(--mono);
+  background: rgba(199, 146, 234, 0.18);
+  color: #c792ea;
+}
+button.ws-tag.pr-merged:hover {
+  background: rgba(199, 146, 234, 0.32);
+}
 /* the ✕ armed by a "would lose work" refusal — next click forces */
 .ws-card:hover .ws-card-del.armed,
 .ws-card-del.armed {

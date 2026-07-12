@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -84,6 +85,10 @@ type Host struct {
 	// um caches subscription usage windows (WatchUsage).
 	um *usageMon
 
+	// prm caches per-worktree PR state (WatchPRs) — the close-the-loop
+	// signal on workspace cards.
+	prm *prMon
+
 	// Lifecycle root for supervised children (agentmon, and rook-agent via
 	// SuperviseAgent when callers pass Done()'s context). Shutdown cancels
 	// it — child processes must die with the host, or every daemon
@@ -112,6 +117,7 @@ func New() *Host {
 		binds:    make(map[string]string),
 		drafts:   make(map[string]draftInfo),
 		um:       newUsageMon(),
+		prm:      newPRMon(),
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
 	// Manual-attribution + stale-ask hooks: the transcript is the ground
@@ -338,10 +344,13 @@ func (h *Host) Handler() http.Handler {
 	return h.cors(h.auth(mux))
 }
 
-// workspaceListItem is a WorkspaceInfo plus live-session count.
+// workspaceListItem is a WorkspaceInfo plus live-session count and, for
+// worktrees, the host-polled PR state (absent = unknown; old frontends
+// ignore the field — fail open on both sides).
 type workspaceListItem struct {
 	WorkspaceInfo
-	Sessions int `json:"sessions"`
+	Sessions int         `json:"sessions"`
+	PR       *PRSnapshot `json:"pr,omitempty"`
 }
 
 func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
@@ -356,7 +365,7 @@ func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 		list := h.reg.list()
 		out := make([]workspaceListItem, 0, len(list))
 		for _, ws := range list {
-			out = append(out, workspaceListItem{WorkspaceInfo: *ws, Sessions: counts[ws.Name]})
+			out = append(out, workspaceListItem{WorkspaceInfo: *ws, Sessions: counts[ws.Name], PR: h.prm.get(ws.Name)})
 			delete(counts, ws.Name)
 		}
 		// live sessions in unregistered workspaces (pre-registry hosts)
@@ -465,6 +474,10 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleWorkspaceIssues(w, r, name)
 	case action == "" && r.Method == http.MethodDelete:
 		force := r.URL.Query().Get("force") == "1"
+		// prune also deletes the local rook/<name> branch — the close-the-
+		// loop cleanup once its PR merged. Explicit opt-in: branch survival
+		// is otherwise the design.
+		prune := r.URL.Query().Get("prune") == "1"
 		ws := h.reg.get(name)
 		// Worktree workspaces guard their checkout: refuse BEFORE any side
 		// effect (sessions stay alive on refusal) when removal would lose
@@ -496,13 +509,27 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		}
 		if ws != nil && ws.WorktreeOf != "" {
 			if _, err := os.Stat(ws.Root); err == nil {
+				// resolve the main repo before removal — the checkout is the
+				// only reliable pointer to it and it's about to disappear
+				repo := ""
+				if prune && ws.Branch != "" {
+					repo, _ = worktreeRepo(ws.Root)
+				}
 				if err := worktreeRemove(ws.Root, force); err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
+				if repo != "" {
+					// best-effort: a surviving branch is the safe default,
+					// and it stays visible in git either way
+					if err := branchDelete(repo, ws.Branch); err != nil {
+						log.Printf("workspace %s: prune %s: %v", name, ws.Branch, err)
+					}
+				}
 			}
 		}
 		h.reg.remove(name)
+		h.prm.forget(name)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)

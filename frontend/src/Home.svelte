@@ -57,6 +57,19 @@
         await refresh();
     }
 
+    /** One-click close-the-loop: the merged nudge carries the merged fact,
+     *  so force (squash merges read as "unmerged" to the guard) and prune
+     *  the local branch knowingly. Kills the tree's shells like any delete. */
+    async function cleanup(name: string): Promise<void> {
+        try {
+            await api.deleteWorkspace(name, true, true);
+        } catch (err) {
+            showError(String(err));
+            return;
+        }
+        await refresh();
+    }
+
     $effect(() => {
         void refresh();
         const t = setInterval(() => void refresh(), 15_000);
@@ -192,6 +205,24 @@
                             {#if ws.issueRef}
                                 <span class="ws-tag issue" title="spawned for {ws.issueRef.tracker} issue {ws.issueRef.key}"
                                     >{ws.issueRef.key}</span
+                                >
+                            {/if}
+                            {#if ws.pr?.state === "merged"}
+                                <button
+                                    class="ws-tag pr-merged"
+                                    title="PR #{ws.pr.number} merged — remove the worktree and delete {ws.branch} (kills its shells)"
+                                    onclick={(e) => {
+                                        e.stopPropagation();
+                                        void cleanup(ws.name);
+                                    }}>⇅ merged — clean up</button
+                                >
+                            {:else if ws.pr?.state === "open"}
+                                <span class="ws-tag pr-open" title={ws.pr.url}>PR #{ws.pr.number}</span>
+                            {:else if ws.pr?.state === "closed"}
+                                <span class="ws-tag pr-closed" title="PR #{ws.pr.number} closed without merging">PR #{ws.pr.number} closed</span>
+                            {:else if ws.pr?.state === "none" && (ws.pr.ahead ?? 0) > 0}
+                                <span class="ws-tag pr-none" title="{ws.pr.ahead} commit(s) on {ws.branch} with no PR — open one from the tree"
+                                    >no PR yet</span
                                 >
                             {/if}
                         </div>
