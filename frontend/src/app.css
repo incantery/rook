@@ -764,7 +764,7 @@ body {
     white-space: nowrap;
 }
 
-/* ==== home: the workspace manager (landing screen) ==== */
+/* ==== home: mission control (landing screen) ==== */
 #home {
     flex: 1;
     display: flex;
@@ -1038,6 +1038,136 @@ button.ws-tag.pr-merged:hover {
 .ws-card:hover .ws-card-del.armed,
 .ws-card-del.armed {
     color: #ff5370;
+}
+
+/* ==== mission control: rollups, task trees, idle rows, the queue ==== */
+/* strip summary: the one-glance verdict — blocked beats merely busy */
+.strip-attn {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: #ffcb6b;
+    animation: attn-pulse 1.6s ease-in-out infinite;
+}
+.strip-quiet {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--grn);
+}
+/* a card with someone waiting on the human gets the amber edge */
+.ws-card.attn {
+    border-left-color: #ffcb6b;
+}
+/* agent-state chips: same vocabulary as the dashboard's window cards */
+.ws-agent {
+    font-size: 10.5px;
+    font-family: var(--mono);
+    padding: 2px 7px;
+    border-radius: 5px;
+}
+.ws-agent.needs_input {
+    background: rgba(255, 203, 107, 0.12);
+    color: #ffcb6b;
+    animation: attn-pulse 1.6s ease-in-out infinite;
+}
+.ws-agent.working {
+    background: rgba(195, 232, 141, 0.12);
+    color: var(--grn);
+}
+.ws-agent.quiet {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--lo);
+}
+/* what the lead agent is asking (or doing) — one clamped line */
+.ws-agent-line {
+    margin-top: 9px;
+    font-size: 11px;
+    color: var(--dim);
+    line-height: 1.45;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.ws-tag.git {
+    background: rgba(130, 170, 255, 0.12);
+    color: #82aaff;
+}
+.ws-tag.dirty {
+    background: rgba(255, 203, 107, 0.1);
+    color: #ffcb6b;
+}
+/* non-shell foreground processes (nvim, make, …) in the workspace */
+.ws-tag.fg {
+    color: var(--dim);
+}
+/* section headers below the grid — dash-sec's look, with air above */
+.home-sec {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--lo);
+    margin: 26px 0 10px;
+}
+/* idle workspaces compress to one-line rows */
+#home-idle {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+.idle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 11px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.015);
+    cursor: pointer;
+    font-size: 12px;
+}
+.idle-row:hover {
+    border-color: rgba(140, 150, 180, 0.4);
+}
+.idle-row.tree {
+    margin-left: 22px;
+}
+.idle-row:hover .ws-card-del {
+    color: var(--lo);
+}
+.idle-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--fg);
+    white-space: nowrap;
+}
+.idle-row.tree .idle-name {
+    font-family: var(--mono);
+    color: #82aaff;
+    font-weight: 500;
+}
+.idle-root {
+    font-size: 10.5px;
+    font-family: var(--mono);
+    color: var(--lo);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* the cross-workspace queue reuses the dashboard's issue-row look */
+#home-queue {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.dash-issue-ws {
+    font-size: 10.5px;
+    font-family: var(--mono);
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: rgba(130, 170, 255, 0.1);
+    color: #82aaff;
+    white-space: nowrap;
 }
 /* spawn modal: the worktree-isolation toggle. The .ws-form field rules
    (100%-wide inputs, block caption spans) are for text fields — undo both

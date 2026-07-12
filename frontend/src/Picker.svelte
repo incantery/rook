@@ -174,7 +174,7 @@
                 onclick={() => {
                     onclose();
                     onmanager();
-                }}>workspace manager</button
+                }}>mission control</button
             >
             <span>↑↓ / ^j ^k navigate</span><span>↵ switch / create</span>
             <span class="pal-spacer"></span>

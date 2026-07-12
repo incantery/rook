@@ -196,7 +196,7 @@
                 >Set root to shell's cwd</button
             >
             <button class="home-btn" onclick={() => runCmd("workspace.manager")}
-                >Workspace manager</button
+                >Mission control</button
             >
         </div>
     </div>
