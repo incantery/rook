@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -164,4 +165,25 @@ func (c *Client) Spend() (Spend, error) {
 	var s Spend
 	_, err := c.req("GET", "/agent/spend", nil, &s)
 	return s, err
+}
+
+// DecisionRow mirrors the subset of the host's decisions ledger the
+// preference pass reads: what was asked, what we proposed, what the user
+// actually did about it.
+type DecisionRow struct {
+	ID         int64   `json:"id"`
+	Workspace  string  `json:"workspace"`
+	Ask        string  `json:"ask"`
+	Action     string  `json:"action"`
+	Draft      string  `json:"draft"`
+	Confidence float64 `json:"confidence"`
+	Verdict    string  `json:"verdict"`
+	FinalText  string  `json:"finalText"`
+}
+
+// Decisions is GET /decisions — the ledger since t, newest first.
+func (c *Client) Decisions(since time.Time) ([]DecisionRow, error) {
+	var rows []DecisionRow
+	_, err := c.req("GET", "/decisions?since="+url.QueryEscape(since.Format(time.RFC3339)), nil, &rows)
+	return rows, err
 }

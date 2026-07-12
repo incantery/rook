@@ -106,6 +106,47 @@ var judgmentSchema = map[string]any{
 }
 
 func (o *OpenAI) Judge(ctx context.Context, system, user string) (*Judgment, Usage, error) {
+	var j Judgment
+	u, err := o.structured(ctx, system, user, "judgment", judgmentSchema, &j)
+	if err != nil {
+		return nil, u, err
+	}
+	if j.Action != "draft" && j.Action != "escalate" {
+		return nil, u, fmt.Errorf("openai: bad action %q", j.Action)
+	}
+	return &j, u, nil
+}
+
+// Extraction is the preference pass's output contract: zero or more short
+// imperative preference lines (docs/agent.md step 2).
+type Extraction struct {
+	Preferences []string `json:"preferences"`
+}
+
+var extractionSchema = map[string]any{
+	"type":                 "object",
+	"additionalProperties": false,
+	"required":             []string{"preferences"},
+	"properties": map[string]any{
+		"preferences": map[string]any{
+			"type":  "array",
+			"items": map[string]any{"type": "string"},
+		},
+	},
+}
+
+func (o *OpenAI) Extract(ctx context.Context, system, user string) (*Extraction, Usage, error) {
+	var e Extraction
+	u, err := o.structured(ctx, system, user, "extraction", extractionSchema, &e)
+	if err != nil {
+		return nil, u, err
+	}
+	return &e, u, nil
+}
+
+// structured is the one POST both passes share: strict json_schema output,
+// temp 0, a hard token ceiling.
+func (o *OpenAI) structured(ctx context.Context, system, user, name string, schema map[string]any, out any) (Usage, error) {
 	body := map[string]any{
 		"model": o.Model,
 		"messages": []map[string]string{
@@ -117,32 +158,32 @@ func (o *OpenAI) Judge(ctx context.Context, system, user string) (*Judgment, Usa
 		"response_format": map[string]any{
 			"type": "json_schema",
 			"json_schema": map[string]any{
-				"name":   "judgment",
+				"name":   name,
 				"strict": true,
-				"schema": judgmentSchema,
+				"schema": schema,
 			},
 		},
 	}
 	b, err := json.Marshal(body)
 	if err != nil {
-		return nil, Usage{}, err
+		return Usage{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, "POST", o.BaseURL+"/chat/completions", bytes.NewReader(b))
 	if err != nil {
-		return nil, Usage{}, err
+		return Usage{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+o.Key)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := o.http.Do(req)
 	if err != nil {
-		return nil, Usage{}, err
+		return Usage{}, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, Usage{}, fmt.Errorf("openai: %s: %s", resp.Status, truncate(string(raw), 300))
+		return Usage{}, fmt.Errorf("openai: %s: %s", resp.Status, truncate(string(raw), 300))
 	}
-	var out struct {
+	var reply struct {
 		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
@@ -157,29 +198,25 @@ func (o *OpenAI) Judge(ctx context.Context, system, user string) (*Judgment, Usa
 			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, Usage{}, err
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		return Usage{}, err
 	}
-	if len(out.Choices) == 0 {
-		return nil, Usage{}, fmt.Errorf("openai: no choices")
+	if len(reply.Choices) == 0 {
+		return Usage{}, fmt.Errorf("openai: no choices")
 	}
-	if out.Choices[0].Message.Refusal != "" {
-		return nil, Usage{}, fmt.Errorf("openai: refusal: %s", out.Choices[0].Message.Refusal)
+	if reply.Choices[0].Message.Refusal != "" {
+		return Usage{}, fmt.Errorf("openai: refusal: %s", reply.Choices[0].Message.Refusal)
 	}
 	u := Usage{
-		InputTokens:  out.Usage.PromptTokens,
-		OutputTokens: out.Usage.CompletionTokens,
-		CachedTokens: out.Usage.PromptTokensDetails.CachedTokens,
+		InputTokens:  reply.Usage.PromptTokens,
+		OutputTokens: reply.Usage.CompletionTokens,
+		CachedTokens: reply.Usage.PromptTokensDetails.CachedTokens,
 	}
 	u.CostUSD = cost(o.Model, u)
-	var j Judgment
-	if err := json.Unmarshal([]byte(out.Choices[0].Message.Content), &j); err != nil {
-		return nil, u, fmt.Errorf("openai: bad judgment json: %w", err)
+	if err := json.Unmarshal([]byte(reply.Choices[0].Message.Content), out); err != nil {
+		return u, fmt.Errorf("openai: bad %s json: %w", name, err)
 	}
-	if j.Action != "draft" && j.Action != "escalate" {
-		return nil, u, fmt.Errorf("openai: bad action %q", j.Action)
-	}
-	return &j, u, nil
+	return u, nil
 }
 
 // pricing per million tokens: input, cached input, output. Unknown models

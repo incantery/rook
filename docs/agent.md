@@ -103,6 +103,23 @@ into future prompts. The extraction is easy; the design work is the store:
 a visible, user-editable file — nothing learned behind your back, in the
 same spirit as "nothing respawns behind your back".
 
+### Shipped (2026-07-12): the store and the extraction pass
+
+The store is `~/.config/rook/preferences.md`. Everything above the
+"## Learned by the drafter" header is the user's, never touched; the
+extractor appends one-line bullets below it, and the whole file rides
+into the drafter's SystemPrompt verbatim — editing the file IS editing
+the agent. Every 15 minutes (and once shortly after start), rook-agent
+reads the decided verdicts past its cursor from GET /decisions, asks
+nano for durable preferences (≤3 per pass, empty is the normal outcome),
+dedups against the file, and appends.
+
+The load-bearing detail is where the cursor lives: NOT in the store.
+The cursor (`~/.local/state/rook/prefs-cursor`) marks which ledger rows
+were already considered, so deleting a learned line — or the whole
+file — can never invite re-extraction of the rows the user just vetoed.
+Deleted stays deleted.
+
 ## First milestone: the attention router
 
 Parity-first applies to the agent too. The first shipped piece is not an

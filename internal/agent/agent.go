@@ -27,6 +27,7 @@ type Agent struct {
 	mu         sync.Mutex
 	seen       map[string]bool // agentSession:askSeq → judged or in flight
 	pauseUntil time.Time
+	extracting bool
 	sem        chan struct{}
 }
 
@@ -50,6 +51,13 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer tick.Stop()
 	cfgCheck := time.NewTicker(time.Minute)
 	defer cfgCheck.Stop()
+	// The preference pass is slow-cadence: one early run for whatever
+	// verdicts accumulated while we were down, then every 15 minutes. Most
+	// passes see no new verdicts and cost nothing.
+	learnFirst := time.NewTimer(90 * time.Second)
+	defer learnFirst.Stop()
+	learn := time.NewTicker(15 * time.Minute)
+	defer learn.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -58,6 +66,10 @@ func (a *Agent) Run(ctx context.Context) error {
 			if !config.Load().Agent {
 				return errors.New("agent turned off in config")
 			}
+		case <-learnFirst.C:
+			go a.extract(ctx)
+		case <-learn.C:
+			go a.extract(ctx)
 		case <-tick.C:
 			items, err := a.Host.Attention()
 			if errors.Is(err, ErrHostGone) {
