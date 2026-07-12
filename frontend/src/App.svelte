@@ -265,7 +265,7 @@
             category: "Workspace",
             keys: keymap.display("workspace.set-root"),
             run: async () => {
-                const id = mgr.activeId;
+                const id = mgr.focusedSessionId;
                 if (!id) return;
                 // failures must be VISIBLE: this flow once died silently on
                 // a stale daemon 404ing the cwd endpoint
@@ -406,6 +406,10 @@
             if (seenAsks.has(k)) continue;
             seenAsks.add(k); // an ask first seen while focused stays silent
             if (!document.hasFocus()) {
+                // "window N" is the host's per-workspace creation index —
+                // once windows hold panes it can drift from the strip slot.
+                // Accepted: the label orients, the jump (by session id) is
+                // what must stay correct.
                 void notify(
                     `${it.workspace} window ${dashTab + 1 + it.window} needs you`,
                     it.ask?.replace(/\n/g, " ") ?? "",
@@ -511,7 +515,7 @@
         {#if app.dashVisible}
             <Dashboard
                 {api}
-                onjump={(i) => mgr.switchTo(i)}
+                onjump={(id) => mgr.switchToId(id)}
                 runCmd={(id) => registry.run(id)}
                 onwork={workIssue}
             />

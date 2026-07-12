@@ -16,7 +16,9 @@
     }
     let {onpicker, ondashboard, oninbox, onactivate, onnew, onpalette}: Props = $props();
 
-    /** the window you're looking at doesn't need to flag you down */
+    /** sessions (panes) in this workspace waiting on you — a window
+     *  pulses if ANY of its panes asks; the window you're looking at
+     *  doesn't flag you down (a visible pane's ask is already on screen) */
     const attnIds = $derived(
         new Set(
             app.attention.filter((i) => i.workspace === app.workspace).map((i) => i.rookSession),
@@ -72,7 +74,8 @@
             <button
                 class="tab"
                 class:active={tab.id === app.activeId && !app.dashVisible}
-                class:attn={attnIds.has(tab.id) && (tab.id !== app.activeId || app.dashVisible)}
+                class:attn={tab.sessions.some((id) => attnIds.has(id)) &&
+                    (tab.id !== app.activeId || app.dashVisible)}
                 style="--wails-draggable: no-drag"
                 title={tab.name}
                 onclick={() => onactivate(tab.id)}>{app.dashTab + 1 + i}</button

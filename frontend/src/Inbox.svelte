@@ -184,6 +184,10 @@
                     role="presentation"
                 >
                     <div class="inbox-head">
+                        <!-- "window N" is the host's per-workspace creation index —
+                             once windows hold panes it can drift from the strip slot.
+                             Accepted: the label orients, the jump (by session id) is
+                             what must stay correct. -->
                         <span class="inbox-chip"
                             >{it.workspace} · window {dashTab + 1 + it.window}</span
                         >

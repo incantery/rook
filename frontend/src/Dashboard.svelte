@@ -10,7 +10,8 @@
 
     interface Props {
         api: HostAPI;
-        onjump: (index: number) => void;
+        /** jump to the pane holding this host session (mgr.switchToId) */
+        onjump: (sessionId: string) => void;
         runCmd: (id: string) => void;
         /** start claude on this issue (worktree by default) — App owns the flow */
         onwork: (issue: IssueInfo) => Promise<void>;
@@ -128,9 +129,13 @@
                 {@const draft = app.attention.find(
                     (a) => a.rookSession === s.id && a.draft?.action === "draft",
                 )}
-                <div class="dash-card" onclick={() => onjump(i)} role="presentation">
+                <!-- cards stay one-per-session (each is a distinct shell/agent);
+                     the number is the STRIP SLOT of the window holding the pane,
+                     falling back to list order until the strip snapshot has it -->
+                {@const slot = app.tabs.findIndex((t) => t.sessions.includes(s.id))}
+                <div class="dash-card" onclick={() => onjump(s.id)} role="presentation">
                     <div class="dash-card-top">
-                        <span class="dash-num">{app.dashTab + 1 + i}</span>
+                        <span class="dash-num">{app.dashTab + 1 + (slot === -1 ? i : slot)}</span>
                         <!-- agent sessions get the accent — the attention router's
                              targets, visible at a glance -->
                         <span class="dash-fg" class:agent={s.fg === "claude"}>{s.fg || "?"}</span>
