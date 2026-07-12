@@ -16,8 +16,8 @@
 import type {Terminal} from "@xterm/xterm";
 import type {FitAddon} from "@xterm/addon-fit";
 import type {HostAPI, SessionInfo} from "../hostapi";
-import {leafOf, leaves, newLeaf, removeAt, setWeight} from "./layout";
-import type {LayoutNode, SplitNode} from "./layout";
+import {leafOf, leaves, neighborOf, newLeaf, removeAt, setWeight, splitAt} from "./layout";
+import type {Dir, Edge, LayoutNode, SplitNode} from "./layout";
 import {applyFocus, applyZoom, project} from "./view";
 import type {ViewHooks} from "./view";
 
@@ -513,6 +513,81 @@ export class TermManager {
 
     focusActive(): void {
         this.active?.panes.get(this.active.focused)?.focus();
+    }
+
+    /** Split the focused pane: a new session (cwd inherited from the
+     *  focused shell) lands in the second half — tmux ` % / ` ". */
+    async splitFocused(dir: Dir): Promise<void> {
+        const win = this.active;
+        if (!win) return;
+        this.unzoom(win); // splitting a zoomed pane unzooms first
+        const from = this.focusedTab(win);
+        if (!from) return;
+        // spawn at roughly the post-split grid so the shell's first
+        // prompt parses near-right; the post-project fit trues it up
+        const cols = dir === "row" ? Math.max(2, Math.floor(from.term.cols / 2)) : from.term.cols;
+        const rows = dir === "col" ? Math.max(2, Math.floor(from.term.rows / 2)) : from.term.rows;
+        const s = await this.api.create(cols, rows, from.id, win.workspace);
+        const tab = this.addTab(s);
+        const leaf = newLeaf(s.id);
+        // the target pane can die during the await — the new session
+        // must still land somewhere, so it falls back to its own window
+        if (!this.windows.includes(win) || !win.panes.has(win.focused)) {
+            this.activate(this.makeWindow(leaf, tab.workspace));
+            return;
+        }
+        win.root = splitAt(win.root, win.focused, dir, leaf);
+        win.panes.set(leaf.id, new TermPane(tab, this.api));
+        win.focused = leaf.id;
+        project(win, this.hooks(win));
+        if (win === this.active) {
+            // the user may have switched windows during the await — a
+            // background split must not steal fit-timing or focus
+            this.syncSize(true);
+            win.panes.get(leaf.id)?.focus();
+        }
+        this.events.changed();
+    }
+
+    /** Move focus to the pane across the shared edge — ` arrows. No
+     *  wrap at the layout's edge (tmux default). */
+    focusPane(dir: Edge): void {
+        const win = this.active;
+        if (!win) return;
+        const target = neighborOf(win.root, win.focused, dir);
+        if (!target) return;
+        this.unzoom(win); // like tmux select-pane: leaving zoom shows where you land
+        this.setFocusedPane(win, target);
+    }
+
+    /** Cycle panes in leaf order — ` o. */
+    cyclePane(): void {
+        const win = this.active;
+        if (!win) return;
+        const ls = leaves(win.root);
+        if (ls.length < 2) return;
+        const i = ls.findIndex((l) => l.id === win.focused);
+        this.unzoom(win);
+        this.setFocusedPane(win, ls[(i + 1) % ls.length].id);
+    }
+
+    /** Zoom the focused pane to the full window — ` z. Transient: zoom
+     *  never persists, and any structural change clears it. */
+    toggleZoom(): void {
+        const win = this.active;
+        if (!win) return;
+        if (win.zoomed === null && leaves(win.root).length < 2) return;
+        win.zoomed = win.zoomed === null ? win.focused : null;
+        applyZoom(win);
+        this.syncSize(true);
+        win.panes.get(win.focused)?.focus();
+    }
+
+    private unzoom(win: Win): void {
+        if (win.zoomed === null) return;
+        win.zoomed = null;
+        applyZoom(win);
+        if (win === this.active) this.syncSize(true);
     }
 
     sendToActive(data: string): void {

@@ -293,6 +293,25 @@ body {
 .divider.dragging::after {
     background: var(--acc);
 }
+/* the focused pane's accent — only meaningful with siblings to lose to */
+.window.multi .pane.focused {
+    outline: 1px solid rgba(130, 170, 255, 0.4);
+    outline-offset: -1px;
+}
+/* zoom: visibility, not display — hidden siblings keep their dimensions
+   so fit stays truthful; splits stay static so .zoom resolves against
+   .window (see .split above) */
+.window.zoomed .pane:not(.zoom) {
+    visibility: hidden;
+}
+.window.zoomed .divider {
+    visibility: hidden;
+}
+.window.zoomed .pane.zoom {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+}
 .term-wrap {
     position: absolute;
     inset: 0;
