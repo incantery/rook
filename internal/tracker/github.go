@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -33,9 +35,28 @@ var ghLogin = sync.OnceValue(func() string {
 	return strings.TrimSpace(out)
 })
 
+// findGH resolves the gh CLI: PATH first, then the conventional install
+// spots — the daemon inherits launchd's minimal PATH, not the shell's.
+var findGH = sync.OnceValue(func() string {
+	if p, err := exec.LookPath("gh"); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	for _, p := range []string{
+		"/opt/homebrew/bin/gh",
+		"/usr/local/bin/gh",
+		filepath.Join(home, ".local", "bin", "gh"),
+	} {
+		if st, err := os.Stat(p); err == nil && st.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
+})
+
 func runGH(dir string, args ...string) (string, error) {
-	gh, err := exec.LookPath("gh")
-	if err != nil {
+	gh := findGH()
+	if gh == "" {
 		return "", fmt.Errorf("gh not installed")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
