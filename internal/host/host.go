@@ -535,6 +535,15 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleWorkspaceIssues(w, r, name)
 	case action == "spawn" && r.Method == http.MethodPost:
 		h.handleWorkspaceSpawn(w, r, name)
+	// the read-only review surface (review.go) — the Monaco pane's data
+	case action == "changes" && r.Method == http.MethodGet:
+		h.handleWorkspaceChanges(w, r, name)
+	case action == "diff" && r.Method == http.MethodGet:
+		h.handleWorkspaceDiff(w, r, name)
+	case action == "file" && r.Method == http.MethodGet:
+		h.handleWorkspaceFile(w, r, name)
+	case action == "files" && r.Method == http.MethodGet:
+		h.handleWorkspaceFiles(w, name)
 	case action == "" && r.Method == http.MethodDelete:
 		force := r.URL.Query().Get("force") == "1"
 		// prune also deletes the worktree's local branch — the close-the-
