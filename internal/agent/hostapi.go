@@ -138,6 +138,7 @@ type DraftPost struct {
 	AskSeq       int     `json:"askSeq"`
 	Action       string  `json:"action"`
 	Reply        string  `json:"reply"`
+	Reason       string  `json:"reason"`
 	Confidence   float64 `json:"confidence"`
 	Model        string  `json:"model"`
 	InputTokens  int64   `json:"inputTokens"`

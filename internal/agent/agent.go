@@ -191,6 +191,7 @@ func (a *Agent) judge(ctx context.Context, it AttentionItem) {
 		AskSeq:       it.AskSeq,
 		Action:       j.Action,
 		Reply:        j.Reply,
+		Reason:       j.Reason,
 		Confidence:   j.Confidence,
 		Model:        a.AI.Model,
 		InputTokens:  u.InputTokens,

@@ -24,6 +24,7 @@ type draftInfo struct {
 	AskSeq     int     `json:"askSeq"`
 	Action     string  `json:"action"` // draft | escalate
 	Reply      string  `json:"reply,omitempty"`
+	Reason     string  `json:"reason,omitempty"` // nano's why, verbatim
 	Confidence float64 `json:"confidence,omitempty"`
 }
 
@@ -146,6 +147,7 @@ func (h *Host) handleDraftPost(w http.ResponseWriter, r *http.Request, agentSess
 		AskSeq       int
 		Action       string
 		Reply        string
+		Reason       string
 		Confidence   float64
 		Model        string
 		InputTokens  int64
@@ -187,6 +189,7 @@ func (h *Host) handleDraftPost(w http.ResponseWriter, r *http.Request, agentSess
 		Ask:          st.Ask,
 		Action:       req.Action,
 		Draft:        req.Reply,
+		Reason:       req.Reason,
 		Confidence:   req.Confidence,
 		Model:        req.Model,
 		InputTokens:  req.InputTokens,
@@ -211,7 +214,7 @@ func (h *Host) handleDraftPost(w http.ResponseWriter, r *http.Request, agentSess
 	h.draftMu.Lock()
 	h.drafts[agentSession] = draftInfo{
 		ID: id, AskSeq: req.AskSeq, Action: req.Action,
-		Reply: req.Reply, Confidence: req.Confidence,
+		Reply: req.Reply, Reason: req.Reason, Confidence: req.Confidence,
 	}
 	h.draftMu.Unlock()
 	writeJSON(w, map[string]any{"id": id})

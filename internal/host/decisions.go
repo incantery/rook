@@ -25,6 +25,9 @@ type Decision struct {
 	Ask          string     `json:"ask"`
 	Action       string     `json:"action"` // draft | escalate
 	Draft        string     `json:"draft,omitempty"`
+	// Reason is nano's own why, verbatim — what makes an escalation legible
+	// ("touches release signing") and a draft auditable.
+	Reason       string     `json:"reason,omitempty"`
 	Confidence   float64    `json:"confidence,omitempty"`
 	Model        string     `json:"model,omitempty"`
 	InputTokens  int64      `json:"inputTokens,omitempty"`
@@ -46,10 +49,10 @@ func (r *registry) insertDecision(d *Decision) (int64, error) {
 	}
 	res, err := r.db.Exec(
 		`INSERT INTO decisions (agent_session, ask_seq, workspace, rook_session, cwd, ask, action,
-		   draft, confidence, model, input_tokens, output_tokens, cached_tokens, cost_usd, verdict, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+		   draft, reason, confidence, model, input_tokens, output_tokens, cached_tokens, cost_usd, verdict, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
 		d.AgentSession, d.AskSeq, d.Workspace, d.RookSession, d.CWD, d.Ask, d.Action,
-		d.Draft, d.Confidence, d.Model, d.InputTokens, d.OutputTokens, d.CachedTokens, d.CostUSD,
+		d.Draft, d.Reason, d.Confidence, d.Model, d.InputTokens, d.OutputTokens, d.CachedTokens, d.CostUSD,
 		time.Now().Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -77,7 +80,7 @@ func (r *registry) decideDraft(id int64, verdict, finalText string) bool {
 }
 
 const decisionCols = `id, agent_session, ask_seq, workspace, rook_session, cwd, ask, action,
-	COALESCE(draft,''), COALESCE(confidence,0), COALESCE(model,''),
+	COALESCE(draft,''), COALESCE(reason,''), COALESCE(confidence,0), COALESCE(model,''),
 	COALESCE(input_tokens,0), COALESCE(output_tokens,0), COALESCE(cached_tokens,0), COALESCE(cost_usd,0),
 	verdict, COALESCE(final_text,''), created_at, COALESCE(decided_at,'')`
 
@@ -85,7 +88,7 @@ func scanDecision(row interface{ Scan(...any) error }) (*Decision, error) {
 	var d Decision
 	var created, decided string
 	if err := row.Scan(&d.ID, &d.AgentSession, &d.AskSeq, &d.Workspace, &d.RookSession, &d.CWD,
-		&d.Ask, &d.Action, &d.Draft, &d.Confidence, &d.Model,
+		&d.Ask, &d.Action, &d.Draft, &d.Reason, &d.Confidence, &d.Model,
 		&d.InputTokens, &d.OutputTokens, &d.CachedTokens, &d.CostUSD,
 		&d.Verdict, &d.FinalText, &created, &decided); err != nil {
 		return nil, err

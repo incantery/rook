@@ -31,7 +31,7 @@ const (
 	// replaced (sessions die with it — the tmux server-upgrade reality).
 	// BUMP THIS with any host API or storage change: a stale daemon
 	// answering health checks 404s new endpoints silently.
-	Version = 11
+	Version = 12
 	ringCap = 512 * 1024
 )
 

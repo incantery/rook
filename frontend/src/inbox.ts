@@ -271,10 +271,15 @@ export class Inbox {
             const pct = it.draft.confidence ? ` ${Math.round(it.draft.confidence * 100)}%` : "";
             const mark = it.draft.action === "spawn" ? "▶ new session:" : "✎";
             slot.textContent = `${mark} ${it.draft.reply ?? ""}`;
-            slot.title = `${it.draft.action}${pct} — ↵ approve, e edit, x reject`;
+            const why = it.draft.reason ? `\n${it.draft.reason}` : "";
+            slot.title = `${it.draft.action}${pct} — ↵ approve, e edit, x reject${why}`;
         } else if (it.draft?.action === "escalate") {
             slot.classList.add("escalate");
-            slot.textContent = "⚑ yours to answer";
+            // the reason is what makes an escalation legible: "yours —
+            // destructive" reads as a judgment, not a shrug
+            slot.textContent = it.draft.reason
+                ? `⚑ yours — ${it.draft.reason}`
+                : "⚑ yours to answer";
         } else {
             slot.classList.add("pending");
             slot.textContent = "";

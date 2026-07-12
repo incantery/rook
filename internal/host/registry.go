@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -71,11 +72,19 @@ CREATE TABLE IF NOT EXISTS decisions (
 	cost_usd      REAL,
 	verdict       TEXT DEFAULT 'open', -- open|approved|edited|rejected|manual|stale|auto
 	final_text    TEXT,
+	reason        TEXT, -- nano's own why, verbatim (drafted because…/escalated because…)
 	created_at    TEXT NOT NULL,
 	decided_at    TEXT,
 	UNIQUE(agent_session, ask_seq)
 );
 `
+
+// migrations are columns added after a table shipped — CREATE IF NOT EXISTS
+// won't touch an existing table, so each ALTER runs and "duplicate column"
+// is the expected steady-state error.
+var migrations = []string{
+	`ALTER TABLE decisions ADD COLUMN reason TEXT`,
+}
 
 func loadRegistry() *registry {
 	dir := DataDir()
@@ -96,6 +105,11 @@ func loadRegistry() *registry {
 		return &registry{}
 	}
 	r := &registry{db: db}
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			log.Printf("registry: migration %q: %v", m, err)
+		}
+	}
 	r.migrateJSON()
 	return r
 }

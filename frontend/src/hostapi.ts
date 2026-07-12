@@ -135,6 +135,8 @@ export interface DraftInfo {
      *  into the source window. */
     action: "draft" | "escalate" | "spawn";
     reply?: string;
+    /** nano's own why, verbatim — shown on escalations and draft tooltips */
+    reason?: string;
     confidence?: number;
 }
 

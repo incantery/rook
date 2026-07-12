@@ -286,6 +286,7 @@ type attentionItem struct {
 		ID         int64   `json:"id"`
 		Action     string  `json:"action"`
 		Reply      string  `json:"reply"`
+		Reason     string  `json:"reason"`
 		Confidence float64 `json:"confidence"`
 	} `json:"draft"`
 }
@@ -327,7 +328,11 @@ func runAttention() error {
 					strings.ReplaceAll(it.Draft.Reply, "\n", " "))
 				fmt.Printf("     rookctl approve %d | rookctl reject %d\n", it.Draft.ID, it.Draft.ID)
 			case "escalate":
-				fmt.Printf("   ⚑ yours to answer (draft #%d escalated)\n", it.Draft.ID)
+				if it.Draft.Reason != "" {
+					fmt.Printf("   ⚑ yours to answer — %s\n", strings.ReplaceAll(it.Draft.Reason, "\n", " "))
+				} else {
+					fmt.Printf("   ⚑ yours to answer (draft #%d escalated)\n", it.Draft.ID)
+				}
 			}
 		}
 	}
