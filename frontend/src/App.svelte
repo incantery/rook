@@ -80,6 +80,20 @@
         app.screen = "home"; // Home remounts and refreshes itself
     }
 
+    /** ` h from a terminal shows mission control; ` h on mission control
+     *  returns to the workspace you left — a toggle, one muscle memory.
+     *  No-op on home when there's nowhere to go back to (fresh app, the
+     *  workspace was deleted). */
+    function toggleHome(): void {
+        if (app.screen !== "home") {
+            showHome();
+            return;
+        }
+        if (mgr.activeId || app.workspaces.some((w) => w.name === app.workspace)) {
+            void showWorkspace(app.workspace);
+        }
+    }
+
     function toggleDash(): void {
         app.dashVisible = !app.dashVisible;
         if (!app.dashVisible) mgr.focusActive();
@@ -193,10 +207,10 @@
         },
         {
             id: "workspace.manager",
-            title: "Mission control",
+            title: "Mission control (toggle)",
             category: "Workspace",
             keys: "` h",
-            run: showHome,
+            run: toggleHome,
         },
         {
             id: "workspace.dashboard",
@@ -285,8 +299,29 @@
         }
         if (app.pickerOpen) return; // picker's own input handles keys
         if (app.screen === "home") {
-            // no terminal on screen: only the palette chord and the
-            // workspace switcher make sense here
+            // the prefix works here too, so ` h toggles back to the
+            // workspace you left — but never while typing in a modal input
+            const el = e.target as HTMLElement | null;
+            const typing =
+                el != null &&
+                (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+            if (app.prefixArmed) {
+                if (e.key === "Shift" || e.key === "Meta" || e.key === "Alt" || e.key === "Control")
+                    return;
+                app.prefixArmed = false;
+                if (typing) return;
+                e.preventDefault();
+                e.stopPropagation();
+                if (e.key === "h") registry.run("workspace.manager");
+                // anything else: prefix consumed, key ignored — tmux behavior
+                return;
+            }
+            if (!typing && e.key === "`" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+                e.preventDefault();
+                e.stopPropagation();
+                app.prefixArmed = true;
+                return;
+            }
             if (e.metaKey && e.code === "KeyK") {
                 e.preventDefault();
                 registry.run("palette.toggle");
