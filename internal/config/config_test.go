@@ -54,6 +54,39 @@ func TestLoadWorkflowDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadKeybinds(t *testing.T) {
+	writeConfig(t, `
+keybind = m=workspace.manager
+keybind = cmd+shift+k = palette.toggle
+# unbind form: empty command clears the trigger's default
+keybind = h=
+# "=" itself stays bindable (split on the LAST '=')
+keybind = ==session.next
+# no '=' in the value → not a binding, ignored
+keybind = nonsense
+`)
+	cfg := Load()
+	want := map[string]string{
+		"m":           "workspace.manager",
+		"cmd+shift+k": "palette.toggle",
+		"h":           "",
+		"=":           "session.next",
+	}
+	if len(cfg.Keybinds) != len(want) {
+		t.Fatalf("keybinds: %v", cfg.Keybinds)
+	}
+	for k, v := range want {
+		if got, ok := cfg.Keybinds[k]; !ok || got != v {
+			t.Fatalf("keybind %q = %q, want %q (present %v)", k, got, v, ok)
+		}
+	}
+
+	writeConfig(t, "# nothing configured\n")
+	if cfg := Load(); cfg.Keybinds != nil {
+		t.Fatalf("keybinds must default nil: %v", cfg.Keybinds)
+	}
+}
+
 // messy values: whitespace and stray commas collapse, order survives
 func TestSplitList(t *testing.T) {
 	got := splitList(" /a , , /b,")

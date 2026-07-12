@@ -55,6 +55,14 @@ type Config struct {
 	// pipeline.
 	Workflow  []string            `json:"workflow"`
 	Workflows map[string][]string `json:"workflows"`
+	// Keybinds maps a trigger to a registry command id, ghostty-style:
+	// `keybind = <trigger>=<command>`, repeated per binding. A bare key
+	// ("h") acts after the backtick prefix; a modifier chord
+	// ("cmd+shift+]") acts directly. An empty command ("keybind = h=")
+	// unbinds the trigger's default. The frontend owns validation and
+	// fails open: unknown commands, unparseable chords, and reserved
+	// triggers (digits, the literal-backtick escape) are ignored there.
+	Keybinds map[string]string `json:"keybinds"`
 }
 
 func Default() Config {
@@ -180,6 +188,16 @@ func Load() Config {
 			}
 		case "workflow":
 			cfg.Workflow = splitList(value)
+		case "keybind":
+			// <trigger>=<command>; command ids never contain '=', so split
+			// on the LAST '=' — that keeps "=" itself a bindable trigger and
+			// makes `keybind = h=` (empty command) the unbind form.
+			if i := strings.LastIndexByte(value, '='); i > 0 {
+				if cfg.Keybinds == nil {
+					cfg.Keybinds = map[string]string{}
+				}
+				cfg.Keybinds[strings.TrimSpace(value[:i])] = strings.TrimSpace(value[i+1:])
+			}
 		}
 	}
 	return cfg

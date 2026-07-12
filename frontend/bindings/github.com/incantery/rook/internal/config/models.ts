@@ -59,4 +59,15 @@ export interface Config {
      */
     "workflow": string[] | null;
     "workflows": { [_ in string]?: string[] | null } | null;
+
+    /**
+     * Keybinds maps a trigger to a registry command id, ghostty-style:
+     * `keybind = <trigger>=<command>`, repeated per binding. A bare key
+     * ("h") acts after the backtick prefix; a modifier chord
+     * ("cmd+shift+]") acts directly. An empty command ("keybind = h=")
+     * unbinds the trigger's default. The frontend owns validation and
+     * fails open: unknown commands, unparseable chords, and reserved
+     * triggers (digits, the literal-backtick escape) are ignored there.
+     */
+    "keybinds": { [_ in string]?: string } | null;
 }
