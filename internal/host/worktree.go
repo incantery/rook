@@ -84,19 +84,35 @@ func worktreeRisk(dir, branch string) (dirty, unmerged int, err error) {
 	return dirty, unmerged, err
 }
 
-// worktreeRemove detaches and deletes the checkout (branch stays). The main
-// repo is resolved from the worktree itself — the source workspace record
-// may be long gone by removal time.
-func worktreeRemove(dir string, force bool) error {
+// worktreeRepo resolves the main repository a worktree belongs to, from the
+// worktree itself — the source workspace record may be long gone. Callers
+// that need the repo after removal must resolve it BEFORE removing.
+func worktreeRepo(dir string) (string, error) {
 	common, err := runGit(dir, 10*time.Second, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(common), nil
+}
+
+// worktreeRemove detaches and deletes the checkout (branch stays).
+func worktreeRemove(dir string, force bool) error {
+	repo, err := worktreeRepo(dir)
 	if err != nil {
 		return err
 	}
-	repo := filepath.Dir(common)
 	args := []string{"worktree", "remove"}
 	if force {
 		args = append(args, "--force")
 	}
 	_, err = runGit(repo, 30*time.Second, append(args, dir)...)
+	return err
+}
+
+// branchDelete prunes the local branch — the close-the-loop cleanup once
+// its PR merged. -D, not -d: a squash merge leaves the branch "unmerged"
+// in git's eyes, and the caller carries the merged fact.
+func branchDelete(repoRoot, branch string) error {
+	_, err := runGit(repoRoot, 10*time.Second, "branch", "-D", branch)
 	return err
 }

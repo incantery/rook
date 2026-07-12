@@ -56,6 +56,9 @@ func BuildTask(i Issue) string {
 	}
 	if i.Tracker == "github" {
 		fmt.Fprintf(&b, "Use `gh issue view %s --comments` for full context.\n", strings.TrimPrefix(i.Key, "#"))
+		// The issue learns its state through GitHub's own PR↔issue linkage —
+		// rook never writes to the tracker (read, never mirror).
+		fmt.Fprintf(&b, "When the work is done, push the branch and open a PR with `Closes %s` in its description so the issue closes on merge.\n", i.Key)
 	}
 	return b.String()
 }
