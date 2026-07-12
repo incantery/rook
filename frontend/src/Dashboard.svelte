@@ -82,12 +82,19 @@
             ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a))
             : null,
     );
+
+    // Lineage from the registry snapshot — /status doesn't carry it, and
+    // the head must say "task tree of X", not read like a peer workspace.
+    const treeOf = $derived(app.workspaceInfo?.worktreeOf ?? null);
 </script>
 
 <div id="dashboard">
     <div id="dash-inner">
         <div class="dash-head">
             <div class="dash-head-text">
+                {#if treeOf}
+                    <div class="dash-lineage">⎇ task tree of {treeOf}</div>
+                {/if}
                 <div class="dash-name">{st?.name ?? app.workspace}</div>
                 <div class="dash-root">
                     {st?.root ? tilde(st.root) : "no root — cd somewhere, then ` ."}
@@ -169,7 +176,7 @@
                             >{/if}
                         <button
                             class="home-btn dash-issue-go"
-                            title="Start claude on this issue in a fresh worktree"
+                            title="Start claude on this issue in a fresh task tree"
                             disabled={starting !== ""}
                             onclick={() => void work(i)}
                             >{starting === i.key ? "…" : "▶ work"}</button

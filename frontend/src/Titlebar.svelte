@@ -22,6 +22,13 @@
             app.attention.filter((i) => i.workspace === app.workspace).map((i) => i.rookSession),
         ),
     );
+    // Lineage on the "you are here" chip: inside a task tree the bare name
+    // is a lie of omission — say what it was carved from. Fails open to the
+    // bare name until the workspaces poll lands (or on an older host).
+    const tree = $derived.by(() => {
+        const info = app.workspaceInfo;
+        return info?.worktreeOf ? {of: info.worktreeOf, branch: info.branch} : null;
+    });
     const worstUsage = $derived(
         app.usage && app.usage.windows.length
             ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a))
@@ -42,10 +49,16 @@
 <div id="titlebar">
     <button
         id="ws-label"
+        class:tasktree={tree}
         style="--wails-draggable: no-drag"
-        title="Switch workspace (` s)"
+        title={tree
+            ? `Task tree of ${tree.of} — branch ${tree.branch ?? "?"}. Switch workspace (\` s)`
+            : "Switch workspace (` s)"}
         onclick={onpicker}
-        ><span class="ws-dot"></span><span class="ws-name">{app.workspace}</span></button
+        >{#if tree}<span class="ws-parent">{tree.of}</span><span class="ws-sep">▸</span><span
+                class="ws-name">⎇ {app.workspace}</span
+            >{:else}<span class="ws-dot"></span><span class="ws-name">{app.workspace}</span
+            >{/if}</button
     >
     <div id="tabs">
         <button

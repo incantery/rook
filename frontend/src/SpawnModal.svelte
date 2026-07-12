@@ -78,10 +78,10 @@
             >
             <label
                 class="spawn-wt"
-                title="git worktree off the workspace's repo — parallel sessions stop sharing one checkout"
+                title="a git worktree off the workspace's repo — parallel sessions stop sharing one checkout"
             >
                 <input type="checkbox" bind:checked={worktree} />
-                <span>Isolate in a new worktree (branch <code>rook/…</code>)</span>
+                <span>Isolate in a task tree of the workspace (branch <code>rook/…</code>)</span>
             </label>
             <div class="key-error" hidden={!error}>{error}</div>
         </div>
