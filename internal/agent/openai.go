@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/incantery/rook/internal/keychain"
@@ -221,14 +223,21 @@ func (o *OpenAI) structured(ctx context.Context, system, user, name string, sche
 
 // pricing per million tokens: input, cached input, output. Unknown models
 // record zero cost (tokens are still in the row — the ledger stays honest
-// about what it doesn't know).
+// about what it doesn't know) — but loudly: a silently-zeroed ledger reads
+// as "free" right when someone changes agent-model, which is exactly when
+// the numbers matter.
 var pricing = map[string][3]float64{
 	"gpt-5.4-nano": {0.20, 0.02, 1.25},
 }
 
+var warnedModels sync.Map
+
 func cost(model string, u Usage) float64 {
 	p, ok := pricing[model]
 	if !ok {
+		if _, seen := warnedModels.LoadOrStore(model, true); !seen {
+			log.Printf("openai: no pricing for model %q — ledger rows will show $0 for it (tokens still recorded); add it to the pricing map", model)
+		}
 		return 0
 	}
 	fresh := max(u.InputTokens-u.CachedTokens, 0)

@@ -123,8 +123,12 @@ func (a *Agent) extract(ctx context.Context) {
 		log.Printf("extract: %v", err)
 		return
 	}
-	// Extraction spend is not in the host's ledger yet (no ask to hang the
-	// row on) — logged here so the cost stays visible.
+	// Extraction spend lands in the host ledger as a closed 'auto' row —
+	// the daily cap counts every call, not just drafts. Failure is logged,
+	// not fatal: losing one spend row beats losing the learned prefs.
+	if err := a.Host.PostSpend("extract", u); err != nil {
+		log.Printf("extract: spend row: %v", err)
+	}
 	var fresh []string
 	for _, p := range e.Preferences {
 		p = strings.TrimSpace(p)

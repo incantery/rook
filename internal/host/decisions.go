@@ -61,6 +61,24 @@ func (r *registry) insertDecision(d *Decision) (int64, error) {
 	return res.LastInsertId()
 }
 
+// recordSpend writes an already-closed ledger row (verdict 'auto') for LLM
+// spend that has no ask to hang on — the preference-extraction pass. The
+// ledger stays the single place money is counted; ask_seq is a nanosecond
+// stamp purely to satisfy the uniqueness constraint.
+func (r *registry) recordSpend(action, model string, in, out, cached int64, usd float64) error {
+	if r.db == nil {
+		return errNoDB
+	}
+	now := time.Now()
+	_, err := r.db.Exec(
+		`INSERT INTO decisions (agent_session, ask_seq, ask, action, model,
+		   input_tokens, output_tokens, cached_tokens, cost_usd, verdict, created_at, decided_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'auto', ?, ?)`,
+		action, now.UnixNano(), "("+action+" pass)", action, model, in, out, cached, usd,
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	return err
+}
+
 // decideDraft closes an open row. Returns false when the row wasn't open —
 // the caller's 409, and the guard against double-deciding (approve racing
 // the transcript echo of its own pty write).

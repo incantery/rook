@@ -168,6 +168,20 @@ func (c *Client) Spend() (Spend, error) {
 	return s, err
 }
 
+// PostSpend records LLM spend that has no ask row (extraction passes) in
+// the host ledger, so the daily cap sees every call.
+func (c *Client) PostSpend(action string, u Usage) error {
+	_, err := c.req("POST", "/agent/spend", map[string]any{
+		"action":       action,
+		"model":        "",
+		"inputTokens":  u.InputTokens,
+		"outputTokens": u.OutputTokens,
+		"cachedTokens": u.CachedTokens,
+		"costUsd":      u.CostUSD,
+	}, nil)
+	return err
+}
+
 // DecisionRow mirrors the subset of the host's decisions ledger the
 // preference pass reads: what was asked, what we proposed, what the user
 // actually did about it.

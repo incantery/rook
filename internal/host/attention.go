@@ -419,16 +419,38 @@ func (h *Host) onTurnCompleted(agentSession string, askSeq int) {
 }
 
 // GET /agent/spend — the drafter's budget guard reads its own ledger.
+// POST — LLM spend with no ask to hang a draft row on (the preference
+// extraction pass) lands as a closed 'auto' row, so the daily cap and the
+// cost surfaces count every call the agent makes, not just drafts.
 func (h *Host) handleSpend(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		now := time.Now()
+		midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		todayUSD, _ := h.reg.spendSince(midnight)
+		_, hourCalls := h.reg.spendSince(now.Add(-time.Hour))
+		writeJSON(w, map[string]any{"todayUsd": todayUSD, "hourCalls": hourCalls})
+	case http.MethodPost:
+		var req struct {
+			Action       string
+			Model        string
+			InputTokens  int64
+			OutputTokens int64
+			CachedTokens int64
+			CostUSD      float64
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Action == "" {
+			http.Error(w, "action required", http.StatusBadRequest)
+			return
+		}
+		if err := h.reg.recordSpend(req.Action, req.Model, req.InputTokens, req.OutputTokens, req.CachedTokens, req.CostUSD); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	now := time.Now()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	todayUSD, _ := h.reg.spendSince(midnight)
-	_, hourCalls := h.reg.spendSince(now.Add(-time.Hour))
-	writeJSON(w, map[string]any{"todayUsd": todayUSD, "hourCalls": hourCalls})
 }
 
 // GET /decisions?since=RFC3339 — the ledger, for rookctl and the future
