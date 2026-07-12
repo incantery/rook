@@ -53,6 +53,28 @@ CREATE TABLE IF NOT EXISTS workspaces (
 	created_at TEXT NOT NULL,
 	last_used  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS decisions (
+	id            INTEGER PRIMARY KEY,
+	agent_session TEXT NOT NULL,
+	ask_seq       INTEGER NOT NULL,
+	workspace     TEXT DEFAULT '',
+	rook_session  TEXT DEFAULT '',
+	cwd           TEXT DEFAULT '',
+	ask           TEXT NOT NULL,
+	action        TEXT NOT NULL, -- draft | escalate
+	draft         TEXT,
+	confidence    REAL,
+	model         TEXT,
+	input_tokens  INT,
+	output_tokens INT,
+	cached_tokens INT,
+	cost_usd      REAL,
+	verdict       TEXT DEFAULT 'open', -- open|approved|edited|rejected|manual|stale|auto
+	final_text    TEXT,
+	created_at    TEXT NOT NULL,
+	decided_at    TEXT,
+	UNIQUE(agent_session, ask_seq)
+);
 `
 
 func loadRegistry() *registry {

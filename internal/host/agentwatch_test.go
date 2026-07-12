@@ -2,6 +2,8 @@ package host
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -65,6 +67,170 @@ func TestAgentStateMachine(t *testing.T) {
 	a.apply(ev(t, "session_ended", id, "", map[string]string{"reason": "inactive"}))
 	if a.states[id] != nil {
 		t.Error("session_ended did not drop the state")
+	}
+}
+
+// AskSeq is the identity of "this ask": it must tick on every completed
+// turn and never otherwise — drafts and notifications dedupe on it.
+func TestAskSeq(t *testing.T) {
+	a := newAgentWatch()
+	id := "s-seq"
+	var hookSeqs []int
+	a.onTurnCompleted = func(sid string, seq int) {
+		if sid == id {
+			hookSeqs = append(hookSeqs, seq)
+		}
+	}
+
+	a.apply(ev(t, "assistant_message", id, "/r", map[string]any{"text": "first?"}))
+	if a.states[id].AskSeq != 0 {
+		t.Fatalf("AskSeq before any turn = %d, want 0", a.states[id].AskSeq)
+	}
+	a.apply(ev(t, "turn_completed", id, "", map[string]any{}))
+	a.apply(ev(t, "user_prompt", id, "", map[string]any{"text": "yes"}))
+	a.apply(ev(t, "assistant_message", id, "", map[string]any{"text": "second?"}))
+	a.apply(ev(t, "turn_completed", id, "", map[string]any{}))
+	if got := a.states[id].AskSeq; got != 2 {
+		t.Errorf("AskSeq after two turns = %d, want 2", got)
+	}
+	if len(hookSeqs) != 2 || hookSeqs[0] != 1 || hookSeqs[1] != 2 {
+		t.Errorf("onTurnCompleted seqs = %v, want [1 2]", hookSeqs)
+	}
+}
+
+// The history ring: bounded at histCap, oldest dropped first, text capped,
+// and the onUserReply hook sees what the user actually typed.
+func TestHistoryRing(t *testing.T) {
+	a := newAgentWatch()
+	id := "s-hist"
+	var replies []string
+	a.onUserReply = func(_, text string) { replies = append(replies, text) }
+
+	long := strings.Repeat("x", 800)
+	a.apply(ev(t, "user_prompt", id, "/r", map[string]any{"text": long}))
+	for i := range 15 {
+		a.apply(ev(t, "assistant_message", id, "", map[string]any{"text": fmt.Sprintf("msg-%d", i)}))
+	}
+	a.apply(ev(t, "tool_call", id, "", map[string]any{"name": "Bash", "input": "go test"}))
+
+	_, hist, ok := a.context(id)
+	if !ok {
+		t.Fatal("context: session missing")
+	}
+	if len(hist) != histCap {
+		t.Fatalf("ring len = %d, want %d", len(hist), histCap)
+	}
+	last := hist[len(hist)-1]
+	if last.Role != "tool" || last.Text != "Bash go test" {
+		t.Errorf("last entry = %+v, want tool/Bash go test", last)
+	}
+	if hist[len(hist)-2].Text != "msg-14" {
+		t.Errorf("ring must keep newest entries, got %q before tool", hist[len(hist)-2].Text)
+	}
+	for _, m := range hist {
+		if n := len([]rune(m.Text)); n > histMaxText+1 {
+			t.Errorf("entry text %d runes > cap %d", n, histMaxText)
+		}
+	}
+	if len(replies) != 1 || len([]rune(replies[0])) != 800 {
+		t.Errorf("onUserReply got %d replies (len %d) — hook must carry the full text", len(replies), len(replies))
+	}
+
+	// empty-text events (metadata level) must not pollute the ring
+	before := len(hist)
+	a.apply(ev(t, "assistant_message", id, "", map[string]any{"input_tokens": 5}))
+	_, hist, _ = a.context(id)
+	if len(hist) != before {
+		t.Error("empty assistant text must not be recorded")
+	}
+}
+
+// AskUserQuestion is the one mid-turn prompt the transcript can identify:
+// it must surface as an interactive needs_input with the question and
+// options as the ask — and dissolve when the tool result (the user's
+// selection) lands.
+func TestInteractivePicker(t *testing.T) {
+	a := newAgentWatch()
+	id := "s-picker"
+	input := `{"questions":[{"question":"Should I implement both NOTES.md items now?","header":"Scope",` +
+		`"options":[{"label":"Yes, both","description":"do it"},{"label":"No","description":"tell me"}],"multiSelect":false}]}`
+
+	a.apply(ev(t, "user_prompt", id, "/repo", map[string]any{"text": "go"}))
+	a.apply(ev(t, "tool_call", id, "", map[string]any{"name": "AskUserQuestion", "input": input}))
+
+	st := a.states[id]
+	if st.State != "needs_input" || !st.Interactive {
+		t.Fatalf("picker: state=%q interactive=%v, want needs_input/true", st.State, st.Interactive)
+	}
+	if st.AskSeq != 1 {
+		t.Errorf("picker must mint an askSeq, got %d", st.AskSeq)
+	}
+	want := "Should I implement both NOTES.md items now?  — 1) Yes, both 2) No"
+	if st.Ask != want {
+		t.Errorf("ask = %q\nwant %q", st.Ask, want)
+	}
+
+	// user picks an option → tool_result → the ask is over
+	a.apply(ev(t, "tool_result", id, "", map[string]any{"ok": true, "content": "Yes, both"}))
+	if st.State != "working" || st.Interactive || st.Ask != "" {
+		t.Errorf("after selection: state=%q interactive=%v ask=%q, want working/false/empty", st.State, st.Interactive, st.Ask)
+	}
+
+	// a normal turn end afterwards is a fresh, non-interactive ask
+	a.apply(ev(t, "assistant_message", id, "", map[string]any{"text": "Done. Ship it?"}))
+	a.apply(ev(t, "turn_completed", id, "", map[string]any{}))
+	if st.AskSeq != 2 || st.Interactive || st.Ask != "Done. Ship it?" {
+		t.Errorf("post-picker turn: seq=%d interactive=%v ask=%q", st.AskSeq, st.Interactive, st.Ask)
+	}
+
+	// truncated/garbled input (agentmon caps at 2KB) degrades, not drops
+	a.apply(ev(t, "tool_call", id, "", map[string]any{"name": "AskUserQuestion", "input": `{"questions":[{"quest`}))
+	if st.State != "needs_input" || st.Ask == "" {
+		t.Errorf("garbled picker input must still surface an ask, got state=%q ask=%q", st.State, st.Ask)
+	}
+}
+
+// The Notification hook: a permission prompt becomes an interactive ask;
+// the 60s idle reminder for an already-surfaced ask is a no-op; the
+// granted permission (tool_result) dissolves it.
+func TestNotify(t *testing.T) {
+	a := newAgentWatch()
+	id := "s-notify"
+	var staled []int
+	a.onTurnCompleted = func(_ string, seq int) { staled = append(staled, seq) }
+
+	// mid-turn permission prompt — transcript says "working", hook knows better
+	a.apply(ev(t, "user_prompt", id, "/repo", map[string]any{"text": "go"}))
+	a.apply(ev(t, "tool_call", id, "", map[string]any{"name": "Bash", "input": "rm -rf build"}))
+	a.notify(id, "Claude needs your permission to use Bash")
+
+	st := a.states[id]
+	if st.State != "needs_input" || !st.Interactive || st.AskSeq != 1 {
+		t.Fatalf("permission prompt: state=%q interactive=%v seq=%d", st.State, st.Interactive, st.AskSeq)
+	}
+	if st.Ask != "Claude needs your permission to use Bash" {
+		t.Errorf("ask = %q", st.Ask)
+	}
+	if len(staled) != 1 {
+		t.Errorf("notify must fire the stale hook, got %v", staled)
+	}
+
+	// idle reminder while already surfaced: no new ask identity
+	a.notify(id, "Claude is waiting for your input")
+	if st.AskSeq != 1 || st.Ask != "Claude needs your permission to use Bash" {
+		t.Errorf("idle reminder must not remint the ask: seq=%d ask=%q", st.AskSeq, st.Ask)
+	}
+
+	// permission granted → tool runs → result clears the ask
+	a.apply(ev(t, "tool_result", id, "", map[string]any{"ok": true}))
+	if st.State != "working" || st.Interactive || st.Ask != "" {
+		t.Errorf("after grant: state=%q interactive=%v ask=%q", st.State, st.Interactive, st.Ask)
+	}
+
+	// a session agentmon hasn't seen yet still surfaces via the hook
+	a.notify("s-unseen", "Claude needs your permission to use Edit")
+	if un := a.states["s-unseen"]; un == nil || un.State != "needs_input" || !un.Interactive {
+		t.Errorf("unseen session: %+v", a.states["s-unseen"])
 	}
 }
 

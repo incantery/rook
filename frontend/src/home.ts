@@ -24,6 +24,7 @@ export class Home {
     private nameInput: HTMLInputElement;
     private rootInput: HTMLInputElement;
     private workspaces: WorkspaceInfo[] = [];
+    private attention = new Map<string, number>();
 
     constructor(
         private api: HostAPI,
@@ -70,6 +71,16 @@ export class Home {
         this.workspaces = await this.api.listWorkspaces();
         this.renderBanner();
         this.renderGrid();
+    }
+
+    /** Workspace → waiting-session count, from the global /attention poll
+     *  (main.ts). Cards get the amber "needs you" tag. */
+    setAttention(counts: Map<string, number>): void {
+        const same =
+            counts.size === this.attention.size &&
+            [...counts].every(([k, v]) => this.attention.get(k) === v);
+        this.attention = counts;
+        if (!same && this.visible) this.renderGrid();
     }
 
     /** Surface a failure on the manager instead of a blank screen. */
@@ -128,6 +139,13 @@ export class Home {
             status.className = "ws-tag " + (ws.sessions > 0 ? "live" : "idle");
             status.textContent = ws.sessions > 0 ? `● ${ws.sessions} live` : "idle";
             tags.appendChild(status);
+            const attn = this.attention.get(ws.name);
+            if (attn) {
+                const a = document.createElement("span");
+                a.className = "ws-tag attn";
+                a.textContent = `◉ ${attn} needs you`;
+                tags.appendChild(a);
+            }
             if (ws.scratch) {
                 const s = document.createElement("span");
                 s.className = "ws-tag scratch";

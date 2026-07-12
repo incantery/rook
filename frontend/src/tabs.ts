@@ -221,6 +221,25 @@ export class Tabs {
         if (tab) this.activate(tab);
     }
 
+    /** New window in the given workspace (root-seeded cwd) and jump to
+     *  it — the spawner's landing pad. Returns the session id so the
+     *  caller can type into it. */
+    async spawnIn(workspace: string): Promise<string> {
+        const from = this.active ?? undefined;
+        const s = await this.api.create(from?.term.cols ?? 100, from?.term.rows ?? 30, undefined, workspace);
+        this.activate(this.addTab(s));
+        return s.id;
+    }
+
+    /** Jump to a window by host session id, across workspaces — the
+     *  inbox's "take me there". activate() switches the workspace too. */
+    switchToId(sessionId: string): boolean {
+        const tab = this.tabs.find((t) => t.id === sessionId);
+        if (!tab) return false;
+        this.activate(tab);
+        return true;
+    }
+
     focusActive(): void {
         this.active?.term.focus();
     }

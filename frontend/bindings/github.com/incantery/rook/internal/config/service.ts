@@ -9,10 +9,29 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 // @ts-ignore: Unused imports
 import * as $models from "./models.js";
 
+export function ClearOpenAIKey(): $CancellablePromise<void> {
+    return $Call.ByID(2969362405);
+}
+
 /**
  * Get re-reads the file on every call, so a page reload picks up edits
  * without restarting the app.
  */
 export function Get(): $CancellablePromise<$models.Config> {
     return $Call.ByID(1220524577);
+}
+
+/**
+ * OpenAIKeyStatus reports where a usable key currently lives: "keychain",
+ * "file" (the ~/.config/rook/openai-key fallback), or "" for none.
+ */
+export function OpenAIKeyStatus(): $CancellablePromise<string> {
+    return $Call.ByID(591849110);
+}
+
+/**
+ * SetOpenAIKey stores the drafter's API key in the login keychain.
+ */
+export function SetOpenAIKey(key: string): $CancellablePromise<void> {
+    return $Call.ByID(3580416418, key);
 }

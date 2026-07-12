@@ -2,6 +2,7 @@ import {Terminal} from "@xterm/xterm";
 import {FitAddon} from "@xterm/addon-fit";
 import {WebglAddon} from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import {Call} from "@wailsio/runtime";
 import {Service as Config} from "../bindings/github.com/incantery/rook/internal/config";
 import {Service as Host} from "../bindings/github.com/incantery/rook/internal/hostclient";
 import {HostAPI} from "./hostapi";
@@ -11,6 +12,9 @@ import {Palette} from "./palette";
 import {WorkspacePicker} from "./picker";
 import {Home} from "./home";
 import {Dashboard} from "./dashboard";
+import {Inbox} from "./inbox";
+import {KeyModal} from "./settings";
+import {shellQuote, SpawnModal} from "./spawn";
 
 // Renderer A/B switch: WebGL showed stale-frame artifacts in WKWebView, so
 // the DOM renderer is the default until that's re-judged.
@@ -141,6 +145,34 @@ async function main() {
         showHome,
         () => tabs.focusActive(),
     );
+    // The attention inbox: cross-workspace "who's waiting on you", with the
+    // drafter's replies once rook-agent runs (docs/agent.md).
+    const inbox = new Inbox(
+        api,
+        (sessionId) => {
+            home.hide();
+            appScreen.hidden = false;
+            if (!tabs.switchToId(sessionId)) console.warn("inbox jump: window is gone", sessionId);
+        },
+        () => tabs.focusActive(),
+    );
+    inbox.dashTab = dashTab;
+    const keyModal = new KeyModal(() => tabs.focusActive());
+    const spawnModal = new SpawnModal(
+        () => tabs.workspace,
+        async (task, workspace) => {
+            home.hide();
+            appScreen.hidden = false;
+            const id = await tabs.spawnIn(workspace);
+            // let the shell come up before typing the command
+            setTimeout(() => {
+                api.sendInput(id, `claude ${shellQuote(task)}\r`).catch((err) => {
+                    console.error("spawn: sending claude command failed", err);
+                });
+            }, 400);
+        },
+        () => tabs.focusActive(),
+    );
 
     // Titlebar breadcrumb: current workspace, click to switch (design's
     // workspace switcher affordance).
@@ -156,9 +188,12 @@ async function main() {
         {id: "session.next", title: "Next window", category: "Session", keys: "⌘⇧]", run: () => tabs.next()},
         {id: "session.prev", title: "Previous window", category: "Session", keys: "⌘⇧[", run: () => tabs.prev()},
         {id: "config.reload", title: "Reload config", category: "Config", keys: "` r", run: () => location.reload()},
+        {id: "config.openai-key", title: "Set OpenAI API key (agent)", category: "Config", run: () => keyModal.open()},
         {id: "workspace.switch", title: "Switch workspace…", category: "Workspace", keys: "` s", run: () => picker.open()},
         {id: "workspace.manager", title: "Workspace manager", category: "Workspace", keys: "` h", run: showHome},
         {id: "workspace.dashboard", title: "Workspace dashboard", category: "Workspace", keys: "` d", run: () => dash.toggle()},
+        {id: "attention.inbox", title: "Attention inbox", category: "View", keys: "` a", run: () => inbox.toggle()},
+        {id: "agent.spawn", title: "New agent session (claude on a task)", category: "Session", keys: "` n", run: () => spawnModal.open()},
         {id: "workspace.scratch", title: "New scratch shell", category: "Workspace", run: () => home.scratch()},
         {
             id: "workspace.set-root",
@@ -206,6 +241,8 @@ async function main() {
     window.addEventListener(
         "keydown",
         (e) => {
+            if (inbox.visible) return; // inbox's capture handler owns keys
+            if (keyModal.visible || spawnModal.visible) return; // modals own their keys
             if (palette.visible) {
                 if (e.metaKey && e.code === "KeyK") {
                     e.preventDefault();
@@ -235,6 +272,8 @@ async function main() {
                 else if (e.key === "r") registry.run("config.reload");
                 else if (e.key === "k") registry.run("palette.toggle");
                 else if (e.key === "s") registry.run("workspace.switch");
+                else if (e.key === "a") registry.run("attention.inbox");
+                else if (e.key === "n") registry.run("agent.spawn");
                 else if (e.key === "h") registry.run("workspace.manager");
                 else if (e.key === ".") registry.run("workspace.set-root");
                 else if (e.key === "d" || e.key === String(dashTab)) registry.run("workspace.dashboard");
@@ -275,20 +314,49 @@ async function main() {
 
     new ResizeObserver(() => tabs.syncSize()).observe(document.getElementById("terminals")!);
 
-    // Attention poll: while a workspace is on screen, ask the host who's
-    // waiting on the user and pulse those window numbers. This is the
-    // attention router's first surface (docs/agent.md milestone 1) — pure
-    // plumbing, no model anywhere.
+    // Attention poll, global: one GET /attention feeds every surface —
+    // the pulsing strip numbers, the titlebar chip, the manager's cards,
+    // the dashboard's draft hints, and macOS notifications. This is the
+    // attention router's surface (docs/agent.md milestone 1) — pure
+    // plumbing, no model anywhere in the app.
+    const attnChip = document.getElementById("attn-chip")!;
+    attnChip.addEventListener("click", () => inbox.toggle());
+    // one notification per ask, ever — (sessionId, askSeq) is the identity
+    const seenAsks = new Set<string>();
+    const notify = (title: string, body: string) =>
+        Call.ByName("github.com/incantery/rook/internal/notify.Service.Notify", title, body).catch(
+            (err: unknown) => console.warn("notification failed", err),
+        );
     setInterval(async () => {
-        if (home.visible) return;
+        let items;
         try {
-            const st = await api.workspaceStatus(tabs.workspace);
-            tabs.setAttention(
-                new Set(st.sessions.filter((s) => s.agent?.state === "needs_input").map((s) => s.id)),
-            );
+            items = await api.attention();
         } catch {
-            // host briefly unreachable — keep the last known strip state
+            return; // host briefly unreachable — keep the last known state
         }
+        tabs.setAttention(
+            new Set(items.filter((i) => i.workspace === tabs.workspace).map((i) => i.rookSession)),
+        );
+        attnChip.hidden = items.length === 0;
+        attnChip.textContent = `◉ ${items.length}`;
+        const counts = new Map<string, number>();
+        for (const it of items) counts.set(it.workspace, (counts.get(it.workspace) ?? 0) + 1);
+        home.setAttention(counts);
+        dash.setAttention(items);
+        for (const it of items) {
+            const k = `${it.agentSession}:${it.askSeq}`;
+            if (seenAsks.has(k)) continue;
+            seenAsks.add(k); // an ask first seen while focused stays silent
+            if (!document.hasFocus()) {
+                void notify(
+                    `${it.workspace} window ${dashTab + 1 + it.window} needs you`,
+                    it.ask?.replace(/\n/g, " ") ?? "",
+                );
+            }
+        }
+        // asks that resolved can be forgotten (keeps the set bounded)
+        const live = new Set(items.map((i) => `${i.agentSession}:${i.askSeq}`));
+        for (const k of seenAsks) if (!live.has(k)) seenAsks.delete(k);
     }, 5000);
 
     try {

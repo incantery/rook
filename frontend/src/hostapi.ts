@@ -83,6 +83,58 @@ export class HostAPI {
     async workspaceStatus(name: string): Promise<WorkspaceStatus> {
         return (await this.req(`/workspaces/${encodeURIComponent(name)}/status`)).json();
     }
+
+    /** Everyone waiting on the user, cross-workspace — the inbox's feed. */
+    async attention(): Promise<AttentionItem[]> {
+        return (await this.req("/attention")).json();
+    }
+
+    /** Raw bytes into a session's pty; append "\r" to submit. */
+    async sendInput(id: string, data: string): Promise<void> {
+        await this.req(`/sessions/${id}/input`, {
+            method: "POST",
+            body: JSON.stringify({data}),
+        });
+    }
+
+    /** Send a draft into its window; text (≠ draft) records verdict `edited`. */
+    async approveDraft(id: number, text?: string): Promise<void> {
+        await this.req(`/drafts/${id}/approve`, {
+            method: "POST",
+            body: JSON.stringify(text ? {text} : {}),
+        });
+    }
+
+    async rejectDraft(id: number): Promise<void> {
+        await this.req(`/drafts/${id}/reject`, {method: "POST", body: "{}"});
+    }
+}
+
+/** An open judgment from the drafter on one ask (docs/agent.md). */
+export interface DraftInfo {
+    id: number;
+    askSeq: number;
+    /** spawn: approval starts a NEW session on the task instead of typing
+     *  into the source window. */
+    action: "draft" | "escalate" | "spawn";
+    reply?: string;
+    confidence?: number;
+}
+
+/** One "a claude session is waiting on you" row from GET /attention. */
+export interface AttentionItem {
+    workspace: string;
+    rookSession: string;
+    window: number;
+    agentSession: string;
+    askSeq: number;
+    state: string;
+    title?: string;
+    ask?: string;
+    /** A TUI picker in the window — jump and answer there; nothing can be typed for you. */
+    interactive?: boolean;
+    since: string;
+    draft?: DraftInfo | null;
 }
 
 export interface WorkspaceInfo {
@@ -111,6 +163,7 @@ export interface AgentStatus {
     tool?: string;
     model?: string;
     costUsd?: number;
+    askSeq: number;
     since: string;
     lastEvent: string;
 }

@@ -31,7 +31,7 @@ const (
 	// replaced (sessions die with it — the tmux server-upgrade reality).
 	// BUMP THIS with any host API or storage change: a stale daemon
 	// answering health checks 404s new endpoints silently.
-	Version = 7
+	Version = 10
 	ringCap = 512 * 1024
 )
 
@@ -75,6 +75,12 @@ type Host struct {
 	bindMu sync.Mutex
 	claims map[string]string
 	binds  map[string]string
+
+	// Live drafts by transcript session id — what /attention decorates its
+	// items with. The decisions table is the durable ledger; this map is
+	// just the "current open draft" index over it.
+	draftMu sync.Mutex
+	drafts  map[string]draftInfo
 }
 
 type cwdEntry struct {
@@ -95,7 +101,12 @@ func New() *Host {
 		cwdCache: make(map[int]cwdEntry),
 		claims:   make(map[string]string),
 		binds:    make(map[string]string),
+		drafts:   make(map[string]draftInfo),
 	}
+	// Manual-attribution + stale-ask hooks: the transcript is the ground
+	// truth for what actually got answered (see onUserReply).
+	h.aw.onUserReply = h.onUserReply
+	h.aw.onTurnCompleted = h.onTurnCompleted
 	go h.aw.run(context.Background())
 	return h
 }
@@ -290,10 +301,15 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/workspaces", h.handleWorkspaces)
 	mux.HandleFunc("/workspaces/", h.handleWorkspace)
 	// every live claude session agentwatch knows about, uncorrelated —
-	// debugging surface now, the nano tier's read surface later
+	// debugging surface now, the drafter's read surface via /agents/{id}
 	mux.HandleFunc("/agents", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, h.aw.snapshot())
 	})
+	mux.HandleFunc("/agents/", h.handleAgent)
+	mux.HandleFunc("/attention", h.handleAttention)
+	mux.HandleFunc("/drafts/", h.handleDraftDecide)
+	mux.HandleFunc("/agent/spend", h.handleSpend)
+	mux.HandleFunc("/decisions", h.handleDecisions)
 	return h.cors(h.auth(mux))
 }
 
@@ -566,6 +582,13 @@ func (h *Host) correlate(sessions []sessionStatus, live []*session, states []*Ag
 }
 
 func (h *Host) handleWorkspaceStatus(w http.ResponseWriter, name string) {
+	writeJSON(w, h.statusFor(name, true))
+}
+
+// statusFor assembles the live picture of one workspace — the dashboard
+// payload, and (via /attention) the attention router's input. withGit
+// skips the repo probe for callers that only care about sessions.
+func (h *Host) statusFor(name string, withGit bool) workspaceStatus {
 	h.mu.Lock()
 	var sess []*session
 	for _, s := range h.sessions {
@@ -595,20 +618,22 @@ func (h *Host) handleWorkspaceStatus(w http.ResponseWriter, name string) {
 		}(i, s)
 	}
 	wg.Wait()
-	// repo status from the root — or from wherever the first shell is, for
-	// rootless (scratch) workspaces
-	dir := out.Root
-	if dir == "" && len(out.Sessions) > 0 {
-		dir = out.Sessions[0].Cwd
+	if withGit {
+		// repo status from the root — or from wherever the first shell is,
+		// for rootless (scratch) workspaces
+		dir := out.Root
+		if dir == "" && len(out.Sessions) > 0 {
+			dir = out.Sessions[0].Cwd
+		}
+		out.Git = gitInfo(dir)
 	}
-	out.Git = gitInfo(dir)
 	h.correlate(out.Sessions, sess, h.aw.snapshot())
 	for _, s := range out.Sessions {
 		if s.Agent != nil && s.Agent.State == "needs_input" {
 			out.Attention++
 		}
 	}
-	writeJSON(w, out)
+	return out
 }
 
 func (h *Host) cors(next http.Handler) http.Handler {
@@ -750,6 +775,20 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 			delete(h.binds, req.AgentSession)
 		}
 		h.bindMu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	case action == "input" && r.Method == http.MethodPost:
+		// Raw, byte-faithful pty write — the attention surface's actuator
+		// (rookctl send, draft approval). Callers append "\r" to submit;
+		// the host adds nothing.
+		var req struct{ Data string }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Data == "" {
+			http.Error(w, "data required", http.StatusBadRequest)
+			return
+		}
+		if _, err := s.pty.Write([]byte(req.Data)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case action == "resize" && r.Method == http.MethodPost:
 		var req struct{ Cols, Rows int }

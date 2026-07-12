@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -52,6 +53,9 @@ func main() {
 	}
 
 	log.Printf("rook-host listening on 127.0.0.1:%d (pid %d)", port, os.Getpid())
+	// The drafter (rook-agent) is a supervised child, not a third daemon —
+	// absent binary just means the feature is off.
+	go h.SuperviseAgent(context.Background(), fmt.Sprintf("http://127.0.0.1:%d", port))
 	if err := http.Serve(ln, h.Handler()); err != nil {
 		log.Fatal(err)
 	}

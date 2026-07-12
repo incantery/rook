@@ -9,7 +9,7 @@
 
 APP := /Applications/rook.app
 
-.PHONY: build start dev package install clean
+.PHONY: build start dev package install clean agent
 
 build:
 	wails3 task build
@@ -38,7 +38,15 @@ install: package
 	@# The CLI (tmux's scripting surface): rookctl ls / agents, plus the
 	@# claim hooks claude runs. Lives on PATH, not in the bundle.
 	go build -o $(shell go env GOPATH)/bin/rookctl ./cmd/rookctl
-	@echo "installed $(APP) + rookctl — quit + relaunch rook to pick it up"
+	go build -o $(shell go env GOPATH)/bin/rook-agent ./cmd/rook-agent
+	@echo "installed $(APP) + rookctl + rook-agent — quit + relaunch rook to pick it up"
+
+# The drafter's dev loop: rebuild, and the running host's supervisor
+# notices the new mtime and respawns rook-agent — no daemon replacement,
+# no shell deaths. Deliberately NOT bundled into the .app: next-to-binary
+# would shadow this loop.
+agent:
+	go build -o $(shell go env GOPATH)/bin/rook-agent ./cmd/rook-agent
 
 clean:
 	rm -rf bin frontend/dist

@@ -4,7 +4,7 @@
 // reports, which is the same context the attention router (docs/agent.md)
 // will consume — if the dashboard can't show it, the agent can't know it.
 
-import type {AgentStatus, HostAPI, WorkspaceStatus} from "./hostapi";
+import type {AgentStatus, AttentionItem, HostAPI, WorkspaceStatus} from "./hostapi";
 import type {Tabs} from "./tabs";
 import {ago} from "./home";
 
@@ -46,8 +46,15 @@ function squeeze(p: string, max = 46): string {
 export class Dashboard {
     private el: HTMLElement;
     private timer: number | null = null;
+    private attention: AttentionItem[] = [];
 
     onJump: (index: number) => void = () => {};
+
+    /** Latest /attention items (main.ts's global poll) — cards flag when
+     *  the drafter has a reply waiting in the inbox. */
+    setAttention(items: AttentionItem[]): void {
+        this.attention = items;
+    }
 
     constructor(
         private api: HostAPI,
@@ -149,6 +156,16 @@ export class Dashboard {
             cwd.textContent = squeeze(tilde(s.cwd || "")) || "—";
             cwd.title = s.cwd;
             if (s.agent) card.appendChild(agentLine(s.agent));
+            const draft = this.attention.find(
+                (a) => a.rookSession === s.id && a.draft?.action === "draft",
+            );
+            if (draft) {
+                const d = document.createElement("div");
+                d.className = "dash-draft";
+                d.textContent = "↳ draft ready — ` a";
+                d.title = draft.draft!.reply ?? "";
+                card.appendChild(d);
+            }
             card.addEventListener("click", () => this.onJump(i));
             grid.appendChild(card);
         });

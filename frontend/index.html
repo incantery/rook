@@ -446,6 +446,138 @@
         flex: 1;
       }
 
+      /* ==== attention inbox (` a) — palette-shaped overlay ==== */
+      .inbox-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--fg);
+      }
+      .inbox-row {
+        display: block;
+      }
+      .inbox-head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+      }
+      .inbox-chip {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: #ffcb6b;
+        background: rgba(255, 203, 107, 0.1);
+        padding: 2px 7px;
+        border-radius: 5px;
+      }
+      .inbox-age {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--lo);
+        margin-left: auto;
+      }
+      .inbox-ask {
+        margin-top: 6px;
+        font-size: 12.5px;
+        color: var(--fg);
+        line-height: 1.45;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .inbox-draft {
+        margin-top: 5px;
+        font-family: var(--mono);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      .inbox-draft.pending {
+        display: none;
+      }
+      .inbox-draft.ready {
+        color: var(--grn);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .inbox-draft.escalate {
+        color: #ffcb6b;
+      }
+      .inbox-edit {
+        width: 100%;
+        box-sizing: border-box;
+        background: rgba(10, 12, 20, 0.8);
+        border: 1px solid var(--acc);
+        border-radius: 7px;
+        padding: 7px 9px;
+        color: var(--fg);
+        font-family: var(--mono);
+        font-size: 12px;
+        outline: none;
+        resize: vertical;
+      }
+      .inbox-edit-hint {
+        margin-top: 3px;
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--lo);
+      }
+      .key-status {
+        font-size: 11.5px;
+        color: var(--lo);
+        font-family: var(--mono);
+        line-height: 1.5;
+      }
+      .key-status.ok {
+        color: var(--grn);
+      }
+      .key-error {
+        font-size: 11.5px;
+        color: #ff5370;
+        font-family: var(--mono);
+      }
+      .key-error[hidden] {
+        display: none;
+      }
+      .inbox-empty {
+        padding: 26px;
+        text-align: center;
+        color: var(--lo);
+        font-size: 12.5px;
+      }
+      /* titlebar count chip: how many sessions are waiting on you */
+      #attn-chip {
+        appearance: none;
+        border: none;
+        align-self: center;
+        margin-right: 10px;
+        padding: 2px 9px;
+        border-radius: 10px;
+        font-family: var(--mono);
+        font-size: 10.5px;
+        font-weight: 600;
+        color: #ffcb6b;
+        background: rgba(255, 203, 107, 0.12);
+        border: 1px solid rgba(255, 203, 107, 0.35);
+        cursor: pointer;
+      }
+      #attn-chip[hidden] {
+        display: none;
+      }
+      .ws-tag.attn {
+        background: rgba(255, 203, 107, 0.12);
+        color: #ffcb6b;
+        animation: attn-pulse 1.6s ease-in-out infinite;
+      }
+      /* dashboard card hint: the drafter has a reply waiting in the inbox */
+      .dash-draft {
+        margin-top: 5px;
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--grn);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       /* ==== home: the workspace manager (landing screen) ==== */
       #home {
         flex: 1;
@@ -688,7 +820,8 @@
         color: var(--dim);
         margin-bottom: 6px;
       }
-      .ws-form input {
+      .ws-form input,
+      .ws-form textarea {
         width: 100%;
         box-sizing: border-box;
         background: rgba(10, 12, 20, 0.8);
@@ -699,8 +832,10 @@
         font-family: var(--mono);
         font-size: 12.5px;
         outline: none;
+        resize: vertical;
       }
-      .ws-form input:focus {
+      .ws-form input:focus,
+      .ws-form textarea:focus {
         border-color: var(--acc);
       }
       .ws-modal-title {
@@ -771,6 +906,7 @@
       <span id="ws-label" style="--wails-draggable: no-drag" title="Switch workspace (` s)"></span>
       <div id="tabs"></div>
       <span id="prefix-pill" hidden>prefix</span>
+      <button id="attn-chip" style="--wails-draggable: no-drag" title="Attention inbox (` a)" hidden></button>
       <button id="palette-btn" style="--wails-draggable: no-drag">
         commands <kbd>⌘K</kbd>
       </button>

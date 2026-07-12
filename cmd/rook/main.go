@@ -8,6 +8,7 @@ import (
 	"github.com/incantery/rook/frontend"
 	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/hostclient"
+	"github.com/incantery/rook/internal/notify"
 )
 
 func main() {
@@ -17,6 +18,9 @@ func main() {
 		Services: []application.Service{
 			application.NewService(&hostclient.Service{}),
 			application.NewService(&config.Service{}),
+			// notifications for the attention router — the frontend calls
+			// this by FQN (no generated bindings needed for one method)
+			application.NewService(&notify.Service{}),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(frontend.Assets),
