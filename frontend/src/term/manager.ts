@@ -42,7 +42,20 @@ interface Tab {
     ws: WebSocket | null;
     wrap: HTMLElement;
     lastSize: string;
+    /** Ring replay in flight: xterm's auto-replies to replayed queries
+     *  must be filtered out of onData — their askers are long gone, and
+     *  the shell would echo them as junk input. Typing passes through. */
+    replaying: boolean;
 }
+
+// The response sequences xterm generates on its own while parsing: cursor
+// position reports (CSI R), device attributes (CSI c), status reports
+// (CSI n), color reports (OSC 4/10-12), and DCS replies. During replay
+// these answer queries from programs that already exited; nothing here
+// overlaps what a keyboard can produce (arrows/function keys use other
+// finals — except modifier+F3, which collides with CPR and is an accepted
+// loss inside the sub-second gate).
+const AUTO_REPLY = /\x1b(?:\[\??\d+(?:;\d+)*[Rn]|\[[>?]?\d*(?:;\d+)*c|\](?:4|1[0-2]);[^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)/g;
 
 export class TermManager {
     private tabs: Tab[] = [];
@@ -115,6 +128,12 @@ export class TermManager {
 
         const {term, fit} = this.mkTerm();
         term.open(box);
+        // Parse the replay at the pty's real grid, not xterm's 80×24
+        // default — init() attaches while terminals are hidden, so fit
+        // hasn't run yet. At the wrong width zsh's prompt-EOL trick
+        // (inverse "%" + a row of spaces) wraps and the % stays visible;
+        // reflow-on-fit can't unwrap what parsed wrong.
+        if (s.cols > 0 && s.rows > 0) term.resize(s.cols, s.rows);
 
         const tab: Tab = {
             id: s.id,
@@ -125,9 +144,15 @@ export class TermManager {
             ws: null,
             wrap,
             lastSize: "",
+            replaying: true,
         };
         term.onData((data) => {
-            if (tab.ws?.readyState === WebSocket.OPEN) tab.ws.send(data);
+            if (tab.ws?.readyState !== WebSocket.OPEN) return;
+            if (tab.replaying) {
+                data = data.replace(AUTO_REPLY, "");
+                if (!data) return;
+            }
+            tab.ws.send(data);
         });
         this.connect(tab);
         this.tabs.push(tab);
@@ -136,16 +161,42 @@ export class TermManager {
     }
 
     private connect(tab: Tab): void {
+        tab.replaying = true;
         const ws = this.api.attach(tab.id);
         ws.binaryType = "arraybuffer";
+        // While the gate is up, onData drops AUTO_REPLY sequences (answers
+        // to replayed queries) and passes typing through untouched — so the
+        // gate costs no input latency, only response filtering. It still
+        // MUST fail open: past the replay, a live program's query answers
+        // are load-bearing (vim theme detection), and a filter only a host
+        // signal can lift would eat them forever under protocol skew (a
+        // host predating the marker). The timer bounds the gate; the
+        // marker just ends it early and precisely.
+        let gate = 0;
+        const lift = () => {
+            if (tab.ws === ws) tab.replaying = false; // stale timers stay quiet
+        };
         ws.onopen = () => {
+            // The host replays its whole ring on every attach — start from
+            // a blank grid or a reconnect renders the history twice.
+            tab.term.reset();
             tab.ws = ws;
+            gate = window.setTimeout(lift, 1500);
             if (tab === this.active) this.syncSize(true);
         };
-        ws.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+        ws.onmessage = (e: MessageEvent<ArrayBuffer | string>) => {
+            if (typeof e.data === "string") {
+                // the replay→live seam ("live" text frame). Lift only once
+                // xterm has PARSED the replay, not merely queued it — an
+                // empty write's callback marks that point.
+                clearTimeout(gate);
+                tab.term.write("", lift);
+                return;
+            }
             tab.term.write(new Uint8Array(e.data));
         };
         ws.onclose = async (ev) => {
+            clearTimeout(gate);
             if (tab.ws === ws) tab.ws = null;
             if (ev.reason === "replaced") return; // a newer attach owns the session
             try {

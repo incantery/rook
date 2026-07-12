@@ -75,17 +75,36 @@ func TestAttachReplayGapFree(t *testing.T) {
 		}
 		c.SetReadLimit(1 << 21)
 		var buf []byte
+		markers, markerAt := 0, int64(-1)
 		// Read until we've provably crossed the seam: a record produced
 		// well after this attach began.
 		for {
-			_, data, rerr := c.Read(ctx)
+			typ, data, rerr := c.Read(ctx)
 			if rerr != nil {
 				t.Fatalf("round %d: read: %v (got %d bytes)", round, rerr, len(buf))
+			}
+			// the replay→live seam marker — exactly one, all-binary otherwise
+			if typ == websocket.MessageText {
+				if string(data) != "live" {
+					t.Fatalf("round %d: unexpected text frame %q", round, data)
+				}
+				markers++
+				markerAt = lastRecord(buf)
+				continue
 			}
 			buf = append(buf, data...)
 			if last := lastRecord(buf); last > atAttach+20_000 {
 				break
 			}
+		}
+		if markers != 1 {
+			t.Fatalf("round %d: %d live markers, want exactly 1", round, markers)
+		}
+		// Everything before the marker is replay: it can't already contain
+		// records from far past the attach snapshot (the writer outruns the
+		// replay a little; 20k records of slack is orders beyond that).
+		if markerAt > atAttach+20_000 {
+			t.Fatalf("round %d: live marker arrived after record %d (attach saw %d) — marker not at the seam", round, markerAt, atAttach)
 		}
 		c.Close(websocket.StatusNormalClosure, "done")
 		cancel()

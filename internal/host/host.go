@@ -857,6 +857,15 @@ func (h *Host) handleAttach(w http.ResponseWriter, r *http.Request, s *session) 
 			break
 		}
 	}
+	// Mark the replay→live seam with the sole text frame on this socket
+	// (output is all binary). Replayed bytes contain terminal queries (OSC
+	// 10/11, CSI 6n, …) whose askers are long gone; the client must
+	// swallow xterm's auto-replies to them or they land in the shell as
+	// junk input ("11;rgb:0000/…;1R" at the prompt). Sent under wmu, so
+	// every live pump write sorts strictly after it.
+	if ok {
+		ok = c.Write(context.Background(), websocket.MessageText, []byte("live")) == nil
+	}
 	s.wmu.Unlock()
 	if !ok {
 		s.detach(c)
