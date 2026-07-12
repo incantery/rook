@@ -102,7 +102,13 @@ async function main() {
 
     mount(App, {
         target: document.getElementById("app")!,
-        props: {api, mkTerm, dashTab: cfg.dashboardTab, keybinds: cfg.keybinds ?? {}},
+        props: {
+            api,
+            mkTerm,
+            dashTab: cfg.dashboardTab,
+            keybinds: cfg.keybinds ?? {},
+            paneFont: {family: font, size: cfg.fontSize},
+        },
     });
 }
 

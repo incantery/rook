@@ -329,6 +329,83 @@ body {
     background-color: transparent !important;
 }
 
+/* ==== editor pane (term/editor.ts): Monaco review/diff + file viewer.
+   Opaque on purpose — Monaco can't render transparent, so the pane owns
+   its background at the body tint's full-opacity color. ==== */
+.editor-wrap {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    background: #0f111a;
+}
+.editor-head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 8px;
+    border-bottom: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+}
+.editor-btn {
+    flex: none;
+    background: none;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    cursor: pointer;
+}
+.editor-btn:hover {
+    color: var(--fg);
+    border-color: var(--acc);
+}
+.editor-counter {
+    flex: none;
+}
+.editor-path {
+    color: var(--fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* the fallback/error note pushes the ⟳ × cluster to the right edge */
+.editor-note {
+    flex: 1;
+    min-width: 0;
+    text-align: right;
+    color: #ffcb6b;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.editor-body {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+}
+/* labeled states (loading, binary, clean, errors) over the editor */
+.editor-status {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--dim);
+    background: #0f111a;
+}
+
 /* ==== workspace dashboard: window 0, frosted over the terminals so
    the window's translucency survives ==== */
 #dashboard {
