@@ -9,6 +9,7 @@
     import type {HostAPI, IssueInfo} from "./hostapi";
     import {TermManager, type TermFactory} from "./term/manager";
     import {Registry} from "./registry";
+    import {buildKeymap, sigOf} from "./keymap";
     import {app} from "./state.svelte";
     import {shellQuote} from "./util";
     import Titlebar from "./Titlebar.svelte";
@@ -24,10 +25,14 @@
         api: HostAPI;
         mkTerm: TermFactory;
         dashTab: number;
+        keybinds: Record<string, string | undefined>;
     }
-    let {api, mkTerm, dashTab}: Props = $props();
+    let {api, mkTerm, dashTab, keybinds}: Props = $props();
     // svelte-ignore state_referenced_locally — dashTab is config, fixed for the app's lifetime
     app.dashTab = dashTab;
+    // config-fixed like dashTab: ` r reloads the page, which re-reads it
+    // svelte-ignore state_referenced_locally
+    const keymap = buildKeymap(keybinds);
 
     let terminalsEl: HTMLElement;
     let home = $state<Home | null>(null);
@@ -143,12 +148,13 @@
         }, 400);
     }
 
+    // keys hints come from the keymap so the palette reflects rebinds
     registry.register(
         {
             id: "palette.toggle",
             title: "Command palette",
             category: "View",
-            keys: "⌘K",
+            keys: keymap.display("palette.toggle"),
             run: () => {
                 app.paletteOpen = !app.paletteOpen;
             },
@@ -157,35 +163,35 @@
             id: "session.new",
             title: "New window (inherits cwd)",
             category: "Session",
-            keys: "` c",
+            keys: keymap.display("session.new"),
             run: () => void mgr.newSession(),
         },
         {
             id: "session.close",
             title: "Kill window",
             category: "Session",
-            keys: "` x",
+            keys: keymap.display("session.close"),
             run: () => void mgr.closeActive(),
         },
         {
             id: "session.next",
             title: "Next window",
             category: "Session",
-            keys: "⌘⇧]",
+            keys: keymap.display("session.next"),
             run: () => mgr.next(),
         },
         {
             id: "session.prev",
             title: "Previous window",
             category: "Session",
-            keys: "⌘⇧[",
+            keys: keymap.display("session.prev"),
             run: () => mgr.prev(),
         },
         {
             id: "config.reload",
             title: "Reload config",
             category: "Config",
-            keys: "` r",
+            keys: keymap.display("config.reload"),
             run: () => location.reload(),
         },
         {
@@ -200,7 +206,7 @@
             id: "workspace.switch",
             title: "Switch workspace…",
             category: "Workspace",
-            keys: "` s",
+            keys: keymap.display("workspace.switch"),
             run: () => {
                 app.pickerOpen = true;
             },
@@ -209,21 +215,21 @@
             id: "workspace.manager",
             title: "Mission control (toggle)",
             category: "Workspace",
-            keys: "` h",
+            keys: keymap.display("workspace.manager"),
             run: toggleHome,
         },
         {
             id: "workspace.dashboard",
             title: "Workspace dashboard",
             category: "Workspace",
-            keys: "` d",
+            keys: keymap.display("workspace.dashboard"),
             run: toggleDash,
         },
         {
             id: "attention.inbox",
             title: "Attention inbox",
             category: "View",
-            keys: "` a",
+            keys: keymap.display("attention.inbox"),
             run: () => {
                 app.inboxOpen = !app.inboxOpen;
             },
@@ -232,7 +238,7 @@
             id: "agent.spawn",
             title: "New agent session (claude on a task)",
             category: "Session",
-            keys: "` n",
+            keys: keymap.display("agent.spawn"),
             run: () => {
                 app.spawnOpen = true;
             },
@@ -257,7 +263,7 @@
             id: "workspace.set-root",
             title: "Set workspace root to shell's directory",
             category: "Workspace",
-            keys: "` .",
+            keys: keymap.display("workspace.set-root"),
             run: async () => {
                 const id = mgr.activeId;
                 if (!id) return;
@@ -284,14 +290,15 @@
     // ==== keybindings — two layers, both dispatching registry commands ====
     //
     // 1. The backtick prefix, straight from the tmux config: ` arms, the
-    //    next key acts. `` sends a literal backtick. `c new window,
-    //    `r reload config, `1-9 select window.
+    //    next key acts. `` sends a literal backtick. `1-9 select window.
     // 2. macOS chords (⌘K palette etc.) as a native-feeling complement.
+    // Both layers resolve through the keymap (defaults + config `keybind`
+    // overrides); only the digit keys and `` stay hardwired here.
     function onKeydown(e: KeyboardEvent): void {
         if (app.inboxOpen) return; // inbox's capture handler owns keys
         if (app.keyOpen || app.spawnOpen) return; // modals own their keys
         if (app.paletteOpen) {
-            if (e.metaKey && e.code === "KeyK") {
+            if (keymap.chords.get(sigOf(e)) === "palette.toggle") {
                 e.preventDefault();
                 app.paletteOpen = false;
             }
@@ -312,7 +319,8 @@
                 if (typing) return;
                 e.preventDefault();
                 e.stopPropagation();
-                if (e.key === "h") registry.run("workspace.manager");
+                if (keymap.prefix.get(e.key) === "workspace.manager")
+                    registry.run("workspace.manager");
                 // anything else: prefix consumed, key ignored — tmux behavior
                 return;
             }
@@ -322,9 +330,13 @@
                 app.prefixArmed = true;
                 return;
             }
-            if (e.metaKey && e.code === "KeyK") {
-                e.preventDefault();
-                registry.run("palette.toggle");
+            if (e.metaKey || e.ctrlKey || e.altKey) {
+                const id = keymap.chords.get(sigOf(e));
+                // only the commands that make sense without a terminal
+                if (id === "palette.toggle" || id === "workspace.manager") {
+                    e.preventDefault();
+                    registry.run(id);
+                }
             }
             return;
         }
@@ -336,20 +348,15 @@
             e.stopPropagation();
             app.prefixArmed = false;
             if (e.key === "`") mgr.sendToActive("`");
-            else if (e.key === "c") registry.run("session.new");
-            else if (e.key === "x") registry.run("session.close");
-            else if (e.key === "r") registry.run("config.reload");
-            else if (e.key === "k") registry.run("palette.toggle");
-            else if (e.key === "s") registry.run("workspace.switch");
-            else if (e.key === "a") registry.run("attention.inbox");
-            else if (e.key === "n") registry.run("agent.spawn");
-            else if (e.key === "h") registry.run("workspace.manager");
-            else if (e.key === ".") registry.run("workspace.set-root");
-            else if (e.key === "d" || e.key === String(dashTab))
-                registry.run("workspace.dashboard");
-            else if (/^[0-9]$/.test(e.key) && Number(e.key) > dashTab)
-                mgr.switchTo(Number(e.key) - dashTab - 1);
-            // anything else: prefix consumed, key ignored — tmux behavior
+            else if (/^[0-9]$/.test(e.key)) {
+                // reserved: the strip digits are computed from dashboard-tab
+                if (Number(e.key) === dashTab) registry.run("workspace.dashboard");
+                else if (Number(e.key) > dashTab) mgr.switchTo(Number(e.key) - dashTab - 1);
+            } else {
+                const cmd = keymap.prefix.get(e.key);
+                if (cmd) registry.run(cmd);
+                // unbound: prefix consumed, key ignored — tmux behavior
+            }
             return;
         }
         if (e.key === "`" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
@@ -359,14 +366,10 @@
             return;
         }
 
-        if (!e.metaKey) return;
-        let id: string | null = null;
-        if (e.code === "KeyK" && !e.shiftKey) id = "palette.toggle";
-        else if (e.code === "KeyT" && !e.shiftKey) id = "session.new";
-        else if (e.code === "BracketRight" && e.shiftKey) id = "session.next";
-        else if (e.code === "BracketLeft" && e.shiftKey) id = "session.prev";
-        else if (e.code === "Comma" && e.shiftKey) id = "config.reload";
-        else if (/^Digit[0-9]$/.test(e.code) && !e.shiftKey) {
+        // chords need a real modifier; everything else belongs to the shell
+        if (!e.metaKey && !e.ctrlKey && !e.altKey) return;
+        if (e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && /^Digit[0-9]$/.test(e.code)) {
+            // reserved: ⌘digits mirror the strip, computed from dashboard-tab
             e.preventDefault();
             e.stopPropagation();
             const n = Number(e.code.slice(5));
@@ -374,11 +377,13 @@
             else if (n > dashTab) mgr.switchTo(n - dashTab - 1);
             return;
         }
+        const id = keymap.chords.get(sigOf(e));
         if (id) {
             e.preventDefault();
             e.stopPropagation();
             registry.run(id);
         }
+        // unbound chords fall through untouched (ctrl-c and friends)
     }
 
     // ==== host polls: attention (5s) and usage/costs (30s), into the

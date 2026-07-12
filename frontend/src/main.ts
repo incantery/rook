@@ -102,7 +102,7 @@ async function main() {
 
     mount(App, {
         target: document.getElementById("app")!,
-        props: {api, mkTerm, dashTab: cfg.dashboardTab},
+        props: {api, mkTerm, dashTab: cfg.dashboardTab, keybinds: cfg.keybinds ?? {}},
     });
 }
 

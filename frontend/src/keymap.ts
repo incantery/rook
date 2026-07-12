@@ -1,0 +1,179 @@
+// The keybinding table: the tmux-derived defaults, overlaid with the
+// config file's `keybind = <trigger>=<command>` lines. Two layers, same
+// as the ladder in App.svelte — bare-key triggers act after the backtick
+// prefix, modifier chords act directly. This module only builds the
+// lookup tables and the palette's display strings; App.svelte owns
+// dispatch. Config edits arrive through ` r (reload re-runs main()).
+//
+// Fail open on user input: a trigger that doesn't parse, or one that's
+// reserved, drops with a console.warn — it never breaks the defaults
+// around it. Reserved and not rebindable: digits (window switching and
+// the dashboard slot are computed from dashboard-tab) and the prefix
+// backtick (the literal-` escape).
+
+export interface Keymap {
+    /** prefix layer: e.key → command id (case-sensitive, so `H` binds shift-h) */
+    prefix: Map<string, string>;
+    /** chord layer: modifier signature (see sigOf) → command id */
+    chords: Map<string, string>;
+    /** display-only hint for the palette, e.g. "` h" or "⌘⇧]" */
+    display(command: string): string | undefined;
+}
+
+// Every default binding, in display order (display() shows a command's
+// FIRST binding, which is why ⌘K precedes ` k). A config override on the
+// same trigger replaces the entry; `keybind = <trigger>=` removes it.
+const DEFAULTS: [string, string][] = [
+    ["cmd+k", "palette.toggle"],
+    ["c", "session.new"],
+    ["x", "session.close"],
+    ["r", "config.reload"],
+    ["k", "palette.toggle"],
+    ["s", "workspace.switch"],
+    ["a", "attention.inbox"],
+    ["n", "agent.spawn"],
+    ["h", "workspace.manager"],
+    [".", "workspace.set-root"],
+    ["d", "workspace.dashboard"],
+    ["cmd+t", "session.new"],
+    ["cmd+shift+]", "session.next"],
+    ["cmd+shift+[", "session.prev"],
+    ["cmd+shift+,", "config.reload"],
+];
+
+interface Bind {
+    layer: "prefix" | "chord";
+    /** the lookup key: e.key for prefix, sigOf-shaped for chords */
+    key: string;
+    command: string;
+    disp: string;
+}
+
+/** The chord lookup key for a live event — must mirror parseChord. */
+export function sigOf(e: KeyboardEvent): string {
+    return (
+        (e.metaKey ? "M" : "") +
+        (e.ctrlKey ? "C" : "") +
+        (e.altKey ? "A" : "") +
+        (e.shiftKey ? "S" : "") +
+        ":" +
+        e.code
+    );
+}
+
+// Chords match on KeyboardEvent.code (layout-independent, and shift can't
+// rewrite it the way it rewrites e.key: shift+] must not become "}").
+const NAMED_CODES: Record<string, string> = {
+    "[": "BracketLeft",
+    "]": "BracketRight",
+    ",": "Comma",
+    ".": "Period",
+    ";": "Semicolon",
+    "'": "Quote",
+    "/": "Slash",
+    "\\": "Backslash",
+    "-": "Minus",
+    "=": "Equal",
+    "`": "Backquote",
+    enter: "Enter",
+    tab: "Tab",
+    space: "Space",
+    escape: "Escape",
+    backspace: "Backspace",
+    up: "ArrowUp",
+    down: "ArrowDown",
+    left: "ArrowLeft",
+    right: "ArrowRight",
+};
+
+const KEY_DISP: Record<string, string> = {
+    enter: "↩",
+    tab: "⇥",
+    space: "␣",
+    escape: "⎋",
+    backspace: "⌫",
+    up: "↑",
+    down: "↓",
+    left: "←",
+    right: "→",
+};
+
+function keyToCode(key: string): string | null {
+    if (/^[a-z]$/i.test(key)) return "Key" + key.toUpperCase();
+    if (/^[0-9]$/.test(key)) return "Digit" + key;
+    return NAMED_CODES[key.toLowerCase()] ?? null;
+}
+
+function parseChord(trigger: string): Bind | null {
+    const parts = trigger
+        .split("+")
+        .map((p) => p.trim().toLowerCase())
+        .filter((p) => p !== "");
+    const key = parts.pop();
+    if (!key) return null;
+    let meta = false,
+        ctrl = false,
+        alt = false,
+        shift = false;
+    for (const p of parts) {
+        if (p === "cmd" || p === "meta" || p === "super") meta = true;
+        else if (p === "ctrl" || p === "control") ctrl = true;
+        else if (p === "alt" || p === "opt" || p === "option") alt = true;
+        else if (p === "shift") shift = true;
+        else return null;
+    }
+    // shift alone can't carry a chord — it would shadow plain typing
+    if (!meta && !ctrl && !alt) return null;
+    const code = keyToCode(key);
+    if (!code) return null;
+    const sig =
+        (meta ? "M" : "") + (ctrl ? "C" : "") + (alt ? "A" : "") + (shift ? "S" : "") + ":" + code;
+    const disp =
+        (meta ? "⌘" : "") +
+        (ctrl ? "⌃" : "") +
+        (alt ? "⌥" : "") +
+        (shift ? "⇧" : "") +
+        (KEY_DISP[key] ?? key.toUpperCase());
+    return {layer: "chord", key: sig, command: "", disp};
+}
+
+function parseTrigger(trigger: string): Bind | null {
+    // "+" itself stays a bindable prefix key; anything longer with a "+"
+    // reads as a chord
+    if (trigger.includes("+") && trigger !== "+") return parseChord(trigger);
+    if (trigger.length !== 1) return null;
+    return {layer: "prefix", key: trigger, command: "", disp: "` " + trigger};
+}
+
+function reserved(b: Bind): boolean {
+    if (b.layer === "prefix") return b.key === "`" || /^[0-9]$/.test(b.key);
+    return /^M:Digit[0-9]$/.test(b.key); // bare ⌘1-9 switch windows
+}
+
+export function buildKeymap(overrides: Record<string, string | undefined>): Keymap {
+    const binds: Bind[] = [];
+    const apply = (trigger: string, command: string, fromConfig: boolean) => {
+        const b = parseTrigger(trigger);
+        if (!b || (fromConfig && reserved(b))) {
+            if (fromConfig) console.warn("keybind ignored (bad or reserved trigger):", trigger);
+            return;
+        }
+        // one action per trigger: rebinding replaces, "" just unbinds
+        const i = binds.findIndex((x) => x.layer === b.layer && x.key === b.key);
+        if (i !== -1) binds.splice(i, 1);
+        if (command !== "") binds.push({...b, command});
+    };
+    for (const [t, c] of DEFAULTS) apply(t, c, false);
+    for (const [t, c] of Object.entries(overrides)) {
+        if (typeof c === "string") apply(t.trim(), c, true);
+    }
+
+    const prefix = new Map<string, string>();
+    const chords = new Map<string, string>();
+    for (const b of binds) (b.layer === "prefix" ? prefix : chords).set(b.key, b.command);
+    return {
+        prefix,
+        chords,
+        display: (command) => binds.find((b) => b.command === command)?.disp,
+    };
+}
