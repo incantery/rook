@@ -153,7 +153,7 @@ func (r *registry) migrateJSON() {
 		return
 	}
 	for _, w := range list {
-		r.db.Exec(
+		_, _ = r.db.Exec(
 			`INSERT OR IGNORE INTO workspaces (name, root, scratch, created_at, last_used) VALUES (?, ?, ?, ?, ?)`,
 			w.Name, w.Root, w.Scratch, w.Created.Format(time.RFC3339Nano), w.LastUsed.Format(time.RFC3339Nano),
 		)

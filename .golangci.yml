@@ -1,0 +1,41 @@
+version: "2"
+
+# Default linter set (errcheck, govet, ineffassign, staticcheck, unused),
+# with errcheck tuned down: this codebase makes deliberate fire-and-forget
+# calls for cleanup paths (defer Close, best-effort kills/removes, writes
+# to an already-doomed pty or websocket). Checking those adds noise, not
+# safety — new categories of noise should be excluded here, not silenced
+# inline.
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        # defer f.Close() and friends
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*database/sql.Rows).Close
+        # fire-and-forget writes to a pty or stdout
+        - (*os.File).Write
+        # best-effort filesystem cleanup
+        - os.Remove
+        - os.RemoveAll
+        - os.Rename
+        # best-effort process teardown
+        - (*os/exec.Cmd).Run
+        - (*os/exec.Cmd).Wait
+        - (*os.Process).Kill
+        - syscall.Kill
+        # websocket close paths (Conn.Close takes args, so it isn't io.Closer)
+        - (*github.com/coder/websocket.Conn).Close
+        - (*github.com/coder/websocket.Conn).CloseNow
+        # best-effort JSON: encode onto an http.ResponseWriter, or parse a
+        # payload where the zero value is an acceptable fallback
+        - (*encoding/json.Encoder).Encode
+        - (*encoding/json.Decoder).Decode
+        - encoding/json.Unmarshal
+  exclusions:
+    rules:
+      # Tests routinely ignore errors from setup/teardown helpers.
+      - path: _test\.go
+        linters:
+          - errcheck

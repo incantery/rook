@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # cmd/rook embeds frontend/dist (go:embed all:dist); lint and tests
+      # only need the directory to be non-empty, not real assets.
+      - name: Stub embedded frontend assets
+        run: mkdir -p frontend/dist && touch frontend/dist/.stub
+
+      # go build ./... would also hit the build/ios scaffold package, which
+      # doesn't compile; scope everything to the real packages instead.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.7.2
+          args: ./internal/... ./cmd/...
+
+      - name: Test
+        run: go test ./internal/... ./cmd/...
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Type check
+        run: npm run check
+
+      - name: Build
+        run: npm run build
