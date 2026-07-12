@@ -16,8 +16,18 @@
 import type {Terminal} from "@xterm/xterm";
 import type {FitAddon} from "@xterm/addon-fit";
 import type {HostAPI, SessionInfo} from "../hostapi";
-import {leafOf, leaves, neighborOf, newLeaf, removeAt, setWeight, splitAt} from "./layout";
-import type {Dir, Edge, LayoutNode, SplitNode} from "./layout";
+import {
+    leafOf,
+    leaves,
+    neighborOf,
+    newLeaf,
+    normalize,
+    reconcile,
+    removeAt,
+    setWeight,
+    splitAt,
+} from "./layout";
+import type {Dir, Edge, LayoutNode, SplitNode, StoredState} from "./layout";
 import {applyFocus, applyZoom, project} from "./view";
 import type {ViewHooks} from "./view";
 
@@ -204,14 +214,41 @@ export class TermManager {
         return this.windows.filter((w) => w.workspace === ws);
     }
 
-    /** Attach every live session (background-warm) as a single-pane
-     *  window; activation waits for openWorkspace — the manager screen
-     *  decides what to open. */
+    /** Attach every live session (background-warm), rebuilding stored
+     *  windows where the layout and the host agree — the host is truth,
+     *  and anything unclaimed lands as a single-pane window. Activation
+     *  waits for openWorkspace — the manager screen decides what to open. */
     async init(): Promise<void> {
         const sessions = await this.api.list();
-        for (const s of sessions) {
-            const tab = this.addTab(s);
-            this.makeWindow(newLeaf(s.id), tab.workspace);
+        let stored: StoredState | null = null;
+        try {
+            const raw = localStorage.getItem("rook.layout.v1");
+            stored = raw === null ? null : normalize(JSON.parse(raw));
+        } catch {
+            // unparseable — fail open to all-single-pane, never a broken boot
+        }
+        for (const s of sessions) this.addTab(s);
+        for (const w of reconcile(stored, sessions)) {
+            this.makeWindow(w.root, w.workspace, w.focused);
+        }
+        this.save(); // reconcile's repairs become the new truth
+    }
+
+    /** Persist windows (order, trees, weights, focus) — zoom stays
+     *  transient. Called on every layout-affecting mutation. */
+    private save(): void {
+        const state: StoredState = {
+            version: 1,
+            windows: this.windows.map((w) => ({
+                workspace: w.workspace,
+                root: w.root,
+                focused: w.focused,
+            })),
+        };
+        try {
+            localStorage.setItem("rook.layout.v1", JSON.stringify(state));
+        } catch (err) {
+            console.warn("layout save failed", err);
         }
     }
 
@@ -301,6 +338,7 @@ export class TermManager {
         };
         project(win, this.hooks(win));
         this.windows.push(win);
+        this.save();
         this.events.changed();
         return win;
     }
@@ -333,6 +371,7 @@ export class TermManager {
             onDragEnd: () => {
                 this.dragStart = null;
                 this.syncSize(true);
+                this.save(); // weights settled
             },
         };
     }
@@ -343,6 +382,7 @@ export class TermManager {
         win.focused = paneId;
         applyFocus(win);
         win.panes.get(paneId)?.focus();
+        this.save(); // focus survives reload
         this.events.changed(); // the strip shows the focused pane's name
     }
 
@@ -503,8 +543,11 @@ export class TermManager {
                 win.zoomed = null; // jumping to a hidden sibling unzooms
                 applyZoom(win);
             }
-            win.focused = leaf.id;
-            applyFocus(win);
+            if (win.focused !== leaf.id) {
+                win.focused = leaf.id;
+                applyFocus(win);
+                this.save();
+            }
             this.activate(win);
             return true;
         }
@@ -540,6 +583,7 @@ export class TermManager {
         win.panes.set(leaf.id, new TermPane(tab, this.api));
         win.focused = leaf.id;
         project(win, this.hooks(win));
+        this.save();
         if (win === this.active) {
             // the user may have switched windows during the await — a
             // background split must not steal fit-timing or focus
@@ -622,6 +666,7 @@ export class TermManager {
             this.syncSize(true);
             win.panes.get(win.focused)?.focus();
         }
+        this.save();
         this.events.changed();
     }
 
@@ -630,6 +675,7 @@ export class TermManager {
         if (idx !== -1) this.windows.splice(idx, 1);
         if (this.lastActive.get(win.workspace) === win) this.lastActive.delete(win.workspace);
         win.el.remove();
+        this.save();
         this.events.changed();
         if (this.active !== win) return;
         this.active = null;
