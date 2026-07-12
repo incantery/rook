@@ -32,7 +32,12 @@ export class HostAPI {
 
     /** cwdFrom: inherit the working directory of that session's shell
      *  (tmux `new-window -c "#{pane_current_path}"`). */
-    async create(cols: number, rows: number, cwdFrom?: string, workspace?: string): Promise<SessionInfo> {
+    async create(
+        cols: number,
+        rows: number,
+        cwdFrom?: string,
+        workspace?: string,
+    ): Promise<SessionInfo> {
         return (
             await this.req("/sessions", {
                 method: "POST",
@@ -91,7 +96,9 @@ export class HostAPI {
      *  unless prune deletes it too (the merged-PR cleanup path). */
     async deleteWorkspace(name: string, force = false, prune = false): Promise<void> {
         const q = [force ? "force=1" : "", prune ? "prune=1" : ""].filter(Boolean).join("&");
-        await this.req(`/workspaces/${encodeURIComponent(name)}${q ? `?${q}` : ""}`, {method: "DELETE"});
+        await this.req(`/workspaces/${encodeURIComponent(name)}${q ? `?${q}` : ""}`, {
+            method: "DELETE",
+        });
     }
 
     /** Live workspace status: per-session foreground process + cwd, repo

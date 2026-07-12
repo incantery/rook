@@ -78,7 +78,9 @@
     }
 
     const worstUsage = $derived(
-        app.usage && app.usage.windows.length ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a)) : null,
+        app.usage && app.usage.windows.length
+            ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a))
+            : null,
     );
 </script>
 
@@ -87,12 +89,16 @@
         <div class="dash-head">
             <div class="dash-head-text">
                 <div class="dash-name">{st?.name ?? app.workspace}</div>
-                <div class="dash-root">{st?.root ? tilde(st.root) : "no root — cd somewhere, then ` ."}</div>
+                <div class="dash-root">
+                    {st?.root ? tilde(st.root) : "no root — cd somewhere, then ` ."}
+                </div>
             </div>
             <div class="dash-pills">
                 {#if st?.git}
                     <span class="dash-pill branch">⎇ {st.git.branch}</span>
-                    {#if st.git.dirty > 0}<span class="dash-pill dirty">● {st.git.dirty} modified</span>
+                    {#if st.git.dirty > 0}<span class="dash-pill dirty"
+                            >● {st.git.dirty} modified</span
+                        >
                     {:else}<span class="dash-pill clean">✓ clean</span>{/if}
                     {#if st.git.ahead > 0}<span class="dash-pill sync">↑{st.git.ahead}</span>{/if}
                     {#if st.git.behind > 0}<span class="dash-pill sync">↓{st.git.behind}</span>{/if}
@@ -112,7 +118,9 @@
         <div class="dash-sec">Windows</div>
         <div id="dash-grid">
             {#each st?.sessions ?? [] as s, i (s.id)}
-                {@const draft = app.attention.find((a) => a.rookSession === s.id && a.draft?.action === "draft")}
+                {@const draft = app.attention.find(
+                    (a) => a.rookSession === s.id && a.draft?.action === "draft",
+                )}
                 <div class="dash-card" onclick={() => onjump(i)} role="presentation">
                     <div class="dash-card-top">
                         <span class="dash-num">{app.dashTab + 1 + i}</span>
@@ -124,7 +132,10 @@
                     </div>
                     <div class="dash-cwd" title={s.cwd}>{squeeze(tilde(s.cwd || "")) || "—"}</div>
                     {#if s.agent}
-                        {@const text = s.agent.state === "needs_input" ? s.agent.ask || s.agent.title : s.agent.title}
+                        {@const text =
+                            s.agent.state === "needs_input"
+                                ? s.agent.ask || s.agent.title
+                                : s.agent.title}
                         <div class="dash-agent {s.agent.state}">
                             <span class="dash-agent-chip">{agentLabel(s.agent)}</span>
                             {#if text}
@@ -133,7 +144,9 @@
                         </div>
                     {/if}
                     {#if draft}
-                        <div class="dash-draft" title={draft.draft?.reply ?? ""}>↳ draft ready — ` a</div>
+                        <div class="dash-draft" title={draft.draft?.reply ?? ""}>
+                            ↳ draft ready — ` a
+                        </div>
                     {/if}
                 </div>
             {/each}
@@ -147,14 +160,19 @@
                 {#each queue.issues as i (i.tracker + i.key)}
                     <div class="dash-issue">
                         <span class="dash-issue-key">{i.key}</span>
-                        <span class="dash-issue-who" class:mine={i.mine}>{i.mine ? "mine" : "open"}</span>
+                        <span class="dash-issue-who" class:mine={i.mine}
+                            >{i.mine ? "mine" : "open"}</span
+                        >
                         <span class="dash-issue-title" title={i.title}>{i.title}</span>
-                        {#if i.state && i.state !== "open"}<span class="dash-issue-state">{i.state}</span>{/if}
+                        {#if i.state && i.state !== "open"}<span class="dash-issue-state"
+                                >{i.state}</span
+                            >{/if}
                         <button
                             class="home-btn dash-issue-go"
                             title="Start claude on this issue in a fresh worktree"
                             disabled={starting !== ""}
-                            onclick={() => void work(i)}>{starting === i.key ? "…" : "▶ work"}</button
+                            onclick={() => void work(i)}
+                            >{starting === i.key ? "…" : "▶ work"}</button
                         >
                     </div>
                 {/each}
@@ -164,9 +182,15 @@
             </div>
         {/if}
         <div class="dash-actions">
-            <button class="home-btn" onclick={() => runCmd("session.new")}><span class="plus">+</span> New window</button>
-            <button class="home-btn" onclick={() => runCmd("workspace.set-root")}>Set root to shell's cwd</button>
-            <button class="home-btn" onclick={() => runCmd("workspace.manager")}>Workspace manager</button>
+            <button class="home-btn" onclick={() => runCmd("session.new")}
+                ><span class="plus">+</span> New window</button
+            >
+            <button class="home-btn" onclick={() => runCmd("workspace.set-root")}
+                >Set root to shell's cwd</button
+            >
+            <button class="home-btn" onclick={() => runCmd("workspace.manager")}
+                >Workspace manager</button
+            >
         </div>
     </div>
 </div>

@@ -19,17 +19,19 @@
     /** the window you're looking at doesn't need to flag you down */
     const attnIds = $derived(
         new Set(
-            app.attention
-                .filter((i) => i.workspace === app.workspace)
-                .map((i) => i.rookSession),
+            app.attention.filter((i) => i.workspace === app.workspace).map((i) => i.rookSession),
         ),
     );
     const worstUsage = $derived(
-        app.usage && app.usage.windows.length ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a)) : null,
+        app.usage && app.usage.windows.length
+            ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a))
+            : null,
     );
     const usageTitle = $derived.by(() => {
         if (!app.usage) return "";
-        let t = app.usage.windows.map((w) => `${w.label}: ${w.pct}% — resets ${w.resets}`).join("\n");
+        let t = app.usage.windows
+            .map((w) => `${w.label}: ${w.pct}% — resets ${w.resets}`)
+            .join("\n");
         if (app.costs && (app.costs.todayUsd > 0 || app.costs.weekUsd > 0)) {
             t += `\nraw-inference value: $${app.costs.todayUsd.toFixed(2)} today · $${app.costs.weekUsd.toFixed(2)} 7d`;
         }
@@ -38,7 +40,11 @@
 </script>
 
 <div id="titlebar">
-    <button id="ws-label" style="--wails-draggable: no-drag" title="Switch workspace (` s)" onclick={onpicker}
+    <button
+        id="ws-label"
+        style="--wails-draggable: no-drag"
+        title="Switch workspace (` s)"
+        onclick={onpicker}
         ><span class="ws-dot"></span><span class="ws-name">{app.workspace}</span></button
     >
     <div id="tabs">
@@ -59,7 +65,12 @@
                 onclick={() => onactivate(tab.id)}>{app.dashTab + 1 + i}</button
             >
         {/each}
-        <button class="tab tab-new" style="--wails-draggable: no-drag" title="New window (` c)" onclick={onnew}>+</button>
+        <button
+            class="tab tab-new"
+            style="--wails-draggable: no-drag"
+            title="New window (` c)"
+            onclick={onnew}>+</button
+        >
     </div>
     <span id="prefix-pill" hidden={!app.prefixArmed}>prefix</span>
     {#if worstUsage}
@@ -72,8 +83,11 @@
         >
     {/if}
     {#if app.attention.length > 0}
-        <button id="attn-chip" style="--wails-draggable: no-drag" title="Attention inbox (` a)" onclick={oninbox}
-            >◉ {app.attention.length}</button
+        <button
+            id="attn-chip"
+            style="--wails-draggable: no-drag"
+            title="Attention inbox (` a)"
+            onclick={oninbox}>◉ {app.attention.length}</button
         >
     {/if}
     <button id="palette-btn" style="--wails-draggable: no-drag" onclick={onpalette}>

@@ -67,11 +67,19 @@
                     spellcheck="false"
                     placeholder="fix the flaky picker test and run the suite"
                     bind:value={task}
-                    bind:this={taskEl}
-                ></textarea>
+                    bind:this={taskEl}></textarea>
             </label>
-            <label><span>Workspace</span><input class="spawn-ws" spellcheck="false" bind:value={ws} /></label>
-            <label class="spawn-wt" title="git worktree off the workspace's repo — parallel sessions stop sharing one checkout">
+            <label
+                ><span>Workspace</span><input
+                    class="spawn-ws"
+                    spellcheck="false"
+                    bind:value={ws}
+                /></label
+            >
+            <label
+                class="spawn-wt"
+                title="git worktree off the workspace's repo — parallel sessions stop sharing one checkout"
+            >
                 <input type="checkbox" bind:checked={worktree} />
                 <span>Isolate in a new worktree (branch <code>rook/…</code>)</span>
             </label>
@@ -79,7 +87,9 @@
         </div>
         <div class="ws-modal-foot">
             <button class="home-btn spawn-cancel" onclick={onclose}>Cancel</button>
-            <button class="home-btn primary spawn-go" onclick={() => void go()}>Start session</button>
+            <button class="home-btn primary spawn-go" onclick={() => void go()}
+                >Start session</button
+            >
         </div>
     </div>
 </div>

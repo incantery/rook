@@ -55,7 +55,8 @@ interface Tab {
 // overlaps what a keyboard can produce (arrows/function keys use other
 // finals — except modifier+F3, which collides with CPR and is an accepted
 // loss inside the sub-second gate).
-const AUTO_REPLY = /\x1b(?:\[\??\d+(?:;\d+)*[Rn]|\[[>?]?\d*(?:;\d+)*c|\](?:4|1[0-2]);[^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)/g;
+const AUTO_REPLY =
+    /\x1b(?:\[\??\d+(?:;\d+)*[Rn]|\[[>?]?\d*(?:;\d+)*c|\](?:4|1[0-2]);[^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)/g;
 
 export class TermManager {
     private tabs: Tab[] = [];
@@ -217,7 +218,12 @@ export class TermManager {
      *  `-c "#{pane_current_path}"`). */
     async newSession(): Promise<void> {
         const from = this.lastActive.get(this.current) ?? this.active ?? undefined;
-        const s = await this.api.create(from?.term.cols ?? 100, from?.term.rows ?? 30, from?.id, this.current);
+        const s = await this.api.create(
+            from?.term.cols ?? 100,
+            from?.term.rows ?? 30,
+            from?.id,
+            this.current,
+        );
         this.activate(this.addTab(s));
     }
 
@@ -281,7 +287,12 @@ export class TermManager {
      *  caller can type into it. */
     async spawnIn(workspace: string): Promise<string> {
         const from = this.active ?? undefined;
-        const s = await this.api.create(from?.term.cols ?? 100, from?.term.rows ?? 30, undefined, workspace);
+        const s = await this.api.create(
+            from?.term.cols ?? 100,
+            from?.term.rows ?? 30,
+            undefined,
+            workspace,
+        );
         this.activate(this.addTab(s));
         return s.id;
     }
