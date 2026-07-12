@@ -306,9 +306,9 @@ func (h *Host) approveDraft(w http.ResponseWriter, r *http.Request, d *Decision)
 }
 
 // approveSpawn actuates a spawn draft: a fresh window in the row's
-// workspace (falling back to the source session's), with the claude
-// command typed in once the shell has had a beat to come up. The claim
-// hook correlates the new claude session on its own.
+// workspace (falling back to the source session's), with the coder command
+// typed in via spawnTask. The claim hook correlates the new session on its
+// own.
 func (h *Host) approveSpawn(w http.ResponseWriter, d *Decision, verdict, task string) {
 	ws := d.Workspace
 	if ws == "" {
@@ -324,16 +324,11 @@ func (h *Host) approveSpawn(w http.ResponseWriter, d *Decision, verdict, task st
 		return
 	}
 	h.dropDraft(d.AgentSession, d.ID)
-	wsInfo := h.reg.upsert(ws, "", false)
-	s, err := h.spawn(100, 30, wsInfo.Root, ws)
+	s, err := h.spawnTask(ws, task)
 	if err != nil {
 		http.Error(w, "approved but spawn failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	go func() {
-		time.Sleep(400 * time.Millisecond) // let the shell come up
-		s.pty.Write([]byte("claude " + shellQuote(task) + "\r"))
-	}()
 	writeJSON(w, map[string]any{"rookSession": s.info.ID, "verdict": verdict, "workspace": ws})
 }
 

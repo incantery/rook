@@ -141,6 +141,19 @@ export class HostAPI {
         return (await this.req("/costs")).json();
     }
 
+    /** Start the coder on a task in a fresh window of the workspace.
+     *  Either a literal task or a preset the host expands into its own
+     *  prompt (e.g. "resolve-conflicts") — host-built prompts keep every
+     *  surface actuating the identical thing. */
+    async spawnTask(ws: string, opts: {task?: string; preset?: string}): Promise<SessionInfo> {
+        return (
+            await this.req(`/workspaces/${encodeURIComponent(ws)}/spawn`, {
+                method: "POST",
+                body: JSON.stringify(opts),
+            })
+        ).json();
+    }
+
     /** Raw bytes into a session's pty; append "\r" to submit. */
     async sendInput(id: string, data: string): Promise<void> {
         await this.req(`/sessions/${id}/input`, {
@@ -251,6 +264,9 @@ export interface PRInfo {
     state: "none" | "open" | "merged" | "closed";
     number?: number;
     url?: string;
+    /** the open PR can't merge as-is (gh reports CONFLICTING) — absent on
+     *  hosts/gh versions that don't know, never falsely true (fail open) */
+    conflicts?: boolean;
     /** commits only this branch has — work with no PR yet */
     ahead?: number;
     dirty?: number;

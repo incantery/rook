@@ -26,6 +26,10 @@ type PRSnapshot struct {
 	State  string `json:"state"` // none | open | merged | closed
 	Number int    `json:"number,omitempty"`
 	URL    string `json:"url,omitempty"`
+	// Conflicts: the open PR can't merge as-is (gh says CONFLICTING).
+	// Strict equality on the gh answer = fail open — UNKNOWN, empty, or a
+	// gh too old to report mergeability never reads as conflicted.
+	Conflicts bool `json:"conflicts,omitempty"`
 	// Ahead/Dirty come from worktreeRisk: commits only this branch has and
 	// uncommitted files — "work exists with no PR yet" is the nudge to open
 	// one.
@@ -113,6 +117,7 @@ func (h *Host) pollPRs() {
 			snap.State = strings.ToLower(pr.State)
 			snap.Number = pr.Number
 			snap.URL = pr.URL
+			snap.Conflicts = snap.State == "open" && pr.Mergeable == "CONFLICTING"
 		}
 		// Unknown risk reads as 0 here — this feeds a nudge, not the
 		// deletion guard, which re-derives risk itself at delete time.

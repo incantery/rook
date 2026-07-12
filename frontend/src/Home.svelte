@@ -178,6 +178,26 @@
         await refresh();
     }
 
+    // Conflicts chip debounce: trees we've already spawned a resolver into
+    // this session — the chip goes passive so a second click can't double-
+    // spawn. The 60s PR poll clears the conflict flag (and the chip) once
+    // the agent lands the merge; on spawn failure the button re-arms.
+    let resolving = $state<string[]>([]);
+
+    /** One-click conflict resolution: spawn an agent in the task tree with
+     *  the host-built resolve-conflicts prompt (merge base in, keep both
+     *  sides' intent, push — never rebase). */
+    async function resolveConflicts(name: string): Promise<void> {
+        if (resolving.includes(name)) return;
+        resolving = [...resolving, name];
+        try {
+            await api.spawnTask(name, {preset: "resolve-conflicts"});
+        } catch (err) {
+            showError(String(err));
+            resolving = resolving.filter((n) => n !== name);
+        }
+    }
+
     /** One-click close-the-loop: the merged nudge carries the merged fact,
      *  so force (squash merges read as "unmerged" to the guard) and prune
      *  the local branch knowingly. Kills the tree's shells like any delete. */
@@ -343,6 +363,24 @@
                 void cleanup(w.name);
             }}>⇅ merged — clean up</button
         >
+    {:else if w.pr?.state === "open" && w.pr.conflicts}
+        {#if resolving.includes(w.name)}
+            <span
+                class="ws-tag pr-conflicts"
+                title="an agent is resolving PR #{w.pr.number}'s conflicts in this tree"
+                >⚠ resolving…</span
+            >
+        {:else}
+            <button
+                class="ws-tag pr-conflicts"
+                title="PR #{w.pr
+                    .number} has merge conflicts — spawn an agent in this tree to merge the base branch and resolve them"
+                onclick={(e) => {
+                    e.stopPropagation();
+                    void resolveConflicts(w.name);
+                }}>⚠ conflicts — resolve</button
+            >
+        {/if}
     {:else if w.pr?.state === "open"}
         <span class="ws-tag pr-open" title={w.pr.url}>PR #{w.pr.number}</span>
     {:else if w.pr?.state === "closed"}

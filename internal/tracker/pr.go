@@ -16,6 +16,11 @@ type PR struct {
 	State    string    `json:"state"` // OPEN | CLOSED | MERGED
 	URL      string    `json:"url"`
 	MergedAt time.Time `json:"mergedAt"`
+	// Mergeable is GitHub's merge check: MERGEABLE | CONFLICTING | UNKNOWN
+	// (empty on gh versions that don't send it). Only CONFLICTING means
+	// conflicts — every other value fails open to "fine".
+	Mergeable        string `json:"mergeable"`
+	MergeStateStatus string `json:"mergeStateStatus"`
 }
 
 // PRStatus resolves the PR for a branch, run in the checkout so gh finds
@@ -23,7 +28,7 @@ type PR struct {
 // normal answer, not an error. GitHub keeps the PR↔branch association
 // even after the remote branch is auto-deleted post-merge.
 func PRStatus(root, branch string) (*PR, error) {
-	out, err := runGH(root, "pr", "view", branch, "--json", "number,state,url,mergedAt")
+	out, err := runGH(root, "pr", "view", branch, "--json", "number,state,url,mergedAt,mergeable,mergeStateStatus")
 	if err != nil {
 		if strings.Contains(err.Error(), "no pull requests found") {
 			return nil, nil
