@@ -20,14 +20,16 @@ import {
     leafOf,
     leaves,
     neighborOf,
+    newEditorLeaf,
     newLeaf,
     normalize,
     reconcile,
     removeAt,
     setWeight,
     splitAt,
+    termOnly,
 } from "./layout";
-import type {Dir, Edge, LayoutNode, SplitNode, StoredState} from "./layout";
+import type {Dir, Edge, LayoutNode, SplitNode, StoredState, StoredWindow} from "./layout";
 import {applyFocus, applyZoom, project} from "./view";
 import type {ViewHooks} from "./view";
 
@@ -62,8 +64,10 @@ export interface PaneContent {
     /** the pane's root element, moved (never rebuilt) by the projector */
     readonly el: HTMLElement;
     /** term panes expose their host session (attention, jump, kill,
-     *  cwd-from); future pane kinds return null */
+     *  cwd-from); other pane kinds return null */
     readonly sessionId: string | null;
+    /** what the strip shows while this pane is focused */
+    readonly title: string;
     focus(): void;
     /** size the content to its cell and tell whoever needs to know */
     fit(force?: boolean): void;
@@ -99,6 +103,10 @@ class TermPane implements PaneContent {
 
     get sessionId(): string {
         return this.tab.id;
+    }
+
+    get title(): string {
+        return this.tab.name;
     }
 
     focus(): void {
@@ -190,11 +198,12 @@ export class TermManager {
     }
 
     private tabInfo(w: Win): TabInfo {
-        const sessions = leaves(w.root).map((l) => l.content.session);
-        const focusedSession = w.panes.get(w.focused)?.sessionId;
+        const sessions = leaves(w.root).flatMap((l) =>
+            l.content.type === "term" ? [l.content.session] : [],
+        );
         return {
             id: w.id,
-            name: (focusedSession && this.sessions.get(focusedSession)?.name) || "",
+            name: w.panes.get(w.focused)?.title || "",
             workspace: w.workspace,
             sessions,
         };
@@ -235,16 +244,24 @@ export class TermManager {
     }
 
     /** Persist windows (order, trees, weights, focus) — zoom stays
-     *  transient. Called on every layout-affecting mutation. */
+     *  transient, editor panes strip out entirely (rook.layout.v1 is
+     *  term-only; an editor-only window has no persistent form). Called
+     *  on every layout-affecting mutation. */
     private save(): void {
-        const state: StoredState = {
-            version: 1,
-            windows: this.windows.map((w) => ({
+        const windows: StoredWindow[] = [];
+        for (const w of this.windows) {
+            const root = termOnly(w.root);
+            if (root === null) continue;
+            const ids = new Set(leaves(root).map((l) => l.id));
+            windows.push({
                 workspace: w.workspace,
-                root: w.root,
-                focused: w.focused,
-            })),
-        };
+                root,
+                // focus pointing at a stripped editor pane repairs to the
+                // first surviving terminal
+                focused: ids.has(w.focused) ? w.focused : leaves(root)[0].id,
+            });
+        }
+        const state: StoredState = {version: 1, windows};
         try {
             localStorage.setItem("rook.layout.v1", JSON.stringify(state));
         } catch (err) {
@@ -315,14 +332,20 @@ export class TermManager {
         return tab;
     }
 
-    /** Build a window around a layout tree whose sessions already have
-     *  Tabs, project it (hidden until activated), and put it on the strip. */
-    private makeWindow(root: LayoutNode, workspace: string, focused?: string): Win {
+    /** Build a window around a layout tree, project it (hidden until
+     *  activated), and put it on the strip. Term leaves fill from their
+     *  Tabs; other pane kinds arrive pre-built via `panes`. */
+    private makeWindow(
+        root: LayoutNode,
+        workspace: string,
+        focused?: string,
+        panes = new Map<string, PaneContent>(),
+    ): Win {
         const el = document.createElement("div");
         el.className = "window";
         this.container.appendChild(el);
-        const panes = new Map<string, PaneContent>();
         for (const l of leaves(root)) {
+            if (panes.has(l.id) || l.content.type !== "term") continue;
             const tab = this.sessions.get(l.content.session);
             if (tab) panes.set(l.id, new TermPane(tab, this.api));
         }
@@ -491,10 +514,26 @@ export class TermManager {
         for (const p of this.active.panes.values()) p.fit(force);
     }
 
-    /** Kill the focused pane's session (ws close does the rest). */
+    /** New single-pane window around non-terminal content — ` g's entry.
+     *  The manager stays Monaco-free: the caller builds the PaneContent
+     *  for the fresh leaf. */
+    openPaneWindow(mk: (leafId: string) => PaneContent): void {
+        const leaf = newEditorLeaf();
+        const panes = new Map<string, PaneContent>([[leaf.id, mk(leaf.id)]]);
+        this.activate(this.makeWindow(leaf, this.current, leaf.id, panes));
+    }
+
+    /** Close the focused pane: terminals die host-side (kill; the ws
+     *  close collapses the pane), editor panes are purely local. */
     async closeActive(): Promise<void> {
-        const id = this.focusedSessionId;
-        if (id) await this.api.kill(id);
+        const win = this.active;
+        const pane = win?.panes.get(win.focused);
+        if (!win || !pane) return;
+        if (pane.sessionId !== null) {
+            await this.api.kill(pane.sessionId);
+        } else {
+            this.removePaneLocal(win, win.focused);
+        }
     }
 
     next(): void {
@@ -564,13 +603,16 @@ export class TermManager {
         const win = this.active;
         if (!win) return;
         this.unzoom(win); // splitting a zoomed pane unzooms first
+        // no shell under the focused pane (editor) → default grid and no
+        // cwd inheritance; the host seeds the workspace root instead
         const from = this.focusedTab(win);
-        if (!from) return;
+        const baseCols = from?.term.cols ?? 100;
+        const baseRows = from?.term.rows ?? 30;
         // spawn at roughly the post-split grid so the shell's first
         // prompt parses near-right; the post-project fit trues it up
-        const cols = dir === "row" ? Math.max(2, Math.floor(from.term.cols / 2)) : from.term.cols;
-        const rows = dir === "col" ? Math.max(2, Math.floor(from.term.rows / 2)) : from.term.rows;
-        const s = await this.api.create(cols, rows, from.id, win.workspace);
+        const cols = dir === "row" ? Math.max(2, Math.floor(baseCols / 2)) : baseCols;
+        const rows = dir === "col" ? Math.max(2, Math.floor(baseRows / 2)) : baseRows;
+        const s = await this.api.create(cols, rows, from?.id, win.workspace);
         const tab = this.addTab(s);
         const leaf = newLeaf(s.id);
         // the target pane can die during the await — the new session
@@ -640,7 +682,7 @@ export class TermManager {
     }
 
     /** Session death: drop its pane, collapse the tree; a window losing
-     *  its last pane leaves the strip (today's exact tail). */
+     *  its last pane leaves the strip. */
     private removeSession(tab: Tab): void {
         if (!this.sessions.delete(tab.id)) return;
         const win = this.windows.find((w) => leafOf(w.root, tab.id));
@@ -651,16 +693,23 @@ export class TermManager {
             tab.wrap.remove();
             return;
         }
-        win.panes.get(leaf.id)?.dispose(); // the only DOM-removal site
-        win.panes.delete(leaf.id);
-        const {root, neighbor} = removeAt(win.root, leaf.id);
+        this.removePaneLocal(win, leaf.id);
+    }
+
+    /** Drop a pane from its window and collapse the tree — the shared
+     *  tail of session death and editor-pane close. The sibling absorbs
+     *  the space and the focus; the last pane takes the window with it. */
+    private removePaneLocal(win: Win, leafId: string): void {
+        win.panes.get(leafId)?.dispose(); // the only DOM-removal site
+        win.panes.delete(leafId);
+        const {root, neighbor} = removeAt(win.root, leafId);
         if (root === null) {
             this.removeWindow(win);
             return;
         }
         win.root = root;
         win.zoomed = null; // any structural change clears zoom
-        if (win.focused === leaf.id) win.focused = neighbor?.id ?? leaves(root)[0].id;
+        if (win.focused === leafId) win.focused = neighbor?.id ?? leaves(root)[0].id;
         project(win, this.hooks(win));
         if (win === this.active) {
             this.syncSize(true);
