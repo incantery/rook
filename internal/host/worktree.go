@@ -14,7 +14,8 @@ import (
 // Worktree workspaces: a workspace whose root is a `git worktree add` off a
 // source workspace's repo — one branch per task, so parallel agent sessions
 // stop stomping each other in a shared checkout. Trees live under rook's
-// own data dir (never inside the user's repos), branches under rook/<name>.
+// own data dir (never inside the user's repos), branches under
+// <prefix><name> (rook/ unless branch-prefix-<workspace> says otherwise).
 // rook never deletes work: removal refuses while the tree is dirty or the
 // branch holds commits unreachable from every other ref, unless forced.
 // The branch always survives removal — it may live on in a PR.
@@ -23,6 +24,60 @@ import (
 // under DataDir means cleanup only ever deletes inside rook's own territory.
 func worktreeDir(name string) string {
 	return filepath.Join(DataDir(), "worktrees", name)
+}
+
+// issueName derives a workspace name from the issue that spawned it —
+// "<key>-<slugified-title>", "#9" + "Top bar alignment" → "9-top-bar-
+// alignment" — so the name means something in the workspace list, `git
+// branch`, and the eventual PR. "" (no issue, or nothing slug-safe in it)
+// sends the caller to the <source>-t<n> fallback.
+func issueName(issue *spawnIssue) string {
+	if issue == nil {
+		return ""
+	}
+	name := slugify(issue.Key)
+	// titles run long; cut at a word boundary so the tail stays readable
+	if t := truncateSlug(slugify(strings.ToLower(issue.Title)), 32); t != "" {
+		if name != "" {
+			name += "-"
+		}
+		name += t
+	}
+	return name
+}
+
+// slugify keeps s safe as both a directory name and a git branch segment:
+// alphanumeric runs survive (case intact — jira keys read PROJ-42), and
+// everything between them collapses to single hyphens.
+func slugify(s string) string {
+	var b strings.Builder
+	pending := false
+	for _, r := range s {
+		alnum := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		if !alnum {
+			pending = b.Len() > 0
+			continue
+		}
+		if pending {
+			b.WriteByte('-')
+			pending = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// truncateSlug caps a slug at max bytes, backing up to the previous hyphen
+// so no word is cut mid-way.
+func truncateSlug(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	s = s[:max]
+	if i := strings.LastIndexByte(s, '-'); i > 0 {
+		s = s[:i]
+	}
+	return s
 }
 
 // runGit runs git in dir with a hard timeout, returning trimmed combined
@@ -74,7 +129,7 @@ func worktreeRisk(dir, branch string) (dirty, unmerged int, err error) {
 		dirty = strings.Count(status, "\n") + 1
 	}
 	// --exclude only scopes the next --branches; remote refs never contain
-	// the rook/<name> branch, so they need no exclusion.
+	// the worktree's branch, so they need no exclusion.
 	count, err := runGit(dir, 10*time.Second,
 		"rev-list", "--count", branch, "--not", "--exclude="+branch, "--branches", "--remotes")
 	if err != nil {

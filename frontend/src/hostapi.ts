@@ -79,10 +79,15 @@ export class HostAPI {
         });
     }
 
-    /** New git worktree off `from`'s repo (branch rook/<name>), registered
-     *  as a workspace — the isolation rung under parallel agent sessions.
-     *  `issue` stamps which tracker issue spawned it (work-on-issue flow). */
-    async createWorktree(from: string, issue?: IssueRef): Promise<WorkspaceInfo> {
+    /** New git worktree off `from`'s repo (branch rook/<name> unless the
+     *  workspace configures a branch-prefix), registered as a workspace —
+     *  the isolation rung under parallel agent sessions. `issue` stamps
+     *  which tracker issue spawned it (work-on-issue flow); its title is
+     *  what the host derives the workspace name from. */
+    async createWorktree(
+        from: string,
+        issue?: IssueRef & {title?: string},
+    ): Promise<WorkspaceInfo> {
         return (
             await this.req("/workspaces", {
                 method: "POST",
@@ -250,7 +255,7 @@ export interface WorkspaceInfo {
     scratch?: boolean;
     /** source workspace this one was carved from (git worktree) */
     worktreeOf?: string;
-    /** the worktree's rook/<name> branch */
+    /** the worktree's branch (rook/<name> unless a prefix is configured) */
     branch?: string;
     /** the issue this workspace was spawned for — absent otherwise */
     issueRef?: IssueRef;
