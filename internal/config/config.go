@@ -38,6 +38,10 @@ type Config struct {
 	JiraEmail    string            `json:"jiraEmail"`
 	JiraJQL      string            `json:"jiraJql"`
 	JiraProjects map[string]string `json:"jiraProjects"`
+	// BranchPrefixes maps a workspace to its worktree-branch prefix,
+	// `branch-prefix-<workspace> = seth/`. The value is used verbatim
+	// (bring your own trailing separator); unset means rook/.
+	BranchPrefixes map[string]string `json:"branchPrefixes"`
 }
 
 func Default() Config {
@@ -96,6 +100,13 @@ func Load() Config {
 				cfg.JiraProjects = map[string]string{}
 			}
 			cfg.JiraProjects[ws] = value
+			continue
+		}
+		if ws, ok := strings.CutPrefix(key, "branch-prefix-"); ok && ws != "" && value != "" {
+			if cfg.BranchPrefixes == nil {
+				cfg.BranchPrefixes = map[string]string{}
+			}
+			cfg.BranchPrefixes[ws] = value
 			continue
 		}
 		switch key {

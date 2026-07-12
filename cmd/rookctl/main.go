@@ -504,7 +504,8 @@ func runUpdate(args []string) error {
 // runSpawn is the user-invoked half of the spawner (docs/agent.md step 4):
 // a fresh window in the workspace, with claude started on the task. Inside
 // a rook window it inherits your workspace and cwd; -w overrides.
-// --worktree carves a fresh git worktree (branch rook/<name>) off the
+// --worktree carves a fresh git worktree (branch rook/<name>, prefix
+// configurable via branch-prefix-<workspace>) off the
 // workspace's repo first and lands the session there — parallel sessions
 // stop sharing one checkout.
 func runSpawn(args []string) error {
@@ -677,10 +678,11 @@ func runWork(args []string) error {
 	task := issue.Task
 	target, cwdFrom := ws, os.Getenv("ROOK_SESSION")
 	if worktree {
-		// stamp provenance: the workspace records which issue spawned it
+		// stamp provenance: the workspace records which issue spawned it,
+		// and the title lets the host derive a meaningful name
 		raw, err := c.req("POST", "/workspaces", map[string]any{
 			"worktreeFrom": ws,
-			"issue":        map[string]string{"tracker": issue.Tracker, "key": issue.Key},
+			"issue":        map[string]string{"tracker": issue.Tracker, "key": issue.Key, "title": issue.Title},
 		})
 		if err != nil {
 			return err

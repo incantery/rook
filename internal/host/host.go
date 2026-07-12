@@ -26,6 +26,7 @@ import (
 	"github.com/coder/websocket"
 	cpty "github.com/creack/pty"
 
+	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/version"
 )
 
@@ -384,7 +385,7 @@ func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 			WorktreeFrom string
 			// Issue stamps the tracker issue this worktree is spawned
 			// for (work-on-issue flow); only meaningful with WorktreeFrom.
-			Issue *IssueRef
+			Issue *spawnIssue
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		req.Name = strings.TrimSpace(req.Name)
@@ -408,11 +409,31 @@ func (h *Host) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// spawnIssue is the wire shape of the issue in POST /workspaces: the ref
+// that gets stored as provenance, plus the title — which only feeds the
+// workspace name and is never persisted (the queue is the title's home).
+type spawnIssue struct {
+	IssueRef
+	Title string
+}
+
+// branchPrefix is the source workspace's worktree-branch prefix:
+// `branch-prefix-<workspace>` in the config (hot-read, like the issue
+// trackers), used verbatim — teams bring their own separator. rook/ when
+// unset.
+func branchPrefix(ws string) string {
+	if p := config.Load().BranchPrefixes[ws]; p != "" {
+		return p
+	}
+	return "rook/"
+}
+
 // createWorktreeWorkspace is POST /workspaces {worktreeFrom}: a fresh
 // `git worktree add` off the source workspace's repo, on branch
-// rook/<name>, registered as a workspace rooted at the new checkout. The
-// spawner's isolation rung — parallel agent sessions get a tree each.
-func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string, issue *IssueRef) {
+// <prefix><name> (rook/ unless configured), registered as a workspace
+// rooted at the new checkout. The spawner's isolation rung — parallel
+// agent sessions get a tree each.
+func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string, issue *spawnIssue) {
 	src := h.reg.get(from)
 	if src == nil || src.Root == "" {
 		http.Error(w, fmt.Sprintf("workspace %q has no root to branch from", from), http.StatusBadRequest)
@@ -422,33 +443,55 @@ func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string,
 		http.Error(w, fmt.Sprintf("%s is not a git repo", src.Root), http.StatusBadRequest)
 		return
 	}
+	if issue != nil && issue.Key == "" {
+		issue = nil // an empty ref is no ref
+	}
+	prefix := branchPrefix(from)
 	if name == "" {
 		// auto-names must also step past branches left behind by deleted
 		// worktrees — the branch outliving its tree is the design
-		for n := 1; ; n++ {
-			name = fmt.Sprintf("%s-t%d", from, n)
-			if _, err := os.Stat(worktreeDir(name)); os.IsNotExist(err) &&
-				h.reg.get(name) == nil && !branchExists(src.Root, "rook/"+name) {
-				break
+		free := func(name string) bool {
+			_, err := os.Stat(worktreeDir(name))
+			return os.IsNotExist(err) && h.reg.get(name) == nil && !branchExists(src.Root, prefix+name)
+		}
+		if base := issueName(issue); base != "" {
+			// issue spawns name themselves from the issue
+			for n := 1; ; n++ {
+				name = base
+				if n > 1 {
+					name = fmt.Sprintf("%s-%d", base, n)
+				}
+				if free(name) {
+					break
+				}
+			}
+		} else {
+			// last resort for nameless manual spawns
+			for n := 1; ; n++ {
+				name = fmt.Sprintf("%s-t%d", from, n)
+				if free(name) {
+					break
+				}
 			}
 		}
 	} else if h.reg.get(name) != nil {
 		http.Error(w, fmt.Sprintf("workspace %q already exists", name), http.StatusConflict)
 		return
-	} else if branchExists(src.Root, "rook/"+name) {
-		http.Error(w, fmt.Sprintf("branch rook/%s already exists (left by an earlier worktree) — pick another name or delete the branch", name), http.StatusConflict)
+	} else if branchExists(src.Root, prefix+name) {
+		http.Error(w, fmt.Sprintf("branch %s%s already exists (left by an earlier worktree) — pick another name or delete the branch", prefix, name), http.StatusConflict)
 		return
 	}
 	dir := worktreeDir(name)
-	branch := "rook/" + name
+	branch := prefix + name
 	if err := worktreeAdd(src.Root, dir, branch); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if issue != nil && issue.Key == "" {
-		issue = nil // an empty ref is no ref
+	var ref *IssueRef
+	if issue != nil {
+		ref = &issue.IssueRef
 	}
-	ws, err := h.reg.createWorktreeWS(name, dir, from, branch, issue)
+	ws, err := h.reg.createWorktreeWS(name, dir, from, branch, ref)
 	if err != nil {
 		_ = worktreeRemove(dir, true) // roll back the checkout; nothing is in it yet
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -474,7 +517,7 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleWorkspaceIssues(w, r, name)
 	case action == "" && r.Method == http.MethodDelete:
 		force := r.URL.Query().Get("force") == "1"
-		// prune also deletes the local rook/<name> branch — the close-the-
+		// prune also deletes the worktree's local branch — the close-the-
 		// loop cleanup once its PR merged. Explicit opt-in: branch survival
 		// is otherwise the design.
 		prune := r.URL.Query().Get("prune") == "1"
