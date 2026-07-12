@@ -1,0 +1,119 @@
+<!-- The workspace dashboard — window 0 of every workspace. It renders
+     exactly what GET /workspaces/{name}/status reports, which is the same
+     context the attention router (docs/agent.md) consumes — if the
+     dashboard can't show it, the agent can't know it. -->
+<script lang="ts">
+    import type {AgentStatus, HostAPI, WorkspaceStatus} from "./hostapi";
+    import {shortWindow} from "./hostapi";
+    import {app} from "./state.svelte";
+    import {ago, squeeze, tilde} from "./util";
+
+    interface Props {
+        api: HostAPI;
+        onjump: (index: number) => void;
+        runCmd: (id: string) => void;
+    }
+    let {api, onjump, runCmd}: Props = $props();
+
+    let st = $state<WorkspaceStatus | null>(null);
+
+    /** One line of agent state on a window card: what claude is doing,
+     *  and — at needs_input — what it's asking. */
+    function agentLabel(a: AgentStatus): string {
+        const label =
+            a.state === "needs_input"
+                ? "◉ needs you"
+                : a.state === "quiet"
+                  ? `◌ quiet${a.tool ? " — " + a.tool : ""}`
+                  : `● working${a.tool ? " — " + a.tool : ""}`;
+        return label + (a.costUsd ? ` · $${a.costUsd.toFixed(2)}` : "");
+    }
+
+    async function refresh() {
+        try {
+            const fresh = await api.workspaceStatus(app.workspace);
+            st = fresh;
+        } catch (err) {
+            console.error("dashboard refresh failed", err);
+        }
+    }
+
+    // fg process / cwd / git all drift while you watch — poll cheaply.
+    // usage/costs pills read the store (App's slower poll owns them).
+    $effect(() => {
+        void refresh();
+        const t = setInterval(() => void refresh(), 3000);
+        return () => clearInterval(t);
+    });
+
+    const worstUsage = $derived(
+        app.usage && app.usage.windows.length ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a)) : null,
+    );
+</script>
+
+<div id="dashboard">
+    <div id="dash-inner">
+        <div class="dash-head">
+            <div class="dash-head-text">
+                <div class="dash-name">{st?.name ?? app.workspace}</div>
+                <div class="dash-root">{st?.root ? tilde(st.root) : "no root — cd somewhere, then ` ."}</div>
+            </div>
+            <div class="dash-pills">
+                {#if st?.git}
+                    <span class="dash-pill branch">⎇ {st.git.branch}</span>
+                    {#if st.git.dirty > 0}<span class="dash-pill dirty">● {st.git.dirty} modified</span>
+                    {:else}<span class="dash-pill clean">✓ clean</span>{/if}
+                    {#if st.git.ahead > 0}<span class="dash-pill sync">↑{st.git.ahead}</span>{/if}
+                    {#if st.git.behind > 0}<span class="dash-pill sync">↓{st.git.behind}</span>{/if}
+                {/if}
+                <!-- the fresh-start pills: usage + cost render even at zero — the
+                     dashboard should say "nothing burning", not say nothing -->
+                {#if worstUsage}
+                    <span class="dash-pill" class:dirty={worstUsage.pct >= 90}
+                        >◔ {worstUsage.pct}% {shortWindow(worstUsage.label)}</span
+                    >
+                {/if}
+                {#if app.costs}
+                    <span class="dash-pill">${app.costs.todayUsd.toFixed(2)} today</span>
+                {/if}
+            </div>
+        </div>
+        <div class="dash-sec">Windows</div>
+        <div id="dash-grid">
+            {#each st?.sessions ?? [] as s, i (s.id)}
+                {@const draft = app.attention.find((a) => a.rookSession === s.id && a.draft?.action === "draft")}
+                <div class="dash-card" onclick={() => onjump(i)} role="presentation">
+                    <div class="dash-card-top">
+                        <span class="dash-num">{app.dashTab + 1 + i}</span>
+                        <!-- agent sessions get the accent — the attention router's
+                             targets, visible at a glance -->
+                        <span class="dash-fg" class:agent={s.fg === "claude"}>{s.fg || "?"}</span>
+                        <span class="dash-spacer"></span>
+                        <span class="dash-when">{ago(s.created)}</span>
+                    </div>
+                    <div class="dash-cwd" title={s.cwd}>{squeeze(tilde(s.cwd || "")) || "—"}</div>
+                    {#if s.agent}
+                        {@const text = s.agent.state === "needs_input" ? s.agent.ask || s.agent.title : s.agent.title}
+                        <div class="dash-agent {s.agent.state}">
+                            <span class="dash-agent-chip">{agentLabel(s.agent)}</span>
+                            {#if text}
+                                <div class="dash-agent-text" title={text}>{text}</div>
+                            {/if}
+                        </div>
+                    {/if}
+                    {#if draft}
+                        <div class="dash-draft" title={draft.draft?.reply ?? ""}>↳ draft ready — ` a</div>
+                    {/if}
+                </div>
+            {/each}
+            {#if (st?.sessions ?? []).length === 0}
+                <div class="home-empty">No windows — ` c opens one.</div>
+            {/if}
+        </div>
+        <div class="dash-actions">
+            <button class="home-btn" onclick={() => runCmd("session.new")}><span class="plus">+</span> New window</button>
+            <button class="home-btn" onclick={() => runCmd("workspace.set-root")}>Set root to shell's cwd</button>
+            <button class="home-btn" onclick={() => runCmd("workspace.manager")}>Workspace manager</button>
+        </div>
+    </div>
+</div>

@@ -1,15 +1,37 @@
-// Workspace-aware session tabs, tmux-shaped: workspace = tmux session,
-// window = host session (tab). The dashboard sits at `dashTab` (config
-// dashboard-tab) and shell windows number from the next one up. Every tab
-// in every workspace stays attached (the host keeps producing into rings
-// either way); the strip renders only the current workspace, so switching
-// is instant and background workspaces stay warm.
+// The terminal runtime — the imperative island of README decision 7.
+// Owns every xterm instance, its WebSocket data plane, the write path,
+// resize, focus, and disposal. Svelte places the container and renders the
+// strip FROM this manager's state; it never drives the terminals. Nothing
+// in this file may import Svelte, and no reactive system may sit between
+// pty bytes and term.write().
+//
+// Lifecycle rule (host-owned sessions outlive the UI): a terminal's DOM
+// lives in the manager-owned container and is removed only when its host
+// session dies — screen switches are CSS visibility, never unmounts.
 
 import type {Terminal} from "@xterm/xterm";
 import type {FitAddon} from "@xterm/addon-fit";
-import type {HostAPI, SessionInfo} from "./hostapi";
+import type {HostAPI, SessionInfo} from "../hostapi";
 
 export type TermFactory = () => {term: Terminal; fit: FitAddon};
+
+/** The UI-rate projection of a terminal — what the Svelte strip renders. */
+export interface TabInfo {
+    id: string;
+    name: string;
+    workspace: string;
+}
+
+/** UI-rate events out of the island. All of them are "state changed,
+ *  re-project" signals — none carry terminal output. */
+export interface TermEvents {
+    /** tabs / active window / current workspace changed */
+    changed(): void;
+    /** the current workspace lost its last window → manager screen */
+    workspaceGone(): void;
+    /** a window was activated — overlays (dashboard) dismiss */
+    activated(): void;
+}
 
 interface Tab {
     id: string;
@@ -22,36 +44,30 @@ interface Tab {
     lastSize: string;
 }
 
-export class Tabs {
+export class TermManager {
     private tabs: Tab[] = [];
     private active: Tab | null = null;
     private current = "main";
     private lastActive = new Map<string, Tab>();
-    private dashActive = false;
-    private attention = new Set<string>();
-    /** Strip number of the dashboard (config dashboard-tab); shell
-     *  windows display as dashTab+1, dashTab+2, … */
-    dashTab = 1;
-
-    /** Called when the active workspace loses its last window — the
-     *  manager (home) takes over, VS Code-style. */
-    onWorkspaceGone: () => void = () => {};
-    /** Called whenever the current workspace (or its tab set) changes. */
-    onChange: () => void = () => {};
-    /** Called when a window is activated — dismisses overlays (dashboard). */
-    onActivate: () => void = () => {};
-    /** The strip's window-0 button — toggles the workspace dashboard. */
-    onDashboard: () => void = () => {};
 
     constructor(
-        private stripEl: HTMLElement,
-        private termsEl: HTMLElement,
+        private container: HTMLElement,
         private api: HostAPI,
         private mkTerm: TermFactory,
+        private events: TermEvents,
     ) {}
 
     get workspace(): string {
         return this.current;
+    }
+
+    get activeId(): string | null {
+        return this.active?.id ?? null;
+    }
+
+    /** Snapshot for the strip and pickers: tabs in the current workspace. */
+    currentTabs(): TabInfo[] {
+        return this.wsTabs().map(({id, name, workspace}) => ({id, name, workspace}));
     }
 
     workspaces(): {name: string; count: number}[] {
@@ -95,7 +111,7 @@ export class Tabs {
         const box = document.createElement("div");
         box.className = "term-box";
         wrap.appendChild(box);
-        this.termsEl.appendChild(wrap);
+        this.container.appendChild(wrap);
 
         const {term, fit} = this.mkTerm();
         term.open(box);
@@ -115,7 +131,7 @@ export class Tabs {
         });
         this.connect(tab);
         this.tabs.push(tab);
-        this.renderStrip();
+        this.events.changed();
         return tab;
     }
 
@@ -154,33 +170,21 @@ export class Tabs {
         this.activate(this.addTab(s));
     }
 
-    activate(tab: Tab): void {
+    private activate(tab: Tab): void {
         this.current = tab.workspace;
         localStorage.setItem("rook.workspace", this.current);
         for (const t of this.tabs) t.wrap.classList.toggle("active", t === tab);
         this.active = tab;
         this.lastActive.set(tab.workspace, tab);
-        this.renderStrip();
         this.syncSize(true);
         tab.term.focus();
-        this.onChange();
-        this.onActivate();
+        this.events.changed();
+        this.events.activated();
     }
 
-    /** Strip state for the dashboard: window 0 lights up, the active
-     *  window number dims (tmux current-window semantics). */
-    setDashboardActive(v: boolean): void {
-        if (this.dashActive === v) return;
-        this.dashActive = v;
-        this.renderStrip();
-    }
-
-    /** Session ids whose agent is waiting on the user — their window
-     *  numbers pulse (tmux monitor-activity, but for claude). */
-    setAttention(ids: Set<string>): void {
-        if (ids.size === this.attention.size && [...ids].every((id) => this.attention.has(id))) return;
-        this.attention = ids;
-        this.renderStrip();
+    activateId(id: string): void {
+        const tab = this.tabs.find((t) => t.id === id);
+        if (tab) this.activate(tab);
     }
 
     /** Fit the active grid to its container and tell the PTY, deduped. */
@@ -244,10 +248,6 @@ export class Tabs {
         this.active?.term.focus();
     }
 
-    get activeId(): string | null {
-        return this.active?.id ?? null;
-    }
-
     sendToActive(data: string): void {
         if (this.active?.ws?.readyState === WebSocket.OPEN) this.active.ws.send(data);
     }
@@ -259,7 +259,7 @@ export class Tabs {
         if (this.lastActive.get(tab.workspace) === tab) this.lastActive.delete(tab.workspace);
         tab.term.dispose();
         tab.wrap.remove();
-        this.renderStrip();
+        this.events.changed();
         if (this.active !== tab) return;
         this.active = null;
         const sameWs = this.wsTabs(tab.workspace);
@@ -267,41 +267,7 @@ export class Tabs {
             this.activate(sameWs[0]);
         } else {
             // workspace died with its last window → back to the manager
-            this.onWorkspaceGone();
+            this.events.workspaceGone();
         }
-    }
-
-    /** tmux-style strip: bare window numbers within the current workspace
-     *  (window-status-format ' #{window_index} ' — no names). */
-    private renderStrip(): void {
-        this.stripEl.innerHTML = "";
-        // the workspace dashboard's slot
-        const dash = document.createElement("button");
-        dash.className = "tab tab-dash" + (this.dashActive ? " active" : "");
-        dash.style.setProperty("--wails-draggable", "no-drag");
-        dash.textContent = String(this.dashTab);
-        dash.title = "Dashboard (` d)";
-        dash.addEventListener("click", () => this.onDashboard());
-        this.stripEl.appendChild(dash);
-        this.wsTabs().forEach((tab, i) => {
-            const btn = document.createElement("button");
-            let cls = "tab" + (tab === this.active && !this.dashActive ? " active" : "");
-            // the window you're looking at doesn't need to flag you down
-            if (this.attention.has(tab.id) && (tab !== this.active || this.dashActive)) cls += " attn";
-            btn.className = cls;
-            btn.style.setProperty("--wails-draggable", "no-drag");
-            btn.textContent = String(this.dashTab + 1 + i);
-            btn.title = tab.name;
-            btn.addEventListener("click", () => this.activate(tab));
-            this.stripEl.appendChild(btn);
-        });
-        const plus = document.createElement("button");
-        plus.className = "tab tab-new";
-        plus.style.setProperty("--wails-draggable", "no-drag");
-        plus.textContent = "+";
-        plus.title = "New window (` c)";
-        plus.addEventListener("click", () => void this.newSession());
-        this.stripEl.appendChild(plus);
-        this.onChange();
     }
 }
