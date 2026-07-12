@@ -455,6 +455,8 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case action == "status" && r.Method == http.MethodGet:
 		h.handleWorkspaceStatus(w, name)
+	case action == "issues" && r.Method == http.MethodGet:
+		h.handleWorkspaceIssues(w, r, name)
 	case action == "" && r.Method == http.MethodDelete:
 		force := r.URL.Query().Get("force") == "1"
 		ws := h.reg.get(name)

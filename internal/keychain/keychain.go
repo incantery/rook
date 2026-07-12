@@ -14,11 +14,12 @@ import (
 	"strings"
 )
 
-// The one item rook owns today: the drafter's OpenAI key
-// (`security find-generic-password -s rook -a openai`).
+// The items rook owns: the drafter's OpenAI key and the issue queue's
+// Jira API token (`security find-generic-password -s rook -a <account>`).
 const (
 	Service       = "rook"
 	OpenAIAccount = "openai"
+	JiraAccount   = "jira"
 )
 
 var ErrUnsupported = errors.New("keychain: only supported on macOS")

@@ -12,7 +12,11 @@
 //	rookctl approve       send a draft (optionally edited) into its window
 //	rookctl reject        decline a draft
 //	rookctl spawn         start a claude session: rookctl spawn [-w ws] [--worktree] <task…>
+//	rookctl issues        the workspace's work queue (GitHub + Jira, mine + unassigned)
+//	rookctl work          start claude on an issue in a fresh worktree: rookctl work INF-7
+//	rookctl decisions     the drafter's ledger, last 7 days, with the verdict mix
 //	rookctl set-openai-key store the drafter's API key in the keychain
+//	rookctl set-jira-token store the Jira API token (queue credential) in the keychain
 //	rookctl claim         claude SessionStart hook body (stdin → host)
 //	rookctl unclaim       claude SessionEnd hook body
 //	rookctl notify-hook   claude Notification hook body (permission prompts)
@@ -105,8 +109,16 @@ func main() {
 		err = runReject(os.Args[2:])
 	case "spawn":
 		err = runSpawn(os.Args[2:])
+	case "issues":
+		err = runIssues(os.Args[2:])
+	case "work":
+		err = runWork(os.Args[2:])
+	case "decisions":
+		err = runDecisions()
 	case "set-openai-key":
 		err = runSetOpenAIKey()
+	case "set-jira-token":
+		err = runSetJiraToken()
 	case "claim":
 		err = runClaim(false)
 	case "unclaim":
@@ -560,6 +572,206 @@ func shellQuote(s string) string {
 }
 
 // ---- set-openai-key ----
+
+// ---- issues (the work queue: GitHub + Jira behind the host) ----
+
+type issueRow struct {
+	Tracker string `json:"tracker"`
+	Key     string `json:"key"`
+	Title   string `json:"title"`
+	State   string `json:"state"`
+	Mine    bool   `json:"mine"`
+	URL     string `json:"url"`
+	Task    string `json:"task"`
+}
+
+type issuesResp struct {
+	Issues []issueRow `json:"issues"`
+	Errors []string   `json:"errors"`
+}
+
+func fetchIssues(c *client, ws string) (issuesResp, error) {
+	var res issuesResp
+	raw, err := c.req("GET", "/workspaces/"+ws+"/issues", nil)
+	if err != nil {
+		return res, err
+	}
+	return res, json.Unmarshal(raw, &res)
+}
+
+// runIssues prints the workspace's queue: mine first, then unassigned.
+func runIssues(args []string) error {
+	ws := os.Getenv("ROOK_WORKSPACE")
+	if len(args) >= 2 && args[0] == "-w" {
+		ws = args[1]
+	}
+	if ws == "" {
+		return fmt.Errorf("usage: rookctl issues [-w workspace] (or run inside a rook window)")
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	res, err := fetchIssues(c, ws)
+	if err != nil {
+		return err
+	}
+	for _, e := range res.Errors {
+		fmt.Fprintln(os.Stderr, "rookctl: issues:", e)
+	}
+	if len(res.Issues) == 0 {
+		fmt.Println("queue empty")
+		return nil
+	}
+	for _, i := range res.Issues {
+		who := "unassigned"
+		if i.Mine {
+			who = "mine"
+		}
+		title := i.Title
+		if len(title) > 70 {
+			title = title[:70] + "…"
+		}
+		fmt.Printf("%-10s %-10s %-11s %s\n", i.Key, who, i.State, title)
+	}
+	return nil
+}
+
+// runWork starts a claude session on an issue — the issue→worktree→session
+// loop in one command. Worktree isolation is the default when the
+// workspace has a repo; --no-worktree lands in the workspace itself.
+func runWork(args []string) error {
+	ws := os.Getenv("ROOK_WORKSPACE")
+	worktree := true
+	for len(args) > 0 {
+		if args[0] == "-w" && len(args) >= 2 {
+			ws, args = args[1], args[2:]
+		} else if args[0] == "--no-worktree" {
+			worktree, args = false, args[1:]
+		} else {
+			break
+		}
+	}
+	if len(args) != 1 || ws == "" {
+		return fmt.Errorf("usage: rookctl work [-w workspace] [--no-worktree] <issue-key>")
+	}
+	key := args[0]
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	res, err := fetchIssues(c, ws)
+	if err != nil {
+		return err
+	}
+	var task string
+	for _, i := range res.Issues {
+		if i.Key == key || strings.TrimPrefix(i.Key, "#") == key {
+			task = i.Task
+			break
+		}
+	}
+	if task == "" {
+		return fmt.Errorf("%s is not in %s's queue (rookctl issues to see it)", key, ws)
+	}
+	target, cwdFrom := ws, os.Getenv("ROOK_SESSION")
+	if worktree {
+		raw, err := c.req("POST", "/workspaces", map[string]any{"worktreeFrom": ws})
+		if err != nil {
+			return err
+		}
+		var created struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &created); err != nil {
+			return err
+		}
+		target, cwdFrom = created.Name, ""
+	}
+	raw, err := c.req("POST", "/sessions", map[string]any{
+		"cols": 100, "rows": 30, "workspace": target, "cwdFrom": cwdFrom,
+	})
+	if err != nil {
+		return err
+	}
+	var s struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return err
+	}
+	time.Sleep(500 * time.Millisecond) // let the shell come up
+	if _, err := c.req("POST", "/sessions/"+s.ID+"/input",
+		map[string]string{"data": "claude " + shellQuote(task) + "\r"}); err != nil {
+		return err
+	}
+	fmt.Printf("working %s in %s (session %s)\n", key, target, s.ID)
+	return nil
+}
+
+// ---- decisions (the drafter's ledger, human-readable) ----
+
+func runDecisions() error {
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	since := time.Now().Add(-7 * 24 * time.Hour)
+	raw, err := c.req("GET", "/decisions?since="+since.UTC().Format("2006-01-02T15:04:05Z"), nil)
+	if err != nil {
+		return err
+	}
+	var rows []struct {
+		Action     string  `json:"action"`
+		Verdict    string  `json:"verdict"`
+		Confidence float64 `json:"confidence"`
+		Model      string  `json:"model"`
+		CostUSD    float64 `json:"costUsd"`
+		Ask        string  `json:"ask"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		fmt.Println("no decisions in the last 7 days")
+		return nil
+	}
+	mix := map[string]int{}
+	var usd float64
+	for _, r := range rows {
+		mix[r.Verdict]++
+		usd += r.CostUSD
+		ask := strings.ReplaceAll(r.Ask, "\n", " ")
+		if len(ask) > 60 {
+			ask = ask[:60] + "…"
+		}
+		fmt.Printf("%-9s %-9s %4.2f  $%.4f  %s\n", r.Action, r.Verdict, r.Confidence, r.CostUSD, ask)
+	}
+	fmt.Printf("\n%d decisions, $%.4f — verdicts:", len(rows), usd)
+	for _, v := range []string{"approved", "edited", "rejected", "manual", "stale", "open", "auto"} {
+		if mix[v] > 0 {
+			fmt.Printf(" %s %d", v, mix[v])
+		}
+	}
+	fmt.Println()
+	return nil
+}
+
+// runSetJiraToken mirrors runSetOpenAIKey for the issue queue's Jira
+// credential (api token from id.atlassian.com; email + url live in config).
+func runSetJiraToken() error {
+	cmd := exec.Command("security", "add-generic-password", "-U",
+		"-s", keychain.Service, "-a", keychain.JiraAccount, "-w")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("security add-generic-password: %w", err)
+	}
+	if k, err := keychain.Get(keychain.Service, keychain.JiraAccount); err != nil || k == "" {
+		return fmt.Errorf("stored, but read-back failed — is the login keychain locked?")
+	}
+	fmt.Println("jira token stored — set jira-url, jira-email, and jira-project-<workspace> in ~/.config/rook/config")
+	return nil
+}
 
 // runSetOpenAIKey hands the whole prompt to the security tool: it reads
 // the key with hidden input on the tty, so the secret never appears in

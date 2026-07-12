@@ -102,6 +102,12 @@ export class HostAPI {
         return (await this.req("/attention")).json();
     }
 
+    /** The workspace's work queue: GitHub + Jira, mine + unassigned, with
+     *  ready-to-spawn task prompts. Host caches ~60s; read, never mirror. */
+    async issues(ws: string): Promise<IssuesResult> {
+        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/issues`)).json();
+    }
+
     /** Subscription usage windows, cached by the host's cost-weighted prober. */
     async usage(): Promise<UsageSnapshot> {
         return (await this.req("/usage")).json();
@@ -189,6 +195,24 @@ export interface AttentionItem {
     interactive?: boolean;
     since: string;
     draft?: DraftInfo | null;
+}
+
+/** One row of the workspace's issue queue (GET /workspaces/{ws}/issues). */
+export interface IssueInfo {
+    tracker: "github" | "jira";
+    key: string;
+    title: string;
+    state?: string;
+    mine: boolean;
+    url?: string;
+    /** host-built claude prompt — every surface spawns the identical thing */
+    task: string;
+}
+
+export interface IssuesResult {
+    issues: IssueInfo[];
+    /** per-tracker failures; a dead Jira must not blank the GitHub rows */
+    errors?: string[];
 }
 
 export interface WorkspaceInfo {

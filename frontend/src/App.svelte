@@ -6,7 +6,7 @@
 <script lang="ts">
     import {onMount, tick} from "svelte";
     import {Call} from "@wailsio/runtime";
-    import type {HostAPI} from "./hostapi";
+    import type {HostAPI, IssueInfo} from "./hostapi";
     import {TermManager, type TermFactory} from "./term/manager";
     import {Registry} from "./registry";
     import {app} from "./state.svelte";
@@ -79,6 +79,26 @@
         setTimeout(() => {
             api.sendInput(id, `claude ${shellQuote(task)}\r`).catch((err) => {
                 console.error("spawn: sending claude command failed", err);
+            });
+        }, 400);
+    }
+
+    // The issue→worktree→session loop, dashboard-invoked: isolate in a
+    // fresh worktree when the workspace has a repo, else land in the
+    // workspace itself — the queue must work for non-repo roots too.
+    async function workIssue(issue: IssueInfo): Promise<void> {
+        let workspace = app.workspace;
+        try {
+            workspace = (await api.createWorktree(workspace)).name;
+        } catch (err) {
+            console.warn("worktree isolation unavailable — spawning in the workspace", err);
+        }
+        app.screen = "app";
+        await tick(); // spawnIn activates: fit/focus need a visible DOM
+        const id = await mgr.spawnIn(workspace);
+        setTimeout(() => {
+            api.sendInput(id, `claude ${shellQuote(issue.task)}\r`).catch((err) => {
+                console.error("work: sending claude command failed", err);
             });
         }, 400);
     }
@@ -328,7 +348,7 @@
             <div id="fatal">{fatal}</div>
         {/if}
         {#if app.dashVisible}
-            <Dashboard {api} onjump={(i) => mgr.switchTo(i)} runCmd={(id) => registry.run(id)} />
+            <Dashboard {api} onjump={(i) => mgr.switchTo(i)} runCmd={(id) => registry.run(id)} onwork={workIssue} />
         {/if}
     </div>
 </div>

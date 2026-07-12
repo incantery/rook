@@ -364,6 +364,63 @@ body {
   gap: 9px;
   flex-wrap: wrap;
 }
+/* the issue queue: one row per issue, mine before unassigned */
+#dash-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 22px;
+}
+.dash-issue {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 12px;
+}
+.dash-issue-key {
+  font-family: var(--mono);
+  color: #82aaff;
+  white-space: nowrap;
+}
+.dash-issue-who {
+  font-size: 10.5px;
+  font-family: var(--mono);
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--lo);
+}
+.dash-issue-who.mine {
+  background: rgba(195, 232, 141, 0.12);
+  color: var(--grn);
+}
+.dash-issue-title {
+  flex: 1;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dash-issue-state {
+  font-size: 10.5px;
+  color: var(--lo);
+  white-space: nowrap;
+}
+.dash-issue-go {
+  white-space: nowrap;
+}
+.dash-issue-err {
+  font-size: 11px;
+  color: #ffcb6b;
+  padding: 2px 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ==== command palette + workspace picker overlays ==== */
 .overlay {

@@ -30,6 +30,14 @@ type Config struct {
 	Agent            bool    `json:"agent"`
 	AgentModel       string  `json:"agentModel"`
 	AgentDailyCapUSD float64 `json:"agentDailyCapUsd"`
+	// Jira issue queue (host-read): jira-url + jira-email are global; a
+	// workspace opts in with `jira-project-<workspace> = KEY`. The API
+	// token lives in the keychain (rookctl set-jira-token), file fallback
+	// ~/.config/rook/jira-token. jira-jql replaces the default query.
+	JiraURL      string            `json:"jiraUrl"`
+	JiraEmail    string            `json:"jiraEmail"`
+	JiraJQL      string            `json:"jiraJql"`
+	JiraProjects map[string]string `json:"jiraProjects"`
 }
 
 func Default() Config {
@@ -82,6 +90,14 @@ func Load() Config {
 		}
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
+		// dynamic keys first — the switch below only knows fixed names
+		if ws, ok := strings.CutPrefix(key, "jira-project-"); ok && ws != "" && value != "" {
+			if cfg.JiraProjects == nil {
+				cfg.JiraProjects = map[string]string{}
+			}
+			cfg.JiraProjects[ws] = value
+			continue
+		}
 		switch key {
 		case "font-family":
 			if value != "" {
@@ -117,6 +133,12 @@ func Load() Config {
 			if f, err := strconv.ParseFloat(value, 64); err == nil && f >= 0 {
 				cfg.AgentDailyCapUSD = f
 			}
+		case "jira-url":
+			cfg.JiraURL = strings.TrimRight(value, "/")
+		case "jira-email":
+			cfg.JiraEmail = value
+		case "jira-jql":
+			cfg.JiraJQL = value
 		}
 	}
 	return cfg
@@ -145,6 +167,25 @@ func (s *Service) SetOpenAIKey(key string) error {
 
 func (s *Service) ClearOpenAIKey() error {
 	return keychain.Delete(keychain.Service, keychain.OpenAIAccount)
+}
+
+// JiraToken resolves the Jira API token: keychain first (service rook,
+// account jira — set via `rookctl set-jira-token`), then the
+// ~/.config/rook/jira-token file (must be 0600-tight, like the OpenAI
+// fallback). "" means the Jira queue is off.
+func JiraToken() string {
+	if t, err := keychain.Get(keychain.Service, keychain.JiraAccount); err == nil && strings.TrimSpace(t) != "" {
+		return strings.TrimSpace(t)
+	}
+	tokFile := filepath.Join(filepath.Dir(Path()), "jira-token")
+	if st, err := os.Stat(tokFile); err != nil || st.Mode().Perm()&0o077 != 0 {
+		return ""
+	}
+	data, err := os.ReadFile(tokFile)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // OpenAIKeyStatus reports where a usable key currently lives: "keychain",

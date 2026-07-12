@@ -3,7 +3,7 @@
      context the attention router (docs/agent.md) consumes — if the
      dashboard can't show it, the agent can't know it. -->
 <script lang="ts">
-    import type {AgentStatus, HostAPI, WorkspaceStatus} from "./hostapi";
+    import type {AgentStatus, HostAPI, IssueInfo, IssuesResult, WorkspaceStatus} from "./hostapi";
     import {shortWindow} from "./hostapi";
     import {app} from "./state.svelte";
     import {ago, squeeze, tilde} from "./util";
@@ -12,10 +12,14 @@
         api: HostAPI;
         onjump: (index: number) => void;
         runCmd: (id: string) => void;
+        /** start claude on this issue (worktree by default) — App owns the flow */
+        onwork: (issue: IssueInfo) => Promise<void>;
     }
-    let {api, onjump, runCmd}: Props = $props();
+    let {api, onjump, runCmd, onwork}: Props = $props();
 
     let st = $state<WorkspaceStatus | null>(null);
+    let queue = $state<IssuesResult | null>(null);
+    let starting = $state(""); // issue key being started (debounce the ▶)
 
     /** One line of agent state on a window card: what claude is doing,
      *  and — at needs_input — what it's asking. */
@@ -45,6 +49,33 @@
         const t = setInterval(() => void refresh(), 3000);
         return () => clearInterval(t);
     });
+
+    // The issue queue moves at human speed and the host caches ~60s —
+    // poll gently, and re-fetch when the workspace changes.
+    $effect(() => {
+        const ws = app.workspace;
+        queue = null;
+        const fetchQueue = async () => {
+            try {
+                queue = await api.issues(ws);
+            } catch (err) {
+                console.error("issues fetch failed", err);
+            }
+        };
+        void fetchQueue();
+        const t = setInterval(() => void fetchQueue(), 60_000);
+        return () => clearInterval(t);
+    });
+
+    async function work(issue: IssueInfo) {
+        if (starting) return;
+        starting = issue.key;
+        try {
+            await onwork(issue);
+        } finally {
+            starting = "";
+        }
+    }
 
     const worstUsage = $derived(
         app.usage && app.usage.windows.length ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a)) : null,
@@ -110,6 +141,28 @@
                 <div class="home-empty">No windows — ` c opens one.</div>
             {/if}
         </div>
+        {#if queue && (queue.issues.length > 0 || (queue.errors ?? []).length > 0)}
+            <div class="dash-sec">Queue</div>
+            <div id="dash-queue">
+                {#each queue.issues as i (i.tracker + i.key)}
+                    <div class="dash-issue">
+                        <span class="dash-issue-key">{i.key}</span>
+                        <span class="dash-issue-who" class:mine={i.mine}>{i.mine ? "mine" : "open"}</span>
+                        <span class="dash-issue-title" title={i.title}>{i.title}</span>
+                        {#if i.state && i.state !== "open"}<span class="dash-issue-state">{i.state}</span>{/if}
+                        <button
+                            class="home-btn dash-issue-go"
+                            title="Start claude on this issue in a fresh worktree"
+                            disabled={starting !== ""}
+                            onclick={() => void work(i)}>{starting === i.key ? "…" : "▶ work"}</button
+                        >
+                    </div>
+                {/each}
+                {#each queue.errors ?? [] as e}
+                    <div class="dash-issue-err" title={e}>⚠ {e}</div>
+                {/each}
+            </div>
+        {/if}
         <div class="dash-actions">
             <button class="home-btn" onclick={() => runCmd("session.new")}><span class="plus">+</span> New window</button>
             <button class="home-btn" onclick={() => runCmd("workspace.set-root")}>Set root to shell's cwd</button>

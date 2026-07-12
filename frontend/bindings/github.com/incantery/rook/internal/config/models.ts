@@ -22,4 +22,15 @@ export interface Config {
     "agent": boolean;
     "agentModel": string;
     "agentDailyCapUsd": number;
+
+    /**
+     * Jira issue queue (host-read): jira-url + jira-email are global; a
+     * workspace opts in with `jira-project-<workspace> = KEY`. The API
+     * token lives in the keychain (rookctl set-jira-token), file fallback
+     * ~/.config/rook/jira-token. jira-jql replaces the default query.
+     */
+    "jiraUrl": string;
+    "jiraEmail": string;
+    "jiraJql": string;
+    "jiraProjects": { [_ in string]?: string } | null;
 }
