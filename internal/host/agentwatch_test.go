@@ -68,31 +68,87 @@ func TestAgentStateMachine(t *testing.T) {
 	}
 }
 
-func TestCorrelate(t *testing.T) {
+// The field bug this guards: two claude windows in one repo (plus a third
+// claude session in the same dir that isn't in rook at all), needs_input
+// fires in the later window — and recency-based pairing pulsed the earlier
+// one. The ask text on the window's own PTY is the tiebreaker.
+func TestCorrelateByRingContent(t *testing.T) {
 	now := time.Now()
-	states := []*AgentStatus{
-		{SessionID: "old", Project: "/tmp/x", State: "working", LastEvent: now.Add(-time.Minute)},
-		{SessionID: "new", Project: "/tmp/x", State: "needs_input", LastEvent: now},
-		{SessionID: "cwd-only", CWD: "/tmp/y", State: "working", LastEvent: now},
+	ask := "Should I delete the old migration or keep it for the rollback path?"
+	mkStates := func() []*AgentStatus {
+		return []*AgentStatus{
+			// most recent: a claude session outside any rook window
+			{SessionID: "ghostty", Project: "/repo", State: "working", LastEvent: now},
+			{SessionID: "asker", Project: "/repo", State: "needs_input", Ask: ask, LastEvent: now.Add(-time.Second)},
+			{SessionID: "worker", Project: "/repo", State: "working", LastEvent: now.Add(-2 * time.Second)},
+		}
 	}
 	sessions := []sessionStatus{
-		{Fg: "claude", Cwd: "/tmp/x"},
-		{Fg: "zsh", Cwd: "/tmp/x"},   // not claude — never correlated
-		{Fg: "claude", Cwd: "/tmp/x"}, // second claude in same dir gets the older state
-		{Fg: "claude", Cwd: "/tmp/y"}, // matches by exact cwd
+		{SessionInfo: SessionInfo{ID: "w2"}, Fg: "claude", Cwd: "/repo"},
+		{SessionInfo: SessionInfo{ID: "w3"}, Fg: "claude", Cwd: "/repo"},
+		{SessionInfo: SessionInfo{ID: "w4"}, Fg: "zsh", Cwd: "/repo"},
 	}
-	correlate(sessions, states)
+	// w3's PTY shows the ask the way a TUI renders it: colored, wrapped,
+	// markdown stripped differently than the transcript text
+	live := []*session{
+		{ring: []byte("\x1b[32mCompiling…\x1b[0m done\r\n$ ")},
+		{ring: []byte("\x1b[38;5;153mShould I delete the old\r\nmigration \x1b[1mor keep it\x1b[22m for the\r\nrollback path?\x1b[0m\r\n❯ ")},
+		{ring: []byte("irrelevant shell output")},
+	}
 
-	if sessions[0].Agent == nil || sessions[0].Agent.SessionID != "new" {
-		t.Errorf("first claude window should get the most recent state, got %+v", sessions[0].Agent)
+	h := &Host{binds: make(map[string]string)}
+	h.correlate(sessions, live, mkStates())
+
+	if sessions[1].Agent == nil || sessions[1].Agent.SessionID != "asker" {
+		t.Fatalf("w3 should get the needs_input state (its PTY shows the ask), got %+v", sessions[1].Agent)
 	}
-	if sessions[1].Agent != nil {
+	if sessions[0].Agent != nil && sessions[0].Agent.SessionID == "asker" {
+		t.Error("w2 must not get the needs_input state")
+	}
+	if sessions[2].Agent != nil {
 		t.Error("zsh window must not get an agent state")
 	}
-	if sessions[2].Agent == nil || sessions[2].Agent.SessionID != "old" {
-		t.Errorf("second claude window should get the remaining state, got %+v", sessions[2].Agent)
+	if h.binds["asker"] != "w3" {
+		t.Errorf("ring match should bind asker→w3, binds = %v", h.binds)
 	}
-	if sessions[3].Agent == nil || sessions[3].Agent.SessionID != "cwd-only" {
-		t.Errorf("exact-cwd match failed, got %+v", sessions[3].Agent)
+
+	// sticky: the ask has scrolled out of the ring, the pairing holds
+	sessions[0].Agent, sessions[1].Agent = nil, nil
+	live[1].ring = []byte("$ make test\r\nok\r\n")
+	h.correlate(sessions, live, mkStates())
+	if sessions[1].Agent == nil || sessions[1].Agent.SessionID != "asker" {
+		t.Fatalf("binding should keep asker on w3, got %+v", sessions[1].Agent)
+	}
+
+	// the bound window dies → unpin, recency fallback resumes
+	sessions[0].Agent, sessions[1].Agent = nil, nil
+	h.correlate(sessions[:1], live[:1], mkStates())
+	if h.binds["asker"] != "" {
+		t.Errorf("binding to a dead window should be dropped, binds = %v", h.binds)
+	}
+	if sessions[0].Agent == nil {
+		t.Error("lone claude window should still get a state by recency")
+	}
+}
+
+// Ambiguous evidence must not bind: identical text on two windows.
+func TestCorrelateAmbiguousRing(t *testing.T) {
+	ask := "Ready for the next step whenever you are, just say the word."
+	ring := []byte("Ready for the next step whenever you are, just say the word.")
+	sessions := []sessionStatus{
+		{SessionInfo: SessionInfo{ID: "a"}, Fg: "claude", Cwd: "/repo"},
+		{SessionInfo: SessionInfo{ID: "b"}, Fg: "claude", Cwd: "/repo"},
+	}
+	live := []*session{{ring: ring}, {ring: ring}}
+	states := []*AgentStatus{
+		{SessionID: "s1", Project: "/repo", State: "needs_input", Ask: ask, LastEvent: time.Now()},
+	}
+	h := &Host{binds: make(map[string]string)}
+	h.correlate(sessions, live, states)
+	if len(h.binds) != 0 {
+		t.Errorf("ambiguous match must not bind, binds = %v", h.binds)
+	}
+	if sessions[0].Agent == nil {
+		t.Error("state should still land somewhere via recency fallback")
 	}
 }

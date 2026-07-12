@@ -6,6 +6,7 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -29,7 +31,7 @@ const (
 	// replaced (sessions die with it — the tmux server-upgrade reality).
 	// BUMP THIS with any host API or storage change: a stale daemon
 	// answering health checks 404s new endpoints silently.
-	Version = 5
+	Version = 6
 	ringCap = 512 * 1024
 )
 
@@ -65,6 +67,11 @@ type Host struct {
 
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
+
+	// binds pins transcript session ids to rook session ids once ring-
+	// content matching has proven the pairing (see correlate).
+	bindMu sync.Mutex
+	binds  map[string]string
 }
 
 type cwdEntry struct {
@@ -83,6 +90,7 @@ func New() *Host {
 		reg:      loadRegistry(),
 		aw:       newAgentWatch(),
 		cwdCache: make(map[int]cwdEntry),
+		binds:    make(map[string]string),
 	}
 	go h.aw.run(context.Background())
 	return h
@@ -199,6 +207,13 @@ func (h *Host) readPump(s *session) {
 	// shell exited
 	s.cmd.Wait()
 	s.pty.Close()
+	h.bindMu.Lock()
+	for tid, sid := range h.binds {
+		if sid == s.info.ID {
+			delete(h.binds, tid)
+		}
+	}
+	h.bindMu.Unlock()
 	h.mu.Lock()
 	delete(h.sessions, s.info.ID)
 	remaining := 0
@@ -366,25 +381,138 @@ type workspaceStatus struct {
 	Attention int `json:"attention"`
 }
 
-// correlate pairs rook windows running claude with agentwatch's transcript
-// sessions, by working directory: exact cwd when the watcher saw the
-// session start, the (path-decoded) project otherwise. Two claude sessions
-// in the same dir are disambiguated by recency only — an accepted v1 limit
-// (transcripts carry no pid).
-func correlate(sessions []sessionStatus, states []*AgentStatus) {
-	sort.Slice(states, func(i, j int) bool { return states[i].LastEvent.After(states[j].LastEvent) })
-	used := make(map[string]bool)
-	for i := range sessions {
-		if sessions[i].Fg != "claude" || sessions[i].Cwd == "" {
-			continue
+// ansiRE strips escape sequences (CSI, OSC, single-char ESC) so ring
+// content can be compared to transcript text.
+var ansiRE = regexp.MustCompile(`\x1b(\[[0-9;:?<=>]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)?|[@-Z\\-_])`)
+
+// normText reduces text to lowercase alphanumerics: TUI rendering differs
+// from transcript text by markdown markers, wrapping, and color — none of
+// which survive this.
+func normText(b []byte) []byte {
+	b = ansiRE.ReplaceAll(b, nil)
+	out := b[:0]
+	for _, c := range b {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			out = append(out, c)
+		case c >= 'A' && c <= 'Z':
+			out = append(out, c+'a'-'A')
 		}
-		for _, st := range states {
-			if used[st.SessionID] {
+	}
+	return out
+}
+
+// askProbe is the tail of an ask, normalized — long enough to be
+// distinctive, short enough to survive agentmon's content truncation.
+func askProbe(ask string) []byte {
+	p := normText([]byte(ask))
+	if len(p) > 160 {
+		p = p[len(p)-160:]
+	}
+	if len(p) < 12 {
+		return nil // too generic to be evidence
+	}
+	return p
+}
+
+func (s *session) normRing() []byte {
+	s.mu.Lock()
+	ring := make([]byte, len(s.ring))
+	copy(ring, s.ring)
+	s.mu.Unlock()
+	return normText(ring)
+}
+
+// correlate pairs rook windows running claude with agentwatch's transcript
+// sessions. Working directory narrows the field, but several claude
+// sessions can share one dir (including ones running outside rook), so
+// within a dir the evidence hierarchy is:
+//
+//  1. sticky bindings — pairs proven earlier stay paired
+//  2. ring content — at needs_input, claude's ask text is on exactly one
+//     window's PTY; a unique match proves the pair and binds it
+//  3. recency — last resort, never binds (guesses must not stick)
+//
+// live is index-aligned with sessions and supplies the ring buffers.
+func (h *Host) correlate(sessions []sessionStatus, live []*session, states []*AgentStatus) {
+	sort.Slice(states, func(i, j int) bool { return states[i].LastEvent.After(states[j].LastEvent) })
+	h.bindMu.Lock()
+	defer h.bindMu.Unlock()
+
+	var windows []int // claude windows, still unassigned
+	for i := range sessions {
+		if sessions[i].Fg == "claude" && sessions[i].Cwd != "" {
+			windows = append(windows, i)
+		}
+	}
+	dirMatch := func(st *AgentStatus, i int) bool {
+		return st.CWD == sessions[i].Cwd || st.Project == sessions[i].Cwd
+	}
+	assign := func(st *AgentStatus, i int) {
+		sessions[i].Agent = st
+		for k, w := range windows {
+			if w == i {
+				windows = append(windows[:k], windows[k+1:]...)
+				break
+			}
+		}
+	}
+
+	var unbound []*AgentStatus
+	for _, st := range states {
+		if id := h.binds[st.SessionID]; id != "" {
+			bound := false
+			for _, i := range windows {
+				if sessions[i].ID == id {
+					assign(st, i)
+					bound = true
+					break
+				}
+			}
+			if bound {
 				continue
 			}
-			if st.CWD == sessions[i].Cwd || st.Project == sessions[i].Cwd {
-				sessions[i].Agent = st
-				used[st.SessionID] = true
+			delete(h.binds, st.SessionID) // window is gone; unpin
+		}
+		unbound = append(unbound, st)
+	}
+
+	var leftover []*AgentStatus
+	rings := make(map[int][]byte)
+	for _, st := range unbound {
+		probe := askProbe(st.Ask)
+		if st.State != "needs_input" || probe == nil {
+			leftover = append(leftover, st)
+			continue
+		}
+		match := -1
+		for _, i := range windows {
+			if !dirMatch(st, i) {
+				continue
+			}
+			if _, ok := rings[i]; !ok {
+				rings[i] = live[i].normRing()
+			}
+			if bytes.Contains(rings[i], probe) {
+				if match != -1 {
+					match = -1 // two windows show the same text: not evidence
+					break
+				}
+				match = i
+			}
+		}
+		if match == -1 {
+			leftover = append(leftover, st)
+			continue
+		}
+		h.binds[st.SessionID] = sessions[match].ID
+		assign(st, match)
+	}
+
+	for _, st := range leftover {
+		for _, i := range windows {
+			if dirMatch(st, i) {
+				assign(st, i)
 				break
 			}
 		}
@@ -428,7 +556,7 @@ func (h *Host) handleWorkspaceStatus(w http.ResponseWriter, name string) {
 		dir = out.Sessions[0].Cwd
 	}
 	out.Git = gitInfo(dir)
-	correlate(out.Sessions, h.aw.snapshot())
+	h.correlate(out.Sessions, sess, h.aw.snapshot())
 	for _, s := range out.Sessions {
 		if s.Agent != nil && s.Agent.State == "needs_input" {
 			out.Attention++
