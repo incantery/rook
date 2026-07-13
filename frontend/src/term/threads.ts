@@ -115,6 +115,10 @@ export class ThreadBand {
      *  editor selection to lines and routes ⌘⇧M/context-menu here. */
     openComposer(startLine: number, endLine: number): void {
         this.closeComposer();
+        // identity for the async save path: a second composer may replace
+        // this one while a create is in flight — its completion must not
+        // touch the replacement
+        let mine: Zone | null = null;
         const dom = document.createElement("div");
         dom.className = "thread-zone";
         const card = document.createElement("div");
@@ -139,11 +143,11 @@ export class ThreadBand {
             save.disabled = true;
             try {
                 await this.hooks.create(startLine, endLine, body);
-                this.closeComposer(); // the refetch renders the pending marker
+                if (this.composer === mine) this.closeComposer(); // the refetch renders the pending marker
             } catch (e) {
                 err.textContent = String(e);
                 err.hidden = false;
-                if (this.composer) this.sizeZone(this.composer);
+                if (this.composer === mine && mine) this.sizeZone(mine);
             } finally {
                 save.disabled = false;
             }
@@ -172,6 +176,7 @@ export class ThreadBand {
             id = a.addZone(zone);
         });
         this.composer = {id, zone, dom, card};
+        mine = this.composer;
         this.sizeZone(this.composer);
         this.editor.revealLinesInCenterIfOutsideViewport(startLine, endLine);
         requestAnimationFrame(() => input.focus());
