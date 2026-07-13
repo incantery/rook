@@ -530,17 +530,29 @@ func threadsNudge(n int, ws string) string {
 // claudeSessionIn finds the workspace's live claude window via the claim
 // machinery (SessionStart hook → rookctl claim — authoritative, and the
 // standard install). Deliberately NOT fg-based: no lsof on the submit
-// path, and claims are testable against pipe fixtures. No claim → ""
-// and submit spawns a responder instead.
-func (h *Host) claudeSessionIn(ws string) string {
+// path, and claims are testable against pipe fixtures. Multiple claimed
+// windows pick the newest session (highest numeric id) — deterministic,
+// and the latest-started claude is the likeliest active coder. Nil means
+// no claim; submit spawns a responder instead.
+func (h *Host) claudeSessionIn(ws string) *session {
 	h.bindMu.Lock()
 	defer h.bindMu.Unlock()
+	var best *session
+	bestN := -1
 	for _, sid := range h.claims {
-		if s := h.get(sid); s != nil && s.info.Workspace == ws {
-			return sid
+		s := h.get(sid)
+		if s == nil || s.info.Workspace != ws {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimPrefix(sid, "s"))
+		if err != nil {
+			n = 0 // unknown shape sorts oldest
+		}
+		if n > bestN {
+			best, bestN = s, n
 		}
 	}
-	return ""
+	return best
 }
 
 // handleThreadsSubmit is POST /workspaces/{name}/threads/submit: flip
@@ -561,10 +573,9 @@ func (h *Host) handleThreadsSubmit(w http.ResponseWriter, r *http.Request, name 
 		return
 	}
 	prompt := threadsNudge(waiting, name)
-	if sid := h.claudeSessionIn(name); sid != "" {
-		s := h.get(sid)
+	if s := h.claudeSessionIn(name); s != nil {
 		if _, err := s.pty.Write([]byte(prompt + "\r")); err == nil {
-			writeJSON(w, map[string]any{"mode": "typed", "rookSession": sid, "count": n})
+			writeJSON(w, map[string]any{"mode": "typed", "rookSession": s.info.ID, "count": n})
 			return
 		}
 		// a dead pty falls through to a fresh responder

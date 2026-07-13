@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // threadReg is a registry over a throwaway data dir — store tests need
@@ -442,6 +443,141 @@ func TestThreadSubmitTypesNudge(t *testing.T) {
 	if w := postWS(t, h, "/workspaces/ws/threads/submit", nil); w.Code != 400 {
 		t.Fatalf("drained submit: %d %s", w.Code, w.Body)
 	}
+}
+
+// TestThreadSubmitMultipleClaimsPicksNewest verifies that when a workspace
+// has multiple claimed claude sessions, the nudge goes to the one with the
+// highest numeric ID (the newest/latest-started claude).
+func TestThreadSubmitMultipleClaimsPicksNewest(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	// Set up two pipes: one for w1 (claimed), one for w2 (newest claimed)
+	pr1, pw1, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr2, pw2, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr1.Close(); pw1.Close(); pr2.Close(); pw2.Close() })
+
+	repo := t.TempDir()
+	gitT(t, repo, "init", "-b", "main")
+	os.WriteFile(filepath.Join(repo, "f.txt"), []byte("one\ntwo\n"), 0o644)
+	gitT(t, repo, "add", ".")
+	gitT(t, repo, "commit", "-m", "init")
+
+	// Create host with two claimed sessions: w1 (older) and w2 (newer)
+	h := &Host{
+		sessions: map[string]*session{
+			"s1": {info: SessionInfo{ID: "s1", Workspace: "ws"}, pty: pw1},
+			"s2": {info: SessionInfo{ID: "s2", Workspace: "ws"}, pty: pw2},
+		},
+		reg:      loadRegistry(),
+		aw:       newAgentWatch(),
+		cwdCache: make(map[int]cwdEntry),
+		claims:   map[string]string{"t1": "s1", "t2": "s2"},
+		binds:    map[string]string{},
+		drafts:   make(map[string]draftInfo),
+	}
+	if h.reg.db == nil {
+		t.Fatal("test registry has no db")
+	}
+	h.reg.upsert("ws", repo, false)
+
+	// Create a pending thread
+	h.reg.createThread(&ThreadInfo{Workspace: "ws", Path: "f.txt",
+		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "one"}, "test?")
+
+	// Submit: should nudge s2 (highest id), not s1
+	w := postWS(t, h, "/workspaces/ws/threads/submit", nil)
+	if w.Code != 200 {
+		t.Fatalf("submit: %d %s", w.Code, w.Body)
+	}
+	var res struct {
+		Mode        string `json:"mode"`
+		RookSession string `json:"rookSession"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &res)
+	if res.Mode != "typed" || res.RookSession != "s2" {
+		t.Fatalf("submit result: got mode=%s session=%s, want typed/s2", res.Mode, res.RookSession)
+	}
+
+	// Verify the nudge arrived on pr2 (w2's read end), not pr1
+	line, err := bufio.NewReader(pr2).ReadString('\r')
+	if err != nil || !strings.Contains(line, "1 review comment") {
+		t.Fatalf("nudge on pr2: %q (%v)", line, err)
+	}
+
+	// pr1 should be empty (the nudge went to pr2, not pr1)
+	pr1.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	if _, err := bufio.NewReader(pr1).ReadString('\r'); err == nil {
+		t.Fatal("nudge unexpectedly arrived on pr1 (should only go to newest s2)")
+	}
+}
+
+// TestThreadSubmitDeadPtyFallthrough verifies that when a claimed session's
+// pty is dead/closed, submit falls through to spawning a responder instead
+// of panicking or getting stuck on a nil session.
+func TestThreadSubmitDeadPtyFallthrough(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close() })
+
+	repo := t.TempDir()
+	gitT(t, repo, "init", "-b", "main")
+	os.WriteFile(filepath.Join(repo, "f.txt"), []byte("one\n"), 0o644)
+	gitT(t, repo, "add", ".")
+	gitT(t, repo, "commit", "-m", "init")
+
+	// Create host with one claimed session whose write-end is closed
+	pw.Close() // Close the write end → pty.Write will fail
+	h := &Host{
+		sessions: map[string]*session{
+			"s1": {info: SessionInfo{ID: "s1", Workspace: "ws"}, pty: pw},
+		},
+		reg:      loadRegistry(),
+		aw:       newAgentWatch(),
+		cwdCache: make(map[int]cwdEntry),
+		claims:   map[string]string{"t1": "s1"},
+		binds:    map[string]string{},
+		drafts:   make(map[string]draftInfo),
+	}
+	if h.reg.db == nil {
+		t.Fatal("test registry has no db")
+	}
+	h.reg.upsert("ws", repo, false)
+
+	// Create a pending thread
+	h.reg.createThread(&ThreadInfo{Workspace: "ws", Path: "f.txt",
+		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "one"}, "test?")
+
+	// Submit: pty.Write fails on the closed pipe → should spawn instead
+	w := postWS(t, h, "/workspaces/ws/threads/submit", nil)
+	if w.Code != 200 {
+		t.Fatalf("submit: %d %s", w.Code, w.Body)
+	}
+	var res struct {
+		Mode        string `json:"mode"`
+		RookSession string `json:"rookSession"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &res)
+	if res.Mode != "spawned" {
+		t.Fatalf("submit result: got mode=%s want spawned", res.Mode)
+	}
+
+	// Verify the spawned responder is live
+	if h.get(res.RookSession) == nil {
+		t.Fatal("responder session not live")
+	}
+
+	// Clean up
+	h.kill(res.RookSession)
 }
 
 func TestThreadSubmitSpawnsResponder(t *testing.T) {
