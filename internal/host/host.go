@@ -443,10 +443,12 @@ type spawnIssue struct {
 
 // branchPrefix is the source workspace's worktree-branch prefix:
 // `branch-prefix-<workspace>` in the config (hot-read, like the issue
-// trackers), used verbatim — teams bring their own separator. rook/ when
-// unset.
+// trackers), used verbatim — teams bring their own separator. An explicit
+// empty value (`branch-prefix-<ws> =`) means no prefix at all, so branches
+// can match a CI naming scheme exactly; only a genuinely unset prefix falls
+// back to rook/.
 func branchPrefix(ws string) string {
-	if p := config.Load().BranchPrefixes[ws]; p != "" {
+	if p, ok := config.Load().BranchPrefixes[ws]; ok {
 		return p
 	}
 	return "rook/"
