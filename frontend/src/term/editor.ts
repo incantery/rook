@@ -5,9 +5,11 @@
 // arrives through await import("./monaco"), so nothing here lands in the
 // boot bundle.
 
-import type {ChangedFile, HostAPI} from "../hostapi";
+import type {ChangedFile, HostAPI, ThreadInfo} from "../hostapi";
 import type {PaneContent} from "./manager";
 import type * as monacoTypes from "monaco-editor";
+import {ThreadBand, type BandHooks} from "./threads";
+import {submitLabel} from "./threadview";
 
 type Monaco = typeof import("./monaco").monaco;
 
@@ -38,6 +40,7 @@ export class EditorPane implements PaneContent {
     private noteEl: HTMLElement;
     private counterEl: HTMLElement | null = null;
     private baseBtn: HTMLButtonElement | null = null;
+    private submitBtn: HTMLButtonElement;
 
     private monaco: Monaco | null = null;
     private diffEditor: monacoTypes.editor.IStandaloneDiffEditor | null = null;
@@ -52,6 +55,10 @@ export class EditorPane implements PaneContent {
     private disposed = false;
     /** model URIs must be unique for the pane's whole life */
     private seq = 0;
+
+    /** every thread in the workspace — bands slice per (path, side) */
+    private threadsAll: ThreadInfo[] = [];
+    private bands: ThreadBand[] = [];
 
     constructor(
         private api: HostAPI,
@@ -76,7 +83,15 @@ export class EditorPane implements PaneContent {
         this.pathEl = this.span("editor-path", opts.kind === "file" ? (opts.path ?? "") : "");
         this.noteEl = this.span("editor-note", "");
         head.append(this.pathEl, this.noteEl);
+        this.submitBtn = this.btn(
+            "",
+            "send review comments to the workspace's claude",
+            () => void this.submit(),
+        );
+        this.submitBtn.classList.add("editor-submit");
+        this.submitBtn.hidden = true;
         head.append(
+            this.submitBtn,
             this.btn(
                 "⟳",
                 "refresh",
@@ -104,10 +119,12 @@ export class EditorPane implements PaneContent {
 
     focus(): void {
         (this.diffEditor ?? this.editor)?.focus();
-        // a re-focused review is often stale — the agent kept working
-        if (this.opts.kind === "review" && this.monaco && Date.now() - this.fetchedAt > STALE_MS) {
-            void this.refresh();
-        }
+        // a re-focused pane is often stale — the agent kept working. But
+        // never refetch out from under a half-written comment.
+        if (!this.monaco || Date.now() - this.fetchedAt <= STALE_MS) return;
+        if (this.bands.some((b) => b.hasDraft())) return;
+        if (this.opts.kind === "review") void this.refresh();
+        else void this.refetchThreads();
     }
 
     /** The manager calls this exactly when geometry changes (activate,
@@ -119,6 +136,7 @@ export class EditorPane implements PaneContent {
 
     dispose(): void {
         this.disposed = true;
+        for (const b of this.bands) b.dispose();
         this.disposeModels();
         this.diffEditor?.dispose();
         this.editor?.dispose();
@@ -157,6 +175,13 @@ export class EditorPane implements PaneContent {
         if (!this.monaco) return;
         const keep = this.files[this.idx]?.path;
         try {
+            // threads ride the same cycle but never gate it — a hanging
+            // /threads must not stall a diff the pane already has
+            void this.fetchThreads().then(() => {
+                const p = this.currentPath();
+                if (this.disposed || !p) return;
+                for (const b of this.bands) b.render(this.threadsAll, p);
+            });
             const res = await this.api.changes(this.opts.workspace, this.base);
             if (this.disposed) return;
             this.fetchedAt = Date.now();
@@ -212,6 +237,7 @@ export class EditorPane implements PaneContent {
             this.models.push(original, modified);
             this.ensureDiffEditor().setModel({original, modified});
             this.fit();
+            this.rebuildBands();
         } catch (err) {
             this.fail(`diffing ${f.path}`, err);
         }
@@ -222,6 +248,12 @@ export class EditorPane implements PaneContent {
         const path = this.opts.path ?? "";
         if (!m) return;
         try {
+            // same non-gating fetch as refresh()
+            void this.fetchThreads().then(() => {
+                const p = this.currentPath();
+                if (this.disposed || !p) return;
+                for (const b of this.bands) b.render(this.threadsAll, p);
+            });
             const res = await this.api.readFile(this.opts.workspace, path);
             if (this.disposed) return;
             if (res.binary) {
@@ -235,9 +267,159 @@ export class EditorPane implements PaneContent {
             this.models.push(model);
             this.ensureEditor().setModel(model);
             this.fit();
+            this.rebuildBands();
         } catch (err) {
             this.fail(`reading ${path}`, err);
         }
+    }
+
+    // ---- threads: the conversation layer (term/threads.ts) ----
+
+    /** Thread-less daemons must not take the review pane down — the list
+     *  just stays empty (fail open, the protocol-skew rule). */
+    private async fetchThreads(): Promise<void> {
+        try {
+            this.threadsAll = await this.api.threads(this.opts.workspace);
+            this.fetchedAt = Date.now();
+        } catch (err) {
+            console.warn("editor pane: threads unavailable:", err);
+        }
+        this.updateSubmit();
+    }
+
+    private currentPath(): string | undefined {
+        return this.opts.kind === "file" ? this.opts.path : this.files[this.idx]?.path;
+    }
+
+    /** Mutations refetch and re-render — the pane's data is always the
+     *  host's answer, never locally patched. */
+    private async refetchThreads(): Promise<void> {
+        await this.fetchThreads();
+        if (this.disposed) return;
+        const path = this.currentPath();
+        if (!path) return;
+        for (const b of this.bands) b.render(this.threadsAll, path);
+    }
+
+    private bandHooks(side: "modified" | "original"): BandHooks {
+        return {
+            reply: async (id, body) => {
+                await this.api.threadComment(id, body);
+                await this.refetchThreads();
+            },
+            resolve: async (id) => {
+                await this.api.threadResolve(id);
+                await this.refetchThreads();
+            },
+            reopen: async (id) => {
+                await this.api.threadReopen(id);
+                await this.refetchThreads();
+            },
+            create: async (startLine, endLine, body) => {
+                const path = this.currentPath();
+                if (!path) return;
+                await this.api.createThread(this.opts.workspace, {
+                    path,
+                    startLine,
+                    endLine,
+                    side,
+                    base: side === "original" ? this.base : undefined,
+                    body,
+                });
+                await this.refetchThreads();
+            },
+        };
+    }
+
+    /** "submit N" while pending threads exist; "nudge again" when open
+     *  threads still await the agent (the host's re-nudge semantics,
+     *  mirrored); hidden otherwise. */
+    private updateSubmit(): void {
+        const label = submitLabel(this.threadsAll);
+        this.submitBtn.textContent = label;
+        this.submitBtn.hidden = label === "";
+    }
+
+    private async submit(): Promise<void> {
+        if (this.submitBtn.disabled) return;
+        this.submitBtn.disabled = true;
+        try {
+            const res = await this.api.submitThreads(this.opts.workspace);
+            this.opts.onFlash(
+                res.mode === "typed"
+                    ? "review sent — nudged the live claude session"
+                    : "review sent — spawned a responder",
+            );
+        } catch (err) {
+            const msg = String(err);
+            this.opts.onFlash(
+                msg.includes(" 404 ")
+                    ? "threads need a newer rook-host — relaunch rook"
+                    : `submit failed: ${msg}`,
+            );
+        } finally {
+            this.submitBtn.disabled = false;
+        }
+        await this.refetchThreads();
+    }
+
+    /** ⌘⇧M / right-click → composer on the invoking editor's selection.
+     *  Registered once per editor; the keybinding lives inside Monaco's
+     *  own layer, so the backtick prefix is untouched. */
+    // Note: typed IStandaloneCodeEditor, not the brief's ICodeEditor — addAction
+    // only exists on the standalone interface (monaco-editor 0.55.1 editor.api.d.ts);
+    // every caller (both diff-child editors and the single-file editor) is a
+    // standalone editor, so this is a widening-free correction, not a design change.
+    private addCommentAction(ed: monacoTypes.editor.IStandaloneCodeEditor): void {
+        const m = this.monaco;
+        if (!m) return;
+        ed.addAction({
+            id: "rook.comment",
+            label: "Comment on selection",
+            keybindings: [m.KeyMod.CtrlCmd | m.KeyMod.Shift | m.KeyCode.KeyM],
+            contextMenuGroupId: "9_rook",
+            contextMenuOrder: 1,
+            run: () => {
+                const band = this.bands.find((b) => b.editor === ed);
+                const sel = ed.getSelection();
+                if (!band || !sel) return;
+                let end = sel.endLineNumber;
+                // a full-line drag ends at column 1 of the NEXT line — not a line
+                if (end > sel.startLineNumber && sel.endColumn === 1) end--;
+                band.openComposer(sel.startLineNumber, end);
+            },
+        });
+    }
+
+    /** Editors persist across file navs but models don't — decorations
+     *  and zones live on the model/view, so bands rebuild per nav. Open
+     *  widgets are restored by id where the new file still has them. */
+    private rebuildBands(): void {
+        const open = new Set(this.bands.flatMap((b) => b.openThreadIds()));
+        for (const b of this.bands) b.dispose();
+        this.bands = [];
+        const m = this.monaco;
+        const path = this.currentPath();
+        if (!m || !path) return;
+        if (this.diffEditor) {
+            this.bands = [
+                new ThreadBand(
+                    m,
+                    this.diffEditor.getOriginalEditor(),
+                    "original",
+                    this.bandHooks("original"),
+                ),
+                new ThreadBand(
+                    m,
+                    this.diffEditor.getModifiedEditor(),
+                    "modified",
+                    this.bandHooks("modified"),
+                ),
+            ];
+        } else if (this.editor) {
+            this.bands = [new ThreadBand(m, this.editor, "modified", this.bandHooks("modified"))];
+        }
+        for (const b of this.bands) b.render(this.threadsAll, path, open);
     }
 
     // ---- monaco plumbing ----
@@ -245,6 +427,7 @@ export class EditorPane implements PaneContent {
     private editorOpts(): monacoTypes.editor.IStandaloneEditorConstructionOptions {
         return {
             readOnly: true,
+            glyphMargin: true,
             automaticLayout: false, // the manager's fit() is the resize signal
             theme: "rook",
             fontFamily: this.opts.font.family,
@@ -260,6 +443,8 @@ export class EditorPane implements PaneContent {
                 ...this.editorOpts(),
                 renderSideBySide: true,
             });
+            this.addCommentAction(this.diffEditor.getOriginalEditor());
+            this.addCommentAction(this.diffEditor.getModifiedEditor());
         }
         return this.diffEditor;
     }
@@ -267,6 +452,7 @@ export class EditorPane implements PaneContent {
     private ensureEditor(): monacoTypes.editor.IStandaloneCodeEditor {
         if (!this.editor) {
             this.editor = this.monaco!.editor.create(this.body, this.editorOpts());
+            this.addCommentAction(this.editor);
         }
         return this.editor;
     }

@@ -181,6 +181,72 @@ export class HostAPI {
         return (await this.req(`/workspaces/${encodeURIComponent(ws)}/files`)).json();
     }
 
+    /** All of a workspace's threads — comments inline, ranges re-anchored
+     *  on read (currentStart/currentEnd, outdated). The pane fetches
+     *  everything and slices locally; filters exist for cheaper pulls. */
+    async threads(ws: string, opts?: {state?: string; path?: string}): Promise<ThreadInfo[]> {
+        const q = new URLSearchParams();
+        if (opts?.state) q.set("state", opts.state);
+        if (opts?.path) q.set("path", opts.path);
+        const qs = q.size > 0 ? `?${q}` : "";
+        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/threads${qs}`)).json();
+    }
+
+    /** Comment on a file range → a pending thread. The host snapshots the
+     *  anchored content NOW; base only matters for side=original (which
+     *  ref the original text came from). */
+    async createThread(
+        ws: string,
+        req: {
+            path: string;
+            startLine: number;
+            endLine: number;
+            side?: "modified" | "original";
+            base?: "head" | "branch";
+            body: string;
+        },
+    ): Promise<ThreadInfo> {
+        return (
+            await this.req(`/workspaces/${encodeURIComponent(ws)}/threads`, {
+                method: "POST",
+                body: JSON.stringify(req),
+            })
+        ).json();
+    }
+
+    /** The webview IS the user — author is declared, and here always "user". */
+    async threadComment(id: number, body: string): Promise<void> {
+        await this.req(`/threads/${id}/comments`, {
+            method: "POST",
+            body: JSON.stringify({body, author: "user"}),
+        });
+    }
+
+    async threadResolve(id: number): Promise<void> {
+        await this.req(`/threads/${id}/resolve`, {
+            method: "POST",
+            body: JSON.stringify({by: "user"}),
+        });
+    }
+
+    async threadReopen(id: number): Promise<void> {
+        await this.req(`/threads/${id}/reopen`, {
+            method: "POST",
+            body: JSON.stringify({by: "user"}),
+        });
+    }
+
+    /** Flip pending→open and nudge the responder — or re-nudge when open
+     *  threads still await the agent. 400 = nothing to submit. */
+    async submitThreads(ws: string): Promise<ThreadsSubmitResult> {
+        return (
+            await this.req(`/workspaces/${encodeURIComponent(ws)}/threads/submit`, {
+                method: "POST",
+                body: "{}",
+            })
+        ).json();
+    }
+
     /** Raw bytes into a session's pty; append "\r" to submit. */
     async sendInput(id: string, data: string): Promise<void> {
         await this.req(`/sessions/${id}/input`, {
@@ -248,6 +314,49 @@ export interface FileResult {
 export interface FilesResult {
     files: string[];
     truncated?: boolean;
+}
+
+/** One utterance in a thread. Author is declared, not authenticated —
+ *  every client shares the one localhost token (spec, by design). */
+export interface ThreadComment {
+    id: number;
+    author: "user" | "agent";
+    agentSession?: string;
+    body: string;
+    created: string;
+}
+
+/** A file-anchored AI conversation (GET /workspaces/{ws}/threads). The
+ *  current* fields are computed on read — the stored anchor mapped onto
+ *  today's file; outdated means the anchored lines themselves changed
+ *  (render anchorText instead of pointing at live lines). */
+export interface ThreadInfo {
+    id: number;
+    workspace: string;
+    path: string;
+    startLine: number;
+    endLine: number;
+    side: "modified" | "original";
+    blobSha: string;
+    commitSha?: string;
+    anchorText: string;
+    state: "pending" | "open" | "resolved";
+    resolvedBy?: "user" | "agent";
+    agentReopens?: number;
+    created: string;
+    updated: string;
+    submitted?: string;
+    comments: ThreadComment[];
+    currentStart: number;
+    currentEnd: number;
+    outdated?: boolean;
+}
+
+/** POST /workspaces/{ws}/threads/submit — how the nudge landed. */
+export interface ThreadsSubmitResult {
+    mode: "typed" | "spawned";
+    rookSession: string;
+    count: number;
 }
 
 /** One "Current …: N% used" line from claude's /usage, host-scraped. */

@@ -416,6 +416,12 @@
             return; // palette's own input handles the rest
         }
         if (app.pickerOpen || app.filePickerOpen) return; // pickers' own inputs handle keys
+        // thread widgets own their keys: comments about code are full of
+        // backticks, and the capture-phase prefix must not eat them. Only
+        // .thread-zone is guarded — xterm's and Monaco's hidden textareas
+        // are NOT, so the prefix keeps working everywhere else.
+        const tgt = e.target as HTMLElement | null;
+        if (tgt?.closest?.(".thread-zone")) return;
         if (app.screen === "home") {
             // the prefix works here too, so ` h toggles back to the
             // workspace you left — but never while typing in a modal input
