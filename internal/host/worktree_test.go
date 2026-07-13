@@ -304,6 +304,35 @@ func TestWorktreeBranchPrefix(t *testing.T) {
 	}
 }
 
+func TestWorktreeEmptyBranchPrefix(t *testing.T) {
+	h, srv, _ := newWorktreeHost(t)
+	c := &wtClient{srv.URL, h.Token()}
+	cfgDir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "rook")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// an explicitly empty prefix — the branch matches a CI naming scheme exactly
+	if err := os.WriteFile(filepath.Join(cfgDir, "config"), []byte("branch-prefix-src =\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := c.do(t, "POST", "/workspaces", map[string]any{
+		"worktreeFrom": "src",
+		"issue":        map[string]string{"tracker": "jira", "key": "FIX-123", "title": "fix the drop down spacing"},
+	})
+	if code != 200 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var ws WorkspaceInfo
+	json.Unmarshal([]byte(body), &ws)
+	if ws.Branch != "FIX-123-fix-the-drop-down-spacing" {
+		t.Fatalf("branch = %q, want FIX-123-fix-the-drop-down-spacing", ws.Branch)
+	}
+	if got := gitT(t, ws.Root, "rev-parse", "--abbrev-ref", "HEAD"); got != "FIX-123-fix-the-drop-down-spacing" {
+		t.Fatalf("checkout on %q", got)
+	}
+}
+
 func TestWorktreeCreateErrors(t *testing.T) {
 	h, srv, _ := newWorktreeHost(t)
 	c := &wtClient{srv.URL, h.Token()}

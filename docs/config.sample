@@ -108,8 +108,12 @@
 # jira-project-<workspace> = KEY
 
 # The worktree-branch prefix for a workspace. The value is used verbatim, so
-# bring your own trailing separator. Unset falls back to rook/.
+# bring your own trailing separator. Unset falls back to rook/. An explicitly
+# empty value (nothing after the =) means no prefix at all, so branches match a
+# CI naming scheme exactly — issue FIX-123 "fix the drop down spacing" then
+# lands on branch FIX-123-fix-the-drop-down-spacing.
 # branch-prefix-<workspace> = seth/
+# branch-prefix-<workspace> =
 
 # Override the global workflow for one workspace. An explicitly empty value
 # (nothing after the =) opts that workspace out of the global pipeline

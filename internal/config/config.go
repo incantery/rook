@@ -131,16 +131,18 @@ func Load() Config {
 			cfg.JiraProjects[ws] = value
 			continue
 		}
-		if ws, ok := strings.CutPrefix(key, "branch-prefix-"); ok && ws != "" && value != "" {
+		// an EMPTY value is meaningful here: `branch-prefix-<ws> =` stores an
+		// empty string — that workspace's branches carry no prefix (matching a
+		// CI naming scheme exactly). A genuinely unset key falls back to rook/.
+		if ws, ok := strings.CutPrefix(key, "branch-prefix-"); ok && ws != "" {
 			if cfg.BranchPrefixes == nil {
 				cfg.BranchPrefixes = map[string]string{}
 			}
 			cfg.BranchPrefixes[ws] = value
 			continue
 		}
-		// unlike the other dynamic keys, an EMPTY value is meaningful here:
-		// `workflow-<ws> =` stores an empty non-nil list — that workspace
-		// explicitly opts out of the global workflow.
+		// likewise for workflows: `workflow-<ws> =` stores an empty non-nil
+		// list — that workspace explicitly opts out of the global workflow.
 		if ws, ok := strings.CutPrefix(key, "workflow-"); ok && ws != "" {
 			if cfg.Workflows == nil {
 				cfg.Workflows = map[string][]string{}
