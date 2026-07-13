@@ -438,6 +438,107 @@ body {
     content: "◌"; /* the anchor no longer matches the file */
 }
 
+/* zone widgets: cards floating in the space a view zone reserves */
+.thread-card {
+    box-sizing: border-box;
+    max-width: 640px;
+    margin: 4px 12px 4px 4px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: #151928;
+    border: 1px solid #252a3d;
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--fg);
+}
+.thread-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.thread-state {
+    flex: none;
+    padding: 0 6px;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+.thread-state-pending {
+    color: #ffcb6b;
+}
+.thread-state-open {
+    color: #82aaff;
+}
+.thread-state-resolved {
+    color: #c3e88d;
+}
+.thread-meta {
+    color: var(--dim);
+    font-size: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* outdated: the anchored lines as they were when commented */
+.thread-anchor {
+    margin: 0;
+    padding: 4px 8px;
+    background: #0b0d14;
+    border-left: 2px solid #464b66;
+    color: var(--dim);
+    font-size: 11px;
+    white-space: pre;
+    overflow-x: auto;
+}
+.thread-comment {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.thread-author {
+    font-size: 10px;
+    color: #82aaff; /* agent */
+}
+.thread-author-user {
+    color: #ffcb6b;
+}
+.thread-body {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.thread-reply {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.thread-input {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 26px;
+    padding: 4px 6px;
+    background: #0b0d14;
+    border: 1px solid #252a3d;
+    border-radius: 4px;
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 12px;
+    resize: vertical;
+}
+.thread-input:focus {
+    outline: none;
+    border-color: var(--acc);
+}
+.thread-err {
+    color: #ff5370;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+}
+
 /* ==== workspace dashboard: window 0, frosted over the terminals so
    the window's translucency survives ==== */
 #dashboard {

@@ -8,7 +8,7 @@
 import type {ChangedFile, HostAPI, ThreadInfo} from "../hostapi";
 import type {PaneContent} from "./manager";
 import type * as monacoTypes from "monaco-editor";
-import {ThreadBand} from "./threads";
+import {ThreadBand, type BandHooks} from "./threads";
 
 type Monaco = typeof import("./monaco").monaco;
 
@@ -277,9 +277,50 @@ export class EditorPane implements PaneContent {
         return this.opts.kind === "file" ? this.opts.path : this.files[this.idx]?.path;
     }
 
+    /** Mutations refetch and re-render — the pane's data is always the
+     *  host's answer, never locally patched. */
+    private async refetchThreads(): Promise<void> {
+        await this.fetchThreads();
+        const path = this.currentPath();
+        if (!path) return;
+        for (const b of this.bands) b.render(this.threadsAll, path);
+    }
+
+    private bandHooks(side: "modified" | "original"): BandHooks {
+        return {
+            reply: async (id, body) => {
+                await this.api.threadComment(id, body);
+                await this.refetchThreads();
+            },
+            resolve: async (id) => {
+                await this.api.threadResolve(id);
+                await this.refetchThreads();
+            },
+            reopen: async (id) => {
+                await this.api.threadReopen(id);
+                await this.refetchThreads();
+            },
+            create: async (startLine, endLine, body) => {
+                const path = this.currentPath();
+                if (!path) return;
+                await this.api.createThread(this.opts.workspace, {
+                    path,
+                    startLine,
+                    endLine,
+                    side,
+                    base: side === "original" ? this.base : undefined,
+                    body,
+                });
+                await this.refetchThreads();
+            },
+        };
+    }
+
     /** Editors persist across file navs but models don't — decorations
-     *  and zones live on the model/view, so bands rebuild per nav. */
+     *  and zones live on the model/view, so bands rebuild per nav. Open
+     *  widgets are restored by id where the new file still has them. */
     private rebuildBands(): void {
+        const open = new Set(this.bands.flatMap((b) => b.openThreadIds()));
         for (const b of this.bands) b.dispose();
         this.bands = [];
         const m = this.monaco;
@@ -287,13 +328,23 @@ export class EditorPane implements PaneContent {
         if (!m || !path) return;
         if (this.diffEditor) {
             this.bands = [
-                new ThreadBand(m, this.diffEditor.getOriginalEditor(), "original"),
-                new ThreadBand(m, this.diffEditor.getModifiedEditor(), "modified"),
+                new ThreadBand(
+                    m,
+                    this.diffEditor.getOriginalEditor(),
+                    "original",
+                    this.bandHooks("original"),
+                ),
+                new ThreadBand(
+                    m,
+                    this.diffEditor.getModifiedEditor(),
+                    "modified",
+                    this.bandHooks("modified"),
+                ),
             ];
         } else if (this.editor) {
-            this.bands = [new ThreadBand(m, this.editor, "modified")];
+            this.bands = [new ThreadBand(m, this.editor, "modified", this.bandHooks("modified"))];
         }
-        for (const b of this.bands) b.render(this.threadsAll, path);
+        for (const b of this.bands) b.render(this.threadsAll, path, open);
     }
 
     // ---- monaco plumbing ----
