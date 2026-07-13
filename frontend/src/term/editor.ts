@@ -9,6 +9,7 @@ import type {ChangedFile, HostAPI, ThreadInfo} from "../hostapi";
 import type {PaneContent} from "./manager";
 import type * as monacoTypes from "monaco-editor";
 import {ThreadBand, type BandHooks} from "./threads";
+import {submitLabel} from "./threadview";
 
 type Monaco = typeof import("./monaco").monaco;
 
@@ -39,6 +40,7 @@ export class EditorPane implements PaneContent {
     private noteEl: HTMLElement;
     private counterEl: HTMLElement | null = null;
     private baseBtn: HTMLButtonElement | null = null;
+    private submitBtn: HTMLButtonElement;
 
     private monaco: Monaco | null = null;
     private diffEditor: monacoTypes.editor.IStandaloneDiffEditor | null = null;
@@ -81,7 +83,15 @@ export class EditorPane implements PaneContent {
         this.pathEl = this.span("editor-path", opts.kind === "file" ? (opts.path ?? "") : "");
         this.noteEl = this.span("editor-note", "");
         head.append(this.pathEl, this.noteEl);
+        this.submitBtn = this.btn(
+            "",
+            "send review comments to the workspace's claude",
+            () => void this.submit(),
+        );
+        this.submitBtn.classList.add("editor-submit");
+        this.submitBtn.hidden = true;
         head.append(
+            this.submitBtn,
             this.btn(
                 "⟳",
                 "refresh",
@@ -109,10 +119,12 @@ export class EditorPane implements PaneContent {
 
     focus(): void {
         (this.diffEditor ?? this.editor)?.focus();
-        // a re-focused review is often stale — the agent kept working
-        if (this.opts.kind === "review" && this.monaco && Date.now() - this.fetchedAt > STALE_MS) {
-            void this.refresh();
-        }
+        // a re-focused pane is often stale — the agent kept working. But
+        // never refetch out from under a half-written comment.
+        if (!this.monaco || Date.now() - this.fetchedAt <= STALE_MS) return;
+        if (this.bands.some((b) => b.hasDraft())) return;
+        if (this.opts.kind === "review") void this.refresh();
+        else void this.refetchThreads();
     }
 
     /** The manager calls this exactly when geometry changes (activate,
@@ -268,9 +280,11 @@ export class EditorPane implements PaneContent {
     private async fetchThreads(): Promise<void> {
         try {
             this.threadsAll = await this.api.threads(this.opts.workspace);
+            this.fetchedAt = Date.now();
         } catch (err) {
             console.warn("editor pane: threads unavailable:", err);
         }
+        this.updateSubmit();
     }
 
     private currentPath(): string | undefined {
@@ -315,6 +329,38 @@ export class EditorPane implements PaneContent {
                 await this.refetchThreads();
             },
         };
+    }
+
+    /** "submit N" while pending threads exist; "nudge again" when open
+     *  threads still await the agent (the host's re-nudge semantics,
+     *  mirrored); hidden otherwise. */
+    private updateSubmit(): void {
+        const label = submitLabel(this.threadsAll);
+        this.submitBtn.textContent = label;
+        this.submitBtn.hidden = label === "";
+    }
+
+    private async submit(): Promise<void> {
+        if (this.submitBtn.disabled) return;
+        this.submitBtn.disabled = true;
+        try {
+            const res = await this.api.submitThreads(this.opts.workspace);
+            this.opts.onFlash(
+                res.mode === "typed"
+                    ? "review sent — nudged the live claude session"
+                    : "review sent — spawned a responder",
+            );
+        } catch (err) {
+            const msg = String(err);
+            this.opts.onFlash(
+                msg.includes(" 404 ")
+                    ? "threads need a newer rook-host — relaunch rook"
+                    : `submit failed: ${msg}`,
+            );
+        } finally {
+            this.submitBtn.disabled = false;
+        }
+        await this.refetchThreads();
     }
 
     /** ⌘⇧M / right-click → composer on the invoking editor's selection.

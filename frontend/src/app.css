@@ -539,6 +539,16 @@ body {
     overflow-wrap: anywhere;
 }
 
+/* the head's submit button carries the review's call to action */
+.editor-submit {
+    color: #ffcb6b;
+    border-color: #ffcb6b55;
+}
+.editor-submit:hover {
+    color: #ffcb6b;
+    border-color: #ffcb6b;
+}
+
 /* ==== workspace dashboard: window 0, frosted over the terminals so
    the window's translucency survives ==== */
 #dashboard {
