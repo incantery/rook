@@ -17,7 +17,7 @@ func TestRoundTrip(t *testing.T) {
 		t.Skip("no security tool")
 	}
 	const svc, acct = "rook-test", "openai"
-	secret := `sk-tr"icky\va lue`
+	secret := "sk-tr\"icky\\va lue_with_$ and `backtick` 09"
 	t.Cleanup(func() { Delete(svc, acct) })
 
 	if err := Set(svc, acct, secret); err != nil {
