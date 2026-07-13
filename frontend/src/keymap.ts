@@ -1,4 +1,8 @@
 // The keybinding table: the tmux-derived defaults, overlaid with the
+//
+//
+//
+//
 // config file's `keybind = <trigger>=<command>` lines. Two layers, same
 // as the ladder in App.svelte — bare-key triggers act after the backtick
 // prefix, modifier chords act directly. This module only builds the
@@ -23,7 +27,7 @@ export interface Keymap {
 // Every default binding, in display order (display() shows a command's
 // FIRST binding, which is why ⌘K precedes ` k). A config override on the
 // same trigger replaces the entry; `keybind = <trigger>=` removes it.
-const DEFAULTS: [string, string][] = [
+export const DEFAULTS: [string, string][] = [
     ["cmd+k", "palette.toggle"],
     ["c", "session.new"],
     ["x", "session.close"],
@@ -39,6 +43,7 @@ const DEFAULTS: [string, string][] = [
     ["cmd+shift+]", "session.next"],
     ["cmd+shift+[", "session.prev"],
     ["cmd+shift+,", "config.reload"],
+    ["cmd+,", "config.settings"],
     // panes — tmux-faithful: % splits right, " splits down, o cycles,
     // arrows move focus, z zooms; ⌘D/⌘⇧D as the native-feeling chords
     ["%", "pane.split-right"],
@@ -224,7 +229,11 @@ export function parseLeader(trigger: string | undefined): Leader {
         const chord = parseChord(t);
         if (chord) {
             const sig = chord.key;
-            return {matches: (e) => sigOf(e) === sig, literal: controlLiteral(t), disp: chord.disp};
+            return {
+                matches: (e) => sigOf(e) === sig,
+                literal: controlLiteral(t),
+                disp: chord.disp,
+            };
         }
         return BACKTICK_LEADER; // unparseable chord → fall back
     }
@@ -269,4 +278,74 @@ export function buildKeymap(
         chords,
         display: (command) => binds.find((b) => b.command === command)?.disp,
     };
+}
+
+export interface KeybindRow {
+    trigger: string;
+    command: string;
+}
+
+// A stable identity for a trigger: two triggers collide iff they resolve to
+// the same layer+lookup key (e.g. "cmd+d" and "cmd+D" without shift). null
+// means the trigger doesn't parse (the editor shows it as invalid).
+export function triggerSig(trigger: string): string | null {
+    const b = parseTrigger(trigger.trim());
+    if (!b) return null;
+    return b.layer + ":" + b.key;
+}
+
+// True if the trigger is reserved (digits, the literal backtick) — buildKeymap
+// drops these from config, so the editor must flag them instead of saving.
+export function isReservedTrigger(trigger: string): boolean {
+    const b = parseTrigger(trigger.trim());
+    return b ? reserved(b) : false;
+}
+
+// Turn the editor's desired binding rows into the minimal config `keybind`
+// override map (trigger -> command; "" command = unbind a default). Triggers
+// are compared by PARSED identity (triggerSig), not raw text, so a row that
+// re-spells a default (case/alias variant) is recognized as the same slot
+// instead of double-emitting an add + a stale unbind. buildKeymap applies
+// DEFAULTS then these overrides, so we emit only the diff.
+export function computeKeybindOverrides(rows: KeybindRow[]): Record<string, string> {
+    const overrides: Record<string, string> = {};
+    const defCmdBySig = new Map<string, string>(); // slot signature -> default command
+    const defTriggerBySig = new Map<string, string>(); // slot signature -> default trigger string
+    for (const [t, c] of DEFAULTS) {
+        const sig = triggerSig(t);
+        if (sig == null) continue;
+        defCmdBySig.set(sig, c);
+        defTriggerBySig.set(sig, t);
+    }
+    const rowSigs = new Set<string>();
+    for (const {trigger, command} of rows) {
+        const t = trigger.trim();
+        if (!t || !command) continue;
+        const sig = triggerSig(t);
+        if (sig == null) continue; // unparseable — the editor blocks these before save
+        rowSigs.add(sig);
+        if (defCmdBySig.get(sig) !== command) overrides[t] = command; // new or changed slot
+    }
+    for (const [sig, t] of defTriggerBySig) {
+        if (!rowSigs.has(sig)) overrides[t] = ""; // a default slot with no surviving row → unbind
+    }
+    return overrides;
+}
+
+// The current bindings as editable rows — DEFAULTS overlaid with config
+// overrides, one row per bound trigger (multi-trigger commands yield multiple
+// rows, so an unrelated save never silently drops a binding). The exact inverse
+// of computeKeybindOverrides, mirroring buildKeymap's apply order.
+export function effectiveKeybindRows(overrides: Record<string, string | undefined>): KeybindRow[] {
+    const bySig = new Map<string, KeybindRow>(); // slot signature -> row (insertion-ordered)
+    const apply = (trigger: string, command: string, fromConfig: boolean) => {
+        const sig = triggerSig(trigger);
+        if (sig == null || (fromConfig && isReservedTrigger(trigger))) return;
+        if (command === "") bySig.delete(sig);
+        else bySig.set(sig, {trigger, command});
+    };
+    for (const [t, c] of DEFAULTS) apply(t, c, false);
+    for (const [t, c] of Object.entries(overrides))
+        if (typeof c === "string") apply(t.trim(), c, true);
+    return [...bySig.values()];
 }

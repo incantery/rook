@@ -20,7 +20,7 @@
     import FilePicker from "./FilePicker.svelte";
     import Inbox from "./Inbox.svelte";
     import SpawnModal from "./SpawnModal.svelte";
-    import KeyModal from "./KeyModal.svelte";
+    import Settings from "./Settings.svelte";
 
     interface Props {
         api: HostAPI;
@@ -296,11 +296,12 @@
             run: () => location.reload(),
         },
         {
-            id: "config.openai-key",
-            title: "Set OpenAI API key (agent)",
+            id: "config.settings",
+            title: "Settings…",
             category: "Config",
+            keys: keymap.display("config.settings"),
             run: () => {
-                app.keyOpen = true;
+                app.settingsOpen = true;
             },
         },
         {
@@ -407,7 +408,7 @@
     // overrides); only the digit keys and the leader stay hardwired here.
     function onKeydown(e: KeyboardEvent): void {
         if (app.inboxOpen) return; // inbox's capture handler owns keys
-        if (app.keyOpen || app.spawnOpen) return; // modals own their keys
+        if (app.spawnOpen || app.settingsOpen) return; // modals own their keys
         if (app.paletteOpen) {
             if (keymap.chords.get(sigOf(e)) === "palette.toggle") {
                 e.preventDefault();
@@ -698,10 +699,10 @@
         }}
     />
 {/if}
-{#if app.keyOpen}
-    <KeyModal
+{#if app.settingsOpen}
+    <Settings
         onclose={() => {
-            app.keyOpen = false;
+            app.settingsOpen = false;
             focusBack();
         }}
     />

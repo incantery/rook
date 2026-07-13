@@ -1247,8 +1247,8 @@ Edit leader, font family/size, and rebind commands with live conflict/reserved d
 - Modify: `frontend/src/AppearanceSettings.svelte` (replace the stub)
 
 **Interfaces:**
-- Consumes: `cfg: ConfigModel`, `Call.ByName` for `SetConfig`, and from `keymap.ts`: `DEFAULTS`, `buildKeymap`, `computeKeybindOverrides`, `triggerSig`, `parseTrigger` — plus `sigOf` for chord capture.
-- Note: to enumerate rebindable command ids, import the shared list. The registry lives in `App.svelte`; expose the command id/title list by reading `DEFAULTS` command ids (every default-bound command) unioned with config override commands. (A future task can surface the full registry; DEFAULTS covers every command that ships with a binding.)
+- Consumes: `cfg: ConfigModel`, `Call.ByName` for `SetConfig`, and from `keymap.ts`: `DEFAULTS`, `effectiveKeybindRows`, `computeKeybindOverrides`, `triggerSig`, `isReservedTrigger`, `type KeybindRow`.
+- The keybind editor is **trigger-centric**: rows are seeded from `effectiveKeybindRows(cfg.keybinds ?? {})` (one row per bound trigger, so dual-bound commands like `palette.toggle` = `cmd+k` + `k` keep every row and an unrelated save never strips a binding). On save, `computeKeybindOverrides(rows)` diffs back to the minimal override map. `DEFAULTS` command ids feed the "add binding" picker (every command that ships with a binding; the full runtime registry is a follow-up).
 
 - [ ] **Step 1: Implement the section**
 
@@ -1257,12 +1257,15 @@ Replace `frontend/src/AppearanceSettings.svelte` with:
 ```svelte
 <!-- Appearance: leader, pane font, and the keybind editor. These are read at
      boot (main.ts) and passed as props, so saving reloads the page to re-read.
-     The editor reuses keymap.ts for parsing, conflict, and override math. -->
+     The keybind editor is trigger-centric — one row per bound trigger, seeded
+     from effectiveKeybindRows so multi-trigger commands keep every binding —
+     and reuses keymap.ts for parsing, conflict, reserved, and override math. -->
 <script lang="ts">
     import {Call} from "@wailsio/runtime";
     import type {Config as ConfigModel} from "../bindings/github.com/incantery/rook/internal/config/models";
     import {
         DEFAULTS,
+        effectiveKeybindRows,
         computeKeybindOverrides,
         triggerSig,
         isReservedTrigger,
@@ -1273,35 +1276,35 @@ Replace `frontend/src/AppearanceSettings.svelte` with:
 
     let {cfg}: {cfg: ConfigModel} = $props();
 
+    // svelte-ignore state_referenced_locally
     let leader = $state(cfg.leader || "`");
+    // svelte-ignore state_referenced_locally
     let fontFamily = $state(cfg.fontFamily || "");
+    // svelte-ignore state_referenced_locally
     let fontSize = $state(cfg.fontSize || 18);
+    // svelte-ignore state_referenced_locally — seeded once; the shell reloads cfg on open
+    let rows = $state<KeybindRow[]>(effectiveKeybindRows(cfg.keybinds ?? {}));
+
     let error = $state("");
     let saved = $state(false);
-
-    // The effective binding table (defaults overlaid with config overrides) as
-    // editable rows: one command per row, showing its current trigger.
-    const overrides: Record<string, string | undefined> = cfg.keybinds ?? {};
-    // command -> its current trigger string (prefer config override, else the
-    // first DEFAULT trigger). Command list = every command that has a default.
-    const commandIds = [...new Set(DEFAULTS.map(([, c]) => c))];
-    function currentTrigger(cmd: string): string {
-        for (const [t, c] of Object.entries(overrides)) if (c === cmd && typeof c === "string") return t;
-        const d = DEFAULTS.find(([, c]) => c === cmd);
-        return d ? d[0] : "";
-    }
-    let rows = $state<KeybindRow[]>(commandIds.map((c) => ({command: c, trigger: currentTrigger(c)})));
-
-    // capture target: index of the row currently listening for a chord, or -1
+    // index of the row currently capturing a chord, or -1
     let capturing = $state(-1);
 
-    // conflicts: a trigger signature shared by 2+ rows, or a reserved/unparsable
-    // trigger. Returns a per-row message map.
+    // the "add binding" command picker: every command that ships with a default
+    const allCommands = [...new Set(DEFAULTS.map(([, c]) => c))].sort();
+    let addCommand = $state("");
+
+    // per-row problem: "reserved", "unparsable", or "conflict" (sig shared by
+    // 2+ rows). Empty-trigger rows are ignored (dropped on save), not flagged.
     const problems = $derived.by(() => {
         const bySig = new Map<string, number[]>();
         const out: Record<number, string> = {};
         rows.forEach((r, i) => {
-            if (!r.trigger) return;
+            if (!r.trigger) return; // unbound row — ignored on save
+            if (isReservedTrigger(r.trigger)) {
+                out[i] = "reserved";
+                return;
+            }
             const sig = triggerSig(r.trigger);
             if (sig == null) {
                 out[i] = "unparsable";
@@ -1310,41 +1313,54 @@ Replace `frontend/src/AppearanceSettings.svelte` with:
             bySig.set(sig, [...(bySig.get(sig) ?? []), i]);
         });
         for (const idxs of bySig.values()) {
-            if (idxs.length > 1) for (const i of idxs) out[i] = "conflict";
+            if (idxs.length > 1) for (const i of idxs) out[i] ??= "conflict";
         }
-        // reserved triggers: buildKeymap would drop them — flag here too
-        rows.forEach((r, i) => {
-            if (r.trigger && isReservedTrigger(r.trigger)) out[i] = "reserved";
-        });
         return out;
     });
     const hasProblem = $derived(Object.keys(problems).length > 0);
 
-    function onCaptureKey(e: KeyboardEvent, i: number) {
-        if (capturing !== i) return;
-        e.preventDefault();
-        e.stopPropagation();
-        if (e.key === "Escape") {
-            capturing = -1;
-            return;
-        }
-        // build a trigger string from the event: modifier chord or bare key
+    // Turn a keydown into a trigger string keymap.ts can parse. Named keys
+    // (arrows) map to keymap's short names; bare modifiers wait for the real key.
+    function triggerFromEvent(e: KeyboardEvent): string | null {
+        const named: Record<string, string> = {
+            arrowup: "up",
+            arrowdown: "down",
+            arrowleft: "left",
+            arrowright: "right",
+        };
+        const base = named[e.key.toLowerCase()] ?? e.key.toLowerCase();
+        if (["shift", "meta", "alt", "control"].includes(base)) return null;
         const mods: string[] = [];
         if (e.metaKey) mods.push("cmd");
         if (e.ctrlKey) mods.push("ctrl");
         if (e.altKey) mods.push("alt");
         if (e.shiftKey) mods.push("shift");
-        const base = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
-        if (["shift", "meta", "alt", "control"].includes(base)) return; // wait for the real key
-        const trigger = mods.length ? [...mods, base].join("+") : base;
+        return mods.length ? [...mods, base].join("+") : base;
+    }
+
+    function onCaptureKey(e: KeyboardEvent, i: number) {
+        if (capturing !== i) return;
+        e.preventDefault();
+        e.stopPropagation(); // don't let Escape bubble to the shell (which would close Settings)
+        if (e.key === "Escape") {
+            capturing = -1;
+            return;
+        }
+        const trigger = triggerFromEvent(e);
+        if (trigger == null) return; // bare modifier — keep waiting
         rows[i] = {...rows[i], trigger};
         rows = [...rows];
         capturing = -1;
     }
 
-    function unbind(i: number) {
-        rows[i] = {...rows[i], trigger: ""};
-        rows = [...rows];
+    function removeRow(i: number) {
+        rows = rows.filter((_, j) => j !== i);
+    }
+
+    function addRow() {
+        if (!addCommand) return;
+        rows = [...rows, {command: addCommand, trigger: ""}];
+        addCommand = "";
     }
 
     async function save() {
@@ -1388,7 +1404,7 @@ Replace `frontend/src/AppearanceSettings.svelte` with:
     </label>
 
     <div class="ws-modal-title">Keybinds</div>
-    {#each rows as row, i (row.command)}
+    {#each rows as row, i (i)}
         <div class="settings-row">
             <span>{row.command}</span>
             <input
@@ -1399,9 +1415,19 @@ Replace `frontend/src/AppearanceSettings.svelte` with:
                 onkeydown={(e) => onCaptureKey(e, i)}
             />
             {#if problems[i]}<span class="settings-conflict">⚠ {problems[i]}</span>{/if}
-            <button class="home-btn" onclick={() => unbind(i)}>Unbind</button>
+            <button class="home-btn" onclick={() => removeRow(i)}>Remove</button>
         </div>
     {/each}
+
+    <div class="settings-row">
+        <select bind:value={addCommand}>
+            <option value="">+ add binding…</option>
+            {#each allCommands as c (c)}
+                <option value={c}>{c}</option>
+            {/each}
+        </select>
+        <button class="home-btn" disabled={!addCommand} onclick={addRow}>Add</button>
+    </div>
 
     {#if error}<div class="settings-error">{error}</div>{/if}
     <div class="ws-modal-foot">

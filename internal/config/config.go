@@ -273,15 +273,43 @@ func JiraToken() string {
 	return strings.TrimSpace(string(data))
 }
 
-// OpenAIKeyStatus reports where a usable key currently lives: "keychain",
-// "file" (the ~/.config/rook/openai-key fallback), or "" for none.
-func (s *Service) OpenAIKeyStatus() string {
-	if k, err := keychain.Get(keychain.Service, keychain.OpenAIAccount); err == nil && k != "" {
+// keyStatus reports where a usable secret lives: "keychain" if the keychain
+// holds it, else "file" if a 0600-tight fallback file exists and is non-empty,
+// else "". Shared by the OpenAI and Jira status methods.
+func keyStatus(account, fileName string) string {
+	if k, err := keychain.Get(keychain.Service, account); err == nil && k != "" {
 		return "keychain"
 	}
-	keyFile := filepath.Join(filepath.Dir(Path()), "openai-key")
-	if st, err := os.Stat(keyFile); err == nil && st.Mode().Perm()&0o077 == 0 && st.Size() > 0 {
+	f := filepath.Join(filepath.Dir(Path()), fileName)
+	if st, err := os.Stat(f); err == nil && st.Mode().Perm()&0o077 == 0 && st.Size() > 0 {
 		return "file"
 	}
 	return ""
+}
+
+// OpenAIKeyStatus reports where a usable key currently lives: "keychain",
+// "file" (the ~/.config/rook/openai-key fallback), or "" for none.
+func (s *Service) OpenAIKeyStatus() string {
+	return keyStatus(keychain.OpenAIAccount, "openai-key")
+}
+
+// SetJiraToken stores the Jira API token in the login keychain (service rook,
+// account jira). Entering it here — not on a shell — is why special characters
+// like underscores survive.
+func (s *Service) SetJiraToken(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return errors.New("empty token")
+	}
+	return keychain.Set(keychain.Service, keychain.JiraAccount, token)
+}
+
+func (s *Service) ClearJiraToken() error {
+	return keychain.Delete(keychain.Service, keychain.JiraAccount)
+}
+
+// JiraTokenStatus reports where the token lives: "keychain", "file"
+// (~/.config/rook/jira-token, 0600), or "" for none.
+func (s *Service) JiraTokenStatus() string {
+	return keyStatus(keychain.JiraAccount, "jira-token")
 }

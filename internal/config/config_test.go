@@ -97,3 +97,37 @@ func TestSplitList(t *testing.T) {
 		t.Fatalf("empty input must give empty non-nil list: %v", empty)
 	}
 }
+
+// JiraTokenStatus's file branch is cross-platform (keychain is darwin-only and
+// tested there); point Path() at a temp dir via XDG and exercise file/none.
+func TestJiraTokenStatusFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "rook"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var s Service
+
+	// none: no keychain item (test env), no file
+	if got := s.JiraTokenStatus(); got != "" && got != "keychain" {
+		t.Fatalf("clean env should be \"\" (or a stray keychain item); got %q", got)
+	}
+
+	// file, but world-readable → must be ignored (0600-tight rule)
+	tok := filepath.Join(dir, "rook", "jira-token")
+	if err := os.WriteFile(tok, []byte("abc_def\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.JiraTokenStatus(); got == "file" {
+		t.Fatalf("loose-perm token file must not count as a source")
+	}
+
+	// file, 0600 → "file" (assuming no keychain item shadowing it)
+	if err := os.Chmod(tok, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := s.JiraTokenStatus()
+	if got != "file" && got != "keychain" {
+		t.Fatalf("tight token file should read as \"file\"; got %q", got)
+	}
+}

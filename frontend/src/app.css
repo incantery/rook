@@ -959,15 +959,6 @@ body {
     font-size: 10px;
     color: var(--lo);
 }
-.key-status {
-    font-size: 11.5px;
-    color: var(--lo);
-    font-family: var(--mono);
-    line-height: 1.5;
-}
-.key-status.ok {
-    color: var(--grn);
-}
 .key-error {
     font-size: 11.5px;
     color: #ff5370;
@@ -1628,4 +1619,92 @@ button.ws-tag.pr-conflicts:hover {
     font-size: 13px;
     padding: 24px;
     white-space: pre-wrap;
+}
+
+/* Settings: full-screen surface with a left nav. Reuses .overlay tints via
+   its own opaque backdrop so terminals underneath don't bleed through. */
+.settings-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    background: rgba(15, 17, 26, 0.98);
+    color: #8f93a2;
+    outline: none;
+}
+.settings-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid #2a2e3d;
+}
+.settings-title {
+    font-size: 15px;
+    color: #eeffff;
+}
+.settings-body {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+}
+.settings-nav {
+    width: 160px;
+    border-right: 1px solid #2a2e3d;
+    padding: 12px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.settings-nav-item {
+    text-align: left;
+    padding: 8px 12px;
+    border: none;
+    background: none;
+    color: #8f93a2;
+    border-radius: 6px;
+    cursor: pointer;
+}
+.settings-nav-item.active {
+    background: #262b3a;
+    color: #eeffff;
+}
+.settings-pane {
+    flex: 1;
+    padding: 20px 24px;
+    overflow-y: auto;
+}
+.settings-loading {
+    color: #6b7089;
+}
+.settings-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+}
+.settings-row input[type="text"],
+.settings-row input[type="password"],
+.settings-row input[type="number"] {
+    flex: 1;
+    min-width: 0;
+}
+.settings-status {
+    color: #6b7089;
+    margin: 6px 0 14px;
+}
+.settings-status.ok {
+    color: #c3e88d;
+}
+.settings-error {
+    color: #ff5370;
+    margin-top: 8px;
+}
+.settings-saved {
+    color: #c3e88d;
+    margin-left: 8px;
+}
+.settings-conflict {
+    color: #ff5370;
 }
