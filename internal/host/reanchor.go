@@ -12,6 +12,7 @@ package host
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -98,13 +99,11 @@ func diffHunks(old, cur []byte) ([]hunk, error) {
 	if err := os.WriteFile(fb, cur, 0o600); err != nil {
 		return nil, err
 	}
-	git, err := exec.LookPath("git")
+	out, err := gitOut(dir, reviewTimeout, "diff", "--no-index", "--unified=0", fa, fb)
 	if err != nil {
-		git = "/usr/bin/git" // launchd's minimal PATH
-	}
-	out, err := exec.Command(git, "diff", "--no-index", "--unified=0", fa, fb).Output()
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+		// exit code 1 just means "files differ" — the success case here
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 1 {
 			return nil, err
 		}
 	}
