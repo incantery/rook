@@ -313,23 +313,52 @@ export function isReservedTrigger(trigger: string): boolean {
 }
 
 // Turn the editor's desired binding rows into the minimal config `keybind`
-// override map (trigger -> command; "" command = unbind a default). buildKeymap
-// applies DEFAULTS first then these overrides, so we only need to emit the
-// diff: changed/new triggers, and unbinds for default triggers no longer used.
+// override map (trigger -> command; "" command = unbind a default). Triggers
+// are compared by PARSED identity (triggerSig), not raw text, so a row that
+// re-spells a default (case/alias variant) is recognized as the same slot
+// instead of double-emitting an add + a stale unbind. buildKeymap applies
+// DEFAULTS then these overrides, so we emit only the diff.
 export function computeKeybindOverrides(rows: KeybindRow[]): Record<string, string> {
   const overrides: Record<string, string> = {};
-  const defByTrigger = new Map<string, string>();
-  for (const [t, c] of DEFAULTS) defByTrigger.set(t, c);
-
-  const rowTriggers = new Set<string>();
+  const defCmdBySig = new Map<string, string>(); // slot signature -> default command
+  const defTriggerBySig = new Map<string, string>(); // slot signature -> default trigger string
+  for (const [t, c] of DEFAULTS) {
+    const sig = triggerSig(t);
+    if (sig == null) continue;
+    defCmdBySig.set(sig, c);
+    defTriggerBySig.set(sig, t);
+  }
+  const rowSigs = new Set<string>();
   for (const { trigger, command } of rows) {
     const t = trigger.trim();
     if (!t || !command) continue;
-    rowTriggers.add(t);
-    if (defByTrigger.get(t) !== command) overrides[t] = command; // new or changed
+    const sig = triggerSig(t);
+    if (sig == null) continue; // unparseable — the editor blocks these before save
+    rowSigs.add(sig);
+    if (defCmdBySig.get(sig) !== command) overrides[t] = command; // new or changed slot
   }
-  for (const [t] of DEFAULTS) {
-    if (!rowTriggers.has(t)) overrides[t] = ""; // a default trigger was removed
+  for (const [sig, t] of defTriggerBySig) {
+    if (!rowSigs.has(sig)) overrides[t] = ""; // a default slot with no surviving row → unbind
   }
   return overrides;
+}
+
+// The current bindings as editable rows — DEFAULTS overlaid with config
+// overrides, one row per bound trigger (multi-trigger commands yield multiple
+// rows, so an unrelated save never silently drops a binding). The exact inverse
+// of computeKeybindOverrides, mirroring buildKeymap's apply order.
+export function effectiveKeybindRows(
+  overrides: Record<string, string | undefined>,
+): KeybindRow[] {
+  const bySig = new Map<string, KeybindRow>(); // slot signature -> row (insertion-ordered)
+  const apply = (trigger: string, command: string, fromConfig: boolean) => {
+    const sig = triggerSig(trigger);
+    if (sig == null || (fromConfig && isReservedTrigger(trigger))) return;
+    if (command === "") bySig.delete(sig);
+    else bySig.set(sig, { trigger, command });
+  };
+  for (const [t, c] of DEFAULTS) apply(t, c, false);
+  for (const [t, c] of Object.entries(overrides))
+    if (typeof c === "string") apply(t.trim(), c, true);
+  return [...bySig.values()];
 }
