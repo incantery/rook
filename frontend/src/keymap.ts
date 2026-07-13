@@ -27,7 +27,7 @@ export interface Keymap {
 // Every default binding, in display order (display() shows a command's
 // FIRST binding, which is why ⌘K precedes ` k). A config override on the
 // same trigger replaces the entry; `keybind = <trigger>=` removes it.
-const DEFAULTS: [string, string][] = [
+export const DEFAULTS: [string, string][] = [
   ["cmd+k", "palette.toggle"],
   ["c", "session.new"],
   ["x", "session.close"],
@@ -289,4 +289,47 @@ export function buildKeymap(
     chords,
     display: (command) => binds.find((b) => b.command === command)?.disp,
   };
+}
+
+export interface KeybindRow {
+  trigger: string;
+  command: string;
+}
+
+// A stable identity for a trigger: two triggers collide iff they resolve to
+// the same layer+lookup key (e.g. "cmd+d" and "cmd+D" without shift). null
+// means the trigger doesn't parse (the editor shows it as invalid).
+export function triggerSig(trigger: string): string | null {
+  const b = parseTrigger(trigger.trim());
+  if (!b) return null;
+  return b.layer + ":" + b.key;
+}
+
+// True if the trigger is reserved (digits, the literal backtick) — buildKeymap
+// drops these from config, so the editor must flag them instead of saving.
+export function isReservedTrigger(trigger: string): boolean {
+  const b = parseTrigger(trigger.trim());
+  return b ? reserved(b) : false;
+}
+
+// Turn the editor's desired binding rows into the minimal config `keybind`
+// override map (trigger -> command; "" command = unbind a default). buildKeymap
+// applies DEFAULTS first then these overrides, so we only need to emit the
+// diff: changed/new triggers, and unbinds for default triggers no longer used.
+export function computeKeybindOverrides(rows: KeybindRow[]): Record<string, string> {
+  const overrides: Record<string, string> = {};
+  const defByTrigger = new Map<string, string>();
+  for (const [t, c] of DEFAULTS) defByTrigger.set(t, c);
+
+  const rowTriggers = new Set<string>();
+  for (const { trigger, command } of rows) {
+    const t = trigger.trim();
+    if (!t || !command) continue;
+    rowTriggers.add(t);
+    if (defByTrigger.get(t) !== command) overrides[t] = command; // new or changed
+  }
+  for (const [t] of DEFAULTS) {
+    if (!rowTriggers.has(t)) overrides[t] = ""; // a default trigger was removed
+  }
+  return overrides;
 }
