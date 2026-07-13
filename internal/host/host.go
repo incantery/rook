@@ -86,6 +86,10 @@ type Host struct {
 	// um caches subscription usage windows (WatchUsage).
 	um *usageMon
 
+	// anchorMemo caches re-anchor diffs per (old,cur) blob pair
+	// (threads.go / reanchor.go).
+	anchorMemo hunkMemo
+
 	// prm caches per-worktree PR state (WatchPRs) — the close-the-loop
 	// signal on workspace cards.
 	prm *prMon
