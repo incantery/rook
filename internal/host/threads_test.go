@@ -2,6 +2,7 @@ package host
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,5 +255,68 @@ func TestThreadCreateAndList(t *testing.T) {
 	}
 	if found.Outdated {
 		t.Fatalf("original-side thread outdated in list: %+v", found)
+	}
+}
+
+func TestThreadCommentResolveReopen(t *testing.T) {
+	h, srv, repo := newWorktreeHost(t)
+	c := &wtClient{srv.URL, h.Token()}
+	os.WriteFile(filepath.Join(repo, "f.txt"), []byte("one\n"), 0o644)
+	code, body := c.do(t, "POST", "/workspaces/src/threads", map[string]any{
+		"path": "f.txt", "startLine": 1, "endLine": 1, "body": "hm"})
+	if code != 200 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var th ThreadInfo
+	json.Unmarshal([]byte(body), &th)
+	id := fmt.Sprintf("%d", th.ID)
+
+	// agent reply
+	if code, body = c.do(t, "POST", "/threads/"+id+"/comments", map[string]any{
+		"body": "fixed in abc123", "author": "agent", "agentSession": "t9"}); code != 204 {
+		t.Fatalf("reply: %d %s", code, body)
+	}
+	got := h.reg.getThread(th.ID)
+	if len(got.Comments) != 2 || got.Comments[1].Author != "agent" || got.Comments[1].AgentSession != "t9" {
+		t.Fatalf("comments: %+v", got.Comments)
+	}
+
+	// bad author / empty body → 400
+	if code, _ = c.do(t, "POST", "/threads/"+id+"/comments", map[string]any{
+		"body": "x", "author": "root"}); code != 400 {
+		t.Fatalf("bad author: %d", code)
+	}
+	if code, _ = c.do(t, "POST", "/threads/"+id+"/comments", map[string]any{
+		"author": "user"}); code != 400 {
+		t.Fatalf("empty body: %d", code)
+	}
+
+	// resolve by agent → reopen → verdict datum recorded; blob pruned on
+	// resolve and the thread still renders
+	if code, body = c.do(t, "POST", "/threads/"+id+"/resolve", map[string]any{"by": "agent"}); code != 204 {
+		t.Fatalf("resolve: %d %s", code, body)
+	}
+	if h.reg.getAnchorBlob(th.BlobSHA) != nil {
+		t.Fatal("blob should prune once no unresolved thread references it")
+	}
+	if code, _ = c.do(t, "POST", "/threads/"+id+"/resolve", map[string]any{"by": "user"}); code != 409 {
+		t.Fatalf("double resolve: %d", code)
+	}
+	if code, _ = c.do(t, "POST", "/threads/"+id+"/reopen", nil); code != 204 {
+		t.Fatalf("reopen: %d", code)
+	}
+	if got = h.reg.getThread(th.ID); got.AgentReopens != 1 || got.State != "open" {
+		t.Fatalf("verdict datum: %+v", got)
+	}
+	if code, _ = c.do(t, "POST", "/threads/"+id+"/reopen", nil); code != 409 {
+		t.Fatalf("reopen open thread: %d", code)
+	}
+
+	// unknown id / bad routes
+	if code, _ = c.do(t, "POST", "/threads/999/comments", map[string]any{"body": "x"}); code != 404 {
+		t.Fatalf("ghost thread: %d", code)
+	}
+	if code, _ = c.do(t, "GET", "/threads/"+id+"/comments", nil); code != 404 {
+		t.Fatalf("GET on thread route: %d", code)
 	}
 }

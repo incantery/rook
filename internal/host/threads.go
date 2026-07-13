@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -444,4 +445,69 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 	t := h.reg.getThread(id)
 	h.anchorNow(ws, top, t)
 	writeJSON(w, t)
+}
+
+// handleThread routes /threads/{id}/comments|resolve|reopen. Thread ids
+// are global, so per-thread verbs need no workspace — `rookctl reply 12`
+// works from anywhere.
+func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/threads/")
+	idStr, action, _ := strings.Cut(rest, "/")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || r.Method != http.MethodPost {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	switch action {
+	case "comments":
+		var req struct{ Body, Author, AgentSession string }
+		json.NewDecoder(r.Body).Decode(&req)
+		req.Body = strings.TrimSpace(req.Body)
+		if req.Author == "" {
+			req.Author = "user"
+		}
+		if req.Body == "" {
+			http.Error(w, "body required", http.StatusBadRequest)
+			return
+		}
+		if req.Author != "user" && req.Author != "agent" {
+			http.Error(w, "author must be user or agent", http.StatusBadRequest)
+			return
+		}
+		if err := h.reg.addThreadComment(id, req.Author, req.AgentSession, req.Body); err != nil {
+			http.Error(w, "no such thread", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case "resolve":
+		var req struct{ By string }
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.By == "" {
+			req.By = "user"
+		}
+		if req.By != "user" && req.By != "agent" {
+			http.Error(w, "by must be user or agent", http.StatusBadRequest)
+			return
+		}
+		switch err := h.reg.resolveThread(id, req.By); err {
+		case nil:
+			h.reg.pruneAnchorBlobs() // resolved threads release their snapshots
+			w.WriteHeader(http.StatusNoContent)
+		case errThreadState:
+			http.Error(w, "already resolved", http.StatusConflict)
+		default:
+			http.Error(w, "no such thread", http.StatusNotFound)
+		}
+	case "reopen":
+		switch err := h.reg.reopenThread(id); err {
+		case nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errThreadState:
+			http.Error(w, "thread is not resolved", http.StatusConflict)
+		default:
+			http.Error(w, "no such thread", http.StatusNotFound)
+		}
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
 }

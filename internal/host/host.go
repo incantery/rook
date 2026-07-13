@@ -356,6 +356,8 @@ func (h *Host) Handler() http.Handler {
 	})
 	mux.HandleFunc("/costs", h.handleCosts)
 	mux.HandleFunc("/drafts/", h.handleDraftDecide)
+	// per-thread verbs — ids are global, no workspace in the path
+	mux.HandleFunc("/threads/", h.handleThread)
 	mux.HandleFunc("/agent/spend", h.handleSpend)
 	mux.HandleFunc("/decisions", h.handleDecisions)
 	return h.cors(h.auth(mux))
