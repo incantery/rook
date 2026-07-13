@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -221,5 +222,37 @@ func TestThreadCreateAndList(t *testing.T) {
 	json.Unmarshal([]byte(body), &th)
 	if th.AnchorText != "hello" || th.Side != "original" {
 		t.Fatalf("original anchor: %+v", th)
+	}
+	// the diverged working tree must not brand a fresh original-side
+	// thread outdated — it re-anchors against the base, not the tree.
+	if th.Outdated {
+		t.Fatalf("original side wrongly outdated on create: %+v", th)
+	}
+	if th.CommitSHA == "" {
+		t.Fatalf("original side missing commitSha: %+v", th)
+	}
+	wantHead := strings.TrimSpace(gitT(t, repo, "rev-parse", "HEAD"))
+	if th.CommitSHA != wantHead {
+		t.Fatalf("original side commitSha: got %q want %q (head mode)", th.CommitSHA, wantHead)
+	}
+
+	// GET-list coherence: the original-side thread must still show as
+	// not outdated even though the working tree has since diverged.
+	code, body = c.do(t, "GET", "/workspaces/src/threads", nil)
+	if code != 200 {
+		t.Fatalf("list: %d %s", code, body)
+	}
+	json.Unmarshal([]byte(body), &list)
+	var found *ThreadInfo
+	for i := range list {
+		if list[i].Side == "original" {
+			found = &list[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("original-side thread missing from list")
+	}
+	if found.Outdated {
+		t.Fatalf("original-side thread outdated in list: %+v", found)
 	}
 }

@@ -69,23 +69,25 @@ func TestMapRange(t *testing.T) {
 
 func TestAnchorNow(t *testing.T) {
 	h, _, repo := newWorktreeHost(t)
+	ws := h.reg.get("src")
 	// anchored content: 5 lines
 	orig := []byte("l1\nl2\nl3\nl4\nl5\n")
 	os.WriteFile(filepath.Join(repo, "f.txt"), orig, 0o644)
 	sha := gitBlobSHA(orig)
 	h.reg.putAnchorBlob(sha, orig)
+	// Side is left unset — empty side must behave as "modified".
 	th := &ThreadInfo{Workspace: "src", Path: "f.txt", StartLine: 3, EndLine: 4,
 		BlobSHA: sha, CurrentStart: 3, CurrentEnd: 4}
 
 	// same content → fast path, no change
-	h.anchorNow(repo, th)
+	h.anchorNow(ws, repo, th)
 	if th.CurrentStart != 3 || th.CurrentEnd != 4 || th.Outdated {
 		t.Fatalf("same-sha: %+v", th)
 	}
 
 	// two lines inserted above → range rides down
 	os.WriteFile(filepath.Join(repo, "f.txt"), []byte("a\nb\nl1\nl2\nl3\nl4\nl5\n"), 0o644)
-	h.anchorNow(repo, th)
+	h.anchorNow(ws, repo, th)
 	if th.CurrentStart != 5 || th.CurrentEnd != 6 || th.Outdated {
 		t.Fatalf("shift: %+v", th)
 	}
@@ -93,7 +95,7 @@ func TestAnchorNow(t *testing.T) {
 	// anchored line edited → outdated, range stays at stored positions
 	th.CurrentStart, th.CurrentEnd, th.Outdated = th.StartLine, th.EndLine, false
 	os.WriteFile(filepath.Join(repo, "f.txt"), []byte("l1\nl2\nCHANGED\nl4\nl5\n"), 0o644)
-	h.anchorNow(repo, th)
+	h.anchorNow(ws, repo, th)
 	if !th.Outdated || th.CurrentStart != 3 {
 		t.Fatalf("overlap: %+v", th)
 	}
@@ -101,7 +103,7 @@ func TestAnchorNow(t *testing.T) {
 	// file gone → outdated
 	th.Outdated = false
 	os.Remove(filepath.Join(repo, "f.txt"))
-	h.anchorNow(repo, th)
+	h.anchorNow(ws, repo, th)
 	if !th.Outdated {
 		t.Fatalf("deleted file: %+v", th)
 	}
@@ -109,8 +111,23 @@ func TestAnchorNow(t *testing.T) {
 	// blob missing (pruned) → outdated, never an error
 	th2 := &ThreadInfo{Workspace: "src", Path: "a.txt", StartLine: 1, EndLine: 1,
 		BlobSHA: "nope", CurrentStart: 1, CurrentEnd: 1}
-	h.anchorNow(repo, th2)
+	h.anchorNow(ws, repo, th2)
 	if !th2.Outdated {
 		t.Fatalf("missing blob: %+v", th2)
+	}
+
+	// original-side thread anchored to committed content: the regression
+	// this fix prevents. a.txt is committed (HEAD) as "hello\n"; even
+	// though the working tree copy has since diverged, re-anchoring an
+	// original-side thread must compare against the BASE, not the tree —
+	// so it stays NOT outdated with the stored range.
+	helloSHA := gitBlobSHA([]byte("hello\n"))
+	h.reg.putAnchorBlob(helloSHA, []byte("hello\n"))
+	os.WriteFile(filepath.Join(repo, "a.txt"), []byte("edited\n"), 0o644)
+	th3 := &ThreadInfo{Workspace: "src", Path: "a.txt", StartLine: 1, EndLine: 1,
+		Side: "original", BlobSHA: helloSHA, CurrentStart: 1, CurrentEnd: 1}
+	h.anchorNow(ws, repo, th3)
+	if th3.Outdated || th3.CurrentStart != 1 || th3.CurrentEnd != 1 {
+		t.Fatalf("original-side against diverged tree: %+v", th3)
 	}
 }

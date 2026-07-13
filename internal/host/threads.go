@@ -337,7 +337,7 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 		list := h.reg.listThreads(name,
 			r.URL.Query().Get("state"), r.URL.Query().Get("path"))
 		for _, t := range list {
-			h.anchorNow(top, t)
+			h.anchorNow(ws, top, t)
 		}
 		if list == nil {
 			list = []*ThreadInfo{}
@@ -384,8 +384,9 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 	// snapshot the anchored content NOW — the anchor is what the
 	// commenter was looking at, not what the file becomes
 	var content []byte
+	var base reviewBase
 	if req.Side == "original" {
-		base := h.reviewBaseFor(ws, top, req.Base)
+		base = h.reviewBaseFor(ws, top, req.Base)
 		out, err := gitOut(top, reviewTimeout, "show", base.ref+":"+req.Path)
 		if err != nil {
 			http.Error(w, "no original content: "+err.Error(), http.StatusNotFound)
@@ -417,8 +418,15 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 		return
 	}
 
+	// the commit recorded alongside the snapshot must be the ref the
+	// content actually came from: HEAD for modified, the diff base for
+	// original (in branch mode that's a merge-base sha, not HEAD)
+	commitRef := "HEAD"
+	if req.Side == "original" {
+		commitRef = base.ref
+	}
 	commit := ""
-	if out, err := gitOut(top, reviewTimeout, "rev-parse", "HEAD"); err == nil {
+	if out, err := gitOut(top, reviewTimeout, "rev-parse", commitRef); err == nil {
 		commit = strings.TrimSpace(string(out))
 	}
 	sha := gitBlobSHA(content)
@@ -434,6 +442,6 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 		return
 	}
 	t := h.reg.getThread(id)
-	h.anchorNow(top, t)
+	h.anchorNow(ws, top, t)
 	writeJSON(w, t)
 }

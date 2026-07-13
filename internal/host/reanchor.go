@@ -136,18 +136,34 @@ func (c *hunkMemo) put(key string, h []hunk) {
 
 // anchorNow maps t's stored anchor onto the file as it is right now.
 // Every failure lands on outdated-with-stored-range — a thread renders
-// from anchor_text, never errors.
-func (h *Host) anchorNow(top string, t *ThreadInfo) {
+// from anchor_text, never errors. The "current" content source follows
+// the side: a modified-side thread compares against the working tree,
+// but an original-side thread's snapshot came from the diff base, so it
+// must re-anchor against that SAME base — comparing it to the working
+// tree would brand a freshly created thread outdated the instant the
+// tree diverges, which it always has by definition on that side.
+func (h *Host) anchorNow(ws *WorkspaceInfo, top string, t *ThreadInfo) {
 	t.CurrentStart, t.CurrentEnd = t.StartLine, t.EndLine
 	abs, err := confinePath(top, t.Path)
 	if err != nil {
 		t.Outdated = true
 		return
 	}
-	cur, err := os.ReadFile(abs)
-	if err != nil {
-		t.Outdated = true // deleted (or unreadable) file
-		return
+	var cur []byte
+	if t.Side == "original" {
+		base := h.reviewBaseFor(ws, top, "")
+		out, err := gitOut(top, reviewTimeout, "show", base.ref+":"+t.Path)
+		if err != nil {
+			t.Outdated = true // base content gone
+			return
+		}
+		cur = out
+	} else {
+		cur, err = os.ReadFile(abs)
+		if err != nil {
+			t.Outdated = true // deleted (or unreadable) file
+			return
+		}
 	}
 	curSHA := gitBlobSHA(cur)
 	if curSHA == t.BlobSHA {
