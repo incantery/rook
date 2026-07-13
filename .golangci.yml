@@ -33,6 +33,10 @@ linters:
         - (*encoding/json.Encoder).Encode
         - (*encoding/json.Decoder).Decode
         - encoding/json.Unmarshal
+        # hash writes never fail (hash.Hash docs)
+        - (hash.Hash).Write
+        # defer tx.Rollback() after a successful Commit errors by design
+        - (*database/sql.Tx).Rollback
   exclusions:
     rules:
       # Tests routinely ignore errors from setup/teardown helpers.

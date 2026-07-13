@@ -26,7 +26,7 @@ import (
 // process — the fast path must not fork.
 func gitBlobSHA(content []byte) string {
 	h := sha1.New()
-	fmt.Fprintf(h, "blob %d\x00", len(content))
+	h.Write(fmt.Appendf(nil, "blob %d\x00", len(content)))
 	h.Write(content)
 	return hex.EncodeToString(h.Sum(nil))
 }

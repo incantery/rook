@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -270,12 +271,14 @@ func (r *registry) threadsAwaitingAgent(ws string) int {
 		return 0
 	}
 	var n int
-	r.db.QueryRow(
+	if err := r.db.QueryRow(
 		`SELECT COUNT(*) FROM threads t
 		 WHERE t.workspace = ? AND t.state = 'open'
 		   AND (SELECT c.author FROM thread_comments c
 		        WHERE c.thread_id = t.id ORDER BY c.id DESC LIMIT 1) = 'user'`,
-		ws).Scan(&n)
+		ws).Scan(&n); err != nil {
+		log.Printf("threads: awaiting count: %v", err)
+	}
 	return n
 }
 
@@ -283,8 +286,10 @@ func (r *registry) putAnchorBlob(sha string, content []byte) {
 	if r.db == nil {
 		return
 	}
-	r.db.Exec(`INSERT OR IGNORE INTO anchor_blobs (sha, content) VALUES (?, ?)`,
-		sha, content)
+	if _, err := r.db.Exec(`INSERT OR IGNORE INTO anchor_blobs (sha, content) VALUES (?, ?)`,
+		sha, content); err != nil {
+		log.Printf("threads: put blob: %v", err)
+	}
 }
 
 func (r *registry) getAnchorBlob(sha string) []byte {
@@ -305,8 +310,10 @@ func (r *registry) pruneAnchorBlobs() {
 	if r.db == nil {
 		return
 	}
-	r.db.Exec(`DELETE FROM anchor_blobs WHERE sha NOT IN
-	           (SELECT blob_sha FROM threads WHERE state != 'resolved')`)
+	if _, err := r.db.Exec(`DELETE FROM anchor_blobs WHERE sha NOT IN
+	           (SELECT blob_sha FROM threads WHERE state != 'resolved')`); err != nil {
+		log.Printf("threads: prune blobs: %v", err)
+	}
 }
 
 // threadTop resolves where thread paths are confined to: the repo top
