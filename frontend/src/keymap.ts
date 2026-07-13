@@ -184,7 +184,64 @@ function reserved(b: Bind): boolean {
     return /^M:Digit[0-9]$/.test(b.key); // bare ⌘1-9 switch windows
 }
 
-export function buildKeymap(overrides: Record<string, string | undefined>): Keymap {
+// The leader (tmux prefix): the key or chord that arms the bare-key layer.
+// A single key like the backtick default matches on e.key with no modifiers;
+// a chord like `ctrl+b` (the tmux default) matches on the sigOf signature.
+export interface Leader {
+    /** does this keydown fire the leader? */
+    matches(e: KeyboardEvent): boolean;
+    /** what to pass to the terminal when the leader is pressed twice ("" = swallow) */
+    literal: string;
+    /** display glyph for the pill/palette, e.g. "`" or "⌃B" */
+    disp: string;
+}
+
+// A ctrl+<letter> leader passes its control byte through on the double-press,
+// the way tmux sends C-b when you hit the prefix twice. Other chords have no
+// natural passthrough, so they swallow it.
+function controlLiteral(trigger: string): string {
+    const parts = trigger
+        .split("+")
+        .map((p) => p.trim().toLowerCase())
+        .filter((p) => p !== "");
+    const key = parts.pop();
+    const onlyCtrl = parts.length === 1 && (parts[0] === "ctrl" || parts[0] === "control");
+    if (onlyCtrl && key && /^[a-z]$/.test(key)) {
+        return String.fromCharCode(key.toUpperCase().charCodeAt(0) - 64);
+    }
+    return "";
+}
+
+const BACKTICK_LEADER: Leader = {
+    matches: (e) => e.key === "`" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey,
+    literal: "`",
+    disp: "`",
+};
+
+export function parseLeader(trigger: string | undefined): Leader {
+    const t = (trigger ?? "").trim();
+    if (t.includes("+") && t !== "+") {
+        const chord = parseChord(t);
+        if (chord) {
+            const sig = chord.key;
+            return {matches: (e) => sigOf(e) === sig, literal: controlLiteral(t), disp: chord.disp};
+        }
+        return BACKTICK_LEADER; // unparseable chord → fall back
+    }
+    if (t.length === 1) {
+        return {
+            matches: (e) => e.key === t && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey,
+            literal: t,
+            disp: t,
+        };
+    }
+    return BACKTICK_LEADER;
+}
+
+export function buildKeymap(
+    overrides: Record<string, string | undefined>,
+    leaderDisp = "`",
+): Keymap {
     const binds: Bind[] = [];
     const apply = (trigger: string, command: string, fromConfig: boolean) => {
         const b = parseTrigger(trigger);
@@ -192,6 +249,8 @@ export function buildKeymap(overrides: Record<string, string | undefined>): Keym
             if (fromConfig) console.warn("keybind ignored (bad or reserved trigger):", trigger);
             return;
         }
+        // prefix disp is built as "` " + key; swap in the configured leader
+        if (b.layer === "prefix" && leaderDisp !== "`") b.disp = leaderDisp + b.disp.slice(1);
         // one action per trigger: rebinding replaces, "" just unbinds
         const i = binds.findIndex((x) => x.layer === b.layer && x.key === b.key);
         if (i !== -1) binds.splice(i, 1);

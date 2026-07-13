@@ -9,7 +9,7 @@
     import type {HostAPI, IssueInfo} from "./hostapi";
     import {TermManager, type TermFactory} from "./term/manager";
     import {Registry} from "./registry";
-    import {buildKeymap, sigOf} from "./keymap";
+    import {buildKeymap, parseLeader, sigOf} from "./keymap";
     import {app} from "./state.svelte";
     import {shellQuote} from "./util";
     import Titlebar from "./Titlebar.svelte";
@@ -27,15 +27,19 @@
         mkTerm: TermFactory;
         dashTab: number;
         keybinds: Record<string, string | undefined>;
+        /** the tmux-style prefix: a key ("`") or chord ("ctrl+b") */
+        leader: string;
         /** the config font, for the Monaco pane (terminals get it via mkTerm) */
         paneFont: {family: string; size: number};
     }
-    let {api, mkTerm, dashTab, keybinds, paneFont}: Props = $props();
+    let {api, mkTerm, dashTab, keybinds, leader: leaderCfg, paneFont}: Props = $props();
     // svelte-ignore state_referenced_locally — dashTab is config, fixed for the app's lifetime
     app.dashTab = dashTab;
-    // config-fixed like dashTab: ` r reloads the page, which re-reads it
+    // config-fixed like dashTab: the leader reloads the page, which re-reads it
     // svelte-ignore state_referenced_locally
-    const keymap = buildKeymap(keybinds);
+    const leader = parseLeader(leaderCfg);
+    // svelte-ignore state_referenced_locally
+    const keymap = buildKeymap(keybinds, leader.disp);
 
     let terminalsEl: HTMLElement;
     let home = $state<Home | null>(null);
@@ -395,11 +399,12 @@
 
     // ==== keybindings — two layers, both dispatching registry commands ====
     //
-    // 1. The backtick prefix, straight from the tmux config: ` arms, the
-    //    next key acts. `` sends a literal backtick. `1-9 select window.
+    // 1. The leader prefix (config `leader`, backtick by default, or a tmux
+    //    ctrl+b-style chord): the leader arms, the next key acts. Pressing
+    //    the leader twice passes it through. leader-digit selects a window.
     // 2. macOS chords (⌘K palette etc.) as a native-feeling complement.
     // Both layers resolve through the keymap (defaults + config `keybind`
-    // overrides); only the digit keys and `` stay hardwired here.
+    // overrides); only the digit keys and the leader stay hardwired here.
     function onKeydown(e: KeyboardEvent): void {
         if (app.inboxOpen) return; // inbox's capture handler owns keys
         if (app.keyOpen || app.spawnOpen) return; // modals own their keys
@@ -430,7 +435,7 @@
                 // anything else: prefix consumed, key ignored — tmux behavior
                 return;
             }
-            if (!typing && e.key === "`" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+            if (!typing && leader.matches(e)) {
                 e.preventDefault();
                 e.stopPropagation();
                 app.prefixArmed = true;
@@ -453,8 +458,10 @@
             e.preventDefault();
             e.stopPropagation();
             app.prefixArmed = false;
-            if (e.key === "`") mgr.sendToActive("`");
-            else if (/^[0-9]$/.test(e.key)) {
+            if (leader.matches(e)) {
+                // leader pressed twice: tmux passthrough (a literal ` or a control byte)
+                if (leader.literal) mgr.sendToActive(leader.literal);
+            } else if (/^[0-9]$/.test(e.key)) {
                 // reserved: the strip digits are computed from dashboard-tab
                 if (Number(e.key) === dashTab) registry.run("workspace.dashboard");
                 else if (Number(e.key) > dashTab) mgr.switchTo(Number(e.key) - dashTab - 1);
@@ -465,7 +472,7 @@
             }
             return;
         }
-        if (e.key === "`" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        if (leader.matches(e)) {
             e.preventDefault();
             e.stopPropagation();
             app.prefixArmed = true;

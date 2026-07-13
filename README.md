@@ -28,6 +28,14 @@ Gatekeeper ceremony.
 From source: `make install` (needs Go, node, and the wails3 CLI).
 Maintainers cut releases with `make release VERSION=vX.Y.Z`.
 
+## Configure
+
+Config lives at `~/.config/rook/config` — ghostty-style `key = value` lines.
+The file is optional; missing means defaults. [`docs/config.sample`](docs/config.sample)
+is the complete surface: every key, each set to its default and commented out,
+so you can copy it in verbatim and uncomment what you want to change. Secrets
+(the OpenAI key, the Jira token) live in the keychain, not the file.
+
 ## What it is
 
 A desktop terminal app with a built-in agent as the primary driver. The agent
