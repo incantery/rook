@@ -1,0 +1,126 @@
+# rook config — the complete, documented surface.
+#
+# Copy this to ~/.config/rook/config (XDG_CONFIG_HOME is respected) and
+# uncomment what you want to change. Every key below is set to its actual
+# default and commented out, so dropping this file in verbatim is a no-op.
+#
+# Format is ghostty-style: one `key = value` per line, `#` starts a comment,
+# blank lines are ignored. Unknown keys are ignored too, so a newer sample
+# than your build degrades quietly. The file is re-read on every page reload —
+# no restart needed to pick up an edit.
+#
+# Secrets are NOT managed here (see the bottom of this file).
+
+
+# ── Fonts and window chrome ──────────────────────────────────────────────
+
+# Terminal font. A Nerd Font gives you the powerline/devicon glyphs.
+# font-family = Hack Nerd Font Mono
+
+# Point size.
+# font-size = 18
+
+# Window background opacity, 0 (transparent) to 1 (opaque).
+# background-opacity = 0.95
+
+# Inner padding between the terminal grid and the window edge, in points.
+# window-padding-x = 4
+# window-padding-y = 4
+
+
+# ── Dashboard ────────────────────────────────────────────────────────────
+
+# Which strip number the dashboard occupies, 0 to 8. Shell windows number
+# from the next one up, and the backtick-then-digit jump follows along.
+# dashboard-tab = 1
+
+
+# ── Built-in agent (opt-in; see docs/agent.md) ───────────────────────────
+
+# The whole agent feature is off until you turn it on. Accepts on or true.
+# agent = off
+
+# Model the drafter runs.
+# agent-model = gpt-5.4-nano
+
+# Hard daily spend ceiling for the agent, in US dollars.
+# agent-daily-cap-usd = 1.00
+
+
+# ── Coder ────────────────────────────────────────────────────────────────
+
+# The CLI the host types into spawned task windows (spawn drafts, the
+# conflict-resolve chip, workflow stages).
+# coder = claude
+
+
+# ── Jira issue queue (host-read) ─────────────────────────────────────────
+#
+# jira-url and jira-email are global. A workspace opts into the queue with a
+# per-workspace jira-project key (below). The API token is NOT set here — it
+# lives in the keychain (see the secrets note at the bottom). Empty by
+# default, which leaves the queue off.
+
+# Your Jira site.
+# jira-url = https://your-org.atlassian.net
+
+# The account email the token belongs to.
+# jira-email = you@example.com
+
+# Overrides the default issue query. Left empty, rook uses its built-in JQL.
+# jira-jql = assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC
+
+
+# ── Workflow: staged review pipeline (host-read) ─────────────────────────
+#
+# Slash commands, comma-separated, run in sequence after a worktree's coding
+# agent opens its PR — each spawned in its own window. Empty means the
+# feature is off.
+# workflow = /security-review, /review
+
+
+# ── Keybindings ──────────────────────────────────────────────────────────
+#
+# keybind = <trigger>=<command>, one line per binding, repeatable. A bare key
+# ("m") fires after the backtick prefix; a modifier chord ("cmd+shift+k")
+# fires directly. An empty command ("keybind = m=") unbinds a default. The
+# frontend owns validation and fails open, so unknown commands, unparseable
+# chords, and reserved triggers (digits, the backtick escape) are ignored.
+# keybind = m=workspace.manager
+# keybind = cmd+shift+k=palette.toggle
+
+
+# ── Per-workspace overrides (dynamic keys) ───────────────────────────────
+#
+# These keys carry a workspace name in the key itself. Replace <workspace>
+# with the workspace's name. They have no global default — a workspace simply
+# has no override until you add its line.
+
+# Opt a workspace into the Jira queue by naming its project key. Both parts
+# matter: the <workspace> suffix picks the workspace, the value is the Jira
+# project key. No line means that workspace pulls no Jira issues.
+# jira-project-<workspace> = KEY
+
+# The worktree-branch prefix for a workspace. The value is used verbatim, so
+# bring your own trailing separator. Unset falls back to rook/.
+# branch-prefix-<workspace> = seth/
+
+# Override the global workflow for one workspace. An explicitly empty value
+# (nothing after the =) opts that workspace out of the global pipeline
+# entirely; a non-empty value replaces it for that workspace.
+# workflow-<workspace> = /review
+
+
+# ── Secrets are NOT file-managed ─────────────────────────────────────────
+#
+# The OpenAI key (the agent's credential) and the Jira API token never live
+# in this file — the config stays user-owned and safe to commit or share.
+# They live in the login keychain instead:
+#
+#   rookctl set-jira-token        # stores the Jira API token
+#
+# The OpenAI key is set from the app. Each has a file fallback for
+# headless setups, and both must be tight 0600:
+#
+#   ~/.config/rook/openai-key
+#   ~/.config/rook/jira-token
