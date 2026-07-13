@@ -97,11 +97,13 @@
     }
 
     function removeRow(i: number) {
+        capturing = -1; // structural edit shifts indices — cancel any in-progress capture
         rows = rows.filter((_, j) => j !== i);
     }
 
     function addRow() {
         if (!addCommand) return;
+        capturing = -1;
         rows = [...rows, {command: addCommand, trigger: ""}];
         addCommand = "";
     }
@@ -156,6 +158,9 @@
                 value={capturing === i ? "press keys…" : row.trigger || "(unbound)"}
                 onclick={() => (capturing = i)}
                 onkeydown={(e) => onCaptureKey(e, i)}
+                onblur={() => {
+                    if (capturing === i) capturing = -1;
+                }}
             />
             {#if problems[i]}<span class="settings-conflict">⚠ {problems[i]}</span>{/if}
             <button class="home-btn" onclick={() => removeRow(i)}>Remove</button>
