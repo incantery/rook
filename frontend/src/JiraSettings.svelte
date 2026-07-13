@@ -10,11 +10,16 @@
 
     let {cfg}: {cfg: ConfigModel} = $props();
 
+    // seeded once from cfg into an editable buffer; not $derived on purpose
+    // svelte-ignore state_referenced_locally
     let url = $state(cfg.jiraUrl ?? "");
+    // svelte-ignore state_referenced_locally
     let email = $state(cfg.jiraEmail ?? "");
+    // svelte-ignore state_referenced_locally
     let jql = $state(cfg.jiraJql ?? "");
     // project rows keyed by workspace name; start from config, offer a row per
     // known workspace so mapping is discoverable
+    // svelte-ignore state_referenced_locally
     let projects = $state<Record<string, string>>({...cfg.jiraProjects} as Record<string, string>);
     let token = $state("");
     let tokenStatus = $state("checking…");
@@ -70,6 +75,7 @@
     }
 
     async function clearToken() {
+        error = "";
         try {
             await Call.ByName(SVC + "ClearJiraToken");
             tokenOk = false;
