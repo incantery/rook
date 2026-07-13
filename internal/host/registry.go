@@ -113,6 +113,35 @@ CREATE TABLE IF NOT EXISTS stages (
 	finished_at  TEXT,
 	UNIQUE(workspace, idx)
 );
+CREATE TABLE IF NOT EXISTS threads (
+	id            INTEGER PRIMARY KEY,
+	workspace     TEXT NOT NULL,
+	path          TEXT NOT NULL,
+	start_line    INTEGER NOT NULL,
+	end_line      INTEGER NOT NULL,
+	side          TEXT NOT NULL DEFAULT 'modified', -- modified|original (diff side)
+	blob_sha      TEXT NOT NULL,              -- content identity at anchor time
+	commit_sha    TEXT NOT NULL DEFAULT '',   -- HEAD at anchor time, informational
+	anchor_text   TEXT NOT NULL,              -- the anchored lines verbatim
+	state         TEXT NOT NULL DEFAULT 'pending', -- pending|open|resolved
+	resolved_by   TEXT NOT NULL DEFAULT '',   -- ''|user|agent
+	agent_reopens INTEGER NOT NULL DEFAULT 0, -- user reopened an agent-resolve (verdict datum)
+	created_at    TEXT NOT NULL,
+	updated_at    TEXT NOT NULL,
+	submitted_at  TEXT
+);
+CREATE TABLE IF NOT EXISTS thread_comments (
+	id            INTEGER PRIMARY KEY,
+	thread_id     INTEGER NOT NULL,
+	author        TEXT NOT NULL,              -- user|agent (declared, not authenticated)
+	agent_session TEXT NOT NULL DEFAULT '',
+	body          TEXT NOT NULL,
+	created_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS anchor_blobs (
+	sha     TEXT PRIMARY KEY,                 -- git blob hash of content
+	content BLOB NOT NULL
+);
 `
 
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS

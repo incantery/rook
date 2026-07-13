@@ -1,0 +1,143 @@
+package host
+
+import (
+	"testing"
+)
+
+// threadReg is a registry over a throwaway data dir — store tests need
+// no Host, no HTTP.
+func threadReg(t *testing.T) *registry {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	r := loadRegistry()
+	if r.db == nil {
+		t.Fatal("test registry has no db")
+	}
+	return r
+}
+
+func TestThreadStoreCRUD(t *testing.T) {
+	r := threadReg(t)
+
+	id, err := r.createThread(&ThreadInfo{
+		Workspace: "ws", Path: "a.txt", StartLine: 2, EndLine: 3,
+		Side: "modified", BlobSHA: "abc", CommitSHA: "deadbeef",
+		AnchorText: "two\nthree",
+	}, "why is this like this?")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	th := r.getThread(id)
+	if th == nil || th.State != "pending" || len(th.Comments) != 1 {
+		t.Fatalf("getThread: %+v", th)
+	}
+	if th.Comments[0].Author != "user" || th.Comments[0].Body != "why is this like this?" {
+		t.Fatalf("first comment: %+v", th.Comments[0])
+	}
+
+	// list filters: workspace, state, path
+	if got := len(r.listThreads("ws", "", "")); got != 1 {
+		t.Fatalf("list ws: %d", got)
+	}
+	if got := len(r.listThreads("other", "", "")); got != 0 {
+		t.Fatalf("list other ws: %d", got)
+	}
+	if got := len(r.listThreads("ws", "open", "")); got != 0 {
+		t.Fatalf("list open: %d", got)
+	}
+	if got := len(r.listThreads("ws", "pending", "a.txt")); got != 1 {
+		t.Fatalf("list pending a.txt: %d", got)
+	}
+
+	// submit: pending → open, stamped
+	if n := r.submitThreads("ws"); n != 1 {
+		t.Fatalf("submit: %d", n)
+	}
+	th = r.getThread(id)
+	if th.State != "open" || th.Submitted == nil {
+		t.Fatalf("after submit: %+v", th)
+	}
+	// awaiting agent: open + last comment by user
+	if n := r.threadsAwaitingAgent("ws"); n != 1 {
+		t.Fatalf("awaiting: %d", n)
+	}
+
+	// agent replies — no longer awaiting
+	if err := r.addThreadComment(id, "agent", "t1", "moved the guard"); err != nil {
+		t.Fatal(err)
+	}
+	if n := r.threadsAwaitingAgent("ws"); n != 0 {
+		t.Fatalf("awaiting after reply: %d", n)
+	}
+	th = r.getThread(id)
+	if len(th.Comments) != 2 || th.Comments[1].AgentSession != "t1" {
+		t.Fatalf("comments after reply: %+v", th.Comments)
+	}
+
+	// resolve by agent, user reopens → agent_reopens increments
+	if err := r.resolveThread(id, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	th = r.getThread(id)
+	if th.State != "resolved" || th.ResolvedBy != "agent" {
+		t.Fatalf("after resolve: %+v", th)
+	}
+	if err := r.resolveThread(id, "user"); err != errThreadState {
+		t.Fatalf("double resolve: %v", err)
+	}
+	if err := r.reopenThread(id); err != nil {
+		t.Fatal(err)
+	}
+	th = r.getThread(id)
+	if th.State != "open" || th.ResolvedBy != "" || th.AgentReopens != 1 {
+		t.Fatalf("after reopen: %+v", th)
+	}
+	if err := r.reopenThread(id); err != errThreadState {
+		t.Fatalf("reopen non-resolved: %v", err)
+	}
+
+	// unknown ids
+	if r.getThread(999) != nil {
+		t.Fatal("ghost thread")
+	}
+	if err := r.addThreadComment(999, "user", "", "x"); err == nil {
+		t.Fatal("comment on ghost thread must error")
+	}
+}
+
+func TestAnchorBlobs(t *testing.T) {
+	r := threadReg(t)
+	r.putAnchorBlob("sha1", []byte("hello\n"))
+	r.putAnchorBlob("sha1", []byte("hello\n")) // dedup: second put is a no-op
+	if got := r.getAnchorBlob("sha1"); string(got) != "hello\n" {
+		t.Fatalf("blob: %q", got)
+	}
+	if r.getAnchorBlob("missing") != nil {
+		t.Fatal("missing blob must be nil")
+	}
+
+	// prune keeps blobs referenced by unresolved threads only
+	id, _ := r.createThread(&ThreadInfo{
+		Workspace: "ws", Path: "a.txt", StartLine: 1, EndLine: 1,
+		Side: "modified", BlobSHA: "sha1", AnchorText: "hello",
+	}, "hm")
+	r.putAnchorBlob("orphan", []byte("x"))
+	r.pruneAnchorBlobs()
+	if r.getAnchorBlob("sha1") == nil {
+		t.Fatal("referenced blob pruned")
+	}
+	if r.getAnchorBlob("orphan") != nil {
+		t.Fatal("orphan blob survived prune")
+	}
+	r.submitThreads("ws")
+	r.resolveThread(id, "user")
+	r.pruneAnchorBlobs()
+	if r.getAnchorBlob("sha1") != nil {
+		t.Fatal("blob for resolved-only thread survived prune")
+	}
+	// the resolved thread still renders (anchor_text), just outdated
+	if th := r.getThread(id); th == nil || th.AnchorText != "hello" {
+		t.Fatalf("resolved thread lost its text: %+v", th)
+	}
+}
