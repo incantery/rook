@@ -223,17 +223,17 @@ func (r *registry) resolveThread(id int64, by string) error {
 }
 
 // reopenThread flips resolved → open. A user reopening an AGENT-resolve
-// is the negative-verdict datum — counted here, read in slice 3.
-func (r *registry) reopenThread(id int64) error {
+// is the negative-verdict datum — incremented only when both sides match.
+func (r *registry) reopenThread(id int64, by string) error {
 	if r.db == nil {
 		return fmt.Errorf("no registry db")
 	}
 	now := time.Now().Format(time.RFC3339Nano)
 	res, err := r.db.Exec(
 		`UPDATE threads SET state = 'open',
-		   agent_reopens = agent_reopens + (resolved_by = 'agent'),
+		   agent_reopens = agent_reopens + (resolved_by = 'agent' AND ? = 'user'),
 		   resolved_by = '', updated_at = ?
-		 WHERE id = ? AND state = 'resolved'`, now, id)
+		 WHERE id = ? AND state = 'resolved'`, by, now, id)
 	if err != nil {
 		return err
 	}
@@ -499,7 +499,16 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "no such thread", http.StatusNotFound)
 		}
 	case "reopen":
-		switch err := h.reg.reopenThread(id); err {
+		var req struct{ By string }
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.By == "" {
+			req.By = "user"
+		}
+		if req.By != "user" && req.By != "agent" {
+			http.Error(w, "by must be user or agent", http.StatusBadRequest)
+			return
+		}
+		switch err := h.reg.reopenThread(id, req.By); err {
 		case nil:
 			w.WriteHeader(http.StatusNoContent)
 		case errThreadState:

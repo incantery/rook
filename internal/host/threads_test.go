@@ -91,14 +91,14 @@ func TestThreadStoreCRUD(t *testing.T) {
 	if err := r.resolveThread(id, "user"); err != errThreadState {
 		t.Fatalf("double resolve: %v", err)
 	}
-	if err := r.reopenThread(id); err != nil {
+	if err := r.reopenThread(id, "user"); err != nil {
 		t.Fatal(err)
 	}
 	th = r.getThread(id)
 	if th.State != "open" || th.ResolvedBy != "" || th.AgentReopens != 1 {
 		t.Fatalf("after reopen: %+v", th)
 	}
-	if err := r.reopenThread(id); err != errThreadState {
+	if err := r.reopenThread(id, "user"); err != errThreadState {
 		t.Fatalf("reopen non-resolved: %v", err)
 	}
 
@@ -310,6 +310,25 @@ func TestThreadCommentResolveReopen(t *testing.T) {
 	}
 	if code, _ = c.do(t, "POST", "/threads/"+id+"/reopen", nil); code != 409 {
 		t.Fatalf("reopen open thread: %d", code)
+	}
+
+	// agent reopening its own resolve must not count: resolve again, reopen as agent
+	if code, _ = c.do(t, "POST", "/threads/"+id+"/resolve", map[string]any{"by": "agent"}); code != 204 {
+		t.Fatalf("resolve again: %d", code)
+	}
+	if code, _ = c.do(t, "POST", "/threads/"+id+"/reopen", map[string]any{"by": "agent"}); code != 204 {
+		t.Fatalf("reopen as agent: %d", code)
+	}
+	if got = h.reg.getThread(th.ID); got.AgentReopens != 1 {
+		t.Fatalf("agent self-reopen must not increment: %+v", got)
+	}
+
+	// invalid by value
+	if code, _ = c.do(t, "POST", "/threads/"+id+"/resolve", map[string]any{"by": "agent"}); code != 204 {
+		t.Fatalf("resolve for invalid test: %d", code)
+	}
+	if code, _ = c.do(t, "POST", "/threads/"+id+"/reopen", map[string]any{"by": "root"}); code != 400 {
+		t.Fatalf("invalid by value: %d", code)
 	}
 
 	// unknown id / bad routes
