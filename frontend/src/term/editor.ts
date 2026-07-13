@@ -163,10 +163,14 @@ export class EditorPane implements PaneContent {
         if (!this.monaco) return;
         const keep = this.files[this.idx]?.path;
         try {
-            const [res] = await Promise.all([
-                this.api.changes(this.opts.workspace, this.base),
-                this.fetchThreads(),
-            ]);
+            // threads ride the same cycle but never gate it — a hanging
+            // /threads must not stall a diff the pane already has
+            void this.fetchThreads().then(() => {
+                const p = this.currentPath();
+                if (this.disposed || !p) return;
+                for (const b of this.bands) b.render(this.threadsAll, p);
+            });
+            const res = await this.api.changes(this.opts.workspace, this.base);
             if (this.disposed) return;
             this.fetchedAt = Date.now();
             // the host decides the default and reports what it diffed —
@@ -232,10 +236,13 @@ export class EditorPane implements PaneContent {
         const path = this.opts.path ?? "";
         if (!m) return;
         try {
-            const [res] = await Promise.all([
-                this.api.readFile(this.opts.workspace, path),
-                this.fetchThreads(),
-            ]);
+            // same non-gating fetch as refresh()
+            void this.fetchThreads().then(() => {
+                const p = this.currentPath();
+                if (this.disposed || !p) return;
+                for (const b of this.bands) b.render(this.threadsAll, p);
+            });
+            const res = await this.api.readFile(this.opts.workspace, path);
             if (this.disposed) return;
             if (res.binary) {
                 this.showStatus(`${path}: binary file`);
