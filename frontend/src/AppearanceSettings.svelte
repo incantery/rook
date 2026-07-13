@@ -138,13 +138,28 @@
 
 <div class="ws-form">
     <div class="ws-modal-title">Appearance</div>
-    <label class="settings-row"><span>Leader</span>
-        <input type="text" placeholder="` or ctrl+b" bind:value={leader} spellcheck="false" autocomplete="off" />
+    <label class="settings-row"
+        ><span>Leader</span>
+        <input
+            type="text"
+            placeholder="` or ctrl+b"
+            bind:value={leader}
+            spellcheck="false"
+            autocomplete="off"
+        />
     </label>
-    <label class="settings-row"><span>Font family</span>
-        <input type="text" placeholder="Hack Nerd Font Mono" bind:value={fontFamily} spellcheck="false" autocomplete="off" />
+    <label class="settings-row"
+        ><span>Font family</span>
+        <input
+            type="text"
+            placeholder="Hack Nerd Font Mono"
+            bind:value={fontFamily}
+            spellcheck="false"
+            autocomplete="off"
+        />
     </label>
-    <label class="settings-row"><span>Font size</span>
+    <label class="settings-row"
+        ><span>Font size</span>
         <input type="number" min="6" max="72" bind:value={fontSize} />
     </label>
 
@@ -181,6 +196,8 @@
     <div class="ws-modal-foot">
         <span class="home-spacer"></span>
         {#if saved}<span class="settings-saved">saved — reloading…</span>{/if}
-        <button class="home-btn primary" disabled={hasProblem} onclick={() => void save()}>Save &amp; reload</button>
+        <button class="home-btn primary" disabled={hasProblem} onclick={() => void save()}
+            >Save &amp; reload</button
+        >
     </div>
 </div>

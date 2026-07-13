@@ -89,28 +89,63 @@
 <div class="ws-form">
     <div class="ws-modal-title">Jira connection</div>
 
-    <label class="settings-row"><span>Base URL</span>
-        <input type="text" placeholder="https://org.atlassian.net" bind:value={url} spellcheck="false" autocomplete="off" />
+    <label class="settings-row"
+        ><span>Base URL</span>
+        <input
+            type="text"
+            placeholder="https://org.atlassian.net"
+            bind:value={url}
+            spellcheck="false"
+            autocomplete="off"
+        />
     </label>
-    <label class="settings-row"><span>Email</span>
-        <input type="text" placeholder="you@org.com" bind:value={email} spellcheck="false" autocomplete="off" />
+    <label class="settings-row"
+        ><span>Email</span>
+        <input
+            type="text"
+            placeholder="you@org.com"
+            bind:value={email}
+            spellcheck="false"
+            autocomplete="off"
+        />
     </label>
-    <label class="settings-row"><span>JQL override</span>
-        <input type="text" placeholder="(optional)" bind:value={jql} spellcheck="false" autocomplete="off" />
+    <label class="settings-row"
+        ><span>JQL override</span>
+        <input
+            type="text"
+            placeholder="(optional)"
+            bind:value={jql}
+            spellcheck="false"
+            autocomplete="off"
+        />
     </label>
 
     <div class="settings-status" class:ok={tokenOk}>{tokenStatus}</div>
-    <div class="settings-row"><span>API token</span>
-        <input type="password" placeholder="paste token (underscores welcome)" bind:value={token} spellcheck="false" autocomplete="off" />
+    <div class="settings-row">
+        <span>API token</span>
+        <input
+            type="password"
+            placeholder="paste token (underscores welcome)"
+            bind:value={token}
+            spellcheck="false"
+            autocomplete="off"
+        />
         <button class="home-btn" onclick={() => void clearToken()}>Remove</button>
     </div>
 
     <div class="ws-modal-title">Project mapping</div>
     {#each workspaceNames as ws (ws)}
-        <label class="settings-row"><span>{ws}</span>
-            <input type="text" placeholder="PROJECTKEY (blank = off)" spellcheck="false" autocomplete="off"
+        <label class="settings-row"
+            ><span>{ws}</span>
+            <input
+                type="text"
+                placeholder="PROJECTKEY (blank = off)"
+                spellcheck="false"
+                autocomplete="off"
                 value={projects[ws] ?? ""}
-                oninput={(e) => (projects = {...projects, [ws]: (e.target as HTMLInputElement).value})} />
+                oninput={(e) =>
+                    (projects = {...projects, [ws]: (e.target as HTMLInputElement).value})}
+            />
         </label>
     {/each}
 

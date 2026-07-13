@@ -45,7 +45,8 @@
         try {
             await Call.ByName(SVC + "ClearOpenAIKey");
             statusOk = false;
-            status = "no key configured — the agent idles until one exists (and agent = on in the config)";
+            status =
+                "no key configured — the agent idles until one exists (and agent = on in the config)";
         } catch (err) {
             error = `keychain delete failed: ${err}`;
         }
@@ -55,8 +56,15 @@
 <div class="ws-form">
     <div class="ws-modal-title">OpenAI API key — the drafter's credential</div>
     <div class="settings-status" class:ok={statusOk}>{status}</div>
-    <label class="settings-row"><span>Key</span>
-        <input type="password" placeholder="sk-…" bind:value={key} spellcheck="false" autocomplete="off" />
+    <label class="settings-row"
+        ><span>Key</span>
+        <input
+            type="password"
+            placeholder="sk-…"
+            bind:value={key}
+            spellcheck="false"
+            autocomplete="off"
+        />
         <button class="home-btn" onclick={() => void clear()}>Remove</button>
     </label>
     {#if error}<div class="settings-error">{error}</div>{/if}
