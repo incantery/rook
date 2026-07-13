@@ -10,8 +10,13 @@ import (
 	"time"
 )
 
-// Jira reads the current queue over the REST v2 search API (v2, not v3,
-// because v2 returns descriptions as plain text instead of ADF documents).
+// Jira reads the current queue over the enhanced-search endpoint
+// /rest/api/2/search/jql. It stays on v2 (not v3) because v2 returns
+// descriptions as plain text instead of ADF documents; the old
+// /rest/api/2/search was removed by Atlassian in May 2025 (410 Gone).
+// We only ever fetch the first page, so the endpoint's nextPageToken
+// pagination (which replaced startAt) doesn't matter and the response's
+// issues array decodes exactly as before.
 // Auth is the standard cloud pair: account email + API token, basic auth.
 type Jira struct {
 	BaseURL string // https://yourorg.atlassian.net
@@ -80,7 +85,7 @@ func (j *Jira) search(jql string) ([]Issue, error) {
 		"maxResults": {"50"},
 		"fields":     {"summary,description,status,assignee,labels,updated"},
 	}
-	req, err := http.NewRequest(http.MethodGet, j.BaseURL+"/rest/api/2/search?"+q.Encode(), nil)
+	req, err := http.NewRequest(http.MethodGet, j.BaseURL+"/rest/api/2/search/jql?"+q.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}

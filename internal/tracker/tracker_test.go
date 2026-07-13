@@ -32,10 +32,22 @@ func TestParseGitHubScope(t *testing.T) {
 	}
 }
 
-// fakeJira answers /rest/api/2/search, rejecting sprint JQL when sprints=false.
+// fakeJira answers the enhanced-search endpoint /rest/api/2/search/jql,
+// rejecting sprint JQL when sprints=false. The legacy /rest/api/2/search
+// path was removed by Atlassian and now returns 410 Gone — model that so a
+// regression back to the old endpoint fails loudly instead of silently.
 func fakeJira(t *testing.T, sprints bool) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/api/2/search/jql" {
+			w.WriteHeader(http.StatusGone) // 410
+			json.NewEncoder(w).Encode(map[string]any{
+				"errorMessages": []string{
+					"The requested API has been removed. Please migrate to the /rest/api/3/search/jql endpoint.",
+				},
+			})
+			return
+		}
 		jql := r.URL.Query().Get("jql")
 		if user, _, _ := r.BasicAuth(); user != "me@example.com" {
 			w.WriteHeader(401)
