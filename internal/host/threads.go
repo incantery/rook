@@ -32,21 +32,21 @@ type ThreadComment struct {
 // ThreadInfo is a thread with its comments and, when read through the
 // HTTP surface, the re-anchored current range (reanchor.go).
 type ThreadInfo struct {
-	ID           int64      `json:"id"`
-	Workspace    string     `json:"workspace"`
-	Path         string     `json:"path"`
-	StartLine    int        `json:"startLine"` // 1-based, inclusive
-	EndLine      int        `json:"endLine"`
-	Side         string     `json:"side"`                // modified|original
-	BlobSHA      string     `json:"blobSha"`             // anchor content identity
-	CommitSHA    string     `json:"commitSha,omitempty"` // display only
-	AnchorText   string     `json:"anchorText"`
-	State        string     `json:"state"` // pending|open|resolved
-	ResolvedBy   string     `json:"resolvedBy,omitempty"`
-	AgentReopens int        `json:"agentReopens,omitempty"`
-	Created      time.Time  `json:"created"`
-	Updated      time.Time  `json:"updated"`
-	Submitted    *time.Time `json:"submitted,omitempty"`
+	ID           int64           `json:"id"`
+	Workspace    string          `json:"workspace"`
+	Path         string          `json:"path"`
+	StartLine    int             `json:"startLine"` // 1-based, inclusive
+	EndLine      int             `json:"endLine"`
+	Side         string          `json:"side"`                // modified|original
+	BlobSHA      string          `json:"blobSha"`             // anchor content identity
+	CommitSHA    string          `json:"commitSha,omitempty"` // display only
+	AnchorText   string          `json:"anchorText"`
+	State        string          `json:"state"` // pending|open|resolved
+	ResolvedBy   string          `json:"resolvedBy,omitempty"`
+	AgentReopens int             `json:"agentReopens,omitempty"`
+	Created      time.Time       `json:"created"`
+	Updated      time.Time       `json:"updated"`
+	Submitted    *time.Time      `json:"submitted,omitempty"`
 	Comments     []ThreadComment `json:"comments"`
 	// Computed on read — the anchor mapped onto today's file. Outdated
 	// means the anchored lines themselves changed; render AnchorText.
