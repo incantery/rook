@@ -86,6 +86,10 @@ type Host struct {
 	// um caches subscription usage windows (WatchUsage).
 	um *usageMon
 
+	// anchorMemo caches re-anchor diffs per (old,cur) blob pair
+	// (threads.go / reanchor.go).
+	anchorMemo hunkMemo
+
 	// prm caches per-worktree PR state (WatchPRs) — the close-the-loop
 	// signal on workspace cards.
 	prm *prMon
@@ -352,6 +356,8 @@ func (h *Host) Handler() http.Handler {
 	})
 	mux.HandleFunc("/costs", h.handleCosts)
 	mux.HandleFunc("/drafts/", h.handleDraftDecide)
+	// per-thread verbs — ids are global, no workspace in the path
+	mux.HandleFunc("/threads/", h.handleThread)
 	mux.HandleFunc("/agent/spend", h.handleSpend)
 	mux.HandleFunc("/decisions", h.handleDecisions)
 	return h.cors(h.auth(mux))
@@ -544,6 +550,11 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleWorkspaceFile(w, r, name)
 	case action == "files" && r.Method == http.MethodGet:
 		h.handleWorkspaceFiles(w, name)
+	// threads: file-anchored AI conversations (threads.go)
+	case action == "threads/submit" && r.Method == http.MethodPost:
+		h.handleThreadsSubmit(w, r, name)
+	case action == "threads":
+		h.handleWorkspaceThreads(w, r, name)
 	case action == "" && r.Method == http.MethodDelete:
 		force := r.URL.Query().Get("force") == "1"
 		// prune also deletes the worktree's local branch — the close-the-

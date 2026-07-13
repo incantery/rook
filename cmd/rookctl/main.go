@@ -14,6 +14,12 @@
 //	rookctl spawn         start a claude session: rookctl spawn [-w ws] [--worktree] <task…>
 //	rookctl issues        the workspace's work queue (GitHub + Jira, mine + unassigned)
 //	rookctl changes       the workspace's changed files: rookctl changes [-w ws] [--base head|branch]
+//	rookctl threads       list a workspace's threads: rookctl threads [-w ws] [--pending] [--json]
+//	rookctl comment       start a pending thread: rookctl comment [-w ws] <path>:<a>[-<b>] <text…>
+//	rookctl submit        submit pending comments + nudge the responder: rookctl submit [-w ws]
+//	rookctl reply         reply in a thread (as the agent): rookctl reply [--user] <id> <text…>
+//	rookctl resolve       resolve a thread (as the agent): rookctl resolve [--user] <id>
+//	rookctl reopen        undo a resolve (as the human, by default — agent_reopens only counts a user's reopen): rookctl reopen [--agent] <id>
 //	rookctl work          start claude on an issue in a fresh worktree: rookctl work INF-7
 //	rookctl decisions     the drafter's ledger, last 7 days, with the verdict mix
 //	rookctl set-openai-key store the drafter's API key in the keychain
@@ -35,6 +41,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,6 +121,18 @@ func main() {
 		err = runIssues(os.Args[2:])
 	case "changes":
 		err = runChanges(os.Args[2:])
+	case "threads":
+		err = runThreads(os.Args[2:])
+	case "comment":
+		err = runComment(os.Args[2:])
+	case "submit":
+		err = runSubmit(os.Args[2:])
+	case "reply":
+		err = runThreadVerb("reply", os.Args[2:])
+	case "resolve":
+		err = runThreadVerb("resolve", os.Args[2:])
+	case "reopen":
+		err = runThreadVerb("reopen", os.Args[2:])
 	case "work":
 		err = runWork(os.Args[2:])
 	case "decisions":
@@ -138,7 +157,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -795,6 +814,232 @@ func runWork(args []string) error {
 		return err
 	}
 	fmt.Printf("working %s in %s (session %s)\n", key, target, s.ID)
+	return nil
+}
+
+// ---- threads (file-anchored conversations; the rook-threads skill's
+// entire tool surface — docs/superpowers/specs/2026-07-12-threads-design.md) ----
+
+type threadComment struct {
+	Author string `json:"author"`
+	Body   string `json:"body"`
+}
+
+type threadRow struct {
+	ID           int64           `json:"id"`
+	Path         string          `json:"path"`
+	StartLine    int             `json:"startLine"`
+	EndLine      int             `json:"endLine"`
+	State        string          `json:"state"`
+	Outdated     bool            `json:"outdated"`
+	AnchorText   string          `json:"anchorText"`
+	CurrentStart int             `json:"currentStart"`
+	CurrentEnd   int             `json:"currentEnd"`
+	Comments     []threadComment `json:"comments"`
+}
+
+// awaitingAgent mirrors the host's derived "needs reply": open + last
+// comment by the user.
+func awaitingAgent(t threadRow) bool {
+	return t.State == "open" && len(t.Comments) > 0 &&
+		t.Comments[len(t.Comments)-1].Author == "user"
+}
+
+func runThreads(args []string) error {
+	ws := os.Getenv("ROOK_WORKSPACE")
+	pending, asJSON := false, false
+	for len(args) > 0 {
+		switch {
+		case args[0] == "-w" && len(args) >= 2:
+			ws, args = args[1], args[2:]
+		case args[0] == "--pending":
+			pending, args = true, args[1:]
+		case args[0] == "--json":
+			asJSON, args = true, args[1:]
+		default:
+			return fmt.Errorf("usage: rookctl threads [-w workspace] [--pending] [--json]")
+		}
+	}
+	if ws == "" {
+		return fmt.Errorf("usage: rookctl threads [-w workspace] (or run inside a rook window)")
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	raw, err := c.req("GET", "/workspaces/"+ws+"/threads", nil)
+	if err != nil {
+		return err
+	}
+	var rows []threadRow
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return err
+	}
+	if pending {
+		kept := rows[:0]
+		for _, t := range rows {
+			if awaitingAgent(t) {
+				kept = append(kept, t)
+			}
+		}
+		rows = kept
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(rows)
+	}
+	if len(rows) == 0 {
+		fmt.Println("no threads")
+		return nil
+	}
+	for _, t := range rows {
+		mark := " "
+		if awaitingAgent(t) {
+			mark = "◉"
+		}
+		loc := fmt.Sprintf("%s:%d-%d", t.Path, t.CurrentStart, t.CurrentEnd)
+		if t.Outdated {
+			loc += " (outdated)"
+		}
+		last := ""
+		if n := len(t.Comments); n > 0 {
+			last = t.Comments[n-1].Author + ": " + strings.ReplaceAll(t.Comments[n-1].Body, "\n", " ")
+			if len(last) > 70 {
+				last = last[:70] + "…"
+			}
+		}
+		fmt.Printf("%s #%-4d %-9s %-40s %s\n", mark, t.ID, t.State, loc, last)
+	}
+	return nil
+}
+
+// parseAnchor splits "path:40-45" / "path:40" on the LAST colon, so
+// paths containing colons still parse.
+func parseAnchor(s string) (path string, start, end int, err error) {
+	i := strings.LastIndex(s, ":")
+	if i <= 0 {
+		return "", 0, 0, fmt.Errorf("anchor must be <path>:<line>[-<line>]")
+	}
+	path = s[:i]
+	span := s[i+1:]
+	a, b, _ := strings.Cut(span, "-")
+	if start, err = strconv.Atoi(a); err != nil {
+		return "", 0, 0, fmt.Errorf("bad line number %q", a)
+	}
+	end = start
+	if b != "" {
+		if end, err = strconv.Atoi(b); err != nil {
+			return "", 0, 0, fmt.Errorf("bad line number %q", b)
+		}
+	}
+	return path, start, end, nil
+}
+
+func runComment(args []string) error {
+	ws := os.Getenv("ROOK_WORKSPACE")
+	if len(args) >= 2 && args[0] == "-w" {
+		ws, args = args[1], args[2:]
+	}
+	if len(args) < 2 || ws == "" {
+		return fmt.Errorf("usage: rookctl comment [-w workspace] <path>:<line>[-<line>] <text…>")
+	}
+	path, start, end, err := parseAnchor(args[0])
+	if err != nil {
+		return err
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	raw, err := c.req("POST", "/workspaces/"+ws+"/threads", map[string]any{
+		"path": path, "startLine": start, "endLine": end,
+		"body": strings.Join(args[1:], " "),
+	})
+	if err != nil {
+		return err
+	}
+	var th struct {
+		ID int64 `json:"id"`
+	}
+	json.Unmarshal(raw, &th)
+	fmt.Printf("#%d pending — rookctl submit to send\n", th.ID)
+	return nil
+}
+
+func runSubmit(args []string) error {
+	ws := os.Getenv("ROOK_WORKSPACE")
+	if len(args) >= 2 && args[0] == "-w" {
+		ws = args[1]
+	}
+	if ws == "" {
+		return fmt.Errorf("usage: rookctl submit [-w workspace] (or run inside a rook window)")
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	raw, err := c.req("POST", "/workspaces/"+ws+"/threads/submit", map[string]any{})
+	if err != nil {
+		return err
+	}
+	var res struct {
+		Mode        string `json:"mode"`
+		RookSession string `json:"rookSession"`
+		Count       int    `json:"count"`
+	}
+	json.Unmarshal(raw, &res)
+	fmt.Printf("%d comment(s) submitted — nudge %s (%s)\n", res.Count, res.Mode, res.RookSession)
+	return nil
+}
+
+// runThreadVerb handles reply/resolve/reopen. reply/resolve are
+// characteristically the agent's verbs, so author/by default to agent;
+// reopen defaults to user — reopening an agent-resolve is characteristically
+// the human's act, and agent_reopens (the verdict ledger's payload) only
+// increments on by=user, so a bare `rookctl reopen` must record it.
+// --user/--agent override the default; the last leading flag wins.
+func runThreadVerb(verb string, args []string) error {
+	forceUser, forceAgent := false, false
+	for len(args) > 0 && (args[0] == "--user" || args[0] == "--agent") {
+		if args[0] == "--user" {
+			forceUser, forceAgent = true, false
+		} else {
+			forceAgent, forceUser = true, false
+		}
+		args = args[1:]
+	}
+	if len(args) < 1 {
+		return fmt.Errorf("usage: rookctl %s [--user|--agent] <thread-id> [text…]", verb)
+	}
+	id := args[0]
+	who := "agent"
+	if verb == "reopen" {
+		who = "user"
+	}
+	if forceUser {
+		who = "user"
+	} else if forceAgent {
+		who = "agent"
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	switch verb {
+	case "reply":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: rookctl reply [--user] <thread-id> <text…>")
+		}
+		_, err = c.req("POST", "/threads/"+id+"/comments",
+			map[string]string{"body": strings.Join(args[1:], " "), "author": who})
+	case "resolve":
+		_, err = c.req("POST", "/threads/"+id+"/resolve", map[string]string{"by": who})
+	case "reopen":
+		_, err = c.req("POST", "/threads/"+id+"/reopen", map[string]string{"by": who})
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("#%s %s (as %s)\n", id, verb, who)
 	return nil
 }
 
