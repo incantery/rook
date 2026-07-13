@@ -74,7 +74,13 @@ export class ThreadBand {
         }
         this.decorations.set(decs);
         for (const [tid, z] of Array.from(this.zones)) {
-            if (this.zoneBusy(z)) continue;
+            if (this.zoneBusy(z)) {
+                // a skipped refresh must not leave the one-shot focus
+                // request armed — it would fire on some later render and
+                // yank focus into a thread the user moved on from
+                if (this.focusReply === tid) this.focusReply = null;
+                continue;
+            }
             const t = this.threads.find((x) => x.id === tid);
             if (t) this.refreshZone(t, z);
             else this.closeZone(tid);

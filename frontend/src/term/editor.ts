@@ -281,6 +281,7 @@ export class EditorPane implements PaneContent {
      *  host's answer, never locally patched. */
     private async refetchThreads(): Promise<void> {
         await this.fetchThreads();
+        if (this.disposed) return;
         const path = this.currentPath();
         if (!path) return;
         for (const b of this.bands) b.render(this.threadsAll, path);
