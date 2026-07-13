@@ -1,6 +1,9 @@
 package host
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -139,5 +142,84 @@ func TestAnchorBlobs(t *testing.T) {
 	// the resolved thread still renders (anchor_text), just outdated
 	if th := r.getThread(id); th == nil || th.AnchorText != "hello" {
 		t.Fatalf("resolved thread lost its text: %+v", th)
+	}
+}
+
+func TestThreadCreateAndList(t *testing.T) {
+	h, srv, repo := newWorktreeHost(t)
+	c := &wtClient{srv.URL, h.Token()}
+	os.WriteFile(filepath.Join(repo, "f.txt"), []byte("l1\nl2\nl3\nl4\nl5\n"), 0o644)
+
+	code, body := c.do(t, "POST", "/workspaces/src/threads", map[string]any{
+		"path": "f.txt", "startLine": 2, "endLine": 3, "body": "why?"})
+	if code != 200 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var th ThreadInfo
+	json.Unmarshal([]byte(body), &th)
+	if th.State != "pending" || th.AnchorText != "l2\nl3" || th.Side != "modified" ||
+		th.CurrentStart != 2 || th.Outdated || len(th.Comments) != 1 {
+		t.Fatalf("thread: %+v", th)
+	}
+	if th.BlobSHA == "" || th.CommitSHA == "" {
+		t.Fatalf("anchor identity missing: %+v", th)
+	}
+
+	// the snapshot landed
+	if h.reg.getAnchorBlob(th.BlobSHA) == nil {
+		t.Fatal("anchor blob not stored")
+	}
+
+	// list re-anchors: insert 2 lines above the range
+	os.WriteFile(filepath.Join(repo, "f.txt"), []byte("a\nb\nl1\nl2\nl3\nl4\nl5\n"), 0o644)
+	code, body = c.do(t, "GET", "/workspaces/src/threads", nil)
+	if code != 200 {
+		t.Fatalf("list: %d %s", code, body)
+	}
+	var list []ThreadInfo
+	json.Unmarshal([]byte(body), &list)
+	if len(list) != 1 || list[0].CurrentStart != 4 || list[0].CurrentEnd != 5 || list[0].Outdated {
+		t.Fatalf("re-anchored list: %+v", list)
+	}
+
+	// filters pass through
+	code, body = c.do(t, "GET", "/workspaces/src/threads?state=open", nil)
+	json.Unmarshal([]byte(body), &list)
+	if code != 200 || len(list) != 0 {
+		t.Fatalf("state filter: %d %+v", code, list)
+	}
+
+	// validation
+	for name, req := range map[string]map[string]any{
+		"no body":   {"path": "f.txt", "startLine": 1, "endLine": 1},
+		"no path":   {"startLine": 1, "endLine": 1, "body": "x"},
+		"bad range": {"path": "f.txt", "startLine": 3, "endLine": 2, "body": "x"},
+		"oob range": {"path": "f.txt", "startLine": 1, "endLine": 99, "body": "x"},
+		"bad side":  {"path": "f.txt", "startLine": 1, "endLine": 1, "side": "left", "body": "x"},
+		"traversal": {"path": "../x", "startLine": 1, "endLine": 1, "body": "x"},
+	} {
+		if code, body := c.do(t, "POST", "/workspaces/src/threads", req); code != 400 {
+			t.Errorf("%s: %d %s", name, code, body)
+		}
+	}
+	if code, _ := c.do(t, "POST", "/workspaces/src/threads", map[string]any{
+		"path": "missing.txt", "startLine": 1, "endLine": 1, "body": "x"}); code != 404 {
+		t.Errorf("missing file: %d", code)
+	}
+	if code, _ := c.do(t, "GET", "/workspaces/nope/threads", nil); code != 404 {
+		t.Errorf("unknown ws: %d", code)
+	}
+
+	// original side: anchored to the base's content (a.txt is committed
+	// as "hello\n"; the working tree copy no longer matters)
+	os.WriteFile(filepath.Join(repo, "a.txt"), []byte("edited\n"), 0o644)
+	code, body = c.do(t, "POST", "/workspaces/src/threads", map[string]any{
+		"path": "a.txt", "startLine": 1, "endLine": 1, "side": "original", "body": "gone?"})
+	if code != 200 {
+		t.Fatalf("original side: %d %s", code, body)
+	}
+	json.Unmarshal([]byte(body), &th)
+	if th.AnchorText != "hello" || th.Side != "original" {
+		t.Fatalf("original anchor: %+v", th)
 	}
 }

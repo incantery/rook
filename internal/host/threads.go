@@ -9,8 +9,12 @@ package host
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -302,4 +306,134 @@ func (r *registry) pruneAnchorBlobs() {
 	}
 	r.db.Exec(`DELETE FROM anchor_blobs WHERE sha NOT IN
 	           (SELECT blob_sha FROM threads WHERE state != 'resolved')`)
+}
+
+// threadTop resolves where thread paths are confined to: the repo top
+// when the root is a repo (git paths are top-relative), the root itself
+// otherwise — the ` e file viewer's exact rule, so anything viewable is
+// commentable.
+func (h *Host) threadTop(ws *WorkspaceInfo) string {
+	if top, err := repoTop(ws.Root); err == nil {
+		return top
+	}
+	return ws.Root
+}
+
+// handleWorkspaceThreads is /workspaces/{name}/threads: GET lists (with
+// read-time re-anchoring), POST creates a pending thread with its first
+// comment and captures the anchor snapshot at that instant.
+func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, name string) {
+	ws := h.reg.get(name)
+	if ws == nil {
+		http.Error(w, "no such workspace: "+name, http.StatusNotFound)
+		return
+	}
+	if ws.Root == "" {
+		http.Error(w, "workspace has no root", http.StatusBadRequest)
+		return
+	}
+	if r.Method == http.MethodGet {
+		top := h.threadTop(ws)
+		list := h.reg.listThreads(name,
+			r.URL.Query().Get("state"), r.URL.Query().Get("path"))
+		for _, t := range list {
+			h.anchorNow(top, t)
+		}
+		if list == nil {
+			list = []*ThreadInfo{}
+		}
+		writeJSON(w, list)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Path      string
+		StartLine int
+		EndLine   int
+		Side      string
+		Base      string
+		Body      string
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.Side == "" {
+		req.Side = "modified"
+	}
+	req.Body = strings.TrimSpace(req.Body)
+	switch {
+	case req.Body == "":
+		http.Error(w, "body required", http.StatusBadRequest)
+		return
+	case req.Side != "modified" && req.Side != "original":
+		http.Error(w, "side must be modified or original", http.StatusBadRequest)
+		return
+	case req.StartLine < 1 || req.EndLine < req.StartLine:
+		http.Error(w, "bad line range", http.StatusBadRequest)
+		return
+	}
+	top := h.threadTop(ws)
+	abs, err := confinePath(top, req.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// snapshot the anchored content NOW — the anchor is what the
+	// commenter was looking at, not what the file becomes
+	var content []byte
+	if req.Side == "original" {
+		base := h.reviewBaseFor(ws, top, req.Base)
+		out, err := gitOut(top, reviewTimeout, "show", base.ref+":"+req.Path)
+		if err != nil {
+			http.Error(w, "no original content: "+err.Error(), http.StatusNotFound)
+			return
+		}
+		content = out
+	} else {
+		content, err = os.ReadFile(abs)
+		if err != nil {
+			http.Error(w, "no such file: "+req.Path, http.StatusNotFound)
+			return
+		}
+	}
+	if _, binary, _ := capSide(content); binary {
+		http.Error(w, "binary file", http.StatusBadRequest)
+		return
+	}
+	if len(content) > reviewMaxSide {
+		http.Error(w, "file exceeds the 2 MB anchor cap", http.StatusBadRequest)
+		return
+	}
+	lines := strings.Split(string(content), "\n")
+	// a trailing newline yields a phantom "" final element — not a line
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if req.EndLine > len(lines) {
+		http.Error(w, "range out of bounds", http.StatusBadRequest)
+		return
+	}
+
+	commit := ""
+	if out, err := gitOut(top, reviewTimeout, "rev-parse", "HEAD"); err == nil {
+		commit = strings.TrimSpace(string(out))
+	}
+	sha := gitBlobSHA(content)
+	h.reg.putAnchorBlob(sha, content)
+	id, err := h.reg.createThread(&ThreadInfo{
+		Workspace: name, Path: req.Path,
+		StartLine: req.StartLine, EndLine: req.EndLine,
+		Side: req.Side, BlobSHA: sha, CommitSHA: commit,
+		AnchorText: strings.Join(lines[req.StartLine-1:req.EndLine], "\n"),
+	}, req.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	t := h.reg.getThread(id)
+	h.anchorNow(top, t)
+	writeJSON(w, t)
 }
