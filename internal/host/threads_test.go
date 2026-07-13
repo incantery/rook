@@ -32,7 +32,7 @@ func TestThreadStoreCRUD(t *testing.T) {
 		Workspace: "ws", Path: "a.txt", StartLine: 2, EndLine: 3,
 		Side: "modified", BlobSHA: "abc", CommitSHA: "deadbeef",
 		AnchorText: "two\nthree",
-	}, "why is this like this?")
+	}, "why is this like this?", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestAnchorBlobs(t *testing.T) {
 	id, _ := r.createThread(&ThreadInfo{
 		Workspace: "ws", Path: "a.txt", StartLine: 1, EndLine: 1,
 		Side: "modified", BlobSHA: "sha1", AnchorText: "hello",
-	}, "hm")
+	}, "hm", nil)
 	r.putAnchorBlob("orphan", []byte("x"))
 	r.pruneAnchorBlobs()
 	if r.getAnchorBlob("sha1") == nil {
@@ -148,6 +148,49 @@ func TestAnchorBlobs(t *testing.T) {
 	// the resolved thread still renders (anchor_text), just outdated
 	if th := r.getThread(id); th == nil || th.AnchorText != "hello" {
 		t.Fatalf("resolved thread lost its text: %+v", th)
+	}
+}
+
+// TestCreateThreadBlobInTx is the Fix 1 regression: the anchor blob must
+// land inside createThread's own tx so a concurrent resolve's prune can
+// never delete a snapshot whose thread hasn't committed yet. Simulated
+// here without goroutines: create thread A with a real blob, then create
+// a second, still-pending thread B referencing the same sha (with no
+// blob arg of its own — it relies on A's write), resolve A, and prune.
+// The blob must survive because B still references it unresolved.
+func TestCreateThreadBlobInTx(t *testing.T) {
+	r := threadReg(t)
+
+	idA, err := r.createThread(&ThreadInfo{
+		Workspace: "ws", Path: "a.txt", StartLine: 1, EndLine: 1,
+		Side: "modified", BlobSHA: "shared-sha", AnchorText: "hello",
+	}, "first", []byte("hello\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.getAnchorBlob("shared-sha"); string(got) != "hello\n" {
+		t.Fatalf("blob not stored by createThread: %q", got)
+	}
+
+	idB, err := r.createThread(&ThreadInfo{
+		Workspace: "ws", Path: "b.txt", StartLine: 1, EndLine: 1,
+		Side: "modified", BlobSHA: "shared-sha", AnchorText: "hello",
+	}, "second", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.resolveThread(idA, "user"); err != nil {
+		t.Fatal(err)
+	}
+	r.pruneAnchorBlobs()
+	if r.getAnchorBlob("shared-sha") == nil {
+		t.Fatal("blob pruned while a pending thread still references it")
+	}
+
+	// sanity: B is still unresolved
+	if th := r.getThread(idB); th == nil || th.State == "resolved" {
+		t.Fatalf("thread B unexpectedly resolved: %+v", th)
 	}
 }
 
@@ -395,9 +438,9 @@ func TestThreadSubmitTypesNudge(t *testing.T) {
 
 	// two pending comments, one submit, one nudge naming both
 	id1, _ := h.reg.createThread(&ThreadInfo{Workspace: "ws", Path: "f.txt",
-		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "one"}, "a?")
+		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "one"}, "a?", nil)
 	h.reg.createThread(&ThreadInfo{Workspace: "ws", Path: "f.txt",
-		StartLine: 2, EndLine: 2, Side: "modified", BlobSHA: "s", AnchorText: "two"}, "b?")
+		StartLine: 2, EndLine: 2, Side: "modified", BlobSHA: "s", AnchorText: "two"}, "b?", nil)
 	w := postWS(t, h, "/workspaces/ws/threads/submit", nil)
 	if w.Code != 200 {
 		t.Fatalf("submit: %d %s", w.Code, w.Body)
@@ -488,7 +531,7 @@ func TestThreadSubmitMultipleClaimsPicksNewest(t *testing.T) {
 
 	// Create a pending thread
 	h.reg.createThread(&ThreadInfo{Workspace: "ws", Path: "f.txt",
-		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "one"}, "test?")
+		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "one"}, "test?", nil)
 
 	// Submit: should nudge s2 (highest id), not s1
 	w := postWS(t, h, "/workspaces/ws/threads/submit", nil)
@@ -555,7 +598,7 @@ func TestThreadSubmitDeadPtyFallthrough(t *testing.T) {
 
 	// Create a pending thread
 	h.reg.createThread(&ThreadInfo{Workspace: "ws", Path: "f.txt",
-		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "one"}, "test?")
+		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "one"}, "test?", nil)
 
 	// Submit: pty.Write fails on the closed pipe → should spawn instead
 	w := postWS(t, h, "/workspaces/ws/threads/submit", nil)

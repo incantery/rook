@@ -18,7 +18,8 @@
 //	rookctl comment       start a pending thread: rookctl comment [-w ws] <path>:<a>[-<b>] <text…>
 //	rookctl submit        submit pending comments + nudge the responder: rookctl submit [-w ws]
 //	rookctl reply         reply in a thread (as the agent): rookctl reply [--user] <id> <text…>
-//	rookctl resolve       resolve a thread (as the agent): rookctl resolve [--user] <id>; reopen [--user] <id> undoes
+//	rookctl resolve       resolve a thread (as the agent): rookctl resolve [--user] <id>
+//	rookctl reopen        undo a resolve (as the human, by default — agent_reopens only counts a user's reopen): rookctl reopen [--agent] <id>
 //	rookctl work          start claude on an issue in a fresh worktree: rookctl work INF-7
 //	rookctl decisions     the drafter's ledger, last 7 days, with the verdict mix
 //	rookctl set-openai-key store the drafter's API key in the keychain
@@ -156,7 +157,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--user] <id>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -990,20 +991,34 @@ func runSubmit(args []string) error {
 	return nil
 }
 
-// runThreadVerb handles reply/resolve/reopen — the agent's verbs, so
-// author/by default to agent; --user says a human is driving the CLI.
+// runThreadVerb handles reply/resolve/reopen. reply/resolve are
+// characteristically the agent's verbs, so author/by default to agent;
+// reopen defaults to user — reopening an agent-resolve is characteristically
+// the human's act, and agent_reopens (the verdict ledger's payload) only
+// increments on by=user, so a bare `rookctl reopen` must record it.
+// --user/--agent override the default; the last leading flag wins.
 func runThreadVerb(verb string, args []string) error {
-	asUser := false
-	for len(args) > 0 && args[0] == "--user" {
-		asUser, args = true, args[1:]
+	forceUser, forceAgent := false, false
+	for len(args) > 0 && (args[0] == "--user" || args[0] == "--agent") {
+		if args[0] == "--user" {
+			forceUser, forceAgent = true, false
+		} else {
+			forceAgent, forceUser = true, false
+		}
+		args = args[1:]
 	}
 	if len(args) < 1 {
-		return fmt.Errorf("usage: rookctl %s [--user] <thread-id> [text…]", verb)
+		return fmt.Errorf("usage: rookctl %s [--user|--agent] <thread-id> [text…]", verb)
 	}
 	id := args[0]
 	who := "agent"
-	if asUser {
+	if verb == "reopen" {
 		who = "user"
+	}
+	if forceUser {
+		who = "user"
+	} else if forceAgent {
+		who = "agent"
 	}
 	c, err := connect()
 	if err != nil {
@@ -1021,7 +1036,11 @@ func runThreadVerb(verb string, args []string) error {
 	case "reopen":
 		_, err = c.req("POST", "/threads/"+id+"/reopen", map[string]string{"by": who})
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	fmt.Printf("#%s %s (as %s)\n", id, verb, who)
+	return nil
 }
 
 // ---- decisions (the drafter's ledger, human-readable) ----

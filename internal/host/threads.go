@@ -85,9 +85,13 @@ func scanThread(row interface{ Scan(...any) error }) (*ThreadInfo, error) {
 	return &t, nil
 }
 
-// createThread inserts the thread and its first comment in one tx —
-// a thread without an opening comment cannot exist.
-func (r *registry) createThread(t *ThreadInfo, body string) (int64, error) {
+// createThread inserts the anchor blob (if any), the thread, and its
+// first comment all in one tx — a thread without an opening comment
+// cannot exist, and the blob lands before the thread row does, so a
+// concurrent resolve's pruneAnchorBlobs (which only sees committed
+// threads) can never delete a snapshot out from under a thread that
+// hasn't committed yet.
+func (r *registry) createThread(t *ThreadInfo, body string, blob []byte) (int64, error) {
 	if r.db == nil {
 		return 0, fmt.Errorf("no registry db")
 	}
@@ -97,6 +101,12 @@ func (r *registry) createThread(t *ThreadInfo, body string) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	if blob != nil {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO anchor_blobs (sha, content) VALUES (?, ?)`,
+			t.BlobSHA, blob); err != nil {
+			return 0, err
+		}
+	}
 	res, err := tx.Exec(
 		`INSERT INTO threads (workspace, path, start_line, end_line, side,
 		 blob_sha, commit_sha, anchor_text, created_at, updated_at)
@@ -189,7 +199,12 @@ func (r *registry) addThreadComment(id int64, author, agentSession, body string)
 		return fmt.Errorf("no registry db")
 	}
 	now := time.Now().Format(time.RFC3339Nano)
-	res, err := r.db.Exec(
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`UPDATE threads SET updated_at = ? WHERE id = ?`, now, id)
 	if err != nil {
 		return err
@@ -197,10 +212,12 @@ func (r *registry) addThreadComment(id int64, author, agentSession, body string)
 	if n, _ := res.RowsAffected(); n == 0 {
 		return sql.ErrNoRows
 	}
-	_, err = r.db.Exec(
+	if _, err := tx.Exec(
 		`INSERT INTO thread_comments (thread_id, author, agent_session, body, created_at)
-		 VALUES (?, ?, ?, ?, ?)`, id, author, agentSession, body, now)
-	return err
+		 VALUES (?, ?, ?, ?, ?)`, id, author, agentSession, body, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *registry) resolveThread(id int64, by string) error {
@@ -282,6 +299,9 @@ func (r *registry) threadsAwaitingAgent(ws string) int {
 	return n
 }
 
+// putAnchorBlob is the test seam — production writes go through
+// createThread's tx instead, so pruneAnchorBlobs can never race a
+// half-created thread.
 func (r *registry) putAnchorBlob(sha string, content []byte) {
 	if r.db == nil {
 		return
@@ -438,13 +458,12 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 		commit = strings.TrimSpace(string(out))
 	}
 	sha := gitBlobSHA(content)
-	h.reg.putAnchorBlob(sha, content)
 	id, err := h.reg.createThread(&ThreadInfo{
 		Workspace: name, Path: req.Path,
 		StartLine: req.StartLine, EndLine: req.EndLine,
 		Side: req.Side, BlobSHA: sha, CommitSHA: commit,
 		AnchorText: strings.Join(lines[req.StartLine-1:req.EndLine], "\n"),
-	}, req.Body)
+	}, req.Body, content)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
