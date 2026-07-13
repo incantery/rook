@@ -17,8 +17,8 @@
 //	rookctl threads       list a workspace's threads: rookctl threads [-w ws] [--pending] [--json]
 //	rookctl comment       start a pending thread: rookctl comment [-w ws] <path>:<a>[-<b>] <text…>
 //	rookctl submit        submit pending comments + nudge the responder: rookctl submit [-w ws]
-//	rookctl reply         reply in a thread (as the agent): rookctl reply <id> <text…>
-//	rookctl resolve       resolve a thread: rookctl resolve <id> [--user]  (reopen undoes)
+//	rookctl reply         reply in a thread (as the agent): rookctl reply [--user] <id> <text…>
+//	rookctl resolve       resolve a thread (as the agent): rookctl resolve [--user] <id>; reopen [--user] <id> undoes
 //	rookctl work          start claude on an issue in a fresh worktree: rookctl work INF-7
 //	rookctl decisions     the drafter's ledger, last 7 days, with the verdict mix
 //	rookctl set-openai-key store the drafter's API key in the keychain
@@ -156,7 +156,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply <id> <text…>|resolve <id>|reopen <id>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--user] <id>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -994,17 +994,11 @@ func runSubmit(args []string) error {
 // author/by default to agent; --user says a human is driving the CLI.
 func runThreadVerb(verb string, args []string) error {
 	asUser := false
-	kept := args[:0]
-	for _, a := range args {
-		if a == "--user" {
-			asUser = true
-		} else {
-			kept = append(kept, a)
-		}
+	for len(args) > 0 && args[0] == "--user" {
+		asUser, args = true, args[1:]
 	}
-	args = kept
 	if len(args) < 1 {
-		return fmt.Errorf("usage: rookctl %s <thread-id> [text…] [--user]", verb)
+		return fmt.Errorf("usage: rookctl %s [--user] <thread-id> [text…]", verb)
 	}
 	id := args[0]
 	who := "agent"
@@ -1018,7 +1012,7 @@ func runThreadVerb(verb string, args []string) error {
 	switch verb {
 	case "reply":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: rookctl reply <thread-id> <text…>")
+			return fmt.Errorf("usage: rookctl reply [--user] <thread-id> <text…>")
 		}
 		_, err = c.req("POST", "/threads/"+id+"/comments",
 			map[string]string{"body": strings.Join(args[1:], " "), "author": who})
