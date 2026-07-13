@@ -556,28 +556,31 @@ import {ThreadBand} from "./threads";
 
 2c. In `editorOpts()`, add `glyphMargin: true,` directly after `readOnly: true,`.
 
-2d. In `refresh()`, replace the line
+2d. In `refresh()`, directly BEFORE the line
 `const res = await this.api.changes(this.opts.workspace, this.base);`
-with (threads ride the same fetch cycle):
+insert (threads ride the same fetch cycle but never gate it — a hanging
+`/threads` must not stall a diff the pane already has; fail open):
 
 ```ts
-            const [res] = await Promise.all([
-                this.api.changes(this.opts.workspace, this.base),
-                this.fetchThreads(),
-            ]);
+            void this.fetchThreads().then(() => {
+                const p = this.currentPath();
+                if (this.disposed || !p) return;
+                for (const b of this.bands) b.render(this.threadsAll, p);
+            });
 ```
 
 2e. In `open(i)`, add `this.rebuildBands();` immediately after the `this.fit();` line (the success path's tail).
 
-2f. In `loadFile()`, replace
+2f. In `loadFile()`, directly BEFORE the line
 `const res = await this.api.readFile(this.opts.workspace, path);`
-with:
+insert the same non-gating fetch:
 
 ```ts
-            const [res] = await Promise.all([
-                this.api.readFile(this.opts.workspace, path),
-                this.fetchThreads(),
-            ]);
+            void this.fetchThreads().then(() => {
+                const p = this.currentPath();
+                if (this.disposed || !p) return;
+                for (const b of this.bands) b.render(this.threadsAll, p);
+            });
 ```
 
 and add `this.rebuildBands();` immediately after its `this.fit();` line.
