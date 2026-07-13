@@ -77,7 +77,9 @@ func (s *Service) SetConfig(p Patch) error {
 		}
 	}
 	if p.Projects != nil {
-		lines = reconcilePrefix(lines, "jira-project-", p.Projects)
+		if lines, err = reconcilePrefix(lines, "jira-project-", p.Projects); err != nil {
+			return err
+		}
 	}
 	if p.Keybinds != nil {
 		if err := replaceKeybinds(&lines, p.Keybinds); err != nil {
@@ -137,8 +139,18 @@ func upsertScalar(lines []string, key, val string) []string {
 
 // reconcilePrefix makes the `<prefix><name> = value` lines exactly match want:
 // prefixed lines whose name is in want are updated in place; prefixed lines not
-// in want are dropped; names in want with no line are appended (sorted).
-func reconcilePrefix(lines []string, prefix string, want map[string]string) []string {
+// in want are dropped; names in want with no line are appended (sorted). Any
+// name or value containing a newline is rejected before mutating so a JSON
+// value can't inject a rogue physical line (e.g. a `keybind =` directive).
+func reconcilePrefix(lines []string, prefix string, want map[string]string) ([]string, error) {
+	for name, val := range want {
+		if strings.ContainsAny(name, "\n\r") {
+			return nil, fmt.Errorf("config: jira-project %q name must be a single line", name)
+		}
+		if strings.ContainsAny(val, "\n\r") {
+			return nil, fmt.Errorf("config: jira-project %q value must be a single line", name)
+		}
+	}
 	seen := map[string]bool{}
 	out := make([]string, 0, len(lines))
 	for _, ln := range lines {
@@ -162,7 +174,7 @@ func reconcilePrefix(lines []string, prefix string, want map[string]string) []st
 	for _, name := range names {
 		out = append(out, prefix+name+" = "+want[name])
 	}
-	return out
+	return out, nil
 }
 
 // replaceKeybinds removes every `keybind = ...` line and appends the desired

@@ -72,6 +72,24 @@ func TestSetConfigProjectsReconcile(t *testing.T) {
 	}
 }
 
+// A newline in a project value must be rejected (all-or-nothing) so a JSON
+// value can't inject a rogue physical config line — e.g. a keybind directive.
+func TestSetConfigProjectsRejectsNewline(t *testing.T) {
+	writeConfig(t, "jira-project-rook = OLD\n")
+
+	var s Service
+	if err := s.SetConfig(Patch{Projects: map[string]string{
+		"rook": "X\nkeybind = ctrl+z=nuke",
+	}}); err == nil {
+		t.Fatalf("newline in project value must be rejected")
+	}
+	// The file must never have been written: the injected directive must not
+	// have reached Load().
+	if _, ok := Load().Keybinds["ctrl+z"]; ok {
+		t.Fatalf("injected keybind reached the config: %+v", Load().Keybinds)
+	}
+}
+
 // Keybinds are a block: all existing keybind lines are replaced by the set.
 func TestSetConfigKeybindsBlockReplace(t *testing.T) {
 	writeConfig(t, "keybind = g=review.changes\nkeybind = e=file.open\nleader = `\n")
