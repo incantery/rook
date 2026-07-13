@@ -1,8 +1,11 @@
 package host
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -338,4 +341,131 @@ func TestThreadCommentResolveReopen(t *testing.T) {
 	if code, _ = c.do(t, "GET", "/threads/"+id+"/comments", nil); code != 404 {
 		t.Fatalf("GET on thread route: %d", code)
 	}
+}
+
+// threadHost is the pipe-pty fixture (draftHost's shape): one fake
+// window in workspace "ws", claimed by transcript "t1" — the typed
+// nudge lands on the readable end of the pipe.
+func threadHost(t *testing.T) (*Host, *os.File, string) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	repo := t.TempDir()
+	gitT(t, repo, "init", "-b", "main")
+	os.WriteFile(filepath.Join(repo, "f.txt"), []byte("one\ntwo\n"), 0o644)
+	gitT(t, repo, "add", ".")
+	gitT(t, repo, "commit", "-m", "init")
+	h := &Host{
+		sessions: map[string]*session{"w1": {info: SessionInfo{ID: "w1", Workspace: "ws"}, pty: pw}},
+		reg:      loadRegistry(),
+		aw:       newAgentWatch(),
+		cwdCache: make(map[int]cwdEntry),
+		claims:   map[string]string{"t1": "w1"},
+		binds:    map[string]string{},
+		drafts:   make(map[string]draftInfo),
+	}
+	if h.reg.db == nil {
+		t.Fatal("test registry has no db")
+	}
+	h.reg.upsert("ws", repo, false)
+	return h, pr, repo
+}
+
+func postWS(t *testing.T, h *Host, path string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", path, bytes.NewReader(b))
+	w := httptest.NewRecorder()
+	h.handleWorkspace(w, req)
+	return w
+}
+
+func TestThreadSubmitTypesNudge(t *testing.T) {
+	h, ptyOut, _ := threadHost(t)
+
+	// no threads at all → 400
+	if w := postWS(t, h, "/workspaces/ws/threads/submit", nil); w.Code != 400 {
+		t.Fatalf("empty submit: %d %s", w.Code, w.Body)
+	}
+
+	// two pending comments, one submit, one nudge naming both
+	id1, _ := h.reg.createThread(&ThreadInfo{Workspace: "ws", Path: "f.txt",
+		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "one"}, "a?")
+	h.reg.createThread(&ThreadInfo{Workspace: "ws", Path: "f.txt",
+		StartLine: 2, EndLine: 2, Side: "modified", BlobSHA: "s", AnchorText: "two"}, "b?")
+	w := postWS(t, h, "/workspaces/ws/threads/submit", nil)
+	if w.Code != 200 {
+		t.Fatalf("submit: %d %s", w.Code, w.Body)
+	}
+	var res struct {
+		Mode        string `json:"mode"`
+		RookSession string `json:"rookSession"`
+		Count       int    `json:"count"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &res)
+	if res.Mode != "typed" || res.RookSession != "w1" || res.Count != 2 {
+		t.Fatalf("submit result: %+v", res)
+	}
+	line, err := bufio.NewReader(ptyOut).ReadString('\r')
+	if err != nil || !strings.Contains(line, "2 review comment") || !strings.Contains(line, "rook-threads") {
+		t.Fatalf("nudge on pty: %q (%v)", line, err)
+	}
+	if th := h.reg.getThread(id1); th.State != "open" {
+		t.Fatalf("state after submit: %+v", th)
+	}
+
+	// re-nudge: zero pending but still awaiting the agent → nudge again
+	w = postWS(t, h, "/workspaces/ws/threads/submit", nil)
+	if w.Code != 200 {
+		t.Fatalf("re-nudge: %d %s", w.Code, w.Body)
+	}
+	json.Unmarshal(w.Body.Bytes(), &res)
+	if res.Mode != "typed" || res.Count != 0 {
+		t.Fatalf("re-nudge result: %+v", res)
+	}
+	if _, err := bufio.NewReader(ptyOut).ReadString('\r'); err != nil {
+		t.Fatalf("re-nudge pty: %v", err)
+	}
+
+	// agent replied to everything → nothing to submit → 400
+	h.reg.addThreadComment(id1, "agent", "t1", "done")
+	th2 := h.reg.listThreads("ws", "open", "")
+	for _, x := range th2 {
+		if x.ID != id1 {
+			h.reg.addThreadComment(x.ID, "agent", "t1", "done")
+		}
+	}
+	if w := postWS(t, h, "/workspaces/ws/threads/submit", nil); w.Code != 400 {
+		t.Fatalf("drained submit: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestThreadSubmitSpawnsResponder(t *testing.T) {
+	h, srv, repo := newWorktreeHost(t)
+	c := &wtClient{srv.URL, h.Token()}
+	os.WriteFile(filepath.Join(repo, "f.txt"), []byte("one\n"), 0o644)
+	c.do(t, "POST", "/workspaces/src/threads", map[string]any{
+		"path": "f.txt", "startLine": 1, "endLine": 1, "body": "hm"})
+
+	// no claimed claude window in "src" → spawn path
+	code, body := c.do(t, "POST", "/workspaces/src/threads/submit", nil)
+	if code != 200 {
+		t.Fatalf("submit: %d %s", code, body)
+	}
+	var res struct {
+		Mode        string `json:"mode"`
+		RookSession string `json:"rookSession"`
+	}
+	json.Unmarshal([]byte(body), &res)
+	if res.Mode != "spawned" || res.RookSession == "" {
+		t.Fatalf("spawn result: %+v", res)
+	}
+	if h.get(res.RookSession) == nil {
+		t.Fatal("responder session not live")
+	}
+	h.kill(res.RookSession) // no orphan shells from tests
 }

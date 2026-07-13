@@ -520,3 +520,59 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}
 }
+
+// threadsNudge is THE nudge — one host-built string for both actuation
+// paths, so every surface triggers the identical thing.
+func threadsNudge(n int, ws string) string {
+	return fmt.Sprintf("You have %d review comment(s) in %s. Use the rook-threads skill to address them.", n, ws)
+}
+
+// claudeSessionIn finds the workspace's live claude window via the claim
+// machinery (SessionStart hook → rookctl claim — authoritative, and the
+// standard install). Deliberately NOT fg-based: no lsof on the submit
+// path, and claims are testable against pipe fixtures. No claim → ""
+// and submit spawns a responder instead.
+func (h *Host) claudeSessionIn(ws string) string {
+	h.bindMu.Lock()
+	defer h.bindMu.Unlock()
+	for _, sid := range h.claims {
+		if s := h.get(sid); s != nil && s.info.Workspace == ws {
+			return sid
+		}
+	}
+	return ""
+}
+
+// handleThreadsSubmit is POST /workspaces/{name}/threads/submit: flip
+// pending→open and nudge the responder. Re-nudgeable — zero pending but
+// open threads still awaiting the agent fires the nudge again ("claude
+// missed it", or the earlier spawn failed). Actuation failure leaves
+// threads open; nothing is lost, resubmit retries.
+func (h *Host) handleThreadsSubmit(w http.ResponseWriter, r *http.Request, name string) {
+	ws := h.reg.get(name)
+	if ws == nil {
+		http.Error(w, "no such workspace: "+name, http.StatusNotFound)
+		return
+	}
+	n := h.reg.submitThreads(name)
+	waiting := h.reg.threadsAwaitingAgent(name)
+	if waiting == 0 {
+		http.Error(w, "nothing to submit", http.StatusBadRequest)
+		return
+	}
+	prompt := threadsNudge(waiting, name)
+	if sid := h.claudeSessionIn(name); sid != "" {
+		s := h.get(sid)
+		if _, err := s.pty.Write([]byte(prompt + "\r")); err == nil {
+			writeJSON(w, map[string]any{"mode": "typed", "rookSession": sid, "count": n})
+			return
+		}
+		// a dead pty falls through to a fresh responder
+	}
+	s, err := h.spawnTask(name, prompt)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"mode": "spawned", "rookSession": s.info.ID, "count": n})
+}
