@@ -128,15 +128,28 @@ export class EditorPane implements PaneContent {
     // ---- data flow ----
 
     private async load(): Promise<void> {
-        this.showStatus("loading…");
+        // stage-named statuses: a hang must say WHERE it hangs (the
+        // monaco chunk is the app's first big lazy import — new asset-
+        // serving territory for the webview)
+        this.showStatus("loading Monaco…");
+        const watchdog = setTimeout(() => {
+            this.showStatus(
+                "still loading Monaco (3.6 MB chunk)… — if this never finishes, the asset serving is stuck; check the console",
+            );
+        }, 8000);
         try {
+            const t0 = performance.now();
             this.monaco = (await import("./monaco")).monaco;
+            console.info(`editor pane: monaco loaded in ${Math.round(performance.now() - t0)}ms`);
         } catch (err) {
             console.error("monaco failed to load", err);
             this.showStatus(`Monaco failed to load: ${err}`);
             return;
+        } finally {
+            clearTimeout(watchdog);
         }
         if (this.disposed) return;
+        this.showStatus(this.opts.kind === "file" ? "reading file…" : "fetching changes…");
         await (this.opts.kind === "file" ? this.loadFile() : this.refresh());
     }
 
