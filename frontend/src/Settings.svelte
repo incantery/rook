@@ -15,8 +15,12 @@
     type Section = "jira" | "openai" | "appearance";
     let section = $state<Section>("jira");
     let cfg = $state<ConfigModel | null>(null);
+    let rootEl: HTMLDivElement;
 
     $effect(() => {
+        // pull focus off the terminal's hidden xterm input so keystrokes
+        // don't leak through; later sections' own inputs take over on click
+        rootEl?.focus();
         Config.Get().then(
             (c) => (cfg = c),
             (err) => console.error("settings: config load failed", err),
@@ -35,7 +39,9 @@
     ];
 </script>
 
-<div id="settings" class="settings-screen" onkeydown={onKeydown} role="presentation">
+<svelte:window onkeydown={onKeydown} />
+
+<div id="settings" class="settings-screen" bind:this={rootEl} tabindex="-1">
     <div class="settings-bar">
         <div class="settings-title">Settings</div>
         <button class="home-btn settings-close" onclick={onclose}>Close (Esc)</button>

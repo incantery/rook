@@ -1631,6 +1631,7 @@ button.ws-tag.pr-conflicts:hover {
     flex-direction: column;
     background: rgba(15, 17, 26, 0.98);
     color: #8f93a2;
+    outline: none;
 }
 .settings-bar {
     display: flex;
