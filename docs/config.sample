@@ -80,7 +80,13 @@
 
 
 # ── Keybindings ──────────────────────────────────────────────────────────
-#
+
+# The leader: the tmux-style prefix that arms the bare-key bindings below.
+# Either a single key (the backtick default) or a modifier chord in the same
+# form as a keybind trigger — set it to ctrl+b for the tmux default. Press it
+# twice to pass it through to the terminal.
+# leader = `
+
 # keybind = <trigger>=<command>, one line per binding, repeatable. A bare key
 # ("m") fires after the backtick prefix; a modifier chord ("cmd+shift+k")
 # fires directly. An empty command ("keybind = m=") unbinds a default. The

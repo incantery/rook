@@ -55,9 +55,15 @@ type Config struct {
 	// pipeline.
 	Workflow  []string            `json:"workflow"`
 	Workflows map[string][]string `json:"workflows"`
+	// Leader is the tmux-style prefix that arms the bare-key bindings: a
+	// single key (`leader = \`, the backtick default) or a modifier chord
+	// (`leader = ctrl+b`, the tmux default). Pressing it twice passes the
+	// leader through to the terminal. The frontend owns parsing and falls
+	// back to the backtick on anything it can't read.
+	Leader string `json:"leader"`
 	// Keybinds maps a trigger to a registry command id, ghostty-style:
 	// `keybind = <trigger>=<command>`, repeated per binding. A bare key
-	// ("h") acts after the backtick prefix; a modifier chord
+	// ("h") acts after the leader prefix; a modifier chord
 	// ("cmd+shift+]") acts directly. An empty command ("keybind = h=")
 	// unbinds the trigger's default. The frontend owns validation and
 	// fails open: unknown commands, unparseable chords, and reserved
@@ -77,6 +83,7 @@ func Default() Config {
 		AgentModel:        "gpt-5.4-nano",
 		AgentDailyCapUSD:  1.00,
 		Coder:             "claude",
+		Leader:            "`",
 	}
 }
 
@@ -185,6 +192,10 @@ func Load() Config {
 		case "coder":
 			if value != "" {
 				cfg.Coder = value
+			}
+		case "leader":
+			if value != "" {
+				cfg.Leader = value
 			}
 		case "workflow":
 			cfg.Workflow = splitList(value)
