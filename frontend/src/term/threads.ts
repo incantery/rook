@@ -39,6 +39,7 @@ export class ThreadBand {
     private mouseSub: monacoTypes.IDisposable;
     /** focus this thread's reply box on its next refresh (post-reopen) */
     private focusReply: number | null = null;
+    private composer: Zone | null = null;
 
     constructor(
         private monaco: Monaco,
@@ -98,13 +99,89 @@ export class ThreadBand {
      *  signal that auto-refetch must keep its hands off. */
     hasDraft(): boolean {
         for (const z of this.zones.values()) if (this.zoneBusy(z)) return true;
-        return false;
+        return this.composer !== null && this.zoneBusy(this.composer);
     }
 
     dispose(): void {
         this.mouseSub.dispose();
         this.decorations.clear();
         for (const tid of Array.from(this.zones.keys())) this.closeZone(tid);
+        this.closeComposer();
+    }
+
+    // ---- composer: selection → new pending thread ----
+
+    /** One composer per band; opening again moves it. The pane maps the
+     *  editor selection to lines and routes ⌘⇧M/context-menu here. */
+    openComposer(startLine: number, endLine: number): void {
+        this.closeComposer();
+        const dom = document.createElement("div");
+        dom.className = "thread-zone";
+        const card = document.createElement("div");
+        card.className = "thread-card";
+        const meta = document.createElement("div");
+        meta.className = "thread-meta";
+        const lines = startLine === endLine ? `L${startLine}` : `L${startLine}–${endLine}`;
+        meta.textContent = `new thread on ${lines}${this.side === "original" ? " (original side)" : ""}`;
+        const input = document.createElement("textarea");
+        input.className = "thread-input";
+        input.rows = 3;
+        input.placeholder = "start a thread… (⌘⏎ comments · esc cancels)";
+        const err = document.createElement("div");
+        err.className = "thread-err";
+        err.hidden = true;
+        const row = document.createElement("div");
+        row.className = "thread-row";
+        const save = this.actBtn("comment", async () => {
+            const body = input.value.trim();
+            if (!body) return;
+            err.hidden = true;
+            save.disabled = true;
+            try {
+                await this.hooks.create(startLine, endLine, body);
+                this.closeComposer(); // the refetch renders the pending marker
+            } catch (e) {
+                err.textContent = String(e);
+                err.hidden = false;
+                if (this.composer) this.sizeZone(this.composer);
+            } finally {
+                save.disabled = false;
+            }
+        });
+        row.append(
+            save,
+            this.actBtn("cancel", () => this.closeComposer()),
+        );
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                save.click();
+            } else if (e.key === "Escape") {
+                this.closeComposer();
+            }
+        });
+        card.append(meta, input, row, err);
+        dom.appendChild(card);
+        const zone: monacoTypes.editor.IViewZone = {
+            afterLineNumber: endLine,
+            heightInPx: 120,
+            domNode: dom,
+        };
+        let id = "";
+        this.editor.changeViewZones((a) => {
+            id = a.addZone(zone);
+        });
+        this.composer = {id, zone, dom, card};
+        this.sizeZone(this.composer);
+        this.editor.revealLinesInCenterIfOutsideViewport(startLine, endLine);
+        requestAnimationFrame(() => input.focus());
+    }
+
+    closeComposer(): void {
+        const c = this.composer;
+        if (!c) return;
+        this.composer = null;
+        this.editor.changeViewZones((a) => a.removeZone(c.id));
     }
 
     // ---- widgets ----

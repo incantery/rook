@@ -317,6 +317,34 @@ export class EditorPane implements PaneContent {
         };
     }
 
+    /** ⌘⇧M / right-click → composer on the invoking editor's selection.
+     *  Registered once per editor; the keybinding lives inside Monaco's
+     *  own layer, so the backtick prefix is untouched. */
+    // Note: typed IStandaloneCodeEditor, not the brief's ICodeEditor — addAction
+    // only exists on the standalone interface (monaco-editor 0.55.1 editor.api.d.ts);
+    // every caller (both diff-child editors and the single-file editor) is a
+    // standalone editor, so this is a widening-free correction, not a design change.
+    private addCommentAction(ed: monacoTypes.editor.IStandaloneCodeEditor): void {
+        const m = this.monaco;
+        if (!m) return;
+        ed.addAction({
+            id: "rook.comment",
+            label: "Comment on selection",
+            keybindings: [m.KeyMod.CtrlCmd | m.KeyMod.Shift | m.KeyCode.KeyM],
+            contextMenuGroupId: "9_rook",
+            contextMenuOrder: 1,
+            run: () => {
+                const band = this.bands.find((b) => b.editor === ed);
+                const sel = ed.getSelection();
+                if (!band || !sel) return;
+                let end = sel.endLineNumber;
+                // a full-line drag ends at column 1 of the NEXT line — not a line
+                if (end > sel.startLineNumber && sel.endColumn === 1) end--;
+                band.openComposer(sel.startLineNumber, end);
+            },
+        });
+    }
+
     /** Editors persist across file navs but models don't — decorations
      *  and zones live on the model/view, so bands rebuild per nav. Open
      *  widgets are restored by id where the new file still has them. */
@@ -369,6 +397,8 @@ export class EditorPane implements PaneContent {
                 ...this.editorOpts(),
                 renderSideBySide: true,
             });
+            this.addCommentAction(this.diffEditor.getOriginalEditor());
+            this.addCommentAction(this.diffEditor.getModifiedEditor());
         }
         return this.diffEditor;
     }
@@ -376,6 +406,7 @@ export class EditorPane implements PaneContent {
     private ensureEditor(): monacoTypes.editor.IStandaloneCodeEditor {
         if (!this.editor) {
             this.editor = this.monaco!.editor.create(this.body, this.editorOpts());
+            this.addCommentAction(this.editor);
         }
         return this.editor;
     }
