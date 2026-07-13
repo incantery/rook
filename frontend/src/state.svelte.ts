@@ -21,7 +21,7 @@ class AppState {
     filePickerOpen = $state(false);
     inboxOpen = $state(false);
     spawnOpen = $state(false);
-    keyOpen = $state(false);
+    settingsOpen = $state(false);
 
     // host polls (App.svelte owns the timers)
     attention = $state<AttentionItem[]>([]);
@@ -47,7 +47,7 @@ class AppState {
             this.filePickerOpen ||
             this.inboxOpen ||
             this.spawnOpen ||
-            this.keyOpen
+            this.settingsOpen
         );
     }
 
@@ -57,7 +57,7 @@ class AppState {
         this.filePickerOpen = false;
         this.inboxOpen = false;
         this.spawnOpen = false;
-        this.keyOpen = false;
+        this.settingsOpen = false;
     }
 }
 
