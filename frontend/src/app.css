@@ -411,6 +411,33 @@ body {
     background: #0f111a;
 }
 
+/* ==== threads (term/threads.ts): gutter glyphs + zone widgets ==== */
+.thread-glyph {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 9px;
+}
+.thread-glyph::before {
+    content: "●";
+}
+.thread-glyph-pending {
+    color: #ffcb6b;
+}
+.thread-glyph-pending::before {
+    content: "◐"; /* half-full: written but not yet submitted */
+}
+.thread-glyph-open {
+    color: #82aaff;
+}
+.thread-glyph-resolved {
+    color: #464b66;
+}
+.thread-glyph-outdated::before {
+    content: "◌"; /* the anchor no longer matches the file */
+}
+
 /* ==== workspace dashboard: window 0, frosted over the terminals so
    the window's translucency survives ==== */
 #dashboard {

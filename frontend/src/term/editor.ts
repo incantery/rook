@@ -5,9 +5,10 @@
 // arrives through await import("./monaco"), so nothing here lands in the
 // boot bundle.
 
-import type {ChangedFile, HostAPI} from "../hostapi";
+import type {ChangedFile, HostAPI, ThreadInfo} from "../hostapi";
 import type {PaneContent} from "./manager";
 import type * as monacoTypes from "monaco-editor";
+import {ThreadBand} from "./threads";
 
 type Monaco = typeof import("./monaco").monaco;
 
@@ -52,6 +53,10 @@ export class EditorPane implements PaneContent {
     private disposed = false;
     /** model URIs must be unique for the pane's whole life */
     private seq = 0;
+
+    /** every thread in the workspace — bands slice per (path, side) */
+    private threadsAll: ThreadInfo[] = [];
+    private bands: ThreadBand[] = [];
 
     constructor(
         private api: HostAPI,
@@ -119,6 +124,7 @@ export class EditorPane implements PaneContent {
 
     dispose(): void {
         this.disposed = true;
+        for (const b of this.bands) b.dispose();
         this.disposeModels();
         this.diffEditor?.dispose();
         this.editor?.dispose();
@@ -157,7 +163,10 @@ export class EditorPane implements PaneContent {
         if (!this.monaco) return;
         const keep = this.files[this.idx]?.path;
         try {
-            const res = await this.api.changes(this.opts.workspace, this.base);
+            const [res] = await Promise.all([
+                this.api.changes(this.opts.workspace, this.base),
+                this.fetchThreads(),
+            ]);
             if (this.disposed) return;
             this.fetchedAt = Date.now();
             // the host decides the default and reports what it diffed —
@@ -212,6 +221,7 @@ export class EditorPane implements PaneContent {
             this.models.push(original, modified);
             this.ensureDiffEditor().setModel({original, modified});
             this.fit();
+            this.rebuildBands();
         } catch (err) {
             this.fail(`diffing ${f.path}`, err);
         }
@@ -222,7 +232,10 @@ export class EditorPane implements PaneContent {
         const path = this.opts.path ?? "";
         if (!m) return;
         try {
-            const res = await this.api.readFile(this.opts.workspace, path);
+            const [res] = await Promise.all([
+                this.api.readFile(this.opts.workspace, path),
+                this.fetchThreads(),
+            ]);
             if (this.disposed) return;
             if (res.binary) {
                 this.showStatus(`${path}: binary file`);
@@ -235,9 +248,45 @@ export class EditorPane implements PaneContent {
             this.models.push(model);
             this.ensureEditor().setModel(model);
             this.fit();
+            this.rebuildBands();
         } catch (err) {
             this.fail(`reading ${path}`, err);
         }
+    }
+
+    // ---- threads: the conversation layer (term/threads.ts) ----
+
+    /** Thread-less daemons must not take the review pane down — the list
+     *  just stays empty (fail open, the protocol-skew rule). */
+    private async fetchThreads(): Promise<void> {
+        try {
+            this.threadsAll = await this.api.threads(this.opts.workspace);
+        } catch (err) {
+            console.warn("editor pane: threads unavailable:", err);
+        }
+    }
+
+    private currentPath(): string | undefined {
+        return this.opts.kind === "file" ? this.opts.path : this.files[this.idx]?.path;
+    }
+
+    /** Editors persist across file navs but models don't — decorations
+     *  and zones live on the model/view, so bands rebuild per nav. */
+    private rebuildBands(): void {
+        for (const b of this.bands) b.dispose();
+        this.bands = [];
+        const m = this.monaco;
+        const path = this.currentPath();
+        if (!m || !path) return;
+        if (this.diffEditor) {
+            this.bands = [
+                new ThreadBand(m, this.diffEditor.getOriginalEditor(), "original"),
+                new ThreadBand(m, this.diffEditor.getModifiedEditor(), "modified"),
+            ];
+        } else if (this.editor) {
+            this.bands = [new ThreadBand(m, this.editor, "modified")];
+        }
+        for (const b of this.bands) b.render(this.threadsAll, path);
     }
 
     // ---- monaco plumbing ----
@@ -245,6 +294,7 @@ export class EditorPane implements PaneContent {
     private editorOpts(): monacoTypes.editor.IStandaloneEditorConstructionOptions {
         return {
             readOnly: true,
+            glyphMargin: true,
             automaticLayout: false, // the manager's fit() is the resize signal
             theme: "rook",
             fontFamily: this.opts.font.family,
