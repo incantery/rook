@@ -391,6 +391,11 @@ body {
     min-height: 0;
 }
 /* labeled states (loading, binary, clean, errors) over the editor */
+/* display:flex would beat the hidden attribute's UA display:none —
+   clearStatus() toggles hidden, so the override must be explicit */
+.editor-status[hidden] {
+    display: none;
+}
 .editor-status {
     position: absolute;
     inset: 0;
