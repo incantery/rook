@@ -116,6 +116,23 @@ func TestSetConfigKeybindsBlockReplace(t *testing.T) {
 	}
 }
 
+// "=" is a valid keybind trigger: Load() splits on the LAST "=", so SetConfig
+// must be able to write what Load can read (round-trip through the file).
+func TestSetConfigKeybindEqualsTrigger(t *testing.T) {
+	writeConfig(t, "# empty\n")
+
+	var s Service
+	if err := s.SetConfig(Patch{Keybinds: map[string]string{
+		"=": "palette.toggle",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Load()
+	if cfg.Keybinds["="] != "palette.toggle" {
+		t.Fatalf(`"=" trigger did not round-trip: %+v`, cfg.Keybinds)
+	}
+}
+
 // Writing into a fresh (missing) file creates it and leaves no temp file.
 func TestSetConfigCreatesFileAtomically(t *testing.T) {
 	dir := t.TempDir()

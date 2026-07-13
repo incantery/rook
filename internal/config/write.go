@@ -189,7 +189,10 @@ func replaceKeybinds(lines *[]string, want map[string]string) error {
 	}
 	triggers := make([]string, 0, len(want))
 	for t := range want {
-		if strings.ContainsAny(t, "\n\r=") {
+		// Only newlines are rejected — "=" stays a valid trigger. Writing
+		// `keybind = ==<cmd>` round-trips through Load(), which splits on the
+		// LAST "=" (commands never contain "="), so this is unambiguous.
+		if strings.ContainsAny(t, "\n\r") {
 			return fmt.Errorf("config: bad keybind trigger %q", t)
 		}
 		triggers = append(triggers, t)
