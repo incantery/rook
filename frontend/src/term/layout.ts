@@ -7,12 +7,11 @@
 /** row = children side-by-side (a vertical divider), col = stacked. */
 export type Dir = "row" | "col";
 
-/** What a pane shows. Only terminals today; the editor pane arrives as
- *  a second variant — content is a tagged union on purpose. */
-export interface PaneRef {
-    type: "term";
-    session: string;
-}
+/** What a pane shows — a tagged union on purpose. Editor leaves are
+ *  deliberately minimal: their runtime state lives on the EditorPane
+ *  object, and they never persist (normalize rejects them, termOnly
+ *  strips them before save). */
+export type PaneRef = {type: "term"; session: string} | {type: "editor"};
 
 export interface LeafNode {
     kind: "leaf";
@@ -58,6 +57,10 @@ export function newLeaf(session: string): LeafNode {
     return {kind: "leaf", id: crypto.randomUUID(), content: {type: "term", session}};
 }
 
+export function newEditorLeaf(): LeafNode {
+    return {kind: "leaf", id: crypto.randomUUID(), content: {type: "editor"}};
+}
+
 /** All leaves, in-order — this defines the ` o cycle order. */
 export function leaves(root: LayoutNode): LeafNode[] {
     if (root.kind === "leaf") return [root];
@@ -65,7 +68,22 @@ export function leaves(root: LayoutNode): LeafNode[] {
 }
 
 export function leafOf(root: LayoutNode, session: string): LeafNode | null {
-    return leaves(root).find((l) => l.content.session === session) ?? null;
+    return (
+        leaves(root).find((l) => l.content.type === "term" && l.content.session === session) ?? null
+    );
+}
+
+/** The tree with every editor leaf stripped (collapse included) — what
+ *  save() persists. Null when nothing survives: an editor-only window
+ *  has no persistent form. */
+export function termOnly(root: LayoutNode): LayoutNode | null {
+    let out: LayoutNode | null = root;
+    for (const l of leaves(root)) {
+        if (l.content.type === "term") continue;
+        if (out === null) return null;
+        out = removeAt(out, l.id).root;
+    }
+    return out;
 }
 
 export function findLeaf(root: LayoutNode, paneId: string): LeafNode | null {
@@ -280,10 +298,14 @@ export function reconcile(
     for (const win of stored?.windows ?? []) {
         let root: LayoutNode | null = win.root;
         for (const l of leaves(win.root)) {
-            const sid = l.content.session;
-            if (ws.get(sid) === win.workspace && !claimed.has(sid)) {
-                claimed.add(sid);
-                continue;
+            // editor leaves can't come out of storage (normalize rejects
+            // them) — prune defensively anyway, the fail-open path
+            if (l.content.type === "term") {
+                const sid = l.content.session;
+                if (ws.get(sid) === win.workspace && !claimed.has(sid)) {
+                    claimed.add(sid);
+                    continue;
+                }
             }
             root = root === null ? null : removeAt(root, l.id).root;
         }

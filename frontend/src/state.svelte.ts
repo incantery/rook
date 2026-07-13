@@ -18,6 +18,7 @@ class AppState {
     // overlays (at most one open; the keybinding ladder checks these)
     paletteOpen = $state(false);
     pickerOpen = $state(false);
+    filePickerOpen = $state(false);
     inboxOpen = $state(false);
     spawnOpen = $state(false);
     keyOpen = $state(false);
@@ -41,13 +42,19 @@ class AppState {
 
     get anyOverlayOpen(): boolean {
         return (
-            this.paletteOpen || this.pickerOpen || this.inboxOpen || this.spawnOpen || this.keyOpen
+            this.paletteOpen ||
+            this.pickerOpen ||
+            this.filePickerOpen ||
+            this.inboxOpen ||
+            this.spawnOpen ||
+            this.keyOpen
         );
     }
 
     closeOverlays(): void {
         this.paletteOpen = false;
         this.pickerOpen = false;
+        this.filePickerOpen = false;
         this.inboxOpen = false;
         this.spawnOpen = false;
         this.keyOpen = false;

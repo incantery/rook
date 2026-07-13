@@ -154,6 +154,33 @@ export class HostAPI {
         ).json();
     }
 
+    /** The review pane's file list. Omit base on the first fetch — the
+     *  host picks the default (branch for worktrees, head elsewhere) and
+     *  the response's base reports what was actually diffed. */
+    async changes(ws: string, base?: string): Promise<ChangesResult> {
+        const q = base ? `?base=${encodeURIComponent(base)}` : "";
+        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/changes${q}`)).json();
+    }
+
+    /** Both full texts of one file's diff — Monaco wants sides, not patches. */
+    async fileDiff(ws: string, path: string, base?: string): Promise<DiffResult> {
+        const q = new URLSearchParams({path});
+        if (base) q.set("base", base);
+        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/diff?${q}`)).json();
+    }
+
+    /** One file, read-only (the ` e viewer). */
+    async readFile(ws: string, path: string): Promise<FileResult> {
+        const q = new URLSearchParams({path});
+        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/file?${q}`)).json();
+    }
+
+    /** The file picker's listing: git's view in repos, a bounded walk
+     *  elsewhere. */
+    async listFiles(ws: string): Promise<FilesResult> {
+        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/files`)).json();
+    }
+
     /** Raw bytes into a session's pty; append "\r" to submit. */
     async sendInput(id: string, data: string): Promise<void> {
         await this.req(`/sessions/${id}/input`, {
@@ -173,6 +200,54 @@ export class HostAPI {
     async rejectDraft(id: number): Promise<void> {
         await this.req(`/drafts/${id}/reject`, {method: "POST", body: "{}"});
     }
+}
+
+/** One row of GET /workspaces/{ws}/changes — what a review covers. */
+export interface ChangedFile {
+    path: string;
+    status: "modified" | "added" | "deleted" | "renamed" | "untracked";
+    /** the pre-rename path, renames only */
+    oldPath?: string;
+}
+
+/** GET /workspaces/{ws}/changes. base reports what was actually diffed:
+ *  branch mode falls open to head (fallback says why) when no merge
+ *  base resolves. */
+export interface ChangesResult {
+    base: "head" | "branch";
+    baseRef: string;
+    baseName: string;
+    fallback?: string;
+    files: ChangedFile[];
+    truncated?: boolean;
+}
+
+/** GET /workspaces/{ws}/diff — both sides, full text. Empty original =
+ *  added/untracked; empty modified = deleted; binary withholds both. */
+export interface DiffResult {
+    path: string;
+    base: "head" | "branch";
+    baseRef: string;
+    baseName: string;
+    original: string;
+    modified: string;
+    binary?: boolean;
+    truncated?: boolean;
+    fallback?: string;
+}
+
+/** GET /workspaces/{ws}/file — the read-only viewer's payload. */
+export interface FileResult {
+    path: string;
+    content: string;
+    binary?: boolean;
+    truncated?: boolean;
+}
+
+/** GET /workspaces/{ws}/files — repo-top-relative paths for the picker. */
+export interface FilesResult {
+    files: string[];
+    truncated?: boolean;
 }
 
 /** One "Current …: N% used" line from claude's /usage, host-scraped. */

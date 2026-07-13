@@ -13,6 +13,7 @@
 //	rookctl reject        decline a draft
 //	rookctl spawn         start a claude session: rookctl spawn [-w ws] [--worktree] <task…>
 //	rookctl issues        the workspace's work queue (GitHub + Jira, mine + unassigned)
+//	rookctl changes       the workspace's changed files: rookctl changes [-w ws] [--base head|branch]
 //	rookctl work          start claude on an issue in a fresh worktree: rookctl work INF-7
 //	rookctl decisions     the drafter's ledger, last 7 days, with the verdict mix
 //	rookctl set-openai-key store the drafter's API key in the keychain
@@ -111,6 +112,8 @@ func main() {
 		err = runSpawn(os.Args[2:])
 	case "issues":
 		err = runIssues(os.Args[2:])
+	case "changes":
+		err = runChanges(os.Args[2:])
 	case "work":
 		err = runWork(os.Args[2:])
 	case "decisions":
@@ -135,7 +138,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -634,6 +637,85 @@ func runIssues(args []string) error {
 			title = title[:70] + "…"
 		}
 		fmt.Printf("%-10s %-10s %-11s %s\n", i.Key, who, i.State, title)
+	}
+	return nil
+}
+
+// ---- changes (the review pane's file list, scriptable) ----
+
+// runChanges prints what the Monaco review pane shows: the workspace's
+// changed files against the host-resolved base (merge-base of the task
+// branch by default in worktrees, HEAD elsewhere; --base overrides).
+func runChanges(args []string) error {
+	ws := os.Getenv("ROOK_WORKSPACE")
+	base := ""
+	for len(args) > 0 {
+		if args[0] == "-w" && len(args) >= 2 {
+			ws, args = args[1], args[2:]
+		} else if args[0] == "--base" && len(args) >= 2 {
+			base, args = args[1], args[2:]
+		} else {
+			return fmt.Errorf("usage: rookctl changes [-w workspace] [--base head|branch]")
+		}
+	}
+	if ws == "" {
+		return fmt.Errorf("usage: rookctl changes [-w workspace] [--base head|branch] (or run inside a rook window)")
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	path := "/workspaces/" + ws + "/changes"
+	if base != "" {
+		path += "?base=" + base
+	}
+	raw, err := c.req("GET", path, nil)
+	if err != nil {
+		return err
+	}
+	var res struct {
+		Base     string `json:"base"`
+		BaseRef  string `json:"baseRef"`
+		BaseName string `json:"baseName"`
+		Fallback string `json:"fallback"`
+		Files    []struct {
+			Path    string `json:"path"`
+			Status  string `json:"status"`
+			OldPath string `json:"oldPath"`
+		} `json:"files"`
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return err
+	}
+	if res.Fallback != "" {
+		fmt.Fprintln(os.Stderr, "rookctl: changes:", res.Fallback)
+	}
+	ref := res.BaseRef
+	if len(ref) > 8 {
+		ref = ref[:8]
+	}
+	fmt.Printf("vs %s (%s)\n", res.BaseName, ref)
+	if len(res.Files) == 0 {
+		fmt.Println("working tree clean")
+		return nil
+	}
+	marks := map[string]string{
+		"modified": "M", "added": "A", "deleted": "D", "renamed": "R", "untracked": "?",
+	}
+	for _, f := range res.Files {
+		mark := marks[f.Status]
+		if mark == "" {
+			mark = "?"
+		}
+		line := mark + "\t" + f.Path
+		if f.OldPath != "" {
+			line += "  (was " + f.OldPath + ")"
+		}
+		fmt.Println(line)
+	}
+	if res.Truncated {
+		fmt.Println("… list truncated")
 	}
 	return nil
 }

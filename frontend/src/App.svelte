@@ -17,6 +17,7 @@
     import Home from "./Home.svelte";
     import Palette from "./Palette.svelte";
     import Picker from "./Picker.svelte";
+    import FilePicker from "./FilePicker.svelte";
     import Inbox from "./Inbox.svelte";
     import SpawnModal from "./SpawnModal.svelte";
     import KeyModal from "./KeyModal.svelte";
@@ -26,8 +27,10 @@
         mkTerm: TermFactory;
         dashTab: number;
         keybinds: Record<string, string | undefined>;
+        /** the config font, for the Monaco pane (terminals get it via mkTerm) */
+        paneFont: {family: string; size: number};
     }
-    let {api, mkTerm, dashTab, keybinds}: Props = $props();
+    let {api, mkTerm, dashTab, keybinds, paneFont}: Props = $props();
     // svelte-ignore state_referenced_locally — dashTab is config, fixed for the app's lifetime
     app.dashTab = dashTab;
     // config-fixed like dashTab: ` r reloads the page, which re-reads it
@@ -105,6 +108,42 @@
     }
 
     const focusBack = () => mgr.focusActive();
+
+    /** Transient message in the titlebar's workspace slot — failures must
+     *  be VISIBLE (set-root once died silently on a stale daemon 404). */
+    function flash(msg: string): void {
+        const prev = app.workspace;
+        app.workspace = msg;
+        setTimeout(() => (app.workspace = prev), 2500);
+    }
+
+    /** Open a Monaco pane as a NEW window on the strip (it's a pane, so
+     *  ` % splits a terminal in beside it). The EditorPane is constructed
+     *  here — the manager stays Monaco-free. */
+    async function openEditorPane(kind: "review" | "file", path?: string): Promise<void> {
+        try {
+            await initDone;
+            // the showWorkspace dance: activation fits and focuses, and
+            // both silently no-op on a display:none subtree
+            app.screen = "app";
+            await tick();
+            const {EditorPane} = await import("./term/editor");
+            mgr.openPaneWindow(
+                () =>
+                    new EditorPane(api, {
+                        workspace: app.workspace,
+                        kind,
+                        path,
+                        font: paneFont,
+                        onFlash: flash,
+                        onClose: () => void mgr.closeActive(),
+                    }),
+            );
+        } catch (err) {
+            console.error("editor pane failed", err);
+            flash("editor pane failed — see console");
+        }
+    }
 
     async function spawn(task: string, workspace: string, worktree: boolean): Promise<void> {
         // worktree isolation: carve a fresh checkout+branch off the target
@@ -318,6 +357,22 @@
             },
         },
         {
+            id: "review.changes",
+            title: "Review changes (diff)",
+            category: "View",
+            keys: keymap.display("review.changes"),
+            run: () => void openEditorPane("review"),
+        },
+        {
+            id: "file.open",
+            title: "Open file (read-only)",
+            category: "View",
+            keys: keymap.display("file.open"),
+            run: () => {
+                app.filePickerOpen = true;
+            },
+        },
+        {
             id: "workspace.set-root",
             title: "Set workspace root to shell's directory",
             category: "Workspace",
@@ -325,13 +380,6 @@
             run: async () => {
                 const id = mgr.focusedSessionId;
                 if (!id) return;
-                // failures must be VISIBLE: this flow once died silently on
-                // a stale daemon 404ing the cwd endpoint
-                const flash = (msg: string) => {
-                    const prev = app.workspace;
-                    app.workspace = msg;
-                    setTimeout(() => (app.workspace = prev), 2500);
-                };
                 try {
                     const cwd = await api.sessionCwd(id);
                     if (!cwd) throw new Error("host couldn't resolve the shell's cwd");
@@ -362,7 +410,7 @@
             }
             return; // palette's own input handles the rest
         }
-        if (app.pickerOpen) return; // picker's own input handles keys
+        if (app.pickerOpen || app.filePickerOpen) return; // pickers' own inputs handle keys
         if (app.screen === "home") {
             // the prefix works here too, so ` h toggles back to the
             // workspace you left — but never while typing in a modal input
@@ -598,6 +646,16 @@
         onmanager={showHome}
         onclose={() => {
             app.pickerOpen = false;
+            focusBack();
+        }}
+    />
+{/if}
+{#if app.filePickerOpen}
+    <FilePicker
+        {api}
+        onopen={(path) => void openEditorPane("file", path)}
+        onclose={() => {
+            app.filePickerOpen = false;
             focusBack();
         }}
     />
