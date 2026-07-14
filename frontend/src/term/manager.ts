@@ -13,7 +13,7 @@
 // lives in manager-owned window containers and is removed only when its
 // host session dies — screen and pane switches are CSS, never unmounts.
 
-import type {Terminal} from "@xterm/xterm";
+import type {ITheme, Terminal} from "@xterm/xterm";
 import type {FitAddon} from "@xterm/addon-fit";
 import type {HostAPI, SessionInfo} from "../hostapi";
 import {
@@ -609,6 +609,12 @@ export class TermManager {
 
     focusActive(): void {
         this.active?.panes.get(this.active.focused)?.focus();
+    }
+
+    /** Re-theme every live terminal — the theme service calls this on a swap.
+     *  New terminals pick up the theme via mkTerm (main.ts reads the service). */
+    setTerminalTheme(theme: ITheme): void {
+        for (const tab of this.sessions.values()) tab.term.options.theme = theme;
     }
 
     /** Split the focused pane: a new session (cwd inherited from the

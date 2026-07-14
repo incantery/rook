@@ -11,37 +11,13 @@ import "./app.css";
 import {Service as Config} from "../bindings/github.com/incantery/rook/internal/config";
 import {Service as Host} from "../bindings/github.com/incantery/rook/internal/hostclient";
 import {HostAPI} from "./hostapi";
+import {themeService} from "./theme/service";
 import App from "./App.svelte";
 
 // Renderer A/B switch: WebGL showed stale-frame artifacts in WKWebView, so
 // the DOM renderer is the default until that's re-judged.
 // devtools: localStorage.setItem("rook.renderer", "webgl"); location.reload()
 const useWebgl = localStorage.getItem("rook.renderer") === "webgl";
-
-// Material Ocean, matching the ghostty theme. Background fully transparent:
-// the page body paints the tint once, full-bleed, at the config's opacity.
-const THEME = {
-    background: "#00000000",
-    foreground: "#8f93a2",
-    cursor: "#ffcc00",
-    selectionBackground: "#717cb4",
-    black: "#546e7a",
-    red: "#ff5370",
-    green: "#c3e88d",
-    yellow: "#ffcb6b",
-    blue: "#82aaff",
-    magenta: "#c792ea",
-    cyan: "#89ddff",
-    white: "#eeffff",
-    brightBlack: "#546e7a",
-    brightRed: "#ff5370",
-    brightGreen: "#c3e88d",
-    brightYellow: "#ffcb6b",
-    brightBlue: "#82aaff",
-    brightMagenta: "#c792ea",
-    brightCyan: "#89ddff",
-    brightWhite: "#ffffff",
-};
 
 function fatal(msg: string): void {
     const el = document.createElement("div");
@@ -54,7 +30,9 @@ async function main() {
     const cfg = await Config.Get();
     console.info("config loaded:", JSON.stringify(cfg));
     const font = `"${cfg.fontFamily}", Menlo, ui-monospace, monospace`;
-    document.body.style.background = `rgba(15, 17, 26, ${cfg.backgroundOpacity})`;
+    // paint chrome + the body tint from the active theme before anything mounts
+    themeService.setOpacity(cfg.backgroundOpacity);
+    themeService.applyChrome();
 
     // Measure with the real font: a grid computed from fallback-font cell
     // metrics spawns PTYs at the wrong size.
@@ -73,7 +51,7 @@ async function main() {
             fontSize: cfg.fontSize,
             scrollback: 10_000,
             macOptionIsMeta: true,
-            theme: THEME,
+            theme: themeService.xtermTheme(),
         });
         const fit = new FitAddon();
         term.loadAddon(fit);

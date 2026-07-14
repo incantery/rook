@@ -55,6 +55,15 @@ html {
     margin: 0;
     height: 100%;
     background: transparent;
+    /* Material Ocean defaults for the bare vars the imperative islands read
+       (terminal tree, Monaco pane, thread glyphs). Declared on :root (html),
+       NOT body — the ThemeService writes runtime overrides onto documentElement
+       (inline, so they win), and a body-level declaration would shadow them for
+       body's subtree. main.ts's applyChrome() overrides these at boot. */
+    --acc: #82aaff;
+    --fg: #d6deeb;
+    --dim: #8f93a2;
+    --line: rgba(140, 150, 180, 0.14);
 }
 body {
     margin: 0;
@@ -64,13 +73,8 @@ body {
     background: rgba(15, 17, 26, 0.95);
     overflow: hidden;
     font-family: system-ui, sans-serif;
-    /* vars still read by the imperative remainder below (terminal tree,
-       Monaco editor pane, thread glyphs). The @theme palette above is the
-       source for utility classes; these mirror it for that raw CSS. */
-    --acc: #82aaff;
-    --fg: #d6deeb;
-    --dim: #8f93a2;
-    --line: rgba(140, 150, 180, 0.14);
+    /* the color vars moved to :root (html) so the ThemeService's runtime
+       overrides aren't shadowed; --mono (a font, not themed) stays here. */
     --mono: "Hack Nerd Font Mono", Menlo, ui-monospace, monospace;
 }
 /* the Svelte mount point takes over body's column layout */

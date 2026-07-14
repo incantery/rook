@@ -8,6 +8,7 @@
     import {Call} from "@wailsio/runtime";
     import type {HostAPI, IssueInfo} from "./hostapi";
     import {TermManager, type TermFactory} from "./term/manager";
+    import {themeService} from "./theme/service";
     import {Registry} from "./registry";
     import {buildKeymap, parseLeader, sigOf} from "./keymap";
     import {app, MODES, type Mode} from "./state.svelte";
@@ -632,6 +633,10 @@
             activated: () => (app.dashVisible = false),
         });
 
+        // live theme swaps re-color every terminal (chrome + Monaco re-theme
+        // through their own subscriptions in the service)
+        const unTheme = themeService.onXterm((t) => mgr.setTerminalTheme(t));
+
         window.addEventListener("keydown", onKeydown, {capture: true});
         const ro = new ResizeObserver(() => mgr.syncSize());
         ro.observe(terminalsEl);
@@ -656,6 +661,7 @@
         })();
 
         return () => {
+            unTheme();
             window.removeEventListener("keydown", onKeydown, {capture: true});
             ro.disconnect();
             clearInterval(attnTimer);

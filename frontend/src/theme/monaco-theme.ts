@@ -9,7 +9,7 @@
 // exactly from green/red at the same low alphas the old theme hardcoded.
 
 import type {editor} from "monaco-editor";
-import {noHash, withAlpha} from "./color";
+import {mix, noHash, withAlpha} from "./color";
 import type {Palette} from "./palette";
 
 export function buildMonacoTheme(p: Palette): editor.IStandaloneThemeData {
@@ -44,7 +44,9 @@ export function buildMonacoTheme(p: Palette): editor.IStandaloneThemeData {
             "editorLineNumber.foreground": p.lo,
             "editorLineNumber.activeForeground": p.dim,
             "editorWidget.background": p.overlay,
-            "editorWidget.border": p.line,
+            // a subtle border between the widget surface and the line hue —
+            // derived so it stays dark (using p.line raw would be far too light)
+            "editorWidget.border": mix(p.overlay, p.line, 0.13),
             // diff tints: green/red washes, same alphas the old theme baked in
             "diffEditor.insertedTextBackground": withAlpha(p.green, 34 / 255),
             "diffEditor.removedTextBackground": withAlpha(p.red, 34 / 255),

@@ -18,6 +18,8 @@ import "monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution";
 import "monaco-editor/esm/vs/basic-languages/rust/rust.contribution";
 import "monaco-editor/esm/vs/basic-languages/python/python.contribution";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+import {buildMonacoTheme} from "../theme/monaco-theme";
+import {themeService} from "../theme/service";
 
 // edcore ships no .d.ts; the package types (editor.api.d.ts) describe
 // exactly the surface it re-exports.
@@ -29,37 +31,14 @@ self.MonacoEnvironment = {
     getWorker: () => new EditorWorker(),
 };
 
-// Material Ocean, mirroring main.ts's xterm THEME — but on an OPAQUE
-// panel: Monaco can't render transparent, so the editor pane owns its
-// background (#0f111a, the body tint at full opacity).
-monaco.editor.defineTheme("rook", {
-    base: "vs-dark",
-    inherit: true,
-    rules: [
-        {token: "comment", foreground: "546e7a"},
-        {token: "string", foreground: "c3e88d"},
-        {token: "number", foreground: "f78c6c"},
-        {token: "keyword", foreground: "c792ea"},
-        {token: "type", foreground: "ffcb6b"},
-        {token: "delimiter", foreground: "89ddff"},
-        {token: "tag", foreground: "ff5370"},
-        {token: "attribute.name", foreground: "ffcb6b"},
-        {token: "attribute.value", foreground: "c3e88d"},
-    ],
-    colors: {
-        "editor.background": "#0f111a",
-        "editor.foreground": "#8f93a2",
-        "editorCursor.foreground": "#ffcc00",
-        "editor.selectionBackground": "#717cb4",
-        "editorLineNumber.foreground": "#3a3f58",
-        "editorLineNumber.activeForeground": "#8f93a2",
-        "editorWidget.background": "#151928",
-        "editorWidget.border": "#252a3d",
-        "diffEditor.insertedTextBackground": "#c3e88d22",
-        "diffEditor.removedTextBackground": "#ff537022",
-        "diffEditor.insertedLineBackground": "#c3e88d12",
-        "diffEditor.removedLineBackground": "#ff537012",
-    },
+// The "rook" theme is built from the active Palette (theme/service.ts) — the
+// single source of truth, mirroring the xterm + chrome colors. Monaco can't
+// render transparent, so the editor owns an opaque background (the palette bg).
+// Redefining + setTheme on a live swap re-colors every open editor.
+monaco.editor.defineTheme("rook", buildMonacoTheme(themeService.active().palette));
+themeService.onMonaco((data) => {
+    monaco.editor.defineTheme("rook", data);
+    monaco.editor.setTheme("rook");
 });
 
 export {monaco};
