@@ -12,7 +12,7 @@
 //  - semanticTokenColors is IGNORED (Monaco+Monarch has no semantic tokens).
 //  - Every real theme uses #RRGGBBAA / #RGBA — all values normalize first.
 
-import {darken, lighten, mix, normalizeHex, withAlpha} from "./color";
+import {darken, lighten, mix, normalizeHex, stripAlpha, withAlpha} from "./color";
 import type {Palette, Syntax, Theme} from "./palette";
 
 interface TokenColor {
@@ -135,10 +135,20 @@ export function importVSCode(text: string): Theme {
 
         fg,
         editorFg,
+        // Muted secondary text, and the one role real themes lie about — so
+        // take the first candidate that's actually DISTINCT from fg:
+        //  - Catppuccin sets descriptionForeground === foreground, which would
+        //    collapse dim into fg and flatten every secondary label.
+        //  - editorLineNumber.activeForeground is NOT a grey: it's the ACCENT
+        //    in Catppuccin (mauve), so it made "muted" text purple.
+        // disabledForeground lands on the intended muted tone (subtext0) in
+        // both Catppuccin flavors; deriving toward bg is the honest last stop.
         dim:
-            c("descriptionForeground") ??
-            c("editorLineNumber.activeForeground") ??
-            mix(editorFg, bg, 0.35),
+            distinctFrom(fg, [
+                c("descriptionForeground"),
+                c("disabledForeground"),
+                c("tab.inactiveForeground"),
+            ]) ?? mix(editorFg, bg, 0.35),
         lo: c("editorLineNumber.foreground") ?? mix(editorFg, bg, 0.55),
 
         accent: c("focusBorder") ?? c("textLink.foreground") ?? blue,
@@ -184,6 +194,14 @@ export function importVSCode(text: string): Theme {
 
 /** The color a token of one of `targets` would receive: the tokenColors rule
  *  whose selector is the LONGEST dotted-prefix of any target. */
+/** First candidate that differs from `base` (ignoring alpha), else undefined.
+ *  A theme is free to point a "secondary" key at its primary color; taking that
+ *  at face value silently erases the distinction the role exists for. */
+function distinctFrom(base: string, candidates: (string | undefined)[]): string | undefined {
+    const b = stripAlpha(base);
+    return candidates.find((v) => v != null && stripAlpha(v) !== b);
+}
+
 function scopeColor(rules: TokenColor[], targets: string[]): string | undefined {
     let best: {len: number; color: string} | undefined;
     for (const t of targets) {

@@ -13,14 +13,26 @@ import type {editor} from "monaco-editor";
 import {withAlpha} from "./color";
 import {cssVars} from "./cssvars";
 import {ONE_DARK, ONE_LIGHT} from "./builtins";
+import {
+    CATPPUCCIN_FRAPPE,
+    CATPPUCCIN_LATTE,
+    CATPPUCCIN_MACCHIATO,
+    CATPPUCCIN_MOCHA,
+} from "./catppuccin";
 import {buildMonacoTheme} from "./monaco-theme";
 import {MATERIAL_OCEAN, type Theme} from "./palette";
 import {buildXtermTheme} from "./xterm";
 
+// Insertion order is what the Settings picker lists, so keep it meaningful:
+// rook's own default first, then each family light→dark.
 const BUILTINS: Record<string, Theme> = {
     [MATERIAL_OCEAN.name]: MATERIAL_OCEAN,
     [ONE_DARK.name]: ONE_DARK,
     [ONE_LIGHT.name]: ONE_LIGHT,
+    [CATPPUCCIN_LATTE.name]: CATPPUCCIN_LATTE,
+    [CATPPUCCIN_FRAPPE.name]: CATPPUCCIN_FRAPPE,
+    [CATPPUCCIN_MACCHIATO.name]: CATPPUCCIN_MACCHIATO,
+    [CATPPUCCIN_MOCHA.name]: CATPPUCCIN_MOCHA,
 };
 
 /** Register a built-in theme (called by theme/builtins). Last write wins. */

@@ -88,3 +88,49 @@ describe("importVSCode", () => {
         expect(p.syntax.type).toMatch(/^#[0-9a-f]{6,8}$/); // no type scope → hue
     });
 });
+
+// Regression from importing the real Catppuccin themes: a theme is free to
+// point a "secondary" key straight at its primary colour, and taking that at
+// face value silently erases the distinction the role exists for.
+describe("importVSCode: dim must stay distinct from fg", () => {
+    const theme = (colors: Record<string, string>) =>
+        importVSCode(JSON.stringify({name: "T", type: "dark", colors, tokenColors: []}));
+
+    it("skips descriptionForeground when it equals foreground", () => {
+        // exactly what Catppuccin ships: descriptionForeground === foreground
+        const p = theme({
+            "editor.background": "#1e1e2e",
+            "editor.foreground": "#cdd6f4",
+            foreground: "#cdd6f4",
+            descriptionForeground: "#cdd6f4",
+            disabledForeground: "#a6adc8",
+        }).palette;
+        expect(p.dim).toBe("#a6adc8"); // fell through to disabledForeground
+        expect(p.dim).not.toBe(p.fg);
+    });
+
+    it("still prefers descriptionForeground when it is genuinely distinct", () => {
+        const p = theme({
+            "editor.background": "#1e1e2e",
+            "editor.foreground": "#cdd6f4",
+            foreground: "#cdd6f4",
+            descriptionForeground: "#9399b2",
+            disabledForeground: "#a6adc8",
+        }).palette;
+        expect(p.dim).toBe("#9399b2");
+    });
+
+    it("derives rather than fall back to a non-grey", () => {
+        // Catppuccin's editorLineNumber.activeForeground is its ACCENT (mauve).
+        // Nothing may reach for it: "muted" text must never come out purple.
+        const p = theme({
+            "editor.background": "#1e1e2e",
+            "editor.foreground": "#cdd6f4",
+            foreground: "#cdd6f4",
+            descriptionForeground: "#cdd6f4",
+            "editorLineNumber.activeForeground": "#cba6f7",
+        }).palette;
+        expect(p.dim).not.toBe("#cba6f7");
+        expect(p.dim).not.toBe(p.fg);
+    });
+});

@@ -113,6 +113,43 @@ test("a light theme actually lightens the Settings surfaces", async ({page}) => 
     expect(await luma(page, "#theme-select", "color")).toBeLessThan(0.4);
 });
 
+// Every built-in must be pickable and coherent — a generated palette (the
+// Catppuccin flavours come out of importVSCode, not a human) can carry a role
+// that's empty or that collapsed into another. Cheap to check for all of them,
+// and it fails the moment a new theme is registered badly.
+test("every built-in theme applies coherently", async ({page}) => {
+    await page.goto("/");
+    await openAppearance(page);
+    const names = await page.locator("#theme-select option").allTextContents();
+    expect(names).toContain("Catppuccin Mocha");
+    expect(names).toContain("Catppuccin Latte");
+
+    for (const name of names) {
+        await page.locator("#theme-select").selectOption(name);
+        const vars = await page.evaluate(() => {
+            const s = getComputedStyle(document.documentElement);
+            return ["--bg", "--fg", "--dim", "--acc", "--color-sunken", "--color-on-acc"].map((n) =>
+                s.getPropertyValue(n).trim(),
+            );
+        });
+        for (const v of vars) expect(v, `${name} has an unset role`).toMatch(/^#[0-9a-f]{6,8}$/i);
+        const [bg, fg, dim] = vars;
+        // dim collapsing into fg is exactly what the real Catppuccin JSON does
+        // (descriptionForeground === foreground); the importer must not pass it on
+        expect(dim, `${name}: dim collapsed into fg`).not.toBe(fg);
+        expect(fg, `${name}: fg collapsed into bg`).not.toBe(bg);
+    }
+});
+
+test("a light Catppuccin flavour lightens the chrome too", async ({page}) => {
+    await page.goto("/");
+    await useTheme(page, "Catppuccin Latte");
+    await expect.poll(() => rootVar(page, "--bg")).toBe("#eff1f5");
+    // the sweep's tokens carry a generated palette, not just the authored ones
+    await expect.poll(() => surfaceLuma(page, "#settings")).toBeGreaterThan(0.7);
+    expect(await luma(page, "#theme-select", "color")).toBeLessThan(0.4);
+});
+
 test("the theme choice survives a restart", async ({page}) => {
     await page.goto("/");
     await useTheme(page, "One Dark");
