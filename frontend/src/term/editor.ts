@@ -1,9 +1,12 @@
 // The Monaco pane — the second PaneContent kind, framework-free like the
-// rest of the imperative island. Read-only by design in this slice: a
-// diff review of the workspace's changes (` g) or a single-file viewer
-// (` e) — "inspect an agent's work without leaving rook". Monaco itself
-// arrives through await import("./monaco"), so nothing here lands in the
-// boot bundle.
+// rest of the imperative island. Two modes: a diff review of the
+// workspace's changes (` g, read-only) and a single-file editor (` e).
+// The file editor is where "code editing" lives — vim keybindings, and
+// :w / ⌘S save straight to the workspace file (POST …/write). Both Monaco
+// and monaco-vim arrive through await import(), so nothing here lands in
+// the boot bundle. Editing is enabled only for files that loaded WHOLE:
+// a truncated (>2 MB) or binary read stays read-only, because saving a
+// truncated buffer would overwrite the tail with nothing.
 
 import type {ChangedFile, HostAPI, ThreadInfo} from "../hostapi";
 import type {PaneContent} from "./manager";
@@ -12,6 +15,39 @@ import {ThreadBand} from "./threads";
 import {submitLabel, type Side} from "./threadview";
 
 type Monaco = typeof import("./monaco").monaco;
+type VimLib = typeof import("monaco-vim");
+type VimAdapter = ReturnType<VimLib["initVimMode"]>;
+
+// monaco-vim is loaded once, lazily, the first time any file editor mounts.
+// Its `:w` handler is GLOBAL (registered on the shared Vim singleton), so a
+// save must route to whichever editor is focused — saversByEditor is that
+// map, keyed by the monaco editor the vim adapter wraps (cm.editor).
+let vimLib: VimLib | null = null;
+const saversByEditor = new WeakMap<object, () => void>();
+let exCommandsDefined = false;
+
+async function loadVim(): Promise<VimLib> {
+    if (!vimLib) vimLib = await import("monaco-vim");
+    if (!exCommandsDefined) {
+        // VimMode (= CMAdapter) carries the Vim API on a static the shipped
+        // types don't describe — hence the cast. defineEx(name, prefix, fn)
+        // makes :w/:write, :x, and :wq all save the focused editor (no
+        // quit: the pane is closed with ×, not from vim).
+        const vim = (vimLib.VimMode as unknown as {Vim: VimApi}).Vim;
+        const save = (cm: {editor?: object}) => {
+            if (cm?.editor) saversByEditor.get(cm.editor)?.();
+        };
+        vim.defineEx("write", "w", save);
+        vim.defineEx("wq", "wq", save);
+        vim.defineEx("x", "x", save);
+        exCommandsDefined = true;
+    }
+    return vimLib;
+}
+
+interface VimApi {
+    defineEx(name: string, prefix: string, fn: (cm: {editor?: object}) => void): void;
+}
 
 export interface EditorContext {
     workspace: string;
@@ -72,6 +108,22 @@ export class EditorPane implements PaneContent {
     private editor: monacoTypes.editor.IStandaloneCodeEditor | null = null;
     private models: {dispose(): void}[] = [];
 
+    // ---- file-mode editing (` e only) ----
+    /** the monaco host (fills the body under the head); vimBar sits below */
+    private mount: HTMLElement;
+    private vimBar: HTMLElement | null = null;
+    private vim: VimAdapter | null = null;
+    /** editable iff the file loaded whole — truncated/binary stays read-only */
+    private editable = false;
+    private dirty = false;
+    private saving = false;
+    /** the model version at the last load/save — dirty is a diff against it,
+     *  so undoing back to a saved state reads clean again */
+    private savedVersionId = 0;
+    private changeSub: {dispose(): void} | null = null;
+    /** a dirty × click arms discard; a second click within the window closes */
+    private closeArmed = false;
+
     /** undefined until the host answers — it decides the default base */
     private base: "head" | "branch" | undefined;
     private files: ChangedFile[] = [];
@@ -128,14 +180,23 @@ export class EditorPane implements PaneContent {
                 "refresh",
                 () => void (opts.kind === "file" ? this.loadFile() : this.refresh()),
             ),
-            this.btn("×", "close pane", () => opts.onClose()),
+            this.btn("×", "close pane", () => this.requestClose()),
         );
         this.body = document.createElement("div");
         this.body.className = "editor-body";
         this.statusEl = document.createElement("div");
         this.statusEl.className = "editor-status";
         this.statusEl.hidden = true;
-        this.body.appendChild(this.statusEl);
+        // monaco fills .editor-mount (flex:1); the vim status line sits under
+        // it (file mode only). The status overlay covers the whole body.
+        this.mount = document.createElement("div");
+        this.mount.className = "editor-mount";
+        this.body.append(this.statusEl, this.mount);
+        if (opts.kind === "file") {
+            this.vimBar = document.createElement("div");
+            this.vimBar.className = "editor-vim";
+            this.body.appendChild(this.vimBar);
+        }
         this.el.append(head, this.body);
         void this.load();
     }
@@ -143,7 +204,8 @@ export class EditorPane implements PaneContent {
     get title(): string {
         if (this.opts.kind === "file") {
             const p = this.opts.path ?? "";
-            return p.slice(p.lastIndexOf("/") + 1) || "file";
+            const name = p.slice(p.lastIndexOf("/") + 1) || "file";
+            return this.dirty ? `● ${name}` : name;
         }
         return `⎇ ${this.opts.workspace}`;
     }
@@ -168,6 +230,9 @@ export class EditorPane implements PaneContent {
         this.disposed = true;
         if (this._seam) this.opts.onDispose?.(this._seam);
         for (const b of this.bands) b.dispose();
+        this.changeSub?.dispose();
+        this.vim?.dispose();
+        if (this.editor) saversByEditor.delete(this.editor);
         this.disposeModels();
         this.diffEditor?.dispose();
         this.editor?.dispose();
@@ -346,17 +411,101 @@ export class EditorPane implements PaneContent {
                 this.showStatus(`${path}: binary file`);
                 return;
             }
-            this.pathEl.textContent = path + (res.truncated ? " · truncated at 2 MB" : "");
+            // A whole file is editable; a truncated one stays read-only —
+            // saving its 2 MB prefix would erase everything past it.
+            this.editable = !res.truncated;
+            this.pathEl.textContent =
+                path + (res.truncated ? " · truncated at 2 MB · read-only" : "");
             this.clearStatus();
             this.disposeModels();
             const model = m.editor.createModel(res.content, undefined, this.uri(path));
             this.models.push(model);
-            this.ensureEditor().setModel(model);
+            const ed = this.ensureEditor();
+            ed.setModel(model);
+            ed.updateOptions({readOnly: !this.editable});
+            this.savedVersionId = model.getAlternativeVersionId();
+            this.setDirty(false);
+            this.changeSub?.dispose();
+            this.changeSub = model.onDidChangeContent(() =>
+                this.setDirty(model.getAlternativeVersionId() !== this.savedVersionId),
+            );
             this.fit();
             this.rebuildBands();
+            // vim rides every file editor (motions work read-only too); the
+            // :w saver is registered only when the buffer is editable.
+            await this.attachVim(ed);
         } catch (err) {
             this.fail(`reading ${path}`, err);
         }
+    }
+
+    // ---- file-mode editing: vim, dirty tracking, save ----
+
+    /** Attach vim once, wiring this editor's :w/⌘S saver into the global
+     *  Vim ex map. Read-only (truncated) files still get motions, just no
+     *  saver — a :w there is a harmless no-op. */
+    private async attachVim(ed: monacoTypes.editor.IStandaloneCodeEditor): Promise<void> {
+        if (this.vim) return;
+        let lib: VimLib;
+        try {
+            lib = await loadVim();
+        } catch (err) {
+            // vim is a nicety, never a gate — the editor works without it
+            console.warn("editor pane: monaco-vim failed to load:", err);
+            return;
+        }
+        if (this.disposed || this.editor !== ed) return;
+        if (this.editable) saversByEditor.set(ed, () => void this.save());
+        this.vim = lib.initVimMode(ed, this.vimBar);
+    }
+
+    private setDirty(dirty: boolean): void {
+        if (this.dirty === dirty) return;
+        this.dirty = dirty;
+        this.closeArmed = false; // any edit/save resets the discard arm
+        // the pane tab reads title on change; nudge the counter/path too
+        this.emitChange();
+    }
+
+    /** :w / ⌘S — save the whole buffer to the workspace file. No-op unless
+     *  the file is editable and actually dirty. */
+    private async save(): Promise<void> {
+        const model = this.editor?.getModel();
+        if (!this.editable || !model || this.saving) return;
+        if (!this.dirty) {
+            this.opts.onFlash(`${this.title} — nothing to save`);
+            return;
+        }
+        this.saving = true;
+        const versionId = model.getAlternativeVersionId();
+        try {
+            await this.api.writeFile(this.opts.workspace, this.opts.path ?? "", model.getValue());
+            if (this.disposed) return;
+            this.savedVersionId = versionId;
+            this.setDirty(model.getAlternativeVersionId() !== versionId);
+            this.opts.onFlash(`saved ${this.opts.path ?? ""}`);
+        } catch (err) {
+            const msg = String(err);
+            this.opts.onFlash(
+                msg.includes(" 404 ")
+                    ? "saving needs a newer rook-host — relaunch rook"
+                    : `save failed: ${msg}`,
+            );
+        } finally {
+            this.saving = false;
+        }
+    }
+
+    /** The × button: a dirty pane arms discard on the first click and closes
+     *  on the second — so unsaved edits are never lost to a stray click. */
+    private requestClose(): void {
+        if (this.dirty && !this.closeArmed) {
+            this.closeArmed = true;
+            this.opts.onFlash("unsaved changes — ⌘S to save, or × again to discard");
+            setTimeout(() => (this.closeArmed = false), 3000);
+            return;
+        }
+        this.opts.onClose();
     }
 
     // ---- threads: the conversation layer (term/threads.ts) ----
@@ -488,7 +637,7 @@ export class EditorPane implements PaneContent {
 
     private ensureDiffEditor(): monacoTypes.editor.IStandaloneDiffEditor {
         if (!this.diffEditor) {
-            this.diffEditor = this.monaco!.editor.createDiffEditor(this.body, {
+            this.diffEditor = this.monaco!.editor.createDiffEditor(this.mount, {
                 ...this.editorOpts(),
                 renderSideBySide: true,
             });
@@ -502,9 +651,15 @@ export class EditorPane implements PaneContent {
 
     private ensureEditor(): monacoTypes.editor.IStandaloneCodeEditor {
         if (!this.editor) {
-            this.editor = this.monaco!.editor.create(this.body, this.editorOpts());
+            this.editor = this.monaco!.editor.create(this.mount, this.editorOpts());
             this.addCommentAction(this.editor);
             this.editor.onDidFocusEditorText(() => this.activate());
+            // ⌘S saves from any mode, so non-vim users get a save too; the
+            // vim :w path routes through the same save().
+            this.editor.addCommand(
+                this.monaco!.KeyMod.CtrlCmd | this.monaco!.KeyCode.KeyS,
+                () => void this.save(),
+            );
         }
         return this.editor;
     }

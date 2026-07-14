@@ -582,6 +582,8 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleWorkspaceDiff(w, r, name)
 	case action == "file" && r.Method == http.MethodGet:
 		h.handleWorkspaceFile(w, r, name)
+	case action == "write" && r.Method == http.MethodPost:
+		h.handleWorkspaceWrite(w, r, name)
 	case action == "files" && r.Method == http.MethodGet:
 		h.handleWorkspaceFiles(w, name)
 	// threads: file-anchored AI conversations (threads.go)

@@ -12,6 +12,7 @@ package host
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -27,6 +28,11 @@ const (
 	// per-side content cap — Monaco chokes on giant models long before
 	// the wire does
 	reviewMaxSide = 2 << 20
+	// A save may grow a file past the 2 MB read cap; the editor only lets
+	// you edit files that loaded WHOLE (untruncated), so a bounded amount
+	// of growth is legitimate. This is the write ceiling, generous but not
+	// unbounded — localhost, token-gated, the user's own files.
+	writeMaxSize = 16 << 20
 	// NUL anywhere in this prefix marks the file binary (git's own sniff)
 	reviewSniffLen  = 8000
 	reviewMaxFiles  = 1000  // changes list
@@ -118,6 +124,16 @@ type fileResult struct {
 type filesResult struct {
 	Files     []string `json:"files"`
 	Truncated bool     `json:"truncated,omitempty"`
+}
+
+type writeRequest struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+type writeResult struct {
+	Path  string `json:"path"`
+	Bytes int    `json:"bytes"`
 }
 
 // reviewBase is the resolved diff base for one request.
@@ -402,6 +418,77 @@ func (h *Host) handleWorkspaceFile(w http.ResponseWriter, r *http.Request, name 
 	res := fileResult{Path: rel}
 	res.Content, res.Binary, res.Truncated = capSide(b)
 	writeJSON(w, res)
+}
+
+// handleWorkspaceWrite is POST /workspaces/{name}/write {path, content} —
+// the editor's :w / ⌘S. This is the host API's first WRITE door, kept
+// deliberately narrow: a repo-relative path, confined exactly like the
+// read side (repoTop, else ws.Root), written atomically (temp + rename in
+// the same dir) so a crash never leaves a half file. Existing permissions
+// are preserved — an executable stays executable. The editor only enables
+// saving for files it loaded whole, so this never truncates.
+func (h *Host) handleWorkspaceWrite(w http.ResponseWriter, r *http.Request, name string) {
+	ws := h.reg.get(name)
+	if ws == nil {
+		http.Error(w, "no such workspace: "+name, http.StatusNotFound)
+		return
+	}
+	if ws.Root == "" {
+		http.Error(w, "workspace has no root", http.StatusBadRequest)
+		return
+	}
+	var req writeRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, writeMaxSize+1<<16)).Decode(&req); err != nil {
+		http.Error(w, "bad body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.Content) > writeMaxSize {
+		http.Error(w, "content exceeds write cap", http.StatusRequestEntityTooLarge)
+		return
+	}
+	top, err := repoTop(ws.Root)
+	if err != nil {
+		top = ws.Root
+	}
+	abs, err := confinePath(top, req.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := atomicWrite(abs, []byte(req.Content)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, writeResult{Path: req.Path, Bytes: len(req.Content)})
+}
+
+// atomicWrite replaces abs's contents in one rename: write a sibling temp
+// file, fsync it closed, chmod it to the existing file's mode (0644 for a
+// new file), then rename over the target. The temp is removed on any early
+// return; after a successful rename the remove is a no-op miss.
+func atomicWrite(abs string, data []byte) error {
+	dir := filepath.Dir(abs)
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(abs); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(dir, ".rook-save-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, abs)
 }
 
 // handleWorkspaceFiles is GET /workspaces/{name}/files — the file picker's

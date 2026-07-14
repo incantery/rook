@@ -175,6 +175,18 @@ export class HostAPI {
         return (await this.req(`/workspaces/${encodeURIComponent(ws)}/file?${q}`)).json();
     }
 
+    /** Save a file's full new content (the editor's :w / ⌘S). The host
+     *  writes atomically and confines the path exactly like every read.
+     *  Only ever called for files that loaded whole — never a truncated
+     *  buffer, which would overwrite the tail with nothing. 404s on old
+     *  daemons (no write endpoint) — the caller surfaces that. */
+    async writeFile(ws: string, path: string, content: string): Promise<void> {
+        await this.req(`/workspaces/${encodeURIComponent(ws)}/write`, {
+            method: "POST",
+            body: JSON.stringify({path, content}),
+        });
+    }
+
     /** The file picker's listing: git's view in repos, a bounded walk
      *  elsewhere. */
     async listFiles(ws: string): Promise<FilesResult> {

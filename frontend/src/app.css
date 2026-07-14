@@ -250,6 +250,38 @@ body {
     flex: 1;
     position: relative;
     min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+/* monaco fills this; the vim status line (file mode) sits below it */
+.editor-mount {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+}
+/* the vim status line — mode indicator on the left, :command input right */
+.editor-vim {
+    flex: none;
+    display: flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 8px;
+    border-top: 1px solid var(--line);
+    background: #0f111a;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+}
+.editor-vim input {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: none;
+    outline: none;
+    font: inherit;
+    color: var(--fg);
 }
 /* labeled states (loading, binary, clean, errors) over the editor */
 /* display:flex would beat the hidden attribute's UA display:none —

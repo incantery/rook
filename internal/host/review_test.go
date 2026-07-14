@@ -243,3 +243,49 @@ func TestReviewFileAndFiles(t *testing.T) {
 		t.Fatalf("non-repo file: %+v", f)
 	}
 }
+
+func TestReviewWrite(t *testing.T) {
+	h, srv, repo := newWorktreeHost(t)
+	c := &wtClient{srv.URL, h.Token()}
+
+	// round trip: save new content, it lands on disk verbatim
+	code, body := c.do(t, "POST", "/workspaces/src/write", writeRequest{Path: "a.txt", Content: "changed\n"})
+	if code != 200 {
+		t.Fatalf("write: %d %s", code, body)
+	}
+	var res writeResult
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		t.Fatalf("write result: %v in %s", err, body)
+	}
+	if res.Bytes != 8 {
+		t.Fatalf("write bytes: %+v", res)
+	}
+	if got, _ := os.ReadFile(filepath.Join(repo, "a.txt")); string(got) != "changed\n" {
+		t.Fatalf("on disk: %q", got)
+	}
+
+	// a save preserves the file's mode — an executable stays executable
+	tool := filepath.Join(repo, "tool.sh")
+	os.WriteFile(tool, []byte("#!/bin/sh\n"), 0o755)
+	if code, body := c.do(t, "POST", "/workspaces/src/write", writeRequest{Path: "tool.sh", Content: "#!/bin/sh\necho hi\n"}); code != 200 {
+		t.Fatalf("write tool.sh: %d %s", code, body)
+	}
+	if fi, err := os.Stat(tool); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Fatalf("mode not preserved: %v %v", fi.Mode().Perm(), err)
+	}
+
+	// confinePath guards writes exactly like reads: no escape, no empty path
+	for _, rel := range []string{"../escape.txt", "", "/etc/evil"} {
+		if code, _ := c.do(t, "POST", "/workspaces/src/write", writeRequest{Path: rel, Content: "x"}); code != 400 {
+			t.Fatalf("write %q: got %d, want 400", rel, code)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(repo), "escape.txt")); !os.IsNotExist(err) {
+		t.Fatalf("traversal write escaped the repo")
+	}
+
+	// unknown workspace → 404
+	if code, _ := c.do(t, "POST", "/workspaces/nope/write", writeRequest{Path: "a.txt", Content: "x"}); code != 404 {
+		t.Fatalf("unknown workspace: got %d, want 404", code)
+	}
+}
