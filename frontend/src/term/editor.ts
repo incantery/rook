@@ -123,6 +123,8 @@ export class EditorPane implements PaneContent {
     private changeSub: {dispose(): void} | null = null;
     /** a dirty × click arms discard; a second click within the window closes */
     private closeArmed = false;
+    /** focus() fired before the editor existed — apply it once it does */
+    private wantFocus = false;
 
     /** undefined until the host answers — it decides the default base */
     private base: "head" | "branch" | undefined;
@@ -211,12 +213,27 @@ export class EditorPane implements PaneContent {
     }
 
     focus(): void {
-        (this.diffEditor ?? this.editor)?.focus();
+        const ed = this.diffEditor ?? this.editor;
+        // On open, the manager focuses this pane while the Monaco chunk is
+        // still loading — there's no editor to take focus yet. Latch the
+        // request so the load path focuses it the moment it exists (else the
+        // user has to click in before vim/typing works).
+        if (ed) ed.focus();
+        else this.wantFocus = true;
         // a re-focused pane is often stale — the agent kept working. Thread
         // drafts live in the panel (chrome), so refetch is always safe here.
         if (!this.monaco || Date.now() - this.fetchedAt <= STALE_MS) return;
         if (this.opts.kind === "review") void this.refresh();
         else void this.refetchThreads();
+    }
+
+    /** Honor a focus() that landed before the editor existed. */
+    private applyPendingFocus(): void {
+        if (!this.wantFocus) return;
+        const ed = this.diffEditor ?? this.editor;
+        if (!ed) return;
+        this.wantFocus = false;
+        ed.focus();
     }
 
     /** The manager calls this exactly when geometry changes (activate,
@@ -388,6 +405,7 @@ export class EditorPane implements PaneContent {
             this.ensureDiffEditor().setModel({original, modified});
             this.fit();
             this.rebuildBands();
+            this.applyPendingFocus();
         } catch (err) {
             this.fail(`diffing ${f.path}`, err);
         }
@@ -431,6 +449,7 @@ export class EditorPane implements PaneContent {
             );
             this.fit();
             this.rebuildBands();
+            this.applyPendingFocus();
             // vim rides every file editor (motions work read-only too); the
             // :w saver is registered only when the buffer is editable.
             await this.attachVim(ed);
