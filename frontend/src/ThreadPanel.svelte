@@ -175,35 +175,51 @@
 </script>
 
 {#if !editor}
-    <div class="thread-panel-empty">focus a review or file pane to see its threads</div>
+    <div class="p-4 text-sm opacity-60">focus a review or file pane to see its threads</div>
 {:else if sel.mode === "composer"}
-    <div class="thread-card">
-        <div class="thread-meta">
+    <div
+        class="my-1 mr-3 ml-1 box-border flex max-w-160 flex-col gap-1.5 rounded-md border border-[#252a3d] bg-[#151928] px-2.5 py-2 font-mono text-sm leading-normal text-fg"
+    >
+        <div class="overflow-hidden text-ellipsis text-xs text-dim">
             new thread on {fmtRange(sel.startLine, sel.endLine)}{sel.side === "original"
                 ? " (original side)"
                 : ""}
         </div>
         <textarea
-            class="thread-input"
+            class="box-border min-h-6.5 w-full resize-y rounded-sm border border-[#252a3d] bg-[#0b0d14] px-1.5 py-1 font-mono text-sm text-fg focus:border-acc focus:outline-none"
             rows="3"
             placeholder="start a thread… (⌘⏎ comments · esc cancels)"
             bind:value={draft}
             onkeydown={(e) => keydown(e, submitComposer)}></textarea>
-        {#if err}<div class="thread-err">{err}</div>{/if}
-        <div class="thread-row">
-            <button class="editor-btn thread-act" disabled={busy} onclick={submitComposer}>
+        {#if err}<div class="text-xs text-red [overflow-wrap:anywhere]">{err}</div>{/if}
+        <div class="flex items-center gap-1.5">
+            <button
+                class="flex-none cursor-pointer rounded-sm border border-line/15 bg-transparent px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
+                disabled={busy}
+                onclick={submitComposer}
+            >
                 comment
             </button>
-            <button class="editor-btn thread-act" onclick={cancel}>cancel</button>
+            <button
+                class="flex-none cursor-pointer rounded-sm border border-line/15 bg-transparent px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
+                onclick={cancel}>cancel</button
+            >
         </div>
     </div>
 {:else if active}
-    <div class="thread-card">
-        <div class="thread-row">
-            <span class="thread-state thread-state-{active.thread.state}"
-                >{active.thread.state}</span
+    <div
+        class="my-1 mr-3 ml-1 box-border flex max-w-160 flex-col gap-1.5 rounded-md border border-[#252a3d] bg-[#151928] px-2.5 py-2 font-mono text-sm leading-normal text-fg"
+    >
+        <div class="flex items-center gap-1.5">
+            <span
+                class={[
+                    "flex-none rounded-full border border-current px-1.5 text-xs tracking-wider uppercase",
+                    active.thread.state === "pending" && "text-amber",
+                    active.thread.state === "open" && "text-acc",
+                    active.thread.state === "resolved" && "text-grn",
+                ]}>{active.thread.state}</span
             >
-            <span class="thread-meta">
+            <span class="overflow-hidden text-ellipsis text-xs text-dim">
                 #{active.thread.id} · {fmtRange(
                     active.thread.currentStart,
                     active.thread.currentEnd,
@@ -212,50 +228,66 @@
                     : ""}
             </span>
             {#if active.count > 1}
-                <span class="thread-nav">
+                <span class="ml-auto text-xs whitespace-nowrap opacity-80">
                     <button
-                        class="editor-btn"
+                        class="flex-none cursor-pointer rounded-sm border border-line/15 bg-transparent px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
                         title="previous thread here"
                         onclick={() => cycle(-1)}>‹</button
                     >
                     {active.index + 1} of {active.count}
-                    <button class="editor-btn" title="next thread here" onclick={() => cycle(1)}
-                        >›</button
+                    <button
+                        class="flex-none cursor-pointer rounded-sm border border-line/15 bg-transparent px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
+                        title="next thread here"
+                        onclick={() => cycle(1)}>›</button
                     >
                 </span>
             {/if}
         </div>
         {#if active.thread.outdated && active.thread.anchorText}
-            <pre class="thread-anchor">{active.thread.anchorText}</pre>
+            <pre
+                class="m-0 overflow-x-auto border-l-2 border-[#464b66] bg-[#0b0d14] px-2 py-1 text-xs whitespace-pre text-dim">{active
+                    .thread.anchorText}</pre>
         {/if}
         {#each active.thread.comments as c (c.id)}
-            <div class="thread-comment">
-                <span class="thread-author thread-author-{c.author}">{c.author}</span>
-                <div class="thread-body">{c.body}</div>
+            <div class="flex flex-col gap-0.5">
+                <span class={["text-xs", c.author === "user" ? "text-amber" : "text-acc"]}
+                    >{c.author}</span
+                >
+                <div class="whitespace-pre-wrap [overflow-wrap:anywhere]">{c.body}</div>
             </div>
         {/each}
-        {#if err}<div class="thread-err">{err}</div>{/if}
-        <div class="thread-reply">
+        {#if err}<div class="text-xs text-red [overflow-wrap:anywhere]">{err}</div>{/if}
+        <div class="flex flex-col gap-1">
             <textarea
-                class="thread-input"
+                class="box-border min-h-6.5 w-full resize-y rounded-sm border border-[#252a3d] bg-[#0b0d14] px-1.5 py-1 font-mono text-sm text-fg focus:border-acc focus:outline-none"
                 rows="1"
                 placeholder="reply… (⌘⏎ sends · esc closes)"
                 bind:value={draft}
                 onkeydown={(e) => keydown(e, reply)}></textarea>
-            <div class="thread-row">
-                <button class="editor-btn thread-act" disabled={busy} onclick={reply}>reply</button>
+            <div class="flex items-center gap-1.5">
+                <button
+                    class="flex-none cursor-pointer rounded-sm border border-line/15 bg-transparent px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
+                    disabled={busy}
+                    onclick={reply}>reply</button
+                >
                 {#if active.thread.state === "resolved"}
-                    <button class="editor-btn thread-act" disabled={busy} onclick={reopen}
-                        >reopen</button
+                    <button
+                        class="flex-none cursor-pointer rounded-sm border border-line/15 bg-transparent px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
+                        disabled={busy}
+                        onclick={reopen}>reopen</button
                     >
                 {:else}
-                    <button class="editor-btn thread-act" disabled={busy} onclick={resolve}
-                        >resolve</button
+                    <button
+                        class="flex-none cursor-pointer rounded-sm border border-line/15 bg-transparent px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
+                        disabled={busy}
+                        onclick={resolve}>resolve</button
                     >
                 {/if}
             </div>
         </div>
     </div>
 {:else}
-    <div class="thread-panel-empty">select a gutter marker, or select code and ⌘⇧M to comment</div>
+    <div class="p-4 text-sm opacity-60">
+        select a gutter marker, or select code and ⌘⇧M to comment
+    </div>
 {/if}

@@ -53,24 +53,33 @@
     }
 </script>
 
-<div class="ws-form">
-    <div class="ws-modal-title">OpenAI API key — the drafter's credential</div>
-    <div class="settings-status" class:ok={statusOk}>{status}</div>
-    <label class="settings-row"
-        ><span>Key</span>
+<div class="flex flex-col gap-4 p-4.5">
+    <div class="border-b border-line/15 px-4.5 py-3.5 text-sm font-bold text-fg">
+        OpenAI API key — the drafter's credential
+    </div>
+    <div class={["mt-1.5 mb-3.5", statusOk ? "text-grn" : "text-dim"]}>{status}</div>
+    <label class="my-2 flex items-center gap-2"
+        ><span class="mb-1.5 block text-xs font-semibold text-dim">Key</span>
         <input
             type="password"
+            class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
             placeholder="sk-…"
             bind:value={key}
             spellcheck="false"
             autocomplete="off"
         />
-        <button class="home-btn" onclick={() => void clear()}>Remove</button>
+        <button
+            class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-xs font-semibold text-fg hover:bg-white/10"
+            onclick={() => void clear()}>Remove</button
+        >
     </label>
-    {#if error}<div class="settings-error">{error}</div>{/if}
-    <div class="ws-modal-foot">
-        <span class="home-spacer"></span>
-        {#if saved}<span class="settings-saved">saved ✓</span>{/if}
-        <button class="home-btn primary" onclick={() => void save()}>Save to keychain</button>
+    {#if error}<div class="mt-2 text-red">{error}</div>{/if}
+    <div class="flex justify-end gap-2 border-t border-line/15 px-4.5 py-3.5">
+        <span class="flex-1"></span>
+        {#if saved}<span class="ml-2 text-grn">saved ✓</span>{/if}
+        <button
+            class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-[#10131c]"
+            onclick={() => void save()}>Save to keychain</button
+        >
     </div>
 </div>

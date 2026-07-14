@@ -643,8 +643,10 @@
     />
 {/if}
 
-<!-- always mounted: terminals live here; visibility is CSS, never {#if} -->
-<div id="app-screen" hidden={app.screen !== "app"}>
+<!-- always mounted: terminals live here; visibility is a display toggle,
+     never {#if}. flex/hidden are toggled explicitly so exactly one display
+     utility is ever active (a raw [hidden] attr would lose to .flex). -->
+<div class={["min-h-0 flex-1 flex-col", app.screen === "app" ? "flex" : "hidden"]}>
     <Titlebar
         onpicker={() => (app.pickerOpen = true)}
         ondashboard={toggleDash}
@@ -653,10 +655,10 @@
         onnew={() => void mgr.newSession()}
         onpalette={() => registry.run("palette.toggle")}
     />
-    <div id="workbench">
-        <div id="terminals" bind:this={terminalsEl}>
+    <div class="flex min-h-0 min-w-0 flex-1">
+        <div class="relative min-h-0 min-w-0 flex-1" bind:this={terminalsEl}>
             {#if fatal}
-                <div id="fatal">{fatal}</div>
+                <div class="whitespace-pre-wrap p-6 font-mono text-sm text-red">{fatal}</div>
             {/if}
             {#if app.dashVisible}
                 <Dashboard

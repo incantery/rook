@@ -89,42 +89,61 @@
     const treeOf = $derived(app.workspaceInfo?.worktreeOf ?? null);
 </script>
 
-<div id="dashboard">
-    <div id="dash-inner">
-        <div class="dash-head">
-            <div class="dash-head-text">
+<div class="absolute inset-0 z-10 overflow-y-auto bg-[#0f111a]/72 backdrop-blur-xl">
+    <div class="mx-auto max-w-215 px-6.5 pt-7 pb-15">
+        <div class="mb-6 flex items-start gap-3">
+            <div class="min-w-0 flex-1">
                 {#if treeOf}
-                    <div class="dash-lineage">⎇ task tree of {treeOf}</div>
+                    <div class="mb-1 font-mono text-xs text-acc">⎇ task tree of {treeOf}</div>
                 {/if}
-                <div class="dash-name">{st?.name ?? app.workspace}</div>
-                <div class="dash-root">
+                <div class="text-xl font-bold text-fg">{st?.name ?? app.workspace}</div>
+                <div class="mt-1.5 font-mono text-xs text-lo">
                     {st?.root ? tilde(st.root) : "no root — cd somewhere, then ` ."}
                 </div>
             </div>
-            <div class="dash-pills">
+            <div class="flex flex-wrap items-center gap-1.5">
                 {#if st?.git}
-                    <span class="dash-pill branch">⎇ {st.git.branch}</span>
-                    {#if st.git.dirty > 0}<span class="dash-pill dirty"
+                    <span
+                        class="rounded-md bg-acc/10 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-acc"
+                        >⎇ {st.git.branch}</span
+                    >
+                    {#if st.git.dirty > 0}<span
+                            class="rounded-md bg-amber/10 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-amber"
                             >● {st.git.dirty} modified</span
                         >
-                    {:else}<span class="dash-pill clean">✓ clean</span>{/if}
-                    {#if st.git.ahead > 0}<span class="dash-pill sync">↑{st.git.ahead}</span>{/if}
-                    {#if st.git.behind > 0}<span class="dash-pill sync">↓{st.git.behind}</span>{/if}
+                    {:else}<span
+                            class="rounded-md bg-grn/10 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-grn"
+                            >✓ clean</span
+                        >{/if}
+                    {#if st.git.ahead > 0}<span
+                            class="rounded-md bg-white/5 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-dim"
+                            >↑{st.git.ahead}</span
+                        >{/if}
+                    {#if st.git.behind > 0}<span
+                            class="rounded-md bg-white/5 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-dim"
+                            >↓{st.git.behind}</span
+                        >{/if}
                 {/if}
                 <!-- the fresh-start pills: usage + cost render even at zero — the
                      dashboard should say "nothing burning", not say nothing -->
                 {#if worstUsage}
-                    <span class="dash-pill" class:dirty={worstUsage.pct >= 90}
-                        >◔ {worstUsage.pct}% {shortWindow(worstUsage.label)}</span
+                    <span
+                        class={[
+                            "rounded-md px-2 py-0.5 font-mono text-xs whitespace-nowrap",
+                            worstUsage.pct >= 90 ? "bg-amber/10 text-amber" : "bg-white/5 text-dim",
+                        ]}>◔ {worstUsage.pct}% {shortWindow(worstUsage.label)}</span
                     >
                 {/if}
                 {#if app.costs}
-                    <span class="dash-pill">${app.costs.todayUsd.toFixed(2)} today</span>
+                    <span
+                        class="rounded-md bg-white/5 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-dim"
+                        >${app.costs.todayUsd.toFixed(2)} today</span
+                    >
                 {/if}
             </div>
         </div>
-        <div class="dash-sec">Windows</div>
-        <div id="dash-grid">
+        <div class="mb-2.5 text-xs font-bold tracking-widest uppercase text-lo">Windows</div>
+        <div class="mb-6.5 grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-2.5">
             {#each st?.sessions ?? [] as s, i (s.id)}
                 {@const draft = app.attention.find(
                     (a) => a.rookSession === s.id && a.draft?.action === "draft",
@@ -133,54 +152,95 @@
                      the number is the STRIP SLOT of the window holding the pane,
                      falling back to list order until the strip snapshot has it -->
                 {@const slot = app.tabs.findIndex((t) => t.sessions.includes(s.id))}
-                <div class="dash-card" onclick={() => onjump(s.id)} role="presentation">
-                    <div class="dash-card-top">
-                        <span class="dash-num">{app.dashTab + 1 + (slot === -1 ? i : slot)}</span>
+                <div
+                    class="cursor-pointer rounded-xl border border-line/15 bg-white/3 px-3.5 py-3 transition-colors hover:border-line/40"
+                    onclick={() => onjump(s.id)}
+                    role="presentation"
+                >
+                    <div class="mb-1.5 flex items-baseline gap-2">
+                        <span class="font-mono text-xs text-lo"
+                            >{app.dashTab + 1 + (slot === -1 ? i : slot)}</span
+                        >
                         <!-- agent sessions get the accent — the attention router's
                              targets, visible at a glance -->
-                        <span class="dash-fg" class:agent={s.fg === "claude"}>{s.fg || "?"}</span>
-                        <span class="dash-spacer"></span>
-                        <span class="dash-when">{ago(s.created)}</span>
+                        <span
+                            class={[
+                                "font-mono text-sm font-bold",
+                                s.fg === "claude" ? "text-grn" : "text-fg",
+                            ]}>{s.fg || "?"}</span
+                        >
+                        <span class="flex-1"></span>
+                        <span class="font-mono text-xs whitespace-nowrap text-lo"
+                            >{ago(s.created)}</span
+                        >
                     </div>
-                    <div class="dash-cwd" title={s.cwd}>{squeeze(tilde(s.cwd || "")) || "—"}</div>
+                    <div class="truncate font-mono text-xs text-lo" title={s.cwd}>
+                        {squeeze(tilde(s.cwd || "")) || "—"}
+                    </div>
                     {#if s.agent}
                         {@const text =
                             s.agent.state === "needs_input"
                                 ? s.agent.ask || s.agent.title
                                 : s.agent.title}
-                        <div class="dash-agent {s.agent.state}">
-                            <span class="dash-agent-chip">{agentLabel(s.agent)}</span>
+                        <div class="mt-2 border-t border-line/15 pt-2">
+                            <span
+                                class={[
+                                    "font-mono text-xs",
+                                    s.agent.state === "working"
+                                        ? "text-grn"
+                                        : s.agent.state === "needs_input"
+                                          ? "text-amber"
+                                          : s.agent.state === "quiet"
+                                            ? "text-lo"
+                                            : "text-dim",
+                                ]}>{agentLabel(s.agent)}</span
+                            >
                             {#if text}
-                                <div class="dash-agent-text" title={text}>{text}</div>
+                                <div
+                                    class="mt-1.5 line-clamp-2 text-xs leading-normal text-dim"
+                                    title={text}
+                                >
+                                    {text}
+                                </div>
                             {/if}
                         </div>
                     {/if}
                     {#if draft}
-                        <div class="dash-draft" title={draft.draft?.reply ?? ""}>
+                        <div
+                            class="mt-1.5 truncate font-mono text-xs text-grn"
+                            title={draft.draft?.reply ?? ""}
+                        >
                             ↳ draft ready — ` a
                         </div>
                     {/if}
                 </div>
             {/each}
             {#if (st?.sessions ?? []).length === 0}
-                <div class="home-empty">No windows — ` c opens one.</div>
+                <div class="col-span-full p-10 text-center text-sm text-lo">
+                    No windows — ` c opens one.
+                </div>
             {/if}
         </div>
         {#if queue && (queue.issues.length > 0 || (queue.errors ?? []).length > 0)}
-            <div class="dash-sec">Queue</div>
-            <div id="dash-queue">
+            <div class="mb-2.5 text-xs font-bold tracking-widest uppercase text-lo">Queue</div>
+            <div class="mb-5.5 flex flex-col gap-1.5">
                 {#each queue.issues as i (i.tracker + i.key)}
-                    <div class="dash-issue">
-                        <span class="dash-issue-key">{i.key}</span>
-                        <span class="dash-issue-who" class:mine={i.mine}
-                            >{i.mine ? "mine" : "open"}</span
+                    <div
+                        class="flex items-center gap-2.5 rounded-lg border border-line/15 bg-white/2 px-3 py-1.5 text-sm"
+                    >
+                        <span class="font-mono whitespace-nowrap text-acc">{i.key}</span>
+                        <span
+                            class={[
+                                "rounded-md px-1.5 py-px font-mono text-xs",
+                                i.mine ? "bg-grn/12 text-grn" : "bg-white/5 text-lo",
+                            ]}>{i.mine ? "mine" : "open"}</span
                         >
-                        <span class="dash-issue-title" title={i.title}>{i.title}</span>
-                        {#if i.state && i.state !== "open"}<span class="dash-issue-state"
-                                >{i.state}</span
+                        <span class="flex-1 truncate text-fg" title={i.title}>{i.title}</span>
+                        {#if i.state && i.state !== "open"}<span
+                                class="text-xs whitespace-nowrap text-lo">{i.state}</span
                             >{/if}
                         <button
-                            class="home-btn dash-issue-go"
+                            class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-white/4 px-3 py-1.5 font-[inherit] text-sm font-semibold whitespace-nowrap text-fg hover:bg-white/8"
                             title="Start claude on this issue in a fresh task tree"
                             disabled={starting !== ""}
                             onclick={() => void work(i)}
@@ -189,19 +249,23 @@
                     </div>
                 {/each}
                 {#each queue.errors ?? [] as e}
-                    <div class="dash-issue-err" title={e}>⚠ {e}</div>
+                    <div class="truncate px-3 py-0.5 text-xs text-amber" title={e}>⚠ {e}</div>
                 {/each}
             </div>
         {/if}
-        <div class="dash-actions">
-            <button class="home-btn" onclick={() => runCmd("session.new")}
-                ><span class="plus">+</span> New window</button
+        <div class="flex flex-wrap gap-2">
+            <button
+                class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-white/4 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/8"
+                onclick={() => runCmd("session.new")}
+                ><span class="text-sm leading-none text-acc">+</span> New window</button
             >
-            <button class="home-btn" onclick={() => runCmd("workspace.set-root")}
-                >Set root to shell's cwd</button
+            <button
+                class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-white/4 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/8"
+                onclick={() => runCmd("workspace.set-root")}>Set root to shell's cwd</button
             >
-            <button class="home-btn" onclick={() => runCmd("workspace.manager")}
-                >Mission control</button
+            <button
+                class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-white/4 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/8"
+                onclick={() => runCmd("workspace.manager")}>Mission control</button
             >
         </div>
     </div>

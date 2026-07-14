@@ -86,33 +86,38 @@
     }
 </script>
 
-<div class="ws-form">
-    <div class="ws-modal-title">Jira connection</div>
+<div class="flex flex-col gap-4 p-4.5">
+    <div class="border-b border-line/15 px-4.5 py-3.5 text-sm font-bold text-fg">
+        Jira connection
+    </div>
 
-    <label class="settings-row"
-        ><span>Base URL</span>
+    <label class="my-2 flex items-center gap-2"
+        ><span class="mb-1.5 block text-xs font-semibold text-dim">Base URL</span>
         <input
             type="text"
+            class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
             placeholder="https://org.atlassian.net"
             bind:value={url}
             spellcheck="false"
             autocomplete="off"
         />
     </label>
-    <label class="settings-row"
-        ><span>Email</span>
+    <label class="my-2 flex items-center gap-2"
+        ><span class="mb-1.5 block text-xs font-semibold text-dim">Email</span>
         <input
             type="text"
+            class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
             placeholder="you@org.com"
             bind:value={email}
             spellcheck="false"
             autocomplete="off"
         />
     </label>
-    <label class="settings-row"
-        ><span>JQL override</span>
+    <label class="my-2 flex items-center gap-2"
+        ><span class="mb-1.5 block text-xs font-semibold text-dim">JQL override</span>
         <input
             type="text"
+            class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
             placeholder="(optional)"
             bind:value={jql}
             spellcheck="false"
@@ -120,25 +125,32 @@
         />
     </label>
 
-    <div class="settings-status" class:ok={tokenOk}>{tokenStatus}</div>
-    <div class="settings-row">
+    <div class={["mt-1.5 mb-3.5", tokenOk ? "text-grn" : "text-dim"]}>{tokenStatus}</div>
+    <div class="my-2 flex items-center gap-2">
         <span>API token</span>
         <input
             type="password"
+            class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
             placeholder="paste token (underscores welcome)"
             bind:value={token}
             spellcheck="false"
             autocomplete="off"
         />
-        <button class="home-btn" onclick={() => void clearToken()}>Remove</button>
+        <button
+            class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-xs font-semibold text-fg hover:bg-white/10"
+            onclick={() => void clearToken()}>Remove</button
+        >
     </div>
 
-    <div class="ws-modal-title">Project mapping</div>
+    <div class="border-b border-line/15 px-4.5 py-3.5 text-sm font-bold text-fg">
+        Project mapping
+    </div>
     {#each workspaceNames as ws (ws)}
-        <label class="settings-row"
-            ><span>{ws}</span>
+        <label class="my-2 flex items-center gap-2"
+            ><span class="mb-1.5 block text-xs font-semibold text-dim">{ws}</span>
             <input
                 type="text"
+                class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
                 placeholder="PROJECTKEY (blank = off)"
                 spellcheck="false"
                 autocomplete="off"
@@ -149,10 +161,13 @@
         </label>
     {/each}
 
-    {#if error}<div class="settings-error">{error}</div>{/if}
-    <div class="ws-modal-foot">
-        <span class="home-spacer"></span>
-        {#if saved}<span class="settings-saved">saved ✓</span>{/if}
-        <button class="home-btn primary" onclick={() => void save()}>Save</button>
+    {#if error}<div class="mt-2 text-red">{error}</div>{/if}
+    <div class="flex justify-end gap-2 border-t border-line/15 px-4.5 py-3.5">
+        <span class="flex-1"></span>
+        {#if saved}<span class="ml-2 text-grn">saved ✓</span>{/if}
+        <button
+            class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-[#10131c]"
+            onclick={() => void save()}>Save</button
+        >
     </div>
 </div>

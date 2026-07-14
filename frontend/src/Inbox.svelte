@@ -156,24 +156,35 @@
 </script>
 
 <div
-    id="inbox"
-    class="overlay"
+    class="fixed inset-0 z-50 flex items-start justify-center bg-black/55 pt-[12vh]"
     onmousedown={(e) => e.target === e.currentTarget && onclose()}
     role="presentation"
 >
-    <div class="pal-panel">
-        <div class="pal-inputrow">
-            <span class="inbox-title">Attention</span>
-            <span class="pal-spacer"></span>
-            <span class="pal-esc">esc</span>
+    <div
+        class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-[#151924] shadow-2xl"
+    >
+        <div class="flex items-center gap-2.5 border-b border-line/15 px-4 py-3">
+            <span class="text-sm font-bold text-fg">Attention</span>
+            <span class="flex-1"></span>
+            <span class="rounded border border-line/15 px-1.5 py-0.5 font-mono text-xs text-lo"
+                >esc</span
+            >
         </div>
-        <div class="pal-list inbox-list" bind:this={listEl}>
+        <div class="max-h-[48vh] overflow-y-auto p-1.5" bind:this={listEl}>
             {#if items.length === 0}
-                <div class="inbox-empty">Nobody needs you.</div>
+                <div class="p-6 text-center text-sm text-lo">Nobody needs you.</div>
             {/if}
             {#each items as it, i (key(it))}
+                {@const draftReady =
+                    !it.interactive &&
+                    (it.draft?.action === "draft" || it.draft?.action === "spawn") &&
+                    editingKey !== key(it)}
+                <!-- .sel stays as a JS scroll-into-view hook, not a style -->
                 <div
-                    class="pal-item inbox-row"
+                    class={[
+                        "block cursor-pointer rounded-md px-3 py-2 hover:bg-acc/15",
+                        i === selIndex && "bg-acc/15",
+                    ]}
                     class:sel={i === selIndex}
                     onmousedown={(e) => {
                         e.preventDefault();
@@ -183,35 +194,40 @@
                     }}
                     role="presentation"
                 >
-                    <div class="inbox-head">
+                    <div class="flex items-baseline gap-2.5">
                         <!-- "window N" is the host's per-workspace creation index —
                              once windows hold panes it can drift from the strip slot.
                              Accepted: the label orients, the jump (by session id) is
                              what must stay correct. -->
-                        <span class="inbox-chip"
+                        <span
+                            class="rounded-sm bg-amber/10 px-1.5 py-0.5 font-mono text-xs text-amber"
                             >{it.workspace} · window {dashTab + 1 + it.window}</span
                         >
-                        <span class="inbox-age">{ago(it.since)}</span>
+                        <span class="ml-auto font-mono text-xs text-lo">{ago(it.since)}</span>
                     </div>
                     {#if it.ask}
-                        <div class="inbox-ask" title={it.ask}>{it.ask.replace(/\n/g, " ")}</div>
+                        <div class="mt-1.5 truncate text-sm leading-normal text-fg" title={it.ask}>
+                            {it.ask.replace(/\n/g, " ")}
+                        </div>
                     {/if}
                     <div
-                        class="inbox-draft"
-                        class:escalate={it.interactive || it.draft?.action === "escalate"}
-                        class:ready={!it.interactive &&
-                            (it.draft?.action === "draft" || it.draft?.action === "spawn") &&
-                            editingKey !== key(it)}
-                        class:pending={!it.interactive && !it.draft}
+                        class={[
+                            "mt-1 font-mono text-xs leading-normal",
+                            !it.interactive && !it.draft && "hidden",
+                            draftReady && "truncate text-grn",
+                            (it.interactive || it.draft?.action === "escalate") && "text-amber",
+                        ]}
                     >
                         {#if editingKey === key(it) && (it.draft?.action === "draft" || it.draft?.action === "spawn")}
                             <textarea
-                                class="inbox-edit"
+                                class="box-border w-full resize-y rounded-md border border-acc bg-[#0a0c14]/80 px-2 py-1.5 font-mono text-xs text-fg outline-none"
                                 rows="2"
                                 spellcheck="false"
                                 bind:value={editText}
                                 bind:this={editEl}></textarea>
-                            <div class="inbox-edit-hint">↵ send edited · esc cancel</div>
+                            <div class="mt-0.5 font-mono text-xs text-lo">
+                                ↵ send edited · esc cancel
+                            </div>
                         {:else if it.interactive}
                             ⌨ pick an option in the window — ↵ jumps
                         {:else if it.draft?.action === "draft" || it.draft?.action === "spawn"}
@@ -234,10 +250,12 @@
                 </div>
             {/each}
         </div>
-        <div class="pal-footer">
+        <div
+            class="flex items-center gap-4 border-t border-line/15 px-4 py-2 font-mono text-xs text-lo"
+        >
             <span>↑↓ / j k navigate</span><span>↵ approve / jump</span><span>o open</span>
             <span>e edit</span><span>x dismiss</span>
-            <span class="pal-spacer"></span>
+            <span class="flex-1"></span>
             <span>drafts are suggestions — you send them</span>
         </div>
     </div>
