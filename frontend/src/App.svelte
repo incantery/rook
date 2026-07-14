@@ -163,14 +163,14 @@
             await tick();
             const {EditorPane} = await import("./term/editor");
             mgr.openPaneWindow(
-                () =>
+                (leafId) =>
                     new EditorPane(api, {
                         workspace: app.workspace,
                         kind,
                         path,
                         font: paneFont,
                         onFlash: flash,
-                        onClose: () => void mgr.closeActive(),
+                        onClose: () => mgr.closePane(leafId),
                         onActivate: (seam) => {
                             activeEditor = seam;
                             activeEditorKind = kind;

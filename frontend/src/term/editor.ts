@@ -19,11 +19,14 @@ type VimLib = typeof import("monaco-vim");
 type VimAdapter = ReturnType<VimLib["initVimMode"]>;
 
 // monaco-vim is loaded once, lazily, the first time any file editor mounts.
-// Its `:w` handler is GLOBAL (registered on the shared Vim singleton), so a
-// save must route to whichever editor is focused — saversByEditor is that
-// map, keyed by the monaco editor the vim adapter wraps (cm.editor).
+// The ex-command handlers (:w, :q, :qa …) are GLOBAL — registered on the one
+// shared Vim singleton — so they route to the right pane at call time:
+//   paneByEditor  the focused editor → its pane (:w/:q act on that editor;
+//                 the command is typed INTO that editor, so cm.editor is it)
+//   livePanes     every editor pane, because :qa spans panes and windows
 let vimLib: VimLib | null = null;
-const saversByEditor = new WeakMap<object, () => void>();
+const paneByEditor = new WeakMap<object, EditorPane>();
+const livePanes = new Set<EditorPane>();
 let exCommandsDefined = false;
 
 async function loadVim(): Promise<VimLib> {
@@ -31,22 +34,28 @@ async function loadVim(): Promise<VimLib> {
     if (!exCommandsDefined) {
         // VimMode (= CMAdapter) carries the Vim API on a static the shipped
         // types don't describe — hence the cast. defineEx(name, prefix, fn)
-        // makes :w/:write, :x, and :wq all save the focused editor (no
-        // quit: the pane is closed with ×, not from vim).
+        // requires prefix to be a literal prefix of name, so :qa pairs with
+        // "qall", not "quitall".
         const vim = (vimLib.VimMode as unknown as {Vim: VimApi}).Vim;
-        const save = (cm: {editor?: object}) => {
-            if (cm?.editor) saversByEditor.get(cm.editor)?.();
-        };
-        vim.defineEx("write", "w", save);
-        vim.defineEx("wq", "wq", save);
-        vim.defineEx("x", "x", save);
+        const paneOf = (cm: ExCm) => (cm?.editor ? paneByEditor.get(cm.editor) : undefined);
+        // the bang (:q!, :qa!) parses into argString, never the command name
+        const forced = (p: ExParams) => (p?.argString ?? "").trim().startsWith("!");
+        vim.defineEx("write", "w", (cm) => void paneOf(cm)?.save());
+        vim.defineEx("quit", "q", (cm, p) => paneOf(cm)?.exQuit(forced(p)));
+        vim.defineEx("wq", "wq", (cm) => void paneOf(cm)?.exSaveQuit());
+        vim.defineEx("xit", "x", (cm) => void paneOf(cm)?.exSaveQuit());
+        vim.defineEx("qall", "qa", (cm, p) => paneOf(cm)?.exQuitAll(forced(p)));
+        vim.defineEx("wqall", "wqa", (cm) => void paneOf(cm)?.exSaveQuitAll());
+        vim.defineEx("xall", "xa", (cm) => void paneOf(cm)?.exSaveQuitAll());
         exCommandsDefined = true;
     }
     return vimLib;
 }
 
+type ExCm = {editor?: object};
+type ExParams = {argString?: string};
 interface VimApi {
-    defineEx(name: string, prefix: string, fn: (cm: {editor?: object}) => void): void;
+    defineEx(name: string, prefix: string, fn: (cm: ExCm, params: ExParams) => void): void;
 }
 
 export interface EditorContext {
@@ -200,6 +209,7 @@ export class EditorPane implements PaneContent {
             this.body.appendChild(this.vimBar);
         }
         this.el.append(head, this.body);
+        livePanes.add(this); // :qa closes every editor pane, this one included
         void this.load();
     }
 
@@ -249,7 +259,8 @@ export class EditorPane implements PaneContent {
         for (const b of this.bands) b.dispose();
         this.changeSub?.dispose();
         this.vim?.dispose();
-        if (this.editor) saversByEditor.delete(this.editor);
+        if (this.editor) paneByEditor.delete(this.editor);
+        livePanes.delete(this);
         this.disposeModels();
         this.diffEditor?.dispose();
         this.editor?.dispose();
@@ -474,7 +485,9 @@ export class EditorPane implements PaneContent {
             return;
         }
         if (this.disposed || this.editor !== ed) return;
-        if (this.editable) saversByEditor.set(ed, () => void this.save());
+        // route :w/:q typed in this editor back to this pane (save() itself
+        // no-ops when the buffer isn't editable — a read-only :w is harmless)
+        paneByEditor.set(ed, this);
         this.vim = lib.initVimMode(ed, this.vimBar);
     }
 
@@ -486,23 +499,36 @@ export class EditorPane implements PaneContent {
         this.emitChange();
     }
 
-    /** :w / ⌘S — save the whole buffer to the workspace file. No-op unless
-     *  the file is editable and actually dirty. */
-    private async save(): Promise<void> {
-        const model = this.editor?.getModel();
-        if (!this.editable || !model || this.saving) return;
-        if (!this.dirty) {
-            this.opts.onFlash(`${this.title} — nothing to save`);
+    /** :w / ⌘S — save with user feedback. Public: the global vim ex map and
+     *  the ⌘S command both call it. */
+    async save(): Promise<void> {
+        if (!this.editable) {
+            this.opts.onFlash(`${this.opts.path ?? "file"} is read-only`);
             return;
         }
+        if (!this.dirty) {
+            this.opts.onFlash(`${this.opts.path ?? ""} — nothing to save`);
+            return;
+        }
+        await this.doSave();
+    }
+
+    /** The write itself — silent, so quit paths don't spam flashes. Returns
+     *  true when the buffer is clean afterward (safe to quit): a non-editable
+     *  or already-clean pane is trivially clean; a failed write is not. */
+    private async doSave(): Promise<boolean> {
+        const model = this.editor?.getModel();
+        if (!this.editable || !model || !this.dirty) return true;
+        if (this.saving) return false;
         this.saving = true;
         const versionId = model.getAlternativeVersionId();
         try {
             await this.api.writeFile(this.opts.workspace, this.opts.path ?? "", model.getValue());
-            if (this.disposed) return;
+            if (this.disposed) return true;
             this.savedVersionId = versionId;
             this.setDirty(model.getAlternativeVersionId() !== versionId);
             this.opts.onFlash(`saved ${this.opts.path ?? ""}`);
+            return !this.dirty;
         } catch (err) {
             const msg = String(err);
             this.opts.onFlash(
@@ -510,9 +536,53 @@ export class EditorPane implements PaneContent {
                     ? "saving needs a newer rook-host — relaunch rook"
                     : `save failed: ${msg}`,
             );
+            return false;
         } finally {
             this.saving = false;
         }
+    }
+
+    /** :q — close this pane; refuse (vim-style) on unsaved edits. */
+    exQuit(force: boolean): void {
+        if (!force && this.dirty) {
+            this.opts.onFlash("unsaved changes — :w to save, or :q! to discard");
+            return;
+        }
+        this.opts.onClose();
+    }
+
+    /** :wq / :x — save, then close only if the write succeeded. */
+    async exSaveQuit(): Promise<void> {
+        if (await this.doSave()) this.opts.onClose();
+    }
+
+    /** :qa — close every editor pane; refuse if any holds unsaved edits.
+     *  Same-class access lets this read siblings' state and close them. */
+    exQuitAll(force: boolean): void {
+        const panes = [...livePanes];
+        if (!force) {
+            const dirty = panes.filter((p) => p.dirty).length;
+            if (dirty > 0) {
+                this.opts.onFlash(
+                    `unsaved changes in ${dirty} editor(s) — :wqa to save, or :qa! to discard`,
+                );
+                return;
+            }
+        }
+        for (const p of panes) p.opts.onClose();
+    }
+
+    /** :wqa / :xa — save every editable pane, then close the ones now clean;
+     *  a pane whose write failed stays open with its own error flash. */
+    async exSaveQuitAll(): Promise<void> {
+        const panes = [...livePanes];
+        const saved = await Promise.all(panes.map(async (p) => [p, await p.doSave()] as const));
+        let failed = 0;
+        for (const [p, ok] of saved) {
+            if (ok) p.opts.onClose();
+            else failed++;
+        }
+        if (failed > 0) this.opts.onFlash(`${failed} editor(s) still unsaved — left open`);
     }
 
     /** The × button: a dirty pane arms discard on the first click and closes

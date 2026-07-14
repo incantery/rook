@@ -536,6 +536,20 @@ export class TermManager {
         }
     }
 
+    /** Close a specific pane by its leaf id, wherever it lives — the
+     *  editor's :q / :qa path, which targets panes by identity, not focus
+     *  (closeActive would keep closing whatever ends up focused). */
+    closePane(leafId: string): void {
+        const win = this.windows.find((w) => w.panes.has(leafId));
+        if (!win) return;
+        const pane = win.panes.get(leafId);
+        if (pane && pane.sessionId !== null) {
+            void this.api.kill(pane.sessionId);
+        } else {
+            this.removePaneLocal(win, leafId);
+        }
+    }
+
     next(): void {
         this.step(1);
     }
