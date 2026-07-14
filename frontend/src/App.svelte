@@ -153,6 +153,9 @@
                         onFlash: flash,
                         onClose: () => void mgr.closeActive(),
                         onActivate: (seam) => (activeEditor = seam),
+                        onDispose: (seam) => {
+                            if (activeEditor === seam) activeEditor = null;
+                        },
                     }),
             );
         } catch (err) {

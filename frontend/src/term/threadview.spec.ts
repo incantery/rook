@@ -82,6 +82,10 @@ describe("pickFromStack", () => {
         const stack = [th({id: 2}), th({id: 8})];
         expect(pickFromStack(stack, 99)?.index).toBe(0);
     });
+    it("defaults to the top when activeId is omitted", () => {
+        const stack = [th({id: 2}), th({id: 8})];
+        expect(pickFromStack(stack)).toEqual({thread: stack[0], index: 0, count: 2});
+    });
 });
 
 describe("cycleStack", () => {
@@ -93,6 +97,10 @@ describe("cycleStack", () => {
     });
     it("returns null on an empty stack", () => {
         expect(cycleStack([], 1, 1)).toBeNull();
+    });
+    it("falls back to index 0 then applies dir when activeId isn't in the stack", () => {
+        const stack = [th({id: 2}), th({id: 5})];
+        expect(cycleStack(stack, 99, 1)).toBe(5);
     });
 });
 

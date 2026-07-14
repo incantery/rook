@@ -30,11 +30,10 @@ export function markerLines(threads: ThreadInfo[]): Map<number, ThreadInfo[]> {
  *  yet submitted) > open (live conversation) > resolved — plus an
  *  outdated modifier when any anchor no longer matches the file. */
 export function glyphClass(group: ThreadInfo[]): string {
-    const rank = {pending: 0, open: 1, resolved: 2} as const;
     let best: ThreadInfo["state"] = "resolved";
     let outdated = false;
     for (const t of group) {
-        if (rank[t.state] < rank[best]) best = t.state;
+        if (STATE_RANK[t.state] < STATE_RANK[best]) best = t.state;
         if (t.outdated) outdated = true;
     }
     return `thread-glyph thread-glyph-${best}${outdated ? " thread-glyph-outdated" : ""}`;

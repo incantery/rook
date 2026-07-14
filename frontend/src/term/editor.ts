@@ -46,6 +46,9 @@ export interface EditorPaneOpts {
     /** the pane calls this when a Monaco editor gains focus, so chrome can
      *  bind the thread panel to the active editor */
     onActivate?: (seam: EditorSeam) => void;
+    /** the pane calls this on dispose, iff a seam was ever handed out, so
+     *  chrome can drop a reference to what's now a disposed seam */
+    onDispose?: (seam: EditorSeam) => void;
 }
 
 /** How stale a review may be before a re-focus refetches it. */
@@ -86,6 +89,7 @@ export class EditorPane implements PaneContent {
     private markerCbs: ((line: number, side: Side, ids: number[]) => void)[] = [];
     private composeCbs: ((s: number, e: number, side: Side) => void)[] = [];
     private changeCbs: (() => void)[] = [];
+    private _seam: EditorSeam | null = null;
 
     constructor(
         private api: HostAPI,
@@ -162,6 +166,7 @@ export class EditorPane implements PaneContent {
 
     dispose(): void {
         this.disposed = true;
+        if (this._seam) this.opts.onDispose?.(this._seam);
         for (const b of this.bands) b.dispose();
         this.disposeModels();
         this.diffEditor?.dispose();
@@ -172,7 +177,7 @@ export class EditorPane implements PaneContent {
     // ---- the seam (chrome ↔ island) ----
 
     get seam(): EditorSeam {
-        return {
+        return (this._seam ??= {
             context: () => {
                 const path = this.currentPath();
                 return path ? {workspace: this.opts.workspace, path, base: this.base} : null;
@@ -186,7 +191,7 @@ export class EditorPane implements PaneContent {
             onMarkerClick: (cb) => this.sub(this.markerCbs, cb),
             onCompose: (cb) => this.sub(this.composeCbs, cb),
             onChange: (cb) => this.sub(this.changeCbs, cb),
-        };
+        });
     }
 
     private sub<T>(list: T[], cb: T): () => void {
