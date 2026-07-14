@@ -43,26 +43,24 @@
 
 <div
     id="settings"
-    class="fixed inset-0 z-50 flex flex-col bg-[#0f111a]/98 text-dim outline-none"
+    class="fixed inset-0 z-50 flex flex-col bg-bg/98 text-dim outline-none"
     bind:this={rootEl}
     tabindex="-1"
 >
-    <div class="flex items-center justify-between border-b border-[#2a2e3d] px-4 py-3">
-        <div class="text-base text-[#eeffff]">Settings</div>
+    <div class="flex items-center justify-between border-b border-line/15 px-4 py-3">
+        <div class="text-base text-fg">Settings</div>
         <button
             class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-xs font-semibold text-fg hover:bg-white/10"
             onclick={onclose}>Close (Esc)</button
         >
     </div>
     <div class="flex min-h-0 flex-1">
-        <nav class="flex w-40 flex-col gap-1 border-r border-[#2a2e3d] px-2 py-3">
+        <nav class="flex w-40 flex-col gap-1 border-r border-line/15 px-2 py-3">
             {#each nav as n (n.id)}
                 <button
                     class={[
                         "cursor-pointer rounded-md border-0 px-3 py-2 text-left",
-                        section === n.id
-                            ? "bg-[#262b3a] text-[#eeffff]"
-                            : "bg-transparent text-dim",
+                        section === n.id ? "bg-line/20 text-fg" : "bg-transparent text-dim",
                     ]}
                     onclick={() => (section = n.id)}>{n.label}</button
                 >

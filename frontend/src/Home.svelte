@@ -366,13 +366,13 @@
     {/if}
     {#if w.issueRef}
         <span
-            class="rounded-md bg-[#c792ea]/12 px-1.5 py-0.5 font-mono text-xs text-[#c792ea]"
+            class="rounded-md bg-magenta/12 px-1.5 py-0.5 font-mono text-xs text-magenta"
             title="spawned for {w.issueRef.tracker} issue {w.issueRef.key}">{w.issueRef.key}</span
         >
     {/if}
     {#if w.pr?.state === "merged"}
         <button
-            class="cursor-pointer rounded-md border-0 bg-[#c792ea]/18 px-1.5 py-0.5 font-mono text-xs text-[#c792ea] hover:bg-[#c792ea]/32"
+            class="cursor-pointer rounded-md border-0 bg-magenta/18 px-1.5 py-0.5 font-mono text-xs text-magenta hover:bg-magenta/32"
             title="PR #{w.pr
                 .number} merged — remove the task tree and delete {w.branch} (kills its shells)"
             onclick={(e) => {
@@ -704,7 +704,7 @@
         role="presentation"
     >
         <div
-            class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-[#151924] shadow-2xl"
+            class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-overlay shadow-2xl"
         >
             <div class="border-b border-line/15 px-4.5 py-4 text-sm font-bold text-fg">
                 New workspace
@@ -712,7 +712,7 @@
             <div class="flex flex-col gap-4 p-4.5">
                 <label
                     ><span class="mb-1.5 block text-xs font-semibold text-dim">Name</span><input
-                        class="box-border w-full rounded-lg border border-line/15 bg-[#0a0c14]/80 px-3 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
+                        class="box-border w-full rounded-lg border border-line/15 bg-sunken/80 px-3 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
                         placeholder="e.g. rook-core"
                         spellcheck="false"
                         bind:value={modalName}
@@ -724,7 +724,7 @@
                         >Directory (optional — or set it later from inside the workspace: cd
                         anywhere, then ` .)</span
                     ><input
-                        class="box-border w-full rounded-lg border border-line/15 bg-[#0a0c14]/80 px-3 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
+                        class="box-border w-full rounded-lg border border-line/15 bg-sunken/80 px-3 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
                         placeholder="~/go/src/github.com/incantery/rook"
                         spellcheck="false"
                         bind:value={modalRoot}
@@ -737,7 +737,7 @@
                     onclick={() => (modalOpen = false)}>Cancel</button
                 >
                 <button
-                    class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-sm font-semibold text-[#10131c]"
+                    class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-sm font-semibold text-on-acc"
                     onclick={() => void createFromModal()}>Create workspace</button
                 >
             </div>

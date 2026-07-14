@@ -25,6 +25,15 @@ export function cssVars(p: Palette): Record<string, string> {
         "--color-hot": p.hot,
         "--color-line": p.line,
         "--color-raise": p.raise,
+        // the surface + contrast tokens the chrome markup needs to stop
+        // hardcoding hex (bg-bg, bg-sunken/80, bg-overlay, text-on-acc).
+        // Without these a light theme flips the text and leaves the panel
+        // dark — dark-on-dark, which is exactly what Settings did.
+        "--color-bg": p.bg,
+        "--color-sunken": p.sunken,
+        "--color-overlay": p.overlay,
+        "--color-on-acc": p.onAccent,
+        "--color-magenta": p.magenta,
         // bare mirrors read by the imperative islands (term/*, editor pane)
         "--bg": p.bg,
         "--acc": p.accent,

@@ -12,7 +12,7 @@
 //  - semanticTokenColors is IGNORED (Monaco+Monarch has no semantic tokens).
 //  - Every real theme uses #RRGGBBAA / #RGBA — all values normalize first.
 
-import {mix, normalizeHex, withAlpha} from "./color";
+import {darken, lighten, mix, normalizeHex, withAlpha} from "./color";
 import type {Palette, Syntax, Theme} from "./palette";
 
 interface TokenColor {
@@ -97,6 +97,7 @@ export function importVSCode(text: string): Theme {
         scopeColor(rules, SYNTAX_TARGETS[role]);
 
     // surfaces + core text (derive what the theme omits)
+    const isLight = raw.type === "light";
     const bg = c("editor.background") ?? "#1e1e1e";
     const editorFg = c("editor.foreground") ?? "#d4d4d4";
     const fg = c("foreground") ?? c("sideBar.foreground") ?? editorFg;
@@ -114,9 +115,13 @@ export function importVSCode(text: string): Theme {
     const orange = mix(red, yellow, 0.5);
 
     const palette: Palette = {
-        type: raw.type === "light" ? "light" : "dark",
+        type: isLight ? "light" : "dark",
 
         bg,
+        // input.background is the well; when omitted, push AWAY from the text
+        // rather than always darkening — a light theme's well is lighter than
+        // its base, so darken(bg) would invert the depth cue.
+        sunken: c("input.background") ?? (isLight ? lighten(bg, 0.5) : darken(bg, 0.3)),
         raise: c("sideBar.background") ?? c("editorGroupHeader.tabsBackground") ?? bg,
         overlay:
             c("editorWidget.background") ??
@@ -137,6 +142,10 @@ export function importVSCode(text: string): Theme {
         lo: c("editorLineNumber.foreground") ?? mix(editorFg, bg, 0.55),
 
         accent: c("focusBorder") ?? c("textLink.foreground") ?? blue,
+        // contrast against the ACCENT, which is a light blue in most dark
+        // themes and a saturated one in most light themes — so this tracks
+        // the theme's type, not the accent's own channel math.
+        onAccent: c("button.foreground") ?? (isLight ? "#ffffff" : bg),
         cursor: c("editorCursor.foreground") ?? c("terminalCursor.foreground") ?? editorFg,
         selection: c("editor.selectionBackground") ?? withAlpha(blue, 0.3),
 

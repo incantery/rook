@@ -1,4 +1,5 @@
 import {describe, expect, it} from "vitest";
+import {ONE_LIGHT} from "./builtins";
 import {cssVars} from "./cssvars";
 import {MATERIAL_OCEAN} from "./palette";
 
@@ -21,14 +22,19 @@ describe("cssVars", () => {
         for (const name of [
             "--color-acc",
             "--color-amber",
+            "--color-bg",
             "--color-dim",
             "--color-fg",
             "--color-grn",
             "--color-hot",
             "--color-line",
             "--color-lo",
+            "--color-magenta",
+            "--color-on-acc",
+            "--color-overlay",
             "--color-raise",
             "--color-red",
+            "--color-sunken",
             "--bg",
             "--acc",
             "--dim",
@@ -37,5 +43,20 @@ describe("cssVars", () => {
         ]) {
             expect(v[name]).toMatch(/^#[0-9a-f]{6,8}$/i);
         }
+    });
+
+    // These four are why light themes were broken: the chrome hardcoded them,
+    // so --fg flipped dark while the panels stayed dark. They must TRACK the
+    // palette, not the theme that happened to be authored first.
+    it("tracks the palette for the surfaces chrome used to hardcode", () => {
+        const light = cssVars(ONE_LIGHT.palette);
+        expect(light["--color-bg"]).toBe("#fafafa");
+        expect(light["--color-overlay"]).toBe("#ffffff");
+        // a light theme's well is LIGHTER than its base — the whole point of
+        // authoring `sunken` instead of deriving darken(bg)
+        expect(light["--color-sunken"]).toBe("#ffffff");
+        // white text on One Light's saturated blue, not Material Ocean's near-black
+        expect(light["--color-on-acc"]).toBe("#ffffff");
+        expect(v["--color-on-acc"]).toBe("#10131c");
     });
 });

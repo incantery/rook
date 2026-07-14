@@ -281,7 +281,7 @@
                         >
                     </div>
                     <textarea
-                        class="box-border min-h-6.5 w-full resize-y rounded-sm border border-[#252a3d] bg-[#0b0d14] px-1.5 py-1 font-mono text-xs text-fg focus:border-acc focus:outline-none"
+                        class="box-border min-h-6.5 w-full resize-y rounded-sm border border-line/15 bg-sunken px-1.5 py-1 font-mono text-xs text-fg focus:border-acc focus:outline-none"
                         rows="3"
                         placeholder="Ask the agent, or leave a note for this region…"
                         bind:value={draft}
@@ -289,7 +289,7 @@
                     {#if err}<div class="text-xs text-red [overflow-wrap:anywhere]">{err}</div>{/if}
                     <div class="mt-2 flex items-center gap-2">
                         <button
-                            class="cursor-pointer rounded-lg bg-acc px-3 py-1.5 text-xs font-semibold text-[#0b0d14] hover:brightness-110 disabled:opacity-50"
+                            class="cursor-pointer rounded-lg bg-acc px-3 py-1.5 text-xs font-semibold text-on-acc hover:brightness-110 disabled:opacity-50"
                             disabled={busy}
                             onclick={submitComposer}>Start thread</button
                         >
@@ -337,7 +337,7 @@
                         <div class="px-3 pb-3 pt-0.5">
                             {#if t.outdated && t.anchorText}
                                 <pre
-                                    class="m-0 overflow-x-auto border-l-2 border-[#464b66] bg-[#0b0d14] px-2 py-1 text-xs whitespace-pre text-dim">{t.anchorText}</pre>
+                                    class="m-0 overflow-x-auto border-l-2 border-line/30 bg-sunken px-2 py-1 text-xs whitespace-pre text-dim">{t.anchorText}</pre>
                             {/if}
                             <div class="flex flex-col gap-3 py-2.5">
                                 {#each t.comments as c (c.id)}
@@ -384,7 +384,7 @@
                                     >
                                 {/if}
                                 <input
-                                    class="box-border min-h-6.5 w-full min-w-0 flex-1 resize-none rounded-sm border border-[#252a3d] bg-[#0b0d14] px-1.5 py-1 font-mono text-xs text-fg focus:border-acc focus:outline-none"
+                                    class="box-border min-h-6.5 w-full min-w-0 flex-1 resize-none rounded-sm border border-line/15 bg-sunken px-1.5 py-1 font-mono text-xs text-fg focus:border-acc focus:outline-none"
                                     placeholder="reply…"
                                     bind:value={draft}
                                     onkeydown={(e) => keydown(e, reply)}

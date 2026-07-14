@@ -58,7 +58,7 @@
     role="presentation"
 >
     <div
-        class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-[#151924] shadow-2xl"
+        class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-overlay shadow-2xl"
     >
         <div class="flex items-center gap-2.5 border-b border-line/15 px-4 py-3">
             <span class="font-mono text-sm text-lo">›</span>

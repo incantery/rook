@@ -11,6 +11,7 @@ export const ONE_DARK: Theme = {
         type: "dark",
 
         bg: "#282c34",
+        sunken: "#21252b",
         raise: "#21252b",
         overlay: "#2c313a",
         line: "#3e4451",
@@ -21,6 +22,7 @@ export const ONE_DARK: Theme = {
         lo: "#495162",
 
         accent: "#61afef",
+        onAccent: "#282c34", // #61afef is a light blue — dark text on it
         cursor: "#528bff",
         selection: "#3e4451",
 
@@ -76,6 +78,9 @@ export const ONE_LIGHT: Theme = {
         type: "light",
 
         bg: "#fafafa",
+        // the light-theme case the `sunken` role exists for: a well here is
+        // LIGHTER than the base, so no darken(bg) derivation would work.
+        sunken: "#ffffff",
         raise: "#eaeaeb",
         overlay: "#ffffff",
         line: "#c8c8c9",
@@ -86,6 +91,7 @@ export const ONE_LIGHT: Theme = {
         lo: "#9d9d9f",
 
         accent: "#4078f2",
+        onAccent: "#ffffff", // #4078f2 is a saturated blue — white text on it
         cursor: "#526fff",
         selection: "#d4d4d5",
 

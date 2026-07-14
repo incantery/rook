@@ -161,7 +161,7 @@
     role="presentation"
 >
     <div
-        class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-[#151924] shadow-2xl"
+        class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-overlay shadow-2xl"
     >
         <div class="flex items-center gap-2.5 border-b border-line/15 px-4 py-3">
             <span class="text-sm font-bold text-fg">Attention</span>
@@ -220,7 +220,7 @@
                     >
                         {#if editingKey === key(it) && (it.draft?.action === "draft" || it.draft?.action === "spawn")}
                             <textarea
-                                class="box-border w-full resize-y rounded-md border border-acc bg-[#0a0c14]/80 px-2 py-1.5 font-mono text-xs text-fg outline-none"
+                                class="box-border w-full resize-y rounded-md border border-acc bg-sunken/80 px-2 py-1.5 font-mono text-xs text-fg outline-none"
                                 rows="2"
                                 spellcheck="false"
                                 bind:value={editText}

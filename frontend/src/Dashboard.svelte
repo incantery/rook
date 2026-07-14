@@ -89,7 +89,7 @@
     const treeOf = $derived(app.workspaceInfo?.worktreeOf ?? null);
 </script>
 
-<div class="absolute inset-0 z-10 overflow-y-auto bg-[#0f111a]/72 backdrop-blur-xl">
+<div class="absolute inset-0 z-10 overflow-y-auto bg-bg/72 backdrop-blur-xl">
     <div class="mx-auto max-w-215 px-6.5 pt-7 pb-15">
         <div class="mb-6 flex items-start gap-3">
             <div class="min-w-0 flex-1">

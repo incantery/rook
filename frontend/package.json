@@ -12,7 +12,7 @@
         "test": "vitest run",
         "check": "svelte-check",
         "lint": "oxlint --deny-warnings",
-        "format": "oxfmt",
+        "format": "oxfmt .",
         "format:check": "oxfmt --check ."
     },
     "dependencies": {

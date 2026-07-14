@@ -23,6 +23,15 @@
     --color-amber: #ffcb6b;
     --color-red: #ff5370;
     --color-hot: #f07178;
+    --color-magenta: #c792ea;
+    /* surfaces: the window base, the recessed wells inputs sit in, and the
+       floating shell modals/palette share. text-on-acc is the contrast text
+       an accent-filled button needs. All four swap with the theme — chrome
+       that hardcodes them instead is what breaks light themes. */
+    --color-bg: #0f111a;
+    --color-sunken: #0a0c14;
+    --color-overlay: #151928;
+    --color-on-acc: #10131c;
     /* hairline stock (solid; use border-line/15 for the 0.14 hairline,
        border-line/30 for the stronger panel/pill edge) + the faint
        raised-surface tint, exposed so chrome converts cleanly. */

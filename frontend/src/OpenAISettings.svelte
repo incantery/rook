@@ -62,7 +62,7 @@
         ><span class="mb-1.5 block text-xs font-semibold text-dim">Key</span>
         <input
             type="password"
-            class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
+            class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-sunken/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
             placeholder="sk-…"
             bind:value={key}
             spellcheck="false"
@@ -78,7 +78,7 @@
         <span class="flex-1"></span>
         {#if saved}<span class="ml-2 text-grn">saved ✓</span>{/if}
         <button
-            class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-[#10131c]"
+            class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-on-acc"
             onclick={() => void save()}>Save to keychain</button
         >
     </div>

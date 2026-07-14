@@ -26,6 +26,9 @@ export interface Palette {
 
     // surfaces
     bg: string; // editor + terminal + window base
+    sunken: string; // recessed: input wells, code blocks. NOT always darker
+    // than bg — a light theme's well reads as lighter, so
+    // this is authored, not derived from bg.
     raise: string; // raised panel: side panes, titlebar
     overlay: string; // floating: palette, widgets, modals
     line: string; // hairlines / borders (solid stock; chrome applies /15)
@@ -38,6 +41,9 @@ export interface Palette {
 
     // state
     accent: string; // focus ring, active, links
+    onAccent: string; // text/icons ON an accent fill (primary buttons) — must
+    // contrast with `accent`, so it tracks the accent's
+    // lightness, not the theme's type
     cursor: string; // caret
     selection: string; // selection background
 
@@ -74,7 +80,12 @@ export const MATERIAL_OCEAN: Theme = {
         type: "dark",
 
         bg: "#0f111a",
+        // the input wells' bg-[#0a0c14]/80; ThreadPanel drifted to #0b0d14
+        // for the same job, and folds in here.
+        sunken: "#0a0c14",
         raise: "#ffffff09", // rgba(255,255,255,0.035)
+        // the modal/palette shell drifted to #151924 in markup vs #151928 in
+        // term/monaco.ts — 4 apart in blue, one role.
         overlay: "#151928",
         line: "#8c96b4", // rgb(140,150,180)
 
@@ -84,6 +95,9 @@ export const MATERIAL_OCEAN: Theme = {
         lo: "#5b6273",
 
         accent: "#82aaff",
+        // primary buttons drifted between #10131c and #0b0d14 (ThreadPanel);
+        // the majority value wins.
+        onAccent: "#10131c",
         cursor: "#ffcc00",
         selection: "#717cb4",
 

@@ -56,7 +56,7 @@
     role="presentation"
 >
     <div
-        class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-[#151924] shadow-2xl"
+        class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-overlay shadow-2xl"
     >
         <div class="border-b border-line/15 px-4.5 py-3.5 text-sm font-bold text-fg">
             New agent session
@@ -67,7 +67,7 @@
                     >Task — becomes <code>claude "…"</code> in a fresh window</span
                 >
                 <textarea
-                    class="box-border w-full resize-y rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
+                    class="box-border w-full resize-y rounded-lg border border-line/15 bg-sunken/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
                     rows="3"
                     spellcheck="false"
                     placeholder="fix the flaky picker test and run the suite"
@@ -76,7 +76,7 @@
             </label>
             <label
                 ><span class="mb-1.5 block text-xs font-semibold text-dim">Workspace</span><input
-                    class="box-border w-full rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
+                    class="box-border w-full rounded-lg border border-line/15 bg-sunken/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
                     spellcheck="false"
                     bind:value={ws}
                 /></label
@@ -100,7 +100,7 @@
                 onclick={onclose}>Cancel</button
             >
             <button
-                class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-[#10131c]"
+                class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-on-acc"
                 onclick={() => void go()}>Start session</button
             >
         </div>
