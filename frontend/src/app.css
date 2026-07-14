@@ -300,40 +300,6 @@ body {
 .thread-glyph-outdated::before {
     content: "◌"; /* the anchor no longer matches the file */
 }
-
-/* outdated: the anchored lines as they were when commented */
-.thread-anchor {
-    margin: 0;
-    padding: 4px 8px;
-    background: #0b0d14;
-    border-left: 2px solid #464b66;
-    color: var(--dim);
-    font-size: 11px;
-    white-space: pre;
-    overflow-x: auto;
-}
-.thread-input {
-    box-sizing: border-box;
-    width: 100%;
-    min-height: 26px;
-    padding: 4px 6px;
-    background: #0b0d14;
-    border: 1px solid #252a3d;
-    border-radius: 4px;
-    color: var(--fg);
-    font-family: var(--mono);
-    font-size: 12px;
-    resize: vertical;
-}
-.thread-input:focus {
-    outline: none;
-    border-color: var(--acc);
-}
-.thread-err {
-    color: #ff5370;
-    font-size: 11px;
-    overflow-wrap: anywhere;
-}
 .thread-active-line {
     background: color-mix(in srgb, var(--acc) 18%, transparent);
 }

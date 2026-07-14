@@ -281,12 +281,12 @@
                         >
                     </div>
                     <textarea
-                        class="thread-input"
+                        class="box-border min-h-6.5 w-full resize-y rounded-sm border border-[#252a3d] bg-[#0b0d14] px-1.5 py-1 font-mono text-xs text-fg focus:border-acc focus:outline-none"
                         rows="3"
                         placeholder="Ask the agent, or leave a note for this region…"
                         bind:value={draft}
                         onkeydown={(e) => keydown(e, submitComposer)}></textarea>
-                    {#if err}<div class="thread-err">{err}</div>{/if}
+                    {#if err}<div class="text-xs text-red [overflow-wrap:anywhere]">{err}</div>{/if}
                     <div class="mt-2 flex items-center gap-2">
                         <button
                             class="cursor-pointer rounded-lg bg-acc px-3 py-1.5 text-xs font-semibold text-[#0b0d14] hover:brightness-110 disabled:opacity-50"
@@ -336,7 +336,8 @@
                     {#if selectedId === t.id}
                         <div class="px-3 pb-3 pt-0.5">
                             {#if t.outdated && t.anchorText}
-                                <pre class="thread-anchor">{t.anchorText}</pre>
+                                <pre
+                                    class="m-0 overflow-x-auto border-l-2 border-[#464b66] bg-[#0b0d14] px-2 py-1 text-xs whitespace-pre text-dim">{t.anchorText}</pre>
                             {/if}
                             <div class="flex flex-col gap-3 py-2.5">
                                 {#each t.comments as c (c.id)}
@@ -369,7 +370,9 @@
                                 {/each}
                             </div>
 
-                            {#if err}<div class="thread-err">{err}</div>{/if}
+                            {#if err}<div class="text-xs text-red [overflow-wrap:anywhere]">
+                                    {err}
+                                </div>{/if}
 
                             <div class="mt-2.5 flex gap-2">
                                 {#if t.state === "pending"}
@@ -381,7 +384,7 @@
                                     >
                                 {/if}
                                 <input
-                                    class="thread-input min-w-0 flex-1 resize-none"
+                                    class="box-border min-h-6.5 w-full min-w-0 flex-1 resize-none rounded-sm border border-[#252a3d] bg-[#0b0d14] px-1.5 py-1 font-mono text-xs text-fg focus:border-acc focus:outline-none"
                                     placeholder="reply…"
                                     bind:value={draft}
                                     onkeydown={(e) => keydown(e, reply)}
