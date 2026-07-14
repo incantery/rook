@@ -39,6 +39,10 @@ class AppState {
      *  Closed at boot — the mode you enter opens it (review does today). */
     threadPaneOpen = $state(false);
 
+    /** the left side pane: the file explorer. A plain toggle (` b), not
+     *  mode-derived — like VS Code's sidebar it persists across modes. */
+    explorerOpen = $state(false);
+
     // overlays (at most one open; the keybinding ladder checks these)
     paletteOpen = $state(false);
     pickerOpen = $state(false);

@@ -23,6 +23,7 @@
     import Settings from "./Settings.svelte";
     import SidePane from "./SidePane.svelte";
     import ThreadPanel from "./ThreadPanel.svelte";
+    import FileExplorer from "./FileExplorer.svelte";
     import type {EditorSeam} from "./term/editor";
 
     interface Props {
@@ -415,6 +416,15 @@
             },
         },
         {
+            id: "explorer.toggle",
+            title: "Toggle file explorer",
+            category: "View",
+            keys: keymap.display("explorer.toggle"),
+            run: () => {
+                app.explorerOpen = !app.explorerOpen;
+            },
+        },
+        {
             id: "file.open",
             title: "Open file (read-only)",
             category: "View",
@@ -678,6 +688,18 @@
         onpalette={() => registry.run("palette.toggle")}
     />
     <div class="flex min-h-0 min-w-0 flex-1">
+        <SidePane
+            side="left"
+            visible={app.explorerOpen}
+            title="Explorer"
+            onclose={() => (app.explorerOpen = false)}
+        >
+            <FileExplorer
+                {api}
+                workspace={app.workspace}
+                onopen={(path) => void openEditorPane("file", path)}
+            />
+        </SidePane>
         <div class="relative min-h-0 min-w-0 flex-1" bind:this={terminalsEl}>
             {#if fatal}
                 <div class="whitespace-pre-wrap p-6 font-mono text-sm text-red">{fatal}</div>

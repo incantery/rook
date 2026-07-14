@@ -58,6 +58,7 @@ export const DEFAULTS: [string, string][] = [
     ["g", "review.changes"],
     ["e", "file.open"],
     ["t", "threads.toggle"],
+    ["b", "explorer.toggle"],
     ["cmd+d", "pane.split-right"],
     ["cmd+shift+d", "pane.split-down"],
 ];
