@@ -9,6 +9,13 @@ export interface Config {
     "windowPaddingY": number;
 
     /**
+     * Theme names the color theme (built-in like "Material Ocean", "One Dark",
+     * "One Light"). Empty = the frontend's default. Frontend-only: the host
+     * stores it, the webview builds and applies the palette.
+     */
+    "theme": string;
+
+    /**
      * DashboardTab is the strip number the dashboard occupies; shell
      * windows number from the next one up (` <n> follows along).
      */
@@ -103,6 +110,7 @@ export interface Patch {
     "leader"?: string | null;
     "fontFamily"?: string | null;
     "fontSize"?: number | null;
+    "theme"?: string | null;
 
     /**
      * Projects: the full desired jira-project-<ws> map. Rows not present are

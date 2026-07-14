@@ -23,6 +23,9 @@
 # Window background opacity, 0 (transparent) to 1 (opaque).
 # background-opacity = 0.95
 
+# Color theme (built-in). One of: Material Ocean (default), One Dark, One Light.
+# theme = Material Ocean
+
 # Inner padding between the terminal grid and the window edge, in points.
 # window-padding-x = 4
 # window-padding-y = 4

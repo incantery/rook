@@ -6,6 +6,7 @@
 <script lang="ts">
     import {Call} from "@wailsio/runtime";
     import type {Config as ConfigModel} from "../bindings/github.com/incantery/rook/internal/config/models";
+    import {themeService} from "./theme/service";
     import {
         DEFAULTS,
         effectiveKeybindRows,
@@ -19,6 +20,9 @@
 
     let {cfg}: {cfg: ConfigModel} = $props();
 
+    const themes = themeService.builtins();
+    // svelte-ignore state_referenced_locally
+    let theme = $state(cfg.theme || themeService.activeName());
     // svelte-ignore state_referenced_locally
     let leader = $state(cfg.leader || "`");
     // svelte-ignore state_referenced_locally
@@ -108,6 +112,18 @@
         addCommand = "";
     }
 
+    // Theme applies LIVE (the ThemeService re-colors chrome, terminals, and
+    // Monaco at runtime) — no reload, unlike font/leader/keybinds. Persist the
+    // choice surgically so it survives relaunch.
+    async function applyTheme() {
+        themeService.apply(theme);
+        try {
+            await Call.ByName(SVC + "SetConfig", {theme});
+        } catch (err) {
+            error = `theme save failed: ${err}`;
+        }
+    }
+
     async function save() {
         error = "";
         saved = false;
@@ -138,6 +154,18 @@
 
 <div class="flex flex-col gap-4 p-4.5">
     <div class="border-b border-line/15 px-4.5 py-3.5 text-sm font-bold text-fg">Appearance</div>
+    <label class="my-2 flex items-center gap-2"
+        ><span class="mb-1.5 block text-xs font-semibold text-dim">Theme</span>
+        <select
+            class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
+            bind:value={theme}
+            onchange={() => void applyTheme()}
+        >
+            {#each themes as t (t)}
+                <option value={t}>{t}</option>
+            {/each}
+        </select>
+    </label>
     <label class="my-2 flex items-center gap-2"
         ><span class="mb-1.5 block text-xs font-semibold text-dim">Leader</span>
         <input

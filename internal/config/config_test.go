@@ -114,6 +114,18 @@ workspace-allow = rook, dora
 	}
 }
 
+func TestLoadTheme(t *testing.T) {
+	writeConfig(t, "theme = One Dark\n")
+	if cfg := Load(); cfg.Theme != "One Dark" {
+		t.Fatalf("theme = %q", cfg.Theme)
+	}
+	// unset → the default built-in
+	writeConfig(t, "# nothing\n")
+	if cfg := Load(); cfg.Theme != "Material Ocean" {
+		t.Fatalf("theme must default to Material Ocean: %q", cfg.Theme)
+	}
+}
+
 // JiraTokenStatus's file branch is cross-platform (keychain is darwin-only and
 // tested there); point Path() at a temp dir via XDG and exercise file/none.
 func TestJiraTokenStatusFile(t *testing.T) {

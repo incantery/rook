@@ -21,6 +21,10 @@ type Config struct {
 	BackgroundOpacity float64 `json:"backgroundOpacity"`
 	WindowPaddingX    int     `json:"windowPaddingX"`
 	WindowPaddingY    int     `json:"windowPaddingY"`
+	// Theme names the color theme (built-in like "Material Ocean", "One Dark",
+	// "One Light"). Empty = the frontend's default. Frontend-only: the host
+	// stores it, the webview builds and applies the palette.
+	Theme string `json:"theme"`
 	// DashboardTab is the strip number the dashboard occupies; shell
 	// windows number from the next one up (` <n> follows along).
 	DashboardTab int `json:"dashboardTab"`
@@ -85,6 +89,7 @@ func Default() Config {
 		BackgroundOpacity: 0.95,
 		WindowPaddingX:    4,
 		WindowPaddingY:    4,
+		Theme:             "Material Ocean",
 		DashboardTab:      1,
 		Agent:             false,
 		AgentModel:        "gpt-5.4-nano",
@@ -169,6 +174,10 @@ func Load() Config {
 		case "background-opacity":
 			if o, err := strconv.ParseFloat(value, 64); err == nil && o >= 0 && o <= 1 {
 				cfg.BackgroundOpacity = o
+			}
+		case "theme":
+			if value != "" {
+				cfg.Theme = value
 			}
 		case "window-padding-x":
 			if n, err := strconv.Atoi(value); err == nil && n >= 0 {

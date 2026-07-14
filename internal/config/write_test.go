@@ -51,6 +51,28 @@ func TestSetConfigScalarUpsertPreserves(t *testing.T) {
 	}
 }
 
+func TestSetConfigTheme(t *testing.T) {
+	writeConfig(t, "# my config\nfont-size = 14\n")
+	var s Service
+	if err := s.SetConfig(Patch{Theme: ptr("One Dark")}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg := Load(); cfg.Theme != "One Dark" {
+		t.Fatalf("theme = %q", cfg.Theme)
+	}
+	// upsert last-wins; comments + other keys preserved
+	if err := s.SetConfig(Patch{Theme: ptr("One Light")}); err != nil {
+		t.Fatal(err)
+	}
+	out := read(t, Path())
+	if !strings.Contains(out, "# my config") || !strings.Contains(out, "font-size = 14") {
+		t.Fatalf("comment / other key lost:\n%s", out)
+	}
+	if cfg := Load(); cfg.Theme != "One Light" {
+		t.Fatalf("theme not upserted: %q", cfg.Theme)
+	}
+}
+
 // Projects reconcile: existing kept-row updates, missing row is added, a row
 // absent from the patch map is deleted.
 func TestSetConfigProjectsReconcile(t *testing.T) {

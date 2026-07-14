@@ -20,6 +20,7 @@ type Patch struct {
 	Leader     *string `json:"leader,omitempty"`
 	FontFamily *string `json:"fontFamily,omitempty"`
 	FontSize   *int    `json:"fontSize,omitempty"`
+	Theme      *string `json:"theme,omitempty"`
 	// Projects: the full desired jira-project-<ws> map. Rows not present are
 	// deleted; rows present are upserted.
 	Projects map[string]string `json:"projects,omitempty"`
@@ -73,6 +74,11 @@ func (s *Service) SetConfig(p Patch) error {
 	}
 	if p.FontSize != nil {
 		if err := set("font-size", strconv.Itoa(*p.FontSize)); err != nil {
+			return err
+		}
+	}
+	if p.Theme != nil {
+		if err := set("theme", *p.Theme); err != nil {
 			return err
 		}
 	}

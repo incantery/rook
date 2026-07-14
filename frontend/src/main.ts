@@ -32,7 +32,8 @@ async function main() {
     const font = `"${cfg.fontFamily}", Menlo, ui-monospace, monospace`;
     // paint chrome + the body tint from the active theme before anything mounts
     themeService.setOpacity(cfg.backgroundOpacity);
-    themeService.applyChrome();
+    themeService.apply(cfg.theme); // no-op if the name is unknown
+    themeService.applyChrome(); // idempotent; guarantees the paint either way
 
     // Measure with the real font: a grid computed from fallback-font cell
     // metrics spawns PTYs at the wrong size.
