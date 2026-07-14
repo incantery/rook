@@ -26,6 +26,7 @@ export function cssVars(p: Palette): Record<string, string> {
         "--color-line": p.line,
         "--color-raise": p.raise,
         // bare mirrors read by the imperative islands (term/*, editor pane)
+        "--bg": p.bg,
         "--acc": p.accent,
         "--fg": p.fg,
         "--dim": p.dim,

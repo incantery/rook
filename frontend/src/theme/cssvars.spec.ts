@@ -29,6 +29,7 @@ describe("cssVars", () => {
             "--color-lo",
             "--color-raise",
             "--color-red",
+            "--bg",
             "--acc",
             "--dim",
             "--fg",
