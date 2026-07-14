@@ -112,7 +112,8 @@
     }
 
     const path = $derived(editor?.context()?.path ?? "");
-    const visible = $derived(filterThreads(fileThreads(threads, path), filter));
+    const onFile = $derived(fileThreads(threads, path));
+    const visible = $derived(filterThreads(onFile, filter));
     const selected = $derived(
         selectedId == null ? null : (threads.find((t) => t.id === selectedId) ?? null),
     );
@@ -254,7 +255,7 @@
             </div>
             <span class="flex-1"></span>
             <span class="flex items-center gap-1.5 font-mono text-[10px] text-lo">
-                <span class="size-1.5 rounded-full bg-amber"></span>{openCount(threads)} open
+                <span class="size-1.5 rounded-full bg-amber"></span>{openCount(onFile)} open
             </span>
         </div>
 
@@ -419,8 +420,8 @@
 
             {#if visible.length === 0 && !composer}
                 <div class="px-2.5 py-6 text-center text-xs leading-relaxed text-lo">
-                    No threads in this filter.{#if resolvedCount(threads) > 0 && filter === "open"}<br
-                        />{resolvedCount(threads)} resolved — see the Resolved tab.{/if}
+                    No threads in this filter.{#if resolvedCount(onFile) > 0 && filter === "open"}<br
+                        />{resolvedCount(onFile)} resolved — see the Resolved tab.{/if}
                 </div>
             {/if}
         </div>
