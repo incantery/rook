@@ -79,6 +79,16 @@
 # workflow = /security-review, /review
 
 
+# ── Workspace visibility filter (presentation-only) ───────────────────────
+#
+# A comma-separated list of workspace names to show in the dashboard, mission
+# control, and /overview. When set, only these workspaces (and any worktree
+# carved from one of them) appear — all others are filtered out. Useful for
+# demos and screenshots. Not access control: registration and per-workspace
+# endpoints are unaffected. Unset means every workspace shows.
+# For example: workspace-allow = rook, dora
+
+
 # ── Keybindings ──────────────────────────────────────────────────────────
 
 # The leader: the tmux-style prefix that arms the bare-key bindings below.

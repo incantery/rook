@@ -98,6 +98,22 @@ func TestSplitList(t *testing.T) {
 	}
 }
 
+func TestLoadWorkspaceAllow(t *testing.T) {
+	writeConfig(t, `
+workspace-allow = rook, dora
+`)
+	cfg := Load()
+	if !slices.Equal(cfg.WorkspaceAllow, []string{"rook", "dora"}) {
+		t.Fatalf("workspace-allow: %v", cfg.WorkspaceAllow)
+	}
+
+	// unset → feature off, nil list
+	writeConfig(t, "# nothing configured\n")
+	if cfg := Load(); cfg.WorkspaceAllow != nil {
+		t.Fatalf("workspace-allow must default nil (off): %v", cfg.WorkspaceAllow)
+	}
+}
+
 // JiraTokenStatus's file branch is cross-platform (keychain is darwin-only and
 // tested there); point Path() at a temp dir via XDG and exercise file/none.
 func TestJiraTokenStatusFile(t *testing.T) {
