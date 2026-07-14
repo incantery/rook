@@ -111,8 +111,9 @@
         const ctx = editor?.context();
         if (!body || !ctx || sel.mode !== "composer") return;
         const {startLine, endLine, side} = sel;
+        let created: ThreadInfo | null = null;
         await run(async () => {
-            const t = await api.createThread(ctx.workspace, {
+            created = await api.createThread(ctx.workspace, {
                 path: ctx.path,
                 startLine,
                 endLine,
@@ -121,9 +122,13 @@
                 body,
             });
             draft = "";
-            sel = {mode: "thread", id: t.id};
-            editor?.reveal(t);
         });
+        // select AFTER run()'s refetch has populated `threads`, so the
+        // `active` derived resolves immediately (no empty-state flash)
+        if (created) {
+            sel = {mode: "thread", id: (created as ThreadInfo).id};
+            editor?.reveal(created as ThreadInfo);
+        }
     }
 
     async function reply(): Promise<void> {
