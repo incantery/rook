@@ -49,7 +49,7 @@
 </script>
 
 <div
-    class="relative flex h-11 shrink-0 items-center justify-end gap-2 border-b border-line/15 bg-raise pl-21 pr-3.5"
+    class="relative flex h-13 shrink-0 items-center justify-end gap-2 border-b border-line/15 bg-raise pl-21 pr-3.5"
     style="--wails-draggable: drag"
 >
     <button

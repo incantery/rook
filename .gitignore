@@ -11,3 +11,4 @@ build/android/overlay.json
 build/android/gen/
 # local one-off builds
 /rookctl
+frontend/rook

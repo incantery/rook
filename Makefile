@@ -1,7 +1,9 @@
 # Developing rook using rook:
 #   make install  — production .app into /Applications; the daily driver
-#   make dev      — hot-reload dev instance (own window; unstamped, so it
-#                   rides the installed daemon and never replaces it)
+#   make dev      — hot-reload dev instance in a fully isolated sandbox
+#                   (its own XDG_STATE_HOME + XDG_CONFIG_HOME + XDG_DATA_HOME
+#                   → own host daemon, sessions, config, and database; never
+#                   touches the daily driver — see dev for why it matters)
 #   make start    — quick foreground run of a production build
 # Promote: make install, then quit+relaunch the installed app. Every
 # install gets a fresh BUILD id stamped into ALL binaries, and the app
@@ -24,7 +26,24 @@ build:
 start: build
 	./bin/rook
 
+# Isolated sandbox. The dev instance gets its own state (host daemon +
+# sessions), config, and data (database + worktrees) dirs, so it never rides
+# the daily driver's daemon or writes its records.
+# That mattered: the host is one-client-per-session — when a shared-daemon
+# dev instance background-attached the daily driver's sessions, its attach
+# EVICTED the daily driver's (host closes the old socket "replaced"), and
+# the frontend doesn't reconnect a replaced session — freezing the pane you
+# launched from until you opened a new window. Own daemon = no contact.
+# Config is sandboxed too, so re-enter Jira/OpenAI keys in the dev instance;
+# writes stay in rook-dev and never clobber your real ~/.config/rook.
+# XDG_DATA_HOME sandboxes DataDir (internal/host: registry.go rook.db +
+# worktree.go checkouts) — else dev shares the daily driver's rook.db, so
+# its workspaces, verdict ledger, threads, and cost totals would pollute the
+# real ones, and worktrees would land in the shared tree.
 dev:
+	XDG_STATE_HOME=$(HOME)/.local/state/rook-dev \
+	XDG_CONFIG_HOME=$(HOME)/.config/rook-dev \
+	XDG_DATA_HOME=$(HOME)/.local/share/rook-dev \
 	wails3 dev
 
 package:
