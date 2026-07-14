@@ -326,8 +326,12 @@
 
 {#snippet delBtn(name: string)}
     <button
-        class="ws-card-del"
-        class:armed={forceArmed === name}
+        class={[
+            "cursor-pointer appearance-none border-0 bg-transparent px-1 py-0.5 text-xs",
+            forceArmed === name
+                ? "text-red"
+                : "text-transparent group-hover:text-lo hover:text-red",
+        ]}
         title={forceArmed === name
             ? "Delete anyway — discards the task tree (branch survives)"
             : "Delete workspace (kills its shells)"}
@@ -341,30 +345,34 @@
 {#snippet wsTags(w: OverviewItem, nested: boolean)}
     {@const burn = app.costs?.live.find((l) => l.workspace === w.name)?.usd ?? 0}
     {#if burn >= 0.01}
-        <span class="ws-tag cost" title="live claude sessions here, priced as API tokens"
-            >${burn.toFixed(2)}</span
+        <span
+            class="rounded-md bg-dim/12 px-1.5 py-0.5 font-mono text-xs text-dim"
+            title="live claude sessions here, priced as API tokens">${burn.toFixed(2)}</span
         >
     {/if}
     {#if w.scratch}
-        <span class="ws-tag scratch">scratch</span>
+        <span class="rounded-md bg-amber/12 px-1.5 py-0.5 font-mono text-xs text-amber"
+            >scratch</span
+        >
     {/if}
     {#if w.worktreeOf}
         <!-- nested under its source: the branch is the missing fact.
              floated to the top level (source gone): say the lineage. -->
         <span
-            class="ws-tag worktree"
+            class="rounded-md bg-acc/12 px-1.5 py-0.5 font-mono text-xs text-acc"
             title="task tree of {w.worktreeOf} — a git worktree on branch {w.branch}"
             >{nested ? `⎇ ${w.branch}` : `task tree of ${w.worktreeOf} · ⎇ ${w.branch}`}</span
         >
     {/if}
     {#if w.issueRef}
-        <span class="ws-tag issue" title="spawned for {w.issueRef.tracker} issue {w.issueRef.key}"
-            >{w.issueRef.key}</span
+        <span
+            class="rounded-md bg-[#c792ea]/12 px-1.5 py-0.5 font-mono text-xs text-[#c792ea]"
+            title="spawned for {w.issueRef.tracker} issue {w.issueRef.key}">{w.issueRef.key}</span
         >
     {/if}
     {#if w.pr?.state === "merged"}
         <button
-            class="ws-tag pr-merged"
+            class="cursor-pointer rounded-md border-0 bg-[#c792ea]/18 px-1.5 py-0.5 font-mono text-xs text-[#c792ea] hover:bg-[#c792ea]/32"
             title="PR #{w.pr
                 .number} merged — remove the task tree and delete {w.branch} (kills its shells)"
             onclick={(e) => {
@@ -375,13 +383,13 @@
     {:else if w.pr?.state === "open" && w.pr.conflicts}
         {#if resolving.includes(w.name)}
             <span
-                class="ws-tag pr-conflicts"
+                class="rounded-md bg-amber/15 px-1.5 py-0.5 font-mono text-xs text-amber"
                 title="an agent is resolving PR #{w.pr.number}'s conflicts in this tree"
                 >⚠ resolving…</span
             >
         {:else}
             <button
-                class="ws-tag pr-conflicts"
+                class="cursor-pointer rounded-md border-0 bg-amber/15 px-1.5 py-0.5 font-mono text-xs text-amber hover:bg-amber/28"
                 title="PR #{w.pr
                     .number} has merge conflicts — spawn an agent in this tree to merge the base branch and resolve them"
                 onclick={(e) => {
@@ -391,14 +399,17 @@
             >
         {/if}
     {:else if w.pr?.state === "open"}
-        <span class="ws-tag pr-open" title={w.pr.url}>PR #{w.pr.number}</span>
+        <span class="rounded-md bg-grn/12 px-1.5 py-0.5 font-mono text-xs text-grn" title={w.pr.url}
+            >PR #{w.pr.number}</span
+        >
     {:else if w.pr?.state === "closed"}
-        <span class="ws-tag pr-closed" title="PR #{w.pr.number} closed without merging"
-            >PR #{w.pr.number} closed</span
+        <span
+            class="rounded-md bg-red/12 px-1.5 py-0.5 font-mono text-xs text-red"
+            title="PR #{w.pr.number} closed without merging">PR #{w.pr.number} closed</span
         >
     {:else if w.pr?.state === "none" && (w.pr.ahead ?? 0) > 0}
         <span
-            class="ws-tag pr-none"
+            class="rounded-md bg-amber/10 px-1.5 py-0.5 font-mono text-xs text-amber"
             title="{w.pr.ahead} commit(s) on {w.branch} with no PR — open one from the tree"
             >no PR yet</span
         >
@@ -409,35 +420,57 @@
     {@const chips = agentChips(w)}
     {@const line = agentLine(w)}
     <div
-        class="ws-card"
-        class:tasktree={w.worktreeOf}
-        class:attn={attnOf(w) > 0}
+        class={[
+            "group cursor-pointer rounded-xl border border-l-2 border-line/15 px-4 py-3.5 hover:-translate-y-px hover:border-line/40",
+            w.worktreeOf ? "bg-acc/[0.035] [border-left-style:dashed]" : "bg-white/[0.025]",
+            attnOf(w) > 0 ? "border-l-amber" : w.worktreeOf ? "border-l-acc/60" : "border-l-acc",
+        ]}
         onclick={() => onopen(w.name)}
         role="presentation"
     >
-        <div class="ws-card-head">
-            <span class="ws-card-name">{w.name}</span>
+        <div class="mb-2 flex items-center gap-2">
+            <span class="min-w-0 flex-1 truncate text-sm font-bold text-fg">{w.name}</span>
             {@render delBtn(w.name)}
-            <span class="ws-card-when">{ago(w.lastUsed || w.created)}</span>
+            <span class="whitespace-nowrap font-mono text-xs text-lo"
+                >{ago(w.lastUsed || w.created)}</span
+            >
         </div>
-        <div class="ws-card-root">{tilde(w.root || "") || "~"}</div>
-        <div class="ws-card-tags">
-            <span class="ws-tag" class:live={w.sessions > 0} class:idle={w.sessions === 0}>
+        <div class="mb-3 truncate font-mono text-xs text-lo">{tilde(w.root || "") || "~"}</div>
+        <div class="flex flex-wrap gap-1.5">
+            <span
+                class={[
+                    "rounded-md px-1.5 py-0.5 font-mono text-xs",
+                    w.sessions > 0 ? "bg-grn/12 text-grn" : "bg-white/5 text-dim",
+                ]}
+            >
                 {w.sessions > 0 ? `● ${w.sessions} live` : "idle"}
             </span>
             {#each chips as c (c.cls)}
-                <span class="ws-agent {c.cls}">{c.text}</span>
+                <span
+                    class={[
+                        "rounded-md px-1.5 py-0.5 font-mono text-xs",
+                        c.cls === "needs_input"
+                            ? "animate-attn-pulse bg-amber/12 text-amber"
+                            : c.cls === "working"
+                              ? "bg-grn/12 text-grn"
+                              : "bg-white/5 text-lo",
+                    ]}>{c.text}</span
+                >
             {/each}
             {#if w.git}
                 <!-- a task tree's branch already sits on its lineage tag -->
                 {#if !w.worktreeOf}
-                    <span class="ws-tag git">⎇ {w.git.branch}</span>
+                    <span class="rounded-md bg-acc/12 px-1.5 py-0.5 font-mono text-xs text-acc"
+                        >⎇ {w.git.branch}</span
+                    >
                 {/if}
                 {#if w.git.dirty > 0}
-                    <span class="ws-tag dirty">● {w.git.dirty} modified</span>
+                    <span class="rounded-md bg-amber/10 px-1.5 py-0.5 font-mono text-xs text-amber"
+                        >● {w.git.dirty} modified</span
+                    >
                 {/if}
                 {#if w.git.ahead > 0 || w.git.behind > 0}
-                    <span class="ws-tag">
+                    <span class="rounded-md bg-white/5 px-1.5 py-0.5 font-mono text-xs text-dim">
                         {[
                             w.git.ahead > 0 ? `↑${w.git.ahead}` : "",
                             w.git.behind > 0 ? `↓${w.git.behind}` : "",
@@ -448,43 +481,67 @@
                 {/if}
             {/if}
             {#each fgTools(w) as f (f)}
-                <span class="ws-tag fg">{f}</span>
+                <span class="rounded-md bg-white/5 px-1.5 py-0.5 font-mono text-xs text-dim"
+                    >{f}</span
+                >
             {/each}
             {@render wsTags(w, nested)}
         </div>
         {#if w.stages?.length}
             <!-- the work item's pipeline at a glance: coding → review stages -->
-            <div class="ws-stages">
+            <div class="mt-2 flex flex-wrap gap-x-2.5 gap-y-1">
                 {#each w.stages as s, si (si)}
                     <span
-                        class="ws-stage {s.status}"
-                        class:needs={s.needsInput}
+                        class={[
+                            "whitespace-nowrap font-mono text-xs",
+                            s.status === "done"
+                                ? "text-grn"
+                                : s.status === "error"
+                                  ? "text-red"
+                                  : s.status === "running"
+                                    ? s.needsInput
+                                        ? "animate-attn-pulse text-amber"
+                                        : "animate-[stage-pulse_2.2s_ease-in-out_infinite] text-grn"
+                                    : "text-lo",
+                        ]}
                         title={s.detail || s.name}>{stageGlyph(s)} {s.name}</span
                     >
                 {/each}
             </div>
         {/if}
         {#if line}
-            <div class="ws-agent-line" title={line}>{line}</div>
+            <div class="mt-2 line-clamp-2 text-xs leading-normal text-dim" title={line}>{line}</div>
         {/if}
     </div>
 {/snippet}
 
-<div id="home">
-    <div id="home-strip">
-        <span class="brand">Rook</span>
-        <span class="brand-sub">mission control</span>
+<div id="home" class="flex min-h-0 flex-1 flex-col">
+    <div
+        id="home-strip"
+        class="flex h-13 shrink-0 items-center gap-2.5 pl-21 pr-5.5"
+        style="--wails-draggable: drag"
+    >
+        <span class="text-sm font-bold text-fg">Rook</span>
+        <span class="font-mono text-xs text-lo">mission control</span>
         {#if needsYou > 0}
-            <span class="strip-attn">◉ {needsYou} need{needsYou === 1 ? "s" : ""} you</span>
+            <span class="animate-attn-pulse font-mono text-xs text-amber"
+                >◉ {needsYou} need{needsYou === 1 ? "s" : ""} you</span
+            >
         {:else if liveShells > 0}
-            <span class="strip-quiet">● {liveShells} live, none blocked</span>
+            <span class="font-mono text-xs text-grn">● {liveShells} live, none blocked</span>
         {/if}
-        <span class="home-spacer"></span>
+        <span class="flex-1"></span>
         {#if worstUsage && app.usage}
             <span
                 id="home-usage"
-                class:warn={worstUsage.pct >= 70 && worstUsage.pct < 90}
-                class:hot={worstUsage.pct >= 90}
+                class={[
+                    "rounded-xl border px-2.5 py-0.5 font-mono text-xs",
+                    worstUsage.pct >= 90
+                        ? "border-hot/35 bg-hot/12 text-hot"
+                        : worstUsage.pct >= 70
+                          ? "border-amber/35 bg-amber/12 text-amber"
+                          : "border-dim/30 bg-dim/10 text-dim",
+                ]}
                 title={app.usage.windows
                     .map((w) => `${w.label}: ${w.pct}% — resets ${w.resets}`)
                     .join("\n")}
@@ -495,6 +552,7 @@
         {#if app.costs}
             <span
                 id="home-costs"
+                class="font-mono text-xs text-dim"
                 title="What claude usage would cost on API billing — absorbed by the subscription"
             >
                 {[
@@ -507,30 +565,39 @@
             </span>
         {/if}
     </div>
-    <div id="home-scroll">
-        <div id="home-inner">
+    <div id="home-scroll" class="flex-1 overflow-y-auto px-6 pb-15 pt-2">
+        <div id="home-inner" class="mx-auto max-w-245">
             {#if error}
-                <div id="home-error">{error}</div>
+                <div
+                    id="home-error"
+                    class="mb-3.5 rounded-lg border border-red/40 bg-red/8 px-3.5 py-2.5 font-mono text-sm text-red"
+                >
+                    {error}
+                </div>
             {/if}
-            <div class="home-head">
-                <h2>Workspaces</h2>
-                <span class="home-spacer"></span>
+            <div class="mb-4 mt-1 flex items-center gap-3">
+                <h2 class="m-0 text-base font-bold text-fg">Workspaces</h2>
+                <span class="flex-1"></span>
                 <button
-                    class="home-btn"
+                    class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/10"
                     style="--wails-draggable: no-drag"
                     title="One-off shell; discarded when it exits"
                     onclick={() => void scratch()}>scratch shell</button
                 >
-                <button class="home-btn" style="--wails-draggable: no-drag" onclick={openModal}>
-                    <span class="plus">+</span> New workspace</button
+                <button
+                    class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/10"
+                    style="--wails-draggable: no-drag"
+                    onclick={openModal}
+                >
+                    <span class="text-sm leading-none text-acc">+</span> New workspace</button
                 >
             </div>
-            <div id="home-grid">
+            <div id="home-grid" class="grid grid-cols-[repeat(auto-fill,minmax(270px,1fr))] gap-3">
                 {#each active as g (g.ws.name)}
-                    <div class="ws-group">
+                    <div class="flex flex-col gap-2 self-start">
                         {@render card(g.ws, false)}
                         {#if g.trees.length > 0}
-                            <div class="ws-trees">
+                            <div class="ml-3 flex flex-col gap-2 border-l border-acc/30 pl-3">
                                 {#each g.trees as t (t.name)}
                                     {@render card(t, true)}
                                 {/each}
@@ -539,29 +606,42 @@
                     </div>
                 {/each}
                 {#if items.length === 0}
-                    <div class="home-empty">
+                    <div class="col-span-full p-10 text-center text-sm text-lo">
                         No workspaces yet — create one, or grab a scratch shell.
                     </div>
                 {/if}
             </div>
             {#if idle.length > 0}
-                <div class="home-sec">Idle</div>
-                <div id="home-idle">
+                <div class="mb-2.5 mt-6 text-xs font-bold uppercase tracking-wider text-lo">
+                    Idle
+                </div>
+                <div id="home-idle" class="flex flex-col gap-1">
                     {#each idle as g (g.ws.name)}
                         {#each [g.ws, ...g.trees] as w, wi (w.name)}
                             <div
-                                class="idle-row"
-                                class:tree={wi > 0}
+                                class={[
+                                    "group flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/[0.015] px-3 py-1.5 text-sm hover:border-line/40",
+                                    wi > 0 && "ml-5.5",
+                                ]}
                                 onclick={() => onopen(w.name)}
                                 role="presentation"
                             >
-                                <span class="idle-name"
-                                    >{w.worktreeOf ? `⎇ ${w.name}` : w.name}</span
+                                <span
+                                    class={[
+                                        "whitespace-nowrap text-sm",
+                                        wi > 0
+                                            ? "font-mono font-medium text-acc"
+                                            : "font-semibold text-fg",
+                                    ]}>{w.worktreeOf ? `⎇ ${w.name}` : w.name}</span
                                 >
                                 {@render wsTags(w, wi > 0)}
-                                <span class="idle-root">{tilde(w.root || "")}</span>
-                                <span class="home-spacer"></span>
-                                <span class="ws-card-when">{ago(w.lastUsed || w.created)}</span>
+                                <span class="truncate font-mono text-xs text-lo"
+                                    >{tilde(w.root || "")}</span
+                                >
+                                <span class="flex-1"></span>
+                                <span class="whitespace-nowrap font-mono text-xs text-lo"
+                                    >{ago(w.lastUsed || w.created)}</span
+                                >
                                 {@render delBtn(w.name)}
                             </div>
                         {/each}
@@ -569,20 +649,30 @@
                 </div>
             {/if}
             {#if queueRows.length > 0 || queueErrors.length > 0}
-                <div class="home-sec">Queue — work waiting to start</div>
-                <div id="home-queue">
+                <div class="mb-2.5 mt-6 text-xs font-bold uppercase tracking-wider text-lo">
+                    Queue — work waiting to start
+                </div>
+                <div id="home-queue" class="flex flex-col gap-1.5">
                     {#each queueRows as r (r.ws + r.issue.tracker + r.issue.key)}
-                        <div class="dash-issue">
-                            <span class="dash-issue-key">{r.issue.key}</span>
-                            <span class="dash-issue-who" class:mine={r.issue.mine}
-                                >{r.issue.mine ? "mine" : "open"}</span
+                        <div
+                            class="flex items-center gap-2.5 rounded-lg border border-line/15 bg-white/[0.02] px-3 py-2 text-sm"
+                        >
+                            <span class="whitespace-nowrap font-mono text-acc">{r.issue.key}</span>
+                            <span
+                                class={[
+                                    "rounded-md px-1.5 py-px font-mono text-xs",
+                                    r.issue.mine ? "bg-grn/12 text-grn" : "bg-white/5 text-lo",
+                                ]}>{r.issue.mine ? "mine" : "open"}</span
                             >
-                            <span class="dash-issue-title" title={r.issue.title}
+                            <span class="flex-1 truncate text-fg" title={r.issue.title}
                                 >{r.issue.title}</span
                             >
-                            <span class="dash-issue-ws" title="from {r.ws}'s queue">{r.ws}</span>
+                            <span
+                                class="whitespace-nowrap rounded-md bg-acc/10 px-1.5 py-px font-mono text-xs text-acc"
+                                title="from {r.ws}'s queue">{r.ws}</span
+                            >
                             <button
-                                class="home-btn dash-issue-go"
+                                class="flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/10"
                                 title="Start claude on this issue in a fresh task tree of {r.ws}"
                                 disabled={starting !== ""}
                                 onclick={() => void work(r.ws, r.issue)}
@@ -591,7 +681,7 @@
                         </div>
                     {/each}
                     {#each queueErrors as e (e)}
-                        <div class="dash-issue-err" title={e}>⚠ {e}</div>
+                        <div class="truncate px-3 py-0.5 text-xs text-amber" title={e}>⚠ {e}</div>
                     {/each}
                 </div>
             {/if}
@@ -602,7 +692,7 @@
 {#if modalOpen}
     <div
         id="ws-modal"
-        class="overlay"
+        class="fixed inset-0 z-50 flex items-start justify-center bg-black/55 pt-[12vh]"
         onmousedown={(e) => e.target === e.currentTarget && (modalOpen = false)}
         onkeydown={(e) => {
             if (e.key === "Enter") void createFromModal();
@@ -613,11 +703,16 @@
         }}
         role="presentation"
     >
-        <div class="pal-panel">
-            <div class="ws-modal-title">New workspace</div>
-            <div class="ws-form">
+        <div
+            class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-[#151924] shadow-2xl"
+        >
+            <div class="border-b border-line/15 px-4.5 py-4 text-sm font-bold text-fg">
+                New workspace
+            </div>
+            <div class="flex flex-col gap-4 p-4.5">
                 <label
-                    ><span>Name</span><input
+                    ><span class="mb-1.5 block text-xs font-semibold text-dim">Name</span><input
+                        class="box-border w-full rounded-lg border border-line/15 bg-[#0a0c14]/80 px-3 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
                         placeholder="e.g. rook-core"
                         spellcheck="false"
                         bind:value={modalName}
@@ -625,20 +720,25 @@
                     /></label
                 >
                 <label
-                    ><span
+                    ><span class="mb-1.5 block text-xs font-semibold text-dim"
                         >Directory (optional — or set it later from inside the workspace: cd
                         anywhere, then ` .)</span
                     ><input
+                        class="box-border w-full rounded-lg border border-line/15 bg-[#0a0c14]/80 px-3 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
                         placeholder="~/go/src/github.com/incantery/rook"
                         spellcheck="false"
                         bind:value={modalRoot}
                     /></label
                 >
             </div>
-            <div class="ws-modal-foot">
-                <button class="home-btn" onclick={() => (modalOpen = false)}>Cancel</button>
-                <button class="home-btn primary" onclick={() => void createFromModal()}
-                    >Create workspace</button
+            <div class="flex justify-end gap-2 border-t border-line/15 px-4.5 py-3.5">
+                <button
+                    class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/10"
+                    onclick={() => (modalOpen = false)}>Cancel</button
+                >
+                <button
+                    class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-sm font-semibold text-[#10131c]"
+                    onclick={() => void createFromModal()}>Create workspace</button
                 >
             </div>
         </div>

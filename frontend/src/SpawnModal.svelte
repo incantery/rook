@@ -51,18 +51,23 @@
 <svelte:window onkeydown={onKeydown} />
 
 <div
-    id="spawn-modal"
-    class="overlay"
+    class="fixed inset-0 z-50 flex items-start justify-center bg-black/55 pt-[12vh]"
     onmousedown={(e) => e.target === e.currentTarget && onclose()}
     role="presentation"
 >
-    <div class="pal-panel">
-        <div class="ws-modal-title">New agent session</div>
-        <div class="ws-form">
+    <div
+        class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-[#151924] shadow-2xl"
+    >
+        <div class="border-b border-line/15 px-4.5 py-3.5 text-sm font-bold text-fg">
+            New agent session
+        </div>
+        <div class="flex flex-col gap-4 p-4.5">
             <label>
-                <span>Task — becomes <code>claude "…"</code> in a fresh window</span>
+                <span class="mb-1.5 block text-xs font-semibold text-dim"
+                    >Task — becomes <code>claude "…"</code> in a fresh window</span
+                >
                 <textarea
-                    class="spawn-task"
+                    class="box-border w-full resize-y rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
                     rows="3"
                     spellcheck="false"
                     placeholder="fix the flaky picker test and run the suite"
@@ -70,25 +75,33 @@
                     bind:this={taskEl}></textarea>
             </label>
             <label
-                ><span>Workspace</span><input
-                    class="spawn-ws"
+                ><span class="mb-1.5 block text-xs font-semibold text-dim">Workspace</span><input
+                    class="box-border w-full rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
                     spellcheck="false"
                     bind:value={ws}
                 /></label
             >
             <label
-                class="spawn-wt"
+                class="flex cursor-pointer items-center gap-2"
                 title="a git worktree off the workspace's repo — parallel sessions stop sharing one checkout"
             >
-                <input type="checkbox" bind:checked={worktree} />
-                <span>Isolate in a task tree of the workspace (branch <code>rook/…</code>)</span>
+                <input type="checkbox" class="m-0 w-auto accent-acc" bind:checked={worktree} />
+                <span class="text-xs font-normal text-dim"
+                    >Isolate in a task tree of the workspace (branch <code>rook/…</code>)</span
+                >
             </label>
-            <div class="key-error" hidden={!error}>{error}</div>
+            {#if error}
+                <div class="font-mono text-xs text-red">{error}</div>
+            {/if}
         </div>
-        <div class="ws-modal-foot">
-            <button class="home-btn spawn-cancel" onclick={onclose}>Cancel</button>
-            <button class="home-btn primary spawn-go" onclick={() => void go()}
-                >Start session</button
+        <div class="flex justify-end gap-2 border-t border-line/15 px-4.5 py-3.5">
+            <button
+                class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-xs font-semibold text-fg hover:bg-white/10"
+                onclick={onclose}>Cancel</button
+            >
+            <button
+                class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-[#10131c]"
+                onclick={() => void go()}>Start session</button
             >
         </div>
     </div>

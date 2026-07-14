@@ -237,7 +237,7 @@
 </script>
 
 {#if !editor}
-    <div class="thread-panel-empty">focus a review or file pane to see its threads</div>
+    <div class="p-4 text-sm opacity-60">focus a review or file pane to see its threads</div>
 {:else}
     <div class="flex h-full min-h-0 flex-col text-fg">
         <!-- filters + counts (SidePane's header already says "Threads") -->

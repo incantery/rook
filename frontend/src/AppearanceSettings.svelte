@@ -136,39 +136,48 @@
     }
 </script>
 
-<div class="ws-form">
-    <div class="ws-modal-title">Appearance</div>
-    <label class="settings-row"
-        ><span>Leader</span>
+<div class="flex flex-col gap-4 p-4.5">
+    <div class="border-b border-line/15 px-4.5 py-3.5 text-sm font-bold text-fg">Appearance</div>
+    <label class="my-2 flex items-center gap-2"
+        ><span class="mb-1.5 block text-xs font-semibold text-dim">Leader</span>
         <input
             type="text"
+            class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
             placeholder="` or ctrl+b"
             bind:value={leader}
             spellcheck="false"
             autocomplete="off"
         />
     </label>
-    <label class="settings-row"
-        ><span>Font family</span>
+    <label class="my-2 flex items-center gap-2"
+        ><span class="mb-1.5 block text-xs font-semibold text-dim">Font family</span>
         <input
             type="text"
+            class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
             placeholder="Hack Nerd Font Mono"
             bind:value={fontFamily}
             spellcheck="false"
             autocomplete="off"
         />
     </label>
-    <label class="settings-row"
-        ><span>Font size</span>
-        <input type="number" min="6" max="72" bind:value={fontSize} />
+    <label class="my-2 flex items-center gap-2"
+        ><span class="mb-1.5 block text-xs font-semibold text-dim">Font size</span>
+        <input
+            type="number"
+            class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
+            min="6"
+            max="72"
+            bind:value={fontSize}
+        />
     </label>
 
-    <div class="ws-modal-title">Keybinds</div>
+    <div class="border-b border-line/15 px-4.5 py-3.5 text-sm font-bold text-fg">Keybinds</div>
     {#each rows as row, i (i)}
-        <div class="settings-row">
+        <div class="my-2 flex items-center gap-2">
             <span>{row.command}</span>
             <input
                 type="text"
+                class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
                 readonly
                 value={capturing === i ? "press keys…" : row.trigger || "(unbound)"}
                 onclick={() => (capturing = i)}
@@ -177,27 +186,36 @@
                     if (capturing === i) capturing = -1;
                 }}
             />
-            {#if problems[i]}<span class="settings-conflict">⚠ {problems[i]}</span>{/if}
-            <button class="home-btn" onclick={() => removeRow(i)}>Remove</button>
+            {#if problems[i]}<span class="text-red">⚠ {problems[i]}</span>{/if}
+            <button
+                class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-xs font-semibold text-fg hover:bg-white/10"
+                onclick={() => removeRow(i)}>Remove</button
+            >
         </div>
     {/each}
 
-    <div class="settings-row">
+    <div class="my-2 flex items-center gap-2">
         <select bind:value={addCommand}>
             <option value="">+ add binding…</option>
             {#each allCommands as c (c)}
                 <option value={c}>{c}</option>
             {/each}
         </select>
-        <button class="home-btn" disabled={!addCommand} onclick={addRow}>Add</button>
+        <button
+            class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-xs font-semibold text-fg hover:bg-white/10"
+            disabled={!addCommand}
+            onclick={addRow}>Add</button
+        >
     </div>
 
-    {#if error}<div class="settings-error">{error}</div>{/if}
-    <div class="ws-modal-foot">
-        <span class="home-spacer"></span>
-        {#if saved}<span class="settings-saved">saved — reloading…</span>{/if}
-        <button class="home-btn primary" disabled={hasProblem} onclick={() => void save()}
-            >Save &amp; reload</button
+    {#if error}<div class="mt-2 text-red">{error}</div>{/if}
+    <div class="flex justify-end gap-2 border-t border-line/15 px-4.5 py-3.5">
+        <span class="flex-1"></span>
+        {#if saved}<span class="ml-2 text-grn">saved — reloading…</span>{/if}
+        <button
+            class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-[#10131c]"
+            disabled={hasProblem}
+            onclick={() => void save()}>Save &amp; reload</button
         >
     </div>
 </div>
