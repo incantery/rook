@@ -5,6 +5,20 @@
 import type {AttentionItem, CostsSnapshot, UsageSnapshot, WorkspaceInfo} from "./hostapi";
 import type {TabInfo} from "./term/manager";
 
+/** the workbench mode — which surface owns the viewport. Chrome reads this
+ *  to pick context-aware defaults instead of branching on any one surface. */
+export type Mode = "home" | "terminal" | "review" | "file";
+
+/** each mode declares its chrome defaults; the right pane opens by default
+ *  only where a mode asks for it (today: review). Keep the default OUT of the
+ *  pane wiring — a new mode that wants the pane just flips its flag here. */
+export const MODES: Record<Mode, {rightPaneDefault: boolean}> = {
+    home: {rightPaneDefault: false},
+    terminal: {rightPaneDefault: false},
+    review: {rightPaneDefault: true},
+    file: {rightPaneDefault: false},
+};
+
 class AppState {
     /** which screen owns the viewport; the app-screen is CSS-hidden on
      *  "home", never unmounted — terminals live inside it */
@@ -17,8 +31,13 @@ class AppState {
     focusedSessionId = $state<string | null>(null);
     dashVisible = $state(false);
     prefixArmed = $state(false);
-    /** the workbench side pane (VS Code-style); threads are its first tenant */
-    threadPaneOpen = $state(true);
+    /** which surface owns the viewport; App.svelte derives this from screen,
+     *  the focused editor's kind, and terminal focus. Entering a mode applies
+     *  MODES[mode].rightPaneDefault to the right pane. */
+    mode = $state<Mode>("home");
+    /** the workbench side pane (VS Code-style); threads are its first tenant.
+     *  Closed at boot — the mode you enter opens it (review does today). */
+    threadPaneOpen = $state(false);
 
     // overlays (at most one open; the keybinding ladder checks these)
     paletteOpen = $state(false);

@@ -10,7 +10,7 @@
     import {TermManager, type TermFactory} from "./term/manager";
     import {Registry} from "./registry";
     import {buildKeymap, parseLeader, sigOf} from "./keymap";
-    import {app} from "./state.svelte";
+    import {app, MODES, type Mode} from "./state.svelte";
     import {shellQuote} from "./util";
     import Titlebar from "./Titlebar.svelte";
     import Dashboard from "./Dashboard.svelte";
@@ -52,11 +52,30 @@
     const registry = new Registry();
 
     let activeEditor = $state<EditorSeam | null>(null);
+    // the active editor's kind rides alongside the seam so chrome can tell
+    // review mode from file mode (the seam itself stays kind-agnostic)
+    let activeEditorKind = $state<"review" | "file">("review");
     // focusing a terminal idles the panel; focusedSessionId is null when an
     // editor pane (Monaco) holds focus, so switching back onto a review pane
     // keeps its seam bound
     $effect(() => {
         if (app.focusedSessionId) activeEditor = null;
+    });
+
+    // ==== mode: what surface owns the viewport, and its chrome defaults ====
+    // Home wins; then a focused editor pane names the mode by its kind; else a
+    // terminal holds focus. Derived, so it only actually changes on transition.
+    const currentMode = $derived<Mode>(
+        app.screen === "home" ? "home" : activeEditor ? activeEditorKind : "terminal",
+    );
+    $effect(() => {
+        app.mode = currentMode;
+    });
+    // Entering a mode (re)applies its right-pane default; this reads only
+    // app.mode, so a manual toggle (threads.toggle) within a mode survives
+    // until the next transition. Review is the only mode that opens it today.
+    $effect(() => {
+        app.threadPaneOpen = MODES[app.mode].rightPaneDefault;
     });
 
     // resolved when the manager has attached every live session — opening a
@@ -152,7 +171,10 @@
                         font: paneFont,
                         onFlash: flash,
                         onClose: () => void mgr.closeActive(),
-                        onActivate: (seam) => (activeEditor = seam),
+                        onActivate: (seam) => {
+                            activeEditor = seam;
+                            activeEditorKind = kind;
+                        },
                         onDispose: (seam) => {
                             if (activeEditor === seam) activeEditor = null;
                         },
