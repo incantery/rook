@@ -16,6 +16,10 @@ import (
 // sessions still appear.
 func TestOverview(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	// overview runs through workspaceList, which reads config.Load() fresh for
+	// the workspace-allow filter — isolate config too, else a real
+	// ~/.config/rook with workspace-allow set hides the test's workspaces.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	h := New()
 	defer h.Shutdown()
 
