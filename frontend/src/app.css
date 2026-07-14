@@ -18,7 +18,18 @@
     --color-amber: #ffcb6b;
     --color-red: #ff5370;
     --color-hot: #f07178;
+    /* hairline borders + the faint raised-surface tint, exposed as
+       utilities (border-line / bg-raise) so chrome converts cleanly. */
+    --color-line: rgba(140, 150, 180, 0.14);
+    --color-raise: rgba(255, 255, 255, 0.035);
     --font-mono: "Hack Nerd Font Mono", Menlo, ui-monospace, monospace;
+    /* a claude session in this window is waiting on you (titlebar tab) */
+    --animate-attn-pulse: attn-pulse 1.6s ease-in-out infinite;
+}
+@keyframes attn-pulse {
+    50% {
+        opacity: 0.45;
+    }
 }
 
 /* html must stay transparent: the tint lives on body ALONE (a second
@@ -50,168 +61,6 @@ body {
     height: 100%;
     display: flex;
     flex-direction: column;
-}
-
-/* ==== titlebar: drag region; tab strip is centered bare window
-   numbers, straight from the tmux config (status-justify centre,
-   window-status-format ' #{window_index} '). 44px centers content on
-   the hidden-inset traffic lights. ==== */
-#titlebar {
-    position: relative;
-    flex: 0 0 44px;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
-    padding: 0 14px 0 84px;
-    background: var(--raise);
-    border-bottom: 1px solid var(--line);
-    --wails-draggable: drag;
-}
-/* every pill in the bar shares one height so the three clusters sit on
-   a single vertical center line */
-#ws-label,
-#prefix-pill,
-#usage-chip,
-#attn-chip,
-#palette-btn {
-    display: inline-flex;
-    align-items: center;
-    align-self: center;
-    height: 24px;
-    box-sizing: border-box;
-}
-#tabs {
-    position: absolute;
-    left: 50%;
-    top: 0;
-    bottom: 0;
-    transform: translateX(-50%);
-    display: flex;
-    align-items: stretch;
-}
-.tab {
-    appearance: none;
-    background: none;
-    border: none;
-    display: flex;
-    align-items: center;
-    padding: 0 13px;
-    font-size: 13px;
-    font-family: var(--mono);
-    color: var(--lo);
-    cursor: pointer;
-}
-.tab:hover {
-    color: var(--dim);
-}
-.tab.active {
-    color: #ffffff;
-    font-weight: 700;
-}
-.tab-new {
-    font-size: 14px;
-}
-.tab-dash.active {
-    color: var(--acc);
-    font-weight: 700;
-}
-/* a claude session in this window is waiting on you */
-.tab.attn {
-    color: #ffcb6b;
-    animation: attn-pulse 1.6s ease-in-out infinite;
-}
-@keyframes attn-pulse {
-    50% {
-        opacity: 0.45;
-    }
-}
-/* workspace chip: a stateful "you are here", not an app title — accent
-   pill so a workspace switch is instantly visible */
-#ws-label {
-    appearance: none;
-    position: absolute;
-    left: 84px;
-    top: 50%;
-    transform: translateY(-50%);
-    gap: 7px;
-    max-width: 240px;
-    padding: 0 11px;
-    border-radius: 999px;
-    font-family: var(--mono);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--acc);
-    background: rgba(130, 170, 255, 0.1);
-    border: 1px solid rgba(130, 170, 255, 0.3);
-    cursor: pointer;
-}
-#ws-label .ws-dot {
-    flex: none;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: currentColor;
-}
-#ws-label .ws-name {
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-}
-#ws-label:hover {
-    background: rgba(130, 170, 255, 0.18);
-    border-color: rgba(130, 170, 255, 0.5);
-}
-/* inside a task tree the chip reads lineage: dim source ▸ bright tree */
-#ws-label.tasktree {
-    max-width: 330px;
-}
-#ws-label .ws-parent {
-    opacity: 0.62;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-}
-#ws-label .ws-sep {
-    flex: none;
-    opacity: 0.5;
-}
-#prefix-pill {
-    padding: 0 10px;
-    border-radius: 999px;
-    font-family: var(--mono);
-    font-size: 10.5px;
-    font-weight: 600;
-    color: #ffcb6b;
-    background: rgba(255, 203, 107, 0.12);
-    border: 1px solid rgba(255, 203, 107, 0.35);
-}
-#prefix-pill[hidden] {
-    display: none;
-}
-#palette-btn {
-    appearance: none;
-    gap: 8px;
-    padding: 0 8px 0 10px;
-    border-radius: 6px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--line);
-    color: var(--dim);
-    font-family: inherit;
-    font-size: 11px;
-    cursor: pointer;
-}
-#palette-btn:hover {
-    color: var(--fg);
-    background: rgba(255, 255, 255, 0.08);
-}
-#palette-btn kbd {
-    font-family: var(--mono);
-    font-size: 10.5px;
-    padding: 1px 5px;
-    border-radius: 4px;
-    border: 1px solid var(--line);
-    color: var(--lo);
 }
 
 /* ==== terminal area: one .window per strip entry, only .active shown;
@@ -981,48 +830,6 @@ body {
     text-align: center;
     color: var(--lo);
     font-size: 12.5px;
-}
-/* titlebar count chip: how many sessions are waiting on you */
-#attn-chip {
-    appearance: none;
-    padding: 0 10px;
-    border-radius: 999px;
-    font-family: var(--mono);
-    font-size: 10.5px;
-    font-weight: 600;
-    color: #ffcb6b;
-    background: rgba(255, 203, 107, 0.12);
-    border: 1px solid rgba(255, 203, 107, 0.35);
-    cursor: pointer;
-}
-#attn-chip[hidden] {
-    display: none;
-}
-/* titlebar usage chip: the tightest subscription window (hover for all) */
-#usage-chip {
-    appearance: none;
-    padding: 0 10px;
-    border-radius: 999px;
-    font-family: var(--mono);
-    font-size: 10.5px;
-    font-weight: 600;
-    color: #7d8590;
-    background: rgba(125, 133, 144, 0.1);
-    border: 1px solid rgba(125, 133, 144, 0.3);
-    cursor: default;
-}
-#usage-chip.warn {
-    color: #ffcb6b;
-    background: rgba(255, 203, 107, 0.12);
-    border-color: rgba(255, 203, 107, 0.35);
-}
-#usage-chip.hot {
-    color: #f07178;
-    background: rgba(240, 113, 120, 0.12);
-    border-color: rgba(240, 113, 120, 0.35);
-}
-#usage-chip[hidden] {
-    display: none;
 }
 /* manager strip: subscription windows + today's raw-inference cost */
 #home-costs,

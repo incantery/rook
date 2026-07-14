@@ -48,65 +48,98 @@
     });
 </script>
 
-<div id="titlebar">
+<div
+    class="relative flex h-11 shrink-0 items-center justify-end gap-2 border-b border-line bg-raise pl-21 pr-3.5"
+    style="--wails-draggable: drag"
+>
     <button
-        id="ws-label"
-        class:tasktree={tree}
+        class="absolute left-21 top-1/2 box-border inline-flex h-6 -translate-y-1/2 cursor-pointer appearance-none items-center gap-2 self-center rounded-full border border-acc/30 bg-acc/10 px-3 font-mono text-xs font-semibold text-acc hover:border-acc/50 hover:bg-acc/20"
+        class:max-w-60={!tree}
+        class:max-w-80={tree}
         style="--wails-draggable: no-drag"
         title={tree
             ? `Task tree of ${tree.of} — branch ${tree.branch ?? "?"}. Switch workspace (\` s)`
             : "Switch workspace (` s)"}
         onclick={onpicker}
-        >{#if tree}<span class="ws-parent">{tree.of}</span><span class="ws-sep">▸</span><span
-                class="ws-name">⎇ {app.workspace}</span
-            >{:else}<span class="ws-dot"></span><span class="ws-name">{app.workspace}</span
-            >{/if}</button
+        >{#if tree}<span class="truncate opacity-60">{tree.of}</span><span
+                class="flex-none opacity-50">▸</span
+            ><span class="truncate">⎇ {app.workspace}</span>{:else}<span
+                class="h-1.5 w-1.5 flex-none rounded-full bg-current"
+            ></span><span class="truncate">{app.workspace}</span>{/if}</button
     >
-    <div id="tabs">
+    <div class="absolute inset-y-0 left-1/2 flex -translate-x-1/2 items-stretch">
         <button
-            class="tab tab-dash"
-            class:active={app.dashVisible}
+            class={[
+                "flex cursor-pointer appearance-none items-center border-0 bg-transparent px-3 font-mono text-sm",
+                app.dashVisible ? "font-bold text-acc" : "text-lo hover:text-dim",
+            ]}
             style="--wails-draggable: no-drag"
             title="Dashboard (` d)"
             onclick={ondashboard}>{app.dashTab}</button
         >
         {#each app.tabs as tab, i (tab.id)}
+            {@const active = tab.id === app.activeId && !app.dashVisible}
+            {@const attn =
+                tab.sessions.some((id) => attnIds.has(id)) &&
+                (tab.id !== app.activeId || app.dashVisible)}
             <button
-                class="tab"
-                class:active={tab.id === app.activeId && !app.dashVisible}
-                class:attn={tab.sessions.some((id) => attnIds.has(id)) &&
-                    (tab.id !== app.activeId || app.dashVisible)}
+                class={[
+                    "flex cursor-pointer appearance-none items-center border-0 bg-transparent px-3 font-mono text-sm",
+                    active
+                        ? "font-bold text-white"
+                        : attn
+                          ? "animate-attn-pulse text-amber"
+                          : "text-lo hover:text-dim",
+                ]}
                 style="--wails-draggable: no-drag"
                 title={tab.name}
                 onclick={() => onactivate(tab.id)}>{app.dashTab + 1 + i}</button
             >
         {/each}
         <button
-            class="tab tab-new"
+            class="flex cursor-pointer appearance-none items-center border-0 bg-transparent px-3 font-mono text-sm text-lo hover:text-dim"
             style="--wails-draggable: no-drag"
             title="New window (` c)"
             onclick={onnew}>+</button
         >
     </div>
-    <span id="prefix-pill" hidden={!app.prefixArmed}>prefix</span>
+    {#if app.prefixArmed}
+        <span
+            class="box-border inline-flex h-6 items-center self-center rounded-full border border-amber/35 bg-amber/12 px-2.5 font-mono text-xs font-semibold text-amber"
+            >prefix</span
+        >
+    {/if}
     {#if worstUsage}
+        {@const warn = worstUsage.pct >= 70 && worstUsage.pct < 90}
+        {@const hot = worstUsage.pct >= 90}
         <button
-            id="usage-chip"
-            class:warn={worstUsage.pct >= 70 && worstUsage.pct < 90}
-            class:hot={worstUsage.pct >= 90}
+            class={[
+                "box-border inline-flex h-6 cursor-default appearance-none items-center self-center rounded-full border px-2.5 font-mono text-xs font-semibold",
+                hot
+                    ? "border-hot/35 bg-hot/12 text-hot"
+                    : warn
+                      ? "border-amber/35 bg-amber/12 text-amber"
+                      : "border-dim/30 bg-dim/10 text-dim",
+            ]}
             style="--wails-draggable: no-drag"
             title={usageTitle}>{worstUsage.pct}% {shortWindow(worstUsage.label)}</button
         >
     {/if}
     {#if app.attention.length > 0}
         <button
-            id="attn-chip"
+            class="box-border inline-flex h-6 cursor-pointer appearance-none items-center self-center rounded-full border border-amber/35 bg-amber/12 px-2.5 font-mono text-xs font-semibold text-amber"
             style="--wails-draggable: no-drag"
             title="Attention inbox (` a)"
             onclick={oninbox}>◉ {app.attention.length}</button
         >
     {/if}
-    <button id="palette-btn" style="--wails-draggable: no-drag" onclick={onpalette}>
-        commands <kbd>⌘K</kbd>
+    <button
+        class="box-border inline-flex h-6 cursor-pointer appearance-none items-center gap-2 self-center rounded-md border border-line bg-white/5 pl-2.5 pr-2 text-xs text-dim hover:bg-white/10 hover:text-fg"
+        style="--wails-draggable: no-drag"
+        onclick={onpalette}
+    >
+        commands <kbd class="rounded border border-line px-1.5 py-px font-mono text-xs text-lo"
+            >⌘K</kbd
+        >
     </button>
 </div>
