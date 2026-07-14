@@ -14,6 +14,8 @@ class AppState {
     activeId = $state<string | null>(null);
     dashVisible = $state(false);
     prefixArmed = $state(false);
+    /** the workbench side pane (VS Code-style); threads are its first tenant */
+    threadPaneOpen = $state(true);
 
     // overlays (at most one open; the keybinding ladder checks these)
     paletteOpen = $state(false);

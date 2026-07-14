@@ -21,6 +21,9 @@
     import Inbox from "./Inbox.svelte";
     import SpawnModal from "./SpawnModal.svelte";
     import Settings from "./Settings.svelte";
+    import SidePane from "./SidePane.svelte";
+    import ThreadPanel from "./ThreadPanel.svelte";
+    import type {EditorSeam} from "./term/editor";
 
     interface Props {
         api: HostAPI;
@@ -47,6 +50,12 @@
     // assigned once in onMount, before any interaction can read it
     let mgr: TermManager = $state() as unknown as TermManager;
     const registry = new Registry();
+
+    let activeEditor = $state<EditorSeam | null>(null);
+    // focusing a terminal (activeId set by the manager) idles the panel
+    $effect(() => {
+        if (app.activeId) activeEditor = null;
+    });
 
     // resolved when the manager has attached every live session — opening a
     // workspace before that could double-create its window
@@ -141,6 +150,7 @@
                         font: paneFont,
                         onFlash: flash,
                         onClose: () => void mgr.closeActive(),
+                        onActivate: (seam) => (activeEditor = seam),
                     }),
             );
         } catch (err) {
@@ -367,6 +377,15 @@
             category: "View",
             keys: keymap.display("review.changes"),
             run: () => void openEditorPane("review"),
+        },
+        {
+            id: "threads.toggle",
+            title: "Toggle thread pane",
+            category: "View",
+            keys: keymap.display("threads.toggle"),
+            run: () => {
+                app.threadPaneOpen = !app.threadPaneOpen;
+            },
         },
         {
             id: "file.open",
@@ -628,18 +647,28 @@
         onnew={() => void mgr.newSession()}
         onpalette={() => registry.run("palette.toggle")}
     />
-    <div id="terminals" bind:this={terminalsEl}>
-        {#if fatal}
-            <div id="fatal">{fatal}</div>
-        {/if}
-        {#if app.dashVisible}
-            <Dashboard
-                {api}
-                onjump={(id) => mgr.switchToId(id)}
-                runCmd={(id) => registry.run(id)}
-                onwork={workIssue}
-            />
-        {/if}
+    <div id="workbench">
+        <div id="terminals" bind:this={terminalsEl}>
+            {#if fatal}
+                <div id="fatal">{fatal}</div>
+            {/if}
+            {#if app.dashVisible}
+                <Dashboard
+                    {api}
+                    onjump={(id) => mgr.switchToId(id)}
+                    runCmd={(id) => registry.run(id)}
+                    onwork={workIssue}
+                />
+            {/if}
+        </div>
+        <SidePane
+            side="right"
+            visible={app.threadPaneOpen}
+            title="Threads"
+            onclose={() => (app.threadPaneOpen = false)}
+        >
+            <ThreadPanel {api} editor={activeEditor} />
+        </SidePane>
     </div>
 </div>
 
