@@ -538,6 +538,15 @@ body {
     font-size: 11px;
     overflow-wrap: anywhere;
 }
+.thread-nav {
+    margin-left: auto;
+    font-size: 0.75rem;
+    opacity: 0.8;
+    white-space: nowrap;
+}
+.thread-active-line {
+    background: color-mix(in srgb, var(--accent, #4a9eff) 18%, transparent);
+}
 
 /* the head's submit button carries the review's call to action */
 .editor-submit {
@@ -1725,12 +1734,12 @@ button.ws-tag.pr-conflicts:hover {
     flex-direction: column;
     width: 22rem;
     min-width: 16rem;
-    background: var(--bg, #1e1e1e);
-    border-left: 1px solid var(--border, #333);
+    background: var(--raise);
+    border-left: 1px solid var(--line);
 }
 .side-pane-left {
     border-left: none;
-    border-right: 1px solid var(--border, #333);
+    border-right: 1px solid var(--line);
     order: -1;
 }
 .side-pane-head {
@@ -1738,7 +1747,7 @@ button.ws-tag.pr-conflicts:hover {
     align-items: center;
     justify-content: space-between;
     padding: 0.25rem 0.5rem;
-    border-bottom: 1px solid var(--border, #333);
+    border-bottom: 1px solid var(--line);
 }
 .side-pane-title {
     font-size: 0.75rem;
