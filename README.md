@@ -1,6 +1,6 @@
 # rook
 
-An AI-native terminal for the agent age — a Wails desktop app that replaces a
+An AI-native IDE for the agent age — a Wails desktop app that replaces a
 ghostty+tmux daily driver with something an agent can drive as fluently as you can.
 
 The name works twice: rooks are the clever corvids — tool-users and the classic
@@ -9,6 +9,10 @@ is the castle, the home base you retreat into. Part of the
 [incantery](https://github.com/incantery) suite, but deliberately its own thing:
 nothing depends on rook, and rook's only planned sibling dependency is
 [sigil](https://github.com/incantery/sigil) as the frontend language (below).
+
+## Demo
+
+https://github.com/user-attachments/assets/1ebda3b9-14ca-4193-8629-ecb1871025bc
 
 ## Install
 
