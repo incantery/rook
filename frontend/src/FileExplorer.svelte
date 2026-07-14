@@ -80,7 +80,7 @@
 {#snippet row(node: FileNode, depth: number)}
     {#if node.dir}
         <button
-            class="flex w-full items-center gap-1 py-0.5 pr-2 text-left font-mono text-xs text-fg hover:bg-white/5"
+            class="flex w-full appearance-none items-center gap-1 border-0 bg-transparent py-0.5 pr-2 text-left font-mono text-xs text-fg hover:bg-white/5"
             style="padding-left: {depth * 12 + 6}px"
             onclick={() => toggle(node.path)}
         >
@@ -94,7 +94,7 @@
         {/if}
     {:else}
         <button
-            class="flex w-full items-center gap-1 py-0.5 pr-2 text-left font-mono text-xs text-dim hover:bg-white/5 hover:text-fg"
+            class="flex w-full appearance-none items-center gap-1 border-0 bg-transparent py-0.5 pr-2 text-left font-mono text-xs text-dim hover:bg-white/5 hover:text-fg"
             style="padding-left: {depth * 12 + 6}px"
             onclick={() => onopen(node.path)}
         >
