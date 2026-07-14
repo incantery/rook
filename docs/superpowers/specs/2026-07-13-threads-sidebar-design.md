@@ -39,6 +39,17 @@ Svelte inside Monaco; no Monaco inside the pane.
 
 ## Architecture
 
+The layout is a **global side-pane system** (VS Code-style) wrapping the
+workbench, plus a narrow seam from the editor island up into it. Two
+distinct pieces:
+
+- **Chrome (Svelte):** `#app-screen` becomes a row —
+  `[#terminals workbench] [right side pane]`. The side pane is Svelte
+  chrome, a sibling of the workbench, **never inside `editor-wrap`**. The
+  thread panel is a placement-agnostic tenant slotted into it.
+- **Island (framework-free):** the editor pane (`term/editor.ts`) stays
+  imperative DOM and loses all conversation UI, exposing only a seam.
+
 ### The seam (island ↔ chrome)
 
 `ThreadBand` (`frontend/src/term/threads.ts`) shrinks to a **read-only
@@ -65,26 +76,40 @@ Three signals out, two calls in:
     paint the read-only anchor highlight.
   - `clearHighlight()`.
 
-`BandHooks` (reply / resolve / reopen / create) **moves up to the pane**
-and calls `hostapi` directly. The pane no longer routes conversation
-mutations; the island does zero conversation logic.
+`BandHooks` (reply / resolve / reopen / create) **moves up to chrome** —
+the thread panel calls `hostapi` directly. The island does zero
+conversation logic and does not route mutations.
 
-### The thread pane (Svelte chrome)
+**Active-editor binding.** `App.svelte` already constructs each
+`EditorPane`. It holds `activeEditorPane` (the most-recently-focused
+editor pane) and wires its seam to the thread panel; when a terminal is
+focused instead, the panel idles (empty state). With splits, more than one
+editor pane can exist — the panel tracks whichever was focused last.
 
-A contextual **right pane** inside the `` ` g`` review/diff pane and
-`` ` e`` file viewer (layout: the sidebar is a sub-region of the editor
-pane, not a peer in the window strip). VS Code-style:
+### The side pane + thread panel (Svelte chrome)
 
-- **Open by default**, **toggleable** closed/open via a header affordance
-  and a keybinding registered in the keymap (consistent with the existing
-  `` ` `` leader layer). Collapsing hands the width back to Monaco.
-- Holds **one thread at a time** (single-select). Reuses `threadview.ts`
-  (already DOM-free) for its view-model and shares its thread-card
-  rendering with the future 2c inbox.
-- **Scope guard (YAGNI):** we build only this right thread pane. The
-  open/collapse mechanism is generic enough that a future left pane (file
-  tree, etc.) could reuse it, but no left pane and no general pane
-  framework ship in this slice.
+Two Svelte layers, deliberately split so placement is configurable and the
+panel is not:
+
+- **`SidePane`** — the slot. A container parameterized by `side`
+  (`"left" | "right"`), `visible`, and width; renders one panel. Only the
+  **right** slot is mounted this slice. Open by default, **toggleable**
+  via a header affordance + a keybinding in the keymap (consistent with
+  the `` ` `` leader layer). Collapsing hands the width back to the
+  workbench.
+- **`ThreadPanel`** — the tenant. Self-contained and **placement-agnostic**:
+  it knows nothing about which side hosts it. Takes the active editor
+  pane's seam + `hostapi`, holds **one thread at a time** (single-select),
+  and reuses `threadview.ts` (DOM-free) for its view-model. The same
+  component the 2c inbox can render.
+
+**Built with left + dynamic panes in mind (YAGNI on building them).** This
+slice ships the right slot with `ThreadPanel` as its sole tenant. It does
+**not** ship a left pane, a panel registry, or user-configurable
+placement — but the `SidePane`/`ThreadPanel` split is exactly so a left
+slot and slot-to-panel configuration drop in later without touching the
+panel. `ThreadPanel` must never reference "right"; `SidePane` must never
+reference threads.
 
 ## Pane state machine
 
@@ -153,15 +178,18 @@ Mostly inherited from today's patterns:
 
 ## Testing
 
-- **`threadview.ts` unit tests** (pure view-model, the existing pattern):
-  stack ranking + `N of Y` selection, marker-line computation, active-
-  highlight range, empty / composer / thread transitions, file-nav reset.
-- **Component tests** for the pane's three states and the draft-safety
-  guard (refetch must not clobber a non-empty textarea).
-- **Manual GUI checklist** (Seth's standard for pane work): marker-click
-  loads + jumps + highlights; ⌘⇧M composes; save creates + transitions;
-  cycle a stacked line; resolve / reopen; outdated rendering; toggle the
-  pane closed / open; file-nav clears.
+This slice adds **vitest** — the frontend's first committed test runner
+(today's `threadview.ts` "tests" are ad-hoc scratchpad scripts). Node
+environment, no jsdom; the view-model is pure so no DOM is needed.
+
+- **`threadview.ts` unit tests** (vitest, pure view-model): stack ranking
+  + `N of Y` selection, marker-line computation, active-highlight range,
+  empty / composer / thread transitions, file-nav reset.
+- **Manual GUI checklist** (Seth's standard for pane work, covers the
+  DOM/Monaco/seam wiring vitest can't reach): marker-click loads + jumps +
+  highlights; ⌘⇧M composes; save creates + transitions; cycle a stacked
+  line; resolve / reopen; outdated rendering; toggle the pane closed /
+  open; file-nav clears; terminal-focus idles the panel.
 - **No new host/Go tests** — frontend-only; the host thread API is
   unchanged.
 
@@ -170,7 +198,9 @@ Mostly inherited from today's patterns:
 - The 2c attention inbox and the `rook-threads` skill (still owed from the
   original design; the shared thread-card component built here is the
   reusable piece the inbox will render).
-- A left pane / general pane framework.
+- A **left pane**, a **panel registry**, or **user-configurable
+  placement** — the `SidePane`/`ThreadPanel` split is built to accept them
+  later, but only the right slot + thread tenant ship now.
 - A multi-thread list view (single-thread + `N of Y` cycling is the model;
   a list can grow later if a file routinely carries many threads).
 - Any host, anchoring, or rookctl change.
