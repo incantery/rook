@@ -372,6 +372,30 @@ type workspaceListItem struct {
 	PR       *PRSnapshot `json:"pr,omitempty"`
 }
 
+// allowSet turns the workspace-allow config list into a membership set, or
+// nil when the list is empty (the filter is off).
+func allowSet(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[n] = true
+	}
+	return m
+}
+
+// allowedWorkspace reports whether a workspace is visible under the
+// workspace-allow filter. An empty set means the filter is off (everything
+// visible). A workspace passes if its own name or its worktree source is
+// listed — the name-or-WorktreeOf pattern shared with Jira/workflow lookups.
+func allowedWorkspace(name, worktreeOf string, allow map[string]bool) bool {
+	if len(allow) == 0 {
+		return true
+	}
+	return allow[name] || (worktreeOf != "" && allow[worktreeOf])
+}
+
 // workspaceList assembles the workspace list with live-session counts and
 // PR snapshots — GET /workspaces verbatim, and /overview's base layer.
 func (h *Host) workspaceList() []workspaceListItem {
@@ -381,14 +405,22 @@ func (h *Host) workspaceList() []workspaceListItem {
 		counts[s.info.Workspace]++
 	}
 	h.mu.Unlock()
+	allow := allowSet(config.Load().WorkspaceAllow)
 	list := h.reg.list()
 	out := make([]workspaceListItem, 0, len(list))
 	for _, ws := range list {
-		out = append(out, workspaceListItem{WorkspaceInfo: *ws, Sessions: counts[ws.Name], PR: h.prm.get(ws.Name)})
-		delete(counts, ws.Name)
+		sessions := counts[ws.Name]
+		delete(counts, ws.Name) // consumed; must not reappear below even if filtered out
+		if !allowedWorkspace(ws.Name, ws.WorktreeOf, allow) {
+			continue
+		}
+		out = append(out, workspaceListItem{WorkspaceInfo: *ws, Sessions: sessions, PR: h.prm.get(ws.Name)})
 	}
 	// live sessions in unregistered workspaces (pre-registry hosts)
 	for name, n := range counts {
+		if !allowedWorkspace(name, "", allow) {
+			continue
+		}
 		out = append(out, workspaceListItem{WorkspaceInfo: WorkspaceInfo{Name: name}, Sessions: n})
 	}
 	return out
