@@ -69,6 +69,13 @@ type Config struct {
 	// fails open: unknown commands, unparseable chords, and reserved
 	// triggers (digits, the literal-backtick escape) are ignored there.
 	Keybinds map[string]string `json:"keybinds"`
+	// WorkspaceAllow is a presentation-only visibility filter: when
+	// non-empty, only the named workspaces (and any worktree carved from
+	// one of them) appear in the host's workspace list — the dashboard,
+	// mission control, and /overview. Empty/unset means every workspace
+	// shows. `workspace-allow = rook, dora`. Not access control:
+	// registration and per-workspace endpoints are unaffected.
+	WorkspaceAllow []string `json:"workspaceAllow"`
 }
 
 func Default() Config {
@@ -201,6 +208,8 @@ func Load() Config {
 			}
 		case "workflow":
 			cfg.Workflow = splitList(value)
+		case "workspace-allow":
+			cfg.WorkspaceAllow = splitList(value)
 		case "keybind":
 			// <trigger>=<command>; command ids never contain '=', so split
 			// on the LAST '=' — that keeps "=" itself a bindable trigger and
