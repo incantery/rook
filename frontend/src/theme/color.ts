@@ -60,11 +60,7 @@ export function darken(hex: string, amt: number): string {
 
 function rgb(hex: string): [number, number, number] {
     const h = stripAlpha(hex);
-    return [
-        parseInt(h.slice(1, 3), 16),
-        parseInt(h.slice(3, 5), 16),
-        parseInt(h.slice(5, 7), 16),
-    ];
+    return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
 }
 
 function toHex(r: number, g: number, b: number): string {
