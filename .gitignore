@@ -12,3 +12,6 @@ build/android/gen/
 # local one-off builds
 /rookctl
 frontend/rook
+# playwright output (the e2e sandbox itself lives in bin/, already ignored)
+frontend/test-results
+frontend/playwright-report

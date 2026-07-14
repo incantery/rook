@@ -18,7 +18,7 @@ APP := /Applications/rook.app
 BUILD := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit).$(shell date +%Y%m%d%H%M%S)
 BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 
-.PHONY: build start dev package install clean agent release
+.PHONY: build start dev package install clean agent release e2e e2e-clean
 
 build:
 	wails3 task build
@@ -75,7 +75,22 @@ install: package
 agent:
 	go build -ldflags "$(BUILD_FLAG)" -o $(shell go env GOPATH)/bin/rook-agent ./cmd/rook-agent
 
-clean:
+# Browser-driven tests against the REAL app: Wails server mode runs rook as an
+# HTTP server, so Playwright gets the actual Go services and a real host
+# daemon — sandboxed in bin/e2e, never your daily driver. See docs/e2e.md.
+#   make e2e                     — all specs
+#   make e2e ARGS="--headed"     — watch it happen
+#   make e2e ARGS=theme          — one file
+e2e:
+	cd frontend && pnpm exec playwright test $(ARGS)
+
+# The sandbox daemon is setsid'd to outlive the app (same as the real one), so
+# it survives the run by design. This is how you stop it.
+e2e-clean:
+	-pkill -f 'bin/e2e/rook-host'
+	rm -rf bin/e2e
+
+clean: e2e-clean
 	rm -rf bin frontend/dist
 
 # Publish a release: make release VERSION=v0.1.0

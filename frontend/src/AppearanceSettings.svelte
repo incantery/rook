@@ -157,6 +157,7 @@
     <label class="my-2 flex items-center gap-2"
         ><span class="mb-1.5 block text-xs font-semibold text-dim">Theme</span>
         <select
+            id="theme-select"
             class="box-border w-full min-w-0 flex-1 rounded-lg border border-line/15 bg-[#0a0c14]/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
             bind:value={theme}
             onchange={() => void applyTheme()}
