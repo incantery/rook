@@ -29,7 +29,7 @@ base="https://github.com/$repo/releases/download/$tag"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-echo "downloading rook $tag…"
+echo "downloading rook ${tag}…"
 curl -fsSL -o "$tmp/$zip" "$base/$zip"
 curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt"
 (cd "$tmp" && grep "  $zip\$" checksums.txt | shasum -a 256 -c - >/dev/null) \
