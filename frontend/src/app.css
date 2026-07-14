@@ -545,7 +545,7 @@ body {
     white-space: nowrap;
 }
 .thread-active-line {
-    background: color-mix(in srgb, var(--accent, #4a9eff) 18%, transparent);
+    background: color-mix(in srgb, var(--acc) 18%, transparent);
 }
 
 /* the head's submit button carries the review's call to action */
