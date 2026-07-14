@@ -7,5 +7,6 @@ export {
 };
 
 export type {
-    Config
+    Config,
+    Patch
 } from "./models.js";

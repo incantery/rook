@@ -79,4 +79,40 @@ export interface Config {
      * triggers (digits, the literal-backtick escape) are ignored there.
      */
     "keybinds": { [_ in string]?: string } | null;
+
+    /**
+     * WorkspaceAllow is a presentation-only visibility filter: when
+     * non-empty, only the named workspaces (and any worktree carved from
+     * one of them) appear in the host's workspace list — the dashboard,
+     * mission control, and /overview. Empty/unset means every workspace
+     * shows. `workspace-allow = rook, dora`. Not access control:
+     * registration and per-workspace endpoints are unaffected.
+     */
+    "workspaceAllow": string[] | null;
+}
+
+/**
+ * Patch is the subset of config the Settings UI edits. A nil pointer / nil map
+ * means "leave untouched"; a non-nil value (even empty) is applied. Everything
+ * not named here — comments, blank lines, out-of-scope keys — is preserved.
+ */
+export interface Patch {
+    "jiraUrl"?: string | null;
+    "jiraEmail"?: string | null;
+    "jiraJql"?: string | null;
+    "leader"?: string | null;
+    "fontFamily"?: string | null;
+    "fontSize"?: number | null;
+
+    /**
+     * Projects: the full desired jira-project-<ws> map. Rows not present are
+     * deleted; rows present are upserted.
+     */
+    "projects"?: { [_ in string]?: string } | null;
+
+    /**
+     * Keybinds: the full desired keybind set (trigger -> command; "" command =
+     * unbind line). Replaces the entire keybind block.
+     */
+    "keybinds"?: { [_ in string]?: string } | null;
 }

@@ -9,6 +9,10 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 // @ts-ignore: Unused imports
 import * as $models from "./models.js";
 
+export function ClearJiraToken(): $CancellablePromise<void> {
+    return $Call.ByID(3300020977);
+}
+
 export function ClearOpenAIKey(): $CancellablePromise<void> {
     return $Call.ByID(2969362405);
 }
@@ -22,11 +26,35 @@ export function Get(): $CancellablePromise<$models.Config> {
 }
 
 /**
+ * JiraTokenStatus reports where the token lives: "keychain", "file"
+ * (~/.config/rook/jira-token, 0600), or "" for none.
+ */
+export function JiraTokenStatus(): $CancellablePromise<string> {
+    return $Call.ByID(2498627626);
+}
+
+/**
  * OpenAIKeyStatus reports where a usable key currently lives: "keychain",
  * "file" (the ~/.config/rook/openai-key fallback), or "" for none.
  */
 export function OpenAIKeyStatus(): $CancellablePromise<string> {
     return $Call.ByID(591849110);
+}
+
+/**
+ * SetConfig applies a Patch surgically to the config file.
+ */
+export function SetConfig(p: $models.Patch): $CancellablePromise<void> {
+    return $Call.ByID(1981843071, p);
+}
+
+/**
+ * SetJiraToken stores the Jira API token in the login keychain (service rook,
+ * account jira). Entering it here — not on a shell — is why special characters
+ * like underscores survive.
+ */
+export function SetJiraToken(token: string): $CancellablePromise<void> {
+    return $Call.ByID(872166990, token);
 }
 
 /**
