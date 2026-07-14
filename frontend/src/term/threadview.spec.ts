@@ -1,12 +1,20 @@
 import {describe, expect, it} from "vitest";
 import type {ThreadInfo} from "../hostapi";
 import {
+    avatar,
     bandThreads,
     contextKey,
     cycleStack,
+    fileThreads,
+    filterThreads,
     glyphClass,
     markerLines,
+    openCount,
     pickFromStack,
+    relTime,
+    resolvedCount,
+    snippetOf,
+    stateMeta,
     threadStack,
 } from "./threadview";
 
@@ -113,5 +121,91 @@ describe("contextKey", () => {
             contextKey({workspace: "w", path: "b.ts"}),
         );
         expect(contextKey(null)).toBe("");
+    });
+});
+
+describe("fileThreads", () => {
+    it("keeps this file across both sides, sorted by line then id", () => {
+        const all = [
+            th({id: 3, path: "a.ts", currentStart: 10}),
+            th({id: 1, path: "a.ts", currentStart: 5}),
+            th({id: 2, path: "b.ts", currentStart: 1}),
+            th({id: 4, path: "a.ts", side: "original", currentStart: 5}),
+        ];
+        expect(fileThreads(all, "a.ts").map((t) => t.id)).toEqual([1, 4, 3]);
+    });
+});
+
+describe("filterThreads", () => {
+    const all = [
+        th({id: 1, state: "pending"}),
+        th({id: 2, state: "open"}),
+        th({id: 3, state: "resolved"}),
+    ];
+    it("open = pending + open (not resolved)", () => {
+        expect(filterThreads(all, "open").map((t) => t.id)).toEqual([1, 2]);
+    });
+    it("resolved = resolved only", () => {
+        expect(filterThreads(all, "resolved").map((t) => t.id)).toEqual([3]);
+    });
+    it("all = everything", () => {
+        expect(filterThreads(all, "all").map((t) => t.id)).toEqual([1, 2, 3]);
+    });
+});
+
+describe("stateMeta", () => {
+    it("maps each state to label + tone", () => {
+        expect(stateMeta("pending")).toEqual({label: "Pending", tone: "amber"});
+        expect(stateMeta("open")).toEqual({label: "Open", tone: "acc"});
+        expect(stateMeta("resolved")).toEqual({label: "Resolved", tone: "grn"});
+    });
+});
+
+describe("openCount / resolvedCount", () => {
+    it("counts by resolved-ness", () => {
+        const all = [
+            th({id: 1, state: "pending"}),
+            th({id: 2, state: "open"}),
+            th({id: 3, state: "resolved"}),
+        ];
+        expect(openCount(all)).toBe(2);
+        expect(resolvedCount(all)).toBe(1);
+    });
+});
+
+describe("relTime", () => {
+    const now = Date.parse("2026-07-14T12:00:00Z");
+    it("floors to just now under 45s", () => {
+        expect(relTime("2026-07-14T11:59:30Z", now)).toBe("just now");
+    });
+    it("minutes", () => {
+        expect(relTime("2026-07-14T11:57:00Z", now)).toBe("3m");
+    });
+    it("hours", () => {
+        expect(relTime("2026-07-14T10:00:00Z", now)).toBe("2h");
+    });
+    it("days", () => {
+        expect(relTime("2026-07-09T12:00:00Z", now)).toBe("5d");
+    });
+    it("empty on unparseable input", () => {
+        expect(relTime("", now)).toBe("");
+    });
+});
+
+describe("avatar", () => {
+    it("agent → R, user → me", () => {
+        expect(avatar("agent")).toEqual({initials: "R", isAgent: true});
+        expect(avatar("user")).toEqual({initials: "me", isAgent: false});
+    });
+});
+
+describe("snippetOf", () => {
+    it("first trimmed line of the anchor", () => {
+        expect(snippetOf(th({id: 1, anchorText: "  cp -R bin/rook.app\nnext"}))).toBe(
+            "cp -R bin/rook.app",
+        );
+    });
+    it("blank fallback when anchor is empty/whitespace", () => {
+        expect(snippetOf(th({id: 1, anchorText: "   "}))).toBe("(blank line)");
     });
 });
