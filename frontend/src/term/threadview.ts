@@ -2,7 +2,7 @@
 // can pin the logic (scratchpad threadview-test). term/threads.ts renders
 // what these compute.
 
-import type {ThreadInfo} from "../hostapi";
+import type {ThreadComment, ThreadInfo} from "../hostapi";
 
 export type Side = "modified" | "original";
 
@@ -102,4 +102,60 @@ export function cycleStack(stack: ThreadInfo[], activeId: number, dir: 1 | -1): 
  *  changes (file-nav / workspace switch). */
 export function contextKey(ctx: {workspace: string; path: string} | null): string {
     return ctx ? `${ctx.workspace}:${ctx.path}` : "";
+}
+
+export type ThreadFilter = "open" | "resolved" | "all";
+export type StateTone = "amber" | "acc" | "grn";
+
+/** The threads the panel lists: this file, both sides, top-down. */
+export function fileThreads(all: ThreadInfo[], path: string): ThreadInfo[] {
+    return all
+        .filter((t) => t.path === path)
+        .sort((a, b) => a.currentStart - b.currentStart || a.id - b.id);
+}
+
+/** Client-side filter tab. "open" means not-resolved (pending + open). */
+export function filterThreads(threads: ThreadInfo[], filter: ThreadFilter): ThreadInfo[] {
+    if (filter === "all") return threads;
+    if (filter === "resolved") return threads.filter((t) => t.state === "resolved");
+    return threads.filter((t) => t.state !== "resolved");
+}
+
+/** Label + accent tone for a thread state. */
+export function stateMeta(state: ThreadInfo["state"]): {label: string; tone: StateTone} {
+    if (state === "pending") return {label: "Pending", tone: "amber"};
+    if (state === "resolved") return {label: "Resolved", tone: "grn"};
+    return {label: "Open", tone: "acc"};
+}
+
+export function openCount(all: ThreadInfo[]): number {
+    return all.filter((t) => t.state !== "resolved").length;
+}
+
+export function resolvedCount(all: ThreadInfo[]): number {
+    return all.filter((t) => t.state === "resolved").length;
+}
+
+/** Compact relative time from an ISO string; nowMs injected for testability. */
+export function relTime(iso: string, nowMs: number): string {
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) return "";
+    const secs = Math.max(0, Math.floor((nowMs - t) / 1000));
+    if (secs < 45) return "just now";
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `${mins}m`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h`;
+    return `${Math.floor(hrs / 24)}d`;
+}
+
+/** Avatar chip for a comment author — no authenticated identity exists. */
+export function avatar(author: ThreadComment["author"]): {initials: string; isAgent: boolean} {
+    return author === "agent" ? {initials: "R", isAgent: true} : {initials: "me", isAgent: false};
+}
+
+/** Collapsed-card snippet: first non-blank line of the anchor. */
+export function snippetOf(t: ThreadInfo): string {
+    const first = (t.anchorText || "").split("\n")[0].trim();
+    return first || "(blank line)";
 }

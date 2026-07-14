@@ -66,6 +66,28 @@ component structure** and render it in rook's existing tokens
 `--fg`, `--dim`, `--lo`, `--mono`, system-ui). No oklch, no web fonts, no
 new dependencies.
 
+**Inline Tailwind utilities, per README decision 7.** rook is mid-migration
+from `app.css` classes to Tailwind v4 utilities; the policy (stated at the
+top of `app.css`) is to convert a surface to utilities when it is being
+touched anyway. This full rewrite qualifies, so `ThreadPanel.svelte` is
+styled with **inline Tailwind utilities in markup** — no new `.tp-*` class
+block, no `@apply`. The `@theme` block exposes the palette as colour
+utilities (`text-acc`, `bg-amber`, `text-grn`, `text-lo`, `font-mono`, …).
+`--line`/`--raise` are not theme colours, so hairline borders/surfaces use
+white-alpha (`border-white/10`, `bg-white/[0.02]`). The four small shared
+classes the design still needs — `.thread-input`, `.thread-err`,
+`.thread-anchor`, `.thread-active-line` — stay in `app.css`; the dead
+single-thread rules (`.thread-card`, `.thread-row`, `.thread-state*`,
+`.thread-meta`, `.thread-comment`, `.thread-author*`, `.thread-body`,
+`.thread-reply`, `.thread-nav`) are deleted.
+
+**SidePane owns the title.** The panel mounts inside `SidePane`, which
+already renders a "Threads" header + close button and a
+`overflow-y:auto` body. The panel therefore shows no redundant title —
+its own top row is the filter tabs + counts — and it lays itself out as a
+flex column filling the body (sticky filters, scrolling list, sticky
+footer hint).
+
 State → accent: `pending` → amber, `open` → acc (blue), `resolved` → grn.
 
 ## Architecture
@@ -133,11 +155,13 @@ Behavior:
 
 ### Styling
 
-Scoped `<style>` in `ThreadPanel.svelte` (the component already owns its
-CSS today). Rounded cards (`border-radius: 11px`), state-toned left accent
-and dot, avatar chips, filter pills, mono snippets — all built from the
-existing tokens. Reuse `.editor-btn` where it fits; add card/list classes.
-No changes to `app.css` root tokens.
+Inline Tailwind v4 utilities in `ThreadPanel.svelte` markup (see the
+principle above). Rounded cards (`rounded-xl`), state-toned dot + label via
+a static `tone → class` lookup (Tailwind scans source for literal class
+names, so never `bg-${tone}`), avatar chips, filter pills, mono snippets —
+all from `@theme` colour utilities + white-alpha surfaces. `app.css` change
+is a **deletion** of the dead single-thread rules; the four shared classes
+above stay. No `@theme` edits, no new `.tp-*` classes.
 
 ## Data mapping (mockup → real model)
 
@@ -168,3 +192,4 @@ No changes to `app.css` root tokens.
 - No proposed-revision or apply-to-tree (deferred to a Layer 2 spec).
 - No gutter-marker redesign — the seam and glyphs are untouched.
 - No web fonts / oklch adoption.
+- No `@theme` token additions and no `@apply` — inline utilities only.
