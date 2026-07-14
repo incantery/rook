@@ -18,9 +18,10 @@
     --color-amber: #ffcb6b;
     --color-red: #ff5370;
     --color-hot: #f07178;
-    /* hairline borders + the faint raised-surface tint, exposed as
-       utilities (border-line / bg-raise) so chrome converts cleanly. */
-    --color-line: rgba(140, 150, 180, 0.14);
+    /* hairline stock (solid; use border-line/15 for the 0.14 hairline,
+       border-line/30 for the stronger panel/pill edge) + the faint
+       raised-surface tint, exposed so chrome converts cleanly. */
+    --color-line: rgb(140, 150, 180);
     --color-raise: rgba(255, 255, 255, 0.035);
     --font-mono: "Hack Nerd Font Mono", Menlo, ui-monospace, monospace;
     /* a claude session in this window is waiting on you (titlebar tab) */

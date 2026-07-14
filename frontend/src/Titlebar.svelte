@@ -49,7 +49,7 @@
 </script>
 
 <div
-    class="relative flex h-11 shrink-0 items-center justify-end gap-2 border-b border-line bg-raise pl-21 pr-3.5"
+    class="relative flex h-11 shrink-0 items-center justify-end gap-2 border-b border-line/15 bg-raise pl-21 pr-3.5"
     style="--wails-draggable: drag"
 >
     <button
@@ -134,11 +134,11 @@
         >
     {/if}
     <button
-        class="box-border inline-flex h-6 cursor-pointer appearance-none items-center gap-2 self-center rounded-md border border-line bg-white/5 pl-2.5 pr-2 text-xs text-dim hover:bg-white/10 hover:text-fg"
+        class="box-border inline-flex h-6 cursor-pointer appearance-none items-center gap-2 self-center rounded-md border border-line/15 bg-white/5 pl-2.5 pr-2 text-xs text-dim hover:bg-white/10 hover:text-fg"
         style="--wails-draggable: no-drag"
         onclick={onpalette}
     >
-        commands <kbd class="rounded border border-line px-1.5 py-px font-mono text-xs text-lo"
+        commands <kbd class="rounded border border-line/15 px-1.5 py-px font-mono text-xs text-lo"
             >⌘K</kbd
         >
     </button>

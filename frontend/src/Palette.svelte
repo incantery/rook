@@ -53,16 +53,17 @@
 </script>
 
 <div
-    id="palette"
-    class="overlay"
+    class="fixed inset-0 z-50 flex items-start justify-center bg-black/55 pt-[12vh]"
     onmousedown={(e) => e.target === e.currentTarget && onclose()}
     role="presentation"
 >
-    <div class="pal-panel">
-        <div class="pal-inputrow">
-            <span class="pal-chevron">›</span>
+    <div
+        class="w-150 max-w-[92vw] overflow-hidden rounded-xl border border-line/30 bg-[#151924] shadow-2xl"
+    >
+        <div class="flex items-center gap-2.5 border-b border-line/15 px-4 py-3">
+            <span class="font-mono text-sm text-lo">›</span>
             <input
-                class="pal-input"
+                class="flex-1 border-0 bg-transparent font-[inherit] text-base text-fg outline-none"
                 placeholder="Run a command…"
                 spellcheck="false"
                 bind:this={inputEl}
@@ -70,12 +71,18 @@
                 oninput={() => (sel = 0)}
                 onkeydown={onKeydown}
             />
-            <span class="pal-esc">esc</span>
+            <span class="rounded border border-line/15 px-1.5 py-0.5 font-mono text-xs text-lo"
+                >esc</span
+            >
         </div>
-        <div class="pal-list" bind:this={listEl}>
+        <div class="max-h-[48vh] overflow-y-auto p-1.5" bind:this={listEl}>
             {#each current as cmd, i (cmd.id)}
+                <!-- .sel stays as a JS scroll-into-view hook, not a style -->
                 <div
-                    class="pal-item"
+                    class={[
+                        "flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 hover:bg-acc/15",
+                        i === sel && "bg-acc/15",
+                    ]}
                     class:sel={i === sel}
                     onmousedown={(e) => {
                         e.preventDefault();
@@ -83,15 +90,19 @@
                     }}
                     role="presentation"
                 >
-                    <span class="pal-title">{cmd.title}</span>
-                    <span class="pal-cat">{cmd.category}</span>
-                    <span class="pal-keys">{cmd.keys ?? ""}</span>
+                    <span class="flex-1 text-sm text-fg">{cmd.title}</span>
+                    <span class="text-xs uppercase tracking-wider text-lo">{cmd.category}</span>
+                    <span class="min-w-10 text-right font-mono text-xs text-dim"
+                        >{cmd.keys ?? ""}</span
+                    >
                 </div>
             {/each}
         </div>
-        <div class="pal-footer">
+        <div
+            class="flex items-center gap-4 border-t border-line/15 px-4 py-2 font-mono text-xs text-lo"
+        >
             <span>↑↓ navigate</span><span>↵ run</span>
-            <span class="pal-spacer"></span>
+            <span class="flex-1"></span>
             <span>humans + agents share this registry</span>
         </div>
     </div>
