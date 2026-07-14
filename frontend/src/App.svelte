@@ -52,9 +52,11 @@
     const registry = new Registry();
 
     let activeEditor = $state<EditorSeam | null>(null);
-    // focusing a terminal (activeId set by the manager) idles the panel
+    // focusing a terminal idles the panel; focusedSessionId is null when an
+    // editor pane (Monaco) holds focus, so switching back onto a review pane
+    // keeps its seam bound
     $effect(() => {
-        if (app.activeId) activeEditor = null;
+        if (app.focusedSessionId) activeEditor = null;
     });
 
     // resolved when the manager has attached every live session — opening a
@@ -588,6 +590,7 @@
             changed: () => {
                 app.tabs = mgr.currentTabs();
                 app.activeId = mgr.activeId;
+                app.focusedSessionId = mgr.focusedSessionId;
                 app.workspace = mgr.workspace;
             },
             workspaceGone: showHome,
