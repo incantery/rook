@@ -8,10 +8,29 @@
 import type {ChangedFile, HostAPI, ThreadInfo} from "../hostapi";
 import type {PaneContent} from "./manager";
 import type * as monacoTypes from "monaco-editor";
-import {ThreadBand, type BandHooks} from "./threads";
-import {submitLabel} from "./threadview";
+import {ThreadBand} from "./threads";
+import {submitLabel, type Side} from "./threadview";
 
 type Monaco = typeof import("./monaco").monaco;
+
+export interface EditorContext {
+    workspace: string;
+    path: string;
+    base: "head" | "branch" | undefined;
+}
+
+/** The narrow door between the editor island and the thread panel (chrome).
+ *  Signals out (marker click, compose, change), calls in (reveal/clear). */
+export interface EditorSeam {
+    context(): EditorContext | null;
+    threads(): ThreadInfo[];
+    refetch(): Promise<void>;
+    reveal(t: ThreadInfo): void;
+    clearHighlight(): void;
+    onMarkerClick(cb: (line: number, side: Side, ids: number[]) => void): () => void;
+    onCompose(cb: (startLine: number, endLine: number, side: Side) => void): () => void;
+    onChange(cb: () => void): () => void;
+}
 
 export interface EditorPaneOpts {
     workspace: string;
@@ -24,6 +43,12 @@ export interface EditorPaneOpts {
     onFlash: (msg: string) => void;
     /** the × button; the caller routes it to closeActive() */
     onClose: () => void;
+    /** the pane calls this when a Monaco editor gains focus, so chrome can
+     *  bind the thread panel to the active editor */
+    onActivate?: (seam: EditorSeam) => void;
+    /** the pane calls this on dispose, iff a seam was ever handed out, so
+     *  chrome can drop a reference to what's now a disposed seam */
+    onDispose?: (seam: EditorSeam) => void;
 }
 
 /** How stale a review may be before a re-focus refetches it. */
@@ -59,6 +84,12 @@ export class EditorPane implements PaneContent {
     /** every thread in the workspace — bands slice per (path, side) */
     private threadsAll: ThreadInfo[] = [];
     private bands: ThreadBand[] = [];
+
+    // seam subscribers (chrome side)
+    private markerCbs: ((line: number, side: Side, ids: number[]) => void)[] = [];
+    private composeCbs: ((s: number, e: number, side: Side) => void)[] = [];
+    private changeCbs: (() => void)[] = [];
+    private _seam: EditorSeam | null = null;
 
     constructor(
         private api: HostAPI,
@@ -119,10 +150,9 @@ export class EditorPane implements PaneContent {
 
     focus(): void {
         (this.diffEditor ?? this.editor)?.focus();
-        // a re-focused pane is often stale — the agent kept working. But
-        // never refetch out from under a half-written comment.
+        // a re-focused pane is often stale — the agent kept working. Thread
+        // drafts live in the panel (chrome), so refetch is always safe here.
         if (!this.monaco || Date.now() - this.fetchedAt <= STALE_MS) return;
-        if (this.bands.some((b) => b.hasDraft())) return;
         if (this.opts.kind === "review") void this.refresh();
         else void this.refetchThreads();
     }
@@ -136,11 +166,65 @@ export class EditorPane implements PaneContent {
 
     dispose(): void {
         this.disposed = true;
+        if (this._seam) this.opts.onDispose?.(this._seam);
         for (const b of this.bands) b.dispose();
         this.disposeModels();
         this.diffEditor?.dispose();
         this.editor?.dispose();
         this.el.remove();
+    }
+
+    // ---- the seam (chrome ↔ island) ----
+
+    get seam(): EditorSeam {
+        return (this._seam ??= {
+            context: () => {
+                const path = this.currentPath();
+                return path ? {workspace: this.opts.workspace, path, base: this.base} : null;
+            },
+            threads: () => this.threadsAll,
+            refetch: () => this.refetchThreads(),
+            reveal: (t) => this.reveal(t),
+            clearHighlight: () => {
+                for (const b of this.bands) b.clearHighlight();
+            },
+            onMarkerClick: (cb) => this.sub(this.markerCbs, cb),
+            onCompose: (cb) => this.sub(this.composeCbs, cb),
+            onChange: (cb) => this.sub(this.changeCbs, cb),
+        });
+    }
+
+    private sub<T>(list: T[], cb: T): () => void {
+        list.push(cb);
+        return () => {
+            const i = list.indexOf(cb);
+            if (i >= 0) list.splice(i, 1);
+        };
+    }
+
+    private emitChange(): void {
+        for (const cb of this.changeCbs) cb();
+    }
+
+    private activate(): void {
+        this.opts.onActivate?.(this.seam);
+    }
+
+    /** Jump the right editor to a thread's anchor and paint the highlight;
+     *  outdated threads still reveal their best-effort mapped range. */
+    private reveal(t: ThreadInfo): void {
+        for (const b of this.bands) {
+            if (b.side === t.side) {
+                b.highlight(t.currentStart, t.currentEnd);
+                b.editor.revealLinesInCenterIfOutsideViewport(
+                    Math.max(1, t.currentStart),
+                    Math.max(1, t.currentEnd),
+                );
+                b.editor.focus();
+            } else {
+                b.clearHighlight();
+            }
+        }
     }
 
     // ---- data flow ----
@@ -181,6 +265,7 @@ export class EditorPane implements PaneContent {
                 const p = this.currentPath();
                 if (this.disposed || !p) return;
                 for (const b of this.bands) b.render(this.threadsAll, p);
+                this.emitChange();
             });
             const res = await this.api.changes(this.opts.workspace, this.base);
             if (this.disposed) return;
@@ -253,6 +338,7 @@ export class EditorPane implements PaneContent {
                 const p = this.currentPath();
                 if (this.disposed || !p) return;
                 for (const b of this.bands) b.render(this.threadsAll, p);
+                this.emitChange();
             });
             const res = await this.api.readFile(this.opts.workspace, path);
             if (this.disposed) return;
@@ -299,36 +385,7 @@ export class EditorPane implements PaneContent {
         const path = this.currentPath();
         if (!path) return;
         for (const b of this.bands) b.render(this.threadsAll, path);
-    }
-
-    private bandHooks(side: "modified" | "original"): BandHooks {
-        return {
-            reply: async (id, body) => {
-                await this.api.threadComment(id, body);
-                await this.refetchThreads();
-            },
-            resolve: async (id) => {
-                await this.api.threadResolve(id);
-                await this.refetchThreads();
-            },
-            reopen: async (id) => {
-                await this.api.threadReopen(id);
-                await this.refetchThreads();
-            },
-            create: async (startLine, endLine, body) => {
-                const path = this.currentPath();
-                if (!path) return;
-                await this.api.createThread(this.opts.workspace, {
-                    path,
-                    startLine,
-                    endLine,
-                    side,
-                    base: side === "original" ? this.base : undefined,
-                    body,
-                });
-                await this.refetchThreads();
-            },
-        };
+        this.emitChange();
     }
 
     /** "submit N" while pending threads exist; "nudge again" when open
@@ -386,40 +443,32 @@ export class EditorPane implements PaneContent {
                 let end = sel.endLineNumber;
                 // a full-line drag ends at column 1 of the NEXT line — not a line
                 if (end > sel.startLineNumber && sel.endColumn === 1) end--;
-                band.openComposer(sel.startLineNumber, end);
+                for (const cb of this.composeCbs) cb(sel.startLineNumber, end, band.side);
             },
         });
     }
 
     /** Editors persist across file navs but models don't — decorations
-     *  and zones live on the model/view, so bands rebuild per nav. Open
-     *  widgets are restored by id where the new file still has them. */
+     *  live on the model/view, so bands rebuild per nav. */
     private rebuildBands(): void {
-        const open = new Set(this.bands.flatMap((b) => b.openThreadIds()));
         for (const b of this.bands) b.dispose();
         this.bands = [];
         const m = this.monaco;
         const path = this.currentPath();
         if (!m || !path) return;
+        const onMarker = (line: number, side: Side, ids: number[]) => {
+            for (const cb of this.markerCbs) cb(line, side, ids);
+        };
         if (this.diffEditor) {
             this.bands = [
-                new ThreadBand(
-                    m,
-                    this.diffEditor.getOriginalEditor(),
-                    "original",
-                    this.bandHooks("original"),
-                ),
-                new ThreadBand(
-                    m,
-                    this.diffEditor.getModifiedEditor(),
-                    "modified",
-                    this.bandHooks("modified"),
-                ),
+                new ThreadBand(m, this.diffEditor.getOriginalEditor(), "original", onMarker),
+                new ThreadBand(m, this.diffEditor.getModifiedEditor(), "modified", onMarker),
             ];
         } else if (this.editor) {
-            this.bands = [new ThreadBand(m, this.editor, "modified", this.bandHooks("modified"))];
+            this.bands = [new ThreadBand(m, this.editor, "modified", onMarker)];
         }
-        for (const b of this.bands) b.render(this.threadsAll, path, open);
+        for (const b of this.bands) b.render(this.threadsAll, path);
+        this.emitChange();
     }
 
     // ---- monaco plumbing ----
@@ -445,6 +494,8 @@ export class EditorPane implements PaneContent {
             });
             this.addCommentAction(this.diffEditor.getOriginalEditor());
             this.addCommentAction(this.diffEditor.getModifiedEditor());
+            this.diffEditor.getOriginalEditor().onDidFocusEditorText(() => this.activate());
+            this.diffEditor.getModifiedEditor().onDidFocusEditorText(() => this.activate());
         }
         return this.diffEditor;
     }
@@ -453,6 +504,7 @@ export class EditorPane implements PaneContent {
         if (!this.editor) {
             this.editor = this.monaco!.editor.create(this.body, this.editorOpts());
             this.addCommentAction(this.editor);
+            this.editor.onDidFocusEditorText(() => this.activate());
         }
         return this.editor;
     }

@@ -538,6 +538,15 @@ body {
     font-size: 11px;
     overflow-wrap: anywhere;
 }
+.thread-nav {
+    margin-left: auto;
+    font-size: 0.75rem;
+    opacity: 0.8;
+    white-space: nowrap;
+}
+.thread-active-line {
+    background: color-mix(in srgb, var(--acc) 18%, transparent);
+}
 
 /* the head's submit button carries the review's call to action */
 .editor-submit {
@@ -1707,4 +1716,52 @@ button.ws-tag.pr-conflicts:hover {
 }
 .settings-conflict {
     color: #ff5370;
+}
+
+/* workbench = terminals + the side pane, side by side */
+#workbench {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+}
+#workbench #terminals {
+    flex: 1;
+    min-width: 0;
+}
+.side-pane {
+    display: flex;
+    flex-direction: column;
+    width: 22rem;
+    min-width: 16rem;
+    background: var(--raise);
+    border-left: 1px solid var(--line);
+}
+.side-pane-left {
+    border-left: none;
+    border-right: 1px solid var(--line);
+    order: -1;
+}
+.side-pane-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.25rem 0.5rem;
+    border-bottom: 1px solid var(--line);
+}
+.side-pane-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    opacity: 0.7;
+}
+.side-pane-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+.thread-panel-empty {
+    padding: 1rem;
+    opacity: 0.6;
+    font-size: 0.85rem;
 }

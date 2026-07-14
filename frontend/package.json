@@ -9,6 +9,7 @@
         "build:dev": "vite build --minify false --mode development",
         "build": "vite build --mode production",
         "preview": "vite preview",
+        "test": "vitest run",
         "check": "svelte-check",
         "lint": "oxlint --deny-warnings",
         "format": "oxfmt",
@@ -30,6 +31,7 @@
         "svelte-check": "^4.7.2",
         "tailwindcss": "^4.3.2",
         "typescript": "^5.9.3",
-        "vite": "^8.0.5"
+        "vite": "^8.0.5",
+        "vitest": "^4.1.10"
     }
 }

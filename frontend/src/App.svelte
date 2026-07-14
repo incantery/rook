@@ -21,6 +21,9 @@
     import Inbox from "./Inbox.svelte";
     import SpawnModal from "./SpawnModal.svelte";
     import Settings from "./Settings.svelte";
+    import SidePane from "./SidePane.svelte";
+    import ThreadPanel from "./ThreadPanel.svelte";
+    import type {EditorSeam} from "./term/editor";
 
     interface Props {
         api: HostAPI;
@@ -47,6 +50,14 @@
     // assigned once in onMount, before any interaction can read it
     let mgr: TermManager = $state() as unknown as TermManager;
     const registry = new Registry();
+
+    let activeEditor = $state<EditorSeam | null>(null);
+    // focusing a terminal idles the panel; focusedSessionId is null when an
+    // editor pane (Monaco) holds focus, so switching back onto a review pane
+    // keeps its seam bound
+    $effect(() => {
+        if (app.focusedSessionId) activeEditor = null;
+    });
 
     // resolved when the manager has attached every live session — opening a
     // workspace before that could double-create its window
@@ -141,6 +152,10 @@
                         font: paneFont,
                         onFlash: flash,
                         onClose: () => void mgr.closeActive(),
+                        onActivate: (seam) => (activeEditor = seam),
+                        onDispose: (seam) => {
+                            if (activeEditor === seam) activeEditor = null;
+                        },
                     }),
             );
         } catch (err) {
@@ -369,6 +384,15 @@
             run: () => void openEditorPane("review"),
         },
         {
+            id: "threads.toggle",
+            title: "Toggle thread pane",
+            category: "View",
+            keys: keymap.display("threads.toggle"),
+            run: () => {
+                app.threadPaneOpen = !app.threadPaneOpen;
+            },
+        },
+        {
             id: "file.open",
             title: "Open file (read-only)",
             category: "View",
@@ -417,12 +441,12 @@
             return; // palette's own input handles the rest
         }
         if (app.pickerOpen || app.filePickerOpen) return; // pickers' own inputs handle keys
-        // thread widgets own their keys: comments about code are full of
+        // the thread panel owns its keys: comments about code are full of
         // backticks, and the capture-phase prefix must not eat them. Only
-        // .thread-zone is guarded — xterm's and Monaco's hidden textareas
-        // are NOT, so the prefix keeps working everywhere else.
+        // .side-pane is guarded — xterm's and Monaco's hidden textareas live
+        // in #terminals, NOT .side-pane, so the prefix keeps working there.
         const tgt = e.target as HTMLElement | null;
-        if (tgt?.closest?.(".thread-zone")) return;
+        if (tgt?.closest?.(".side-pane")) return;
         if (app.screen === "home") {
             // the prefix works here too, so ` h toggles back to the
             // workspace you left — but never while typing in a modal input
@@ -569,6 +593,7 @@
             changed: () => {
                 app.tabs = mgr.currentTabs();
                 app.activeId = mgr.activeId;
+                app.focusedSessionId = mgr.focusedSessionId;
                 app.workspace = mgr.workspace;
             },
             workspaceGone: showHome,
@@ -628,18 +653,28 @@
         onnew={() => void mgr.newSession()}
         onpalette={() => registry.run("palette.toggle")}
     />
-    <div id="terminals" bind:this={terminalsEl}>
-        {#if fatal}
-            <div id="fatal">{fatal}</div>
-        {/if}
-        {#if app.dashVisible}
-            <Dashboard
-                {api}
-                onjump={(id) => mgr.switchToId(id)}
-                runCmd={(id) => registry.run(id)}
-                onwork={workIssue}
-            />
-        {/if}
+    <div id="workbench">
+        <div id="terminals" bind:this={terminalsEl}>
+            {#if fatal}
+                <div id="fatal">{fatal}</div>
+            {/if}
+            {#if app.dashVisible}
+                <Dashboard
+                    {api}
+                    onjump={(id) => mgr.switchToId(id)}
+                    runCmd={(id) => registry.run(id)}
+                    onwork={workIssue}
+                />
+            {/if}
+        </div>
+        <SidePane
+            side="right"
+            visible={app.threadPaneOpen}
+            title="Threads"
+            onclose={() => (app.threadPaneOpen = false)}
+        >
+            <ThreadPanel {api} editor={activeEditor} />
+        </SidePane>
     </div>
 </div>
 

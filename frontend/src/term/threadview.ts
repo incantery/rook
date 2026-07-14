@@ -30,11 +30,10 @@ export function markerLines(threads: ThreadInfo[]): Map<number, ThreadInfo[]> {
  *  yet submitted) > open (live conversation) > resolved — plus an
  *  outdated modifier when any anchor no longer matches the file. */
 export function glyphClass(group: ThreadInfo[]): string {
-    const rank = {pending: 0, open: 1, resolved: 2} as const;
     let best: ThreadInfo["state"] = "resolved";
     let outdated = false;
     for (const t of group) {
-        if (rank[t.state] < rank[best]) best = t.state;
+        if (STATE_RANK[t.state] < STATE_RANK[best]) best = t.state;
         if (t.outdated) outdated = true;
     }
     return `thread-glyph thread-glyph-${best}${outdated ? " thread-glyph-outdated" : ""}`;
@@ -61,4 +60,46 @@ export function submitLabel(all: ThreadInfo[]): string {
     if (p > 0) return `submit ${p}`;
     if (awaitingAgent(all) > 0) return "nudge again";
     return "";
+}
+
+const STATE_RANK = {pending: 0, open: 1, resolved: 2} as const;
+
+/** The rank-sorted stack of threads whose marker sits on `line` (this
+ *  file + side). Pending > open > resolved, then id — matches glyphClass
+ *  so the top of the stack is the glyph's state. */
+export function threadStack(
+    all: ThreadInfo[],
+    path: string,
+    side: Side,
+    line: number,
+): ThreadInfo[] {
+    return bandThreads(all, path, side)
+        .filter((t) => Math.max(1, t.currentStart) === line)
+        .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || a.id - b.id);
+}
+
+/** The thread to show for a stack: the active one if still present, else
+ *  the top. index is 0-based (render as `index+1 of count`). */
+export function pickFromStack(
+    stack: ThreadInfo[],
+    activeId?: number,
+): {thread: ThreadInfo; index: number; count: number} | null {
+    if (stack.length === 0) return null;
+    let i = activeId != null ? stack.findIndex((t) => t.id === activeId) : -1;
+    if (i < 0) i = 0;
+    return {thread: stack[i], index: i, count: stack.length};
+}
+
+/** Next thread id when cycling `‹ ›` within a line's stack; wraps. */
+export function cycleStack(stack: ThreadInfo[], activeId: number, dir: 1 | -1): number | null {
+    if (stack.length === 0) return null;
+    let i = stack.findIndex((t) => t.id === activeId);
+    if (i < 0) i = 0;
+    return stack[(i + dir + stack.length) % stack.length].id;
+}
+
+/** Identity of the panel's file context — selection resets when it
+ *  changes (file-nav / workspace switch). */
+export function contextKey(ctx: {workspace: string; path: string} | null): string {
+    return ctx ? `${ctx.workspace}:${ctx.path}` : "";
 }

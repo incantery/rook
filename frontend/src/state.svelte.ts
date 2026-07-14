@@ -12,8 +12,13 @@ class AppState {
     workspace = $state("main");
     tabs = $state<TabInfo[]>([]);
     activeId = $state<string | null>(null);
+    /** the focused pane's host session — null when an editor pane (Monaco)
+     *  is focused, a session id when a terminal is. Mirrors mgr.focusedSessionId. */
+    focusedSessionId = $state<string | null>(null);
     dashVisible = $state(false);
     prefixArmed = $state(false);
+    /** the workbench side pane (VS Code-style); threads are its first tenant */
+    threadPaneOpen = $state(true);
 
     // overlays (at most one open; the keybinding ladder checks these)
     paletteOpen = $state(false);
