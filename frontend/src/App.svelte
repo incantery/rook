@@ -686,13 +686,27 @@
         if (app.prefixArmed) {
             if (e.key === "Shift" || e.key === "Meta" || e.key === "Alt" || e.key === "Control")
                 return;
+            app.prefixArmed = false;
+            // Leader twice = tmux's send-prefix. Let the SECOND press through
+            // untouched and the pane that has focus decides what it means:
+            // xterm writes it to the PTY, Monaco hands it to vim, which reads
+            // it in ITS mode — insert inserts a backtick, normal jumps to a
+            // mark. That mode is the reason nothing is synthesised here. The
+            // old path wrote leader.literal to the focused SESSION's socket,
+            // which an editor pane doesn't have (its sessionId is null), so
+            // the one escape from a prefix key was dead in the one pane made
+            // of text. A leader with no natural literal (a chord like ⌘⇧X)
+            // has nothing to pass through: swallow it, as before.
+            if (leader.matches(e)) {
+                if (!leader.literal) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+                return;
+            }
             e.preventDefault();
             e.stopPropagation();
-            app.prefixArmed = false;
-            if (leader.matches(e)) {
-                // leader pressed twice: tmux passthrough (a literal ` or a control byte)
-                if (leader.literal) mgr.sendToActive(leader.literal);
-            } else if (/^[0-9]$/.test(e.key)) {
+            if (/^[0-9]$/.test(e.key)) {
                 // reserved: the strip digits ARE the windows, 1-based. The
                 // dashboard no longer takes a slot — it isn't a layout (` d).
                 mgr.switchTo(Number(e.key) - 1);

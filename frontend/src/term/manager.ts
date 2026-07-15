@@ -788,11 +788,6 @@ export class TermManager {
         if (win === this.active) this.syncSize(true);
     }
 
-    sendToActive(data: string): void {
-        const tab = this.active ? this.focusedTab(this.active) : undefined;
-        if (tab?.ws?.readyState === WebSocket.OPEN) tab.ws.send(data);
-    }
-
     /** Session death: drop its pane, collapse the tree; a window losing
      *  its last pane leaves the strip. */
     private removeSession(tab: Tab): void {
