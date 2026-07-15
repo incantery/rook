@@ -18,8 +18,11 @@
 
 {#if visible}
     <!-- `side-pane` is kept as a bare JS-hook marker (App's keydown guard
-         does closest(".side-pane")), not a style. -->
+         does closest(".side-pane")), not a style. data-side is the same kind
+         of hook: App projects DOM focus onto its focus zone and needs to know
+         WHICH side took it, without reading a layout class. -->
     <aside
+        data-side={side}
         class={[
             "side-pane flex w-88 min-w-64 flex-col border-line/15 bg-raise",
             side === "left" ? "order-first border-r" : "border-l",

@@ -574,6 +574,25 @@
         mgr.refocusPane();
     }
 
+    /** Keep the zone honest with where the keyboard ACTUALLY is.
+     *
+     *  focusDir/toTerms set the zone as an intent — entering the explorer has
+     *  to work that way, since the pane focuses itself from an $effect on the
+     *  prop. But plenty of things move focus without going through them, and
+     *  a hand-maintained zone desyncs the moment one does: opening a file from
+     *  the explorer focuses Monaco, and the zone was left saying "left", so
+     *  ⌃h read as "already at the left edge, nothing to do" and did nothing
+     *  until a ⌃l resynced it. The zone is a PROJECTION of DOM focus; this is
+     *  what projects it. Clicks into a pane and reveals both land here too. */
+    function onFocusIn(e: FocusEvent): void {
+        // an overlay borrows focus and gives it back — the zone waits it out
+        if (app.anyOverlayOpen) return;
+        const el = e.target as HTMLElement | null;
+        if (!el?.closest) return;
+        const pane = el.closest<HTMLElement>(".side-pane");
+        app.focusZone = pane ? (pane.dataset.side === "left" ? "left" : "right") : "terms";
+    }
+
     // A side pane that closes under a focus that lives in it would strand the
     // keyboard in a detached node; hand focus back instead.
     $effect(() => {
@@ -788,6 +807,9 @@
         const unTheme = themeService.onXterm((t) => mgr.setTerminalTheme(t));
 
         window.addEventListener("keydown", onKeydown, {capture: true});
+        // focusin (not focus) — it bubbles, so one listener sees every pane,
+        // side pane and Monaco/xterm textarea in the app
+        window.addEventListener("focusin", onFocusIn);
         const ro = new ResizeObserver(() => mgr.syncSize());
         ro.observe(terminalsEl);
 
@@ -813,6 +835,7 @@
         return () => {
             unTheme();
             window.removeEventListener("keydown", onKeydown, {capture: true});
+            window.removeEventListener("focusin", onFocusIn);
             ro.disconnect();
             clearInterval(attnTimer);
             clearInterval(moneyTimer);
