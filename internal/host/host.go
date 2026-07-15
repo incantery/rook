@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,6 +70,10 @@ type Host struct {
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
 
+	// pt is the batched process table: one `ps` behind a TTL, shared by
+	// fgOf and the monitor (procsample.go, monitor.go).
+	pt *procTable
+
 	// Two tiers of transcript↔window pairing (see correlate): claims are
 	// authoritative (a SessionStart hook inside the claude process told us,
 	// via `rookctl claim`); binds are heuristic (proven by ring content).
@@ -121,6 +126,7 @@ func New() *Host {
 		reg:      loadRegistry(),
 		aw:       newAgentWatch(),
 		cwdCache: make(map[int]cwdEntry),
+		pt:       newProcTable(),
 		claims:   make(map[string]string),
 		binds:    make(map[string]string),
 		drafts:   make(map[string]draftInfo),
@@ -272,6 +278,15 @@ func (h *Host) readPump(s *session) {
 	// shell exited
 	s.cmd.Wait()
 	s.pty.Close()
+	// The cwd cache is keyed by pid and its TTL only gates staleness, never
+	// removal — without this every shell ever spawned left an entry behind,
+	// and a reused pid could read a dead session's cwd for up to 8s.
+	// Process is nil for sessions that never started a shell (tests).
+	if s.cmd != nil && s.cmd.Process != nil {
+		h.cwdMu.Lock()
+		delete(h.cwdCache, s.cmd.Process.Pid)
+		h.cwdMu.Unlock()
+	}
 	h.bindMu.Lock()
 	for tid, sid := range h.binds {
 		if sid == s.info.ID {
@@ -360,6 +375,15 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/threads/", h.handleThread)
 	mux.HandleFunc("/agent/spend", h.handleSpend)
 	mux.HandleFunc("/decisions", h.handleDecisions)
+	mux.HandleFunc("/runtime", h.handleRuntime)
+	// pprof rides the same authenticated loopback surface as everything
+	// else — no side door (README decision 3). Reach it with the token:
+	//   go tool pprof "http://127.0.0.1:$PORT/debug/pprof/heap?token=$TOKEN"
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	return h.cors(h.auth(mux))
 }
 
@@ -875,7 +899,7 @@ func (h *Host) statusFor(name string, withGit bool) workspaceStatus {
 			info := s.info
 			s.mu.Unlock()
 			pid := s.cmd.Process.Pid
-			out.Sessions[i] = sessionStatus{SessionInfo: info, Fg: fgOf(s.pty, pid), Cwd: h.cachedCwdOf(pid)}
+			out.Sessions[i] = sessionStatus{SessionInfo: info, Fg: h.fgOf(s.pty, pid), Cwd: h.cachedCwdOf(pid)}
 		}(i, s)
 	}
 	wg.Wait()

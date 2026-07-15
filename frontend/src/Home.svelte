@@ -10,7 +10,7 @@
      on a fresh start is information, not absence). -->
 <script lang="ts">
     import type {HostAPI, IssueInfo, IssuesResult, OverviewItem, StageInfo} from "./hostapi";
-    import {shortWindow} from "./hostapi";
+    import {footprintOf, footprintTitle, shortBytes, shortWindow} from "./hostapi";
     import {app} from "./state.svelte";
     import {ago, tilde} from "./util";
 
@@ -109,6 +109,7 @@
             ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a))
             : null,
     );
+    const footprint = $derived(footprintOf(app.runtime?.gauges));
 
     /** The card's agent-state chips: ◉ needs you leads, then ● working,
      *  then ◌ quiet. Works from the rollup when the host sends one, from
@@ -560,6 +561,20 @@
                         ? [`drafter $${app.costs.drafterTodayUsd.toFixed(2)}`]
                         : []),
                 ].join(" · ")}
+            </span>
+        {/if}
+        {#if footprint && footprint.total > 0}
+            <span
+                id="home-footprint"
+                class={[
+                    "rounded-xl border px-2.5 py-0.5 font-mono text-xs",
+                    footprint.orphaned
+                        ? "border-amber/35 bg-amber/12 text-amber"
+                        : "border-dim/30 bg-dim/10 text-dim",
+                ]}
+                title={footprintTitle(footprint)}
+            >
+                {footprint.orphaned ? "⚠ " : ""}{shortBytes(footprint.total)}
             </span>
         {/if}
     </div>

@@ -141,6 +141,12 @@ export class HostAPI {
         return (await this.req("/costs")).json();
     }
 
+    /** What rook costs the machine right now: RSS/CPU by process role, host
+     *  runtime, and the long-lived map sizes that are the leak gauges. */
+    async runtime(): Promise<RuntimeSnapshot> {
+        return (await this.req("/runtime")).json();
+    }
+
     /** Start the coder on a task in a fresh window of the workspace.
      *  Either a literal task or a preset the host expands into its own
      *  prompt (e.g. "resolve-conflicts") — host-built prompts keep every
@@ -381,6 +387,77 @@ export interface UsageWindow {
 export interface UsageSnapshot {
     windows: UsageWindow[];
     capturedAt: string;
+}
+
+/** One gauge reading in the host's monitor (internal/host/monitor.go). The
+ *  shape is the Prometheus data model — metric + labels + value — because
+ *  the series are stored to be exportable, not just charted here. */
+export interface Gauge {
+    metric: string;
+    labels?: Record<string, string>;
+    value: number;
+}
+
+export interface RuntimeSnapshot {
+    at: string;
+    gauges: Gauge[];
+}
+
+/** Sum a gauge across label values, or within one label match. */
+export function gaugeOf(gauges: Gauge[], metric: string, match?: Record<string, string>): number {
+    let total = 0;
+    for (const g of gauges) {
+        if (g.metric !== metric) continue;
+        if (match && Object.entries(match).some(([k, v]) => g.labels?.[k] !== v)) continue;
+        total += g.value;
+    }
+    return total;
+}
+
+/** The process roles rook accounts for, heaviest first — coder sessions
+ *  dwarf rook itself, and a footprint that hid that would misreport where
+ *  the memory actually goes. */
+export const FOOTPRINT_ROLES = ["coder", "webkit", "app", "host", "agent"] as const;
+export type FootprintRole = (typeof FOOTPRINT_ROLES)[number];
+
+export interface Footprint {
+    rss: Record<FootprintRole, number>;
+    total: number;
+    /** WebKit XPC processes carry identical argv and ppid 1, so they cannot
+     *  be attributed to their app from the process table — but they never
+     *  outlive it legitimately, so content processes with no app at all is
+     *  an unambiguous orphan. */
+    orphaned: boolean;
+}
+
+export function footprintOf(gauges: Gauge[] | undefined): Footprint | null {
+    if (!gauges?.length) return null;
+    const rss = Object.fromEntries(
+        FOOTPRINT_ROLES.map((r) => [r, gaugeOf(gauges, "rook_process_rss_bytes", {role: r})]),
+    ) as Record<FootprintRole, number>;
+    const total = FOOTPRINT_ROLES.reduce((sum, r) => sum + rss[r], 0);
+    return {
+        rss,
+        total,
+        orphaned:
+            gaugeOf(gauges, "rook_process_count", {role: "app"}) === 0 &&
+            gaugeOf(gauges, "rook_process_count", {role: "webkit"}) > 0,
+    };
+}
+
+/** Compact byte size for a chip: 4.8G, 812M. */
+export function shortBytes(n: number): string {
+    return n >= 1e9 ? `${(n / 1e9).toFixed(1)}G` : `${Math.round(n / 1e6)}M`;
+}
+
+/** Per-role breakdown for a footprint chip's tooltip. */
+export function footprintTitle(f: Footprint): string {
+    let t = FOOTPRINT_ROLES.filter((r) => f.rss[r] > 0)
+        .map((r) => `${r}: ${shortBytes(f.rss[r])}`)
+        .join("\n");
+    t += `\ntotal: ${shortBytes(f.total)}`;
+    if (f.orphaned) t += "\n\n⚠ WebKit processes with no app — orphaned";
+    return t;
 }
 
 /** Compact usage-window label: session → 5h, week (all models) → wk,

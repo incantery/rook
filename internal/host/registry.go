@@ -142,6 +142,13 @@ CREATE TABLE IF NOT EXISTS anchor_blobs (
 	sha     TEXT PRIMARY KEY,                 -- git blob hash of content
 	content BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS samples (
+	ts     TEXT NOT NULL,
+	metric TEXT NOT NULL,            -- rook_process_rss_bytes, …
+	labels TEXT NOT NULL DEFAULT '', -- JSON object, keys sorted by Marshal
+	value  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS samples_ts ON samples(ts);
 `
 
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS
@@ -296,6 +303,85 @@ func (r *registry) addDailyCost(day string, usd float64) {
 		 ON CONFLICT(day) DO UPDATE SET usd = usd + excluded.usd`, day, usd); err != nil {
 		log.Printf("registry: cost: %v", err)
 	}
+}
+
+// sampleRetention bounds the monitor's series. Everything else in this file
+// grows forever on purpose — the ledger is the product — but samples are
+// diagnostics, and a 30s cadence with no sweeper is how you get a multi-GB
+// database by accident.
+const sampleRetention = 7 * 24 * time.Hour
+
+// addSamples writes one gather pass in a single transaction: ~15 rows every
+// 30s, so the tx is what keeps it one fsync instead of fifteen.
+func (r *registry) addSamples(at time.Time, ss []sample) {
+	if r.db == nil || len(ss) == 0 {
+		return
+	}
+	tx, err := r.db.Begin()
+	if err != nil {
+		log.Printf("registry: samples: %v", err)
+		return
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT INTO samples (ts, metric, labels, value) VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		log.Printf("registry: samples: %v", err)
+		return
+	}
+	defer stmt.Close()
+	ts := at.Format(time.RFC3339Nano)
+	for _, s := range ss {
+		if _, err := stmt.Exec(ts, s.Metric, s.labelJSON(), s.Value); err != nil {
+			log.Printf("registry: samples: %v", err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("registry: samples: %v", err)
+	}
+}
+
+func (r *registry) pruneSamples(before time.Time) {
+	if r.db == nil {
+		return
+	}
+	if _, err := r.db.Exec(`DELETE FROM samples WHERE ts < ?`, before.Format(time.RFC3339Nano)); err != nil {
+		log.Printf("registry: prune samples: %v", err)
+	}
+}
+
+// samplesSince reads the stored series back, oldest first — the detail
+// panel's payload, and the shape a Prometheus remote-write would iterate.
+func (r *registry) samplesSince(t time.Time) []storedSample {
+	out := []storedSample{}
+	if r.db == nil {
+		return out
+	}
+	rows, err := r.db.Query(
+		`SELECT ts, metric, labels, value FROM samples WHERE ts >= ? ORDER BY ts`,
+		t.Format(time.RFC3339Nano))
+	if err != nil {
+		log.Printf("registry: samplesSince: %v", err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ts, metric, labels string
+		var v float64
+		if err := rows.Scan(&ts, &metric, &labels, &v); err != nil {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			continue
+		}
+		s := storedSample{At: at, Metric: metric, Value: v}
+		if labels != "" {
+			json.Unmarshal([]byte(labels), &s.Labels)
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 func (r *registry) costSince(day string) float64 {

@@ -799,6 +799,11 @@
         } catch {
             // costs are independent of usage — keep last known
         }
+        try {
+            app.runtime = await api.runtime();
+        } catch {
+            // diagnostics must never cost a surface — keep last known
+        }
     }
 
     onMount(() => {

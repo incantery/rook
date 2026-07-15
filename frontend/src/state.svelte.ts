@@ -2,7 +2,13 @@
 // The terminal runtime (term/manager.ts) writes projections INTO this via
 // its events; terminal output itself never passes through here.
 
-import type {AttentionItem, CostsSnapshot, UsageSnapshot, WorkspaceInfo} from "./hostapi";
+import type {
+    AttentionItem,
+    CostsSnapshot,
+    RuntimeSnapshot,
+    UsageSnapshot,
+    WorkspaceInfo,
+} from "./hostapi";
 import type {TabInfo} from "./term/manager";
 
 /** the workbench mode — which surface owns the viewport. Chrome reads this
@@ -71,6 +77,7 @@ class AppState {
     attention = $state<AttentionItem[]>([]);
     usage = $state<UsageSnapshot | null>(null);
     costs = $state<CostsSnapshot | null>(null);
+    runtime = $state<RuntimeSnapshot | null>(null);
     /** registry snapshot — lineage (worktreeOf/branch) for every surface
      *  that names a workspace; Home refreshes it eagerly after mutations */
     workspaces = $state<WorkspaceInfo[]>([]);

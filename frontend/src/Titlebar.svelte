@@ -3,7 +3,7 @@
      pure projection of the terminal runtime's state via the store — clicks
      dispatch back into the manager, never touch terminals directly. -->
 <script lang="ts">
-    import {shortWindow} from "./hostapi";
+    import {footprintOf, footprintTitle, shortBytes, shortWindow} from "./hostapi";
     import {app} from "./state.svelte";
 
     interface Props {
@@ -46,6 +46,8 @@
         }
         return t;
     });
+
+    const footprint = $derived(footprintOf(app.runtime?.gauges));
 </script>
 
 <div
@@ -129,6 +131,19 @@
             ]}
             style="--wails-draggable: no-drag"
             title={usageTitle}>{worstUsage.pct}% {shortWindow(worstUsage.label)}</button
+        >
+    {/if}
+    {#if footprint && footprint.total > 0}
+        <button
+            class={[
+                "box-border inline-flex h-6 cursor-default appearance-none items-center self-center rounded-full border px-2.5 font-mono text-xs font-semibold",
+                footprint.orphaned
+                    ? "border-amber/35 bg-amber/12 text-amber"
+                    : "border-dim/30 bg-dim/10 text-dim",
+            ]}
+            style="--wails-draggable: no-drag"
+            title={footprintTitle(footprint)}
+            >{footprint.orphaned ? "⚠ " : ""}{shortBytes(footprint.total)}</button
         >
     {/if}
     {#if app.attention.length > 0}
