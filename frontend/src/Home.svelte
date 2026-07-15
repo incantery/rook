@@ -422,7 +422,7 @@
     <div
         class={[
             "group cursor-pointer rounded-xl border border-l-2 border-line/15 px-4 py-3.5 hover:-translate-y-px hover:border-line/40",
-            w.worktreeOf ? "bg-acc/[0.035] [border-left-style:dashed]" : "bg-white/[0.025]",
+            w.worktreeOf ? "bg-acc/[0.035] [border-left-style:dashed]" : "bg-fg/[0.025]",
             attnOf(w) > 0 ? "border-l-amber" : w.worktreeOf ? "border-l-acc/60" : "border-l-acc",
         ]}
         onclick={() => onopen(w.name)}
@@ -440,7 +440,7 @@
             <span
                 class={[
                     "rounded-md px-1.5 py-0.5 font-mono text-xs",
-                    w.sessions > 0 ? "bg-grn/12 text-grn" : "bg-white/5 text-dim",
+                    w.sessions > 0 ? "bg-grn/12 text-grn" : "bg-fg/5 text-dim",
                 ]}
             >
                 {w.sessions > 0 ? `● ${w.sessions} live` : "idle"}
@@ -453,7 +453,7 @@
                             ? "animate-attn-pulse bg-amber/12 text-amber"
                             : c.cls === "working"
                               ? "bg-grn/12 text-grn"
-                              : "bg-white/5 text-lo",
+                              : "bg-fg/5 text-lo",
                     ]}>{c.text}</span
                 >
             {/each}
@@ -470,7 +470,7 @@
                     >
                 {/if}
                 {#if w.git.ahead > 0 || w.git.behind > 0}
-                    <span class="rounded-md bg-white/5 px-1.5 py-0.5 font-mono text-xs text-dim">
+                    <span class="rounded-md bg-fg/5 px-1.5 py-0.5 font-mono text-xs text-dim">
                         {[
                             w.git.ahead > 0 ? `↑${w.git.ahead}` : "",
                             w.git.behind > 0 ? `↓${w.git.behind}` : "",
@@ -481,9 +481,7 @@
                 {/if}
             {/if}
             {#each fgTools(w) as f (f)}
-                <span class="rounded-md bg-white/5 px-1.5 py-0.5 font-mono text-xs text-dim"
-                    >{f}</span
-                >
+                <span class="rounded-md bg-fg/5 px-1.5 py-0.5 font-mono text-xs text-dim">{f}</span>
             {/each}
             {@render wsTags(w, nested)}
         </div>
@@ -579,13 +577,13 @@
                 <h2 class="m-0 text-base font-bold text-fg">Workspaces</h2>
                 <span class="flex-1"></span>
                 <button
-                    class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/10"
+                    class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/10"
                     style="--wails-draggable: no-drag"
                     title="One-off shell; discarded when it exits"
                     onclick={() => void scratch()}>scratch shell</button
                 >
                 <button
-                    class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/10"
+                    class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/10"
                     style="--wails-draggable: no-drag"
                     onclick={openModal}
                 >
@@ -620,7 +618,7 @@
                         {#each [g.ws, ...g.trees] as w, wi (w.name)}
                             <div
                                 class={[
-                                    "group flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/[0.015] px-3 py-1.5 text-sm hover:border-line/40",
+                                    "group flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/[0.015] px-3 py-1.5 text-sm hover:border-line/40",
                                     wi > 0 && "ml-5.5",
                                 ]}
                                 onclick={() => onopen(w.name)}
@@ -655,13 +653,13 @@
                 <div id="home-queue" class="flex flex-col gap-1.5">
                     {#each queueRows as r (r.ws + r.issue.tracker + r.issue.key)}
                         <div
-                            class="flex items-center gap-2.5 rounded-lg border border-line/15 bg-white/[0.02] px-3 py-2 text-sm"
+                            class="flex items-center gap-2.5 rounded-lg border border-line/15 bg-fg/[0.02] px-3 py-2 text-sm"
                         >
                             <span class="whitespace-nowrap font-mono text-acc">{r.issue.key}</span>
                             <span
                                 class={[
                                     "rounded-md px-1.5 py-px font-mono text-xs",
-                                    r.issue.mine ? "bg-grn/12 text-grn" : "bg-white/5 text-lo",
+                                    r.issue.mine ? "bg-grn/12 text-grn" : "bg-fg/5 text-lo",
                                 ]}>{r.issue.mine ? "mine" : "open"}</span
                             >
                             <span class="flex-1 truncate text-fg" title={r.issue.title}
@@ -672,7 +670,7 @@
                                 title="from {r.ws}'s queue">{r.ws}</span
                             >
                             <button
-                                class="flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/10"
+                                class="flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/10"
                                 title="Start claude on this issue in a fresh task tree of {r.ws}"
                                 disabled={starting !== ""}
                                 onclick={() => void work(r.ws, r.issue)}
@@ -733,7 +731,7 @@
             </div>
             <div class="flex justify-end gap-2 border-t border-line/15 px-4.5 py-3.5">
                 <button
-                    class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/10"
+                    class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/10"
                     onclick={() => (modalOpen = false)}>Cancel</button
                 >
                 <button

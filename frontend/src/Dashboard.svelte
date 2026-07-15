@@ -116,11 +116,11 @@
                             >✓ clean</span
                         >{/if}
                     {#if st.git.ahead > 0}<span
-                            class="rounded-md bg-white/5 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-dim"
+                            class="rounded-md bg-fg/5 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-dim"
                             >↑{st.git.ahead}</span
                         >{/if}
                     {#if st.git.behind > 0}<span
-                            class="rounded-md bg-white/5 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-dim"
+                            class="rounded-md bg-fg/5 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-dim"
                             >↓{st.git.behind}</span
                         >{/if}
                 {/if}
@@ -130,13 +130,13 @@
                     <span
                         class={[
                             "rounded-md px-2 py-0.5 font-mono text-xs whitespace-nowrap",
-                            worstUsage.pct >= 90 ? "bg-amber/10 text-amber" : "bg-white/5 text-dim",
+                            worstUsage.pct >= 90 ? "bg-amber/10 text-amber" : "bg-fg/5 text-dim",
                         ]}>◔ {worstUsage.pct}% {shortWindow(worstUsage.label)}</span
                     >
                 {/if}
                 {#if app.costs}
                     <span
-                        class="rounded-md bg-white/5 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-dim"
+                        class="rounded-md bg-fg/5 px-2 py-0.5 font-mono text-xs whitespace-nowrap text-dim"
                         >${app.costs.todayUsd.toFixed(2)} today</span
                     >
                 {/if}
@@ -153,7 +153,7 @@
                      falling back to list order until the strip snapshot has it -->
                 {@const slot = app.tabs.findIndex((t) => t.sessions.includes(s.id))}
                 <div
-                    class="cursor-pointer rounded-xl border border-line/15 bg-white/3 px-3.5 py-3 transition-colors hover:border-line/40"
+                    class="cursor-pointer rounded-xl border border-line/15 bg-fg/3 px-3.5 py-3 transition-colors hover:border-line/40"
                     onclick={() => onjump(s.id)}
                     role="presentation"
                 >
@@ -226,13 +226,13 @@
             <div class="mb-5.5 flex flex-col gap-1.5">
                 {#each queue.issues as i (i.tracker + i.key)}
                     <div
-                        class="flex items-center gap-2.5 rounded-lg border border-line/15 bg-white/2 px-3 py-1.5 text-sm"
+                        class="flex items-center gap-2.5 rounded-lg border border-line/15 bg-fg/2 px-3 py-1.5 text-sm"
                     >
                         <span class="font-mono whitespace-nowrap text-acc">{i.key}</span>
                         <span
                             class={[
                                 "rounded-md px-1.5 py-px font-mono text-xs",
-                                i.mine ? "bg-grn/12 text-grn" : "bg-white/5 text-lo",
+                                i.mine ? "bg-grn/12 text-grn" : "bg-fg/5 text-lo",
                             ]}>{i.mine ? "mine" : "open"}</span
                         >
                         <span class="flex-1 truncate text-fg" title={i.title}>{i.title}</span>
@@ -240,7 +240,7 @@
                                 class="text-xs whitespace-nowrap text-lo">{i.state}</span
                             >{/if}
                         <button
-                            class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-white/4 px-3 py-1.5 font-[inherit] text-sm font-semibold whitespace-nowrap text-fg hover:bg-white/8"
+                            class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-fg/4 px-3 py-1.5 font-[inherit] text-sm font-semibold whitespace-nowrap text-fg hover:bg-fg/8"
                             title="Start claude on this issue in a fresh task tree"
                             disabled={starting !== ""}
                             onclick={() => void work(i)}
@@ -255,16 +255,16 @@
         {/if}
         <div class="flex flex-wrap gap-2">
             <button
-                class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-white/4 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/8"
+                class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-fg/4 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/8"
                 onclick={() => runCmd("session.new")}
                 ><span class="text-sm leading-none text-acc">+</span> New window</button
             >
             <button
-                class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-white/4 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/8"
+                class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-fg/4 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/8"
                 onclick={() => runCmd("workspace.set-root")}>Set root to shell's cwd</button
             >
             <button
-                class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-white/4 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-white/8"
+                class="flex cursor-pointer items-center gap-1.5 rounded-lg border border-line/15 bg-fg/4 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/8"
                 onclick={() => runCmd("workspace.manager")}>Mission control</button
             >
         </div>

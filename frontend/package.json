@@ -11,7 +11,7 @@
         "preview": "vite preview",
         "test": "vitest run",
         "check": "svelte-check",
-        "lint": "oxlint --deny-warnings",
+        "lint": "oxlint --deny-warnings && node scripts/lint-theme.mjs",
         "format": "oxfmt .",
         "format:check": "oxfmt --check ."
     },

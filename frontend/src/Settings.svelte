@@ -50,7 +50,7 @@
     <div class="flex items-center justify-between border-b border-line/15 px-4 py-3">
         <div class="text-base text-fg">Settings</div>
         <button
-            class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-white/5 px-3 py-1.5 font-[inherit] text-xs font-semibold text-fg hover:bg-white/10"
+            class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-xs font-semibold text-fg hover:bg-fg/10"
             onclick={onclose}>Close (Esc)</button
         >
     </div>

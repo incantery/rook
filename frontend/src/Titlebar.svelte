@@ -86,7 +86,7 @@
                 class={[
                     "flex cursor-pointer appearance-none items-center border-0 bg-transparent px-3 font-mono text-sm",
                     active
-                        ? "font-bold text-white"
+                        ? "font-bold text-fg"
                         : attn
                           ? "animate-attn-pulse text-amber"
                           : "text-lo hover:text-dim",
@@ -134,7 +134,7 @@
         >
     {/if}
     <button
-        class="box-border inline-flex h-6 cursor-pointer appearance-none items-center gap-2 self-center rounded-md border border-line/15 bg-white/5 pl-2.5 pr-2 text-xs text-dim hover:bg-white/10 hover:text-fg"
+        class="box-border inline-flex h-6 cursor-pointer appearance-none items-center gap-2 self-center rounded-md border border-line/15 bg-fg/5 pl-2.5 pr-2 text-xs text-dim hover:bg-fg/10 hover:text-fg"
         style="--wails-draggable: no-drag"
         onclick={onpalette}
     >
