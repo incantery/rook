@@ -43,6 +43,14 @@ class AppState {
      *  mode-derived — like VS Code's sidebar it persists across modes. */
     explorerOpen = $state(false);
 
+    /** Which REGION of the workbench holds focus. The terminal manager tracks
+     *  focus as a pane id inside its layout tree, which by construction can't
+     *  say "focus is in the explorer" — so the zone sits a level above it and
+     *  the two compose: ⌃hjkl walks panes until the tree has no neighbour that
+     *  way, then hands off across this boundary to an open side pane.
+     *  Always "terms" while the side pane in question is closed. */
+    focusZone = $state<"terms" | "left" | "right">("terms");
+
     // overlays (at most one open; the keybinding ladder checks these)
     paletteOpen = $state(false);
     pickerOpen = $state(false);

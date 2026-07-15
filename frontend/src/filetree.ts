@@ -133,6 +133,37 @@ export function pruneToChanged(nodes: FileNode[], statuses: Map<string, GitStatu
     return out;
 }
 
+/** One rendered row: the node plus the indent its nesting earns it. */
+export interface VisibleRow {
+    node: FileNode;
+    depth: number;
+}
+
+/** The tree flattened to exactly the rows on screen, in render order —
+ *  children of a collapsed directory are gone, not hidden.
+ *
+ *  This is what makes the explorer keyboard-navigable: j/k are "next/prev
+ *  row", which is a flat-list idea, not a tree one. Deriving the flat list
+ *  from the tree (rather than the reverse) keeps ONE source of truth, so the
+ *  cursor can never point at a row the tree isn't rendering. */
+export function flattenVisible(nodes: FileNode[], expanded: ReadonlySet<string>): VisibleRow[] {
+    const out: VisibleRow[] = [];
+    const walk = (ns: FileNode[], depth: number): void => {
+        for (const node of ns) {
+            out.push({node, depth});
+            if (node.dir && expanded.has(node.path)) walk(node.children, depth + 1);
+        }
+    };
+    walk(nodes, 0);
+    return out;
+}
+
+/** The containing directory's path, or "" at the top. `h` climbs with this. */
+export function parentPath(path: string): string {
+    const i = path.lastIndexOf("/");
+    return i === -1 ? "" : path.slice(0, i);
+}
+
 /** Every directory path in a tree, for auto-expanding a pruned scope —
  *  a changed-only tree with everything collapsed shows nothing useful. */
 export function dirPaths(nodes: FileNode[]): string[] {

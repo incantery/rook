@@ -49,6 +49,17 @@ export const DEFAULTS: [string, string][] = [
     ["%", "pane.split-right"],
     ['"', "pane.split-down"],
     ["o", "pane.next"],
+    // vim-navigator chords, listed BEFORE the arrows so the palette
+    // advertises these — they're the primary binding now. They also cross
+    // into an open side pane at the layout's edge, which ` arrows do too.
+    // A full-screen app (vim, less) keeps them; see mgr.focusedInAltScreen.
+    // Cost, inherited from vim-tmux-navigator: ⌃L no longer clears the
+    // screen and ⌃H no longer backspaces at a shell prompt. Unbind with
+    // `keybind = ctrl+l=` to take them back.
+    ["ctrl+h", "pane.focus-left"],
+    ["ctrl+j", "pane.focus-down"],
+    ["ctrl+k", "pane.focus-up"],
+    ["ctrl+l", "pane.focus-right"],
     ["left", "pane.focus-left"],
     ["right", "pane.focus-right"],
     ["up", "pane.focus-up"],

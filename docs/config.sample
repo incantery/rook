@@ -108,6 +108,15 @@
 # keybind = m=workspace.manager
 # keybind = cmd+shift+k=palette.toggle
 
+# ctrl+h/j/k/l move between panes, vim-tmux-navigator style, and cross into an
+# open side pane at the layout's edge. A full-screen app keeps them — while
+# vim, less or htop is up they go to the app, not to rook — but at a SHELL
+# PROMPT rook takes them, so ctrl+l no longer clears the screen and ctrl+h no
+# longer backspaces. Unbind either to take it back (` and the arrows still
+# navigate, in vim too):
+# keybind = ctrl+l=
+# keybind = ctrl+h=
+
 
 # ── Per-workspace overrides (dynamic keys) ───────────────────────────────
 #

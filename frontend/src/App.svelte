@@ -8,6 +8,7 @@
     import {Call} from "@wailsio/runtime";
     import type {HostAPI, IssueInfo} from "./hostapi";
     import {TermManager, type TermFactory} from "./term/manager";
+    import type {Edge} from "./term/layout";
     import {themeService} from "./theme/service";
     import {Registry} from "./registry";
     import {buildKeymap, parseLeader, sigOf} from "./keymap";
@@ -283,28 +284,28 @@
             title: "Focus pane left",
             category: "Pane",
             keys: keymap.display("pane.focus-left"),
-            run: () => mgr.focusPane("left"),
+            run: () => focusDir("left"),
         },
         {
             id: "pane.focus-right",
             title: "Focus pane right",
             category: "Pane",
             keys: keymap.display("pane.focus-right"),
-            run: () => mgr.focusPane("right"),
+            run: () => focusDir("right"),
         },
         {
             id: "pane.focus-up",
             title: "Focus pane up",
             category: "Pane",
             keys: keymap.display("pane.focus-up"),
-            run: () => mgr.focusPane("up"),
+            run: () => focusDir("up"),
         },
         {
             id: "pane.focus-down",
             title: "Focus pane down",
             category: "Pane",
             keys: keymap.display("pane.focus-down"),
-            run: () => mgr.focusPane("down"),
+            run: () => focusDir("down"),
         },
         {
             id: "pane.zoom",
@@ -455,6 +456,58 @@
         },
     );
 
+    // ==== workbench-level directional focus ====
+    //
+    // mgr.focusPane walks the terminal layout tree; it returns false at the
+    // tree's edge. That edge is where the workbench takes over: to the left
+    // and right of the terminals sit the side panes, which are Svelte chrome
+    // and not in the tree at all. So the two models compose — pane, pane,
+    // pane, …, then across the boundary into an open pane. A CLOSED side pane
+    // is not a target: the edge just stops, as tmux does (no wrap).
+    const NAV: Set<string> = new Set([
+        "pane.focus-left",
+        "pane.focus-right",
+        "pane.focus-up",
+        "pane.focus-down",
+    ]);
+
+    /** Is this element somewhere text is being entered? Such a target keeps
+     *  its own keys — we never steal from a caret. */
+    function isTyping(el: HTMLElement | null): boolean {
+        return (
+            el != null &&
+            (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)
+        );
+    }
+
+    function focusDir(dir: Edge): void {
+        if (app.focusZone === "left") {
+            // the explorer owns up/down (its own rows); only l leaves it
+            if (dir === "right") toTerms();
+            return;
+        }
+        if (app.focusZone === "right") {
+            if (dir === "left") toTerms();
+            return;
+        }
+        if (mgr.focusPane(dir)) return; // moved inside the layout tree
+        if (dir === "left" && app.explorerOpen) app.focusZone = "left";
+        else if (dir === "right" && app.threadPaneOpen) app.focusZone = "right";
+        // else: at the workbench edge with nothing beyond it — stay put
+    }
+
+    function toTerms(): void {
+        app.focusZone = "terms";
+        mgr.refocusPane();
+    }
+
+    // A side pane that closes under a focus that lives in it would strand the
+    // keyboard in a detached node; hand focus back instead.
+    $effect(() => {
+        if (app.focusZone === "left" && !app.explorerOpen) toTerms();
+        if (app.focusZone === "right" && !app.threadPaneOpen) toTerms();
+    });
+
     // ==== keybindings — two layers, both dispatching registry commands ====
     //
     // 1. The leader prefix (config `leader`, backtick by default, or a tmux
@@ -474,19 +527,41 @@
             return; // palette's own input handles the rest
         }
         if (app.pickerOpen || app.filePickerOpen) return; // pickers' own inputs handle keys
+
+        const tgt = e.target as HTMLElement | null;
+        const inSidePane = tgt?.closest?.(".side-pane") != null;
+
+        // The vim-navigator chords resolve BEFORE the side-pane guard below:
+        // they're the workbench's own movement keys, and a pane you can enter
+        // but never leave is a trap. They stay out of the way of real typing —
+        // a side pane's text inputs keep them (⌃H is a backspace there).
+        if (app.screen !== "home") {
+            const nav = keymap.chords.get(sigOf(e));
+            if (nav && NAV.has(nav) && !(inSidePane && isTyping(tgt))) {
+                // A full-screen app in the focused terminal owns these — this
+                // is vim-tmux-navigator's is_vim check, read off the alternate
+                // screen buffer instead of grepping ps. Only the terminals
+                // zone can yield: a side pane isn't running vim.
+                if (!(app.focusZone === "terms" && mgr.focusedInAltScreen)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    registry.run(nav);
+                    return;
+                }
+                return; // hand it to the TUI, untouched
+            }
+        }
+
         // the thread panel owns its keys: comments about code are full of
         // backticks, and the capture-phase prefix must not eat them. Only
         // .side-pane is guarded — xterm's and Monaco's hidden textareas live
         // in #terminals, NOT .side-pane, so the prefix keeps working there.
-        const tgt = e.target as HTMLElement | null;
-        if (tgt?.closest?.(".side-pane")) return;
+        if (inSidePane) return;
         if (app.screen === "home") {
             // the prefix works here too, so ` h toggles back to the
             // workspace you left — but never while typing in a modal input
             const el = e.target as HTMLElement | null;
-            const typing =
-                el != null &&
-                (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+            const typing = isTyping(el);
             if (app.prefixArmed) {
                 if (e.key === "Shift" || e.key === "Meta" || e.key === "Alt" || e.key === "Control")
                     return;
@@ -703,6 +778,7 @@
             <FileExplorer
                 {api}
                 workspace={app.workspace}
+                active={app.focusZone === "left"}
                 onopen={(path) => void openEditorPane("file", path)}
             />
         </SidePane>

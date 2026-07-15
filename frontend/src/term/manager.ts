@@ -192,6 +192,31 @@ export class TermManager {
         return this.active.panes.get(this.active.focused)?.sessionId ?? null;
     }
 
+    /** Is the focused pane a terminal running a FULLSCREEN app (vim, less,
+     *  htop) rather than sitting at a shell prompt?
+     *
+     *  This is rook's answer to vim-tmux-navigator's `is_vim`, and a better
+     *  one. That plugin shells out per keypress to grep `ps` for the pane's
+     *  foreground process — which breaks on wrappers, ssh and sudo, and costs
+     *  a fork. Entering the alternate screen buffer is instead a fact of the
+     *  terminal protocol (smcup/rmcup): every full-screen TUI sets it, no
+     *  shell prompt does, and xterm already tracks it for us. No poll, no
+     *  staleness, no race — which matters, because the host's `fg` signal is
+     *  polled at 3s and would mis-route every key between opening vim and the
+     *  next tick.
+     *
+     *  The tradeoff vs is_vim: this is broader. `less` and `htop` are also
+     *  full-screen, so they keep ⌃hjkl too, where tmux would have navigated
+     *  away. "A full-screen app owns the keyboard" is the simpler rule, and
+     *  the leader (` + arrows) always navigates regardless. */
+    get focusedInAltScreen(): boolean {
+        const win = this.active;
+        if (!win) return false;
+        // an editor pane has no session and no TUI — it never yields
+        if (!win.panes.get(win.focused)?.sessionId) return false;
+        return this.focusedTab(win)?.term.buffer.active.type === "alternate";
+    }
+
     /** Snapshot for the strip and pickers: windows in the current workspace. */
     currentTabs(): TabInfo[] {
         return this.wsWins().map((w) => this.tabInfo(w));
@@ -657,13 +682,24 @@ export class TermManager {
 
     /** Move focus to the pane across the shared edge — ` arrows. No
      *  wrap at the layout's edge (tmux default). */
-    focusPane(dir: Edge): void {
+    /** Move focus one pane in `dir`. Returns false when the layout has no
+     *  neighbour that way — i.e. we're at its edge. The workbench uses that
+     *  as its hand-off signal: past the edge lies a side pane, not nothing. */
+    focusPane(dir: Edge): boolean {
         const win = this.active;
-        if (!win) return;
+        if (!win) return false;
         const target = neighborOf(win.root, win.focused, dir);
-        if (!target) return;
+        if (!target) return false;
         this.unzoom(win); // like tmux select-pane: leaving zoom shows where you land
         this.setFocusedPane(win, target);
+        return true;
+    }
+
+    /** Put DOM focus back on the focused pane — the way home from a side pane. */
+    refocusPane(): void {
+        const win = this.active;
+        if (!win) return;
+        win.panes.get(win.focused)?.focus();
     }
 
     /** Cycle panes in leaf order — ` o. */

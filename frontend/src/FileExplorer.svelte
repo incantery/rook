@@ -17,6 +17,8 @@
         changeCounts,
         dirPaths,
         fileIcon,
+        flattenVisible,
+        parentPath,
         pruneToChanged,
         statusMap,
         statusMeta,
@@ -29,8 +31,15 @@
     let {
         api,
         workspace,
+        active,
         onopen,
-    }: {api: HostAPI; workspace: string; onopen: (path: string) => void} = $props();
+    }: {
+        api: HostAPI;
+        workspace: string;
+        /** the workbench's focus zone is this pane — take the keyboard */
+        active: boolean;
+        onopen: (path: string) => void;
+    } = $props();
 
     // Tone → literal class names. Tailwind scans source for literal strings,
     // so this must never be `text-${tone}` (that emits nothing).
@@ -106,6 +115,83 @@
     const statuses = $derived(statusMap(changed));
     const counts = $derived(changeCounts(changed));
     const shown = $derived(scope === "changed" ? pruneToChanged(tree, statuses) : tree);
+    /** exactly the rows on screen, in order — what j/k walk */
+    const rows = $derived(flattenVisible(shown, expanded));
+
+    // The cursor is a PATH, not an index: rows are re-derived on every
+    // expand/collapse/refetch, and an index would silently point at a
+    // different file after any of them.
+    let cursor = $state("");
+    let treeEl = $state<HTMLElement | null>(null);
+    const cursorAt = $derived(rows.findIndex((r) => r.node.path === cursor));
+
+    // Taking the zone takes the keyboard. Landing with no cursor (or one whose
+    // row is gone — a collapse or a scope flip can eat it) starts at the top.
+    $effect(() => {
+        if (!active) return;
+        treeEl?.focus();
+        if (rows.length > 0 && !rows.some((r) => r.node.path === cursor))
+            cursor = rows[0].node.path;
+    });
+
+    function moveTo(i: number): void {
+        if (i < 0 || i >= rows.length) return;
+        cursor = rows[i].node.path;
+        // keep the cursor row on screen; the tree is the scroll container
+        queueMicrotask(() =>
+            treeEl
+                ?.querySelector('[data-cursor="true"]')
+                ?.scrollIntoView({block: "nearest", behavior: "instant"}),
+        );
+    }
+
+    function onTreeKey(e: KeyboardEvent): void {
+        if (e.metaKey || e.ctrlKey || e.altKey) return; // chords belong to the workbench
+        const row = cursorAt === -1 ? null : rows[cursorAt];
+        switch (e.key) {
+            case "j":
+            case "ArrowDown":
+                moveTo(cursorAt + 1);
+                break;
+            case "k":
+            case "ArrowUp":
+                moveTo(cursorAt - 1);
+                break;
+            case "h": {
+                // an open directory closes; anything else climbs to its parent
+                if (row?.node.dir && expanded.has(row.node.path)) {
+                    toggle(row.node.path);
+                    break;
+                }
+                const up = parentPath(row?.node.path ?? "");
+                if (up) moveTo(rows.findIndex((r) => r.node.path === up));
+                break;
+            }
+            case "l":
+                // a closed directory opens; an open one steps into its first
+                // child; a file opens in an editor pane
+                if (!row) break;
+                if (!row.node.dir) onopen(row.node.path);
+                else if (!expanded.has(row.node.path)) toggle(row.node.path);
+                else moveTo(cursorAt + 1);
+                break;
+            case "Enter":
+                if (!row) break;
+                if (row.node.dir) toggle(row.node.path);
+                else onopen(row.node.path);
+                break;
+            case "g":
+                moveTo(0);
+                break;
+            case "G":
+                moveTo(rows.length - 1);
+                break;
+            default:
+                return; // not ours — let it through
+        }
+        e.preventDefault();
+        e.stopPropagation();
+    }
 
     // A changed-only tree collapsed to its roots shows nothing useful, so
     // open its dirs — but only when the dir set itself changes, so a refetch
@@ -159,19 +245,30 @@
         </div>
     {/if}
 
-    <!-- the tree is the only scroll region -->
-    <div class="min-h-0 flex-1 overflow-y-auto py-1">
+    <!-- The tree is the only scroll region, and the keyboard target: focus
+         lands here (tabindex -1, so only the workbench puts it here), and the
+         rows are plain divs. They were <button>s, but a button per row fights
+         a roving cursor — every j/k would drag DOM focus with it. -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+    <div
+        class="min-h-0 flex-1 overflow-y-auto py-1 outline-none"
+        bind:this={treeEl}
+        tabindex="-1"
+        role="tree"
+        aria-label="Files"
+        onkeydown={onTreeKey}
+    >
         {#if loading}
             <div class="px-3 py-2 font-mono text-xs text-dim">loading…</div>
         {:else if error}
             <div class="px-3 py-2 font-mono text-xs text-red">{error}</div>
-        {:else if shown.length === 0}
+        {:else if rows.length === 0}
             <div class="px-3 py-2 font-mono text-xs text-dim">
                 {scope === "changed" ? "no changes" : "no files"}
             </div>
         {:else}
-            {#each shown as node (node.path)}
-                {@render row(node, 0)}
+            {#each rows as r (r.node.path)}
+                {@render row(r.node, r.depth)}
             {/each}
             {#if truncated && scope === "all"}
                 <div class="px-3 py-2 font-mono text-[10px] text-dim opacity-70">
@@ -193,51 +290,59 @@
     {/if}
 </div>
 
-<!-- one file/dir row; dirs recurse into their children when expanded -->
+<!-- One row, already flattened — flattenVisible did the nesting, so this only
+     draws. The cursor reads as a filled row + accent edge while the pane holds
+     focus, and fades to a faint outline when it doesn't: it must stay findable
+     (you left it there) without competing with the real focus. -->
 {#snippet row(node: FileNode, depth: number)}
     {@const status = statuses.get(node.path)}
     {@const meta = status ? statusMeta(status) : null}
     {@const count = threads.get(node.path) ?? 0}
-    {#if node.dir}
-        <button
-            class="flex w-full appearance-none items-center gap-1 border-0 bg-transparent py-0.5 pr-2 text-left font-mono text-xs text-fg hover:bg-fg/5"
-            style="padding-left: {depth * 12 + 6}px"
-            onclick={() => toggle(node.path)}
-        >
+    {@const on = cursor === node.path}
+    <div
+        class={"flex w-full cursor-pointer items-center gap-1 border-l-2 py-0.5 pr-2 text-left font-mono text-xs " +
+            (on && active
+                ? "border-acc bg-acc/15 text-fg"
+                : on
+                  ? "border-line/30 bg-fg/5 text-fg"
+                  : "border-transparent hover:bg-fg/5 ") +
+            (on ? "" : node.dir || status ? "text-fg" : "text-dim")}
+        style="padding-left: {depth * 12 + 4}px"
+        data-cursor={on}
+        role="treeitem"
+        aria-selected={on}
+        aria-expanded={node.dir ? expanded.has(node.path) : undefined}
+        tabindex="-1"
+        onclick={() => {
+            cursor = node.path;
+            if (node.dir) toggle(node.path);
+            else onopen(node.path);
+        }}
+        onkeydown={() => {}}
+    >
+        {#if node.dir}
             <span class="w-3 flex-none text-lo">{expanded.has(node.path) ? "▾" : "▸"}</span>
             <span class="flex-none text-acc/70">▦</span>
-            <span class="truncate font-semibold">{node.name}</span>
-        </button>
-        {#if expanded.has(node.path)}
-            {#each node.children as child (child.path)}
-                {@render row(child, depth + 1)}
-            {/each}
-        {/if}
-    {:else}
-        <button
-            class={"flex w-full appearance-none items-center gap-1 border-0 bg-transparent py-0.5 pr-2 text-left font-mono text-xs hover:bg-fg/5 hover:text-fg " +
-                (status ? "text-fg" : "text-dim")}
-            style="padding-left: {depth * 12 + 6}px"
-            onclick={() => onopen(node.path)}
-        >
+            <span class="min-w-0 flex-1 truncate font-semibold">{node.name}</span>
+        {:else}
             <span class="w-3 flex-none"></span>
             <span class={"flex-none " + (meta ? TONE_TEXT[meta.tone] : "text-lo")}
                 >{fileIcon(node.name)}</span
             >
             <span class="min-w-0 flex-1 truncate">{node.name}</span>
-            {#if count > 0}
-                <span
-                    class="inline-flex h-4 min-w-4 flex-none items-center justify-center rounded-md bg-acc/15 px-1 font-mono text-[9.5px] font-bold text-acc"
-                    title="{count} unresolved thread{count === 1 ? '' : 's'}">{count}</span
-                >
-            {:else if meta}
-                <span
-                    class={"w-3.5 flex-none text-center text-[10px] font-bold " +
-                        TONE_TEXT[meta.tone]}>{meta.letter}</span
-                >
-            {:else}
-                <span class="w-3.5 flex-none"></span>
-            {/if}
-        </button>
-    {/if}
+        {/if}
+        {#if count > 0}
+            <span
+                class="inline-flex h-4 min-w-4 flex-none items-center justify-center rounded-md bg-acc/15 px-1 font-mono text-[9.5px] font-bold text-acc"
+                title="{count} unresolved thread{count === 1 ? '' : 's'}">{count}</span
+            >
+        {:else if meta}
+            <span
+                class={"w-3.5 flex-none text-center text-[10px] font-bold " + TONE_TEXT[meta.tone]}
+                >{meta.letter}</span
+            >
+        {:else}
+            <span class="w-3.5 flex-none"></span>
+        {/if}
+    </div>
 {/snippet}

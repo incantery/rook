@@ -4,6 +4,8 @@ import {
     changeCounts,
     dirPaths,
     fileIcon,
+    flattenVisible,
+    parentPath,
     pruneToChanged,
     statusMap,
     statusMeta,
@@ -121,6 +123,57 @@ describe("pruneToChanged", () => {
         const before = shape(tree);
         pruneToChanged(tree, statusMap([chg("src/a.ts", "modified")]));
         expect(shape(tree)).toEqual(before);
+    });
+});
+
+describe("flattenVisible", () => {
+    const tree = buildFileTree(["src/sub/b.ts", "src/a.ts", "e.md"]);
+
+    it("renders only top-level rows when nothing is expanded", () => {
+        expect(flattenVisible(tree, new Set()).map((r) => r.node.name)).toEqual(["src", "e.md"]);
+    });
+
+    it("splices an expanded dir's children in, at depth+1, in render order", () => {
+        const rows = flattenVisible(tree, new Set(["src"]));
+        expect(rows.map((r) => `${r.depth}:${r.node.name}`)).toEqual([
+            "0:src",
+            "1:sub",
+            "1:a.ts",
+            "0:e.md",
+        ]);
+    });
+
+    it("keeps a collapsed dir's children out even when a descendant is expanded", () => {
+        // "src/sub" is expanded but "src" is not — b.ts must not appear
+        const rows = flattenVisible(tree, new Set(["src/sub"]));
+        expect(rows.map((r) => r.node.name)).toEqual(["src", "e.md"]);
+    });
+
+    it("nests to arbitrary depth", () => {
+        const rows = flattenVisible(tree, new Set(["src", "src/sub"]));
+        expect(rows.map((r) => `${r.depth}:${r.node.name}`)).toEqual([
+            "0:src",
+            "1:sub",
+            "2:b.ts",
+            "1:a.ts",
+            "0:e.md",
+        ]);
+    });
+
+    it("is empty for an empty tree", () => {
+        expect(flattenVisible([], new Set())).toEqual([]);
+    });
+});
+
+describe("parentPath", () => {
+    it("drops the last segment", () => {
+        expect(parentPath("src/sub/b.ts")).toBe("src/sub");
+        expect(parentPath("src/a.ts")).toBe("src");
+    });
+
+    it("returns empty at the top level — h has nowhere to climb", () => {
+        expect(parentPath("e.md")).toBe("");
+        expect(parentPath("")).toBe("");
     });
 });
 
