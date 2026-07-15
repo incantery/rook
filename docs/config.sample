@@ -31,13 +31,6 @@
 # window-padding-y = 4
 
 
-# ── Dashboard ────────────────────────────────────────────────────────────
-
-# Which strip number the dashboard occupies, 0 to 8. Shell windows number
-# from the next one up, and the backtick-then-digit jump follows along.
-# dashboard-tab = 1
-
-
 # ── Built-in agent (opt-in; see docs/agent.md) ───────────────────────────
 
 # The whole agent feature is off until you turn it on. Accepts on or true.

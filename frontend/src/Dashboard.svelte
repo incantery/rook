@@ -158,8 +158,7 @@
                     role="presentation"
                 >
                     <div class="mb-1.5 flex items-baseline gap-2">
-                        <span class="font-mono text-xs text-lo"
-                            >{app.dashTab + 1 + (slot === -1 ? i : slot)}</span
+                        <span class="font-mono text-xs text-lo">{(slot === -1 ? i : slot) + 1}</span
                         >
                         <!-- agent sessions get the accent — the attention router's
                              targets, visible at a glance -->

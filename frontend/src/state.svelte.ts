@@ -81,9 +81,6 @@ class AppState {
         return this.workspaces.find((w) => w.name === this.workspace);
     }
 
-    /** strip slot of the dashboard (config dashboard-tab) */
-    dashTab = 1;
-
     get anyOverlayOpen(): boolean {
         return (
             this.paletteOpen ||

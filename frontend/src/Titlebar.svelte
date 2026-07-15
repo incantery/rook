@@ -68,14 +68,20 @@
             ></span><span class="truncate">{app.workspace}</span>{/if}</button
     >
     <div class="absolute inset-y-0 left-1/2 flex -translate-x-1/2 items-stretch">
+        <!-- The dashboard is a SURFACE, not a layout, so it no longer takes a
+             number: the strip is windows and its digits are ` <n>. A numbered
+             dashboard put three species of noun in one list (a singleton
+             surface, layouts, and — before buffers — documents), which is why
+             the numbers never quite meant anything. -->
         <button
             class={[
-                "flex cursor-pointer appearance-none items-center border-0 bg-transparent px-3 font-mono text-sm",
-                app.dashVisible ? "font-bold text-acc" : "text-lo hover:text-dim",
+                "mr-1 flex cursor-pointer appearance-none items-center border-0 bg-transparent px-2 text-sm",
+                app.dashVisible ? "text-acc" : "text-lo hover:text-dim",
             ]}
             style="--wails-draggable: no-drag"
             title="Dashboard (` d)"
-            onclick={ondashboard}>{app.dashTab}</button
+            aria-label="Dashboard"
+            onclick={ondashboard}>⊞</button
         >
         {#each app.tabs as tab, i (tab.id)}
             {@const active = tab.id === app.activeId && !app.dashVisible}
@@ -93,7 +99,7 @@
                 ]}
                 style="--wails-draggable: no-drag"
                 title={tab.name}
-                onclick={() => onactivate(tab.id)}>{app.dashTab + 1 + i}</button
+                onclick={() => onactivate(tab.id)}>{i + 1}</button
             >
         {/each}
         <button

@@ -16,12 +16,6 @@ export interface Config {
     "theme": string;
 
     /**
-     * DashboardTab is the strip number the dashboard occupies; shell
-     * windows number from the next one up (` <n> follows along).
-     */
-    "dashboardTab": number;
-
-    /**
      * Agent settings (docs/agent.md): read by rook-agent, never by the
      * host — the host supervises the process, the process reads its own
      * policy. Off by default; the whole feature is opt-in.

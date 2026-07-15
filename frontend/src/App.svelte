@@ -31,17 +31,14 @@
     interface Props {
         api: HostAPI;
         mkTerm: TermFactory;
-        dashTab: number;
         keybinds: Record<string, string | undefined>;
         /** the tmux-style prefix: a key ("`") or chord ("ctrl+b") */
         leader: string;
         /** the config font, for the Monaco pane (terminals get it via mkTerm) */
         paneFont: {family: string; size: number};
     }
-    let {api, mkTerm, dashTab, keybinds, leader: leaderCfg, paneFont}: Props = $props();
-    // svelte-ignore state_referenced_locally — dashTab is config, fixed for the app's lifetime
-    app.dashTab = dashTab;
-    // config-fixed like dashTab: the leader reloads the page, which re-reads it
+    let {api, mkTerm, keybinds, leader: leaderCfg, paneFont}: Props = $props();
+    // config-fixed: the leader reloads the page, which re-reads it
     // svelte-ignore state_referenced_locally
     const leader = parseLeader(leaderCfg);
     // svelte-ignore state_referenced_locally
@@ -677,9 +674,9 @@
                 // leader pressed twice: tmux passthrough (a literal ` or a control byte)
                 if (leader.literal) mgr.sendToActive(leader.literal);
             } else if (/^[0-9]$/.test(e.key)) {
-                // reserved: the strip digits are computed from dashboard-tab
-                if (Number(e.key) === dashTab) registry.run("workspace.dashboard");
-                else if (Number(e.key) > dashTab) mgr.switchTo(Number(e.key) - dashTab - 1);
+                // reserved: the strip digits ARE the windows, 1-based. The
+                // dashboard no longer takes a slot — it isn't a layout (` d).
+                mgr.switchTo(Number(e.key) - 1);
             } else {
                 const cmd = keymap.prefix.get(e.key);
                 if (cmd) registry.run(cmd);
@@ -697,12 +694,11 @@
         // chords need a real modifier; everything else belongs to the shell
         if (!e.metaKey && !e.ctrlKey && !e.altKey) return;
         if (e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && /^Digit[0-9]$/.test(e.code)) {
-            // reserved: ⌘digits mirror the strip, computed from dashboard-tab
+            // reserved: ⌘digits mirror the strip
             e.preventDefault();
             e.stopPropagation();
             const n = Number(e.code.slice(5));
-            if (n === dashTab) registry.run("workspace.dashboard");
-            else if (n > dashTab) mgr.switchTo(n - dashTab - 1);
+            mgr.switchTo(n - 1);
             return;
         }
         const id = keymap.chords.get(sigOf(e));
@@ -739,7 +735,7 @@
                 // Accepted: the label orients, the jump (by session id) is
                 // what must stay correct.
                 void notify(
-                    `${it.workspace} window ${dashTab + 1 + it.window} needs you`,
+                    `${it.workspace} window ${it.window + 1} needs you`,
                     it.ask?.replace(/\n/g, " ") ?? "",
                 );
             }
@@ -919,7 +915,6 @@
 {#if app.inboxOpen}
     <Inbox
         {api}
-        {dashTab}
         onjump={async (sessionId) => {
             app.screen = "app";
             await tick(); // switchToId activates: fit/focus need a visible DOM

@@ -9,11 +9,10 @@
 
     interface Props {
         api: HostAPI;
-        dashTab: number;
         onjump: (sessionId: string) => void;
         onclose: () => void;
     }
-    let {api, dashTab, onjump, onclose}: Props = $props();
+    let {api, onjump, onclose}: Props = $props();
 
     // Keyed on the transcript session, not the window: a new claude process
     // in the same window is a new identity (askSeq restarts with it).
@@ -201,7 +200,7 @@
                              what must stay correct. -->
                         <span
                             class="rounded-sm bg-amber/10 px-1.5 py-0.5 font-mono text-xs text-amber"
-                            >{it.workspace} · window {dashTab + 1 + it.window}</span
+                            >{it.workspace} · window {it.window + 1}</span
                         >
                         <span class="ml-auto font-mono text-xs text-lo">{ago(it.since)}</span>
                     </div>

@@ -84,7 +84,6 @@ async function main() {
         props: {
             api,
             mkTerm,
-            dashTab: cfg.dashboardTab,
             keybinds: cfg.keybinds ?? {},
             leader: cfg.leader,
             paneFont: {family: font, size: cfg.fontSize},

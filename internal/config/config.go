@@ -25,9 +25,6 @@ type Config struct {
 	// "One Light"). Empty = the frontend's default. Frontend-only: the host
 	// stores it, the webview builds and applies the palette.
 	Theme string `json:"theme"`
-	// DashboardTab is the strip number the dashboard occupies; shell
-	// windows number from the next one up (` <n> follows along).
-	DashboardTab int `json:"dashboardTab"`
 	// Agent settings (docs/agent.md): read by rook-agent, never by the
 	// host — the host supervises the process, the process reads its own
 	// policy. Off by default; the whole feature is opt-in.
@@ -90,7 +87,6 @@ func Default() Config {
 		WindowPaddingX:    4,
 		WindowPaddingY:    4,
 		Theme:             "Material Ocean",
-		DashboardTab:      1,
 		Agent:             false,
 		AgentModel:        "gpt-5.4-nano",
 		AgentDailyCapUSD:  1.00,
@@ -186,10 +182,6 @@ func Load() Config {
 		case "window-padding-y":
 			if n, err := strconv.Atoi(value); err == nil && n >= 0 {
 				cfg.WindowPaddingY = n
-			}
-		case "dashboard-tab":
-			if n, err := strconv.Atoi(value); err == nil && n >= 0 && n <= 8 {
-				cfg.DashboardTab = n
 			}
 		case "agent":
 			cfg.Agent = value == "on" || value == "true"
