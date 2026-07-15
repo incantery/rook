@@ -125,8 +125,7 @@ func TestExtractAppendsAndAdvancesCursor(t *testing.T) {
 	host := extractHost(t, sampleRows, Spend{})
 	ai, calls := fakeExtractAI(t, []string{"when approving tests, also run lint"})
 	a := New(&Client{Endpoint: host.URL, Token: "t", http: http.DefaultClient},
-		NewOpenAI("k", "gpt-5.4-nano"), 1.00)
-	a.AI.BaseURL = ai.URL
+		testEngine(ai), 1.00)
 
 	a.extract(context.Background())
 
@@ -161,8 +160,7 @@ func TestExtractDedupsAgainstStore(t *testing.T) {
 	host := extractHost(t, sampleRows, Spend{})
 	ai, _ := fakeExtractAI(t, []string{"When approving tests, also run lint."})
 	a := New(&Client{Endpoint: host.URL, Token: "t", http: http.DefaultClient},
-		NewOpenAI("k", "gpt-5.4-nano"), 1.00)
-	a.AI.BaseURL = ai.URL
+		testEngine(ai), 1.00)
 
 	a.extract(context.Background())
 
@@ -181,8 +179,7 @@ func TestExtractBudgetGuard(t *testing.T) {
 	host := extractHost(t, sampleRows, Spend{TodayUSD: 1.50})
 	ai, calls := fakeExtractAI(t, []string{"anything"})
 	a := New(&Client{Endpoint: host.URL, Token: "t", http: http.DefaultClient},
-		NewOpenAI("k", "gpt-5.4-nano"), 1.00)
-	a.AI.BaseURL = ai.URL
+		testEngine(ai), 1.00)
 
 	a.extract(context.Background())
 
@@ -204,8 +201,7 @@ func TestExtractSkipsUndecided(t *testing.T) {
 	}, Spend{})
 	ai, calls := fakeExtractAI(t, nil)
 	a := New(&Client{Endpoint: host.URL, Token: "t", http: http.DefaultClient},
-		NewOpenAI("k", "gpt-5.4-nano"), 1.00)
-	a.AI.BaseURL = ai.URL
+		testEngine(ai), 1.00)
 
 	a.extract(context.Background())
 

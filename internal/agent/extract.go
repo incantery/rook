@@ -116,7 +116,7 @@ func (a *Agent) extract(ctx context.Context) {
 	}
 
 	prefs := LoadPreferences()
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, a.AI.Timeout())
 	defer cancel()
 	e, u, err := a.AI.Extract(callCtx, extractRubric, extractPrompt(prefs, rows))
 	if err != nil {

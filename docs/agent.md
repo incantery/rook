@@ -78,6 +78,66 @@ host already senses it) + working-directory match. Consequences:
   sensor (no LLM, no rook knowledge); rook owns correlation, state, and
   everything that acts.
 
+### Shipped (2026-07-14): two engines, and the drafter stops needing setup
+
+The drafter's model backend is now an interface (`internal/agent/engine.go`)
+with two implementations, and `agent-engine = auto` picks one:
+
+- **claude** — shells out to `claude -p` (haiku by default). The argument is
+  dependency arithmetic, not model quality: rook-agent *already* requires
+  claude, because agentmon reads its transcripts and without claude sessions
+  there is nothing to draft against. So this adds no dependency and removes
+  one — no API key, no keychain entry, no config edit. If claude is on PATH
+  the drafter works.
+- **openai** — an API key, as before. Kept deliberately, and not only as a
+  fallback: it is the only way to keep the drafter's spend *off* the
+  subscription's rate limit. "Two tiers, two billing models" (above) was
+  written about a bad reply wasting session time; sharing a quota is a second
+  route to the same harm — hit your limit and you lose the coder *and* the
+  drafter at once, exactly when you have the most sessions running.
+
+**The output contract is a tool.** `claude -p` has no strict `json_schema`, so
+the judgment arrives as a tool call instead: a one-tool MCP server
+(`internal/agent/mcp.go`, served by `rook-agent mcp <pass>`) declares the
+shape, and `--output-format stream-json` carries the payload. MCP declares,
+the stream delivers. The failure mode is the safe one — no tool call means no
+judgment, and no judgment leaves the ask surfaced draft-less, which is what
+escalate already looks like. The schema-violation path and the safe path are
+the same path, so this needs no enforcement to be correct. We never
+synthesize a judgment: a fabricated row is worse than no row, because the
+ledger is the thing that earns autonomy.
+
+Three findings worth keeping, each paid for once:
+
+1. **`claude -p` writes a transcript into `~/.claude/projects` by default** —
+   the exact tree agentmon watches. Left alone, the drafter manufactures the
+   events rook-host reduces to session state: the agent watching itself.
+   `--no-session-persistence` is the fix and is guarded by a test.
+2. **A tool is an offer, not an obligation.** The shared rubric says what to
+   decide, not how to answer, because json_schema made "how" a property of
+   the OpenAI request. Given only the rubric, the model reasons well and calls
+   nothing. The ClaudeCode engine appends its own output-contract paragraph —
+   appended, so the cached prefix stays byte-stable.
+3. **The drafter must stay a classifier.** With tools it will use them, and a
+   $0.0005 classify becomes an agentic run — holding a shell — against a
+   session that is already blocked. `--strict-mcp-config` plus an
+   `--allowed-tools` allowlist of exactly one tool is what prevents it.
+
+The cost is honest rather than good: ~$0.0146 and ~15s per judgment versus
+nano's ~$0.0005 and ~1s, roughly 30x. Almost none of it is rook's — an empty
+`claude -p` already carries ~19k tokens and 31 tools before our prompt. It is
+the price of inheriting the user's global claude config, it scales with what
+they have installed, and `--bare` removes it but only with an
+`ANTHROPIC_API_KEY` (never OAuth, never the keychain). Cheap and clean, or
+free and inherited — the user's credential decides. At ~35 calls/day it is
+cents either way.
+
+Not yet done, and it gates what comes next: the verdict ledger still cannot
+tell "the draft was wrong" from "the draft was never seen", so swapping the
+engine cannot be *shown* to have improved drafting. This change is justified
+on setup cost alone. See the sequence below — step 3 stays blocked until
+`manual` splits.
+
 ## The escalation gate (load-bearing)
 
 "Reply to a claude session" spans two difficulty tiers:

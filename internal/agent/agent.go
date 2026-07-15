@@ -16,7 +16,7 @@ import (
 // host; ours is just "which asks are in flight".
 type Agent struct {
 	Host        *Client
-	AI          *OpenAI
+	AI          Engine
 	DailyCapUSD float64
 	// Debounce lets a burst of transcript events settle before we spend a
 	// call — the ask we draft against must be the one that stays on screen.
@@ -31,7 +31,7 @@ type Agent struct {
 	sem        chan struct{}
 }
 
-func New(host *Client, ai *OpenAI, dailyCapUSD float64) *Agent {
+func New(host *Client, ai Engine, dailyCapUSD float64) *Agent {
 	return &Agent{
 		Host:        host,
 		AI:          ai,
@@ -173,7 +173,7 @@ func (a *Agent) judge(ctx context.Context, it AttentionItem) {
 		return // ask moved on; its key dies with it
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, a.AI.Timeout())
 	defer cancel()
 	j, u, err := a.AI.Judge(callCtx, SystemPrompt(LoadPreferences()), UserPrompt(c))
 	if err != nil {
@@ -193,7 +193,7 @@ func (a *Agent) judge(ctx context.Context, it AttentionItem) {
 		Reply:        j.Reply,
 		Reason:       j.Reason,
 		Confidence:   j.Confidence,
-		Model:        a.AI.Model,
+		Model:        a.AI.Name(),
 		InputTokens:  u.InputTokens,
 		OutputTokens: u.OutputTokens,
 		CachedTokens: u.CachedTokens,

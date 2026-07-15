@@ -77,8 +77,19 @@ func NewOpenAI(key, model string) *OpenAI {
 	}
 }
 
+// Name is the Engine seam's model identifier — the ledger column that makes
+// an engine A/B legible after the fact.
+func (o *OpenAI) Name() string { return o.Model }
+
+// Timeout matches the http.Client's own ceiling: one POST, no process to
+// start, no config to inherit. A structured nano call is ~1s, so this is
+// already 30x headroom and the number has never been the interesting one.
+func (o *OpenAI) Timeout() time.Duration { return 30 * time.Second }
+
 // Judgment is the drafter's whole output contract: decide whether this ask
-// is mechanical (draft) or judgment-shaped (escalate), and say why.
+// is mechanical (draft) or judgment-shaped (escalate), and say why. Both
+// engines produce it: OpenAI via strict json_schema, ClaudeCode via a tool
+// call whose input schema is this same shape (mcp.go).
 type Judgment struct {
 	Action     string  `json:"action"` // draft | escalate
 	Reply      string  `json:"reply"`

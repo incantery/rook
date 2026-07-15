@@ -70,10 +70,17 @@ func fakeOpenAI(t *testing.T, j Judgment) (*httptest.Server, *atomic.Int32) {
 
 func testAgent(host *fakeHost, ai *httptest.Server) *Agent {
 	a := New(&Client{Endpoint: host.URL, Token: "t", http: http.DefaultClient},
-		NewOpenAI("k", "gpt-5.4-nano"), 1.00)
-	a.AI.BaseURL = ai.URL
+		testEngine(ai), 1.00)
 	a.Debounce = 0
 	return a
+}
+
+// testEngine is the OpenAI engine pointed at a fake API. Engine is an
+// interface now, so the BaseURL override happens before New takes it.
+func testEngine(ai *httptest.Server) *OpenAI {
+	o := NewOpenAI("k", "gpt-5.4-nano")
+	o.BaseURL = ai.URL
+	return o
 }
 
 func TestJudgePostsDraft(t *testing.T) {

@@ -28,7 +28,15 @@ type Config struct {
 	// Agent settings (docs/agent.md): read by rook-agent, never by the
 	// host — the host supervises the process, the process reads its own
 	// policy. Off by default; the whole feature is opt-in.
-	Agent            bool    `json:"agent"`
+	Agent bool `json:"agent"`
+	// AgentEngine picks the drafter's model backend: "claude" shells out to
+	// the coder CLI the user already has (no key, no setup — claude is
+	// already a hard dependency, since agentmon reads its transcripts),
+	// "openai" uses an API key, "auto" (the default) prefers claude when
+	// it's on PATH and falls back to a key. Empty means auto.
+	AgentEngine string `json:"agentEngine"`
+	// AgentModel empty means the engine's own default — the engines disagree
+	// (nano vs haiku), so the default can't live here.
 	AgentModel       string  `json:"agentModel"`
 	AgentDailyCapUSD float64 `json:"agentDailyCapUsd"`
 	// Jira issue queue (host-read): jira-url + jira-email are global; a
@@ -88,7 +96,8 @@ func Default() Config {
 		WindowPaddingY:    4,
 		Theme:             "Material Ocean",
 		Agent:             false,
-		AgentModel:        "gpt-5.4-nano",
+		AgentEngine:       "auto",
+		AgentModel:        "", // engine's default
 		AgentDailyCapUSD:  1.00,
 		Coder:             "claude",
 		Leader:            "`",
@@ -188,6 +197,10 @@ func Load() Config {
 		case "agent-model":
 			if value != "" {
 				cfg.AgentModel = value
+			}
+		case "agent-engine":
+			if value != "" {
+				cfg.AgentEngine = value
 			}
 		case "agent-daily-cap-usd":
 			if f, err := strconv.ParseFloat(value, 64); err == nil && f >= 0 {

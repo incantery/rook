@@ -21,6 +21,20 @@ export interface Config {
      * policy. Off by default; the whole feature is opt-in.
      */
     "agent": boolean;
+
+    /**
+     * AgentEngine picks the drafter's model backend: "claude" shells out to
+     * the coder CLI the user already has (no key, no setup — claude is
+     * already a hard dependency, since agentmon reads its transcripts),
+     * "openai" uses an API key, "auto" (the default) prefers claude when
+     * it's on PATH and falls back to a key. Empty means auto.
+     */
+    "agentEngine": string;
+
+    /**
+     * AgentModel empty means the engine's own default — the engines disagree
+     * (nano vs haiku), so the default can't live here.
+     */
     "agentModel": string;
     "agentDailyCapUsd": number;
 
