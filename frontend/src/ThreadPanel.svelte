@@ -40,6 +40,14 @@
         acc: "bg-acc",
         grn: "bg-grn",
     };
+    // The expanded card is edged in its own state's tone (the mockup's
+    // `border: 1px solid meta.color`), so an open card still says what it is
+    // once its collapsed dot + label scroll out of view.
+    const TONE_BORDER: Record<StateTone, string> = {
+        amber: "border-amber/45",
+        acc: "border-acc/45",
+        grn: "border-grn/45",
+    };
     const FILTERS: [ThreadFilter, string][] = [
         ["open", "Open"],
         ["resolved", "Resolved"],
@@ -241,14 +249,14 @@
 {:else}
     <div class="flex h-full min-h-0 flex-col text-fg">
         <!-- filters + counts (SidePane's header already says "Threads") -->
-        <div class="flex shrink-0 items-center gap-2 border-b border-white/10 px-3 py-2">
+        <div class="flex shrink-0 items-center gap-2 border-b border-line/15 px-3 py-2">
             <div class="flex gap-1.5">
                 {#each FILTERS as [id, label] (id)}
                     <button
                         class={"cursor-pointer rounded-lg border px-2.5 py-1 text-[11px] font-semibold " +
                             (filter === id
                                 ? "border-acc/40 bg-acc/15 text-acc"
-                                : "border-white/10 bg-transparent text-lo hover:text-fg")}
+                                : "border-line/15 bg-transparent text-lo hover:text-fg")}
                         onclick={() => (filter = id)}>{label}</button
                     >
                 {/each}
@@ -303,8 +311,8 @@
                 <div
                     class={"overflow-hidden rounded-xl border transition-colors " +
                         (selectedId === t.id
-                            ? "border-acc/45 bg-white/[0.04]"
-                            : "border-white/10 bg-white/[0.02]")}
+                            ? TONE_BORDER[meta.tone] + " bg-fg/[0.06] shadow-lg"
+                            : "border-line/15 bg-fg/[0.03]")}
                 >
                     <div
                         class="flex cursor-pointer items-center gap-2.5 px-3 py-2.5"
@@ -347,7 +355,7 @@
                                             class={"inline-flex size-5 shrink-0 items-center justify-center rounded-md text-[10px] font-bold " +
                                                 (av.isAgent
                                                     ? "bg-acc/20 text-acc"
-                                                    : "bg-white/10 text-fg")}>{av.initials}</span
+                                                    : "bg-fg/10 text-fg")}>{av.initials}</span
                                         >
                                         <div class="min-w-0 flex-1 pt-px">
                                             <div class="mb-0.5 flex items-center gap-2">
@@ -390,14 +398,14 @@
                                     onkeydown={(e) => keydown(e, reply)}
                                 />
                                 <button
-                                    class="shrink-0 cursor-pointer rounded-lg border border-white/10 bg-white/5 px-3 text-[11px] font-semibold text-fg hover:border-acc disabled:opacity-50"
+                                    class="shrink-0 cursor-pointer rounded-lg border border-line/15 bg-fg/5 px-3 text-[11px] font-semibold text-fg hover:border-acc disabled:opacity-50"
                                     disabled={busy}
                                     onclick={reply}>Send</button
                                 >
                             </div>
 
                             <div
-                                class="mt-2.5 flex items-center gap-3.5 border-t border-white/10 pt-2.5"
+                                class="mt-2.5 flex items-center gap-3.5 border-t border-line/15 pt-2.5"
                             >
                                 {#if t.state === "resolved"}
                                     <button
@@ -431,11 +439,17 @@
 
         <!-- footer hint -->
         <div
-            class="flex shrink-0 items-center gap-2.5 border-t border-white/10 px-3.5 py-2 font-mono text-[10px] text-lo"
+            class="flex shrink-0 items-center gap-2.5 border-t border-line/15 px-3.5 py-2 font-mono text-[10px] text-lo"
         >
-            <span>click any line to start a thread</span>
+            <!-- Name the gesture that actually exists. The mockup's "click any
+                 line to start a thread" was aspirational: a bare line click does
+                 nothing, and creation is Monaco's rook.comment action
+                 (term/editor.ts) — ⌘⇧M on a selection, or its context menu.
+                 Both spans stay nowrap: the pane is 352px and a wrapped hint
+                 pushes the footer to two lines. -->
+            <span class="whitespace-nowrap">⌘⇧M starts a thread</span>
             <span class="flex-1"></span>
-            <span>agents reply here</span>
+            <span class="whitespace-nowrap">agents reply here</span>
         </div>
     </div>
 {/if}
