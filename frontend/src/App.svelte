@@ -8,7 +8,7 @@
     import {Call} from "@wailsio/runtime";
     import type {HostAPI, IssueInfo} from "./hostapi";
     import {TermManager, type TermFactory} from "./term/manager";
-    import type {Edge} from "./term/layout";
+    import type {Edge, PaneRef} from "./term/layout";
     import {themeService} from "./theme/service";
     import {Registry} from "./registry";
     import {buildKeymap, parseLeader, sigOf} from "./keymap";
@@ -154,35 +154,111 @@
         setTimeout(() => (app.workspace = prev), 2500);
     }
 
-    /** Open a Monaco pane as a NEW window on the strip (it's a pane, so
-     *  ` % splits a terminal in beside it). The EditorPane is constructed
-     *  here — the manager stays Monaco-free. */
-    async function openEditorPane(kind: "review" | "file", path?: string): Promise<void> {
+    // ==== buffers ====
+    //
+    // A file is a BUFFER: it exists independently of any pane, and a pane is
+    // a viewport onto one (vim's buffer/window split; VS Code's editor/group
+    // split is the same thing with the list drawn as tabs). The strip is for
+    // LAYOUTS — tmux windows — so a file must never mint one.
+    //
+    // `buffers` is the open set, most-recent first: `:ls`, and what the ⌘P
+    // picker offers before it offers the whole repo. It deliberately outlives
+    // the panes — retarget a pane off a file and the file is still open, which
+    // is the difference between buffers and a single-file viewer.
+
+    /** leafId → the EditorPane in it. The manager holds these as opaque
+     *  PaneContent (it stays Monaco-free), but retargeting needs the real
+     *  thing, so chrome keeps the index. */
+    const editorPanes = new Map<string, import("./term/editor").EditorPane>();
+
+    /** Promote a path to most-recent. Bounded: this is a working set, not
+     *  history — the picker searches the whole repo anyway. */
+    function touchBuffer(path: string): void {
+        app.buffers = [path, ...app.buffers.filter((p) => p !== path)].slice(0, 50);
+    }
+
+    async function newEditorWindow(kind: "review" | "file", path?: string): Promise<void> {
+        // the showWorkspace dance: activation fits and focuses, and
+        // both silently no-op on a display:none subtree
+        app.screen = "app";
+        await tick();
+        const {EditorPane} = await import("./term/editor");
+        const ref: PaneRef =
+            kind === "review" ? {type: "review"} : {type: "file", path: path ?? ""};
+        mgr.openPaneWindow(ref, (leafId) => {
+            const pane = new EditorPane(api, {
+                workspace: app.workspace,
+                kind,
+                path,
+                font: paneFont,
+                onFlash: flash,
+                onClose: () => mgr.closePane(leafId),
+                onActivate: (seam) => {
+                    activeEditor = seam;
+                    activeEditorKind = kind;
+                },
+                onDispose: (seam) => {
+                    editorPanes.delete(leafId);
+                    if (activeEditor === seam) activeEditor = null;
+                },
+            });
+            editorPanes.set(leafId, pane);
+            return pane;
+        });
+    }
+
+    /** Open a file as a BUFFER, not a window. The ladder, in vim's terms:
+     *    1. already displayed → `:b` — go to it, don't open a second copy
+     *    2. a file pane exists → `:e` — retarget it in place, keeping the
+     *       pane's id, position, focus and Monaco instance
+     *    3. nothing to reuse → mint one window, ONCE
+     *  Step 3 used to be the only step, which is why every file minted a
+     *  numbered slot in a strip that means "layout". */
+    async function openFile(path: string): Promise<void> {
         try {
             await initDone;
-            // the showWorkspace dance: activation fits and focuses, and
-            // both silently no-op on a display:none subtree
-            app.screen = "app";
-            await tick();
-            const {EditorPane} = await import("./term/editor");
-            mgr.openPaneWindow(
-                (leafId) =>
-                    new EditorPane(api, {
-                        workspace: app.workspace,
-                        kind,
-                        path,
-                        font: paneFont,
-                        onFlash: flash,
-                        onClose: () => mgr.closePane(leafId),
-                        onActivate: (seam) => {
-                            activeEditor = seam;
-                            activeEditorKind = kind;
-                        },
-                        onDispose: (seam) => {
-                            if (activeEditor === seam) activeEditor = null;
-                        },
-                    }),
-            );
+            touchBuffer(path);
+            const open = mgr.findPane((c) => c.type === "file" && c.path === path);
+            if (open) {
+                app.screen = "app";
+                await tick();
+                mgr.revealPane(open);
+                return;
+            }
+            const reusable = mgr.findPane((c) => c.type === "file");
+            if (reusable) {
+                const pane = editorPanes.get(reusable.leafId);
+                // A dirty pane refuses (vim's `:e` without a bang). Don't nag
+                // and don't discard — fall through and give the file its own
+                // pane, so the click still does something.
+                if (pane && (await pane.setFile(path))) {
+                    mgr.retargetPane(reusable, {type: "file", path});
+                    app.screen = "app";
+                    await tick();
+                    mgr.revealPane(reusable);
+                    return;
+                }
+            }
+            await newEditorWindow("file", path);
+        } catch (err) {
+            console.error("editor pane failed", err);
+            flash("editor pane failed — see console");
+        }
+    }
+
+    /** The review is a singleton surface, not a document: one walker over the
+     *  whole changed set. A second ` g goes to the one you have. */
+    async function openReview(): Promise<void> {
+        try {
+            await initDone;
+            const at = mgr.findPane((c) => c.type === "review");
+            if (at) {
+                app.screen = "app";
+                await tick();
+                mgr.revealPane(at);
+                return;
+            }
+            await newEditorWindow("review");
         } catch (err) {
             console.error("editor pane failed", err);
             flash("editor pane failed — see console");
@@ -406,7 +482,7 @@
             title: "Review changes (diff)",
             category: "View",
             keys: keymap.display("review.changes"),
-            run: () => void openEditorPane("review"),
+            run: () => void openReview(),
         },
         {
             id: "threads.toggle",
@@ -702,6 +778,9 @@
                 app.tabs = mgr.currentTabs();
                 app.activeId = mgr.activeId;
                 app.focusedSessionId = mgr.focusedSessionId;
+                // buffer paths are repo-relative, so they mean nothing in
+                // another workspace — drop them at the boundary
+                if (app.workspace !== mgr.workspace) app.buffers = [];
                 app.workspace = mgr.workspace;
             },
             workspaceGone: showHome,
@@ -779,7 +858,7 @@
                 {api}
                 workspace={app.workspace}
                 active={app.focusZone === "left"}
-                onopen={(path) => void openEditorPane("file", path)}
+                onopen={(path) => void openFile(path)}
             />
         </SidePane>
         <div class="relative min-h-0 min-w-0 flex-1" bind:this={terminalsEl}>
@@ -830,7 +909,7 @@
 {#if app.filePickerOpen}
     <FilePicker
         {api}
-        onopen={(path) => void openEditorPane("file", path)}
+        onopen={(path) => void openFile(path)}
         onclose={() => {
             app.filePickerOpen = false;
             focusBack();

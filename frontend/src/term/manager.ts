@@ -17,21 +17,40 @@ import type {ITheme, Terminal} from "@xterm/xterm";
 import type {FitAddon} from "@xterm/addon-fit";
 import type {HostAPI, SessionInfo} from "../hostapi";
 import {
+    findLeafBy,
     leafOf,
     leaves,
     neighborOf,
-    newEditorLeaf,
     newLeaf,
     normalize,
     reconcile,
     removeAt,
+    retarget,
     setWeight,
     splitAt,
     termOnly,
 } from "./layout";
-import type {Dir, Edge, LayoutNode, SplitNode, StoredState, StoredWindow} from "./layout";
+import type {
+    Dir,
+    Edge,
+    LayoutNode,
+    LeafNode,
+    PaneRef,
+    SplitNode,
+    StoredState,
+    StoredWindow,
+} from "./layout";
+
 import {applyFocus, applyZoom, project} from "./view";
 import type {ViewHooks} from "./view";
+
+/** Where a pane lives, by id — the manager hands these out instead of its
+ *  internal Win, so callers can name a pane without holding one. */
+export interface PaneAt {
+    winId: string;
+    leafId: string;
+    content: PaneRef;
+}
 
 export type TermFactory = () => {term: Terminal; fit: FitAddon};
 
@@ -539,13 +558,50 @@ export class TermManager {
         for (const p of this.active.panes.values()) p.fit(force);
     }
 
-    /** New single-pane window around non-terminal content — ` g's entry.
-     *  The manager stays Monaco-free: the caller builds the PaneContent
-     *  for the fresh leaf. */
-    openPaneWindow(mk: (leafId: string) => PaneContent): void {
-        const leaf = newEditorLeaf();
+    /** New single-pane window around non-terminal content. The manager stays
+     *  Monaco-free: the caller builds the PaneContent for the fresh leaf, and
+     *  passes the ref so the tree knows WHAT the pane shows. */
+    openPaneWindow(content: PaneRef, mk: (leafId: string) => PaneContent): void {
+        const leaf: LeafNode = {kind: "leaf", id: crypto.randomUUID(), content};
         const panes = new Map<string, PaneContent>([[leaf.id, mk(leaf.id)]]);
         this.activate(this.makeWindow(leaf, this.current, leaf.id, panes));
+    }
+
+    /** Find a pane by what it shows, current workspace only. Prefers the
+     *  ACTIVE window, so "is this file already open?" answers with the copy
+     *  in front of you rather than one three windows away. Returns opaque
+     *  ids — Win is the manager's own business. */
+    findPane(pred: (c: PaneRef) => boolean): PaneAt | null {
+        const wins = this.wsWins();
+        const ordered = this.active
+            ? [this.active, ...wins.filter((w) => w !== this.active)]
+            : wins;
+        for (const win of ordered) {
+            const leaf = findLeafBy(win.root, pred);
+            if (leaf) return {winId: win.id, leafId: leaf.id, content: leaf.content};
+        }
+        return null;
+    }
+
+    /** Reveal a pane found via findPane: switch to its window, focus it. */
+    revealPane(at: PaneAt): void {
+        const win = this.windows.find((w) => w.id === at.winId);
+        if (!win) return;
+        if (this.active !== win) this.activate(win);
+        this.unzoom(win);
+        this.setFocusedPane(win, at.leafId);
+        win.panes.get(at.leafId)?.focus();
+    }
+
+    /** Record that a pane now shows different content. The PaneContent object
+     *  is untouched — it retargeted itself; this only keeps the TREE honest,
+     *  which is what findPane and the strip's title read. */
+    retargetPane(at: PaneAt, content: PaneRef): void {
+        const win = this.windows.find((w) => w.id === at.winId);
+        if (!win) return;
+        win.root = retarget(win.root, at.leafId, content);
+        this.save();
+        this.events.changed();
     }
 
     /** Close the focused pane: terminals die host-side (kill; the ws

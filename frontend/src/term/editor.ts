@@ -422,6 +422,34 @@ export class EditorPane implements PaneContent {
         }
     }
 
+    /** Point this pane at a different file — `:e`, the whole reason buffers
+     *  work. The pane keeps its id, its place in the layout and its Monaco
+     *  instance; only the model underneath changes. Cheap, because loadFile()
+     *  already rebuilds the model, head, bands and vim from opts.path.
+     *
+     *  Refuses a dirty buffer the way vim refuses `:e` without a bang —
+     *  silently discarding someone's edits to service a click in the explorer
+     *  is never the right trade. Returns whether it moved, so the caller can
+     *  fall back to another pane rather than appear to do nothing.
+     *
+     *  file-mode only: a review pane is a walker over the changed set, not a
+     *  document, and its head/editor are a different shape entirely. */
+    async setFile(path: string): Promise<boolean> {
+        if (this.opts.kind !== "file" || this.disposed) return false;
+        if (this.opts.path === path) return true; // already here
+        if (this.dirty) {
+            this.opts.onFlash(`${this.opts.path ?? "buffer"} has unsaved changes`);
+            return false;
+        }
+        this.opts.path = path;
+        this.closeArmed = false;
+        this.editable = false; // until the read says otherwise
+        this.showStatus("reading file…");
+        await this.loadFile();
+        this.emitChange(); // the strip's title + the thread panel's file context
+        return true;
+    }
+
     private async loadFile(): Promise<void> {
         const m = this.monaco;
         const path = this.opts.path ?? "";

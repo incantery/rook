@@ -39,16 +39,29 @@
         loaded = true;
     });
 
+    // Open buffers first, then the rest of the repo — this picker is `:ls`
+    // and `:find` in one box, which is what makes the buffer list visible
+    // without spending a tab bar on it. Both halves take the same filter, and
+    // a buffer never repeats in the tail.
     const items = $derived.by((): string[] => {
         const q = query.trim().toLowerCase();
-        const out: string[] = [];
+        const hit = (f: string) => !q || f.toLowerCase().includes(q);
+        const open = app.buffers.filter(hit);
+        const openSet = new Set(open);
+        const out: string[] = [...open];
         for (const f of files) {
-            if (q && !f.toLowerCase().includes(q)) continue;
+            if (!hit(f) || openSet.has(f)) continue;
             out.push(f);
             if (out.length === RENDER_CAP) break;
         }
         return out;
     });
+    /** how many leading items are open buffers — the list draws the seam */
+    const openCount = $derived(
+        app.buffers.filter(
+            (f) => !query.trim() || f.toLowerCase().includes(query.trim().toLowerCase()),
+        ).length,
+    );
 
     function pick(path: string | undefined) {
         if (!path) return;
@@ -119,6 +132,20 @@
                 </div>
             {/if}
             {#each items as path, i (path)}
+                {#if i === 0 && openCount > 0}
+                    <div
+                        class="px-3 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-wider text-lo"
+                    >
+                        Open buffers
+                    </div>
+                {/if}
+                {#if i === openCount && openCount > 0}
+                    <div
+                        class="mt-1 border-t border-line/15 px-3 pb-1 pt-2 text-[10px] font-bold uppercase tracking-wider text-lo"
+                    >
+                        All files
+                    </div>
+                {/if}
                 <!-- .sel stays as a JS scroll-into-view hook, not a style -->
                 <div
                     class={[
@@ -132,7 +159,12 @@
                     }}
                     role="presentation"
                 >
-                    <span class="flex-1 text-sm text-fg">{path}</span>
+                    <span class={"flex-1 text-sm " + (i < openCount ? "text-fg" : "text-dim")}
+                        >{path}</span
+                    >
+                    {#if i < openCount}
+                        <span class="font-mono text-[10px] text-lo">buffer</span>
+                    {/if}
                 </div>
             {/each}
         </div>

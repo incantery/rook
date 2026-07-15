@@ -43,6 +43,14 @@ class AppState {
      *  mode-derived — like VS Code's sidebar it persists across modes. */
     explorerOpen = $state(false);
 
+    /** The open file buffers for the CURRENT workspace, most-recent first —
+     *  vim's `:ls`. A buffer is not a pane and not a strip entry: it's the
+     *  document itself, which is why opening a file must never mint a window.
+     *  Panes reference buffers ({type:"file", path} in the layout tree); this
+     *  list outlives them, so retargeting a pane off a file leaves the file
+     *  open. Reset on workspace switch — paths are repo-relative. */
+    buffers = $state<string[]>([]);
+
     /** Which REGION of the workbench holds focus. The terminal manager tracks
      *  focus as a pane id inside its layout tree, which by construction can't
      *  say "focus is in the explorer" — so the zone sits a level above it and

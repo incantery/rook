@@ -7,11 +7,26 @@
 /** row = children side-by-side (a vertical divider), col = stacked. */
 export type Dir = "row" | "col";
 
-/** What a pane shows — a tagged union on purpose. Editor leaves are
- *  deliberately minimal: their runtime state lives on the EditorPane
- *  object, and they never persist (normalize rejects them, termOnly
- *  strips them before save). */
-export type PaneRef = {type: "term"; session: string} | {type: "editor"};
+/** What a pane shows — a tagged union on purpose, and every arm now carries
+ *  IDENTITY. That asymmetry used to be the bug: `term` named its session (a
+ *  host-owned thing a pane merely points at — a buffer in all but name) while
+ *  the editor arm named nothing, so a file could only be addressed as "the
+ *  window that happens to contain it". Hence a window minted per file.
+ *
+ *  `file` is a document: a pane can be retargeted from one to another in
+ *  place, which is what makes buffers work. `review` is NOT a document and
+ *  deliberately has no path — it's a walker over the whole changed set with
+ *  its own ‹ › cursor, so it's a surface, not a buffer. The two can't morph
+ *  into each other either (different head, diffEditor vs editor).
+ *
+ *  Neither persists yet: normalize() accepts only `term`, and termOnly()
+ *  strips the rest before save. Identity is what a later slice needs to fix
+ *  that — a stored `{type:"file", path}` is restorable; `{type:"editor"}` was
+ *  not, which is why "an editor-only window has no persistent form". */
+export type PaneRef =
+    | {type: "term"; session: string}
+    | {type: "file"; path: string}
+    | {type: "review"};
 
 export interface LeafNode {
     kind: "leaf";
@@ -57,8 +72,25 @@ export function newLeaf(session: string): LeafNode {
     return {kind: "leaf", id: crypto.randomUUID(), content: {type: "term", session}};
 }
 
-export function newEditorLeaf(): LeafNode {
-    return {kind: "leaf", id: crypto.randomUUID(), content: {type: "editor"}};
+export function newFileLeaf(path: string): LeafNode {
+    return {kind: "leaf", id: crypto.randomUUID(), content: {type: "file", path}};
+}
+
+export function newReviewLeaf(): LeafNode {
+    return {kind: "leaf", id: crypto.randomUUID(), content: {type: "review"}};
+}
+
+/** Point an existing leaf at different content, in place — the pane keeps its
+ *  id, so focus, zoom and its position in the tree all survive. This is `:e`:
+ *  the viewport stays put and the buffer under it changes. */
+export function retarget(root: LayoutNode, paneId: string, content: PaneRef): LayoutNode {
+    if (root.kind === "leaf") return root.id === paneId ? {...root, content} : root;
+    return {...root, children: root.children.map((c) => retarget(c, paneId, content))};
+}
+
+/** The first leaf whose content matches, in ` o cycle order. */
+export function findLeafBy(root: LayoutNode, pred: (c: PaneRef) => boolean): LeafNode | null {
+    return leaves(root).find((l) => pred(l.content)) ?? null;
 }
 
 /** All leaves, in-order — this defines the ` o cycle order. */
