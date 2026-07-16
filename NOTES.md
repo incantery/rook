@@ -20,3 +20,4 @@
 # Issue Tracking
 
 - [ ] One of the next things we should probably setup is some kind of issue tracking integration. Then the rook agent can tie into the list of issues to determine what we should work on next
+- [ ] The file tree should be based on CWD rather than workspace I think, but let's dicsuss.

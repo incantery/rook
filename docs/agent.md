@@ -292,6 +292,62 @@ asynchronous kill — turns out to be load-bearing for the usage prober's
 `claude -p /usage`, which is killed the same way. The sleep stayed; its comment
 was the thing that was wrong.
 
+### Shipped (2026-07-15): the session view
+
+`` ` v`` opens a claude session as a rendered conversation. It is a **pane** —
+it splits, it sits beside the pty it is a view of, and it retargets in place to
+another session, because a session is a document too. The pty is untouched:
+`terminal ↗` jumps to it, and everything rook has not reimplemented still works
+there. `GET /agents/{id}/transcript` over `transcript.FindSession`/
+`ReadSession`; `agentview.ts` holds every decision with its spec and the
+`.svelte` stays dumb (the `term/threadview.ts` split); `AgentPane` is the first
+Svelte mounted outside `main.ts`, behind the same narrow `PaneContent` seam
+that keeps the manager Monaco-free.
+
+The endpoint **retains nothing** — it reads the jsonl on demand. Live is a
+stream, history is a file, and holding every session's records in memory to
+serve a view nobody may open is paying for scrollback at all times. It is also
+the read the tailer cannot do: `watch` follows appends forward, scrollback
+pages backward from the end. Two reads of one artifact, which is why the parser
+is stateless.
+
+Three numbers decided the design, and none of them were guessable:
+
+- **Transcripts average 1.6MB and reach 58MB.** Windowing is not a nicety. A
+  200-record window of a real 1.3MB session is 96KB on the wire — 5x less than
+  the 485KB it starts as, because bookkeeping records (`attachment`,
+  `file-history-snapshot`, `queue-operation`, `mode`, `ai-title`,
+  `last-prompt`) are not conversation. Nothing else is capped: tool input
+  arrives whole, which is the entire reason agentmon had to go.
+- **Thinking blocks are empty.** 7430 of them corpus-wide, 25MB of signature,
+  and *zero renderable characters between them* — claude writes the reasoning
+  encrypted. agentmon's `// dropped by design` was right, and nothing above
+  should be read as saying otherwise. The signature is an attestation for
+  replaying to the API, which rook never does, so it never reaches the wire.
+  The block survives so a turn's shape does.
+- **Every `tool_use` carries an id** — 38,807 of them, no exceptions. Pairing a
+  call to its result is a two-line map in `agentview.ts`, and was structurally
+  impossible through agentmon's events.
+
+`` ` v`` targets the session in front of you, read from `correlate()` at command
+time — **not** from `app.attention`, which only lists sessions that need
+something and would have made the command do nothing for a session that is
+happily working, i.e. most of them.
+
+The gap is the predicted one: **markdown renders literally.** The TUI renders
+it and this does not. That is the first real instance of "every Claude Code
+feature rook has not reimplemented is one you lose by not being in the TUI",
+which is the standing risk of this entire surface and the reason the pty stays.
+No markdown library is installed. A decision, not an oversight.
+
+Fixed on the way, because it made the feature look broken rather than absent:
+`make dev` could not load a host change at all. Every unstamped build reports
+Build "dev", so the compatibility check compared `"dev" == "dev"`, matched, and
+rode a daemon from hours earlier while `wails3` dutifully rebuilt the binary on
+every save. The daemon now records a content hash of its own executable and
+unstamped clients compare against it (`internal/hostclient`). Stamped builds
+are untouched.
+
 ## The escalation gate (load-bearing)
 
 "Reply to a claude session" spans two difficulty tiers:
