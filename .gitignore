@@ -15,3 +15,7 @@ frontend/rook
 # playwright output (the e2e sandbox itself lives in bin/, already ignored)
 frontend/test-results
 frontend/playwright-report
+# Claude Code's worktree isolation drops checkouts of this repo in here. They
+# are live git worktrees, so `git add -A` tries to commit an embedded repo and
+# `make release` refuses the dirty tree — which is how one blocked a release.
+.claude/worktrees/
