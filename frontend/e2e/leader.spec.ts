@@ -37,8 +37,10 @@ const made: string[] = [];
 test.afterEach(async ({page}) => {
     for (const name of made.splice(0)) {
         await page.goto("/");
+        // The deck lands on agents; workspaces (and their ✕) are a tab over.
+        await page.getByRole("button", {name: /^workspaces/}).click();
         const card = page
-            .locator("#home-scroll div.group")
+            .locator("#home-workspaces div.group")
             .filter({has: page.getByText(name, {exact: true})});
         // Wait for the card rather than testing for it: #home renders before
         // listWorkspaces resolves, so an immediate count() reads 0 for a
@@ -57,6 +59,7 @@ async function openWorkspace(page: Page, name: string) {
     made.push(name);
     await page.goto("/");
     await expect(page.locator("#home")).toBeVisible();
+    await page.getByRole("button", {name: /^workspaces/}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();
     await page.getByPlaceholder("e.g. rook-core").fill(name);
@@ -118,4 +121,25 @@ test("` ` still types a literal backtick into a terminal", async ({page}) => {
     await page.keyboard.type("x``y");
 
     await expect(shown(page, ".xterm-rows")).toContainText("x`y", {timeout: 10_000});
+});
+
+// Mission control has to TAKE focus, not just be on top of everything.
+//
+// #terminals is never unmounted — visibility is a display toggle (App.svelte
+// says so out loud) — so xterm's hidden textarea keeps DOM focus across the
+// switch unless something claims it. That is why the deck's j/k used to end
+// up in the shell you last had open, and why the deck's keys are bound to a
+// focused element rather than to window. Same file as the leader tests
+// because it is the same question: where does a keystroke actually land.
+test("mission control takes focus off the terminal", async ({page}) => {
+    await openWorkspace(page, "deck-focus");
+    await shown(page, ".xterm-screen").click();
+    // the terminal really has it, or the assertion below proves nothing
+    expect(await page.evaluate(() => document.activeElement?.tagName)).toBe("TEXTAREA");
+
+    await page.keyboard.press("`");
+    await page.keyboard.press("h");
+    await expect(page.locator("#home")).toBeVisible();
+
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("home");
 });

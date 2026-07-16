@@ -199,6 +199,26 @@
         };
     }
 
+    /** Raw attach from the deck — straight to the pty behind a row.
+     *
+     *  No correlate lookup, unlike jumpToPty: the deck's rows come from
+     *  /overview, which now carries the pty id per agent, so the id is
+     *  already in hand. switchToId crosses windows AND workspaces on its own,
+     *  which matters here in a way it doesn't for ` v — the deck lists every
+     *  workspace at once, so the row you press R on is routinely not in the
+     *  one you're standing in. */
+    async function openPty(id: string): Promise<void> {
+        try {
+            await initDone;
+            app.screen = "app";
+            await tick(); // activate() no-ops on a display:none subtree
+            if (!mgr.switchToId(id)) flash("no live terminal for this session");
+        } catch (err) {
+            console.error("raw attach failed", err);
+            flash("no live terminal for this session");
+        }
+    }
+
     /** ` v — watch the agent session you are looking at.
      *
      *  Which session that is comes from the host's correlate(), read at
@@ -382,6 +402,41 @@
         }, 400);
     }
 
+    /** The workspace the spawn modal opens on. The deck names it (you're
+     *  looking at rook's agents, so n means "another one of those"); every
+     *  other door falls back to the workspace you're standing in. */
+    let spawnWs = $state("");
+
+    function openSpawn(workspace = app.workspace): void {
+        spawnWs = workspace;
+        app.spawnOpen = true;
+    }
+
+    /** Spawn from the deck: host-side, no window, you stay on the deck.
+     *
+     *  spawn() above mints a terminal and drops you into it, which is the
+     *  opposite of what this screen is for — you came to START work, not to
+     *  go sit and watch it. POST /workspaces/{ws}/spawn is the same actuator
+     *  the conflicts chip and the workflow stages already use: the host owns
+     *  the pty, types the coder command, and the claim hook correlates the
+     *  session on its own. The row appears on the next 5s poll.
+     *
+     *  The pty is born 100x30 with nobody attached, and that cost lands on
+     *  the RAW view alone: scrollback rendered at 100 columns reflows when
+     *  you finally attach wider, while the transcript reader never touches a
+     *  pty. Background spawning is only tolerable BECAUSE the conversation
+     *  view exists — before it, an unattended session's only record was a
+     *  100-column ring. */
+    async function spawnBackground(
+        task: string,
+        workspace: string,
+        worktree: boolean,
+    ): Promise<void> {
+        if (worktree) workspace = (await api.createWorktree(workspace)).name;
+        await api.spawnTask(workspace, {task});
+        await home?.refresh(); // don't make them wait out the poll for their own action
+    }
+
     // The issue→worktree→session loop, invoked from the dashboard (current
     // workspace) or mission control (any workspace's queue): isolate in a
     // fresh worktree when the workspace has a repo, else land in the
@@ -559,9 +614,7 @@
             title: "New agent session (claude on a task)",
             category: "Session",
             keys: keymap.display("agent.spawn"),
-            run: () => {
-                app.spawnOpen = true;
-            },
+            run: () => openSpawn(),
         },
         {
             id: "workspace.scratch",
@@ -982,6 +1035,9 @@
         onopen={(name) => void showWorkspace(name)}
         onspawn={(name) => void spawnShell(name)}
         onwork={(ws, issue) => workIssue(issue, ws)}
+        onagent={(session) => void openAgent(session)}
+        onraw={(id) => void openPty(id)}
+        onnew={(ws) => openSpawn(ws || app.workspace)}
     />
 {/if}
 
@@ -1082,8 +1138,9 @@
 {/if}
 {#if app.spawnOpen}
     <SpawnModal
-        currentWorkspace={app.workspace}
-        onspawn={spawn}
+        currentWorkspace={spawnWs}
+        background={app.screen === "home"}
+        onspawn={app.screen === "home" ? spawnBackground : spawn}
         onclose={() => {
             app.spawnOpen = false;
             focusBack();

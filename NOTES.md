@@ -11,6 +11,7 @@
 
 - [ ] The rook agent should have more agency. Right now it does a lot of just "yours to answer".
 - [ ] Improve the agent recommendation and response setup. I'm thinking something like having something on the dashboard, or a way to have a more detailed view, where Rook can display a summary of what it's replying to and why. If we dial this in, it will/should let us just run most claude code sessions "in the background" and only attach when we specifically choose to directly attach even though it's running interactive the whole time.
+- [ ] Markdown in the svelte session view. Claude writes markdown and the view renders it literally today — fences, lists, headings, bold all show their syntax. It's the difference between a view you'd use and one you'd tolerate, so it gates daily-driving the 90% case. Options: take a dep, reuse Monaco (already chunked, already themed), or write a small renderer for the subset claude actually emits.
 
 # Rook App
 
@@ -21,3 +22,4 @@
 
 - [ ] One of the next things we should probably setup is some kind of issue tracking integration. Then the rook agent can tie into the list of issues to determine what we should work on next
 - [ ] The file tree should be based on CWD rather than workspace I think, but let's dicsuss.
+- [ ] When dashboard or mission control is open, input keeps going into the most recently open terminal

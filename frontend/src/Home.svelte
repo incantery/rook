@@ -1,14 +1,30 @@
-<!-- Mission control — the app's landing screen (issue #12): the answer to
-     "what is going on across everything right now". Task trees hang under
-     their source workspace on the lineage rail, whatever needs the human
-     floats to the top, idle groups compress to one-line rows, and the
-     issue queues of every repo surface here — work waiting to start,
-     cross-workspace. Data is GET /overview (one call, live rollups); on an
-     old daemon it fails open to the bare /workspaces list and renders what
-     it has. The strip carries the app-wide status line: subscription usage
-     windows + the raw-inference cost picture (zeros render — "$0.00 today"
-     on a fresh start is information, not absence). -->
+<!-- Mission control — the app's landing screen: the answer to "what is going
+     on across everything right now", and the deck you steer from.
+
+     The unit is the AGENT. It used to be the workspace: a grid of cards with
+     agents reduced to chips inside them, which meant the thing you actually
+     came here for was countable but never addressable. Now every agent across
+     every workspace is one flat, ordered, vim-navigable list — needs-you
+     first — and the workspace is a column on the row. Press ↵ for the
+     conversation, R for the raw pty: two chromes over one session, the same
+     bargain as the editor's (docs/agent.md, amendment 2026-07-15).
+     Workspaces and the cross-repo issue queue keep their own tabs; they are
+     still how work starts and how trees get cleaned up.
+
+     Data is GET /overview (one call, live rollups); on an old daemon it fails
+     open to the bare /workspaces list and renders what it has — minus the
+     ids, which costs the verbs and not the rows. The strip carries the
+     app-wide status line: subscription usage windows + the raw-inference cost
+     picture (zeros render — "$0.00 today" on a fresh start is information,
+     not absence).
+
+     Ordering, filtering and cursor motion live in deck.ts, tested there. This
+     file is chrome, polling, and keys. -->
 <script lang="ts">
+    import {onMount, tick} from "svelte";
+
+    import AgentSession from "./AgentSession.svelte";
+    import {counts, glyph, group, match, move, rows, short, type DeckRow} from "./deck";
     import type {HostAPI, IssueInfo, IssuesResult, OverviewItem, StageInfo} from "./hostapi";
     import {footprintOf, footprintTitle, shortBytes, shortWindow} from "./hostapi";
     import {app} from "./state.svelte";
@@ -22,8 +38,15 @@
         onspawn: (name: string) => void;
         /** start claude on this issue off that workspace — App owns the flow */
         onwork: (workspace: string, issue: IssueInfo) => Promise<void>;
+        /** ↵ — open a claude session as a conversation (App owns the ladder) */
+        onagent: (session: string) => void;
+        /** R — attach the raw pty behind a row */
+        onraw: (rookSession: string) => void;
+        /** n — new agent, prefilled with the workspace you're looking at.
+         *  From here it spawns host-side and joins the list; App owns that. */
+        onnew: (workspace: string) => void;
     }
-    let {api, onopen, onspawn, onwork}: Props = $props();
+    let {api, onopen, onspawn, onwork, onagent, onraw, onnew}: Props = $props();
 
     let items = $state<OverviewItem[]>([]);
     let error = $state("");
@@ -33,13 +56,54 @@
     let nameEl = $state<HTMLInputElement | null>(null);
     let starting = $state(""); // issue key being started (debounce the ▶)
 
+    // ==== the deck ====
+    // Tabs are one row of the same control: the four agent states filter the
+    // list, `queue` and `workspaces` swap what the list IS. They share a strip
+    // because they answer one question in descending urgency — who needs me,
+    // what's running, what could start, what exists.
+    type Tab = "all" | "needs_input" | "working" | "quiet" | "queue" | "workspaces";
+    const AGENT_TABS = ["all", "needs_input", "working", "quiet"] as const;
+    const isAgentTab = (t: Tab) => (AGENT_TABS as readonly string[]).includes(t);
+
+    let tab = $state<Tab>("all");
+    let query = $state("");
+    let cursor = $state(0);
+    let grouped = $state(false);
+    let deckEl = $state<HTMLElement | null>(null);
+    let filterEl = $state<HTMLInputElement | null>(null);
+    /** `g` pressed once, waiting to see if it's `gg` */
+    let gArmed = $state(false);
+
+    const allRows = $derived(rows(items));
+    const tally = $derived(counts(allRows));
+    const visible = $derived(
+        allRows
+            .filter((r) => (tab === "all" || !isAgentTab(tab) ? true : r.state === tab))
+            .filter((r) => match(r, query)),
+    );
+    // deckGroups, not groups: the workspace-lineage `groups` below is a
+    // different thing entirely, and these two live in one file.
+    const deckGroups = $derived(group(visible));
+    /** What j/k walk. Grouping REORDERS rows, so the cursor has to index what
+     *  is on screen — indexing the flat list while rendering the grouped one
+     *  would move the highlight to an unrelated row. One list, both modes. */
+    const navRows = $derived(grouped ? deckGroups.flatMap((g) => g.rows) : visible);
+    /** The cursor addresses a POSITION, but rows come and go under it on
+     *  every 5s poll. Clamping keeps it in range; selection is re-read from
+     *  the list each time rather than held, so a vanished row degrades to its
+     *  neighbour instead of to a stale object. */
+    const selected = $derived<DeckRow | null>(navRows[cursor] ?? null);
+
+    $effect(() => {
+        if (cursor > navRows.length - 1) cursor = Math.max(0, navRows.length - 1);
+    });
+
     // needs-you fallback for old daemons whose /overview is missing: the
     // attention poll knows the same count, just without the rest of the rollup
     const attnCounts = $derived.by(() => {
-        const counts = new Map<string, number>();
-        for (const it of app.attention)
-            counts.set(it.workspace, (counts.get(it.workspace) ?? 0) + 1);
-        return counts;
+        const byWs = new Map<string, number>();
+        for (const it of app.attention) byWs.set(it.workspace, (byWs.get(it.workspace) ?? 0) + 1);
+        return byWs;
     });
 
     const attnOf = (w: OverviewItem) => w.attention ?? attnCounts.get(w.name) ?? 0;
@@ -103,7 +167,20 @@
     const active = $derived(groups.filter(isActive));
     const idle = $derived(groups.filter((g) => !isActive(g)));
     const liveShells = $derived(groups.reduce((n, g) => n + g.live, 0));
-    const needsYou = $derived(groups.reduce((n, g) => n + g.attention, 0));
+    /** The strip's headline count.
+     *
+     *  Max of two sources, and both are load-bearing. The deck's own tally is
+     *  the truth when /overview carries agents — it counts the very rows on
+     *  screen, so the strip cannot contradict the `needs you` tab, which it
+     *  did when this read workspace attention alone. The workspace rollup
+     *  survives as the floor because an old daemon sends no agents at all and
+     *  the attention poll is then the only thing that knows. */
+    const needsYou = $derived(
+        Math.max(
+            tally.needs_input,
+            groups.reduce((n, g) => n + g.attention, 0),
+        ),
+    );
     const worstUsage = $derived(
         app.usage && app.usage.windows.length
             ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a))
@@ -168,6 +245,121 @@
     export function showError(msg: string): void {
         error = msg;
         setTimeout(() => (error = ""), 6000);
+    }
+
+    /** Take real DOM focus.
+     *
+     *  Not decoration: #terminals is always mounted (visibility is a display
+     *  toggle, never {#if}), so xterm's hidden textarea holds focus unless
+     *  something takes it. That is why keys pressed on this screen used to
+     *  land in the terminal you last had open. The zone follows DOM focus
+     *  rather than tracking it, so the fix is to actually hold it. */
+    export function focusDeck(): void {
+        deckEl?.focus({preventScroll: true});
+    }
+
+    onMount(focusDeck);
+
+    function openNormal(r: DeckRow | null): void {
+        if (!r) return;
+        if (!r.session) {
+            showError("no transcript for this session yet — R opens its terminal");
+            return;
+        }
+        onagent(r.session);
+    }
+
+    function openRaw(r: DeckRow | null): void {
+        if (!r) return;
+        if (!r.rookSession) {
+            showError("no live terminal for this agent — ↵ opens the conversation");
+            return;
+        }
+        onraw(r.rookSession);
+    }
+
+    function cycleTab(delta: number): void {
+        const order: Tab[] = [...AGENT_TABS, "queue", "workspaces"];
+        tab = order[(order.indexOf(tab) + delta + order.length) % order.length];
+        cursor = 0;
+    }
+
+    /** The deck's keys. Vim where vim has an opinion, mnemonic where it
+     *  doesn't.
+     *
+     *  `gg`/`G` go to top/bottom because that is what those keys mean, which
+     *  costs the design's `g = group by` — grouping is `w` (by workspace)
+     *  instead. Muscle memory outranks a mockup's footer, and rook groups by
+     *  workspace, not by "project", so the mnemonic is better anyway. */
+    function onKey(e: KeyboardEvent): void {
+        const tgt = e.target as HTMLElement | null;
+        // The filter input owns everything while it has focus — j is a letter
+        // there, not a motion. Escape hands the deck back.
+        if (tgt instanceof HTMLInputElement || tgt instanceof HTMLTextAreaElement) {
+            if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                if (query) query = "";
+                filterEl?.blur();
+                focusDeck();
+            }
+            return;
+        }
+        if (e.metaKey || e.ctrlKey || e.altKey) return; // App's chords and the leader
+        if (modalOpen) return;
+
+        const g = gArmed;
+        gArmed = false;
+        const len = navRows.length;
+        const step = (d: number) => {
+            e.preventDefault();
+            cursor = move(cursor, d, len);
+        };
+
+        switch (e.key) {
+            case "j":
+            case "ArrowDown":
+                return step(1);
+            case "k":
+            case "ArrowUp":
+                return step(-1);
+            case "g":
+                e.preventDefault();
+                if (g)
+                    cursor = move(cursor, -len, len); // gg
+                else gArmed = true;
+                return;
+            case "G":
+                return step(len);
+            case "Enter":
+                e.preventDefault();
+                return openNormal(selected);
+            case "R":
+                e.preventDefault();
+                return openRaw(selected);
+            case "n":
+                e.preventDefault();
+                // appends to this list; never a window. The row under the
+                // cursor names the workspace — n usually means "another one
+                // like this".
+                onnew(selected?.workspace ?? "");
+                return;
+            case "w":
+                e.preventDefault();
+                grouped = !grouped;
+                return;
+            case "/":
+                e.preventDefault();
+                void tick().then(() => filterEl?.focus());
+                return;
+            case "Tab":
+                e.preventDefault();
+                return cycleTab(e.shiftKey ? -1 : 1);
+            case "Escape":
+                e.preventDefault();
+                if (query) query = "";
+                return;
+        }
     }
 
     // Two-step worktree deletion: the host 409s when removal would lose
@@ -514,7 +706,92 @@
     </div>
 {/snippet}
 
-<div id="home" class="flex min-h-0 flex-1 flex-col">
+{#snippet deckRow(r: DeckRow, i: number)}
+    {@const on = i === cursor}
+    <div
+        class={[
+            "relative flex h-10.5 shrink-0 cursor-pointer items-center border-b border-line/8 pl-10 pr-4",
+            on ? "bg-acc/8" : "hover:bg-fg/[0.03]",
+        ]}
+        onclick={() => (cursor = i)}
+        ondblclick={() => openNormal(r)}
+        role="presentation"
+    >
+        {#if on}
+            <span class="absolute inset-y-0 left-0 w-0.75 bg-acc"></span>
+            <span class="absolute left-3.5 font-mono text-xs text-acc">›</span>
+        {/if}
+        <span class="flex w-24 shrink-0 items-center gap-2">
+            <span
+                class={[
+                    "font-mono text-xs",
+                    r.state === "needs_input"
+                        ? "animate-attn-pulse text-amber"
+                        : r.state === "working"
+                          ? "text-grn"
+                          : "text-lo",
+                ]}>{glyph(r.state)} {short(r.state)}</span
+            >
+        </span>
+        <!-- the workspace is a COLUMN now, not the container -->
+        <span
+            class="w-33 shrink-0 truncate pr-3 font-mono text-xs text-dim"
+            title={r.worktreeOf ? `task tree of ${r.worktreeOf} · ⎇ ${r.branch}` : r.workspace}
+            >{r.worktreeOf ? "⎇ " : ""}{r.workspace}</span
+        >
+        <span
+            class={["min-w-0 flex-1 truncate pr-3.5 text-sm", on ? "text-fg" : "text-dim"]}
+            title={r.ask || r.title}>{r.title}</span
+        >
+        {#if r.tool}
+            <span class="w-20 shrink-0 truncate pr-2 font-mono text-xs text-lo">{r.tool}</span>
+        {/if}
+        {#if (r.costUsd ?? 0) >= 0.01}
+            <span class="w-15 shrink-0 text-right font-mono text-xs text-lo"
+                >${r.costUsd!.toFixed(2)}</span
+            >
+        {/if}
+        <span class="w-14 shrink-0 text-right font-mono text-xs text-lo"
+            >{r.lastEvent ? ago(r.lastEvent) : ""}</span
+        >
+        <span class="w-16 shrink-0 truncate text-right font-mono text-xs text-lo"
+            >{r.model ?? ""}</span
+        >
+    </div>
+{/snippet}
+
+{#snippet tabBtn(id: Tab, label: string, n: number, tone: string)}
+    <button
+        class={[
+            "cursor-pointer rounded-md border-0 px-2.5 py-1 font-mono text-xs",
+            tab === id
+                ? "bg-acc text-on-acc font-semibold"
+                : `bg-transparent ${tone} hover:bg-fg/8`,
+        ]}
+        onclick={() => {
+            tab = id;
+            cursor = 0;
+            focusDeck();
+        }}>{label} {n}</button
+    >
+{/snippet}
+
+<!-- role=application is the point, not a workaround: it tells assistive tech
+     to pass keys through to us, which is what a vim surface needs. The lint
+     wants listeners only on natively-interactive elements; this div IS the
+     interactive element, and it must hold focus, or keys reach the terminal
+     underneath — #terminals is always mounted, so its textarea keeps focus
+     unless someone takes it. -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div
+    id="home"
+    class="flex min-h-0 flex-1 flex-col outline-none"
+    tabindex="-1"
+    bind:this={deckEl}
+    onkeydown={onKey}
+    role="application"
+    aria-label="Mission control"
+>
     <div
         id="home-strip"
         class="flex h-13 shrink-0 items-center gap-2.5 pl-21 pr-5.5"
@@ -578,97 +855,102 @@
             </span>
         {/if}
     </div>
-    <div id="home-scroll" class="flex-1 overflow-y-auto px-6 pb-15 pt-2">
-        <div id="home-inner" class="mx-auto max-w-245">
-            {#if error}
+    <div
+        id="home-tabs"
+        class="flex h-10 shrink-0 items-center gap-1 border-y border-line/12 bg-fg/[0.02] px-3"
+    >
+        {@render tabBtn("all", "all", tally.all, "text-dim")}
+        {@render tabBtn("needs_input", "needs you", tally.needs_input, "text-amber")}
+        {@render tabBtn("working", "working", tally.working, "text-grn")}
+        {@render tabBtn("quiet", "quiet", tally.quiet, "text-lo")}
+        <span class="mx-1.5 h-4 w-px bg-line/20"></span>
+        {@render tabBtn("queue", "queue", queueRows.length, "text-magenta")}
+        {@render tabBtn("workspaces", "workspaces", items.length, "text-dim")}
+        <span class="flex-1"></span>
+        {#if isAgentTab(tab)}
+            <button
+                class="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 font-mono text-xs text-lo hover:bg-fg/8"
+                style="--wails-draggable: no-drag"
+                title="w — group by workspace"
+                onclick={() => {
+                    grouped = !grouped;
+                    focusDeck();
+                }}>{grouped ? "grouped" : "flat"}</button
+            >
+            <div
+                class="flex items-center gap-1.5 rounded-lg border border-line/15 bg-sunken/60 px-2 py-1"
+                style="--wails-draggable: no-drag"
+            >
+                <span class="font-mono text-xs text-acc">/</span>
+                <input
+                    bind:this={filterEl}
+                    bind:value={query}
+                    class="w-48 border-0 bg-transparent font-mono text-xs text-fg outline-none placeholder:text-lo"
+                    placeholder="state:needs ws:rook"
+                    spellcheck="false"
+                />
+            </div>
+        {/if}
+    </div>
+
+    {#if error}
+        <div
+            id="home-error"
+            class="shrink-0 border-b border-red/40 bg-red/8 px-4 py-2 font-mono text-sm text-red"
+        >
+            {error}
+        </div>
+    {/if}
+
+    <div class="flex min-h-0 flex-1">
+        <div
+            class={[
+                "flex min-w-0 flex-1 flex-col",
+                isAgentTab(tab) && "lg:border-r lg:border-line/12",
+            ]}
+        >
+            {#if isAgentTab(tab)}
                 <div
-                    id="home-error"
-                    class="mb-3.5 rounded-lg border border-red/40 bg-red/8 px-3.5 py-2.5 font-mono text-sm text-red"
+                    class="flex h-7 shrink-0 items-center border-b border-line/12 pl-10 pr-4 font-mono text-[10px] uppercase tracking-wider text-lo"
                 >
-                    {error}
+                    <span class="w-24 shrink-0">state</span>
+                    <span class="w-33 shrink-0">workspace</span>
+                    <span class="min-w-0 flex-1">task</span>
+                    <span class="w-14 shrink-0 text-right">age</span>
+                    <span class="w-16 shrink-0 text-right">model</span>
                 </div>
-            {/if}
-            <div class="mb-4 mt-1 flex items-center gap-3">
-                <h2 class="m-0 text-base font-bold text-fg">Workspaces</h2>
-                <span class="flex-1"></span>
-                <button
-                    class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/10"
-                    style="--wails-draggable: no-drag"
-                    title="One-off shell; discarded when it exits"
-                    onclick={() => void scratch()}>scratch shell</button
-                >
-                <button
-                    class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/10"
-                    style="--wails-draggable: no-drag"
-                    onclick={openModal}
-                >
-                    <span class="text-sm leading-none text-acc">+</span> New workspace</button
-                >
-            </div>
-            <div id="home-grid" class="grid grid-cols-[repeat(auto-fill,minmax(270px,1fr))] gap-3">
-                {#each active as g (g.ws.name)}
-                    <div class="flex flex-col gap-2 self-start">
-                        {@render card(g.ws, false)}
-                        {#if g.trees.length > 0}
-                            <div class="ml-3 flex flex-col gap-2 border-l border-acc/30 pl-3">
-                                {#each g.trees as t (t.name)}
-                                    {@render card(t, true)}
-                                {/each}
-                            </div>
-                        {/if}
-                    </div>
-                {/each}
-                {#if items.length === 0}
-                    <div class="col-span-full p-10 text-center text-sm text-lo">
-                        No workspaces yet — create one, or grab a scratch shell.
-                    </div>
-                {/if}
-            </div>
-            {#if idle.length > 0}
-                <div class="mb-2.5 mt-6 text-xs font-bold uppercase tracking-wider text-lo">
-                    Idle
-                </div>
-                <div id="home-idle" class="flex flex-col gap-1">
-                    {#each idle as g (g.ws.name)}
-                        {#each [g.ws, ...g.trees] as w, wi (w.name)}
+                <div id="home-rows" class="flex min-h-0 flex-1 flex-col overflow-y-auto">
+                    {#if navRows.length === 0}
+                        <div class="p-10 text-center text-sm text-lo">
+                            {allRows.length === 0
+                                ? "No agents running. Press n to start one."
+                                : "Nothing matches this filter."}
+                        </div>
+                    {:else if grouped}
+                        {#each deckGroups as g (g.workspace)}
                             <div
-                                class={[
-                                    "group flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/[0.015] px-3 py-1.5 text-sm hover:border-line/40",
-                                    wi > 0 && "ml-5.5",
-                                ]}
-                                onclick={() => onopen(w.name)}
-                                role="presentation"
+                                class="sticky top-0 z-2 flex items-center gap-2 border-b border-line/12 bg-sunken px-4 py-1.5"
                             >
-                                <span
-                                    class={[
-                                        "whitespace-nowrap text-sm",
-                                        wi > 0
-                                            ? "font-mono font-medium text-acc"
-                                            : "font-semibold text-fg",
-                                    ]}>{w.worktreeOf ? `⎇ ${w.name}` : w.name}</span
+                                <span class="font-mono text-xs font-semibold text-dim"
+                                    >{g.workspace}</span
                                 >
-                                {@render wsTags(w, wi > 0)}
-                                <span class="truncate font-mono text-xs text-lo"
-                                    >{tilde(w.root || "")}</span
-                                >
-                                <span class="flex-1"></span>
-                                <span class="whitespace-nowrap font-mono text-xs text-lo"
-                                    >{ago(w.lastUsed || w.created)}</span
-                                >
-                                {@render delBtn(w.name)}
+                                <span class="font-mono text-xs text-lo">{g.rows.length}</span>
                             </div>
+                            {#each g.rows as r (r.key)}
+                                {@render deckRow(r, navRows.indexOf(r))}
+                            {/each}
                         {/each}
-                    {/each}
+                    {:else}
+                        {#each visible as r, i (r.key)}
+                            {@render deckRow(r, i)}
+                        {/each}
+                    {/if}
                 </div>
-            {/if}
-            {#if queueRows.length > 0 || queueErrors.length > 0}
-                <div class="mb-2.5 mt-6 text-xs font-bold uppercase tracking-wider text-lo">
-                    Queue — work waiting to start
-                </div>
-                <div id="home-queue" class="flex flex-col gap-1.5">
+            {:else if tab === "queue"}
+                <div class="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-4">
                     {#each queueRows as r (r.ws + r.issue.tracker + r.issue.key)}
                         <div
-                            class="flex items-center gap-2.5 rounded-lg border border-line/15 bg-fg/[0.02] px-3 py-2 text-sm"
+                            class="flex shrink-0 items-center gap-2.5 rounded-lg border border-line/15 bg-fg/[0.02] px-3 py-2 text-sm"
                         >
                             <span class="whitespace-nowrap font-mono text-acc">{r.issue.key}</span>
                             <span
@@ -694,11 +976,145 @@
                         </div>
                     {/each}
                     {#each queueErrors as e (e)}
-                        <div class="truncate px-3 py-0.5 text-xs text-amber" title={e}>⚠ {e}</div>
+                        <div class="shrink-0 truncate px-3 py-0.5 text-xs text-amber" title={e}>
+                            ⚠ {e}
+                        </div>
                     {/each}
+                    {#if queueRows.length === 0 && queueErrors.length === 0}
+                        <div class="p-10 text-center text-sm text-lo">
+                            Nothing waiting — every tracked issue is either in flight or closed.
+                        </div>
+                    {/if}
+                </div>
+            {:else}
+                <div
+                    id="home-workspaces"
+                    class="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-10 pt-3"
+                >
+                    <div class="mb-3.5 flex shrink-0 items-center gap-3">
+                        <span class="flex-1"></span>
+                        <button
+                            class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/10"
+                            style="--wails-draggable: no-drag"
+                            title="One-off shell; discarded when it exits"
+                            onclick={() => void scratch()}>scratch shell</button
+                        >
+                        <button
+                            class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/10"
+                            style="--wails-draggable: no-drag"
+                            onclick={openModal}
+                        >
+                            <span class="text-sm leading-none text-acc">+</span> New workspace</button
+                        >
+                    </div>
+                    <div
+                        id="home-grid"
+                        class="grid shrink-0 grid-cols-[repeat(auto-fill,minmax(270px,1fr))] gap-3"
+                    >
+                        {#each active as g (g.ws.name)}
+                            <div class="flex flex-col gap-2 self-start">
+                                {@render card(g.ws, false)}
+                                {#if g.trees.length > 0}
+                                    <div
+                                        class="ml-3 flex flex-col gap-2 border-l border-acc/30 pl-3"
+                                    >
+                                        {#each g.trees as t (t.name)}
+                                            {@render card(t, true)}
+                                        {/each}
+                                    </div>
+                                {/if}
+                            </div>
+                        {/each}
+                        {#if items.length === 0}
+                            <div class="col-span-full p-10 text-center text-sm text-lo">
+                                No workspaces yet — create one, or grab a scratch shell.
+                            </div>
+                        {/if}
+                    </div>
+                    {#if idle.length > 0}
+                        <div
+                            class="mb-2.5 mt-6 shrink-0 text-xs font-bold uppercase tracking-wider text-lo"
+                        >
+                            Idle
+                        </div>
+                        <div id="home-idle" class="flex shrink-0 flex-col gap-1">
+                            {#each idle as g (g.ws.name)}
+                                {#each [g.ws, ...g.trees] as w, wi (w.name)}
+                                    <div
+                                        class={[
+                                            "group flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/[0.015] px-3 py-1.5 text-sm hover:border-line/40",
+                                            wi > 0 && "ml-5.5",
+                                        ]}
+                                        onclick={() => onopen(w.name)}
+                                        role="presentation"
+                                    >
+                                        <span
+                                            class={[
+                                                "whitespace-nowrap text-sm",
+                                                wi > 0
+                                                    ? "font-mono font-medium text-acc"
+                                                    : "font-semibold text-fg",
+                                            ]}>{w.worktreeOf ? `⎇ ${w.name}` : w.name}</span
+                                        >
+                                        {@render wsTags(w, wi > 0)}
+                                        <span class="truncate font-mono text-xs text-lo"
+                                            >{tilde(w.root || "")}</span
+                                        >
+                                        <span class="flex-1"></span>
+                                        <span class="whitespace-nowrap font-mono text-xs text-lo"
+                                            >{ago(w.lastUsed || w.created)}</span
+                                        >
+                                        {@render delBtn(w.name)}
+                                    </div>
+                                {/each}
+                            {/each}
+                        </div>
+                    {/if}
                 </div>
             {/if}
         </div>
+
+        <!-- The detail rail: the selected agent's conversation, live. Hidden
+             on narrow windows rather than squeezed — a 200px transcript is
+             worse than none, and ↵ opens the same view full-size. -->
+        {#if isAgentTab(tab)}
+            <div class="hidden w-100 shrink-0 flex-col bg-sunken/40 xl:flex">
+                {#if selected?.session}
+                    {#key selected.session}
+                        <div class="relative min-h-0 flex-1">
+                            <AgentSession
+                                {api}
+                                session={selected.session}
+                                onjump={() => openRaw(selected)}
+                            />
+                        </div>
+                    {/key}
+                {:else}
+                    <div
+                        class="flex flex-1 items-center justify-center p-8 text-center text-sm text-lo"
+                    >
+                        {selected ? "No transcript for this session yet." : "Nothing selected."}
+                    </div>
+                {/if}
+            </div>
+        {/if}
+    </div>
+
+    <div
+        id="home-hints"
+        class="flex h-7 shrink-0 items-center gap-4 border-t border-line/12 bg-sunken/60 px-4 font-mono text-[11px] text-lo"
+    >
+        {#if isAgentTab(tab)}
+            <span><span class="text-dim">j/k</span> row</span>
+            <span><span class="text-dim">↵</span> conversation</span>
+            <span><span class="text-dim">R</span> raw</span>
+            <span><span class="text-dim">w</span> group</span>
+            <span><span class="text-dim">/</span> filter</span>
+        {/if}
+        <span><span class="text-dim">n</span> new agent</span>
+        <span><span class="text-dim">⇥</span> tab</span>
+        <span class="flex-1"></span>
+        <span><span class="text-acc">⌘K</span> palette</span>
     </div>
 </div>
 

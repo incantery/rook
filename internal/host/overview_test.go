@@ -88,3 +88,66 @@ func TestOverview(t *testing.T) {
 		t.Fatalf("beta fg = %v, want [sleep]", beta.Fg)
 	}
 }
+
+// A deck row has to be openable, and openable means carrying BOTH ids: the
+// transcript (conversation view) and the pty (raw attach). They come from two
+// different objects — the agent names itself, the session names the window —
+// which is exactly how one of them goes missing.
+func TestAgentRowCarriesBothIdentities(t *testing.T) {
+	last := time.Now().Add(-90 * time.Second)
+	s := sessionStatus{
+		SessionInfo: SessionInfo{ID: "rook-pty-7", Workspace: "rook"},
+		Fg:          "claude",
+		Cwd:         "/src/rook",
+		Agent: &AgentStatus{
+			SessionID: "transcript-abc",
+			State:     "needs_input",
+			Title:     "Migrate charts to design tokens",
+			Ask:       "Should I keep the legacy palette export?",
+			Tool:      "Edit",
+			Model:     "opus",
+			CostUSD:   1.25,
+			LastEvent: last,
+		},
+	}
+
+	got := agentRow(s)
+
+	// The two ids must not be crossed: a row that opens the transcript when
+	// you asked for raw (or vice versa) is worse than one that refuses.
+	if got.SessionID != "transcript-abc" {
+		t.Errorf("SessionID = %q, want the transcript id", got.SessionID)
+	}
+	if got.RookSession != "rook-pty-7" {
+		t.Errorf("RookSession = %q, want the pty session id", got.RookSession)
+	}
+	if got.State != "needs_input" || got.Title != "Migrate charts to design tokens" {
+		t.Errorf("state/title lost: %+v", got)
+	}
+	if got.Ask != "Should I keep the legacy palette export?" || got.Tool != "Edit" {
+		t.Errorf("ask/tool lost: %+v", got)
+	}
+	if got.Model != "opus" || got.CostUSD != 1.25 {
+		t.Errorf("model/cost lost: %+v", got)
+	}
+	if !got.LastEvent.Equal(last) {
+		t.Errorf("LastEvent = %v, want %v — the row's age column reads this", got.LastEvent, last)
+	}
+}
+
+// An agent the watcher sees but never correlated to a window has no pty. It is
+// still a real agent and still belongs in the list: the deck drops the raw
+// verb rather than the row. Losing it here would make a working claude
+// invisible for the only reason that rook couldn't guess its window.
+func TestAgentRowUncorrelatedKeepsTheTranscript(t *testing.T) {
+	got := agentRow(sessionStatus{
+		SessionInfo: SessionInfo{ID: ""},
+		Agent:       &AgentStatus{SessionID: "transcript-xyz", State: "working"},
+	})
+	if got.SessionID != "transcript-xyz" {
+		t.Errorf("SessionID = %q — an uncorrelated agent still has a transcript", got.SessionID)
+	}
+	if got.RookSession != "" {
+		t.Errorf("RookSession = %q, want empty rather than invented", got.RookSession)
+	}
+}

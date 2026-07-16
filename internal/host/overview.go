@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"time"
 )
 
 // GET /overview: the mission-control payload (issue #12) — every workspace
@@ -14,13 +15,38 @@ import (
 // polls /workspaces/{name}/status. Old frontends never ask; new frontends
 // fall back to /workspaces when this 404s on an old daemon.
 
-// overviewAgent is the card-sized slice of an AgentStatus: enough to say
-// what the agent is doing (and asking), nothing session-internal.
+// overviewAgent is the row-sized slice of an AgentStatus: enough to say what
+// the agent is doing (and asking), and enough to OPEN it.
+//
+// The ids are what changed. This used to feed a workspace card's chips —
+// counts and a one-liner, nothing you could act on — so it named nothing and
+// an agent could only be addressed as "the workspace it happens to be in". A
+// row you press ↵ on is a different contract: SessionID addresses the
+// transcript (the conversation view), RookSession addresses the pty (raw
+// attach). Two ids because they are two different things, and the deck offers
+// both verbs. Same asymmetry PaneRef had, same fix.
+//
+// Either may be empty and the row is still real: a claude the watcher sees
+// but has not correlated to a window has no RookSession, and one whose
+// transcript hasn't been located has no SessionID. Callers render what they
+// have and drop the verbs they cannot reach — an agent you can see but not
+// open beats an agent you cannot see.
 type overviewAgent struct {
 	State string `json:"state"` // working | needs_input | quiet
 	Title string `json:"title,omitempty"`
 	Ask   string `json:"ask,omitempty"`
 	Tool  string `json:"tool,omitempty"`
+	// SessionID is the claude transcript id — the conversation view.
+	SessionID string `json:"sessionId,omitempty"`
+	// RookSession is the pty session holding this agent's claude — raw
+	// attach, and what the deck's ↵-into-the-terminal jumps to.
+	RookSession string  `json:"rookSession,omitempty"`
+	Model       string  `json:"model,omitempty"`
+	CostUSD     float64 `json:"costUsd,omitempty"`
+	// LastEvent drives the row's age column. Not omitempty: a zero time
+	// marshals as a zero date rather than vanishing, and the reader needs
+	// to tell "no activity recorded" from "field absent".
+	LastEvent time.Time `json:"lastEvent"`
 }
 
 // StageInfo is one row of a work item's checklist: the persisted stage rows
@@ -76,10 +102,7 @@ func (h *Host) handleOverview(w http.ResponseWriter, r *http.Request) {
 					o.Fg = append(o.Fg, s.Fg)
 				}
 				if s.Agent != nil {
-					o.Agents = append(o.Agents, overviewAgent{
-						State: s.Agent.State, Title: s.Agent.Title,
-						Ask: s.Agent.Ask, Tool: s.Agent.Tool,
-					})
+					o.Agents = append(o.Agents, agentRow(s))
 				}
 				// a running stage whose window is waiting on the user: the
 				// checklist's ◉ — live state, decorated, never persisted
@@ -133,6 +156,24 @@ func (h *Host) stageList(it *workspaceListItem) []StageInfo {
 		out = append(out, StageInfo{Name: name, Status: "pending"})
 	}
 	return out
+}
+
+// agentRow projects a correlated session into the row the deck renders.
+//
+// It is split out of the assembly loop because it is the part worth testing.
+// s.ID is the pty the agent was correlated to; s.Agent.SessionID is its
+// transcript — two ids, from two different objects, that a struct literal
+// nested three levels inside a goroutine could quietly stop carrying without
+// anything failing to compile. The symptom would be a row that renders
+// perfectly and does nothing when you press ↵.
+func agentRow(s sessionStatus) overviewAgent {
+	return overviewAgent{
+		State: s.Agent.State, Title: s.Agent.Title,
+		Ask: s.Agent.Ask, Tool: s.Agent.Tool,
+		SessionID: s.Agent.SessionID, RookSession: s.ID,
+		Model: s.Agent.Model, CostUSD: s.Agent.CostUSD,
+		LastEvent: s.Agent.LastEvent,
+	}
 }
 
 func agentRank(state string) int {

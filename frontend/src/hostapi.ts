@@ -603,11 +603,28 @@ export interface WorkspaceInfo {
 }
 
 /** One agent's card-sized state inside an overview item. */
+/** One agent in the overview rollup — a deck row's raw material.
+ *
+ *  Both ids are optional and mean different things when absent: no
+ *  `sessionId` = the transcript wasn't located, so there's no conversation
+ *  to render; no `rookSession` = the agent was never correlated to a window,
+ *  so there's no pty to attach. Either way the row still renders and the
+ *  unreachable verb is dropped — an agent you can see but not open beats an
+ *  agent you can't see. Old daemons send neither (they predate the fields),
+ *  which degrades to exactly that. */
 export interface OverviewAgent {
     state: "working" | "needs_input" | "quiet";
     title?: string;
     ask?: string;
     tool?: string;
+    /** claude transcript id — opens the conversation view */
+    sessionId?: string;
+    /** rook pty session id — opens the raw terminal */
+    rookSession?: string;
+    model?: string;
+    costUsd?: number;
+    /** last activity; drives the age column. Zero date on an old daemon. */
+    lastEvent?: string;
 }
 
 /** One row of a work item's checklist: the synthetic coding stage, then

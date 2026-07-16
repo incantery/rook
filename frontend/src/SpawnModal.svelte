@@ -1,14 +1,21 @@
-<!-- The spawn modal (` n / palette "New agent session"): type a task, get a
-     window with claude already working on it. This is the user-invoked rung
-     of the spawner ladder (docs/agent.md step 4) — zero LLM; nano earns
-     routing and unsolicited proposals later, through the same actuator. -->
+<!-- The spawn modal (` n / palette "New agent session" / the deck's n): type a
+     task, get claude working on it. This is the user-invoked rung of the
+     spawner ladder (docs/agent.md step 4) — zero LLM; nano earns routing and
+     unsolicited proposals later, through the same actuator.
+
+     Two landings, one form. From a workspace you get a window and you're in
+     it; from the deck the host owns the pty and you stay where you are, and
+     the row appears on the next poll. `background` only changes what the form
+     PROMISES — the caller's onspawn is what makes it true. -->
 <script lang="ts">
     interface Props {
         currentWorkspace: string;
+        /** the session starts with no window and nobody attached */
+        background?: boolean;
         onspawn: (task: string, workspace: string, worktree: boolean) => Promise<void>;
         onclose: () => void;
     }
-    let {currentWorkspace, onspawn, onclose}: Props = $props();
+    let {currentWorkspace, background = false, onspawn, onclose}: Props = $props();
 
     let task = $state("");
     // svelte-ignore state_referenced_locally — prefill, user edits from here
@@ -64,7 +71,10 @@
         <div class="flex flex-col gap-4 p-4.5">
             <label>
                 <span class="mb-1.5 block text-xs font-semibold text-dim"
-                    >Task — becomes <code>claude "…"</code> in a fresh window</span
+                    >Task — becomes <code>claude "…"</code>
+                    {background
+                        ? "in the background; it joins the list"
+                        : "in a fresh window"}</span
                 >
                 <textarea
                     class="box-border w-full resize-y rounded-lg border border-line/15 bg-sunken/80 px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-acc"
