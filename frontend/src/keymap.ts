@@ -36,6 +36,7 @@ export const DEFAULTS: [string, string][] = [
     ["s", "workspace.switch"],
     ["a", "attention.inbox"],
     ["n", "agent.spawn"],
+    ["v", "agent.view"],
     ["h", "workspace.manager"],
     [".", "workspace.set-root"],
     ["d", "workspace.dashboard"],

@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -36,6 +37,80 @@ func DefaultRoot() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".claude", "projects"), nil
+}
+
+// FindSession locates a session's transcript by its id.
+//
+// The tree is <root>/<project-slug>/<session-uuid>.jsonl, and the slug is a
+// lossy transform of the cwd — both '/' and '.' collapse to '-', so
+// /a/b/github.com/x and /a/b/github-com/x produce the same directory name.
+// The path is therefore searched for rather than computed: scanning a few
+// dozen project directories costs nothing and cannot be wrong.
+//
+// Subagent transcripts live deeper and are never matched.
+func FindSession(root, sessionID string) (string, error) {
+	if root == "" {
+		r, err := DefaultRoot()
+		if err != nil {
+			return "", err
+		}
+		root = r
+	}
+	if sessionID == "" || strings.ContainsAny(sessionID, "/\\.") {
+		// Session ids are uuids. Anything with a separator is a caller
+		// trying to escape the tree, not a session.
+		return "", fmt.Errorf("transcript: invalid session id %q", sessionID)
+	}
+	projects, err := os.ReadDir(root)
+	if err != nil {
+		return "", err
+	}
+	name := sessionID + ".jsonl"
+	for _, p := range projects {
+		if !p.IsDir() {
+			continue
+		}
+		path := filepath.Join(root, p.Name(), name)
+		if st, err := os.Stat(path); err == nil && !st.IsDir() {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("transcript: no session %s under %s", sessionID, root)
+}
+
+// ReadSession returns a window of a session's records in file order, ending
+// at before (exclusive) or at EOF when before is 0. More reports whether
+// older records exist ahead of the window — i.e. whether scrollback can page
+// further back.
+//
+// Windowing is not optional: transcripts here average 1.6MB and reach 58MB,
+// so "just send the file" is a page nobody can render. The whole file is
+// still read to find line boundaries, which at the average is nothing and at
+// the outlier is one 58MB sequential read; if that ever bites, the fix is an
+// offset index, not a smaller window.
+func ReadSession(path string, limit int, before int64) (lines []Line, more bool, err error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	t := NewTail(path)
+	all, err := t.Read()
+	if err != nil {
+		return nil, false, err
+	}
+	if before > 0 {
+		cut := len(all)
+		for i, ln := range all {
+			if ln.Offset >= before {
+				cut = i
+				break
+			}
+		}
+		all = all[:cut]
+	}
+	if len(all) > limit {
+		return all[len(all)-limit:], true, nil
+	}
+	return all, false, nil
 }
 
 // Watcher follows every live session in the transcript tree and emits their

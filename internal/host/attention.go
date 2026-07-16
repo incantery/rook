@@ -95,8 +95,8 @@ func (h *Host) attention() []attentionItem {
 	return items
 }
 
-// handleAgent routes /agents/{id}/context (GET) and /agents/{id}/draft
-// (POST) — {id} is the transcript session id.
+// handleAgent routes /agents/{id}/context (GET), /agents/{id}/transcript
+// (GET) and /agents/{id}/draft (POST) — {id} is the transcript session id.
 func (h *Host) handleAgent(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/agents/")
 	id, action, _ := strings.Cut(rest, "/")
@@ -124,6 +124,11 @@ func (h *Host) handleAgent(w http.ResponseWriter, r *http.Request) {
 			"ask":       st.Ask,
 			"history":   hist,
 		})
+	case action == "transcript" && r.Method == http.MethodGet:
+		// Whole records, read from the file — /context serves the
+		// drafter's 12-entry ring capped at 700 chars, which is a prompt,
+		// not a conversation.
+		h.handleAgentTranscript(w, r, id)
 	case action == "draft" && r.Method == http.MethodPost:
 		h.handleDraftPost(w, r, id)
 	case action == "notify" && r.Method == http.MethodPost:

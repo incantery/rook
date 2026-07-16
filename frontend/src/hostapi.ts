@@ -2,6 +2,26 @@
 // between the webview and the host — the app process is only involved in
 // discovering the endpoint (see internal/hostclient).
 
+/** What every endpoint throws on a non-2xx.
+ *
+ *  `status` is load-bearing, not decoration. rook-host outlives the app that
+ *  spawned it, and an unstamped build — `make dev`, `go run` — never replaces
+ *  the running daemon on purpose (internal/hostclient/service.go: the hacking
+ *  instance rides the daily driver's host). So a 404 from a route the
+ *  frontend knows about usually means the DAEMON IS OLDER THAN THE APP, which
+ *  wants a different message from "the host is down". Callers that only
+ *  stringify keep working: the message is unchanged. */
+export class HostError extends Error {
+    readonly name = "HostError";
+    constructor(
+        readonly status: number,
+        readonly path: string,
+        readonly body: string,
+    ) {
+        super(`host ${path}: ${status} ${body}`);
+    }
+}
+
 export interface SessionInfo {
     id: string;
     name: string;
@@ -22,7 +42,7 @@ export class HostAPI {
             ...init,
             headers: {Authorization: `Bearer ${this.token}`, ...init?.headers},
         });
-        if (!r.ok) throw new Error(`host ${path}: ${r.status} ${await r.text()}`);
+        if (!r.ok) throw new HostError(r.status, path, await r.text());
         return r;
     }
 
@@ -123,6 +143,24 @@ export class HostAPI {
     /** Everyone waiting on the user, cross-workspace — the inbox's feed. */
     async attention(): Promise<AttentionItem[]> {
         return (await this.req("/attention")).json();
+    }
+
+    /** GET /agents/{id}/transcript — whole records for one claude session,
+     *  which the host reads off disk on demand rather than holding in memory.
+     *
+     *  Oldest-first within a window that ends at `before` (exclusive) or at
+     *  the session's end. `more` means older records exist: page by passing
+     *  the first record's offset straight back as `before`.
+     *
+     *  NOT /agents/{id}/context — that serves the drafter's 12-entry ring
+     *  capped at 700 chars. It is a prompt, not a conversation. */
+    async agentTranscript(id: string, limit?: number, before?: number): Promise<TranscriptResult> {
+        const q = new URLSearchParams();
+        if (limit) q.set("limit", String(limit));
+        if (before) q.set("before", String(before));
+        const qs = q.toString();
+        const path = `/agents/${encodeURIComponent(id)}/transcript${qs ? `?${qs}` : ""}`;
+        return (await this.req(path)).json();
     }
 
     /** The workspace's work queue: GitHub + Jira, mine + unassigned, with
@@ -603,7 +641,61 @@ export interface GitInfo {
     behind: number;
 }
 
-/** Transcript-derived state of a claude session (via agentmon). */
+/** One content block of a message. Which fields are set depends on `type`:
+ *
+ *      text        → text
+ *      thinking    → nothing. Claude Code writes an encrypted signature and
+ *                    no text (7430 blocks on one real machine, zero
+ *                    renderable characters between them), and the host drops
+ *                    the signature. The block survives so a turn's shape does.
+ *      tool_use    → id, name, input
+ *      tool_result → toolUseId, content, isError
+ *
+ *  `id` pairs with a later block's `toolUseId`; a tool_use with no result yet
+ *  is a call still outstanding. `input` is the raw argument object, uncapped —
+ *  a picker's questions and options live in there.
+ *
+ *  `type` is widened to string on purpose: a Claude Code release that adds a
+ *  block kind must render as a gap, never a crash. */
+export interface TranscriptBlock {
+    type: "text" | "thinking" | "tool_use" | "tool_result" | (string & {});
+    text?: string;
+    id?: string;
+    name?: string;
+    input?: unknown;
+    toolUseId?: string;
+    content?: string;
+    isError?: boolean;
+}
+
+/** One transcript record. `offset` is the scrollback cursor — pass the first
+ *  record's offset back as `before` to page into the past. */
+export interface TranscriptRecord {
+    offset: number;
+    type: "user" | "assistant" | "system" | (string & {});
+    ts?: string;
+    uuid?: string;
+    model?: string;
+    blocks?: TranscriptBlock[];
+    /** system records: "turn_duration" is the end of a turn */
+    subtype?: string;
+    durationMs?: number;
+}
+
+export interface TranscriptResult {
+    sessionId: string;
+    records: TranscriptRecord[];
+    /** older records exist before records[0].offset */
+    more: boolean;
+    /** the reduced chip, riding along so a view needs one poll and not two.
+     *  Absent when the host's reducer has never seen the session — a
+     *  transcript on disk outlives the process that wrote it. */
+    status?: AgentStatus;
+}
+
+/** Transcript-derived state of a claude session: what the host's reducer
+ *  makes of ~/.claude/projects. A chip, not a conversation — for the
+ *  conversation see agentTranscript(). */
 export interface AgentStatus {
     sessionId: string;
     cwd: string;

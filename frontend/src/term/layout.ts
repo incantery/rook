@@ -26,7 +26,10 @@ export type Dir = "row" | "col";
 export type PaneRef =
     | {type: "term"; session: string}
     | {type: "file"; path: string}
-    | {type: "review"};
+    | {type: "review"}
+    /** a claude session as a conversation; `session` is the transcript
+     *  session id, not a rook pty session */
+    | {type: "agent"; session: string};
 
 export interface LeafNode {
     kind: "leaf";

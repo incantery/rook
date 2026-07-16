@@ -168,6 +168,111 @@
      *  thing, so chrome keeps the index. */
     const editorPanes = new Map<string, import("./term/editor").EditorPane>();
 
+    /** leafId → the AgentPane in it. Same reason as editorPanes, and the same
+     *  discipline: entries are deleted on dispose, because a map that only
+     *  grows is exactly the leak WatchMonitor gauges. */
+    const agentPanes = new Map<string, import("./term/agentpane.svelte").AgentPane>();
+
+    /** Jump from a conversation to the live pty it is a view of — the 10%
+     *  escape hatch the whole surface is predicated on.
+     *
+     *  Looked up at click time rather than mirrored: the claude↔pty pairing
+     *  lives in the host's correlate(), /workspaces/{ws}/status is where it
+     *  surfaces, and one request on a click beats a fourth poll that is
+     *  usually wrong. A session with no live window is normal — claude
+     *  outlives the terminal it was started in. */
+    function jumpToPty(session: string): () => Promise<void> {
+        return async () => {
+            try {
+                const st = await api.workspaceStatus(app.workspace);
+                const s = st.sessions.find((x) => x.agent?.sessionId === session);
+                if (s) {
+                    app.screen = "app";
+                    await tick();
+                    if (mgr.switchToId(s.id)) return;
+                }
+                flash("no live terminal for this session");
+            } catch (err) {
+                console.error("jump to pty failed", err);
+                flash("no live terminal for this session");
+            }
+        };
+    }
+
+    /** ` v — watch the agent session you are looking at.
+     *
+     *  Which session that is comes from the host's correlate(), read at
+     *  command time: the pty in front of you, then whatever needs you, then
+     *  any agent in the workspace. NOT from app.attention — that only lists
+     *  sessions that need something, so keying off it would make ` v do
+     *  nothing for a session that is happily working, which is most of them. */
+    async function viewAgent(): Promise<void> {
+        try {
+            const st = await api.workspaceStatus(app.workspace);
+            const focused = st.sessions.find((s) => s.id === app.focusedSessionId && s.agent);
+            const target =
+                focused?.agent?.sessionId ??
+                st.sessions.find((s) => s.agent?.state === "needs_input")?.agent?.sessionId ??
+                st.sessions.find((s) => s.agent)?.agent?.sessionId;
+            if (!target) {
+                flash("no agent session in this workspace");
+                return;
+            }
+            await openAgent(target);
+        } catch (err) {
+            console.error("agent view failed", err);
+            flash("agent view failed — see console");
+        }
+    }
+
+    /** Open a claude session as a conversation. The same ladder as openFile:
+     *    1. already displayed → go to it
+     *    2. an agent pane exists → retarget it in place
+     *    3. nothing to reuse → mint one window, ONCE
+     *  A session is a document too. */
+    async function openAgent(session: string): Promise<void> {
+        try {
+            await initDone;
+            const shown = mgr.findPane((c) => c.type === "agent" && c.session === session);
+            if (shown) {
+                app.screen = "app";
+                await tick();
+                mgr.revealPane(shown);
+                return;
+            }
+            const reusable = mgr.findPane((c) => c.type === "agent");
+            if (reusable) {
+                const pane = agentPanes.get(reusable.leafId);
+                if (pane) {
+                    pane.retarget(session, jumpToPty(session));
+                    mgr.retargetPane(reusable, {type: "agent", session});
+                    app.screen = "app";
+                    await tick();
+                    mgr.revealPane(reusable);
+                    return;
+                }
+            }
+            // the showWorkspace dance: activation fits and focuses, and both
+            // silently no-op on a display:none subtree
+            app.screen = "app";
+            await tick();
+            const {AgentPane} = await import("./term/agentpane.svelte");
+            mgr.openPaneWindow({type: "agent", session}, (leafId) => {
+                const pane = new AgentPane({
+                    api,
+                    session,
+                    onjump: jumpToPty(session),
+                    onDispose: () => agentPanes.delete(leafId),
+                });
+                agentPanes.set(leafId, pane);
+                return pane;
+            });
+        } catch (err) {
+            console.error("agent pane failed", err);
+            flash("agent pane failed — see console");
+        }
+    }
+
     /** Promote a path to most-recent. Bounded: this is a working set, not
      *  history — the picker searches the whole repo anyway. */
     function touchBuffer(path: string): void {
@@ -480,6 +585,13 @@
             category: "View",
             keys: keymap.display("review.changes"),
             run: () => void openReview(),
+        },
+        {
+            id: "agent.view",
+            title: "Watch agent session (conversation)",
+            category: "View",
+            keys: keymap.display("agent.view"),
+            run: () => void viewAgent(),
         },
         {
             id: "threads.toggle",

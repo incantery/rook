@@ -204,6 +204,18 @@ body {
     background-color: transparent !important;
 }
 
+/* ==== agent pane (term/agentpane.svelte.ts): a claude session as a
+   conversation. Only the wrapper is here — it's built outside Svelte, so it
+   needs to fill its .pane cell the way .editor-wrap does. Everything inside
+   is AgentSession.svelte, and stays utilities. ==== */
+.agent-wrap {
+    position: absolute;
+    inset: 0;
+}
+.agent-wrap:focus {
+    outline: none;
+}
+
 /* ==== editor pane (term/editor.ts): Monaco review/diff + file viewer.
    Opaque on purpose — Monaco can't render transparent, so the pane owns
    its background at the body tint's full-opacity color. ==== */

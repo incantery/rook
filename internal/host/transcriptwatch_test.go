@@ -10,14 +10,26 @@ import (
 	"github.com/incantery/rook/internal/transcript"
 )
 
-// rline parses a real transcript line and feeds it in as a live append.
-func rline(t *testing.T, sessionID, line string) transcript.Line {
+// mustParse parses a real transcript line, or fails the test.
+func mustParse(t *testing.T, line string) *transcript.Record {
 	t.Helper()
 	rec, err := transcript.Parse([]byte(line))
 	if err != nil {
 		t.Fatalf("Parse(%s): %v", line, err)
 	}
-	return transcript.Line{SessionID: sessionID, Record: rec, Live: true}
+	return rec
+}
+
+// lineOf wraps a record at a byte offset, the way a Tail hands it over.
+func lineOf(t *testing.T, rec *transcript.Record, offset int64) transcript.Line {
+	t.Helper()
+	return transcript.Line{SessionID: "s", Record: rec, Offset: offset}
+}
+
+// rline parses a real transcript line and feeds it in as a live append.
+func rline(t *testing.T, sessionID, line string) transcript.Line {
+	t.Helper()
+	return transcript.Line{SessionID: sessionID, Record: mustParse(t, line), Live: true}
 }
 
 func backlog(ln transcript.Line) transcript.Line {
