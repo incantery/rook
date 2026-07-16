@@ -53,6 +53,7 @@ func main() {
 		PID:     os.Getpid(),
 		Release: version.Version,
 		Build:   version.Build,
+		BinHash: host.BinHash(),
 	}); err != nil {
 		log.Fatal(err)
 	}
