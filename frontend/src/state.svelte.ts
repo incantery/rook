@@ -2,6 +2,7 @@
 // The terminal runtime (term/manager.ts) writes projections INTO this via
 // its events; terminal output itself never passes through here.
 
+import type {Tab} from "./deck";
 import type {
     AttentionItem,
     CostsSnapshot,
@@ -64,6 +65,23 @@ class AppState {
      *  way, then hands off across this boundary to an open side pane.
      *  Always "terms" while the side pane in question is closed. */
     focusZone = $state<"terms" | "left" | "right">("terms");
+
+    /** Mission control's own state — which tab, what filter, where the cursor
+     *  is, flat or grouped.
+     *
+     *  Up here rather than inside Home because Home is an `{#if}` and remounts
+     *  on every trip out to a workspace and back. Held locally, the deck lost
+     *  your filter, your grouping and your place every time you opened a row —
+     *  and opening a row IS the triage loop, so the loop reset its own context
+     *  once per iteration. #terminals survives the same switch by being a
+     *  display toggle; the deck gets there by keeping its state outside the
+     *  component instead, which also lets its polls stop while you're away. */
+    deck = $state<{tab: Tab; query: string; cursor: number; grouped: boolean}>({
+        tab: "all",
+        query: "",
+        cursor: 0,
+        grouped: false,
+    });
 
     // overlays (at most one open; the keybinding ladder checks these)
     paletteOpen = $state(false);

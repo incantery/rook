@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -135,19 +137,149 @@ func TestAgentRowCarriesBothIdentities(t *testing.T) {
 	}
 }
 
-// An agent the watcher sees but never correlated to a window has no pty. It is
-// still a real agent and still belongs in the list: the deck drops the raw
-// verb rather than the row. Losing it here would make a working claude
-// invisible for the only reason that rook couldn't guess its window.
-func TestAgentRowUncorrelatedKeepsTheTranscript(t *testing.T) {
-	got := agentRow(sessionStatus{
-		SessionInfo: SessionInfo{ID: ""},
-		Agent:       &AgentStatus{SessionID: "transcript-xyz", State: "working"},
-	})
-	if got.SessionID != "transcript-xyz" {
-		t.Errorf("SessionID = %q — an uncorrelated agent still has a transcript", got.SessionID)
+// The seam, end to end: a real agent, correlated to a real window, arriving
+// over HTTP with both ids intact.
+//
+// agentRow's unit test above cannot see the one failure that matters. Revert
+// handleOverview to an inline struct literal that drops both ids and it still
+// passes — nothing asserts the projection is CALLED. That's the whole bug
+// class the extraction was meant to close, so it gets a test that goes
+// through the endpoint.
+//
+// No real claude needed: fgOf basenames the window's foreground process, so a
+// copy of `sleep` named `claude` is a claude window as far as correlate() can
+// tell. That is the same tier-2/3 cwd match the daily driver leans on today
+// (the claim hook is a hook install away, and tier 0 is inert without it).
+func TestOverviewRowsCarryIdentityEndToEnd(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := New()
+	defer h.Shutdown()
+
+	// EvalSymlinks: on macOS t.TempDir() hands back /var/folders/... while the
+	// process's real cwd resolves to /private/var/folders/..., and correlation
+	// is a string compare on cwd — the test would fail for a reason that has
+	// nothing to do with what it's testing.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got.RookSession != "" {
-		t.Errorf("RookSession = %q, want empty rather than invented", got.RookSession)
+	h.reg.upsert("rook", dir, false)
+
+	// a "claude" window: correlate() reads the foreground process name
+	fake := filepath.Join(t.TempDir(), "claude")
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep on PATH")
+	}
+	body, err := os.ReadFile(sleep)
+	if err != nil {
+		t.Skip("cannot read sleep")
+	}
+	if err := os.WriteFile(fake, body, 0o755); err != nil {
+		t.Skip("cannot write a fake claude")
+	}
+	cmd := exec.Command(fake, "300")
+	cmd.Dir = dir
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	defer r.Close()
+	h.mu.Lock()
+	h.sessions["pty-1"] = &session{
+		info: SessionInfo{ID: "pty-1", Name: "pty-1", Workspace: "rook", Created: time.Now()},
+		pty:  r,
+		cmd:  cmd,
+	}
+	h.mu.Unlock()
+
+	last := time.Now().Add(-90 * time.Second)
+	h.aw.mu.Lock()
+	h.aw.states["transcript-abc"] = &AgentStatus{
+		SessionID: "transcript-abc",
+		CWD:       dir, // tier-2/3 correlation is a cwd match
+		State:     "needs_input",
+		Title:     "Migrate charts to design tokens",
+		Ask:       "Keep the legacy palette export?",
+		Model:     "opus",
+		CostUSD:   1.25,
+		LastEvent: last,
+	}
+	h.aw.mu.Unlock()
+
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/overview", nil)
+	req.Header.Set("Authorization", "Bearer "+h.Token())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var items []overviewItem
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		t.Fatal(err)
+	}
+
+	var got *overviewAgent
+	for _, it := range items {
+		if it.Name == "rook" && len(it.Agents) > 0 {
+			got = &it.Agents[0]
+		}
+	}
+	if got == nil {
+		t.Fatalf("no correlated agent row in /overview: %+v", items)
+	}
+	// the two ids, from two different objects — the reason for all of this
+	if got.SessionID != "transcript-abc" {
+		t.Errorf("sessionId = %q, want the transcript id", got.SessionID)
+	}
+	if got.RookSession != "pty-1" {
+		t.Errorf("rookSession = %q, want the pty id — the row can't open raw without it", got.RookSession)
+	}
+	if got.Model != "opus" || got.CostUSD != 1.25 {
+		t.Errorf("model/cost lost in transit: %+v", got)
+	}
+	if !got.LastEvent.Equal(last) {
+		t.Errorf("lastEvent = %v, want %v", got.LastEvent, last)
+	}
+}
+
+// needs_input leads. The deck's whole thesis is that the human's queue sorts
+// itself to the top, and this is the comparator it rests on.
+func TestAgentRankPutsTheHumansQueueFirst(t *testing.T) {
+	for _, tt := range []struct {
+		state string
+		rank  int
+	}{
+		{"needs_input", 0},
+		{"working", 1},
+		{"quiet", 2},
+		{"", 2}, // unknown sorts with the idle, never above the blocked
+	} {
+		if got := agentRank(tt.state); got != tt.rank {
+			t.Errorf("agentRank(%q) = %d, want %d", tt.state, got, tt.rank)
+		}
+	}
+}
+
+// LastEvent deliberately has no omitempty (a zero time.Time is not the zero
+// value encoding/json omits anyway, but the intent is what's being pinned):
+// the reader needs to tell "no activity recorded" from "field absent", and
+// absent is what an OLD daemon sends. Someone tidying omitempty onto it would
+// collapse that distinction silently.
+func TestOverviewAgentAlwaysReportsLastEvent(t *testing.T) {
+	b, err := json.Marshal(overviewAgent{State: "quiet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"lastEvent"`) {
+		t.Errorf("lastEvent vanished from %s — absent must mean an old daemon, not a quiet one", b)
 	}
 }

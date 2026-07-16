@@ -1,6 +1,19 @@
 import {describe, expect, it} from "vitest";
 
-import {counts, group, match, move, rows, short, type DeckRow} from "./deck";
+import {
+    counts,
+    cycle,
+    group,
+    inTab,
+    isAgentTab,
+    match,
+    move,
+    rows,
+    short,
+    TABS,
+    type DeckRow,
+    type Tab,
+} from "./deck";
 import type {OverviewItem} from "./hostapi";
 
 /** Minimal overview item — only the fields the deck reads. */
@@ -59,10 +72,11 @@ describe("rows", () => {
         expect(r.rookSession).toBe("pty1");
     });
 
-    it("keeps an uncorrelated agent, minus the verb it can't reach", () => {
-        // An agent with no pty is still real. Dropping it would hide a
-        // working claude for the sole reason that rook couldn't guess its
-        // window — the row renders, raw attach is what goes away.
+    it("renders a row the host gave no ids for, minus the verbs", () => {
+        // The old-daemon case, which is the only way an id goes missing: a
+        // current host only emits agents it correlated to a live window, so it
+        // always sends both. rows() must not gate on their presence — the row
+        // renders and Home drops the verb it can't reach.
         const [r] = rows([ws("rook", [{state: "working", title: "t", sessionId: "tx"}])]);
         expect(r.session).toBe("tx");
         expect(r.rookSession).toBeUndefined();
@@ -108,6 +122,47 @@ describe("rows", () => {
 
     it("survives a workspace with no agents", () => {
         expect(rows([ws("idle", undefined)])).toEqual([]);
+    });
+
+    it("reads a zero date as no activity, not as 739812d ago", () => {
+        // Go's zero time.Time marshals to this, and it is a truthy STRING —
+        // so every `lastEvent ? ago(lastEvent) : ""` guard sails past it and
+        // renders two millennia into a 56px column. Date.parse gives a big
+        // negative number here, not NaN, so that check doesn't catch it either.
+        const [r] = rows([ws("a", [{state: "working", lastEvent: "0001-01-01T00:00:00Z"}])]);
+        expect(r.lastEvent).toBeUndefined();
+    });
+
+    it("keeps a real timestamp verbatim", () => {
+        const [r] = rows([ws("a", [{state: "working", lastEvent: "2026-07-15T12:00:00Z"}])]);
+        expect(r.lastEvent).toBe("2026-07-15T12:00:00Z");
+    });
+
+    it("files a state this build has never heard of under working, never quiet", () => {
+        // The host types state as a bare string; a newer daemon could add one.
+        // quiet is the bucket you ignore — the one label we must never apply
+        // by accident — and an unranked state also NaNs the sort comparator.
+        const [r] = rows([ws("a", [{state: "planning" as never}])]);
+        expect(r.state).toBe("working");
+    });
+
+    it("does not let an unknown state poison the tally", () => {
+        const r = rows([
+            ws("a", [{state: "planning" as never}, {state: "needs_input"}, {state: "quiet"}]),
+        ]);
+        expect(counts(r)).toEqual({all: 3, needs_input: 1, working: 1, quiet: 1});
+    });
+
+    it("does not let an unknown state scramble the order", () => {
+        const r = rows([
+            ws("a", [
+                {state: "planning" as never, title: "u"},
+                {state: "needs_input", title: "n"},
+            ]),
+        ]);
+        // NaN out of the comparator makes sort order arbitrary — needs_input
+        // must still lead.
+        expect(r[0].title).toBe("n");
     });
 });
 
@@ -168,27 +223,53 @@ describe("match", () => {
         expect(match(r, "")).toBe(true);
         expect(match(r, "   ")).toBe(true);
     });
+
+    it("does not hide anything while you are still typing a field term", () => {
+        // A bare `state:` matching everything looks like the typo case above,
+        // but it isn't: it's the keystroke on the way to `state:needs`.
+        // Failing it closed would make the list flash empty mid-word. The
+        // invariant that matters — typing more only narrows — still holds.
+        expect(match(r, "state:")).toBe(true);
+        expect(match(r, "ws:")).toBe(true);
+    });
 });
 
 describe("group", () => {
-    it("groups by workspace and floats the most urgent group up", () => {
-        const r = rows([
-            ws("quiet-ws", [{state: "quiet", title: "q"}]),
-            ws("busy-ws", [{state: "working", title: "w"}]),
-            ws("blocked-ws", [{state: "needs_input", title: "n"}]),
+    // Feed group() RAW rows, never rows() output. The earlier version of these
+    // tests piped rows() in, which sorts before group() ever sees anything —
+    // so group()'s own sorting was dead code and deleting it left the tests
+    // green. Unsorted input is the only input that can fail.
+    it("floats the most urgent group up, from unsorted input", () => {
+        const g = group([
+            row({workspace: "quiet-ws", state: "quiet"}),
+            row({workspace: "blocked-ws", state: "needs_input"}),
+            row({workspace: "busy-ws", state: "working"}),
         ]);
-        expect(group(r).map((g) => g.workspace)).toEqual(["blocked-ws", "busy-ws", "quiet-ws"]);
+        expect(g.map((x) => x.workspace)).toEqual(["blocked-ws", "busy-ws", "quiet-ws"]);
     });
 
-    it("keeps triage order inside a group", () => {
-        const r = rows([
-            ws("rook", [
-                {state: "quiet", title: "q"},
-                {state: "needs_input", title: "n"},
-            ]),
+    it("sorts inside a group too, from unsorted input", () => {
+        const [g] = group([
+            row({workspace: "rook", state: "quiet", title: "q"}),
+            row({workspace: "rook", state: "needs_input", title: "n"}),
+            row({workspace: "rook", state: "working", title: "w"}),
         ]);
-        const [g] = group(r);
-        expect(g.rows.map((x) => x.title)).toEqual(["n", "q"]);
+        expect(g.rows.map((x) => x.title)).toEqual(["n", "w", "q"]);
+    });
+
+    it("ranks a group by its best row, not its worst or its first", () => {
+        // one blocked agent should outrank a workspace that is merely busy,
+        // however many quiet rows sit behind it
+        const g = group([
+            row({workspace: "busy", state: "working"}),
+            row({workspace: "mixed", state: "quiet"}),
+            row({workspace: "mixed", state: "needs_input"}),
+        ]);
+        expect(g.map((x) => x.workspace)).toEqual(["mixed", "busy"]);
+    });
+
+    it("survives an empty list", () => {
+        expect(group([])).toEqual([]);
     });
 });
 
@@ -215,10 +296,76 @@ describe("move", () => {
     });
 });
 
+describe("cycle", () => {
+    it("steps forward and back", () => {
+        expect(cycle("all", 1)).toBe("needs_input");
+        expect(cycle("needs_input", -1)).toBe("all");
+    });
+
+    it("wraps both ways — a tab strip is a ring, unlike the cursor", () => {
+        expect(cycle("workspaces", 1)).toBe("all");
+        expect(cycle("all", -1)).toBe("workspaces");
+    });
+
+    it("wraps for any delta, the way move takes big jumps", () => {
+        // `(i + delta + n) % n` corrects exactly one step of underflow and
+        // then returns undefined — through a signature that says Tab. Only ±1
+        // is reachable today, which is precisely how it would have survived.
+        expect(TABS.map((_, i) => cycle("all", -(i + 1)))).not.toContain(undefined);
+        expect(cycle("all", -7)).toBe("workspaces");
+        expect(cycle("all", -999)).toBe(TABS[((-999 % 6) + 6) % 6]);
+        expect(cycle("all", 999)).toBe(TABS[999 % 6]);
+    });
+
+    it("visits every tab exactly once per lap", () => {
+        const seen: Tab[] = [];
+        let t: Tab = "all";
+        for (let i = 0; i < TABS.length; i++) {
+            seen.push(t);
+            t = cycle(t, 1);
+        }
+        expect(new Set(seen).size).toBe(TABS.length);
+        expect(t).toBe("all");
+    });
+});
+
+describe("inTab", () => {
+    it("shows every state under all", () => {
+        expect(inTab(row({state: "quiet"}), "all")).toBe(true);
+        expect(inTab(row({state: "needs_input"}), "all")).toBe(true);
+    });
+
+    it("narrows to the tab's own state", () => {
+        expect(inTab(row({state: "working"}), "working")).toBe(true);
+        expect(inTab(row({state: "quiet"}), "working")).toBe(false);
+    });
+
+    it("shows NO agent rows on the non-agent tabs", () => {
+        // Not "shows them all unfiltered" — that left the cursor walking the
+        // full agent list behind the workspace grid, so ↵ on the workspaces
+        // tab opened a row you never selected and could not see. Empty makes
+        // every row verb a no-op for free.
+        expect(inTab(row({state: "quiet"}), "queue")).toBe(false);
+        expect(inTab(row({state: "needs_input"}), "workspaces")).toBe(false);
+    });
+
+    it("knows which tabs carry agent rows", () => {
+        expect(TABS.filter(isAgentTab)).toEqual(["all", "needs_input", "working", "quiet"]);
+    });
+});
+
 describe("short", () => {
     it("labels every state in the same width", () => {
         const labels = (["needs_input", "working", "quiet"] as const).map(short);
         expect(labels).toEqual(["needs", "works", "quiet"]);
         expect(new Set(labels.map((l) => l.length)).size).toBe(1);
+    });
+
+    it("gives the short forms distinct first letters", () => {
+        // match() leans on this: `state:w` means working and `state:q` means
+        // quiet only because no two short forms share a prefix. Rename one to
+        // "queued" and `state:q` silently becomes ambiguous.
+        const firsts = (["needs_input", "working", "quiet"] as const).map((s) => short(s)[0]);
+        expect(new Set(firsts).size).toBe(3);
     });
 });

@@ -24,7 +24,20 @@
     import {onMount, tick} from "svelte";
 
     import AgentSession from "./AgentSession.svelte";
-    import {counts, glyph, group, match, move, rows, short, type DeckRow} from "./deck";
+    import {
+        counts,
+        cycle,
+        glyph,
+        group,
+        inTab,
+        isAgentTab,
+        match,
+        move,
+        rows,
+        short,
+        type DeckRow,
+        type Tab,
+    } from "./deck";
     import type {HostAPI, IssueInfo, IssuesResult, OverviewItem, StageInfo} from "./hostapi";
     import {footprintOf, footprintTitle, shortBytes, shortWindow} from "./hostapi";
     import {app} from "./state.svelte";
@@ -57,18 +70,13 @@
     let starting = $state(""); // issue key being started (debounce the ▶)
 
     // ==== the deck ====
-    // Tabs are one row of the same control: the four agent states filter the
-    // list, `queue` and `workspaces` swap what the list IS. They share a strip
-    // because they answer one question in descending urgency — who needs me,
-    // what's running, what could start, what exists.
-    type Tab = "all" | "needs_input" | "working" | "quiet" | "queue" | "workspaces";
-    const AGENT_TABS = ["all", "needs_input", "working", "quiet"] as const;
-    const isAgentTab = (t: Tab) => (AGENT_TABS as readonly string[]).includes(t);
-
-    let tab = $state<Tab>("all");
-    let query = $state("");
-    let cursor = $state(0);
-    let grouped = $state(false);
+    // Tabs, ordering, filtering and cursor motion all live in deck.ts and are
+    // tested there; this file is chrome, polling, and keys.
+    //
+    // The tab, filter, cursor and grouping live on `app` (see
+    // state.svelte.ts): Home is an {#if}, so anything held here dies the
+    // moment you open a row — which is the one thing you came to do.
+    const deck = $derived(app.deck);
     let deckEl = $state<HTMLElement | null>(null);
     let filterEl = $state<HTMLInputElement | null>(null);
     /** `g` pressed once, waiting to see if it's `gg` */
@@ -76,26 +84,51 @@
 
     const allRows = $derived(rows(items));
     const tally = $derived(counts(allRows));
-    const visible = $derived(
-        allRows
-            .filter((r) => (tab === "all" || !isAgentTab(tab) ? true : r.state === tab))
-            .filter((r) => match(r, query)),
-    );
+    const visible = $derived(allRows.filter((r) => inTab(r, deck.tab) && match(r, deck.query)));
     // deckGroups, not groups: the workspace-lineage `groups` below is a
     // different thing entirely, and these two live in one file.
     const deckGroups = $derived(group(visible));
     /** What j/k walk. Grouping REORDERS rows, so the cursor has to index what
      *  is on screen — indexing the flat list while rendering the grouped one
      *  would move the highlight to an unrelated row. One list, both modes. */
-    const navRows = $derived(grouped ? deckGroups.flatMap((g) => g.rows) : visible);
+    const navRows = $derived(deck.grouped ? deckGroups.flatMap((g) => g.rows) : visible);
+    /** Row -> its index in navRows, for the grouped render.
+     *
+     *  The grouped markup needs each row's position in the flat nav order, and
+     *  indexOf per row is quadratic: 200 agents is 40k scans on every keypress
+     *  AND every 5s poll. Same object refs flow through group(), so a Map is
+     *  exact and O(n). */
+    const navIndex = $derived(new Map(navRows.map((r, i) => [r, i])));
     /** The cursor addresses a POSITION, but rows come and go under it on
      *  every 5s poll. Clamping keeps it in range; selection is re-read from
      *  the list each time rather than held, so a vanished row degrades to its
-     *  neighbour instead of to a stale object. */
-    const selected = $derived<DeckRow | null>(navRows[cursor] ?? null);
+     *  neighbour instead of to a stale object.
+     *
+     *  Clamped HERE as well as in the effect below: the effect runs after the
+     *  render flush, so a bare navRows[cursor] renders one frame of null when
+     *  the list shrinks under a bottom cursor — which unmounts the rail and
+     *  refetches it a tick later, for nothing. */
+    const selected = $derived<DeckRow | null>(
+        navRows[Math.min(deck.cursor, navRows.length - 1)] ?? null,
+    );
 
     $effect(() => {
-        if (cursor > navRows.length - 1) cursor = Math.max(0, navRows.length - 1);
+        if (deck.cursor > navRows.length - 1) deck.cursor = Math.max(0, navRows.length - 1);
+    });
+
+    /** The session the rail actually renders, a beat behind the cursor.
+     *
+     *  The rail fetches a 200-record transcript per session it's handed. Wired
+     *  straight to `selected`, holding j down a 40-row deck fires ~40 of them
+     *  and throws 39 away, with the rail flashing "reading transcript…" the
+     *  whole way. Waiting for the cursor to sit still costs nothing when you
+     *  step deliberately and everything when you scroll. */
+    let railSession = $state<string | null>(null);
+    $effect(() => {
+        const want = selected?.session ?? null;
+        if (want === railSession) return; // already there; don't re-arm
+        const t = setTimeout(() => (railSession = want), 150);
+        return () => clearTimeout(t);
     });
 
     // needs-you fallback for old daemons whose /overview is missing: the
@@ -279,42 +312,76 @@
     }
 
     function cycleTab(delta: number): void {
-        const order: Tab[] = [...AGENT_TABS, "queue", "workspaces"];
-        tab = order[(order.indexOf(tab) + delta + order.length) % order.length];
-        cursor = 0;
+        deck.tab = cycle(deck.tab, delta);
+        deck.cursor = 0;
     }
 
     /** The deck's keys. Vim where vim has an opinion, mnemonic where it
      *  doesn't.
      *
-     *  `gg`/`G` go to top/bottom because that is what those keys mean, which
-     *  costs the design's `g = group by` — grouping is `w` (by workspace)
-     *  instead. Muscle memory outranks a mockup's footer, and rook groups by
-     *  workspace, not by "project", so the mnemonic is better anyway. */
+     *  The g-prefix carries its real vim meanings: `gg` to the top, `gt`/`gT`
+     *  across tabs. That costs the design's `g = group by` — grouping is `w`
+     *  (by workspace) instead, which is the better mnemonic anyway since rook
+     *  groups by workspace and not by "project". It also buys back Tab: an
+     *  earlier cut cycled tabs with it, which meant swallowing the one key
+     *  every keyboard user expects to move focus, on a screen full of buttons.
+     *
+     *  A g-prefix followed by anything unbound consumes the g and lets the key
+     *  act — tmux's rule, and forgiving in the direction that matters. */
     function onKey(e: KeyboardEvent): void {
+        // Spend the pending g on ANY key, before every early return below.
+        // Read late and it leaks: arm g, click into the filter, come back, and
+        // your next g jumps to the top instead of arming.
+        const g = gArmed;
+        gArmed = false;
+
         const tgt = e.target as HTMLElement | null;
         // The filter input owns everything while it has focus — j is a letter
         // there, not a motion. Escape hands the deck back.
         if (tgt instanceof HTMLInputElement || tgt instanceof HTMLTextAreaElement) {
-            if (e.key === "Escape") {
+            // Escape LEAVES the filter, it does not undo it — the filter you
+            // just typed is the one you want to walk. Clearing is the second
+            // press, on the deck. (An earlier cut cleared here, which made a
+            // committed filter impossible: every route back to the rows wiped
+            // the thing you filtered for.)
+            //
+            // Not mid-composition, though: with an IME, Escape dismisses the
+            // candidate window, and stealing it there would blur the field out
+            // from under a half-typed word.
+            if (e.key === "Escape" && !e.isComposing) {
                 e.preventDefault();
                 e.stopPropagation();
-                if (query) query = "";
                 filterEl?.blur();
                 focusDeck();
             }
             return;
         }
+        // The rail has its own buttons ("older", "terminal ↗", tool expanders)
+        // and they live inside #home. Without this, focusing one and pressing
+        // Enter opens the conversation full-screen instead of clicking it —
+        // preventDefault kills the button's synthesized click.
+        if (tgt?.closest("button, [role=button]")) return;
         if (e.metaKey || e.ctrlKey || e.altKey) return; // App's chords and the leader
         if (modalOpen) return;
 
-        const g = gArmed;
-        gArmed = false;
         const len = navRows.length;
         const step = (d: number) => {
             e.preventDefault();
-            cursor = move(cursor, d, len);
+            deck.cursor = move(deck.cursor, d, len);
         };
+
+        if (g) {
+            if (e.key === "g") return step(-len); // gg — top
+            if (e.key === "t") {
+                e.preventDefault();
+                return cycleTab(1);
+            }
+            if (e.key === "T") {
+                e.preventDefault();
+                return cycleTab(-1);
+            }
+            // unbound after g: the g is spent, the key still acts
+        }
 
         switch (e.key) {
             case "j":
@@ -325,9 +392,7 @@
                 return step(-1);
             case "g":
                 e.preventDefault();
-                if (g)
-                    cursor = move(cursor, -len, len); // gg
-                else gArmed = true;
+                gArmed = true;
                 return;
             case "G":
                 return step(len);
@@ -346,18 +411,15 @@
                 return;
             case "w":
                 e.preventDefault();
-                grouped = !grouped;
+                deck.grouped = !deck.grouped;
                 return;
             case "/":
                 e.preventDefault();
                 void tick().then(() => filterEl?.focus());
                 return;
-            case "Tab":
-                e.preventDefault();
-                return cycleTab(e.shiftKey ? -1 : 1);
             case "Escape":
                 e.preventDefault();
-                if (query) query = "";
+                if (deck.query) deck.query = "";
                 return;
         }
     }
@@ -514,6 +576,17 @@
         modalName = "";
         modalRoot = "";
         modalOpen = true;
+    }
+
+    /** Close the create modal and take the keyboard back.
+     *
+     *  Same trap as App's focusBack: the modal's focused input unmounts,
+     *  focus falls to <body>, and #home's onkeydown never fires again — the
+     *  deck looks fine and answers nothing. (createFromModal is exempt: it
+     *  navigates away.) */
+    function closeModal(): void {
+        modalOpen = false;
+        focusDeck();
     }
 </script>
 
@@ -707,13 +780,13 @@
 {/snippet}
 
 {#snippet deckRow(r: DeckRow, i: number)}
-    {@const on = i === cursor}
+    {@const on = i === deck.cursor}
     <div
         class={[
             "relative flex h-10.5 shrink-0 cursor-pointer items-center border-b border-line/8 pl-10 pr-4",
             on ? "bg-acc/8" : "hover:bg-fg/[0.03]",
         ]}
-        onclick={() => (cursor = i)}
+        onclick={() => (deck.cursor = i)}
         ondblclick={() => openNormal(r)}
         role="presentation"
     >
@@ -764,13 +837,13 @@
     <button
         class={[
             "cursor-pointer rounded-md border-0 px-2.5 py-1 font-mono text-xs",
-            tab === id
+            deck.tab === id
                 ? "bg-acc text-on-acc font-semibold"
                 : `bg-transparent ${tone} hover:bg-fg/8`,
         ]}
         onclick={() => {
-            tab = id;
-            cursor = 0;
+            deck.tab = id;
+            deck.cursor = 0;
             focusDeck();
         }}>{label} {n}</button
     >
@@ -867,15 +940,15 @@
         {@render tabBtn("queue", "queue", queueRows.length, "text-magenta")}
         {@render tabBtn("workspaces", "workspaces", items.length, "text-dim")}
         <span class="flex-1"></span>
-        {#if isAgentTab(tab)}
+        {#if isAgentTab(deck.tab)}
             <button
                 class="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 font-mono text-xs text-lo hover:bg-fg/8"
                 style="--wails-draggable: no-drag"
                 title="w — group by workspace"
                 onclick={() => {
-                    grouped = !grouped;
+                    deck.grouped = !deck.grouped;
                     focusDeck();
-                }}>{grouped ? "grouped" : "flat"}</button
+                }}>{deck.grouped ? "deck.grouped" : "flat"}</button
             >
             <div
                 class="flex items-center gap-1.5 rounded-lg border border-line/15 bg-sunken/60 px-2 py-1"
@@ -884,7 +957,7 @@
                 <span class="font-mono text-xs text-acc">/</span>
                 <input
                     bind:this={filterEl}
-                    bind:value={query}
+                    bind:value={deck.query}
                     class="w-48 border-0 bg-transparent font-mono text-xs text-fg outline-none placeholder:text-lo"
                     placeholder="state:needs ws:rook"
                     spellcheck="false"
@@ -906,10 +979,10 @@
         <div
             class={[
                 "flex min-w-0 flex-1 flex-col",
-                isAgentTab(tab) && "lg:border-r lg:border-line/12",
+                isAgentTab(deck.tab) && "lg:border-r lg:border-line/12",
             ]}
         >
-            {#if isAgentTab(tab)}
+            {#if isAgentTab(deck.tab)}
                 <div
                     class="flex h-7 shrink-0 items-center border-b border-line/12 pl-10 pr-4 font-mono text-[10px] uppercase tracking-wider text-lo"
                 >
@@ -926,7 +999,7 @@
                                 ? "No agents running. Press n to start one."
                                 : "Nothing matches this filter."}
                         </div>
-                    {:else if grouped}
+                    {:else if deck.grouped}
                         {#each deckGroups as g (g.workspace)}
                             <div
                                 class="sticky top-0 z-2 flex items-center gap-2 border-b border-line/12 bg-sunken px-4 py-1.5"
@@ -937,7 +1010,7 @@
                                 <span class="font-mono text-xs text-lo">{g.rows.length}</span>
                             </div>
                             {#each g.rows as r (r.key)}
-                                {@render deckRow(r, navRows.indexOf(r))}
+                                {@render deckRow(r, navIndex.get(r) ?? 0)}
                             {/each}
                         {/each}
                     {:else}
@@ -946,7 +1019,7 @@
                         {/each}
                     {/if}
                 </div>
-            {:else if tab === "queue"}
+            {:else if deck.tab === "queue"}
                 <div class="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-4">
                     {#each queueRows as r (r.ws + r.issue.tracker + r.issue.key)}
                         <div
@@ -1077,18 +1150,20 @@
         <!-- The detail rail: the selected agent's conversation, live. Hidden
              on narrow windows rather than squeezed — a 200px transcript is
              worse than none, and ↵ opens the same view full-size. -->
-        {#if isAgentTab(tab)}
+        {#if isAgentTab(deck.tab)}
             <div class="hidden w-100 shrink-0 flex-col bg-sunken/40 xl:flex">
-                {#if selected?.session}
-                    {#key selected.session}
-                        <div class="relative min-h-0 flex-1">
-                            <AgentSession
-                                {api}
-                                session={selected.session}
-                                onjump={() => openRaw(selected)}
-                            />
-                        </div>
-                    {/key}
+                {#if railSession}
+                    <!-- no {#key}: AgentSession re-reads on its own when the
+                         session prop changes, so keying it only bought a full
+                         destroy/recreate (DOM, poll interval, scroll state) per
+                         deck.cursor step. -->
+                    <div class="relative min-h-0 flex-1">
+                        <AgentSession
+                            {api}
+                            session={railSession}
+                            onjump={() => openRaw(selected)}
+                        />
+                    </div>
                 {:else}
                     <div
                         class="flex flex-1 items-center justify-center p-8 text-center text-sm text-lo"
@@ -1104,7 +1179,7 @@
         id="home-hints"
         class="flex h-7 shrink-0 items-center gap-4 border-t border-line/12 bg-sunken/60 px-4 font-mono text-[11px] text-lo"
     >
-        {#if isAgentTab(tab)}
+        {#if isAgentTab(deck.tab)}
             <span><span class="text-dim">j/k</span> row</span>
             <span><span class="text-dim">↵</span> conversation</span>
             <span><span class="text-dim">R</span> raw</span>
@@ -1112,7 +1187,7 @@
             <span><span class="text-dim">/</span> filter</span>
         {/if}
         <span><span class="text-dim">n</span> new agent</span>
-        <span><span class="text-dim">⇥</span> tab</span>
+        <span><span class="text-dim">gt</span> deck.tab</span>
         <span class="flex-1"></span>
         <span><span class="text-acc">⌘K</span> palette</span>
     </div>
@@ -1122,12 +1197,12 @@
     <div
         id="ws-modal"
         class="fixed inset-0 z-50 flex items-start justify-center bg-black/55 pt-[12vh]"
-        onmousedown={(e) => e.target === e.currentTarget && (modalOpen = false)}
+        onmousedown={(e) => e.target === e.currentTarget && closeModal()}
         onkeydown={(e) => {
             if (e.key === "Enter") void createFromModal();
             else if (e.key === "Escape") {
                 e.stopPropagation();
-                modalOpen = false;
+                closeModal();
             }
         }}
         role="presentation"
@@ -1163,7 +1238,7 @@
             <div class="flex justify-end gap-2 border-t border-line/15 px-4.5 py-3.5">
                 <button
                     class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/10"
-                    onclick={() => (modalOpen = false)}>Cancel</button
+                    onclick={closeModal}>Cancel</button
                 >
                 <button
                     class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-sm font-semibold text-on-acc"

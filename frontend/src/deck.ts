@@ -45,6 +45,24 @@ export interface DeckRow {
 }
 
 const RANK: Record<AgentState, number> = {needs_input: 0, working: 1, quiet: 2};
+const STATES: readonly string[] = ["needs_input", "working", "quiet"];
+
+/** Narrow the wire's `state` to one this build understands.
+ *
+ *  The TS union is an assertion, not a check: the host types the field as a
+ *  bare Go string, and a NEWER daemon adding a fourth state is exactly the
+ *  skew this repo has been bitten by before. Left unguarded it poisoned four
+ *  functions at once — NaN through compare (arbitrary sort order), a phantom
+ *  NaN key in counts, and — worst — short()/glyph()'s ternaries falling
+ *  through to "quiet".
+ *
+ *  Unknown lands in `working`, never `quiet`. Quiet is the bucket you ignore,
+ *  so it is the one label that must never be applied by accident; working is
+ *  the honest middle — visible, not alarming. One seam instead of four
+ *  defensive lookups. */
+function stateOf(raw: string): AgentState {
+    return (STATES.includes(raw) ? raw : "working") as AgentState;
+}
 
 /** Ordering: whoever needs you first, then whoever's moving, then the quiet —
  *  and within a band, most recent first. This is triage order, and it is the
@@ -59,6 +77,20 @@ function time(iso?: string): number {
     if (!iso) return 0;
     const t = Date.parse(iso);
     return Number.isNaN(t) ? 0 : t;
+}
+
+/** A timestamp, or undefined when there isn't a real one.
+ *
+ *  The zero date is the trap. A Go `time.Time` zero marshals as
+ *  "0001-01-01T00:00:00Z" — a string, so it is TRUTHY, so the view's
+ *  `{r.lastEvent ? ago(r.lastEvent) : ""}` guard sails straight past it and
+ *  renders "739812d ago" into a 56px column. Date.parse doesn't help either:
+ *  it returns a large negative number, not NaN. Normalising here means every
+ *  reader's obvious guard is the correct one. */
+function stampOf(iso?: string): string | undefined {
+    if (!iso) return undefined;
+    const t = Date.parse(iso);
+    return Number.isNaN(t) || t <= 0 ? undefined : iso;
 }
 
 /** A row's identity, most-stable-first. The transcript id is the real one: it
@@ -88,13 +120,13 @@ export function rows(items: OverviewItem[]): DeckRow[] {
                 workspace: w.name,
                 worktreeOf: w.worktreeOf,
                 branch: w.branch,
-                state: a.state,
+                state: stateOf(a.state),
                 title: titleOf(a),
                 ask: a.ask,
                 tool: a.tool,
                 model: a.model,
                 costUsd: a.costUsd,
-                lastEvent: a.lastEvent,
+                lastEvent: stampOf(a.lastEvent),
                 session: a.sessionId,
                 rookSession: a.rookSession,
                 pr: w.pr,
@@ -160,9 +192,16 @@ export interface Group {
     rows: DeckRow[];
 }
 
-/** Group-by-workspace (the `g` toggle). Group order follows the best row in
+/** Group-by-workspace (the `w` toggle). Group order follows the best row in
  *  each group, so a workspace with something blocked floats up — grouping
- *  must not cost you the triage ordering it sits on top of. */
+ *  must not cost you the triage ordering it sits on top of.
+ *
+ *  Sorts BOTH levels, and does not assume its input is ordered. It used to,
+ *  silently: its only caller hands it triage-sorted rows, which made the
+ *  group-level sort a no-op over an already-correct sequence — dead code that
+ *  its own test could not fail, because the test fed it rows() output that
+ *  was sorted before group() ever saw it. A function that is only correct for
+ *  one caller's happens-to-be-sorted input is a trap for the second caller. */
 export function group(rs: DeckRow[]): Group[] {
     const by = new Map<string, DeckRow[]>();
     for (const r of rs) {
@@ -171,8 +210,48 @@ export function group(rs: DeckRow[]): Group[] {
         else by.set(r.workspace, [r]);
     }
     return [...by.entries()]
-        .map(([workspace, rows]) => ({workspace, rows}))
+        .map(([workspace, rows]) => ({workspace, rows: [...rows].sort(compare)}))
         .sort((a, b) => compare(a.rows[0], b.rows[0]));
+}
+
+/** The deck's tabs, in cycle order. The four agent states FILTER the list;
+ *  queue and workspaces swap what the list is. They share one strip because
+ *  they answer one question in descending urgency — who needs me, what's
+ *  running, what could start, what exists. */
+export const TABS = ["all", "needs_input", "working", "quiet", "queue", "workspaces"] as const;
+export type Tab = (typeof TABS)[number];
+
+const AGENT_TABS: readonly string[] = ["all", "needs_input", "working", "quiet"];
+
+/** Does this tab show agent rows (vs. the queue or the workspace grid)? */
+export function isAgentTab(t: Tab): boolean {
+    return AGENT_TABS.includes(t);
+}
+
+/** Which rows a tab shows.
+ *
+ *  The non-agent tabs show NO agent rows — not "all of them unfiltered". That
+ *  distinction is the whole bug: with the permissive reading the cursor still
+ *  walked the full agent list behind the workspace grid, so ↵ on the
+ *  workspaces tab threw you into the conversation of a row you never selected
+ *  and could not see. An empty list makes every row verb a natural no-op
+ *  instead of something each key has to remember to check. */
+export function inTab(r: DeckRow, t: Tab): boolean {
+    return isAgentTab(t) && (t === "all" || r.state === t);
+}
+
+/** gt / gT. Wraps, unlike the cursor: a tab strip is a ring you're cycling on
+ *  purpose, whereas j at the bottom of a triage list must not silently land
+ *  you back on the row you just acted on.
+ *
+ *  Modulo, not remainder. JS `%` keeps the sign, so the naive `(i + delta + n)
+ *  % n` only survives ONE step of underflow and returns undefined from a
+ *  function typed to return Tab — through a signature that forbids it. Only
+ *  ±1 is reachable today, which is exactly how it would have sat there. */
+export function cycle(tab: Tab, delta: number): Tab {
+    const i = TABS.indexOf(tab);
+    const n = TABS.length;
+    return TABS[(((i + delta) % n) + n) % n];
 }
 
 /** Move the cursor within a list, clamping at both ends.

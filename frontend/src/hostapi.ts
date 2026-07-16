@@ -602,16 +602,14 @@ export interface WorkspaceInfo {
     sessions: number;
 }
 
-/** One agent's card-sized state inside an overview item. */
 /** One agent in the overview rollup — a deck row's raw material.
  *
- *  Both ids are optional and mean different things when absent: no
- *  `sessionId` = the transcript wasn't located, so there's no conversation
- *  to render; no `rookSession` = the agent was never correlated to a window,
- *  so there's no pty to attach. Either way the row still renders and the
- *  unreachable verb is dropped — an agent you can see but not open beats an
- *  agent you can't see. Old daemons send neither (they predate the fields),
- *  which degrades to exactly that. */
+ *  The ids are optional for ONE reason: an old daemon predates them and sends
+ *  neither. A current daemon always sends both, because it only emits an
+ *  agent it has correlated to a live claude window (internal/host/overview.go
+ *  says what that costs). So `undefined` here means "old host", not
+ *  "uncorrelated agent" — the row renders either way and the verb it can't
+ *  reach is dropped, which is the fail-open half and the half that's real. */
 export interface OverviewAgent {
     state: "working" | "needs_input" | "quiet";
     title?: string;
@@ -623,7 +621,9 @@ export interface OverviewAgent {
     rookSession?: string;
     model?: string;
     costUsd?: number;
-    /** last activity; drives the age column. Zero date on an old daemon. */
+    /** last activity; drives the age column. Absent on an old daemon — and
+     *  deck.ts also normalizes a zero date to absent, since Go's zero
+     *  time.Time marshals to a truthy string that renders as "739812d ago". */
     lastEvent?: string;
 }
 

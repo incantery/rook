@@ -143,3 +143,23 @@ test("mission control takes focus off the terminal", async ({page}) => {
 
     expect(await page.evaluate(() => document.activeElement?.id)).toBe("home");
 });
+
+// ...and it has to KEEP focus when an overlay closes on top of it.
+//
+// Every overlay's onclose calls focusBack(), which used to mean
+// mgr.focusActive() unconditionally — i.e. focus a terminal, which is the bug
+// above wearing a different hat. Worth its own test because the deck's own
+// focus fix is invisible from here: it runs onMount, and closing a modal is
+// not a mount. No workspace needed — with no terminals to focus, the
+// screen-blind version stranded focus on <body> and j/k simply died.
+test("mission control keeps focus when an overlay closes over it", async ({page}) => {
+    await page.goto("/");
+    await expect(page.locator("#home")).toBeVisible();
+
+    await page.locator("#home").press("n");
+    await expect(page.getByText("New agent session")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByText("New agent session")).toHaveCount(0);
+
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("home");
+});

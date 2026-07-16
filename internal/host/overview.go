@@ -26,11 +26,24 @@ import (
 // attach). Two ids because they are two different things, and the deck offers
 // both verbs. Same asymmetry PaneRef had, same fix.
 //
-// Either may be empty and the row is still real: a claude the watcher sees
-// but has not correlated to a window has no RookSession, and one whose
-// transcript hasn't been located has no SessionID. Callers render what they
-// have and drop the verbs they cannot reach — an agent you can see but not
-// open beats an agent you cannot see.
+// In practice BOTH are always set, and that is worth knowing rather than
+// hoping. Rows are built from correlated sessions only (see handleOverview),
+// and correlate() only ever attaches an agent to a window whose foreground
+// process is the coder — so a row cannot exist without a pty behind it, and
+// the agent named itself the moment the watcher saw it.
+//
+// The cost is the inverse: an agent the host CANNOT correlate gets no row at
+// all. Shell out of claude (ctrl-Z, or a `git log` at the prompt) and its
+// window stops being a claude window, so the agent drops off the deck until
+// you come back. correlate() already keeps the fact — AgentSession is set on
+// the session regardless of what's foreground — so this is fixable without
+// new sensors, and it is worth fixing precisely because the deck exists to
+// watch agents you are NOT sitting in front of.
+//
+// omitempty stays on both anyway: an old daemon omits these fields entirely,
+// and clients read them as absent and drop the verb they cannot reach. That
+// is the fail-open half, and it is real even though the empty-string half
+// isn't.
 type overviewAgent struct {
 	State string `json:"state"` // working | needs_input | quiet
 	Title string `json:"title,omitempty"`

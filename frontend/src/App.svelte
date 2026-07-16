@@ -141,7 +141,19 @@
         if (!app.dashVisible) mgr.focusActive();
     }
 
-    const focusBack = () => mgr.focusActive();
+    /** Hand focus back when an overlay closes — to whatever owns the screen.
+     *
+     *  Screen-aware because it has to be. mgr.focusActive() focuses a TERMINAL
+     *  pane, and every overlay here (palette, picker, inbox, spawn, settings)
+     *  can be opened over mission control. Closing one there used to hand the
+     *  keyboard to the shell you last had open — the deck's own focus fix,
+     *  undone by the modal on top of it. On a fresh boot the terminals are
+     *  display:none, so focus() silently no-ops and strands focus on <body>
+     *  instead: j/k just stop working, with nothing to see. */
+    const focusBack = () => {
+        if (app.screen === "home") home?.focusDeck();
+        else mgr.focusActive();
+    };
 
     /** Transient message in the titlebar's workspace slot — failures must
      *  be VISIBLE (set-root once died silently on a stale daemon 404). */
@@ -208,13 +220,24 @@
      *  workspace at once, so the row you press R on is routinely not in the
      *  one you're standing in. */
     async function openPty(id: string): Promise<void> {
+        const prev = app.screen;
         try {
             await initDone;
+            // The switch has to happen first — switchToId activates, and
+            // fit/focus no-op on a display:none subtree — so put it back if
+            // the pty turns out to be gone. A row whose terminal died since
+            // the last poll should cost you nothing; without this it dumps you
+            // out of the deck onto an unrelated terminal, with a 2.5s titlebar
+            // flash as the only explanation.
             app.screen = "app";
-            await tick(); // activate() no-ops on a display:none subtree
-            if (!mgr.switchToId(id)) flash("no live terminal for this session");
+            await tick();
+            if (!mgr.switchToId(id)) {
+                app.screen = prev;
+                flash("no live terminal for this session");
+            }
         } catch (err) {
             console.error("raw attach failed", err);
+            app.screen = prev;
             flash("no live terminal for this session");
         }
     }
