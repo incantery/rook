@@ -1,32 +1,35 @@
 package host
 
 import (
-	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
 
 // agentwatch is the attention router's sensor layer (docs/agent.md,
-// milestone 1): it consumes agentmon's derived-event stream over stdout
-// (`agentmon watch --dry-run`) and reduces it to one state per live claude
-// session. No LLM anywhere — classification here is mechanical:
+// milestone 1): one state per live claude session, reduced from Claude
+// Code's transcripts. No LLM anywhere — classification is mechanical:
 //
-//	turn_completed        → needs_input (claude finished, waiting on you)
-//	any transcript event  → working
-//	session_idle mid-turn → quiet (long tool run — or a permission prompt;
+//	system/turn_duration  → needs_input (claude finished, waiting on you)
+//	any record            → working
+//	silence mid-turn      → quiet (long tool run — or a permission prompt;
 //	                        the transcript can't tell them apart, so we
 //	                        report the tool and the silence, not a guess)
 //
-// agentmon (github.com/incantery/agentmon) stays dumb and reusable; the
-// correlation of transcript sessions to rook windows happens here, by cwd.
+// This file holds the state, the notify hook, and the readers. The source
+// that fills it lives in transcriptwatch.go, which reads
+// ~/.claude/projects/**/*.jsonl directly.
+//
+// It used to read agentmon's derived-event stream instead
+// (`agentmon watch --dry-run`). That went away on 2026-07-15: agentmon is a
+// telemetry shipper, its parser caps every content field at 2KB and never
+// carries a tool_use id, and rook needs whole records — see the amendment
+// in docs/agent.md. agentmon keeps its own job; both read the same tree and
+// neither knows the other exists.
+//
+// Correlation of transcript sessions to rook windows happens here, by cwd.
 type agentWatch struct {
 	mu     sync.Mutex
 	states map[string]*AgentStatus // by transcript session id
@@ -86,241 +89,16 @@ type AgentStatus struct {
 	LastEvent   time.Time `json:"lastEvent"` // any activity
 	askDraft    string    // last assistant text, promoted to Ask on turn end
 	history     []histMsg // recent-conversation ring (histCap entries)
-}
-
-// agentmonEvent mirrors the envelope of agentmon's derived events. Payload
-// stays raw until the type is known; unknown types are skipped, never fatal
-// (same posture as agentmon itself).
-type agentmonEvent struct {
-	SessionID string          `json:"session_id"`
-	AgentID   string          `json:"agent_id"`
-	Project   string          `json:"project"`
-	TS        time.Time       `json:"ts"`
-	Type      string          `json:"type"`
-	Payload   json.RawMessage `json:"payload"`
-}
-
-// findAgentmon resolves the agentmon binary: PATH first (daemon PATHs are
-// minimal, so this usually misses), then the conventional spots on a dev
-// machine. Empty means the attention layer is off — rook works without it.
-func findAgentmon() string {
-	if p, err := exec.LookPath("agentmon"); err == nil {
-		return p
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	for _, p := range []string{
-		filepath.Join(home, "go", "bin", "agentmon"),
-		filepath.Join(home, "go", "src", "github.com", "incantery", "agentmon", "bin", "agentmon"),
-	} {
-		if st, err := os.Stat(p); err == nil && st.Mode()&0o111 != 0 {
-			return p
-		}
-	}
-	return ""
+	// seenMsg dedupes cost across the several transcript lines Claude Code
+	// writes for one API response, each repeating the same message id and
+	// usage object. Only used by the transcript reader — agentmon does this
+	// dedupe inside its own parser and stamps a cost we just add up. Dies
+	// with the session.
+	seenMsg map[string]bool
 }
 
 func newAgentWatch() *agentWatch {
 	return &agentWatch{states: make(map[string]*AgentStatus)}
-}
-
-// run spawns agentmon and pumps its events forever, restarting with backoff
-// if it dies (or isn't installed yet — it may appear later).
-func (a *agentWatch) run(ctx context.Context) {
-	for {
-		bin := findAgentmon()
-		if bin == "" {
-			log.Println("agentwatch: agentmon not found; attention layer off (retry in 5m)")
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Minute):
-				continue
-			}
-		}
-		a.pump(ctx, bin)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(15 * time.Second):
-		}
-	}
-}
-
-func (a *agentWatch) pump(ctx context.Context, bin string) {
-	// --dry-run: stdout sink, no spool/state on disk — on restart we
-	// fast-forward to "now", which is exactly right for live attention.
-	// --level full so Ask can hold what claude actually said; it never
-	// leaves this machine. --idle-after 20s: attention-speed, not 60s.
-	cmd := exec.CommandContext(ctx, bin, "watch", "--dry-run", "--level", "full", "--idle-after", "20s")
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Printf("agentwatch: pipe: %v", err)
-		return
-	}
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
-		log.Printf("agentwatch: start %s: %v", bin, err)
-		return
-	}
-	log.Printf("agentwatch: consuming %s", bin)
-	sc := bufio.NewScanner(out)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		var ev agentmonEvent
-		if json.Unmarshal(sc.Bytes(), &ev) != nil {
-			continue
-		}
-		a.apply(&ev)
-	}
-	cmd.Wait()
-	log.Println("agentwatch: agentmon exited")
-}
-
-func (a *agentWatch) apply(ev *agentmonEvent) {
-	if ev.AgentID != "" {
-		return // subagent transcripts don't change the main session's state
-	}
-	if ev.Project == usageProbeDir() {
-		return // the usage prober's own headless runs are not sessions
-	}
-	now := ev.TS
-	if now.IsZero() {
-		now = time.Now()
-	}
-
-	a.mu.Lock()
-
-	if ev.Type == "session_ended" {
-		delete(a.states, ev.SessionID)
-		a.mu.Unlock()
-		return
-	}
-	st := a.states[ev.SessionID]
-	if st == nil {
-		st = &AgentStatus{SessionID: ev.SessionID, State: "working", Since: now}
-		a.states[ev.SessionID] = st
-	}
-	if ev.Project != "" {
-		st.Project = ev.Project
-	}
-	st.LastEvent = now
-	setState := func(s string) {
-		if st.State != s {
-			st.State, st.Since = s, now
-		}
-	}
-	record := func(role, text string) {
-		if text == "" {
-			return
-		}
-		if r := []rune(text); len(r) > histMaxText {
-			text = string(r[:histMaxText]) + "…"
-		}
-		st.history = append(st.history, histMsg{Role: role, Text: text, TS: now})
-		if len(st.history) > histCap {
-			st.history = st.history[len(st.history)-histCap:]
-		}
-	}
-	// deferred so hooks run after the lock drops — they call back into
-	// host state that must never nest inside agentwatch's mutex
-	var userReplied, turnDone, turnFinished bool
-	var userReply string
-
-	switch ev.Type {
-	case "session_started":
-		var p struct {
-			CWD string `json:"cwd"`
-		}
-		json.Unmarshal(ev.Payload, &p)
-		if p.CWD != "" {
-			st.CWD = p.CWD
-		}
-	case "session_title":
-		var p struct {
-			Title string `json:"title"`
-		}
-		json.Unmarshal(ev.Payload, &p)
-		st.Title = p.Title
-	case "user_prompt":
-		var p struct {
-			Text string `json:"text"`
-		}
-		json.Unmarshal(ev.Payload, &p)
-		setState("working")
-		st.Ask, st.askDraft, st.Tool = "", "", ""
-		st.Interactive = false
-		record("user", p.Text)
-		userReplied, userReply = true, p.Text
-	case "assistant_message":
-		var p struct {
-			Model   string   `json:"model"`
-			CostUSD *float64 `json:"cost_usd"`
-			Text    string   `json:"text"`
-		}
-		json.Unmarshal(ev.Payload, &p)
-		setState("working")
-		if p.Model != "" {
-			st.Model = p.Model
-		}
-		if p.CostUSD != nil {
-			st.CostUSD += *p.CostUSD
-		}
-		if p.Text != "" {
-			st.askDraft = tail(p.Text, 200)
-		}
-		record("assistant", p.Text)
-	case "tool_call":
-		var p struct {
-			Name  string `json:"name"`
-			Input string `json:"input"`
-		}
-		json.Unmarshal(ev.Payload, &p)
-		setState("working")
-		st.Tool = p.Name
-		record("tool", strings.TrimSpace(p.Name+" "+p.Input))
-		// The one mid-turn prompt the transcript CAN identify: claude's
-		// question picker. No turn_completed will come while it's up, so
-		// it becomes an ask right here — flagged interactive, because the
-		// window wants a menu selection, not typed text.
-		if p.Name == "AskUserQuestion" {
-			setState("needs_input")
-			st.Ask, st.Interactive = pickerAsk(p.Input), true
-			st.AskSeq++
-			turnDone = true // prior asks' open drafts are now stale
-		}
-	case "tool_result":
-		// for a picker, the result IS the user's answer — the ask is over
-		setState("working")
-		if st.Interactive {
-			st.Ask, st.Interactive = "", false
-		}
-	case "turn_completed":
-		setState("needs_input")
-		st.Ask, st.Tool = st.askDraft, ""
-		st.Interactive = false
-		st.AskSeq++
-		turnDone = true
-		turnFinished = true
-	case "session_idle":
-		if st.State == "working" {
-			setState("quiet")
-		}
-	}
-	askSeq := st.AskSeq
-	a.mu.Unlock()
-
-	if userReplied && a.onUserReply != nil {
-		a.onUserReply(ev.SessionID, userReply)
-	}
-	if turnDone && a.onTurnCompleted != nil {
-		a.onTurnCompleted(ev.SessionID, askSeq)
-	}
-	if turnFinished && a.onTurnFinished != nil {
-		a.onTurnFinished(ev.SessionID)
-	}
 }
 
 // notify is the Claude Code Notification hook landing (via `rookctl
@@ -368,7 +146,7 @@ func (a *agentWatch) context(sessionID string) (AgentStatus, []histMsg, bool) {
 	hist := make([]histMsg, len(st.history))
 	copy(hist, st.history)
 	c := *st
-	c.history = nil
+	c.history, c.seenMsg = nil, nil
 	return c, hist, true
 }
 
@@ -385,7 +163,8 @@ func (a *agentWatch) snapshot() []*AgentStatus {
 			continue
 		}
 		c := *st
-		c.history = nil // ring copies stay inside the watcher; use context()
+		// ring copies stay inside the watcher; use context()
+		c.history, c.seenMsg = nil, nil
 		out = append(out, &c)
 	}
 	return out

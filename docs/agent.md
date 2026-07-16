@@ -76,7 +76,8 @@ host already senses it) + working-directory match. Consequences:
   them.
 - The division of labor is permanent: agentmon stays a dumb, reusable
   sensor (no LLM, no rook knowledge); rook owns correlation, state, and
-  everything that acts.
+  everything that acts. *(Overturned 2026-07-15 — see the amendment below.
+  The sensor half was right until the surface changed.)*
 
 ### Shipped (2026-07-14): two engines, and the drafter stops needing setup
 
@@ -137,6 +138,159 @@ tell "the draft was wrong" from "the draft was never seen", so swapping the
 engine cannot be *shown* to have improved drafting. This change is justified
 on setup cost alone. See the sequence below — step 3 stays blocked until
 `manual` splits.
+
+## Amendment (2026-07-15): rook reads the transcripts; agentmon is the wrong sensor
+
+The 2026-07-11 amendment above is not being corrected — it was right for the
+job it was written for. The job changed.
+
+The attention router needs a state chip, an ask string, and a cost number. A
+lossy metrics reduction serves that perfectly, and everything agentmon's parser
+discards, it discards *correctly* for Loki and Grafana. What we want next is
+different: **the agent session rendered in Svelte as the 90% case**, with the
+pty kept exactly as it is so `jump` into the live interactive claude stays the
+10% escape hatch. Not stream-json, not headless — attach is worth more than the
+correlation layer it would delete. The read path is what changes.
+
+A renderer needs what a dashboard doesn't: whole content, call/result identity,
+and low latency. agentmon can give none of the three, and the reasons are
+structural rather than tuneable.
+
+Three findings, each paid for once:
+
+- **The transcript already shows the block.** The `tool_use` record is written
+  when the model emits it and resolves only when the human answers, so the gap
+  between them *is* the block, with the full tool input sitting there for the
+  duration. Measured in one session: two `AskUserQuestion` calls pended 2m32s
+  and 17.7s, while auto-approved `Read`/`Bash` calls resolved in under half a
+  second. So "the transcript can't distinguish them" (above) is too pessimistic.
+  It holds for `Bash` — compiling and waiting look alike — and fails for
+  `AskUserQuestion`, which has no long-running variant. An aged unresolved
+  `tool_use` is the signal, and rook's reducer never looks for it.
+- **agentmon's parser structurally cannot carry it.** `ToolCallPayload{Name,
+  Input}` and `ToolResultPayload{OK, Content}` (`internal/transcript/event.go`)
+  carry no `tool_use_id`, so calls can never be paired to results downstream.
+  `MaxContentBytes = 2048` is applied at *parse* time, and `--level full` —
+  which rook already passes — means "don't clear the field", not "don't truncate
+  it": `redact.go` clears content at Metadata and returns 2KB at Full. A picker
+  with four options and descriptions is clipped, and no flag recovers it.
+  Finally `internal/transcript` is under `internal/`, so rook cannot import it.
+  The subprocess is not a design choice; it is a workaround for a package path.
+- **The hooks are not installed.** Neither `~/.claude/settings.json` nor
+  `settings.local.json` has a `hooks` key, so `claim` — tier-0 evidence in
+  `correlate()` — and `notify-hook`, the only mechanical permission-block
+  sensor, are both inert. Correlation is running on ring-content matching and
+  recency. Unrelated to this amendment, and worth chasing on its own.
+
+The tell we had already: rook's live data plane is `agentmon watch --dry-run`,
+the exhaust of a telemetry daemon told not to ship. Its README says
+`node_exporter` for agent sessions, and that is accurate.
+
+**So rook grows `internal/transcript` and reads `~/.claude/projects/**/*.jsonl`
+directly.** This overturns "the division of labor is permanent" above. agentmon
+keeps its own job — cross-machine telemetry, Loki, cost dashboards, ntfy
+step-away alerts — which rook does not do and should not grow. Both read the
+same files; neither knows the other exists.
+
+This is *less* abstraction, not more. Rook does not depend on agentmon the way
+composable tools depend on each other — it depends on an event vocabulary
+designed for Grafana, with a truncation constant baked in. Deleting that moves
+the composition point from `ToolCallPayload` to the jsonl Claude Code writes: a
+file neither tool owns and both can read. agentmon has no privileged claim to
+it. Two readers of a third party's file is the simplest arrangement available,
+and it is what the suite's plain-file substrate rule already says to do.
+`node_exporter` and your application both read `/proc`.
+
+Scope is a package, not a project. Rook needs discovery (the slug is cwd with
+`/`→`-`), a tail, a permissive parser, and the pricing table (~67 lines, ported
+because `AgentStatus.CostUSD` comes from agentmon's stamping today). It needs
+none of the spool, loki, or drain — that is shipping — and no `redact` at all,
+since content levels exist because bytes leave the machine and here nothing
+crosses a wire. No TOML config. No subagent globbing: rook already discards
+events with a non-empty `agent_id`. No `(machine, session_id, offset, seq)`
+identity: that is Loki dedupe and resume.
+
+Four deliberate divergences, each a thing agentmon got right for itself and
+wrong for us: poll becomes fsnotify (poll is correct for a shipper; latency is
+the point for a UI); the 2KB truncate goes; `tool_use_id` is kept; and the
+parser stops reducing to nine event types, yielding whole records with the
+reduction as a separate layer. agentmon's `parser.go` is the spec — the
+expensive part was reverse-engineering the format, and that survives being read
+rather than imported.
+
+`AgentStatus` is the migration seam and it already exists. Every consumer —
+`correlate()`, `/attention`, the Inbox, the Dashboard — reads that type and
+nothing else. Keep it, swap the source underneath, run both readers and diff
+before cutting over. Rook is the daily driver; the sensor should not change out
+from under it on a single commit.
+
+The honest cost: rook owns a parser for an undocumented format that changes
+without notice. We already carry that risk transitively — agentmon breaking
+breaks rook today — and the mitigation is the one `apply()` already implements
+and the host taught us the hard way: unknown record types are skipped, never
+fatal.
+
+Sequence: `internal/transcript` first, because a renderer cannot be built on a
+truncated stream that cannot pair a call to its result — it is step zero of the
+surface, not a cleanup task. Then the Svelte session view over whole records.
+Then whether pickers can be *answered* rather than only shown: rendering one is
+implementation, but answering it still means synthesising keystrokes into a TUI
+widget whose layout we infer, so `attention.go`'s server-side refusal to type
+into pickers stands until that is proven. Showing the full question so the user
+can decide whether jumping is worth it captures most of the value with none of
+the risk.
+
+One incidental find: agentmon parses `PermissionModePayload{Mode}` and rook's
+`apply()` does not handle `permission_mode`. We are dropping a signal we are
+already handed.
+
+### Shipped (2026-07-15): rook reads its own transcripts
+
+`internal/transcript` (parser, tailer, fsnotify watcher, ported pricing) and
+`internal/host/transcriptwatch.go` (the reducer) replaced the agentmon
+dependency outright. `findAgentmon`, the `watch --dry-run` pump, the
+`agentmonEvent` envelope and `apply()` are gone; `AgentStatus` never moved, so
+`correlate()`, `/attention`, the Inbox and the Dashboard did not change. Net
+−328 lines, one new dependency (fsnotify).
+
+The shadow-diff this doc called for was **not** built, and should not be. The
+oracle was worse than the thing it would have tested: the installed agentmon is
+a 2026-07-10 build that silently skips six record types the format has since
+grown, so most disagreements would have been the new path being right. What the
+diff was really guarding was that the reducer had only ever seen fixtures its
+author wrote from a reading of the format — a reading that could be wrong in
+exactly the way its own tests would agree with. That is answered by replaying
+real sessions through it, not by a second implementation:
+`TestReducerAgainstRealSessions` puts every transcript on the machine through
+the reducer (115 sessions, 64k lines, 0 malformed) and asserts the beliefs the
+unit tests merely assume. It is also where the next format change surfaces.
+
+Two things the build settled that argument could not:
+
+- **`system`/`turn_duration` really is the turn end.** The whole `needs_input`
+  state hangs on that reading. In the corpus, 89 of 115 sessions end there, and
+  one real session shows 7 `turn_duration` records against 8 typed prompts —
+  1:1, the missing one being the turn still open. Had this been wrong, every
+  unit test would still have passed and the Inbox would simply have gone quiet.
+- **Backlog must not fire hooks.** The watcher replays a discovered file from
+  offset 0 to rebuild state, which is correct for state and catastrophic for
+  side effects: every historical `turn_duration` would have fired
+  `onTurnFinished`, the workflow engine's stage-completion sensor. A restart
+  would have advanced every stage for turns that ended hours ago. Records now
+  carry `Live`; state reduces from everything, hooks fire only on appends we
+  watched land.
+
+The picker fix shipped with the cutover and needed no UI work. `pickerAsk` was
+always able to render the question and its numbered options — it was being fed
+input capped at 2KB, which is smaller than a real picker, so it had been
+degrading to "Claude is asking a question (interactive prompt)". Whole input,
+real question.
+
+Also fixed in passing: `permission_mode` is parsed but still unconsumed (the
+gap above stands), and rook-host's 300ms shutdown beat — written for agentmon's
+asynchronous kill — turns out to be load-bearing for the usage prober's
+`claude -p /usage`, which is killed the same way. The sleep stayed; its comment
+was the thing that was wrong.
 
 ## The escalation gate (load-bearing)
 

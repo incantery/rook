@@ -60,7 +60,7 @@ func main() {
 	log.Printf("rook-host %s (build %s) listening on 127.0.0.1:%d (pid %d)", version.Version, version.Build, port, os.Getpid())
 
 	// Everything supervised runs under the host's lifecycle context, so
-	// one Shutdown reaches agentmon and rook-agent alike.
+	// one Shutdown reaches rook-agent and the usage prober alike.
 	ctx := h.Context()
 	// The drafter (rook-agent) is a supervised child, not a third daemon —
 	// absent binary just means the feature is off.
@@ -80,7 +80,7 @@ func main() {
 
 	// Die clean on replacement: SIGTERM (hostclient/rook-host upgrading
 	// past us) must take the supervised children down too — before this,
-	// every daemon replacement leaked an orphaned rook-agent + agentmon.
+	// every daemon replacement leaked its orphaned children.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
 	go func() {
@@ -91,7 +91,10 @@ func main() {
 		case <-agentDone:
 		case <-time.After(2 * time.Second):
 		}
-		// agentmon's kill is asynchronous (CommandContext) — give it a beat
+		// The usage prober's `claude -p /usage` is killed by ctx, and
+		// CommandContext kills asynchronously — give it a beat to land.
+		// (This used to be agentmon's beat; rook stopped spawning it on
+		// 2026-07-15, but the prober inherits the same need.)
 		time.Sleep(300 * time.Millisecond)
 		os.Exit(0)
 	}()

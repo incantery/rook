@@ -21,9 +21,10 @@ import (
 )
 
 // newEngine resolves config to a model backend. "auto" prefers the coder CLI
-// the user already has — rook-agent cannot work without claude anyway
-// (agentmon reads its transcripts), so shelling out to it costs no new
-// dependency and skips the key/keychain/config ritual entirely. An OpenAI key
+// the user already has — rook-agent cannot work without claude anyway (the
+// drafter drafts replies to claude sessions, and rook reduces its transcripts
+// to find them), so shelling out to it costs no new dependency and skips the
+// key/keychain/config ritual entirely. An OpenAI key
 // stays the alternative for anyone who wants the drafter kept off their
 // subscription's rate limit (docs/agent.md: two tiers, two billing models).
 // Neither present means idle, not crash — turning the feature on is editing a

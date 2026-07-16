@@ -145,7 +145,7 @@ func New() *Host {
 	// old host. ✗ + detail is the honest surface — no auto-respawn, no
 	// surprise spend.
 	h.reg.failRunningStages("host restarted — window lost")
-	go h.aw.run(h.ctx)
+	go h.aw.runTranscript(h.ctx)
 	return h
 }
 

@@ -63,8 +63,8 @@ func decide(t *testing.T, h *Host, id string, action, text string) *httptest.Res
 
 func askTurn(t *testing.T, a *agentWatch, id, text string) {
 	t.Helper()
-	a.apply(ev(t, "assistant_message", id, "", map[string]any{"text": text}))
-	a.apply(ev(t, "turn_completed", id, "", map[string]any{}))
+	a.applyRecord(rline(t, id, assistantMsg("m-"+text, text)))
+	a.applyRecord(rline(t, id, turnDone))
 }
 
 // The whole increment-B loop against one host: draft → approve → pty gets
@@ -72,7 +72,7 @@ func askTurn(t *testing.T, a *agentWatch, id, text string) {
 func TestDraftApproveFlow(t *testing.T) {
 	h, ptyOut := draftHost(t)
 	a := h.aw
-	a.apply(ev(t, "session_started", "t1", "/repo", map[string]string{"cwd": "/repo"}))
+	startSession(t, a, "t1", "/repo")
 	askTurn(t, a, "t1", "Deploy to staging?")
 
 	// wrong askSeq → 409, nothing recorded
@@ -107,7 +107,7 @@ func TestDraftApproveFlow(t *testing.T) {
 	}
 
 	// the echo of our own write: user_prompt "yes" must find a decided row
-	a.apply(ev(t, "user_prompt", "t1", "", map[string]any{"text": "yes"}))
+	a.applyRecord(rline(t, "t1", userMsg("yes")))
 	if d := h.reg.getDecision(res.ID); d.Verdict != "approved" {
 		t.Fatalf("echo re-decided the row: %+v", d)
 	}
@@ -123,19 +123,19 @@ func TestDraftApproveFlow(t *testing.T) {
 func TestManualAttribution(t *testing.T) {
 	h, _ := draftHost(t)
 	a := h.aw
-	a.apply(ev(t, "session_started", "t1", "/repo", map[string]string{"cwd": "/repo"}))
+	startSession(t, a, "t1", "/repo")
 
 	askTurn(t, a, "t1", "Run the tests too?")
 	postDraft(t, h, "t1", map[string]any{"askSeq": 1, "action": "draft", "reply": "Yes, run them."})
 	// user types the draft, modulo case/punctuation — that's an approval
-	a.apply(ev(t, "user_prompt", "t1", "", map[string]any{"text": "yes run them"}))
+	a.applyRecord(rline(t, "t1", userMsg("yes run them")))
 	if d := h.reg.getDecision(1); d.Verdict != "approved" {
 		t.Fatalf("matching manual reply: verdict %q, want approved", d.Verdict)
 	}
 
 	askTurn(t, a, "t1", "Delete the old branch?")
 	postDraft(t, h, "t1", map[string]any{"askSeq": 2, "action": "draft", "reply": "yes"})
-	a.apply(ev(t, "user_prompt", "t1", "", map[string]any{"text": "no, keep it for now"}))
+	a.applyRecord(rline(t, "t1", userMsg("no, keep it for now")))
 	if d := h.reg.getDecision(2); d.Verdict != "manual" || d.FinalText != "no, keep it for now" {
 		t.Fatalf("divergent manual reply: %+v", d)
 	}
@@ -153,7 +153,7 @@ func TestManualAttribution(t *testing.T) {
 func TestStaleOnNewTurn(t *testing.T) {
 	h, _ := draftHost(t)
 	a := h.aw
-	a.apply(ev(t, "session_started", "t1", "/repo", map[string]string{"cwd": "/repo"}))
+	startSession(t, a, "t1", "/repo")
 
 	askTurn(t, a, "t1", "First question?")
 	postDraft(t, h, "t1", map[string]any{"askSeq": 1, "action": "draft", "reply": "yes"})
@@ -182,7 +182,7 @@ func TestStaleOnNewTurn(t *testing.T) {
 func TestSpawnDraft(t *testing.T) {
 	h, _ := draftHost(t)
 	a := h.aw
-	a.apply(ev(t, "session_started", "t1", "/repo", map[string]string{"cwd": "/repo"}))
+	startSession(t, a, "t1", "/repo")
 	askTurn(t, a, "t1", "Done. Next steps: fix the flaky picker test.")
 
 	w := postDraft(t, h, "t1", map[string]any{
@@ -239,11 +239,13 @@ func TestSpawnDraft(t *testing.T) {
 func TestInteractiveAskRefusesDrafts(t *testing.T) {
 	h, _ := draftHost(t)
 	a := h.aw
-	a.apply(ev(t, "session_started", "t1", "/repo", map[string]string{"cwd": "/repo"}))
-	a.apply(ev(t, "tool_call", "t1", "", map[string]any{
-		"name":  "AskUserQuestion",
-		"input": `{"questions":[{"question":"Which one?","options":[{"label":"A"},{"label":"B"}]}]}`,
-	}))
+	startSession(t, a, "t1", "/repo")
+	a.applyRecord(rline(t, "t1", toolUse("AskUserQuestion", map[string]any{
+		"questions": []map[string]any{{
+			"question": "Which one?",
+			"options":  []map[string]string{{"label": "A"}, {"label": "B"}},
+		}},
+	})))
 
 	if w := postDraft(t, h, "t1", map[string]any{"askSeq": 1, "action": "draft", "reply": "A"}); w.Code != 409 {
 		t.Fatalf("draft against a picker: code %d, want 409", w.Code)
