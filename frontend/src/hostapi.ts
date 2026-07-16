@@ -107,7 +107,8 @@ export class HostAPI {
     }
 
     /** New task tree: a git worktree off `from`'s repo (branch
-     *  rook/<name> unless the workspace configures a branch-prefix),
+     *  rook/<name> unless the workspace configures a branch-prefix, or a
+     *  branch-delimiter to split an issue's key from its title),
      *  registered as a workspace — the isolation rung under parallel
      *  agent sessions. `issue` stamps which tracker issue spawned it
      *  (work-on-issue flow); its title is what the host derives the

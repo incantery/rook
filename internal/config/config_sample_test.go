@@ -42,7 +42,7 @@ func TestSampleDefaults(t *testing.T) {
 	// per-workspace dynamic keys) carry no meaningful default — zero them so
 	// the comparison is exactly the concrete-default scalar knobs.
 	got.JiraURL, got.JiraEmail, got.JiraJQL = "", "", ""
-	got.JiraProjects, got.BranchPrefixes = nil, nil
+	got.JiraProjects, got.BranchPrefixes, got.BranchDelimiters = nil, nil, nil
 	got.Workflow, got.Workflows, got.Keybinds = nil, nil, nil
 	if !reflect.DeepEqual(got, Default()) {
 		t.Fatalf("sample defaults drifted from config.Default():\n got %+v\nwant %+v", got, Default())

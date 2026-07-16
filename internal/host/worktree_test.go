@@ -333,6 +333,62 @@ func TestWorktreeEmptyBranchPrefix(t *testing.T) {
 	}
 }
 
+func TestWorktreeBranchDelimiter(t *testing.T) {
+	h, srv, _ := newWorktreeHost(t)
+	c := &wtClient{srv.URL, h.Token()}
+	cfgDir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "rook")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config"), []byte("branch-delimiter-src = /\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(key, title string) WorkspaceInfo {
+		t.Helper()
+		code, body := c.do(t, "POST", "/workspaces", map[string]any{
+			"worktreeFrom": "src",
+			"issue":        map[string]string{"tracker": "jira", "key": key, "title": title},
+		})
+		if code != 200 {
+			t.Fatalf("create %s: %d %s", key, code, body)
+		}
+		var ws WorkspaceInfo
+		json.Unmarshal([]byte(body), &ws)
+		return ws
+	}
+
+	// the delimiter splits key from title in the branch — but the workspace
+	// name is a directory under DataDir, so it stays hyphenated
+	ws := mk("FOO-123", "bar baz")
+	if ws.Branch != "rook/FOO-123/bar-baz" || ws.Name != "FOO-123-bar-baz" {
+		t.Fatalf("delimited branch: %+v", ws)
+	}
+	if got := gitT(t, ws.Root, "rev-parse", "--abbrev-ref", "HEAD"); got != "rook/FOO-123/bar-baz" {
+		t.Fatalf("checkout on %q", got)
+	}
+
+	// the collision step lands on the branch too, or the second worktree off
+	// one issue would try to re-add an existing branch
+	if ws = mk("FOO-123", "bar baz"); ws.Branch != "rook/FOO-123/bar-baz-2" || ws.Name != "FOO-123-bar-baz-2" {
+		t.Fatalf("collision step: %+v", ws)
+	}
+
+	// a title with nothing slug-safe leaves no dangling delimiter
+	if ws = mk("FOO-9", "«…»"); ws.Branch != "rook/FOO-9" {
+		t.Fatalf("key-only branch: %+v", ws)
+	}
+
+	// nameless manual spawns have no key/title seam to split
+	code, body := c.do(t, "POST", "/workspaces", map[string]any{"worktreeFrom": "src"})
+	if code != 200 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	json.Unmarshal([]byte(body), &ws)
+	if ws.Branch != "rook/src-t1" {
+		t.Fatalf("auto-name branch = %q, want rook/src-t1", ws.Branch)
+	}
+}
+
 func TestWorktreeCreateErrors(t *testing.T) {
 	h, srv, _ := newWorktreeHost(t)
 	c := &wtClient{srv.URL, h.Token()}

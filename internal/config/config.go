@@ -51,6 +51,10 @@ type Config struct {
 	// `branch-prefix-<workspace> = seth/`. The value is used verbatim
 	// (bring your own trailing separator); unset means rook/.
 	BranchPrefixes map[string]string `json:"branchPrefixes"`
+	// BranchDelimiters maps a workspace to what joins an issue's key to its
+	// title in a worktree branch, `branch-delimiter-<workspace> = /` →
+	// FOO-123/bar-baz. Unset (or empty) means "-".
+	BranchDelimiters map[string]string `json:"branchDelimiters"`
 	// Coder is the CLI the host types into spawned task windows (spawn
 	// drafts, the conflict-resolve chip, workflow stages). claude unless
 	// overridden.
@@ -156,6 +160,16 @@ func Load() Config {
 				cfg.BranchPrefixes = map[string]string{}
 			}
 			cfg.BranchPrefixes[ws] = value
+			continue
+		}
+		// the delimiter takes the opposite reading of an empty value:
+		// FOO-123bar-baz is nobody's naming scheme, so `branch-delimiter-<ws> =`
+		// is a typo and falls back to "-" like an unset key.
+		if ws, ok := strings.CutPrefix(key, "branch-delimiter-"); ok && ws != "" && value != "" {
+			if cfg.BranchDelimiters == nil {
+				cfg.BranchDelimiters = map[string]string{}
+			}
+			cfg.BranchDelimiters[ws] = value
 			continue
 		}
 		// likewise for workflows: `workflow-<ws> =` stores an empty non-nil

@@ -497,22 +497,34 @@ type spawnIssue struct {
 	Title string
 }
 
-// branchPrefix is the source workspace's worktree-branch prefix:
-// `branch-prefix-<workspace>` in the config (hot-read, like the issue
-// trackers), used verbatim — teams bring their own separator. An explicit
-// empty value (`branch-prefix-<ws> =`) means no prefix at all, so branches
-// can match a CI naming scheme exactly; only a genuinely unset prefix falls
-// back to rook/.
-func branchPrefix(ws string) string {
-	if p, ok := config.Load().BranchPrefixes[ws]; ok {
-		return p
+// branchNaming is how the source workspace names its worktree branches, from
+// the config (hot-read, like the issue trackers).
+//
+// prefix is `branch-prefix-<workspace>`, used verbatim — teams bring their
+// own separator. An explicit empty value (`branch-prefix-<ws> =`) means no
+// prefix at all, so branches can match a CI naming scheme exactly; only a
+// genuinely unset prefix falls back to rook/.
+//
+// delim is `branch-delimiter-<workspace>`, what joins a spawning issue's key
+// to its title: "-" by default (FOO-123-bar-baz), `= /` for the teams whose
+// scheme is FOO-123/bar-baz. Unlike the prefix, an empty value reads as unset
+// — FOO-123bar-baz is a typo, not a naming scheme.
+func branchNaming(ws string) (prefix, delim string) {
+	cfg := config.Load()
+	prefix, ok := cfg.BranchPrefixes[ws]
+	if !ok {
+		prefix = "rook/"
 	}
-	return "rook/"
+	if delim = cfg.BranchDelimiters[ws]; delim == "" {
+		delim = "-"
+	}
+	return prefix, delim
 }
 
 // createWorktreeWorkspace is POST /workspaces {worktreeFrom}: a fresh
 // `git worktree add` off the source workspace's repo, on branch
-// <prefix><name> (rook/ unless configured), registered as a workspace
+// <prefix><name> (rook/ unless configured, and an issue's key and title join
+// with the workspace's branch delimiter), registered as a workspace
 // rooted at the new checkout. The spawner's isolation rung — parallel
 // agent sessions get a tree each.
 func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string, issue *spawnIssue) {
@@ -528,22 +540,29 @@ func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string,
 	if issue != nil && issue.Key == "" {
 		issue = nil // an empty ref is no ref
 	}
-	prefix := branchPrefix(from)
+	prefix, delim := branchNaming(from)
+	// what the branch carries after the prefix. It tracks name on every path
+	// but the issue-derived one, where the delimiter may split key from title
+	// (FOO-123/bar-baz) — a name can't, being a directory too.
+	suffix := name
 	if name == "" {
 		// auto-names must also step past branches left behind by deleted
 		// worktrees — the branch outliving its tree is the design
-		free := func(name string) bool {
+		free := func(name, suffix string) bool {
 			_, err := os.Stat(worktreeDir(name))
-			return os.IsNotExist(err) && h.reg.get(name) == nil && !branchExists(src.Root, prefix+name)
+			return os.IsNotExist(err) && h.reg.get(name) == nil && !branchExists(src.Root, prefix+suffix)
 		}
-		if base := issueName(issue); base != "" {
+		key, title := issueSlugs(issue)
+		if base := joinSlugs(key, title, "-"); base != "" {
 			// issue spawns name themselves from the issue
+			branchBase := joinSlugs(key, title, delim)
 			for n := 1; ; n++ {
-				name = base
+				name, suffix = base, branchBase
 				if n > 1 {
 					name = fmt.Sprintf("%s-%d", base, n)
+					suffix = fmt.Sprintf("%s-%d", branchBase, n)
 				}
-				if free(name) {
+				if free(name, suffix) {
 					break
 				}
 			}
@@ -551,7 +570,8 @@ func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string,
 			// last resort for nameless manual spawns
 			for n := 1; ; n++ {
 				name = fmt.Sprintf("%s-t%d", from, n)
-				if free(name) {
+				suffix = name
+				if free(name, suffix) {
 					break
 				}
 			}
@@ -564,7 +584,7 @@ func (h *Host) createWorktreeWorkspace(w http.ResponseWriter, name, from string,
 		return
 	}
 	dir := worktreeDir(name)
-	branch := prefix + name
+	branch := prefix + suffix
 	if err := worktreeAdd(src.Root, dir, branch); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

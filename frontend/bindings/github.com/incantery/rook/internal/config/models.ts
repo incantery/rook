@@ -57,6 +57,13 @@ export interface Config {
     "branchPrefixes": { [_ in string]?: string } | null;
 
     /**
+     * BranchDelimiters maps a workspace to what joins an issue's key to its
+     * title in a worktree branch, `branch-delimiter-<workspace> = /` →
+     * FOO-123/bar-baz. Unset (or empty) means "-".
+     */
+    "branchDelimiters": { [_ in string]?: string } | null;
+
+    /**
      * Coder is the CLI the host types into spawned task windows (spawn
      * drafts, the conflict-resolve chip, workflow stages). claude unless
      * overridden.

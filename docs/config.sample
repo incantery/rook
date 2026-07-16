@@ -144,6 +144,12 @@
 # branch-prefix-<workspace> = seth/
 # branch-prefix-<workspace> =
 
+# What joins a spawning issue's key to its title in that branch. Defaults to a
+# hyphen — issue FOO-123 "bar baz" lands on rook/FOO-123-bar-baz — so set this
+# to / for the scheme that reads rook/FOO-123/bar-baz. Branch names only: the
+# workspace is a directory too, and stays FOO-123-bar-baz either way.
+# branch-delimiter-<workspace> = /
+
 # Override the global workflow for one workspace. An explicitly empty value
 # (nothing after the =) opts that workspace out of the global pipeline
 # entirely; a non-empty value replaces it for that workspace.

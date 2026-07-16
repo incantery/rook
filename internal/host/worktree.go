@@ -15,7 +15,8 @@ import (
 // source workspace's repo — one branch per task, so parallel agent sessions
 // stop stomping each other in a shared checkout. Trees live under rook's
 // own data dir (never inside the user's repos), branches under
-// <prefix><name> (rook/ unless branch-prefix-<workspace> says otherwise).
+// <prefix><name> (rook/ unless branch-prefix-<workspace> says otherwise;
+// an issue's key and title join with branch-delimiter-<workspace>).
 // rook never deletes work: removal refuses while the tree is dirty or the
 // branch holds commits unreachable from every other ref, unless forced.
 // The branch always survives removal — it may live on in a PR.
@@ -26,24 +27,29 @@ func worktreeDir(name string) string {
 	return filepath.Join(DataDir(), "worktrees", name)
 }
 
-// issueName derives a workspace name from the issue that spawned it —
-// "<key>-<slugified-title>", "#9" + "Top bar alignment" → "9-top-bar-
-// alignment" — so the name means something in the workspace list, `git
-// branch`, and the eventual PR. "" (no issue, or nothing slug-safe in it)
-// sends the caller to the <source>-t<n> fallback.
-func issueName(issue *spawnIssue) string {
+// issueSlugs splits the issue that spawned a worktree into the two halves
+// its names are built from — the key slug and the slugified title, "#9" +
+// "Top bar alignment" → "9" + "top-bar-alignment" — so that the name means
+// something in the workspace list, `git branch`, and the eventual PR. The
+// halves stay apart because the two names join them differently: a workspace
+// name is a directory, so it always joins with "-", while a branch joins with
+// the workspace's configured delimiter. Both empty (no issue, or nothing
+// slug-safe in it) sends the caller to the <source>-t<n> fallback.
+func issueSlugs(issue *spawnIssue) (key, title string) {
 	if issue == nil {
-		return ""
+		return "", ""
 	}
-	name := slugify(issue.Key)
 	// titles run long; cut at a word boundary so the tail stays readable
-	if t := truncateSlug(slugify(strings.ToLower(issue.Title)), 32); t != "" {
-		if name != "" {
-			name += "-"
-		}
-		name += t
+	return slugify(issue.Key), truncateSlug(slugify(strings.ToLower(issue.Title)), 32)
+}
+
+// joinSlugs joins an issue's halves with sep, tolerating either being empty
+// so a key-only issue never trails a dangling separator.
+func joinSlugs(key, title, sep string) string {
+	if key == "" || title == "" {
+		return key + title
 	}
-	return name
+	return key + sep + title
 }
 
 // slugify keeps s safe as both a directory name and a git branch segment:
