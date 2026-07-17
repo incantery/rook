@@ -71,6 +71,13 @@ export interface EditorSeam {
     threads(): ThreadInfo[];
     refetch(): Promise<void>;
     reveal(t: ThreadInfo): void;
+    /** Jump to an arbitrary file+range (the review pane driving itself from a
+     *  hunk list). No-op on a pane whose changed set doesn't hold `path`. */
+    revealAt(path: string, startLine: number, endLine: number, side: Side): void;
+    /** Cancel a latched open-focus so a list-driven reveal doesn't steal the
+     *  keyboard when Monaco finishes loading (the diff is a passive detail
+     *  view; the hunk list keeps focus). */
+    releaseFocus(): void;
     clearHighlight(): void;
     onMarkerClick(cb: (line: number, side: Side, ids: number[]) => void): () => void;
     onCompose(cb: (startLine: number, endLine: number, side: Side) => void): () => void;
@@ -278,6 +285,10 @@ export class EditorPane implements PaneContent {
             threads: () => this.threadsAll,
             refetch: () => this.refetchThreads(),
             reveal: (t) => this.reveal(t),
+            revealAt: (path, s, e, side) => void this.revealAt(path, s, e, side),
+            releaseFocus: () => {
+                this.wantFocus = false;
+            },
             clearHighlight: () => {
                 for (const b of this.bands) b.clearHighlight();
             },
@@ -314,6 +325,44 @@ export class EditorPane implements PaneContent {
                     Math.max(1, t.currentEnd),
                 );
                 b.editor.focus();
+            } else {
+                b.clearHighlight();
+            }
+        }
+    }
+
+    private pendingReveal: {path: string; s: number; e: number; side: Side} | null = null;
+
+    /** Navigate this (review) pane to path, then highlight+scroll to the
+     *  range — the hunk list driving the diff. If path isn't in the changed
+     *  set (different scope/base) it's a no-op, so the list still works even
+     *  when the pane can't show that file. */
+    private async revealAt(
+        path: string,
+        startLine: number,
+        endLine: number,
+        side: Side,
+    ): Promise<void> {
+        // the pane may still be loading its changed set (just opened from a
+        // hunk click) — stash and let refresh() apply it once files land.
+        if (this.files.length === 0) {
+            this.pendingReveal = {path, s: startLine, e: endLine, side};
+            return;
+        }
+        const i = this.files.findIndex((f) => f.path === path);
+        if (i === -1) return;
+        if (i !== this.idx) await this.open(i);
+        if (this.disposed) return;
+        for (const b of this.bands) {
+            if (b.side === side) {
+                b.highlight(startLine, endLine);
+                b.editor.revealLinesInCenterIfOutsideViewport(
+                    Math.max(1, startLine),
+                    Math.max(1, endLine),
+                );
+                // deliberately NOT b.editor.focus() (unlike reveal): the hunk
+                // list keeps the keyboard so j/k/a/r/d stay live while the diff
+                // scrolls alongside.
             } else {
                 b.clearHighlight();
             }
@@ -379,6 +428,13 @@ export class EditorPane implements PaneContent {
             }
             const i = keep ? this.files.findIndex((f) => f.path === keep) : 0;
             await this.open(i === -1 ? 0 : i);
+            // a reveal that arrived before the changed set loaded (hunk click
+            // opened this pane) — apply it now that this.files is populated.
+            if (this.pendingReveal) {
+                const p = this.pendingReveal;
+                this.pendingReveal = null;
+                void this.revealAt(p.path, p.s, p.e, p.side);
+            }
         } catch (err) {
             this.fail("loading changes", err);
         }

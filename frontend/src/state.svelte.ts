@@ -6,6 +6,8 @@ import type {Tab} from "./deck";
 import type {
     AttentionItem,
     CostsSnapshot,
+    ReviewRoot,
+    RookTask,
     RuntimeSnapshot,
     UsageSnapshot,
     WorkspaceInfo,
@@ -49,6 +51,28 @@ class AppState {
     /** the left side pane: the file explorer. A plain toggle (` b), not
      *  mode-derived — like VS Code's sidebar it persists across modes. */
     explorerOpen = $state(false);
+
+    /** the review side pane — a hunk list + disposition, the review work-type's
+     *  chrome. Shares the LEFT slot with the explorer (at most one open), so
+     *  opening it closes the explorer. A plain toggle, like the explorer. */
+    reviewPaneOpen = $state(false);
+
+    /** Review state, OWNED here so the hunk list (side pane) and the bespoke
+     *  hunk detail (center overlay) are two views over one source — no cross-
+     *  component resync. App.svelte drives load/dispose/prepare against the
+     *  host; both surfaces read reviewHunks/reviewSelected. */
+    reviewRoot = $state<ReviewRoot | null>(null);
+    /** the hunk the detail overlay shows; null = overlay closed */
+    reviewSelectedId = $state<number | null>(null);
+
+    get reviewHunks(): RookTask[] {
+        return this.reviewRoot?.children ?? [];
+    }
+    get reviewSelected(): RookTask | null {
+        const id = this.reviewSelectedId;
+        if (id == null) return null;
+        return this.reviewHunks.find((h) => h.id === id) ?? null;
+    }
 
     /** The open file buffers for the CURRENT workspace, most-recent first —
      *  vim's `:ls`. A buffer is not a pane and not a strip entry: it's the

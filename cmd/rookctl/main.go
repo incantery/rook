@@ -47,6 +47,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/incantery/rook/internal/host"
@@ -1126,10 +1127,30 @@ func runReview(args []string) error {
 	}
 }
 
-// reviewScoreAll is the scorer: a single throwaway `claude -p` pass that reads
-// the batch, scores every proposed hunk, and writes results back through the
-// score endpoint. Inference lives HERE in the client, never in the host. Fan-
-// out to per-hunk sub-agents is a deferred latency optimization.
+// scoreModel is the model the per-hunk analysis runs on — cheap, fast, and
+// parallel across hunks. Kept a constant for now; a --model flag can override
+// later if the default proves too weak on gnarly hunks.
+const scoreModel = "claude-haiku-4-5-20251001"
+
+// scoreConcurrency bounds the fan-out — enough to be fast on a big review,
+// not so many that we hammer the machine with claude processes.
+const scoreConcurrency = 6
+
+// hunkAnalysis is one Haiku's read of one hunk. summary + concerns are the
+// "why look at this / what to check" that make a review card worth more than
+// a diff row; risk/understand drive ranking.
+type hunkAnalysis struct {
+	Category   string   `json:"category"`
+	Risk       int      `json:"risk"`
+	Understand int      `json:"understand"`
+	Summary    string   `json:"summary"`
+	Concerns   []string `json:"concerns"`
+}
+
+// reviewScoreAll is the scorer: a Haiku fan-out, ONE call per hunk, run
+// concurrently. Each hunk gets its own analysis (summary/concerns/scores)
+// written back through the score endpoint. Inference lives HERE in the client
+// driving claude, never in the host.
 func reviewScoreAll(args []string) error {
 	ws, rest := reviewWS(args)
 	var id string
@@ -1153,80 +1174,95 @@ func reviewScoreAll(args []string) error {
 	if len(task.Children) == 0 {
 		return fmt.Errorf("review #%d has no hunks to score", task.ID)
 	}
-	prompt := buildScorePrompt(*task)
-	out, err := exec.Command(claude, "-p", prompt).Output()
-	if err != nil {
-		return fmt.Errorf("claude -p failed: %w", err)
+
+	sem := make(chan struct{}, scoreConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	done, failed := 0, 0
+	total := len(task.Children)
+	for _, child := range task.Children {
+		wg.Add(1)
+		go func(hc taskJSON) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			a, err := analyzeHunk(claude, hc)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				body, _ := json.Marshal(map[string]any{
+					"category": a.Category,
+					"summary":  a.Summary,
+					"concerns": a.Concerns,
+					"score":    map[string]int{"risk": a.Risk, "understand": a.Understand},
+				})
+				_, err = c.req("POST", "/tasks/"+strconv.FormatInt(hc.ID, 10)+"/score", json.RawMessage(body))
+			}
+			if err != nil {
+				failed++
+			} else {
+				done++
+			}
+			fmt.Fprintf(os.Stderr, "\rscored %d/%d hunks", done, total)
+		}(child)
 	}
-	scores, err := extractScores(out)
-	if err != nil {
-		return fmt.Errorf("could not parse scores from claude output: %w", err)
+	wg.Wait()
+	fmt.Fprintf(os.Stderr, "\rscored %d/%d hunks", done, total)
+	if failed > 0 {
+		fmt.Fprintf(os.Stderr, " (%d failed)", failed)
 	}
-	n := 0
-	for _, s := range scores {
-		if s.ID == 0 {
-			continue
-		}
-		body, _ := json.Marshal(map[string]any{
-			"category": s.Category,
-			"score":    map[string]int{"risk": s.Risk, "understand": s.Understand},
-		})
-		if _, err := c.req("POST", "/tasks/"+strconv.FormatInt(s.ID, 10)+"/score", json.RawMessage(body)); err == nil {
-			n++
-		}
-	}
-	fmt.Printf("scored %d/%d hunks\n", n, len(task.Children))
+	fmt.Fprintln(os.Stderr)
 	return nil
 }
 
-type hunkScore struct {
-	ID         int64  `json:"id"`
-	Category   string `json:"category"`
-	Risk       int    `json:"risk"`
-	Understand int    `json:"understand"`
+// analyzeHunk runs one Haiku over one hunk's patch and parses its JSON.
+func analyzeHunk(claude string, c taskJSON) (*hunkAnalysis, error) {
+	out, err := exec.Command(claude, "-p", "--model", scoreModel, buildHunkPrompt(c)).Output()
+	if err != nil {
+		return nil, err
+	}
+	return extractAnalysis(out)
 }
 
-func buildScorePrompt(t taskJSON) string {
+func buildHunkPrompt(c taskJSON) string {
 	var b strings.Builder
-	b.WriteString("You are triaging a code review. For each hunk below, judge:\n")
-	b.WriteString("- risk: 1 (trivial/mechanical/docs) to 5 (subtle, high blast radius)\n")
-	b.WriteString("- understand: 1 (skim) to 5 (needs careful human attention)\n")
-	b.WriteString("- category: a terse phrase, e.g. \"internal docs, no prod impact\" or \"error-path change\"\n\n")
-	b.WriteString("Reply with ONLY a JSON array, one object per hunk: ")
-	b.WriteString(`[{"id":N,"category":"...","risk":N,"understand":N}]` + "\n\n")
-	for _, c := range t.Children {
-		fmt.Fprintf(&b, "--- hunk id=%d  %s ---\n%s\n\n", c.ID, c.Title, hunkBody(c))
-	}
+	b.WriteString("You are triaging ONE hunk of a code review. Reply with ONLY a JSON object:\n")
+	b.WriteString(`{"category":"terse phrase","risk":1,"understand":1,"summary":"one sentence: what this change does","concerns":["short things a human should check"]}` + "\n\n")
+	b.WriteString("- risk: 1 trivial/mechanical/docs → 5 subtle, high blast radius\n")
+	b.WriteString("- understand: 1 skim → 5 needs careful human attention\n")
+	b.WriteString("- category: e.g. \"internal docs, no prod impact\", \"error-path change\", \"public API\"\n")
+	b.WriteString("- concerns: 0-3 short bullets a reviewer should check; empty array if genuinely trivial\n\n")
+	fmt.Fprintf(&b, "File: %s\n\n%s\n", c.Path, hunkBody(c))
 	return b.String()
 }
 
 // hunkBody is the anchored patch text, capped so a giant hunk can't blow the
-// prompt; the id+path still orient the model when a body is truncated.
+// prompt; the path still orients the model when a body is truncated.
 func hunkBody(c taskJSON) string {
 	body := c.AnchorText
 	if body == "" {
 		return c.Path
 	}
-	if len(body) > 2000 {
-		body = body[:2000] + "\n… (truncated)"
+	if len(body) > 4000 {
+		body = body[:4000] + "\n… (truncated)"
 	}
 	return body
 }
 
-// extractScores finds the first JSON array in claude's output and parses it —
-// the model may wrap the array in prose.
-func extractScores(out []byte) ([]hunkScore, error) {
+// extractAnalysis finds the first JSON object in claude's output and parses it
+// — the model may wrap the object in prose.
+func extractAnalysis(out []byte) (*hunkAnalysis, error) {
 	s := string(out)
-	i := strings.IndexByte(s, '[')
-	j := strings.LastIndexByte(s, ']')
+	i := strings.IndexByte(s, '{')
+	j := strings.LastIndexByte(s, '}')
 	if i < 0 || j <= i {
-		return nil, fmt.Errorf("no JSON array in output")
+		return nil, fmt.Errorf("no JSON object in output")
 	}
-	var scores []hunkScore
-	if err := json.Unmarshal([]byte(s[i:j+1]), &scores); err != nil {
+	var a hunkAnalysis
+	if err := json.Unmarshal([]byte(s[i:j+1]), &a); err != nil {
 		return nil, err
 	}
-	return scores, nil
+	return &a, nil
 }
 
 func reviewPrepare(args []string) error {

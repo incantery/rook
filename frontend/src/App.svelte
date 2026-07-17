@@ -26,6 +26,8 @@
     import SidePane from "./SidePane.svelte";
     import ThreadPanel from "./ThreadPanel.svelte";
     import FileExplorer from "./FileExplorer.svelte";
+    import ReviewPanel from "./ReviewPanel.svelte";
+    import ReviewItem from "./ReviewItem.svelte";
     import type {EditorSeam} from "./term/editor";
 
     interface Props {
@@ -76,6 +78,12 @@
     // until the next transition. Review is the only mode that opens it today.
     $effect(() => {
         app.threadPaneOpen = MODES[app.mode].rightPaneDefault;
+    });
+
+    // (re)load the review when its pane opens or the workspace changes
+    $effect(() => {
+        app.workspace;
+        if (app.reviewPaneOpen) void loadReview();
     });
 
     // resolved when the manager has attached every live session — opening a
@@ -392,22 +400,86 @@
     }
 
     /** The review is a singleton surface, not a document: one walker over the
-     *  whole changed set. A second ` g goes to the one you have. */
-    async function openReview(): Promise<void> {
+     *  whole changed set. A second ` g goes to the one you have.
+     *
+     *  `target` is a hunk to jump to (the review pane driving itself from the
+     *  ReviewPanel): we open/reveal the pane, then call revealAt on ITS seam
+     *  directly — not activeEditor, which may not be this pane yet. A pane
+     *  that's still loading stashes the reveal and applies it after refresh. */
+    async function openReview(target?: {
+        path: string;
+        startLine: number;
+        endLine: number;
+        side: "modified" | "original";
+    }): Promise<void> {
         try {
             await initDone;
-            const at = mgr.findPane((c) => c.type === "review");
+            let at = mgr.findPane((c) => c.type === "review");
             if (at) {
                 app.screen = "app";
                 await tick();
                 mgr.revealPane(at);
-                return;
+            } else {
+                await newEditorWindow("review");
+                at = mgr.findPane((c) => c.type === "review");
             }
-            await newEditorWindow("review");
+            if (target && at) {
+                const seam = editorPanes.get(at.leafId)?.seam;
+                seam?.revealAt(target.path, target.startLine, target.endLine, target.side);
+                seam?.releaseFocus(); // the diff is a detail view; keep the list's keyboard
+            }
         } catch (err) {
             console.error("editor pane failed", err);
             flash("editor pane failed — see console");
         }
+    }
+
+    // ---- review work-type (RookTask): state on `app`, host via api ----
+
+    async function loadReview(): Promise<void> {
+        try {
+            const roots = await api.reviewTasks(app.workspace, "review");
+            app.reviewRoot = roots[0] ?? null;
+        } catch {
+            app.reviewRoot = null;
+        }
+        if (
+            app.reviewSelectedId != null &&
+            !app.reviewHunks.some((h) => h.id === app.reviewSelectedId)
+        )
+            app.reviewSelectedId = null;
+    }
+
+    async function prepareReview(): Promise<void> {
+        try {
+            await api.prepareReview(app.workspace, "unstaged");
+            await loadReview();
+        } catch (err) {
+            flash(String(err));
+        }
+    }
+
+    async function disposeHunk(id: number, state: string): Promise<void> {
+        try {
+            await api.setTaskState(id, state);
+            await loadReview();
+        } catch (err) {
+            flash(String(err));
+        }
+    }
+
+    function navHunk(dir: number): void {
+        const hunks = app.reviewHunks;
+        const i = hunks.findIndex((h) => h.id === app.reviewSelectedId);
+        if (i === -1) return;
+        app.reviewSelectedId = hunks[Math.min(Math.max(i + dir, 0), hunks.length - 1)].id;
+    }
+
+    async function disposeAndAdvance(state: string): Promise<void> {
+        const id = app.reviewSelectedId;
+        if (id == null) return;
+        await disposeHunk(id, state);
+        navHunk(1);
     }
 
     async function spawn(task: string, workspace: string, worktree: boolean): Promise<void> {
@@ -685,6 +757,16 @@
             keys: keymap.display("explorer.toggle"),
             run: () => {
                 app.explorerOpen = !app.explorerOpen;
+                if (app.explorerOpen) app.reviewPaneOpen = false; // share the left slot
+            },
+        },
+        {
+            id: "review.toggle",
+            title: "Toggle review pane",
+            category: "View",
+            run: () => {
+                app.reviewPaneOpen = !app.reviewPaneOpen;
+                if (app.reviewPaneOpen) app.explorerOpen = false; // share the left slot
             },
         },
         {
@@ -752,7 +834,7 @@
             return;
         }
         if (mgr.focusPane(dir)) return; // moved inside the layout tree
-        if (dir === "left" && app.explorerOpen) app.focusZone = "left";
+        if (dir === "left" && (app.explorerOpen || app.reviewPaneOpen)) app.focusZone = "left";
         else if (dir === "right" && app.threadPaneOpen) app.focusZone = "right";
         // else: at the workbench edge with nothing beyond it — stay put
     }
@@ -784,7 +866,7 @@
     // A side pane that closes under a focus that lives in it would strand the
     // keyboard in a detached node; hand focus back instead.
     $effect(() => {
-        if (app.focusZone === "left" && !app.explorerOpen) toTerms();
+        if (app.focusZone === "left" && !app.explorerOpen && !app.reviewPaneOpen) toTerms();
         if (app.focusZone === "right" && !app.threadPaneOpen) toTerms();
     });
 
@@ -1079,7 +1161,7 @@
     <div class="flex min-h-0 min-w-0 flex-1">
         <SidePane
             side="left"
-            visible={app.explorerOpen}
+            visible={app.explorerOpen && !app.reviewPaneOpen}
             title="Explorer"
             onclose={() => (app.explorerOpen = false)}
         >
@@ -1088,6 +1170,20 @@
                 workspace={app.workspace}
                 active={app.focusZone === "left"}
                 onopen={(path) => void openFile(path)}
+            />
+        </SidePane>
+        <SidePane
+            side="left"
+            visible={app.reviewPaneOpen}
+            title="Review"
+            onclose={() => (app.reviewPaneOpen = false)}
+        >
+            <ReviewPanel
+                active={app.focusZone === "left"}
+                busy={false}
+                onPrepare={() => void prepareReview()}
+                onSelect={(id) => (app.reviewSelectedId = id)}
+                onDispose={(id, state) => void disposeHunk(id, state)}
             />
         </SidePane>
         <div class="relative min-h-0 min-w-0 flex-1" bind:this={terminalsEl}>
@@ -1100,6 +1196,20 @@
                     onjump={(id) => mgr.switchToId(id)}
                     runCmd={(id) => registry.run(id)}
                     onwork={workIssue}
+                />
+            {/if}
+            {#if app.reviewSelected}
+                <ReviewItem
+                    {api}
+                    workspace={app.workspace}
+                    hunk={app.reviewSelected}
+                    pos={{
+                        i: app.reviewHunks.findIndex((h) => h.id === app.reviewSelectedId) + 1,
+                        n: app.reviewHunks.length,
+                    }}
+                    onDispose={(state) => void disposeAndAdvance(state)}
+                    onClose={() => (app.reviewSelectedId = null)}
+                    onNav={navHunk}
                 />
             {/if}
         </div>

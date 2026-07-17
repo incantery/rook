@@ -304,6 +304,49 @@ export class HostAPI {
         ).json();
     }
 
+    /** Prepare (or rebuild) a review batch for a scope — one leaf task per
+     *  diff hunk under a parent review. dryRun computes it in memory and
+     *  writes nothing (a safe preview of real unstaged work). */
+    async prepareReview(
+        ws: string,
+        scope: "unstaged" | "commit" | "branch",
+        arg = "",
+        dryRun = false,
+    ): Promise<ReviewBatch> {
+        return (
+            await this.req(`/workspaces/${encodeURIComponent(ws)}/review`, {
+                method: "POST",
+                body: JSON.stringify({scope, arg, dryRun}),
+            })
+        ).json();
+    }
+
+    /** A workspace's root tasks (children one level deep). Review roots carry
+     *  their gate. Empty workType lists every work-type. */
+    async reviewTasks(ws: string, workType = "review"): Promise<ReviewRoot[]> {
+        const q = workType ? `?workType=${encodeURIComponent(workType)}` : "";
+        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/tasks${q}`)).json();
+    }
+
+    /** One task with its children. */
+    async task(id: number): Promise<RookTask> {
+        return (await this.req(`/tasks/${id}`)).json();
+    }
+
+    /** The derived gate of a review parent — a function of its children. */
+    async taskGate(id: number): Promise<ReviewGate> {
+        return (await this.req(`/tasks/${id}/gate`)).json();
+    }
+
+    /** Disposition a leaf: approved | rejected | deferred (and the review's
+     *  vocabulary — the host validates against the work-type). */
+    async setTaskState(id: number, state: string): Promise<void> {
+        await this.req(`/tasks/${id}/state`, {
+            method: "POST",
+            body: JSON.stringify({state}),
+        });
+    }
+
     /** Raw bytes into a session's pty; append "\r" to submit. */
     async sendInput(id: string, data: string): Promise<void> {
         await this.req(`/sessions/${id}/input`, {
@@ -414,6 +457,68 @@ export interface ThreadsSubmitResult {
     mode: "typed" | "spawned";
     rookSession: string;
     count: number;
+}
+
+/** A RookTask (internal/host/tasks.go): a generic, nestable unit of attention.
+ *  Review is the first work-type — a parent review ('ref' anchor to the scope)
+ *  carries one 'code'-anchored leaf per diff hunk. `state` is opaque, owned by
+ *  the work-type; `detail` is a work-type JSON bag (parent: {scope,verb,…};
+ *  leaf: {category, score, note}). */
+export interface RookTask {
+    id: number;
+    parentId: number;
+    workspace: string;
+    workType: string;
+    state: string;
+    title?: string;
+    anchorKind: "code" | "ref" | "none";
+    path?: string;
+    startLine?: number;
+    endLine?: number;
+    side?: "modified" | "original";
+    blobSha?: string;
+    commitSha?: string;
+    anchorText?: string;
+    anchorRef?: string;
+    origin: string;
+    sourceRef?: string;
+    detail?: {
+        scope?: string;
+        base?: string;
+        verb?: string;
+        label?: string;
+        category?: string;
+        score?: Record<string, number>;
+        summary?: string;
+        concerns?: string[];
+        note?: string;
+    };
+    created: string;
+    updated: string;
+    children?: RookTask[];
+}
+
+/** The derived readiness of a review parent — a pure function of the children's
+ *  states. The verb turns "ready" into the human action (commit/PR/approve). */
+export interface ReviewGate {
+    ready: boolean;
+    verb: string;
+    blocking: number;
+    total: number;
+    counts: Record<string, number>;
+}
+
+/** GET /workspaces/{ws}/tasks — a root task with its gate (review only). */
+export interface ReviewRoot extends RookTask {
+    gate?: ReviewGate;
+}
+
+/** POST /workspaces/{ws}/review — the prepared batch and its gate. dryRun
+ *  echoes back true for a no-write preview. */
+export interface ReviewBatch {
+    task: RookTask;
+    gate: ReviewGate;
+    dryRun?: boolean;
 }
 
 /** One "Current …: N% used" line from claude's /usage, host-scraped. */
