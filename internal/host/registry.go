@@ -149,6 +149,33 @@ CREATE TABLE IF NOT EXISTS samples (
 	value  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS samples_ts ON samples(ts);
+CREATE TABLE IF NOT EXISTS rook_tasks (
+	id           INTEGER PRIMARY KEY,
+	parent_id    INTEGER NOT NULL DEFAULT 0,       -- 0 = root; self-ref, arbitrary depth
+	workspace    TEXT    NOT NULL,
+	work_type    TEXT    NOT NULL,                 -- 'review' (first); interprets state
+	state        TEXT    NOT NULL,                 -- opaque token, owned by work_type
+	title        TEXT    NOT NULL DEFAULT '',
+	-- anchor: kind-tagged union. 'code' promotes the threads columns so a
+	-- hunk-child speaks the same anchor vocabulary; 'ref' points at a
+	-- subject (parent review scope, mirrored ticket); 'none' is freeform.
+	anchor_kind  TEXT    NOT NULL DEFAULT 'none',  -- code|ref|none
+	path         TEXT    NOT NULL DEFAULT '',
+	start_line   INTEGER NOT NULL DEFAULT 0,
+	end_line     INTEGER NOT NULL DEFAULT 0,
+	side         TEXT    NOT NULL DEFAULT 'modified',
+	blob_sha     TEXT    NOT NULL DEFAULT '',
+	commit_sha   TEXT    NOT NULL DEFAULT '',
+	anchor_text  TEXT    NOT NULL DEFAULT '',
+	anchor_ref   TEXT    NOT NULL DEFAULT '',      -- 'unstaged', 'commit:<sha>', 'linear:INF-7'
+	origin       TEXT    NOT NULL DEFAULT 'rook',  -- rook|mirror (mirror = seam only)
+	source_ref   TEXT    NOT NULL DEFAULT '',      -- foreign id when origin=mirror
+	detail       TEXT    NOT NULL DEFAULT '',      -- JSON, work_type-owned (score, base, scope)
+	created_at   TEXT    NOT NULL,
+	updated_at   TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rook_tasks_parent ON rook_tasks(parent_id);
+CREATE INDEX IF NOT EXISTS rook_tasks_ws     ON rook_tasks(workspace, work_type);
 `
 
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS
@@ -160,6 +187,8 @@ var migrations = []string{
 	`ALTER TABLE workspaces ADD COLUMN branch TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workspaces ADD COLUMN issue_tracker TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workspaces ADD COLUMN issue_key TEXT NOT NULL DEFAULT ''`,
+	// a thread may hang off a review task (0 = code-only, the original shape)
+	`ALTER TABLE threads ADD COLUMN rook_task_id INTEGER NOT NULL DEFAULT 0`,
 }
 
 func loadRegistry() *registry {

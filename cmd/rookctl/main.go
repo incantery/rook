@@ -21,6 +21,10 @@
 //	rookctl resolve       resolve a thread (as the agent): rookctl resolve [--user] <id>
 //	rookctl reopen        undo a resolve (as the human, by default — agent_reopens only counts a user's reopen): rookctl reopen [--agent] <id>
 //	rookctl work          start claude on an issue in a fresh worktree: rookctl work INF-7
+//	rookctl review        prepare/show a hunk review: rookctl review [--unstaged|--commit <sha>|--branch] [--dry-run] [-w ws]
+//	                        --dry-run previews the batch in memory, writing nothing to rook.db
+//	                        subverbs: show [<id>], gate [<id>], approve|reject|defer <id…>, score-all, score <id> <json>
+//	rookctl tasks         list a workspace's RookTasks: rookctl tasks [-w ws] [--work-type review] [--json]
 //	rookctl decisions     the drafter's ledger, last 7 days, with the verdict mix
 //	rookctl set-openai-key store the drafter's API key in the keychain
 //	rookctl set-jira-token store the Jira API token (queue credential) in the keychain
@@ -135,6 +139,10 @@ func main() {
 		err = runThreadVerb("reopen", os.Args[2:])
 	case "work":
 		err = runWork(os.Args[2:])
+	case "review":
+		err = runReview(os.Args[2:])
+	case "tasks":
+		err = runTasks(os.Args[2:])
 	case "decisions":
 		err = runDecisions()
 	case "set-openai-key":
@@ -1040,6 +1048,451 @@ func runThreadVerb(verb string, args []string) error {
 		return err
 	}
 	fmt.Printf("#%s %s (as %s)\n", id, verb, who)
+	return nil
+}
+
+// ---- review / tasks (RookTask) ----
+
+type taskJSON struct {
+	ID         int64           `json:"id"`
+	ParentID   int64           `json:"parentId"`
+	WorkType   string          `json:"workType"`
+	State      string          `json:"state"`
+	Title      string          `json:"title"`
+	Path       string          `json:"path"`
+	StartLine  int             `json:"startLine"`
+	AnchorText string          `json:"anchorText"`
+	AnchorRef  string          `json:"anchorRef"`
+	Detail     json.RawMessage `json:"detail"`
+	Children   []taskJSON      `json:"children"`
+}
+
+type gateJSON struct {
+	Ready    bool           `json:"ready"`
+	Verb     string         `json:"verb"`
+	Blocking int            `json:"blocking"`
+	Total    int            `json:"total"`
+	Counts   map[string]int `json:"counts"`
+}
+
+// reviewWS pulls a -w flag (falling back to $ROOK_WORKSPACE) out of args,
+// returning the workspace and the remaining tokens.
+func reviewWS(args []string) (ws string, rest []string) {
+	ws = os.Getenv("ROOK_WORKSPACE")
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-w" && i+1 < len(args) {
+			ws = args[i+1]
+			i++
+			continue
+		}
+		rest = append(rest, args[i])
+	}
+	return ws, rest
+}
+
+// stateMark is the one-glyph disposition column.
+func stateMark(state string) string {
+	switch state {
+	case "approved":
+		return "✓"
+	case "rejected":
+		return "✗"
+	case "deferred":
+		return "»"
+	case "pending":
+		return "…"
+	default: // proposed
+		return "○"
+	}
+}
+
+func runReview(args []string) error {
+	if len(args) == 0 {
+		return reviewPrepare(nil)
+	}
+	switch args[0] {
+	case "show":
+		return reviewShow(args[1:])
+	case "gate":
+		return reviewShowGate(args[1:])
+	case "approve", "reject", "defer":
+		return reviewDispose(args[0], args[1:])
+	case "score":
+		return reviewScore(args[1:])
+	case "score-all":
+		return reviewScoreAll(args[1:])
+	default:
+		return reviewPrepare(args)
+	}
+}
+
+// reviewScoreAll is the scorer: a single throwaway `claude -p` pass that reads
+// the batch, scores every proposed hunk, and writes results back through the
+// score endpoint. Inference lives HERE in the client, never in the host. Fan-
+// out to per-hunk sub-agents is a deferred latency optimization.
+func reviewScoreAll(args []string) error {
+	ws, rest := reviewWS(args)
+	var id string
+	for _, a := range rest {
+		if _, err := strconv.Atoi(a); err == nil {
+			id = a
+		}
+	}
+	claude, err := exec.LookPath("claude")
+	if err != nil {
+		return fmt.Errorf("claude not found on PATH — scoring needs the claude CLI")
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	task, _, err := loadReview(c, ws, id)
+	if err != nil {
+		return err
+	}
+	if len(task.Children) == 0 {
+		return fmt.Errorf("review #%d has no hunks to score", task.ID)
+	}
+	prompt := buildScorePrompt(*task)
+	out, err := exec.Command(claude, "-p", prompt).Output()
+	if err != nil {
+		return fmt.Errorf("claude -p failed: %w", err)
+	}
+	scores, err := extractScores(out)
+	if err != nil {
+		return fmt.Errorf("could not parse scores from claude output: %w", err)
+	}
+	n := 0
+	for _, s := range scores {
+		if s.ID == 0 {
+			continue
+		}
+		body, _ := json.Marshal(map[string]any{
+			"category": s.Category,
+			"score":    map[string]int{"risk": s.Risk, "understand": s.Understand},
+		})
+		if _, err := c.req("POST", "/tasks/"+strconv.FormatInt(s.ID, 10)+"/score", json.RawMessage(body)); err == nil {
+			n++
+		}
+	}
+	fmt.Printf("scored %d/%d hunks\n", n, len(task.Children))
+	return nil
+}
+
+type hunkScore struct {
+	ID         int64  `json:"id"`
+	Category   string `json:"category"`
+	Risk       int    `json:"risk"`
+	Understand int    `json:"understand"`
+}
+
+func buildScorePrompt(t taskJSON) string {
+	var b strings.Builder
+	b.WriteString("You are triaging a code review. For each hunk below, judge:\n")
+	b.WriteString("- risk: 1 (trivial/mechanical/docs) to 5 (subtle, high blast radius)\n")
+	b.WriteString("- understand: 1 (skim) to 5 (needs careful human attention)\n")
+	b.WriteString("- category: a terse phrase, e.g. \"internal docs, no prod impact\" or \"error-path change\"\n\n")
+	b.WriteString("Reply with ONLY a JSON array, one object per hunk: ")
+	b.WriteString(`[{"id":N,"category":"...","risk":N,"understand":N}]` + "\n\n")
+	for _, c := range t.Children {
+		fmt.Fprintf(&b, "--- hunk id=%d  %s ---\n%s\n\n", c.ID, c.Title, hunkBody(c))
+	}
+	return b.String()
+}
+
+// hunkBody is the anchored patch text, capped so a giant hunk can't blow the
+// prompt; the id+path still orient the model when a body is truncated.
+func hunkBody(c taskJSON) string {
+	body := c.AnchorText
+	if body == "" {
+		return c.Path
+	}
+	if len(body) > 2000 {
+		body = body[:2000] + "\n… (truncated)"
+	}
+	return body
+}
+
+// extractScores finds the first JSON array in claude's output and parses it —
+// the model may wrap the array in prose.
+func extractScores(out []byte) ([]hunkScore, error) {
+	s := string(out)
+	i := strings.IndexByte(s, '[')
+	j := strings.LastIndexByte(s, ']')
+	if i < 0 || j <= i {
+		return nil, fmt.Errorf("no JSON array in output")
+	}
+	var scores []hunkScore
+	if err := json.Unmarshal([]byte(s[i:j+1]), &scores); err != nil {
+		return nil, err
+	}
+	return scores, nil
+}
+
+func reviewPrepare(args []string) error {
+	ws, rest := reviewWS(args)
+	scope, arg := "unstaged", ""
+	dryRun := false
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case "--unstaged":
+			scope = "unstaged"
+		case "--branch":
+			scope = "branch"
+		case "--dry-run", "--dryrun":
+			dryRun = true
+		case "--commit":
+			scope = "commit"
+			if i+1 < len(rest) {
+				arg = rest[i+1]
+				i++
+			}
+		}
+	}
+	if ws == "" {
+		return fmt.Errorf("usage: rookctl review [--unstaged|--commit <sha>|--branch] [--dry-run] [-w workspace]")
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	raw, err := c.req("POST", "/workspaces/"+ws+"/review",
+		map[string]any{"scope": scope, "arg": arg, "dryRun": dryRun})
+	if err != nil {
+		return err
+	}
+	var res struct {
+		Task   taskJSON `json:"task"`
+		Gate   gateJSON `json:"gate"`
+		DryRun bool     `json:"dryRun"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return err
+	}
+	if res.DryRun {
+		fmt.Println("(dry run — nothing written to the database)")
+	}
+	printReview(res.Task, res.Gate)
+	return nil
+}
+
+// reviewShow prints a review batch: an explicit task id, else the workspace's
+// newest review.
+func reviewShow(args []string) error {
+	ws, rest := reviewWS(args)
+	asJSON := false
+	var id string
+	for _, a := range rest {
+		if a == "--json" {
+			asJSON = true
+		} else if _, err := strconv.Atoi(a); err == nil {
+			id = a
+		}
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	task, gate, err := loadReview(c, ws, id)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"task": task, "gate": gate})
+	}
+	printReview(*task, *gate)
+	return nil
+}
+
+func reviewShowGate(args []string) error {
+	ws, rest := reviewWS(args)
+	var id string
+	for _, a := range rest {
+		if _, err := strconv.Atoi(a); err == nil {
+			id = a
+		}
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	_, gate, err := loadReview(c, ws, id)
+	if err != nil {
+		return err
+	}
+	fmt.Println(gateLine(*gate))
+	return nil
+}
+
+// loadReview resolves a review parent + gate from an explicit id or the
+// workspace's newest review.
+func loadReview(c *client, ws, id string) (*taskJSON, *gateJSON, error) {
+	if id != "" {
+		raw, err := c.req("GET", "/tasks/"+id, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		var task taskJSON
+		if err := json.Unmarshal(raw, &task); err != nil {
+			return nil, nil, err
+		}
+		graw, err := c.req("GET", "/tasks/"+id+"/gate", nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		var gate gateJSON
+		json.Unmarshal(graw, &gate)
+		return &task, &gate, nil
+	}
+	if ws == "" {
+		return nil, nil, fmt.Errorf("usage: rookctl review show [<task-id>] [-w workspace]")
+	}
+	raw, err := c.req("GET", "/workspaces/"+ws+"/tasks?workType=review", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	var roots []struct {
+		taskJSON
+		Gate gateJSON `json:"gate"`
+	}
+	if err := json.Unmarshal(raw, &roots); err != nil {
+		return nil, nil, err
+	}
+	if len(roots) == 0 {
+		return nil, nil, fmt.Errorf("no reviews in %s — run: rookctl review --unstaged -w %s", ws, ws)
+	}
+	return &roots[0].taskJSON, &roots[0].Gate, nil
+}
+
+func reviewDispose(verb string, args []string) error {
+	state := map[string]string{"approve": "approved", "reject": "rejected", "defer": "deferred"}[verb]
+	var ids, note []string
+	for _, a := range args {
+		if _, err := strconv.Atoi(a); err == nil && len(note) == 0 {
+			ids = append(ids, a)
+		} else {
+			note = append(note, a) // trailing free text (defer note)
+		}
+	}
+	if len(ids) == 0 {
+		return fmt.Errorf("usage: rookctl review %s <task-id> [<task-id>…]", verb)
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := c.req("POST", "/tasks/"+id+"/state", map[string]string{"state": state}); err != nil {
+			return err
+		}
+		if verb == "defer" && len(note) > 0 {
+			c.req("POST", "/tasks/"+id+"/score", map[string]string{"note": strings.Join(note, " ")})
+		}
+	}
+	fmt.Printf("%s %s: %s\n", stateMark(state), state, strings.Join(ids, " "))
+	return nil
+}
+
+// reviewScore is the scorer agent's write path: rookctl review score <id> <json>.
+func reviewScore(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: rookctl review score <task-id> <json>")
+	}
+	id := args[0]
+	body := json.RawMessage(strings.Join(args[1:], " "))
+	if !json.Valid(body) {
+		return fmt.Errorf("score payload is not valid JSON")
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	_, err = c.req("POST", "/tasks/"+id+"/score", body)
+	if err == nil {
+		fmt.Printf("#%s scored\n", id)
+	}
+	return err
+}
+
+func gateLine(g gateJSON) string {
+	if g.Ready {
+		verb := g.Verb
+		if verb == "" {
+			verb = "next steps"
+		}
+		return fmt.Sprintf("→ ready for %s (%d hunks, all dispositioned)", verb, g.Total)
+	}
+	return fmt.Sprintf("→ %d of %d hunks still blocking", g.Blocking, g.Total)
+}
+
+func printReview(t taskJSON, g gateJSON) {
+	fmt.Printf("review #%d — %s\n", t.ID, t.Title)
+	fmt.Println(gateLine(g))
+	for _, c := range t.Children {
+		var d struct {
+			Category string `json:"category"`
+		}
+		json.Unmarshal(c.Detail, &d)
+		line := fmt.Sprintf("  %s #%-4d %-9s %s", stateMark(c.State), c.ID, c.State, c.Title)
+		if d.Category != "" {
+			line += "  — " + d.Category
+		}
+		fmt.Println(line)
+	}
+}
+
+func runTasks(args []string) error {
+	ws, rest := reviewWS(args)
+	workType := ""
+	asJSON := false
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case "--json":
+			asJSON = true
+		case "--work-type":
+			if i+1 < len(rest) {
+				workType = rest[i+1]
+				i++
+			}
+		}
+	}
+	if ws == "" {
+		return fmt.Errorf("usage: rookctl tasks [-w workspace] [--work-type review] [--json]")
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	q := "/workspaces/" + ws + "/tasks"
+	if workType != "" {
+		q += "?workType=" + workType
+	}
+	raw, err := c.req("GET", q, nil)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		os.Stdout.Write(raw)
+		return nil
+	}
+	var roots []struct {
+		taskJSON
+		Gate gateJSON `json:"gate"`
+	}
+	if err := json.Unmarshal(raw, &roots); err != nil {
+		return err
+	}
+	if len(roots) == 0 {
+		fmt.Printf("no tasks in %s\n", ws)
+		return nil
+	}
+	for _, r := range roots {
+		fmt.Printf("#%d %-8s %s", r.ID, r.WorkType, r.Title)
+		if r.WorkType == "review" {
+			fmt.Printf("  [%s]", strings.TrimPrefix(gateLine(r.Gate), "→ "))
+		}
+		fmt.Println()
+	}
 	return nil
 }
 

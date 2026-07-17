@@ -373,6 +373,8 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/drafts/", h.handleDraftDecide)
 	// per-thread verbs — ids are global, no workspace in the path
 	mux.HandleFunc("/threads/", h.handleThread)
+	// per-task verbs (RookTask) — global ids, same as threads
+	mux.HandleFunc("/tasks/", h.handleTask)
 	mux.HandleFunc("/agent/spend", h.handleSpend)
 	mux.HandleFunc("/decisions", h.handleDecisions)
 	mux.HandleFunc("/runtime", h.handleRuntime)
@@ -635,6 +637,11 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleThreadsSubmit(w, r, name)
 	case action == "threads":
 		h.handleWorkspaceThreads(w, r, name)
+	// review work-type over RookTask (reviewtasks.go / tasksapi.go)
+	case action == "review" && r.Method == http.MethodPost:
+		h.handleWorkspaceReview(w, r, name)
+	case action == "tasks" && r.Method == http.MethodGet:
+		h.handleWorkspaceTasks(w, r, name)
 	case action == "" && r.Method == http.MethodDelete:
 		force := r.URL.Query().Get("force") == "1"
 		// prune also deletes the worktree's local branch — the close-the-
