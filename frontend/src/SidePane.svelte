@@ -1,12 +1,15 @@
-<!-- A workbench side pane (VS Code-style secondary side bar): a generic,
-     placement-agnostic slot. It knows a side, a visibility, and a title —
-     nothing about its tenant. The thread panel is this slice's only
-     tenant; a left pane / more panels drop in without touching it. -->
+<!-- A workbench pane slot (VS Code-style secondary side bar / bottom panel):
+     a generic, placement-agnostic slot. It knows a side, a visibility, and a
+     title — nothing about its tenant. Left/right are the vertical rails
+     (explorer, threads); bottom is the vim-quickfix strip. Panes slide in and
+     out — chrome motion the webview gives us for free, and a terminal never
+     could. -->
 <script lang="ts">
     import type {Snippet} from "svelte";
+    import {slide} from "svelte/transition";
 
     interface Props {
-        side: "left" | "right";
+        side: "left" | "right" | "bottom";
         visible: boolean;
         title: string;
         onclose: () => void;
@@ -23,9 +26,12 @@
          WHICH side took it, without reading a layout class. -->
     <aside
         data-side={side}
+        transition:slide={{duration: 160, axis: side === "bottom" ? "y" : "x"}}
         class={[
-            "side-pane flex w-88 min-w-64 flex-col border-line/15 bg-raise",
-            side === "left" ? "order-first border-r" : "border-l",
+            "side-pane flex flex-col border-line/15 bg-raise",
+            side === "left" && "order-first w-88 min-w-64 border-r",
+            side === "right" && "w-88 min-w-64 border-l",
+            side === "bottom" && "h-72 w-full shrink-0 border-t",
         ]}
     >
         <header class="flex items-center justify-between border-b border-line/15 px-2 py-1">

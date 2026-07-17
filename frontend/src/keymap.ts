@@ -237,6 +237,22 @@ const BACKTICK_LEADER: Leader = {
     disp: "`",
 };
 
+// The CONTEXT leader (vim's maplocalleader): where the backtick is the IDE's
+// leader (workbench-global verbs), this one prefixes the verbs of the CURRENT
+// quickfix context. Hardcoded for the dogfood pass — the config seam is the
+// same path the IDE leader rides (parseLeader over a config string); wire a
+// `context-leader` setting once the key survives a week of real typing.
+// Comma is far hotter than backtick in a shell, so this is the constant most
+// likely to move.
+export const CONTEXT_LEADER_KEY = ",";
+
+// The context layer's bindings: deliberately tiny — the two doors into the
+// current context. q = its list (quickfix), a = its verbs (quick actions).
+export const CONTEXT_PREFIX = new Map<string, string>([
+    ["q", "quickfix.toggle"],
+    ["a", "quickaction.toggle"],
+]);
+
 export function parseLeader(trigger: string | undefined): Leader {
     const t = (trigger ?? "").trim();
     if (t.includes("+") && t !== "+") {

@@ -5,11 +5,15 @@ directing AI coding agents. It works and it's wired to real data; it looks
 rough. Make it feel considered, calm, and legible — without changing what it
 does or the design system it lives in.
 
-**Deliverable:** revised markup + Tailwind classes for two Svelte components —
-`frontend/src/ReviewItem.svelte` (the hero — the bespoke hunk detail) and
-`frontend/src/ReviewPanel.svelte` (the ranked list / index). Raw CSS only where
-utilities genuinely can't reach. Keep all behavior, props, state names,
-keyboard handling, and host calls exactly as they are — this is a
+**Deliverable:** revised markup + Tailwind classes for the review-owned Svelte
+components — `frontend/src/ReviewItem.svelte` (the hero — the bespoke hunk
+detail), `frontend/src/ReviewRow.svelte` (one hunk row's content), and
+`frontend/src/ReviewGateHeader.svelte` (the gate line). The list *shell*
+(`frontend/src/QuickfixPanel.svelte`) is a generic vim-quickfix surface shared
+by future contexts — you may polish its chrome (wrapper, cursor row, footer),
+but keep it context-agnostic: nothing review-specific may leak into it. Raw CSS
+only where utilities genuinely can't reach. Keep all behavior, props, state
+names, keyboard handling, and host calls exactly as they are — this is a
 visual/interaction-polish pass, not a rewrite. Explain your reasoning as you go.
 
 _(Attach the current screenshots when you hand this off — they show the list on
@@ -79,33 +83,47 @@ rhythm, and a sense that the top (why look) and bottom (decide) frame the
 evidence in the middle. It's keyboard-driven (see below); design for that, not
 for hover.
 
-### 2. `ReviewPanel.svelte` — the index: a ranked list of hunks
+### 2. The index: a ranked list of hunks (quickfix)
 
-A left side pane (fixed `w-88` ≈ 352px), one tenant of a generic `SidePane` that
-already renders the "REVIEW" title + close. Today each row is: a state glyph,
-the repo-relative file path (mono), the start line, and — when scored — an
-optional `category` line and a small `risk` badge. A gate line + prepare/refresh
-button sit up top; keybind hints in the footer. The currently-open hunk gets a
-left accent border.
+A full-width **bottom strip** (`h-72` ≈ 288px) — vim's quickfix window, where
+it belongs. It stays visible *below* the hero overlay, so the reviewer never
+loses their place in the list while adjudicating a hunk. Architecturally it's
+vim's quickfix, generalized: `QuickfixPanel.svelte` is a **generic** list shell
+(roving cursor, `j/k`, Enter opens the hero, action keys dispatch to the
+current context) that review is merely the first tenant of. Review supplies the parts you'll design:
+`ReviewRow.svelte` — one row's content (state glyph, mono file path, start
+line, and when scored a `category` line + small `risk` badge) — and
+`ReviewGateHeader.svelte` — the gate line beside the shell's prepare/refresh
+button. The shell draws the interactive wrapper (focused row gets `bg-acc/15`;
+the open hunk a left accent border) and the footer hints.
 
 It's the calm index you scan; selecting a row opens the hero. Problems to solve
 here: **no file grouping** (a file with six hunks shows six identical
-`frontend/src/App.svelte` rows — repetitive and hard to parse), **flat
+`frontend/src/App.svelte` rows — repetitive and hard to parse; note grouping
+likely means the shell learns an optional context-supplied group-by — call that
+out as an API suggestion rather than hardcoding review into the shell), **flat
 hierarchy** (nothing guides the eye; use state + risk to create it), and the
-**gate reads as a tiny status** when it's the headline. Consider grouping by
-file, and using the scoring data so a risky untriaged production hunk doesn't
-look like a deferred doc hunk.
+**gate reads as a tiny status** when it's the headline. Use the scoring data so
+a risky untriaged production hunk doesn't look like a deferred doc hunk.
 
 ---
 
 ## Interaction model (do not regress this)
 
-Keyboard-first. In the **list**: `j`/`k` move a roving cursor, `Enter`/click
-opens the hero, `a`/`r`/`d` quick-disposition the cursor hunk. In the **hero**:
-`a`/`r`/`d` dispose (and auto-advance to the next hunk), `j`/`k` move between
-hunks, `esc` closes, typing in the note box is never hijacked. The design must
-work when there are 2 hunks and when there are 60, and read well without a
-mouse.
+Keyboard-first, with **two leaders**: backtick is the IDE leader (workbench
+verbs); `,` is the context leader (vim's maplocalleader) — `,q` toggles the
+quickfix strip, `,a` opens the quick-action modal
+(`QuickActionModal.svelte`, a which-key popup rendered from the context's
+action list; polishing it is in scope). In the **list**: `j`/`k` move a roving
+cursor, `Enter`/click opens the hero, `a`/`r`/`d` quick-disposition the cursor
+hunk. In the **hero**:
+`a`/`r`/`d` dispose (and auto-advance to the next hunk), `o` jumps to the full
+editor, `j`/`k` move between hunks, `esc` closes, typing in the note box is
+never hijacked. The hero's verb buttons are rendered *from* the context's
+action list (`qf.context.actions` — key, label, tone), so keys and buttons
+can't drift; design the button row to that data, not to hardcoded markup. The
+design must work when there are 2 hunks and when there are 60, and read well
+without a mouse.
 
 ### Data available (design around this, don't invent endpoints)
 
@@ -170,8 +188,16 @@ absent. The unscored hero should still be coherent (path + diff + disposition).
   `size-2 rounded-full bg-grn`. **Literal class strings only** — Tailwind scans
   source, so `bg-${tone}` emits nothing; map tone → literal class names (see how
   ThreadPanel does `TONE_BG`/`TONE_TEXT`, and how these two files already do).
-- **Constraints:** the list is 352px, fixed. The hero fills the center viewport
-  (variable, wide). Each is its own scroll region. Keyboard-first.
+- **Constraints:** the list is a full-width bottom strip (`h-72`, ~7 visible
+  rows); rows are wide one-liners (glyph · path:line · category · risk). The
+  hero fills the center viewport above it. Each is its own scroll region.
+  Keyboard-first.
+- **Motion exists — use it, don't drown in it.** The panes slide in
+  (`transition:slide`, 160ms), the hero flies in (`transition:fly`, y:12,
+  160ms), rows `animate:flip` on reorder, state glyphs color-transition. This
+  is a webview, not a terminal — tasteful motion is part of the product's
+  point. Keep durations 120–200ms; the hunk-to-hunk swap inside the hero stays
+  deliberately instant so rapid j/j/j triage never waits on animation.
 
 ---
 

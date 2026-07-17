@@ -52,26 +52,15 @@ class AppState {
      *  mode-derived — like VS Code's sidebar it persists across modes. */
     explorerOpen = $state(false);
 
-    /** the review side pane — a hunk list + disposition, the review work-type's
-     *  chrome. Shares the LEFT slot with the explorer (at most one open), so
-     *  opening it closes the explorer. A plain toggle, like the explorer. */
-    reviewPaneOpen = $state(false);
-
-    /** Review state, OWNED here so the hunk list (side pane) and the bespoke
-     *  hunk detail (center overlay) are two views over one source — no cross-
-     *  component resync. App.svelte drives load/dispose/prepare against the
-     *  host; both surfaces read reviewHunks/reviewSelected. */
+    /** Review DATA, owned here so every review surface (the quickfix list's
+     *  rows, the gate header, the hunk hero) reads one source. Traversal state
+     *  (cursor, open/closed) lives in quickfix.svelte.ts — the generic layer;
+     *  this is only the work-type's data. App.svelte drives load/dispose/
+     *  prepare against the host. */
     reviewRoot = $state<ReviewRoot | null>(null);
-    /** the hunk the detail overlay shows; null = overlay closed */
-    reviewSelectedId = $state<number | null>(null);
 
     get reviewHunks(): RookTask[] {
         return this.reviewRoot?.children ?? [];
-    }
-    get reviewSelected(): RookTask | null {
-        const id = this.reviewSelectedId;
-        if (id == null) return null;
-        return this.reviewHunks.find((h) => h.id === id) ?? null;
     }
 
     /** The open file buffers for the CURRENT workspace, most-recent first —
@@ -87,8 +76,9 @@ class AppState {
      *  say "focus is in the explorer" — so the zone sits a level above it and
      *  the two compose: ⌃hjkl walks panes until the tree has no neighbour that
      *  way, then hands off across this boundary to an open side pane.
-     *  Always "terms" while the side pane in question is closed. */
-    focusZone = $state<"terms" | "left" | "right">("terms");
+     *  Always "terms" while the side pane in question is closed. "bottom" is
+     *  the quickfix strip. */
+    focusZone = $state<"terms" | "left" | "right" | "bottom">("terms");
 
     /** Mission control's own state — which tab, what filter, where the cursor
      *  is, flat or grouped.
@@ -114,6 +104,8 @@ class AppState {
     inboxOpen = $state(false);
     spawnOpen = $state(false);
     settingsOpen = $state(false);
+    /** the quick-action modal: the current quickfix context's verbs (,a) */
+    quickActionOpen = $state(false);
 
     // host polls (App.svelte owns the timers)
     attention = $state<AttentionItem[]>([]);
@@ -137,7 +129,8 @@ class AppState {
             this.filePickerOpen ||
             this.inboxOpen ||
             this.spawnOpen ||
-            this.settingsOpen
+            this.settingsOpen ||
+            this.quickActionOpen
         );
     }
 
@@ -148,6 +141,7 @@ class AppState {
         this.inboxOpen = false;
         this.spawnOpen = false;
         this.settingsOpen = false;
+        this.quickActionOpen = false;
     }
 }
 

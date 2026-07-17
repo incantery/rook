@@ -11,7 +11,7 @@
     import type {Edge, PaneRef} from "./term/layout";
     import {themeService} from "./theme/service";
     import {Registry} from "./registry";
-    import {buildKeymap, parseLeader, sigOf} from "./keymap";
+    import {buildKeymap, CONTEXT_LEADER_KEY, CONTEXT_PREFIX, parseLeader, sigOf} from "./keymap";
     import {app, MODES, type Mode} from "./state.svelte";
     import {shellQuote} from "./util";
     import Titlebar from "./Titlebar.svelte";
@@ -26,8 +26,11 @@
     import SidePane from "./SidePane.svelte";
     import ThreadPanel from "./ThreadPanel.svelte";
     import FileExplorer from "./FileExplorer.svelte";
-    import ReviewPanel from "./ReviewPanel.svelte";
-    import ReviewItem from "./ReviewItem.svelte";
+    import {fly} from "svelte/transition";
+    import QuickfixPanel from "./QuickfixPanel.svelte";
+    import QuickActionModal from "./QuickActionModal.svelte";
+    import {qf} from "./quickfix.svelte";
+    import {makeReviewContext} from "./reviewContext";
     import type {EditorSeam} from "./term/editor";
 
     interface Props {
@@ -45,6 +48,11 @@
     const leader = parseLeader(leaderCfg);
     // svelte-ignore state_referenced_locally
     const keymap = buildKeymap(keybinds, leader.disp);
+    // the context leader (vim's maplocalleader) — see keymap.ts
+    const contextLeader = parseLeader(CONTEXT_LEADER_KEY);
+    /** the context leader armed; the next key dispatches CONTEXT_PREFIX.
+     *  Plain let: nothing renders it yet (the pill is the IDE leader's). */
+    let ctxArmed = false;
 
     let terminalsEl: HTMLElement;
     let home = $state<Home | null>(null);
@@ -80,10 +88,37 @@
         app.threadPaneOpen = MODES[app.mode].rightPaneDefault;
     });
 
-    // (re)load the review when its pane opens or the workspace changes
+    // (re)load the review when its list is open and the workspace changes
     $effect(() => {
         app.workspace;
-        if (app.reviewPaneOpen) void loadReview();
+        if (qf.listOpen && qf.context?.id === "review") void loadReview();
+    });
+
+    // Closing the quick-action modal hands the keyboard back to the quickfix
+    // surface it acted ON — the hero if it's up (it refocuses itself), else
+    // the open strip — never to whichever pane the leader happened to fire
+    // from. Without this, esc out of the modal strands j/k.
+    function closeQuickActions(): void {
+        app.quickActionOpen = false;
+        if (qf.detailOpen) return; // ReviewItem's own effect reclaims focus
+        if (qf.listOpen) {
+            app.focusZone = "bottom";
+            document.getElementById("quickfix-list")?.focus();
+            return;
+        }
+        focusBack();
+    }
+
+    // Closing the hero hands the keyboard back to the strip — esc out of a
+    // hunk should land you on j/k, not in focus limbo (the hero held DOM
+    // focus, so the zone read "terms" while it was up). The "o" editor action
+    // also passes through here, but the editor's own focus lands later and
+    // wins — which is what "take me to the editor" means.
+    let heroWasOpen = false;
+    $effect(() => {
+        const open = qf.detailOpen;
+        if (heroWasOpen && !open && qf.listOpen) app.focusZone = "bottom";
+        heroWasOpen = open;
     });
 
     // resolved when the manager has attached every live session — opening a
@@ -434,7 +469,7 @@
         }
     }
 
-    // ---- review work-type (RookTask): state on `app`, host via api ----
+    // ---- review work-type (RookTask): data on `app`, traversal in `qf` ----
 
     async function loadReview(): Promise<void> {
         try {
@@ -443,11 +478,7 @@
         } catch {
             app.reviewRoot = null;
         }
-        if (
-            app.reviewSelectedId != null &&
-            !app.reviewHunks.some((h) => h.id === app.reviewSelectedId)
-        )
-            app.reviewSelectedId = null;
+        qf.clamp(); // the items changed under the cursor
     }
 
     async function prepareReview(): Promise<void> {
@@ -468,19 +499,27 @@
         }
     }
 
-    function navHunk(dir: number): void {
-        const hunks = app.reviewHunks;
-        const i = hunks.findIndex((h) => h.id === app.reviewSelectedId);
-        if (i === -1) return;
-        app.reviewSelectedId = hunks[Math.min(Math.max(i + dir, 0), hunks.length - 1)].id;
+    function openHunkInEditor(id: number): void {
+        const h = app.reviewHunks.find((x) => x.id === id);
+        if (!h?.path || !h.startLine) return;
+        void openReview({
+            path: h.path,
+            startLine: h.startLine,
+            endLine: h.endLine ?? h.startLine,
+            side: h.side ?? "modified",
+        });
     }
 
-    async function disposeAndAdvance(state: string): Promise<void> {
-        const id = app.reviewSelectedId;
-        if (id == null) return;
-        await disposeHunk(id, state);
-        navHunk(1);
-    }
+    // the review quickfix context — rows/hero/verbs (reviewContext.ts).
+    // api is mount-fixed (one HostAPI per app lifetime), so capturing it here
+    // is deliberate — same rationale as the leader above.
+    // svelte-ignore state_referenced_locally
+    const reviewCtx = makeReviewContext({
+        api,
+        prepare: prepareReview,
+        dispose: disposeHunk,
+        openInEditor: openHunkInEditor,
+    });
 
     async function spawn(task: string, workspace: string, worktree: boolean): Promise<void> {
         // worktree isolation: carve a fresh checkout+branch off the target
@@ -757,7 +796,6 @@
             keys: keymap.display("explorer.toggle"),
             run: () => {
                 app.explorerOpen = !app.explorerOpen;
-                if (app.explorerOpen) app.reviewPaneOpen = false; // share the left slot
             },
         },
         {
@@ -765,9 +803,109 @@
             title: "Toggle review pane",
             category: "View",
             run: () => {
-                app.reviewPaneOpen = !app.reviewPaneOpen;
-                if (app.reviewPaneOpen) app.explorerOpen = false; // share the left slot
+                // toggling review OPEN claims the quickfix list for the review
+                // context (vim: whoever fills the list owns it)
+                if (qf.listOpen && qf.context?.id === "review") {
+                    qf.listOpen = false;
+                    return;
+                }
+                qf.set(reviewCtx);
+                qf.listOpen = true;
+                app.focusZone = "bottom"; // opening the list hands it the keyboard
+                void loadReview();
             },
+        },
+        // quickfix traversal as registry commands — palette-visible now, and
+        // the seam that makes list traversal agent-invokable later
+        {
+            id: "quickfix.toggle",
+            title: "Quickfix: toggle list",
+            category: "View",
+            run: () => {
+                if (qf.listOpen) {
+                    qf.listOpen = false;
+                    return;
+                }
+                if (!qf.context) {
+                    qf.set(reviewCtx); // no producer ran yet — claim review
+                    void loadReview();
+                }
+                qf.listOpen = true;
+                app.focusZone = "bottom";
+            },
+        },
+        {
+            id: "quickaction.toggle",
+            title: "Quick actions (current context)",
+            category: "View",
+            run: () => {
+                if (app.quickActionOpen) {
+                    closeQuickActions();
+                    return;
+                }
+                if (!qf.context) {
+                    qf.set(reviewCtx);
+                    void loadReview();
+                }
+                app.closeOverlays();
+                app.quickActionOpen = true;
+            },
+        },
+        {
+            id: "quickfix.next",
+            title: "Quickfix: next item",
+            category: "View",
+            run: () => qf.move(1),
+        },
+        {
+            id: "quickfix.prev",
+            title: "Quickfix: previous item",
+            category: "View",
+            run: () => qf.move(-1),
+        },
+        {
+            id: "quickfix.open",
+            title: "Quickfix: open list",
+            category: "View",
+            run: () => {
+                // :copen — reopen the current list, keyboard included. With no
+                // context claimed yet, claim review (the only producer today;
+                // when a second tenant lands this becomes "the LAST list").
+                if (!qf.context) {
+                    qf.set(reviewCtx);
+                    void loadReview();
+                }
+                qf.listOpen = true;
+                app.focusZone = "bottom";
+            },
+        },
+        {
+            id: "quickfix.close",
+            title: "Quickfix: close",
+            category: "View",
+            run: () => {
+                if (qf.detailOpen) qf.detailOpen = false;
+                else qf.listOpen = false;
+            },
+        },
+        // the review verbs, agent-invokable: same qf.act path as the keys
+        {
+            id: "review.approve",
+            title: "Review: approve current hunk",
+            category: "View",
+            run: () => void qf.act("a"),
+        },
+        {
+            id: "review.reject",
+            title: "Review: reject current hunk",
+            category: "View",
+            run: () => void qf.act("r"),
+        },
+        {
+            id: "review.defer",
+            title: "Review: defer current hunk",
+            category: "View",
+            run: () => void qf.act("d"),
         },
         {
             id: "file.open",
@@ -833,9 +971,15 @@
             if (dir === "left") toTerms();
             return;
         }
+        if (app.focusZone === "bottom") {
+            // the quickfix strip owns j/k (its own rows); only up leaves it
+            if (dir === "up") toTerms();
+            return;
+        }
         if (mgr.focusPane(dir)) return; // moved inside the layout tree
-        if (dir === "left" && (app.explorerOpen || app.reviewPaneOpen)) app.focusZone = "left";
+        if (dir === "left" && app.explorerOpen) app.focusZone = "left";
         else if (dir === "right" && app.threadPaneOpen) app.focusZone = "right";
+        else if (dir === "down" && qf.listOpen) app.focusZone = "bottom";
         // else: at the workbench edge with nothing beyond it — stay put
     }
 
@@ -860,14 +1004,17 @@
         const el = e.target as HTMLElement | null;
         if (!el?.closest) return;
         const pane = el.closest<HTMLElement>(".side-pane");
-        app.focusZone = pane ? (pane.dataset.side === "left" ? "left" : "right") : "terms";
+        const side = pane?.dataset.side;
+        app.focusZone =
+            side === "left" || side === "right" || side === "bottom" ? side : "terms";
     }
 
     // A side pane that closes under a focus that lives in it would strand the
     // keyboard in a detached node; hand focus back instead.
     $effect(() => {
-        if (app.focusZone === "left" && !app.explorerOpen && !app.reviewPaneOpen) toTerms();
+        if (app.focusZone === "left" && !app.explorerOpen) toTerms();
         if (app.focusZone === "right" && !app.threadPaneOpen) toTerms();
+        if (app.focusZone === "bottom" && !qf.listOpen) toTerms();
     });
 
     // ==== keybindings — two layers, both dispatching registry commands ====
@@ -892,6 +1039,12 @@
 
         const tgt = e.target as HTMLElement | null;
         const inSidePane = tgt?.closest?.(".side-pane") != null;
+
+        // A bare text input OUTSIDE the side panes (the hero's note box) owns
+        // its keys completely — leaders and chords must not eat a comma or a
+        // backtick mid-sentence. xterm's and Monaco's hidden textareas are the
+        // exception: they ARE how panes receive the workbench's keys.
+        if (isTyping(tgt) && !tgt?.closest(".xterm, .monaco-editor")) return;
 
         // The vim-navigator chords resolve BEFORE the side-pane guard below:
         // they're the workbench's own movement keys, and a pane you can enter
@@ -918,7 +1071,10 @@
         // backticks, and the capture-phase prefix must not eat them. Only
         // .side-pane is guarded — xterm's and Monaco's hidden textareas live
         // in #terminals, NOT .side-pane, so the prefix keeps working there.
-        if (inSidePane) return;
+        // The bottom strip is exempt: it has no text inputs, and without the
+        // exemption `,a` from the strip would drop the comma and feed a bare
+        // `a` to the strip's action keys — a stray approve.
+        if (inSidePane && !tgt?.closest?.('[data-side="bottom"]')) return;
         if (app.screen === "home") {
             // the prefix works here too, so ` h toggles back to the
             // workspace you left — but never while typing in a modal input
@@ -987,10 +1143,31 @@
             }
             return;
         }
+        if (ctxArmed) {
+            if (e.key === "Shift" || e.key === "Meta" || e.key === "Alt" || e.key === "Control")
+                return;
+            ctxArmed = false;
+            // context leader twice = send-prefix, the IDE leader's contract:
+            // the second press passes through untouched and the focused pane
+            // decides what a comma means.
+            if (contextLeader.matches(e)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const cmd = CONTEXT_PREFIX.get(e.key);
+            if (cmd) registry.run(cmd);
+            // unbound: prefix consumed, key ignored — tmux behavior
+            return;
+        }
         if (leader.matches(e)) {
             e.preventDefault();
             e.stopPropagation();
             app.prefixArmed = true;
+            return;
+        }
+        if (contextLeader.matches(e)) {
+            e.preventDefault();
+            e.stopPropagation();
+            ctxArmed = true;
             return;
         }
 
@@ -1161,7 +1338,7 @@
     <div class="flex min-h-0 min-w-0 flex-1">
         <SidePane
             side="left"
-            visible={app.explorerOpen && !app.reviewPaneOpen}
+            visible={app.explorerOpen}
             title="Explorer"
             onclose={() => (app.explorerOpen = false)}
         >
@@ -1170,20 +1347,6 @@
                 workspace={app.workspace}
                 active={app.focusZone === "left"}
                 onopen={(path) => void openFile(path)}
-            />
-        </SidePane>
-        <SidePane
-            side="left"
-            visible={app.reviewPaneOpen}
-            title="Review"
-            onclose={() => (app.reviewPaneOpen = false)}
-        >
-            <ReviewPanel
-                active={app.focusZone === "left"}
-                busy={false}
-                onPrepare={() => void prepareReview()}
-                onSelect={(id) => (app.reviewSelectedId = id)}
-                onDispose={(id, state) => void disposeHunk(id, state)}
             />
         </SidePane>
         <div class="relative min-h-0 min-w-0 flex-1" bind:this={terminalsEl}>
@@ -1198,19 +1361,18 @@
                     onwork={workIssue}
                 />
             {/if}
-            {#if app.reviewSelected}
-                <ReviewItem
-                    {api}
-                    workspace={app.workspace}
-                    hunk={app.reviewSelected}
-                    pos={{
-                        i: app.reviewHunks.findIndex((h) => h.id === app.reviewSelectedId) + 1,
-                        n: app.reviewHunks.length,
-                    }}
-                    onDispose={(state) => void disposeAndAdvance(state)}
-                    onClose={() => (app.reviewSelectedId = null)}
-                    onNav={navHunk}
-                />
+            {#if qf.detailOpen && qf.context?.Detail && qf.currentId != null}
+                {@const Detail = qf.context.Detail}
+                <!-- the hero flies in over the viewport — chrome motion, the
+                     webview dividend; the hunk swap inside stays instant so
+                     rapid j/j/j triage never waits on animation -->
+                <div class="absolute inset-0 z-20" transition:fly={{y: 12, duration: 160}}>
+                    <Detail
+                        id={qf.currentId}
+                        pos={{i: qf.cursor + 1, n: qf.ids.length}}
+                        {...qf.context.detailProps?.() ?? {}}
+                    />
+                </div>
             {/if}
         </div>
         <SidePane
@@ -1222,6 +1384,17 @@
             <ThreadPanel {api} editor={activeEditor} />
         </SidePane>
     </div>
+    <!-- the quickfix strip: vim's bottom window, full width under the
+         workbench row (list + hero coexist — the hero overlays the center
+         while the strip stays visible below it) -->
+    <SidePane
+        side="bottom"
+        visible={qf.listOpen && !!qf.context}
+        title={qf.context?.title ?? "Quickfix"}
+        onclose={() => (qf.listOpen = false)}
+    >
+        <QuickfixPanel active={app.focusZone === "bottom"} />
+    </SidePane>
 </div>
 
 {#if app.paletteOpen}
@@ -1232,6 +1405,9 @@
             focusBack();
         }}
     />
+{/if}
+{#if app.quickActionOpen}
+    <QuickActionModal onclose={closeQuickActions} />
 {/if}
 {#if app.pickerOpen}
     <Picker
