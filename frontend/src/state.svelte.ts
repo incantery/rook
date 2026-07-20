@@ -44,6 +44,9 @@ class AppState {
      *  "home", never unmounted — terminals live inside it */
     screen = $state<"home" | "app">("home");
     workspace = $state("main");
+    /** transient titlebar message — the workspace chip shows it for 2.5s.
+     *  Its own slot so a flash can never leak into API workspace params. */
+    flashMsg = $state<string | null>(null);
     tabs = $state<TabInfo[]>([]);
     activeId = $state<string | null>(null);
     /** the focused pane's host session — null when an editor pane (Monaco)
@@ -78,6 +81,12 @@ class AppState {
      *  the last producer owns the list; a new gr replaces it wholesale). Ids
      *  are 1-based positions in this array, minted at fill time. */
     refHits = $state<RefHit[]>([]);
+
+    /** The ACTIVE investigation (explore root, children = the breadcrumb
+     *  trail) — while one is open, every navigation through the opener seam
+     *  appends a visit. Durable on the host; this is just the live mirror,
+     *  reloaded on boot and workspace switch. */
+    exploreTask = $state<RookTask | null>(null);
 
     /** The open file buffers for the CURRENT workspace, most-recent first —
      *  vim's `:ls`. A buffer is not a pane and not a strip entry: it's the
@@ -118,6 +127,7 @@ class AppState {
     pickerOpen = $state(false);
     filePickerOpen = $state(false);
     grepOpen = $state(false);
+    exploreOpen = $state(false);
     inboxOpen = $state(false);
     spawnOpen = $state(false);
     settingsOpen = $state(false);
@@ -145,6 +155,7 @@ class AppState {
             this.pickerOpen ||
             this.filePickerOpen ||
             this.grepOpen ||
+            this.exploreOpen ||
             this.inboxOpen ||
             this.spawnOpen ||
             this.settingsOpen ||
@@ -157,6 +168,7 @@ class AppState {
         this.pickerOpen = false;
         this.filePickerOpen = false;
         this.grepOpen = false;
+        this.exploreOpen = false;
         this.inboxOpen = false;
         this.spawnOpen = false;
         this.settingsOpen = false;

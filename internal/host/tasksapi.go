@@ -99,6 +99,8 @@ func (h *Host) handleTask(w http.ResponseWriter, r *http.Request) {
 		}{t, h.isScoring(id)})
 	case action == "state" && r.Method == http.MethodPost:
 		h.handleTaskState(w, r, id)
+	case action == "visit" && r.Method == http.MethodPost:
+		h.handleTaskVisit(w, r, id)
 	case action == "score" && r.Method == http.MethodPost:
 		h.handleTaskScore(w, r, id)
 	case action == "score-all" && r.Method == http.MethodPost:
@@ -141,9 +143,13 @@ func (h *Host) handleTaskState(w http.ResponseWriter, r *http.Request, id int64)
 		http.Error(w, "no such task", http.StatusNotFound)
 		return
 	}
-	// the work_type owns the vocabulary — review is the only one today
+	// the work_type owns the vocabulary
 	if t.WorkType == "review" && !validReviewLeafState(req.State) {
 		http.Error(w, "invalid review state: "+req.State, http.StatusBadRequest)
+		return
+	}
+	if t.WorkType == "explore" && !validExploreState(req.State, t.ParentID == 0) {
+		http.Error(w, "invalid explore state: "+req.State, http.StatusBadRequest)
 		return
 	}
 	if err := h.reg.setTaskState(id, req.State); err != nil {

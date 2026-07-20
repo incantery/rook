@@ -63,11 +63,11 @@
             ? `Task tree of ${tree.of} — branch ${tree.branch ?? "?"}. Switch workspace (\` s)`
             : "Switch workspace (` s)"}
         onclick={onpicker}
-        >{#if tree}<span class="truncate opacity-60">{tree.of}</span><span
+        >{#if tree && !app.flashMsg}<span class="truncate opacity-60">{tree.of}</span><span
                 class="flex-none opacity-50">▸</span
             ><span class="truncate">⎇ {app.workspace}</span>{:else}<span
                 class="h-1.5 w-1.5 flex-none rounded-full bg-current"
-            ></span><span class="truncate">{app.workspace}</span>{/if}</button
+            ></span><span class="truncate">{app.flashMsg ?? app.workspace}</span>{/if}</button
     >
     <div class="absolute inset-y-0 left-1/2 flex -translate-x-1/2 items-stretch">
         <!-- The dashboard is a SURFACE, not a layout, so it no longer takes a

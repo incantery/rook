@@ -150,6 +150,8 @@ func main() {
 		err = runTasks(os.Args[2:])
 	case "plugin":
 		err = runPlugin(os.Args[2:])
+	case "explore":
+		err = runExplore(os.Args[2:])
 	case "grep":
 		err = runGrep(os.Args[2:])
 	case "lsp":

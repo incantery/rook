@@ -661,6 +661,9 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	// review work-type over RookTask (reviewtasks.go / tasksapi.go)
 	case action == "review" && r.Method == http.MethodPost:
 		h.handleWorkspaceReview(w, r, name)
+	// explore work-type — investigations with breadcrumb trails
+	case action == "explore" && r.Method == http.MethodPost:
+		h.handleWorkspaceExplore(w, r, name)
 	case action == "tasks" && r.Method == http.MethodGet:
 		h.handleWorkspaceTasks(w, r, name)
 	case action == "" && r.Method == http.MethodDelete:

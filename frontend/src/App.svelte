@@ -32,6 +32,8 @@
     import QuickActionModal from "./QuickActionModal.svelte";
     import {qf} from "./quickfix.svelte";
     import {Jumplist} from "./jumplist";
+    import ExploreModal from "./ExploreModal.svelte";
+    import {makeExploreContext} from "./exploreContext";
     import {makeRefsContext, toRefHits} from "./refsContext";
     import {makeReviewContext} from "./reviewContext";
     import type {EditorSeam} from "./term/editor";
@@ -203,10 +205,14 @@
 
     /** Transient message in the titlebar's workspace slot — failures must
      *  be VISIBLE (set-root once died silently on a stale daemon 404). */
+    // Flash rides its own slot, NEVER app.workspace: the old swap-the-name
+    // trick meant any API call inside the 2.5s window used the flash TEXT
+    // as the workspace ("saved x" → GET /workspaces/saved x/files).
+    let flashTimer: ReturnType<typeof setTimeout> | undefined;
     function flash(msg: string): void {
-        const prev = app.workspace;
-        app.workspace = msg;
-        setTimeout(() => (app.workspace = prev), 2500);
+        app.flashMsg = msg;
+        clearTimeout(flashTimer);
+        flashTimer = setTimeout(() => (app.flashMsg = null), 2500);
     }
 
     // ==== buffers ====
@@ -251,6 +257,93 @@
         }
         void openFile(loc.path, {line: loc.line, col: loc.col}, {recordJump: false});
     }
+
+    // ==== investigations (the explore work-type) ====
+    //
+    // An investigation is a durable RookTask whose children are breadcrumbs:
+    // code anchors visited through the opener seam while it was open. The
+    // host owns the trail; app.exploreTask mirrors it for the quickfix.
+
+    /** Resume the newest open investigation — boot and workspace switch. */
+    async function loadExplore(): Promise<void> {
+        try {
+            const roots = await api.reviewTasks(app.workspace, "explore");
+            app.exploreTask = roots.find((t) => t.state === "open") ?? null;
+        } catch {
+            app.exploreTask = null; // old daemon — investigations just absent
+        }
+    }
+
+    async function startExplore(title: string): Promise<void> {
+        try {
+            const t = await api.createExplore(app.workspace, title);
+            t.children = [];
+            app.exploreTask = t;
+            flash(`investigating: ${title}`);
+        } catch (err) {
+            console.error("explore start failed", err);
+            flash(
+                String(err).includes(" 404 ")
+                    ? "investigations need a newer rook-host — relaunch rook"
+                    : "couldn't start investigation — see console",
+            );
+        }
+    }
+
+    async function finishExplore(): Promise<void> {
+        const t = app.exploreTask;
+        if (!t) {
+            flash("no open investigation");
+            return;
+        }
+        try {
+            await api.setTaskState(t.id, "done");
+            app.exploreTask = null;
+            if (qf.context?.id === "explore") qf.listOpen = false;
+            flash(`done — ${t.title ?? "investigation"} (${t.children?.length ?? 0} breadcrumbs)`);
+        } catch (err) {
+            console.error("explore finish failed", err);
+            flash("couldn't finish investigation — see console");
+        }
+    }
+
+    /** Refresh the mirror after a host-side trail change. */
+    async function refreshExplore(): Promise<void> {
+        const t = app.exploreTask;
+        if (!t) return;
+        const full = await api.task(t.id);
+        if (app.exploreTask?.id === t.id) {
+            app.exploreTask = full;
+            qf.clamp();
+        }
+    }
+
+    /** The opener seam writes the trail — fire-and-forget so navigation
+     *  never waits on the ledger. */
+    function recordVisit(path: string, line: number, col: number): void {
+        const t = app.exploreTask;
+        if (!t) return;
+        void api
+            .visitTask(t.id, path, line, col)
+            .then(refreshExplore)
+            .catch((err) => console.warn("breadcrumb failed", err));
+    }
+
+    function showTrail(): void {
+        qf.set(exploreCtx);
+        qf.listOpen = true;
+    }
+
+    const exploreCtx = makeExploreContext({
+        // walking your own trail records the jump but not a new breadcrumb
+        open: (path, line, col) => void openFile(path, {line, col}, {recordVisit: false}),
+        star: async (id) => {
+            const b = app.exploreTask?.children?.find((c) => c.id === id);
+            if (!b) return;
+            await api.setTaskState(id, b.state === "starred" ? "visited" : "starred");
+            await refreshExplore();
+        },
+    });
 
     /** leafId → the AgentPane in it. Same reason as editorPanes, and the same
      *  discipline: entries are deleted on dispose, because a map that only
@@ -442,12 +535,17 @@
     async function openFile(
         path: string,
         at?: {line: number; col: number},
-        opts?: {recordJump?: boolean},
+        opts?: {recordJump?: boolean; recordVisit?: boolean},
     ): Promise<void> {
         try {
             await initDone;
             // ⌃O/⌃I traversal must not rewrite the history it walks
             if (opts?.recordJump !== false) recordJump();
+            // …and an open investigation gets a breadcrumb (never during
+            // traversal — walking history must not rewrite the trail either)
+            if (opts?.recordJump !== false && opts?.recordVisit !== false) {
+                recordVisit(path, at?.line ?? 1, at?.col ?? 1);
+            }
             touchBuffer(path);
             // `at` is a position to land the cursor on (gd's target, a refs
             // hit) — revealPosition latches on a pane that's still loading.
@@ -1021,6 +1119,27 @@
             },
         },
         {
+            id: "explore.start",
+            title: "Explore: start investigation",
+            category: "View",
+            run: () => {
+                app.exploreOpen = true;
+            },
+        },
+        {
+            id: "explore.trail",
+            title: "Explore: show trail",
+            category: "View",
+            keys: keymap.display("explore.trail"),
+            run: showTrail,
+        },
+        {
+            id: "explore.finish",
+            title: "Explore: finish investigation",
+            category: "View",
+            run: () => void finishExplore(),
+        },
+        {
             id: "workspace.set-root",
             title: "Set workspace root to shell's directory",
             category: "Workspace",
@@ -1364,12 +1483,17 @@
                 app.focusedSessionId = mgr.focusedSessionId;
                 // buffer paths are repo-relative, so they mean nothing in
                 // another workspace — drop them (and the jumplist that
-                // holds them) at the boundary
-                if (app.workspace !== mgr.workspace) {
+                // holds them) at the boundary; the new workspace's open
+                // investigation resumes from the host AFTER the name flips
+                // (loadExplore reads app.workspace)
+                const switched = app.workspace !== mgr.workspace;
+                if (switched) {
                     app.buffers = [];
                     jumps.clear();
+                    app.exploreTask = null;
                 }
                 app.workspace = mgr.workspace;
+                if (switched) void loadExplore();
             },
             workspaceGone: showHome,
             activated: () => (app.dashVisible = false),
@@ -1389,6 +1513,7 @@
         void pollAttention();
         void pollMoney();
         void pollWorkspaces();
+        void loadExplore(); // resume an open investigation across restarts
         const attnTimer = setInterval(() => void pollAttention(), 5000);
         const moneyTimer = setInterval(() => void pollMoney(), 30_000);
         const wsTimer = setInterval(() => void pollWorkspaces(), 15_000);
@@ -1544,6 +1669,15 @@
         onopen={(path, line, col) => void openFile(path, {line, col})}
         onclose={() => {
             app.grepOpen = false;
+            focusBack();
+        }}
+    />
+{/if}
+{#if app.exploreOpen}
+    <ExploreModal
+        onstart={(title) => void startExplore(title)}
+        onclose={() => {
+            app.exploreOpen = false;
             focusBack();
         }}
     />

@@ -396,6 +396,27 @@ export class HostAPI {
         await this.req(`/tasks/${rootId}/score-all`, {method: "POST", body: "{}"});
     }
 
+    /** Start an investigation — an explore root whose title is the question. */
+    async createExplore(ws: string, title: string): Promise<RookTask> {
+        return (
+            await this.req(`/workspaces/${encodeURIComponent(ws)}/explore`, {
+                method: "POST",
+                body: JSON.stringify({title}),
+            })
+        ).json();
+    }
+
+    /** Append a breadcrumb to an open investigation (consecutive same-line
+     *  visits collapse on the host). Returns the breadcrumb. */
+    async visitTask(id: number, path: string, line: number, col: number): Promise<RookTask> {
+        return (
+            await this.req(`/tasks/${id}/visit`, {
+                method: "POST",
+                body: JSON.stringify({path, line, col}),
+            })
+        ).json();
+    }
+
     /** Raw bytes into a session's pty; append "\r" to submit. */
     async sendInput(id: string, data: string): Promise<void> {
         await this.req(`/sessions/${id}/input`, {
@@ -579,6 +600,8 @@ export interface RookTask {
         summary?: string;
         concerns?: string[];
         note?: string;
+        /** explore breadcrumbs: the column the visit landed on */
+        col?: number;
     };
     created: string;
     updated: string;

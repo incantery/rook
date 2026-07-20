@@ -96,6 +96,29 @@ func orDefault(s, def string) string {
 	return s
 }
 
+// createTask inserts one task in its own tx and returns the stored row —
+// the single-row path (explore roots and breadcrumbs); batch builders
+// (prepareReview) keep their own tx.
+func (r *registry) createTask(t *RookTask) (*RookTask, error) {
+	if r.db == nil {
+		return nil, fmt.Errorf("no registry db")
+	}
+	tx, err := r.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	now := time.Now().Format(time.RFC3339Nano)
+	id, err := insertTask(tx, t, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return r.getTask(id), nil
+}
+
 func (r *registry) getTask(id int64) *RookTask {
 	if r.db == nil {
 		return nil

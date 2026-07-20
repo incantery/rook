@@ -70,6 +70,7 @@ export const DEFAULTS: [string, string][] = [
     ["g", "review.changes"],
     ["e", "file.open"],
     ["/", "grep.open"],
+    ["i", "explore.trail"],
     ["t", "threads.toggle"],
     ["b", "explorer.toggle"],
     ["cmd+d", "pane.split-right"],
