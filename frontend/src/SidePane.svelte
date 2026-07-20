@@ -35,7 +35,10 @@
         ]}
     >
         <header class="flex items-center justify-between border-b border-line/15 px-2 py-1">
-            <span class="text-xs uppercase tracking-wider opacity-70">{title}</span>
+            <!-- explicit color, not inherited: this span is the reason body
+                 needed one at all, and a pane title is exactly the kind of
+                 chrome nobody re-checks after a theme change -->
+            <span class="text-xs uppercase tracking-wider text-dim">{title}</span>
             <button
                 class="flex-none cursor-pointer rounded-sm border border-line/15 bg-transparent px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
                 title="close pane"

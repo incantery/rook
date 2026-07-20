@@ -67,6 +67,7 @@ type Host struct {
 	token    string
 	reg      *registry
 	aw       *agentWatch
+	tw       *threadWatch // thread change fan-out (threadwatch.go)
 
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
@@ -136,6 +137,7 @@ func New() *Host {
 		token:    hex.EncodeToString(b),
 		reg:      loadRegistry(),
 		aw:       newAgentWatch(),
+		tw:       newThreadWatch(),
 		cwdCache: make(map[int]cwdEntry),
 		pt:       newProcTable(),
 		claims:   make(map[string]string),
@@ -653,6 +655,8 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	// threads: file-anchored AI conversations (threads.go)
 	case action == "threads/submit" && r.Method == http.MethodPost:
 		h.handleThreadsSubmit(w, r, name)
+	case action == "threads/watch" && r.Method == http.MethodGet:
+		h.handleThreadsWatch(w, r, name)
 	case action == "threads":
 		h.handleWorkspaceThreads(w, r, name)
 	// language servers (lsp.go) — the exploration queries + runtime status

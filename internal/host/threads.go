@@ -487,6 +487,7 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 	}
 	t := h.reg.getThread(id)
 	h.anchorNow(ws, top, t)
+	h.notifyThreads(name)
 	writeJSON(w, t)
 }
 
@@ -521,6 +522,9 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "no such thread", http.StatusNotFound)
 			return
 		}
+		// THE case this channel exists for: the agent's reply arrives here
+		// (rookctl reply → this route), and until now nothing told the UI.
+		h.notifyThreadsFor(id)
 		w.WriteHeader(http.StatusNoContent)
 	case "resolve":
 		var req struct{ By string }
@@ -534,6 +538,7 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 		}
 		switch err := h.reg.resolveThread(id, req.By); err {
 		case nil:
+			h.notifyThreadsFor(id)   // before the prune, while the row is still readable
 			h.reg.pruneAnchorBlobs() // resolved threads release their snapshots
 			w.WriteHeader(http.StatusNoContent)
 		case errThreadState:
@@ -556,6 +561,7 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 		}
 		h.reg.submitThread(id)
 		t.State = "open"
+		h.notifyThreads(t.Workspace)
 		mode, sid, err := h.nudge(t.Workspace, threadNudgeOne(t))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -574,6 +580,7 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 		}
 		switch err := h.reg.reopenThread(id, req.By); err {
 		case nil:
+			h.notifyThreadsFor(id)
 			w.WriteHeader(http.StatusNoContent)
 		case errThreadState:
 			http.Error(w, "thread is not resolved", http.StatusConflict)
@@ -700,6 +707,7 @@ func (h *Host) handleThreadsSubmit(w http.ResponseWriter, r *http.Request, name 
 		http.Error(w, "nothing to submit", http.StatusBadRequest)
 		return
 	}
+	h.notifyThreads(name)
 	mode, sid, err := h.nudge(name, threadsNudge(waiting, name))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

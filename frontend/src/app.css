@@ -81,6 +81,12 @@ body {
     /* Pre-JS default; main.ts overwrites from the config's
      background-opacity. */
     background: rgba(15, 17, 26, 0.95);
+    /* Inherited text has to have a THEME color, not the webview's default.
+       Nearly every element sets its own, which is why the one that didn't
+       (SidePane's title) rendered black — and only in the app: Chromium
+       (Playwright) and WKWebView disagree about what an unset color is, so
+       the e2e could never have caught it. */
+    color: var(--color-fg);
     overflow: hidden;
     font-family: system-ui, sans-serif;
     /* the color vars moved to :root (html) so the ThemeService's runtime

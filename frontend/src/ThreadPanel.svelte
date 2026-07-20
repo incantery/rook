@@ -70,6 +70,15 @@
     let busy = $state(false);
     let nowMs = $state(Date.now()); // refreshed on sync; feeds relTime
     let ctxKey = ""; // last-seen file identity; selection/composer reset on change
+    let composerEl = $state<HTMLTextAreaElement | null>(null);
+
+    // The composer is opened BY A KEYSTROKE (,c / ,? / ⌘⇧M), so it has to take
+    // the keyboard with it. Without this the pane slides open and the caret is
+    // still in Monaco — the user reaches for the mouse to type a note they
+    // asked for with a chord.
+    $effect(() => {
+        if (composer && composerEl) composerEl.focus();
+    });
 
     // (Re)bind to the active editor whenever the prop changes.
     $effect(() => {
@@ -164,6 +173,9 @@
         draft = "";
         err = "";
         editor?.clearHighlight();
+        // hand the keyboard back where it came from — ,c is a keyboard verb,
+        // and stranding focus in a side pane forces a mouse to get out
+        editor?.takeFocus();
     }
 
     async function run(fn: () => Promise<void>): Promise<void> {
@@ -205,6 +217,9 @@
         if (created) {
             selectedId = (created as ThreadInfo).id;
             editor?.reveal(created as ThreadInfo);
+            // …and give the keyboard back: the note is written, the next thing
+            // the user wants is to keep reading code, not to be in a panel.
+            editor?.takeFocus();
         }
     }
 
@@ -302,6 +317,7 @@
                     <textarea
                         class="box-border min-h-6.5 w-full resize-y rounded-sm border border-line/15 bg-sunken px-1.5 py-1 font-mono text-xs text-fg focus:border-acc focus:outline-none"
                         rows="3"
+                        bind:this={composerEl}
                         placeholder={composer.mode === "ask"
                             ? "What do you want to know about this region?"
                             : "Leave a note for this region…"}

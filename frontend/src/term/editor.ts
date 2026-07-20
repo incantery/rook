@@ -195,6 +195,10 @@ export interface EditorSeam {
      *  keyboard when Monaco finishes loading (the diff is a passive detail
      *  view; the hunk list keeps focus). */
     releaseFocus(): void;
+    /** Hand the keyboard BACK to the editor — what the panel calls when it's
+     *  done with it (composer submitted or cancelled). Without this, a
+     *  keyboard-driven ,c strands the user in a side pane needing a mouse. */
+    takeFocus(): void;
     clearHighlight(): void;
     /** ,c / ,? — chrome asking the pane to open the composer on the current
      *  selection. The inbound twin of onCompose. False means there was
@@ -430,6 +434,7 @@ export class EditorPane implements PaneContent {
             releaseFocus: () => {
                 this.wantFocus = false;
             },
+            takeFocus: () => this.focus(),
             clearHighlight: () => {
                 for (const b of this.bands) b.clearHighlight();
             },

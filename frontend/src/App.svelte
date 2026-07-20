@@ -77,6 +77,22 @@
         if (app.focusedSessionId) activeEditor = null;
     });
 
+    // Thread changes push; the panes refetch. ONE subscription for the whole
+    // workspace, fanned out — a browser caps concurrent connections per
+    // origin, so an EventSource per editor pane would starve the API itself.
+    //
+    // This is what makes an agent's reply appear. Before it, threads refetched
+    // only when a pane regained focus, so you could ask a question, watch
+    // claude answer in its own window, and rook would still show your comment
+    // alone until you clicked back in.
+    $effect(() => {
+        const ws = app.workspace;
+        if (!ws) return;
+        return api.watchThreads(ws, () => {
+            for (const p of editorPanes.values()) void p.seam.refetch();
+        });
+    });
+
     /** ,c / ,? — compose a thread on the active editor's selection.
      *
      *  The composer lives in ThreadPanel, and SidePane mounts its tenant only

@@ -353,6 +353,29 @@ export class HostAPI {
         });
     }
 
+    /** Push channel for thread changes — the reason an agent's reply now
+     *  appears without refocusing the pane. The event carries no payload;
+     *  the callback refetches through the normal endpoint, which re-anchors.
+     *
+     *  Token rides the query string because EventSource cannot set headers —
+     *  the same door attach() uses, on a loopback-only server. EventSource
+     *  reconnects on its own, so a daemon restart heals with no retry code
+     *  here. Returns an unsubscribe. */
+    watchThreads(ws: string, onChange: () => void): () => void {
+        const url = `${this.endpoint}/workspaces/${encodeURIComponent(ws)}/threads/watch?token=${this.token}`;
+        let es: EventSource | null = null;
+        try {
+            es = new EventSource(url);
+        } catch (err) {
+            // an older daemon has no such route; threads still work on the
+            // fetch-on-focus path (fail open, the protocol-skew rule)
+            console.warn("threads watch unavailable:", err);
+            return () => {};
+        }
+        es.addEventListener("threads", () => onChange());
+        return () => es?.close();
+    }
+
     /** ,? — ask about ONE thread now. Deliberately not submitThreads scoped
      *  to an id: the workspace-level batch would also ship every scratch
      *  note the user had left pending, which is not what asking about this

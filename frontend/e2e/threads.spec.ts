@@ -41,6 +41,19 @@ async function openWorkspace(page: Page, name: string) {
     await expect(shown(page, ".xterm-screen")).toBeVisible({timeout: 15_000});
 }
 
+/** Talk to the sandbox daemon directly — how the AGENT mutates threads
+ *  (rookctl is just an HTTP client), so a test can produce a reply without
+ *  touching the page and prove the UI learns about it on its own. */
+async function hostFetch(route: string, init?: RequestInit): Promise<Response> {
+    const st = JSON.parse(
+        fs.readFileSync(path.join(SANDBOX, "state", "rook", "host.json"), "utf8"),
+    ) as {port: number; token: string};
+    return fetch(`http://127.0.0.1:${st.port}${route}`, {
+        ...init,
+        headers: {Authorization: `Bearer ${st.token}`},
+    });
+}
+
 async function runCommand(page: Page, title: string) {
     await page.getByRole("button", {name: /commands/}).click();
     await expect(page.getByPlaceholder("Run a command…")).toBeVisible();
@@ -103,8 +116,15 @@ test("`,c` notes stay pending; `,?` asks about one region", async ({page}) => {
     await expect(pane).toContainText("New thread");
     const note = pane.getByPlaceholder("Leave a note for this region…");
     await expect(note).toBeVisible();
-    await note.fill("why is this named spawnTask");
-    await pane.getByRole("button", {name: "Start thread"}).click();
+
+    // TYPE BLIND — no fill(), no click. ,c is a keyboard verb, so the composer
+    // has to take the keyboard with it; if it doesn't, these keystrokes go to
+    // Monaco and this assertion fails. The first version of this test used
+    // fill(), which focuses the element itself — so it passed against a
+    // composer a human could only reach with the mouse.
+    await page.keyboard.type("why is this named spawnTask");
+    await expect(note).toHaveValue("why is this named spawnTask");
+    await page.keyboard.press("Meta+Enter");
 
     await expect(pane).toContainText("why is this named spawnTask", {timeout: 15_000});
     await expect(pane).toContainText("Pending");
@@ -114,8 +134,8 @@ test("`,c` notes stay pending; `,?` asks about one region", async ({page}) => {
     await expect(pane).toContainText("Ask the agent");
     const ask = pane.getByPlaceholder("What do you want to know about this region?");
     await expect(ask).toBeVisible();
-    await ask.fill("can the 400ms sleep race the shell");
-    await pane.getByRole("button", {name: "Ask now"}).click();
+    await page.keyboard.type("can the 400ms sleep race the shell");
+    await page.keyboard.press("Meta+Enter");
 
     await expect(pane).toContainText("can the 400ms sleep race the shell", {timeout: 15_000});
 
@@ -130,6 +150,13 @@ test("`,c` notes stay pending; `,?` asks about one region", async ({page}) => {
     // the editor header agrees: one note still batched, awaiting a submit
     await expect(page.getByRole("button", {name: "submit 1"})).toBeVisible();
 
+    // …and the keyboard is back in the editor. Leaving focus in the side pane
+    // means the next vim key does nothing and the user reaches for the mouse,
+    // which is what made the whole flow feel un-vim-like.
+    await expect
+        .poll(() => page.evaluate(() => !!document.activeElement?.closest(".editor-mount")))
+        .toBe(true);
+
     // Actuation is proven by the state transition itself, not by reading the
     // spawned terminal: /threads/{id}/submit only returns 200 after h.nudge
     // succeeded, so a responder that failed to spawn would have left this
@@ -138,4 +165,53 @@ test("`,c` notes stay pending; `,?` asks about one region", async ({page}) => {
     // one-line pty constraint can be asserted without window-focus races.
 
     await page.screenshot({path: "bin/e2e/threads-compose.png", fullPage: true});
+});
+
+// The bug this channel exists for: the agent replies, and rook doesn't say so.
+// Threads used to refetch only when an editor pane regained FOCUS, so you
+// could ask a question, watch claude answer in its own window, and the panel
+// would still show your comment alone until you clicked back in.
+//
+// The test mutates the thread the way the agent does — POST
+// /threads/{id}/comments, the route `rookctl reply` drives — and then touches
+// nothing. No click, no keypress, no refocus. The reply has to arrive on its
+// own or this fails.
+test("an agent's reply arrives without refocusing the pane", async ({page}) => {
+    test.setTimeout(120_000);
+
+    const ws = `watch-e2e-${Date.now()}`;
+    await openWorkspace(page, ws);
+
+    await runCommand(page, "Open file (read-only)");
+    const picker = page.getByPlaceholder("Open file (read-only)…");
+    await expect(picker).toBeVisible();
+    await picker.fill("internal/host/spawntask.go");
+    await picker.press("Enter");
+    await expect(page.locator(".editor-path")).toContainText("spawntask.go", {timeout: 20_000});
+    await expect(page.locator(".editor-vim")).toContainText(/NORMAL/i, {timeout: 15_000});
+
+    const pane = page.locator('.side-pane[data-side="right"]');
+    await ctxChord(page, "c", "gg");
+    await expect(pane).toContainText("New thread");
+    await page.keyboard.type("does this leak the goroutine");
+    await page.keyboard.press("Meta+Enter");
+    await expect(pane.locator('[data-thread-state="pending"]')).toHaveCount(1, {timeout: 15_000});
+
+    // find the thread the agent would be answering
+    const threads = (await (await hostFetch(`/workspaces/${ws}/threads`)).json()) as {
+        id: number;
+        comments: {body: string}[];
+    }[];
+    const target = threads.find((t) => t.comments[0]?.body === "does this leak the goroutine");
+    expect(target, "thread not found on the host").toBeTruthy();
+
+    // …and now the agent answers. Nothing below touches the page.
+    const reply = await hostFetch(`/threads/${target!.id}/comments`, {
+        method: "POST",
+        body: JSON.stringify({body: "No — the pty owns it and Close stops the copy.", author: "agent"}),
+    });
+    expect(reply.status).toBe(204);
+
+    await expect(pane).toContainText("No — the pty owns it", {timeout: 15_000});
+    await expect(pane).toContainText("agent");
 });
