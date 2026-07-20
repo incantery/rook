@@ -233,15 +233,18 @@ export class HostAPI {
     }
 
     /** The file picker's listing: git's view in repos, a bounded walk
-     *  elsewhere. */
-    async listFiles(ws: string): Promise<FilesResult> {
-        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/files`)).json();
+     *  elsewhere. `dir` (a shell's cwd) scopes it — vim's cwd experience;
+     *  join the response's base back onto a path to open it. */
+    async listFiles(ws: string, dir?: string): Promise<FilesResult> {
+        const params = new URLSearchParams(dir ? {dir} : {});
+        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/files?${params}`)).json();
     }
 
     /** Workspace-wide content search — `git grep` in repos (smart case,
-     *  regex with a literal fallback), a bounded walk elsewhere. */
-    async grep(ws: string, q: string): Promise<GrepResult> {
-        const params = new URLSearchParams({q});
+     *  regex with a literal fallback), a bounded walk elsewhere. `dir`
+     *  scopes it like listFiles. */
+    async grep(ws: string, q: string, dir?: string): Promise<GrepResult> {
+        const params = new URLSearchParams(dir ? {q, dir} : {q});
         return (await this.req(`/workspaces/${encodeURIComponent(ws)}/grep?${params}`)).json();
     }
 
@@ -478,12 +481,22 @@ export interface FileResult {
     content: string;
     binary?: boolean;
     truncated?: boolean;
+    /** absolute-path read outside the workspace (stdlib/deps) — read-only */
+    external?: boolean;
 }
 
 /** GET /workspaces/{ws}/files — repo-top-relative paths for the picker. */
 export interface FilesResult {
     files: string[];
     truncated?: boolean;
+    /** prepend to open a path: "" ws-relative, relative = subtree prefix,
+     *  absolute = outside the workspace (external read-only) */
+    base?: string;
+}
+
+/** base ? `${base}/${rel}` : rel — the scoped listings' open path. */
+export function joinBase(base: string | undefined, rel: string): string {
+    return base ? `${base}/${rel}` : rel;
 }
 
 /** One grep hit — 1-based editor coordinates, workspace-relative path. */
@@ -498,6 +511,8 @@ export interface GrepResult {
     hits: GrepHit[];
     truncated?: boolean;
     note?: string;
+    /** mirrors FilesResult.base — join onto a hit's path to open it */
+    base?: string;
 }
 
 /** One definition/reference hit. 1-based editor coordinates; path is

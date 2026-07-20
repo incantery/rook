@@ -4,15 +4,18 @@
 <script lang="ts">
     import {onMount} from "svelte";
     import {fuzzyRank, fuzzySegments} from "./fuzzy";
-    import type {HostAPI} from "./hostapi";
+    import {joinBase, type HostAPI} from "./hostapi";
     import {app} from "./state.svelte";
 
     interface Props {
         api: HostAPI;
+        /** the focused shell's cwd — scopes the listing (vim's experience);
+         *  undefined = the workspace root */
+        dir?: string;
         onopen: (path: string) => void;
         onclose: () => void;
     }
-    let {api, onopen, onclose}: Props = $props();
+    let {api, dir, onopen, onclose}: Props = $props();
 
     /** big repos list 10k paths — render only this many matches */
     const RENDER_CAP = 200;
@@ -20,6 +23,7 @@
     let query = $state("");
     let sel = $state(0);
     let files = $state<string[]>([]);
+    let base = $state("");
     let listTruncated = $state(false);
     let loaded = $state(false);
     let error = $state("");
@@ -28,8 +32,9 @@
 
     onMount(async () => {
         try {
-            const res = await api.listFiles(app.workspace);
+            const res = await api.listFiles(app.workspace, dir);
             files = res.files;
+            base = res.base ?? "";
             listTruncated = res.truncated ?? false;
         } catch (err) {
             console.error("file picker: list failed", err);
@@ -46,16 +51,25 @@
     // query and each ranks within itself; a buffer never repeats in the
     // tail. Ranking runs over the WHOLE list before the render cap, so the
     // best match can't be shadowed by 200 mediocre earlier paths.
-    const items = $derived.by((): {path: string; positions: number[]}[] => {
+    const items = $derived.by((): {path: string; full: string; positions: number[]}[] => {
         const q = query.trim();
         const open = fuzzyRank(q, app.buffers, RENDER_CAP);
+        // buffers hold FULL open paths; a scoped listing's names are
+        // base-relative — dedup and open on the joined form
         const openSet = new Set(open.map((r) => r.item));
         const rest = fuzzyRank(
             q,
-            files.filter((f) => !openSet.has(f)),
+            files.filter((f) => !openSet.has(joinBase(base, f))),
             RENDER_CAP - open.length,
         );
-        return [...open, ...rest].map((r) => ({path: r.item, positions: r.positions}));
+        return [
+            ...open.map((r) => ({path: r.item, full: r.item, positions: r.positions})),
+            ...rest.map((r) => ({
+                path: r.item,
+                full: joinBase(base, r.item),
+                positions: r.positions,
+            })),
+        ];
     });
     /** how many leading items are open buffers — the list draws the seam */
     const openCount = $derived(fuzzyRank(query.trim(), app.buffers, RENDER_CAP).length);
@@ -78,7 +92,7 @@
             sel = Math.max(sel - 1, 0);
         } else if (e.key === "Enter") {
             e.preventDefault();
-            pick(items[sel]?.path);
+            pick(items[sel]?.full);
         } else if (e.key === "Escape") {
             e.preventDefault();
             e.stopPropagation();
@@ -128,7 +142,7 @@
                     <span class="text-xs uppercase tracking-wider text-lo">no matching files</span>
                 </div>
             {/if}
-            {#each items as { path, positions }, i (path)}
+            {#each items as { path, full, positions }, i (full)}
                 {#if i === 0 && openCount > 0}
                     <div
                         class="px-3 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-wider text-lo"
@@ -152,7 +166,7 @@
                     class:sel={i === sel}
                     onmousedown={(e) => {
                         e.preventDefault();
-                        pick(path);
+                        pick(full);
                     }}
                     role="presentation"
                 >
@@ -173,8 +187,9 @@
             <span>↑↓ / ^j ^k navigate</span><span>↵ open</span>
             <span class="flex-1"></span>
             <span>
-                {files.length} files{listTruncated ? " (list truncated)" : ""}{items.length ===
-                RENDER_CAP
+                {#if base}<span class="text-acc">in {base}</span> ·
+                {/if}{files.length}
+                files{listTruncated ? " (list truncated)" : ""}{items.length === RENDER_CAP
                     ? " · keep typing to narrow"
                     : ""}
             </span>

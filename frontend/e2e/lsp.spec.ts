@@ -108,7 +108,14 @@ test("gd jumps across files and gr fills the refs quickfix", async ({page}) => {
     // the openFile ladder retargets the pane to the definition's file
     await expect(editorPath).toContainText("internal/plugin/plugin.go", {timeout: 20_000});
 
-    // gd landed the cursor ON CatalogEntry's definition — gr right here
+    // gd landed the cursor ON CatalogEntry's definition — K hovers it
+    await page.keyboard.press("Shift+K");
+    await expect(page.locator(".monaco-hover:not(.hidden)").first()).toBeVisible({
+        timeout: 20_000,
+    });
+    await page.keyboard.press("Escape");
+
+    // …and gr right here
     await page.keyboard.type("gr");
     const pane = page.locator('.side-pane[data-side="bottom"]');
     await expect(pane).toContainText("References", {timeout: 20_000});
@@ -122,6 +129,16 @@ test("gd jumps across files and gr fills the refs quickfix", async ({page}) => {
     await expect(editorPath).toContainText("internal/host/plugins.go", {timeout: 20_000});
     await page.keyboard.press("Control+i");
     await expect(editorPath).toContainText("internal/plugin/plugin.go", {timeout: 20_000});
+
+    // gd into the stdlib — the definition opens as an external read-only
+    // view (absolute path served by the file endpoint's external branch)
+    await page.locator(".editor-mount").click();
+    await page.keyboard.type("/strings.Fields");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("2w"); // land on Fields, not strings
+    await page.keyboard.type("gd");
+    await expect(editorPath).toContainText("external · read-only", {timeout: 20_000});
+    await expect(editorPath).toContainText("strings.go");
 
     await page.screenshot({path: "bin/e2e/lsp-refs.png", fullPage: true});
 });

@@ -2,20 +2,23 @@
      you type (git grep in repos), Enter opens the hit at its line and
      column. The file picker's shell, telescope's behavior. -->
 <script lang="ts">
-    import type {GrepHit, HostAPI} from "./hostapi";
+    import {joinBase, type GrepHit, type HostAPI} from "./hostapi";
     import {app} from "./state.svelte";
 
     interface Props {
         api: HostAPI;
+        /** the focused shell's cwd — scopes the search; undefined = root */
+        dir?: string;
         /** prefill (⌃S: the word under the editor's cursor); selected on
          *  focus so typing replaces it */
         seed?: string;
         onopen: (path: string, line: number, col: number) => void;
-        /** ⌃Q — telescope muscle memory: dump the hits into the quickfix */
+        /** ⌃Q — telescope muscle memory: dump the hits into the quickfix.
+         *  Paths arrive already joined (openable as-is). */
         onquickfix: (hits: GrepHit[], query: string) => void;
         onclose: () => void;
     }
-    let {api, seed = "", onopen, onquickfix, onclose}: Props = $props();
+    let {api, dir, seed = "", onopen, onquickfix, onclose}: Props = $props();
 
     /** one keystroke of quiet before the wire — live, not chatty */
     const DEBOUNCE_MS = 120;
@@ -28,6 +31,7 @@
     let query = $state(seed);
     let sel = $state(0);
     let hits = $state<GrepHit[]>([]);
+    let base = $state("");
     let truncated = $state(false);
     let note = $state("");
     let searching = $state(false);
@@ -53,9 +57,10 @@
         const mine = ++seq;
         timer = setTimeout(async () => {
             try {
-                const res = await api.grep(app.workspace, q);
+                const res = await api.grep(app.workspace, q, dir);
                 if (mine !== seq) return;
                 hits = res.hits;
+                base = res.base ?? "";
                 truncated = res.truncated ?? false;
                 note = res.note ?? "";
                 sel = 0;
@@ -75,7 +80,7 @@
     function pick(hit: GrepHit | undefined) {
         if (!hit) return;
         onclose();
-        onopen(hit.path, hit.line, hit.col);
+        onopen(joinBase(base, hit.path), hit.line, hit.col);
     }
 
     function onKeydown(e: KeyboardEvent) {
@@ -95,7 +100,10 @@
             e.preventDefault();
             if (hits.length === 0) return;
             onclose();
-            onquickfix(hits, query.trim());
+            onquickfix(
+                hits.map((h) => ({...h, path: joinBase(base, h.path)})),
+                query.trim(),
+            );
         } else if (e.key === "Escape") {
             e.preventDefault();
             e.stopPropagation();
@@ -176,10 +184,11 @@
             <span>↑↓ / ^j ^k navigate</span><span>↵ open at line</span><span>^q → quickfix</span>
             <span class="flex-1"></span>
             <span>
-                {#if searching}searching…{:else if hits.length > 0}{hits.length} hit{hits.length ===
-                    1
-                        ? ""
-                        : "s"}{truncated ? " · truncated — narrow the pattern" : ""}{/if}
+                {#if base}<span class="text-acc">in {base}</span>
+                {/if}{#if searching}searching…{:else if hits.length > 0}{hits.length}
+                    hit{hits.length === 1 ? "" : "s"}{truncated
+                        ? " · truncated — narrow the pattern"
+                        : ""}{/if}
             </span>
         </div>
     </div>

@@ -519,10 +519,15 @@
                 onReferences: showReferences,
                 onRecordJump: recordJump,
                 onJump: jumpNav,
-                // telescope muscle memory, editor-scoped (⌃P/⌃G/⌃S)
-                onFindFile: () => (app.filePickerOpen = true),
+                // telescope muscle memory, editor-scoped (⌃P/⌃G/⌃S) — no
+                // shell focused here, so the scope is the workspace root
+                onFindFile: () => {
+                    scopeDir = undefined;
+                    app.filePickerOpen = true;
+                },
                 onGrep: (seed) => {
                     grepSeed = seed ?? "";
+                    scopeDir = undefined;
                     app.grepOpen = true;
                 },
             });
@@ -548,8 +553,14 @@
             // ⌃O/⌃I traversal must not rewrite the history it walks
             if (opts?.recordJump !== false) recordJump();
             // …and an open investigation gets a breadcrumb (never during
-            // traversal — walking history must not rewrite the trail either)
-            if (opts?.recordJump !== false && opts?.recordVisit !== false) {
+            // traversal — walking history must not rewrite the trail either;
+            // never for external absolute paths — the trail anchors inside
+            // the workspace, and the visit endpoint confines)
+            if (
+                opts?.recordJump !== false &&
+                opts?.recordVisit !== false &&
+                !path.startsWith("/")
+            ) {
                 recordVisit(path, at?.line ?? 1, at?.col ?? 1);
             }
             touchBuffer(path);
@@ -725,15 +736,34 @@
      *  remounts per open, so the seed is read once at init. */
     let grepSeed = $state("");
 
+    /** The focused shell's cwd, resolved when a scoped surface opens — vim's
+     *  cwd experience: pickers and the explorer root where the shell stands.
+     *  undefined (no terminal focused, or the host can't say) = workspace
+     *  root, which is also the answer when the cwd IS the root. */
+    let scopeDir = $state<string | undefined>();
+    async function shellDir(): Promise<string | undefined> {
+        const id = mgr.focusedSessionId;
+        if (!id) return undefined;
+        try {
+            return (await api.sessionCwd(id)) || undefined;
+        } catch {
+            return undefined; // older host / dead session — fall back to root
+        }
+    }
+
     /** ` f — nvim's NvimTreeFindFile: open the explorer with its cursor on
      *  the file you're editing (last file pane, else newest buffer). */
     let explorerRef = $state<{revealPath: (path: string) => void} | null>(null);
+    /** the explorer's root — the shell's cwd when toggled open (` b),
+     *  reset to the workspace root by reveal (` f targets ws-relative) */
+    let explorerDir = $state<string | undefined>();
     async function revealInExplorer(): Promise<void> {
         const path = jumpPane?.position()?.path ?? app.buffers[0];
         if (!path) {
             flash("no file to reveal — open one first (` e)");
             return;
         }
+        explorerDir = undefined; // the target is workspace-relative
         app.explorerOpen = true;
         await tick(); // the pane mounts before the ref exists
         explorerRef?.revealPath(path);
@@ -1029,7 +1059,8 @@
             title: "Toggle file explorer",
             category: "View",
             keys: keymap.display("explorer.toggle"),
-            run: () => {
+            run: async () => {
+                if (!app.explorerOpen) explorerDir = await shellDir();
                 app.explorerOpen = !app.explorerOpen;
             },
         },
@@ -1154,7 +1185,8 @@
             title: "Open file (read-only)",
             category: "View",
             keys: keymap.display("file.open"),
-            run: () => {
+            run: async () => {
+                scopeDir = await shellDir();
                 app.filePickerOpen = true;
             },
         },
@@ -1163,8 +1195,9 @@
             title: "Grep workspace",
             category: "View",
             keys: keymap.display("grep.open"),
-            run: () => {
+            run: async () => {
                 grepSeed = ""; // a stale ⌃S seed must not leak into ` /
+                scopeDir = await shellDir();
                 app.grepOpen = true;
             },
         },
@@ -1224,6 +1257,11 @@
         "pane.focus-up",
         "pane.focus-down",
     ]);
+
+    /** Chords that resolve early like NAV and yield to a full-screen TUI the
+     *  same way: ⌃P/⌃G open the pickers from anywhere in the workbench, but
+     *  vim in a terminal keeps ⌃P completion and less keeps its keys. */
+    const TUI_YIELD: Set<string> = new Set(["file.open", "grep.open"]);
 
     /** Is this element somewhere text is being entered? Such a target keeps
      *  its own keys — we never steal from a caret. */
@@ -1324,7 +1362,7 @@
         // a side pane's text inputs keep them (⌃H is a backspace there).
         if (app.screen !== "home") {
             const nav = keymap.chords.get(sigOf(e));
-            if (nav && NAV.has(nav) && !(inSidePane && isTyping(tgt))) {
+            if (nav && (NAV.has(nav) || TUI_YIELD.has(nav)) && !(inSidePane && isTyping(tgt))) {
                 // A full-screen app in the focused terminal owns these — this
                 // is vim-tmux-navigator's is_vim check, read off the alternate
                 // screen buffer instead of grepping ps. Only the terminals
@@ -1628,6 +1666,7 @@
                 bind:this={explorerRef}
                 {api}
                 workspace={app.workspace}
+                dir={explorerDir}
                 active={app.focusZone === "left"}
                 onopen={(path) => void openFile(path)}
             />
@@ -1707,6 +1746,7 @@
 {#if app.filePickerOpen}
     <FilePicker
         {api}
+        dir={scopeDir}
         onopen={(path) => void openFile(path)}
         onclose={() => {
             app.filePickerOpen = false;
@@ -1717,6 +1757,7 @@
 {#if app.grepOpen}
     <GrepPicker
         {api}
+        dir={scopeDir}
         seed={grepSeed}
         onopen={(path, line, col) => void openFile(path, {line, col})}
         onquickfix={grepToQuickfix}

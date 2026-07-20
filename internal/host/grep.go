@@ -39,6 +39,9 @@ type grepHit struct {
 }
 
 type grepResult struct {
+	// Base mirrors filesResult.Base: what the client prepends to a hit's
+	// path to open it ("" = workspace-relative already).
+	Base      string    `json:"base,omitempty"`
 	Hits      []grepHit `json:"hits"`
 	Truncated bool      `json:"truncated"`
 	Note      string    `json:"note,omitempty"`
@@ -60,12 +63,20 @@ func (h *Host) handleWorkspaceGrep(w http.ResponseWriter, r *http.Request, name 
 		http.Error(w, "missing q", http.StatusBadRequest)
 		return
 	}
-	var res grepResult
-	if top, err := repoTop(ws.Root); err == nil {
-		res = gitGrep(top, q)
-	} else {
-		res = walkGrep(ws.Root, q)
+	top, err := repoTop(ws.Root)
+	if err != nil {
+		top = ws.Root
 	}
+	// ?dir= scopes the search to the shell's cwd — git grep run IN a subdir
+	// searches only below it and reports paths relative to it.
+	root, base := scopeRoot(top, r.URL.Query().Get("dir"))
+	var res grepResult
+	if _, err := repoTop(root); err == nil {
+		res = gitGrep(root, q)
+	} else {
+		res = walkGrep(root, q)
+	}
+	res.Base = base
 	writeJSON(w, res)
 }
 

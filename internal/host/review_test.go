@@ -2,6 +2,7 @@ package host
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -205,6 +206,39 @@ func TestReviewFileAndFiles(t *testing.T) {
 	}
 	reviewGET[fileResult](t, c, "/workspaces/src/file?path=missing.txt", 404)
 	reviewGET[fileResult](t, c, "/workspaces/src/file?path=../x", 400)
+
+	// ?dir= scopes the listing to a subtree: names relative to it, base set
+	os.MkdirAll(filepath.Join(repo, "sub"), 0o755)
+	os.WriteFile(filepath.Join(repo, "sub", "inner.txt"), []byte("i\n"), 0o644)
+	scoped := reviewGET[filesResult](t, c,
+		"/workspaces/src/files?dir="+url.QueryEscape(filepath.Join(repo, "sub")), 200)
+	if scoped.Base != "sub" || strings.Join(scoped.Files, " ") != "inner.txt" {
+		t.Fatalf("scoped files: %+v", scoped)
+	}
+
+	// a dir OUTSIDE the workspace lists from there with an absolute base
+	out := t.TempDir()
+	os.WriteFile(filepath.Join(out, "elsewhere.txt"), []byte("e\n"), 0o644)
+	ext2 := reviewGET[filesResult](t, c,
+		"/workspaces/src/files?dir="+url.QueryEscape(out), 200)
+	if ext2.Base != out || strings.Join(ext2.Files, " ") != "elsewhere.txt" {
+		t.Fatalf("external files: %+v", ext2)
+	}
+
+	// a bogus dir falls back to the workspace, never errors
+	fb := reviewGET[filesResult](t, c, "/workspaces/src/files?dir=%2Fno%2Fsuch%2Fdir", 200)
+	if fb.Base != "" || len(fb.Files) == 0 {
+		t.Fatalf("fallback files: %+v", fb)
+	}
+
+	// an absolute path is an external read-only view (gd into the stdlib)
+	ext := filepath.Join(t.TempDir(), "outside.go")
+	os.WriteFile(ext, []byte("package outside\n"), 0o644)
+	xres := reviewGET[fileResult](t, c, "/workspaces/src/file?path="+url.QueryEscape(ext), 200)
+	if xres.Content != "package outside\n" || !xres.External || xres.Path != ext {
+		t.Fatalf("external file: %+v", xres)
+	}
+	reviewGET[fileResult](t, c, "/workspaces/src/file?path=%2Fno%2Fsuch%2Fexternal.go", 404)
 
 	// repo listing: tracked + untracked, .gitignore respected
 	os.WriteFile(filepath.Join(repo, "loose.txt"), []byte("l\n"), 0o644)

@@ -136,4 +136,34 @@ test("telescope keys: editor ⌃P/⌃G/⌃S, grep ⌃Q → quickfix, ` f reveal"
     const cursorRow = page.locator('.side-pane[data-side="left"] [data-cursor="true"]');
     await expect(cursorRow).toBeVisible({timeout: 15_000});
     await expect(cursorRow).toContainText("grep.go");
+
+    // cwd scoping: cd into a subdir in the shell, and the pickers root there
+    // (the vim experience) — names shorten, opens still resolve ws-relative.
+    // The terminal lives in strip window 1 (the editor minted window 2) —
+    // switch via the strip button, the prefix is dropped inside side panes.
+    const stripOne = page.getByRole("button", {name: "1", exact: true});
+    await stripOne.click();
+    const term = shown(page, ".xterm-screen");
+    await term.click();
+    await page.keyboard.type("cd internal/host");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(800); // the host resolves cwd via lsof
+    await page.keyboard.press("Control+p");
+    await expect(picker).toBeVisible();
+    await expect(page.getByText("in internal/host")).toBeVisible({timeout: 15_000});
+    await picker.fill("grep.go");
+    // Enter, not a row click — the explorer (still open from ` f) also shows
+    // a "grep.go" text under the overlay's backdrop and steals the locator
+    await picker.press("Enter");
+    await expect(editorPath).toContainText("internal/host/grep.go", {timeout: 15_000});
+
+    await stripOne.click();
+    await term.click();
+    await page.keyboard.press("Control+g");
+    await expect(grepInput).toBeVisible();
+    await grepInput.fill("bounded walk-and-scan");
+    await expect(page.getByText("in internal/host")).toBeVisible({timeout: 15_000});
+    const scopedHit = page.getByText("grep.go:", {exact: false}).first();
+    await expect(scopedHit).toBeVisible({timeout: 15_000});
+    await page.keyboard.press("Escape");
 });

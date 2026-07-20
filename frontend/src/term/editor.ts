@@ -631,10 +631,17 @@ export class EditorPane implements PaneContent {
                 return;
             }
             // A whole file is editable; a truncated one stays read-only —
-            // saving its 2 MB prefix would erase everything past it.
-            this.editable = !res.truncated;
+            // saving its 2 MB prefix would erase everything past it. External
+            // (outside-workspace) reads are read-only by design: the write
+            // door confines to the workspace.
+            this.editable = !res.truncated && !res.external;
             this.pathEl.textContent =
-                path + (res.truncated ? " · truncated at 2 MB · read-only" : "");
+                path +
+                (res.truncated
+                    ? " · truncated at 2 MB · read-only"
+                    : res.external
+                      ? " · external · read-only"
+                      : "");
             this.clearStatus();
             this.disposeModels();
             const model = m.editor.createModel(res.content, undefined, this.uri(path));
@@ -863,10 +870,8 @@ export class EditorPane implements PaneContent {
                 this.opts.onFlash(res.note ?? "no definition found");
                 return;
             }
-            if (loc.external) {
-                this.opts.onFlash(`definition outside the workspace: ${loc.path}:${loc.startLine}`);
-                return;
-            }
+            // external (stdlib/deps) rides the same ladder — loc.path is
+            // absolute there and the file surface serves it read-only
             if (loc.path === this.opts.path) {
                 // same-file jumps never reach openFile — record here
                 this.opts.onRecordJump?.();
@@ -902,9 +907,12 @@ export class EditorPane implements PaneContent {
         }
     }
 
-    /** K — Monaco's hover widget at the cursor; the provider does the fetch. */
+    /** K — Monaco's hover widget at the cursor; the provider does the fetch.
+     *  Deferred a tick: the hover controller hides on any keydown that isn't
+     *  a hover shortcut, so triggering inside K's own keystroke shows a hover
+     *  the same event then kills. */
     showHover(): void {
-        this.editor?.trigger("rook", "editor.action.showHover", {});
+        setTimeout(() => this.editor?.trigger("rook", "editor.action.showHover", {}), 0);
     }
 
     /** The hover provider's callback (module-level, routed here by model). */

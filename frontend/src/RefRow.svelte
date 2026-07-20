@@ -16,6 +16,6 @@
     >
     <span class="min-w-0 flex-1 truncate font-mono text-[10px] text-lo">{h.text}</span>
     {#if h.external}
-        <span class="shrink-0 text-[9px] text-amber">outside workspace</span>
+        <span class="shrink-0 text-[9px] text-lo">external · read-only</span>
     {/if}
 {/if}

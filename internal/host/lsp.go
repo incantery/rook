@@ -316,10 +316,21 @@ func (h *Host) handleLSPQuery(w http.ResponseWriter, r *http.Request, name, verb
 		http.Error(w, "bad body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	abs, err := confinePath(top, req.Path)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	// An absolute path is a query FROM an external file (gd landed in the
+	// stdlib and the user keeps digging). It rides the WORKSPACE's instance —
+	// the server that produced those locations already has them open; walking
+	// root markers up from GOROOT would mint a second instance for nothing.
+	external := strings.HasPrefix(req.Path, "/")
+	var abs string
+	if external {
+		abs = filepath.Clean(req.Path)
+	} else {
+		var err error
+		abs, err = confinePath(top, req.Path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	specs, _ := plugin.Resolve(config.LoadWorkspace(top), h.pm)
 	spec := specFor(specs, req.Path)
@@ -327,7 +338,11 @@ func (h *Host) handleLSPQuery(w http.ResponseWriter, r *http.Request, name, verb
 		h.lspEmpty(w, verb, "no language server configured for ."+strings.TrimPrefix(filepath.Ext(req.Path), "."))
 		return
 	}
-	client, note := h.lm.instance(*spec, lspRoot(abs, top, spec.Roots))
+	root := top
+	if !external {
+		root = lspRoot(abs, top, spec.Roots)
+	}
+	client, note := h.lm.instance(*spec, root)
 	if client == nil {
 		h.lspEmpty(w, verb, note)
 		return
@@ -349,6 +364,7 @@ func (h *Host) handleLSPQuery(w http.ResponseWriter, r *http.Request, name, verb
 		writeJSON(w, res)
 	default:
 		var locs []lsp.Location
+		var err error
 		if verb == "definition" {
 			locs, err = client.Definition(ctx, abs, pos)
 		} else {

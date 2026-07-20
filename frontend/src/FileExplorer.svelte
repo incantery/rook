@@ -31,11 +31,15 @@
     let {
         api,
         workspace,
+        dir,
         active,
         onopen,
     }: {
         api: HostAPI;
         workspace: string;
+        /** the focused shell's cwd — roots the tree there (vim's experience);
+         *  undefined = the workspace root */
+        dir?: string;
         /** the workbench's focus zone is this pane — take the keyboard */
         active: boolean;
         onopen: (path: string) => void;
@@ -63,6 +67,10 @@
     let git = $state<GitInfo | null>(null);
     let threads = $state<Map<string, number>>(new Map());
     let scope = $state<ExplorerScope>("all");
+    /** the scoped listing's prefix — node paths are relative to it; join to
+     *  open, and to look up ws-relative decorations (statuses, threads) */
+    let base = $state("");
+    const fullOf = (p: string) => (base ? `${base}/${p}` : p);
     // directory paths that are expanded; reassigned (not mutated) so $state tracks it
     let expanded = $state<Set<string>>(new Set());
     // the dir set we last auto-expanded for; guards the seed from re-running
@@ -79,11 +87,12 @@
             // decoration: settle() them so a non-git or thread-less
             // workspace degrades to a plain tree instead of an error.
             const [files, ch, th] = await Promise.all([
-                api.listFiles(ws),
+                api.listFiles(ws, dir),
                 api.changes(ws).catch(() => null),
                 api.threads(ws).catch(() => []),
             ]);
             tree = buildFileTree(files.files);
+            base = files.base ?? "";
             truncated = files.truncated ?? false;
             changed = ch?.files ?? [];
             threads = threadCounts(th);
@@ -107,14 +116,17 @@
         }
     }
 
-    // (re)load on mount and whenever the workspace changes
+    // (re)load on mount and whenever the workspace or the scope dir changes
     $effect(() => {
+        void dir;
         void load(workspace);
     });
 
     const statuses = $derived(statusMap(changed));
     const counts = $derived(changeCounts(changed));
-    const shown = $derived(scope === "changed" ? pruneToChanged(tree, statuses) : tree);
+    // a scoped (cwd-rooted) tree is exploration — statuses key ws-relative
+    // paths so the Changed scope only exists at the workspace root
+    const shown = $derived(scope === "changed" && !base ? pruneToChanged(tree, statuses) : tree);
     /** exactly the rows on screen, in order — what j/k walk */
     const rows = $derived(flattenVisible(shown, expanded));
 
@@ -171,14 +183,14 @@
                 // a closed directory opens; an open one steps into its first
                 // child; a file opens in an editor pane
                 if (!row) break;
-                if (!row.node.dir) onopen(row.node.path);
+                if (!row.node.dir) onopen(fullOf(row.node.path));
                 else if (!expanded.has(row.node.path)) toggle(row.node.path);
                 else moveTo(cursorAt + 1);
                 break;
             case "Enter":
                 if (!row) break;
                 if (row.node.dir) toggle(row.node.path);
-                else onopen(row.node.path);
+                else onopen(fullOf(row.node.path));
                 break;
             case "g":
                 moveTo(0);
@@ -220,8 +232,16 @@
     }
     $effect(() => {
         if (loading || pendingReveal == null) return;
-        const path = pendingReveal;
+        const full = pendingReveal;
         pendingReveal = null;
+        // a scoped tree holds base-relative names; a target outside the
+        // scope can't be revealed here (the caller resets the scope first)
+        const path = base
+            ? full.startsWith(base + "/")
+                ? full.slice(base.length + 1)
+                : null
+            : full;
+        if (path == null) return;
         // the Changed scope may not hold this file — widen rather than strand
         if (scope === "changed" && !statuses.has(path)) scope = "all";
         const dirs: string[] = [];
@@ -248,8 +268,15 @@
         >
     </div>
 
-    <!-- scope + rollup: only meaningful once we know the diff -->
-    {#if changed.length > 0}
+    {#if base}
+        <div class="shrink-0 border-b border-line/15 px-2 py-1 font-mono text-[10px] text-acc">
+            in {base}
+        </div>
+    {/if}
+
+    <!-- scope + rollup: only meaningful once we know the diff (and only at
+         the workspace root — a scoped tree's statuses key differently) -->
+    {#if changed.length > 0 && !base}
         <div class="flex shrink-0 items-center gap-1.5 border-b border-line/15 px-2 py-1.5">
             {#each SCOPES as [id, label] (id)}
                 <button
@@ -319,9 +346,9 @@
      focus, and fades to a faint outline when it doesn't: it must stay findable
      (you left it there) without competing with the real focus. -->
 {#snippet row(node: FileNode, depth: number)}
-    {@const status = statuses.get(node.path)}
+    {@const status = statuses.get(fullOf(node.path))}
     {@const meta = status ? statusMeta(status) : null}
-    {@const count = threads.get(node.path) ?? 0}
+    {@const count = threads.get(fullOf(node.path)) ?? 0}
     {@const on = cursor === node.path}
     <div
         class={"flex w-full cursor-pointer items-center gap-1 border-l-2 py-0.5 pr-2 text-left font-mono text-xs " +
@@ -340,7 +367,7 @@
         onclick={() => {
             cursor = node.path;
             if (node.dir) toggle(node.path);
-            else onopen(node.path);
+            else onopen(fullOf(node.path));
         }}
         onkeydown={() => {}}
     >

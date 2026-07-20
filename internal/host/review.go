@@ -71,6 +71,41 @@ func repoTop(root string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// scopeRoot resolves an optional ?dir= (the focused shell's cwd) against the
+// workspace: the effective listing root, and the base prefix the client
+// re-joins to open a hit. base "" = the workspace itself (paths stay
+// workspace-relative); a relative base = a subtree inside it; an absolute
+// base = a dir outside the workspace (opens ride the external read-only
+// door). A bad dir falls back to the workspace — scoping is a convenience,
+// never an error.
+func scopeRoot(top, dir string) (root, base string) {
+	if dir == "" || !filepath.IsAbs(dir) {
+		return top, ""
+	}
+	dir = filepath.Clean(dir)
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return top, ""
+	}
+	// Compare RESOLVED paths: a shell's cwd often spells a symlink (macOS
+	// /var → /private/var) while git reports the real top — a literal Rel
+	// would misfile a subtree as outside the workspace.
+	rTop, rDir := top, dir
+	if p, err := filepath.EvalSymlinks(top); err == nil {
+		rTop = p
+	}
+	if p, err := filepath.EvalSymlinks(dir); err == nil {
+		rDir = p
+	}
+	rel, err := filepath.Rel(rTop, rDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return dir, dir
+	}
+	if rel == "." {
+		return top, ""
+	}
+	return dir, filepath.ToSlash(rel)
+}
+
 // confinePath resolves a client-supplied repo-relative path to an absolute
 // one, rejecting anything that would land outside top.
 func confinePath(top, rel string) (string, error) {
@@ -119,9 +154,15 @@ type fileResult struct {
 	Content   string `json:"content"`
 	Binary    bool   `json:"binary,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
+	// External marks an absolute-path read (stdlib/deps) — always read-only.
+	External bool `json:"external,omitempty"`
 }
 
 type filesResult struct {
+	// Base is what the client prepends to open a listed path: "" = paths
+	// are workspace-relative; relative = a subtree prefix inside the
+	// workspace; absolute = an outside-the-workspace dir (external reads).
+	Base      string   `json:"base,omitempty"`
 	Files     []string `json:"files"`
 	Truncated bool     `json:"truncated,omitempty"`
 }
@@ -405,6 +446,23 @@ func (h *Host) handleWorkspaceFile(w http.ResponseWriter, r *http.Request, name 
 		top = ws.Root
 	}
 	rel := r.URL.Query().Get("path")
+	// An absolute path is an EXTERNAL read: gd into the stdlib or a module
+	// cache lands outside the repo, and a labeled dead end helps nobody.
+	// Read-only by construction — the write door still confines to the
+	// workspace. Not an escalation: this API already spawns shells as this
+	// user; a read-only view of user-readable files is strictly weaker.
+	if strings.HasPrefix(rel, "/") {
+		abs := filepath.Clean(rel)
+		b, err := os.ReadFile(abs)
+		if err != nil {
+			http.Error(w, "no such file: "+rel, http.StatusNotFound)
+			return
+		}
+		res := fileResult{Path: abs, External: true}
+		res.Content, res.Binary, res.Truncated = capSide(b)
+		writeJSON(w, res)
+		return
+	}
 	abs, err := confinePath(top, rel)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -495,7 +553,7 @@ func atomicWrite(abs string, data []byte) error {
 // list. Repos get git's view (tracked + untracked, ignores respected);
 // anything else falls back to a bounded WalkDir so ` e works in every
 // workspace.
-func (h *Host) handleWorkspaceFiles(w http.ResponseWriter, name string) {
+func (h *Host) handleWorkspaceFiles(w http.ResponseWriter, r *http.Request, name string) {
 	ws := h.reg.get(name)
 	if ws == nil {
 		http.Error(w, "no such workspace: "+name, http.StatusNotFound)
@@ -505,14 +563,22 @@ func (h *Host) handleWorkspaceFiles(w http.ResponseWriter, name string) {
 		http.Error(w, "workspace has no root", http.StatusBadRequest)
 		return
 	}
-	if top, err := repoTop(ws.Root); err == nil {
-		out, err := gitOut(top, reviewTimeout, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+	top, err := repoTop(ws.Root)
+	if err != nil {
+		top = ws.Root
+	}
+	// ?dir= scopes the listing to the shell's cwd (the vim experience). Git
+	// run IN a subdir already lists relative to it and only below it — the
+	// effective root just moves.
+	root, base := scopeRoot(top, r.URL.Query().Get("dir"))
+	if _, err := repoTop(root); err == nil {
+		out, err := gitOut(root, reviewTimeout, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		res := filesResult{Files: []string{}}
-		for _, f := range strings.Split(string(out), "\x00") {
+		res := filesResult{Files: []string{}, Base: base}
+		for f := range strings.SplitSeq(string(out), "\x00") {
 			if f == "" {
 				continue
 			}
@@ -525,8 +591,8 @@ func (h *Host) handleWorkspaceFiles(w http.ResponseWriter, name string) {
 		writeJSON(w, res)
 		return
 	}
-	files, truncated := walkFiles(ws.Root, reviewMaxWalked)
-	writeJSON(w, filesResult{Files: files, Truncated: truncated})
+	files, truncated := walkFiles(root, reviewMaxWalked)
+	writeJSON(w, filesResult{Files: files, Truncated: truncated, Base: base})
 }
 
 // walkFiles lists a non-repo root: hidden entries and node_modules are

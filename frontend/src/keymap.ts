@@ -68,6 +68,10 @@ export const DEFAULTS: [string, string][] = [
     ["z", "pane.zoom"],
     // the Monaco panes: review diff and read-only file viewer
     ["g", "review.changes"],
+    // telescope muscle memory, workbench-wide — a full-screen TUI keeps
+    // them (vim's ⌃P completion), same yield as the navigator chords
+    ["ctrl+p", "file.open"],
+    ["ctrl+g", "grep.open"],
     ["e", "file.open"],
     ["/", "grep.open"],
     ["i", "explore.trail"],

@@ -37,6 +37,14 @@ func TestGrepRepo(t *testing.T) {
 		t.Errorf("loose.txt hit: %+v", g)
 	}
 
+	// ?dir= scopes the search to a subtree: only its hits, paths relative
+	// to it, base set for the client's re-join
+	scoped := reviewGET[grepResult](t, c,
+		"/workspaces/src/grep?q=needlefunc&dir="+url.QueryEscape(filepath.Join(repo, "sub")), 200)
+	if scoped.Base != "sub" || len(scoped.Hits) != 1 || scoped.Hits[0].Path != "loose.txt" {
+		t.Fatalf("scoped grep: base=%q hits=%+v", scoped.Base, scoped.Hits)
+	}
+
 	// uppercase in the query turns case sensitivity back on
 	res = grepGET(t, c, "src", "NeedleFunc", 200)
 	if len(res.Hits) != 1 || res.Hits[0].Path != "alpha.go" {

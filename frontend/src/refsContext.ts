@@ -45,10 +45,8 @@ export function makeRefsContext(deps: {
                 run: (id) => {
                     const h = app.refHits.find((r) => r.id === id);
                     if (!h) return;
-                    if (h.external) {
-                        deps.flash(`outside the workspace: ${h.path}:${h.line}`);
-                        return;
-                    }
+                    // external hits carry absolute paths; the file surface
+                    // serves them read-only through the same ladder
                     deps.open(h.path, h.line, h.col);
                 },
             },
