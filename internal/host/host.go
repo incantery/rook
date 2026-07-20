@@ -28,6 +28,7 @@ import (
 	cpty "github.com/creack/pty"
 
 	"github.com/incantery/rook/internal/config"
+	"github.com/incantery/rook/internal/plugin"
 	"github.com/incantery/rook/internal/version"
 )
 
@@ -106,6 +107,12 @@ type Host struct {
 	// wfMu serializes workflow advancement (see advanceWorkflow).
 	wfMu sync.Mutex
 
+	// The plugin substrate (internal/plugin) and its language-type
+	// runtime: pm materializes catalog plugins into the data prefix, lm
+	// owns live LSP server instances (lsp.go, plugins.go).
+	pm *plugin.Manager
+	lm *lspManager
+
 	// Lifecycle root for supervised children (agentmon, and rook-agent via
 	// SuperviseAgent when callers pass Done()'s context). Shutdown cancels
 	// it — child processes must die with the host, or every daemon
@@ -136,8 +143,10 @@ func New() *Host {
 		drafts:   make(map[string]draftInfo),
 		um:       newUsageMon(),
 		prm:      newPRMon(),
+		pm:       plugin.NewManager(filepath.Join(DataDir(), "plugins")),
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
+	h.lm = newLSPManager(h.ctx, h.pm)
 	// Manual-attribution + stale-ask hooks: the transcript is the ground
 	// truth for what actually got answered (see onUserReply).
 	h.aw.onUserReply = h.onUserReply
@@ -379,6 +388,9 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/threads/", h.handleThread)
 	// per-task verbs (RookTask) — global ids, same as threads
 	mux.HandleFunc("/tasks/", h.handleTask)
+	// plugin lifecycle (plugins.go) — the catalog, install/upgrade verbs
+	mux.HandleFunc("/plugins", h.handlePlugins)
+	mux.HandleFunc("/plugins/", h.handlePlugins)
 	mux.HandleFunc("/agent/spend", h.handleSpend)
 	mux.HandleFunc("/decisions", h.handleDecisions)
 	mux.HandleFunc("/runtime", h.handleRuntime)
@@ -641,6 +653,9 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleThreadsSubmit(w, r, name)
 	case action == "threads":
 		h.handleWorkspaceThreads(w, r, name)
+	// language servers (lsp.go) — the exploration queries + runtime status
+	case strings.HasPrefix(action, "lsp/"):
+		h.handleWorkspaceLSP(w, r, name, strings.TrimPrefix(action, "lsp/"))
 	// review work-type over RookTask (reviewtasks.go / tasksapi.go)
 	case action == "review" && r.Method == http.MethodPost:
 		h.handleWorkspaceReview(w, r, name)
