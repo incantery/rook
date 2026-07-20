@@ -7,17 +7,25 @@
 
     interface Props {
         api: HostAPI;
+        /** prefill (⌃S: the word under the editor's cursor); selected on
+         *  focus so typing replaces it */
+        seed?: string;
         onopen: (path: string, line: number, col: number) => void;
+        /** ⌃Q — telescope muscle memory: dump the hits into the quickfix */
+        onquickfix: (hits: GrepHit[], query: string) => void;
         onclose: () => void;
     }
-    let {api, onopen, onclose}: Props = $props();
+    let {api, seed = "", onopen, onquickfix, onclose}: Props = $props();
 
     /** one keystroke of quiet before the wire — live, not chatty */
     const DEBOUNCE_MS = 120;
     /** single chars match half the repo — wait for two */
     const MIN_QUERY = 2;
 
-    let query = $state("");
+    // the picker remounts per open, so reading the seed once at init is the
+    // point — later seed changes belong to the NEXT open
+    // svelte-ignore state_referenced_locally
+    let query = $state(seed);
     let sel = $state(0);
     let hits = $state<GrepHit[]>([]);
     let truncated = $state(false);
@@ -83,6 +91,11 @@
         } else if (e.key === "Enter") {
             e.preventDefault();
             pick(hits[sel]);
+        } else if (e.ctrlKey && e.key === "q") {
+            e.preventDefault();
+            if (hits.length === 0) return;
+            onclose();
+            onquickfix(hits, query.trim());
         } else if (e.key === "Escape") {
             e.preventDefault();
             e.stopPropagation();
@@ -92,6 +105,7 @@
 
     $effect(() => {
         inputEl.focus();
+        if (seed) inputEl.select();
     });
     $effect(() => {
         void sel;
@@ -159,7 +173,7 @@
         <div
             class="flex items-center gap-4 border-t border-line/15 px-4 py-2 font-mono text-xs text-lo"
         >
-            <span>↑↓ / ^j ^k navigate</span><span>↵ open at line</span>
+            <span>↑↓ / ^j ^k navigate</span><span>↵ open at line</span><span>^q → quickfix</span>
             <span class="flex-1"></span>
             <span>
                 {#if searching}searching…{:else if hits.length > 0}{hits.length} hit{hits.length ===

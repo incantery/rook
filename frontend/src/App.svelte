@@ -519,6 +519,12 @@
                 onReferences: showReferences,
                 onRecordJump: recordJump,
                 onJump: jumpNav,
+                // telescope muscle memory, editor-scoped (⌃P/⌃G/⌃S)
+                onFindFile: () => (app.filePickerOpen = true),
+                onGrep: (seed) => {
+                    grepSeed = seed ?? "";
+                    app.grepOpen = true;
+                },
             });
             editorPanes.set(leafId, pane);
             return pane;
@@ -710,8 +716,44 @@
     });
     function showReferences(locations: import("./hostapi").LspLocation[]): void {
         app.refHits = toRefHits(locations);
+        app.refTitle = "References";
         qf.set(refsCtx);
         qf.listOpen = true;
+    }
+
+    /** ⌃S seeds the grep picker with the word under the cursor; the picker
+     *  remounts per open, so the seed is read once at init. */
+    let grepSeed = $state("");
+
+    /** ` f — nvim's NvimTreeFindFile: open the explorer with its cursor on
+     *  the file you're editing (last file pane, else newest buffer). */
+    let explorerRef = $state<{revealPath: (path: string) => void} | null>(null);
+    async function revealInExplorer(): Promise<void> {
+        const path = jumpPane?.position()?.path ?? app.buffers[0];
+        if (!path) {
+            flash("no file to reveal — open one first (` e)");
+            return;
+        }
+        app.explorerOpen = true;
+        await tick(); // the pane mounts before the ref exists
+        explorerRef?.revealPath(path);
+        app.focusZone = "left";
+    }
+
+    // grep ⌃Q — the picker's hits become the location list (same context as
+    // gr; vim: the last producer owns it). The picker closes itself first.
+    function grepToQuickfix(hits: import("./hostapi").GrepHit[], query: string): void {
+        app.refHits = hits.map((h, i) => ({
+            id: i + 1,
+            path: h.path,
+            line: h.line,
+            col: h.col,
+            text: h.text,
+        }));
+        app.refTitle = `Grep — ${query}`;
+        qf.set(refsCtx);
+        qf.listOpen = true;
+        app.focusZone = "bottom"; // ⌃Q asked for the list — hand it the keyboard
     }
 
     async function spawn(task: string, workspace: string, worktree: boolean): Promise<void> {
@@ -992,6 +1034,13 @@
             },
         },
         {
+            id: "explorer.reveal",
+            title: "Explorer: reveal current file",
+            category: "View",
+            keys: keymap.display("explorer.reveal"),
+            run: () => void revealInExplorer(),
+        },
+        {
             id: "review.toggle",
             title: "Toggle review pane",
             category: "View",
@@ -1115,6 +1164,7 @@
             category: "View",
             keys: keymap.display("grep.open"),
             run: () => {
+                grepSeed = ""; // a stale ⌃S seed must not leak into ` /
                 app.grepOpen = true;
             },
         },
@@ -1575,6 +1625,7 @@
             onclose={() => (app.explorerOpen = false)}
         >
             <FileExplorer
+                bind:this={explorerRef}
                 {api}
                 workspace={app.workspace}
                 active={app.focusZone === "left"}
@@ -1666,9 +1717,12 @@
 {#if app.grepOpen}
     <GrepPicker
         {api}
+        seed={grepSeed}
         onopen={(path, line, col) => void openFile(path, {line, col})}
+        onquickfix={grepToQuickfix}
         onclose={() => {
             app.grepOpen = false;
+            grepSeed = "";
             focusBack();
         }}
     />

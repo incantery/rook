@@ -210,6 +210,30 @@
         if (!next.delete(path)) next.add(path);
         expanded = next;
     }
+
+    // Reveal (nvim's NvimTreeFindFile, ` f): expand down to the file and put
+    // the cursor on it. Deferred through state because the first reveal can
+    // race the initial load — the effect applies it once the tree is here.
+    let pendingReveal = $state<string | null>(null);
+    export function revealPath(path: string): void {
+        pendingReveal = path;
+    }
+    $effect(() => {
+        if (loading || pendingReveal == null) return;
+        const path = pendingReveal;
+        pendingReveal = null;
+        // the Changed scope may not hold this file — widen rather than strand
+        if (scope === "changed" && !statuses.has(path)) scope = "all";
+        const dirs: string[] = [];
+        for (let p = parentPath(path); p; p = parentPath(p)) dirs.push(p);
+        expanded = new Set([...expanded, ...dirs]);
+        cursor = path;
+        queueMicrotask(() =>
+            treeEl
+                ?.querySelector('[data-cursor="true"]')
+                ?.scrollIntoView({block: "center", behavior: "instant"}),
+        );
+    });
 </script>
 
 <div class="flex h-full min-h-0 flex-col">

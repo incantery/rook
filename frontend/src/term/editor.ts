@@ -65,8 +65,42 @@ async function loadVim(): Promise<VimLib> {
             vim.defineAction("rookJumpForward", (cm) => paneOf(cm)?.jump("forward"));
             vim.mapCommand("<C-o>", "action", "rookJumpBack", {}, {context: "normal"});
             vim.mapCommand("<C-i>", "action", "rookJumpForward", {}, {context: "normal"});
+            // ⌃P/⌃G/⌃S — telescope muscle memory, scoped to the editor so
+            // terminals keep shell history (⌃P) and flow control (⌃S).
+            vim.defineAction("rookFindFile", (cm) => paneOf(cm)?.findFile());
+            vim.defineAction("rookGrep", (cm) => paneOf(cm)?.openGrep());
+            vim.defineAction("rookGrepWord", (cm) => {
+                const p = paneOf(cm);
+                p?.openGrep(p.wordAtCursor() ?? undefined);
+            });
+            vim.mapCommand("<C-p>", "action", "rookFindFile", {}, {context: "normal"});
+            vim.mapCommand("<C-g>", "action", "rookGrep", {}, {context: "normal"});
+            vim.mapCommand("<C-s>", "action", "rookGrepWord", {}, {context: "normal"});
         } catch (err) {
             console.warn("editor pane: vim lsp maps unavailable:", err);
+        }
+        // clipboard=unnamedplus, write side: any yank/delete/change into the
+        // unnamed register mirrors to the system clipboard. The read side (p
+        // pasting FROM other apps) stays vim-internal — navigator.clipboard
+        // reads are async and permission-gated, so they can't back a register.
+        try {
+            const vim = (vimLib.VimMode as unknown as {Vim: VimApi}).Vim;
+            const rc = vim.getRegisterController();
+            const proto = Object.getPrototypeOf(rc) as {
+                pushText(name: unknown, op: string, text: string, ...rest: unknown[]): unknown;
+            };
+            const orig = proto.pushText;
+            proto.pushText = function (name, op, text, ...rest) {
+                // named registers ("ay, and internal "0 pushes) opt out
+                if (name == null || name === "" || name === "+") {
+                    const linewise = rest[0] === true;
+                    const t = linewise && !text.endsWith("\n") ? text + "\n" : text;
+                    void navigator.clipboard?.writeText(t).catch(() => {});
+                }
+                return orig.call(this, name, op, text, ...rest);
+            };
+        } catch (err) {
+            console.warn("editor pane: clipboard mirror unavailable:", err);
         }
         exCommandsDefined = true;
     }
@@ -85,6 +119,7 @@ interface VimApi {
         args?: object,
         extra?: {context?: string},
     ): void;
+    getRegisterController(): object;
 }
 
 // ---- LSP: hover provider + the model→pane bridge ----
@@ -163,6 +198,11 @@ export interface EditorPaneOpts {
     onRecordJump?: () => void;
     /** ⌃O/⌃I — chrome owns the jumplist and drives the openFile ladder */
     onJump?: (dir: "back" | "forward") => void;
+    /** ⌃P — open chrome's file picker */
+    onFindFile?: () => void;
+    /** ⌃G/⌃S — open chrome's grep picker, seeded with the word under the
+     *  cursor when ⌃S asked for it */
+    onGrep?: (seed?: string) => void;
 }
 
 /** How stale a review may be before a re-focus refetches it. */
@@ -778,6 +818,22 @@ export class EditorPane implements PaneContent {
         this.opts.onJump?.(dir);
     }
 
+    /** ⌃P — chrome's file picker; the pane just rings the bell. */
+    findFile(): void {
+        this.opts.onFindFile?.();
+    }
+
+    /** ⌃G / ⌃S — chrome's grep picker, optionally seeded (word under cursor). */
+    openGrep(seed?: string): void {
+        this.opts.onGrep?.(seed);
+    }
+
+    wordAtCursor(): string | null {
+        const pos = this.editor?.getPosition();
+        if (!pos) return null;
+        return this.editor?.getModel()?.getWordAtPosition(pos)?.word ?? null;
+    }
+
     private lspFail(what: string, err: unknown): void {
         const msg = String(err);
         this.opts.onFlash(
@@ -1034,7 +1090,13 @@ export class EditorPane implements PaneContent {
 
     private ensureEditor(): monacoTypes.editor.IStandaloneCodeEditor {
         if (!this.editor) {
-            this.editor = this.monaco!.editor.create(this.mount, this.editorOpts());
+            this.editor = this.monaco!.editor.create(this.mount, {
+                ...this.editorOpts(),
+                // vim motions count lines relative to the cursor (5j); the
+                // cursor line shows its absolute number. File pane only —
+                // the diff stays absolute, its numbers are read, not jumped.
+                lineNumbers: "relative",
+            });
             this.addCommentAction(this.editor);
             this.editor.onDidFocusEditorText(() => this.activate());
             // ⌘S saves from any mode, so non-vim users get a save too; the

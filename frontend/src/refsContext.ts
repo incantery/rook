@@ -1,8 +1,10 @@
-// gr's result list as a quickfix context — the second tenant, and the first
-// list-shaped surface fed by the editor island. Rows are grep-shaped hits in
-// the app store (app.refHits); the one verb jumps the editor there through
-// the openFile ladder. External hits (stdlib/deps) are labeled dead ends
-// until the file surface can serve outside-workspace paths.
+// The location list as a quickfix context — the second tenant, and the first
+// list-shaped surface fed by the editor island. Two producers fill it (vim:
+// the last one owns the list): gr's references and the grep picker's ⌃Q.
+// Rows are grep-shaped hits in the app store (app.refHits); the one verb
+// jumps the editor there through the openFile ladder. External hits
+// (stdlib/deps) are labeled dead ends until the file surface can serve
+// outside-workspace paths.
 
 import RefRow from "./RefRow.svelte";
 import type {LspLocation} from "./hostapi";
@@ -27,7 +29,9 @@ export function makeRefsContext(deps: {
 }): QfContext {
     return {
         id: "refs",
-        title: "References",
+        get title() {
+            return app.refTitle;
+        },
         ids: () => app.refHits.map((h) => h.id),
         Row: RefRow,
         Header: null,
@@ -50,6 +54,6 @@ export function makeRefsContext(deps: {
             },
         ],
         hint: "o open",
-        empty: "No references here — gr on a symbol fills this list.",
+        empty: "Nothing here — gr on a symbol or ⌃Q in grep fills this list.",
     };
 }

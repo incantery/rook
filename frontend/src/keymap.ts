@@ -73,6 +73,7 @@ export const DEFAULTS: [string, string][] = [
     ["i", "explore.trail"],
     ["t", "threads.toggle"],
     ["b", "explorer.toggle"],
+    ["f", "explorer.reveal"],
     ["cmd+d", "pane.split-right"],
     ["cmd+shift+d", "pane.split-down"],
 ];

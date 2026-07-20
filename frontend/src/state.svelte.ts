@@ -77,10 +77,12 @@ class AppState {
         return this.reviewRoot?.children ?? [];
     }
 
-    /** The last gr result — the refs quickfix context's data (vim semantics:
-     *  the last producer owns the list; a new gr replaces it wholesale). Ids
-     *  are 1-based positions in this array, minted at fill time. */
+    /** The last location list — the refs quickfix context's data (vim
+     *  semantics: the last producer owns the list; a new gr or a grep ⌃Q
+     *  replaces it wholesale). Ids are 1-based positions in this array,
+     *  minted at fill time. refTitle names the producer for the list header. */
     refHits = $state<RefHit[]>([]);
+    refTitle = $state("References");
 
     /** The ACTIVE investigation (explore root, children = the breadcrumb
      *  trail) — while one is open, every navigation through the opener seam
