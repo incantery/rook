@@ -238,6 +238,42 @@ export class HostAPI {
         return (await this.req(`/workspaces/${encodeURIComponent(ws)}/files`)).json();
     }
 
+    /** Language-server queries (definition/references), host-spoken LSP.
+     *  Positions are 1-based editor coordinates both ways. `text` carries
+     *  the dirty buffer so unsaved code resolves; omitted = disk. Everything
+     *  not-ready comes back as empty locations + a note (fail open) — and a
+     *  404 means an old daemon, which callers treat the same way. */
+    async lspQuery(
+        ws: string,
+        verb: "definition" | "references",
+        path: string,
+        line: number,
+        col: number,
+        text?: string,
+    ): Promise<LspQueryResult> {
+        return (
+            await this.req(`/workspaces/${encodeURIComponent(ws)}/lsp/${verb}`, {
+                method: "POST",
+                body: JSON.stringify({path, line, col, text: text ?? ""}),
+            })
+        ).json();
+    }
+
+    async lspHover(
+        ws: string,
+        path: string,
+        line: number,
+        col: number,
+        text?: string,
+    ): Promise<LspHoverResult> {
+        return (
+            await this.req(`/workspaces/${encodeURIComponent(ws)}/lsp/hover`, {
+                method: "POST",
+                body: JSON.stringify({path, line, col, text: text ?? ""}),
+            })
+        ).json();
+    }
+
     /** All of a workspace's threads — comments inline, ranges re-anchored
      *  on read (currentStart/currentEnd, outdated). The pane fetches
      *  everything and slices locally; filters exist for cheaper pulls. */
@@ -420,6 +456,30 @@ export interface FileResult {
 export interface FilesResult {
     files: string[];
     truncated?: boolean;
+}
+
+/** One definition/reference hit. 1-based editor coordinates; path is
+ *  workspace-relative unless `external` (stdlib/deps — absolute, and the
+ *  file endpoints can't serve it). */
+export interface LspLocation {
+    path: string;
+    startLine: number;
+    startCol: number;
+    endLine: number;
+    endCol: number;
+    lineText?: string;
+    external?: boolean;
+}
+
+export interface LspQueryResult {
+    locations: LspLocation[];
+    /** why the answer is empty (installing, no server, crashed) — fail open */
+    note?: string;
+}
+
+export interface LspHoverResult {
+    contents: string;
+    note?: string;
 }
 
 /** One utterance in a thread. Author is declared, not authenticated —

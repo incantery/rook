@@ -30,6 +30,7 @@
     import QuickfixPanel from "./QuickfixPanel.svelte";
     import QuickActionModal from "./QuickActionModal.svelte";
     import {qf} from "./quickfix.svelte";
+    import {makeRefsContext, toRefHits} from "./refsContext";
     import {makeReviewContext} from "./reviewContext";
     import type {EditorSeam} from "./term/editor";
 
@@ -389,6 +390,10 @@
                     editorPanes.delete(leafId);
                     if (activeEditor === seam) activeEditor = null;
                 },
+                // gd across files rides the openFile ladder; gr fills the
+                // refs quickfix (vim: the last producer owns the list)
+                onOpenLocation: (p, line, col) => void openFile(p, {line, col}),
+                onReferences: showReferences,
             });
             editorPanes.set(leafId, pane);
             return pane;
@@ -402,15 +407,21 @@
      *    3. nothing to reuse → mint one window, ONCE
      *  Step 3 used to be the only step, which is why every file minted a
      *  numbered slot in a strip that means "layout". */
-    async function openFile(path: string): Promise<void> {
+    async function openFile(path: string, at?: {line: number; col: number}): Promise<void> {
         try {
             await initDone;
             touchBuffer(path);
+            // `at` is a position to land the cursor on (gd's target, a refs
+            // hit) — revealPosition latches on a pane that's still loading.
+            const landOn = (leafId: string) => {
+                if (at) editorPanes.get(leafId)?.revealPosition(at.line, at.col);
+            };
             const open = mgr.findPane((c) => c.type === "file" && c.path === path);
             if (open) {
                 app.screen = "app";
                 await tick();
                 mgr.revealPane(open);
+                landOn(open.leafId);
                 return;
             }
             const reusable = mgr.findPane((c) => c.type === "file");
@@ -424,10 +435,13 @@
                     app.screen = "app";
                     await tick();
                     mgr.revealPane(reusable);
+                    landOn(reusable.leafId);
                     return;
                 }
             }
             await newEditorWindow("file", path);
+            const minted = mgr.findPane((c) => c.type === "file" && c.path === path);
+            if (minted) landOn(minted.leafId);
         } catch (err) {
             console.error("editor pane failed", err);
             flash("editor pane failed — see console");
@@ -550,6 +564,19 @@
         openInEditor: openHunkInEditor,
         triage: triggerTriage,
     });
+
+    // gr's landing: fill the refs store, claim the quickfix, open the list.
+    // The editor keeps its keyboard — the list is there when you want it
+    // (` q / :cnext muscle memory), not a focus steal mid-thought.
+    const refsCtx = makeRefsContext({
+        open: (path, line, col) => void openFile(path, {line, col}),
+        flash,
+    });
+    function showReferences(locations: import("./hostapi").LspLocation[]): void {
+        app.refHits = toRefHits(locations);
+        qf.set(refsCtx);
+        qf.listOpen = true;
+    }
 
     async function spawn(task: string, workspace: string, worktree: boolean): Promise<void> {
         // worktree isolation: carve a fresh checkout+branch off the target
@@ -1035,8 +1062,7 @@
         if (!el?.closest) return;
         const pane = el.closest<HTMLElement>(".side-pane");
         const side = pane?.dataset.side;
-        app.focusZone =
-            side === "left" || side === "right" || side === "bottom" ? side : "terms";
+        app.focusZone = side === "left" || side === "right" || side === "bottom" ? side : "terms";
     }
 
     // A side pane that closes under a focus that lives in it would strand the

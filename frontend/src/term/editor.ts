@@ -8,7 +8,7 @@
 // a truncated (>2 MB) or binary read stays read-only, because saving a
 // truncated buffer would overwrite the tail with nothing.
 
-import type {ChangedFile, HostAPI, ThreadInfo} from "../hostapi";
+import type {ChangedFile, HostAPI, LspLocation, ThreadInfo} from "../hostapi";
 import type {PaneContent} from "./manager";
 import type * as monacoTypes from "monaco-editor";
 import {ThreadBand} from "./threads";
@@ -47,6 +47,20 @@ async function loadVim(): Promise<VimLib> {
         vim.defineEx("qall", "qa", (cm, p) => paneOf(cm)?.exQuitAll(forced(p)));
         vim.defineEx("wqall", "wqa", (cm) => void paneOf(cm)?.exSaveQuitAll());
         vim.defineEx("xall", "xa", (cm) => void paneOf(cm)?.exSaveQuitAll());
+        // gd/gr/K — vim's navigation verbs onto the host's LSP surface.
+        // defineAction/mapCommand ride the same undocumented static as
+        // defineEx; a monaco-vim bump that drops them must not take the
+        // editor down, so the whole block is a nicety behind try/catch.
+        try {
+            vim.defineAction("rookDef", (cm) => void paneOf(cm)?.goToDefinition());
+            vim.defineAction("rookRefs", (cm) => void paneOf(cm)?.showReferences());
+            vim.defineAction("rookHover", (cm) => paneOf(cm)?.showHover());
+            vim.mapCommand("gd", "action", "rookDef", {}, {context: "normal"});
+            vim.mapCommand("gr", "action", "rookRefs", {}, {context: "normal"});
+            vim.mapCommand("K", "action", "rookHover", {}, {context: "normal"});
+        } catch (err) {
+            console.warn("editor pane: vim lsp maps unavailable:", err);
+        }
         exCommandsDefined = true;
     }
     return vimLib;
@@ -56,6 +70,37 @@ type ExCm = {editor?: object};
 type ExParams = {argString?: string};
 interface VimApi {
     defineEx(name: string, prefix: string, fn: (cm: ExCm, params: ExParams) => void): void;
+    defineAction(name: string, fn: (cm: ExCm) => void): void;
+    mapCommand(
+        keys: string,
+        type: string,
+        name: string,
+        args?: object,
+        extra?: {context?: string},
+    ): void;
+}
+
+// ---- LSP: hover provider + the model→pane bridge ----
+// Providers are global per-language in Monaco; rook registers ONE hover
+// provider for '*' and routes through the model→pane map, so the host stays
+// the router ("no server for .txt" is the host's empty+note answer, not a
+// frontend filetype list). Definition/references skip Monaco's own goto
+// contrib entirely — cross-model targets would need a text-model service the
+// zero-language-services build doesn't have; the pane drives the openFile
+// ladder instead.
+const paneByModel = new WeakMap<object, EditorPane>();
+let lspProvidersRegistered = false;
+
+function ensureLspProviders(m: Monaco): void {
+    if (lspProvidersRegistered) return;
+    lspProvidersRegistered = true;
+    m.languages.registerHoverProvider("*", {
+        provideHover: async (model, position) => {
+            const pane = paneByModel.get(model);
+            if (!pane) return null;
+            return pane.hoverAt(position.lineNumber, position.column);
+        },
+    });
 }
 
 export interface EditorContext {
@@ -101,6 +146,11 @@ export interface EditorPaneOpts {
     /** the pane calls this on dispose, iff a seam was ever handed out, so
      *  chrome can drop a reference to what's now a disposed seam */
     onDispose?: (seam: EditorSeam) => void;
+    /** cross-file gd target — chrome routes it through the openFile ladder
+     *  (reveal → retarget → mint), then reveals the position */
+    onOpenLocation?: (path: string, line: number, col: number) => void;
+    /** gr results — chrome hands them to the refs quickfix context */
+    onReferences?: (locations: LspLocation[]) => void;
 }
 
 /** How stale a review may be before a re-focus refetches it. */
@@ -141,6 +191,9 @@ export class EditorPane implements PaneContent {
     private closeArmed = false;
     /** focus() fired before the editor existed — apply it once it does */
     private wantFocus = false;
+    /** a revealPosition() that landed before the model did (gd into a pane
+     *  that's still loading) — applied at the end of loadFile */
+    private pendingPos: {line: number; col: number} | null = null;
 
     /** undefined until the host answers — it decides the default base */
     private base: "head" | "branch" | undefined;
@@ -384,6 +437,7 @@ export class EditorPane implements PaneContent {
         try {
             const t0 = performance.now();
             this.monaco = (await import("./monaco")).monaco;
+            ensureLspProviders(this.monaco);
             console.info(`editor pane: monaco loaded in ${Math.round(performance.now() - t0)}ms`);
         } catch (err) {
             console.error("monaco failed to load", err);
@@ -533,6 +587,7 @@ export class EditorPane implements PaneContent {
             this.disposeModels();
             const model = m.editor.createModel(res.content, undefined, this.uri(path));
             this.models.push(model);
+            paneByModel.set(model, this); // hover routes model → this pane
             const ed = this.ensureEditor();
             ed.setModel(model);
             ed.updateOptions({readOnly: !this.editable});
@@ -545,6 +600,7 @@ export class EditorPane implements PaneContent {
             this.fit();
             this.rebuildBands();
             this.applyPendingFocus();
+            this.applyPendingPos();
             // vim rides every file editor (motions work read-only too); the
             // :w saver is registered only when the buffer is editable.
             await this.attachVim(ed);
@@ -679,6 +735,137 @@ export class EditorPane implements PaneContent {
             return;
         }
         this.opts.onClose();
+    }
+
+    // ---- LSP: gd / gr / K against the host's language servers ----
+
+    /** The dirty buffer rides the query so unsaved code resolves; a clean
+     *  buffer lets the host serve from disk (didOpen dedup stays warm). */
+    private lspText(): string | undefined {
+        if (!this.dirty) return undefined;
+        return this.editor?.getModel()?.getValue();
+    }
+
+    /** file-mode position + path, or null (LSP never serves the diff pane —
+     *  its original side is a historical blob the working tree can't answer
+     *  for). */
+    private lspAt(): {path: string; line: number; col: number} | null {
+        if (this.opts.kind !== "file" || !this.editor) return null;
+        const pos = this.editor.getPosition();
+        const path = this.opts.path;
+        if (!pos || !path) return null;
+        return {path, line: pos.lineNumber, col: pos.column};
+    }
+
+    private lspFail(what: string, err: unknown): void {
+        const msg = String(err);
+        this.opts.onFlash(
+            msg.includes(" 404 ")
+                ? "code intelligence needs a newer rook-host — relaunch rook"
+                : `${what} failed: ${msg}`,
+        );
+    }
+
+    /** gd / F12. One target: jump (same file) or hand chrome the open;
+     *  external (stdlib/deps) is a labeled dead end until the file surface
+     *  can serve outside-workspace paths. */
+    async goToDefinition(): Promise<void> {
+        const at = this.lspAt();
+        if (!at) return;
+        try {
+            const res = await this.api.lspQuery(
+                this.opts.workspace,
+                "definition",
+                at.path,
+                at.line,
+                at.col,
+                this.lspText(),
+            );
+            const loc = res.locations[0];
+            if (!loc) {
+                this.opts.onFlash(res.note ?? "no definition found");
+                return;
+            }
+            if (loc.external) {
+                this.opts.onFlash(`definition outside the workspace: ${loc.path}:${loc.startLine}`);
+                return;
+            }
+            if (loc.path === this.opts.path) {
+                this.revealPosition(loc.startLine, loc.startCol);
+                return;
+            }
+            this.opts.onOpenLocation?.(loc.path, loc.startLine, loc.startCol);
+        } catch (err) {
+            this.lspFail("definition", err);
+        }
+    }
+
+    /** gr / ⇧F12 — the whole list goes to chrome's quickfix (vim's shape). */
+    async showReferences(): Promise<void> {
+        const at = this.lspAt();
+        if (!at) return;
+        try {
+            const res = await this.api.lspQuery(
+                this.opts.workspace,
+                "references",
+                at.path,
+                at.line,
+                at.col,
+                this.lspText(),
+            );
+            if (res.locations.length === 0) {
+                this.opts.onFlash(res.note ?? "no references found");
+                return;
+            }
+            this.opts.onReferences?.(res.locations);
+        } catch (err) {
+            this.lspFail("references", err);
+        }
+    }
+
+    /** K — Monaco's hover widget at the cursor; the provider does the fetch. */
+    showHover(): void {
+        this.editor?.trigger("rook", "editor.action.showHover", {});
+    }
+
+    /** The hover provider's callback (module-level, routed here by model). */
+    async hoverAt(line: number, col: number): Promise<monacoTypes.languages.Hover | null> {
+        const path = this.opts.kind === "file" ? this.opts.path : undefined;
+        if (!path) return null;
+        try {
+            const res = await this.api.lspHover(
+                this.opts.workspace,
+                path,
+                line,
+                col,
+                this.lspText(),
+            );
+            if (!res.contents) return null;
+            return {contents: [{value: res.contents}]};
+        } catch {
+            return null; // hover is ambient — never flash from it
+        }
+    }
+
+    /** Jump the cursor (1-based) — gd's landing, and the refs list's `o`.
+     *  Latches when the model hasn't loaded yet (gd into a fresh pane). */
+    revealPosition(line: number, col: number): void {
+        if (this.opts.kind !== "file") return;
+        const ed = this.editor;
+        if (!ed || !ed.getModel()) {
+            this.pendingPos = {line, col};
+            return;
+        }
+        ed.setPosition({lineNumber: line, column: col});
+        ed.revealPositionInCenterIfOutsideViewport({lineNumber: line, column: col});
+        ed.focus();
+    }
+
+    private applyPendingPos(): void {
+        if (!this.pendingPos) return;
+        const p = this.pendingPos;
+        this.pendingPos = null;
+        this.revealPosition(p.line, p.col);
     }
 
     // ---- threads: the conversation layer (term/threads.ts) ----
@@ -833,6 +1020,23 @@ export class EditorPane implements PaneContent {
                 this.monaco!.KeyMod.CtrlCmd | this.monaco!.KeyCode.KeyS,
                 () => void this.save(),
             );
+            // F12/⇧F12 mirror gd/gr for non-vim hands (and the context menu)
+            this.editor.addAction({
+                id: "rook.def",
+                label: "Go to definition",
+                keybindings: [this.monaco!.KeyCode.F12],
+                contextMenuGroupId: "9_rook",
+                contextMenuOrder: 2,
+                run: () => void this.goToDefinition(),
+            });
+            this.editor.addAction({
+                id: "rook.refs",
+                label: "Find references",
+                keybindings: [this.monaco!.KeyMod.Shift | this.monaco!.KeyCode.F12],
+                contextMenuGroupId: "9_rook",
+                contextMenuOrder: 3,
+                run: () => void this.showReferences(),
+            });
         }
         return this.editor;
     }

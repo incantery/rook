@@ -18,6 +18,17 @@ import type {TabInfo} from "./term/manager";
  *  to pick context-aware defaults instead of branching on any one surface. */
 export type Mode = "home" | "terminal" | "review" | "file";
 
+/** One gr hit in the refs quickfix — 1-based editor coordinates; external
+ *  hits (stdlib/deps) carry an absolute path the file surface can't open. */
+export interface RefHit {
+    id: number;
+    path: string;
+    line: number;
+    col: number;
+    text: string;
+    external?: boolean;
+}
+
 /** each mode declares its chrome defaults; the right pane opens by default
  *  only where a mode asks for it (today: review). Keep the default OUT of the
  *  pane wiring — a new mode that wants the pane just flips its flag here. */
@@ -62,6 +73,11 @@ class AppState {
     get reviewHunks(): RookTask[] {
         return this.reviewRoot?.children ?? [];
     }
+
+    /** The last gr result — the refs quickfix context's data (vim semantics:
+     *  the last producer owns the list; a new gr replaces it wholesale). Ids
+     *  are 1-based positions in this array, minted at fill time. */
+    refHits = $state<RefHit[]>([]);
 
     /** The open file buffers for the CURRENT workspace, most-recent first —
      *  vim's `:ls`. A buffer is not a pane and not a strip entry: it's the
