@@ -111,6 +111,47 @@ export interface Config {
      * registration and per-workspace endpoints are unaffected.
      */
     "workspaceAllow": string[] | null;
+
+    /**
+     * LSP is the plugin intent tier (docs/superpowers/specs/
+     * 2026-07-20-plugins-language-design.md): language names that expand
+     * through the host's curated catalog — `lsp = go, typescript`. Rook
+     * installs and manages these servers itself.
+     */
+    "lsp": string[] | null;
+
+    /**
+     * LSPServers is the explicit tier, keyed by server name: overrides for
+     * a catalog expansion, or bring-your-own declarations
+     * (`lsp-zls = zls`). A non-empty Command marks the server
+     * system-provided — rook execs it as found, never installs it.
+     */
+    "lspServers": { [_ in string]?: LSPServer } | null;
+
+    /**
+     * LSPRefused records repo-layer lines that were ignored under the
+     * trust rule (a cloned repo must never supply argv). Surfaced in
+     * status, never applied.
+     */
+    "lspRefused"?: string[] | null;
+}
+
+/**
+ * LSPServer is one server's explicit-tier declaration. Zero-valued fields
+ * defer to the catalog entry (if the server has one); Off wins over
+ * everything — `lsp-<server> = off` disables the server in either layer.
+ */
+export interface LSPServer {
+    "command"?: string;
+    "off"?: boolean;
+    "filetypes"?: string[] | null;
+    "roots"?: string[] | null;
+
+    /**
+     * Settings is raw JSON handed to the server verbatim
+     * (workspace/didChangeConfiguration) — rook never interprets it.
+     */
+    "settings"?: string;
 }
 
 /**
