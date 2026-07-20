@@ -58,6 +58,13 @@ async function loadVim(): Promise<VimLib> {
             vim.mapCommand("gd", "action", "rookDef", {}, {context: "normal"});
             vim.mapCommand("gr", "action", "rookRefs", {}, {context: "normal"});
             vim.mapCommand("K", "action", "rookHover", {}, {context: "normal"});
+            // ⌃O/⌃I — the workbench jumplist (chrome's, at the openFile
+            // seam), overriding monaco-vim's single-buffer walk: rook's
+            // jumps cross files, so the list must live above the pane.
+            vim.defineAction("rookJumpBack", (cm) => paneOf(cm)?.jump("back"));
+            vim.defineAction("rookJumpForward", (cm) => paneOf(cm)?.jump("forward"));
+            vim.mapCommand("<C-o>", "action", "rookJumpBack", {}, {context: "normal"});
+            vim.mapCommand("<C-i>", "action", "rookJumpForward", {}, {context: "normal"});
         } catch (err) {
             console.warn("editor pane: vim lsp maps unavailable:", err);
         }
@@ -151,6 +158,11 @@ export interface EditorPaneOpts {
     onOpenLocation?: (path: string, line: number, col: number) => void;
     /** gr results — chrome hands them to the refs quickfix context */
     onReferences?: (locations: LspLocation[]) => void;
+    /** a jump is about to happen INSIDE this pane (same-file gd) — chrome
+     *  records the current position; cross-pane jumps record at openFile */
+    onRecordJump?: () => void;
+    /** ⌃O/⌃I — chrome owns the jumplist and drives the openFile ladder */
+    onJump?: (dir: "back" | "forward") => void;
 }
 
 /** How stale a review may be before a re-focus refetches it. */
@@ -746,15 +758,24 @@ export class EditorPane implements PaneContent {
         return this.editor?.getModel()?.getValue();
     }
 
-    /** file-mode position + path, or null (LSP never serves the diff pane —
-     *  its original side is a historical blob the working tree can't answer
-     *  for). */
-    private lspAt(): {path: string; line: number; col: number} | null {
+    /** file-mode position + path, or null (never the diff pane — its
+     *  original side is a historical blob). Public: chrome's jumplist
+     *  reads it to record where a jump left from. */
+    position(): {path: string; line: number; col: number} | null {
         if (this.opts.kind !== "file" || !this.editor) return null;
         const pos = this.editor.getPosition();
         const path = this.opts.path;
         if (!pos || !path) return null;
         return {path, line: pos.lineNumber, col: pos.column};
+    }
+
+    private lspAt(): {path: string; line: number; col: number} | null {
+        return this.position();
+    }
+
+    /** ⌃O/⌃I land here from vim — the list is chrome's, not this pane's. */
+    jump(dir: "back" | "forward"): void {
+        this.opts.onJump?.(dir);
     }
 
     private lspFail(what: string, err: unknown): void {
@@ -791,6 +812,8 @@ export class EditorPane implements PaneContent {
                 return;
             }
             if (loc.path === this.opts.path) {
+                // same-file jumps never reach openFile — record here
+                this.opts.onRecordJump?.();
                 this.revealPosition(loc.startLine, loc.startCol);
                 return;
             }

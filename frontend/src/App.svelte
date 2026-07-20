@@ -31,6 +31,7 @@
     import QuickfixPanel from "./QuickfixPanel.svelte";
     import QuickActionModal from "./QuickActionModal.svelte";
     import {qf} from "./quickfix.svelte";
+    import {Jumplist} from "./jumplist";
     import {makeRefsContext, toRefHits} from "./refsContext";
     import {makeReviewContext} from "./reviewContext";
     import type {EditorSeam} from "./term/editor";
@@ -225,6 +226,32 @@
      *  thing, so chrome keeps the index. */
     const editorPanes = new Map<string, import("./term/editor").EditorPane>();
 
+    // ==== the jumplist (⌃O/⌃I) ====
+    //
+    // One list for the workbench, recorded at the openFile seam — every
+    // navigation (gd, a grep hit, a picker open, a refs `o`) flows through
+    // there, so that's where "where was I" gets written down. Same-file gd
+    // never reaches openFile; the pane's onRecordJump covers it.
+    const jumps = new Jumplist();
+    /** the last file-mode editor pane to hold focus — where a jump departs
+     *  from. Focus may sit in a terminal when a picker opens a file; the
+     *  last editor position is still the right thing to return to. */
+    let jumpPane: import("./term/editor").EditorPane | null = null;
+
+    function recordJump(): void {
+        jumps.push(jumpPane?.position() ?? null);
+    }
+
+    function jumpNav(dir: "back" | "forward"): void {
+        const cur = jumpPane?.position() ?? null;
+        const loc = dir === "back" ? jumps.back(cur) : jumps.forward();
+        if (!loc) {
+            flash(dir === "back" ? "at oldest jump" : "at newest jump");
+            return;
+        }
+        void openFile(loc.path, {line: loc.line, col: loc.col}, {recordJump: false});
+    }
+
     /** leafId → the AgentPane in it. Same reason as editorPanes, and the same
      *  discipline: entries are deleted on dispose, because a map that only
      *  grows is exactly the leak WatchMonitor gauges. */
@@ -386,15 +413,19 @@
                 onActivate: (seam) => {
                     activeEditor = seam;
                     activeEditorKind = kind;
+                    if (kind === "file") jumpPane = pane;
                 },
                 onDispose: (seam) => {
                     editorPanes.delete(leafId);
                     if (activeEditor === seam) activeEditor = null;
+                    if (jumpPane === pane) jumpPane = null;
                 },
                 // gd across files rides the openFile ladder; gr fills the
                 // refs quickfix (vim: the last producer owns the list)
                 onOpenLocation: (p, line, col) => void openFile(p, {line, col}),
                 onReferences: showReferences,
+                onRecordJump: recordJump,
+                onJump: jumpNav,
             });
             editorPanes.set(leafId, pane);
             return pane;
@@ -408,9 +439,15 @@
      *    3. nothing to reuse → mint one window, ONCE
      *  Step 3 used to be the only step, which is why every file minted a
      *  numbered slot in a strip that means "layout". */
-    async function openFile(path: string, at?: {line: number; col: number}): Promise<void> {
+    async function openFile(
+        path: string,
+        at?: {line: number; col: number},
+        opts?: {recordJump?: boolean},
+    ): Promise<void> {
         try {
             await initDone;
+            // ⌃O/⌃I traversal must not rewrite the history it walks
+            if (opts?.recordJump !== false) recordJump();
             touchBuffer(path);
             // `at` is a position to land the cursor on (gd's target, a refs
             // hit) — revealPosition latches on a pane that's still loading.
@@ -1326,8 +1363,12 @@
                 app.activeId = mgr.activeId;
                 app.focusedSessionId = mgr.focusedSessionId;
                 // buffer paths are repo-relative, so they mean nothing in
-                // another workspace — drop them at the boundary
-                if (app.workspace !== mgr.workspace) app.buffers = [];
+                // another workspace — drop them (and the jumplist that
+                // holds them) at the boundary
+                if (app.workspace !== mgr.workspace) {
+                    app.buffers = [];
+                    jumps.clear();
+                }
                 app.workspace = mgr.workspace;
             },
             workspaceGone: showHome,

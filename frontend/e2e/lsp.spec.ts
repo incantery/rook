@@ -116,5 +116,12 @@ test("gd jumps across files and gr fills the refs quickfix", async ({page}) => {
     expect(await rows.count()).toBeGreaterThan(1); // definition + call sites
     await expect(pane).toContainText("plugins.go"); // the caller we came from
 
+    // ⌃O walks the jumplist back across files (the editor kept the
+    // keyboard — the refs list opens without stealing it), ⌃I re-jumps
+    await page.keyboard.press("Control+o");
+    await expect(editorPath).toContainText("internal/host/plugins.go", {timeout: 20_000});
+    await page.keyboard.press("Control+i");
+    await expect(editorPath).toContainText("internal/plugin/plugin.go", {timeout: 20_000});
+
     await page.screenshot({path: "bin/e2e/lsp-refs.png", fullPage: true});
 });
