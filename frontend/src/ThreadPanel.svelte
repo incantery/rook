@@ -2,13 +2,15 @@
      "Threads" title + close button + scroll body). Placement-agnostic: it
      takes the active editor pane's seam + hostapi and lists every thread on
      that file — filterable, one card expanded at a time. Marker clicks and
-     ⌘⇧M come UP through the seam; reveal/highlight go DOWN. Drafts live here
+     ⌘⇧M / ,c / ,? come UP through the seam; reveal/highlight go DOWN. The
+     composer's MODE decides what submitting means: a note lands pending for
+     the batch, an ask submits that one thread and nudges. Drafts live here
      in chrome, so a background refetch never eats them. Styled with inline
      Tailwind utilities (README decision 7). Layer 1: no agent proposed-
      revisions (see spec). -->
 <script lang="ts">
     import type {HostAPI, ThreadInfo} from "./hostapi";
-    import type {EditorSeam} from "./term/editor";
+    import type {ComposeMode, EditorSeam} from "./term/editor";
     import {
         avatar,
         contextKey,
@@ -57,7 +59,12 @@
     let threads = $state<ThreadInfo[]>([]);
     let filter = $state<ThreadFilter>("open");
     let selectedId = $state<number | null>(null); // the one expanded card
-    let composer = $state<{startLine: number; endLine: number; side: Side} | null>(null);
+    let composer = $state<{
+        startLine: number;
+        endLine: number;
+        side: Side;
+        mode: ComposeMode;
+    } | null>(null);
     let draft = $state(""); // composer body OR the expanded card's reply
     let err = $state("");
     let busy = $state(false);
@@ -77,11 +84,11 @@
         sync();
         const offChange = seam.onChange(sync);
         const offMarker = seam.onMarkerClick((line, side, _ids) => selectAt(line, side));
-        const offCompose = seam.onCompose((s, e, side) => {
+        const offCompose = seam.onCompose((s, e, side, mode) => {
             draft = "";
             err = "";
             selectedId = null;
-            composer = {startLine: s, endLine: e, side};
+            composer = {startLine: s, endLine: e, side, mode};
         });
         return () => {
             offChange();
@@ -176,7 +183,7 @@
         const body = draft.trim();
         const ctx = editor?.context();
         if (!body || !ctx || !composer) return;
-        const {startLine, endLine, side} = composer;
+        const {startLine, endLine, side, mode} = composer;
         let created: ThreadInfo | null = null;
         await run(async () => {
             created = await api.createThread(ctx.workspace, {
@@ -187,6 +194,10 @@
                 base: side === "original" ? ctx.base : undefined,
                 body,
             });
+            // ,? asks about THIS thread — a per-thread submit, not the
+            // workspace batch, which would also ship every note deliberately
+            // left pending.
+            if (mode === "ask") await api.submitThread((created as ThreadInfo).id);
             draft = "";
             composer = null;
         });
@@ -273,7 +284,7 @@
                 <div class="rounded-xl border border-acc/40 bg-acc/[0.06] px-3 py-2.5">
                     <div class="mb-2 flex items-center gap-2">
                         <span class="text-[10px] font-bold uppercase tracking-wider text-acc"
-                            >New thread</span
+                            >{composer.mode === "ask" ? "Ask the agent" : "New thread"}</span
                         >
                         <span class="font-mono text-[10px] text-lo"
                             >{fmtRange(composer.startLine, composer.endLine)}{composer.side ===
@@ -291,7 +302,9 @@
                     <textarea
                         class="box-border min-h-6.5 w-full resize-y rounded-sm border border-line/15 bg-sunken px-1.5 py-1 font-mono text-xs text-fg focus:border-acc focus:outline-none"
                         rows="3"
-                        placeholder="Ask the agent, or leave a note for this region…"
+                        placeholder={composer.mode === "ask"
+                            ? "What do you want to know about this region?"
+                            : "Leave a note for this region…"}
                         bind:value={draft}
                         onkeydown={(e) => keydown(e, submitComposer)}></textarea>
                     {#if err}<div class="text-xs text-red [overflow-wrap:anywhere]">{err}</div>{/if}
@@ -299,16 +312,25 @@
                         <button
                             class="cursor-pointer rounded-lg bg-acc px-3 py-1.5 text-xs font-semibold text-on-acc hover:brightness-110 disabled:opacity-50"
                             disabled={busy}
-                            onclick={submitComposer}>Start thread</button
+                            onclick={submitComposer}
+                            >{composer.mode === "ask" ? "Ask now" : "Start thread"}</button
                         >
-                        <span class="font-mono text-[10px] text-lo">⌘↵ sends · esc closes</span>
+                        <span class="font-mono text-[10px] text-lo"
+                            >{composer.mode === "ask"
+                                ? "⌘↵ asks · esc closes"
+                                : "⌘↵ saves · esc closes"}</span
+                        >
                     </div>
                 </div>
             {/if}
 
             {#each visible as t (t.id)}
                 {@const meta = stateMeta(t.state)}
+                <!-- state as a hook, not a style: the tone lives in a class,
+                     but "is this thread still pending" is a fact tests and
+                     future chrome should be able to read off the card. -->
                 <div
+                    data-thread-state={t.state}
                     class={"overflow-hidden rounded-xl border transition-colors " +
                         (selectedId === t.id
                             ? TONE_BORDER[meta.tone] + " bg-fg/[0.06] shadow-lg"

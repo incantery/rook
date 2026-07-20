@@ -61,7 +61,10 @@ describe("remapTokens", () => {
     it("ignores a trailing partial group rather than reading past the end", () => {
         const data = Uint32Array.from([0, 0, 3, 0, 0, 9, 9]); // 5 + 2 stragglers
         expect(() => remapTokens(data, [4], [])).not.toThrow();
-        expect([...data.slice(5)]).toEqual([9, 9]);
+        // Array.from, not a spread: data.slice returns a Uint32Array (which
+        // toEqual won't match against a plain array), and oxlint reads the
+        // spread as the redundant Array.prototype.slice case.
+        expect(Array.from(data.slice(5))).toEqual([9, 9]);
     });
 
     it("passes an out-of-range type index through untouched", () => {

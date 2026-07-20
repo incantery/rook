@@ -253,11 +253,20 @@ const BACKTICK_LEADER: Leader = {
 // likely to move.
 export const CONTEXT_LEADER_KEY = ",";
 
-// The context layer's bindings: deliberately tiny — the two doors into the
-// current context. q = its list (quickfix), a = its verbs (quick actions).
+// The context layer's bindings: deliberately tiny — the doors into the
+// current context. q = its list (quickfix), a = its verbs (quick actions),
+// c/? = say something about the code under the cursor.
+//
+// c and ? are the two halves of the review loop, and they are separate keys
+// rather than one key plus a modifier because they mean genuinely different
+// things: c is the whiteboard (land it pending, keep moving), ? interrupts
+// the agent about THIS line. Conflating them behind a modifier makes the
+// louder of the two an easy mis-press.
 export const CONTEXT_PREFIX = new Map<string, string>([
     ["q", "quickfix.toggle"],
     ["a", "quickaction.toggle"],
+    ["c", "editor.comment"],
+    ["?", "editor.ask"],
 ]);
 
 export function parseLeader(trigger: string | undefined): Leader {

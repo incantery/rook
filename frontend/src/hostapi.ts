@@ -353,6 +353,16 @@ export class HostAPI {
         });
     }
 
+    /** ,? — ask about ONE thread now. Deliberately not submitThreads scoped
+     *  to an id: the workspace-level batch would also ship every scratch
+     *  note the user had left pending, which is not what asking about this
+     *  line means. 409 = the thread is already resolved. */
+    async submitThread(id: number): Promise<ThreadsSubmitResult> {
+        return (
+            await this.req(`/threads/${id}/submit`, {method: "POST", body: "{}"})
+        ).json();
+    }
+
     /** Flip pending→open and nudge the responder — or re-nudge when open
      *  threads still await the agent. 400 = nothing to submit. */
     async submitThreads(ws: string): Promise<ThreadsSubmitResult> {

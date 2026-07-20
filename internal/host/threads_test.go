@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // threadReg is a registry over a throwaway data dir — store tests need
@@ -428,6 +429,84 @@ func postWS(t *testing.T, h *Host, path string, body map[string]any) *httptest.R
 	return w
 }
 
+// postThread drives the global per-thread routes (/threads/{id}/verb), which
+// hang off handleThread rather than handleWorkspace.
+func postThread(t *testing.T, h *Host, path string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", path, bytes.NewReader(b))
+	w := httptest.NewRecorder()
+	h.handleThread(w, req)
+	return w
+}
+
+// ,? — asking about ONE comment must not sweep up the scratch notes the user
+// deliberately left pending. That's the whole reason this endpoint exists
+// instead of reusing the workspace-level batch submit.
+func TestThreadSubmitOneLeavesOthersPending(t *testing.T) {
+	h, ptyOut, _ := threadHost(t)
+
+	asked, _ := h.reg.createThread(&ThreadInfo{Workspace: "ws", Path: "f.txt",
+		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "one"},
+		"could this race?", nil)
+	scratch, _ := h.reg.createThread(&ThreadInfo{Workspace: "ws", Path: "f.txt",
+		StartLine: 2, EndLine: 2, Side: "modified", BlobSHA: "s", AnchorText: "two"},
+		"why is this named skipCache", nil)
+
+	w := postThread(t, h, fmt.Sprintf("/threads/%d/submit", asked), nil)
+	if w.Code != 200 {
+		t.Fatalf("submit one: %d %s", w.Code, w.Body)
+	}
+	if th := h.reg.getThread(asked); th.State != "open" {
+		t.Fatalf("asked thread state: %+v", th)
+	}
+	if th := h.reg.getThread(scratch); th.State != "pending" {
+		t.Fatalf("scratch thread was swept up: %+v", th)
+	}
+
+	// the nudge names THIS thread and quotes it, so the responder needs no
+	// round-trip to the list to know which comment is waiting
+	line, err := bufio.NewReader(ptyOut).ReadString('\r')
+	if err != nil || !strings.Contains(line, fmt.Sprintf("thread %d", asked)) ||
+		!strings.Contains(line, "could this race?") ||
+		!strings.Contains(line, fmt.Sprintf("rookctl reply %d", asked)) {
+		t.Fatalf("single nudge: %q (%v)", line, err)
+	}
+	if strings.ContainsAny(line[:len(line)-1], "\n\r") {
+		t.Fatalf("single nudge is multi-line: %q", line)
+	}
+
+	// a resolved thread can't be asked about
+	if err := h.reg.resolveThread(asked, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if w := postThread(t, h, fmt.Sprintf("/threads/%d/submit", asked), nil); w.Code != 409 {
+		t.Fatalf("submit resolved: %d %s", w.Code, w.Body)
+	}
+	if w := postThread(t, h, "/threads/99999/submit", nil); w.Code != 404 {
+		t.Fatalf("submit missing: %d %s", w.Code, w.Body)
+	}
+}
+
+// A user's comment body is free text and may span lines; the single-thread
+// nudge quotes it into a prompt that must survive a one-line pty write.
+func TestPromptSafeFlattens(t *testing.T) {
+	got := promptSafe("why is this\nnamed   skipCache?\r\n", 240)
+	if got != "why is this named skipCache?" {
+		t.Fatalf("promptSafe: %q", got)
+	}
+	// the cap counts RUNES — a byte cap could split one and emit a mojibake
+	// fragment into the prompt
+	long := strings.Repeat("é", 300)
+	capped := promptSafe(long, 240)
+	if r := []rune(capped); len(r) != 241 || r[240] != '…' {
+		t.Fatalf("promptSafe cap: %d runes", len([]rune(capped)))
+	}
+	if !utf8.ValidString(capped) {
+		t.Fatal("promptSafe produced invalid utf-8")
+	}
+}
+
 func TestThreadSubmitTypesNudge(t *testing.T) {
 	h, ptyOut, _ := threadHost(t)
 
@@ -455,8 +534,18 @@ func TestThreadSubmitTypesNudge(t *testing.T) {
 		t.Fatalf("submit result: %+v", res)
 	}
 	line, err := bufio.NewReader(ptyOut).ReadString('\r')
-	if err != nil || !strings.Contains(line, "2 review comment") || !strings.Contains(line, "rook-threads") {
+	// The nudge must be SELF-CONTAINED: it used to name a "rook-threads"
+	// skill that need not exist on the machine, so a cold responder read the
+	// sentence and had no verbs. Assert it carries the verbs itself.
+	if err != nil || !strings.Contains(line, "2 review comment") ||
+		!strings.Contains(line, "rookctl threads") || !strings.Contains(line, "rookctl reply") {
 		t.Fatalf("nudge on pty: %q (%v)", line, err)
+	}
+	// …and stay ONE LINE. The typed path writes prompt+"\r" into a pty, so an
+	// embedded newline submits the prompt early, mid-sentence — a failure that
+	// looks like claude ignoring half its instructions.
+	if strings.ContainsAny(line[:len(line)-1], "\n\r") {
+		t.Fatalf("nudge is multi-line: %q", line)
 	}
 	if th := h.reg.getThread(id1); th.State != "open" {
 		t.Fatalf("state after submit: %+v", th)

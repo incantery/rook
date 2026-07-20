@@ -281,6 +281,23 @@ func (r *registry) submitThreads(ws string) int {
 	return int(n)
 }
 
+// submitThread flips ONE pending thread open — the ,? path, where the user
+// asked about this line and means this line. Deliberately NOT submitThreads
+// scoped to an id: sweeping the workspace would ship every scratch note the
+// user had deliberately left pending. Re-submitting an already-open thread is
+// not an error, mirroring the batch contract ("you missed this one").
+func (r *registry) submitThread(id int64) {
+	if r.db == nil {
+		return
+	}
+	now := time.Now().Format(time.RFC3339Nano)
+	if _, err := r.db.Exec(
+		`UPDATE threads SET state = 'open', submitted_at = ?, updated_at = ?
+		 WHERE id = ? AND state = 'pending'`, now, now, id); err != nil {
+		log.Printf("threads: submit one: %v", err)
+	}
+}
+
 // threadsAwaitingAgent counts open threads whose LAST comment is the
 // user's — "needs reply" is derived, never stored.
 func (r *registry) threadsAwaitingAgent(ws string) int {
@@ -473,8 +490,8 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 	writeJSON(w, t)
 }
 
-// handleThread routes /threads/{id}/comments|resolve|reopen. Thread ids
-// are global, so per-thread verbs need no workspace — `rookctl reply 12`
+// handleThread routes /threads/{id}/comments|resolve|reopen|submit. Thread
+// ids are global, so per-thread verbs need no workspace — `rookctl reply 12`
 // works from anywhere.
 func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/threads/")
@@ -524,6 +541,27 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 		default:
 			http.Error(w, "no such thread", http.StatusNotFound)
 		}
+	case "submit":
+		// ,? — ask about THIS thread now. The nudge names the thread, so the
+		// responder needs no list round-trip and can't mistake which comment
+		// the user is waiting on.
+		t := h.reg.getThread(id)
+		if t == nil {
+			http.Error(w, "no such thread", http.StatusNotFound)
+			return
+		}
+		if t.State == "resolved" {
+			http.Error(w, "thread is resolved", http.StatusConflict)
+			return
+		}
+		h.reg.submitThread(id)
+		t.State = "open"
+		mode, sid, err := h.nudge(t.Workspace, threadNudgeOne(t))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"mode": mode, "rookSession": sid, "count": 1})
 	case "reopen":
 		var req struct{ By string }
 		json.NewDecoder(r.Body).Decode(&req)
@@ -547,10 +585,74 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// threadsNudge is THE nudge — one host-built string for both actuation
-// paths, so every surface triggers the identical thing.
+// The nudges are SELF-CONTAINED on purpose. They used to say "use the
+// rook-threads skill", which named a skill that need not exist on the
+// machine — a responder without it read the sentence, had no verbs, and the
+// agent half of the loop quietly did nothing. Spelling the rookctl calls out
+// costs a few hundred characters and works on a cold session.
+//
+// Both must stay ONE LINE: the typed path writes prompt+"\r" into a pty, so
+// an embedded newline would submit the prompt early, mid-sentence.
+
 func threadsNudge(n int, ws string) string {
-	return fmt.Sprintf("You have %d review comment(s) in %s. Use the rook-threads skill to address them.", n, ws)
+	return fmt.Sprintf(
+		"You have %d review comment(s) waiting in workspace %s. Read them with `rookctl threads -w %s`. "+
+			"For each: investigate the code it anchors to, then answer with `rookctl reply <id> <text…>` "+
+			"(replies are authored as the agent). Use `rookctl resolve <id>` only once a comment is "+
+			"genuinely addressed — if you disagree, or the call is the human's to make, reply with your "+
+			"reasoning and leave it open. Answer every thread before you finish.",
+		n, ws, ws)
+}
+
+// threadNudgeOne is the ,? path: one comment, asked about now. It quotes the
+// comment so the responder can start without a round-trip to the list.
+func threadNudgeOne(t *ThreadInfo) string {
+	return fmt.Sprintf(
+		"A review comment is waiting in workspace %s, on %s lines %d-%d (thread %d): %q. "+
+			"Investigate the code it anchors to, then answer with `rookctl reply %d <text…>`. "+
+			"Use `rookctl resolve %d` only once it is genuinely addressed — if you disagree, or the "+
+			"call is the human's to make, reply with your reasoning and leave it open. "+
+			"`rookctl threads -w %s` has the full thread if you need more context.",
+		t.Workspace, t.Path, t.StartLine, t.EndLine, t.ID,
+		promptSafe(firstBody(t), 240), t.ID, t.ID, t.Workspace)
+}
+
+// firstBody is the comment that opened the thread — what the user actually
+// wrote, as opposed to any agent replies below it.
+func firstBody(t *ThreadInfo) string {
+	if len(t.Comments) == 0 {
+		return ""
+	}
+	return t.Comments[0].Body
+}
+
+// promptSafe flattens and caps user text destined for a one-line prompt.
+// Fields collapses every run of whitespace — newlines included, which is the
+// whole point — and the cap is in RUNES so a truncation can't split one.
+func promptSafe(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max]) + "…"
+	}
+	return s
+}
+
+// nudge actuates a prompt at the workspace's responder: the live claimed
+// claude window if there is one, else a freshly spawned task. Both submit
+// paths route through here so the batch and single-thread flows can't drift
+// in how they reach the agent.
+func (h *Host) nudge(ws, prompt string) (mode, rookSession string, err error) {
+	if s := h.claudeSessionIn(ws); s != nil {
+		if _, werr := s.pty.Write([]byte(prompt + "\r")); werr == nil {
+			return "typed", s.info.ID, nil
+		}
+		// a dead pty falls through to a fresh responder
+	}
+	s, err := h.spawnTask(ws, prompt)
+	if err != nil {
+		return "", "", err
+	}
+	return "spawned", s.info.ID, nil
 }
 
 // claudeSessionIn finds the workspace's live claude window via the claim
@@ -598,18 +700,10 @@ func (h *Host) handleThreadsSubmit(w http.ResponseWriter, r *http.Request, name 
 		http.Error(w, "nothing to submit", http.StatusBadRequest)
 		return
 	}
-	prompt := threadsNudge(waiting, name)
-	if s := h.claudeSessionIn(name); s != nil {
-		if _, err := s.pty.Write([]byte(prompt + "\r")); err == nil {
-			writeJSON(w, map[string]any{"mode": "typed", "rookSession": s.info.ID, "count": n})
-			return
-		}
-		// a dead pty falls through to a fresh responder
-	}
-	s, err := h.spawnTask(name, prompt)
+	mode, sid, err := h.nudge(name, threadsNudge(waiting, name))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"mode": "spawned", "rookSession": s.info.ID, "count": n})
+	writeJSON(w, map[string]any{"mode": mode, "rookSession": sid, "count": n})
 }

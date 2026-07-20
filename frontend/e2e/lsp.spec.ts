@@ -185,15 +185,26 @@ test("semantic tokens repaint what the grammar gets wrong", async ({page}) => {
         }, needle);
 
     // The grammar paints first and the server repaints after, so poll the
-    // end state: `string` must NOT read as a keyword…
+    // WHOLE end state at once. Polling `string !== package` alone is satisfied
+    // by a not-yet-painted `string` (null !== "mtk5"), which then fails the
+    // hard assertion a millisecond later — poll the condition you actually
+    // mean, never a proxy that a half-rendered DOM can satisfy.
     await expect
-        .poll(async () => (await classOf("string")) !== (await classOf("package")), {
-            timeout: 45_000,
-        })
+        .poll(
+            async () => {
+                const s = await classOf("string");
+                const kw = await classOf("package");
+                const ty = await classOf("pluginStatus");
+                if (!s || !kw || !ty) return false; // still painting
+                return s !== kw && s === ty;
+            },
+            {timeout: 45_000},
+        )
         .toBe(true);
 
-    // …it must read as the same thing a user-defined type does. That pins
-    // the mapping (LSP `type` → the type role), not merely "something moved".
+    // `string` must not read as a keyword, and must read as the same thing a
+    // user-defined type does — that pins the mapping (LSP `type` → the type
+    // role), not merely "something moved".
     expect(await classOf("string")).toBe(await classOf("pluginStatus"));
     expect(await classOf("bool")).toBe(await classOf("pluginStatus"));
 

@@ -36,7 +36,7 @@
     import {makeExploreContext} from "./exploreContext";
     import {makeRefsContext, toRefHits} from "./refsContext";
     import {makeReviewContext} from "./reviewContext";
-    import type {EditorSeam} from "./term/editor";
+    import type {ComposeMode, EditorSeam} from "./term/editor";
 
     interface Props {
         api: HostAPI;
@@ -76,6 +76,25 @@
     $effect(() => {
         if (app.focusedSessionId) activeEditor = null;
     });
+
+    /** ,c / ,? — compose a thread on the active editor's selection.
+     *
+     *  The composer lives in ThreadPanel, and SidePane mounts its tenant only
+     *  while the pane is open ({#if visible}) — so a compose signalled at a
+     *  closed pane reaches zero subscribers and vanishes with no error. Open
+     *  first, let the panel mount and subscribe, then signal. */
+    async function composeThread(mode: ComposeMode): Promise<void> {
+        const seam = activeEditor;
+        if (!seam) {
+            flash("no editor focused — open a file or the review pane first");
+            return;
+        }
+        if (!app.threadPaneOpen) {
+            app.threadPaneOpen = true;
+            await tick();
+        }
+        if (!seam.compose(mode)) flash("nothing to comment on");
+    }
 
     // ==== mode: what surface owns the viewport, and its chrome defaults ====
     // Home wins; then a focused editor pane names the mode by its kind; else a
@@ -1090,6 +1109,18 @@
         },
         // quickfix traversal as registry commands — palette-visible now, and
         // the seam that makes list traversal agent-invokable later
+        {
+            id: "editor.comment",
+            title: "Comment on selection (note)",
+            category: "Review",
+            run: () => void composeThread("note"),
+        },
+        {
+            id: "editor.ask",
+            title: "Ask the agent about selection",
+            category: "Review",
+            run: () => void composeThread("ask"),
+        },
         {
             id: "quickfix.toggle",
             title: "Quickfix: toggle list",

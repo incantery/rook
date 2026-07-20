@@ -176,6 +176,11 @@ export interface EditorContext {
     base: "head" | "branch" | undefined;
 }
 
+/** What the user meant by opening the composer.
+ *   note — the whiteboard: land it pending, keep reviewing, batch it later.
+ *   ask  — this one, now: submit just this thread and nudge the responder. */
+export type ComposeMode = "note" | "ask";
+
 /** The narrow door between the editor island and the thread panel (chrome).
  *  Signals out (marker click, compose, change), calls in (reveal/clear). */
 export interface EditorSeam {
@@ -191,8 +196,14 @@ export interface EditorSeam {
      *  view; the hunk list keeps focus). */
     releaseFocus(): void;
     clearHighlight(): void;
+    /** ,c / ,? — chrome asking the pane to open the composer on the current
+     *  selection. The inbound twin of onCompose. False means there was
+     *  nothing to comment on (no model yet), so chrome can say so. */
+    compose(mode: ComposeMode): boolean;
     onMarkerClick(cb: (line: number, side: Side, ids: number[]) => void): () => void;
-    onCompose(cb: (startLine: number, endLine: number, side: Side) => void): () => void;
+    onCompose(
+        cb: (startLine: number, endLine: number, side: Side, mode: ComposeMode) => void,
+    ): () => void;
     onChange(cb: () => void): () => void;
 }
 
@@ -287,7 +298,7 @@ export class EditorPane implements PaneContent {
 
     // seam subscribers (chrome side)
     private markerCbs: ((line: number, side: Side, ids: number[]) => void)[] = [];
-    private composeCbs: ((s: number, e: number, side: Side) => void)[] = [];
+    private composeCbs: ((s: number, e: number, side: Side, mode: ComposeMode) => void)[] = [];
     private changeCbs: (() => void)[] = [];
     private _seam: EditorSeam | null = null;
 
@@ -422,6 +433,7 @@ export class EditorPane implements PaneContent {
             clearHighlight: () => {
                 for (const b of this.bands) b.clearHighlight();
             },
+            compose: (mode) => this.compose(mode),
             onMarkerClick: (cb) => this.sub(this.markerCbs, cb),
             onCompose: (cb) => this.sub(this.composeCbs, cb),
             onChange: (cb) => this.sub(this.changeCbs, cb),
@@ -1073,16 +1085,34 @@ export class EditorPane implements PaneContent {
             keybindings: [m.KeyMod.CtrlCmd | m.KeyMod.Shift | m.KeyCode.KeyM],
             contextMenuGroupId: "9_rook",
             contextMenuOrder: 1,
-            run: () => {
-                const band = this.bands.find((b) => b.editor === ed);
-                const sel = ed.getSelection();
-                if (!band || !sel) return;
-                let end = sel.endLineNumber;
-                // a full-line drag ends at column 1 of the NEXT line — not a line
-                if (end > sel.startLineNumber && sel.endColumn === 1) end--;
-                for (const cb of this.composeCbs) cb(sel.startLineNumber, end, band.side);
-            },
+            // Monaco hands this action its own editor, so no focus guessing
+            run: () => void this.composeOn(this.bands.find((b) => b.editor === ed), "note"),
         });
+    }
+
+    /** ,c / ,? — the composer on whatever the user has selected. Unlike the
+     *  ⌘⇧M action, which Monaco hands the invoking editor, a keystroke that
+     *  arrives from chrome has to work out WHICH editor holds the cursor: a
+     *  diff pane has two, and a comment composed against the wrong one
+     *  anchors to the wrong side's blob. */
+    compose(mode: ComposeMode): boolean {
+        const band =
+            this.bands.find((b) => b.editor.hasTextFocus()) ??
+            // focus sat in chrome: `modified` is what a review is about, and
+            // it's the only side a plain file pane has
+            this.bands.find((b) => b.side === "modified") ??
+            this.bands[0];
+        return this.composeOn(band, mode);
+    }
+
+    private composeOn(band: ThreadBand | undefined, mode: ComposeMode): boolean {
+        const sel = band?.editor.getSelection();
+        if (!band || !sel) return false;
+        let end = sel.endLineNumber;
+        // a full-line drag ends at column 1 of the NEXT line — not a line
+        if (end > sel.startLineNumber && sel.endColumn === 1) end--;
+        for (const cb of this.composeCbs) cb(sel.startLineNumber, end, band.side, mode);
+        return true;
     }
 
     /** Editors persist across file navs but models don't — decorations
