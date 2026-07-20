@@ -32,6 +32,10 @@ func main() {
 		time.Sleep(300 * time.Millisecond)
 	}
 
+	// Before anything execs: a Finder-launched daemon inherits the GUI PATH
+	// (no homebrew, no toolchains) — adopt the login shell's entries.
+	host.AdoptLoginPATH()
+
 	dir := host.StateDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		log.Fatal(err)
