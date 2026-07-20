@@ -1,8 +1,9 @@
 <!-- File picker (` e) — the workspace's files (git's view in repos, a
-     bounded walk elsewhere), substring-filtered, Enter opens the
+     bounded walk elsewhere), fuzzy-ranked, Enter opens the
      read-only Monaco viewer. Reuses the palette's shell. -->
 <script lang="ts">
     import {onMount} from "svelte";
+    import {fuzzyRank, fuzzySegments} from "./fuzzy";
     import type {HostAPI} from "./hostapi";
     import {app} from "./state.svelte";
 
@@ -41,27 +42,23 @@
 
     // Open buffers first, then the rest of the repo — this picker is `:ls`
     // and `:find` in one box, which is what makes the buffer list visible
-    // without spending a tab bar on it. Both halves take the same filter, and
-    // a buffer never repeats in the tail.
-    const items = $derived.by((): string[] => {
-        const q = query.trim().toLowerCase();
-        const hit = (f: string) => !q || f.toLowerCase().includes(q);
-        const open = app.buffers.filter(hit);
-        const openSet = new Set(open);
-        const out: string[] = [...open];
-        for (const f of files) {
-            if (!hit(f) || openSet.has(f)) continue;
-            out.push(f);
-            if (out.length === RENDER_CAP) break;
-        }
-        return out;
+    // without spending a tab bar on it. Both halves take the same fuzzy
+    // query and each ranks within itself; a buffer never repeats in the
+    // tail. Ranking runs over the WHOLE list before the render cap, so the
+    // best match can't be shadowed by 200 mediocre earlier paths.
+    const items = $derived.by((): {path: string; positions: number[]}[] => {
+        const q = query.trim();
+        const open = fuzzyRank(q, app.buffers, RENDER_CAP);
+        const openSet = new Set(open.map((r) => r.item));
+        const rest = fuzzyRank(
+            q,
+            files.filter((f) => !openSet.has(f)),
+            RENDER_CAP - open.length,
+        );
+        return [...open, ...rest].map((r) => ({path: r.item, positions: r.positions}));
     });
     /** how many leading items are open buffers — the list draws the seam */
-    const openCount = $derived(
-        app.buffers.filter(
-            (f) => !query.trim() || f.toLowerCase().includes(query.trim().toLowerCase()),
-        ).length,
-    );
+    const openCount = $derived(fuzzyRank(query.trim(), app.buffers, RENDER_CAP).length);
 
     function pick(path: string | undefined) {
         if (!path) return;
@@ -81,7 +78,7 @@
             sel = Math.max(sel - 1, 0);
         } else if (e.key === "Enter") {
             e.preventDefault();
-            pick(items[sel]);
+            pick(items[sel]?.path);
         } else if (e.key === "Escape") {
             e.preventDefault();
             e.stopPropagation();
@@ -131,7 +128,7 @@
                     <span class="text-xs uppercase tracking-wider text-lo">no matching files</span>
                 </div>
             {/if}
-            {#each items as path, i (path)}
+            {#each items as { path, positions }, i (path)}
                 {#if i === 0 && openCount > 0}
                     <div
                         class="px-3 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-wider text-lo"
@@ -160,7 +157,9 @@
                     role="presentation"
                 >
                     <span class={"flex-1 text-sm " + (i < openCount ? "text-fg" : "text-dim")}
-                        >{path}</span
+                        >{#each fuzzySegments(path, positions) as seg}{#if seg.hit}<span
+                                    class="font-semibold text-acc">{seg.text}</span
+                                >{:else}{seg.text}{/if}{/each}</span
                     >
                     {#if i < openCount}
                         <span class="font-mono text-[10px] text-lo">buffer</span>
