@@ -17,11 +17,14 @@
         pos,
         api,
         workspace,
+        onTriage,
     }: {
         id: number;
         pos: {i: number; n: number}; // 1-based position for the "3 / 14" counter
         api: HostAPI;
         workspace: string;
+        /** kick the host's Haiku triage fan-out for this review */
+        onTriage: () => Promise<void>;
     } = $props();
 
     const GLYPH: Record<string, string> = {
@@ -206,12 +209,21 @@
                             {/each}
                         </ul>
                     {/if}
-                {:else}
-                    <p class="text-[12px] text-lo">
-                        No analysis yet — run <span class="font-mono"
-                            >rookctl review score-all</span
-                        > to have Haiku triage each hunk.
+                {:else if app.reviewRoot?.scoring}
+                    <p class="flex items-center gap-2 text-[12px] text-lo">
+                        <span class="size-1.5 animate-pulse rounded-full bg-acc"></span>
+                        Haiku is triaging the batch — analyses land here as they finish.
                     </p>
+                {:else}
+                    <div class="flex items-center gap-3">
+                        <button
+                            class="cursor-pointer rounded-lg border border-acc/35 bg-acc/15 px-3 py-1.5 text-[12px] font-semibold text-acc hover:bg-acc/25"
+                            onclick={() => void onTriage()}>✦ Triage with Haiku</button
+                        >
+                        <span class="text-[12px] text-lo"
+                            >score every hunk — risk, summary, what to check</span
+                        >
+                    </div>
                 {/if}
             </div>
 

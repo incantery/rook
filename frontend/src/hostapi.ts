@@ -347,6 +347,12 @@ export class HostAPI {
         });
     }
 
+    /** Trigger the host's Haiku triage fan-out for a review root. Async on
+     *  the host — poll reviewTasks and watch `scoring` + per-hunk details. */
+    async scoreReview(rootId: number): Promise<void> {
+        await this.req(`/tasks/${rootId}/score-all`, {method: "POST", body: "{}"});
+    }
+
     /** Raw bytes into a session's pty; append "\r" to submit. */
     async sendInput(id: string, data: string): Promise<void> {
         await this.req(`/sessions/${id}/input`, {
@@ -508,9 +514,11 @@ export interface ReviewGate {
     counts: Record<string, number>;
 }
 
-/** GET /workspaces/{ws}/tasks — a root task with its gate (review only). */
+/** GET /workspaces/{ws}/tasks — a root task with its gate (review only).
+ *  `scoring` means a Haiku triage fan-out is in flight — keep polling. */
 export interface ReviewRoot extends RookTask {
     gate?: ReviewGate;
+    scoring?: boolean;
 }
 
 /** POST /workspaces/{ws}/review — the prepared batch and its gate. dryRun

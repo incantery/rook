@@ -4,6 +4,7 @@
     import {app} from "./state.svelte";
 
     const gate = $derived(app.reviewRoot?.gate);
+    const scored = $derived(app.reviewHunks.filter((h) => h.detail?.summary).length);
 
     function gateText(): string {
         if (!gate) return "no review yet";
@@ -20,6 +21,12 @@
         <span class={"size-1.5 rounded-full " + (gate.ready ? "bg-grn" : "bg-amber")}></span>
         {gateText()}
     </span>
+    {#if app.reviewRoot?.scoring}
+        <span class="flex items-center gap-1.5 font-mono text-[10px] text-acc">
+            <span class="size-1.5 animate-pulse rounded-full bg-acc"></span>
+            triaging {scored}/{gate.total}
+        </span>
+    {/if}
 {:else}
     <span class="font-mono text-[10px] text-lo">no review yet</span>
 {/if}

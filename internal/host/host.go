@@ -70,6 +70,10 @@ type Host struct {
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
 
+	// review roots with a Haiku triage fan-out in flight (reviewscore.go)
+	scoreMu sync.Mutex
+	scoring map[int64]bool
+
 	// pt is the batched process table: one `ps` behind a TTL, shared by
 	// fgOf and the monitor (procsample.go, monitor.go).
 	pt *procTable

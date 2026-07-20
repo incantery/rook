@@ -510,6 +510,35 @@
         });
     }
 
+    // Trigger the host's triage fan-out and poll scores into the store as
+    // they land. The poll also self-starts when a CLI-triggered run is seen
+    // (loadReview reads scoring=true), so the UI never goes stale mid-triage.
+    let triagePoll: number | null = null;
+    function ensureTriagePoll(): void {
+        triagePoll ??= window.setInterval(async () => {
+            await loadReview();
+            if (!app.reviewRoot?.scoring && triagePoll != null) {
+                clearInterval(triagePoll);
+                triagePoll = null;
+            }
+        }, 2000);
+    }
+    async function triggerTriage(): Promise<void> {
+        const root = app.reviewRoot;
+        if (!root || root.scoring) return;
+        try {
+            await api.scoreReview(root.id);
+        } catch (err) {
+            flash(String(err));
+            return;
+        }
+        await loadReview(); // pick up scoring=true at once
+        ensureTriagePoll();
+    }
+    $effect(() => {
+        if (app.reviewRoot?.scoring) ensureTriagePoll();
+    });
+
     // the review quickfix context — rows/hero/verbs (reviewContext.ts).
     // api is mount-fixed (one HostAPI per app lifetime), so capturing it here
     // is deliberate — same rationale as the leader above.
@@ -519,6 +548,7 @@
         prepare: prepareReview,
         dispose: disposeHunk,
         openInEditor: openHunkInEditor,
+        triage: triggerTriage,
     });
 
     async function spawn(task: string, workspace: string, worktree: boolean): Promise<void> {

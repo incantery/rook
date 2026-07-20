@@ -47,7 +47,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/incantery/rook/internal/host"
@@ -1127,30 +1126,10 @@ func runReview(args []string) error {
 	}
 }
 
-// scoreModel is the model the per-hunk analysis runs on — cheap, fast, and
-// parallel across hunks. Kept a constant for now; a --model flag can override
-// later if the default proves too weak on gnarly hunks.
-const scoreModel = "claude-haiku-4-5-20251001"
-
-// scoreConcurrency bounds the fan-out — enough to be fast on a big review,
-// not so many that we hammer the machine with claude processes.
-const scoreConcurrency = 6
-
-// hunkAnalysis is one Haiku's read of one hunk. summary + concerns are the
-// "why look at this / what to check" that make a review card worth more than
-// a diff row; risk/understand drive ranking.
-type hunkAnalysis struct {
-	Category   string   `json:"category"`
-	Risk       int      `json:"risk"`
-	Understand int      `json:"understand"`
-	Summary    string   `json:"summary"`
-	Concerns   []string `json:"concerns"`
-}
-
-// reviewScoreAll is the scorer: a Haiku fan-out, ONE call per hunk, run
-// concurrently. Each hunk gets its own analysis (summary/concerns/scores)
-// written back through the score endpoint. Inference lives HERE in the client
-// driving claude, never in the host.
+// reviewScoreAll triggers the host's Haiku triage fan-out for a review root
+// (POST /tasks/{id}/score-all — the same endpoint the IDE's Triage button
+// hits; reviewscore.go is the one implementation) and polls until the scores
+// have landed.
 func reviewScoreAll(args []string) error {
 	ws, rest := reviewWS(args)
 	var id string
@@ -1158,10 +1137,6 @@ func reviewScoreAll(args []string) error {
 		if _, err := strconv.Atoi(a); err == nil {
 			id = a
 		}
-	}
-	claude, err := exec.LookPath("claude")
-	if err != nil {
-		return fmt.Errorf("claude not found on PATH — scoring needs the claude CLI")
 	}
 	c, err := connect()
 	if err != nil {
@@ -1174,95 +1149,45 @@ func reviewScoreAll(args []string) error {
 	if len(task.Children) == 0 {
 		return fmt.Errorf("review #%d has no hunks to score", task.ID)
 	}
-
-	sem := make(chan struct{}, scoreConcurrency)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	done, failed := 0, 0
-	total := len(task.Children)
-	for _, child := range task.Children {
-		wg.Add(1)
-		go func(hc taskJSON) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			a, err := analyzeHunk(claude, hc)
-			mu.Lock()
-			defer mu.Unlock()
-			if err == nil {
-				body, _ := json.Marshal(map[string]any{
-					"category": a.Category,
-					"summary":  a.Summary,
-					"concerns": a.Concerns,
-					"score":    map[string]int{"risk": a.Risk, "understand": a.Understand},
-				})
-				_, err = c.req("POST", "/tasks/"+strconv.FormatInt(hc.ID, 10)+"/score", json.RawMessage(body))
-			}
-			if err != nil {
-				failed++
-			} else {
-				done++
-			}
-			fmt.Fprintf(os.Stderr, "\rscored %d/%d hunks", done, total)
-		}(child)
+	rootPath := "/tasks/" + strconv.FormatInt(task.ID, 10)
+	if _, err := c.req("POST", rootPath+"/score-all", map[string]any{}); err != nil {
+		return err
 	}
-	wg.Wait()
-	fmt.Fprintf(os.Stderr, "\rscored %d/%d hunks", done, total)
-	if failed > 0 {
-		fmt.Fprintf(os.Stderr, " (%d failed)", failed)
+	deadline := time.Now().Add(15 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		raw, err := c.req("GET", rootPath, nil)
+		if err != nil {
+			return err
+		}
+		var t struct {
+			taskJSON
+			Scoring bool `json:"scoring"`
+		}
+		if err := json.Unmarshal(raw, &t); err != nil {
+			return err
+		}
+		scored := 0
+		for _, kid := range t.Children {
+			var d struct {
+				Summary string `json:"summary"`
+			}
+			json.Unmarshal(kid.Detail, &d)
+			if d.Summary != "" {
+				scored++
+			}
+		}
+		fmt.Fprintf(os.Stderr, "\rscored %d/%d hunks", scored, len(t.Children))
+		if !t.Scoring {
+			if scored < len(t.Children) {
+				fmt.Fprintf(os.Stderr, " (%d failed — re-run to retry)", len(t.Children)-scored)
+			}
+			fmt.Fprintln(os.Stderr)
+			return nil
+		}
 	}
 	fmt.Fprintln(os.Stderr)
-	return nil
-}
-
-// analyzeHunk runs one Haiku over one hunk's patch and parses its JSON.
-func analyzeHunk(claude string, c taskJSON) (*hunkAnalysis, error) {
-	out, err := exec.Command(claude, "-p", "--model", scoreModel, buildHunkPrompt(c)).Output()
-	if err != nil {
-		return nil, err
-	}
-	return extractAnalysis(out)
-}
-
-func buildHunkPrompt(c taskJSON) string {
-	var b strings.Builder
-	b.WriteString("You are triaging ONE hunk of a code review. Reply with ONLY a JSON object:\n")
-	b.WriteString(`{"category":"terse phrase","risk":1,"understand":1,"summary":"one sentence: what this change does","concerns":["short things a human should check"]}` + "\n\n")
-	b.WriteString("- risk: 1 trivial/mechanical/docs → 5 subtle, high blast radius\n")
-	b.WriteString("- understand: 1 skim → 5 needs careful human attention\n")
-	b.WriteString("- category: e.g. \"internal docs, no prod impact\", \"error-path change\", \"public API\"\n")
-	b.WriteString("- concerns: 0-3 short bullets a reviewer should check; empty array if genuinely trivial\n\n")
-	fmt.Fprintf(&b, "File: %s\n\n%s\n", c.Path, hunkBody(c))
-	return b.String()
-}
-
-// hunkBody is the anchored patch text, capped so a giant hunk can't blow the
-// prompt; the path still orients the model when a body is truncated.
-func hunkBody(c taskJSON) string {
-	body := c.AnchorText
-	if body == "" {
-		return c.Path
-	}
-	if len(body) > 4000 {
-		body = body[:4000] + "\n… (truncated)"
-	}
-	return body
-}
-
-// extractAnalysis finds the first JSON object in claude's output and parses it
-// — the model may wrap the object in prose.
-func extractAnalysis(out []byte) (*hunkAnalysis, error) {
-	s := string(out)
-	i := strings.IndexByte(s, '{')
-	j := strings.LastIndexByte(s, '}')
-	if i < 0 || j <= i {
-		return nil, fmt.Errorf("no JSON object in output")
-	}
-	var a hunkAnalysis
-	if err := json.Unmarshal([]byte(s[i:j+1]), &a); err != nil {
-		return nil, err
-	}
-	return &a, nil
+	return fmt.Errorf("timed out waiting for scoring to finish")
 }
 
 func reviewPrepare(args []string) error {

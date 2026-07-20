@@ -191,6 +191,28 @@ func (r *registry) setTaskState(id int64, state string) error {
 	return nil
 }
 
+// mergeTaskDetail folds a patch into a task's detail bag (read-modify-write),
+// so a score never clobbers {scope,…} and a re-score never drops a note. The
+// scorer (reviewscore.go) and the score endpoint both write through here.
+func (r *registry) mergeTaskDetail(id int64, patch map[string]json.RawMessage) error {
+	if r.db == nil {
+		return fmt.Errorf("no registry db")
+	}
+	t := r.getTask(id)
+	if t == nil {
+		return sql.ErrNoRows
+	}
+	merged := map[string]json.RawMessage{}
+	if len(t.Detail) > 0 {
+		json.Unmarshal(t.Detail, &merged)
+	}
+	for k, v := range patch {
+		merged[k] = v
+	}
+	buf, _ := json.Marshal(merged)
+	return r.setTaskDetail(id, buf)
+}
+
 // setTaskDetail replaces a task's detail bag (the scorer's write path).
 func (r *registry) setTaskDetail(id int64, detail json.RawMessage) error {
 	if r.db == nil {

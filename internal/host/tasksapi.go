@@ -60,10 +60,12 @@ func (h *Host) handleWorkspaceTasks(w http.ResponseWriter, r *http.Request, name
 	type rootWithGate struct {
 		*RookTask
 		Gate *reviewGate `json:"gate,omitempty"`
+		// a Haiku triage fan-out is in flight — clients poll while true
+		Scoring bool `json:"scoring,omitempty"`
 	}
 	out := make([]rootWithGate, 0, len(roots))
 	for _, t := range roots {
-		rw := rootWithGate{RookTask: t}
+		rw := rootWithGate{RookTask: t, Scoring: h.isScoring(t.ID)}
 		if t.WorkType == "review" {
 			g := h.reviewGateFor(t)
 			rw.Gate = &g
@@ -91,11 +93,31 @@ func (h *Host) handleTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		t.Children = h.reg.childrenOf(t.ID)
-		writeJSON(w, t)
+		writeJSON(w, struct {
+			*RookTask
+			Scoring bool `json:"scoring,omitempty"`
+		}{t, h.isScoring(id)})
 	case action == "state" && r.Method == http.MethodPost:
 		h.handleTaskState(w, r, id)
 	case action == "score" && r.Method == http.MethodPost:
 		h.handleTaskScore(w, r, id)
+	case action == "score-all" && r.Method == http.MethodPost:
+		// trigger the Haiku triage fan-out for a review root; async — poll
+		// the task (scoring flag + per-child detail) to watch it land
+		t := h.reg.getTask(id)
+		if t == nil {
+			http.Error(w, "no such task", http.StatusNotFound)
+			return
+		}
+		if t.WorkType != "review" || t.ParentID != 0 {
+			http.Error(w, "score-all wants a review root", http.StatusBadRequest)
+			return
+		}
+		if err := h.scoreReviewAsync(t); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"scoring": true})
 	case action == "gate" && r.Method == http.MethodGet:
 		t := h.reg.getTask(id)
 		if t == nil {
@@ -131,30 +153,16 @@ func (h *Host) handleTaskState(w http.ResponseWriter, r *http.Request, id int64)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleTaskScore is POST /tasks/{id}/score — the scorer agent's write path.
-// The body is merged into the task's detail bag under "score"/"category";
-// scores are disposable, so we store whatever the scorer sends verbatim.
+// handleTaskScore is POST /tasks/{id}/score — a scorer's write path. The body
+// merges into the task's detail bag (never clobbering {scope,…}); scores are
+// disposable, so we store whatever the scorer sends verbatim.
 func (h *Host) handleTaskScore(w http.ResponseWriter, r *http.Request, id int64) {
 	var incoming map[string]json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
 		http.Error(w, "bad body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	t := h.reg.getTask(id)
-	if t == nil {
-		http.Error(w, "no such task", http.StatusNotFound)
-		return
-	}
-	// merge into existing detail so a re-score doesn't drop {scope,...}
-	merged := map[string]json.RawMessage{}
-	if len(t.Detail) > 0 {
-		json.Unmarshal(t.Detail, &merged)
-	}
-	for k, v := range incoming {
-		merged[k] = v
-	}
-	buf, _ := json.Marshal(merged)
-	if err := h.reg.setTaskDetail(id, buf); err != nil {
+	if err := h.reg.mergeTaskDetail(id, incoming); err != nil {
 		if err == sql.ErrNoRows {
 			http.Error(w, "no such task", http.StatusNotFound)
 			return

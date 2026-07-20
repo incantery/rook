@@ -9,6 +9,8 @@ build/ios/xcode/overlay.json
 build/ios/xcode/gen/
 build/android/overlay.json
 build/android/gen/
+# macOS Finder droppings
+.DS_Store
 # local one-off builds
 /rookctl
 frontend/rook
