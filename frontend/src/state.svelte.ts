@@ -117,6 +117,7 @@ class AppState {
     paletteOpen = $state(false);
     pickerOpen = $state(false);
     filePickerOpen = $state(false);
+    grepOpen = $state(false);
     inboxOpen = $state(false);
     spawnOpen = $state(false);
     settingsOpen = $state(false);
@@ -143,6 +144,7 @@ class AppState {
             this.paletteOpen ||
             this.pickerOpen ||
             this.filePickerOpen ||
+            this.grepOpen ||
             this.inboxOpen ||
             this.spawnOpen ||
             this.settingsOpen ||
@@ -154,6 +156,7 @@ class AppState {
         this.paletteOpen = false;
         this.pickerOpen = false;
         this.filePickerOpen = false;
+        this.grepOpen = false;
         this.inboxOpen = false;
         this.spawnOpen = false;
         this.settingsOpen = false;

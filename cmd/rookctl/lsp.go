@@ -9,6 +9,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -220,6 +221,48 @@ func runLSPQuery(verb string, args []string) error {
 	}
 	for _, l := range res.Locations {
 		fmt.Printf("%s:%d:%d: %s\n", l.Path, l.StartLine, l.StartCol, l.LineText)
+	}
+	return nil
+}
+
+// runGrep is workspace-wide content search: rookctl grep <pattern> [-w ws].
+// Same grep-shaped output as def/refs — path:line:col: text.
+func runGrep(args []string) error {
+	ws, args, err := wsFlag(args)
+	if err != nil {
+		return err
+	}
+	if len(args) != 1 {
+		return fmt.Errorf("usage: rookctl grep <pattern> [-w workspace]")
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	raw, err := c.req("GET", "/workspaces/"+ws+"/grep?q="+url.QueryEscape(args[0]), nil)
+	if err != nil {
+		return err
+	}
+	var res struct {
+		Hits []struct {
+			Path      string
+			Line, Col int
+			Text      string
+		}
+		Truncated bool
+		Note      string
+	}
+	if err := jsonInto(raw, &res); err != nil {
+		return err
+	}
+	if res.Note != "" {
+		fmt.Println("· " + res.Note)
+	}
+	for _, h := range res.Hits {
+		fmt.Printf("%s:%d:%d: %s\n", h.Path, h.Line, h.Col, h.Text)
+	}
+	if res.Truncated {
+		fmt.Println("· truncated — narrow the pattern")
 	}
 	return nil
 }

@@ -20,6 +20,7 @@
     import Palette from "./Palette.svelte";
     import Picker from "./Picker.svelte";
     import FilePicker from "./FilePicker.svelte";
+    import GrepPicker from "./GrepPicker.svelte";
     import Inbox from "./Inbox.svelte";
     import SpawnModal from "./SpawnModal.svelte";
     import Settings from "./Settings.svelte";
@@ -974,6 +975,15 @@
             },
         },
         {
+            id: "grep.open",
+            title: "Grep workspace",
+            category: "View",
+            keys: keymap.display("grep.open"),
+            run: () => {
+                app.grepOpen = true;
+            },
+        },
+        {
             id: "workspace.set-root",
             title: "Set workspace root to shell's directory",
             category: "Workspace",
@@ -1091,7 +1101,7 @@
             }
             return; // palette's own input handles the rest
         }
-        if (app.pickerOpen || app.filePickerOpen) return; // pickers' own inputs handle keys
+        if (app.pickerOpen || app.filePickerOpen || app.grepOpen) return; // pickers' own inputs handle keys
 
         const tgt = e.target as HTMLElement | null;
         const inSidePane = tgt?.closest?.(".side-pane") != null;
@@ -1483,6 +1493,16 @@
         onopen={(path) => void openFile(path)}
         onclose={() => {
             app.filePickerOpen = false;
+            focusBack();
+        }}
+    />
+{/if}
+{#if app.grepOpen}
+    <GrepPicker
+        {api}
+        onopen={(path, line, col) => void openFile(path, {line, col})}
+        onclose={() => {
+            app.grepOpen = false;
             focusBack();
         }}
     />

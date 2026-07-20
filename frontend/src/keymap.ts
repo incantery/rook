@@ -69,6 +69,7 @@ export const DEFAULTS: [string, string][] = [
     // the Monaco panes: review diff and read-only file viewer
     ["g", "review.changes"],
     ["e", "file.open"],
+    ["/", "grep.open"],
     ["t", "threads.toggle"],
     ["b", "explorer.toggle"],
     ["cmd+d", "pane.split-right"],

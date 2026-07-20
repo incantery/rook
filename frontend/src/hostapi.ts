@@ -238,6 +238,13 @@ export class HostAPI {
         return (await this.req(`/workspaces/${encodeURIComponent(ws)}/files`)).json();
     }
 
+    /** Workspace-wide content search — `git grep` in repos (smart case,
+     *  regex with a literal fallback), a bounded walk elsewhere. */
+    async grep(ws: string, q: string): Promise<GrepResult> {
+        const params = new URLSearchParams({q});
+        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/grep?${params}`)).json();
+    }
+
     /** Language-server queries (definition/references), host-spoken LSP.
      *  Positions are 1-based editor coordinates both ways. `text` carries
      *  the dirty buffer so unsaved code resolves; omitted = disk. Everything
@@ -456,6 +463,20 @@ export interface FileResult {
 export interface FilesResult {
     files: string[];
     truncated?: boolean;
+}
+
+/** One grep hit — 1-based editor coordinates, workspace-relative path. */
+export interface GrepHit {
+    path: string;
+    line: number;
+    col: number;
+    text: string;
+}
+
+export interface GrepResult {
+    hits: GrepHit[];
+    truncated?: boolean;
+    note?: string;
 }
 
 /** One definition/reference hit. 1-based editor coordinates; path is
