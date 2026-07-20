@@ -13,7 +13,7 @@
 // hand-written theme hardcoded.
 
 import type {editor} from "monaco-editor";
-import {SCOPE_ROLES} from "../highlight/scope";
+import {SCOPE_ROLES, SEMANTIC_ROLES} from "../highlight/scope";
 import {mix, noHash, withAlpha} from "./color";
 import type {Palette} from "./palette";
 
@@ -28,6 +28,13 @@ export function buildMonacoTheme(p: Palette): editor.IStandaloneThemeData {
             // the scope→role table, so this list and the tokenizer's own
             // claim set can never drift apart)
             ...SCOPE_ROLES.map(([scope, role]) => rule(scope, s[role])),
+
+            // LSP semantic token types — the layer above the grammar.
+            // Standalone Monaco resolves a semantic token by joining
+            // [type, ...modifiers] with dots and matching THIS SAME trie
+            // (standaloneThemeService.getTokenStyleMetadata), so a type is
+            // just another rule key and modifiers refine it for free.
+            ...SEMANTIC_ROLES.map(([type, role]) => rule(type, s[role])),
 
             // Monarch names — every language without a vendored grammar.
             // These are single words with no dots, so they can't shadow a

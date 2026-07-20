@@ -45,8 +45,22 @@ type Client struct {
 	mu   sync.Mutex
 	docs map[string]doc // abs path → synced state
 
+	// the server's semantic-token legend, read once off its initialize
+	// reply. Immutable after Start, so no lock — and empty when the server
+	// doesn't do semantic tokens, which is how callers detect that.
+	legend SemanticLegend
+
 	done chan struct{} // closed when the process exits
 	err  error         // Wait's result, valid after done
+}
+
+// SemanticLegend is the server's token vocabulary: semantic token data is
+// integer indices INTO these arrays, so the legend is the only way to read
+// it. Every server publishes its own — gopls names 22 types, vtsls fewer —
+// which is why it rides to the client rather than being hardcoded anywhere.
+type SemanticLegend struct {
+	Types     []string `json:"types"`
+	Modifiers []string `json:"modifiers"`
 }
 
 type doc struct {
@@ -101,6 +115,16 @@ func Start(ctx context.Context, argv []string, root, settings string) (*Client, 
 				"synchronization": map[string]any{
 					"didSave": false,
 				},
+				// Semantic tokens: the whole-file request only. Deltas and
+				// ranges are protocol-level optimizations we don't need
+				// while a query is one HTTP round trip anyway, and gopls
+				// refuses the capability outright if `requests` is absent.
+				"semanticTokens": map[string]any{
+					"requests":       map[string]any{"full": true},
+					"tokenTypes":     []string{},
+					"tokenModifiers": []string{},
+					"formats":        []string{"relative"},
+				},
 			},
 			"workspace": map[string]any{
 				"configuration":    true,
@@ -108,9 +132,25 @@ func Start(ctx context.Context, argv []string, root, settings string) (*Client, 
 			},
 		},
 	}
-	if err := c.callResult(initCtx, "initialize", initParams, nil); err != nil {
+	// The initialize reply carries the server's capabilities; the only one
+	// we read is the semantic-token legend, because token data is
+	// meaningless without it. Everything else stays "just try the request".
+	var initRes struct {
+		Capabilities struct {
+			SemanticTokensProvider *struct {
+				Legend struct {
+					TokenTypes     []string `json:"tokenTypes"`
+					TokenModifiers []string `json:"tokenModifiers"`
+				} `json:"legend"`
+			} `json:"semanticTokensProvider"`
+		} `json:"capabilities"`
+	}
+	if err := c.callResult(initCtx, "initialize", initParams, &initRes); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("lsp: initialize: %w", err)
+	}
+	if p := initRes.Capabilities.SemanticTokensProvider; p != nil {
+		c.legend = SemanticLegend{Types: p.Legend.TokenTypes, Modifiers: p.Legend.TokenModifiers}
 	}
 	c.conn.notify("initialized", map[string]any{})
 	if settings != "" {
@@ -254,6 +294,35 @@ func (c *Client) Hover(ctx context.Context, path string, pos Position) (string, 
 		return "", nil, err
 	}
 	return hoverText(res.Contents), res.Range, nil
+}
+
+// Legend is the server's semantic-token vocabulary; empty Types means the
+// server doesn't do semantic tokens (the caller then skips the request).
+func (c *Client) Legend() SemanticLegend { return c.legend }
+
+// SemanticTokens is textDocument/semanticTokens/full: the whole file's
+// tokens as LSP's relative 5-tuple encoding
+// (deltaLine, deltaStartChar, length, typeIndex, modifierBits), flattened.
+//
+// The encoding is passed through UNTOUCHED all the way to Monaco, which
+// happens to want the identical layout — same tuple, same relative deltas,
+// same 0-based utf-16 coordinates. That is why this is the one LSP surface
+// rook does not convert: every other one crosses the 1-based editor
+// boundary, and a "helpful" conversion here would corrupt the stream.
+func (c *Client) SemanticTokens(ctx context.Context, path string) ([]uint32, error) {
+	if len(c.legend.Types) == 0 {
+		return nil, nil // server declined the capability — not an error
+	}
+	var res struct {
+		Data []uint32 `json:"data"`
+	}
+	params := map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+	}
+	if err := c.callResult(ctx, "textDocument/semanticTokens/full", params, &res); err != nil {
+		return nil, err
+	}
+	return res.Data, nil
 }
 
 // Done closes when the server process exits — the supervision hook.

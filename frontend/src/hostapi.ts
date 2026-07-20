@@ -284,6 +284,20 @@ export class HostAPI {
         ).json();
     }
 
+    /** Whole-file semantic tokens: what the LANGUAGE SERVER knows that no
+     *  grammar can infer — this identifier is a type, that one's a parameter.
+     *  `data` is LSP's relative 5-tuple encoding, which is byte-identical to
+     *  Monaco's, so it rides through untouched; `types`/`modifiers` are the
+     *  server's legend, which the indices in `data` refer to. */
+    async lspSemanticTokens(ws: string, path: string, text?: string): Promise<LspSemanticResult> {
+        return (
+            await this.req(`/workspaces/${encodeURIComponent(ws)}/lsp/semanticTokens`, {
+                method: "POST",
+                body: JSON.stringify({path, text: text ?? ""}),
+            })
+        ).json();
+    }
+
     /** All of a workspace's threads — comments inline, ranges re-anchored
      *  on read (currentStart/currentEnd, outdated). The pane fetches
      *  everything and slices locally; filters exist for cheaper pulls. */
@@ -536,6 +550,16 @@ export interface LspQueryResult {
 
 export interface LspHoverResult {
     contents: string;
+    note?: string;
+}
+
+/** Semantic tokens + the legend they index into. `data` is groups of five:
+ *  (deltaLine, deltaStartChar, length, typeIndex, modifierBits) — relative to
+ *  the previous token, 0-based, UTF-16. Monaco consumes this exact layout. */
+export interface LspSemanticResult {
+    types: string[];
+    modifiers: string[];
+    data: number[];
     note?: string;
 }
 

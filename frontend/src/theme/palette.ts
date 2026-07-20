@@ -139,11 +139,19 @@ export const MATERIAL_OCEAN: Theme = {
             tag: "#ff5370",
             attrName: "#ffcb6b",
             attrValue: "#c3e88d",
-            // unset in today's Monaco theme → editorFg (matches default fall-through)
-            function: "#8f93a2",
+            // These four were editorFg because MONARCH COULD NOT PRODUCE
+            // THEM — a keyword-list tokenizer has no notion of a call site
+            // or a constant, so a color here would never have been drawn.
+            // TextMate scopes and LSP semantic tokens both name them now,
+            // so they take Material Ocean's own published values; leaving
+            // them flat would make the whole semantic layer invisible on the
+            // default theme. `variable` stays at editorFg deliberately —
+            // that IS Material Ocean's answer for a plain identifier, and
+            // coloring every variable is noise, not information.
+            function: "#82aaff",
             variable: "#8f93a2",
-            constant: "#8f93a2",
-            regexp: "#8f93a2",
+            constant: "#f78c6c",
+            regexp: "#89ddff",
         },
     },
 };

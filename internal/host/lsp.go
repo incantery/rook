@@ -205,6 +205,17 @@ type lspHoverResult struct {
 	Note     string `json:"note,omitempty"`
 }
 
+// lspSemanticResult carries the server's legend alongside its token data,
+// because the data is indices INTO the legend and the two are only
+// meaningful together. Data is LSP's relative 5-tuple encoding, untouched —
+// Monaco's is byte-identical, so the whole path is a passthrough.
+type lspSemanticResult struct {
+	Types     []string `json:"types"`
+	Modifiers []string `json:"modifiers"`
+	Data      []uint32 `json:"data"`
+	Note      string   `json:"note,omitempty"`
+}
+
 type lspInstanceStatus struct {
 	Root      string `json:"root"`
 	Pid       int    `json:"pid"`
@@ -299,7 +310,8 @@ func (h *Host) handleWorkspaceLSP(w http.ResponseWriter, r *http.Request, name, 
 		var req struct{ Server string }
 		json.NewDecoder(r.Body).Decode(&req)
 		writeJSON(w, map[string]int{"stopped": h.lm.stop(req.Server)})
-	case (verb == "definition" || verb == "references" || verb == "hover") && r.Method == http.MethodPost:
+	case (verb == "definition" || verb == "references" || verb == "hover" ||
+		verb == "semanticTokens") && r.Method == http.MethodPost:
 		h.handleLSPQuery(w, r, name, verb)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
@@ -355,6 +367,23 @@ func (h *Host) handleLSPQuery(w http.ResponseWriter, r *http.Request, name, verb
 	defer cancel()
 	pos := lsp.Position{Line: req.Line - 1, Col: req.Col - 1}
 	switch verb {
+	case "semanticTokens":
+		// No position: this verb is whole-file. The legend rides along
+		// because the data indexes into it.
+		lg := client.Legend()
+		res := lspSemanticResult{Types: lg.Types, Modifiers: lg.Modifiers, Data: []uint32{}}
+		if len(lg.Types) == 0 {
+			res.Note = "server has no semantic tokens"
+			writeJSON(w, res)
+			return
+		}
+		data, err := client.SemanticTokens(ctx, abs)
+		if err != nil {
+			res.Note = err.Error() // fail open: no tokens + why
+		} else if data != nil {
+			res.Data = data
+		}
+		writeJSON(w, res)
 	case "hover":
 		text, _, err := client.Hover(ctx, abs, pos)
 		res := lspHoverResult{Contents: text}
@@ -382,11 +411,14 @@ func (h *Host) handleLSPQuery(w http.ResponseWriter, r *http.Request, name, verb
 }
 
 func (h *Host) lspEmpty(w http.ResponseWriter, verb, note string) {
-	if verb == "hover" {
+	switch verb {
+	case "hover":
 		writeJSON(w, lspHoverResult{Note: note})
-		return
+	case "semanticTokens":
+		writeJSON(w, lspSemanticResult{Types: []string{}, Data: []uint32{}, Note: note})
+	default:
+		writeJSON(w, lspQueryResult{Locations: []lspLocation{}, Note: note})
 	}
-	writeJSON(w, lspQueryResult{Locations: []lspLocation{}, Note: note})
 }
 
 func toWireLocation(l lsp.Location, top string) lspLocation {

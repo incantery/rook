@@ -68,7 +68,17 @@ func runFakeLSP() {
 			}
 			json.Unmarshal(m.Params, &p)
 			rootURI = p.RootURI
-			reply(map[string]any{"capabilities": map[string]any{}})
+			reply(map[string]any{"capabilities": map[string]any{
+				"semanticTokensProvider": map[string]any{
+					"legend": map[string]any{
+						"tokenTypes":     []string{"namespace", "type", "function"},
+						"tokenModifiers": []string{"declaration"},
+					},
+					"full": true,
+				},
+			}})
+		case "textDocument/semanticTokens/full":
+			reply(map[string]any{"data": []int{0, 0, 4, 2, 1}})
 		case "textDocument/definition":
 			reply([]map[string]any{
 				{"uri": rootURI + "/a.txt", "range": rng},
@@ -154,6 +164,20 @@ func TestLSPQueryAndStatus(t *testing.T) {
 		map[string]any{"path": "main.go", "line": 1, "col": 1})
 	if hov.Contents != "HOVER" || hov.Note != "" {
 		t.Fatalf("hover: %+v", hov)
+	}
+
+	// semantic tokens: legend from initialize, data passed through verbatim
+	// (whole-file — no line/col in the request)
+	sem := lspPOST[lspSemanticResult](t, c, "/workspaces/src/lsp/semanticTokens",
+		map[string]any{"path": "main.go"})
+	if sem.Note != "" {
+		t.Fatalf("semantic note: %q", sem.Note)
+	}
+	if strings.Join(sem.Types, ",") != "namespace,type,function" {
+		t.Fatalf("legend: %+v", sem.Types)
+	}
+	if len(sem.Data) != 5 || sem.Data[2] != 4 || sem.Data[3] != 2 || sem.Data[4] != 1 {
+		t.Fatalf("data: %+v", sem.Data)
 	}
 
 	// the instance shows up in status, then restart reaps it

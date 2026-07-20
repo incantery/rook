@@ -89,6 +89,43 @@ export const SCOPE_ROLES: [string, keyof Syntax][] = [
     ["keyword.control", "keyword"],
 ];
 
+// LSP semantic token types → the same 13 roles. This is the layer ABOVE the
+// grammar: where a TextMate rule infers from shape (a name before "(" is
+// probably a call), these come from a compiler that actually resolved the
+// symbol. Standalone Monaco matches them through the same dotted trie as
+// scopes — [type, ...modifiers].join(".") — so "variable.readonly" refines
+// "variable" with no extra machinery, and a modifier rule can be added later
+// without touching this table.
+//
+// The list is LSP's standard token types (3.17). A server may publish types
+// outside it; those simply find no rule and keep the grammar's color, which
+// is the correct fallback.
+export const SEMANTIC_ROLES: [string, keyof Syntax][] = [
+    ["namespace", "type"],
+    ["type", "type"],
+    ["class", "type"],
+    ["enum", "type"],
+    ["interface", "type"],
+    ["struct", "type"],
+    ["typeParameter", "type"],
+    ["parameter", "variable"],
+    ["variable", "variable"],
+    ["property", "variable"],
+    ["enumMember", "constant"],
+    ["event", "function"],
+    ["function", "function"],
+    ["method", "function"],
+    ["macro", "keyword"],
+    ["keyword", "keyword"],
+    ["modifier", "keyword"],
+    ["comment", "comment"],
+    ["string", "string"],
+    ["number", "number"],
+    ["regexp", "regexp"],
+    ["operator", "operator"],
+    ["decorator", "function"],
+];
+
 /** Every scope prefix some rule claims — the set pickScope walks against. */
 const CLAIMED: ReadonlySet<string> = new Set(SCOPE_ROLES.map(([scope]) => scope));
 

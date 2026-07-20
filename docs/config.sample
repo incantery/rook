@@ -113,7 +113,12 @@
 
 # Raw JSON handed to the server verbatim (workspace/didChangeConfiguration);
 # rook never interprets it. Replaces the catalog entry's default wholesale.
-# lsp-<server>-settings = {"gopls":{"staticcheck":true}}
+# Key it by the SECTION the server pulls — gopls asks for "gopls", so a flat
+# {"staticcheck":true} is answered with null and quietly does nothing.
+# Note the catalog default for gopls is {"gopls":{"semanticTokens":true}},
+# which turns on the semantic highlighting layer; overriding this key drops
+# that unless you carry it along.
+# lsp-<server>-settings = {"gopls":{"staticcheck":true,"semanticTokens":true}}
 #
 # A repository may check in `<repo>/.rook/config` with lsp* keys only: it is
 # parsed after this file (its lines win) and may select catalog languages or

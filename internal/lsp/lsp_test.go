@@ -41,7 +41,15 @@ func runFakeServer() {
 		}
 		switch m.Method {
 		case "initialize":
-			reply(m.ID, map[string]any{"capabilities": map[string]any{}})
+			reply(m.ID, map[string]any{"capabilities": map[string]any{
+				"semanticTokensProvider": map[string]any{
+					"legend": map[string]any{
+						"tokenTypes":     []string{"namespace", "type", "function"},
+						"tokenModifiers": []string{"declaration", "readonly"},
+					},
+					"full": true,
+				},
+			}})
 		case "initialized":
 			// pull configuration like gopls does; stash the client's answer
 			send(map[string]any{"jsonrpc": "2.0", "id": 100, "method": "workspace/configuration",
@@ -72,6 +80,13 @@ func runFakeServer() {
 			reply(m.ID, map[string]any{"contents": map[string]any{
 				"kind":  "markdown",
 				"value": fmt.Sprintf("cfg=%s v=%d", pulled, docVersion),
+			}})
+		case "textDocument/semanticTokens/full":
+			// two tokens in LSP's relative 5-tuple encoding: a `function`
+			// at 0:0 len 3, then a `type` two lines down at char 4 len 5
+			reply(m.ID, map[string]any{"data": []int{
+				0, 0, 3, 2, 0,
+				2, 4, 5, 1, 1,
 			}})
 		case "shutdown":
 			reply(m.ID, nil)
@@ -187,5 +202,39 @@ func TestServerExitFailsCalls(t *testing.T) {
 	_, err := c.References(testCtx(t), "/tmp/x.go", Position{})
 	if err == nil {
 		t.Fatal("call on a dead server must error")
+	}
+}
+
+func TestSemanticTokens(t *testing.T) {
+	c := startFake(t, "")
+
+	// the legend is read off initialize, not requested separately
+	lg := c.Legend()
+	if strings.Join(lg.Types, ",") != "namespace,type,function" {
+		t.Fatalf("legend types: %+v", lg.Types)
+	}
+	if strings.Join(lg.Modifiers, ",") != "declaration,readonly" {
+		t.Fatalf("legend modifiers: %+v", lg.Modifiers)
+	}
+
+	f := filepath.Join(t.TempDir(), "a.go")
+	os.WriteFile(f, []byte("package x\n"), 0o644)
+	if err := c.EnsureOpen(f, ""); err != nil {
+		t.Fatal(err)
+	}
+	data, err := c.SemanticTokens(testCtx(t), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// passed through verbatim — the encoding Monaco wants is the one LSP
+	// sends, so any reshaping here would be a bug
+	want := []uint32{0, 0, 3, 2, 0, 2, 4, 5, 1, 1}
+	if len(data) != len(want) {
+		t.Fatalf("data: %+v", data)
+	}
+	for i := range want {
+		if data[i] != want[i] {
+			t.Fatalf("data[%d] = %d, want %d (%+v)", i, data[i], want[i], data)
+		}
 	}
 }

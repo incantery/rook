@@ -55,9 +55,16 @@ var Catalog = []Entry{
 			Args:      []string{"serve"},
 			Filetypes: []string{"go", "mod", "work"},
 			Roots:     []string{"go.work", "go.mod", ".git"},
-			Method:    "go",
-			Pkg:       "golang.org/x/tools/gopls",
-			Bin:       "bin/gopls",
+			// gopls computes semantic tokens only when asked to — the
+			// client capability alone gets an empty stream, verified
+			// against gopls 0.18. Nested under "gopls" because that's the
+			// SECTION it pulls via workspace/configuration; a flat
+			// {"semanticTokens":true} answers null and silently does
+			// nothing (which is exactly how this was first written).
+			Settings: `{"gopls":{"semanticTokens":true}}`,
+			Method:   "go",
+			Pkg:      "golang.org/x/tools/gopls",
+			Bin:      "bin/gopls",
 		},
 	},
 	{

@@ -79,7 +79,10 @@ test("gd jumps across files and gr fills the refs quickfix", async ({page}) => {
     fs.mkdirSync(confDir, {recursive: true});
     fs.writeFileSync(
         path.join(confDir, "config"),
-        `lsp-gopls = ${GOPLS} serve\nlsp-gopls-filetypes = go\nlsp-gopls-roots = go.mod, .git\n`,
+        `lsp-gopls = ${GOPLS} serve\nlsp-gopls-filetypes = go\nlsp-gopls-roots = go.mod, .git\n` +
+            // the explicit tier doesn't inherit the catalog's settings, so the
+            // spec states them; `lsp = go` users get this by default
+            `lsp-gopls-settings = {"gopls":{"semanticTokens":true}}\n`,
     );
 
     const ws = `lsp-e2e-${Date.now()}`;
@@ -141,4 +144,58 @@ test("gd jumps across files and gr fills the refs quickfix", async ({page}) => {
     await expect(editorPath).toContainText("strings.go");
 
     await page.screenshot({path: "bin/e2e/lsp-refs.png", fullPage: true});
+});
+
+// Semantic tokens: the layer the grammar can't reach. In Go, `string` and
+// `bool` are TYPES, but every TextMate grammar carries them in a keyword
+// list and paints them keyword-colored. gopls resolves them properly, and
+// the semantic layer repaints them as types — measured, not assumed: an A/B
+// with the setting off shows exactly these two tokens changing class.
+test("semantic tokens repaint what the grammar gets wrong", async ({page}) => {
+    test.setTimeout(180_000);
+    test.skip(!fs.existsSync(GOPLS), "no gopls on this machine (~/go/bin/gopls)");
+
+    const confDir = path.join(SANDBOX, "config", "rook");
+    fs.mkdirSync(confDir, {recursive: true});
+    fs.writeFileSync(
+        path.join(confDir, "config"),
+        `lsp-gopls = ${GOPLS} serve\nlsp-gopls-filetypes = go\nlsp-gopls-roots = go.mod, .git\n` +
+            `lsp-gopls-settings = {"gopls":{"semanticTokens":true}}\n`,
+    );
+
+    const ws = `sem-e2e-${Date.now()}`;
+    await openWorkspace(page, ws);
+    await warmup(ws);
+
+    await runCommand(page, "Open file (read-only)");
+    const picker = page.getByPlaceholder("Open file (read-only)…");
+    await expect(picker).toBeVisible();
+    await picker.fill("internal/host/plugins.go");
+    await picker.press("Enter");
+    await expect(page.locator(".editor-path")).toContainText("plugins.go", {timeout: 20_000});
+
+    const classOf = (needle: string) =>
+        page.evaluate((n) => {
+            for (const el of document.querySelectorAll(
+                ".editor-mount .view-line span[class^=mtk]",
+            )) {
+                if ((el.textContent ?? "").trim() === n) return el.className.split(" ")[0];
+            }
+            return null;
+        }, needle);
+
+    // The grammar paints first and the server repaints after, so poll the
+    // end state: `string` must NOT read as a keyword…
+    await expect
+        .poll(async () => (await classOf("string")) !== (await classOf("package")), {
+            timeout: 45_000,
+        })
+        .toBe(true);
+
+    // …it must read as the same thing a user-defined type does. That pins
+    // the mapping (LSP `type` → the type role), not merely "something moved".
+    expect(await classOf("string")).toBe(await classOf("pluginStatus"));
+    expect(await classOf("bool")).toBe(await classOf("pluginStatus"));
+
+    await page.screenshot({path: "bin/e2e/semantic-tokens.png", fullPage: true});
 });

@@ -11,6 +11,7 @@
 import type {ChangedFile, HostAPI, LspLocation, ThreadInfo} from "../hostapi";
 import type {PaneContent} from "./manager";
 import type * as monacoTypes from "monaco-editor";
+import {legendModifiers, legendTypes, unifyTokens} from "../highlight/semantic";
 import {ThreadBand} from "./threads";
 import {submitLabel, type Side} from "./threadview";
 
@@ -143,6 +144,30 @@ function ensureLspProviders(m: Monaco): void {
             return pane.hoverAt(position.lineNumber, position.column);
         },
     });
+    // Semantic tokens LAYER OVER the TextMate grammar: the grammar paints
+    // instantly and everywhere, the server then repaints what it actually
+    // knows (this identifier is a type, that one's a parameter — the
+    // distinction no regex can make). Where there's no server, or it's slow,
+    // or it declines, the grammar's answer simply stands.
+    //
+    // The legend is per-SERVER, but Monaco wants one legend per provider, so
+    // the provider publishes the union of every legend seen so far and
+    // remaps indices into it. In practice one language means one server, so
+    // the remap is usually the identity — it exists so a second server can't
+    // silently miscolor through a legend that isn't its own.
+    m.languages.registerDocumentSemanticTokensProvider("*", {
+        getLegend: () => semanticLegend(),
+        releaseDocumentSemanticTokens: () => {},
+        provideDocumentSemanticTokens: async (model) => {
+            const pane = paneByModel.get(model);
+            if (!pane) return null;
+            return pane.semanticTokens();
+        },
+    });
+}
+
+function semanticLegend(): monacoTypes.languages.SemanticTokensLegend {
+    return {tokenTypes: legendTypes, tokenModifiers: legendModifiers};
 }
 
 export interface EditorContext {
@@ -915,6 +940,22 @@ export class EditorPane implements PaneContent {
         setTimeout(() => this.editor?.trigger("rook", "editor.action.showHover", {}), 0);
     }
 
+    /** The semantic-token provider's callback (module-level, routed here by
+     *  model). Returns null on anything that isn't a live file buffer with a
+     *  server behind it — null means "no semantic layer", and the TextMate
+     *  grammar's colors stand unchanged. */
+    async semanticTokens(): Promise<monacoTypes.languages.SemanticTokens | null> {
+        const path = this.opts.kind === "file" ? this.opts.path : undefined;
+        if (!path) return null;
+        try {
+            const res = await this.api.lspSemanticTokens(this.opts.workspace, path, this.lspText());
+            if (!res.data.length || !res.types.length) return null;
+            return {data: unifyTokens(res.data, res.types, res.modifiers)};
+        } catch {
+            return null; // ambient like hover — never flash, never break paint
+        }
+    }
+
     /** The hover provider's callback (module-level, routed here by model). */
     async hoverAt(line: number, col: number): Promise<monacoTypes.languages.Hover | null> {
         const path = this.opts.kind === "file" ? this.opts.path : undefined;
@@ -1079,6 +1120,11 @@ export class EditorPane implements PaneContent {
             fontSize: this.opts.font.size,
             minimap: {enabled: false},
             scrollBeyondLastLine: false,
+            // Must be explicit. The default is "configuredByTheme", and
+            // standalone Monaco hardcodes its theme's semanticHighlighting
+            // to false (standaloneThemeService.js) — so the default means
+            // OFF, and the provider would be registered but never called.
+            "semanticHighlighting.enabled": true,
         };
     }
 
