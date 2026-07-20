@@ -248,8 +248,7 @@
                     rows="1"
                     placeholder="Drop a thought on this hunk — a question, a doubt, a gut reaction…"
                     bind:value={note}
-                    oninput={() => (noteDone = false)}
-                ></textarea>
+                    oninput={() => (noteDone = false)}></textarea>
                 <button
                     class="shrink-0 cursor-pointer rounded-lg border border-line/15 bg-fg/5 px-3 py-2 text-[12px] font-semibold text-fg hover:border-acc disabled:opacity-50"
                     disabled={noteBusy || !note.trim()}

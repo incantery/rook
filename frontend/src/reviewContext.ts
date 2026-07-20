@@ -32,8 +32,7 @@ export function makeReviewContext(deps: {
     return {
         id: "review",
         title: "Review",
-        ids: () =>
-            [...app.reviewHunks].sort((a, b) => riskRank(b) - riskRank(a)).map((h) => h.id),
+        ids: () => [...app.reviewHunks].sort((a, b) => riskRank(b) - riskRank(a)).map((h) => h.id),
         Row: ReviewRow,
         Header: ReviewGateHeader,
         Detail: ReviewItem,
