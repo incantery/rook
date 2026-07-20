@@ -18,6 +18,7 @@ import "monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution";
 import "monaco-editor/esm/vs/basic-languages/rust/rust.contribution";
 import "monaco-editor/esm/vs/basic-languages/python/python.contribution";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+import {installTextMate} from "../highlight/textmate";
 import {buildMonacoTheme} from "../theme/monaco-theme";
 import {themeService} from "../theme/service";
 
@@ -30,6 +31,12 @@ const monaco = edcore as unknown as typeof monacoTypes;
 self.MonacoEnvironment = {
     getWorker: () => new EditorWorker(),
 };
+
+// TextMate grammars replace Monarch for the vendored languages (and register
+// svelte, which Monaco has no language for at all). Registration is cheap and
+// lazy — the WASM engine and each grammar load on first use of that language,
+// and any failure leaves Monarch in place.
+installTextMate(monaco);
 
 // The "rook" theme is built from the active Palette (theme/service.ts) — the
 // single source of truth, mirroring the xterm + chrome colors. Monaco can't

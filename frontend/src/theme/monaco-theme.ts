@@ -1,14 +1,19 @@
 // Build a Monaco IStandaloneThemeData from a Palette. Two halves:
-//   rules  — syntax colors, keyed on the coarse token names Monaco's Monarch
-//            tokenizers emit (rook uses Monarch, not a TextMate grammar). Rule
-//            foregrounds are BARE 6-digit hex, no # and no alpha.
+//   rules  — syntax colors. Two families, because two tokenizers are live:
+//            TextMate SCOPES (highlight/scope.ts) for the vendored grammars,
+//            and Monaco's coarse MONARCH names for every other language.
+//            Both are matched by the same dotted trie — Monaco splits a token
+//            on "." and walks it, longest prefix wins — so the two families
+//            coexist in one flat list without colliding. Rule foregrounds are
+//            BARE 6-digit hex, no # and no alpha.
 //   colors — the editor-subset UI keys (Monaco has no side bar etc.; the
 //            CSS-var chrome owns everything outside the editor). These DO take
 //            # and may carry alpha.
-// Reproduces term/monaco.ts's theme from palette roles; the diff tints derive
-// exactly from green/red at the same low alphas the old theme hardcoded.
+// The diff tints derive from green/red at the same low alphas the original
+// hand-written theme hardcoded.
 
 import type {editor} from "monaco-editor";
+import {SCOPE_ROLES} from "../highlight/scope";
 import {mix, noHash, withAlpha} from "./color";
 import type {Palette} from "./palette";
 
@@ -19,9 +24,16 @@ export function buildMonacoTheme(p: Palette): editor.IStandaloneThemeData {
         base: p.type === "light" ? "vs" : "vs-dark",
         inherit: true,
         rules: [
+            // TextMate scopes — the vendored grammars (highlight/scope.ts owns
+            // the scope→role table, so this list and the tokenizer's own
+            // claim set can never drift apart)
+            ...SCOPE_ROLES.map(([scope, role]) => rule(scope, s[role])),
+
+            // Monarch names — every language without a vendored grammar.
+            // These are single words with no dots, so they can't shadow a
+            // scope rule (and vice versa).
             rule("comment", s.comment),
             rule("string", s.string),
-            rule("string.regexp", s.regexp),
             rule("regexp", s.regexp),
             rule("number", s.number),
             rule("keyword", s.keyword),

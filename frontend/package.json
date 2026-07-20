@@ -13,7 +13,8 @@
         "check": "svelte-check",
         "lint": "oxlint --deny-warnings && node scripts/lint-theme.mjs",
         "format": "oxfmt .",
-        "format:check": "oxfmt --check ."
+        "format:check": "oxfmt --check .",
+        "grammars": "node scripts/vendor-grammars.mjs"
     },
     "dependencies": {
         "@wailsio/runtime": "latest",
@@ -21,7 +22,9 @@
         "@xterm/addon-webgl": "^0.19.0",
         "@xterm/xterm": "^6.0.0",
         "monaco-editor": "0.55.1",
-        "monaco-vim": "0.4.4"
+        "monaco-vim": "0.4.4",
+        "vscode-oniguruma": "2.0.1",
+        "vscode-textmate": "9.3.2"
     },
     "devDependencies": {
         "@playwright/test": "^1.61.1",
@@ -32,6 +35,7 @@
         "svelte": "^5.56.4",
         "svelte-check": "^4.7.2",
         "tailwindcss": "^4.3.2",
+        "tm-grammars": "1.31.15",
         "typescript": "^5.9.3",
         "vite": "^8.0.5",
         "vitest": "^4.1.10"
