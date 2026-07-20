@@ -44,6 +44,7 @@ func TestSampleDefaults(t *testing.T) {
 	got.JiraURL, got.JiraEmail, got.JiraJQL = "", "", ""
 	got.JiraProjects, got.BranchPrefixes, got.BranchDelimiters = nil, nil, nil
 	got.Workflow, got.Workflows, got.Keybinds = nil, nil, nil
+	got.LSP, got.LSPServers, got.LSPRefused = nil, nil, nil
 	if !reflect.DeepEqual(got, Default()) {
 		t.Fatalf("sample defaults drifted from config.Default():\n got %+v\nwant %+v", got, Default())
 	}

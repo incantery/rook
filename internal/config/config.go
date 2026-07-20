@@ -89,6 +89,33 @@ type Config struct {
 	// shows. `workspace-allow = rook, dora`. Not access control:
 	// registration and per-workspace endpoints are unaffected.
 	WorkspaceAllow []string `json:"workspaceAllow"`
+	// LSP is the plugin intent tier (docs/superpowers/specs/
+	// 2026-07-20-plugins-language-design.md): language names that expand
+	// through the host's curated catalog — `lsp = go, typescript`. Rook
+	// installs and manages these servers itself.
+	LSP []string `json:"lsp"`
+	// LSPServers is the explicit tier, keyed by server name: overrides for
+	// a catalog expansion, or bring-your-own declarations
+	// (`lsp-zls = zls`). A non-empty Command marks the server
+	// system-provided — rook execs it as found, never installs it.
+	LSPServers map[string]LSPServer `json:"lspServers"`
+	// LSPRefused records repo-layer lines that were ignored under the
+	// trust rule (a cloned repo must never supply argv). Surfaced in
+	// status, never applied.
+	LSPRefused []string `json:"lspRefused,omitempty"`
+}
+
+// LSPServer is one server's explicit-tier declaration. Zero-valued fields
+// defer to the catalog entry (if the server has one); Off wins over
+// everything — `lsp-<server> = off` disables the server in either layer.
+type LSPServer struct {
+	Command   string   `json:"command,omitempty"`
+	Off       bool     `json:"off,omitempty"`
+	Filetypes []string `json:"filetypes,omitempty"`
+	Roots     []string `json:"roots,omitempty"`
+	// Settings is raw JSON handed to the server verbatim
+	// (workspace/didChangeConfiguration) — rook never interprets it.
+	Settings string `json:"settings,omitempty"`
 }
 
 func Default() Config {
@@ -122,13 +149,33 @@ func Path() string {
 
 func Load() Config {
 	cfg := Default()
-	path := Path()
+	applyFile(&cfg, Path(), false)
+	return cfg
+}
+
+// LoadWorkspace layers a workspace's checked-in `.rook/config` (repoTop is
+// the repository top-level) over the user config. Layering is parse order:
+// the repo file's lines win, last-wins like every key. The repo layer is
+// bounded to lsp* keys and may select catalog plugins or tune declared
+// servers, but a command line from a cloned repo is refused (recorded in
+// LSPRefused, surfaced in status) — git clone must never supply argv.
+func LoadWorkspace(repoTop string) Config {
+	cfg := Load()
+	if repoTop != "" {
+		applyFile(&cfg, filepath.Join(repoTop, ".rook", "config"), true)
+	}
+	return cfg
+}
+
+// applyFile parses one config file over cfg. Missing file is a no-op.
+// repoLayer bounds parsing to the keys a checked-in file may set.
+func applyFile(cfg *Config, path string, repoLayer bool) {
 	if path == "" {
-		return cfg
+		return
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return cfg
+		return
 	}
 	defer f.Close()
 
@@ -142,115 +189,173 @@ func Load() Config {
 		if !ok {
 			continue
 		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		// dynamic keys first — the switch below only knows fixed names
-		if ws, ok := strings.CutPrefix(key, "jira-project-"); ok && ws != "" && value != "" {
-			if cfg.JiraProjects == nil {
-				cfg.JiraProjects = map[string]string{}
-			}
-			cfg.JiraProjects[ws] = value
-			continue
+		applyKey(cfg, strings.TrimSpace(key), strings.TrimSpace(value), repoLayer)
+	}
+}
+
+// applyKey applies one `key = value` line. The lsp family is handled first
+// (it is the only family the repo layer may touch); everything else is the
+// user file's fixed and dynamic keys.
+func applyKey(cfg *Config, key, value string, repoLayer bool) {
+	if key == "lsp" {
+		cfg.LSP = splitList(value)
+		return
+	}
+	if rest, ok := strings.CutPrefix(key, "lsp-"); ok && rest != "" {
+		applyLSPKey(cfg, rest, value, repoLayer)
+		return
+	}
+	if repoLayer {
+		return // fail open: a repo file may carry keys a newer rook reads
+	}
+	// dynamic keys first — the switch below only knows fixed names
+	if ws, ok := strings.CutPrefix(key, "jira-project-"); ok && ws != "" && value != "" {
+		if cfg.JiraProjects == nil {
+			cfg.JiraProjects = map[string]string{}
 		}
-		// an EMPTY value is meaningful here: `branch-prefix-<ws> =` stores an
-		// empty string — that workspace's branches carry no prefix (matching a
-		// CI naming scheme exactly). A genuinely unset key falls back to rook/.
-		if ws, ok := strings.CutPrefix(key, "branch-prefix-"); ok && ws != "" {
-			if cfg.BranchPrefixes == nil {
-				cfg.BranchPrefixes = map[string]string{}
-			}
-			cfg.BranchPrefixes[ws] = value
-			continue
+		cfg.JiraProjects[ws] = value
+		return
+	}
+	// an EMPTY value is meaningful here: `branch-prefix-<ws> =` stores an
+	// empty string — that workspace's branches carry no prefix (matching a
+	// CI naming scheme exactly). A genuinely unset key falls back to rook/.
+	if ws, ok := strings.CutPrefix(key, "branch-prefix-"); ok && ws != "" {
+		if cfg.BranchPrefixes == nil {
+			cfg.BranchPrefixes = map[string]string{}
 		}
-		// the delimiter takes the opposite reading of an empty value:
-		// FOO-123bar-baz is nobody's naming scheme, so `branch-delimiter-<ws> =`
-		// is a typo and falls back to "-" like an unset key.
-		if ws, ok := strings.CutPrefix(key, "branch-delimiter-"); ok && ws != "" && value != "" {
-			if cfg.BranchDelimiters == nil {
-				cfg.BranchDelimiters = map[string]string{}
-			}
-			cfg.BranchDelimiters[ws] = value
-			continue
+		cfg.BranchPrefixes[ws] = value
+		return
+	}
+	// the delimiter takes the opposite reading of an empty value:
+	// FOO-123bar-baz is nobody's naming scheme, so `branch-delimiter-<ws> =`
+	// is a typo and falls back to "-" like an unset key.
+	if ws, ok := strings.CutPrefix(key, "branch-delimiter-"); ok && ws != "" && value != "" {
+		if cfg.BranchDelimiters == nil {
+			cfg.BranchDelimiters = map[string]string{}
 		}
-		// likewise for workflows: `workflow-<ws> =` stores an empty non-nil
-		// list — that workspace explicitly opts out of the global workflow.
-		if ws, ok := strings.CutPrefix(key, "workflow-"); ok && ws != "" {
-			if cfg.Workflows == nil {
-				cfg.Workflows = map[string][]string{}
-			}
-			cfg.Workflows[ws] = splitList(value)
-			continue
+		cfg.BranchDelimiters[ws] = value
+		return
+	}
+	// likewise for workflows: `workflow-<ws> =` stores an empty non-nil
+	// list — that workspace explicitly opts out of the global workflow.
+	if ws, ok := strings.CutPrefix(key, "workflow-"); ok && ws != "" {
+		if cfg.Workflows == nil {
+			cfg.Workflows = map[string][]string{}
 		}
-		switch key {
-		case "font-family":
-			if value != "" {
-				cfg.FontFamily = value
+		cfg.Workflows[ws] = splitList(value)
+		return
+	}
+	switch key {
+	case "font-family":
+		if value != "" {
+			cfg.FontFamily = value
+		}
+	case "font-size":
+		if n, err := strconv.Atoi(value); err == nil && n > 0 {
+			cfg.FontSize = n
+		}
+	case "background-opacity":
+		if o, err := strconv.ParseFloat(value, 64); err == nil && o >= 0 && o <= 1 {
+			cfg.BackgroundOpacity = o
+		}
+	case "theme":
+		if value != "" {
+			cfg.Theme = value
+		}
+	case "window-padding-x":
+		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
+			cfg.WindowPaddingX = n
+		}
+	case "window-padding-y":
+		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
+			cfg.WindowPaddingY = n
+		}
+	case "agent":
+		cfg.Agent = value == "on" || value == "true"
+	case "agent-model":
+		if value != "" {
+			cfg.AgentModel = value
+		}
+	case "agent-engine":
+		if value != "" {
+			cfg.AgentEngine = value
+		}
+	case "agent-daily-cap-usd":
+		if f, err := strconv.ParseFloat(value, 64); err == nil && f >= 0 {
+			cfg.AgentDailyCapUSD = f
+		}
+	case "jira-url":
+		cfg.JiraURL = strings.TrimRight(value, "/")
+	case "jira-email":
+		cfg.JiraEmail = value
+	case "jira-jql":
+		cfg.JiraJQL = value
+	case "coder":
+		if value != "" {
+			cfg.Coder = value
+		}
+	case "leader":
+		if value != "" {
+			cfg.Leader = value
+		}
+	case "workflow":
+		cfg.Workflow = splitList(value)
+	case "workspace-allow":
+		cfg.WorkspaceAllow = splitList(value)
+	case "keybind":
+		// <trigger>=<command>; command ids never contain '=', so split
+		// on the LAST '=' — that keeps "=" itself a bindable trigger and
+		// makes `keybind = h=` (empty command) the unbind form.
+		if i := strings.LastIndexByte(value, '='); i > 0 {
+			if cfg.Keybinds == nil {
+				cfg.Keybinds = map[string]string{}
 			}
-		case "font-size":
-			if n, err := strconv.Atoi(value); err == nil && n > 0 {
-				cfg.FontSize = n
-			}
-		case "background-opacity":
-			if o, err := strconv.ParseFloat(value, 64); err == nil && o >= 0 && o <= 1 {
-				cfg.BackgroundOpacity = o
-			}
-		case "theme":
-			if value != "" {
-				cfg.Theme = value
-			}
-		case "window-padding-x":
-			if n, err := strconv.Atoi(value); err == nil && n >= 0 {
-				cfg.WindowPaddingX = n
-			}
-		case "window-padding-y":
-			if n, err := strconv.Atoi(value); err == nil && n >= 0 {
-				cfg.WindowPaddingY = n
-			}
-		case "agent":
-			cfg.Agent = value == "on" || value == "true"
-		case "agent-model":
-			if value != "" {
-				cfg.AgentModel = value
-			}
-		case "agent-engine":
-			if value != "" {
-				cfg.AgentEngine = value
-			}
-		case "agent-daily-cap-usd":
-			if f, err := strconv.ParseFloat(value, 64); err == nil && f >= 0 {
-				cfg.AgentDailyCapUSD = f
-			}
-		case "jira-url":
-			cfg.JiraURL = strings.TrimRight(value, "/")
-		case "jira-email":
-			cfg.JiraEmail = value
-		case "jira-jql":
-			cfg.JiraJQL = value
-		case "coder":
-			if value != "" {
-				cfg.Coder = value
-			}
-		case "leader":
-			if value != "" {
-				cfg.Leader = value
-			}
-		case "workflow":
-			cfg.Workflow = splitList(value)
-		case "workspace-allow":
-			cfg.WorkspaceAllow = splitList(value)
-		case "keybind":
-			// <trigger>=<command>; command ids never contain '=', so split
-			// on the LAST '=' — that keeps "=" itself a bindable trigger and
-			// makes `keybind = h=` (empty command) the unbind form.
-			if i := strings.LastIndexByte(value, '='); i > 0 {
-				if cfg.Keybinds == nil {
-					cfg.Keybinds = map[string]string{}
-				}
-				cfg.Keybinds[strings.TrimSpace(value[:i])] = strings.TrimSpace(value[i+1:])
-			}
+			cfg.Keybinds[strings.TrimSpace(value[:i])] = strings.TrimSpace(value[i+1:])
 		}
 	}
-	return cfg
+}
+
+// applyLSPKey applies one `lsp-<server>[-<attr>]` line; rest is the key
+// past "lsp-". The known attribute suffixes are peeled first, so
+// `lsp-gopls-filetypes` addresses server "gopls" — a server whose name
+// itself ends in "-filetypes" is not expressible, accepted.
+func applyLSPKey(cfg *Config, rest, value string, repoLayer bool) {
+	server, attr := rest, ""
+	for _, suf := range []string{"filetypes", "roots", "settings"} {
+		if s, ok := strings.CutSuffix(rest, "-"+suf); ok && s != "" {
+			server, attr = s, suf
+			break
+		}
+	}
+	if cfg.LSPServers == nil {
+		cfg.LSPServers = map[string]LSPServer{}
+	}
+	s := cfg.LSPServers[server]
+	switch attr {
+	case "filetypes":
+		s.Filetypes = splitList(value)
+	case "roots":
+		s.Roots = splitList(value)
+	case "settings":
+		s.Settings = value
+	default: // the base key: a command line, or the off switch
+		if value == "off" {
+			s.Off, s.Command = true, ""
+			break
+		}
+		if repoLayer {
+			// Trust rule: a checked-in file may select and tune, but its
+			// command lines are never exec'd. Record the refusal for status.
+			if value != "" {
+				cfg.LSPRefused = append(cfg.LSPRefused, "lsp-"+server+" = "+value)
+			}
+			return
+		}
+		// last-wins: a command line re-enables a server an earlier line
+		// turned off; an empty value clears back to catalog-managed.
+		s.Off, s.Command = false, value
+	}
+	cfg.LSPServers[server] = s
 }
 
 // splitList parses a comma-separated config value: items trimmed, empties

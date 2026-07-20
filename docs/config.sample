@@ -89,6 +89,38 @@
 # workflow = /security-review, /review
 
 
+# ── Language servers (plugins, host-managed) ─────────────────────────────
+#
+# The plugin intent tier: language names, comma-separated, expanded through
+# rook's curated catalog (go, typescript, svelte). Rook installs and manages
+# these servers itself under ~/.local/share/rook/plugins — pinned versions,
+# lazy install on first use, nothing touches your global environment. Empty
+# means no language support.
+# lsp =
+
+# The explicit tier addresses one server by name. A command line brings your
+# own server: rook execs it from PATH as found and never installs or
+# upgrades it. `off` disables a server either tier declared.
+# lsp-<server> = zls
+
+# Which file extensions route to the server, comma-separated.
+# lsp-<server>-filetypes = zig
+
+# Root markers, in order: the nearest ancestor directory containing one keys
+# the server instance (a monorepo's Go module and TS app each get their
+# own). No marker found means the workspace root.
+# lsp-<server>-roots = build.zig, .git
+
+# Raw JSON handed to the server verbatim (workspace/didChangeConfiguration);
+# rook never interprets it. Replaces the catalog entry's default wholesale.
+# lsp-<server>-settings = {"gopls":{"staticcheck":true}}
+#
+# A repository may check in `<repo>/.rook/config` with lsp* keys only: it is
+# parsed after this file (its lines win) and may select catalog languages or
+# tune declared servers — but its command lines are refused, so a cloned
+# repo can never make rook exec something. Refusals show in lsp status.
+
+
 # ── Workspace visibility filter (presentation-only) ───────────────────────
 #
 # A comma-separated list of workspace names to show in the dashboard, mission
