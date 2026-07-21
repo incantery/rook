@@ -146,6 +146,77 @@ higher still: SIMD-scan the escape boundary too, a tighter SGR parser, an
 8-byte cell. A production Go emulator landing at **500 MB/s–1 GB/s** on real
 content is realistic — several times xterm, at zero per-cell allocation.
 
+## Scale — the actual target (20 agent sessions, not 1 vs ghostty)
+
+The real workload isn't one foreground terminal; it's many background
+agent-driven sessions. That's a DIFFERENT axis, dominated by aggregate
+throughput and — the real killer — GC pressure: an allocating grid model
+stops the world, stalling every session and the UI, worse with N. A
+zero-allocation grid gives the collector nothing to do at any N.
+`go test -run TestScale -v` runs N emulators concurrently, ~4 MiB each:
+
+| | agg throughput | allocated | GC | STW pause |
+|---|---|---|---|---|
+| bulk (ours), n=1 | 486 MB/s | 0 MB | 0 | 0.0 ms |
+| **bulk (ours), n=20** | **4002 MB/s** | **2 MB** | **0** | **0.0 ms** |
+| x/vt, n=1 | 4 MB/s | 404 MB | 4 | 0.3 ms |
+| x/vt, n=20 | 32 MB/s | 8089 MB | 9 | 5.1 ms |
+
+At 20 sessions the packed/bulk design is **125× the aggregate throughput,
+allocates 4000× less (2 MB vs 8 GB), and pauses zero.** It scales ~8× across
+cores (486→4002) because there's no shared allocator contention, and the GC
+never runs because there's nothing on the heap to collect. x/vt at scale is a
+non-starter: 8 GB allocated for 80 MB of work, pauses growing with N.
+
+This is the differentiator, and it is not "faster than ghostty". It's that
+**nobody optimizes this workload.** Native terminals (ghostty/alacritty/kitty)
+tune single-session-foreground; tmux does human multiplexing on an old model;
+VS Code / Zed hold server grids but not for N background agent sessions. The
+workload plays to Go's strengths — cheap goroutine-per-session, a good
+concurrent scheduler — and the one thing that would sink Go (GC) is removed by
+zero-alloc, proven above. Go's weakness (no SIMD intrinsics, lower single-
+stream peak than Zig) is on the axis rook doesn't care about.
+
+Two rook-only architectural multipliers stack on top, both enabled by owning
+the layer end to end:
+
+- **Lazy parse-on-view.** Agent STATE comes from transcripts (rook already
+  reads Claude Code jsonl), NOT from terminal parsing — so a background
+  terminal needs no live grid at all. Keep its byte ring (cheap append),
+  parse to a grid only when viewed (~2 ms for a 1 MiB ring at 475 MB/s). Cost
+  scales with what you're LOOKING at (~1), not what's running (N). The scale
+  table above is the EAGER case; lazy makes background sessions nearly free.
+- **Visibility-tiered work.** Damage tracking and diff streaming only for the
+  visible session(s); x/vt tracks damage always, wasted on 19 hidden ones.
+
+## What owning the tokenizer end-to-end buys
+
+`bulk.go` already IS our own tokenizer — it does not use x/ansi. What that
+ownership gets, measured where marked:
+
+1. **Bulk-scan hot path** — 184→475 MB/s (measured). Can't be had through
+   x/ansi's per-byte `Advance` API.
+2. **Zero allocation** — 0 GC pauses at any N (measured). The scale property.
+   Impossible to guarantee on top of x/vt's grid.
+3. **Fused parse→grid→damage** — no event/callback boundary, no intermediate
+   objects (part of the above).
+4. **Coalescing at parse time** — mark NET damage over a burst, skip
+   intermediate frames (a progress bar redrawing 100× → one damage).
+5. **Tiered fidelity** — parse background sessions lazily / cheaply, promote to
+   full fidelity on view. Only ownership allows it.
+6. **Memory layout control** — 8-byte cell, compact background scrollback,
+   arena allocation. Where scale memory is won.
+7. **The wire protocol** — the grid-diff format to the client is ours to tune.
+
+The cost of ownership, stated honestly: the VT tokenizer is the fiddly,
+edge-case-heavy part, and owning it means owning those bugs (DCS/OSC/APC,
+charsets, mouse encodings, DECRQSS, the kitty keyboard protocol…). Two
+mitigations make it tractable: the fidelity diff harness validates against
+xterm continuously, and the hot path can own the common 95% (print/SGR/cursor/
+erase) while DELEGATING the rare tail to a reference (x/ansi) — fast where it
+matters, correct where it's weird. That hybrid keeps the 475 and de-risks the
+long tail.
+
 ## External calibration — where 475 actually sits
 
 A survey of published terminal-parser benchmarks (kitty, alacritty/vte,
