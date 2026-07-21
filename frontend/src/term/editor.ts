@@ -102,6 +102,24 @@ async function loadVim(): Promise<VimLib> {
         } catch (err) {
             console.warn("editor pane: vim lsp maps unavailable:", err);
         }
+        // :set wrap — soft wrap, window-local, exactly as vim scopes it.
+        //
+        // A pane IS a window here, so the local scope is the pane and the
+        // global one is the default a newly-opened pane starts from. `:set`
+        // with no scope calls this twice, global then local, which is vim's
+        // own semantics: the pane you typed in changes now, and the panes you
+        // open later inherit it.
+        try {
+            vim.defineOption("wrap", undefined, "boolean", [], (value, cm) => {
+                const pane = cm ? paneOf(cm) : undefined;
+                if (value === undefined) return pane ? pane.getWrap() : defaultWrap;
+                if (!cm) defaultWrap = !!value;
+                else pane?.setWrap(!!value);
+                return undefined;
+            });
+        } catch (err) {
+            console.warn("editor pane: :set wrap unavailable:", err);
+        }
         // clipboard=unnamedplus, write side: any yank/delete/change into the
         // unnamed register mirrors to the system clipboard. The read side (p
         // pasting FROM other apps) stays vim-internal — navigator.clipboard
@@ -142,6 +160,19 @@ interface VimApi {
         args?: object,
         extra?: {context?: string},
     ): void;
+    /** CodeMirror's option registry, which monaco-vim inherits wholesale and
+     *  its types omit. The callback is BOTH getter and setter: value===undefined
+     *  is a read, and cm===undefined means the global scope rather than one
+     *  buffer's. `:set`/`:setlocal` already parse no-prefix, `?` and `=` on top
+     *  of it, so defining an option is all that stands between us and the
+     *  whole family of spellings. */
+    defineOption(
+        name: string,
+        defaultValue: unknown,
+        type: "boolean" | "string" | "number",
+        aliases?: string[],
+        callback?: (value: unknown, cm?: ExCm) => unknown,
+    ): void;
     getRegisterController(): object;
     /** monaco-vim's VimMode IS the CodeMirror adapter (its keymap module
      *  default-exports CodeMirror), so the pane's own `vim` handle is the `cm`
@@ -153,6 +184,12 @@ interface VimApi {
  *  it to register ex commands; the panes need it too, for the one thing that
  *  isn't a binding — putting an editor back into NORMAL after a range verb. */
 let vimApi: VimApi | null = null;
+
+/** 'wrap' at global scope: what a pane opens with. Off, like vim and like
+ *  Monaco — code has columns and a wrapped line hides that it is long. The
+ *  prose buffers (draft, thread) override it for themselves; they have no
+ *  columns to preserve. */
+let defaultWrap = false;
 
 // ---- LSP: hover provider + the model→pane bridge ----
 // Providers are global per-language in Monaco; rook registers ONE hover
@@ -379,6 +416,10 @@ export class EditorPane implements PaneContent {
     private threadShown: ThreadInfo | null = null;
     /** editable iff the file loaded whole — truncated/binary stays read-only */
     private editable = false;
+    /** 'wrap', window-local. Seeded from the global default at construction,
+     *  then owned by this pane — `:set wrap` here must not reach across the
+     *  split to the file you are reading beside it. */
+    private wrap = defaultWrap;
     private dirty = false;
     private saving = false;
     /** the model version at the last load/save — dirty is a diff against it,
@@ -985,7 +1026,15 @@ export class EditorPane implements PaneContent {
             paneByModel.set(model, this); // hover routes model → this pane
             const ed = this.ensureEditor();
             ed.setModel(model);
-            ed.updateOptions({readOnly: !this.editable});
+            // Restated on every load rather than set once, because a file
+            // pane retargets in place (:e) and outlives any one file. Monaco
+            // does retain updateOptions across setModel, so this is belt and
+            // braces — but it makes the pane's own field the thing that
+            // decides, instead of whatever the editor was last told.
+            ed.updateOptions({
+                readOnly: !this.editable,
+                wordWrap: this.wrap ? "on" : "off",
+            });
             this.savedVersionId = model.getAlternativeVersionId();
             this.setDirty(false);
             this.changeSub?.dispose();
@@ -1502,7 +1551,21 @@ export class EditorPane implements PaneContent {
         return this.composeOn(band, mode);
     }
 
-    /** ,t — open the thread under the cursor as a buffer. Multiple threads can
+    /** 'wrap' for this pane. Applied to whatever is showing right now — a
+     *  thread buffer included, so `:set nowrap` works while reading one even
+     *  though prose opens wrapped. */
+    setWrap(on: boolean): void {
+        this.wrap = on;
+        const opts = {wordWrap: on ? ("on" as const) : ("off" as const)};
+        this.editor?.updateOptions(opts);
+        this.diffEditor?.updateOptions(opts);
+    }
+
+    getWrap(): boolean {
+        return this.wrap;
+    }
+
+    /** gt — open the thread under the cursor as a buffer. Multiple threads can
      *  anchor to one region; take the top of the stack (most-demanding state),
      *  which is exactly what the gutter glyph is already showing. */
     openThreadAtCursor(): boolean {
