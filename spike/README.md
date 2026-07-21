@@ -146,6 +146,46 @@ higher still: SIMD-scan the escape boundary too, a tighter SGR parser, an
 8-byte cell. A production Go emulator landing at **500 MB/s–1 GB/s** on real
 content is realistic — several times xterm, at zero per-cell allocation.
 
+## External calibration — where 475 actually sits
+
+A survey of published terminal-parser benchmarks (kitty, alacritty/vte,
+ghostty, wezterm, foot, termbench) puts our numbers in context — and tempers
+the 475:
+
+- **Byte-at-a-time parsers land at 0.1–0.3 GB/s across languages.** Our x/ansi
+  at 184 MB/s is textbook for that class. Confirmed, not a Go deficiency.
+- **Bulk-scan (memchr/SIMD to the next ESC, then batch-place the run) is the
+  universal fast-terminal technique** — alacritty's vte, ghostty, and kitty all
+  do it, for a measured 2–5x. Our 184→475 (2.6x) is exactly that speedup,
+  landing in the documented range.
+- **The realistic ceiling is ~0.5–1.5 GB/s whole-ingest, order-of-magnitude
+  1 GB/s, not 10.** You get memory-bandwidth-adjacent but grid-write + dispatch
+  keep you a fraction of raw bandwidth. termbench calls 0.5–2 GB/s "reasonable";
+  simdjson proves >1 GB/s SIMD parsing is real.
+
+The honest correction: **475 is NOT "we beat kitty."** kitty's published
+parse-only figure is ~135 MB/s average (ASCII 122) — but that's FULL fidelity
+(grapheme segmentation, full width, real cell attrs) on their machine, while
+our 475 is a minimal grid (single-rune cells, no combining/wide) on an M-series
+Mac. Apples to oranges. A fair head-to-head needs our full-fidelity grid on the
+same content. What the calibration DOES establish:
+
+- Our technique choice is the correct, proven one.
+- Go with bulk-scan sits in the same band as the fastest native terminals
+  (100–330 MB/s parse-only) — a full-fidelity Go emulator realistically lands
+  ~150–500 MB/s on real content: **competitive with the best, faster than
+  xterm.js, and zero per-cell allocation.**
+- Headroom is real: even the fastest shipping terminals sit below termbench's
+  0.5 GB/s "reasonable" floor, so parse-dispatch + grid-write (not memory
+  bandwidth) is the binding constraint. Techniques still on the table: SIMD
+  UTF-8 decode (ghostty: 16x), a width/grapheme trie (ghostty: 2.8–8x), a CSI
+  fast-path (1.4–2x), and an 8-byte cell.
+
+Separately, the survey reinforces the latency finding: Dan Luu calls the `cat`
+throughput benchmark "useless" for RESPONSIVENESS — throughput is about not
+janking under a firehose, latency is a render-path problem. Consistent with
+what we measured (transport ~5ms, paint dominates).
+
 ## Grid model, not parser — building our own beats xterm
 
 Honest caveat: the 133 is an optimistic ceiling. The prototype is minimal —
