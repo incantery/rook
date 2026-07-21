@@ -111,16 +111,60 @@ The rule is painted while composing too — otherwise the draft names its range
 only as text in a header, and the selection that made it is gone the moment
 focus leaves, so you would be writing about a range you can no longer see.
 
-## What this slice does NOT do
+## Reading: buffers and a navigation verb, not view zones
 
-**Reading is still the sidebar.** The chosen destination is an inline view
-zone under the anchored line — read where the code is, with replies opening a
-draft buffer the same way composition does. Nothing in the codebase uses view
-zones yet, so that is its own slice.
+The first plan for reading was an inline view zone under the anchored line.
+That was rejected, and the reasons generalize:
 
-Until then the panel remains the read surface, minus its composer. It no
-longer springs open on `,c`, because file mode's `rightPaneDefault` is false
-and a comment gesture shouldn't force a reading panel into view.
+1. **A view zone breaks vim's line model.** It occupies screen ROWS without
+   occupying buffer LINES, so `j`/`k`, `⌃D`/`⌃U`, `zz`, `H`/`M`/`L` and
+   relative numbers all stop agreeing with the document — right where the code
+   is densest, since that's where the anchors are.
+2. **It can't be a jump target.** A thread buffer records a jump on the way in,
+   so `⌃O` walks back to the code. That was the original framing — comments as
+   *navigation targets* — and it only works if a thread is a real pane.
+3. **Long threads.** Ten replies in a view zone shove the source apart by forty
+   rows. In a buffer they scroll, search, fold and yank like anything else.
+4. **It would be a third rendering model.** Source buffers, draft buffers, and
+   a widget. The buffer version is one abstraction with a read-only flag —
+   which is already how rook renders read-only files.
+
+So: **`,t`** opens the thread under the cursor as a read-only markdown buffer,
+and **hover** (mouse, or `K`) previews it without displacing anything.
+
+Hover is the right home for preview because it's ephemeral, and because
+`provideHover` returns an ARRAY of markdown blocks that Monaco stacks — so a
+thread and the language server compose instead of competing. Threads sort
+first: they're the rarer thing on a line, and an LSP hover can be long enough
+to push them out of sight. This is also the concrete reason threads are NOT on
+the LSP server rook exposes to nvim (see the comments-lsp spec): clients merge
+diagnostics across servers but *arbitrate* hover, so only the editor owning
+both sources can merge them.
+
+The thread buffer leads with the CONVERSATION. Fencing the anchored source at
+the top pushed the first comment below the fold of a short split, and it's
+redundant while the thread is still anchored — that code is in the pane you
+came from. The snapshot appears only when the anchor DRIFTED, which is the
+whole reason `anchor_text` is stored. A reload reveals the end of the
+conversation, because a reload means something was added.
+
+Its verbs are ex commands — `:reply`, `:resolve`, `:reopen`, `:source`. They
+read as what they do, need no keymap layer inside a read-only buffer, and
+route per-pane through the same `paneByEditor` map `:w` uses. `:reply` opens a
+draft buffer, so composition still has exactly one model.
+
+## The sidebar is gone
+
+Threads are a work list like review hunks, grep hits and references, so they
+read through the one traversal muscle memory: **`` ` t``** opens them as a
+quickfix context, `j`/`k` moves, `o` opens the thread buffer, `s` jumps to the
+source, `x` resolves. `quickfix.svelte.ts` named threads as an intended tenant
+from the start.
+
+That deletes `ThreadPanel.svelte`, the right side pane, `app.threadPaneOpen`,
+and `MODES` (whose only job was deciding whether the right pane opened). The
+two leaders end up symmetric, which is a happy accident worth keeping:
+`` ` t`` lists every thread, `,t` goes to the one under the cursor.
 
 ## Decisions
 

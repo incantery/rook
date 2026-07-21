@@ -12,7 +12,7 @@
     import {themeService} from "./theme/service";
     import {Registry} from "./registry";
     import {buildKeymap, CONTEXT_LEADER_KEY, CONTEXT_PREFIX, parseLeader, sigOf} from "./keymap";
-    import {app, MODES, type Mode} from "./state.svelte";
+    import {app, type Mode} from "./state.svelte";
     import {shellQuote} from "./util";
     import Titlebar from "./Titlebar.svelte";
     import Dashboard from "./Dashboard.svelte";
@@ -25,7 +25,6 @@
     import SpawnModal from "./SpawnModal.svelte";
     import Settings from "./Settings.svelte";
     import SidePane from "./SidePane.svelte";
-    import ThreadPanel from "./ThreadPanel.svelte";
     import FileExplorer from "./FileExplorer.svelte";
     import {fly} from "svelte/transition";
     import QuickfixPanel from "./QuickfixPanel.svelte";
@@ -35,6 +34,7 @@
     import ExploreModal from "./ExploreModal.svelte";
     import {makeExploreContext} from "./exploreContext";
     import {makeRefsContext, toRefHits} from "./refsContext";
+    import {makeThreadsContext} from "./threadsContext";
     import {makeReviewContext} from "./reviewContext";
     import type {ComposeMode, DraftSpec, EditorSeam} from "./term/editor";
 
@@ -88,7 +88,9 @@
     $effect(() => {
         const ws = app.workspace;
         if (!ws) return;
+        void refreshThreads();
         return api.watchThreads(ws, () => {
+            void refreshThreads();
             for (const p of editorPanes.values()) void p.reloadThreads();
         });
     });
@@ -193,6 +195,7 @@
                         // to daemons that have it; reloading here means the new
                         // anchor (or reply) lands on an older host as well.
                         for (const p of editorPanes.values()) void p.reloadThreads();
+                        void refreshThreads();
                     },
                 }),
             DRAFT_FRACTION,
@@ -207,12 +210,6 @@
     );
     $effect(() => {
         app.mode = currentMode;
-    });
-    // Entering a mode (re)applies its right-pane default; this reads only
-    // app.mode, so a manual toggle (threads.toggle) within a mode survives
-    // until the next transition. Review is the only mode that opens it today.
-    $effect(() => {
-        app.threadPaneOpen = MODES[app.mode].rightPaneDefault;
     });
 
     // (re)load the review when its list is open and the workspace changes
@@ -850,6 +847,48 @@
         open: (path, line, col) => void openFile(path, {line, col}),
         flash,
     });
+
+    /** Every thread in the workspace, for the quickfix list. The panes fetch
+     *  their own for the gutter; this is chrome's copy, and the list outlives
+     *  whichever pane has focus. */
+    async function refreshThreads(): Promise<void> {
+        if (!app.workspace) return;
+        try {
+            app.threads = await api.threads(app.workspace);
+        } catch (err) {
+            console.warn("threads list unavailable:", err); // fail open
+        }
+    }
+
+    const threadsCtx = makeThreadsContext({
+        open: (id) => void openThreadBuffer(id),
+        source: (id) => {
+            const t = app.threads.find((x) => x.id === id);
+            if (t) void openFile(t.path, {line: t.currentStart, col: 1});
+        },
+        resolve: async (id) => {
+            await api.threadResolve(id);
+            await refreshThreads();
+        },
+        reopen: async (id) => {
+            await api.threadReopen(id);
+            await refreshThreads();
+        },
+        submit: async () => {
+            try {
+                const res = await api.submitThreads(app.workspace);
+                flash(
+                    res.mode === "typed"
+                        ? "sent — nudged the live claude session"
+                        : "sent — spawned a responder",
+                );
+            } catch (err) {
+                flash(`submit failed: ${String(err)}`);
+            }
+            await refreshThreads();
+        },
+        flash,
+    });
     function showReferences(locations: import("./hostapi").LspLocation[]): void {
         app.refHits = toRefHits(locations);
         app.refTitle = "References";
@@ -1172,11 +1211,18 @@
         },
         {
             id: "threads.toggle",
-            title: "Toggle thread pane",
+            title: "Threads: toggle list",
             category: "View",
             keys: keymap.display("threads.toggle"),
             run: () => {
-                app.threadPaneOpen = !app.threadPaneOpen;
+                if (qf.listOpen && qf.context?.id === "threads") {
+                    qf.listOpen = false;
+                    return;
+                }
+                qf.set(threadsCtx);
+                void refreshThreads();
+                qf.listOpen = true;
+                app.focusZone = "bottom";
             },
         },
         {
@@ -1432,7 +1478,6 @@
         }
         if (mgr.focusPane(dir)) return; // moved inside the layout tree
         if (dir === "left" && app.explorerOpen) app.focusZone = "left";
-        else if (dir === "right" && app.threadPaneOpen) app.focusZone = "right";
         else if (dir === "down" && qf.listOpen) app.focusZone = "bottom";
         // else: at the workbench edge with nothing beyond it — stay put
     }
@@ -1466,7 +1511,6 @@
     // keyboard in a detached node; hand focus back instead.
     $effect(() => {
         if (app.focusZone === "left" && !app.explorerOpen) toTerms();
-        if (app.focusZone === "right" && !app.threadPaneOpen) toTerms();
         if (app.focusZone === "bottom" && !qf.listOpen) toTerms();
     });
 
@@ -1840,14 +1884,6 @@
                 </div>
             {/if}
         </div>
-        <SidePane
-            side="right"
-            visible={app.threadPaneOpen}
-            title="Threads"
-            onclose={() => (app.threadPaneOpen = false)}
-        >
-            <ThreadPanel {api} editor={activeEditor} />
-        </SidePane>
     </div>
     <!-- the quickfix strip: vim's bottom window, full width under the
          workbench row (list + hero coexist — the hero overlays the center

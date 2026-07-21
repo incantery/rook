@@ -9,6 +9,7 @@ import type {
     ReviewRoot,
     RookTask,
     RuntimeSnapshot,
+    ThreadInfo,
     UsageSnapshot,
     WorkspaceInfo,
 } from "./hostapi";
@@ -29,16 +30,6 @@ export interface RefHit {
     external?: boolean;
 }
 
-/** each mode declares its chrome defaults; the right pane opens by default
- *  only where a mode asks for it (today: review). Keep the default OUT of the
- *  pane wiring — a new mode that wants the pane just flips its flag here. */
-export const MODES: Record<Mode, {rightPaneDefault: boolean}> = {
-    home: {rightPaneDefault: false},
-    terminal: {rightPaneDefault: false},
-    review: {rightPaneDefault: true},
-    file: {rightPaneDefault: false},
-};
-
 class AppState {
     /** which screen owns the viewport; the app-screen is CSS-hidden on
      *  "home", never unmounted — terminals live inside it */
@@ -55,12 +46,14 @@ class AppState {
     dashVisible = $state(false);
     prefixArmed = $state(false);
     /** which surface owns the viewport; App.svelte derives this from screen,
-     *  the focused editor's kind, and terminal focus. Entering a mode applies
-     *  MODES[mode].rightPaneDefault to the right pane. */
+     *  the focused editor's kind, and terminal focus. */
     mode = $state<Mode>("home");
-    /** the workbench side pane (VS Code-style); threads are its first tenant.
-     *  Closed at boot — the mode you enter opens it (review does today). */
-    threadPaneOpen = $state(false);
+    /** Every thread in the workspace — the threads QUICKFIX context's store.
+     *  Threads used to have a bespoke side panel; they're a work list like
+     *  every other, so they read through the one traversal muscle memory
+     *  (` t opens it, j/k moves, o opens the thread buffer). Kept here rather
+     *  than in a pane because the list outlives whichever pane has focus. */
+    threads = $state<ThreadInfo[]>([]);
 
     /** the left side pane: the file explorer. A plain toggle (` b), not
      *  mode-derived — like VS Code's sidebar it persists across modes. */

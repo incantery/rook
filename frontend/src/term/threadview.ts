@@ -62,7 +62,10 @@ export function submitLabel(all: ThreadInfo[]): string {
     return "";
 }
 
-const STATE_RANK = {pending: 0, open: 1, resolved: 2} as const;
+/** pending > open > resolved — the one ranking every thread surface sorts by,
+ *  so the quickfix list agrees with the gutter glyph about what's urgent. */
+export const STATE_ORDER = {pending: 0, open: 1, resolved: 2} as const;
+const STATE_RANK = STATE_ORDER;
 
 /** The rank-sorted stack of threads whose marker sits on `line` (this
  *  file + side). Pending > open > resolved, then id — matches glyphClass

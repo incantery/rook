@@ -249,30 +249,26 @@ test("`:q!` discards a draft without creating a thread", async ({page}) => {
 
 // The push channel: the agent replies, and rook says so on its own. Threads
 // used to refetch only when an editor pane regained FOCUS, so you could ask a
-// question, watch claude answer in its own window, and the panel would still
-// show your comment alone until you clicked back in.
-test("an agent's reply arrives without refocusing the pane", async ({page}) => {
+// question, watch claude answer in its own window, and see nothing until you
+// clicked back in. Now a thread BUFFER re-renders itself when the reply lands.
+test("an agent's reply arrives without touching the page", async ({page}) => {
     test.setTimeout(120_000);
 
     const ws = `watch-e2e-${Date.now()}`;
     await openWorkspace(page, ws);
     await openSource(page, "internal/host/spawntask.go");
 
-    await ctxChord(page, "c", "gg");
+    await ctxChord(page, "c", "18G");
     await writeComment(page, "comment", "does this leak the goroutine");
     await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
-
-    // Open the reading panel and EXPAND the card — a collapsed card renders
-    // the anchor snippet and a reply count, not the conversation, so an
-    // assertion on the reply text would fail against a panel that had in fact
-    // updated. Everything below this line happens without touching the page.
-    await runCommand(page, "Toggle thread pane");
-    const pane = page.locator('.side-pane[data-side="right"]');
-    await expect(pane).toContainText("Threads");
-    await pane.locator("[data-thread-state]").first().click();
-    await expect(pane).toContainText("does this leak the goroutine");
-
     const [t] = await threadsOf(ws);
+
+    // open the thread as a buffer, then never touch the page again
+    await ctxChord(page, "t", "18G");
+    const threadPane = page.locator(".editor-mount").last();
+    await expect(threadPane).toContainText("does this leak the goroutine", {timeout: 15_000});
+
+    // …and now the agent answers, the way rookctl reply does
     const reply = await hostFetch(`/threads/${t.id}/comments`, {
         method: "POST",
         body: JSON.stringify({
@@ -282,7 +278,8 @@ test("an agent's reply arrives without refocusing the pane", async ({page}) => {
     });
     expect(reply.status).toBe(204);
 
-    await expect(pane).toContainText("No — the pty owns it", {timeout: 15_000});
+    await expect(threadPane).toContainText("No — the pty owns it", {timeout: 15_000});
+    await expect(threadPane).toContainText("claude");
 });
 
 // The reading half: ,t opens the thread as a read-only BUFFER, :reply answers
@@ -353,4 +350,43 @@ test("`,t` opens a thread buffer; `:reply` answers it; hover previews it", async
     await expect
         .poll(async () => (await threadsOf(ws))[0].state, {timeout: 15_000})
         .toBe("resolved");
+});
+
+// Threads read through the ONE traversal muscle memory rather than a bespoke
+// panel: ` t opens the quickfix list, j/k moves, o opens the thread buffer.
+test("` t lists threads in the quickfix and `o` opens one", async ({page}) => {
+    test.setTimeout(120_000);
+
+    const ws = `qflist-e2e-${Date.now()}`;
+    await openWorkspace(page, ws);
+    await openSource(page, "internal/host/spawntask.go");
+
+    await ctxChord(page, "c", "18G");
+    await writeComment(page, "comment", "first note here");
+    await ctxChord(page, "c", "24G");
+    await writeComment(page, "comment", "second note here");
+    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(2);
+
+    // ` t — the IDE leader opens the list (,t goes to the thread under the
+    // cursor; the two are deliberately the same letter on the two leaders)
+    await page.locator(".editor-mount").first().click();
+    await page.keyboard.press("`");
+    await page.keyboard.press("t");
+
+    const strip = page.locator('.side-pane[data-side="bottom"]');
+    await expect(strip).toContainText("Threads", {timeout: 15_000});
+    const rows = page.locator("#quickfix-list [role=option]");
+    await expect(rows).toHaveCount(2);
+    await expect(strip).toContainText("first note here");
+    await expect(strip).toContainText("second note here");
+
+    // the strip holds the keyboard: j moves, o opens the thread buffer
+    await page.keyboard.press("j");
+    await expect(rows.nth(1)).toHaveAttribute("data-cursor", "1");
+    await page.keyboard.press("o");
+    await expect(page.locator(".editor-path", {hasText: /^thread #/})).toBeVisible({
+        timeout: 15_000,
+    });
+
+    await page.screenshot({path: "bin/e2e/threads-list.png", fullPage: true});
 });
