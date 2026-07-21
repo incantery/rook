@@ -52,7 +52,7 @@ test("grep modal searches the workspace and opens the hit", async ({page}) => {
 
     // a phrase that lives in exactly one place: grep.go's walk comment
     await input.fill("bounded walk-and-scan");
-    const hit = page.getByText("internal/host/grep.go:", {exact: false}).first();
+    const hit = page.locator("[data-finder-row]", {hasText: "internal/host/grep.go:"}).first();
     await expect(hit).toBeVisible({timeout: 15_000});
 
     // click the row (its mousedown picks) — Enter can lose a focus race
@@ -66,7 +66,9 @@ test("grep modal searches the workspace and opens the hit", async ({page}) => {
     // grep-match this very spec file (--untracked searches it too).
     await runCommand(page, "Grep workspace");
     await page.getByPlaceholder("Grep the workspace…").fill(["ZZ", "NOT", "HERE", "ZZ"].join("-"));
-    await expect(page.getByText("no matches")).toBeVisible({timeout: 15_000});
+    await expect(page.locator("[data-finder-list]")).toContainText("no matches", {
+        timeout: 15_000,
+    });
     await page.keyboard.press("Escape");
 });
 
@@ -77,10 +79,10 @@ test("telescope keys: editor ⌃P/⌃G/⌃S, grep ⌃Q → quickfix, ` f reveal"
 
     // open a file and wait for vim — the keys under test are editor-scoped
     await runCommand(page, "Open file (read-only)");
-    const picker = page.getByPlaceholder("Open file (read-only)…");
+    const picker = page.getByPlaceholder("Open file…");
     await expect(picker).toBeVisible();
     await picker.fill("internal/host/grep.go");
-    await page.getByText("internal/host/grep.go", {exact: true}).click();
+    await page.locator("[data-finder-row]").first().click();
     const editorPath = page.locator(".editor-path");
     await expect(editorPath).toContainText("internal/host/grep.go", {timeout: 15_000});
     await expect(page.locator(".editor-vim")).toContainText(/NORMAL/i, {timeout: 15_000});
@@ -120,9 +122,9 @@ test("telescope keys: editor ⌃P/⌃G/⌃S, grep ⌃Q → quickfix, ` f reveal"
     await page.keyboard.press("Control+s");
     await expect(grepInput).toBeVisible();
     await expect(grepInput).toHaveValue("walkGrep");
-    await expect(page.getByText("internal/host/grep.go:", {exact: false}).first()).toBeVisible({
-        timeout: 15_000,
-    });
+    await expect(
+        page.locator("[data-finder-row]", {hasText: "internal/host/grep.go:"}).first(),
+    ).toBeVisible({timeout: 15_000});
 
     // ⌃Q — the hits become the location list, titled by the query
     await page.keyboard.press("Control+q");
@@ -163,7 +165,55 @@ test("telescope keys: editor ⌃P/⌃G/⌃S, grep ⌃Q → quickfix, ` f reveal"
     await expect(grepInput).toBeVisible();
     await grepInput.fill("bounded walk-and-scan");
     await expect(page.getByText("in internal/host")).toBeVisible({timeout: 15_000});
-    const scopedHit = page.getByText("grep.go:", {exact: false}).first();
+    const scopedHit = page.locator("[data-finder-row]", {hasText: "grep.go:"}).first();
     await expect(scopedHit).toBeVisible({timeout: 15_000});
+    await page.keyboard.press("Escape");
+});
+
+test("the finder previews the row under the cursor, and ⌃y hides it", async ({page}) => {
+    test.setTimeout(120_000);
+    const ws = `preview-e2e-${Date.now()}`;
+    await openWorkspace(page, ws);
+
+    // Needles are BUILT AT RUNTIME and pick out a single Go definition. A
+    // literal here would match this very spec file (--untracked greps it),
+    // and the preview would faithfully show the spec instead of the source —
+    // which is how the first draft of this test failed.
+    const walk = ["func", "walkGrep(root"].join(" ");
+    const safe = ["func", "promptSafe(s"].join(" ");
+
+    // Grep, because a grep preview must prove BOTH halves: that it loads the
+    // right file, and that it lands on the right line.
+    await runCommand(page, "Grep workspace");
+    const input = page.getByPlaceholder("Grep the workspace…");
+    await input.fill(walk);
+    await expect(page.locator("[data-finder-row]").first()).toBeVisible({timeout: 15_000});
+
+    // the preview is a Monaco instance inside the overlay, holding content
+    // the row itself never renders
+    const preview = page.locator(".fixed .monaco-editor").first();
+    await expect(preview).toBeVisible({timeout: 20_000});
+    await expect(preview).toHaveAttribute("data-uri", /grep\.go$/, {timeout: 20_000});
+
+    // it centered the HIT, not the top of the file — grep.go is ~200 lines
+    // and walkGrep is near the end, so an unscrolled preview can't show it
+    await expect(preview).toContainText("walkGrep", {timeout: 20_000});
+    await expect(page.locator(".finder-hit-line").first()).toBeVisible({timeout: 10_000});
+
+    // ⌃y collapses it — a narrow window sometimes wants all the rows
+    await page.keyboard.press("Control+y");
+    await expect(preview).toBeHidden({timeout: 10_000});
+    await page.keyboard.press("Control+y");
+    await expect(preview).toBeVisible({timeout: 10_000});
+
+    // a new query retargets the preview in place rather than rebuilding it
+    await input.fill(safe);
+    await expect(page.locator("[data-finder-row]").first()).toBeVisible({timeout: 15_000});
+    await expect(page.locator(".fixed .monaco-editor").first()).toHaveAttribute(
+        "data-uri",
+        /threads\.go$/,
+        {timeout: 20_000},
+    );
+
     await page.keyboard.press("Escape");
 });

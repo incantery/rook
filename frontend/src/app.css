@@ -372,6 +372,15 @@ body {
     margin-left: 3px;
 }
 
+/* The finder preview's hit line (FinderPreview.svelte). Monaco owns this
+   DOM, so the class can't be a utility. A centered viewport still leaves you
+   hunting for WHICH line matched — this is the answer, and it's a wash
+   rather than a rule because the preview is scenery, not an anchor you act
+   on (the thread rule earns its 2px by being actionable). */
+.finder-hit-line {
+    background: color-mix(in srgb, var(--acc) 16%, transparent);
+}
+
 /* the head's submit button carries the review's call to action */
 .editor-submit {
     color: #ffcb6b;

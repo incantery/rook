@@ -73,7 +73,7 @@ async function openWorkspace(page: Page, name: string) {
 async function openFile(page: Page, file: string) {
     await page.keyboard.press("Backquote");
     await page.keyboard.press("e");
-    const query = page.getByPlaceholder("Open file (read-only)…");
+    const query = page.getByPlaceholder("Open file…");
     await expect(query).toBeVisible();
     await query.fill(file);
     // The picker renders before api.listFiles resolves, so Enter can beat the

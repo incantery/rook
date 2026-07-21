@@ -19,8 +19,8 @@
     import Home from "./Home.svelte";
     import Palette from "./Palette.svelte";
     import Picker from "./Picker.svelte";
-    import FilePicker from "./FilePicker.svelte";
-    import GrepPicker from "./GrepPicker.svelte";
+    import Finder from "./Finder.svelte";
+    import {filesSource, grepSource} from "./finderSources";
     import Inbox from "./Inbox.svelte";
     import SpawnModal from "./SpawnModal.svelte";
     import Settings from "./Settings.svelte";
@@ -1947,10 +1947,16 @@
     />
 {/if}
 {#if app.filePickerOpen}
-    <FilePicker
+    <Finder
         {api}
-        dir={scopeDir}
-        onopen={(path) => void openFile(path)}
+        workspace={app.workspace}
+        source={filesSource({
+            api,
+            workspace: app.workspace,
+            dir: scopeDir,
+            buffers: () => app.buffers,
+            open: (path) => void openFile(path),
+        })}
         onclose={() => {
             app.filePickerOpen = false;
             focusBack();
@@ -1958,12 +1964,17 @@
     />
 {/if}
 {#if app.grepOpen}
-    <GrepPicker
+    <Finder
         {api}
-        dir={scopeDir}
+        workspace={app.workspace}
         seed={grepSeed}
-        onopen={(path, line, col) => void openFile(path, {line, col})}
-        onquickfix={grepToQuickfix}
+        source={grepSource({
+            api,
+            workspace: app.workspace,
+            dir: scopeDir,
+            open: (path, line, col) => void openFile(path, {line, col}),
+            quickfix: grepToQuickfix,
+        })}
         onclose={() => {
             app.grepOpen = false;
             grepSeed = "";

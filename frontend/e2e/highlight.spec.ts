@@ -42,7 +42,7 @@ async function openFile(page: Page, file: string) {
     await expect(page.getByPlaceholder("Run a command…")).toBeVisible();
     await page.getByPlaceholder("Run a command…").fill("Open file (read-only)");
     await page.keyboard.press("Enter");
-    const picker = page.getByPlaceholder("Open file (read-only)…");
+    const picker = page.getByPlaceholder("Open file…");
     await expect(picker).toBeVisible();
     await picker.fill(file);
     await picker.press("Enter");
@@ -118,7 +118,7 @@ test("TextMate grammars highlight Go beyond what Monarch could", async ({page}) 
 test("svelte files highlight at all — Monaco has no language for them", async ({page}) => {
     test.setTimeout(120_000);
     await openWorkspace(page, `hl-svelte-${Date.now()}`);
-    await openFile(page, "frontend/src/GrepPicker.svelte");
+    await openFile(page, "frontend/src/Finder.svelte");
 
     // Before the bridge this was plaintext: ONE token class for the whole
     // file. The grammar also registers the language, so this is the crisp

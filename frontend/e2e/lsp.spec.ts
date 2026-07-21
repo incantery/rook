@@ -93,7 +93,7 @@ test("gd jumps across files and gr fills the refs quickfix", async ({page}) => {
     // row (its mousedown picks) — Enter can lose a focus race against the
     // freshly spawned terminal's replay gate.
     await runCommand(page, "Open file (read-only)");
-    const picker = page.getByPlaceholder("Open file (read-only)…");
+    const picker = page.getByPlaceholder("Open file…");
     await expect(picker).toBeVisible();
     await picker.fill("internal/host/plugins.go");
     await page.getByText("internal/host/plugins.go", {exact: true}).click();
@@ -168,7 +168,7 @@ test("semantic tokens repaint what the grammar gets wrong", async ({page}) => {
     await warmup(ws);
 
     await runCommand(page, "Open file (read-only)");
-    const picker = page.getByPlaceholder("Open file (read-only)…");
+    const picker = page.getByPlaceholder("Open file…");
     await expect(picker).toBeVisible();
     await picker.fill("internal/host/plugins.go");
     await picker.press("Enter");

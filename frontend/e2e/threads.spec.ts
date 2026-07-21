@@ -81,7 +81,7 @@ async function runCommand(page: Page, title: string) {
 
 async function openSource(page: Page, file: string) {
     await runCommand(page, "Open file (read-only)");
-    const picker = page.getByPlaceholder("Open file (read-only)…");
+    const picker = page.getByPlaceholder("Open file…");
     await expect(picker).toBeVisible();
     await picker.fill(file);
     await picker.press("Enter");
