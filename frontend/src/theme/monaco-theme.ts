@@ -66,6 +66,15 @@ export function buildMonacoTheme(p: Palette): editor.IStandaloneThemeData {
             // a subtle border between the widget surface and the line hue —
             // derived so it stays dark (using p.line raw would be far too light)
             "editorWidget.border": mix(p.overlay, p.line, 0.13),
+            // The hover is its OWN colour key — it does not inherit
+            // editorWidget.background in a standalone theme, so leaving these
+            // unset renders the hover transparent and its text ghosts over the
+            // code underneath. That matters more now that hover is where a
+            // thread previews.
+            "editorHoverWidget.background": p.overlay,
+            "editorHoverWidget.foreground": p.fg,
+            "editorHoverWidget.border": mix(p.overlay, p.line, 0.13),
+            "editorHoverWidget.statusBarBackground": mix(p.overlay, p.line, 0.06),
             // diff tints: green/red washes, same alphas the old theme baked in
             "diffEditor.insertedTextBackground": withAlpha(p.green, 34 / 255),
             "diffEditor.removedTextBackground": withAlpha(p.red, 34 / 255),

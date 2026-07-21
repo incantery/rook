@@ -36,7 +36,11 @@ export type PaneRef =
      *  its own arm rather than a `file` with a fake path, so the openFile
      *  ladder's `c.type === "file"` retarget predicate can never :e a real
      *  file onto a draft the user is still typing into. */
-    | {type: "draft"; id: string};
+    | {type: "draft"; id: string}
+    /** a thread as a read-only document. Identity is the thread id, so it's a
+     *  buffer in the same sense `file` is: revealable, retargetable, and a
+     *  jumplist target — which a view zone could never be. */
+    | {type: "thread"; id: number};
 
 export interface LeafNode {
     kind: "leaf";

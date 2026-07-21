@@ -3,12 +3,14 @@ import type {ThreadInfo} from "../hostapi";
 import {
     avatar,
     bandThreads,
+    fenceLang,
     contextKey,
     cycleStack,
     fileThreads,
     filterThreads,
     glyphClass,
     markerLines,
+    renderThread,
     openCount,
     pickFromStack,
     relTime,
@@ -207,5 +209,70 @@ describe("snippetOf", () => {
     });
     it("blank fallback when anchor is empty/whitespace", () => {
         expect(snippetOf(th({id: 1, anchorText: "   "}))).toBe("(blank line)");
+    });
+});
+
+describe("renderThread", () => {
+    const base: ThreadInfo = {
+        id: 12,
+        workspace: "rook",
+        path: "internal/host/threads.go",
+        startLine: 41,
+        endLine: 42,
+        side: "modified",
+        blobSha: "s",
+        anchorText: "if s := h.claudeSessionIn(ws); s != nil {\n\ts.pty.Write(p)\n",
+        state: "open",
+        created: "2026-07-20T10:00:00Z",
+        updated: "2026-07-20T10:00:00Z",
+        comments: [
+            {id: 1, author: "user", body: "could this race?", created: "2026-07-20T10:00:00Z"},
+            {id: 2, author: "agent", body: "No — the mutex.", created: "2026-07-20T10:01:00Z"},
+        ],
+        currentStart: 41,
+        currentEnd: 42,
+    };
+    const now = Date.parse("2026-07-20T10:02:00Z");
+
+    it("renders a heading and each comment in order", () => {
+        const md = renderThread(base, now);
+        expect(md).toContain("# Thread #12 — open");
+        expect(md).toContain("`internal/host/threads.go:41-42`");
+        expect(md.indexOf("## you")).toBeLessThan(md.indexOf("## claude"));
+        expect(md).toContain("No — the mutex.");
+    });
+
+    // You opened a thread to read the thread — while it's still anchored, the
+    // code is in the pane you came from, and fencing it here would push the
+    // conversation below the fold of a short split.
+    it("omits the anchor snapshot while the thread is still anchored", () => {
+        const md = renderThread(base, now);
+        expect(md).not.toContain("```");
+        expect(md.indexOf("## you")).toBeLessThan(80);
+    });
+
+    // …but shows it once it drifted, which is the whole reason it's stored:
+    // the file no longer says what was meant.
+    it("shows the snapshot, fenced in the source language, when outdated", () => {
+        const md = renderThread({...base, outdated: true}, now);
+        expect(md).toContain("open · outdated");
+        expect(md).toContain("```go\nif s := h.claudeSessionIn(ws)");
+    });
+
+    it("collapses a single-line range and marks the original side", () => {
+        const md = renderThread({...base, currentStart: 7, currentEnd: 7, side: "original"}, now);
+        expect(md).toContain("`internal/host/threads.go:7` (original)");
+    });
+
+    it("fences bare rather than guessing at an unknown suffix", () => {
+        expect(fenceLang("Makefile")).toBe("");
+        expect(fenceLang("a/b/c.tsx")).toBe("typescript");
+        expect(renderThread({...base, path: "Makefile", outdated: true}, now)).toContain(
+            "```\nif s :=",
+        );
+    });
+
+    it("survives a thread with no comments yet", () => {
+        expect(() => renderThread({...base, comments: []}, now)).not.toThrow();
     });
 });

@@ -13,7 +13,14 @@ import type {PaneContent} from "./manager";
 import type * as monacoTypes from "monaco-editor";
 import {legendModifiers, legendTypes, unifyTokens} from "../highlight/semantic";
 import {ThreadBand} from "./threads";
-import {submitLabel, type Side} from "./threadview";
+import {
+    hoverPreview,
+    pickFromStack,
+    renderThread,
+    submitLabel,
+    threadsCovering,
+    type Side,
+} from "./threadview";
 
 type Monaco = typeof import("./monaco").monaco;
 type VimLib = typeof import("monaco-vim");
@@ -59,6 +66,13 @@ async function loadVim(): Promise<VimLib> {
             vim.defineAction("rookHover", (cm) => paneOf(cm)?.showHover());
             vim.mapCommand("gd", "action", "rookDef", {}, {context: "normal"});
             vim.mapCommand("gr", "action", "rookRefs", {}, {context: "normal"});
+            // A thread buffer's verbs are ex commands, not chords: they read
+            // as what they do, need no keymap layer in a read-only buffer, and
+            // route per-pane through the same paneByEditor map :w uses.
+            vim.defineEx("reply", "rep", (cm) => paneOf(cm)?.threadReply());
+            vim.defineEx("resolve", "res", (cm) => void paneOf(cm)?.threadSetState(true));
+            vim.defineEx("reopen", "reo", (cm) => void paneOf(cm)?.threadSetState(false));
+            vim.defineEx("source", "sou", (cm) => paneOf(cm)?.threadGoToSource());
             vim.mapCommand("K", "action", "rookHover", {}, {context: "normal"});
             // ⌃O/⌃I — the workbench jumplist (chrome's, at the openFile
             // seam), overriding monaco-vim's single-buffer walk: rook's
@@ -211,6 +225,9 @@ export interface EditorSeam {
      *  which opens the draft buffer. False means there was nothing to comment
      *  on (no model yet), so chrome can say so. */
     compose(mode: ComposeMode): boolean;
+    /** ,t — open the thread under the cursor as a buffer. False when there
+     *  isn't one there, so chrome can say so. */
+    openThread(): boolean;
     onMarkerClick(cb: (line: number, side: Side, ids: number[]) => void): () => void;
     onChange(cb: () => void): () => void;
 }
@@ -219,31 +236,43 @@ export interface EditorSeam {
  *  the moment the user asks; the buffer only ever supplies the body. Holding
  *  it here (not in chrome) is what lets the pane be the whole transaction —
  *  :w has every argument it needs without a round trip. */
-export interface DraftSpec {
-    /** the PaneRef arm's id — pane identity, not a thread id */
-    id: string;
-    path: string;
-    startLine: number;
-    endLine: number;
-    side: Side;
-    base?: "head" | "branch";
-    mode: ComposeMode;
-}
+export type DraftSpec =
+    | {
+          /** the PaneRef arm's id — pane identity, not a thread id */
+          id: string;
+          kind: "new";
+          path: string;
+          startLine: number;
+          endLine: number;
+          side: Side;
+          base?: "head" | "branch";
+          mode: ComposeMode;
+      }
+    /** :reply from a thread buffer. The anchor already exists, so the draft
+     *  carries only what it's answering. */
+    | {id: string; kind: "reply"; threadId: number; path: string};
 
 export interface EditorPaneOpts {
     workspace: string;
-    kind: "review" | "file" | "draft";
+    kind: "review" | "file" | "draft" | "thread";
     /** file mode: the repo-top-relative path to view */
     path?: string;
     /** draft mode: what this unsent comment is anchored to */
     draft?: DraftSpec;
+    /** thread mode: which thread this buffer renders */
+    thread?: {id: number};
+    /** a thread buffer wants its source shown — chrome routes through the
+     *  openFile ladder so ⌃O comes back here */
+    onOpenThreadSource?: (path: string, line: number) => void;
     /** draft mode: the thread was created — chrome closes the split and
      *  refreshes the source pane's gutter */
     onSubmitted?: (threadId: number) => void;
-    /** the user wants to comment on a range here — chrome opens a draft
-     *  buffer for it. Both triggers (,c/,? and ⌘⇧M) land here, so there is
-     *  exactly one composition model. */
+    /** the user wants to write a comment — chrome opens a draft buffer for
+     *  it. Every trigger (,c, ,?, ⌘⇧M, and :reply from a thread) lands here,
+     *  so there is exactly one composition model. */
     onCompose?: (spec: DraftSpec) => void;
+    /** ,t — open the thread under the cursor as a buffer */
+    onOpenThread?: (threadId: number) => void;
     /** the terminal's font — the pane should read like the rest of rook */
     font: {family: string; size: number};
     /** surface a failure where the user is looking (titlebar flash) */
@@ -295,6 +324,18 @@ const DRAFT_OPTS = {
     scrollbar: {vertical: "auto", horizontal: "hidden"},
 } as const satisfies monacoTypes.editor.IEditorOptions;
 
+/** A thread buffer is prose too, but a NAVIGABLE one — it keeps line numbers
+ *  so vim motions have coordinates to land on, and the cursor line so you can
+ *  see where you are while reading. */
+const THREAD_OPTS = {
+    lineNumbers: "on",
+    glyphMargin: false,
+    folding: true, // a long conversation folds by ## heading
+    wordWrap: "on",
+    overviewRulerLanes: 0,
+    padding: {top: 8, bottom: 8},
+} as const satisfies monacoTypes.editor.IEditorOptions;
+
 export class EditorPane implements PaneContent {
     readonly el: HTMLElement;
     /** not a terminal: kill/jump/cwd-from all skip this pane */
@@ -318,6 +359,8 @@ export class EditorPane implements PaneContent {
     private mount: HTMLElement;
     private vimBar: HTMLElement | null = null;
     private vim: VimAdapter | null = null;
+    /** the thread this buffer is showing — the ex verbs act on it */
+    private threadShown: ThreadInfo | null = null;
     /** editable iff the file loaded whole — truncated/binary stays read-only */
     private editable = false;
     private dirty = false;
@@ -408,7 +451,7 @@ export class EditorPane implements PaneContent {
         // the mode line + `:` prompt. A draft needs it as much as a file does —
         // it's where :w lands, and it's the signal that this really is a
         // buffer rather than a form that happens to look like one.
-        if (opts.kind === "file" || opts.kind === "draft") {
+        if (opts.kind === "file" || opts.kind === "draft" || opts.kind === "thread") {
             this.vimBar = document.createElement("div");
             this.vimBar.className = "editor-vim";
             this.body.appendChild(this.vimBar);
@@ -419,8 +462,11 @@ export class EditorPane implements PaneContent {
     }
 
     get title(): string {
+        if (this.opts.kind === "thread") return `#${this.opts.thread?.id ?? ""}`;
         if (this.opts.kind === "draft") {
-            return this.opts.draft?.mode === "ask" ? "ask" : "comment";
+            const d = this.opts.draft;
+            if (d?.kind === "reply") return "reply";
+            return d?.mode === "ask" ? "ask" : "comment";
         }
         if (this.opts.kind === "file") {
             const p = this.opts.path ?? "";
@@ -494,6 +540,7 @@ export class EditorPane implements PaneContent {
                 for (const b of this.bands) b.clearHighlight();
             },
             compose: (mode) => this.compose(mode),
+            openThread: () => this.openThreadAtCursor(),
             onMarkerClick: (cb) => this.sub(this.markerCbs, cb),
             onChange: (cb) => this.sub(this.changeCbs, cb),
         });
@@ -604,8 +651,111 @@ export class EditorPane implements PaneContent {
             this.loadDraft(); // nothing to fetch — the buffer starts empty
             return;
         }
+        if (this.opts.kind === "thread") {
+            await this.loadThread();
+            return;
+        }
         this.showStatus(this.opts.kind === "file" ? "reading file…" : "fetching changes…");
         await (this.opts.kind === "file" ? this.loadFile() : this.refresh());
+    }
+
+    /** A thread as a read-only markdown buffer.
+     *
+     *  Deliberately a BUFFER and not a view zone: a view zone occupies screen
+     *  rows without occupying buffer lines, so j/k, ⌃D, zz and relative
+     *  numbers all stop agreeing with the document — and it could never be a
+     *  jump target. Here the conversation scrolls, searches and yanks like
+     *  anything else, and ⌃O walks back to the code.
+     *
+     *  Refetched rather than handed in, so :reply and :resolve can simply
+     *  reload and see the host's answer. */
+    private async loadThread(): Promise<void> {
+        const m = this.monaco;
+        const id = this.opts.thread?.id;
+        if (!m || id == null) return;
+        this.showStatus("reading thread…");
+        let t: ThreadInfo | undefined;
+        try {
+            t = (await this.api.threads(this.opts.workspace)).find((x) => x.id === id);
+        } catch (err) {
+            this.fail("thread", err);
+            return;
+        }
+        if (this.disposed) return;
+        if (!t) {
+            this.showStatus(`thread #${id} is gone`);
+            return;
+        }
+        this.threadShown = t;
+        this.clearStatus();
+        const md = renderThread(t, Date.now());
+        // Reuse the model across reloads when one exists, so a :reply refresh
+        // doesn't lose the viewport or re-attach vim.
+        const existing = this.editor?.getModel();
+        if (existing && !existing.isDisposed()) {
+            const grew = md.length > existing.getValue().length;
+            existing.setValue(md);
+            // A RELOAD means something was added — a reply of yours, or the
+            // agent's answer arriving over the watch stream. Show the end of
+            // the conversation: the newest word is the one being waited on,
+            // and in a short split it would otherwise land below the fold.
+            if (grew) this.editor?.revealLine(existing.getLineCount());
+        } else {
+            const model = m.editor.createModel(
+                md,
+                "markdown",
+                m.Uri.parse(`rook-thread://${++this.seq}/${id}`),
+            );
+            this.models.push(model);
+            paneByModel.set(model, this);
+            this.ensureEditor().setModel(model);
+        }
+        const ed = this.ensureEditor();
+        ed.updateOptions({readOnly: true, ...THREAD_OPTS});
+        this.pathEl.textContent = `thread #${t.id} · ${t.path}:${
+            t.currentStart === t.currentEnd ? t.currentStart : `${t.currentStart}-${t.currentEnd}`
+        }${t.outdated ? " · outdated" : ""}`;
+        this.noteEl.textContent =
+            t.state === "resolved" ? ":reopen · :q" : ":reply · :resolve · :q";
+        this.setDirty(false);
+        this.fit();
+        await this.attachVim(ed);
+        ed.focus();
+    }
+
+    /** :reply — a draft buffer answering this thread. Composition has exactly
+     *  one model, so a reply opens the same kind of buffer a new comment does. */
+    threadReply(): void {
+        const t = this.threadShown;
+        if (!t) return;
+        this.opts.onCompose?.({
+            id: crypto.randomUUID(),
+            kind: "reply",
+            threadId: t.id,
+            path: t.path,
+        });
+    }
+
+    /** :resolve / :reopen — act, then close: the thread is off your plate,
+     *  and leaving its buffer open would say otherwise. */
+    async threadSetState(resolved: boolean): Promise<void> {
+        const t = this.threadShown;
+        if (!t) return;
+        try {
+            if (resolved) await this.api.threadResolve(t.id);
+            else await this.api.threadReopen(t.id);
+            this.opts.onFlash(resolved ? `resolved #${t.id}` : `reopened #${t.id}`);
+            this.opts.onClose();
+        } catch (err) {
+            this.opts.onFlash(`${resolved ? "resolve" : "reopen"} failed: ${String(err)}`);
+        }
+    }
+
+    /** The source this thread annotates — chrome opens it through the
+     *  openFile ladder, so ⌃O returns to the thread. */
+    threadGoToSource(): void {
+        const t = this.threadShown;
+        if (t) this.opts.onOpenThreadSource?.(t.path, t.currentStart);
     }
 
     /** A comment draft: an in-memory model, no host read, no path.
@@ -633,9 +783,12 @@ export class EditorPane implements PaneContent {
         ed.setModel(model);
         this.editable = true;
         ed.updateOptions({readOnly: false, ...DRAFT_OPTS});
-        this.pathEl.textContent = `${d.mode === "ask" ? "ask" : "comment"} · ${d.path}:${
-            d.startLine === d.endLine ? d.startLine : `${d.startLine}-${d.endLine}`
-        }${d.side === "original" ? " (original)" : ""}`;
+        this.pathEl.textContent =
+            d.kind === "reply"
+                ? `reply to #${d.threadId} · ${d.path}`
+                : `${d.mode === "ask" ? "ask" : "comment"} · ${d.path}:${
+                      d.startLine === d.endLine ? d.startLine : `${d.startLine}-${d.endLine}`
+                  }${d.side === "original" ? " (original)" : ""}`;
         this.noteEl.textContent = ":w sends · :q! discards";
         this.savedVersionId = model.getAlternativeVersionId();
         this.setDirty(false);
@@ -914,6 +1067,13 @@ export class EditorPane implements PaneContent {
         if (this.saving) return false;
         this.saving = true;
         try {
+            if (d.kind === "reply") {
+                await this.api.threadComment(d.threadId, body);
+                this.setDirty(false);
+                this.opts.onFlash(`replied to #${d.threadId}`);
+                this.opts.onSubmitted?.(d.threadId);
+                return true;
+            }
             const t = await this.api.createThread(this.opts.workspace, {
                 path: d.path,
                 startLine: d.startLine,
@@ -1133,22 +1293,48 @@ export class EditorPane implements PaneContent {
     }
 
     /** The hover provider's callback (module-level, routed here by model). */
+    /** Hover = the thread PREVIEW plus whatever the language server says.
+     *
+     *  contents is an array of markdown blocks that Monaco stacks with
+     *  separators, so the two sources compose instead of competing — which is
+     *  the whole reason preview lives here rather than in a view zone. Threads
+     *  come first: they're the rarer, more surprising thing on a line, and an
+     *  LSP hover can be long enough to push them out of sight.
+     *
+     *  This is also why rook does NOT put threads on the LSP server it exposes
+     *  to nvim (see the comments-lsp spec): clients merge diagnostics across
+     *  servers but arbitrate hover, so only the editor that owns BOTH sources
+     *  can do this. */
     async hoverAt(line: number, col: number): Promise<monacoTypes.languages.Hover | null> {
-        const path = this.opts.kind === "file" ? this.opts.path : undefined;
-        if (!path) return null;
-        try {
-            const res = await this.api.lspHover(
-                this.opts.workspace,
-                path,
-                line,
-                col,
-                this.lspText(),
-            );
-            if (!res.contents) return null;
-            return {contents: [{value: res.contents}]};
-        } catch {
-            return null; // hover is ambient — never flash from it
+        const contents: {value: string}[] = [];
+        const path = this.currentPath();
+
+        // Threads work in the review diff too, where they matter most — the
+        // LSP half stays file-only, since a diff pane has no single buffer for
+        // a server to answer about.
+        if (path) {
+            const side = this.bands.find((b) => b.editor.hasTextFocus())?.side ?? "modified";
+            for (const t of threadsCovering(this.threadsAll, path, side, line)) {
+                contents.push({value: hoverPreview(t, Date.now())});
+            }
         }
+
+        if (this.opts.kind === "file" && this.opts.path) {
+            try {
+                const res = await this.api.lspHover(
+                    this.opts.workspace,
+                    this.opts.path,
+                    line,
+                    col,
+                    this.lspText(),
+                );
+                if (res.contents) contents.push({value: res.contents});
+            } catch {
+                // hover is ambient — never flash from it, and a dead server
+                // must not swallow the thread preview beside it
+            }
+        }
+        return contents.length > 0 ? {contents} : null;
     }
 
     /** Jump the cursor (1-based) — gd's landing, and the refs list's `o`.
@@ -1188,6 +1374,14 @@ export class EditorPane implements PaneContent {
 
     private currentPath(): string | undefined {
         return this.opts.kind === "file" ? this.opts.path : this.files[this.idx]?.path;
+    }
+
+    /** Re-read whatever this pane shows about threads — the fan-out target for
+     *  the thread-watch stream. A thread buffer re-renders its markdown; every
+     *  other kind refetches the anchors its gutter draws. */
+    async reloadThreads(): Promise<void> {
+        if (this.opts.kind === "thread") await this.loadThread();
+        else await this.refetchThreads();
     }
 
     /** Mutations refetch and re-render — the pane's data is always the
@@ -1269,6 +1463,23 @@ export class EditorPane implements PaneContent {
         return this.composeOn(band, mode);
     }
 
+    /** ,t — open the thread under the cursor as a buffer. Multiple threads can
+     *  anchor to one region; take the top of the stack (most-demanding state),
+     *  which is exactly what the gutter glyph is already showing. */
+    openThreadAtCursor(): boolean {
+        const band =
+            this.bands.find((b) => b.editor.hasTextFocus()) ??
+            this.bands.find((b) => b.side === "modified") ??
+            this.bands[0];
+        const path = this.currentPath();
+        const line = band?.editor.getPosition()?.lineNumber;
+        if (!band || !path || !line) return false;
+        const pick = pickFromStack(threadsCovering(this.threadsAll, path, band.side, line));
+        if (!pick) return false;
+        this.opts.onOpenThread?.(pick.thread.id);
+        return true;
+    }
+
     /** Put this editor back into NORMAL after a range verb consumed the
      *  selection — what vim does after any operator.
      *
@@ -1305,6 +1516,7 @@ export class EditorPane implements PaneContent {
         band.editor.setPosition({lineNumber: sel.startLineNumber, column: 1});
         this.opts.onCompose?.({
             id: crypto.randomUUID(),
+            kind: "new",
             path,
             startLine: sel.startLineNumber,
             endLine: end,

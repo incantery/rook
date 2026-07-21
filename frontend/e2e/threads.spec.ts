@@ -284,3 +284,73 @@ test("an agent's reply arrives without refocusing the pane", async ({page}) => {
 
     await expect(pane).toContainText("No — the pty owns it", {timeout: 15_000});
 });
+
+// The reading half: ,t opens the thread as a read-only BUFFER, :reply answers
+// through the same draft-buffer model composition uses, and hover previews the
+// conversation without displacing a single line of code.
+test("`,t` opens a thread buffer; `:reply` answers it; hover previews it", async ({page}) => {
+    test.setTimeout(120_000);
+
+    const ws = `threadbuf-e2e-${Date.now()}`;
+    await openWorkspace(page, ws);
+    await openSource(page, "internal/host/spawntask.go");
+
+    await ctxChord(page, "c", "18GVjj");
+    await writeComment(page, "comment", "why is this named spawnTask");
+    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
+    const [t] = await threadsOf(ws);
+
+    // ---- hover: the preview, in place ----
+    // K routes through the same provider the mouse does, so the keyboard path
+    // is the one under test. The thread comes FIRST in the stacked contents.
+    await page.locator(".editor-mount").first().click();
+    await page.keyboard.type("18G");
+    await page.keyboard.press("Shift+K");
+    const hover = page.locator(".monaco-hover:not(.hidden)").first();
+    await expect(hover).toBeVisible({timeout: 20_000});
+    await expect(hover).toContainText("why is this named spawnTask");
+    await expect(hover).toContainText(`#${t.id}`);
+    // the hover fades in (.monaco-hover.fade-in); let it settle or the shot
+    // catches it mid-animation and reads as a transparency bug
+    await page.waitForTimeout(300);
+    await page.screenshot({path: "bin/e2e/threads-hover.png", fullPage: true});
+    await page.keyboard.press("Escape");
+
+    // ---- ,t : the thread as a buffer ----
+    await ctxChord(page, "t", "18G");
+    const threadHead = page.locator(".editor-path", {hasText: new RegExp(`^thread #${t.id} `)});
+    await expect(threadHead).toBeVisible({timeout: 15_000});
+    // it is a real buffer: rendered markdown, with the anchored source fenced
+    const threadPane = page.locator(".editor-mount").last();
+    await expect(threadPane).toContainText(`Thread #${t.id}`);
+    await expect(threadPane).toContainText("why is this named spawnTask");
+    // conversation-first: no fenced snapshot while the thread is still
+    // anchored, so a short split shows the comment rather than the code you
+    // are already looking at (the outdated case is pinned in the unit tests)
+    await expect(threadPane).not.toContainText("```");
+
+    // ---- :reply : the same draft-buffer model ----
+    await page.keyboard.type(":reply");
+    await page.keyboard.press("Enter");
+    const replyHead = page.locator(".editor-path", {hasText: /^reply to #/});
+    await expect(replyHead).toBeVisible({timeout: 15_000});
+    await page.keyboard.press("i");
+    await page.keyboard.type("because it spawns the coder, not a task");
+    await page.keyboard.press("Escape");
+    await page.keyboard.type(":w");
+    await page.keyboard.press("Enter");
+    await expect(replyHead).toHaveCount(0, {timeout: 15_000});
+
+    // the thread buffer re-rendered itself with the new comment
+    await expect(threadPane).toContainText("because it spawns the coder", {timeout: 15_000});
+    await page.screenshot({path: "bin/e2e/threads-buffer.png", fullPage: true});
+
+    // ---- :resolve acts and closes ----
+    await page.keyboard.type(":resolve");
+    await page.keyboard.press("Enter");
+    await expect(threadHead).toHaveCount(0, {timeout: 15_000});
+    await expectFocusInSource(page);
+    await expect
+        .poll(async () => (await threadsOf(ws))[0].state, {timeout: 15_000})
+        .toBe("resolved");
+});

@@ -267,6 +267,7 @@ export const CONTEXT_PREFIX = new Map<string, string>([
     ["a", "quickaction.toggle"],
     ["c", "editor.comment"],
     ["?", "editor.ask"],
+    ["t", "editor.thread"],
 ]);
 
 export function parseLeader(trigger: string | undefined): Leader {

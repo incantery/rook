@@ -89,7 +89,7 @@
         const ws = app.workspace;
         if (!ws) return;
         return api.watchThreads(ws, () => {
-            for (const p of editorPanes.values()) void p.seam.refetch();
+            for (const p of editorPanes.values()) void p.reloadThreads();
         });
     });
 
@@ -102,6 +102,56 @@
             return;
         }
         if (!seam.compose(mode)) flash("nothing to comment on");
+    }
+
+    /** ,t — the thread under the cursor, as a read-only buffer. */
+    function goToThread(): void {
+        const seam = activeEditor;
+        if (!seam) {
+            flash("no editor focused");
+            return;
+        }
+        if (!seam.openThread()) flash("no thread on this line");
+    }
+
+    /** A thread as a buffer: reveal-then-mint, like the file ladder. ,t twice
+     *  on the same thread returns to it rather than stacking panes.
+     *
+     *  recordJump first, so ⌃O walks back to the code you came from — the
+     *  thing a view zone could never have offered. */
+    async function openThreadBuffer(id: number): Promise<void> {
+        const open = mgr.findPane((c) => c.type === "thread" && c.id === id);
+        if (open) {
+            mgr.revealPane(open);
+            return;
+        }
+        recordJump();
+        const {EditorPane} = await import("./term/editor");
+        // roomier than a draft — this one is for reading
+        const THREAD_FRACTION = 0.4;
+        mgr.splitWith(
+            "col",
+            {type: "thread", id},
+            (leafId) => {
+                const pane = new EditorPane(api, {
+                    workspace: app.workspace,
+                    kind: "thread",
+                    thread: {id},
+                    font: paneFont,
+                    onFlash: flash,
+                    onClose: () => mgr.closePane(leafId),
+                    onDispose: () => editorPanes.delete(leafId),
+                    onCompose: (spec) => void openDraft(spec), // :reply
+                    onJump: jumpNav,
+                    onOpenThreadSource: (path, line) => void openFile(path, {line, col: 1}),
+                });
+                // registered so the thread-watch stream reaches it; the buffer
+                // ladder still can't find it, since its arm isn't `file`
+                editorPanes.set(leafId, pane);
+                return pane;
+            },
+            THREAD_FRACTION,
+        );
     }
 
     /** A comment draft is a BUFFER, not a form.
@@ -140,9 +190,9 @@
                     },
                     onSubmitted: () => {
                         // The thread-watch stream announces this too, but only
-                        // to daemons that have it; refetching here means the
-                        // new anchor appears in the gutter on an older host.
-                        for (const p of editorPanes.values()) void p.seam.refetch();
+                        // to daemons that have it; reloading here means the new
+                        // anchor (or reply) lands on an older host as well.
+                        for (const p of editorPanes.values()) void p.reloadThreads();
                     },
                 }),
             DRAFT_FRACTION,
@@ -604,6 +654,7 @@
                 },
                 // ,c / ,? / ⌘⇧M all arrive here — one composition model
                 onCompose: (spec) => void openDraft(spec),
+                onOpenThread: (id) => void openThreadBuffer(id),
             });
             editorPanes.set(leafId, pane);
             return pane;
@@ -1175,6 +1226,12 @@
             title: "Ask the agent about selection",
             category: "Review",
             run: () => void composeThread("ask"),
+        },
+        {
+            id: "editor.thread",
+            title: "Go to thread under cursor",
+            category: "Review",
+            run: goToThread,
         },
         {
             id: "quickfix.toggle",
