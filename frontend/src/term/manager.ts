@@ -170,13 +170,22 @@ interface Win {
 
 // The response sequences xterm generates on its own while parsing: cursor
 // position reports (CSI R), device attributes (CSI c), status reports
-// (CSI n), color reports (OSC 4/10-12), and DCS replies. During replay
-// these answer queries from programs that already exited; nothing here
-// overlaps what a keyboard can produce (arrows/function keys use other
-// finals — except modifier+F3, which collides with CPR and is an accepted
-// loss inside the sub-second gate).
-const AUTO_REPLY =
-    /\x1b(?:\[\??\d+(?:;\d+)*[Rn]|\[[>?]?\d*(?:;\d+)*c|\](?:4|1[0-2]);[^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)/g;
+// (CSI n), mode reports (DECRPM, CSI $y), color reports (OSC 4/10-12), and
+// DCS replies. During replay these answer queries from programs that already
+// exited; nothing here overlaps what a keyboard can produce (arrows/function
+// keys use other finals — except modifier+F3, which collides with CPR and is
+// an accepted loss inside the sub-second gate).
+//
+// $y was missing until a websocket tap caught it: nvim opens by asking about
+// synchronized output and friends (CSI ?2026$p …), so a reattach replayed
+// five stale mode reports into whatever was running in the pane. nvim's
+// parser swallows them, which is why this hid — but the whole point of the
+// gate is that an answer never reaches a program that didn't ask.
+//
+// Exported only for the spec: what this does and does not swallow is the
+// whole contract, and nothing else the module exposes makes it observable.
+export const AUTO_REPLY =
+    /\x1b(?:\[\??\d+(?:;\d+)*(?:[Rn]|\$y)|\[[>?]?\d*(?:;\d+)*c|\](?:4|1[0-2]);[^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)/g;
 
 export class TermManager {
     private sessions = new Map<string, Tab>();
