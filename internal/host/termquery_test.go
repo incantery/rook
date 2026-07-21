@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -196,5 +197,82 @@ func TestAnswersWithNobodyAttached(t *testing.T) {
 	case <-got: // answered
 	case <-time.After(3 * time.Second):
 		t.Fatal("no device-attributes reply with nobody attached — a program starting here would hang")
+	}
+}
+
+// Concurrent writes to the pty do not interleave — the property readPump's
+// query replies quietly depend on, since they race live keystrokes and the
+// actuator paths (nudge, draft approve). The protection is NOT ours: an
+// os.File on a pollable fd serializes every Write through the runtime poller's
+// per-fd write lock (internal/poll.FD.writeLock), so two writers never split a
+// third's bytes whatever their size. This guards that assumption — if s.pty
+// ever became a plain io.Writer without that lock, a token would split here.
+//
+// (This started as a test for a mutex I added on a hypothesized interleave.
+// The mutex was redundant with the runtime's lock and came back out; the test
+// stayed, retargeted to the real guarantee.)
+func TestConcurrentPTYWritesDoNotInterleave(t *testing.T) {
+	ptmx, tty, err := cpty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	if tio, terr := unix.IoctlGetTermios(int(tty.Fd()), unix.TIOCGETA); terr == nil {
+		tio.Lflag &^= unix.ICANON | unix.ECHO
+		tio.Oflag &^= unix.OPOST // no \n → \r\n translation to confuse the check
+		_ = unix.IoctlSetTermios(int(tty.Fd()), unix.TIOCSETA, tio)
+	}
+	write := func(b []byte) { _, _ = ptmx.Write(b) }
+
+	const token = "<<TOKEN>"
+	const rounds = 2000
+
+	// reader first, concurrently, and it must drain the FULL total: if it
+	// stops early the unread tail fills the pty buffer, the next Write blocks,
+	// and the writers never finish (which hung two earlier drafts of this).
+	const total = rounds*len(token) + rounds*len("....")
+	read := make(chan []byte, 1)
+	go func() {
+		got := make([]byte, 0, total)
+		buf := make([]byte, 4096)
+		_ = tty.SetReadDeadline(time.Now().Add(30 * time.Second))
+		for len(got) < total {
+			n, rerr := tty.Read(buf)
+			got = append(got, buf[:n]...)
+			if rerr != nil {
+				break
+			}
+		}
+		read <- got
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range rounds {
+			write([]byte(token))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range rounds {
+			write([]byte("....")) // filler that must never split a token
+		}
+	}()
+	wg.Wait()
+
+	got := <-read
+	if strings.Count(string(got), token) == 0 {
+		t.Fatal("read nothing back")
+	}
+	// a filler byte inside a token would leave "<<" not followed by the rest
+	for i := 0; i+2 <= len(got); i++ {
+		if got[i] == '<' && got[i+1] == '<' {
+			if i+len(token) > len(got) || string(got[i:i+len(token)]) != token {
+				t.Fatalf("token split at %d: %q", i, got[max(0, i-2):min(len(got), i+12)])
+			}
+		}
 	}
 }
