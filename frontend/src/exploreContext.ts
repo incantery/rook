@@ -42,7 +42,10 @@ export function makeExploreContext(deps: {
                 run: (id) => deps.star(id),
             },
         ],
-        hint: "o open · s star",
+        hint: [
+            ["o", "open"],
+            ["s", "star"],
+        ],
         empty: "No breadcrumbs yet — navigate while an investigation is open.",
     };
 }

@@ -43,8 +43,9 @@ export interface QfContext {
     /** header line above the list (review: the gate); optional */
     Header: Component | null;
     actions: QfAction[];
-    /** right-side footer hint, e.g. "a·r·d disposition" */
-    hint: string;
+    /** right-side footer verbs as key/label pairs, so every surface renders
+     *  its triggers as keycaps rather than burying them in prose */
+    hint: [key: string, label: string][];
     empty: string;
     /** the prepare/refresh affordance, when the context has one */
     prepare?: {label(): string; run(): void | Promise<void>};

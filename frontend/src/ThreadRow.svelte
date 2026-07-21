@@ -21,11 +21,14 @@
 
 {#if t}
     {@const meta = stateMeta(t.state)}
-    <span class={"shrink-0 " + TONE[meta.tone]}>●</span>
-    <span class="shrink-0 truncate font-mono text-[11px] text-fg"
+    <span class={"shrink-0 text-[10px] " + TONE[meta.tone]}>●</span>
+    <!-- location in mono (it's a coordinate), the comment in the BODY font:
+         prose set in a code face is measurably harder to scan, and the comment
+         is the part you read to decide whether to open the thread -->
+    <span class="shrink-0 truncate font-mono text-[10.5px] text-dim"
         >{t.path}<span class="text-lo">:{t.currentStart}</span></span
     >
-    <span class="min-w-0 flex-1 truncate font-mono text-[10px] text-lo"
+    <span class="min-w-0 flex-1 truncate text-[11.5px] text-fg"
         >{t.comments[0]?.body ?? snippetOf(t)}</span
     >
     {#if t.outdated}

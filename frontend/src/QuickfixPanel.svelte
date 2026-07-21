@@ -8,6 +8,7 @@
 <script lang="ts">
     import {flip} from "svelte/animate";
     import {qf} from "./quickfix.svelte";
+    import Kbd from "./Kbd.svelte";
 
     let {active}: {active: boolean} = $props();
 
@@ -68,10 +69,14 @@
             {#if ctx.Header}
                 {@const Header = ctx.Header}
                 <Header />
-            {:else}
-                <span class="font-mono text-[10px] text-lo">{ctx.title}</span>
             {/if}
             <span class="flex-1"></span>
+            {#if qf.ids.length > 0}
+                <span
+                    class="border-r border-line/15 pr-2 font-mono text-[10px] text-lo tabular-nums"
+                    >{qf.cursor + 1}/{qf.ids.length}</span
+                >
+            {/if}
             {#if ctx.prepare}
                 {@const prep = ctx.prepare}
                 <button
@@ -99,9 +104,10 @@
                 {@const Row = ctx.Row}
                 <div
                     animate:flip={{duration: 160}}
-                    class={"flex cursor-pointer items-center gap-2 border-l-2 px-3 py-1 " +
-                        (focused ? "bg-acc/15 " : "hover:bg-fg/[0.04] ") +
-                        (open ? "border-acc" : "border-transparent")}
+                    class={"flex cursor-pointer items-center gap-2 border-l-2 px-3 py-1.5 " +
+                        (focused
+                            ? "border-acc bg-acc/12 "
+                            : "border-transparent hover:bg-fg/[0.04] ")}
                     role="option"
                     aria-selected={focused}
                     tabindex="-1"
@@ -125,11 +131,18 @@
 
         <!-- footer: traversal on the left, the context's verbs on the right -->
         <div
-            class="flex shrink-0 items-center gap-2 border-t border-line/15 px-3 py-2 font-mono text-[10px] text-lo"
+            class="flex shrink-0 items-center gap-2 border-t border-line/15 px-3 py-2 text-[10px] text-lo"
         >
-            <span class="whitespace-nowrap">j/k move · ↵ open</span>
+            <div class="flex items-baseline gap-3">
+                <Kbd k="j/k" label="move" />
+                <Kbd k="↵" label="open" />
+            </div>
             <span class="flex-1"></span>
-            <span class="whitespace-nowrap">{ctx.hint}</span>
+            <div class="flex items-baseline gap-3">
+                {#each ctx.hint as [k, label] (k)}
+                    <Kbd {k} {label} />
+                {/each}
+            </div>
         </div>
     </div>
 {/if}

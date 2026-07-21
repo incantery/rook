@@ -96,8 +96,22 @@
     });
 
     /** ,c / ,? — start a comment on the active editor's selection. The pane
-     *  resolves the anchor; openDraft turns it into a buffer. */
+     *  resolves the anchor; openDraft turns it into a buffer.
+     *
+     *  Guarded on the FOCUSED pane, not activeEditor: a draft/thread split
+     *  deliberately never becomes activeEditor (it has no threads of its own),
+     *  so without this ,c inside a draft opened a SECOND draft against the
+     *  source's stale selection. */
     function composeThread(mode: ComposeMode): void {
+        const here = mgr.focusedContent()?.type;
+        if (here === "draft") {
+            flash("already writing one — :w sends, :q! discards");
+            return;
+        }
+        if (here === "thread") {
+            flash("in a thread — :reply answers it");
+            return;
+        }
         const seam = activeEditor;
         if (!seam) {
             flash("no editor focused — open a file or the review pane first");
@@ -108,6 +122,10 @@
 
     /** ,t — the thread under the cursor, as a read-only buffer. */
     function goToThread(): void {
+        if (mgr.focusedContent()?.type === "thread") {
+            flash("already in a thread — :q closes it");
+            return;
+        }
         const seam = activeEditor;
         if (!seam) {
             flash("no editor focused");
@@ -122,6 +140,12 @@
      *  recordJump first, so ⌃O walks back to the code you came from — the
      *  thing a view zone could never have offered. */
     async function openThreadBuffer(id: number): Promise<void> {
+        // Yield first, always. Opening from the quick-action modal runs
+        // closeQuickActions() right after this, which pulls focus back to the
+        // strip — so a SYNCHRONOUS reveal lost the race while the mint path
+        // (async by nature) won it, and the same key did two different things
+        // depending on whether the thread happened to be open already.
+        await tick();
         const open = mgr.findPane((c) => c.type === "thread" && c.id === id);
         if (open) {
             mgr.revealPane(open);

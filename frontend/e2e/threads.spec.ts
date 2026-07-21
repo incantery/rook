@@ -320,7 +320,6 @@ test("`,t` opens a thread buffer; `:reply` answers it; hover previews it", async
     // it is a real buffer: rendered markdown, with the anchored source fenced
     const threadPane = page.locator(".editor-mount").last();
     await expect(threadPane).toContainText(`Thread #${t.id}`);
-    await expect(threadPane).toContainText("why is this named spawnTask");
     // conversation-first: no fenced snapshot while the thread is still
     // anchored, so a short split shows the comment rather than the code you
     // are already looking at (the outdated case is pinned in the unit tests)
@@ -389,4 +388,57 @@ test("` t lists threads in the quickfix and `o` opens one", async ({page}) => {
     });
 
     await page.screenshot({path: "bin/e2e/threads-list.png", fullPage: true});
+});
+
+// A thread buffer must NOT grab the keyboard when it re-renders.
+//
+// reloadThreads() routes every watch-stream event back through loadThread, and
+// the stream fans out to every open thread pane — so an unconditional focus
+// there meant any thread changing anywhere in the workspace (an agent reply, a
+// :w of your own) yanked the caret out of whatever you were typing. The pane
+// now focuses only through the wantFocus LATCH, which the open path sets and
+// a reload does not.
+test("a thread buffer re-rendering does not steal the keyboard", async ({page}) => {
+    test.setTimeout(120_000);
+
+    const ws = `focus-e2e-${Date.now()}`;
+    await openWorkspace(page, ws);
+    await openSource(page, "internal/host/spawntask.go");
+
+    await ctxChord(page, "c", "18G");
+    await writeComment(page, "comment", "does this leak the goroutine");
+    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
+    const [t] = await threadsOf(ws);
+
+    await ctxChord(page, "t", "18G");
+    const threadPane = page.locator(".editor-mount").last();
+    await expect(threadPane).toContainText("does this leak the goroutine", {timeout: 15_000});
+
+    // deliberately put the keyboard back in the SOURCE, as a user would after
+    // reading the thread
+    await page.locator(".editor-mount").first().click();
+    const focusedPath = () =>
+        page.evaluate(
+            () =>
+                document.activeElement
+                    ?.closest(".editor-wrap")
+                    ?.querySelector(".editor-path")?.textContent ?? null,
+        );
+    // NB: assert on the "thread #" prefix, not the filename — the thread
+    // buffer's own header also contains the path, so toContain("spawntask.go")
+    // matches BOTH panes and the assertion catches nothing.
+    await expect.poll(focusedPath).not.toMatch(/^thread #/);
+
+    // …now the agent answers. The thread pane must update WITHOUT taking focus.
+    const reply = await hostFetch(`/threads/${t.id}/comments`, {
+        method: "POST",
+        body: JSON.stringify({body: "No — the pty owns it.", author: "agent"}),
+    });
+    expect(reply.status).toBe(204);
+    await expect(threadPane).toContainText("No — the pty owns it", {timeout: 15_000});
+
+    // the load-bearing assertion: the caret never left the source buffer
+    const where = await focusedPath();
+    expect(where).toContain("spawntask.go");
+    expect(where).not.toMatch(/^thread #/);
 });

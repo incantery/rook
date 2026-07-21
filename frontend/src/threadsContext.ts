@@ -74,7 +74,11 @@ export function makeThreadsContext(deps: {
                 },
             },
         ],
-        hint: "o open · s source · x resolve",
+        hint: [
+            ["o", "open"],
+            ["s", "source"],
+            ["x", "resolve"],
+        ],
         empty: "No threads here — ,c leaves a note, ,? asks the agent.",
         // the batch send, in the place every other context puts its verb
         prepare: {

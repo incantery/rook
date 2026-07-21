@@ -699,6 +699,16 @@ export class TermManager {
         for (const tab of this.sessions.values()) tab.term.options.theme = theme;
     }
 
+    /** What the focused pane SHOWS. Chrome needs this to refuse a verb that
+     *  belongs to a source buffer when the keyboard is actually in a draft or
+     *  a thread — activeEditor deliberately keeps pointing at the source, so
+     *  it cannot answer this question. */
+    focusedContent(): PaneRef | null {
+        const win = this.active;
+        if (!win) return null;
+        return leaves(win.root).find((l) => l.id === win.focused)?.content ?? null;
+    }
+
     /** Split the focused pane and put ARBITRARY content in the new half.
      *
      *  splitFocused is terminal-only — it unconditionally spawns a session —

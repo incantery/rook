@@ -72,7 +72,12 @@ export function makeReviewContext(deps: {
                 },
             },
         ],
-        hint: "a·r·d disposition · o editor",
+        hint: [
+            ["a", "approve"],
+            ["r", "reject"],
+            ["d", "defer"],
+            ["o", "editor"],
+        ],
         empty: "No review here yet. Prepare one to review the unstaged changes as hunks.",
         prepare: {
             label: () => (app.reviewRoot ? "↻" : "Prepare"),

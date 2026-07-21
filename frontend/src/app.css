@@ -381,3 +381,21 @@ body {
     color: #ffcb6b;
     border-color: #ffcb6b;
 }
+
+/* Keycaps in the imperatively-built drawer headers — the same chip Kbd.svelte
+   renders in chrome. A hint row names a verb and its trigger; the trigger is
+   the only part you act on, so it gets the affordance. */
+.editor-key {
+    border: 1px solid color-mix(in srgb, var(--line) 20%, transparent);
+    background: color-mix(in srgb, var(--fg) 6%, transparent);
+    border-radius: 3px;
+    padding: 1px 4px;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--dim);
+}
+.editor-hint-sep {
+    margin: 0 8px;
+    color: var(--lo);
+}

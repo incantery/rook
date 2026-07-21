@@ -302,6 +302,15 @@ export interface EditorPaneOpts {
     onGrep?: (seed?: string) => void;
 }
 
+/** The imperative twin of Kbd.svelte: the drawer headers are built outside
+ *  Svelte, so they need their own keycap. Static strings only — this writes
+ *  innerHTML. */
+function keyHints(pairs: [string, string][]): string {
+    return pairs
+        .map(([k, label]) => `<kbd class="editor-key">${k}</kbd>&nbsp;${label}`)
+        .join('<span class="editor-hint-sep">·</span>');
+}
+
 /** How stale a review may be before a re-focus refetches it. */
 const STALE_MS = 2000;
 
@@ -488,7 +497,7 @@ export class EditorPane implements PaneContent {
         // drafts live in the panel (chrome), so refetch is always safe here.
         if (!this.monaco || Date.now() - this.fetchedAt <= STALE_MS) return;
         if (this.opts.kind === "review") void this.refresh();
-        else void this.refetchThreads();
+        else if (this.opts.kind === "file") void this.refetchThreads();
     }
 
     /** Honor a focus() that landed before the editor existed. */
@@ -715,12 +724,26 @@ export class EditorPane implements PaneContent {
         this.pathEl.textContent = `thread #${t.id} · ${t.path}:${
             t.currentStart === t.currentEnd ? t.currentStart : `${t.currentStart}-${t.currentEnd}`
         }${t.outdated ? " · outdated" : ""}`;
-        this.noteEl.textContent =
-            t.state === "resolved" ? ":reopen · :q" : ":reply · :resolve · :q";
+        this.noteEl.innerHTML = keyHints(
+            t.state === "resolved"
+                ? [
+                      [":reopen", "reopen"],
+                      [":q", "close"],
+                  ]
+                : [
+                      [":reply", "answer"],
+                      [":resolve", "done"],
+                      [":q", "close"],
+                  ],
+        );
         this.setDirty(false);
         this.fit();
         await this.attachVim(ed);
-        ed.focus();
+        // Through the LATCH, never unconditionally: reloadThreads() routes
+        // every watch-stream event back through here, and an unconditional
+        // focus meant any thread changing anywhere in the workspace yanked
+        // the keyboard out of whatever you were typing in.
+        this.applyPendingFocus();
     }
 
     /** :reply — a draft buffer answering this thread. Composition has exactly
@@ -789,7 +812,10 @@ export class EditorPane implements PaneContent {
                 : `${d.mode === "ask" ? "ask" : "comment"} · ${d.path}:${
                       d.startLine === d.endLine ? d.startLine : `${d.startLine}-${d.endLine}`
                   }${d.side === "original" ? " (original)" : ""}`;
-        this.noteEl.textContent = ":w sends · :q! discards";
+        this.noteEl.innerHTML = keyHints([
+            [":w", d.kind === "reply" ? "reply" : "send"],
+            [":q!", "discard"],
+        ]);
         this.savedVersionId = model.getAlternativeVersionId();
         this.setDirty(false);
         this.changeSub?.dispose();
@@ -801,7 +827,9 @@ export class EditorPane implements PaneContent {
         // save a keystroke and cost a worse one: a vim hand types `i` on
         // arrival by reflex, which in insert mode is a stray character.
         void this.attachVim(ed);
-        ed.focus();
+        // via the latch (see loadThread): splitWith focuses this pane before
+        // Monaco exists, which sets wantFocus; anything else must not steal.
+        this.applyPendingFocus();
     }
 
     private async refresh(): Promise<void> {

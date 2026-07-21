@@ -51,7 +51,7 @@ export function makeRefsContext(deps: {
                 },
             },
         ],
-        hint: "o open",
+        hint: [["o", "open"]],
         empty: "Nothing here — gr on a symbol or ⌃Q in grep fills this list.",
     };
 }
