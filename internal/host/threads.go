@@ -745,9 +745,14 @@ func (h *Host) claudeSessionIn(ws string) *session {
 	defer h.bindMu.Unlock()
 	var best *session
 	bestN := -1
-	for _, sid := range h.claims {
+	for tid, sid := range h.claims {
 		s := h.get(sid)
 		if s == nil || s.info.Workspace != ws {
+			continue
+		}
+		// The agent that claimed this window may be gone without having
+		// said so (see claimAliveLocked). A dead claim is not a responder.
+		if !h.claimAliveLocked(tid, s) {
 			continue
 		}
 		n, err := strconv.Atoi(strings.TrimPrefix(sid, "s"))

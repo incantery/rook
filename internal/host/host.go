@@ -87,6 +87,16 @@ type Host struct {
 	bindMu sync.Mutex
 	claims map[string]string
 	binds  map[string]string
+	// claimFg is the pty's foreground process group at the moment each claim
+	// was made — the agent's own, since the SessionStart hook runs inside it.
+	// A claim only survives its process if nothing releases it, and the
+	// SessionEnd hook does not run for ^C, a crash, or a kill -9. The claim
+	// then still names a window, but that window has moved on to a shell, or
+	// an editor. Typing a prompt at it is not delivery; it is keystrokes into
+	// whatever is there. Comparing this against the tty's current foreground
+	// group answers "is the thing that claimed this still the thing running"
+	// exactly, and for one ioctl. Keyed like claims: transcript session id.
+	claimFg map[string]int
 
 	// Live drafts by transcript session id — what /attention decorates its
 	// items with. The decisions table is the durable ledger; this map is
@@ -141,6 +151,7 @@ func New() *Host {
 		cwdCache: make(map[int]cwdEntry),
 		pt:       newProcTable(),
 		claims:   make(map[string]string),
+		claimFg:  make(map[string]int),
 		binds:    make(map[string]string),
 		drafts:   make(map[string]draftInfo),
 		um:       newUsageMon(),
@@ -186,6 +197,30 @@ func (h *Host) cachedCwdOf(pid int) string {
 	h.cwdCache[pid] = cwdEntry{cwd, time.Now()}
 	h.cwdMu.Unlock()
 	return cwd
+}
+
+// claimAliveLocked reports whether the window a claim names is still running
+// the process that claimed it. Callers must hold bindMu.
+//
+// A claim is only as durable as the hook that releases it, and SessionEnd
+// does not run for ^C, a crash, or a kill -9. What is left then is a claim
+// pointing at a window where the agent has been replaced by a shell prompt —
+// or by whatever the user started next. Every actuator that types at a claim
+// has to ask this first, because typing at the wrong window is not a missed
+// delivery, it is keystrokes into someone's editor.
+//
+// The test is the tty's foreground process group against the one recorded
+// when the claim was made. Exact, and one ioctl: no `ps`, no lsof, nothing
+// that would make it too expensive for an actuation path.
+//
+// Nothing recorded means a claim older than this check — fail open, since
+// inventing an answer is worse than the behaviour that shipped before.
+func (h *Host) claimAliveLocked(agentSession string, s *session) bool {
+	want, ok := h.claimFg[agentSession]
+	if !ok || want <= 0 {
+		return true
+	}
+	return fgPgrp(s.pty) == want
 }
 
 func (h *Host) Token() string { return h.token }
@@ -311,6 +346,7 @@ func (h *Host) readPump(s *session) {
 	for tid, sid := range h.claims {
 		if sid == s.info.ID {
 			delete(h.claims, tid)
+			delete(h.claimFg, tid)
 		}
 	}
 	h.bindMu.Unlock()
@@ -1103,15 +1139,20 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 		if req.Release {
 			if h.claims[req.AgentSession] == id {
 				delete(h.claims, req.AgentSession)
+				delete(h.claimFg, req.AgentSession)
 			}
 		} else {
 			// one live claude per window: a new claim evicts older ones
 			for tid, sid := range h.claims {
 				if sid == id {
 					delete(h.claims, tid)
+					delete(h.claimFg, tid)
 				}
 			}
 			h.claims[req.AgentSession] = id
+			// The hook runs inside the agent, so the tty's foreground group
+			// right now IS the agent's. See claimFg.
+			h.claimFg[req.AgentSession] = fgPgrp(s.pty)
 			delete(h.binds, req.AgentSession)
 		}
 		h.bindMu.Unlock()

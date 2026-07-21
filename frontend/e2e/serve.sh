@@ -30,9 +30,18 @@ go build -tags server -o "$SANDBOX/rook" ./cmd/rook
 # report Build "dev", which per internal/hostclient means this app rides its
 # sandbox's daemon rather than replacing it.
 go build -o "$SANDBOX/rook-host" ./cmd/rook-host
+# rookctl too: the stub coder claims its window through it, the same call
+# claude's SessionStart hook makes.
+go build -o "$SANDBOX/rookctl" ./cmd/rookctl
 
 export XDG_STATE_HOME="$SANDBOX/xdg/state"
 export XDG_CONFIG_HOME="$SANDBOX/xdg/config"
 export XDG_DATA_HOME="$SANDBOX/xdg/data"
+
+# Point the sandbox's coder at the stub (frontend/e2e/stub-coder.sh explains
+# why). Written every boot rather than once: the config is the only thing
+# standing between a test and a real `claude` invocation with a real bill.
+mkdir -p "$XDG_CONFIG_HOME/rook"
+printf 'coder = %s/frontend/e2e/stub-coder.sh\n' "$PWD" > "$XDG_CONFIG_HOME/rook/config"
 export WAILS_SERVER_PORT="$PORT"
 exec "$SANDBOX/rook"

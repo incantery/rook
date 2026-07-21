@@ -47,6 +47,24 @@ async function writeAll(root: string, files: Record<string, string>): Promise<vo
     }
 }
 
+/** the sandbox XDG triple serve.sh builds — its own state, config and data */
+export const SANDBOX = path.join(REPO, "bin", "e2e", "xdg");
+
+/** the stand-in coder serve.sh points the sandbox's `coder` at */
+export const STUB_CODER = path.join(process.cwd(), "e2e", "stub-coder.sh");
+
+/** Talk to the sandbox daemon directly, for the state a UI cannot show —
+ *  what the host DECIDED, as opposed to what happened to appear on screen. */
+export async function hostFetch(route: string, init?: RequestInit): Promise<Response> {
+    const st = JSON.parse(
+        await fs.readFile(path.join(SANDBOX, "state", "rook", "host.json"), "utf8"),
+    ) as {port: number; token: string};
+    return fetch(`http://127.0.0.1:${st.port}${route}`, {
+        ...init,
+        headers: {Authorization: `Bearer ${st.token}`},
+    });
+}
+
 /** Delete workspaces a spec created, and wait for each to actually go.
  *
  *  Exported for the specs not yet on the `rook` fixture: seven of them carried

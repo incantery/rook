@@ -350,15 +350,21 @@ func shellQuote(s string) string {
 func (h *Host) pairedSession(agentSession string, correlateNow bool) *session {
 	lookup := func() *session {
 		h.bindMu.Lock()
-		id := h.claims[agentSession]
-		if id == "" {
-			id = h.binds[agentSession]
+		defer h.bindMu.Unlock()
+		if id := h.claims[agentSession]; id != "" {
+			s := h.get(id)
+			// A claim whose agent died without unclaiming names a window
+			// running something else; approving a draft into it would type
+			// the text at whatever that is. Fall through to the heuristic
+			// tier rather than actuate on a claim we can prove is stale.
+			if s != nil && h.claimAliveLocked(agentSession, s) {
+				return s
+			}
 		}
-		h.bindMu.Unlock()
-		if id == "" {
-			return nil
+		if id := h.binds[agentSession]; id != "" {
+			return h.get(id)
 		}
-		return h.get(id)
+		return nil
 	}
 	if s := lookup(); s != nil {
 		return s
