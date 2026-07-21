@@ -168,24 +168,34 @@ interface Win {
     cells: Map<string, HTMLElement>;
 }
 
-// The response sequences xterm generates on its own while parsing: cursor
-// position reports (CSI R), device attributes (CSI c), status reports
-// (CSI n), mode reports (DECRPM, CSI $y), color reports (OSC 4/10-12), and
-// DCS replies. During replay these answer queries from programs that already
-// exited; nothing here overlaps what a keyboard can produce (arrows/function
-// keys use other finals — except modifier+F3, which collides with CPR and is
-// an accepted loss inside the sub-second gate).
+// xterm generates replies of its own while parsing, and rook has to decide
+// which of them may reach the pty. Two rules, because there are now two kinds.
 //
-// $y was missing until a websocket tap caught it: nvim opens by asking about
-// synchronized output and friends (CSI ?2026$p …), so a reattach replayed
-// five stale mode reports into whatever was running in the pane. nvim's
-// parser swallows them, which is why this hid — but the whole point of the
-// gate is that an answer never reaches a program that didn't ask.
+// HOST_ANSWERED — the host answers these itself (internal/host/termquery.go),
+// so xterm's copy is always a duplicate and is dropped unconditionally, replay
+// or not. Matched by their EXACT reply shapes rather than by final byte: a
+// pattern like "any CSI ending in n" would also swallow a printer-status
+// reply nobody answers, and a query with no answer is a program that hangs.
 //
-// Exported only for the spec: what this does and does not swallow is the
-// whole contract, and nothing else the module exposes makes it observable.
-export const AUTO_REPLY =
-    /\x1b(?:\[\??\d+(?:;\d+)*(?:[Rn]|\$y)|\[[>?]?\d*(?:;\d+)*c|\](?:4|1[0-2]);[^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)/g;
+// REPLAY_ONLY — the ones the host cannot answer, because they need a model of
+// the screen rather than of the conversation: cursor position (CSI R), the
+// DECRQSS status string (DCS), and the palette reports (OSC 4/10-12) that
+// carry the theme. These stay xterm's job, and stay load-bearing live — vim
+// reads OSC 11 to pick a background — so they are dropped only while a replay
+// is in flight, which is the old gate, unchanged.
+//
+// The split is what makes the gate's fail-open safe again. It was always a
+// timer: past 1.5s the gate lifts whether or not the replay finished, and any
+// straggling reply went through. That is how five stale mode reports reached a
+// live nvim. The family that did it is now dropped by a rule with no timer in
+// it at all.
+//
+// Exported only for the spec: what these do and do not swallow is the whole
+// contract, and nothing else the module exposes makes it observable.
+export const HOST_ANSWERED = /\x1b(?:\[\?1;2c|\[>0;276;0c|\[0n|\[\??\d+(?:;\d+)*\$y)/g;
+
+export const REPLAY_ONLY =
+    /\x1b(?:\[\??\d+(?:;\d+)*R|\](?:4|1[0-2]);[^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)/g;
 
 export class TermManager {
     private sessions = new Map<string, Tab>();
@@ -375,10 +385,12 @@ export class TermManager {
         };
         term.onData((data) => {
             if (tab.ws?.readyState !== WebSocket.OPEN) return;
-            if (tab.replaying) {
-                data = data.replace(AUTO_REPLY, "");
-                if (!data) return;
-            }
+            // Always: the host already answered these, live and once.
+            data = data.replace(HOST_ANSWERED, "");
+            // While replaying: also the ones only xterm can answer, since a
+            // replayed query's asker is long gone. Typing passes untouched.
+            if (tab.replaying) data = data.replace(REPLAY_ONLY, "");
+            if (!data) return;
             tab.ws.send(data);
         });
         this.connect(tab);

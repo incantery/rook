@@ -41,7 +41,7 @@ func TestOverview(t *testing.T) {
 	}
 	defer w.Close()
 	defer r.Close()
-	s := &session{
+	s := &session{q: newTermQ(),
 		info: SessionInfo{ID: "s1", Name: "s1", Workspace: "beta", Created: time.Now()},
 		pty:  r,
 		cmd:  cmd,
@@ -192,7 +192,7 @@ func TestOverviewRowsCarryIdentityEndToEnd(t *testing.T) {
 	defer w.Close()
 	defer r.Close()
 	h.mu.Lock()
-	h.sessions["pty-1"] = &session{
+	h.sessions["pty-1"] = &session{q: newTermQ(),
 		info: SessionInfo{ID: "pty-1", Name: "pty-1", Workspace: "rook", Created: time.Now()},
 		pty:  r,
 		cmd:  cmd,

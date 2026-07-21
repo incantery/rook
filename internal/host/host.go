@@ -53,6 +53,10 @@ type session struct {
 	info SessionInfo
 	pty  *os.File
 	cmd  *exec.Cmd
+	// q answers the terminal queries a program asks (termquery.go). Host-side
+	// so a detached session still gets answers, and so a replayed query is
+	// never answered twice.
+	q *termQ
 
 	mu     sync.Mutex // guards ring, attach
 	ring   []byte
@@ -289,6 +293,7 @@ func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
 		},
 		pty: f,
 		cmd: cmd,
+		q:   newTermQ(),
 	}
 	h.sessions[s.info.ID] = s
 	h.mu.Unlock()
@@ -305,6 +310,12 @@ func (h *Host) readPump(s *session) {
 	for {
 		n, err := s.pty.Read(buf)
 		if n > 0 {
+			// Answer before forwarding: the reply is INPUT, so it never
+			// reaches the ring and can never be replayed at a program that
+			// has stopped asking.
+			if reply := s.q.scan(buf[:n]); len(reply) > 0 {
+				s.pty.Write(reply)
+			}
 			s.mu.Lock()
 			s.ring = append(s.ring, buf[:n]...)
 			if len(s.ring) > ringCap {

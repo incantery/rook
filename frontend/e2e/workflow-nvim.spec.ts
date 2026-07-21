@@ -12,6 +12,16 @@ import * as path from "node:path";
 // config and no plugins. That is deliberate — a plugin-less nvim is the
 // deterministic one, and the thing under test is rook's pty, not nvim's.
 
+/** file contents, or a legible stand-in — never a throw, so a poll reports
+ *  what the file says instead of what the filesystem said. */
+async function read(p: string): Promise<string> {
+    try {
+        return await fs.readFile(p, "utf8");
+    } catch (err) {
+        return `<unreadable: ${(err as NodeJS.ErrnoException).code}>`;
+    }
+}
+
 async function haveNvim(): Promise<boolean> {
     for (const dir of (process.env.PATH ?? "").split(":")) {
         try {
@@ -53,8 +63,12 @@ test("nvim in a pane edits a file and writes it to disk", async ({page, rook}) =
     // the assertion that matters is on DISK, not on screen: it is the only
     // one that proves the keystrokes crossed every layer rather than merely
     // being echoed back into a grid
+    // read() rather than readFile: a poll whose function THROWS reports the
+    // throw, not the mismatch. Teardown removes the fixture repo, so a poll
+    // still in flight when the test gives up died with ENOENT and buried the
+    // real failure — "the file never changed" — under a missing directory.
     await expect
-        .poll(() => fs.readFile(path.join(root, "notes.txt"), "utf8"), {timeout: 20_000})
+        .poll(() => read(path.join(root, "notes.txt")), {timeout: 20_000})
         .toBe("delta\nalpha\nbravo\ncharlie\n");
 });
 
