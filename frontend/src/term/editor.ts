@@ -38,6 +38,7 @@ async function loadVim(): Promise<VimLib> {
         // requires prefix to be a literal prefix of name, so :qa pairs with
         // "qall", not "quitall".
         const vim = (vimLib.VimMode as unknown as {Vim: VimApi}).Vim;
+        vimApi = vim;
         const paneOf = (cm: ExCm) => (cm?.editor ? paneByEditor.get(cm.editor) : undefined);
         // the bang (:q!, :qa!) parses into argString, never the command name
         const forced = (p: ExParams) => (p?.argString ?? "").trim().startsWith("!");
@@ -121,7 +122,16 @@ interface VimApi {
         extra?: {context?: string},
     ): void;
     getRegisterController(): object;
+    /** monaco-vim's VimMode IS the CodeMirror adapter (its keymap module
+     *  default-exports CodeMirror), so the pane's own `vim` handle is the `cm`
+     *  this wants. Optional because a monaco-vim bump could drop it. */
+    exitVisualMode?(cm: unknown, moveHead?: boolean): void;
 }
+
+/** The Vim singleton, captured when the lazy chunk loads. loadVim() reaches
+ *  it to register ex commands; the panes need it too, for the one thing that
+ *  isn't a binding — putting an editor back into NORMAL after a range verb. */
+let vimApi: VimApi | null = null;
 
 // ---- LSP: hover provider + the model→pane bridge ----
 // Providers are global per-language in Monaco; rook registers ONE hover
@@ -195,27 +205,45 @@ export interface EditorSeam {
      *  keyboard when Monaco finishes loading (the diff is a passive detail
      *  view; the hunk list keeps focus). */
     releaseFocus(): void;
-    /** Hand the keyboard BACK to the editor — what the panel calls when it's
-     *  done with it (composer submitted or cancelled). Without this, a
-     *  keyboard-driven ,c strands the user in a side pane needing a mouse. */
-    takeFocus(): void;
     clearHighlight(): void;
-    /** ,c / ,? — chrome asking the pane to open the composer on the current
-     *  selection. The inbound twin of onCompose. False means there was
-     *  nothing to comment on (no model yet), so chrome can say so. */
+    /** ,c / ,? — chrome asking the pane to start a comment on the current
+     *  selection. The pane resolves the anchor and hands it to opts.onCompose,
+     *  which opens the draft buffer. False means there was nothing to comment
+     *  on (no model yet), so chrome can say so. */
     compose(mode: ComposeMode): boolean;
     onMarkerClick(cb: (line: number, side: Side, ids: number[]) => void): () => void;
-    onCompose(
-        cb: (startLine: number, endLine: number, side: Side, mode: ComposeMode) => void,
-    ): () => void;
     onChange(cb: () => void): () => void;
+}
+
+/** What a comment draft is ABOUT. Everything createThread needs is decided
+ *  the moment the user asks; the buffer only ever supplies the body. Holding
+ *  it here (not in chrome) is what lets the pane be the whole transaction —
+ *  :w has every argument it needs without a round trip. */
+export interface DraftSpec {
+    /** the PaneRef arm's id — pane identity, not a thread id */
+    id: string;
+    path: string;
+    startLine: number;
+    endLine: number;
+    side: Side;
+    base?: "head" | "branch";
+    mode: ComposeMode;
 }
 
 export interface EditorPaneOpts {
     workspace: string;
-    kind: "review" | "file";
+    kind: "review" | "file" | "draft";
     /** file mode: the repo-top-relative path to view */
     path?: string;
+    /** draft mode: what this unsent comment is anchored to */
+    draft?: DraftSpec;
+    /** draft mode: the thread was created — chrome closes the split and
+     *  refreshes the source pane's gutter */
+    onSubmitted?: (threadId: number) => void;
+    /** the user wants to comment on a range here — chrome opens a draft
+     *  buffer for it. Both triggers (,c/,? and ⌘⇧M) land here, so there is
+     *  exactly one composition model. */
+    onCompose?: (spec: DraftSpec) => void;
     /** the terminal's font — the pane should read like the rest of rook */
     font: {family: string; size: number};
     /** surface a failure where the user is looking (titlebar flash) */
@@ -247,6 +275,25 @@ export interface EditorPaneOpts {
 
 /** How stale a review may be before a re-focus refetches it. */
 const STALE_MS = 2000;
+
+/** A draft is a prose buffer, not a source view: strip the machinery a file
+ *  pane needs (numbers, glyphs, folding) so a three-line comment reads as a
+ *  three-line comment. Wrapping is on because a comment has no columns. */
+const DRAFT_OPTS = {
+    lineNumbers: "off",
+    glyphMargin: false,
+    folding: false,
+    // not 0: with every gutter off, the text would sit flush against the pane
+    // edge. This is the only left padding Monaco offers (`padding` is
+    // top/bottom only), so it doubles as the draft's margin.
+    lineDecorationsWidth: 12,
+    lineNumbersMinChars: 0,
+    wordWrap: "on",
+    renderLineHighlight: "none",
+    overviewRulerLanes: 0,
+    padding: {top: 8, bottom: 8},
+    scrollbar: {vertical: "auto", horizontal: "hidden"},
+} as const satisfies monacoTypes.editor.IEditorOptions;
 
 export class EditorPane implements PaneContent {
     readonly el: HTMLElement;
@@ -302,7 +349,6 @@ export class EditorPane implements PaneContent {
 
     // seam subscribers (chrome side)
     private markerCbs: ((line: number, side: Side, ids: number[]) => void)[] = [];
-    private composeCbs: ((s: number, e: number, side: Side, mode: ComposeMode) => void)[] = [];
     private changeCbs: (() => void)[] = [];
     private _seam: EditorSeam | null = null;
 
@@ -336,15 +382,19 @@ export class EditorPane implements PaneContent {
         );
         this.submitBtn.classList.add("editor-submit");
         this.submitBtn.hidden = true;
-        head.append(
-            this.submitBtn,
-            this.btn(
-                "⟳",
-                "refresh",
-                () => void (opts.kind === "file" ? this.loadFile() : this.refresh()),
-            ),
-            this.btn("×", "close pane", () => this.requestClose()),
-        );
+        head.append(this.submitBtn);
+        // no refresh on a draft: there is nothing to re-read, and the button
+        // would drive the review pane's refresh() on a pane with no changed set
+        if (opts.kind !== "draft") {
+            head.append(
+                this.btn(
+                    "⟳",
+                    "refresh",
+                    () => void (opts.kind === "file" ? this.loadFile() : this.refresh()),
+                ),
+            );
+        }
+        head.append(this.btn("×", "close pane", () => this.requestClose()));
         this.body = document.createElement("div");
         this.body.className = "editor-body";
         this.statusEl = document.createElement("div");
@@ -355,7 +405,10 @@ export class EditorPane implements PaneContent {
         this.mount = document.createElement("div");
         this.mount.className = "editor-mount";
         this.body.append(this.statusEl, this.mount);
-        if (opts.kind === "file") {
+        // the mode line + `:` prompt. A draft needs it as much as a file does —
+        // it's where :w lands, and it's the signal that this really is a
+        // buffer rather than a form that happens to look like one.
+        if (opts.kind === "file" || opts.kind === "draft") {
             this.vimBar = document.createElement("div");
             this.vimBar.className = "editor-vim";
             this.body.appendChild(this.vimBar);
@@ -366,6 +419,9 @@ export class EditorPane implements PaneContent {
     }
 
     get title(): string {
+        if (this.opts.kind === "draft") {
+            return this.opts.draft?.mode === "ask" ? "ask" : "comment";
+        }
         if (this.opts.kind === "file") {
             const p = this.opts.path ?? "";
             const name = p.slice(p.lastIndexOf("/") + 1) || "file";
@@ -434,13 +490,11 @@ export class EditorPane implements PaneContent {
             releaseFocus: () => {
                 this.wantFocus = false;
             },
-            takeFocus: () => this.focus(),
             clearHighlight: () => {
                 for (const b of this.bands) b.clearHighlight();
             },
             compose: (mode) => this.compose(mode),
             onMarkerClick: (cb) => this.sub(this.markerCbs, cb),
-            onCompose: (cb) => this.sub(this.composeCbs, cb),
             onChange: (cb) => this.sub(this.changeCbs, cb),
         });
     }
@@ -458,6 +512,11 @@ export class EditorPane implements PaneContent {
     }
 
     private activate(): void {
+        // A draft has no file and so no threads: announcing it would rebind
+        // the thread panel to an empty context and blank the list for the
+        // source pane the user is still looking at. The draft is a transient
+        // guest in the window, not the window's subject.
+        if (this.opts.kind === "draft") return;
         this.opts.onActivate?.(this.seam);
     }
 
@@ -541,8 +600,55 @@ export class EditorPane implements PaneContent {
             clearTimeout(watchdog);
         }
         if (this.disposed) return;
+        if (this.opts.kind === "draft") {
+            this.loadDraft(); // nothing to fetch — the buffer starts empty
+            return;
+        }
         this.showStatus(this.opts.kind === "file" ? "reading file…" : "fetching changes…");
         await (this.opts.kind === "file" ? this.loadFile() : this.refresh());
+    }
+
+    /** A comment draft: an in-memory model, no host read, no path.
+     *
+     *  Everything a file pane gets from loadFile — an editable model, vim,
+     *  dirty tracking — a draft has to set up for itself, because there is no
+     *  file to read and `editable` defaults to false. */
+    private loadDraft(): void {
+        const m = this.monaco;
+        const d = this.opts.draft;
+        if (!m || !d) return;
+        this.clearStatus();
+        this.disposeModels();
+        // language DECLARED, not inferred: a draft has no filename for Monaco
+        // to read a suffix off. Markdown because a comment is prose that
+        // wants code fences.
+        const model = m.editor.createModel(
+            "",
+            "markdown",
+            m.Uri.parse(`rook-draft://${++this.seq}/${d.id}`),
+        );
+        this.models.push(model);
+        const ed = this.ensureEditor();
+        paneByModel.set(model, this);
+        ed.setModel(model);
+        this.editable = true;
+        ed.updateOptions({readOnly: false, ...DRAFT_OPTS});
+        this.pathEl.textContent = `${d.mode === "ask" ? "ask" : "comment"} · ${d.path}:${
+            d.startLine === d.endLine ? d.startLine : `${d.startLine}-${d.endLine}`
+        }${d.side === "original" ? " (original)" : ""}`;
+        this.noteEl.textContent = ":w sends · :q! discards";
+        this.savedVersionId = model.getAlternativeVersionId();
+        this.setDirty(false);
+        this.changeSub?.dispose();
+        this.changeSub = model.onDidChangeContent(() =>
+            this.setDirty(model.getAlternativeVersionId() !== this.savedVersionId),
+        );
+        this.fit();
+        // NORMAL mode, like the git-commit buffer. Landing in insert would
+        // save a keystroke and cost a worse one: a vim hand types `i` on
+        // arrival by reflex, which in insert mode is a stray character.
+        void this.attachVim(ed);
+        ed.focus();
     }
 
     private async refresh(): Promise<void> {
@@ -743,6 +849,15 @@ export class EditorPane implements PaneContent {
     /** :w / ⌘S — save with user feedback. Public: the global vim ex map and
      *  the ⌘S command both call it. */
     async save(): Promise<void> {
+        if (this.opts.kind === "draft") {
+            // :w IS the whole gesture here — the git-commit contract. The
+            // buffer exists to be handed off, so a successful write closes the
+            // split, and focus falls back to the source: removePaneLocal hands
+            // it to the spatial neighbour, which for a split-below is the
+            // buffer the comment came from.
+            if (await this.doSave()) this.opts.onClose();
+            return;
+        }
         if (!this.editable) {
             this.opts.onFlash(`${this.opts.path ?? "file"} is read-only`);
             return;
@@ -758,6 +873,7 @@ export class EditorPane implements PaneContent {
      *  true when the buffer is clean afterward (safe to quit): a non-editable
      *  or already-clean pane is trivially clean; a failed write is not. */
     private async doSave(): Promise<boolean> {
+        if (this.opts.kind === "draft") return this.submitDraft();
         const model = this.editor?.getModel();
         if (!this.editable || !model || !this.dirty) return true;
         if (this.saving) return false;
@@ -776,6 +892,49 @@ export class EditorPane implements PaneContent {
                 msg.includes(" 404 ")
                     ? "saving needs a newer rook-host — relaunch rook"
                     : `save failed: ${msg}`,
+            );
+            return false;
+        } finally {
+            this.saving = false;
+        }
+    }
+
+    /** Writing a draft = creating the thread. Returns true when the caller
+     *  may close the split. */
+    private async submitDraft(): Promise<boolean> {
+        const d = this.opts.draft;
+        const body = (this.editor?.getModel()?.getValue() ?? "").trim();
+        if (!d) return false;
+        // An empty buffer is not a comment. Closing silently would swallow the
+        // gesture; say so and stay open, the way :w on an unwritable file does.
+        if (!body) {
+            this.opts.onFlash("nothing to say yet — write a comment, or :q! to discard");
+            return false;
+        }
+        if (this.saving) return false;
+        this.saving = true;
+        try {
+            const t = await this.api.createThread(this.opts.workspace, {
+                path: d.path,
+                startLine: d.startLine,
+                endLine: d.endLine,
+                side: d.side,
+                base: d.side === "original" ? d.base : undefined,
+                body,
+            });
+            if (d.mode === "ask") await this.api.submitThread(t.id);
+            // clean BEFORE the close, or exQuit's dirty guard refuses to shut
+            // the buffer we just successfully sent
+            this.setDirty(false);
+            this.opts.onFlash(d.mode === "ask" ? "asked the agent" : "comment saved");
+            this.opts.onSubmitted?.(t.id);
+            return true;
+        } catch (err) {
+            const msg = String(err);
+            this.opts.onFlash(
+                msg.includes(" 404 ")
+                    ? "comments need a newer rook-host — relaunch rook"
+                    : `comment failed: ${msg}`,
             );
             return false;
         } finally {
@@ -1110,13 +1269,49 @@ export class EditorPane implements PaneContent {
         return this.composeOn(band, mode);
     }
 
+    /** Put this editor back into NORMAL after a range verb consumed the
+     *  selection — what vim does after any operator.
+     *
+     *  Not cosmetic. Left in VISUAL, the NEXT motion extends the stale
+     *  selection instead of moving the cursor, so the following comment
+     *  silently anchors to the previous one's range. The e2e caught that;
+     *  reasoning about it had not. */
+    private exitVisual(): void {
+        try {
+            if (this.vim) vimApi?.exitVisualMode?.(this.vim, false);
+        } catch (err) {
+            console.warn("editor pane: could not leave visual mode:", err);
+        }
+    }
+
     private composeOn(band: ThreadBand | undefined, mode: ComposeMode): boolean {
         const sel = band?.editor.getSelection();
-        if (!band || !sel) return false;
+        const path = this.currentPath();
+        if (!band || !sel || !path) return false;
         let end = sel.endLineNumber;
         // a full-line drag ends at column 1 of the NEXT line — not a line
         if (end > sel.startLineNumber && sel.endColumn === 1) end--;
-        for (const cb of this.composeCbs) cb(sel.startLineNumber, end, band.side, mode);
+        // Mark what's being commented on. Without this the draft names its
+        // range only as text in a header, and the selection itself is gone the
+        // moment focus leaves — so you'd be writing about a range you can no
+        // longer see. Chrome clears it when the draft closes.
+        for (const b of this.bands) b.clearHighlight();
+        band.highlight(sel.startLineNumber, end);
+        this.exitVisual();
+        // Collapse to the start of the range, as vim does after an operator.
+        // exitVisualMode leaves vim's idea of the mode right but Monaco still
+        // PAINTS the old selection, which competes with the anchor rule for
+        // saying what the comment is about.
+        band.editor.setPosition({lineNumber: sel.startLineNumber, column: 1});
+        this.opts.onCompose?.({
+            id: crypto.randomUUID(),
+            path,
+            startLine: sel.startLineNumber,
+            endLine: end,
+            side: band.side,
+            base: this.base,
+            mode,
+        });
         return true;
     }
 

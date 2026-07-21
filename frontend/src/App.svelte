@@ -36,7 +36,7 @@
     import {makeExploreContext} from "./exploreContext";
     import {makeRefsContext, toRefHits} from "./refsContext";
     import {makeReviewContext} from "./reviewContext";
-    import type {ComposeMode, EditorSeam} from "./term/editor";
+    import type {ComposeMode, DraftSpec, EditorSeam} from "./term/editor";
 
     interface Props {
         api: HostAPI;
@@ -93,23 +93,60 @@
         });
     });
 
-    /** ,c / ,? — compose a thread on the active editor's selection.
-     *
-     *  The composer lives in ThreadPanel, and SidePane mounts its tenant only
-     *  while the pane is open ({#if visible}) — so a compose signalled at a
-     *  closed pane reaches zero subscribers and vanishes with no error. Open
-     *  first, let the panel mount and subscribe, then signal. */
-    async function composeThread(mode: ComposeMode): Promise<void> {
+    /** ,c / ,? — start a comment on the active editor's selection. The pane
+     *  resolves the anchor; openDraft turns it into a buffer. */
+    function composeThread(mode: ComposeMode): void {
         const seam = activeEditor;
         if (!seam) {
             flash("no editor focused — open a file or the review pane first");
             return;
         }
-        if (!app.threadPaneOpen) {
-            app.threadPaneOpen = true;
-            await tick();
-        }
         if (!seam.compose(mode)) flash("nothing to comment on");
+    }
+
+    /** A comment draft is a BUFFER, not a form.
+     *
+     *  It opens as a split BELOW its source, which buys three things from
+     *  machinery that already exists: the text is edited in a real Monaco
+     *  model, so vim, undo, registers and :w all work with no second keyboard
+     *  model; the pane is transient, so it takes no strip digit; and closing
+     *  it returns focus to the code, because removePaneLocal hands focus to
+     *  the spatial neighbour and a split-below's neighbour is the source.
+     *
+     *  Deliberately NOT registered in editorPanes: a draft is not a document
+     *  the buffer ladder should ever find, retarget, or refetch. */
+    async function openDraft(spec: DraftSpec): Promise<void> {
+        const {EditorPane} = await import("./term/editor");
+        // the pane that asked, captured now: a draft never calls onActivate
+        // (it has no threads of its own), so activeEditor still points at the
+        // source — but capture it anyway rather than depend on that at close.
+        const source = activeEditor;
+        // a quarter, not a half: the comment is the small thing here, and the
+        // code it annotates has to stay readable while you write about it
+        const DRAFT_FRACTION = 0.25;
+        mgr.splitWith(
+            "col",
+            {type: "draft", id: spec.id},
+            (leafId) =>
+                new EditorPane(api, {
+                    workspace: app.workspace,
+                    kind: "draft",
+                    draft: spec,
+                    font: paneFont,
+                    onFlash: flash,
+                    onClose: () => {
+                        source?.clearHighlight(); // drop the anchor rule
+                        mgr.closePane(leafId);
+                    },
+                    onSubmitted: () => {
+                        // The thread-watch stream announces this too, but only
+                        // to daemons that have it; refetching here means the
+                        // new anchor appears in the gutter on an older host.
+                        for (const p of editorPanes.values()) void p.seam.refetch();
+                    },
+                }),
+            DRAFT_FRACTION,
+        );
     }
 
     // ==== mode: what surface owns the viewport, and its chrome defaults ====
@@ -565,6 +602,8 @@
                     scopeDir = undefined;
                     app.grepOpen = true;
                 },
+                // ,c / ,? / ⌘⇧M all arrive here — one composition model
+                onCompose: (spec) => void openDraft(spec),
             });
             editorPanes.set(leafId, pane);
             return pane;

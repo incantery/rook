@@ -1,16 +1,17 @@
 <!-- The threads side-pane tenant (mounted inside SidePane, which owns the
      "Threads" title + close button + scroll body). Placement-agnostic: it
      takes the active editor pane's seam + hostapi and lists every thread on
-     that file — filterable, one card expanded at a time. Marker clicks and
-     ⌘⇧M / ,c / ,? come UP through the seam; reveal/highlight go DOWN. The
-     composer's MODE decides what submitting means: a note lands pending for
-     the batch, an ask submits that one thread and nudges. Drafts live here
-     in chrome, so a background refetch never eats them. Styled with inline
+     that file — filterable, one card expanded at a time.
+     Marker clicks come UP through the seam; reveal/highlight go DOWN.
+     COMPOSITION LIVES ELSEWHERE: ,c / ,? / ⌘⇧M open a real Monaco draft
+     buffer in a split (term/editor.ts, kind "draft"), because meaningful text
+     belongs in a buffer with vim, undo and :w — not in a web form bolted to
+     the side of an editor. This panel reads. Styled with inline
      Tailwind utilities (README decision 7). Layer 1: no agent proposed-
      revisions (see spec). -->
 <script lang="ts">
     import type {HostAPI, ThreadInfo} from "./hostapi";
-    import type {ComposeMode, EditorSeam} from "./term/editor";
+    import type {EditorSeam} from "./term/editor";
     import {
         avatar,
         contextKey,
@@ -59,50 +60,26 @@
     let threads = $state<ThreadInfo[]>([]);
     let filter = $state<ThreadFilter>("open");
     let selectedId = $state<number | null>(null); // the one expanded card
-    let composer = $state<{
-        startLine: number;
-        endLine: number;
-        side: Side;
-        mode: ComposeMode;
-    } | null>(null);
-    let draft = $state(""); // composer body OR the expanded card's reply
+    let draft = $state(""); // the expanded card's reply
     let err = $state("");
     let busy = $state(false);
     let nowMs = $state(Date.now()); // refreshed on sync; feeds relTime
-    let ctxKey = ""; // last-seen file identity; selection/composer reset on change
-    let composerEl = $state<HTMLTextAreaElement | null>(null);
-
-    // The composer is opened BY A KEYSTROKE (,c / ,? / ⌘⇧M), so it has to take
-    // the keyboard with it. Without this the pane slides open and the caret is
-    // still in Monaco — the user reaches for the mouse to type a note they
-    // asked for with a chord.
-    $effect(() => {
-        if (composer && composerEl) composerEl.focus();
-    });
-
+    let ctxKey = ""; // last-seen file identity; selection resets on change
     // (Re)bind to the active editor whenever the prop changes.
     $effect(() => {
         const seam = editor;
         if (!seam) {
             threads = [];
             selectedId = null;
-            composer = null;
             ctxKey = "";
             return;
         }
         sync();
         const offChange = seam.onChange(sync);
         const offMarker = seam.onMarkerClick((line, side, _ids) => selectAt(line, side));
-        const offCompose = seam.onCompose((s, e, side, mode) => {
-            draft = "";
-            err = "";
-            selectedId = null;
-            composer = {startLine: s, endLine: e, side, mode};
-        });
         return () => {
             offChange();
             offMarker();
-            offCompose();
         };
     });
 
@@ -112,10 +89,9 @@
         nowMs = Date.now();
         const key = contextKey(editor.context());
         if (key !== ctxKey) {
-            // file-nav / workspace switch → drop selection + composer (filter persists)
+            // file-nav / workspace switch → drop selection (filter persists)
             ctxKey = key;
             selectedId = null;
-            composer = null;
             draft = "";
             err = "";
         }
@@ -130,7 +106,6 @@
         if (!pick) return;
         draft = "";
         err = "";
-        composer = null;
         selectedId = pick.thread.id;
         editor?.reveal(pick.thread);
     }
@@ -147,7 +122,6 @@
             collapse();
             return;
         }
-        composer = null;
         draft = "";
         err = "";
         selectedId = t.id;
@@ -168,16 +142,6 @@
         editor?.clearHighlight();
     }
 
-    function cancelComposer(): void {
-        composer = null;
-        draft = "";
-        err = "";
-        editor?.clearHighlight();
-        // hand the keyboard back where it came from — ,c is a keyboard verb,
-        // and stranding focus in a side pane forces a mouse to get out
-        editor?.takeFocus();
-    }
-
     async function run(fn: () => Promise<void>): Promise<void> {
         busy = true;
         err = "";
@@ -188,38 +152,6 @@
             err = String(e);
         } finally {
             busy = false;
-        }
-    }
-
-    async function submitComposer(): Promise<void> {
-        const body = draft.trim();
-        const ctx = editor?.context();
-        if (!body || !ctx || !composer) return;
-        const {startLine, endLine, side, mode} = composer;
-        let created: ThreadInfo | null = null;
-        await run(async () => {
-            created = await api.createThread(ctx.workspace, {
-                path: ctx.path,
-                startLine,
-                endLine,
-                side,
-                base: side === "original" ? ctx.base : undefined,
-                body,
-            });
-            // ,? asks about THIS thread — a per-thread submit, not the
-            // workspace batch, which would also ship every note deliberately
-            // left pending.
-            if (mode === "ask") await api.submitThread((created as ThreadInfo).id);
-            draft = "";
-            composer = null;
-        });
-        // select AFTER refetch populated `threads`, so `selected` resolves at once
-        if (created) {
-            selectedId = (created as ThreadInfo).id;
-            editor?.reveal(created as ThreadInfo);
-            // …and give the keyboard back: the note is written, the next thing
-            // the user wants is to keep reading code, not to be in a panel.
-            editor?.takeFocus();
         }
     }
 
@@ -260,8 +192,7 @@
             e.preventDefault();
             submit();
         } else if (e.key === "Escape") {
-            if (composer) cancelComposer();
-            else collapse();
+            collapse();
         }
     }
 
@@ -295,51 +226,6 @@
 
         <!-- the list is the only scroll region -->
         <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2.5">
-            {#if composer}
-                <div class="rounded-xl border border-acc/40 bg-acc/[0.06] px-3 py-2.5">
-                    <div class="mb-2 flex items-center gap-2">
-                        <span class="text-[10px] font-bold uppercase tracking-wider text-acc"
-                            >{composer.mode === "ask" ? "Ask the agent" : "New thread"}</span
-                        >
-                        <span class="font-mono text-[10px] text-lo"
-                            >{fmtRange(composer.startLine, composer.endLine)}{composer.side ===
-                            "original"
-                                ? " (original)"
-                                : ""}</span
-                        >
-                        <span class="flex-1"></span>
-                        <button
-                            class="cursor-pointer text-xs text-lo hover:text-dim"
-                            aria-label="cancel"
-                            onclick={cancelComposer}>✕</button
-                        >
-                    </div>
-                    <textarea
-                        class="box-border min-h-6.5 w-full resize-y rounded-sm border border-line/15 bg-sunken px-1.5 py-1 font-mono text-xs text-fg focus:border-acc focus:outline-none"
-                        rows="3"
-                        bind:this={composerEl}
-                        placeholder={composer.mode === "ask"
-                            ? "What do you want to know about this region?"
-                            : "Leave a note for this region…"}
-                        bind:value={draft}
-                        onkeydown={(e) => keydown(e, submitComposer)}></textarea>
-                    {#if err}<div class="text-xs text-red [overflow-wrap:anywhere]">{err}</div>{/if}
-                    <div class="mt-2 flex items-center gap-2">
-                        <button
-                            class="cursor-pointer rounded-lg bg-acc px-3 py-1.5 text-xs font-semibold text-on-acc hover:brightness-110 disabled:opacity-50"
-                            disabled={busy}
-                            onclick={submitComposer}
-                            >{composer.mode === "ask" ? "Ask now" : "Start thread"}</button
-                        >
-                        <span class="font-mono text-[10px] text-lo"
-                            >{composer.mode === "ask"
-                                ? "⌘↵ asks · esc closes"
-                                : "⌘↵ saves · esc closes"}</span
-                        >
-                    </div>
-                </div>
-            {/if}
-
             {#each visible as t (t.id)}
                 {@const meta = stateMeta(t.state)}
                 <!-- state as a hook, not a style: the tone lives in a class,
@@ -467,7 +353,7 @@
                 </div>
             {/each}
 
-            {#if visible.length === 0 && !composer}
+            {#if visible.length === 0}
                 <div class="px-2.5 py-6 text-center text-xs leading-relaxed text-lo">
                     No threads in this filter.{#if resolvedCount(onFile) > 0 && filter === "open"}<br
                         />{resolvedCount(onFile)} resolved — see the Resolved tab.{/if}

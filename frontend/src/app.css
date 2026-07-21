@@ -364,8 +364,12 @@ body {
 .thread-glyph-outdated::before {
     content: "◌"; /* the anchor no longer matches the file */
 }
-.thread-active-line {
-    background: color-mix(in srgb, var(--acc) 18%, transparent);
+/* The active thread's extent: a rule beside the code, never over it. Sits in
+   Monaco's line-decorations margin (between the glyph margin and the text),
+   so it marks the range without tinting a single character. */
+.thread-anchor-rule {
+    border-left: 2px solid var(--acc);
+    margin-left: 3px;
 }
 
 /* the head's submit button carries the review's call to action */

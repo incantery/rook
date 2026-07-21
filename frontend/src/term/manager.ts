@@ -26,6 +26,7 @@ import {
     reconcile,
     removeAt,
     retarget,
+    setLeafFraction,
     setWeight,
     splitAt,
     termOnly,
@@ -696,6 +697,44 @@ export class TermManager {
      *  New terminals pick up the theme via mkTerm (main.ts reads the service). */
     setTerminalTheme(theme: ITheme): void {
         for (const tab of this.sessions.values()) tab.term.options.theme = theme;
+    }
+
+    /** Split the focused pane and put ARBITRARY content in the new half.
+     *
+     *  splitFocused is terminal-only — it unconditionally spawns a session —
+     *  so until now the only way to open a non-terminal pane was
+     *  openPaneWindow, which mints a whole new strip window. A comment draft
+     *  wants neither: it belongs BESIDE the code it annotates, in the window
+     *  already showing it, and it must not take a strip digit for the ten
+     *  seconds it exists.
+     *
+     *  Same mk(leafId) inversion as openPaneWindow: the manager stays
+     *  Monaco-free, and chrome gets the leaf id before the pane exists so it
+     *  can close over it. Returns the leaf id, since a transient pane's owner
+     *  needs to be able to close exactly itself later.
+     *
+     *  Synchronous on purpose — there's no api.create to await, so none of
+     *  splitFocused's did-the-target-die-during-the-await dance applies. */
+    splitWith(
+        dir: Dir,
+        content: PaneRef,
+        mk: (leafId: string) => PaneContent,
+        frac?: number,
+    ): string | null {
+        const win = this.active;
+        if (!win) return null;
+        this.unzoom(win);
+        const leaf: LeafNode = {kind: "leaf", id: crypto.randomUUID(), content};
+        win.root = splitAt(win.root, win.focused, dir, leaf);
+        if (frac !== undefined) setLeafFraction(win.root, leaf.id, frac);
+        win.panes.set(leaf.id, mk(leaf.id));
+        win.focused = leaf.id;
+        project(win, this.hooks(win));
+        this.save();
+        this.syncSize(true);
+        win.panes.get(leaf.id)?.focus();
+        this.events.changed();
+        return leaf.id;
     }
 
     /** Split the focused pane: a new session (cwd inherited from the

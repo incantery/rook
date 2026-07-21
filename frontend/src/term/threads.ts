@@ -61,14 +61,21 @@ export class ThreadBand {
         this.glyphs.set(decs);
     }
 
-    /** The read-only highlight for the active thread's anchor lines. */
+    /** The mark for the active thread's anchor lines.
+     *
+     *  A RULE IN THE MARGIN, not a wash over the text. The whole-line tint
+     *  this replaced covered the code it was pointing at — it made the source
+     *  read as inactive, as though the annotation had taken it over, which is
+     *  backwards: the code is the subject and the comment is attached to it.
+     *  A 2px rule in the line-decorations margin says exactly as much (here,
+     *  and this far) while leaving every character its own colour. */
     highlight(startLine: number, endLine: number): void {
         const a = Math.max(1, startLine);
         const b = Math.max(a, endLine);
         this.active.set([
             {
                 range: new this.monaco.Range(a, 1, b, 1),
-                options: {isWholeLine: true, className: "thread-active-line"},
+                options: {isWholeLine: true, linesDecorationsClassName: "thread-anchor-rule"},
             },
         ]);
     }

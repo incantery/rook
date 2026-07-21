@@ -2,18 +2,32 @@ import {expect, test, type Page} from "@playwright/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-// The two comment verbs, end-to-end against the real host: ,c leaves a note
-// (the whiteboard — it lands pending and stays there) and ,? asks about ONE
-// region now (it submits that thread alone and actuates a responder).
+// Commenting, end-to-end against the real host.
 //
-// The distinction is the whole point of the per-thread submit endpoint, so
-// the load-bearing assertion is the negative one: after ,? the earlier note
-// is STILL pending. Reusing the workspace-level batch would have swept it up.
+// A comment is composed in a BUFFER — a Monaco draft model in a split below
+// the source — so what these tests drive is the vim flow: chord, `i`, type,
+// Escape, `:w`, and you are back in the code with a mark in the gutter. There
+// is no form, so nothing here clicks a button or fills a field; if the buffer
+// didn't take the keyboard, every assertion below fails.
+//
+// ,c leaves a note (the whiteboard: it lands pending and stays there); ,? asks
+// about ONE region now. The load-bearing assertion is the negative one: after
+// ,? the earlier note is STILL pending. The workspace batch would have swept
+// it up, which is why the per-thread submit endpoint exists.
 
 const REPO = path.resolve(process.cwd(), "..");
 const SANDBOX = path.join(REPO, "bin", "e2e", "xdg");
 const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`).first();
 const made: string[] = [];
+
+interface Thread {
+    id: number;
+    path: string;
+    startLine: number;
+    endLine: number;
+    state: string;
+    comments: {body: string; author: string}[];
+}
 
 test.afterEach(async ({page}) => {
     for (const name of made.splice(0)) {
@@ -41,9 +55,10 @@ async function openWorkspace(page: Page, name: string) {
     await expect(shown(page, ".xterm-screen")).toBeVisible({timeout: 15_000});
 }
 
-/** Talk to the sandbox daemon directly — how the AGENT mutates threads
- *  (rookctl is just an HTTP client), so a test can produce a reply without
- *  touching the page and prove the UI learns about it on its own. */
+/** Talk to the sandbox daemon directly — how the AGENT sees and mutates
+ *  threads (rookctl is just an HTTP client). Lets a test assert the real
+ *  stored state instead of panel text, and produce an agent reply without
+ *  touching the page at all. */
 async function hostFetch(route: string, init?: RequestInit): Promise<Response> {
     const st = JSON.parse(
         fs.readFileSync(path.join(SANDBOX, "state", "rook", "host.json"), "utf8"),
@@ -54,6 +69,9 @@ async function hostFetch(route: string, init?: RequestInit): Promise<Response> {
     });
 }
 
+const threadsOf = async (ws: string): Promise<Thread[]> =>
+    (await (await hostFetch(`/workspaces/${ws}/threads`)).json()) as Thread[];
+
 async function runCommand(page: Page, title: string) {
     await page.getByRole("button", {name: /commands/}).click();
     await expect(page.getByPlaceholder("Run a command…")).toBeVisible();
@@ -61,28 +79,63 @@ async function runCommand(page: Page, title: string) {
     await page.keyboard.press("Enter");
 }
 
+async function openSource(page: Page, file: string) {
+    await runCommand(page, "Open file (read-only)");
+    const picker = page.getByPlaceholder("Open file (read-only)…");
+    await expect(picker).toBeVisible();
+    await picker.fill(file);
+    await picker.press("Enter");
+    await expect(page.locator(".editor-path").first()).toContainText(file, {timeout: 20_000});
+    // vim must be attached before any keystroke means anything
+    await expect(page.locator(".editor-vim").first()).toContainText(/NORMAL/i, {timeout: 15_000});
+}
+
 /** The context leader is deliberately dead inside side panes, so every chord
  *  departs from the editor — which is also the honest user path. `at` parks
- *  the cursor first, so the two comments anchor to different lines and the
- *  test proves compose reads the CURRENT cursor rather than a fixed spot. */
+ *  the cursor first, so comments anchor to different lines and the test proves
+ *  compose reads the CURRENT cursor rather than a fixed spot. */
 async function ctxChord(page: Page, key: string, at: string) {
-    await page.locator(".editor-mount").click();
+    await page.locator(".editor-mount").first().click();
     await page.keyboard.type(at);
     await page.keyboard.press(",");
     await page.keyboard.press(key);
 }
 
-test("`,c` notes stay pending; `,?` asks about one region", async ({page}) => {
+const draftHeader = (page: Page, kind: "comment" | "ask") =>
+    page.locator(".editor-path", {hasText: new RegExp(`^${kind} ·`)});
+
+/** Write a comment the way a human does. The draft opens in NORMAL mode — the
+ *  git-commit contract — so `i` enters insert and `:w` sends. Nothing here
+ *  targets an element: the keystrokes go wherever focus actually is. */
+async function writeComment(page: Page, kind: "comment" | "ask", body: string) {
+    const header = draftHeader(page, kind);
+    await expect(header).toBeVisible({timeout: 15_000});
+    await page.keyboard.press("i");
+    await page.keyboard.type(body);
+    await page.keyboard.press("Escape");
+    await page.keyboard.type(":w");
+    await page.keyboard.press("Enter");
+    // :w sends AND closes — the buffer existed to be handed off
+    await expect(header).toHaveCount(0, {timeout: 15_000});
+}
+
+/** Step 8: focus returns to the source. With the draft split gone the only
+ *  editor left is the source buffer, so focus sitting in an .editor-mount is
+ *  exactly the claim. This is what makes it feel like vim instead of a form. */
+async function expectFocusInSource(page: Page) {
+    await expect
+        .poll(() => page.evaluate(() => !!document.activeElement?.closest(".editor-mount")))
+        .toBe(true);
+}
+
+test("a comment is written in a buffer and `:w` sends it", async ({page}) => {
     test.setTimeout(120_000);
 
     // Point the coder at something inert: ,? actuates a responder, and the
-    // default coder is `claude` — so without this the suite would spawn the
-    // machine's real claude. (That is why submit had no e2e coverage before.)
-    //
-    // MERGE rather than overwrite: the sandbox config is one file shared by
-    // every spec, so rewriting it wholesale silently disarms another spec's
-    // setup — lsp.spec's gopls lines live here too. Config is hot-read, so
-    // this needs no restart.
+    // default coder is `claude` — without this the suite would spawn the
+    // machine's real claude. MERGE rather than overwrite: the sandbox config
+    // is one file shared by every spec, so rewriting it wholesale silently
+    // disarms another spec's setup (lsp.spec's gopls lines live here too).
     const confDir = path.join(SANDBOX, "config", "rook");
     const confFile = path.join(confDir, "config");
     fs.mkdirSync(confDir, {recursive: true});
@@ -94,124 +147,140 @@ test("`,c` notes stay pending; `,?` asks about one region", async ({page}) => {
         .trimEnd();
     fs.writeFileSync(confFile, `${kept}\ncoder = echo\n`.trimStart());
 
-    await openWorkspace(page, `threads-e2e-${Date.now()}`);
-
-    await runCommand(page, "Open file (read-only)");
-    const picker = page.getByPlaceholder("Open file (read-only)…");
-    await expect(picker).toBeVisible();
-    await picker.fill("internal/host/spawntask.go");
-    await picker.press("Enter");
-    await expect(page.locator(".editor-path")).toContainText("spawntask.go", {timeout: 20_000});
-    // vim must be attached before keystrokes mean anything
-    await expect(page.locator(".editor-vim")).toContainText(/NORMAL/i, {timeout: 15_000});
-
-    const pane = page.locator('.side-pane[data-side="right"]');
+    const ws = `threads-e2e-${Date.now()}`;
+    await openWorkspace(page, ws);
+    await openSource(page, "internal/host/spawntask.go");
 
     // ---- ,c : the whiteboard ----
-    // The pane starts closed in file mode; ,c must open it AND land the
-    // compose. SidePane only mounts its tenant while visible, so a compose
-    // signalled before the mount would reach zero subscribers and vanish.
-    await ctxChord(page, "c", "gg");
-    await expect(pane).toContainText("Threads");
-    await expect(pane).toContainText("New thread");
-    const note = pane.getByPlaceholder("Leave a note for this region…");
-    await expect(note).toBeVisible();
+    // from a real VISUAL-LINE selection, which is how a range comment is
+    // actually made: 18G selects the func signature and the two lines under it
+    await ctxChord(page, "c", "18GVjj");
 
-    // TYPE BLIND — no fill(), no click. ,c is a keyboard verb, so the composer
-    // has to take the keyboard with it; if it doesn't, these keystrokes go to
-    // Monaco and this assertion fails. The first version of this test used
-    // fill(), which focuses the element itself — so it passed against a
-    // composer a human could only reach with the mouse.
+    // the draft is a REAL buffer: it has a vim mode line of its own, which is
+    // the whole difference from the textarea this replaced
+    await expect(draftHeader(page, "comment")).toBeVisible({timeout: 15_000});
+    expect(await page.locator(".editor-vim").count()).toBe(2);
+
+    await page.keyboard.press("i");
     await page.keyboard.type("why is this named spawnTask");
-    await expect(note).toHaveValue("why is this named spawnTask");
-    await page.keyboard.press("Meta+Enter");
+    await page.screenshot({path: "bin/e2e/threads-draft.png", fullPage: true});
+    await page.keyboard.press("Escape");
+    await page.keyboard.type(":w");
+    await page.keyboard.press("Enter");
+    await expect(draftHeader(page, "comment")).toHaveCount(0, {timeout: 15_000});
+    await expectFocusInSource(page);
 
-    await expect(pane).toContainText("why is this named spawnTask", {timeout: 15_000});
-    await expect(pane).toContainText("Pending");
+    // the thread exists on the host, anchored to the whole visual selection —
+    // the range came from the editor, not from the header text
+    await expect
+        .poll(async () => (await threadsOf(ws)).length, {timeout: 15_000})
+        .toBe(1);
+    const [note] = await threadsOf(ws);
+    expect(note.comments[0].body).toBe("why is this named spawnTask");
+    expect(note.startLine).toBe(18);
+    expect(note.endLine).toBe(20);
+    expect(note.state).toBe("pending");
+
+    // …and step 9: a mark in the gutter, not a panel
+    await expect(page.locator(".thread-glyph").first()).toBeVisible({timeout: 15_000});
 
     // ---- ,? : ask about this one, now ----
     await ctxChord(page, "?", "20G");
-    await expect(pane).toContainText("Ask the agent");
-    const ask = pane.getByPlaceholder("What do you want to know about this region?");
-    await expect(ask).toBeVisible();
-    await page.keyboard.type("can the 400ms sleep race the shell");
-    await page.keyboard.press("Meta+Enter");
+    await writeComment(page, "ask", "can the 400ms sleep race the shell");
+    await expectFocusInSource(page);
 
-    await expect(pane).toContainText("can the 400ms sleep race the shell", {timeout: 15_000});
-
-    // THE assertion: exactly one thread went Open (the asked one) and exactly
-    // one is still Pending (the note). A workspace-level batch submit would
-    // have shipped both — that's the bug this endpoint exists to avoid.
-    // Matched on the state hook, not the body: a COLLAPSED card renders the
-    // anchor snippet, so hasText against the comment text finds nothing.
-    await expect(pane.locator('[data-thread-state="pending"]')).toHaveCount(1, {timeout: 15_000});
-    await expect(pane.locator('[data-thread-state="open"]')).toHaveCount(1);
-
-    // the editor header agrees: one note still batched, awaiting a submit
-    await expect(page.getByRole("button", {name: "submit 1"})).toBeVisible();
-
-    // …and the keyboard is back in the editor. Leaving focus in the side pane
-    // means the next vim key does nothing and the user reaches for the mouse,
-    // which is what made the whole flow feel un-vim-like.
     await expect
-        .poll(() => page.evaluate(() => !!document.activeElement?.closest(".editor-mount")))
-        .toBe(true);
+        .poll(async () => (await threadsOf(ws)).length, {timeout: 15_000})
+        .toBe(2);
+    const all = await threadsOf(ws);
+    const asked = all.find((t) => t.comments[0].body.startsWith("can the 400ms"));
+    const noted = all.find((t) => t.comments[0].body.startsWith("why is this"));
 
-    // Actuation is proven by the state transition itself, not by reading the
-    // spawned terminal: /threads/{id}/submit only returns 200 after h.nudge
-    // succeeded, so a responder that failed to spawn would have left this
-    // thread pending and a 500 on the wire. The nudge's exact TEXT is pinned
-    // in Go (TestThreadSubmitOneLeavesOthersPending), which is where the
-    // one-line pty constraint can be asserted without window-focus races.
+    // THE assertion: the asked thread went open, and the earlier note is still
+    // pending. Reusing the workspace batch would have shipped both.
+    expect(asked?.state).toBe("open");
+    expect(noted?.state).toBe("pending");
+
+    // …and the ask anchored where 20G put the CURSOR, not to the visual
+    // selection the previous comment consumed. Composing has to leave the
+    // editor in NORMAL, or the next motion extends a stale selection and this
+    // reads 18 — which is exactly how that bug was found.
+    expect(asked?.startLine).toBe(20);
+    expect(asked?.endLine).toBe(20);
+
+    // Actuation is proven by that transition: /threads/{id}/submit only
+    // returns 200 after h.nudge succeeded, so a responder that failed to spawn
+    // would have left this pending. The nudge's exact TEXT is pinned in Go
+    // (TestThreadSubmitOneLeavesOthersPending), where the one-line pty
+    // constraint can be asserted without window-focus races.
 
     await page.screenshot({path: "bin/e2e/threads-compose.png", fullPage: true});
 });
 
-// The bug this channel exists for: the agent replies, and rook doesn't say so.
-// Threads used to refetch only when an editor pane regained FOCUS, so you
-// could ask a question, watch claude answer in its own window, and the panel
-// would still show your comment alone until you clicked back in.
-//
-// The test mutates the thread the way the agent does — POST
-// /threads/{id}/comments, the route `rookctl reply` drives — and then touches
-// nothing. No click, no keypress, no refocus. The reply has to arrive on its
-// own or this fails.
+// :q! must throw the draft away without creating anything — the escape hatch
+// for "actually, never mind", and the reason :q refuses while the buffer is
+// dirty rather than silently discarding a thought.
+test("`:q!` discards a draft without creating a thread", async ({page}) => {
+    test.setTimeout(120_000);
+    const ws = `discard-e2e-${Date.now()}`;
+    await openWorkspace(page, ws);
+    await openSource(page, "internal/host/spawntask.go");
+
+    await ctxChord(page, "c", "gg");
+    const header = draftHeader(page, "comment");
+    await expect(header).toBeVisible({timeout: 15_000});
+    await page.keyboard.press("i");
+    await page.keyboard.type("half a thought");
+    await page.keyboard.press("Escape");
+
+    // :q refuses while dirty — vim's contract, and here it protects a comment
+    // the user has typed but not sent
+    await page.keyboard.type(":q");
+    await page.keyboard.press("Enter");
+    await expect(header).toBeVisible();
+
+    await page.keyboard.type(":q!");
+    await page.keyboard.press("Enter");
+    await expect(header).toHaveCount(0, {timeout: 15_000});
+    await expectFocusInSource(page);
+
+    expect(await threadsOf(ws)).toHaveLength(0);
+});
+
+// The push channel: the agent replies, and rook says so on its own. Threads
+// used to refetch only when an editor pane regained FOCUS, so you could ask a
+// question, watch claude answer in its own window, and the panel would still
+// show your comment alone until you clicked back in.
 test("an agent's reply arrives without refocusing the pane", async ({page}) => {
     test.setTimeout(120_000);
 
     const ws = `watch-e2e-${Date.now()}`;
     await openWorkspace(page, ws);
+    await openSource(page, "internal/host/spawntask.go");
 
-    await runCommand(page, "Open file (read-only)");
-    const picker = page.getByPlaceholder("Open file (read-only)…");
-    await expect(picker).toBeVisible();
-    await picker.fill("internal/host/spawntask.go");
-    await picker.press("Enter");
-    await expect(page.locator(".editor-path")).toContainText("spawntask.go", {timeout: 20_000});
-    await expect(page.locator(".editor-vim")).toContainText(/NORMAL/i, {timeout: 15_000});
-
-    const pane = page.locator('.side-pane[data-side="right"]');
     await ctxChord(page, "c", "gg");
-    await expect(pane).toContainText("New thread");
-    await page.keyboard.type("does this leak the goroutine");
-    await page.keyboard.press("Meta+Enter");
-    await expect(pane.locator('[data-thread-state="pending"]')).toHaveCount(1, {timeout: 15_000});
+    await writeComment(page, "comment", "does this leak the goroutine");
+    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
 
-    // find the thread the agent would be answering
-    const threads = (await (await hostFetch(`/workspaces/${ws}/threads`)).json()) as {
-        id: number;
-        comments: {body: string}[];
-    }[];
-    const target = threads.find((t) => t.comments[0]?.body === "does this leak the goroutine");
-    expect(target, "thread not found on the host").toBeTruthy();
+    // Open the reading panel and EXPAND the card — a collapsed card renders
+    // the anchor snippet and a reply count, not the conversation, so an
+    // assertion on the reply text would fail against a panel that had in fact
+    // updated. Everything below this line happens without touching the page.
+    await runCommand(page, "Toggle thread pane");
+    const pane = page.locator('.side-pane[data-side="right"]');
+    await expect(pane).toContainText("Threads");
+    await pane.locator("[data-thread-state]").first().click();
+    await expect(pane).toContainText("does this leak the goroutine");
 
-    // …and now the agent answers. Nothing below touches the page.
-    const reply = await hostFetch(`/threads/${target!.id}/comments`, {
+    const [t] = await threadsOf(ws);
+    const reply = await hostFetch(`/threads/${t.id}/comments`, {
         method: "POST",
-        body: JSON.stringify({body: "No — the pty owns it and Close stops the copy.", author: "agent"}),
+        body: JSON.stringify({
+            body: "No — the pty owns it and Close stops the copy.",
+            author: "agent",
+        }),
     });
     expect(reply.status).toBe(204);
 
     await expect(pane).toContainText("No — the pty owns it", {timeout: 15_000});
-    await expect(pane).toContainText("agent");
 });
