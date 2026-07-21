@@ -548,12 +548,30 @@ export class EditorPane implements PaneContent {
         else if (this.opts.kind === "file") void this.refetchThreads();
     }
 
-    /** Honor a focus() that landed before the editor existed. */
+    /** Honor a focus() that landed before the editor existed — unless the
+     *  keyboard has moved on since.
+     *
+     *  The latch is asynchronous by nature: it is set when the manager
+     *  focuses a pane whose Monaco is still loading, and applied at the end
+     *  of the load, after a fetch and attachVim. That is long enough for the
+     *  user to have gone somewhere else. Opening a thread and clicking
+     *  straight back into the code does it — the thread's text appears a few
+     *  ms before the latch resolves, so the click lands first and the latch
+     *  then yanks the caret back out of the source buffer.
+     *
+     *  The manager owns focus and records it as .focused on the pane's cell,
+     *  updated from a CAPTURE-phase mousedown — so by the time any click has
+     *  moved the keyboard, the class already says so. Honor the latch only
+     *  while this pane is still the one the manager means. */
     private applyPendingFocus(): void {
         if (!this.wantFocus) return;
         const ed = this.diffEditor ?? this.editor;
         if (!ed) return;
         this.wantFocus = false;
+        const cell = this.el.closest(".pane");
+        // No cell means the pane isn't mounted in a window yet (the side-pane
+        // tenants), where nothing competes for focus — fail open and focus.
+        if (cell && !cell.classList.contains("focused")) return;
         ed.focus();
     }
 

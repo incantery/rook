@@ -447,6 +447,57 @@ test("a thread buffer re-rendering does not steal the keyboard", async ({page}) 
     expect(where).not.toMatch(/^thread #/);
 });
 
+// The same steal, forced rather than waited for.
+//
+// The latch that focuses a thread pane on open resolves at the END of the
+// load — after a fetch and attachVim. That is long enough for you to have
+// clicked back into the code, which is just what reading a thread and
+// returning to work looks like. The pane must notice it is no longer the
+// focused one and drop the latch instead of yanking the caret back.
+//
+// The test above catches this too, but only when the timing falls that way:
+// it failed 3 runs in 20 before the fix. Here the click is placed in the
+// window deliberately, so the failure is not a matter of luck.
+test("a thread pane loading after you click away does not yank the caret back", async ({page}) => {
+    test.setTimeout(120_000);
+    const ws = `latch-e2e-${Date.now()}`;
+    await openWorkspace(page, ws);
+    await openSource(page, "internal/host/spawntask.go");
+
+    await ctxChord(page, "c", "18G");
+    await writeComment(page, "comment", "does this leak the goroutine");
+    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
+
+    // Hold the thread fetch open. The window between "pane mounted and
+    // focused" and "load finished, latch applied" is about 7ms in practice —
+    // too narrow to land a click in reliably, which is exactly why the test
+    // above only caught this 3 times in 20. Delaying the one request the load
+    // waits on makes that window a second wide and the race a certainty.
+    const slowThreads = (u: URL) => u.pathname.endsWith("/threads");
+    await page.route(slowThreads, async (route) => {
+        await new Promise((r) => setTimeout(r, 1500));
+        await route.continue();
+    });
+
+    await goToThread(page, "18G");
+    // mounted and manager-focused, Monaco still loading — mid-window
+    await expect(page.locator(".editor-mount")).toHaveCount(2);
+    await page.locator(".editor-mount").first().click();
+    await page.unroute(slowThreads);
+
+    // let the thread finish loading; its latch resolves somewhere in here
+    const threadPane = page.locator(".editor-mount").last();
+    await expect(threadPane).toContainText("does this leak the goroutine", {timeout: 15_000});
+
+    const where = await page.evaluate(
+        () =>
+            document.activeElement?.closest(".editor-wrap")?.querySelector(".editor-path")
+                ?.textContent ?? null,
+    );
+    expect(where).toContain("spawntask.go");
+    expect(where).not.toMatch(/^thread #/);
+});
+
 // The gutter said "there is a thread here" and nothing else — you had to open
 // it to learn whether anything was happening. These are the two surfaces that
 // answer that without leaving the code: an inline row under the anchor, and a
