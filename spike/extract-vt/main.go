@@ -39,7 +39,7 @@ type cell struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: extract-vt <capture.raw>")
+		fmt.Fprintln(os.Stderr, "usage: extract-vt <capture.raw> [--resize=COLSxROWS]")
 		os.Exit(2)
 	}
 	rawPath := os.Args[1]
@@ -49,6 +49,20 @@ func main() {
 	check(json.Unmarshal(metaRaw, &m))
 	bytes, err := os.ReadFile(rawPath)
 	check(err)
+
+	// Optional resize: feed at capture geometry, then resize and read the grid
+	// at the new one — the reflow test. x/vt's Resize pads/truncates rather
+	// than re-wrapping, so this is where it diverges from xterm.
+	outCols, outRows := m.Cols, m.Rows
+	for _, a := range os.Args[2:] {
+		if r, ok := strings.CutPrefix(a, "--resize="); ok {
+			parts := strings.SplitN(r, "x", 2)
+			if len(parts) == 2 {
+				outCols, _ = strconv.Atoi(parts[0])
+				outRows, _ = strconv.Atoi(parts[1])
+			}
+		}
+	}
 
 	e := vt.NewEmulator(m.Cols, m.Rows)
 	// The emulator ANSWERS queries itself — DA, DSR, DECRQM — by writing the
@@ -61,19 +75,22 @@ func main() {
 	go func() { _, _ = io.Copy(io.Discard, e); close(drained) }()
 	_, err = e.Write(bytes) // synchronous parse
 	check(err)
+	if outCols != m.Cols || outRows != m.Rows {
+		e.Resize(outCols, outRows) // pads/truncates — no reflow (the point)
+	}
 	_ = e.Close() // EOF the response reader so the drain goroutine exits
 	<-drained
 
-	cells := make([][]cell, m.Rows)
-	for y := range m.Rows {
-		row := make([]cell, m.Cols)
-		for x := range m.Cols {
+	cells := make([][]cell, outRows)
+	for y := range outRows {
+		row := make([]cell, outCols)
+		for x := range outCols {
 			row[x] = norm(e.CellAt(x, y))
 		}
 		cells[y] = row
 	}
 	out, _ := json.Marshal(map[string]any{
-		"name": m.Name, "cols": m.Cols, "rows": m.Rows, "cells": cells,
+		"name": m.Name, "cols": outCols, "rows": outRows, "cells": cells,
 	})
 	os.Stdout.Write(out)
 }

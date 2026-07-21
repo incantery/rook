@@ -16,12 +16,20 @@ const {Terminal} = pkg;
 
 const rawPath = process.argv[2];
 if (!rawPath) {
-    console.error("usage: node extract-xterm.js <capture.raw>");
+    console.error("usage: node extract-xterm.js <capture.raw> [--resize=COLSxROWS]");
     process.exit(2);
 }
+// Optional resize: feed at the capture geometry, then resize and read the grid
+// at the new one — the reflow test. This is where xterm re-wraps soft-wrapped
+// lines and a non-reflowing emulator does not.
+const resizeArg = process.argv.find((a) => a.startsWith("--resize="));
+const resize = resizeArg ? resizeArg.slice("--resize=".length).split("x").map(Number) : null;
+
 const metaPath = rawPath.replace(/\.raw$/, ".meta.json");
 const meta = JSON.parse(readFileSync(metaPath, "utf8"));
 const bytes = readFileSync(rawPath);
+const outCols = resize ? resize[0] : meta.cols;
+const outRows = resize ? resize[1] : meta.rows;
 
 const term = new Terminal({
     cols: meta.cols,
@@ -42,10 +50,10 @@ function extract() {
     const buf = term.buffer.active;
     const cells = [];
     const cell = buf.getNullCell?.() ?? undefined;
-    for (let y = 0; y < meta.rows; y++) {
+    for (let y = 0; y < outRows; y++) {
         const line = buf.getLine(buf.baseY + y);
         const row = [];
-        for (let x = 0; x < meta.cols; x++) {
+        for (let x = 0; x < outCols; x++) {
             const cc = line ? line.getCell(x, cell) : undefined;
             if (!cc) {
                 row.push({c: " ", w: 1, fg: "d", bg: "d", a: ""});
@@ -72,6 +80,10 @@ function extract() {
 }
 
 await new Promise((resolve) => term.write(bytes, resolve));
+if (resize) {
+    term.resize(outCols, outRows); // synchronous; reflows the buffer in place
+    await new Promise((resolve) => term.write("", resolve)); // let it settle
+}
 const cells = extract();
-process.stdout.write(JSON.stringify({name: meta.name, cols: meta.cols, rows: meta.rows, cells}));
+process.stdout.write(JSON.stringify({name: meta.name, cols: outCols, rows: outRows, cells}));
 term.dispose();

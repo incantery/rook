@@ -45,16 +45,35 @@ rook renders today, so it counts as a difference — one confined to the single
 most-contested corner of Unicode width, and tunable (x/vt has a pluggable
 WidthMethod).
 
-**What this does NOT answer — the two live risks:**
+**The grid-diff wire protocol** to a thin client has no production precedent;
+that's ours to design. x/vt's typed `Damage` API is the right primitive.
 
-1. **Reflow on resize.** Verified absent: x/vt's `Resize` pads/truncates rows,
-   and ultraviolet's buffer exposes no per-line soft-wrap bit, so a reflow
-   port has nothing to hang off. xterm.js reflows. This diff holds geometry
-   FIXED, so it says nothing about resize — a separate test still owed, and
-   the biggest open risk.
-2. **The grid-diff wire protocol** to a thin client has no production
-   precedent; that's ours to design. x/vt's typed `Damage` API is the right
-   primitive to build it on.
+## Reflow on resize — measured
+
+`sh spike/termdiff/run-reflow.sh` — the `longlines` capture (six ~134-char
+soft-wrapped lines) fed at 100 cols, then resized:
+
+| resize | identical | what happens |
+|---|---|---|
+| 100→100 (none) | **100.00%** | same layout, both agree |
+| 100→60 (narrow) | **59.6%** | xterm re-wraps; **x/vt truncates and LOSES the overflow** |
+| 100→140 (widen) | **80.6%** | xterm pulls wrapped text back up; x/vt leaves it padded |
+
+Narrowing is the bad one — it's not just different wrapping, x/vt drops the
+characters that fall past the new width, because nothing re-wraps them down.
+
+**But the practical bite is bounded.** On a real resize rook sends SIGWINCH and
+live programs redraw themselves — shell prompt, nvim, htop, tmux — so the
+CURRENT screen self-heals. The gap only shows on content that is NOT redrawn:
+scrollback, and a finished command's output. That is exactly what xterm
+reflows and x/vt would mangle until the next repaint. tmux shipped without
+reflow until 1.8 (2013), so it's a lived-with regression, not a dealbreaker —
+but it IS a regression from what rook users have today.
+
+Fixing it means porting xterm's `BufferReflow.ts` onto x/vt, which first needs
+ultraviolet to track a per-line soft-wrap bit (it does not). Well-defined, not
+small. Options: ship v1 without reflow (bounded regression), or port it first
+(delays the migration).
 
 Also learned: x/vt **answers DA/DSR/DECRQM itself** (writes replies to its
 output, which deadlocks a synchronous `Write` if undrained — see extract-vt).
