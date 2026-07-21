@@ -1,74 +1,53 @@
-import {expect, test, type Page} from "@playwright/test";
-import * as path from "node:path";
+import {expect, test, type Rook} from "./harness";
 
-// The review pane end-to-end: open a workspace rooted at the rook checkout
-// (which always has some working-tree state to diff), open the Review side
-// pane, prepare a batch, and drive a disposition. This is the real host —
-// prepareReview shells git in the sandbox, the gate is the daemon's.
+// The review pane end-to-end, against a repo the test BUILDS. This used to
+// point at the rook checkout and review whatever was uncommitted there, so
+// its result depended on the developer's working tree — it asserts a second
+// hunk, so it passed with two dirty files and failed with one. Now the dirt
+// is part of the fixture and the counts are knowable.
+//
+// This is the real host either way: prepareReview shells git in the sandbox
+// and the gate is the daemon's.
 
-const REPO = path.resolve(process.cwd(), "..");
-const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`).first();
-const made: string[] = [];
-
-test.afterEach(async ({page}) => {
-    for (const name of made.splice(0)) {
-        await page.goto("/");
-        await page.getByRole("button", {name: /^workspaces/}).click();
-        const card = page
-            .locator("#home-workspaces div.group")
-            .filter({has: page.getByText(name, {exact: true})});
-        await expect(card).toHaveCount(1);
-        await card.getByTitle(/^Delete workspace/).click();
-        await expect(card).toHaveCount(0);
-    }
-});
-
-async function openWorkspace(page: Page, name: string) {
-    made.push(name);
-    await page.goto("/");
-    await expect(page.locator("#home")).toBeVisible();
-    await page.getByRole("button", {name: /^workspaces/}).click();
-    await page.getByRole("button", {name: "New workspace"}).click();
-    await expect(page.locator("#ws-modal")).toBeVisible();
-    await page.getByPlaceholder("e.g. rook-core").fill(name);
-    await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
-    await page.getByRole("button", {name: "Create workspace"}).click();
-    await expect(shown(page, ".xterm-screen")).toBeVisible({timeout: 15_000});
+/** three committed files, three unstaged edits — one hunk each, far enough
+ *  apart that git can't coalesce them */
+async function reviewRepo(rook: Rook): Promise<string> {
+    return rook.repo({
+        files: {
+            "main.go": "package main\n\nfunc main() {\n\tprintln(greet())\n}\n",
+            "greet.go": 'package main\n\nfunc greet() string {\n\treturn "hello"\n}\n',
+            "README.md": "# fixture\n\nA repo that exists to be reviewed.\n",
+        },
+        dirty: {
+            "main.go": 'package main\n\nfunc main() {\n\tprintln(greet())\n\tprintln("again")\n}\n',
+            "greet.go": 'package main\n\nfunc greet() string {\n\treturn "hello, world"\n}\n',
+            "README.md": "# fixture\n\nA repo that exists to be reviewed, thoroughly.\n",
+        },
+    });
 }
 
-// Run a palette command by title. Opens the palette via the titlebar button —
-// focus-independent, because the leader chord is deliberately dead inside
-// side panes (App's inSidePane guard) and the quickfix strip may hold focus.
-async function runCommand(page: Page, title: string) {
-    await page.getByRole("button", {name: /commands/}).click();
-    await expect(page.getByPlaceholder("Run a command…")).toBeVisible();
-    await page.getByPlaceholder("Run a command…").fill(title);
-    await page.keyboard.press("Enter");
-}
-
-test("review pane prepares hunks, dispositions, and moves the gate", async ({page}) => {
+test("review pane prepares hunks, dispositions, and moves the gate", async ({page, rook}) => {
+    test.setTimeout(120_000);
+    const root = await reviewRepo(rook);
     // unique per run: workspace delete doesn't drop its rook_tasks, so a fixed
     // name would carry a prior run's review (and its ids) into this one.
-    await openWorkspace(page, `review-e2e-${Date.now()}`);
+    await rook.open({name: `review-e2e-${Date.now()}`, root});
 
     // open the review quickfix strip (vim's bottom window)
-    await runCommand(page, "Toggle review pane");
+    await rook.runCommand("Toggle review pane");
     const pane = page.locator('.side-pane[data-side="bottom"]');
     await expect(pane).toContainText("Review");
     await expect(pane).toContainText("j/k move"); // the footer hint = our pane mounted
 
-    // prepare (or re-run) a batch — the rook checkout has changes to diff.
-    // Stable label regardless of the ↻/Prepare glyph, so a review persisted
-    // in the sandbox db from a prior run doesn't break the lookup.
     await page.getByRole("button", {name: "prepare"}).click();
 
-    // hunk rows land in the generic quickfix list (review is its first tenant)
+    // hunk rows land in the generic quickfix list (review is its first tenant).
+    // THREE, exactly — one per edited file. The old version could only say
+    // "more than zero", which is the assertion a borrowed working tree allows.
     const rows = page.locator("#quickfix-list [role=option]");
-    await expect(rows.first()).toBeVisible({timeout: 10_000});
-    expect(await rows.count()).toBeGreaterThan(0);
-
-    // the gate reports its hunk count
-    await expect(pane).toContainText(/hunks/);
+    await expect(rows.first()).toBeVisible({timeout: 20_000});
+    await expect(rows).toHaveCount(3);
+    await expect(pane).toContainText("3 hunks");
 
     // clicking a hunk opens the bespoke detail overlay (NOT Monaco): the hunk
     // as a decision object — analysis, its own diff, disposition.
@@ -88,9 +67,9 @@ test("review pane prepares hunks, dispositions, and moves the gate", async ({pag
 
     // :copen — close the list, reopen via the command, keyboard included:
     // j moves the cursor immediately, no click needed
-    await runCommand(page, "Quickfix: close");
+    await rook.runCommand("Quickfix: close");
     await expect(pane).toHaveCount(0);
-    await runCommand(page, "Quickfix: open list");
+    await rook.runCommand("Quickfix: open list");
     await expect(pane).toBeVisible();
     await page.keyboard.press("g"); // top
     await page.keyboard.press("j"); // down one
@@ -99,7 +78,7 @@ test("review pane prepares hunks, dispositions, and moves the gate", async ({pag
     // the context leader (vim's maplocalleader): ,q from a TERMINAL toggles
     // the strip. Leaders are deliberately dead inside side panes, so hop to
     // the terminal first — that's also the honest user path.
-    await shown(page, ".xterm-screen").click();
+    await rook.term().click();
     await page.keyboard.press(",");
     await page.keyboard.press("q");
     await expect(pane).toHaveCount(0);
@@ -108,7 +87,7 @@ test("review pane prepares hunks, dispositions, and moves the gate", async ({pag
     await expect(pane).toBeVisible();
 
     // ,a — the quick-action modal, rendered from the context's verbs
-    await shown(page, ".xterm-screen").click();
+    await rook.term().click();
     await page.keyboard.press(",");
     await page.keyboard.press("a");
     const qa = page.getByRole("dialog", {name: "quick actions"});
