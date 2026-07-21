@@ -48,6 +48,50 @@ WidthMethod).
 **The grid-diff wire protocol** to a thin client has no production precedent;
 that's ours to design. x/vt's typed `Damage` API is the right primitive.
 
+## Performance floor — measured (and it corrected two assumptions)
+
+**Parse throughput**, same 40 MiB of realistic heavy output (the nvim capture,
+SGR + alt-screen + cursor thrash), `bench-vt` vs `bench-xterm`:
+
+| emulator | throughput |
+|---|---|
+| xterm.js | **95 MiB/s** |
+| x/vt | **43 MiB/s** |
+
+xterm is 2.2× FASTER — the "Go parses faster" assumption was wrong; x/vt trades
+speed for grapheme correctness (uniseg per cell). But both are far above any
+real output rate (a busy build log is single-digit MB/s), so **parse is not
+the bottleneck for either.** The server-side-grid case does NOT rest on parse
+speed. Its wins are: parse OFF the browser's single JS thread (so a firehose
+can't jank the UI), coalescing render frames before the wire, zero-cost
+background sessions, and detach/orchestration.
+
+**Keystroke round-trip** in the real app (e2e sandbox), `ws.send(key) →
+ws.recv(echo)`, `cat` as the program so tty echo makes program latency ~0:
+
+| | ms |
+|---|---|
+| min | 0.2 |
+| p50 | **5.2** |
+| p90 | 8.2 |
+| p99 | 8.9 |
+
+Excludes the final paint (1–2 compositor frames, ~16–33ms at 60Hz). So the
+transport is TINY — the browser paint dominates keystroke→glyph, not the
+network. Two consequences, both correcting earlier claims:
+
+- **Prediction is a minor lever here, not the headline.** Mosh matters when
+  transport is hundreds of ms; ours is ~5ms, so predictive echo saves ~5ms.
+  Worth doing, not the main event.
+- **The latency lever is the RENDER path** — GPU rendering at high refresh
+  with minimal frame latency. Server-side grid is latency-NEUTRAL; it buys
+  orchestration and scale, not keystroke speed.
+
+Net for the architecture: the case for the server-side grid is
+orchestration + scale + coalescing + off-thread parse, NOT parse speed and NOT
+latency. Latency is a render-path problem, addressed by a GPU client renderer
+(and secondarily prediction). Measured, not assumed.
+
 ## Reflow on resize — measured
 
 `sh spike/termdiff/run-reflow.sh` — the `longlines` capture (six ~134-char
