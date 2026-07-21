@@ -117,6 +117,37 @@ fiddly, correctness-critical part, and x/ansi already nails it. It's **reuse
 x/ansi's parser, build the grid**, which is mechanical and where all the
 performance lives. Well-scoped, and the ceiling clears xterm.
 
+## How fast can Go actually go? (the ceiling)
+
+184 MB/s felt low, and it was — x/ansi is a byte-at-a-time state machine with a
+closure call per rune. Fast terminals don't do that: they bulk-scan the
+printable run (find the next control byte, blast the whole text span into cells
+at once) so the common case never touches the state machine. `bulk.go` is a
+hand-written parser doing exactly that, rendering cell-for-cell identical to the
+packed grid (TestBulkMatchesPacked). `go test -bench 'Bulk|MemFloor'`:
+
+| | git-graph (SGR-heavy) | plain text |
+|---|---|---|
+| memory floor (SIMD `IndexByte` scan only) | **2426 MB/s** | — |
+| bulk **parse only** (no cell write) | 584 MB/s | — |
+| **bulk full emulator (ours)** | **475 MB/s** | 453 MB/s |
+| x/ansi path (packed) | 133 | 134 |
+| xterm.js | 107 | — |
+| x/vt | 4 | — |
+
+**475 MB/s — 4.5× xterm, 3.6× the x/ansi path.** So 200 was never a wall; it
+was x/ansi's per-byte dispatch. And there's more headroom: the memory floor is
+2426, and bulk-parse-without-writing-cells is 584, so on SGR-heavy content the
+CELL WRITES cost only ~20% (584→475) — the real cost above the floor is escape
+/ SGR dispatch. Plain text isn't faster than SGR-heavy (453 vs 475) because
+then every byte becomes a cell write; that path is write-bound, and a leaner
+cell (pack rune+style into 8 bytes instead of 16) would lift it. Routes to
+higher still: SIMD-scan the escape boundary too, a tighter SGR parser, an
+8-byte cell. A production Go emulator landing at **500 MB/s–1 GB/s** on real
+content is realistic — several times xterm, at zero per-cell allocation.
+
+## Grid model, not parser — building our own beats xterm
+
 Honest caveat: the 133 is an optimistic ceiling. The prototype is minimal —
 single-rune cells, drops combining marks, no wide-char continuation, no
 alt-screen / scroll-regions / OSC / DCS. A production grid with full fidelity
