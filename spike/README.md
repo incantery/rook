@@ -92,6 +92,41 @@ orchestration + scale + coalescing + off-thread parse, NOT parse speed and NOT
 latency. Latency is a render-path problem, addressed by a GPU client renderer
 (and secondarily prediction). Measured, not assumed.
 
+## Parser vs grid — is it worth building our own? (yes)
+
+`go test -bench . -benchmem ./spike/parsebench` decomposes x/vt's slowness.
+Same 16 MiB of git output through three paths:
+
+| | throughput | allocations |
+|---|---|---|
+| x/ansi parser alone (no grid) | **184 MB/s** | **0** |
+| packed grid on x/ansi (ours) | **133 MB/s** | ~0 (setup only) |
+| xterm.js | 107 MB/s | — |
+| x/vt | **4 MB/s** | **13,000,000** |
+
+The verdict is unambiguous. **x/vt's problem is its grid model, not the
+parser** — 13M allocations over 16 MiB, a Go string + grapheme segmentation
+per cell plus a heap object per scrolled line. **x/ansi's parser is excellent**
+— 184 MB/s, zero-alloc, and our fidelity diff already validated it at 100%.
+And a **packed-cell grid** (fixed-size cell, preallocated grid, ring-buffer
+scroll — xterm's data model, in Go) **beats xterm** at 133 MB/s, allocation-
+free, and renders correct output (TestPackedProducesSaneGrid).
+
+So "build our own" is not "write a VT parser from scratch" — that's the hard,
+fiddly, correctness-critical part, and x/ansi already nails it. It's **reuse
+x/ansi's parser, build the grid**, which is mechanical and where all the
+performance lives. Well-scoped, and the ceiling clears xterm.
+
+Honest caveat: the 133 is an optimistic ceiling. The prototype is minimal —
+single-rune cells, drops combining marks, no wide-char continuation, no
+alt-screen / scroll-regions / OSC / DCS. A production grid with full fidelity
+needs xterm's overflow-table trick for grapheme clusters, which costs some
+speed. But xterm proves packed + grapheme-correct + 107 MB/s is achievable, so
+a Go version should still match or beat it — and, critically, stay
+allocation-free, which is what lets the host run many session emulators
+without GC thrash. That last property is why x/vt (13M allocs/16MiB) is a
+non-starter at orchestration scale regardless of its clean fidelity.
+
 ## Reflow on resize — measured
 
 `sh spike/termdiff/run-reflow.sh` — the `longlines` capture (six ~134-char
