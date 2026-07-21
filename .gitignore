@@ -21,3 +21,9 @@ frontend/playwright-report
 # are live git worktrees, so `git add -A` tries to commit an embedded repo and
 # `make release` refuses the dirty tree — which is how one blocked a release.
 .claude/worktrees/
+
+# spike build outputs
+/termcap
+/extract-vt
+spike/**/termcap
+spike/**/extract-vt
