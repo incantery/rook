@@ -166,7 +166,7 @@
 </script>
 
 <div
-    class="fixed inset-0 z-50 flex items-start justify-center bg-black/55 pt-[10vh]"
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/55"
     onmousedown={(e) => e.target === e.currentTarget && onclose()}
     role="presentation"
 >
@@ -187,7 +187,10 @@
             <Kbd k="esc" />
         </div>
 
-        <div class="flex h-[52vh] min-h-0">
+        <!-- A FIXED height, not max-h: the box must not resize as results
+             arrive, or the input row you're typing into would walk up and
+             down the screen. That's also what makes centering safe. -->
+        <div class="flex h-[68vh] min-h-0">
             <div
                 class={[
                     "min-w-0 overflow-y-auto p-1.5",

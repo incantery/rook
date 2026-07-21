@@ -54,6 +54,11 @@
                 glyphMargin: false,
                 folding: false,
                 renderLineHighlight: "none",
+                // Monaco pins enclosing scopes at the top by default. In a
+                // full editor that's orientation; in a twelve-line glance it
+                // reads as duplicated or corrupted content — two unrelated
+                // line numbers sitting above the ones you asked for.
+                stickyScroll: {enabled: false},
                 overviewRulerLanes: 0,
                 scrollbar: {vertical: "auto", horizontalScrollbarSize: 6},
                 fontSize: 12,
