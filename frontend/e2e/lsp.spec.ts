@@ -2,6 +2,7 @@ import {expect, test, type Page} from "@playwright/test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import {deleteWorkspaces} from "./harness";
 
 // Code intelligence end-to-end: a real gopls behind the sandbox host, the
 // real Monaco pane in front. The sandbox config is hot-read, so the spec
@@ -17,16 +18,7 @@ const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`
 const made: string[] = [];
 
 test.afterEach(async ({page}) => {
-    for (const name of made.splice(0)) {
-        await page.goto("/");
-        await page.getByRole("button", {name: /^workspaces/}).click();
-        const card = page
-            .locator("#home-workspaces div.group")
-            .filter({has: page.getByText(name, {exact: true})});
-        await expect(card).toHaveCount(1);
-        await card.getByTitle(/^Delete workspace/).click();
-        await expect(card).toHaveCount(0);
-    }
+    await deleteWorkspaces(page, made.splice(0));
 });
 
 async function openWorkspace(page: Page, name: string) {

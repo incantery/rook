@@ -1,5 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
+import {deleteWorkspaces, screenText, shellReady, shellRun} from "./harness";
 
 // Live grep end-to-end: the ` / modal over the real host's git grep,
 // a hit click landing the editor at the hit's file.
@@ -9,16 +10,7 @@ const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`
 const made: string[] = [];
 
 test.afterEach(async ({page}) => {
-    for (const name of made.splice(0)) {
-        await page.goto("/");
-        await page.getByRole("button", {name: /^workspaces/}).click();
-        const card = page
-            .locator("#home-workspaces div.group")
-            .filter({has: page.getByText(name, {exact: true})});
-        await expect(card).toHaveCount(1);
-        await card.getByTitle(/^Delete workspace/).click();
-        await expect(card).toHaveCount(0);
-    }
+    await deleteWorkspaces(page, made.splice(0));
 });
 
 async function openWorkspace(page: Page, name: string) {
@@ -146,10 +138,16 @@ test("telescope keys: editor ⌃P/⌃G/⌃S, grep ⌃Q → quickfix, ` f reveal"
     const stripOne = page.getByRole("button", {name: "1", exact: true});
     await stripOne.click();
     const term = shown(page, ".xterm-screen");
-    await term.click();
-    await page.keyboard.type("cd internal/host");
+    // The shell may not be reading yet — a cold sandbox pays oh-my-zsh's
+    // plugin compilation on its first run, and a cd typed into that goes
+    // nowhere in time. This used to be a flat 800ms sleep, which is what made
+    // the test fail cold and pass warm.
+    await shellReady(page, term);
+    await shellRun(page, term, "cd internal/host");
+    // and prove the shell actually moved before asking the picker where it is
+    await page.keyboard.type("pwd");
     await page.keyboard.press("Enter");
-    await page.waitForTimeout(800); // the host resolves cwd via lsof
+    await expect.poll(() => screenText(term), {timeout: 15_000}).toMatch(/\/internal\/host/);
     await page.keyboard.press("Control+p");
     await expect(picker).toBeVisible();
     await expect(page.getByText("in internal/host")).toBeVisible({timeout: 15_000});

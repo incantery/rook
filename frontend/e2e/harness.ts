@@ -47,6 +47,64 @@ async function writeAll(root: string, files: Record<string, string>): Promise<vo
     }
 }
 
+/** Delete workspaces a spec created, and wait for each to actually go.
+ *
+ *  Exported for the specs not yet on the `rook` fixture: seven of them carried
+ *  a byte-identical copy of this, which meant seven copies of the same two
+ *  bugs. boot.spec's "No workspaces yet" is the sandbox canary, so a leak here
+ *  fails a LATER file and reads as a flake in something innocent.
+ *
+ *  Both waits are explicit. #home renders before listWorkspaces resolves, so
+ *  an immediate count reads 0 for a workspace that is very much there, and a
+ *  cleanup that treats that as "nothing to do" leaves the mess it exists to
+ *  prevent. And deleting kills the workspace's sessions — a shell cold-started
+ *  in a fresh sandbox (oh-my-zsh compiling its plugins) is slow to die, which
+ *  the default 5s covered warm and not cold. */
+export async function deleteWorkspaces(page: Page, names: string[]): Promise<void> {
+    for (const name of names) {
+        await page.goto("/");
+        await page.getByRole("button", {name: /^workspaces/}).click();
+        const card = page
+            .locator("#home-workspaces div.group")
+            .filter({has: page.getByText(name, {exact: true})});
+        await expect(card).toHaveCount(1, {timeout: 30_000});
+        await card.getByTitle(/^Delete workspace/).click();
+        await expect(card).toHaveCount(0, {timeout: 30_000});
+    }
+}
+
+/** Flatten a terminal's rendered text. xterm draws every space as U+00A0 to
+ *  hold the column, so a plain match with a space in it never fires. */
+export const screenText = (term: Locator): Promise<string> =>
+    term.evaluate((el) => (el as HTMLElement).innerText.replace(/ /g, " "));
+
+/** Wait until the shell in `term` is reading input.
+ *
+ *  A pane is visible long before its shell is usable: the e2e sandbox has its
+ *  own XDG triple, so the FIRST run in a fresh sandbox pays oh-my-zsh's plugin
+ *  compilation, which takes seconds and prints while it works. Anything typed
+ *  meanwhile lands in the pty buffer and runs late — or not in the order you
+ *  assumed. That is the whole of the "telescope keys" cold flake: it typed a
+ *  cd, slept 800ms, and opened a picker that had not moved.
+ *
+ *  The probe is arithmetic so the ANSWER differs from the ECHO of the command
+ *  — waiting for a literal you just typed matches the typing, not the shell. */
+export async function shellReady(page: Page, term: Locator): Promise<void> {
+    const token = `rdy${Math.floor(Math.random() * 1e6)}`;
+    await term.click();
+    await page.keyboard.type(`echo ${token}$((6*7))`);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => screenText(term), {timeout: 60_000}).toContain(`${token}42`);
+}
+
+/** Run a command and wait for the shell to finish it, by the same trick. */
+export async function shellRun(page: Page, term: Locator, cmd: string): Promise<void> {
+    await term.click();
+    await page.keyboard.type(cmd);
+    await page.keyboard.press("Enter");
+    await shellReady(page, term);
+}
+
 export class Rook {
     private workspaces: string[] = [];
     private repos: string[] = [];
@@ -185,6 +243,11 @@ export class Rook {
         this.editorOpen = true;
     }
 
+    /** Wait for this pane's shell to be reading input before typing at it. */
+    async shellReady(): Promise<void> {
+        await shellReady(this.page, this.term());
+    }
+
     /** Type an ex command into the focused vim surface (editor or nvim). */
     async ex(cmd: string): Promise<void> {
         await this.page.keyboard.type(cmd);
@@ -206,16 +269,7 @@ export class Rook {
     /** Delete every workspace this test made, then its repos. Workspaces go
      *  first: the daemon holds sessions with cwds inside the repo. */
     async cleanup(): Promise<void> {
-        for (const name of this.workspaces.splice(0)) {
-            await this.page.goto("/");
-            await this.page.getByRole("button", {name: /^workspaces/}).click();
-            const card = this.page
-                .locator("#home-workspaces div.group")
-                .filter({has: this.page.getByText(name, {exact: true})});
-            await expect(card).toHaveCount(1);
-            await card.getByTitle(/^Delete workspace/).click();
-            await expect(card).toHaveCount(0);
-        }
+        await deleteWorkspaces(this.page, this.workspaces.splice(0));
         for (const root of this.repos.splice(0)) {
             await fs.rm(root, {recursive: true, force: true});
         }

@@ -1,5 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
+import {deleteWorkspaces} from "./harness";
 
 // The leader's send-prefix, in both pane kinds.
 //
@@ -35,22 +36,7 @@ const made: string[] = [];
 // clicks kills the workspace's shells too, which is what keeps a later spec
 // from finding this one's terminals restored and parked in the DOM.
 test.afterEach(async ({page}) => {
-    for (const name of made.splice(0)) {
-        await page.goto("/");
-        // The deck lands on agents; workspaces (and their ✕) are a tab over.
-        await page.getByRole("button", {name: /^workspaces/}).click();
-        const card = page
-            .locator("#home-workspaces div.group")
-            .filter({has: page.getByText(name, {exact: true})});
-        // Wait for the card rather than testing for it: #home renders before
-        // listWorkspaces resolves, so an immediate count() reads 0 for a
-        // workspace that is very much there, and a cleanup that treats that as
-        // "nothing to do" leaves the mess it was written to prevent — silently,
-        // which is how it reaches boot.spec instead of this line.
-        await expect(card).toHaveCount(1);
-        await card.getByTitle(/^Delete workspace/).click();
-        await expect(card).toHaveCount(0);
-    }
+    await deleteWorkspaces(page, made.splice(0));
 });
 
 /** Into a workspace rooted at the rook checkout, shell running. The root has

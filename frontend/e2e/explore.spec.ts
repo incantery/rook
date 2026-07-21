@@ -1,5 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
+import {deleteWorkspaces} from "./harness";
 
 // The explore work-type end-to-end: start an investigation, navigate (a
 // picker open + a grep hit), and the breadcrumb trail shows the visits in
@@ -10,16 +11,7 @@ const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`
 const made: string[] = [];
 
 test.afterEach(async ({page}) => {
-    for (const name of made.splice(0)) {
-        await page.goto("/");
-        await page.getByRole("button", {name: /^workspaces/}).click();
-        const card = page
-            .locator("#home-workspaces div.group")
-            .filter({has: page.getByText(name, {exact: true})});
-        await expect(card).toHaveCount(1);
-        await card.getByTitle(/^Delete workspace/).click();
-        await expect(card).toHaveCount(0);
-    }
+    await deleteWorkspaces(page, made.splice(0));
 });
 
 async function openWorkspace(page: Page, name: string) {

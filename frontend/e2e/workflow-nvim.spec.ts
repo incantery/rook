@@ -33,7 +33,9 @@ test("nvim in a pane edits a file and writes it to disk", async ({page, rook}) =
     const root = await rook.repo({files: {"notes.txt": "alpha\nbravo\ncharlie\n"}});
     await rook.open({name: `nvim-edit-${Date.now()}`, root});
 
-    await rook.term().click();
+    // wait for the shell before typing at it: a cold sandbox pays oh-my-zsh's
+    // plugin compilation, and `nvim notes.txt` typed into that runs late
+    await rook.shellReady();
     await rook.ex("nvim notes.txt");
     // the file's own text on screen is the ready signal — a prompt-based one
     // would race nvim's alternate-screen switch
@@ -63,7 +65,9 @@ test("reattaching to a pane running nvim types nothing into it", async ({rook}) 
     await rook.tapPty();
     const ws = await rook.open({name: `nvim-reattach-${Date.now()}`, root});
 
-    await rook.term().click();
+    // wait for the shell before typing at it: a cold sandbox pays oh-my-zsh's
+    // plugin compilation, and `nvim notes.txt` typed into that runs late
+    await rook.shellReady();
     await rook.ex("nvim notes.txt");
     await rook.expectScreen(/alpha/);
     await rook.drainPty(); // everything so far was typed on purpose
