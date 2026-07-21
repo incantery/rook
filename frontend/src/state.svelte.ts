@@ -122,6 +122,8 @@ class AppState {
     pickerOpen = $state(false);
     filePickerOpen = $state(false);
     grepOpen = $state(false);
+    /** the threads finder (,t) — the quickfix list is still ` t */
+    threadFinderOpen = $state(false);
     exploreOpen = $state(false);
     inboxOpen = $state(false);
     spawnOpen = $state(false);
@@ -150,6 +152,7 @@ class AppState {
             this.pickerOpen ||
             this.filePickerOpen ||
             this.grepOpen ||
+            this.threadFinderOpen ||
             this.exploreOpen ||
             this.inboxOpen ||
             this.spawnOpen ||
@@ -163,6 +166,7 @@ class AppState {
         this.pickerOpen = false;
         this.filePickerOpen = false;
         this.grepOpen = false;
+        this.threadFinderOpen = false;
         this.exploreOpen = false;
         this.inboxOpen = false;
         this.spawnOpen = false;

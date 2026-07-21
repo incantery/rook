@@ -38,16 +38,20 @@ type ThreadComment struct {
 // ThreadInfo is a thread with its comments and, when read through the
 // HTTP surface, the re-anchored current range (reanchor.go).
 type ThreadInfo struct {
-	ID           int64           `json:"id"`
-	Workspace    string          `json:"workspace"`
-	Path         string          `json:"path"`
-	StartLine    int             `json:"startLine"` // 1-based, inclusive
-	EndLine      int             `json:"endLine"`
-	Side         string          `json:"side"`                // modified|original
-	BlobSHA      string          `json:"blobSha"`             // anchor content identity
-	CommitSHA    string          `json:"commitSha,omitempty"` // display only
-	AnchorText   string          `json:"anchorText"`
-	State        string          `json:"state"` // pending|open|resolved
+	ID         int64  `json:"id"`
+	Workspace  string `json:"workspace"`
+	Path       string `json:"path"`
+	StartLine  int    `json:"startLine"` // 1-based, inclusive
+	EndLine    int    `json:"endLine"`
+	Side       string `json:"side"`                // modified|original
+	BlobSHA    string `json:"blobSha"`             // anchor content identity
+	CommitSHA  string `json:"commitSha,omitempty"` // display only
+	AnchorText string `json:"anchorText"`
+	State      string `json:"state"` // pending|open|resolved
+	// Why the nudge didn't reach a responder; "" when it did. A thread with
+	// this set is open and submitted but NOBODY WAS TOLD — the one failure
+	// the old model rendered as a normal wait.
+	DeliverError string          `json:"deliverError,omitempty"`
 	ResolvedBy   string          `json:"resolvedBy,omitempty"`
 	AgentReopens int             `json:"agentReopens,omitempty"`
 	Created      time.Time       `json:"created"`
@@ -62,7 +66,7 @@ type ThreadInfo struct {
 }
 
 const threadCols = `id, workspace, path, start_line, end_line, side, blob_sha,
-	commit_sha, anchor_text, state, resolved_by, agent_reopens,
+	commit_sha, anchor_text, state, deliver_error, resolved_by, agent_reopens,
 	created_at, updated_at, submitted_at`
 
 func scanThread(row interface{ Scan(...any) error }) (*ThreadInfo, error) {
@@ -70,7 +74,7 @@ func scanThread(row interface{ Scan(...any) error }) (*ThreadInfo, error) {
 	var created, updated string
 	var submitted sql.NullString
 	if err := row.Scan(&t.ID, &t.Workspace, &t.Path, &t.StartLine, &t.EndLine,
-		&t.Side, &t.BlobSHA, &t.CommitSHA, &t.AnchorText, &t.State,
+		&t.Side, &t.BlobSHA, &t.CommitSHA, &t.AnchorText, &t.State, &t.DeliverError,
 		&t.ResolvedBy, &t.AgentReopens, &created, &updated, &submitted); err != nil {
 		return nil, err
 	}
@@ -298,6 +302,63 @@ func (r *registry) submitThread(id int64) {
 	}
 }
 
+// markDeliverError stamps the workspace's awaiting threads with why the
+// nudge failed. Scoped to open+awaiting because that is exactly the set the
+// nudge was speaking for: a resolved thread or one the agent already
+// answered is not waiting on a delivery that didn't happen.
+func (r *registry) markDeliverError(ws, msg string) {
+	if r.db == nil || msg == "" {
+		return
+	}
+	if _, err := r.db.Exec(
+		`UPDATE threads SET deliver_error = ? WHERE workspace = ? AND state = 'open'
+		   AND (SELECT c.author FROM thread_comments c
+		        WHERE c.thread_id = threads.id ORDER BY c.id DESC LIMIT 1) = 'user'`,
+		promptSafe(msg, 200), ws); err != nil {
+		log.Printf("threads: mark deliver error: %v", err)
+	}
+}
+
+// markThreadDeliverError is the ,? path — one thread, one nudge, one blame.
+func (r *registry) markThreadDeliverError(id int64, msg string) {
+	if r.db == nil || msg == "" {
+		return
+	}
+	if _, err := r.db.Exec(`UPDATE threads SET deliver_error = ? WHERE id = ?`,
+		promptSafe(msg, 200), id); err != nil {
+		log.Printf("threads: mark deliver error one: %v", err)
+	}
+}
+
+// clearDeliverError forgets a past failure for the whole workspace. Called
+// on every SUCCESSFUL nudge: a resubmit that lands is the proof the old
+// error is stale, and leaving it would keep a warning on a thread that is
+// now genuinely just waiting.
+func (r *registry) clearDeliverError(ws string) {
+	if r.db == nil {
+		return
+	}
+	if _, err := r.db.Exec(
+		`UPDATE threads SET deliver_error = '' WHERE workspace = ? AND deliver_error != ''`,
+		ws); err != nil {
+		log.Printf("threads: clear deliver error: %v", err)
+	}
+}
+
+// clearThreadDeliverError runs when the AGENT speaks on a thread — the
+// other proof of delivery, and the stronger one. A nudge can fail, the user
+// can paste the prompt by hand, and the reply still arrives; the warning
+// has to come down when the thing it warned about demonstrably happened.
+func (r *registry) clearThreadDeliverError(id int64) {
+	if r.db == nil {
+		return
+	}
+	if _, err := r.db.Exec(`UPDATE threads SET deliver_error = '' WHERE id = ?`,
+		id); err != nil {
+		log.Printf("threads: clear deliver error one: %v", err)
+	}
+}
+
 // threadsAwaitingAgent counts open threads whose LAST comment is the
 // user's — "needs reply" is derived, never stored.
 func (r *registry) threadsAwaitingAgent(ws string) int {
@@ -522,6 +583,12 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "no such thread", http.StatusNotFound)
 			return
 		}
+		// The agent speaking is proof the nudge landed, whatever the
+		// delivery bookkeeping believes — clear any stale warning first so
+		// the notify below carries the corrected row.
+		if req.Author == "agent" {
+			h.reg.clearThreadDeliverError(id)
+		}
 		// THE case this channel exists for: the agent's reply arrives here
 		// (rookctl reply → this route), and until now nothing told the UI.
 		h.notifyThreadsFor(id)
@@ -564,9 +631,13 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 		h.notifyThreads(t.Workspace)
 		mode, sid, err := h.nudge(t.Workspace, threadNudgeOne(t))
 		if err != nil {
+			h.reg.markThreadDeliverError(id, err.Error())
+			h.notifyThreads(t.Workspace)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		h.reg.clearDeliverError(t.Workspace)
+		h.notifyThreads(t.Workspace)
 		writeJSON(w, map[string]any{"mode": mode, "rookSession": sid, "count": 1})
 	case "reopen":
 		var req struct{ By string }
@@ -710,8 +781,15 @@ func (h *Host) handleThreadsSubmit(w http.ResponseWriter, r *http.Request, name 
 	h.notifyThreads(name)
 	mode, sid, err := h.nudge(name, threadsNudge(waiting, name))
 	if err != nil {
+		// Record it before answering. The threads are already open; without
+		// this they'd be indistinguishable from delivered ones and the user
+		// would be waiting on an agent that was never told.
+		h.reg.markDeliverError(name, err.Error())
+		h.notifyThreads(name)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	h.reg.clearDeliverError(name)
+	h.notifyThreads(name)
 	writeJSON(w, map[string]any{"mode": mode, "rookSession": sid, "count": n})
 }

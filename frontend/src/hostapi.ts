@@ -381,9 +381,7 @@ export class HostAPI {
      *  note the user had left pending, which is not what asking about this
      *  line means. 409 = the thread is already resolved. */
     async submitThread(id: number): Promise<ThreadsSubmitResult> {
-        return (
-            await this.req(`/threads/${id}/submit`, {method: "POST", body: "{}"})
-        ).json();
+        return (await this.req(`/threads/${id}/submit`, {method: "POST", body: "{}"})).json();
     }
 
     /** Flip pending→open and nudge the responder — or re-nudge when open
@@ -621,6 +619,8 @@ export interface ThreadInfo {
     commitSha?: string;
     anchorText: string;
     state: "pending" | "open" | "resolved";
+    /** why the nudge never reached a responder; absent when it did */
+    deliverError?: string;
     resolvedBy?: "user" | "agent";
     agentReopens?: number;
     created: string;

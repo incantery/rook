@@ -1,5 +1,5 @@
 import {describe, expect, it, vi} from "vitest";
-import {filesSource, grepSource, type FileItem} from "./finderSources";
+import {filesSource, grepSource, threadsSource, type FileItem} from "./finderSources";
 import type {HostAPI} from "./hostapi";
 
 /** the two calls the sources make, and nothing else */
@@ -110,5 +110,118 @@ describe("grepSource", () => {
         });
         s.actions.find((a) => a.key === "ctrl+q")!.run(undefined, [], "Foo");
         expect(quickfix).not.toHaveBeenCalled();
+    });
+});
+
+describe("threadsSource", () => {
+    const th = (over: Record<string, unknown> = {}) =>
+        ({
+            id: 1,
+            path: "a.go",
+            state: "open",
+            comments: [{id: 1, author: "user", body: "is the cap right?", created: ""}],
+            currentStart: 12,
+            currentEnd: 14,
+            ...over,
+        }) as never;
+
+    const src = (threads: unknown[], deps: Record<string, unknown> = {}) =>
+        threadsSource({
+            threads: () => threads as never,
+            open: () => {},
+            source: () => {},
+            quickfix: () => {},
+            ...deps,
+        } as never);
+
+    it("groups rows by file so a review reads as a walk through files", async () => {
+        const s = src([th(), th({id: 2, path: "b.go"})]);
+        const items = (await s.load("")).items;
+        expect(items.map((t) => s.row(t, []).group)).toEqual(["a.go", "b.go"]);
+    });
+
+    it("with no query, sorts by what needs you — failures first", async () => {
+        const s = src([
+            th({id: 1, path: "z.go"}),
+            th({id: 2, path: "a.go", deliverError: "spawn failed"}),
+            th({id: 3, path: "m.go", state: "resolved"}),
+        ]);
+        const out = s.rank!("", (await s.load("")).items);
+        expect(out.map((r) => r.item.id)).toEqual([2, 1, 3]);
+    });
+
+    it("matches on what was SAID, not just the path", async () => {
+        const s = src([
+            th({
+                id: 1,
+                path: "a.go",
+                comments: [{id: 1, author: "user", body: "cap", created: ""}],
+            }),
+            th({
+                id: 2,
+                path: "b.go",
+                comments: [{id: 1, author: "user", body: "auth", created: ""}],
+            }),
+        ]);
+        const out = s.rank!("auth", (await s.load("")).items);
+        expect(out[0].item.id).toBe(2);
+    });
+
+    it("matches on status, so 'waiting' narrows to the agent's queue", async () => {
+        const s = src([
+            th({
+                id: 1,
+                comments: [
+                    {id: 1, author: "user", body: "q", created: ""},
+                    {id: 2, author: "agent", body: "a", created: ""},
+                ],
+            }),
+            th({id: 2, path: "b.go"}),
+        ]);
+        const out = s.rank!("waiting", (await s.load("")).items);
+        expect(out[0].item.id).toBe(2);
+    });
+
+    it("translates highlight positions onto the comment the row renders", async () => {
+        // positions index the PROJECTED string (path + status + bodies) but
+        // the row shows only the first comment — an untranslated position
+        // would accent whatever character happened to sit at that offset
+        const s = src([
+            th({path: "a.go", comments: [{id: 1, author: "user", body: "zebra", created: ""}]}),
+        ]);
+        const out = s.rank!("zebra", (await s.load("")).items);
+        const row = s.row(out[0].item, out[0].positions);
+        const hit = row.segments
+            .filter((g) => g.hit)
+            .map((g) => g.text)
+            .join("");
+        expect(hit).toBe("zebra");
+    });
+
+    it("drops positions that landed on the path or status, not the comment", async () => {
+        const s = src([
+            th({
+                path: "zzz.go",
+                comments: [{id: 1, author: "user", body: "nothing alike", created: ""}],
+            }),
+        ]);
+        const out = s.rank!("zzz", (await s.load("")).items);
+        const row = s.row(out[0].item, out[0].positions);
+        // the match was entirely in the path, which this row does not render
+        expect(row.segments.some((g) => g.hit)).toBe(false);
+    });
+
+    it("does not repeat the path in the row — the group header already said it", async () => {
+        const s = src([th({path: "a.go"})]);
+        const row = s.row((await s.load("")).items[0], []);
+        expect(row.segments.map((g) => g.text).join("")).not.toContain("a.go");
+        expect(row.group).toBe("a.go");
+        expect(row.locator).toBe("12");
+    });
+
+    it("previews the anchored line, which is the code the thread argues about", async () => {
+        const s = src([th()]);
+        const [t] = (await s.load("")).items;
+        expect(s.preview(t)).toEqual({path: "a.go", line: 12});
     });
 });

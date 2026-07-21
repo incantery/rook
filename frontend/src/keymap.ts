@@ -267,7 +267,10 @@ export const CONTEXT_PREFIX = new Map<string, string>([
     ["a", "quickaction.toggle"],
     ["c", "editor.comment"],
     ["?", "editor.ask"],
-    ["t", "editor.thread"],
+    // t = every thread in the workspace, as a finder. The thread under the
+    // cursor is gt (a motion, and it lives with gd/gr where it belongs);
+    // the leader is for the surfaces you reach for without a cursor.
+    ["t", "threads.find"],
 ]);
 
 export function parseLeader(trigger: string | undefined): Leader {

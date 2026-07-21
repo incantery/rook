@@ -66,6 +66,13 @@ async function loadVim(): Promise<VimLib> {
             vim.defineAction("rookHover", (cm) => paneOf(cm)?.showHover());
             vim.mapCommand("gd", "action", "rookDef", {}, {context: "normal"});
             vim.mapCommand("gr", "action", "rookRefs", {}, {context: "normal"});
+            // gt — go to the thread under the cursor. It sits with gd/gr
+            // because it IS that verb: jump to the thing attached to this
+            // symbol. It moved here from ,t when the context leader took
+            // over as the door to the thread LIST, which is the one that
+            // wants a leader (it's a workspace-wide surface, not a motion).
+            vim.defineAction("rookThread", (cm) => paneOf(cm)?.openThreadAtCursor());
+            vim.mapCommand("gt", "action", "rookThread", {}, {context: "normal"});
             // A thread buffer's verbs are ex commands, not chords: they read
             // as what they do, need no keymap layer in a read-only buffer, and
             // route per-pane through the same paneByEditor map :w uses.
@@ -1472,7 +1479,11 @@ export class EditorPane implements PaneContent {
             contextMenuGroupId: "9_rook",
             contextMenuOrder: 1,
             // Monaco hands this action its own editor, so no focus guessing
-            run: () => void this.composeOn(this.bands.find((b) => b.editor === ed), "note"),
+            run: () =>
+                void this.composeOn(
+                    this.bands.find((b) => b.editor === ed),
+                    "note",
+                ),
         });
     }
 

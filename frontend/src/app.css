@@ -352,14 +352,35 @@ body {
 .thread-glyph::before {
     content: "●";
 }
+/* One glyph per STATUS (threadview.ts threadStatus), not per stored state:
+   the gutter's whole job is to say whose move it is, and stored state can't
+   tell "the agent hasn't answered yet" from "the agent was never told".
+   Fill carries the information — hollow means nothing has come back — and
+   colour is the secondary cue, so this survives being read at 9px.
+   Theme vars, not the hex these used to be: the palette is being unified. */
+.thread-glyph-failed {
+    color: var(--color-red);
+}
+.thread-glyph-failed::before {
+    content: "✕"; /* the nudge never landed — only you can restart this */
+}
 .thread-glyph-pending {
-    color: #ffcb6b;
+    color: var(--color-amber);
 }
 .thread-glyph-pending::before {
     content: "◐"; /* half-full: written but not yet submitted */
 }
-.thread-glyph-open {
-    color: #82aaff;
+.thread-glyph-waiting {
+    color: var(--acc);
+}
+.thread-glyph-waiting::before {
+    content: "○"; /* hollow: sent, nothing back yet */
+}
+.thread-glyph-answered {
+    color: var(--color-magenta);
+}
+.thread-glyph-answered::before {
+    content: "●"; /* filled: there is something here to read */
 }
 .thread-glyph-resolved {
     color: #464b66;
@@ -367,6 +388,75 @@ body {
 .thread-glyph-outdated::before {
     content: "◌"; /* the anchor no longer matches the file */
 }
+/* The inline status row (a Monaco view zone, term/threads.ts). Reads as an
+   annotation ON the code, not a line OF it: no background block, a single
+   accent rule tying it to the anchor above, and the body in the UI font so
+   it can never be mistaken for source. Muted until hovered — a file with
+   eight threads should stay readable as code. */
+/* Monaco owns the zone's own node — it writes display/position/width there
+   as inline styles, which beat the sheet. Anything we lay out has to live
+   one level in, or `display: flex` is quietly reverted to block. */
+.thread-zone-host {
+    height: 100%;
+}
+.thread-zone {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 100%;
+    padding-left: 12px;
+    font-family: system-ui, sans-serif;
+    font-size: 11px;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    opacity: 0.75;
+}
+.thread-zone:hover {
+    opacity: 1;
+}
+/* the glyph inside the row is inline, unlike its gutter twin */
+.thread-zone .thread-glyph {
+    display: inline-flex;
+    flex: none;
+}
+.thread-zone-label {
+    flex: none;
+    font-weight: 600;
+    text-transform: lowercase;
+}
+.thread-zone-failed .thread-zone-label {
+    color: var(--color-red);
+}
+.thread-zone-pending .thread-zone-label {
+    color: var(--color-amber);
+}
+.thread-zone-waiting .thread-zone-label {
+    color: var(--acc);
+}
+.thread-zone-answered .thread-zone-label {
+    color: var(--color-magenta);
+}
+/* a failure is the one status that should catch the eye unprompted */
+.thread-zone-failed {
+    border-left-color: var(--color-red);
+    opacity: 1;
+}
+.thread-zone-body {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--dim);
+}
+.thread-zone-tail {
+    flex: none;
+    margin-left: auto;
+    padding-right: 12px;
+    color: var(--color-lo);
+}
+
 /* The active thread's extent: a rule beside the code, never over it. Sits in
    Monaco's line-decorations margin (between the glyph margin and the text),
    so it marks the range without tinting a single character. */

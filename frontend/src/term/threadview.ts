@@ -26,17 +26,73 @@ export function markerLines(threads: ThreadInfo[]): Map<number, ThreadInfo[]> {
     return m;
 }
 
-/** The glyph reflects the group's most-demanding state — pending (not
- *  yet submitted) > open (live conversation) > resolved — plus an
- *  outdated modifier when any anchor no longer matches the file. */
+/** What a thread is DOING, which is what the gutter and the inline row
+ *  actually want to say. Stored `state` is only three values and can't
+ *  distinguish the two situations you care about most while reviewing:
+ *  whether the ball is with the agent, and whether the agent was ever told.
+ *
+ *    failed    the nudge never reached a responder (the host recorded why)
+ *    pending   written, not yet submitted — the ball is with you
+ *    waiting   submitted, last word is yours — the ball is with the agent
+ *    answered  the agent has replied and it's your move
+ *    resolved  done
+ *
+ *  Derived, not stored, except `failed` — that one needs the host to
+ *  remember a delivery that didn't happen, because nothing about the row
+ *  would otherwise differ from a normal wait. */
+export type ThreadStatus = "failed" | "pending" | "waiting" | "answered" | "resolved";
+
+export function threadStatus(t: ThreadInfo): ThreadStatus {
+    if (t.state === "resolved") return "resolved";
+    // A delivery failure outranks pending: a thread can be marked failed
+    // only after a submit, so this can't mask an unsubmitted note. Resolved
+    // still wins over both — a stale error must not resurrect a done thread.
+    if (t.deliverError) return "failed";
+    if (t.state === "pending") return "pending";
+    const last = t.comments[t.comments.length - 1];
+    return last?.author === "user" ? "waiting" : "answered";
+}
+
+/** Most-demanding first — the one ranking every thread surface sorts by, so
+ *  the quickfix list, the finder, and the gutter glyph agree about what is
+ *  urgent. A failure sorts above everything: it's the only status where
+ *  nothing at all is happening and only you can restart it. */
+export const STATUS_ORDER: Record<ThreadStatus, number> = {
+    failed: 0,
+    pending: 1,
+    answered: 2,
+    waiting: 3,
+    resolved: 4,
+};
+
+/** The glyph reflects the group's most-demanding status, plus an outdated
+ *  modifier when any anchor no longer matches the file. */
 export function glyphClass(group: ThreadInfo[]): string {
-    let best: ThreadInfo["state"] = "resolved";
+    let best: ThreadStatus = "resolved";
     let outdated = false;
     for (const t of group) {
-        if (STATE_RANK[t.state] < STATE_RANK[best]) best = t.state;
+        const s = threadStatus(t);
+        if (STATUS_ORDER[s] < STATUS_ORDER[best]) best = s;
         if (t.outdated) outdated = true;
     }
     return `thread-glyph thread-glyph-${best}${outdated ? " thread-glyph-outdated" : ""}`;
+}
+
+/** Label + tone per status — the inline row, the hover, and the list all
+ *  name a thread the same way. */
+export function statusMeta(s: ThreadStatus): {label: string; tone: StateTone} {
+    switch (s) {
+        case "failed":
+            return {label: "not delivered", tone: "red"};
+        case "pending":
+            return {label: "not sent yet", tone: "amber"};
+        case "waiting":
+            return {label: "waiting on agent", tone: "acc"};
+        case "answered":
+            return {label: "agent replied", tone: "magenta"};
+        case "resolved":
+            return {label: "resolved", tone: "grn"};
+    }
 }
 
 export function pendingCount(all: ThreadInfo[]): number {
@@ -126,7 +182,7 @@ export function contextKey(ctx: {workspace: string; path: string} | null): strin
 }
 
 export type ThreadFilter = "open" | "resolved" | "all";
-export type StateTone = "amber" | "acc" | "grn";
+export type StateTone = "amber" | "acc" | "grn" | "red" | "magenta";
 
 /** The threads the panel lists: this file, both sides, top-down. */
 export function fileThreads(all: ThreadInfo[], path: string): ThreadInfo[] {

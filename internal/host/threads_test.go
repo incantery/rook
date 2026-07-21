@@ -737,3 +737,114 @@ func TestThreadSubmitSpawnsResponder(t *testing.T) {
 	}
 	h.kill(res.RookSession) // no orphan shells from tests
 }
+
+// A failed nudge used to be invisible: both submit handlers flip state to
+// open and THEN 500, so the row looked exactly like a delivered one and the
+// user waited forever on an agent nobody told. These pin the column that
+// makes the difference observable.
+
+func TestDeliverErrorMarkScopesToAwaitingThreads(t *testing.T) {
+	r := threadReg(t)
+	mk := func(body string) int64 {
+		id, err := r.createThread(&ThreadInfo{Workspace: "ws", Path: "f.go",
+			StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "x"}, body, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	awaiting := mk("awaiting")    // open, last word is the user's
+	answered := mk("answered")    // open, but the agent already replied
+	pending := mk("still a note") // never submitted
+	resolved := mk("done")
+
+	r.submitThread(awaiting)
+	r.submitThread(answered)
+	r.submitThread(resolved)
+	if err := r.addThreadComment(answered, "agent", "s1", "looked at it"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.resolveThread(resolved, "user"); err != nil {
+		t.Fatal(err)
+	}
+
+	r.markDeliverError("ws", "spawn: no such directory")
+
+	errOf := func(id int64) string {
+		th := r.getThread(id)
+		if th == nil {
+			t.Fatalf("thread %d vanished", id)
+		}
+		return th.DeliverError
+	}
+	if got := errOf(awaiting); got != "spawn: no such directory" {
+		t.Errorf("awaiting thread: deliverError = %q, want the failure", got)
+	}
+	// The nudge spoke only for threads actually waiting on a reply. A
+	// thread the agent already answered, an unsubmitted note, and a
+	// resolved one were none of its business.
+	for _, tc := range []struct {
+		name string
+		id   int64
+	}{{"answered", answered}, {"pending", pending}, {"resolved", resolved}} {
+		if got := errOf(tc.id); got != "" {
+			t.Errorf("%s thread: deliverError = %q, want empty", tc.name, got)
+		}
+	}
+}
+
+func TestDeliverErrorClearedByAgentReply(t *testing.T) {
+	r := threadReg(t)
+	id, err := r.createThread(&ThreadInfo{Workspace: "ws", Path: "f.go",
+		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "x"}, "why?", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.submitThread(id)
+	r.markDeliverError("ws", "pty write failed")
+	if r.getThread(id).DeliverError == "" {
+		t.Fatal("precondition: the thread should be carrying a failure")
+	}
+
+	// The agent speaking is proof the nudge landed — whatever the delivery
+	// bookkeeping believed. A user who pasted the prompt by hand gets the
+	// same correction.
+	r.clearThreadDeliverError(id)
+	if got := r.getThread(id).DeliverError; got != "" {
+		t.Errorf("after the agent replied: deliverError = %q, want cleared", got)
+	}
+}
+
+func TestDeliverErrorSurvivesTheWireAndClearsOnResubmit(t *testing.T) {
+	r := threadReg(t)
+	id, err := r.createThread(&ThreadInfo{Workspace: "ws", Path: "f.go",
+		StartLine: 1, EndLine: 1, Side: "modified", BlobSHA: "s", AnchorText: "x"}, "why?", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.submitThread(id)
+	r.markDeliverError("ws", "spawn failed")
+
+	// it has to round-trip: the gutter can only warn about what reaches it
+	blob, err := json.Marshal(r.getThread(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		DeliverError string `json:"deliverError"`
+	}
+	json.Unmarshal(blob, &wire)
+	if wire.DeliverError != "spawn failed" {
+		t.Errorf("wire deliverError = %q, want it carried", wire.DeliverError)
+	}
+
+	// a resubmit that lands proves the old error is stale
+	r.clearDeliverError("ws")
+	if got := r.getThread(id).DeliverError; got != "" {
+		t.Errorf("after a successful nudge: deliverError = %q, want cleared", got)
+	}
+	blob, _ = json.Marshal(r.getThread(id))
+	if strings.Contains(string(blob), "deliverError") {
+		t.Error("an empty deliverError should be omitted from the wire, not sent as \"\"")
+	}
+}

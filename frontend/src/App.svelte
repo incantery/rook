@@ -6,7 +6,7 @@
 <script lang="ts">
     import {onMount, tick} from "svelte";
     import {Call} from "@wailsio/runtime";
-    import type {HostAPI, IssueInfo} from "./hostapi";
+    import type {HostAPI, IssueInfo, ThreadInfo} from "./hostapi";
     import {TermManager, type TermFactory} from "./term/manager";
     import type {Edge, PaneRef} from "./term/layout";
     import {themeService} from "./theme/service";
@@ -20,7 +20,7 @@
     import Palette from "./Palette.svelte";
     import Picker from "./Picker.svelte";
     import Finder from "./Finder.svelte";
-    import {filesSource, grepSource} from "./finderSources";
+    import {filesSource, grepSource, threadsSource} from "./finderSources";
     import Inbox from "./Inbox.svelte";
     import SpawnModal from "./SpawnModal.svelte";
     import Settings from "./Settings.svelte";
@@ -974,6 +974,22 @@
         app.focusZone = "bottom"; // ⌃Q asked for the list — hand it the keyboard
     }
 
+    // ,t's ⌃Q — the matched threads become the location list. Same door as
+    // grep's: one quickfix, many producers, the last one owns it.
+    function threadsToQuickfix(threads: ThreadInfo[], query: string): void {
+        app.refHits = threads.map((t, i) => ({
+            id: i + 1,
+            path: t.path,
+            line: Math.max(1, t.currentStart),
+            col: 1,
+            text: t.comments[0]?.body ?? "",
+        }));
+        app.refTitle = query ? `Threads — ${query}` : "Threads";
+        qf.set(refsCtx);
+        qf.listOpen = true;
+        app.focusZone = "bottom";
+    }
+
     async function spawn(task: string, workspace: string, worktree: boolean): Promise<void> {
         // worktree isolation: carve a fresh checkout+branch off the target
         // workspace's repo and land the session there instead
@@ -1247,6 +1263,17 @@
                 void refreshThreads();
                 qf.listOpen = true;
                 app.focusZone = "bottom";
+            },
+        },
+        {
+            id: "threads.find",
+            title: "Threads: find",
+            category: "View",
+            keys: keymap.display("threads.find"),
+            run: () => {
+                // the store is what the source reads; make sure it's warm
+                void refreshThreads();
+                app.threadFinderOpen = true;
             },
         },
         {
@@ -1978,6 +2005,22 @@
         onclose={() => {
             app.grepOpen = false;
             grepSeed = "";
+            focusBack();
+        }}
+    />
+{/if}
+{#if app.threadFinderOpen}
+    <Finder
+        {api}
+        workspace={app.workspace}
+        source={threadsSource({
+            threads: () => app.threads,
+            open: (id) => void openThreadBuffer(id),
+            source: (path, line) => void openFile(path, {line, col: 1}),
+            quickfix: threadsToQuickfix,
+        })}
+        onclose={() => {
+            app.threadFinderOpen = false;
             focusBack();
         }}
     />

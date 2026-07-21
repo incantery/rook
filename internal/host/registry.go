@@ -189,6 +189,12 @@ var migrations = []string{
 	`ALTER TABLE workspaces ADD COLUMN issue_key TEXT NOT NULL DEFAULT ''`,
 	// a thread may hang off a review task (0 = code-only, the original shape)
 	`ALTER TABLE threads ADD COLUMN rook_task_id INTEGER NOT NULL DEFAULT 0`,
+	// Why the nudge didn't reach a responder, '' when it did. Until this
+	// column existed a failed delivery was INDISTINGUISHABLE from a
+	// successful one: both submit handlers flip state to open, then 500 on
+	// the nudge error, leaving a thread that looks submitted and waiting
+	// forever. The gutter can only warn about what the row remembers.
+	`ALTER TABLE threads ADD COLUMN deliver_error TEXT NOT NULL DEFAULT ''`,
 }
 
 func loadRegistry() *registry {
