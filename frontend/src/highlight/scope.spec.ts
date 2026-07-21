@@ -77,6 +77,87 @@ describe("pickScope", () => {
     });
 });
 
+// Every stack below was CAPTURED from the vendored markdown grammar running
+// under vscode-textmate — not invented. Markdown is the one language whose
+// constructs span their own content (a quote scope covers the quoted prose, a
+// list scope covers the whole item), so what a rule must NOT claim matters as
+// much here as what it must.
+describe("pickScope on markdown", () => {
+    it("paints a heading as one run, marker and text alike", () => {
+        const marker = [
+            "text.html.markdown",
+            "markup.heading.markdown",
+            "heading.1.markdown",
+            "punctuation.definition.heading.markdown",
+        ];
+        const text = [
+            "text.html.markdown",
+            "markup.heading.markdown",
+            "heading.1.markdown",
+            "entity.name.section.markdown",
+        ];
+        expect(pickScope(marker)).toBe("markup.heading.markdown");
+        expect(pickScope(text)).toBe("markup.heading.markdown");
+    });
+
+    it("paints a blockquote's prose, because the quote is the construct", () => {
+        expect(
+            pickScope(["text.html.markdown", "markup.quote.markdown", "meta.paragraph.markdown"]),
+        ).toBe("markup.quote.markdown");
+    });
+
+    // The counterpart, and the reason markup.list.* is deliberately unclaimed:
+    // its scope spans the entire item, so claiming it would paint every word
+    // of every list the bullet's color.
+    it("colors a list's bullet but NOT the item's text", () => {
+        expect(
+            pickScope([
+                "text.html.markdown",
+                "markup.list.unnumbered.markdown",
+                "punctuation.definition.list.begin.markdown",
+            ]),
+        ).toBe("punctuation.definition.list.begin.markdown");
+        expect(
+            pickScope([
+                "text.html.markdown",
+                "markup.list.unnumbered.markdown",
+                "meta.paragraph.markdown",
+            ]),
+        ).toBe("meta.paragraph.markdown");
+    });
+
+    // markup.fenced_code.block wraps the embedded grammar's own scopes. If it
+    // were claimed it would sit between them and the fall-outward walk and
+    // flatten every unstyled token in a fence to one color.
+    it("lets an embedded grammar win inside a fence", () => {
+        expect(
+            pickScope([
+                "text.html.markdown",
+                "markup.fenced_code.block.markdown",
+                "meta.embedded.block.go",
+                "constant.language.null.go",
+            ]),
+        ).toBe("constant.language.null.go");
+    });
+
+    it("leaves table cells alone while framing the table", () => {
+        expect(pickScope(["text.html.markdown", "markup.table.markdown"])).toBe(
+            "markup.table.markdown",
+        );
+        expect(claimed("markup.table.markdown")).toBe(false);
+        expect(claimed("punctuation.definition.table.markdown")).toBe(true);
+    });
+
+    it("claims emphasis without claiming a color", () => {
+        expect(
+            pickScope(["text.html.markdown", "meta.paragraph.markdown", "markup.bold.markdown"]),
+        ).toBe("markup.bold.markdown");
+        const bold = SCOPE_ROLES.find(([s]) => s === "markup.bold");
+        expect(bold?.[1]).toBe(null);
+        expect(bold?.[2]).toBe("bold");
+    });
+});
+
 describe("SCOPE_ROLES", () => {
     it("maps every scope to a real syntax role", () => {
         const roles = new Set([
@@ -95,7 +176,18 @@ describe("SCOPE_ROLES", () => {
             "regexp",
         ]);
         for (const [scope, role] of SCOPE_ROLES) {
+            // null is legal — a style-only rule (markup.bold) that adds weight
+            // and lets the color fall through the theme trie
+            if (role === null) continue;
             expect(roles.has(role), `${scope} → ${role}`).toBe(true);
+        }
+    });
+
+    it("gives every style-only rule an actual style", () => {
+        // a rule with neither a color nor a style paints nothing and would
+        // silently claim a scope away from the fall-outward walk
+        for (const [scope, role, fontStyle] of SCOPE_ROLES) {
+            if (role === null) expect(fontStyle, `${scope} has no color`).toBeTruthy();
         }
     });
 

@@ -22,10 +22,27 @@
 
 import type {Syntax} from "../theme/palette";
 
+/** A scope prefix, the syntax role it paints, and optionally a font style.
+ *
+ *  The role may be null: a rule with weight but no color. Monaco merges the
+ *  two independently (`acceptOverwrite` skips a foreground of ColorId.None),
+ *  so such a rule leaves the color to fall through the trie. That is what
+ *  emphasis wants — **bold** in a paragraph should be body text that is
+ *  heavier, not a new hue.
+ *
+ *  Fall-through goes to the trie's PARENT, not to whatever the token was
+ *  nested inside: pickScope hands Monaco one scope string per token, so by
+ *  theme-resolution time there is no memory of the enclosing construct.
+ *  "markup.bold.markdown" resolves against "markup" (no rule) and lands on
+ *  the root default. The honest cost: bold inside a heading is body-colored
+ *  and bold, not heading-colored and bold. Rare enough to accept; the common
+ *  case — emphasis in prose — is exactly right. */
+export type ScopeRule = [scope: string, role: keyof Syntax | null, fontStyle?: string];
+
 /** A scope prefix and the syntax role it paints. Order is irrelevant —
  *  matching is by dotted-prefix specificity, longest wins — but the table
  *  reads outermost-concept-first on purpose. */
-export const SCOPE_ROLES: [string, keyof Syntax][] = [
+export const SCOPE_ROLES: ScopeRule[] = [
     // comments — the leading // or /* is punctuation.definition.comment,
     // which nothing claims, so it falls outward onto this rule
     ["comment", "comment"],
@@ -70,10 +87,44 @@ export const SCOPE_ROLES: [string, keyof Syntax][] = [
     ["variable.other.property", "variable"],
     ["support.variable", "variable"],
 
-    // markup: html/svelte/markdown
+    // markup: html/svelte
     ["entity.name.tag", "tag"],
     ["entity.other.attribute-name", "attrName"],
     ["meta.attribute.value", "attrValue"],
+
+    // PROSE — markdown's markup.* family. This table was code-shaped until
+    // these landed, so a .md file tokenized correctly and then rendered as
+    // flat editorFg: the grammar emits 82 markup.* scopes and not one of them
+    // was claimed. Only fenced code had color, because those tokens carry the
+    // embedded grammar's source.* scopes.
+    //
+    // The `##`, the `**`, the `>` are punctuation.definition.* and stay
+    // deliberately unclaimed, exactly like a string's quotes — they fall
+    // outward onto the construct they open, so a heading is one colored run.
+    ["markup.heading", "keyword", "bold"],
+    ["markup.bold", null, "bold"],
+    ["markup.italic", null, "italic"],
+    ["markup.strikethrough", null, "strikethrough"],
+    ["markup.inline.raw", "string"], // `code span`
+    ["markup.raw.block", "string"], // indented block, no language to embed
+    ["markup.underline.link", "function", "underline"],
+    ["markup.quote", "comment", "italic"],
+    ["meta.separator", "comment"], // ---
+    // The bullet ONLY. markup.list.* spans the whole item (begin/while), so
+    // claiming it would paint every word of every list.
+    ["punctuation.definition.list.begin", "keyword"],
+    // A table's frame. Its |---|---| row already resolved to operator through
+    // the generic punctuation.separator rule, so without this the pipes and
+    // the dashes of one table read as two different things.
+    ["punctuation.definition.table", "operator"],
+    // the `go` in ```go — a quiet label, like the --- rule above
+    ["fenced_code.block.language", "comment"],
+    //
+    // NOT claimed, on purpose:
+    //   markup.fenced_code.block — spans the embedded code, whose own scopes
+    //     must win; claiming it would flatten every unstyled identifier in a
+    //     fence to one color.
+    //   markup.table — spans the cells, not just the pipes.
 
     // Structural punctuation ONLY, named family by family. A blanket
     // "punctuation" rule would claim punctuation.definition.string.begin and

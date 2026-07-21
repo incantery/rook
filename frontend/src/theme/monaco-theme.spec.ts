@@ -13,6 +13,22 @@ describe("buildMonacoTheme", () => {
         expect(ruleFor("keyword")?.foreground).toBe("c792ea");
         expect(ruleFor("delimiter")?.foreground).toBe("89ddff"); // operator role
     });
+    it("carries a scope's font style through to the rule", () => {
+        expect(ruleFor("markup.heading")?.fontStyle).toBe("bold");
+        expect(ruleFor("markup.heading")?.foreground).toBe("c792ea"); // keyword role
+        expect(ruleFor("markup.quote")?.fontStyle).toBe("italic");
+    });
+
+    // Monaco merges foreground and fontStyle independently, so a rule with no
+    // foreground lets the color fall through the trie to the default. That is
+    // what keeps **bold** in a paragraph reading as body text with weight,
+    // rather than recoloring emphasis to some syntax hue.
+    it("emits no foreground for a style-only rule", () => {
+        const bold = ruleFor("markup.bold");
+        expect(bold?.fontStyle).toBe("bold");
+        expect(bold && "foreground" in bold).toBe(false);
+    });
+
     it("sets the editor-subset UI colors", () => {
         expect(t.colors?.["editor.foreground"]).toBe("#8f93a2");
         expect(t.colors?.["editorCursor.foreground"]).toBe("#ffcc00");

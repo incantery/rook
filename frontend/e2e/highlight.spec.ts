@@ -130,6 +130,69 @@ test("svelte files highlight at all — Monaco has no language for them", async 
     await page.screenshot({path: "bin/e2e/highlight-svelte.png", fullPage: true});
 });
 
+/** the FULL className of the first token whose text starts with `needle`.
+ *  Monaco writes the color as mtk<id> and each font style as a separate
+ *  class (mtkb/mtki/mtku/mtks), so the whole string is the paint.
+ *
+ *  Monaco renders every space as U+00A0 to hold the column width, so a needle
+ *  with a space in it can never match raw textContent — the heading above
+ *  reads "# End-to-end tests" in the DOM. classOf above got away
+ *  without this only because every needle it was ever given is one word. */
+async function fullClassOf(page: Page, needle: string): Promise<string | null> {
+    return page.evaluate((n) => {
+        const flat = (s: string) => s.replace(/\u00a0/g, " ").trim();
+        for (const el of document.querySelectorAll(".editor-mount .view-line span[class^=mtk]")) {
+            if (flat(el.textContent ?? "").startsWith(n)) return el.className;
+        }
+        return null;
+    }, needle);
+}
+
+test("markdown prose is painted, not just its code fences", async ({page}) => {
+    test.setTimeout(120_000);
+    await openWorkspace(page, `hl-md-${Date.now()}`);
+    // short, and its first 20 lines carry a heading, body prose, a code span
+    // and a bold run — everything this asserts, above the fold
+    await openFile(page, "docs/e2e.md");
+
+    // Needles carry their markers because Monaco MERGES adjacent tokens that
+    // share metadata: the grammar emits ` / make e2e / ` as three tokens, all
+    // resolving to markup.inline.raw, so one span reading "`make e2e`" is what
+    // reaches the DOM. Same for the ** around a bold run and the # of a
+    // heading — which is the fall-outward contract working, visible in the
+    // markup.
+    const probes = async () => ({
+        heading: await fullClassOf(page, "# End-to-end tests"),
+        body: await fullClassOf(page, "drives the real rook"),
+        span: await fullClassOf(page, "`make e2e`"),
+        bold: await fullClassOf(page, "**server mode**"),
+    });
+    await expect
+        .poll(async () => Object.values(await probes()).filter(Boolean).length, {timeout: 30_000})
+        .toBe(4);
+
+    const {heading, body, span, bold} = await probes();
+
+    // The regression this whole change exists to prevent. Until markup.* was
+    // claimed, every one of these resolved to the same class: markdown
+    // tokenized correctly and then rendered as one flat color, because the
+    // scope table only knew code roles. Fences looked fine and hid it.
+    expect(heading).not.toBe(body);
+    expect(span).not.toBe(body);
+
+    // Headings carry weight as well as hue.
+    expect(heading).toContain(" mtkb");
+
+    // Emphasis is the OPPOSITE case: markup.bold is a style-only rule, so it
+    // takes body color and adds weight. Monaco resolves each token's single
+    // scope independently, so the color falls through the trie to the default
+    // rather than to whatever construct enclosed it — asserting the exact
+    // body class here is what pins that down.
+    expect(bold).toBe(`${body} mtkb`);
+
+    await page.screenshot({path: "bin/e2e/highlight-markdown.png", fullPage: true});
+});
+
 test("a language with no vendored grammar still tokenizes on Monarch", async ({page}) => {
     test.setTimeout(120_000);
     await openWorkspace(page, `hl-fallback-${Date.now()}`);

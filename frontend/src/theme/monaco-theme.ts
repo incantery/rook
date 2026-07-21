@@ -19,7 +19,15 @@ import type {Palette} from "./palette";
 
 export function buildMonacoTheme(p: Palette): editor.IStandaloneThemeData {
     const s = p.syntax;
-    const rule = (token: string, color: string) => ({token, foreground: noHash(color)});
+    // Both halves are optional and independent. A rule with no color carries
+    // only weight (markup.bold): Monaco's trie merges fontStyle and foreground
+    // separately, so the color falls through to the parent rule and emphasis
+    // in prose reads as body text with more weight rather than a new hue.
+    const rule = (token: string, color: string | null, fontStyle?: string) => ({
+        token,
+        ...(color ? {foreground: noHash(color)} : {}),
+        ...(fontStyle ? {fontStyle} : {}),
+    });
     return {
         base: p.type === "light" ? "vs" : "vs-dark",
         inherit: true,
@@ -27,7 +35,9 @@ export function buildMonacoTheme(p: Palette): editor.IStandaloneThemeData {
             // TextMate scopes — the vendored grammars (highlight/scope.ts owns
             // the scope→role table, so this list and the tokenizer's own
             // claim set can never drift apart)
-            ...SCOPE_ROLES.map(([scope, role]) => rule(scope, s[role])),
+            ...SCOPE_ROLES.map(([scope, role, fontStyle]) =>
+                rule(scope, role ? s[role] : null, fontStyle),
+            ),
 
             // LSP semantic token types — the layer above the grammar.
             // Standalone Monaco resolves a semantic token by joining
