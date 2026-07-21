@@ -1,0 +1,10 @@
+{
+  "bytes": 64613,
+  "cmd": [
+    "nvim",
+    "internal/host/termquery.go"
+  ],
+  "cols": 120,
+  "name": "nvim-edit",
+  "rows": 40
+}

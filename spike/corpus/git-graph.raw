@@ -1,0 +1,82 @@
+* [33mb6ef7fe[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mspike/server-terminal[m[33m, [m[1;32mmain[m[33m)[m host: test that concurrent pty writes don't interleave
+* [33m2bf216b[m host: the terminal answers its own questions
+* [33m541438d[m[33m ([m[1;33mtag: [m[1;33mv0.9.7[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m host: a claim outlives its agent, and rook kept typing at the window anyway
+* [33mf651137[m[33m ([m[1;33mtag: [m[1;33mv0.9.6[m[33m)[m e2e: wait for the shell, and delete workspaces like it might take a moment
+* [33m91901e4[m[33m ([m[1;33mtag: [m[1;33mv0.9.5[m[33m)[m editor: the focus latch let go of a pane the user had already left
+* [33md7c7265[m[33m ([m[1;33mtag: [m[1;33mv0.9.4[m[33m)[m e2e: a harness, a repo the test owns, and the pty's first coverage
+* [33m95f0ff8[m[33m ([m[1;33mtag: [m[1;33mv0.9.3[m[33m)[m terminal: the replay gate could not see mode reports
+* [33m67d584f[m[33m ([m[1;33mtag: [m[1;33mv0.9.2[m[33m)[m editor: :set wrap, scoped the way vim scopes it
+* [33maad6783[m[33m ([m[1;33mtag: [m[1;33mv0.9.1[m[33m)[m markdown: the theme could not see prose, only its code fences
+* [33m6b5c62c[m[33m ([m[1;33mtag: [m[1;33mv0.9.0[m[33m)[m threads: say whose move it is — inline rows, real statuses, and ,t as a finder
+* [33ma4829eb[m theme: the editor pane joins the tint — monaco does do transparency
+* [33m399fd38[m[33m ([m[1;33mtag: [m[1;33mv0.8.3[m[33m)[m finder: center the picker and give it the height to be centered in
+* [33m1d5a1c5[m[33m ([m[1;33mtag: [m[1;33mv0.8.2[m[33m)[m finder: one telescope over pluggable sources, with a preview pane
+* [33m27de138[m[33m ([m[1;33mtag: [m[1;33mv0.8.1[m[33m)[m threads: stop the thread buffer stealing focus; keycaps and an active rail
+* [33m918df77[m[33m ([m[1;33mtag: [m[1;33mv0.8.0[m[33m)[m threads: the sidebar becomes a quickfix list
+* [33mf9dcbc3[m threads: a thread is a buffer too — ,t to open it, hover to peek
+* [33me8fb611[m[33m ([m[1;33mtag: [m[1;33mv0.7.0[m[33m)[m threads: a comment is a buffer, not a form
+* [33m7cc16db[m[33m ([m[1;33mtag: [m[1;33mv0.6.1[m[33m)[m threads: the reply arrives on its own, and the composer takes the keyboard
+* [33m440ebb6[m[33m ([m[1;33mtag: [m[1;33mv0.6.0[m[33m)[m docs: comments over LSP — the shareable half, and the boundary it stops at
+* [33m85ada06[m threads: ,c leaves a note, ,? asks now — and the nudge carries its own verbs
+* [33m2bfa6a2[m[33m ([m[1;33mtag: [m[1;33mv0.5.1[m[33m)[m editor: semantic tokens — what the compiler knows, over what the grammar guesses
+* [33m60f8d39[m[33m ([m[1;33mtag: [m[1;33mv0.5.0[m[33m)[m editor: TextMate grammars — what VS Code runs, in place of Monarch
+* [33m1a391dd[m[33m ([m[1;33mtag: [m[1;33mv0.4.3[m[33m)[m editor: K speaks, the world opens — hover fix, external files, cwd-rooted search
+* [33m90991dc[m[33m ([m[1;33mtag: [m[1;33mv0.4.2[m[33m)[m host: adopt the login shell's PATH — a Finder launch has no toolchains
+* [33mbb1bfac[m[33m ([m[1;33mtag: [m[1;33mv0.4.1[m[33m)[m editor: the nvim keys come home — telescope chords, relative numbers, unnamedplus
+* [33m7f5f308[m bindings: regenerate config models for the lsp family
+* [33maf391ad[m[33m ([m[1;33mtag: [m[1;33mv0.4.0[m[33m)[m explore: an investigation is a task, and the trail writes itself
+* [33mc43588e[m editor: ⌃O/⌃I — the jumplist lives above the pane, at the openFile seam
+* [33ma56b669[m grep: ` / — live search over git's view, a hit is a place to land
+* [33m42b0178[m picker: fuzzy — boundaries beat substrings, and the basename is the intent
+* [33m5c8079b[m fmt: oxfmt drift in two review files
+* [33m0178491[m editor: gd/gr/K — navigation joins the island, refs join the quickfix
+* [33m105594a[m lsp host: an instance per (server, root marker), fail-open, grep-shaped
+* [33ma82c383[m lsp: a hand-rolled client — framing, handshake, full sync, three queries
+* [33mdb61730[m plugin: the substrate — catalog, staging-dir installs, the binary is the lock
+* [33m0da6c8a[m config: the lsp family — two tiers, and parse order is the merge engine
+* [33mb966446[m plugins: the spec — a plugin system whose only day-one type is language support
+* [33m4c8a1af[m triage: haiku fan-out is the host's job, and risk sorts the list
+* [33m59eca52[m quickfix: one traversal over any work list, and a comma for the context
+* [33m332b43e[m review: the hunk is a decision, not a diff — bespoke detail + haiku fan-out
+* [33mbce6f32[m rooktask: review, the first work-type over a nestable unit of attention
+* [33m514a5f5[m[33m ([m[1;33mtag: [m[1;33mv0.3.1[m[33m, [m[1;32mrook/7-detach-inactive-stop-rendering[m[33m)[m worktree: a branch delimiter, because a name is a directory and a branch is not
+* [33m0c2da8e[m[33m ([m[1;33mtag: [m[1;33mv0.3.0[m[33m)[m gitignore: Claude Code's worktree isolation is not repo content
+* [33m4cffea4[m deck: the review found three tests that could not fail
+* [33m2858a59[m deck: an agent is a row, not a chip inside a workspace
+* [33m37fab6d[m docs: the session view shipped, and what measuring it overturned
+* [33md550ca9[m agent: a claude session is a conversation, and a pane
+* [33m4722526[m hostclient: "dev" is not a build id, so stop riding on it
+* [33mb78b97c[m transcript: agentmon was the right tool for a different job
+* [33m83e474d[m monitor: one ps for the fg sensor and what rook costs the machine
+* [33mb0b7a2a[m[33m ([m[1;33mtag: [m[1;33mv0.2.0[m[33m)[m leader: let the second press through instead of synthesising it
+* [33m3dc134e[m agent: two engines, and the drafter stops needing setup
+* [33m9b5658f[m focus: make the zone follow DOM focus instead of tracking it
+* [33m195dc44[m strip: the dashboard is a surface, not a layout
+* [33mc361bf4[m buffers: a file is a document, not a window
+* [33m2fedd43[m panes: ctrl+hjkl navigation, across the workbench and into the tree
+* [33m89ac504[m theme: finish the white-alpha sweep, and guard it
+* [33m187fadd[m threads: stop promising a gesture the panel doesn't have
+* [33m7c88d3b[m explorer: the mockup's review decoration — status, threads, scope
+* [33m4d90409[m theme: add Catppuccin (all four flavours), via the importer
+* [33md48a50b[m theme: sweep the chrome's hardcoded surfaces onto palette tokens
+* [33m3eedf4b[m e2e: drive the real app headless with Playwright
+* [33m5425773[m theme: oxfmt color.ts (missed in the Phase A commit)
+* [33m9e8b990[m theme: theme the editor pane surface (--bg)
+* [33m8a9c783[m theme: persist selection (theme config scalar) + Settings picker
+* [33mf968857[m theme: One Dark + One Light built-ins
+* [33md872c02[m theme: VS Code theme importer
+* [33mcef1ceb[m theme: ThemeService — collapse the four palettes into one (parity)
+* [33m5a64e64[m theme: pure foundations — color math, Palette, per-consumer builders
+* [33m81c9fc6[m docs: theming design + Phase A plan
+* [33m074f0a8[m explorer: reset button background (no-preflight buttonface leak)
+* [33m34fcd7d[m explorer: file tree in a left side pane (` b)
+* [33m7df4e90[m editor: wire vim quit commands — :q :wq :x :qa :qa! :wqa
+* [33mf5392f6[m editor: auto-focus the file/diff editor once Monaco finishes loading
+* [33mc6bd503[m editor: vim keybindings + editable file mode with :w/⌘S save
+* [33mb79aea7[m host: isolate XDG_CONFIG_HOME in TestOverview
+* [33m91bd9a2[m dev: fully isolate the dev sandbox from the daily driver
+* [33ma6a885b[m threads: inline the last raw CSS classes into Tailwind utilities
+*   [33m88bf522[m Merge origin/main (Tailwind refactor) into threads-list-view + mode work
+[32m|[m[33m\[m  
+[32m|[m *   [33mb6f6c04[m Merge pull request #37 from incantery/rook/13-convert-remaining-app-css-to
+[32m|[m [34m|[m[35m\[m  

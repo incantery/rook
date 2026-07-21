@@ -1,0 +1,12 @@
+{
+  "name": "unicode",
+  "cols": 80,
+  "rows": 24,
+  "cmd": [
+    "/usr/bin/printf",
+    "%s",
+    "\u001b[2J\u001b[HCJK wide: 你好世界 こんにちは 안녕하세요\nemoji ZWJ: 👨‍👩‍👧‍👦 🇺🇸 🎉 🧑‍💻\ncombining: é à ö ñ  café\nbox: ┌─┐ │x│ └─┘\ntruecolor \u001b[38;2;255;100;0mORANGE\u001b[0m \u001b[1;4;31mbold-under-red\u001b[0m\ntab\tstops\there\n"
+  ],
+  "captureMs": 600,
+  "steps": []
+}
