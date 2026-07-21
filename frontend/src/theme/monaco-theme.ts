@@ -56,7 +56,16 @@ export function buildMonacoTheme(p: Palette): editor.IStandaloneThemeData {
             rule("attribute.value", s.attrValue),
         ],
         colors: {
-            "editor.background": p.bg,
+            // Fully transparent, NOT p.bg: the window is see-through
+            // (MacBackdropTransparent) and the body tint is the one layer that
+            // paints. Monaco does support alpha here — parseHex takes #RRGGBBAA
+            // and the standalone theme service emits it as rgba() into
+            // --vscode-editor-background — but it paints that var on BOTH
+            // .monaco-editor and .monaco-editor-background (lines-content, the
+            // margin covers, the textarea cover), so any partial alpha stacks
+            // with itself. Zero is the only value that composes: the pane owns
+            // the tint once, Monaco adds nothing.
+            "editor.background": "#00000000",
             "editor.foreground": p.editorFg,
             "editorCursor.foreground": p.cursor,
             "editor.selectionBackground": p.selection,

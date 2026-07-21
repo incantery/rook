@@ -88,7 +88,12 @@ export const themeService = {
         for (const [k, v] of Object.entries(cssVars(active.palette))) {
             root.style.setProperty(k, v);
         }
-        document.body.style.background = withAlpha(active.palette.bg, opacity);
+        const tint = withAlpha(active.palette.bg, opacity);
+        document.body.style.background = tint;
+        // The same tint as a var, for the panes that must MASK what's under
+        // them (the editor's status overlay) rather than let the body show
+        // through. Opaque --bg would read as a slab against the tint.
+        root.style.setProperty("--bg-tint", tint);
     },
 
     /** Switch themes at runtime: chrome + every live terminal + Monaco. */

@@ -14,9 +14,11 @@ describe("buildMonacoTheme", () => {
         expect(ruleFor("delimiter")?.foreground).toBe("89ddff"); // operator role
     });
     it("sets the editor-subset UI colors", () => {
-        expect(t.colors?.["editor.background"]).toBe("#0f111a");
         expect(t.colors?.["editor.foreground"]).toBe("#8f93a2");
         expect(t.colors?.["editorCursor.foreground"]).toBe("#ffcc00");
+    });
+    it("leaves the editor background fully transparent for the body tint", () => {
+        expect(t.colors?.["editor.background"]).toBe("#00000000");
     });
     it("derives the diff tints to the old exact values", () => {
         expect(t.colors?.["diffEditor.insertedTextBackground"]).toBe("#c3e88d22");

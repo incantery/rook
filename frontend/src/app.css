@@ -70,6 +70,7 @@ html {
        (inline, so they win), and a body-level declaration would shadow them for
        body's subtree. main.ts's applyChrome() overrides these at boot. */
     --bg: #0f111a;
+    --bg-tint: rgba(15, 17, 26, 0.95); /* matches body's pre-JS default below */
     --acc: #82aaff;
     --fg: #d6deeb;
     --dim: #8f93a2;
@@ -223,14 +224,15 @@ body {
 }
 
 /* ==== editor pane (term/editor.ts): Monaco review/diff + file viewer.
-   Opaque on purpose — Monaco can't render transparent, so the pane owns
-   its background at the body tint's full-opacity color. ==== */
+   Transparent, like every other pane: Monaco's editor.background is #00000000
+   (see theme/monaco-theme.ts for why zero and not a partial alpha), so the
+   body tint is what shows through the code. ==== */
 .editor-wrap {
     position: absolute;
     inset: 0;
     display: flex;
     flex-direction: column;
-    background: var(--bg);
+    background: transparent;
 }
 .editor-head {
     flex: none;
@@ -299,7 +301,6 @@ body {
     height: 20px;
     padding: 0 8px;
     border-top: 1px solid var(--line);
-    background: var(--bg);
     font-family: var(--mono);
     font-size: 11px;
     color: var(--dim);
@@ -333,7 +334,9 @@ body {
     font-family: var(--mono);
     font-size: 12px;
     color: var(--dim);
-    background: var(--bg);
+    /* the tint, not --bg: this one MASKS (stale code must not ghost under a
+       "loading"/"binary" label) but still has to read as the same surface */
+    background: var(--bg-tint);
 }
 
 /* ==== threads: Monaco gutter glyphs (term/threadview.ts) + the
