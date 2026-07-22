@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -239,4 +240,101 @@ func (e *Emulator) mouseEncoding() int {
 		}
 	}
 	return 0
+}
+
+// osc handles an OSC payload (the bytes between ESC ] and the terminator). It
+// answers the color queries programs use to read the theme — OSC 10/11/12 for
+// the default fg/bg/cursor, OSC 4 for a palette index — the residual query.go
+// left to the client (the "vim reads OSC 11 for the background" case). A set
+// (spec is a color, not "?") is recorded so a later query stays consistent;
+// rendering stays client-driven, so a set does not repaint. Other OSC codes
+// (title, hyperlinks) are ignored — they never reached the grid before either.
+func (e *Emulator) osc(payload []byte) {
+	code, rest, ok := strings.Cut(string(payload), ";")
+	if !ok {
+		return
+	}
+	switch code {
+	case "10":
+		e.oscDynColor(10, rest, &e.fgColor)
+	case "11":
+		e.oscDynColor(11, rest, &e.bgColor)
+	case "12":
+		e.oscDynColor(12, rest, &e.cursorColor)
+	case "4":
+		e.oscIndexColor(rest)
+	}
+}
+
+// oscDynColor answers or sets one of the dynamic colors (OSC 10/11/12).
+func (e *Emulator) oscDynColor(code int, spec string, slot *uint32) {
+	if spec == "?" {
+		e.reply("\x1b]" + strconv.Itoa(code) + ";" + oscColorString(*slot) + "\x1b\\")
+		return
+	}
+	if c, ok := parseOSCColor(spec); ok {
+		*slot = c
+	}
+}
+
+// oscIndexColor answers or sets a palette index (OSC 4 ; index ; spec).
+func (e *Emulator) oscIndexColor(rest string) {
+	idxStr, spec, ok := strings.Cut(rest, ";")
+	if !ok {
+		return
+	}
+	idx, err := strconv.Atoi(idxStr)
+	if err != nil || idx < 0 || idx > 15 {
+		return
+	}
+	if spec == "?" {
+		e.reply("\x1b]4;" + idxStr + ";" + oscColorString(e.palette[idx]) + "\x1b\\")
+		return
+	}
+	if c, ok := parseOSCColor(spec); ok {
+		e.palette[idx] = c
+	}
+}
+
+// oscColorString formats a 0xRRGGBB color as xterm's 16-bit reply, each 8-bit
+// channel doubled into 16 bits (0xff -> ffff).
+func oscColorString(c uint32) string {
+	r, g, b := (c>>16)&0xff, (c>>8)&0xff, c&0xff
+	return fmt.Sprintf("rgb:%04x/%04x/%04x", r*0x101, g*0x101, b*0x101)
+}
+
+// parseOSCColor parses the color specs a program uses to set a color: xterm's
+// rgb:R/G/B (1-4 hex digits per channel) and #RRGGBB.
+func parseOSCColor(spec string) (uint32, bool) {
+	if rest, ok := strings.CutPrefix(spec, "rgb:"); ok {
+		parts := strings.Split(rest, "/")
+		if len(parts) != 3 {
+			return 0, false
+		}
+		var out uint32
+		for _, p := range parts {
+			v, err := strconv.ParseUint(p, 16, 32)
+			if err != nil || len(p) < 1 || len(p) > 4 {
+				return 0, false
+			}
+			switch len(p) { // scale to 8 bits
+			case 1:
+				v *= 0x11
+			case 3:
+				v >>= 4
+			case 4:
+				v >>= 8
+			}
+			out = out<<8 | (uint32(v) & 0xff)
+		}
+		return out, true
+	}
+	if rest, ok := strings.CutPrefix(spec, "#"); ok && len(rest) == 6 {
+		v, err := strconv.ParseUint(rest, 16, 32)
+		if err != nil {
+			return 0, false
+		}
+		return uint32(v), true
+	}
+	return 0, false
 }

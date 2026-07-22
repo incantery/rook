@@ -20,7 +20,7 @@ import {
     CATPPUCCIN_MOCHA,
 } from "./catppuccin";
 import {buildMonacoTheme} from "./monaco-theme";
-import {MATERIAL_OCEAN, type Theme} from "./palette";
+import {MATERIAL_OCEAN, type Palette, type Theme} from "./palette";
 import {buildXtermTheme} from "./xterm";
 
 // Insertion order is what the Settings picker lists, so keep it meaningful:
@@ -44,6 +44,7 @@ let active: Theme = MATERIAL_OCEAN;
 let opacity = 1;
 const xtermSubs = new Set<(t: ITheme) => void>();
 const monacoSubs = new Set<(d: editor.IStandaloneThemeData) => void>();
+const paletteSubs = new Set<(p: Palette) => void>();
 
 export const themeService = {
     builtins(): string[] {
@@ -80,6 +81,13 @@ export const themeService = {
         monacoSubs.add(cb);
         return () => monacoSubs.delete(cb);
     },
+    /** The terminal renderer colors from --term-* CSS vars, but the host emulator
+     *  also needs the palette to answer OSC color queries — App subscribes here
+     *  and pushes it to the manager on every theme change. */
+    onPalette(cb: (p: Palette) => void): () => void {
+        paletteSubs.add(cb);
+        return () => paletteSubs.delete(cb);
+    },
 
     /** Write the chrome vars + body tint to the DOM. Safe before Svelte mounts;
      *  documentElement (html) inline style beats app.css :root, so this wins. */
@@ -106,5 +114,6 @@ export const themeService = {
         for (const cb of xtermSubs) cb(xt);
         const mt = buildMonacoTheme(active.palette);
         for (const cb of monacoSubs) cb(mt);
+        for (const cb of paletteSubs) cb(active.palette);
     },
 };

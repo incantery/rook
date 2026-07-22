@@ -58,7 +58,7 @@ export function darken(hex: string, amt: number): string {
     return mix(hex, "#000000", amt);
 }
 
-function rgb(hex: string): [number, number, number] {
+export function rgb(hex: string): [number, number, number] {
     const h = stripAlpha(hex);
     return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
 }

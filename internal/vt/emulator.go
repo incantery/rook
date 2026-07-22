@@ -43,6 +43,23 @@ type Emulator struct {
 	decModes  map[int]bool // DEC private modes seen via CSI ? h/l — for DECRQM reports
 	ansiModes map[int]bool // ANSI modes seen via CSI h/l
 	sbLines   int          // scrollback depth, for reset
+
+	// The theme colors, for answering OSC palette queries (OSC 4/10/11/12) — the
+	// residual query.go left to the client. 0xRRGGBB. Seeded to a dark default so
+	// a program never hangs on an unanswered query; the client sends the real
+	// theme (SetPalette) on attach and on every theme change.
+	palette     [16]uint32
+	fgColor     uint32
+	bgColor     uint32
+	cursorColor uint32
+}
+
+// defaultPalette is a conventional 16-colour ramp — a stand-in until the client
+// sends the theme. The default background is dark, so a program that reads it
+// (vim's background detection) guesses dark before the real palette lands.
+var defaultPalette = [16]uint32{
+	0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x1e90ff, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
+	0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
 }
 
 type savedCursor struct {
@@ -78,9 +95,13 @@ func NewWithScrollback(w, h, scrollbackLines int) *Emulator {
 		combinedIdx:   map[string]int{},
 		// Defaults that are not false: a mode report before any h/l must say
 		// wraparound is on and the cursor is visible, as xterm.js does.
-		decModes:  map[int]bool{7: true, 25: true},
-		ansiModes: map[int]bool{},
-		sbLines:   scrollbackLines,
+		decModes:    map[int]bool{7: true, 25: true},
+		ansiModes:   map[int]bool{},
+		sbLines:     scrollbackLines,
+		palette:     defaultPalette,
+		fgColor:     0xd6deeb, // light on a dark default
+		bgColor:     0x0f111a,
+		cursorColor: 0xd6deeb,
 	}
 	if scrollbackLines > 0 {
 		e.primary.sb = newScrollback(w, scrollbackLines)
@@ -142,6 +163,16 @@ func (e *Emulator) Cursor() (x, y int) { return e.cur.cx, e.cur.cy }
 // ctrl+hjkl navigates panes on the normal screen but belongs to the program on
 // the alt screen.
 func (e *Emulator) AltScreen() bool { return e.onAlt }
+
+// SetPalette sets the theme colors the emulator answers OSC palette queries
+// with: the default foreground/background/cursor and the 16-colour ANSI ramp,
+// each 0xRRGGBB. The client sends these from its theme on attach and on a theme
+// change, so a program reading the terminal's colors (vim, delta) gets the
+// palette the user actually sees.
+func (e *Emulator) SetPalette(fg, bg, cursor uint32, ansi [16]uint32) {
+	e.fgColor, e.bgColor, e.cursorColor = fg, bg, cursor
+	e.palette = ansi
+}
 
 // MouseTracking reports the mouse-reporting mode a program has enabled: level
 // 0 = off, 1 = X10 (?9), 2 = normal (?1000), 3 = button-event (?1002, drags),

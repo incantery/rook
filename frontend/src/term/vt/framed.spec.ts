@@ -2,9 +2,11 @@ import {describe, expect, it} from "vitest";
 import {
     decodeServerMessage,
     encodeInput,
+    encodePalette,
     encodeResize,
     MSG_FRAME,
     MSG_INPUT,
+    MSG_PALETTE,
     MSG_RESIZE,
     MSG_STATE,
 } from "./framed";
@@ -62,5 +64,15 @@ describe("framed transport", () => {
     it("encodes resize as tag + two big-endian uint16", () => {
         expect([...encodeResize(80, 24)]).toEqual([MSG_RESIZE, 0, 80, 0, 24]);
         expect([...encodeResize(300, 100)]).toEqual([MSG_RESIZE, 1, 44, 0, 100]); // 300 = 0x012c
+    });
+
+    it("encodes the palette as tag + fg/bg/cursor + 16 ansi RGB triples", () => {
+        const ansi = Array.from({length: 16}, (_, i) => [i, i, i] as [number, number, number]);
+        const bytes = encodePalette([1, 2, 3], [4, 5, 6], [7, 8, 9], ansi);
+        expect(bytes.length).toBe(1 + 9 + 48);
+        expect(bytes[0]).toBe(MSG_PALETTE);
+        expect([...bytes.slice(1, 10)]).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        expect([...bytes.slice(10, 13)]).toEqual([0, 0, 0]); // ansi[0]
+        expect([...bytes.slice(-3)]).toEqual([15, 15, 15]); // ansi[15]
     });
 });

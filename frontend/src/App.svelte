@@ -9,6 +9,10 @@
     import type {HostAPI, IssueInfo, ThreadInfo} from "./hostapi";
     import {TermManager} from "./term/manager";
     import type {Edge, PaneRef} from "./term/layout";
+    import {themeService} from "./theme/service";
+    import {rgb} from "./theme/color";
+    import type {Palette as ThemePalette} from "./theme/palette";
+    import {encodePalette} from "./term/vt/framed";
     import {Registry} from "./registry";
     import {buildKeymap, CONTEXT_LEADER_KEY, CONTEXT_PREFIX, parseLeader, sigOf} from "./keymap";
     import {app, type Mode} from "./state.svelte";
@@ -1824,8 +1828,15 @@
         });
 
         // The terminal renderer reads its colors from --term-* CSS variables,
-        // which the theme service writes onto :root on every swap — so a live
-        // theme change re-colors every terminal with no subscription here.
+        // which the theme service writes onto :root on every swap. But the host
+        // emulator also needs the palette, to answer a program's OSC color
+        // queries (vim reading the background) — push it now and on every swap.
+        const sendPalette = (p: ThemePalette) =>
+            mgr.setPalette(
+                encodePalette(rgb(p.editorFg), rgb(p.bg), rgb(p.cursor), p.ansi.map(rgb)),
+            );
+        sendPalette(themeService.active().palette);
+        const unPalette = themeService.onPalette(sendPalette);
 
         window.addEventListener("keydown", onKeydown, {capture: true});
         // focusin (not focus) — it bubbles, so one listener sees every pane,
@@ -1855,6 +1866,7 @@
         })();
 
         return () => {
+            unPalette();
             window.removeEventListener("keydown", onKeydown, {capture: true});
             window.removeEventListener("focusin", onFocusIn);
             ro.disconnect();

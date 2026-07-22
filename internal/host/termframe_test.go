@@ -330,6 +330,86 @@ func TestFramedCursorMoveIsSent(t *testing.T) {
 	waitCursorX(0) // the frame that carries only the cursor must arrive
 }
 
+// TestFramedPaletteAnswersOSC proves the palette a client sends reaches the
+// emulator and shapes its OSC answers: after msgPalette sets the background, a
+// program's OSC 11 query gets that color back (the vim-background path).
+func TestFramedPaletteAnswersOSC(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	h := New()
+
+	ptmx, tty, err := cpty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	if tio, terr := unix.IoctlGetTermios(int(tty.Fd()), unix.TIOCGETA); terr == nil {
+		tio.Lflag &^= unix.ICANON | unix.ECHO
+		if serr := unix.IoctlSetTermios(int(tty.Fd()), unix.TIOCSETA, tio); serr != nil {
+			t.Skipf("cannot raw the test tty: %v", serr)
+		}
+	} else {
+		t.Skipf("cannot read tty termios: %v", terr)
+	}
+
+	s := &session{
+		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: 20, Rows: 4, Created: time.Now()},
+		pty:   ptmx,
+		cmd:   exec.Command("true"),
+		emu:   vt.New(20, 4),
+		dirty: make(chan struct{}, 1),
+	}
+	h.mu.Lock()
+	h.sessions["s1"] = s
+	h.mu.Unlock()
+	go h.readPump(s)
+
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+
+	c, ctx, cancel := dialFramed(t, srv, h, "s1")
+	defer cancel()
+	defer c.Close(websocket.StatusNormalClosure, "done")
+
+	// Set the background to 0x123456 via the palette message.
+	pal := make([]byte, 1+paletteBytes)
+	pal[0] = msgPalette
+	pal[4], pal[5], pal[6] = 0x12, 0x34, 0x56 // bg is the 2nd RGB triple
+	if err := c.Write(ctx, websocket.MessageBinary, pal); err != nil {
+		t.Fatal(err)
+	}
+
+	// The palette (ws) and the query (tty) race across goroutines, so re-ask
+	// until the answer reflects the set color. It applies within a message or two.
+	replies := make(chan string, 8)
+	go func() {
+		buf := make([]byte, 128)
+		for {
+			n, rerr := tty.Read(buf)
+			if n > 0 {
+				replies <- string(buf[:n])
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+
+	deadline := time.After(3 * time.Second)
+	want := "\x1b]11;rgb:1212/3434/5656\x1b\\"
+	for {
+		tty.Write([]byte("\x1b]11;?\x1b\\")) // program asks for the background
+		select {
+		case r := <-replies:
+			if strings.Contains(r, want) {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("OSC 11 never answered with the set palette (want %q)", want)
+		}
+	}
+}
+
 // TestFramedInputReachesPty is the input half: a msgInput message is written to
 // the session's pty, so a program reading the tty sees the keystrokes.
 func TestFramedInputReachesPty(t *testing.T) {

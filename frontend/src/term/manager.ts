@@ -183,6 +183,9 @@ export class TermManager {
      *  the TOTAL delta against these, so clamping stays cursor-true */
     private dragStart: {split: SplitNode; i: number; w: [number, number]} | null = null;
     private fitQueued = 0;
+    /** the theme's colors (encoded msgPalette), sent to every session so the
+     *  host emulator can answer OSC palette queries. */
+    private palette: Uint8Array | null = null;
 
     constructor(
         private container: HTMLElement,
@@ -192,6 +195,16 @@ export class TermManager {
 
     get workspace(): string {
         return this.current;
+    }
+
+    /** setPalette stores the theme's colors and pushes them to every open
+     *  session, so the host emulator answers OSC palette queries with the theme
+     *  the user sees (vim reading the background). New sessions get it on connect. */
+    setPalette(bytes: Uint8Array): void {
+        this.palette = bytes;
+        for (const tab of this.sessions.values()) {
+            if (tab.ws?.readyState === WebSocket.OPEN) tab.ws.send(bytes);
+        }
     }
 
     /** the active WINDOW id (strip identity) */
@@ -458,7 +471,9 @@ export class TermManager {
             // "live" seam, no query-suppression. The snapshot repaints it.
             tab.renderer.reset();
             tab.ws = ws;
-            // resize the host to our current grid, and true up once laid out
+            // give the host emulator the theme (for OSC palette answers) and our
+            // grid before the first output, then true the grid up once laid out
+            if (this.palette) ws.send(this.palette);
             ws.send(encodeResize(tab.cols, tab.rows));
             this.paneInActive(tab.id)?.fit(true);
         };

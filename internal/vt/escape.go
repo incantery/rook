@@ -411,4 +411,3 @@ func extColor(ps []int, i int) (c Color, adv int, ok bool) {
 
 // osc handles Operating System Command strings (window title, palette, etc.).
 // None change the grid, so they are consumed and dropped for now.
-func (e *Emulator) osc(_ []byte) {}

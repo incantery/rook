@@ -7,6 +7,7 @@ export const MSG_FRAME = 0x01; // server -> client: a vt.Frame
 export const MSG_STATE = 0x02; // server -> client: session state (alt screen)
 export const MSG_INPUT = 0x10; // client -> server: raw pty bytes
 export const MSG_RESIZE = 0x11; // client -> server: cols, rows
+export const MSG_PALETTE = 0x12; // client -> server: theme colors for OSC answers
 
 // state flags byte: bit0 alt screen; bits1-3 mouse tracking level (0-4); bit4
 // SGR mouse encoding.
@@ -60,4 +61,24 @@ export function encodeResize(cols: number, rows: number): Uint8Array {
         (rows >> 8) & 0xff,
         rows & 0xff,
     ]);
+}
+
+export type RGB = [number, number, number];
+
+/** encodePalette frames the theme's colors — default fg/bg/cursor then the 16
+ *  ANSI colors — as RGB triples, for the host emulator's OSC palette answers. */
+export function encodePalette(fg: RGB, bg: RGB, cursor: RGB, ansi: RGB[]): Uint8Array {
+    const out = new Uint8Array(1 + 9 + 48);
+    out[0] = MSG_PALETTE;
+    let o = 1;
+    const put = (c: RGB) => {
+        out[o++] = c[0];
+        out[o++] = c[1];
+        out[o++] = c[2];
+    };
+    put(fg);
+    put(bg);
+    put(cursor);
+    for (let i = 0; i < 16; i++) put(ansi[i] ?? [0, 0, 0]);
+    return out;
 }

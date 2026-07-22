@@ -34,9 +34,13 @@ const (
 	msgState byte = 0x02 // payload: 1 flags byte (bit0 = alt screen)
 
 	// client -> server
-	msgInput  byte = 0x10 // payload: raw bytes for the pty
-	msgResize byte = 0x11 // payload: cols, rows as two big-endian uint16
+	msgInput   byte = 0x10 // payload: raw bytes for the pty
+	msgResize  byte = 0x11 // payload: cols, rows as two big-endian uint16
+	msgPalette byte = 0x12 // payload: fg,bg,cursor (3 bytes RGB each) + 16 ansi RGB
 )
+
+// paletteBytes is the msgPalette payload length: fg+bg+cursor (9) + 16 ANSI (48).
+const paletteBytes = 9 + 16*3
 
 // msgState payload is one flags byte: bit0 = alt screen; bits1-3 = mouse
 // tracking level (0=off..4=any-event); bit4 = SGR mouse encoding.
@@ -47,6 +51,9 @@ const (
 
 // mouseFlags packs the mouse level (0-4) into bits 1-3.
 func mouseFlags(level int) byte { return byte(level&0x7) << 1 }
+
+// rgb24 reads a 0xRRGGBB color from the first three bytes of b.
+func rgb24(b []byte) uint32 { return uint32(b[0])<<16 | uint32(b[1])<<8 | uint32(b[2]) }
 
 // frameInterval bounds how often the render loop diffs the grid: a burst of pty
 // output between ticks folds into one net frame (the coalescing D6 wants). It is
@@ -110,6 +117,18 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 			s.info.Cols, s.info.Rows = cols, rows
 			s.mu.Unlock()
 			s.signalDirty() // force the resend that the geometry change needs
+		case msgPalette:
+			p := data[1:]
+			if len(p) < paletteBytes {
+				continue
+			}
+			var ansi [16]uint32
+			for i := range ansi {
+				ansi[i] = rgb24(p[9+i*3:])
+			}
+			s.emuMu.Lock()
+			s.emu.SetPalette(rgb24(p[0:]), rgb24(p[3:]), rgb24(p[6:]), ansi)
+			s.emuMu.Unlock()
 		}
 	}
 
