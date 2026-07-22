@@ -10,6 +10,7 @@
         "build": "vite build --mode production",
         "preview": "vite preview",
         "test": "vitest run",
+        "test:bench": "playwright test -c playwright.bench.config.ts",
         "check": "svelte-check",
         "lint": "oxlint --deny-warnings && node scripts/lint-theme.mjs",
         "format": "oxfmt .",

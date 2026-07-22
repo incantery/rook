@@ -1,0 +1,42 @@
+/* Raw CSS for the imperative VT renderer, per rook's convention for imperative
+ * islands (xterm/Monaco stay raw CSS, not Tailwind). Colors hang off --term-*
+ * custom properties so the theme drives them; metrics off --vt-* so a pane can
+ * size the grid. */
+
+.vt-screen {
+    position: relative;
+    font-family: var(--vt-font, ui-monospace, "SF Mono", Menlo, monospace);
+    font-size: var(--vt-font-size, 13px);
+    line-height: var(--vt-line-height, 1.2);
+    --vt-cell-w: 1ch;
+    --vt-cell-h: calc(var(--vt-font-size, 13px) * var(--vt-line-height, 1.2));
+    color: var(--term-fg, #d0d0d0);
+    background: var(--term-bg, #1e1e1e);
+    white-space: pre;
+    overflow: hidden;
+    contain: strict;
+    tab-size: 8;
+}
+
+.vt-row {
+    height: var(--vt-cell-h);
+    white-space: pre;
+    /* a row is its own containing block so a repaint can't reflow its siblings */
+    contain: content;
+    will-change: contents;
+}
+
+.vt-cursor {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: var(--vt-cell-w);
+    height: var(--vt-cell-h);
+    background: var(--term-cursor, var(--term-fg, #d0d0d0));
+    opacity: 0.7;
+    pointer-events: none;
+    transform: translate(
+        calc(var(--vt-cx, 0) * var(--vt-cell-w)),
+        calc(var(--vt-cy, 0) * var(--vt-cell-h))
+    );
+}
