@@ -16,6 +16,7 @@
 
 import {decodeFrame, type Frame, type WCell} from "./frame";
 import {ClientGrid, coalesceCells} from "./grid";
+import {keyToBytes} from "./keymap";
 import {rowExtent, type Selection, selectedText, wordAt} from "./selection";
 import {rowHtml} from "./style";
 
@@ -24,11 +25,15 @@ export interface RendererOptions {
     className?: string;
     /** how many scrolled-off lines to retain on the client (default 5000). */
     scrollbackCap?: number;
+    /** sink for terminal input — key presses and pastes translated to pty bytes.
+     *  Omit for a read-only renderer (e.g. a preview or a bench harness). */
+    onInput?: (data: string) => void;
 }
 
 export class GridRenderer {
-    readonly grid: ClientGrid;
+    grid: ClientGrid;
     private container: HTMLElement;
+    private onInput?: (data: string) => void;
     private rowEls: HTMLElement[] = [];
     private cursorEl: HTMLElement;
     private selectionEl: HTMLElement;
@@ -51,6 +56,7 @@ export class GridRenderer {
         this.container = container;
         this.grid = new ClientGrid(cols, rows);
         this.scrollbackCap = opts.scrollbackCap ?? 5000;
+        this.onInput = opts.onInput;
 
         container.classList.add("vt-screen");
         if (opts.className) container.classList.add(opts.className);
@@ -137,6 +143,37 @@ export class GridRenderer {
         return this.viewOffset;
     }
 
+    /** resize changes the grid geometry (a window resize / SIGWINCH). It rebuilds
+     *  the client grid and row elements at the new size and pins the viewport to
+     *  the live screen; the next Frame — the host resends the whole screen after a
+     *  resize — repaints them. Scrollback history is kept (its rows keep their own
+     *  width and render fine); the selection is dropped, since its coordinates no
+     *  longer map. The caller is responsible for telling the host the new size. */
+    resize(cols: number, rows: number): void {
+        if (cols === this.grid.cols && rows === this.grid.rows) return;
+        this.grid = new ClientGrid(cols, rows);
+        this.selection = null;
+        this.viewOffset = 0;
+        this.cellW = 0; // geometry changed — re-measure lazily
+        this.cellH = 0;
+        this.container.style.setProperty("--vt-cols", String(cols));
+        this.container.style.setProperty("--vt-rows", String(rows));
+
+        const frag = document.createDocumentFragment();
+        this.rowEls = [];
+        for (let y = 0; y < rows; y++) {
+            const el = document.createElement("div");
+            el.className = "vt-row";
+            this.rowEls.push(el);
+            frag.appendChild(el);
+        }
+        this.selectionEl.replaceChildren(); // drop stale selection rects
+        frag.appendChild(this.selectionEl);
+        frag.appendChild(this.cursorEl);
+        this.container.replaceChildren(frag);
+        this.paintCursor();
+    }
+
     /** applyBytes decodes wire bytes and applies the frame. */
     applyBytes(bytes: Uint8Array): void {
         this.applyFrame(decodeFrame(bytes));
@@ -214,10 +251,22 @@ export class GridRenderer {
     private installInput(): void {
         this.container.addEventListener("mousedown", this.onMouseDown);
         this.container.addEventListener("keydown", this.onKeyDown);
+        this.container.addEventListener("paste", this.onPaste);
         this.container.addEventListener("wheel", this.onWheel, {passive: false});
         window.addEventListener("mousemove", this.onMouseMove);
         window.addEventListener("mouseup", this.onMouseUp);
     }
+
+    private onPaste = (e: ClipboardEvent): void => {
+        if (!this.onInput) return;
+        const text = e.clipboardData?.getData("text");
+        if (!text) return;
+        if (this.viewOffset > 0) this.scrollToBottom();
+        // Raw text for now; bracketed-paste wrapping (?2004) arrives with the
+        // host session-state signal in a later slice.
+        this.onInput(text);
+        e.preventDefault();
+    };
 
     private onWheel = (e: WheelEvent): void => {
         // wheel up goes back into history; convert pixels to whole lines
@@ -326,6 +375,14 @@ export class GridRenderer {
                     return;
             }
         }
+
+        // Everything else is terminal input: translate and forward to the pty.
+        const bytes = keyToBytes(e);
+        if (bytes !== null && this.onInput) {
+            if (this.viewOffset > 0) this.scrollToBottom(); // typing returns to live
+            this.onInput(bytes);
+            e.preventDefault();
+        }
     };
 
     private setSelection(sel: Selection): void {
@@ -358,6 +415,7 @@ export class GridRenderer {
         if (this.raf) cancelAnimationFrame(this.raf);
         this.container.removeEventListener("mousedown", this.onMouseDown);
         this.container.removeEventListener("keydown", this.onKeyDown);
+        this.container.removeEventListener("paste", this.onPaste);
         this.container.removeEventListener("wheel", this.onWheel);
         window.removeEventListener("mousemove", this.onMouseMove);
         window.removeEventListener("mouseup", this.onMouseUp);
