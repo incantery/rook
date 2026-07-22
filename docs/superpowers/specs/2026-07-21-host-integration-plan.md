@@ -131,14 +131,20 @@ Each phase clears a gate before the next. HI-A is additive and unwired — new
 code nothing calls yet, so the live path is untouched while it is built. HI-B
 wires it up; HI-C is the atomic, irreversible swap-and-delete (HI-1).
 
-- **HI-A — Protocol + emulator gaps (additive, unwired).** Build the typed
-  envelope (HI-2) on the new framed endpoint; `Emulator.Resize`; the per-session
-  frame loop (HI-5) with query drain to pty (HI-4); `GridRenderer.resize` and an
-  input-forwarding callback. Nothing in the live mount calls any of it yet.
-  *Gate:* a test client attaches to the framed endpoint, drives a **real pty
-  session** (the `make e2e` harness), and reconstructs the grid identically to a
-  reference; no query byte ever reaches the client; a mid-session resize resends
-  cleanly.
+- **HI-A — Protocol + emulator gaps (additive, unwired). DONE (2026-07-21).**
+  Built the tagged envelope (`internal/host/termframe.go`: `msgFrame` out;
+  `msgInput`/`msgResize` in) on `/sessions/{id}/framed`; `Emulator.Resize`
+  (clip/pad, no reflow, shrink→scrollback); the per-session render loop feeding
+  off a blank Surface (first Render = snapshot) coalescing at 16 ms; `readPump`
+  feeds the emulator alongside the legacy ring, draining+discarding its query
+  replies (termquery.go still owns the raw path). Frontend: `keymap.ts`
+  (`keyToBytes`), `GridRenderer.resize()` + `onInput` sink + paste. Nothing in
+  the live mount calls any of it. *Gate met:* `internal/host/termframe_test.go` —
+  a framed client driving a real pty (pipe + real pty pair) reconstructs the
+  emulator's grid byte-for-byte via `vt.DecodeFrame`+`ClientGrid` (SGR + wide
+  chars survive); a resize resends the whole screen at the new geometry; input
+  reaches the pty; no query reaches the client (structural — Frames never carry
+  the out buffer). Race-clean. 9 keymap units + 5 input/resize browser cases.
 - **HI-B — The renderer as the live pane.** Swap `GridRenderer` in for xterm in
   the mount; input forwarding; resize→host; theme→renderer + host palette
   (HI-4); keybind routing from the alt-screen signal (HI-6); reattach as
