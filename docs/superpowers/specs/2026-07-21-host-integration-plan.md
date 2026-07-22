@@ -156,16 +156,20 @@ wires it up; HI-C is the atomic, irreversible swap-and-delete (HI-1).
   OSC). *Gate met:* `make e2e` 46/46 against the real app + daemon — nvim in a
   pane (alt-screen, keybind routing, full-screen redraw, input, file write) and
   reattach-without-double-typing among them.
-  - **Follow-up still open:** OSC 4/10-12 palette answering. The emulator's
-    `osc()` is a no-op, so a program that asks for the background color (vim's
-    OSC 11) goes unanswered — minor on a dark theme, but a real gap. Needs the
-    palette fed to the host emulator + the answer in `osc()`.
-- **HI-C — Delete the remaining dead path (pure cleanup).** The raw `/attach`
-  route + ring-replay + `"live"` sentinel in `host.go`; `hostapi.attach` (raw);
-  `mkTerm`'s xterm/addons are already gone, but the xterm.js/addon **deps** in
-  package.json, `theme/xterm.ts` (`buildXtermTheme`), and `service.ts`
-  `onXterm`/`xtermTheme` remain. The ring itself stays — `correlate`/`normRing`
-  read it. *Gate:* xterm absent from package.json; suites green.
+  - **OSC follow-up — DONE (2026-07-22).** The emulator holds the theme palette
+    and answers OSC 4/10/11/12 (`osc()` in query.go), seeded to a dark default so
+    a program never hangs. The client pushes the palette over `msgPalette` on
+    attach and on every theme change (App subscribes to `themeService.onPalette`;
+    manager broadcasts). Gated by unit tests (OSC query/set) + a host test
+    (msgPalette sets the bg, OSC 11 answers it).
+- **HI-C — Delete the remaining dead path. DONE (2026-07-22).** Removed the raw
+  `/attach` route, `handleAttach` (ring-replay + `"live"` sentinel),
+  `session.attach`/`wmu`/`detach`, and `attach_test.go`; `hostapi.attach`;
+  `theme/xterm.ts` (`buildXtermTheme`) + spec; `service.ts`
+  `onXterm`/`xtermTheme`/`xtermSubs` + the ITheme import; and the
+  `@xterm/*` dependencies. The ring stays — `correlate`/`normRing` read it.
+  xterm.js is out of the tree and off the dependency list. Suites green,
+  `make e2e` 47/47.
 - **HI-D — Scrollback fetch.** The `ScrollbackFetch` request (HI-2) that closes
   the two gaps the scrollback commit (6071a2d) deferred here: **fresh-attach
   history** (a newly-attached pane seeing output from before it connected) and
