@@ -14,7 +14,10 @@
     background: var(--term-bg, #1e1e1e);
     white-space: pre;
     overflow: hidden;
-    contain: strict;
+    /* layout+style containment isolates a repaint from the rest of the page
+     * without `size` containment, which would collapse the box when a pane
+     * hasn't sized it (and break hit-testing). The pane sizes the screen. */
+    contain: layout style;
     tab-size: 8;
 }
 
@@ -39,4 +42,22 @@
         calc(var(--vt-cx, 0) * var(--vt-cell-w)),
         calc(var(--vt-cy, 0) * var(--vt-cell-h))
     );
+}
+
+/* The selection overlay: a translucent layer of rectangles over the glyphs,
+ * decoupled from row painting so a repaint never disturbs the highlight. */
+.vt-selection {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.vt-sel-rect {
+    position: absolute;
+    background: var(--term-selection, rgba(120, 150, 255, 0.35));
+}
+
+/* Selecting text should not also select surrounding UI chrome. */
+.vt-screen {
+    user-select: none;
 }
