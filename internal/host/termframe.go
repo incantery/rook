@@ -31,11 +31,15 @@ import (
 const (
 	// server -> client
 	msgFrame byte = 0x01 // payload: vt.Frame.Encode()
+	msgState byte = 0x02 // payload: 1 flags byte (bit0 = alt screen)
 
 	// client -> server
 	msgInput  byte = 0x10 // payload: raw bytes for the pty
 	msgResize byte = 0x11 // payload: cols, rows as two big-endian uint16
 )
+
+// stateAlt is the alt-screen bit of a msgState payload.
+const stateAlt byte = 1 << 0
 
 // frameInterval bounds how often the render loop diffs the grid: a burst of pty
 // output between ticks folds into one net frame (the coalescing D6 wants). It is
@@ -113,10 +117,24 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 // framedRenderLoop diffs the emulator's grid against what this client knows and
 // ships the delta, coalesced at frameInterval. It is the sole writer to c.
 func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Conn, surface *vt.Surface) {
+	lastAlt, altKnown := false, false
 	render := func() bool {
 		s.emuMu.Lock()
 		f := s.emu.Render(surface)
+		alt := s.emu.AltScreen()
 		s.emuMu.Unlock()
+		// Announce the alt-screen state before the frame that changed it, so the
+		// client's keybind routing is never a frame behind (HI-6).
+		if !altKnown || alt != lastAlt {
+			altKnown, lastAlt = true, alt
+			var flags byte
+			if alt {
+				flags = stateAlt
+			}
+			if c.Write(ctx, websocket.MessageBinary, []byte{msgState, flags}) != nil {
+				return false
+			}
+		}
 		if f.Empty() {
 			return true // nothing changed — not an error
 		}

@@ -45,6 +45,17 @@ describe("cssVars", () => {
         }
     });
 
+    it("emits the terminal fg/bg/cursor/selection and the 16 ANSI colors", () => {
+        const p = MATERIAL_OCEAN.palette;
+        expect(v["--term-fg"]).toBe(p.editorFg);
+        expect(v["--term-bg"]).toBe(p.bg);
+        expect(v["--term-cursor"]).toBe(p.cursor);
+        expect(v["--term-selection"]).toBe(p.selection);
+        for (let i = 0; i < 16; i++) {
+            expect(v[`--term-ansi-${i}`]).toBe(p.ansi[i]);
+        }
+    });
+
     // These four are why light themes were broken: the chrome hardcoded them,
     // so --fg flipped dark while the panels stayed dark. They must TRACK the
     // palette, not the theme that happened to be authored first.

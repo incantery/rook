@@ -137,6 +137,12 @@ func clampToGrid(x, y, w, h int) (int, int) {
 // Cursor is the visible cursor position (logical, on the active screen).
 func (e *Emulator) Cursor() (x, y int) { return e.cur.cx, e.cur.cy }
 
+// AltScreen reports whether the alt screen is active — a full-screen program
+// (vim, less, htop) owns the viewport. The client uses this to route keybinds:
+// ctrl+hjkl navigates panes on the normal screen but belongs to the program on
+// the alt screen.
+func (e *Emulator) AltScreen() bool { return e.onAlt }
+
 // CellAt returns a copy of the visible cell at (x,y) on the active screen.
 func (e *Emulator) CellAt(x, y int) Cell {
 	if x < 0 || x >= e.w || y < 0 || y >= e.h {

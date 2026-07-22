@@ -46,7 +46,13 @@ func readGrid(t *testing.T, c *websocket.Conn, ctx context.Context, cols, rows i
 		if typ != websocket.MessageBinary {
 			t.Fatalf("non-binary frame %v — a query reply leaked to the client?", typ)
 		}
-		if len(data) == 0 || data[0] != msgFrame {
+		if len(data) == 0 {
+			t.Fatalf("empty message")
+		}
+		if data[0] == msgState {
+			continue // session-state (alt screen); not a grid frame
+		}
+		if data[0] != msgFrame {
 			t.Fatalf("unexpected message tag %v", data)
 		}
 		f, derr := vt.DecodeFrame(data[1:])
@@ -202,6 +208,64 @@ func TestFramedResizeResends(t *testing.T) {
 		if gridHasRow(g, "hello world") {
 			return // reconstructed at the new width
 		}
+	}
+}
+
+// TestFramedAltScreenState is the HI-6 gate: entering and leaving the alt screen
+// reaches the client as msgState with the alt bit set/cleared, so keybind routing
+// can follow it.
+func TestFramedAltScreenState(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	h := New()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	s := &session{
+		q:     newTermQ(),
+		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: 20, Rows: 4, Created: time.Now()},
+		pty:   r,
+		cmd:   exec.Command("true"),
+		emu:   vt.New(20, 4),
+		dirty: make(chan struct{}, 1),
+	}
+	h.mu.Lock()
+	h.sessions["s1"] = s
+	h.mu.Unlock()
+	go h.readPump(s)
+
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+
+	c, ctx, cancel := dialFramed(t, srv, h, "s1")
+	defer cancel()
+	defer c.Close(websocket.StatusNormalClosure, "done")
+
+	// waitAlt reads until a msgState arrives and returns its alt bit.
+	waitAlt := func() bool {
+		for {
+			_, data, rerr := c.Read(ctx)
+			if rerr != nil {
+				t.Fatalf("read state: %v", rerr)
+			}
+			if len(data) >= 2 && data[0] == msgState {
+				return data[1]&stateAlt != 0
+			}
+		}
+	}
+
+	// The initial state is the normal screen.
+	if waitAlt() {
+		t.Fatal("initial state = alt, want normal")
+	}
+	w.Write([]byte("\x1b[?1049h")) // enter alt
+	if !waitAlt() {
+		t.Fatal("after ?1049h: state = normal, want alt")
+	}
+	w.Write([]byte("\x1b[?1049l")) // leave alt
+	if waitAlt() {
+		t.Fatal("after ?1049l: state = alt, want normal")
 	}
 }
 

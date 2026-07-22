@@ -11,7 +11,9 @@
     --vt-cell-w: 1ch;
     --vt-cell-h: calc(var(--vt-font-size, 13px) * var(--vt-line-height, 1.2));
     color: var(--term-fg, #d0d0d0);
-    background: var(--term-bg, #1e1e1e);
+    /* transparent so the body tint shows through, as the xterm canvas did;
+       --term-bg is the solid base reverse video paints from (style.ts). */
+    background: transparent;
     white-space: pre;
     overflow: hidden;
     /* layout+style containment isolates a repaint from the rest of the page

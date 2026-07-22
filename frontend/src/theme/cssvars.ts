@@ -40,5 +40,22 @@ export function cssVars(p: Palette): Record<string, string> {
         "--fg": p.fg,
         "--dim": p.dim,
         "--line": withAlpha(p.line, LINE_ALPHA),
+        // the host-emulator terminal (GridRenderer) reads these: the default
+        // fg/cursor/selection and the 16-colour ANSI ramp (term/vt/style.ts +
+        // renderer.css). --term-bg is the SOLID base used by reverse video; the
+        // pane itself is transparent so the body tint shows through, as the
+        // xterm canvas did.
+        "--term-fg": p.editorFg,
+        "--term-bg": p.bg,
+        "--term-cursor": p.cursor,
+        "--term-selection": p.selection,
+        ...ansiVars(p.ansi),
     };
+}
+
+// ansiVars maps the 16-colour ramp to --term-ansi-0..15.
+function ansiVars(ansi: string[]): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (let i = 0; i < 16; i++) out[`--term-ansi-${i}`] = ansi[i];
+    return out;
 }
