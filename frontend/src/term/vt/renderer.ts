@@ -17,6 +17,7 @@
 import {decodeFrame, type Frame, type WCell} from "./frame";
 import {ClientGrid, coalesceCells} from "./grid";
 import {keyToBytes} from "./keymap";
+import {BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_WHEEL_DOWN, BTN_WHEEL_UP, encodeMouse} from "./mouse";
 import {rowExtent, type Selection, selectedText, wordAt} from "./selection";
 import {rowHtml} from "./style";
 
@@ -45,6 +46,15 @@ export class GridRenderer {
     private moved = false;
     private cellW = 0;
     private cellH = 0;
+
+    // Mouse tracking a program has enabled (from the host's msgState): level
+    // 0 off .. 4 any-event, and whether SGR encoding is on. When tracking, the
+    // wheel and clicks are forwarded to the program instead of driving local
+    // scrollback/selection — Shift always forces the local behavior.
+    private mouseLevel = 0;
+    private mouseSgr = false;
+    private mouseReporting = false; // a press was forwarded; the gesture is the program's
+    private mouseBtn = 0;
 
     // scrollback: rows that have scrolled off, and the viewport's offset into
     // history (0 = pinned to the live bottom, N = N lines back).
@@ -134,6 +144,28 @@ export class GridRenderer {
     /** focus gives the screen keyboard focus, so key presses reach onInput. */
     focus(): void {
         this.container.focus();
+    }
+
+    /** setMouseMode records the mouse tracking a program has enabled (msgState),
+     *  which decides whether the wheel and clicks are forwarded to it. */
+    setMouseMode(level: number, sgr: boolean): void {
+        this.mouseLevel = level;
+        this.mouseSgr = sgr;
+        if (level === 0) this.mouseReporting = false;
+    }
+
+    private forwardMouse(
+        button: number,
+        clientX: number,
+        clientY: number,
+        press: boolean,
+        motion: boolean,
+    ): void {
+        if (!this.onInput) return;
+        const {x, y} = this.pointToCell(clientX, clientY);
+        this.onInput(
+            encodeMouse({button, col: x + 1, row: y + 1, press, motion, sgr: this.mouseSgr}),
+        );
     }
 
     /** reset blanks the live grid and pins to the bottom — used on (re)connect,
@@ -268,9 +300,15 @@ export class GridRenderer {
         this.container.addEventListener("keydown", this.onKeyDown);
         this.container.addEventListener("paste", this.onPaste);
         this.container.addEventListener("wheel", this.onWheel, {passive: false});
+        this.container.addEventListener("contextmenu", this.onContextMenu);
         window.addEventListener("mousemove", this.onMouseMove);
         window.addEventListener("mouseup", this.onMouseUp);
     }
+
+    private onContextMenu = (e: MouseEvent): void => {
+        // a right-click belongs to a mouse-tracking program, not the browser menu
+        if (this.mouseLevel >= 1) e.preventDefault();
+    };
 
     private onPaste = (e: ClipboardEvent): void => {
         if (!this.onInput) return;
@@ -284,9 +322,21 @@ export class GridRenderer {
     };
 
     private onWheel = (e: WheelEvent): void => {
-        // wheel up goes back into history; convert pixels to whole lines
-        const lines = Math.max(1, Math.round(Math.abs(e.deltaY) / (this.cellH || 16)));
-        this.scrollLines(e.deltaY < 0 ? lines : -lines);
+        const notches = Math.max(
+            1,
+            Math.min(5, Math.round(Math.abs(e.deltaY) / (this.cellH || 16))),
+        );
+        // A program tracking the mouse owns the wheel — it scrolls its own view
+        // (Claude Code's conversation, a pager). Shift forces local scrollback.
+        if (this.mouseLevel >= 2 && !e.shiftKey) {
+            const button = e.deltaY < 0 ? BTN_WHEEL_UP : BTN_WHEEL_DOWN;
+            for (let i = 0; i < notches; i++) {
+                this.forwardMouse(button, e.clientX, e.clientY, true, false);
+            }
+            e.preventDefault();
+            return;
+        }
+        this.scrollLines(e.deltaY < 0 ? notches : -notches);
         if (this.scrollbackRows.length > 0) e.preventDefault();
     };
 
@@ -317,6 +367,18 @@ export class GridRenderer {
     }
 
     private onMouseDown = (e: MouseEvent): void => {
+        // A program tracking the mouse owns clicks too. Shift forces local
+        // selection so text is still selectable over a mouse-driven TUI.
+        if (this.mouseLevel >= 1 && !e.shiftKey) {
+            this.mouseBtn = e.button === 1 ? BTN_MIDDLE : e.button === 2 ? BTN_RIGHT : BTN_LEFT;
+            this.forwardMouse(this.mouseBtn, e.clientX, e.clientY, true, false);
+            this.mouseReporting = true;
+            // preventDefault blocks the native focus, so take it explicitly — the
+            // click must still put the keyboard on this pane.
+            this.container.focus();
+            e.preventDefault();
+            return;
+        }
         if (e.button !== 0) return; // left button only
         const cell = this.pointToCell(e.clientX, e.clientY);
 
@@ -346,13 +408,28 @@ export class GridRenderer {
     };
 
     private onMouseMove = (e: MouseEvent): void => {
+        if (this.mouseReporting) {
+            // report drags only when the program asked for motion (level >= 3)
+            if (this.mouseLevel >= 3) {
+                this.forwardMouse(this.mouseBtn, e.clientX, e.clientY, true, true);
+            }
+            return;
+        }
         if (!this.dragging || !this.selection) return;
         this.moved = true;
         this.selection.focus = this.pointToCell(e.clientX, e.clientY);
         this.paintSelection();
     };
 
-    private onMouseUp = (): void => {
+    private onMouseUp = (e: MouseEvent): void => {
+        if (this.mouseReporting) {
+            this.mouseReporting = false;
+            // X10 (level 1) has no release event; normal+ (>=2) does
+            if (this.mouseLevel >= 2) {
+                this.forwardMouse(this.mouseBtn, e.clientX, e.clientY, false, false);
+            }
+            return;
+        }
         if (!this.dragging) return;
         this.dragging = false;
         if (!this.moved) this.clearSelection(); // a plain click clears the selection
@@ -432,6 +509,7 @@ export class GridRenderer {
         this.container.removeEventListener("keydown", this.onKeyDown);
         this.container.removeEventListener("paste", this.onPaste);
         this.container.removeEventListener("wheel", this.onWheel);
+        this.container.removeEventListener("contextmenu", this.onContextMenu);
         window.removeEventListener("mousemove", this.onMouseMove);
         window.removeEventListener("mouseup", this.onMouseUp);
         this.container.replaceChildren();

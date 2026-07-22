@@ -468,6 +468,7 @@ export class TermManager {
                 tab.renderer.applyBytes(msg.payload);
             } else if (msg.kind === "state") {
                 tab.alt = msg.alt; // keybind routing reads this via focusedInAltScreen
+                tab.renderer.setMouseMode(msg.mouseLevel, msg.mouseSgr);
             }
         };
         ws.onclose = async (ev) => {

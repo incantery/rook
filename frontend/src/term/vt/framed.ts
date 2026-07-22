@@ -8,11 +8,14 @@ export const MSG_STATE = 0x02; // server -> client: session state (alt screen)
 export const MSG_INPUT = 0x10; // client -> server: raw pty bytes
 export const MSG_RESIZE = 0x11; // client -> server: cols, rows
 
-export const STATE_ALT = 0x01; // bit0 of a state payload: alt screen active
+// state flags byte: bit0 alt screen; bits1-3 mouse tracking level (0-4); bit4
+// SGR mouse encoding.
+export const STATE_ALT = 0x01;
+export const STATE_MOUSE_SGR = 0x10;
 
 export type ServerMessage =
     | {kind: "frame"; payload: Uint8Array}
-    | {kind: "state"; alt: boolean}
+    | {kind: "state"; alt: boolean; mouseLevel: number; mouseSgr: boolean}
     | {kind: "unknown"; tag: number};
 
 /** decodeServerMessage classifies one incoming binary message. The frame payload
@@ -23,8 +26,15 @@ export function decodeServerMessage(buf: ArrayBuffer): ServerMessage {
     switch (b[0]) {
         case MSG_FRAME:
             return {kind: "frame", payload: b.subarray(1)};
-        case MSG_STATE:
-            return {kind: "state", alt: b.length > 1 && (b[1] & STATE_ALT) !== 0};
+        case MSG_STATE: {
+            const flags = b.length > 1 ? b[1] : 0;
+            return {
+                kind: "state",
+                alt: (flags & STATE_ALT) !== 0,
+                mouseLevel: (flags >> 1) & 0x7,
+                mouseSgr: (flags & STATE_MOUSE_SGR) !== 0,
+            };
+        }
         default:
             return {kind: "unknown", tag: b[0]};
     }

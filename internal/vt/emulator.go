@@ -143,6 +143,27 @@ func (e *Emulator) Cursor() (x, y int) { return e.cur.cx, e.cur.cy }
 // the alt screen.
 func (e *Emulator) AltScreen() bool { return e.onAlt }
 
+// MouseTracking reports the mouse-reporting mode a program has enabled: level
+// 0 = off, 1 = X10 (?9), 2 = normal (?1000), 3 = button-event (?1002, drags),
+// 4 = any-event (?1003); and whether SGR encoding (?1006/?1016) is on. The
+// client reads this to decide whether the wheel and clicks belong to the
+// program (forwarded as mouse reports) or to local scrollback and selection —
+// the "scrolling in Claude Code" case, where the program drives the scroll.
+func (e *Emulator) MouseTracking() (level int, sgr bool) {
+	switch e.mouseProtocol() {
+	case 9:
+		level = 1
+	case 1000:
+		level = 2
+	case 1002:
+		level = 3
+	case 1003:
+		level = 4
+	}
+	enc := e.mouseEncoding()
+	return level, enc == 1006 || enc == 1016
+}
+
 // CellAt returns a copy of the visible cell at (x,y) on the active screen.
 func (e *Emulator) CellAt(x, y int) Cell {
 	if x < 0 || x >= e.w || y < 0 || y >= e.h {

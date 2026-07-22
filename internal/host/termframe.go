@@ -38,8 +38,15 @@ const (
 	msgResize byte = 0x11 // payload: cols, rows as two big-endian uint16
 )
 
-// stateAlt is the alt-screen bit of a msgState payload.
-const stateAlt byte = 1 << 0
+// msgState payload is one flags byte: bit0 = alt screen; bits1-3 = mouse
+// tracking level (0=off..4=any-event); bit4 = SGR mouse encoding.
+const (
+	stateAlt      byte = 1 << 0
+	stateMouseSGR byte = 1 << 4
+)
+
+// mouseFlags packs the mouse level (0-4) into bits 1-3.
+func mouseFlags(level int) byte { return byte(level&0x7) << 1 }
 
 // frameInterval bounds how often the render loop diffs the grid: a burst of pty
 // output between ticks folds into one net frame (the coalescing D6 wants). It is
@@ -117,21 +124,26 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 // framedRenderLoop diffs the emulator's grid against what this client knows and
 // ships the delta, coalesced at frameInterval. It is the sole writer to c.
 func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Conn, surface *vt.Surface) {
-	lastAlt, altKnown := false, false
+	lastState, stateKnown := byte(0), false
 	render := func() bool {
 		s.emuMu.Lock()
 		f := s.emu.Render(surface)
 		alt := s.emu.AltScreen()
+		mlevel, msgr := s.emu.MouseTracking()
 		s.emuMu.Unlock()
-		// Announce the alt-screen state before the frame that changed it, so the
-		// client's keybind routing is never a frame behind (HI-6).
-		if !altKnown || alt != lastAlt {
-			altKnown, lastAlt = true, alt
-			var flags byte
-			if alt {
-				flags = stateAlt
-			}
-			if c.Write(ctx, websocket.MessageBinary, []byte{msgState, flags}) != nil {
+		// Announce session state (alt screen + mouse mode) before the frame that
+		// changed it, so keybind routing (HI-6) and mouse forwarding are never a
+		// frame behind.
+		state := mouseFlags(mlevel)
+		if alt {
+			state |= stateAlt
+		}
+		if msgr {
+			state |= stateMouseSGR
+		}
+		if !stateKnown || state != lastState {
+			stateKnown, lastState = true, state
+			if c.Write(ctx, websocket.MessageBinary, []byte{msgState, state}) != nil {
 				return false
 			}
 		}
@@ -146,23 +158,30 @@ func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Co
 	if !render() {
 		return
 	}
+	last := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-s.dirty:
 		}
-		// Let a burst pile into the emulator, then send the one net diff.
-		t := time.NewTimer(frameInterval)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return
-		case <-t.C:
+		// Coalesce a burst to one frame per interval, but render a change that
+		// lands after an idle gap immediately — that is the keystroke echo the
+		// user feels. A fixed wait here made every echo a frame late, which read
+		// as sluggish typing under an interactive TUI.
+		if wait := frameInterval - time.Since(last); wait > 0 {
+			t := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+			}
 		}
 		if !render() {
 			return
 		}
+		last = time.Now()
 	}
 }
 

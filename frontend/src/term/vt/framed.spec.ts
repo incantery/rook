@@ -23,11 +23,27 @@ describe("framed transport", () => {
         }
     });
 
-    it("decodes a state message's alt bit", () => {
-        const on = decodeServerMessage(buf(MSG_STATE, 0x01));
-        const off = decodeServerMessage(buf(MSG_STATE, 0x00));
-        expect(on).toEqual({kind: "state", alt: true});
-        expect(off).toEqual({kind: "state", alt: false});
+    it("decodes a state message's alt, mouse level, and SGR bits", () => {
+        expect(decodeServerMessage(buf(MSG_STATE, 0x00))).toEqual({
+            kind: "state",
+            alt: false,
+            mouseLevel: 0,
+            mouseSgr: false,
+        });
+        // alt only
+        expect(decodeServerMessage(buf(MSG_STATE, 0x01))).toEqual({
+            kind: "state",
+            alt: true,
+            mouseLevel: 0,
+            mouseSgr: false,
+        });
+        // mouse level 3 (bits1-3 = 011 -> 0x06) + SGR (bit4 = 0x10)
+        expect(decodeServerMessage(buf(MSG_STATE, 0x06 | 0x10))).toEqual({
+            kind: "state",
+            alt: false,
+            mouseLevel: 3,
+            mouseSgr: true,
+        });
     });
 
     it("reports unknown tags and empty messages", () => {
