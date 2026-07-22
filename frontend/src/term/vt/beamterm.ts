@@ -122,12 +122,14 @@ export class BeamtermGridRenderer implements TermRenderer {
     }
 
     private sizeCanvas(cols: number, rows: number): void {
-        const w = Math.round(cols * this.cellW * this.dpr);
-        const h = Math.round(rows * this.cellH * this.dpr);
-        this.canvas.width = w;
-        this.canvas.height = h;
-        this.canvas.style.width = `${w / this.dpr}px`;
-        this.canvas.style.height = `${h / this.dpr}px`;
+        // resize() takes CSS pixels and owns the backing store, scaling by dpr
+        // itself — hand it device pixels and it doubles them again, leaving
+        // the grid at 2x the cols/rows we feed (content in the top-left
+        // quadrant on retina; invisible at dpr 1, where the units coincide).
+        const w = Math.round(cols * this.cellW);
+        const h = Math.round(rows * this.cellH);
+        this.canvas.style.width = `${w}px`;
+        this.canvas.style.height = `${h}px`;
         this.wasm.resize(w, h);
     }
 
