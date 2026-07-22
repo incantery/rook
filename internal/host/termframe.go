@@ -189,7 +189,7 @@ type sbFetch struct {
 // The Surface just goes stale; the reveal render diffs the live grid against
 // it and ships the net of everything missed as one frame. N background
 // sessions cost their ring storage and parsing — nothing per-frame.
-func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Conn, surface *vt.Surface, fetch <-chan sbFetch, vis <-chan bool) {
+func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Conn, surface Surface, fetch <-chan sbFetch, vis <-chan bool) {
 	lastState, stateKnown := byte(0), false
 	lastCursor, cursorKnown := vt.Cursor{}, false
 	render := func() bool {

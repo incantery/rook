@@ -106,7 +106,7 @@ func TestFramedReconstructsGrid(t *testing.T) {
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
 		pty:   r,
 		cmd:   exec.Command("true"),
-		emu:   vt.New(cols, rows),
+		emu:   newTerminal(cols, rows),
 		dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()
@@ -161,7 +161,7 @@ func TestFramedResizeResends(t *testing.T) {
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
 		pty:   r,
 		cmd:   exec.Command("true"),
-		emu:   vt.New(cols, rows),
+		emu:   newTerminal(cols, rows),
 		dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()
@@ -224,7 +224,7 @@ func TestFramedAltScreenState(t *testing.T) {
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: 20, Rows: 4, Created: time.Now()},
 		pty:   r,
 		cmd:   exec.Command("true"),
-		emu:   vt.New(20, 4),
+		emu:   newTerminal(20, 4),
 		dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()
@@ -282,7 +282,7 @@ func TestFramedCursorMoveIsSent(t *testing.T) {
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
 		pty:   r,
 		cmd:   exec.Command("true"),
-		emu:   vt.New(cols, rows),
+		emu:   newTerminal(cols, rows),
 		dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()
@@ -356,7 +356,7 @@ func TestFramedPaletteAnswersOSC(t *testing.T) {
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: 20, Rows: 4, Created: time.Now()},
 		pty:   ptmx,
 		cmd:   exec.Command("true"),
-		emu:   vt.New(20, 4),
+		emu:   newTerminal(20, 4),
 		dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()
@@ -437,7 +437,7 @@ func TestFramedInputReachesPty(t *testing.T) {
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: 20, Rows: 4, Created: time.Now()},
 		pty:   ptmx,
 		cmd:   exec.Command("true"),
-		emu:   vt.New(20, 4),
+		emu:   newTerminal(20, 4),
 		dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()
@@ -501,7 +501,7 @@ func TestFramedAnswersQueries(t *testing.T) {
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: 20, Rows: 4, Created: time.Now()},
 		pty:   ptmx,
 		cmd:   exec.Command("true"),
-		emu:   vt.New(20, 4),
+		emu:   newTerminal(20, 4),
 		dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()
@@ -550,7 +550,7 @@ func TestFramedScrollbackFetch(t *testing.T) {
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
 		pty:   r,
 		cmd:   exec.Command("true"),
-		emu:   vt.New(cols, rows),
+		emu:   newTerminal(cols, rows),
 		dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()
@@ -626,7 +626,7 @@ func TestFramedPauseResume(t *testing.T) {
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
 		pty:   r,
 		cmd:   exec.Command("true"),
-		emu:   vt.New(cols, rows),
+		emu:   newTerminal(cols, rows),
 		dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()

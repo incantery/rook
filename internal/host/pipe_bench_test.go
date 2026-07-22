@@ -8,8 +8,6 @@ import (
 	"time"
 
 	cpty "github.com/creack/pty"
-
-	"github.com/incantery/rook/internal/vt"
 )
 
 // The full host pipeline (real pty -> gather -> parse ->
@@ -30,7 +28,7 @@ func benchPipe(b *testing.B, line string) {
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
 		pty:   ptm,
 		cmd:   exec.Command("true"),
-		emu:   vt.New(cols, rows),
+		emu:   newTerminal(cols, rows),
 		dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()
@@ -44,7 +42,7 @@ func benchPipe(b *testing.B, line string) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		surface := func() *vt.Surface {
+		surface := func() Surface {
 			s.emuMu.Lock()
 			defer s.emuMu.Unlock()
 			return s.emu.NewSurface()

@@ -30,7 +30,6 @@ import (
 	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/plugin"
 	"github.com/incantery/rook/internal/version"
-	"github.com/incantery/rook/internal/vt"
 )
 
 // Client/daemon compatibility is version.Build equality — binaries built
@@ -60,7 +59,7 @@ type session struct {
 
 	// The framed transport (termframe.go): a host-side emulator and the client
 	// that renders its grid diffs.
-	emu       *vt.Emulator
+	emu       Terminal
 	emuMu     sync.Mutex    // guards emu across readPump, render loop, resize
 	dirty     chan struct{} // buffered(1): pty output happened, render loop wake
 	frameConn *websocket.Conn
@@ -295,7 +294,7 @@ func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
 		},
 		pty:   f,
 		cmd:   cmd,
-		emu:   vt.New(cols, rows),
+		emu:   newTerminal(cols, rows),
 		dirty: make(chan struct{}, 1),
 	}
 	h.sessions[s.info.ID] = s

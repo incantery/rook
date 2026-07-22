@@ -21,6 +21,7 @@ import {
     encodeSbFetch,
     encodeVis,
 } from "./vt/framed";
+import type {TermRenderer} from "./vt/api";
 import {GridRenderer} from "./vt/renderer";
 import "./vt/renderer.css";
 import {
@@ -103,8 +104,9 @@ interface Tab {
     id: string;
     name: string;
     workspace: string;
-    /** the host-side-emulator renderer (term/vt) that replaced xterm */
-    renderer: GridRenderer;
+    /** the renderer behind the bytes seam (term/vt/api.ts) — DOM today,
+     *  WebGL planned; the Tab never sees past the interface */
+    renderer: TermRenderer;
     /** the element the renderer paints into — measured to compute the grid */
     box: HTMLElement;
     /** last geometry sent to the host (was term.cols/term.rows) */

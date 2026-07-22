@@ -14,6 +14,7 @@
 // imperative DOM. A thin Svelte wrapper mounts it (later); the raw CSS lives
 // alongside, per rook's convention for imperative islands.
 
+import type {TermRenderer} from "./api";
 import {decodeFrame, decodeSbChunk, type Frame, type WCell} from "./frame";
 import {ClientGrid, coalesceCells} from "./grid";
 import {keyToBytes} from "./keymap";
@@ -40,7 +41,7 @@ const SB_PAGE = 128;
 /** an in-flight page request older than this may be re-asked (it was dropped). */
 const SB_RETRY_MS = 2000;
 
-export class GridRenderer {
+export class GridRenderer implements TermRenderer {
     grid: ClientGrid;
     private container: HTMLElement;
     private onInput?: (data: string) => void;
