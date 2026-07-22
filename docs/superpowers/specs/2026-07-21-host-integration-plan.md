@@ -145,17 +145,27 @@ wires it up; HI-C is the atomic, irreversible swap-and-delete (HI-1).
   chars survive); a resize resends the whole screen at the new geometry; input
   reaches the pty; no query reaches the client (structural — Frames never carry
   the out buffer). Race-clean. 9 keymap units + 5 input/resize browser cases.
-- **HI-B — The renderer as the live pane.** Swap `GridRenderer` in for xterm in
-  the mount; input forwarding; resize→host; theme→renderer + host palette
-  (HI-4); keybind routing from the alt-screen signal (HI-6); reattach as
-  blank-surface snapshot (HI-3). *Gate:* daily-drive — vim (alt-screen +
-  truecolor), `claude`, `git log`, a `yes` firehose; frame-time gate holds on
-  real output.
-- **HI-C — Delete the old path (atomic, irreversible).** `/attach` serves
-  Frames; delete `termquery.go`, `HOST_ANSWERED`/`REPLAY_ONLY`, the ring-replay +
-  `"live"` sentinel, `mkTerm`'s xterm/addons, `theme/xterm.ts`, and the
-  xterm.js/addon deps — in one coherent change. *Gate:* xterm.js absent from the
-  bundle; the daily-driver bar held.
+- **HI-B — The renderer as the live pane. DONE (2026-07-21).** `GridRenderer`
+  replaced xterm in the mount (manager.ts `Tab.renderer`); input forwarding via
+  `onInput`→`encodeInput`; resize computed from the box + measured cell →
+  `encodeResize`; keybind routing from `tab.alt` (the wire, HI-6); reattach as a
+  blank-Surface snapshot (HI-3), so the replay gate / `"live"` sentinel /
+  `HOST_ANSWERED`+`REPLAY_ONLY` regexes are gone. Theme flows through the
+  `--term-*` CSS vars the service already writes. `readPump` now routes the
+  emulator's query replies to the pty and `termquery.go` is deleted (HI-4, minus
+  OSC). *Gate met:* `make e2e` 46/46 against the real app + daemon — nvim in a
+  pane (alt-screen, keybind routing, full-screen redraw, input, file write) and
+  reattach-without-double-typing among them.
+  - **Follow-up still open:** OSC 4/10-12 palette answering. The emulator's
+    `osc()` is a no-op, so a program that asks for the background color (vim's
+    OSC 11) goes unanswered — minor on a dark theme, but a real gap. Needs the
+    palette fed to the host emulator + the answer in `osc()`.
+- **HI-C — Delete the remaining dead path (pure cleanup).** The raw `/attach`
+  route + ring-replay + `"live"` sentinel in `host.go`; `hostapi.attach` (raw);
+  `mkTerm`'s xterm/addons are already gone, but the xterm.js/addon **deps** in
+  package.json, `theme/xterm.ts` (`buildXtermTheme`), and `service.ts`
+  `onXterm`/`xtermTheme` remain. The ring itself stays — `correlate`/`normRing`
+  read it. *Gate:* xterm absent from package.json; suites green.
 - **HI-D — Scrollback fetch.** The `ScrollbackFetch` request (HI-2) that closes
   the two gaps the scrollback commit (6071a2d) deferred here: **fresh-attach
   history** (a newly-attached pane seeing output from before it connected) and
