@@ -626,6 +626,21 @@
         }
     }
 
+    /** The performance pane, from the footprint chip. A surface with no
+     *  identity, so it's a singleton per workspace: reveal the existing one
+     *  before opening another. */
+    async function openMonitor(): Promise<void> {
+        app.screen = "app";
+        await tick();
+        const at = mgr.findPane((c) => c.type === "monitor");
+        if (at) {
+            mgr.revealPane(at);
+            return;
+        }
+        const {MonitorPane} = await import("./term/monitorpane.svelte");
+        mgr.openPaneWindow({type: "monitor"}, () => new MonitorPane({api}));
+    }
+
     /** Promote a path to most-recent. Bounded: this is a working set, not
      *  history — the picker searches the whole repo anyway. */
     function touchBuffer(path: string): void {
@@ -1901,6 +1916,7 @@
         onactivate={(id) => mgr.activateId(id)}
         onnew={() => void mgr.newSession()}
         onpalette={() => registry.run("palette.toggle")}
+        onmonitor={() => void openMonitor()}
     />
     <div class="flex min-h-0 min-w-0 flex-1">
         <SidePane

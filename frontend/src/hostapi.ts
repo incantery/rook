@@ -188,6 +188,18 @@ export class HostAPI {
         return (await this.req("/runtime")).json();
     }
 
+    /** The live gauges plus the per-session workload breakdown — the
+     *  performance pane's fast poll. */
+    async runtimeDetail(): Promise<RuntimeDetail> {
+        return (await this.req("/runtime?detail=1")).json();
+    }
+
+    /** The stored monitor series (30s cadence) for the last `since`
+     *  (a Go duration: "15m", "6h"). */
+    async runtimeSeries(since: string): Promise<{series: StoredSample[] | null}> {
+        return (await this.req(`/runtime?since=${since}`)).json();
+    }
+
     /** Start the coder on a task in a fresh window of the workspace.
      *  Either a literal task or a preset the host expands into its own
      *  prompt (e.g. "resolve-conflicts") — host-built prompts keep every
@@ -731,6 +743,38 @@ export interface Gauge {
 export interface RuntimeSnapshot {
     at: string;
     gauges: Gauge[];
+}
+
+/** One stored monitor reading (30s cadence, 7-day retention) — the series
+ *  behind the performance pane's charts. */
+export interface StoredSample {
+    at: string;
+    metric: string;
+    labels?: Record<string, string>;
+    value: number;
+}
+
+/** One process in a session's live top list. */
+export interface WorkloadProc {
+    pid: number;
+    comm: string;
+    rss: number;
+    cpu: number;
+}
+
+/** One session's live footprint: the shell rook spawned plus everything the
+ *  user started under it — their migration, not rook's overhead. */
+export interface SessionLoad {
+    id: string;
+    name: string;
+    workspace: string;
+    rss: number;
+    cpu: number;
+    procs: WorkloadProc[] | null;
+}
+
+export interface RuntimeDetail extends RuntimeSnapshot {
+    sessions: SessionLoad[];
 }
 
 /** Sum a gauge across label values, or within one label match. */

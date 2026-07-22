@@ -40,7 +40,11 @@ export type PaneRef =
     /** a thread as a read-only document. Identity is the thread id, so it's a
      *  buffer in the same sense `file` is: revealable, retargetable, and a
      *  jumplist target — which a view zone could never be. */
-    | {type: "thread"; id: number};
+    | {type: "thread"; id: number}
+    /** the performance pane: rook's own footprint vs the sessions' workload,
+     *  charted. Like `review` it's a surface with no identity — there is one
+     *  machine — so it carries no field and never persists. */
+    | {type: "monitor"};
 
 export interface LeafNode {
     kind: "leaf";

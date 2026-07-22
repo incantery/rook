@@ -13,8 +13,10 @@
         onactivate: (id: string) => void;
         onnew: () => void;
         onpalette: () => void;
+        /** the footprint chip opens the performance pane */
+        onmonitor: () => void;
     }
-    let {onpicker, ondashboard, oninbox, onactivate, onnew, onpalette}: Props = $props();
+    let {onpicker, ondashboard, oninbox, onactivate, onnew, onpalette, onmonitor}: Props = $props();
 
     /** sessions (panes) in this workspace waiting on you — a window
      *  pulses if ANY of its panes asks; the window you're looking at
@@ -135,14 +137,16 @@
     {/if}
     {#if footprint && footprint.total > 0}
         <button
+            id="tb-footprint"
             class={[
-                "box-border inline-flex h-6 cursor-default appearance-none items-center self-center rounded-full border px-2.5 font-mono text-xs font-semibold",
+                "box-border inline-flex h-6 cursor-pointer appearance-none items-center self-center rounded-full border px-2.5 font-mono text-xs font-semibold",
                 footprint.orphaned
-                    ? "border-amber/35 bg-amber/12 text-amber"
-                    : "border-dim/30 bg-dim/10 text-dim",
+                    ? "border-amber/35 bg-amber/12 text-amber hover:bg-amber/20"
+                    : "border-dim/30 bg-dim/10 text-dim hover:bg-dim/20",
             ]}
             style="--wails-draggable: no-drag"
             title={footprintTitle(footprint)}
+            onclick={onmonitor}
             >{footprint.orphaned ? "⚠ " : ""}{shortBytes(footprint.total)}</button
         >
     {/if}

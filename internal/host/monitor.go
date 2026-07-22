@@ -116,6 +116,10 @@ func (h *Host) mapSizes() map[string]int {
 func (h *Host) gather() []sample {
 	tbl := h.pt.current()
 	coder := config.Load().Coder
+	// Tree beats name: anything in a session's subtree is the user's workload
+	// (workload.go), even a coder binary they ran by hand — the name-based
+	// roles below then only catch rook's own processes.
+	workload := h.workloadPids(tbl)
 
 	type agg struct {
 		rss int64
@@ -125,6 +129,9 @@ func (h *Host) gather() []sample {
 	byRole := map[string]*agg{}
 	for _, p := range tbl {
 		role := roleOf(p.Comm, coder)
+		if workload[p.PID] {
+			role = "workload"
+		}
 		if role == "" {
 			continue
 		}
@@ -183,8 +190,9 @@ func (h *Host) WatchMonitor(ctx context.Context) {
 	}
 }
 
-// handleRuntime is GET /runtime: live gauges, or ?since=6h for the stored
-// series behind the detail panel.
+// handleRuntime is GET /runtime: live gauges, ?since=6h for the stored series
+// behind the detail panel, or ?detail=1 for gauges plus the live per-session
+// workload breakdown (the monitor pane's poll).
 func (h *Host) handleRuntime(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -200,6 +208,14 @@ func (h *Host) handleRuntime(w http.ResponseWriter, r *http.Request) {
 			d = sampleRetention
 		}
 		writeJSON(w, map[string]any{"series": h.reg.samplesSince(time.Now().Add(-d))})
+		return
+	}
+	if r.URL.Query().Get("detail") != "" {
+		writeJSON(w, map[string]any{
+			"at":       time.Now(),
+			"gauges":   h.gather(),
+			"sessions": h.sessionLoads(),
+		})
 		return
 	}
 	writeJSON(w, map[string]any{"at": time.Now(), "gauges": h.gather()})
