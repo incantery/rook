@@ -268,6 +268,72 @@ func (s *screen) eraseDisplay(mode int, fill Cell) {
 	}
 }
 
+// resize changes the screen geometry to newW×newH without reflow (reflow is a
+// v1 non-goal — see D7 in the server-terminal design). Each row is clipped on
+// the right or padded with blanks; content is never rewrapped. Rows are
+// bottom-anchored so a vertical shrink keeps the cursor line and the most-recent
+// output, and the rows that fall off the top of the primary screen are pushed to
+// scrollback — they genuinely scrolled into history. The ring offset is
+// flattened (top=0) and the scroll region reset to the whole screen.
+func (s *screen) resize(newW, newH int) {
+	if newW == s.w && newH == s.h {
+		return
+	}
+	oldW, oldH, oldTop, old := s.w, s.h, s.top, s.cells
+	// logical returns old logical row y as its physical slice, through the ring.
+	logical := func(y int) []Cell {
+		py := oldTop + y
+		if py >= oldH {
+			py -= oldH
+		}
+		return old[py*oldW : py*oldW+oldW]
+	}
+
+	// Bottom-anchor: old logical row (oldH-1) maps to new row (newH-1). shift>0
+	// means that many top rows fall off (a shrink); shift<0 leaves blank rows at
+	// the top (a grow).
+	shift := oldH - newH
+
+	// Rebuild scrollback at the new width (clip/pad per row via push's copy, never
+	// reflow), then push the rows that fell off the top of a shrink, in order — so
+	// history stays chronological: oldest retained line first, departing rows last.
+	if s.sb != nil {
+		nsb := newScrollback(newW, s.sb.cap)
+		for i := range s.sb.count {
+			nsb.push(s.sb.row(i))
+		}
+		for y := range shift {
+			nsb.push(logical(y))
+		}
+		s.sb = nsb
+	}
+
+	cells := make([]Cell, newW*newH)
+	for i := range cells {
+		cells[i] = blank
+	}
+	for ny := range newH {
+		oy := ny + shift
+		if oy < 0 || oy >= oldH {
+			continue // a blank row: the extra space a grow opened up
+		}
+		src := logical(oy)
+		dst := cells[ny*newW : ny*newW+newW]
+		for x := 0; x < newW && x < oldW; x++ {
+			dst[x] = src[x]
+		}
+	}
+
+	s.w, s.h = newW, newH
+	s.cells = cells
+	s.top = 0
+	s.stop, s.sbot = 0, newH-1
+	s.scrolled = 0
+	s.wrapNext = false // a pending autowrap doesn't survive a geometry change
+	s.cy -= shift      // move the cursor with the bottom-anchored content
+	s.clampCursor()
+}
+
 // clampCursor keeps the cursor inside the grid after any move.
 func (s *screen) clampCursor() {
 	if s.cx < 0 {

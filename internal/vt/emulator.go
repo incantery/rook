@@ -93,6 +93,47 @@ func NewWithScrollback(w, h, scrollbackLines int) *Emulator {
 func (e *Emulator) Cols() int { return e.w }
 func (e *Emulator) Rows() int { return e.h }
 
+// Resize changes the terminal geometry, as a SIGWINCH would. Content is
+// preserved without reflow (D7): rows are clipped or padded and bottom-anchored,
+// so a shrink keeps the cursor line and rows that scroll off the top of the
+// primary screen enter scrollback. Both the primary and alt screens resize, so
+// the geometry is correct whichever is active. The first Render after a Resize
+// resends the whole screen — the client's Surface geometry no longer matches — so
+// a client reconstructs the resized grid from a single frame.
+func (e *Emulator) Resize(w, h int) {
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	if w == e.w && h == e.h {
+		return
+	}
+	e.primary.resize(w, h)
+	e.alt.resize(w, h)
+	e.w, e.h = w, h
+	// The DECSC / alt-switch cursor slots hold absolute coordinates that may now
+	// be off the grid; clamp them so a later restore lands in range.
+	e.saved.cx, e.saved.cy = clampToGrid(e.saved.cx, e.saved.cy, w, h)
+	e.savedAlt.cx, e.savedAlt.cy = clampToGrid(e.savedAlt.cx, e.savedAlt.cy, w, h)
+}
+
+// clampToGrid clamps (x,y) into a w×h grid.
+func clampToGrid(x, y, w, h int) (int, int) {
+	if x < 0 {
+		x = 0
+	} else if x >= w {
+		x = w - 1
+	}
+	if y < 0 {
+		y = 0
+	} else if y >= h {
+		y = h - 1
+	}
+	return x, y
+}
+
 // Cursor is the visible cursor position (logical, on the active screen).
 func (e *Emulator) Cursor() (x, y int) { return e.cur.cx, e.cur.cy }
 
