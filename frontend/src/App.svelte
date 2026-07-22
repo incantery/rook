@@ -7,9 +7,8 @@
     import {onMount, tick} from "svelte";
     import {Call} from "@wailsio/runtime";
     import type {HostAPI, IssueInfo, ThreadInfo} from "./hostapi";
-    import {TermManager, type TermFactory} from "./term/manager";
+    import {TermManager} from "./term/manager";
     import type {Edge, PaneRef} from "./term/layout";
-    import {themeService} from "./theme/service";
     import {Registry} from "./registry";
     import {buildKeymap, CONTEXT_LEADER_KEY, CONTEXT_PREFIX, parseLeader, sigOf} from "./keymap";
     import {app, type Mode} from "./state.svelte";
@@ -40,14 +39,13 @@
 
     interface Props {
         api: HostAPI;
-        mkTerm: TermFactory;
         keybinds: Record<string, string | undefined>;
         /** the tmux-style prefix: a key ("`") or chord ("ctrl+b") */
         leader: string;
-        /** the config font, for the Monaco pane (terminals get it via mkTerm) */
+        /** the config font, for the Monaco pane and the terminal renderer */
         paneFont: {family: string; size: number};
     }
-    let {api, mkTerm, keybinds, leader: leaderCfg, paneFont}: Props = $props();
+    let {api, keybinds, leader: leaderCfg, paneFont}: Props = $props();
     // config-fixed: the leader reloads the page, which re-reads it
     // svelte-ignore state_referenced_locally
     const leader = parseLeader(leaderCfg);
@@ -1590,9 +1588,9 @@
 
         // A bare text input OUTSIDE the side panes (the hero's note box) owns
         // its keys completely — leaders and chords must not eat a comma or a
-        // backtick mid-sentence. xterm's and Monaco's hidden textareas are the
+        // backtick mid-sentence. The terminal (.vt-screen) and Monaco are the
         // exception: they ARE how panes receive the workbench's keys.
-        if (isTyping(tgt) && !tgt?.closest(".xterm, .monaco-editor")) return;
+        if (isTyping(tgt) && !tgt?.closest(".vt-screen, .monaco-editor")) return;
 
         // The vim-navigator chords resolve BEFORE the side-pane guard below:
         // they're the workbench's own movement keys, and a pane you can enter
@@ -1617,8 +1615,8 @@
 
         // the thread panel owns its keys: comments about code are full of
         // backticks, and the capture-phase prefix must not eat them. Only
-        // .side-pane is guarded — xterm's and Monaco's hidden textareas live
-        // in #terminals, NOT .side-pane, so the prefix keeps working there.
+        // .side-pane is guarded — the terminal and Monaco surfaces live in
+        // #terminals, NOT .side-pane, so the prefix keeps working there.
         // The bottom strip is exempt: it has no text inputs, and without the
         // exemption `,a` from the strip would drop the comma and feed a bare
         // `a` to the strip's action keys — a stray approve.
@@ -1802,7 +1800,7 @@
     }
 
     onMount(() => {
-        mgr = new TermManager(terminalsEl, api, mkTerm, {
+        mgr = new TermManager(terminalsEl, api, {
             changed: () => {
                 app.tabs = mgr.currentTabs();
                 app.activeId = mgr.activeId;
@@ -1825,13 +1823,13 @@
             activated: () => (app.dashVisible = false),
         });
 
-        // live theme swaps re-color every terminal (chrome + Monaco re-theme
-        // through their own subscriptions in the service)
-        const unTheme = themeService.onXterm((t) => mgr.setTerminalTheme(t));
+        // The terminal renderer reads its colors from --term-* CSS variables,
+        // which the theme service writes onto :root on every swap — so a live
+        // theme change re-colors every terminal with no subscription here.
 
         window.addEventListener("keydown", onKeydown, {capture: true});
         // focusin (not focus) — it bubbles, so one listener sees every pane,
-        // side pane and Monaco/xterm textarea in the app
+        // side pane and the terminal/Monaco surface in the app
         window.addEventListener("focusin", onFocusIn);
         const ro = new ResizeObserver(() => mgr.syncSize());
         ro.observe(terminalsEl);
@@ -1857,7 +1855,6 @@
         })();
 
         return () => {
-            unTheme();
             window.removeEventListener("keydown", onKeydown, {capture: true});
             window.removeEventListener("focusin", onFocusIn);
             ro.disconnect();

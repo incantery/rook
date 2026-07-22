@@ -54,10 +54,6 @@ type session struct {
 	info SessionInfo
 	pty  *os.File
 	cmd  *exec.Cmd
-	// q answers the terminal queries a program asks (termquery.go). Host-side
-	// so a detached session still gets answers, and so a replayed query is
-	// never answered twice.
-	q *termQ
 
 	mu     sync.Mutex // guards ring, attach, frameConn
 	ring   []byte
@@ -301,7 +297,6 @@ func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
 		},
 		pty:   f,
 		cmd:   cmd,
-		q:     newTermQ(),
 		emu:   vt.New(cols, rows),
 		dirty: make(chan struct{}, 1),
 	}
@@ -320,22 +315,23 @@ func (h *Host) readPump(s *session) {
 	for {
 		n, err := s.pty.Read(buf)
 		if n > 0 {
-			// Answer before forwarding: the reply is INPUT, so it never
-			// reaches the ring and can never be replayed at a program that
-			// has stopped asking.
-			if reply := s.q.scan(buf[:n]); len(reply) > 0 {
-				s.pty.Write(reply)
-			}
-			// Feed the host-side emulator too (termframe.go). Additive for now:
-			// the raw path above still owns query answers, so the emulator's own
-			// replies are drained and discarded here; HI-C routes them to the pty
-			// and retires termquery.go. Frames carry only grid state, never these.
-			// (emu is nil only for the bare sessions some tests hand-build.)
+			// The emulator answers the session's terminal queries now (DA/DSR/
+			// CPR/DECRQM/DECRQSS): feed it the output, then route its replies
+			// back as pty INPUT — so they never reach the ring or a rendering
+			// client, and a program that stopped asking is never re-answered.
+			// This is the query answering that termquery.go (DA/DSR only) and
+			// xterm (CPR/DECRQSS/OSC) used to split; the emulator holds the
+			// screen, so it does both. OSC 4/10-12 palette answers still want
+			// the theme and are a follow-up. (emu is nil only for the bare
+			// sessions some tests hand-build.)
 			if s.emu != nil {
 				s.emuMu.Lock()
 				s.emu.Write(buf[:n])
-				s.emu.TakeOutput()
+				reply := s.emu.TakeOutput()
 				s.emuMu.Unlock()
+				if len(reply) > 0 {
+					s.pty.Write(reply)
+				}
 				s.signalDirty()
 			}
 			s.mu.Lock()

@@ -88,6 +88,13 @@ export class HostAPI {
         return new WebSocket(`${ws}/sessions/${id}/attach?token=${this.token}`);
     }
 
+    /** The framed transport: the host runs the emulator and streams grid diffs
+     *  (internal/host/termframe.go). Resize travels in-band, not over HTTP. */
+    attachFramed(id: string): WebSocket {
+        const ws = this.endpoint.replace(/^http/, "ws");
+        return new WebSocket(`${ws}/sessions/${id}/framed?token=${this.token}`);
+    }
+
     async listWorkspaces(): Promise<WorkspaceInfo[]> {
         return (await this.req("/workspaces")).json();
     }

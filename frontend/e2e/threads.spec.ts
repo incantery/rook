@@ -44,7 +44,7 @@ async function openWorkspace(page: Page, name: string) {
     await page.getByPlaceholder("e.g. rook-core").fill(name);
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
-    await expect(shown(page, ".xterm-screen")).toBeVisible({timeout: 15_000});
+    await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
 }
 
 /** Talk to the sandbox daemon directly — how the AGENT sees and mutates

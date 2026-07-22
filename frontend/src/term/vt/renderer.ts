@@ -131,6 +131,21 @@ export class GridRenderer {
         this.repaintViewport();
     }
 
+    /** focus gives the screen keyboard focus, so key presses reach onInput. */
+    focus(): void {
+        this.container.focus();
+    }
+
+    /** reset blanks the live grid and pins to the bottom — used on (re)connect,
+     *  before the host's fresh snapshot arrives, so stale cells can't linger.
+     *  Scrollback history is kept: it belongs to the same session. */
+    reset(): void {
+        this.grid = new ClientGrid(this.grid.cols, this.grid.rows);
+        this.viewOffset = 0;
+        for (let y = 0; y < this.grid.rows; y++) this.paintRow(y);
+        this.paintCursor();
+    }
+
     /** scrollToBottom pins the viewport back to the live screen. */
     scrollToBottom(): void {
         if (this.viewOffset === 0) return;

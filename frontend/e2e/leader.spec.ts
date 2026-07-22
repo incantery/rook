@@ -52,7 +52,7 @@ async function openWorkspace(page: Page, name: string) {
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
     // the shell is the app screen's proof of life
-    await expect(shown(page, ".xterm-screen")).toBeVisible({timeout: 15_000});
+    await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
 }
 
 /** ` e → picker → open a file in Monaco, with vim attached. */
@@ -103,10 +103,10 @@ test("` ` types a literal backtick into the editor", async ({page}) => {
 test("` ` still types a literal backtick into a terminal", async ({page}) => {
     await openWorkspace(page, "leader-term");
 
-    await shown(page, ".xterm-screen").click();
+    await shown(page, ".vt-screen").click();
     await page.keyboard.type("x``y");
 
-    await expect(shown(page, ".xterm-rows")).toContainText("x`y", {timeout: 10_000});
+    await expect(shown(page, ".vt-screen")).toContainText("x`y", {timeout: 10_000});
 });
 
 // Mission control has to TAKE focus, not just be on top of everything.
@@ -119,9 +119,12 @@ test("` ` still types a literal backtick into a terminal", async ({page}) => {
 // because it is the same question: where does a keystroke actually land.
 test("mission control takes focus off the terminal", async ({page}) => {
     await openWorkspace(page, "deck-focus");
-    await shown(page, ".xterm-screen").click();
-    // the terminal really has it, or the assertion below proves nothing
-    expect(await page.evaluate(() => document.activeElement?.tagName)).toBe("TEXTAREA");
+    await shown(page, ".vt-screen").click();
+    // the terminal really has it, or the assertion below proves nothing. The
+    // renderer's focusable element is the .vt-screen div (no hidden textarea).
+    expect(
+        await page.evaluate(() => document.activeElement?.classList.contains("vt-screen")),
+    ).toBe(true);
 
     await page.keyboard.press("`");
     await page.keyboard.press("h");

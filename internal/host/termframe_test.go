@@ -103,7 +103,6 @@ func TestFramedReconstructsGrid(t *testing.T) {
 	defer w.Close()
 	const cols, rows = 40, 8
 	s := &session{
-		q:     newTermQ(),
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
 		pty:   r,
 		cmd:   exec.Command("true"),
@@ -159,7 +158,6 @@ func TestFramedResizeResends(t *testing.T) {
 	defer w.Close()
 	const cols, rows = 20, 4
 	s := &session{
-		q:     newTermQ(),
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
 		pty:   r,
 		cmd:   exec.Command("true"),
@@ -223,7 +221,6 @@ func TestFramedAltScreenState(t *testing.T) {
 	}
 	defer w.Close()
 	s := &session{
-		q:     newTermQ(),
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: 20, Rows: 4, Created: time.Now()},
 		pty:   r,
 		cmd:   exec.Command("true"),
@@ -293,7 +290,6 @@ func TestFramedInputReachesPty(t *testing.T) {
 	}
 
 	s := &session{
-		q:     newTermQ(),
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: 20, Rows: 4, Created: time.Now()},
 		pty:   ptmx,
 		cmd:   exec.Command("true"),
@@ -330,5 +326,64 @@ func TestFramedInputReachesPty(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("input never reached the pty")
+	}
+}
+
+// TestFramedAnswersQueries proves the emulator answers terminal queries and the
+// reply reaches the pty as input — the query answering that moved off the raw
+// path (termquery.go) and xterm onto the host emulator. A program asks DA1; the
+// answer must come back on the tty, and never as a frame (readGrid enforces
+// that separately).
+func TestFramedAnswersQueries(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	h := New()
+
+	ptmx, tty, err := cpty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	if tio, terr := unix.IoctlGetTermios(int(tty.Fd()), unix.TIOCGETA); terr == nil {
+		tio.Lflag &^= unix.ICANON | unix.ECHO
+		if serr := unix.IoctlSetTermios(int(tty.Fd()), unix.TIOCSETA, tio); serr != nil {
+			t.Skipf("cannot raw the test tty: %v", serr)
+		}
+	} else {
+		t.Skipf("cannot read tty termios: %v", terr)
+	}
+
+	s := &session{
+		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: 20, Rows: 4, Created: time.Now()},
+		pty:   ptmx,
+		cmd:   exec.Command("true"),
+		emu:   vt.New(20, 4),
+		dirty: make(chan struct{}, 1),
+	}
+	h.mu.Lock()
+	h.sessions["s1"] = s
+	h.mu.Unlock()
+	go h.readPump(s)
+	// No attach needed: readPump answers whether or not a client is watching.
+
+	// the "program" asks its terminal what it is (DA1)
+	if _, err := tty.Write([]byte("\x1b[c")); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _ := tty.Read(buf)
+		got <- string(buf[:n])
+	}()
+	select {
+	case reply := <-got:
+		// xterm.js's answer, which the emulator mirrors: VT100 w/ AVO.
+		if !strings.Contains(reply, "\x1b[?1;2c") {
+			t.Fatalf("DA1 reply = %q, want it to contain \\x1b[?1;2c", reply)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("query was never answered to the pty")
 	}
 }

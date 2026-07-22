@@ -32,7 +32,7 @@ func TestAttachReplayGapFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer w.Close()
-	s := &session{q: newTermQ(),
+	s := &session{
 		info: SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Created: time.Now()},
 		pty:  r,
 		cmd:  exec.Command("true"), // never started; Wait() just errors on EOF

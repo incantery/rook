@@ -226,7 +226,7 @@ export class Rook {
 
     /** the visible terminal pane */
     term(): Locator {
-        return shown(this.page, ".xterm-screen");
+        return shown(this.page, ".vt-screen");
     }
 
     /** Run a palette command by title. The titlebar button rather than the

@@ -13,9 +13,10 @@
 // lives in manager-owned window containers and is removed only when its
 // host session dies — screen and pane switches are CSS, never unmounts.
 
-import type {ITheme, Terminal} from "@xterm/xterm";
-import type {FitAddon} from "@xterm/addon-fit";
 import type {HostAPI, SessionInfo} from "../hostapi";
+import {decodeServerMessage, encodeInput, encodeResize} from "./vt/framed";
+import {GridRenderer} from "./vt/renderer";
+import "./vt/renderer.css";
 import {
     findLeafBy,
     leafOf,
@@ -52,8 +53,6 @@ export interface PaneAt {
     leafId: string;
     content: PaneRef;
 }
-
-export type TermFactory = () => {term: Terminal; fit: FitAddon};
 
 /** The UI-rate projection of a WINDOW — what the Svelte strip renders. */
 export interface TabInfo {
@@ -98,24 +97,24 @@ interface Tab {
     id: string;
     name: string;
     workspace: string;
-    term: Terminal;
-    fit: FitAddon;
+    /** the host-side-emulator renderer (term/vt) that replaced xterm */
+    renderer: GridRenderer;
+    /** the element the renderer paints into — measured to compute the grid */
+    box: HTMLElement;
+    /** last geometry sent to the host (was term.cols/term.rows) */
+    cols: number;
+    rows: number;
+    /** alt-screen state, from the host's msgState — drives keybind routing */
+    alt: boolean;
     ws: WebSocket | null;
     wrap: HTMLElement;
     lastSize: string;
-    /** Ring replay in flight: xterm's auto-replies to replayed queries
-     *  must be filtered out of onData — their askers are long gone, and
-     *  the shell would echo them as junk input. Typing passes through. */
-    replaying: boolean;
 }
 
 /** A terminal pane: PaneContent over a Tab. The Tab keeps the whole
  *  replay/reconnect machinery; this is just the pane-shaped view. */
 class TermPane implements PaneContent {
-    constructor(
-        private tab: Tab,
-        private api: HostAPI,
-    ) {}
+    constructor(private tab: Tab) {}
 
     get el(): HTMLElement {
         return this.tab.wrap;
@@ -130,24 +129,30 @@ class TermPane implements PaneContent {
     }
 
     focus(): void {
-        this.tab.term.focus();
+        this.tab.renderer.focus();
     }
 
-    /** Fit the grid to the cell and tell the PTY, deduped on colsxrows. */
+    /** Fit the grid to the cell and tell the host, deduped on colsxrows. The
+     *  grid is computed from the box's pixel size and the measured cell — the
+     *  work FitAddon did — then the renderer and the host are resized together. */
     fit(force = false): void {
         const {tab} = this;
-        tab.fit.fit();
-        const key = `${tab.term.cols}x${tab.term.rows}`;
+        const {w, h} = tab.renderer.cellSize();
+        if (!w || !h) return; // not laid out yet; a later fit trues it up
+        const cols = Math.max(2, Math.floor(tab.box.clientWidth / w));
+        const rows = Math.max(1, Math.floor(tab.box.clientHeight / h));
+        const key = `${cols}x${rows}`;
         if (!force && key === tab.lastSize) return;
         tab.lastSize = key;
-        this.api.resize(tab.id, tab.term.cols, tab.term.rows).catch((err) => {
-            console.error("resize failed", err);
-        });
+        tab.cols = cols;
+        tab.rows = rows;
+        tab.renderer.resize(cols, rows);
+        if (tab.ws?.readyState === WebSocket.OPEN) tab.ws.send(encodeResize(cols, rows));
     }
 
     /** The ONLY place terminal DOM is removed — session death. */
     dispose(): void {
-        this.tab.term.dispose();
+        this.tab.renderer.destroy();
         this.tab.wrap.remove();
     }
 }
@@ -168,35 +173,6 @@ interface Win {
     cells: Map<string, HTMLElement>;
 }
 
-// xterm generates replies of its own while parsing, and rook has to decide
-// which of them may reach the pty. Two rules, because there are now two kinds.
-//
-// HOST_ANSWERED — the host answers these itself (internal/host/termquery.go),
-// so xterm's copy is always a duplicate and is dropped unconditionally, replay
-// or not. Matched by their EXACT reply shapes rather than by final byte: a
-// pattern like "any CSI ending in n" would also swallow a printer-status
-// reply nobody answers, and a query with no answer is a program that hangs.
-//
-// REPLAY_ONLY — the ones the host cannot answer, because they need a model of
-// the screen rather than of the conversation: cursor position (CSI R), the
-// DECRQSS status string (DCS), and the palette reports (OSC 4/10-12) that
-// carry the theme. These stay xterm's job, and stay load-bearing live — vim
-// reads OSC 11 to pick a background — so they are dropped only while a replay
-// is in flight, which is the old gate, unchanged.
-//
-// The split is what makes the gate's fail-open safe again. It was always a
-// timer: past 1.5s the gate lifts whether or not the replay finished, and any
-// straggling reply went through. That is how five stale mode reports reached a
-// live nvim. The family that did it is now dropped by a rule with no timer in
-// it at all.
-//
-// Exported only for the spec: what these do and do not swallow is the whole
-// contract, and nothing else the module exposes makes it observable.
-export const HOST_ANSWERED = /\x1b(?:\[\?1;2c|\[>0;276;0c|\[0n|\[\??\d+(?:;\d+)*\$y)/g;
-
-export const REPLAY_ONLY =
-    /\x1b(?:\[\??\d+(?:;\d+)*R|\](?:4|1[0-2]);[^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\)/g;
-
 export class TermManager {
     private sessions = new Map<string, Tab>();
     private windows: Win[] = [];
@@ -211,7 +187,6 @@ export class TermManager {
     constructor(
         private container: HTMLElement,
         private api: HostAPI,
-        private mkTerm: TermFactory,
         private events: TermEvents,
     ) {}
 
@@ -247,13 +222,16 @@ export class TermManager {
      *  The tradeoff vs is_vim: this is broader. `less` and `htop` are also
      *  full-screen, so they keep ⌃hjkl too, where tmux would have navigated
      *  away. "A full-screen app owns the keyboard" is the simpler rule, and
-     *  the leader (` + arrows) always navigates regardless. */
+     *  the leader (` + arrows) always navigates regardless.
+     *
+     *  The alt-screen fact now comes from the host emulator over the wire
+     *  (msgState → tab.alt), not from reading xterm's buffer. */
     get focusedInAltScreen(): boolean {
         const win = this.active;
         if (!win) return false;
         // an editor pane has no session and no TUI — it never yields
         if (!win.panes.get(win.focused)?.sessionId) return false;
-        return this.focusedTab(win)?.term.buffer.active.type === "alternate";
+        return this.focusedTab(win)?.alt ?? false;
     }
 
     /** Snapshot for the strip and pickers: windows in the current workspace. */
@@ -363,36 +341,32 @@ export class TermManager {
         wrap.appendChild(box);
         this.container.appendChild(wrap);
 
-        const {term, fit} = this.mkTerm();
-        term.open(box);
-        // Parse the replay at the pty's real grid, not xterm's 80×24
-        // default — init() attaches while terminals are hidden, so fit
-        // hasn't run yet. At the wrong width zsh's prompt-EOL trick
-        // (inverse "%" + a row of spaces) wraps and the % stays visible;
-        // reflow-on-fit can't unwrap what parsed wrong.
-        if (s.cols > 0 && s.rows > 0) term.resize(s.cols, s.rows);
-
-        const tab: Tab = {
+        // Start at the pty's real grid, not a default — init() attaches while
+        // terminals are hidden, so fit hasn't run yet. The host also parses at
+        // this size until a fit resizes it.
+        const cols = s.cols > 0 ? s.cols : 100;
+        const rows = s.rows > 0 ? s.rows : 30;
+        // eslint-disable-next-line prefer-const -- assigned below; the onInput
+        // closure reads tab.ws lazily, at keypress time, when it is set.
+        let tab: Tab;
+        const renderer = new GridRenderer(box, cols, rows, {
+            onInput: (data) => {
+                if (tab.ws?.readyState === WebSocket.OPEN) tab.ws.send(encodeInput(data));
+            },
+        });
+        tab = {
             id: s.id,
             name: s.name,
             workspace: s.workspace || "main",
-            term,
-            fit,
+            renderer,
+            box,
+            cols,
+            rows,
+            alt: false,
             ws: null,
             wrap,
             lastSize: "",
-            replaying: true,
         };
-        term.onData((data) => {
-            if (tab.ws?.readyState !== WebSocket.OPEN) return;
-            // Always: the host already answered these, live and once.
-            data = data.replace(HOST_ANSWERED, "");
-            // While replaying: also the ones only xterm can answer, since a
-            // replayed query's asker is long gone. Typing passes untouched.
-            if (tab.replaying) data = data.replace(REPLAY_ONLY, "");
-            if (!data) return;
-            tab.ws.send(data);
-        });
         this.connect(tab);
         this.sessions.set(tab.id, tab);
         return tab;
@@ -413,7 +387,7 @@ export class TermManager {
         for (const l of leaves(root)) {
             if (panes.has(l.id) || l.content.type !== "term") continue;
             const tab = this.sessions.get(l.content.session);
-            if (tab) panes.set(l.id, new TermPane(tab, this.api));
+            if (tab) panes.set(l.id, new TermPane(tab));
         }
         const win: Win = {
             id: crypto.randomUUID(),
@@ -476,42 +450,27 @@ export class TermManager {
     }
 
     private connect(tab: Tab): void {
-        tab.replaying = true;
-        const ws = this.api.attach(tab.id);
+        const ws = this.api.attachFramed(tab.id);
         ws.binaryType = "arraybuffer";
-        // While the gate is up, onData drops AUTO_REPLY sequences (answers
-        // to replayed queries) and passes typing through untouched — so the
-        // gate costs no input latency, only response filtering. It still
-        // MUST fail open: past the replay, a live program's query answers
-        // are load-bearing (vim theme detection), and a filter only a host
-        // signal can lift would eat them forever under protocol skew (a
-        // host predating the marker). The timer bounds the gate; the
-        // marker just ends it early and precisely.
-        let gate = 0;
-        const lift = () => {
-            if (tab.ws === ws) tab.replaying = false; // stale timers stay quiet
-        };
         ws.onopen = () => {
-            // The host replays its whole ring on every attach — start from
-            // a blank grid or a reconnect renders the history twice.
-            tab.term.reset();
+            // A fresh attach: the host renders a full snapshot against a blank
+            // Surface, so blank the client grid first — no replay gate, no
+            // "live" seam, no query-suppression. The snapshot repaints it.
+            tab.renderer.reset();
             tab.ws = ws;
-            gate = window.setTimeout(lift, 1500);
+            // resize the host to our current grid, and true up once laid out
+            ws.send(encodeResize(tab.cols, tab.rows));
             this.paneInActive(tab.id)?.fit(true);
         };
-        ws.onmessage = (e: MessageEvent<ArrayBuffer | string>) => {
-            if (typeof e.data === "string") {
-                // the replay→live seam ("live" text frame). Lift only once
-                // xterm has PARSED the replay, not merely queued it — an
-                // empty write's callback marks that point.
-                clearTimeout(gate);
-                tab.term.write("", lift);
-                return;
+        ws.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+            const msg = decodeServerMessage(e.data);
+            if (msg.kind === "frame") {
+                tab.renderer.applyBytes(msg.payload);
+            } else if (msg.kind === "state") {
+                tab.alt = msg.alt; // keybind routing reads this via focusedInAltScreen
             }
-            tab.term.write(new Uint8Array(e.data));
         };
         ws.onclose = async (ev) => {
-            clearTimeout(gate);
             if (tab.ws === ws) tab.ws = null;
             if (ev.reason === "replaced") return; // a newer attach owns the session
             try {
@@ -548,8 +507,8 @@ export class TermManager {
         const fromWin = this.lastActive.get(this.current) ?? this.active ?? undefined;
         const from = fromWin ? this.focusedTab(fromWin) : undefined;
         const s = await this.api.create(
-            from?.term.cols ?? 100,
-            from?.term.rows ?? 30,
+            from?.cols ?? 100,
+            from?.rows ?? 30,
             from?.id,
             this.current,
         );
@@ -678,12 +637,7 @@ export class TermManager {
      *  caller can type into it. */
     async spawnIn(workspace: string): Promise<string> {
         const from = this.active ? this.focusedTab(this.active) : undefined;
-        const s = await this.api.create(
-            from?.term.cols ?? 100,
-            from?.term.rows ?? 30,
-            undefined,
-            workspace,
-        );
+        const s = await this.api.create(from?.cols ?? 100, from?.rows ?? 30, undefined, workspace);
         const tab = this.addTab(s);
         this.activate(this.makeWindow(newLeaf(s.id), tab.workspace));
         return s.id;
@@ -714,11 +668,10 @@ export class TermManager {
         this.active?.panes.get(this.active.focused)?.focus();
     }
 
-    /** Re-theme every live terminal — the theme service calls this on a swap.
-     *  New terminals pick up the theme via mkTerm (main.ts reads the service). */
-    setTerminalTheme(theme: ITheme): void {
-        for (const tab of this.sessions.values()) tab.term.options.theme = theme;
-    }
+    // The renderer reads its colors from --term-* CSS custom properties, which
+    // the theme service writes onto :root on every swap (theme/cssvars.ts). A
+    // theme change re-tints every live terminal with no per-tab call — so the
+    // old setTerminalTheme is gone.
 
     /** What the focused pane SHOWS. Chrome needs this to refuse a verb that
      *  belongs to a source buffer when the keyboard is actually in a draft or
@@ -777,8 +730,8 @@ export class TermManager {
         // no shell under the focused pane (editor) → default grid and no
         // cwd inheritance; the host seeds the workspace root instead
         const from = this.focusedTab(win);
-        const baseCols = from?.term.cols ?? 100;
-        const baseRows = from?.term.rows ?? 30;
+        const baseCols = from?.cols ?? 100;
+        const baseRows = from?.rows ?? 30;
         // spawn at roughly the post-split grid so the shell's first
         // prompt parses near-right; the post-project fit trues it up
         const cols = dir === "row" ? Math.max(2, Math.floor(baseCols / 2)) : baseCols;
@@ -793,7 +746,7 @@ export class TermManager {
             return;
         }
         win.root = splitAt(win.root, win.focused, dir, leaf);
-        win.panes.set(leaf.id, new TermPane(tab, this.api));
+        win.panes.set(leaf.id, new TermPane(tab));
         win.focused = leaf.id;
         project(win, this.hooks(win));
         this.save();
@@ -866,7 +819,7 @@ export class TermManager {
         const leaf = win ? leafOf(win.root, tab.id) : null;
         if (!win || !leaf) {
             // never made it into a window — still must not leak
-            tab.term.dispose();
+            tab.renderer.destroy();
             tab.wrap.remove();
             return;
         }

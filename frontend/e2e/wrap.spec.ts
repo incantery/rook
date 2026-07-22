@@ -26,7 +26,7 @@ async function openWorkspace(page: Page, name: string) {
     await page.getByPlaceholder("e.g. rook-core").fill(name);
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
-    await expect(shown(page, ".xterm-screen")).toBeVisible({timeout: 15_000});
+    await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
 }
 
 async function openFile(page: Page, file: string) {

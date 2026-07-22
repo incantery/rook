@@ -23,7 +23,7 @@ async function openWorkspace(page: Page, name: string) {
     await page.getByPlaceholder("e.g. rook-core").fill(name);
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
-    await expect(shown(page, ".xterm-screen")).toBeVisible({timeout: 15_000});
+    await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
 }
 
 async function runCommand(page: Page, title: string) {
@@ -137,7 +137,7 @@ test("telescope keys: editor ⌃P/⌃G/⌃S, grep ⌃Q → quickfix, ` f reveal"
     // switch via the strip button, the prefix is dropped inside side panes.
     const stripOne = page.getByRole("button", {name: "1", exact: true});
     await stripOne.click();
-    const term = shown(page, ".xterm-screen");
+    const term = shown(page, ".vt-screen");
     // The shell may not be reading yet — a cold sandbox pays oh-my-zsh's
     // plugin compilation on its first run, and a cd typed into that goes
     // nowhere in time. This used to be a flat 800ms sleep, which is what made
