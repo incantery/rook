@@ -83,9 +83,9 @@ export class ClientGrid {
         };
     }
 
-    /** coalesceRow merges a row's cells into style-runs. The trailing half of a
-     *  wide glyph (width 0) is skipped: its pixels belong to the lead cell's
-     *  double-width character. */
+    /** coalesceRow merges a live row's cells into style-runs. The trailing half
+     *  of a wide glyph (width 0) is skipped: its pixels belong to the lead cell's
+     *  double-width character. Reads the row in place (no slice) for the hot path. */
     coalesceRow(y: number): Span[] {
         const spans: Span[] = [];
         const base = y * this.cols;
@@ -102,4 +102,29 @@ export class ClientGrid {
         }
         return spans;
     }
+
+    /** rowCells returns a shallow copy of row y's cells — used to capture a row
+     *  into scrollback before the grid shifts. Cells are immutable once placed,
+     *  so sharing their references is safe. */
+    rowCells(y: number): WCell[] {
+        const base = y * this.cols;
+        return this.cells.slice(base, base + this.cols);
+    }
+}
+
+/** coalesceCells merges an arbitrary row of cells into style-runs — the
+ *  scrollback-viewport counterpart to coalesceRow, which works off a copied row. */
+export function coalesceCells(cells: WCell[]): Span[] {
+    const spans: Span[] = [];
+    let cur: Span | null = null;
+    for (const cell of cells) {
+        if (cell.width === 0) continue;
+        if (cur && cur.fg === cell.fg && cur.bg === cell.bg && cur.attr === cell.attr) {
+            cur.text += cell.content;
+        } else {
+            cur = {text: cell.content, fg: cell.fg, bg: cell.bg, attr: cell.attr};
+            spans.push(cur);
+        }
+    }
+    return spans;
 }

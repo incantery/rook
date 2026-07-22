@@ -14,14 +14,16 @@
 // imperative DOM. A thin Svelte wrapper mounts it (later); the raw CSS lives
 // alongside, per rook's convention for imperative islands.
 
-import {decodeFrame, type Frame} from "./frame";
-import {ClientGrid} from "./grid";
+import {decodeFrame, type Frame, type WCell} from "./frame";
+import {ClientGrid, coalesceCells} from "./grid";
 import {rowExtent, type Selection, selectedText, wordAt} from "./selection";
 import {rowHtml} from "./style";
 
 export interface RendererOptions {
     /** class applied to the container; styling (font, --term-* vars) hangs off it. */
     className?: string;
+    /** how many scrolled-off lines to retain on the client (default 5000). */
+    scrollbackCap?: number;
 }
 
 export class GridRenderer {
@@ -39,9 +41,16 @@ export class GridRenderer {
     private cellW = 0;
     private cellH = 0;
 
+    // scrollback: rows that have scrolled off, and the viewport's offset into
+    // history (0 = pinned to the live bottom, N = N lines back).
+    private scrollbackRows: WCell[][] = [];
+    private scrollbackCap: number;
+    private viewOffset = 0;
+
     constructor(container: HTMLElement, cols: number, rows: number, opts: RendererOptions = {}) {
         this.container = container;
         this.grid = new ClientGrid(cols, rows);
+        this.scrollbackCap = opts.scrollbackCap ?? 5000;
 
         container.classList.add("vt-screen");
         if (opts.className) container.classList.add(opts.className);
@@ -76,12 +85,56 @@ export class GridRenderer {
         this.installInput();
     }
 
-    /** applyFrame applies a decoded Frame immediately: repaint changed rows, move
-     *  the cursor. Synchronous — the coalescing already happened server-side. */
+    /** applyFrame applies a decoded Frame immediately: capture any scrolled-off
+     *  rows into scrollback, apply the frame, and repaint. Synchronous — the
+     *  coalescing already happened server-side. */
     applyFrame(frame: Frame): void {
+        if (frame.scroll > 0) {
+            // capture the rows about to leave the top before the grid shifts
+            const n = Math.min(frame.scroll, this.grid.rows);
+            for (let y = 0; y < n; y++) this.pushScrollback(this.grid.rowCells(y));
+            // if the viewport is scrolled up, keep it pinned to the same content
+            if (this.viewOffset > 0) {
+                this.viewOffset = Math.min(
+                    this.viewOffset + frame.scroll,
+                    this.scrollbackRows.length,
+                );
+            }
+        }
         const dirty = this.grid.apply(frame);
-        for (const y of dirty) this.paintRow(y);
-        this.paintCursor();
+        if (this.viewOffset === 0) {
+            for (const y of dirty) this.paintRow(y);
+            this.paintCursor();
+        }
+        // while scrolled up the live grid changes below the viewport; nothing to
+        // repaint until the user returns to the bottom.
+    }
+
+    private pushScrollback(row: WCell[]): void {
+        this.scrollbackRows.push(row);
+        if (this.scrollbackRows.length > this.scrollbackCap) this.scrollbackRows.shift();
+    }
+
+    /** scrollLines moves the viewport by delta lines (positive = back into
+     *  history), clamped, and repaints. */
+    scrollLines(delta: number): void {
+        const max = this.scrollbackRows.length;
+        const next = Math.max(0, Math.min(max, this.viewOffset + delta));
+        if (next === this.viewOffset) return;
+        this.viewOffset = next;
+        this.repaintViewport();
+    }
+
+    /** scrollToBottom pins the viewport back to the live screen. */
+    scrollToBottom(): void {
+        if (this.viewOffset === 0) return;
+        this.viewOffset = 0;
+        this.repaintViewport();
+    }
+
+    /** how many lines the viewport is scrolled back (0 = live). */
+    get scrollOffset(): number {
+        return this.viewOffset;
     }
 
     /** applyBytes decodes wire bytes and applies the frame. */
@@ -134,9 +187,24 @@ export class GridRenderer {
         this.rowEls[y].innerHTML = rowHtml(this.grid.coalesceRow(y));
     }
 
+    // repaintViewport redraws every display row from the virtual buffer
+    // (scrollback above, live screen below) at the current offset. Used whenever
+    // the offset changes; the live path (offset 0) uses the faster paintRow.
+    private repaintViewport(): void {
+        const hist = this.scrollbackRows.length;
+        for (let y = 0; y < this.grid.rows; y++) {
+            const v = hist - this.viewOffset + y;
+            const cells =
+                v < 0 ? [] : v < hist ? this.scrollbackRows[v] : this.grid.rowCells(v - hist);
+            this.rowEls[y].innerHTML = rowHtml(coalesceCells(cells));
+        }
+        this.paintCursor();
+    }
+
     private paintCursor(): void {
         const {x, y, visible} = this.grid.cursor;
-        this.cursorEl.style.display = visible ? "block" : "none";
+        // the cursor lives on the live screen; hide it while viewing history
+        this.cursorEl.style.display = visible && this.viewOffset === 0 ? "block" : "none";
         this.cursorEl.style.setProperty("--vt-cx", String(x));
         this.cursorEl.style.setProperty("--vt-cy", String(y));
     }
@@ -146,9 +214,17 @@ export class GridRenderer {
     private installInput(): void {
         this.container.addEventListener("mousedown", this.onMouseDown);
         this.container.addEventListener("keydown", this.onKeyDown);
+        this.container.addEventListener("wheel", this.onWheel, {passive: false});
         window.addEventListener("mousemove", this.onMouseMove);
         window.addEventListener("mouseup", this.onMouseUp);
     }
+
+    private onWheel = (e: WheelEvent): void => {
+        // wheel up goes back into history; convert pixels to whole lines
+        const lines = Math.max(1, Math.round(Math.abs(e.deltaY) / (this.cellH || 16)));
+        this.scrollLines(e.deltaY < 0 ? lines : -lines);
+        if (this.scrollbackRows.length > 0) e.preventDefault();
+    };
 
     /** measureCell reads the pixel size of one cell from the laid-out DOM, so
      *  pixel<->cell mapping and the selection overlay line up with the glyphs. */
@@ -226,6 +302,29 @@ export class GridRenderer {
         ) {
             void this.copySelection();
             e.preventDefault();
+            return;
+        }
+        // Shift+PageUp/PageDown/Home/End scroll history without disturbing the pty
+        if (e.shiftKey) {
+            const page = this.grid.rows - 1;
+            switch (e.key) {
+                case "PageUp":
+                    this.scrollLines(page);
+                    e.preventDefault();
+                    return;
+                case "PageDown":
+                    this.scrollLines(-page);
+                    e.preventDefault();
+                    return;
+                case "Home":
+                    this.scrollLines(this.scrollbackRows.length);
+                    e.preventDefault();
+                    return;
+                case "End":
+                    this.scrollToBottom();
+                    e.preventDefault();
+                    return;
+            }
         }
     };
 
@@ -259,6 +358,7 @@ export class GridRenderer {
         if (this.raf) cancelAnimationFrame(this.raf);
         this.container.removeEventListener("mousedown", this.onMouseDown);
         this.container.removeEventListener("keydown", this.onKeyDown);
+        this.container.removeEventListener("wheel", this.onWheel);
         window.removeEventListener("mousemove", this.onMouseMove);
         window.removeEventListener("mouseup", this.onMouseUp);
         this.container.replaceChildren();
