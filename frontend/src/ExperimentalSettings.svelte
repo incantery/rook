@@ -27,8 +27,8 @@
         The DOM renderer is the default and the accessible one. The WebGL renderer (beamterm) is a
         performance experiment — typing latency measured lower and firehose output is cheaper to
         paint, but it is missing pieces: <span class="text-fg"
-            >scrollback view, mouse support for TUI apps (Claude Code scroll, vim mouse),
-            screen-reader text, and window transparency (the pane paints opaque)</span
+            >click/drag for mouse-driven TUI apps (the wheel is forwarded), screen-reader text,
+            and window transparency (the pane paints opaque)</span
         >. If it fails to load, the DOM renderer takes over automatically.
     </p>
 

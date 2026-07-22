@@ -66,6 +66,56 @@ test("pre-attach history pages in from the host ring", async ({page}) => {
     await expect.poll(() => screenText(term2), {timeout: 15_000}).toContain("300");
 });
 
+test("webgl: pre-attach history pages in and paints on canvas", async ({page}) => {
+    // same journey as above, on the WebGL renderer — the SbStore is shared,
+    // but the canvas paint path (repaintViewport, padding, cursor gating) and
+    // the Shift-key bindings are beamterm's own.
+    await page.addInitScript(() => localStorage.setItem("rook.renderer", "webgl"));
+    await openWorkspace(page, "sb-webgl");
+    await expect(page.locator(".vt-webgl canvas")).toHaveCount(1, {timeout: 15_000});
+
+    const webglText = () =>
+        page.evaluate(() => {
+            const el = [...document.querySelectorAll<HTMLElement>(".vt-webgl")].find(
+                (e) => e.offsetParent !== null,
+            ) as (HTMLElement & {__screenText?: () => string}) | undefined;
+            return el?.__screenText?.() ?? "";
+        });
+    const term = shown(page, ".vt-webgl");
+    await term.click();
+    await page.keyboard.type("echo rdy$((6*7))");
+    await page.keyboard.press("Enter");
+    await expect.poll(webglText, {timeout: 60_000}).toContain("rdy42");
+
+    await page.keyboard.type("seq 1 300");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("echo dn$((6*8))");
+    await page.keyboard.press("Enter");
+    await expect.poll(webglText, {timeout: 15_000}).toContain("dn48");
+
+    await page.reload();
+    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page
+        .locator("#home-workspaces div.group")
+        .filter({has: page.getByText("sb-webgl", {exact: true})})
+        .first()
+        .click();
+    await expect(page.locator(".vt-webgl canvas >> visible=true")).toHaveCount(1, {
+        timeout: 15_000,
+    });
+
+    // the snapshot is the live tail; the command echo is only in host history
+    await expect.poll(webglText, {timeout: 15_000}).toContain("dn48");
+    expect(await webglText()).not.toContain("seq 1 300");
+
+    await shown(page, ".vt-webgl").click();
+    await page.keyboard.press("Shift+Home");
+    await expect.poll(webglText, {timeout: 15_000}).toContain("seq 1 300");
+
+    await page.keyboard.press("Shift+End");
+    await expect.poll(webglText, {timeout: 15_000}).toContain("dn48");
+});
+
 test("output produced while a window is hidden lands on reveal", async ({page}) => {
     await openWorkspace(page, "sb-reveal");
     const term = shown(page, ".vt-screen");

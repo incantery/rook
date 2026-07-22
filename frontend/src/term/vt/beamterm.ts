@@ -10,10 +10,11 @@
 // already coalesces, so a full 405x113 repaint is a few hundred boundary
 // crossings, not 45k.
 //
-// SPIKE SCOPE — not yet wired: local scrollback view (shift+wheel),
-// scrollback paging (applySbChunk is a no-op), mouse forwarding to tracking
-// programs, a11y (canvas has no readable text — the DOM renderer remains the
-// accessible fallback). Selection is beamterm's built-in (drag + auto-copy).
+// SPIKE SCOPE — not yet wired: click/drag forwarding to mouse-tracking
+// programs (the wheel IS forwarded), a11y (canvas has no readable text — the
+// DOM renderer remains the accessible fallback). Selection is beamterm's
+// built-in (drag + auto-copy). Scrollback is the shared SbStore (sbstore.ts):
+// host-paged history, wheel + Shift+PageUp/Home to view it.
 
 import type {TermRenderer} from "./api";
 import init, {
@@ -24,10 +25,20 @@ import init, {
     SelectionMode,
     style,
 } from "@beamterm/renderer/web";
-import {Attr, COLOR_RGB, COLOR_SET, type Color, decodeFrame} from "./frame";
+import {
+    Attr,
+    COLOR_RGB,
+    COLOR_SET,
+    type Color,
+    decodeFrame,
+    decodeSbChunk,
+    type WCell,
+} from "./frame";
 import {ClientGrid} from "./grid";
 import {keyToBytes} from "./keymap";
+import {BTN_WHEEL_DOWN, BTN_WHEEL_UP, encodeMouse} from "./mouse";
 import type {RendererOptions} from "./renderer";
+import {SbStore} from "./sbstore";
 
 let ready = false;
 
@@ -59,6 +70,8 @@ function cssHex(name: string, fallback: number): number {
 
 let nextCanvasId = 0;
 
+const BLANK: WCell = {content: " ", fg: 0, bg: 0, attr: 0, width: 1};
+
 export class BeamtermGridRenderer implements TermRenderer {
     private grid: ClientGrid;
     private wasm: Beamterm;
@@ -74,12 +87,19 @@ export class BeamtermGridRenderer implements TermRenderer {
     private lastCursor = {x: 0, y: 0};
     /** style cache: resolved (attr,fg,bg) -> wasm CellStyle, bounds churn */
     private styles = new Map<number, CellStyle>();
+    /** host-paged scrollback viewport (shared state machine, sbstore.ts) */
+    private sb: SbStore;
+    // mouse tracking a program enabled (msgState): the wheel is forwarded to
+    // it instead of scrolling history; Shift forces local scrollback.
+    private mouseLevel = 0;
+    private mouseSgr = false;
 
     constructor(container: HTMLElement, cols: number, rows: number, opts: RendererOptions = {}) {
         if (!ready) throw new Error("beamterm: initBeamterm() has not completed");
         this.container = container;
         this.onInput = opts.onInput;
         this.grid = new ClientGrid(cols, rows);
+        this.sb = new SbStore(opts.scrollbackCap ?? 5000, opts.onSbFetch);
 
         container.classList.add("vt-screen", "vt-webgl");
         container.setAttribute("role", "log");
@@ -108,6 +128,7 @@ export class BeamtermGridRenderer implements TermRenderer {
 
         container.addEventListener("keydown", this.onKeyDown);
         container.addEventListener("paste", this.onPaste);
+        container.addEventListener("wheel", this.onWheel, {passive: false});
 
         // spike probe: expose readable text for e2e (canvas has no innerText)
         (container as HTMLElement & {__screenText?: () => string}).__screenText = () =>
@@ -155,10 +176,17 @@ export class BeamtermGridRenderer implements TermRenderer {
         return s;
     }
 
-    /** paintRow writes one grid row into the batch as style-spans — the unit
-     *  of boundary crossing. Wide glyphs advance two columns (beamterm places
-     *  the trailing half itself). */
+    /** paintRow writes one live grid row into the batch as style-spans — the
+     *  unit of boundary crossing. */
     private paintRow(batch: Batch, y: number): void {
+        this.paintCells(batch, y, (x) => this.grid.cellAt(x, y));
+    }
+
+    /** paintCells writes one display row from an arbitrary cell source
+     *  (live grid or a scrollback line), covering every column — short
+     *  history rows pad with blanks so stale canvas cells can't linger. Wide
+     *  glyphs advance two columns (beamterm places the trailing half itself). */
+    private paintCells(batch: Batch, y: number, at: (x: number) => WCell): void {
         let x = 0;
         let spanX = 0;
         let text = "";
@@ -169,7 +197,7 @@ export class BeamtermGridRenderer implements TermRenderer {
             if (text.length > 0) batch.text(spanX, y, text, this.styleFor(attr, fg, bg));
         };
         for (let cx = 0; cx < this.grid.cols; cx++) {
-            const cell = this.grid.cellAt(cx, y);
+            const cell = at(cx);
             if (cell.width === 0) continue; // trailer of a wide glyph
             const rf = this.resolve(cell.attr & Attr.Reverse ? cell.bg : cell.fg, this.defFg);
             const rb = this.resolve(cell.attr & Attr.Reverse ? cell.fg : cell.bg, this.defBg);
@@ -205,7 +233,11 @@ export class BeamtermGridRenderer implements TermRenderer {
 
     applyBytes(bytes: Uint8Array): void {
         const frame = decodeFrame(bytes);
+        this.sb.noteFrame(frame, this.grid.rows, (y) => this.grid.rowCells(y));
         const dirty = this.grid.apply(frame);
+        // while scrolled up the live grid changes below the viewport; nothing
+        // to repaint until the user returns to the bottom.
+        if (this.sb.offset > 0) return;
         const batch = this.wasm.batch();
         for (const y of dirty) this.paintRow(batch, y);
         this.paintCursor(batch);
@@ -215,16 +247,44 @@ export class BeamtermGridRenderer implements TermRenderer {
         this.container.dispatchEvent(new CustomEvent("rook:frame"));
     }
 
-    applySbChunk(): void {
-        // spike: host-paged scrollback view not yet wired for webgl
+    applySbChunk(bytes: Uint8Array): void {
+        if (!this.sb.applyChunk(decodeSbChunk(bytes))) return;
+        if (this.sb.offset > 0) this.repaintViewport();
     }
 
-    setMouseMode(): void {
-        // accepted, not yet forwarded — mouse-tracking programs are post-spike
+    /** repaintViewport redraws the whole canvas from the virtual buffer
+     *  (history above, live screen below). One batch, one draw call — the
+     *  full repaint per scroll step is what the renderer is built for. */
+    private repaintViewport(): void {
+        const rows = this.sb.viewport(this.grid.rows, (y) => this.grid.rowCells(y));
+        const batch = this.wasm.batch();
+        for (let y = 0; y < this.grid.rows; y++) {
+            const cells = rows[y];
+            this.paintCells(batch, y, cells ? (x) => cells[x] ?? BLANK : () => BLANK);
+        }
+        // the cursor lives on the live screen; it returns with the bottom
+        if (this.sb.offset === 0) this.paintCursor(batch);
+        this.wasm.render();
+        batch.free();
+        this.container.dispatchEvent(new CustomEvent("rook:frame"));
+    }
+
+    private scrollLines(delta: number): void {
+        if (this.sb.scroll(delta)) this.repaintViewport();
+    }
+
+    private scrollToBottom(): void {
+        if (this.sb.toBottom()) this.repaintViewport();
+    }
+
+    setMouseMode(level: number, sgr: boolean): void {
+        this.mouseLevel = level;
+        this.mouseSgr = sgr;
     }
 
     reset(): void {
         this.grid = new ClientGrid(this.grid.cols, this.grid.rows);
+        this.sb.toBottom();
         const batch = this.wasm.batch();
         batch.clear(this.defBg);
         this.wasm.render();
@@ -234,6 +294,7 @@ export class BeamtermGridRenderer implements TermRenderer {
     resize(cols: number, rows: number): void {
         if (cols === this.grid.cols && rows === this.grid.rows) return;
         this.grid = new ClientGrid(cols, rows);
+        this.sb.toBottom();
         this.sizeCanvas(cols, rows);
         // beamterm preserves cell content across resize, but our grid is
         // fresh — clear, or pre-resize cells (a stale cursor block) survive
@@ -253,11 +314,16 @@ export class BeamtermGridRenderer implements TermRenderer {
     }
 
     private screenText(): string {
+        // viewport-aware: while scrolled, report what the canvas shows
+        const rows =
+            this.sb.offset > 0
+                ? this.sb.viewport(this.grid.rows, (y) => this.grid.rowCells(y))
+                : null;
         const lines: string[] = [];
         for (let y = 0; y < this.grid.rows; y++) {
             let line = "";
             for (let x = 0; x < this.grid.cols; x++) {
-                const c = this.grid.cellAt(x, y);
+                const c = rows ? (rows[y]?.[x] ?? BLANK) : this.grid.cellAt(x, y);
                 if (c.width !== 0) line += c.content;
             }
             lines.push(line.trimEnd());
@@ -266,8 +332,31 @@ export class BeamtermGridRenderer implements TermRenderer {
     }
 
     private onKeyDown = (e: KeyboardEvent): void => {
+        // Shift+PageUp/PageDown/Home/End scroll history without disturbing the pty
+        if (e.shiftKey) {
+            const page = this.grid.rows - 1;
+            switch (e.key) {
+                case "PageUp":
+                    this.scrollLines(page);
+                    e.preventDefault();
+                    return;
+                case "PageDown":
+                    this.scrollLines(-page);
+                    e.preventDefault();
+                    return;
+                case "Home":
+                    this.scrollLines(this.sb.max);
+                    e.preventDefault();
+                    return;
+                case "End":
+                    this.scrollToBottom();
+                    e.preventDefault();
+                    return;
+            }
+        }
         const bytes = keyToBytes(e);
         if (bytes !== null && this.onInput) {
+            this.scrollToBottom(); // typing returns to live
             this.onInput(bytes);
             e.preventDefault();
         }
@@ -276,14 +365,48 @@ export class BeamtermGridRenderer implements TermRenderer {
     private onPaste = (e: ClipboardEvent): void => {
         const text = e.clipboardData?.getData("text");
         if (text && this.onInput) {
+            this.scrollToBottom();
             this.onInput(text);
             e.preventDefault();
         }
     };
 
+    private onWheel = (e: WheelEvent): void => {
+        const notches = Math.max(
+            1,
+            Math.min(5, Math.round(Math.abs(e.deltaY) / (this.cellH || 16))),
+        );
+        // A program tracking the mouse owns the wheel — it scrolls its own view
+        // (Claude Code's conversation, a pager). Shift forces local scrollback.
+        if (this.mouseLevel >= 2 && !e.shiftKey) {
+            if (this.onInput) {
+                const rect = this.canvas.getBoundingClientRect();
+                const col = Math.max(
+                    1,
+                    Math.min(this.grid.cols, Math.floor((e.clientX - rect.left) / this.cellW) + 1),
+                );
+                const row = Math.max(
+                    1,
+                    Math.min(this.grid.rows, Math.floor((e.clientY - rect.top) / this.cellH) + 1),
+                );
+                const button = e.deltaY < 0 ? BTN_WHEEL_UP : BTN_WHEEL_DOWN;
+                for (let i = 0; i < notches; i++) {
+                    this.onInput(
+                        encodeMouse({button, col, row, press: true, motion: false, sgr: this.mouseSgr}),
+                    );
+                }
+            }
+            e.preventDefault();
+            return;
+        }
+        this.scrollLines(e.deltaY < 0 ? notches : -notches);
+        if (this.sb.max > 0) e.preventDefault();
+    };
+
     destroy(): void {
         this.container.removeEventListener("keydown", this.onKeyDown);
         this.container.removeEventListener("paste", this.onPaste);
+        this.container.removeEventListener("wheel", this.onWheel);
         this.wasm.free();
         this.canvas.remove();
     }
