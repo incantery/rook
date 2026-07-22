@@ -17,8 +17,8 @@
 /** A packed terminal color, identical to Go's vt.Color. */
 export type Color = number;
 
-const COLOR_SET = 0x80000000;
-const COLOR_RGB = 0x40000000;
+export const COLOR_SET = 0x80000000;
+export const COLOR_RGB = 0x40000000;
 
 /** Attribute bits, matching vt.Attr's iota order. */
 export const Attr = {

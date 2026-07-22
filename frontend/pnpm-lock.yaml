@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@beamterm/renderer':
+        specifier: ^1.0.0
+        version: 1.0.0
       '@wailsio/runtime':
         specifier: latest
         version: 3.0.0-alpha.97
@@ -62,6 +65,10 @@ importers:
         version: 4.1.10(vite@8.1.4(jiti@2.7.0))
 
 packages:
+
+  '@beamterm/renderer@1.0.0':
+    resolution: {integrity: sha512-Uct8zOjj8aR/63D+fl3Hv9D01HFCMzIvAqtkZk+lgAendUMid5loccrhtQkEjqUWDUMgu54SDLhnROnUj8sCFw==}
+    engines: {node: '>=16.0.0'}
 
   '@emnapi/core@1.11.1':
     resolution: {integrity: sha512-RSvbQmHzdKzNsLYa/wHrbc3KN4sYLKAdPZxqiM2HATqv/SBk2/ENSHpvXGaLOMcsAyz0poEGqkmmKYG3OWiJEQ==}
@@ -1012,6 +1019,8 @@ packages:
     resolution: {integrity: sha512-B58NGBEoc8Y9MWWCQGl/gq9xBCe4IiKM0a2x7GZdQKOW5Exr8S1W24J6OgM1njK8xCRGvAJIL/MxXHf6SkmQKQ==}
 
 snapshots:
+
+  '@beamterm/renderer@1.0.0': {}
 
   '@emnapi/core@1.11.1':
     dependencies:

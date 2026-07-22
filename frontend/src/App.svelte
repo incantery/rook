@@ -13,6 +13,7 @@
     import {rgb} from "./theme/color";
     import type {Palette as ThemePalette} from "./theme/palette";
     import {encodePalette} from "./term/vt/framed";
+    import {preloadRenderer} from "./term/vt/registry";
     import {Registry} from "./registry";
     import {buildKeymap, CONTEXT_LEADER_KEY, CONTEXT_PREFIX, parseLeader, sigOf} from "./keymap";
     import {app, type Mode} from "./state.svelte";
@@ -1870,6 +1871,9 @@
 
         initDone = (async () => {
             try {
+                // the configured renderer's WASM (if any) must be live before
+                // the first terminal mounts; fails open to the DOM renderer
+                await preloadRenderer();
                 await mgr.init(); // attach live sessions (background-warm)
             } catch (err) {
                 fatal = `failed to open sessions:\n${err}`;

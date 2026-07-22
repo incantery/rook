@@ -22,7 +22,7 @@ import {
     encodeVis,
 } from "./vt/framed";
 import type {TermRenderer} from "./vt/api";
-import {GridRenderer} from "./vt/renderer";
+import {makeRenderer} from "./vt/registry";
 import "./vt/renderer.css";
 import {
     findLeafBy,
@@ -373,7 +373,7 @@ export class TermManager {
         // eslint-disable-next-line prefer-const -- assigned below; the onInput
         // closure reads tab.ws lazily, at keypress time, when it is set.
         let tab: Tab;
-        const renderer = new GridRenderer(box, cols, rows, {
+        const renderer = makeRenderer(box, cols, rows, {
             onInput: (data) => {
                 if (tab.ws?.readyState === WebSocket.OPEN) tab.ws.send(encodeInput(data));
             },
