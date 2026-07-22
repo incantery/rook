@@ -294,6 +294,9 @@ func (e *Emulator) csiPrivate(ps []int, final byte) {
 // ?1049 form, which stashes and restores the cursor and clears the alt buffer
 // on entry — what full-screen apps like nvim use.
 func (e *Emulator) switchAlt(enter, saveCursor bool) {
+	// A buffer swap is a full-screen change on the client, not a scroll; drop
+	// any pending scroll count so the next Render diffs the whole screen.
+	e.primary.scrolled = 0
 	if enter {
 		if e.onAlt {
 			return

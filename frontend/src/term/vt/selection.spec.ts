@@ -23,7 +23,7 @@ function gridOf(lines: string[], cols: number): ClientGrid {
         }
         return {y, runs: [{x: 0, cells}]};
     });
-    const f: Frame = {cursor: {x: 0, y: 0, visible: true}, rows};
+    const f: Frame = {cursor: {x: 0, y: 0, visible: true}, scroll: 0, rows};
     g.apply(f);
     return g;
 }

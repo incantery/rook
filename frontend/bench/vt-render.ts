@@ -35,7 +35,7 @@ function row(y: number, seed: number, colorEvery: number): Run {
 function fullFrame(seed: number, colorEvery: number): Frame {
     const rows = [];
     for (let y = 0; y < ROWS; y++) rows.push({y, runs: [row(y, seed, colorEvery)]});
-    return {cursor: {x: seed % COLS, y: ROWS - 1, visible: true}, rows};
+    return {cursor: {x: seed % COLS, y: ROWS - 1, visible: true}, scroll: 0, rows};
 }
 
 // scroll: every frame rewrites every row (content shifted by one line), the

@@ -75,6 +75,6 @@ describe("decoder edge cases", () => {
 
     it("rejects a truncated frame", () => {
         // version + a cursor that runs off the end
-        expect(() => decodeFrame(new Uint8Array([1, 0x80]))).toThrow(/truncated|varint/);
+        expect(() => decodeFrame(new Uint8Array([2, 0x80]))).toThrow(/truncated|varint/);
     });
 });

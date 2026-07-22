@@ -127,6 +127,37 @@ func TestCoalescingBeatsPerWrite(t *testing.T) {
 	}
 }
 
+// TestScrollOp verifies that a full-screen scroll ships as a compact scroll-op
+// (scroll count + only the newly-exposed rows), not a whole-screen diff, and
+// that the client still reconstructs the visible grid identically.
+func TestScrollOp(t *testing.T) {
+	e := New(20, 5)
+	surf := e.NewSurface()
+	client := NewClientGrid(20, 5)
+
+	e.Write([]byte("L1\r\nL2\r\nL3\r\nL4\r\nL5")) // fill the screen, no scroll yet
+	f := e.Render(surf)
+	if f.Scroll != 0 {
+		t.Fatalf("first frame scroll=%d, want 0", f.Scroll)
+	}
+	client.Apply(roundtrip(t, f))
+	assertClientMatches(t, "filled", client, e)
+
+	e.Write([]byte("\r\nL6\r\nL7")) // two line feeds at the bottom -> scroll by 2
+	f = e.Render(surf)
+	if f.Scroll != 2 {
+		t.Fatalf("scroll frame scroll=%d, want 2", f.Scroll)
+	}
+	if len(f.Rows) > 2 {
+		t.Fatalf("scroll frame touched %d rows, want only the 2 newly-exposed", len(f.Rows))
+	}
+	client.Apply(roundtrip(t, f))
+	assertClientMatches(t, "after scroll", client, e)
+	if line(e, 0) != "L3" || line(e, 4) != "L7" {
+		t.Fatalf("visible after scroll = %q..%q, want L3..L7", line(e, 0), line(e, 4))
+	}
+}
+
 func TestFrameEncodeRoundtrip(t *testing.T) {
 	f := Frame{
 		Cursor: Cursor{X: 3, Y: 7, Visible: false},

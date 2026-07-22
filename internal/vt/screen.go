@@ -19,6 +19,7 @@ type screen struct {
 	stop, sbot int         // scroll region, inclusive logical rows; default 0..h-1
 	wrapNext   bool        // deferred autowrap: cursor printed to the last column
 	sb         *scrollback // lines scrolled off the top; nil on the alt screen
+	scrolled   int         // full-screen lines scrolled off since the last Render
 }
 
 func newScreen(w, h int) *screen {
@@ -98,6 +99,7 @@ func (s *screen) scrollUpN(n int, fill Cell) {
 			base := s.rowBase(k)
 			s.sb.push(s.cells[base : base+s.w])
 		}
+		s.scrolled += n // the wire coalesces this into one scroll-op per Render
 	}
 	if n >= rows {
 		s.clearRows(s.stop, s.sbot, fill)

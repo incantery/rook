@@ -21,7 +21,7 @@ function textFrame(lines: string[]): Frame {
         }));
         return {y, runs: [{x: 0, cells}]};
     });
-    return {cursor: {x: 0, y: 0, visible: true}, rows};
+    return {cursor: {x: 0, y: 0, visible: true}, scroll: 0, rows};
 }
 
 const container = document.getElementById("screen")!;

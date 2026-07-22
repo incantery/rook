@@ -30,10 +30,13 @@ export class ClientGrid {
         this.cells = Array.from({length: cols * rows}, () => BLANK);
     }
 
-    /** apply a Frame, returning the indices of the rows that changed (so a
-     *  renderer repaints only those). */
+    /** apply a Frame: first the scroll (shift up, blanking the exposed bottom),
+     *  then the changed runs. Returns the indices of the rows that changed — all
+     *  of them when the frame scrolled — so a renderer repaints only those. */
     apply(f: Frame): number[] {
         this.cursor = f.cursor;
+        const scrolled = f.scroll > 0;
+        if (scrolled) this.scrollUp(f.scroll);
         const dirty: number[] = [];
         for (const row of f.rows) {
             if (row.y < 0 || row.y >= this.rows) continue;
@@ -44,9 +47,23 @@ export class ClientGrid {
                     if (x >= 0 && x < this.cols) this.cells[base + x] = run.cells[k];
                 }
             }
-            dirty.push(row.y);
+            if (!scrolled) dirty.push(row.y);
         }
+        // A scroll moves every row's content, so all of them need repainting.
+        if (scrolled) for (let y = 0; y < this.rows; y++) dirty.push(y);
         return dirty;
+    }
+
+    /** scrollUp shifts the visible grid up by n rows, blanking the exposed
+     *  bottom — mirroring the emulator so a scroll frame reconstructs exactly. */
+    private scrollUp(n: number): void {
+        const blank: WCell = {content: " ", fg: 0, bg: 0, attr: 0, width: 1};
+        if (n >= this.rows) {
+            this.cells.fill(blank);
+            return;
+        }
+        this.cells.copyWithin(0, n * this.cols);
+        this.cells.fill(blank, (this.rows - n) * this.cols);
     }
 
     cellAt(x: number, y: number): WCell {

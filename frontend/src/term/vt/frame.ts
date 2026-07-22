@@ -59,10 +59,13 @@ export interface Cursor {
 
 export interface Frame {
     cursor: Cursor;
+    /** rows the primary screen scrolled off the top since the client's last
+     *  frame; the client captures those rows into scrollback, then shifts up. */
+    scroll: number;
     rows: RowRuns[];
 }
 
-const WIRE_VERSION = 1;
+const WIRE_VERSION = 2;
 
 /** colorToken renders a Color the way Go's Color.Token does, so a decoded grid
  *  can be compared against the emulator: "d" default, "p<n>" palette, "#rrggbb". */
@@ -122,6 +125,7 @@ export function decodeFrame(buf: Uint8Array): Frame {
     const r = new Reader(buf);
     if (r.byte() !== WIRE_VERSION) throw new Error("vt: unknown wire version");
     const cursor: Cursor = {x: r.uvarint(), y: r.uvarint(), visible: r.byte() !== 0};
+    const scroll = r.uvarint();
     const rowCount = r.uvarint();
     const rows: RowRuns[] = [];
     for (let ri = 0; ri < rowCount; ri++) {
@@ -144,5 +148,5 @@ export function decodeFrame(buf: Uint8Array): Frame {
         }
         rows.push({y, runs});
     }
-    return {cursor, rows};
+    return {cursor, scroll, rows};
 }

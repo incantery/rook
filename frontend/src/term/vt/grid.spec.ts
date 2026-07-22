@@ -5,7 +5,7 @@ import {ClientGrid} from "./grid";
 // Build a Frame that writes `cells` starting at (x,y) as one run — the shape the
 // tests use to drive the grid without hand-encoding wire bytes.
 function frame(y: number, x: number, cells: WCell[], cursor = {x: 0, y: 0, visible: true}): Frame {
-    return {cursor, rows: [{y, runs: [{x, cells}]}]};
+    return {cursor, scroll: 0, rows: [{y, runs: [{x, cells}]}]};
 }
 
 function cell(content: string, over: Partial<WCell> = {}): WCell {
@@ -22,6 +22,7 @@ describe("ClientGrid.apply", () => {
         const g = new ClientGrid(10, 5);
         const dirty = g.apply({
             cursor: {x: 0, y: 0, visible: true},
+            scroll: 0,
             rows: [
                 {y: 1, runs: [{x: 0, cells: [cell("a")]}]},
                 {y: 3, runs: [{x: 2, cells: [cell("b")]}]},
@@ -37,6 +38,30 @@ describe("ClientGrid.apply", () => {
         const g = new ClientGrid(4, 2);
         g.apply(frame(0, 0, [cell("x")], {x: 3, y: 1, visible: false}));
         expect(g.cursor).toEqual({x: 3, y: 1, visible: false});
+    });
+
+    it("scroll shifts rows up, blanks the bottom, and applies new rows", () => {
+        const g = new ClientGrid(2, 3);
+        g.apply({
+            cursor: {x: 0, y: 0, visible: true},
+            scroll: 0,
+            rows: [
+                {y: 0, runs: [{x: 0, cells: [cell("A")]}]},
+                {y: 1, runs: [{x: 0, cells: [cell("B")]}]},
+                {y: 2, runs: [{x: 0, cells: [cell("C")]}]},
+            ],
+        });
+        const dirty = g.apply({
+            cursor: {x: 0, y: 2, visible: true},
+            scroll: 1,
+            rows: [{y: 2, runs: [{x: 0, cells: [cell("D")]}]}],
+        });
+        expect([g.cellAt(0, 0).content, g.cellAt(0, 1).content, g.cellAt(0, 2).content]).toEqual([
+            "B",
+            "C",
+            "D",
+        ]);
+        expect(dirty).toEqual([0, 1, 2]); // a scroll repaints every row
     });
 });
 

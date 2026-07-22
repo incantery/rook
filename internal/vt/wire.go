@@ -45,17 +45,21 @@ type RowRuns struct {
 	Runs []Run
 }
 
-// Frame is one coalesced update: the cursor, and the rows that changed.
+// Frame is one coalesced update: the cursor, how far the screen scrolled since
+// the client's last frame, and the rows that changed. Scroll lets a full-screen
+// scroll ship as "scrolled N + the newly-exposed rows" rather than a whole-
+// screen diff, and is how the client feeds its own scrollback: it captures the N
+// rows about to leave the top before shifting.
 type Frame struct {
 	Cursor Cursor
+	Scroll int
 	Rows   []RowRuns
 }
 
-// Empty reports whether the frame carries no cell changes (cursor-only frames
-// still count as empty for change purposes).
-func (f Frame) Empty() bool { return len(f.Rows) == 0 }
+// Empty reports whether the frame carries no changes at all.
+func (f Frame) Empty() bool { return len(f.Rows) == 0 && f.Scroll == 0 }
 
-const wireVersion = 1
+const wireVersion = 2
 
 // Encode serializes a Frame to bytes. The layout is length-prefixed and
 // varint-packed; colors are the packed 32-bit Color, content is a UTF-8 string.
@@ -65,6 +69,7 @@ func (f Frame) Encode() []byte {
 	buf = binary.AppendUvarint(buf, uint64(f.Cursor.X))
 	buf = binary.AppendUvarint(buf, uint64(f.Cursor.Y))
 	buf = append(buf, boolByte(f.Cursor.Visible))
+	buf = binary.AppendUvarint(buf, uint64(f.Scroll))
 	buf = binary.AppendUvarint(buf, uint64(len(f.Rows)))
 	for _, row := range f.Rows {
 		buf = binary.AppendUvarint(buf, uint64(row.Y))
@@ -101,6 +106,7 @@ func DecodeFrame(b []byte) (Frame, error) {
 	f.Cursor.X = int(d.uvarint())
 	f.Cursor.Y = int(d.uvarint())
 	f.Cursor.Visible = d.byte() != 0
+	f.Scroll = int(d.uvarint())
 	nRows := int(d.uvarint())
 	f.Rows = make([]RowRuns, nRows)
 	for i := range f.Rows {
@@ -191,9 +197,13 @@ func NewClientGrid(cols, rows int) *ClientGrid {
 	return g
 }
 
-// Apply updates the grid with a Frame.
+// Apply updates the grid with a Frame: first the scroll (shift up, blanking the
+// exposed rows), then the changed runs.
 func (g *ClientGrid) Apply(f Frame) {
 	g.cursor = f.Cursor
+	if f.Scroll > 0 {
+		g.scrollUp(f.Scroll)
+	}
 	for _, row := range f.Rows {
 		if row.Y < 0 || row.Y >= g.rows {
 			continue
@@ -207,6 +217,21 @@ func (g *ClientGrid) Apply(f Frame) {
 				}
 			}
 		}
+	}
+}
+
+// scrollUp shifts the visible grid up by n rows, blanking the exposed bottom.
+func (g *ClientGrid) scrollUp(n int) {
+	blank := WCell{Content: " ", Width: 1}
+	if n >= g.rows {
+		for i := range g.cells {
+			g.cells[i] = blank
+		}
+		return
+	}
+	copy(g.cells, g.cells[n*g.cols:])
+	for i := (g.rows - n) * g.cols; i < len(g.cells); i++ {
+		g.cells[i] = blank
 	}
 }
 

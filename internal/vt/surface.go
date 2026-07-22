@@ -41,7 +41,18 @@ func (e *Emulator) NewSurface() *Surface {
 func (e *Emulator) Render(s *Surface) Frame {
 	f := Frame{Cursor: Cursor{X: e.cur.cx, Y: e.cur.cy, Visible: e.cursorVisible}}
 	if s.cols != e.w || s.rows != e.h {
-		e.resyncSurface(s) // geometry changed under us: full resend next
+		e.resyncSurface(s)     // geometry changed under us: full resend next
+		e.primary.scrolled = 0 // scroll is moot when everything resends
+	} else if e.cur == e.primary && e.primary.scrolled > 0 {
+		// The primary screen scrolled since the last Render. Emit it as a scroll
+		// op and shift the surface to match, so the diff below carries only the
+		// newly-exposed rows, not the whole shifted screen. Capped at the screen
+		// height: a burst larger than the screen replaced everything anyway (the
+		// lines in between live only in the server-side scrollback ring).
+		n := min(e.primary.scrolled, e.h)
+		e.primary.scrolled = 0
+		f.Scroll = n
+		shiftSurfaceUp(s, n)
 	}
 	for y := range e.h {
 		var runs []Run
@@ -84,6 +95,22 @@ func (e *Emulator) cellAtLogical(x, y int) Cell {
 // back into its string.
 func (e *Emulator) wcell(c Cell) WCell {
 	return WCell{Content: e.Content(c), FG: c.FG, BG: c.BG, Attr: c.Attr, Width: c.Width}
+}
+
+// shiftSurfaceUp mirrors a client scroll on the Surface: move rows up by n and
+// blank the exposed bottom, so the diff that follows re-sends only what the
+// client won't already have after it applies the same scroll.
+func shiftSurfaceUp(s *Surface, n int) {
+	if n >= s.rows {
+		for i := range s.cells {
+			s.cells[i] = blank
+		}
+		return
+	}
+	copy(s.cells, s.cells[n*s.cols:])
+	for i := (s.rows - n) * s.cols; i < len(s.cells); i++ {
+		s.cells[i] = blank
+	}
 }
 
 // resyncSurface reallocates s to the current geometry and blanks it, forcing the
