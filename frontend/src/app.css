@@ -194,22 +194,17 @@ body {
     inset: 0;
     z-index: 5;
 }
+/* The sized, full-pane container. The breathing gap lives here (not as
+   padding): fit derives the grid from .term-box's height, and padding would
+   inflate it past the visible area. */
 .term-wrap {
-    position: absolute;
-    inset: 0;
-}
-/* Insets, NOT padding: the fit addon derives the grid from this
-   element's computed height and container padding silently inflates
-   the grid past the visible area. */
-.term-box {
     position: absolute;
     inset: 2px 4px 4px;
 }
-/* xterm v6 ships an opaque #000 on this bare div; it would paint over
-   the translucent body tint. */
-.xterm .xterm-viewport {
-    background-color: transparent !important;
-}
+/* .term-box carries the renderer's .vt-screen class, which sizes it to fill
+   .term-wrap (width/height 100%). It needs no positioning of its own — and must
+   not set position:absolute, which would fight .vt-screen's position:relative
+   and collapse the box to its content height. */
 
 /* ==== agent pane (term/agentpane.svelte.ts): a claude session as a
    conversation. Only the wrapper is here — it's built outside Svelte, so it

@@ -5,11 +5,18 @@
 
 .vt-screen {
     position: relative;
+    /* fill the pane's sized container (.term-wrap); on a container with no
+     * definite height (the bench harnesses) this resolves to auto, i.e. the
+     * content height, so those keep working. */
+    width: 100%;
+    height: 100%;
     font-family: var(--vt-font, ui-monospace, "SF Mono", Menlo, monospace);
     font-size: var(--vt-font-size, 13px);
     line-height: var(--vt-line-height, 1.2);
     --vt-cell-w: 1ch;
-    --vt-cell-h: calc(var(--vt-font-size, 13px) * var(--vt-line-height, 1.2));
+    /* round to whole pixels: fractional row heights leave sub-pixel seams
+     * between rows that show the translucent tint as faint horizontal lines. */
+    --vt-cell-h: round(calc(var(--vt-font-size, 13px) * var(--vt-line-height, 1.2)), 1px);
     color: var(--term-fg, #d0d0d0);
     /* transparent so the body tint shows through, as the xterm canvas did;
        --term-bg is the solid base reverse video paints from (style.ts). */
@@ -26,9 +33,10 @@
 .vt-row {
     height: var(--vt-cell-h);
     white-space: pre;
-    /* a row is its own containing block so a repaint can't reflow its siblings */
-    contain: content;
-    will-change: contents;
+    /* isolate a row's reflow from its siblings. NOT `content` (which adds paint
+     * containment): promoting each row to its own layer left sub-pixel seams
+     * between rows — the faint horizontal lines. */
+    contain: layout style;
 }
 
 .vt-cursor {
