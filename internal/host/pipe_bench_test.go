@@ -14,6 +14,12 @@ import (
 // 16ms render ticks) at the 6K-fullscreen geometry, without zsh or a browser.
 // The e2e `time cat 150MB` gate, inside a profiler's reach.
 func benchPipe(b *testing.B, line string) {
+	benchPipeWith(b, line, newTerminal)
+}
+
+// benchPipeWith runs the pipeline against any Terminal backend — the seam is
+// what makes "which emulator?" a benchmark flag instead of a debate.
+func benchPipeWith(b *testing.B, line string, mk func(cols, rows int) Terminal) {
 	b.Setenv("XDG_DATA_HOME", b.TempDir())
 	h := New()
 	ptm, tty, err := cpty.Open()
@@ -28,7 +34,7 @@ func benchPipe(b *testing.B, line string) {
 		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
 		pty:   ptm,
 		cmd:   exec.Command("true"),
-		emu:   newTerminal(cols, rows),
+		emu:   mk(cols, rows),
 		dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()

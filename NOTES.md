@@ -24,6 +24,14 @@
 - [ ] The file tree should be based on CWD rather than workspace I think, but let's dicsuss.
 - [ ] When dashboard or mission control is open, input keeps going into the most recently open terminal
 
+# Emulator (internal/vt)
+
+- [x] libghostty-vt differential oracle (2026-07-22): `make ghostty-lib` + `go test -tags ghostty ./internal/host/ -run Ghostty`; fixed 16 conformance bug classes on day one (charset/ACS, alt-screen cursor, tab stops, DECALN, REP, wide-pair tearing, combining-mark widths, pending-wrap semantics, …). Benchmarks: their parser 4–6× faster (SIMD — real headroom), our pipeline 4× faster (their per-cell FFI read path drowns it). PERF.md has the table.
+- [ ] Parser rework (VT state machine proper): C0 controls EXECUTE inside escape sequences (we abort); C1 as raw bytes/codepoints should execute in 8-bit-tolerant mode (we drop, ghostty stores, xterm executes). Known-divergent classes documented in the fuzz filter.
+- [ ] Replace go-runewidth classification with own width table (its zero-width table misses hundreds of combining ranges — patched via Mn/Me/Cf bitmap; a unified table would also reclaim the ~10% unicode parse cost of the patch and the fuzz-adjudicated margins like Hangul fillers).
+- [ ] Ghostty upstream candidates (report when we engage): CSI 0a/0e (HPR/VPR) miss the zero-coercion CSI 0C/0B have.
+- [ ] Adapter v2 (only if ever needed as a real backend): per-row dirty flags + bulk row read to fix the 17ms full-screen FFI snapshot; WRITE_PTY effect callback for query responses; scrollback paging parity.
+
 # WebGL Renderer (beamterm) — adoption gaps
 
 - [ ] Window transparency: the canvas paints opaque, so background-opacity doesn't show through. Beamterm's fragment shader already supports it (`u_bg_alpha`, core `set_bg_alpha()` since 0.16.0) — the JS/wasm wrapper just exposes no setter. Decision (2026-07-22): don't file upstream yet; once we're confident in beamterm, file the PR (thin wasm_bindgen delegation).

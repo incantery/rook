@@ -90,6 +90,20 @@ e2e-clean:
 	-pkill -f 'bin/e2e/rook-host'
 	rm -rf bin/e2e
 
+# libghostty-vt for the `ghostty` build tag (benchmarks + differential
+# fuzzing — see internal/host/ghostty_term.go). Requires zig (brew install
+# zig). The normal build never needs this.
+#   make ghostty-lib
+#   go test -tags ghostty ./internal/host/ -run Ghostty
+#   go test -tags ghostty ./internal/host/ -bench 'Pipe|WriteOnly|RenderSnapshot' -run xxx
+GHOSTTY_SRC ?= $(HOME)/go/src/github.com/ghostty-org/ghostty
+ghostty-lib:
+	@test -d $(GHOSTTY_SRC) || git clone --depth 1 https://github.com/ghostty-org/ghostty.git $(GHOSTTY_SRC)
+	cd $(GHOSTTY_SRC) && zig build -Demit-lib-vt=true -Doptimize=ReleaseFast
+	rm -rf bin/ghostty-vt && mkdir -p bin/ghostty-vt/lib
+	cp -R $(GHOSTTY_SRC)/zig-out/include bin/ghostty-vt/
+	cp $(GHOSTTY_SRC)/zig-out/lib/libghostty-vt.a bin/ghostty-vt/lib/
+
 clean: e2e-clean
 	rm -rf bin frontend/dist
 

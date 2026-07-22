@@ -76,6 +76,46 @@ Caveats that decide how to read this:
   needs a text mirror), theme-change re-read. WASM adds 1.4MB, lazy-loaded
   only when the flag is set.
 
+## libghostty-vt as a second backend (2026-07-22)
+
+Ghostty's terminal core (`libghostty-vt`, zero-dependency static lib built
+from source with zig) behind the Go `Terminal` seam, under the `ghostty`
+build tag — `make ghostty-lib`, then `go test -tags ghostty ./internal/host/`.
+Adapter v1 diffs the full viewport in Go (per-row dirty flags are a later
+slice), punts scrollback paging and pty query responses.
+
+| metric @405×113 | internal/vt | libghostty-vt |
+|---|---|---|
+| Write-only parse, ascii | 226 MB/s | **840 MB/s** |
+| Write-only parse, unicode | 107 MB/s | **599 MB/s** |
+| Full-screen render snapshot | **0.78ms** | 17.1ms |
+| Full pipeline (pty→parse→16ms render), ascii | **441 MB/s** | 103 MB/s |
+| Full pipeline, unicode | **124 MB/s** | 65 MB/s |
+
+The three questions this was built to answer:
+- **"Is cgo really that big a deal?"** No — at gather-chunk sizes, per-Write
+  overhead is invisible. Ghostty's SIMD parser is genuinely 4–6× faster than
+  ours; that headroom is real and worth chasing.
+- **The render READ path is the whole story**, exactly as predicted: ~275k
+  cgo calls per full-screen snapshot (~60ns each) = 17ms — during a firehose
+  the 16ms render tick pays it while holding the emulator lock, so total
+  system throughput lands 4× BELOW our backend despite their faster parser.
+  A viable adapter v2 needs per-row dirty skipping and a bulk row read.
+- **Differential fuzzing is the jackpot.** The oracle (33-stream table +
+  `FuzzGhosttyOracle`, corpus checked in) found and we fixed, in one day:
+  DEC Special Graphics charset (ncurses ACS borders rendered as "lqk"),
+  alt-screen cursor preservation, invalid-UTF-8 maximal-subpart substitution,
+  ESC state-machine restarts (ESC ESC, mid-CSI/OSC/DCS ESC), tab stops
+  (HTS/TBC/CHT/CBT), DECALN, REP, HPB/VPB, SGR 21, combining-mark width
+  classification (go-runewidth misses hundreds of Mn ranges — U+0611 broke
+  real Arabic), wide-pair tearing (overlapping glyphs), Cf format-char
+  clustering, pending-wrap semantics on TAB/BS/LF, malformed-CSI rejection,
+  color-index clamping, single-line DECSTBM. Plus one candidate ghostty bug
+  (CSI 0a/0e skip the zero-coercion CSI 0C/0B have — report upstream when
+  we engage). Known-divergent classes (documented in the fuzz filter): C0
+  executed inside sequences, raw/codepoint C1 handling, param-edge
+  adjudications where we match xterm.
+
 ## Known headroom (in rough value order)
 
 - **Unicode parse** (215 MB/s vs 400 ascii): `runewidth` per-rune

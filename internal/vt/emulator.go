@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
@@ -30,6 +31,21 @@ type Emulator struct {
 	autowrap      bool // DECAWM (?7)
 	originMode    bool // DECOM (?6)
 	cursorVisible bool // DECTCEM (?25)
+
+	// Charsets: G0/G1 designators (ESC ( X / ESC ) X) and the GL shift
+	// (SO/SI). Only 'B' (ASCII) and '0' (DEC Special Graphics — the ncurses
+	// ACS line-drawing set) are meaningful; anything else acts as ASCII.
+	// Found by the libghostty differential oracle: TUI borders drawn via
+	// smacs/rmacs printed as literal "lqk" instead of box glyphs.
+	g0, g1 byte // charset designators; zero value means ASCII
+	shift  int  // 0 = GL is G0, 1 = GL is G1 (SO/SI)
+
+	// tabs: custom tab stops (HTS/TBC). nil means the default every-8 stops —
+	// the common case pays no allocation and no scan.
+	tabs []bool
+
+	// lastGlyph is the most recent graphic character placed, for REP (CSI b).
+	lastGlyph rune
 
 	combined    []string       // multi-codepoint cell contents, indexed by negative Content
 	combinedIdx map[string]int // intern table: cluster -> index, dedups and bounds growth
@@ -143,6 +159,15 @@ func (e *Emulator) Resize(w, h int) {
 	// be off the grid; clamp them so a later restore lands in range.
 	e.saved.cx, e.saved.cy = clampToGrid(e.saved.cx, e.saved.cy, w, h)
 	e.savedAlt.cx, e.savedAlt.cy = clampToGrid(e.savedAlt.cx, e.savedAlt.cy, w, h)
+	// Custom tab stops keep their columns; new columns get the every-8 default.
+	if e.tabs != nil {
+		tabs := make([]bool, w)
+		n := copy(tabs, e.tabs)
+		for x := (n/8 + 1) * 8; x < w; x += 8 {
+			tabs[x] = true
+		}
+		e.tabs = tabs
+	}
 }
 
 // clampToGrid clamps (x,y) into a w×h grid.
@@ -276,34 +301,122 @@ func (e *Emulator) parse(b []byte) {
 				return
 			}
 			r, sz := utf8.DecodeRune(b[i:])
+			if r == utf8.RuneError && sz == 1 {
+				// Invalid UTF-8: one replacement char per MAXIMAL SUBPART
+				// (Unicode best practice), not one per byte — found by the
+				// libghostty differential fuzzer on \xe6\xbc0.
+				sz = invalidUTF8Len(b[i:])
+			}
 			e.printRune(r)
 			i += sz
 		}
 	}
 }
 
+// invalidUTF8Len returns the length of the maximal subpart of an ill-formed
+// UTF-8 sequence at the start of b (Unicode 15 §3.9 "U+FFFD Substitution of
+// Maximal Subparts"): the longest prefix that could still begin a valid
+// sequence, minimum 1. The WHATWG-table second-byte constraints matter — an
+// overlong or out-of-range continuation ends the subpart at the lead byte.
+func invalidUTF8Len(b []byte) int {
+	lead := b[0]
+	var lo, hi byte // valid range for the SECOND byte
+	var want int    // continuation bytes a complete sequence needs
+	switch {
+	case lead >= 0xc2 && lead <= 0xdf:
+		return 1 // a valid continuation would have decoded; the lead stands alone
+	case lead == 0xe0:
+		lo, hi, want = 0xa0, 0xbf, 2
+	case lead >= 0xe1 && lead <= 0xec || lead == 0xee || lead == 0xef:
+		lo, hi, want = 0x80, 0xbf, 2
+	case lead == 0xed:
+		lo, hi, want = 0x80, 0x9f, 2
+	case lead == 0xf0:
+		lo, hi, want = 0x90, 0xbf, 3
+	case lead >= 0xf1 && lead <= 0xf3:
+		lo, hi, want = 0x80, 0xbf, 3
+	case lead == 0xf4:
+		lo, hi, want = 0x80, 0x8f, 3
+	default: // 0x80..0xc1, 0xf5..0xff: never a lead
+		return 1
+	}
+	if len(b) < 2 || b[1] < lo || b[1] > hi {
+		return 1
+	}
+	n := 2
+	for n <= want && n < len(b) && b[n] >= 0x80 && b[n] <= 0xbf {
+		n++
+	}
+	return n
+}
+
 // ctrl handles a C0 control byte.
 func (e *Emulator) ctrl(c byte) {
 	s := e.cur
 	switch c {
-	case '\n', '\v', '\f': // LF, VT, FF all index down
+	case '\n', '\v', '\f': // LF, VT, FF all index down — and cancel a pending
+		// wrap (xterm/ghostty; found by the differential fuzzer)
+		s.wrapNext = false
 		s.lineFeed(e.fill())
 	case '\r':
 		s.cx = 0
 		s.wrapNext = false
 	case '\b':
-		if s.wrapNext {
-			s.wrapNext = false
-		} else if s.cx > 0 {
+		// BS from a pending wrap both cancels the wrap AND steps back
+		// (xterm/ghostty — found by the differential fuzzer)
+		s.wrapNext = false
+		if s.cx > 0 {
 			s.cx--
 		}
 	case '\t':
-		s.cx = (s.cx/8 + 1) * 8
-		if s.cx >= s.w {
-			s.cx = s.w - 1
-		}
-		s.wrapNext = false
+		// pending wrap survives a tab: at the margin the tab clamps in place
+		// and the wrap still fires on the next glyph (xterm/ghostty — found
+		// by the differential fuzzer on a tab-to-margin stream)
+		s.cx = e.nextTabStop(s.cx)
+	case 0x0e: // SO — shift GL to G1
+		e.shift = 1
+	case 0x0f: // SI — shift GL to G0
+		e.shift = 0
 	}
+}
+
+// materializeTabs switches from the implicit every-8 stops to an explicit
+// table, so HTS/TBC edits have something to write into.
+func (e *Emulator) materializeTabs() {
+	if e.tabs != nil {
+		return
+	}
+	e.tabs = make([]bool, e.w)
+	for x := 8; x < e.w; x += 8 {
+		e.tabs[x] = true
+	}
+}
+
+// nextTabStop returns the column after x holding a tab stop, clamped to the
+// last column (a tab never wraps).
+func (e *Emulator) nextTabStop(x int) int {
+	if e.tabs == nil {
+		return min((x/8+1)*8, e.w-1)
+	}
+	for n := x + 1; n < e.w; n++ {
+		if e.tabs[n] {
+			return n
+		}
+	}
+	return e.w - 1
+}
+
+// prevTabStop returns the column before x holding a tab stop, clamped to 0.
+func (e *Emulator) prevTabStop(x int) int {
+	if e.tabs == nil {
+		return max((x-1)/8*8, 0)
+	}
+	for n := x - 1; n > 0; n-- {
+		if e.tabs[n] {
+			return n
+		}
+	}
+	return 0
 }
 
 // printASCII places a run of single-width ASCII cells, writing straight into the
@@ -329,8 +442,30 @@ func (e *Emulator) printASCII(run []byte) {
 		k := min(len(run)-j, space)
 		base := s.rowBase(s.cy)
 		row := s.cells[base : base+s.w]
-		for m := range k {
-			row[s.cx+m] = Cell{Content: rune(run[j+m]), FG: fg, BG: bg, Attr: attr, Width: 1}
+		// Only the run's boundary cells can tear a wide pair (the interior
+		// is fully overwritten); inline checks on the row keep this off the
+		// hot path's profile.
+		if row[s.cx].Width == 0 && s.cx > 0 && row[s.cx-1].Width == 2 {
+			row[s.cx-1] = blank
+		}
+		if end := s.cx + k - 1; row[end].Width == 2 && end+1 < s.w {
+			row[end+1] = blank
+		}
+		if tab := e.charsetTable(); tab != nil {
+			// DEC Special Graphics active (TUI borders) — translate 0x5f..0x7e
+			for m := range k {
+				ch := rune(run[j+m])
+				if ch >= 0x5f && ch <= 0x7e {
+					ch = tab[ch-0x5f]
+				}
+				row[s.cx+m] = Cell{Content: ch, FG: fg, BG: bg, Attr: attr, Width: 1}
+			}
+			e.lastGlyph = row[s.cx+k-1].Content
+		} else {
+			for m := range k {
+				row[s.cx+m] = Cell{Content: rune(run[j+m]), FG: fg, BG: bg, Attr: attr, Width: 1}
+			}
+			e.lastGlyph = rune(run[j+k-1])
 		}
 		// one high-water update per run, not per cell — the mark is what lets
 		// the scroll path copy content width instead of terminal width
@@ -348,14 +483,67 @@ func (e *Emulator) printASCII(run []byte) {
 	}
 }
 
+// combiningBMP is a bitmap of the BMP's Mn/Me (combining mark) codepoints,
+// built from the stdlib unicode tables. go-runewidth's zero-width table
+// misses hundreds of mark ranges (Hebrew, Arabic, the Indic scripts… —
+// found by the libghostty differential fuzzer on U+0611), and correcting it
+// with unicode.In cost 28% of unicode parse throughput; a bit test costs
+// nothing.
+// zeroJoinBMP marks the BMP codepoints that join the preceding cell's
+// cluster regardless of go-runewidth's table: combining marks (Mn/Me — its
+// zero-width table misses hundreds of ranges, found by the differential
+// fuzzer on U+0611) and default-ignorable format chars (Cf minus the visible
+// exceptions). One bitmap, one byte-load on the non-ASCII print path —
+// unicode.In cost 28% of parse throughput.
+var zeroJoinBMP [0x10000 / 8]byte
+
+func init() {
+	for _, tab := range []*unicode.RangeTable{unicode.Mn, unicode.Me, unicode.Cf} {
+		for _, r := range tab.R16 {
+			for c := uint32(r.Lo); c <= uint32(r.Hi); c += uint32(r.Stride) {
+				zeroJoinBMP[c/8] |= 1 << (c % 8)
+			}
+		}
+	}
+	// The visible Cf exceptions: the prepended concatenation marks (Arabic
+	// number signs & co.), the interlinear annotation controls, and — by
+	// terminal convention rather than Unicode — the soft hyphen, which xterm
+	// and ghostty draw as a glyph.
+	for _, r := range [...][2]uint32{
+		{0x00AD, 0x00AD}, {0x0600, 0x0605}, {0x06DD, 0x06DD}, {0x070F, 0x070F},
+		{0x0890, 0x0891}, {0x08E2, 0x08E2}, {0xFFF9, 0xFFFB},
+	} {
+		for c := r[0]; c <= r[1]; c++ {
+			zeroJoinBMP[c/8] &^= 1 << (c % 8)
+		}
+	}
+}
+
+// isZeroJoin reports whether r attaches to the previous cell instead of
+// occupying its own (combining marks and ignorable format characters).
+func isZeroJoin(r rune) bool {
+	if r < 0x10000 {
+		return zeroJoinBMP[r/8]&(1<<(r%8)) != 0
+	}
+	return unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf)
+}
+
 // printRune places one non-ASCII glyph, handling width (wide CJK, zero-width
 // combining) and the ZWJ-cluster fusion that keeps an emoji family in one cell.
 func (e *Emulator) printRune(r rune) {
 	wd := runewidth.RuneWidth(r)
+	if r == 0xad {
+		wd = 1 // soft hyphen: go-runewidth says 0, terminals draw a glyph
+	} else if wd >= 1 && isZeroJoin(r) {
+		// even the East-Asian-Wide combining marks (U+302D) join the
+		// preceding cell's cluster, or vanish baseless
+		wd = 0
+	}
 	if wd == 0 {
 		e.combine(r)
 		return
 	}
+	e.lastGlyph = r
 	if e.pendingZWJ { // fuse this base onto the ZWJ cluster instead of a new cell
 		e.combine(r)
 		e.pendingZWJ = false
@@ -377,9 +565,22 @@ func (e *Emulator) printRune(r rune) {
 			s.cx = max(s.w-wd, 0)
 		}
 	}
+	// repair any wide pair this write tears (boundary cells only)
+	{
+		base := s.rowBase(s.cy)
+		row := s.cells[base : base+s.w]
+		if row[s.cx].Width == 0 && s.cx > 0 && row[s.cx-1].Width == 2 {
+			row[s.cx-1] = blank
+		}
+		if end := s.cx + wd - 1; end < s.w && row[end].Width == 2 && end+1 < s.w {
+			row[end+1] = blank
+		}
+	}
 	s.put(s.cx, s.cy, Cell{Content: r, FG: e.fg, BG: e.bg, Attr: e.attr, Width: uint8(wd)})
 	if wd == 2 {
-		s.put(s.cx+1, s.cy, Cell{FG: e.fg, BG: e.bg, Attr: e.attr, Width: 0})
+		// the spacer carries no pen state — renderers never paint it, and
+		// ghostty's stays default (the oracle compares cell-for-cell)
+		s.put(s.cx+1, s.cy, Cell{Width: 0})
 	}
 	s.cx += wd
 	if s.cx >= s.w {
@@ -402,6 +603,12 @@ func (e *Emulator) combine(r rune) {
 		return
 	}
 	cell := s.at(tx, s.cy)
+	if cell.Width == 0 && tx > 0 {
+		// the cursor sits after a wide glyph: the mark belongs to the lead
+		// cell, not the spacer (found by the differential fuzzer)
+		tx--
+		cell = s.at(tx, s.cy)
+	}
 	// Build the new cluster (existing content + r) into a reused scratch buffer.
 	e.clusterBuf = e.clusterBuf[:0]
 	if idx, ok := cell.combinedLookup(); ok {
@@ -503,6 +710,29 @@ func (e *Emulator) reset() {
 	e.decModes[7] = true
 	e.decModes[25] = true
 	e.pendingZWJ = false
+	e.g0, e.g1, e.shift = 0, 0, 0
+	e.tabs = nil
+}
+
+// decSpecial is the DEC Special Graphics mapping for bytes 0x5f..0x7e — the
+// ncurses ACS set (box drawing, scan lines, a few symbols).
+var decSpecial = [32]rune{
+	' ', '◆', '▒', '␉', '␌', '␍', '␊', '°', '±', '␤', '␋',
+	'┘', '┐', '┌', '└', '┼', '⎺', '⎻', '─', '⎼', '⎽',
+	'├', '┤', '┴', '┬', '│', '≤', '≥', 'π', '≠', '£', '·',
+}
+
+// charsetTable returns the active GL translation table, or nil for plain
+// ASCII — the nil check is one branch per print RUN, not per cell.
+func (e *Emulator) charsetTable() *[32]rune {
+	d := e.g0
+	if e.shift == 1 {
+		d = e.g1
+	}
+	if d == '0' {
+		return &decSpecial
+	}
+	return nil
 }
 
 // TakeOutput returns and clears the emulator's pending replies to terminal
