@@ -14,7 +14,7 @@
 // imperative DOM. A thin Svelte wrapper mounts it (later); the raw CSS lives
 // alongside, per rook's convention for imperative islands.
 
-import {decodeFrame, type Frame, type WCell} from "./frame";
+import {decodeFrame, decodeSbChunk, type Frame, type WCell} from "./frame";
 import {ClientGrid, coalesceCells} from "./grid";
 import {keyToBytes} from "./keymap";
 import {BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_WHEEL_DOWN, BTN_WHEEL_UP, encodeMouse} from "./mouse";
@@ -24,12 +24,21 @@ import {rowHtml} from "./style";
 export interface RendererOptions {
     /** class applied to the container; styling (font, --term-* vars) hangs off it. */
     className?: string;
-    /** how many scrolled-off lines to retain on the client (default 5000). */
+    /** how many history lines to cache client-side (default 5000). The host ring
+     *  is the store; this only bounds the local page cache. */
     scrollbackCap?: number;
     /** sink for terminal input — key presses and pastes translated to pty bytes.
      *  Omit for a read-only renderer (e.g. a preview or a bench harness). */
     onInput?: (data: string) => void;
+    /** sink for history page requests (encodeSbFetch on the wire). Omit and the
+     *  renderer scrolls only what it captured itself. */
+    onSbFetch?: (start: number, count: number) => void;
 }
+
+/** history page size: request granularity and the prefetch unit. */
+const SB_PAGE = 128;
+/** an in-flight page request older than this may be re-asked (it was dropped). */
+const SB_RETRY_MS = 2000;
 
 export class GridRenderer {
     grid: ClientGrid;
@@ -56,17 +65,26 @@ export class GridRenderer {
     private mouseReporting = false; // a press was forwarded; the gesture is the program's
     private mouseBtn = 0;
 
-    // scrollback: rows that have scrolled off, and the viewport's offset into
-    // history (0 = pinned to the live bottom, N = N lines back).
-    private scrollbackRows: WCell[][] = [];
+    // History is the host ring; this is a viewport over it (reverse-paginated
+    // virtualized scrolling). The cache holds pages of absolute-indexed lines:
+    // rows we watched scroll off enter it for free, everything else is fetched
+    // on demand via onSbFetch and evicted when far from the viewport — N
+    // sessions of deep history cost the client ~a screenful each, not a copy.
+    private sbCache = new Map<number, WCell[]>();
+    private sbTotal = 0; // absolute index of the live screen's top row
+    private sbBase = 0; // lowest fetchable index the host has reported
+    private sbEpoch = -1; // history numbering; a frame with a new one voids the cache
+    private inflight = new Map<number, number>(); // page start -> request time
+    private onSbFetch?: (start: number, count: number) => void;
     private scrollbackCap: number;
-    private viewOffset = 0;
+    private viewOffset = 0; // 0 = pinned to the live bottom, N = N lines back
 
     constructor(container: HTMLElement, cols: number, rows: number, opts: RendererOptions = {}) {
         this.container = container;
         this.grid = new ClientGrid(cols, rows);
         this.scrollbackCap = opts.scrollbackCap ?? 5000;
         this.onInput = opts.onInput;
+        this.onSbFetch = opts.onSbFetch;
 
         container.classList.add("vt-screen");
         if (opts.className) container.classList.add(opts.className);
@@ -102,21 +120,34 @@ export class GridRenderer {
     }
 
     /** applyFrame applies a decoded Frame immediately: capture any scrolled-off
-     *  rows into scrollback, apply the frame, and repaint. Synchronous — the
-     *  coalescing already happened server-side. */
+     *  rows into the history cache at their absolute indices, apply the frame,
+     *  and repaint. Synchronous — the coalescing already happened server-side. */
     applyFrame(frame: Frame): void {
-        if (frame.scroll > 0) {
-            // capture the rows about to leave the top before the grid shifts
+        const prevTotal = this.sbTotal;
+        if (frame.epoch !== this.sbEpoch) {
+            // history was renumbered (resize, reset) — cached pages are void
+            this.sbEpoch = frame.epoch;
+            this.sbCache.clear();
+            this.inflight.clear();
+            this.sbBase = 0;
+            this.viewOffset = 0;
+        } else if (frame.scroll > 0) {
+            // The departing rows are the OLDEST unseen lines: they live at
+            // [prevTotal, prevTotal+scroll). When hist outran the capped scroll
+            // (a burst bigger than the screen), the lines in between were never
+            // on this screen — they stay uncached, fetchable from the host ring.
             const n = Math.min(frame.scroll, this.grid.rows);
-            for (let y = 0; y < n; y++) this.pushScrollback(this.grid.rowCells(y));
+            for (let y = 0; y < n; y++) this.sbCache.set(prevTotal + y, this.grid.rowCells(y));
+            this.evictFar();
             // if the viewport is scrolled up, keep it pinned to the same content
             if (this.viewOffset > 0) {
                 this.viewOffset = Math.min(
-                    this.viewOffset + frame.scroll,
-                    this.scrollbackRows.length,
+                    this.viewOffset + (frame.hist - prevTotal),
+                    frame.hist - this.sbBase,
                 );
             }
         }
+        this.sbTotal = frame.hist;
         const dirty = this.grid.apply(frame);
         if (this.viewOffset === 0) {
             for (const y of dirty) this.paintRow(y);
@@ -126,19 +157,47 @@ export class GridRenderer {
         // repaint until the user returns to the bottom.
     }
 
-    private pushScrollback(row: WCell[]): void {
-        this.scrollbackRows.push(row);
-        if (this.scrollbackRows.length > this.scrollbackCap) this.scrollbackRows.shift();
+    /** applySbChunk fills the cache from a fetched history page and repaints any
+     *  viewport rows it satisfied. */
+    applySbChunk(bytes: Uint8Array): void {
+        const ch = decodeSbChunk(bytes);
+        if (ch.epoch !== this.sbEpoch) return; // stale numbering; drop it
+        this.sbBase = ch.base;
+        this.sbTotal = Math.max(this.sbTotal, ch.total);
+        for (let j = 0; j < ch.lines.length; j++) this.sbCache.set(ch.start + j, ch.lines[j]);
+        // release in-flight pages this reply covered (or that eviction voided)
+        const end = ch.start + ch.lines.length;
+        for (const p of [...this.inflight.keys()]) {
+            if ((p < end && p + SB_PAGE > ch.start) || p + SB_PAGE <= ch.base) {
+                this.inflight.delete(p);
+            }
+        }
+        this.evictFar();
+        // the host may hold less than we hoped — re-clamp, then show what came
+        this.viewOffset = Math.min(this.viewOffset, this.sbTotal - this.sbBase);
+        if (this.viewOffset > 0) this.repaintViewport();
     }
 
     /** scrollLines moves the viewport by delta lines (positive = back into
-     *  history), clamped, and repaints. */
+     *  history), clamped to what the host holds, and repaints. */
     scrollLines(delta: number): void {
-        const max = this.scrollbackRows.length;
+        const max = this.sbTotal - this.sbBase;
         const next = Math.max(0, Math.min(max, this.viewOffset + delta));
         if (next === this.viewOffset) return;
         this.viewOffset = next;
         this.repaintViewport();
+    }
+
+    /** evictFar trims the cache to cap, dropping the lines farthest from the
+     *  viewport — the ones a resumed scroll is least likely to want next. */
+    private evictFar(): void {
+        if (this.sbCache.size <= this.scrollbackCap) return;
+        const center = this.sbTotal - this.viewOffset;
+        const keys = [...this.sbCache.keys()].sort(
+            (a, b) => Math.abs(b - center) - Math.abs(a - center),
+        );
+        const drop = this.sbCache.size - Math.floor(this.scrollbackCap * 0.9);
+        for (let i = 0; i < drop; i++) this.sbCache.delete(keys[i]);
     }
 
     /** focus gives the screen keyboard focus, so key presses reach onInput. */
@@ -272,17 +331,51 @@ export class GridRenderer {
     }
 
     // repaintViewport redraws every display row from the virtual buffer
-    // (scrollback above, live screen below) at the current offset. Used whenever
-    // the offset changes; the live path (offset 0) uses the faster paintRow.
+    // (history above, live screen below) at the current offset. A history row
+    // missing from the cache paints blank and is fetched; the chunk repaints it.
+    // Used whenever the offset changes; the live path (offset 0) uses the faster
+    // paintRow.
     private repaintViewport(): void {
-        const hist = this.scrollbackRows.length;
+        const missing: number[] = [];
         for (let y = 0; y < this.grid.rows; y++) {
-            const v = hist - this.viewOffset + y;
-            const cells =
-                v < 0 ? [] : v < hist ? this.scrollbackRows[v] : this.grid.rowCells(v - hist);
+            const a = this.sbTotal - this.viewOffset + y;
+            let cells: WCell[] = [];
+            if (a >= this.sbTotal) {
+                cells = this.grid.rowCells(a - this.sbTotal);
+            } else if (a >= 0) {
+                const hit = this.sbCache.get(a);
+                if (hit) cells = hit;
+                else if (a >= this.sbBase) missing.push(a);
+            }
             this.rowEls[y].innerHTML = rowHtml(coalesceCells(cells));
         }
         this.paintCursor();
+        this.fetchPages(missing);
+    }
+
+    /** fetchPages requests the page-aligned chunks covering the given absolute
+     *  indices, plus one screenful above the viewport as prefetch — so smooth
+     *  wheeling stays ahead of the round trip. Deduped against in-flight
+     *  requests; a request older than SB_RETRY_MS may be re-asked (dropped). */
+    private fetchPages(missing: number[]): void {
+        if (!this.onSbFetch) return;
+        if (this.viewOffset > 0) {
+            const top = this.sbTotal - this.viewOffset;
+            const lo = Math.max(this.sbBase, top - this.grid.rows);
+            for (let a = lo; a < top; a++) {
+                if (!this.sbCache.has(a)) missing.push(a);
+            }
+        }
+        if (missing.length === 0) return;
+        const pages = new Set<number>();
+        for (const a of missing) pages.add(Math.floor(a / SB_PAGE) * SB_PAGE);
+        const now = Date.now();
+        for (const p of pages) {
+            const asked = this.inflight.get(p);
+            if (asked !== undefined && now - asked < SB_RETRY_MS) continue;
+            this.inflight.set(p, now);
+            this.onSbFetch(p, SB_PAGE);
+        }
     }
 
     private paintCursor(): void {
@@ -337,7 +430,7 @@ export class GridRenderer {
             return;
         }
         this.scrollLines(e.deltaY < 0 ? notches : -notches);
-        if (this.scrollbackRows.length > 0) e.preventDefault();
+        if (this.sbTotal > this.sbBase) e.preventDefault();
     };
 
     /** measureCell reads the pixel size of one cell from the laid-out DOM, so
@@ -458,7 +551,7 @@ export class GridRenderer {
                     e.preventDefault();
                     return;
                 case "Home":
-                    this.scrollLines(this.scrollbackRows.length);
+                    this.scrollLines(this.sbTotal - this.sbBase);
                     e.preventDefault();
                     return;
                 case "End":

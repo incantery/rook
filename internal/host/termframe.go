@@ -30,13 +30,16 @@ import (
 
 const (
 	// server -> client
-	msgFrame byte = 0x01 // payload: vt.Frame.Encode()
-	msgState byte = 0x02 // payload: 1 flags byte (bit0 = alt screen)
+	msgFrame   byte = 0x01 // payload: vt.Frame.Encode()
+	msgState   byte = 0x02 // payload: 1 flags byte (bit0 = alt screen)
+	msgSbChunk byte = 0x03 // payload: vt.EncodeScrollback — a page of history
 
 	// client -> server
 	msgInput   byte = 0x10 // payload: raw bytes for the pty
 	msgResize  byte = 0x11 // payload: cols, rows as two big-endian uint16
 	msgPalette byte = 0x12 // payload: fg,bg,cursor (3 bytes RGB each) + 16 ansi RGB
+	msgSbFetch byte = 0x13 // payload: start (BE uint32), count (BE uint16)
+	msgVis     byte = 0x14 // payload: 1 byte — 0 hidden, 1 visible
 )
 
 // paletteBytes is the msgPalette payload length: fg+bg+cursor (9) + 16 ANSI (48).
@@ -85,7 +88,16 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 	s.emuMu.Unlock()
 
 	ctx := r.Context()
-	go h.framedRenderLoop(ctx, s, c, surface)
+	// Scrollback fetches ride to the render loop — the sole writer to c — over
+	// a small buffered channel. A full channel drops the request: the client
+	// re-asks after a beat (its in-flight marker expires), and history reads
+	// must never backpressure the input loop.
+	fetch := make(chan sbFetch, 4)
+	// Visibility rides its own cap-1 channel; the input loop (sole producer)
+	// drains a stale value before pushing, so the render loop always sees the
+	// latest state and the input loop never blocks.
+	vis := make(chan bool, 1)
+	go h.framedRenderLoop(ctx, s, c, surface, fetch, vis)
 
 	// Client -> host: input and resize. Detach on any read error; the session and
 	// its emulator live on.
@@ -129,6 +141,27 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 			s.emuMu.Lock()
 			s.emu.SetPalette(rgb24(p[0:]), rgb24(p[3:]), rgb24(p[6:]), ansi)
 			s.emuMu.Unlock()
+		case msgSbFetch:
+			if len(data) < 7 {
+				continue
+			}
+			req := sbFetch{
+				start: uint64(binary.BigEndian.Uint32(data[1:5])),
+				count: int(binary.BigEndian.Uint16(data[5:7])),
+			}
+			select {
+			case fetch <- req:
+			default: // full — drop; the client retries
+			}
+		case msgVis:
+			if len(data) < 2 {
+				continue
+			}
+			select {
+			case <-vis:
+			default:
+			}
+			vis <- data[1] != 0
 		}
 	}
 
@@ -140,9 +173,23 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 	c.CloseNow()
 }
 
+// sbFetch is a client's request for a page of scrollback history.
+type sbFetch struct {
+	start uint64
+	count int
+}
+
 // framedRenderLoop diffs the emulator's grid against what this client knows and
-// ships the delta, coalesced at frameInterval. It is the sole writer to c.
-func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Conn, surface *vt.Surface) {
+// ships the delta, coalesced at frameInterval. It is the sole writer to c —
+// scrollback chunk replies are written here too, for that reason.
+//
+// A hidden pane (vis false) pauses here, not upstream: the emulator keeps
+// parsing (correctness — the grid must be right whenever the user looks), but
+// no diff is taken, no frame encoded, no bytes sent, no client DOM touched.
+// The Surface just goes stale; the reveal render diffs the live grid against
+// it and ships the net of everything missed as one frame. N background
+// sessions cost their ring storage and parsing — nothing per-frame.
+func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Conn, surface *vt.Surface, fetch <-chan sbFetch, vis <-chan bool) {
 	lastState, stateKnown := byte(0), false
 	lastCursor, cursorKnown := vt.Cursor{}, false
 	render := func() bool {
@@ -179,16 +226,49 @@ func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Co
 		return c.Write(ctx, websocket.MessageBinary, msg) == nil
 	}
 
+	// serve answers one scrollback fetch. Chunks bypass the frame rate limit:
+	// they are history reads, not grid churn, and the user is mid-scroll.
+	serve := func(req sbFetch) bool {
+		s.emuMu.Lock()
+		chunk := s.emu.EncodeScrollback(req.start, req.count)
+		s.emuMu.Unlock()
+		msg := append([]byte{msgSbChunk}, chunk...)
+		return c.Write(ctx, websocket.MessageBinary, msg) == nil
+	}
+
 	// The snapshot: whatever is already on screen when the client attaches.
 	if !render() {
 		return
 	}
 	last := time.Now()
+	visible := true
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case req := <-fetch:
+			if !serve(req) {
+				return
+			}
+			continue
+		case v := <-vis:
+			if v == visible {
+				continue
+			}
+			visible = v
+			if !visible {
+				continue
+			}
+			// reveal: whatever accumulated while hidden, as one net frame now
+			if !render() {
+				return
+			}
+			last = time.Now()
+			continue
 		case <-s.dirty:
+			if !visible {
+				continue // parsing continues; rendering waits for the reveal
+			}
 		}
 		// Coalesce a burst to one frame per interval, but render a change that
 		// lands after an idle gap immediately — that is the keystroke echo the

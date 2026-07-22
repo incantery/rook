@@ -60,12 +60,19 @@ export interface Cursor {
 export interface Frame {
     cursor: Cursor;
     /** rows the primary screen scrolled off the top since the client's last
-     *  frame; the client captures those rows into scrollback, then shifts up. */
+     *  frame; the client captures those rows into scrollback, then shifts up.
+     *  Capped at the screen height — hist carries the real depth. */
     scroll: number;
+    /** absolute index of the live screen's top row (lines ever pushed to the
+     *  host's history ring). The client's captured rows live at [prevHist,
+     *  prevHist+scroll); anything between that and hist is fetchable. */
+    hist: number;
+    /** history numbering epoch — a change (resize, reset) voids cached pages. */
+    epoch: number;
     rows: RowRuns[];
 }
 
-const WIRE_VERSION = 2;
+const WIRE_VERSION = 3;
 
 /** colorToken renders a Color the way Go's Color.Token does, so a decoded grid
  *  can be compared against the emulator: "d" default, "p<n>" palette, "#rrggbb". */
@@ -120,12 +127,18 @@ class Reader {
     }
 }
 
-/** decodeFrame parses one Frame from wire bytes produced by vt.Frame.Encode. */
+/** decodeFrame parses one Frame from wire bytes produced by vt.Frame.Encode.
+ *  Version 2 (a host older than this frontend — the daemon outlives installs)
+ *  is accepted with zeroed history fields: scrollback degrades to nothing,
+ *  typing and rendering survive. Fail open on host skew, always. */
 export function decodeFrame(buf: Uint8Array): Frame {
     const r = new Reader(buf);
-    if (r.byte() !== WIRE_VERSION) throw new Error("vt: unknown wire version");
+    const version = r.byte();
+    if (version !== 2 && version !== WIRE_VERSION) throw new Error("vt: unknown wire version");
     const cursor: Cursor = {x: r.uvarint(), y: r.uvarint(), visible: r.byte() !== 0};
     const scroll = r.uvarint();
+    const hist = version >= 3 ? r.uvarint() : 0;
+    const epoch = version >= 3 ? r.byte() : 0;
     const rowCount = r.uvarint();
     const rows: RowRuns[] = [];
     for (let ri = 0; ri < rowCount; ri++) {
@@ -148,5 +161,42 @@ export function decodeFrame(buf: Uint8Array): Frame {
         }
         rows.push({y, runs});
     }
-    return {cursor, scroll, rows};
+    return {cursor, scroll, hist, epoch, rows};
+}
+
+/** A decoded page of scrollback lines starting at absolute index start
+ *  (vt.EncodeScrollback). Lines are trimmed of trailing blanks. */
+export interface SbChunk {
+    epoch: number;
+    /** the retained window: absolute lines [base, total) are fetchable */
+    base: number;
+    total: number;
+    start: number;
+    lines: WCell[][];
+}
+
+/** decodeSbChunk parses one scrollback page from wire bytes. */
+export function decodeSbChunk(buf: Uint8Array): SbChunk {
+    const r = new Reader(buf);
+    if (r.byte() !== WIRE_VERSION) throw new Error("vt: unknown wire version");
+    const epoch = r.byte();
+    const base = r.uvarint();
+    const total = r.uvarint();
+    const start = r.uvarint();
+    const n = r.uvarint();
+    const lines: WCell[][] = [];
+    for (let i = 0; i < n; i++) {
+        const m = r.uvarint();
+        const line: WCell[] = [];
+        for (let j = 0; j < m; j++) {
+            const attr = r.byte();
+            const width = r.byte();
+            const fg = r.uvarint();
+            const bg = r.uvarint();
+            const content = r.str(r.uvarint());
+            line.push({content, fg, bg, attr, width});
+        }
+        lines.push(line);
+    }
+    return {epoch, base, total, start, lines};
 }

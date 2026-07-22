@@ -531,3 +531,166 @@ func TestFramedAnswersQueries(t *testing.T) {
 		t.Fatal("query was never answered to the pty")
 	}
 }
+
+// TestFramedScrollbackFetch is the paging gate: a client asks for a page of
+// history by absolute index (msgSbFetch) and gets it back as a chunk
+// (msgSbChunk) — reverse-paginated virtualized scrolling's round trip. The
+// server ring is the store; the client never held these lines.
+func TestFramedScrollbackFetch(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	h := New()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	const cols, rows = 20, 3
+	s := &session{
+		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
+		pty:   r,
+		cmd:   exec.Command("true"),
+		emu:   vt.New(cols, rows),
+		dirty: make(chan struct{}, 1),
+	}
+	h.mu.Lock()
+	h.sessions["s1"] = s
+	h.mu.Unlock()
+	go h.readPump(s)
+
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+
+	// ten lines through a 3-row screen: L1..L7 land in history at absolute 0..6
+	for i := 1; i <= 10; i++ {
+		if i > 1 {
+			w.Write([]byte("\r\n"))
+		}
+		w.Write([]byte("L" + string(rune('0'+i%10))))
+	}
+
+	c, ctx, cancel := dialFramed(t, srv, h, "s1")
+	defer cancel()
+	defer c.Close(websocket.StatusNormalClosure, "done")
+	readGrid(t, c, ctx, cols, rows, "L8") // sync: the screen is settled
+
+	// fetch absolute lines [2,5) — a page from the middle of history
+	req := []byte{msgSbFetch, 0, 0, 0, 2, 0, 3}
+	if err := c.Write(ctx, websocket.MessageBinary, req); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, data, rerr := c.Read(ctx)
+		if rerr != nil {
+			t.Fatalf("read chunk: %v", rerr)
+		}
+		if len(data) == 0 || data[0] != msgSbChunk {
+			continue // frames/state keep flowing; skip to the chunk
+		}
+		ch, derr := vt.DecodeSbChunk(data[1:])
+		if derr != nil {
+			t.Fatalf("decode chunk: %v", derr)
+		}
+		if ch.Base != 0 || ch.Total != 7 || ch.Start != 2 || len(ch.Lines) != 3 {
+			t.Fatalf("chunk = base %d total %d start %d n %d, want 0/7/2/3",
+				ch.Base, ch.Total, ch.Start, len(ch.Lines))
+		}
+		for j, want := range []string{"L3", "L4", "L5"} {
+			var b strings.Builder
+			for _, cell := range ch.Lines[j] {
+				b.WriteString(cell.Content)
+			}
+			if got := strings.TrimRight(b.String(), " "); got != want {
+				t.Fatalf("chunk line %d = %q, want %q", j, got, want)
+			}
+		}
+		return
+	}
+}
+
+// TestFramedPauseResume is the pause-hidden-panes gate: a pane the client
+// declared hidden (msgVis 0) gets NO frames while the emulator keeps parsing,
+// and the reveal (msgVis 1) ships the net of everything missed as one frame —
+// the Surface simply went stale and the resume render diffs against it.
+func TestFramedPauseResume(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	h := New()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	const cols, rows = 20, 3
+	s := &session{
+		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
+		pty:   r,
+		cmd:   exec.Command("true"),
+		emu:   vt.New(cols, rows),
+		dirty: make(chan struct{}, 1),
+	}
+	h.mu.Lock()
+	h.sessions["s1"] = s
+	h.mu.Unlock()
+	go h.readPump(s)
+
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+
+	w.Write([]byte("one"))
+	c, ctx, cancel := dialFramed(t, srv, h, "s1")
+	defer cancel()
+	defer c.Close(websocket.StatusNormalClosure, "done")
+	g := readGrid(t, c, ctx, cols, rows, "one")
+
+	// From here on a goroutine reads: a timed-out direct Read would close the
+	// whole websocket (coder/websocket semantics), so silence is asserted by
+	// watching a channel instead.
+	msgs := make(chan []byte, 16)
+	go func() {
+		defer close(msgs)
+		for {
+			_, data, rerr := c.Read(ctx)
+			if rerr != nil {
+				return
+			}
+			msgs <- data
+		}
+	}()
+
+	// hide, then let the session produce
+	if err := c.Write(ctx, websocket.MessageBinary, []byte{msgVis, 0}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond) // the input loop processes the hide
+	w.Write([]byte("\r\ntwo"))
+
+	// silence: nothing may arrive while hidden
+	select {
+	case m := <-msgs:
+		t.Fatalf("message %v arrived while hidden", m)
+	case <-time.After(400 * time.Millisecond):
+	}
+
+	// reveal: the missed output lands as a diff against what we already have
+	if err := c.Write(ctx, websocket.MessageBinary, []byte{msgVis, 1}); err != nil {
+		t.Fatal(err)
+	}
+	for gridRow(g, 1) != "two" {
+		data, ok := <-msgs
+		if !ok {
+			t.Fatalf("connection died before the reveal frame (row1=%q)", gridRow(g, 1))
+		}
+		if len(data) == 0 || data[0] != msgFrame {
+			continue
+		}
+		f, derr := vt.DecodeFrame(data[1:])
+		if derr != nil {
+			t.Fatalf("decode frame: %v", derr)
+		}
+		g.Apply(f)
+	}
+	if gridRow(g, 0) != "one" {
+		t.Fatalf("row 0 = %q after reveal, want %q untouched", gridRow(g, 0), "one")
+	}
+}

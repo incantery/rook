@@ -4,6 +4,7 @@ import {
     encodeInput,
     encodePalette,
     encodeResize,
+    encodeSbFetch,
     MSG_FRAME,
     MSG_INPUT,
     MSG_PALETTE,
@@ -74,5 +75,18 @@ describe("framed transport", () => {
         expect([...bytes.slice(1, 10)]).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
         expect([...bytes.slice(10, 13)]).toEqual([0, 0, 0]); // ansi[0]
         expect([...bytes.slice(-3)]).toEqual([15, 15, 15]); // ansi[15]
+    });
+});
+
+describe("scrollback paging messages", () => {
+    it("encodeSbFetch frames start (BE u32) and count (BE u16)", () => {
+        expect([...encodeSbFetch(0x01020304, 0x0203)]).toEqual([0x13, 1, 2, 3, 4, 2, 3]);
+        expect([...encodeSbFetch(0, 0)]).toEqual([0x13, 0, 0, 0, 0, 0, 0]);
+    });
+
+    it("classifies a chunk message with its payload view", () => {
+        const msg = decodeServerMessage(buf(0x03, 9, 8, 7));
+        expect(msg.kind).toBe("sbchunk");
+        if (msg.kind === "sbchunk") expect([...msg.payload]).toEqual([9, 8, 7]);
     });
 });

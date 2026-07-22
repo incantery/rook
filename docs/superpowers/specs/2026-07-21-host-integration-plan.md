@@ -170,12 +170,20 @@ wires it up; HI-C is the atomic, irreversible swap-and-delete (HI-1).
   `@xterm/*` dependencies. The ring stays — `correlate`/`normRing` read it.
   xterm.js is out of the tree and off the dependency list. Suites green,
   `make e2e` 47/47.
-- **HI-D — Scrollback fetch.** The `ScrollbackFetch` request (HI-2) that closes
-  the two gaps the scrollback commit (6071a2d) deferred here: **fresh-attach
-  history** (a newly-attached pane seeing output from before it connected) and
-  the **fast-scroll gap** (a burst larger than the screen leaves intermediate
-  lines only in the server ring). The server already holds the data; this is the
-  request path to it.
+- **HI-D — Scrollback fetch. DONE (2026-07-22), as paging.** Went further than
+  the planned bulk fetch: history is **host-backed and reverse-paginated**
+  (absolute line indices on the emulator ring + `msgSbFetch`/`msgSbChunk`
+  pages; the Frame carries `Hist`/`Epoch`, wire v3). The client's dense
+  5000-row scrollback array became a sparse page cache with prefetch and
+  distance eviction. Closes both deferred gaps (fresh-attach history,
+  fast-scroll gap) without ever shipping history wholesale. Old-host skew
+  fails open: v2 frames decode with zeroed history.
+- **Phase 4 — Pause hidden panes. DONE (2026-07-22).** `msgVis`: a hidden
+  pane's render loop skips diff/encode/send entirely (the emulator keeps
+  parsing); the reveal renders the net against the stale Surface as one frame.
+  The absolute indexing makes the reveal's capped scroll correct for
+  scrollback — the gap is fetchable, never mislabeled. N background sessions
+  now cost ring storage + parsing, nothing per-frame.
 
 ## Risks and honest caveats
 
@@ -197,7 +205,9 @@ wires it up; HI-C is the atomic, irreversible swap-and-delete (HI-1).
 
 ## Non-goals (this plan)
 
-- Lazy parse-on-view / visibility-tiered damage (spec Phase 4).
+- Lazy parse-on-view / visibility-tiered damage (spec Phase 4). *(Frame
+  pausing landed 2026-07-22 — see Phase 4 above; parse-on-view itself stays
+  out: parsing is what keeps the grid truthful for the reveal.)*
 - Reflow on resize (spec Phase 5 / D7).
 - The agent MCP terminal tools (spec Phase 5 / D8).
 - Predictive/local echo (spec D1 measured it a ~5 ms footnote).

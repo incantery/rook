@@ -39,7 +39,8 @@ func (e *Emulator) NewSurface() *Surface {
 // states collapses to a single net diff. Cost is O(cols*rows) with no
 // allocation for unchanged cells.
 func (e *Emulator) Render(s *Surface) Frame {
-	f := Frame{Cursor: Cursor{X: e.cur.cx, Y: e.cur.cy, Visible: e.cursorVisible}}
+	f := Frame{Cursor: Cursor{X: e.cur.cx, Y: e.cur.cy, Visible: e.cursorVisible}, Epoch: e.sbEpoch}
+	_, f.Hist = e.History()
 	if s.cols != e.w || s.rows != e.h {
 		e.resyncSurface(s)     // geometry changed under us: full resend next
 		e.primary.scrolled = 0 // scroll is moot when everything resends

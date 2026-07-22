@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {decodeFrame} from "./frame";
+import {decodeFrame, decodeSbChunk} from "./frame";
 import {ClientGrid} from "./grid";
 import fixtureData from "./testdata/frames.json";
 
@@ -75,6 +75,26 @@ describe("decoder edge cases", () => {
 
     it("rejects a truncated frame", () => {
         // version + a cursor that runs off the end
-        expect(() => decodeFrame(new Uint8Array([2, 0x80]))).toThrow(/truncated|varint/);
+        expect(() => decodeFrame(new Uint8Array([3, 0x80]))).toThrow(/truncated|varint/);
+    });
+});
+
+describe("decodeSbChunk", () => {
+    it("decodes a page of history lines", () => {
+        // version 3, epoch 5, window [2,9), start 4, 2 lines: "A" then empty.
+        // cell layout: attr, width, fg uvarint, bg uvarint, len uvarint, bytes.
+        const chunk = new Uint8Array([
+            3, 5, 2, 9, 4, 2, /*line0*/ 1, 0, 1, 0, 0, 1, 0x41, /*line1*/ 0,
+        ]);
+        const ch = decodeSbChunk(chunk);
+        expect(ch).toMatchObject({epoch: 5, base: 2, total: 9, start: 4});
+        expect(ch.lines).toHaveLength(2);
+        expect(ch.lines[0]).toHaveLength(1);
+        expect(ch.lines[0][0].content).toBe("A");
+        expect(ch.lines[1]).toEqual([]);
+    });
+
+    it("rejects a chunk with the wrong version", () => {
+        expect(() => decodeSbChunk(new Uint8Array([2, 0, 0, 0, 0, 0]))).toThrow(/wire version/);
     });
 });

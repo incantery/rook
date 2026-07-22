@@ -43,6 +43,10 @@ type Emulator struct {
 	decModes  map[int]bool // DEC private modes seen via CSI ? h/l — for DECRQM reports
 	ansiModes map[int]bool // ANSI modes seen via CSI h/l
 	sbLines   int          // scrollback depth, for reset
+	sbEpoch   byte         // bumps when history's absolute indices stop meaning
+	// anything (resize rebuilds the ring at the new width; RIS discards it) —
+	// a client compares epochs and drops its cached pages wholesale instead
+	// of reasoning about how a rebuild renumbered them.
 
 	// The theme colors, for answering OSC palette queries (OSC 4/10/11/12) — the
 	// residual query.go left to the client. 0xRRGGBB. Seeded to a dark default so
@@ -134,6 +138,7 @@ func (e *Emulator) Resize(w, h int) {
 	e.primary.resize(w, h)
 	e.alt.resize(w, h)
 	e.w, e.h = w, h
+	e.sbEpoch++ // the rebuild renumbered history; cached pages are void
 	// The DECSC / alt-switch cursor slots hold absolute coordinates that may now
 	// be off the grid; clamp them so a later restore lands in range.
 	e.saved.cx, e.saved.cy = clampToGrid(e.saved.cx, e.saved.cy, w, h)
@@ -441,6 +446,23 @@ func (e *Emulator) ScrollbackLen() int {
 	return e.primary.sb.count
 }
 
+// History reports the absolute index window of retained scrollback: lines
+// [base, total) are fetchable, lines below base have been evicted, and total is
+// the absolute index of the live screen's top row. Absolute indices are stable
+// within one epoch (SbEpoch), which is what lets a client page history on
+// demand instead of holding a copy.
+func (e *Emulator) History() (base, total uint64) {
+	sb := e.primary.sb
+	if sb == nil {
+		return 0, 0
+	}
+	return sb.pushed - uint64(sb.count), sb.pushed
+}
+
+// SbEpoch identifies the current numbering of history's absolute indices; it
+// changes when a resize or reset renumbers them (see the field).
+func (e *Emulator) SbEpoch() byte { return e.sbEpoch }
+
 // ScrollbackCell returns the cell at column x of scrollback line i, where i=0 is
 // the oldest retained line. Out-of-range reads return a blank cell.
 func (e *Emulator) ScrollbackCell(x, i int) Cell {
@@ -458,6 +480,7 @@ func (e *Emulator) reset() {
 	if e.sbLines > 0 {
 		e.primary.sb = newScrollback(e.w, e.sbLines)
 	}
+	e.sbEpoch++ // history discarded; a client's cached pages are void
 	e.cur = e.primary
 	e.onAlt = false
 	e.fg, e.bg, e.attr = DefaultColor, DefaultColor, 0

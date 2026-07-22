@@ -14,7 +14,13 @@
 // host session dies — screen and pane switches are CSS, never unmounts.
 
 import type {HostAPI, SessionInfo} from "../hostapi";
-import {decodeServerMessage, encodeInput, encodeResize} from "./vt/framed";
+import {
+    decodeServerMessage,
+    encodeInput,
+    encodeResize,
+    encodeSbFetch,
+    encodeVis,
+} from "./vt/framed";
 import {GridRenderer} from "./vt/renderer";
 import "./vt/renderer.css";
 import {
@@ -109,6 +115,8 @@ interface Tab {
     ws: WebSocket | null;
     wrap: HTMLElement;
     lastSize: string;
+    /** last visibility told to the host — hidden panes get no frames */
+    visible: boolean;
 }
 
 /** A terminal pane: PaneContent over a Tab. The Tab keeps the whole
@@ -339,6 +347,7 @@ export class TermManager {
         // linger behind the dashboard, and re-project the (empty) strip
         for (const w of this.windows) w.el.classList.remove("active");
         this.active = null;
+        this.syncVisibility(); // no window on stage — every session is hidden
         this.events.changed();
         return false;
     }
@@ -366,6 +375,9 @@ export class TermManager {
             onInput: (data) => {
                 if (tab.ws?.readyState === WebSocket.OPEN) tab.ws.send(encodeInput(data));
             },
+            onSbFetch: (start, count) => {
+                if (tab.ws?.readyState === WebSocket.OPEN) tab.ws.send(encodeSbFetch(start, count));
+            },
         });
         tab = {
             id: s.id,
@@ -379,6 +391,7 @@ export class TermManager {
             ws: null,
             wrap,
             lastSize: "",
+            visible: true,
         };
         this.connect(tab);
         this.sessions.set(tab.id, tab);
@@ -475,6 +488,9 @@ export class TermManager {
             // grid before the first output, then true the grid up once laid out
             if (this.palette) ws.send(this.palette);
             ws.send(encodeResize(tab.cols, tab.rows));
+            // the host assumes visible; correct it if this tab is backgrounded
+            // (init() attaches every session, most of them hidden)
+            if (!tab.visible) ws.send(encodeVis(false));
             this.paneInActive(tab.id)?.fit(true);
         };
         ws.onmessage = (e: MessageEvent<ArrayBuffer>) => {
@@ -484,6 +500,8 @@ export class TermManager {
             } else if (msg.kind === "state") {
                 tab.alt = msg.alt; // keybind routing reads this via focusedInAltScreen
                 tab.renderer.setMouseMode(msg.mouseLevel, msg.mouseSgr);
+            } else if (msg.kind === "sbchunk") {
+                tab.renderer.applySbChunk(msg.payload);
             }
         };
         ws.onclose = async (ev) => {
@@ -538,10 +556,30 @@ export class TermManager {
         for (const w of this.windows) w.el.classList.toggle("active", w === win);
         this.active = win;
         this.lastActive.set(win.workspace, win);
+        this.syncVisibility();
         this.syncSize(true);
         win.panes.get(win.focused)?.focus();
         this.events.changed();
         this.events.activated();
+    }
+
+    /** Tell each session's host render loop whether anyone can see it. A
+     *  hidden session keeps parsing host-side but ships no frames — the CPU
+     *  a busy background agent costs the UI drops to ~zero — and the reveal
+     *  (activate) renders the net of everything missed as one frame. */
+    private syncVisibility(): void {
+        const seen = new Set<string>();
+        if (this.active) {
+            for (const p of this.active.panes.values()) {
+                if (p.sessionId) seen.add(p.sessionId);
+            }
+        }
+        for (const tab of this.sessions.values()) {
+            const v = seen.has(tab.id);
+            if (tab.visible === v) continue;
+            tab.visible = v;
+            if (tab.ws?.readyState === WebSocket.OPEN) tab.ws.send(encodeVis(v));
+        }
     }
 
     activateId(id: string): void {

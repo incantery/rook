@@ -50,16 +50,25 @@ type RowRuns struct {
 // scroll ship as "scrolled N + the newly-exposed rows" rather than a whole-
 // screen diff, and is how the client feeds its own scrollback: it captures the N
 // rows about to leave the top before shifting.
+//
+// Hist and Epoch place the frame in history's absolute address space
+// (Emulator.History): Scroll is capped at the screen height, so a burst that
+// scrolled 500 lines between frames advances Hist by 500 while Scroll says the
+// screen's worth — the client captures its departing rows at [prevHist,
+// prevHist+Scroll) and knows the rest is fetchable from the host ring, never
+// mislabeling what it saw as lines it didn't.
 type Frame struct {
 	Cursor Cursor
 	Scroll int
+	Hist   uint64 // absolute index of the live screen's top row (lines ever pushed)
+	Epoch  byte   // history numbering epoch; a change voids cached history
 	Rows   []RowRuns
 }
 
 // Empty reports whether the frame carries no changes at all.
 func (f Frame) Empty() bool { return len(f.Rows) == 0 && f.Scroll == 0 }
 
-const wireVersion = 2
+const wireVersion = 3
 
 // Encode serializes a Frame to bytes. The layout is length-prefixed and
 // varint-packed; colors are the packed 32-bit Color, content is a UTF-8 string.
@@ -70,6 +79,8 @@ func (f Frame) Encode() []byte {
 	buf = binary.AppendUvarint(buf, uint64(f.Cursor.Y))
 	buf = append(buf, boolByte(f.Cursor.Visible))
 	buf = binary.AppendUvarint(buf, uint64(f.Scroll))
+	buf = binary.AppendUvarint(buf, f.Hist)
+	buf = append(buf, f.Epoch)
 	buf = binary.AppendUvarint(buf, uint64(len(f.Rows)))
 	for _, row := range f.Rows {
 		buf = binary.AppendUvarint(buf, uint64(row.Y))
@@ -107,6 +118,8 @@ func DecodeFrame(b []byte) (Frame, error) {
 	f.Cursor.Y = int(d.uvarint())
 	f.Cursor.Visible = d.byte() != 0
 	f.Scroll = int(d.uvarint())
+	f.Hist = d.uvarint()
+	f.Epoch = d.byte()
 	nRows := int(d.uvarint())
 	f.Rows = make([]RowRuns, nRows)
 	for i := range f.Rows {
@@ -175,6 +188,90 @@ func boolByte(b bool) byte {
 		return 1
 	}
 	return 0
+}
+
+// --- scrollback paging ---
+//
+// History never ships whole: the ring is the store and a client is a viewport
+// over it, requesting pages of absolute-indexed lines as the user scrolls
+// (reverse-paginated virtualized scrolling). A chunk reply always carries the
+// current [base, total) window and epoch, so every fetch also refreshes the
+// client's knowledge of what exists — including "nothing below base", which is
+// how it learns to clamp.
+
+// MaxSbChunk bounds one chunk reply; a client pages, it doesn't bulk-fetch.
+const MaxSbChunk = 512
+
+// SbChunk is a decoded page of scrollback lines starting at absolute index
+// Start. Lines are trimmed of trailing blanks; the client pads to width.
+type SbChunk struct {
+	Epoch       byte
+	Base, Total uint64
+	Start       uint64
+	Lines       [][]WCell
+}
+
+// EncodeScrollback encodes up to count history lines starting at absolute index
+// start, clamped to the retained window and MaxSbChunk. count 0 is a stat: the
+// reply carries just the current epoch and [base, total).
+func (e *Emulator) EncodeScrollback(start uint64, count int) []byte {
+	base, total := e.History()
+	count = min(count, MaxSbChunk)
+	start = max(start, base)
+	end := min(start+uint64(count), total)
+	start = min(start, end)
+	buf := make([]byte, 0, 256)
+	buf = append(buf, wireVersion, e.sbEpoch)
+	buf = binary.AppendUvarint(buf, base)
+	buf = binary.AppendUvarint(buf, total)
+	buf = binary.AppendUvarint(buf, start)
+	buf = binary.AppendUvarint(buf, end-start)
+	sb := e.primary.sb
+	for i := start; i < end; i++ {
+		row := sb.row(int(i - base))
+		n := len(row)
+		for n > 0 && row[n-1] == blank {
+			n--
+		}
+		buf = binary.AppendUvarint(buf, uint64(n))
+		for _, c := range row[:n] {
+			buf = appendCell(buf, e.wcell(c))
+		}
+	}
+	return buf
+}
+
+// DecodeSbChunk parses a chunk produced by EncodeScrollback.
+func DecodeSbChunk(b []byte) (SbChunk, error) {
+	d := decoder{b: b}
+	var ch SbChunk
+	if d.byte() != wireVersion {
+		return ch, errors.New("vt: unknown wire version")
+	}
+	ch.Epoch = d.byte()
+	ch.Base = d.uvarint()
+	ch.Total = d.uvarint()
+	ch.Start = d.uvarint()
+	n := int(d.uvarint())
+	if d.err != nil || n > MaxSbChunk {
+		return SbChunk{}, errShortFrame
+	}
+	ch.Lines = make([][]WCell, n)
+	for i := range ch.Lines {
+		m := int(d.uvarint())
+		if d.err != nil || m < 0 || m > len(b) {
+			return SbChunk{}, errShortFrame
+		}
+		line := make([]WCell, m)
+		for j := range line {
+			line[j] = d.cell()
+		}
+		ch.Lines[i] = line
+	}
+	if d.err != nil {
+		return SbChunk{}, d.err
+	}
+	return ch, nil
 }
 
 // ClientGrid is the renderer side: a grid a client maintains by applying Frames.

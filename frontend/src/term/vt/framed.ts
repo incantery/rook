@@ -5,9 +5,12 @@
 
 export const MSG_FRAME = 0x01; // server -> client: a vt.Frame
 export const MSG_STATE = 0x02; // server -> client: session state (alt screen)
+export const MSG_SB_CHUNK = 0x03; // server -> client: a page of scrollback history
 export const MSG_INPUT = 0x10; // client -> server: raw pty bytes
 export const MSG_RESIZE = 0x11; // client -> server: cols, rows
 export const MSG_PALETTE = 0x12; // client -> server: theme colors for OSC answers
+export const MSG_SB_FETCH = 0x13; // client -> server: request a scrollback page
+export const MSG_VIS = 0x14; // client -> server: pane visibility (pause frames)
 
 // state flags byte: bit0 alt screen; bits1-3 mouse tracking level (0-4); bit4
 // SGR mouse encoding.
@@ -17,6 +20,7 @@ export const STATE_MOUSE_SGR = 0x10;
 export type ServerMessage =
     | {kind: "frame"; payload: Uint8Array}
     | {kind: "state"; alt: boolean; mouseLevel: number; mouseSgr: boolean}
+    | {kind: "sbchunk"; payload: Uint8Array}
     | {kind: "unknown"; tag: number};
 
 /** decodeServerMessage classifies one incoming binary message. The frame payload
@@ -36,9 +40,31 @@ export function decodeServerMessage(buf: ArrayBuffer): ServerMessage {
                 mouseSgr: (flags & STATE_MOUSE_SGR) !== 0,
             };
         }
+        case MSG_SB_CHUNK:
+            return {kind: "sbchunk", payload: b.subarray(1)};
         default:
             return {kind: "unknown", tag: b[0]};
     }
+}
+
+/** encodeVis tells the host whether anyone can see this pane. Hidden panes
+ *  keep parsing host-side but ship no frames; the reveal ships the net diff. */
+export function encodeVis(visible: boolean): Uint8Array {
+    return new Uint8Array([MSG_VIS, visible ? 1 : 0]);
+}
+
+/** encodeSbFetch requests count history lines from absolute index start:
+ *  BE uint32 start, BE uint16 count. count 0 is a stat (bounds only). */
+export function encodeSbFetch(start: number, count: number): Uint8Array {
+    return new Uint8Array([
+        MSG_SB_FETCH,
+        (start >>> 24) & 0xff,
+        (start >>> 16) & 0xff,
+        (start >>> 8) & 0xff,
+        start & 0xff,
+        (count >> 8) & 0xff,
+        count & 0xff,
+    ]);
 }
 
 const encoder = new TextEncoder();

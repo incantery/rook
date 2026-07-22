@@ -14,6 +14,10 @@ type scrollback struct {
 	rows   []Cell // cap*w cells, addressed as a ring of lines
 	head   int    // slot of the oldest retained line
 	count  int    // lines currently retained, <= cap
+	pushed uint64 // lines ever pushed — the absolute index of the next push.
+	// Absolute indexing is what lets a client page history without holding
+	// it: line i keeps its index for the life of the ring, eviction just
+	// moves the retained window's base (pushed-count) past it.
 }
 
 func newScrollback(w, capLines int) *scrollback {
@@ -29,6 +33,7 @@ func newScrollback(w, capLines int) *scrollback {
 
 // push copies one line (w cells) into the ring, evicting the oldest if full.
 func (sb *scrollback) push(line []Cell) {
+	sb.pushed++
 	var slot int
 	if sb.count < sb.cap {
 		slot = (sb.head + sb.count) % sb.cap
