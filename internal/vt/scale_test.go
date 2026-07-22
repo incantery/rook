@@ -19,18 +19,26 @@ func TestScale(t *testing.T) {
 	data := grow(raw, 4<<20)
 
 	run := func(n int) (allocMB float64, gc uint32, pauseMs float64) {
+		// Create the emulators up front, outside the measured window: their
+		// fixed footprint (two grids + a preallocated scrollback ring) is a
+		// one-time per-session cost, not the thing under test. What must stay
+		// near zero is the *parse* allocation — allocation that scales with
+		// bytes processed, the x/vt failure mode that GC-thrashes at scale.
+		emus := make([]*Emulator, n)
+		for i := range emus {
+			emus[i] = New(120, 40)
+		}
 		runtime.GC()
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
 
 		var wg sync.WaitGroup
 		t0 := time.Now()
-		for range n {
+		for i := range n {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				e := New(120, 40)
-				e.Write(data)
+				emus[i].Write(data)
 			}()
 		}
 		wg.Wait()
@@ -48,12 +56,12 @@ func TestScale(t *testing.T) {
 
 	for _, n := range []int{1, 20} {
 		allocMB, _, pauseMs := run(n)
-		// A ~4 MiB parse per session must not allocate on the order of the
-		// input (that is the x/vt failure mode: 8 GB / 20 sessions). A few MB
-		// of fixed grid+goroutine overhead per session is fine; scaling with
-		// bytes-processed is not.
-		if perSession := allocMB / float64(n); perSession > 2.0 {
-			t.Errorf("n=%d: %.1f MB/session allocated — grid is not zero-alloc", n, perSession)
+		// A ~4 MiB parse per session must allocate almost nothing (that is the
+		// x/vt failure mode: 8 GB over 20 sessions). Setup is excluded, so this
+		// is parse allocation only; a small constant covers goroutine stacks and
+		// MemStats jitter.
+		if perSession := allocMB / float64(n); perSession > 0.5 {
+			t.Errorf("n=%d: %.2f MB/session allocated during parse — not zero-alloc", n, perSession)
 		}
 		if pauseMs > 5.0 {
 			t.Errorf("n=%d: %.2f ms STW pause — GC pressure at scale", n, pauseMs)

@@ -42,6 +42,7 @@ type Emulator struct {
 	out       []byte       // replies to queries, to be written back to the pty as input
 	decModes  map[int]bool // DEC private modes seen via CSI ? h/l — for DECRQM reports
 	ansiModes map[int]bool // ANSI modes seen via CSI h/l
+	sbLines   int          // scrollback depth, for reset
 }
 
 type savedCursor struct {
@@ -52,8 +53,15 @@ type savedCursor struct {
 	originMode bool
 }
 
-// New returns an emulator of the given size with a cleared primary screen.
-func New(w, h int) *Emulator {
+// DefaultScrollback is how many lines the primary screen retains by default.
+const DefaultScrollback = 1000
+
+// New returns an emulator of the given size with a cleared primary screen and
+// the default scrollback depth.
+func New(w, h int) *Emulator { return NewWithScrollback(w, h, DefaultScrollback) }
+
+// NewWithScrollback is New with an explicit scrollback depth (0 disables it).
+func NewWithScrollback(w, h, scrollbackLines int) *Emulator {
 	if w < 1 {
 		w = 1
 	}
@@ -72,6 +80,10 @@ func New(w, h int) *Emulator {
 		// wraparound is on and the cursor is visible, as xterm.js does.
 		decModes:  map[int]bool{7: true, 25: true},
 		ansiModes: map[int]bool{},
+		sbLines:   scrollbackLines,
+	}
+	if scrollbackLines > 0 {
+		e.primary.sb = newScrollback(w, scrollbackLines)
 	}
 	e.cur = e.primary
 	return e
@@ -322,10 +334,31 @@ func (e *Emulator) restore(sc savedCursor) {
 	e.cur.clampCursor()
 }
 
+// ScrollbackLen reports how many lines have scrolled off the primary screen.
+func (e *Emulator) ScrollbackLen() int {
+	if e.primary.sb == nil {
+		return 0
+	}
+	return e.primary.sb.count
+}
+
+// ScrollbackCell returns the cell at column x of scrollback line i, where i=0 is
+// the oldest retained line. Out-of-range reads return a blank cell.
+func (e *Emulator) ScrollbackCell(x, i int) Cell {
+	sb := e.primary.sb
+	if sb == nil || i < 0 || i >= sb.count || x < 0 || x >= e.w {
+		return blank
+	}
+	return sb.row(i)[x]
+}
+
 // reset returns the emulator to power-on state (RIS / ESC c).
 func (e *Emulator) reset() {
 	e.primary = newScreen(e.w, e.h)
 	e.alt = newScreen(e.w, e.h)
+	if e.sbLines > 0 {
+		e.primary.sb = newScrollback(e.w, e.sbLines)
+	}
 	e.cur = e.primary
 	e.onAlt = false
 	e.fg, e.bg, e.attr = DefaultColor, DefaultColor, 0

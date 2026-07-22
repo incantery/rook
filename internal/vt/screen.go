@@ -14,10 +14,11 @@ package vt
 type screen struct {
 	w, h       int
 	cells      []Cell
-	top        int  // physical row that logical row 0 currently maps to
-	cx, cy     int  // cursor, logical coordinates, always in range
-	stop, sbot int  // scroll region, inclusive logical rows; default 0..h-1
-	wrapNext   bool // deferred autowrap: cursor printed to the last column
+	top        int         // physical row that logical row 0 currently maps to
+	cx, cy     int         // cursor, logical coordinates, always in range
+	stop, sbot int         // scroll region, inclusive logical rows; default 0..h-1
+	wrapNext   bool        // deferred autowrap: cursor printed to the last column
+	sb         *scrollback // lines scrolled off the top; nil on the alt screen
 }
 
 func newScreen(w, h int) *screen {
@@ -89,6 +90,15 @@ func (s *screen) scrollUpN(n int, fill Cell) {
 		return
 	}
 	rows := s.sbot - s.stop + 1
+	// A full-screen scroll pushes the departing lines to scrollback (at most the
+	// whole screen). A scroll *region* smaller than the screen is a redraw within
+	// margins (less, htop) — not history — so it retains nothing.
+	if s.fullRegion() && s.sb != nil {
+		for k := 0; k < n && k < s.h; k++ {
+			base := s.rowBase(k)
+			s.sb.push(s.cells[base : base+s.w])
+		}
+	}
 	if n >= rows {
 		s.clearRows(s.stop, s.sbot, fill)
 		return
