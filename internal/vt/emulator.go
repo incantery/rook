@@ -38,6 +38,10 @@ type Emulator struct {
 
 	carry   []byte // an escape sequence split across Write calls, held for the next
 	scratch []byte // reusable carry+input concat buffer
+
+	out       []byte       // replies to queries, to be written back to the pty as input
+	decModes  map[int]bool // DEC private modes seen via CSI ? h/l — for DECRQM reports
+	ansiModes map[int]bool // ANSI modes seen via CSI h/l
 }
 
 type savedCursor struct {
@@ -64,6 +68,10 @@ func New(w, h int) *Emulator {
 		autowrap:      true,
 		cursorVisible: true,
 		combinedIdx:   map[string]int{},
+		// Defaults that are not false: a mode report before any h/l must say
+		// wraparound is on and the cursor is visible, as xterm.js does.
+		decModes:  map[int]bool{7: true, 25: true},
+		ansiModes: map[int]bool{},
 	}
 	e.cur = e.primary
 	return e
@@ -326,5 +334,23 @@ func (e *Emulator) reset() {
 	e.cursorVisible = true
 	e.combined = e.combined[:0]
 	clear(e.combinedIdx)
+	clear(e.decModes)
+	clear(e.ansiModes)
+	e.decModes[7] = true
+	e.decModes[25] = true
 	e.pendingZWJ = false
+}
+
+// TakeOutput returns and clears the emulator's pending replies to terminal
+// queries (DA, DSR, DECRQM, DECRQSS, …). The host writes these back to the pty
+// as input. Because they go here and never into the grid, they never reach a
+// rendering client — the AUTO_REPLY filtering that xterm-in-the-browser needed
+// has no counterpart here.
+func (e *Emulator) TakeOutput() []byte {
+	if len(e.out) == 0 {
+		return nil
+	}
+	out := e.out
+	e.out = nil
+	return out
 }

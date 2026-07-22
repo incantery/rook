@@ -57,12 +57,17 @@ func (e *Emulator) escOSC(b []byte, i int) (int, bool) {
 	return i, true
 }
 
-// escString consumes a DCS/SOS/PM/APC string (through ST or BEL) and ignores it.
-// These carry sixel, DECRQSS replies, kitty graphics — none change the grid here.
+// escString consumes a DCS/SOS/PM/APC string (through ST or BEL). Most carry
+// sixel/kitty graphics that don't change the grid and are dropped; a DCS may be
+// a DECRQSS request ("what is the current SGR / scroll region"), which the
+// emulator can answer because it holds that state — so DCS payloads are routed
+// to dcs().
 func (e *Emulator) escString(b []byte, i int) (int, bool) {
+	intro := b[i+1]
 	n := len(b)
 	for j := i + 2; j < n; j++ {
 		if b[j] == 0x07 {
+			e.stringPayload(intro, b[i+2:j])
 			return j + 1, false
 		}
 		if b[j] == 0x1b {
@@ -70,11 +75,20 @@ func (e *Emulator) escString(b []byte, i int) (int, bool) {
 				return i, true
 			}
 			if b[j+1] == '\\' {
+				e.stringPayload(intro, b[i+2:j])
 				return j + 2, false
 			}
 		}
 	}
 	return i, true
+}
+
+// stringPayload dispatches a completed DCS/SOS/PM/APC body. Only DCS (intro 'P')
+// carries anything we answer.
+func (e *Emulator) stringPayload(intro byte, payload []byte) {
+	if intro == 'P' {
+		e.dcs(payload)
+	}
 }
 
 // escSingle handles the short ESC-prefixed sequences: index/reverse-index,
@@ -113,7 +127,8 @@ func (e *Emulator) csi(params []byte, final byte) {
 	var ps [32]int
 	np := 0
 	cur := 0
-	var prefix byte // '?', '>', '=' for private/device forms; 0 otherwise
+	var prefix byte // '?', '>', '<', '=' for private/device forms; 0 otherwise
+	var inter byte  // an intermediate byte (0x20–0x2f), e.g. '$' in DECRQM
 	for _, ch := range params {
 		switch {
 		case ch >= '0' && ch <= '9':
@@ -124,8 +139,10 @@ func (e *Emulator) csi(params []byte, final byte) {
 				np++
 			}
 			cur = 0
-		case ch == '?' || ch == '>' || ch == '=':
+		case ch == '?' || ch == '>' || ch == '<' || ch == '=':
 			prefix = ch
+		case ch >= 0x20 && ch <= 0x2f:
+			inter = ch
 		}
 	}
 	if np < len(ps) {
@@ -133,12 +150,18 @@ func (e *Emulator) csi(params []byte, final byte) {
 		np++
 	}
 
+	// Queries answer themselves into e.out and change nothing on screen, so they
+	// are handled before the grid dispatch and never reach a rendering client.
+	if e.answerQuery(ps[:np], prefix, inter, final) {
+		return
+	}
+
 	if prefix == '?' {
 		e.csiPrivate(ps[:np], final)
 		return
 	}
 	if prefix != 0 {
-		return // '>'/'=' device-attribute requests: replies are Phase 2
+		return // '>'/'<'/'=' device forms we do not act on
 	}
 
 	// param, treating 0 (and absent) as the default — the convention for the
@@ -195,9 +218,13 @@ func (e *Emulator) csi(params []byte, final byte) {
 		e.saved = e.snapshotCursor()
 	case 'u': // SCORC — restore cursor
 		e.restore(e.saved)
-	case 'h', 'l', 'n', 'c', 't', 'g', 'q', 'p':
-		// ANSI mode set/reset, device reports, window ops, tab clear, cursor
-		// style — no visible-grid effect here, or a Phase-2 reply.
+	case 'h', 'l': // ANSI mode set/reset — tracked for DECRQM, no grid effect
+		set := final == 'h'
+		for _, m := range ps[:np] {
+			e.ansiModes[m] = set
+		}
+	case 't', 'g', 'q':
+		// window ops, tab clear, cursor style — no visible-grid effect here.
 	}
 }
 
@@ -246,6 +273,7 @@ func (e *Emulator) csiPrivate(ps []int, final byte) {
 	}
 	set := final == 'h'
 	for _, m := range ps {
+		e.decModes[m] = set // recorded for DECRQM, whether or not it affects the grid
 		switch m {
 		case 6: // DECOM — origin mode
 			e.originMode = set
