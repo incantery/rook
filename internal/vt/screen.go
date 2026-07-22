@@ -270,11 +270,12 @@ func (s *screen) eraseDisplay(mode int, fill Cell) {
 
 // resize changes the screen geometry to newW×newH without reflow (reflow is a
 // v1 non-goal — see D7 in the server-terminal design). Each row is clipped on
-// the right or padded with blanks; content is never rewrapped. Rows are
-// bottom-anchored so a vertical shrink keeps the cursor line and the most-recent
-// output, and the rows that fall off the top of the primary screen are pushed to
-// scrollback — they genuinely scrolled into history. The ring offset is
-// flattened (top=0) and the scroll region reset to the whole screen.
+// the right or padded with blanks; content is never rewrapped. The vertical
+// anchor is asymmetric, as terminals do it: a SHRINK bottom-anchors (rows scroll
+// off the top into scrollback, keeping the cursor line and recent output), while
+// a GROW top-anchors (content stays put and blank rows fill the bottom) — so a
+// shell's prompt keeps its place instead of sliding to the middle when the pane
+// grows. The ring offset is flattened (top=0) and the scroll region reset.
 func (s *screen) resize(newW, newH int) {
 	if newW == s.w && newH == s.h {
 		return
@@ -289,10 +290,13 @@ func (s *screen) resize(newW, newH int) {
 		return old[py*oldW : py*oldW+oldW]
 	}
 
-	// Bottom-anchor: old logical row (oldH-1) maps to new row (newH-1). shift>0
-	// means that many top rows fall off (a shrink); shift<0 leaves blank rows at
-	// the top (a grow).
-	shift := oldH - newH
+	// shift>0 drops that many top rows (a shrink, bottom-anchored). A grow keeps
+	// shift 0 (top-anchored), so old row y stays at new row y and the new rows
+	// open up blank at the bottom.
+	shift := 0
+	if newH < oldH {
+		shift = oldH - newH
+	}
 
 	// Rebuild scrollback at the new width (clip/pad per row via push's copy, never
 	// reflow), then push the rows that fell off the top of a shrink, in order — so

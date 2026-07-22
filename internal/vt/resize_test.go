@@ -9,14 +9,13 @@ func TestResizeGrowKeepsContent(t *testing.T) {
 	if e.Cols() != 20 || e.Rows() != 5 {
 		t.Fatalf("geometry = %dx%d, want 20x5", e.Cols(), e.Rows())
 	}
-	// Bottom-anchored: the old screen's rows (hello, world, blank) map onto the
-	// bottom of the taller one, so content lands on rows 2,3 and the old trailing
-	// blank pins row 4; the extra height opens as blank rows 0,1.
-	if line(e, 2) != "hello" || line(e, 3) != "world" {
-		t.Fatalf("grow: rows 2,3 = %q,%q, want hello,world", line(e, 2), line(e, 3))
+	// Top-anchored on grow: content stays where it was (rows 0,1) and the extra
+	// height opens as blank rows below — a shell prompt keeps its place.
+	if line(e, 0) != "hello" || line(e, 1) != "world" {
+		t.Fatalf("grow: rows 0,1 = %q,%q, want hello,world", line(e, 0), line(e, 1))
 	}
-	if line(e, 0) != "" || line(e, 1) != "" || line(e, 4) != "" {
-		t.Fatalf("grow: rows 0,1,4 should be blank, got %q,%q,%q", line(e, 0), line(e, 1), line(e, 4))
+	if line(e, 2) != "" || line(e, 3) != "" || line(e, 4) != "" {
+		t.Fatalf("grow: rows 2,3,4 should be blank, got %q,%q,%q", line(e, 2), line(e, 3), line(e, 4))
 	}
 }
 
@@ -115,17 +114,16 @@ func TestResizeTriggersFullResend(t *testing.T) {
 		}
 		got[row.Y] = trimTrailSpace(s)
 	}
-	// Bottom-anchored into 4 rows (old rows hello,world,blank): hello lands on
-	// row 1, world on row 2, the old trailing blank pins row 3.
-	if got[1] != "hello" || got[2] != "world" {
-		t.Fatalf("resend rows = %q, want row1=hello row2=world", got)
+	// Top-anchored on grow: hello,world stay on rows 0,1.
+	if got[0] != "hello" || got[1] != "world" {
+		t.Fatalf("resend rows = %q, want row0=hello row1=world", got)
 	}
 
 	// and the client reconstructs the resized grid exactly from that one frame.
 	cg := NewClientGrid(20, 4)
 	cg.Apply(f)
-	if rowString(cg, 1) != "hello" || rowString(cg, 2) != "world" {
-		t.Fatalf("client after resize resend: row1=%q row2=%q", rowString(cg, 1), rowString(cg, 2))
+	if rowString(cg, 0) != "hello" || rowString(cg, 1) != "world" {
+		t.Fatalf("client after resize resend: row0=%q row1=%q", rowString(cg, 0), rowString(cg, 1))
 	}
 }
 
