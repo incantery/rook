@@ -20,10 +20,22 @@ type screen struct {
 	wrapNext   bool        // deferred autowrap: cursor printed to the last column
 	sb         *scrollback // lines scrolled off the top; nil on the alt screen
 	scrolled   int         // full-screen lines scrolled off since the last Render
+
+	// used is a per-PHYSICAL-row high-water mark: cells at and beyond used[py]
+	// are blank. Writers maintain it (a compare per print run, not per cell);
+	// the scroll path consumes it, so pushing a departing row to scrollback and
+	// blanking the exposed row cost the CONTENT width, not the terminal width.
+	// On wide grids that is most of the firehose cost: a 72-char log line on a
+	// 405-column screen copies 72 cells, not 405 — and the mark comes from what
+	// writers already know, never from scanning (a branchy trailing-blank scan
+	// costs more than the memcpy it saves; measured, not guessed).
+	// The bound is conservative: styled fills and blank overwrites may inflate
+	// it, which costs speed, never correctness.
+	used []int
 }
 
 func newScreen(w, h int) *screen {
-	s := &screen{w: w, h: h, cells: make([]Cell, w*h), sbot: h - 1}
+	s := &screen{w: w, h: h, cells: make([]Cell, w*h), sbot: h - 1, used: make([]int, h)}
 	for i := range s.cells {
 		s.cells[i] = blank
 	}
@@ -51,20 +63,35 @@ func (s *screen) put(x, y int, c Cell) {
 	if x < 0 || x >= s.w || y < 0 || y >= s.h {
 		return
 	}
-	s.cells[s.idx(x, y)] = c
+	i := s.idx(x, y)
+	s.cells[i] = c
+	if py := i / s.w; x >= s.used[py] {
+		s.used[py] = x + 1
+	}
 }
 
 // fullRegion reports whether the scroll region is the whole screen — the case
 // the ring fast path handles.
 func (s *screen) fullRegion() bool { return s.stop == 0 && s.sbot == s.h-1 }
 
-// clearRow fills one logical row with fill.
+// clearRow fills one logical row with fill. Blank fill — the common case —
+// clears only the used prefix (everything beyond is blank by invariant).
 func (s *screen) clearRow(y int, fill Cell) {
 	base := s.rowBase(y)
+	py := base / s.w
+	if fill == blank {
+		row := s.cells[base : base+s.used[py]]
+		for i := range row {
+			row[i] = blank
+		}
+		s.used[py] = 0
+		return
+	}
 	row := s.cells[base : base+s.w]
 	for i := range row {
 		row[i] = fill
 	}
+	s.used[py] = s.w
 }
 
 // clearRows fills logical rows [y0,y1] inclusive.
@@ -74,13 +101,20 @@ func (s *screen) clearRows(y0, y1 int, fill Cell) {
 	}
 }
 
-// copyRow copies logical row src onto logical row dst (whole width).
+// copyRow copies logical row src onto logical row dst — the src's used prefix,
+// plus blanking whatever longer content dst held.
 func (s *screen) copyRow(dst, src int) {
 	if dst == src {
 		return
 	}
 	db, sb := s.rowBase(dst), s.rowBase(src)
-	copy(s.cells[db:db+s.w], s.cells[sb:sb+s.w])
+	dpy, spy := db/s.w, sb/s.w
+	us := s.used[spy]
+	copy(s.cells[db:db+us], s.cells[sb:sb+us])
+	for i := db + us; i < db+s.used[dpy]; i++ {
+		s.cells[i] = blank
+	}
+	s.used[dpy] = us
 }
 
 // scrollUpN moves the scroll region up by n rows (content scrolls off the top
@@ -97,7 +131,7 @@ func (s *screen) scrollUpN(n int, fill Cell) {
 	if s.fullRegion() && s.sb != nil {
 		for k := 0; k < n && k < s.h; k++ {
 			base := s.rowBase(k)
-			s.sb.push(s.cells[base : base+s.w])
+			s.sb.push(s.cells[base : base+s.used[base/s.w]])
 		}
 		s.scrolled += n // the wire coalesces this into one scroll-op per Render
 	}
@@ -212,6 +246,13 @@ func (s *screen) insertChars(n int, fill Cell) {
 	for i := s.cx; i < s.cx+n; i++ {
 		row[i] = fill
 	}
+	py := base / s.w
+	if s.used[py] > s.cx { // shifted content moved the mark right
+		s.used[py] = min(s.used[py]+n, s.w)
+	}
+	if fill != blank && s.cx+n > s.used[py] {
+		s.used[py] = s.cx + n
+	}
 }
 
 // deleteChars shifts the cursor row left by n from the cursor, pulling cells in
@@ -229,6 +270,11 @@ func (s *screen) deleteChars(n int, fill Cell) {
 	for i := s.w - n; i < s.w; i++ {
 		row[i] = fill
 	}
+	// content only moved left, so the old mark still bounds it — unless the
+	// vacated right end was filled with something visible
+	if fill != blank {
+		s.used[base/s.w] = s.w
+	}
 }
 
 // eraseChars clears n cells from the cursor without moving anything (ECH).
@@ -242,9 +288,23 @@ func (s *screen) eraseChars(n int, fill Cell) {
 func (s *screen) eraseLine(mode int, fill Cell) {
 	switch mode {
 	case 0:
-		for x := s.cx; x < s.w; x++ {
-			s.put(x, s.cy, fill)
+		// erase-to-end is the shell redraw workhorse: with a blank fill only
+		// the used tail needs writing, and the mark retreats to the cursor
+		base := s.rowBase(s.cy)
+		py := base / s.w
+		if fill == blank {
+			for x := s.cx; x < s.used[py]; x++ {
+				s.cells[base+x] = blank
+			}
+			if s.cx < s.used[py] {
+				s.used[py] = s.cx
+			}
+			return
 		}
+		for x := s.cx; x < s.w; x++ {
+			s.cells[base+x] = fill
+		}
+		s.used[py] = s.w
 	case 1:
 		for x := 0; x <= s.cx && x < s.w; x++ {
 			s.put(x, s.cy, fill)
@@ -316,6 +376,7 @@ func (s *screen) resize(newW, newH int) {
 	for i := range cells {
 		cells[i] = blank
 	}
+	used := make([]int, newH)
 	for ny := range newH {
 		oy := ny + shift
 		if oy < 0 || oy >= oldH {
@@ -326,10 +387,16 @@ func (s *screen) resize(newW, newH int) {
 		for x := 0; x < newW && x < oldW; x++ {
 			dst[x] = src[x]
 		}
+		opy := oldTop + oy
+		if opy >= oldH {
+			opy -= oldH
+		}
+		used[ny] = min(s.used[opy], newW)
 	}
 
 	s.w, s.h = newW, newH
 	s.cells = cells
+	s.used = used
 	s.top = 0
 	s.stop, s.sbot = 0, newH-1
 	s.scrolled = 0

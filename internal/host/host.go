@@ -305,14 +305,100 @@ func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
 	return s, nil
 }
 
+// gather is the pty-draining half of readPump (the Ghostty gather-thread
+// shape). The kernel hands out at most ~1KB per pty read(), and a serial
+// read-then-parse loop stalls twice per cycle: the writing TUI blocks on a
+// full kernel buffer while we parse, and the parser idles while we sit in the
+// read syscall. So one goroutine does nothing but drain the pty into a pending
+// buffer, and the parse loop takes whatever has accumulated as one coalesced
+// chunk — reads overlap parsing, and a firehose reaches the emulator in
+// big writes instead of 1KB nibbles.
+type gather struct {
+	mu      sync.Mutex
+	pending []byte
+	err     error         // terminal read error; delivered after pending drains
+	notify  chan struct{} // cap 1: bytes or err landed
+	drained chan struct{} // cap 1: parser took — releases backpressure
+}
+
+// gatherMax bounds unparsed bytes; past it the gather loop stops reading until
+// the parser catches up, pushing backpressure into the pty like the old serial
+// loop did — just at a much coarser grain.
+const gatherMax = 1 << 20
+
+func (g *gather) run(pty *os.File) {
+	buf := make([]byte, 64*1024)
+	for {
+		n, err := pty.Read(buf)
+		if n > 0 {
+			g.mu.Lock()
+			g.pending = append(g.pending, buf[:n]...)
+			over := len(g.pending) > gatherMax
+			g.mu.Unlock()
+			g.signal(g.notify)
+			if over {
+				<-g.drained
+			}
+		}
+		if err != nil {
+			g.mu.Lock()
+			g.err = err
+			g.mu.Unlock()
+			g.signal(g.notify)
+			return
+		}
+	}
+}
+
+// take blocks until output or the terminal error is available, then swaps the
+// pending buffer for the caller's recycled one (zero steady-state allocation).
+func (g *gather) take(recycled []byte) ([]byte, error) {
+	waited := false
+	for {
+		g.mu.Lock()
+		if n := len(g.pending); n > 0 || g.err != nil {
+			// Micro-batch: waking with only a nibble pending usually means the
+			// parser is OUTRUNNING the pty mid-burst — the kernel hands out
+			// ~1KB per read, and swapping per nibble puts a goroutine wake on
+			// the per-KB path, which caps throughput below the parse rate
+			// (measured: a faster parser made `cat 150MB` slower). One beat of
+			// sleep gathers a chunk worth parsing; at most one per take, so an
+			// interactive keystroke's echo is delayed ≤~a quarter millisecond.
+			if n > 0 && n < 32<<10 && g.err == nil && !waited {
+				g.mu.Unlock()
+				waited = true
+				time.Sleep(200 * time.Microsecond)
+				continue
+			}
+			data, err := g.pending, g.err
+			g.pending = recycled[:0]
+			g.mu.Unlock()
+			g.signal(g.drained)
+			return data, err
+		}
+		g.mu.Unlock()
+		<-g.notify
+	}
+}
+
+func (g *gather) signal(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
 // readPump runs for the session's whole life, host-side: output lands in the
 // ring buffer whether or not a client is attached — sessions keep producing
-// while detached, and the ring is what a reattaching client replays.
+// while detached, and the ring is what a reattaching client replays. It is the
+// parse half of the gather pair (see gather).
 func (h *Host) readPump(s *session) {
-	buf := make([]byte, 32*1024)
+	g := &gather{notify: make(chan struct{}, 1), drained: make(chan struct{}, 1)}
+	go g.run(s.pty)
+	var chunk []byte
 	for {
-		n, err := s.pty.Read(buf)
-		if n > 0 {
+		buf, err := g.take(chunk)
+		if n := len(buf); n > 0 {
 			// The emulator answers the session's terminal queries now (DA/DSR/
 			// CPR/DECRQM/DECRQSS): feed it the output, then route its replies
 			// back as pty INPUT — so they never reach the ring or a rendering
@@ -341,6 +427,12 @@ func (h *Host) readPump(s *session) {
 				s.ring = s.ring[len(s.ring)-ringCap:]
 			}
 			s.mu.Unlock()
+		}
+		// recycle the chunk, but let a firehose-sized buffer go once the
+		// burst is over — two 1MB slabs per idle session is not a deal
+		chunk = buf
+		if cap(chunk) > 256<<10 && len(buf) < 64<<10 {
+			chunk = nil
 		}
 		if err != nil {
 			break

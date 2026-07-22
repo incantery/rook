@@ -110,3 +110,18 @@ func BenchmarkNew(b *testing.B) {
 		_ = New(120, 40)
 	}
 }
+
+// BenchmarkPlaintextWide: the plaintext firehose at a 6K-fullscreen grid
+// (405x113). Width-proportional costs hide at 120 cols — the scroll path's
+// scrollback push and exposed-row clear both scale with terminal width unless
+// bounded by the screen's used marks. This is the regression net for those.
+func BenchmarkPlaintextWide(b *testing.B) {
+	line := "the quick brown fox jumps over the lazy dog while carrying a load\n"
+	data := grow([]byte(strings.Repeat(line, 1)), 4<<20)
+	e := New(405, 113)
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	for b.Loop() {
+		e.Write(data)
+	}
+}

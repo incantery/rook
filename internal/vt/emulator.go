@@ -332,6 +332,11 @@ func (e *Emulator) printASCII(run []byte) {
 		for m := range k {
 			row[s.cx+m] = Cell{Content: rune(run[j+m]), FG: fg, BG: bg, Attr: attr, Width: 1}
 		}
+		// one high-water update per run, not per cell — the mark is what lets
+		// the scroll path copy content width instead of terminal width
+		if py := base / s.w; s.cx+k > s.used[py] {
+			s.used[py] = s.cx + k
+		}
 		s.cx += k
 		j += k
 		if s.cx >= s.w {
@@ -470,7 +475,11 @@ func (e *Emulator) ScrollbackCell(x, i int) Cell {
 	if sb == nil || i < 0 || i >= sb.count || x < 0 || x >= e.w {
 		return blank
 	}
-	return sb.row(i)[x]
+	row := sb.row(i)
+	if x >= len(row) { // beyond the stored prefix — trailing blank
+		return blank
+	}
+	return row[x]
 }
 
 // reset returns the emulator to power-on state (RIS / ESC c).

@@ -12,6 +12,7 @@ package vt
 type scrollback struct {
 	w, cap int
 	rows   []Cell // cap*w cells, addressed as a ring of lines
+	lens   []int  // used length per slot; cells beyond it are blank (unstored)
 	head   int    // slot of the oldest retained line
 	count  int    // lines currently retained, <= cap
 	pushed uint64 // lines ever pushed — the absolute index of the next push.
@@ -24,16 +25,17 @@ func newScrollback(w, capLines int) *scrollback {
 	if capLines < 1 {
 		capLines = 1
 	}
-	sb := &scrollback{w: w, cap: capLines, rows: make([]Cell, capLines*w)}
-	for i := range sb.rows {
-		sb.rows[i] = blank
-	}
-	return sb
+	return &scrollback{w: w, cap: capLines, rows: make([]Cell, capLines*w), lens: make([]int, capLines)}
 }
 
-// push copies one line (w cells) into the ring, evicting the oldest if full.
+// push copies one line into the ring, evicting the oldest if full. Callers pass
+// only the line's used prefix (the screen's high-water mark) — the copy follows
+// content width, not terminal width, which is most of the ring's cost on a wide
+// grid. Slots are reused without clearing: lens says where a line ends, and the
+// stale cells beyond it are never read.
 func (sb *scrollback) push(line []Cell) {
 	sb.pushed++
+	n := min(len(line), sb.w)
 	var slot int
 	if sb.count < sb.cap {
 		slot = (sb.head + sb.count) % sb.cap
@@ -42,12 +44,14 @@ func (sb *scrollback) push(line []Cell) {
 		slot = sb.head
 		sb.head = (sb.head + 1) % sb.cap
 	}
-	copy(sb.rows[slot*sb.w:slot*sb.w+sb.w], line)
+	copy(sb.rows[slot*sb.w:], line[:n])
+	sb.lens[slot] = n
 }
 
-// row returns line i as a read-only slice into the ring, where 0 is the oldest
-// retained line and count-1 is the most recently scrolled off.
+// row returns the used prefix of line i as a read-only slice into the ring,
+// where 0 is the oldest retained line and count-1 is the most recently scrolled
+// off. Cells beyond the prefix are blank; callers pad.
 func (sb *scrollback) row(i int) []Cell {
 	slot := (sb.head + i) % sb.cap
-	return sb.rows[slot*sb.w : slot*sb.w+sb.w]
+	return sb.rows[slot*sb.w : slot*sb.w+sb.lens[slot]]
 }
