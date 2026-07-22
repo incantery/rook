@@ -71,3 +71,10 @@
 .vt-screen {
     user-select: none;
 }
+
+/* The screen is focusable (tabindex) so it can receive keys, but its own cursor
+ * is the focus indicator — suppress the browser's focus ring, as xterm did. */
+.vt-screen:focus,
+.vt-screen:focus-visible {
+    outline: none;
+}

@@ -1,6 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces} from "./harness";
+import {deleteWorkspaces, shellReady} from "./harness";
 
 // The leader's send-prefix, in both pane kinds.
 //
@@ -151,4 +151,19 @@ test("mission control keeps focus when an overlay closes over it", async ({page}
     await expect(page.getByText("New agent session")).toHaveCount(0);
 
     expect(await page.evaluate(() => document.activeElement?.id)).toBe("home");
+});
+
+// Exiting the shell must tear the pane down. The session dies host-side and
+// closes the framed socket; the frontend's onclose sees the session is gone and
+// drops the pane — the last one leaving returns to mission control. The bug this
+// guards: only the raw socket was closed on exit, so `exit` hung with a dead
+// shell behind a live pane.
+test("exiting the shell closes the pane and returns to mission control", async ({page}) => {
+    await openWorkspace(page, "leader-exit");
+    const term = shown(page, ".vt-screen");
+    await shellReady(page, term);
+    await term.click();
+    await page.keyboard.type("exit");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#home")).toBeVisible({timeout: 15_000});
 });

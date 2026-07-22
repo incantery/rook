@@ -397,9 +397,17 @@ func (h *Host) readPump(s *session) {
 	s.mu.Lock()
 	c := s.attach
 	s.attach = nil
+	fc := s.frameConn
+	s.frameConn = nil
 	s.mu.Unlock()
+	// Close BOTH transports so a client on either learns the session is gone and
+	// tears its pane down. Missing the framed one left `exit` hanging: the shell
+	// died, the socket stayed open, and the frontend never got the close.
 	if c != nil {
 		c.Close(websocket.StatusNormalClosure, "session-exited")
+	}
+	if fc != nil {
+		fc.Close(websocket.StatusNormalClosure, "session-exited")
 	}
 }
 

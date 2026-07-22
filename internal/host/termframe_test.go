@@ -266,6 +266,70 @@ func TestFramedAltScreenState(t *testing.T) {
 	}
 }
 
+// TestFramedCursorMoveIsSent guards the "space doesn't show" bug: a frame that
+// moves the cursor with no cell change must still reach the client, or a space
+// (or an arrow key at a prompt) leaves the cursor visually stuck.
+func TestFramedCursorMoveIsSent(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	h := New()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	const cols, rows = 20, 4
+	s := &session{
+		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
+		pty:   r,
+		cmd:   exec.Command("true"),
+		emu:   vt.New(cols, rows),
+		dirty: make(chan struct{}, 1),
+	}
+	h.mu.Lock()
+	h.sessions["s1"] = s
+	h.mu.Unlock()
+	go h.readPump(s)
+
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+
+	w.Write([]byte("abc"))
+
+	c, ctx, cancel := dialFramed(t, srv, h, "s1")
+	defer cancel()
+	defer c.Close(websocket.StatusNormalClosure, "done")
+
+	g := vt.NewClientGrid(cols, rows)
+	// waitCursorX applies frames until the client's cursor reaches x.
+	waitCursorX := func(x int) {
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case <-deadline:
+				t.Fatalf("cursor never reached x=%d (now %d)", x, g.CursorPos().X)
+			default:
+			}
+			_, data, rerr := c.Read(ctx)
+			if rerr != nil {
+				t.Fatalf("read: %v", rerr)
+			}
+			if len(data) == 0 || data[0] != msgFrame {
+				continue
+			}
+			f, _ := vt.DecodeFrame(data[1:])
+			g.Apply(f)
+			if g.CursorPos().X == x {
+				return
+			}
+		}
+	}
+	waitCursorX(3) // after "abc"
+
+	// Move the cursor to column 1 (x=0) — a pure cursor move, no cell changes.
+	w.Write([]byte("\x1b[1G"))
+	waitCursorX(0) // the frame that carries only the cursor must arrive
+}
+
 // TestFramedInputReachesPty is the input half: a msgInput message is written to
 // the session's pty, so a program reading the tty sees the keystrokes.
 func TestFramedInputReachesPty(t *testing.T) {

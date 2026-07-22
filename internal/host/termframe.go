@@ -125,6 +125,7 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 // ships the delta, coalesced at frameInterval. It is the sole writer to c.
 func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Conn, surface *vt.Surface) {
 	lastState, stateKnown := byte(0), false
+	lastCursor, cursorKnown := vt.Cursor{}, false
 	render := func() bool {
 		s.emuMu.Lock()
 		f := s.emu.Render(surface)
@@ -147,9 +148,14 @@ func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Co
 				return false
 			}
 		}
-		if f.Empty() {
+		// Send when cells changed OR the cursor moved. A cursor-only frame
+		// matters: typing a space into an already-blank cell changes no cell,
+		// only the cursor — dropping it left the space invisible until the next
+		// glyph forced a frame.
+		if f.Empty() && cursorKnown && f.Cursor == lastCursor {
 			return true // nothing changed — not an error
 		}
+		lastCursor, cursorKnown = f.Cursor, true
 		msg := append([]byte{msgFrame}, f.Encode()...)
 		return c.Write(ctx, websocket.MessageBinary, msg) == nil
 	}
