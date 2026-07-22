@@ -23,3 +23,12 @@
 - [ ] One of the next things we should probably setup is some kind of issue tracking integration. Then the rook agent can tie into the list of issues to determine what we should work on next
 - [ ] The file tree should be based on CWD rather than workspace I think, but let's dicsuss.
 - [ ] When dashboard or mission control is open, input keeps going into the most recently open terminal
+
+# WebGL Renderer (beamterm) — adoption gaps
+
+- [ ] Window transparency: the canvas paints opaque, so background-opacity doesn't show through. Beamterm's fragment shader already supports it (`u_bg_alpha`, core `set_bg_alpha()` since 0.16.0) — the JS/wasm wrapper just exposes no setter. Decision (2026-07-22): don't file upstream yet; once we're confident in beamterm, file the PR (thin wasm_bindgen delegation).
+- [x] Scrollback view on canvas — shared SbStore (sbstore.ts) extracted from the DOM renderer; wheel + Shift+PageUp/Home; host paging works on canvas
+- [ ] Mouse forwarding to tracking programs: wheel IS forwarded now (Claude Code scroll works); clicks/drags (vim mouse) still local-only
+- [ ] A11y text mirror (canvas has no readable text; DOM renderer is the accessible fallback)
+- [ ] Theme-change re-read of CSS vars (palette swap currently needs a reload)
+- [ ] Key-to-pixel latency probe to settle the DOM-vs-WebGL headed measurement asymmetry
