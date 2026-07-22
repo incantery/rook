@@ -7,6 +7,7 @@ import (
 
 	"github.com/incantery/rook/frontend"
 	"github.com/incantery/rook/internal/config"
+	"github.com/incantery/rook/internal/fontdir"
 	"github.com/incantery/rook/internal/hostclient"
 	"github.com/incantery/rook/internal/notify"
 )
@@ -24,6 +25,11 @@ func main() {
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(frontend.Assets),
+			// /rookfont hands installed font bytes to the webview — WebKit's
+			// canvas can't use user-installed fonts (the WebGL renderer's
+			// atlas would tofu every nerd-font icon), but FontFace-loaded
+			// bytes it accepts. See internal/fontdir.
+			Middleware: fontdir.Middleware,
 		},
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,

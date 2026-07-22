@@ -7,6 +7,7 @@ import "./app.css";
 import {Service as Config} from "../bindings/github.com/incantery/rook/internal/config";
 import {Service as Host} from "../bindings/github.com/incantery/rook/internal/hostclient";
 import {HostAPI} from "./hostapi";
+import {loadCanvasFonts} from "./term/vt/registry";
 import {themeService} from "./theme/service";
 import App from "./App.svelte";
 
@@ -31,6 +32,11 @@ async function main() {
     const root = document.documentElement.style;
     root.setProperty("--vt-font", font);
     root.setProperty("--vt-font-size", `${cfg.fontSize}px`);
+
+    // WebGL only: hand the canvas a FontFace copy of the terminal font —
+    // WebKit's fillText can't see user-installed fonts (see registry.ts).
+    // Must land before the atlas rasterizes, i.e. before any pane exists.
+    await loadCanvasFonts(cfg.fontFamily);
 
     // Measure with the real font: a grid computed from fallback-font cell
     // metrics spawns PTYs at the wrong size.
