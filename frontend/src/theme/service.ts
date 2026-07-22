@@ -8,7 +8,6 @@
 // re-themes by writing the CSS vars onto documentElement, which the Tailwind
 // utilities and imperative islands both read.
 
-import type {ITheme} from "@xterm/xterm";
 import type {editor} from "monaco-editor";
 import {withAlpha} from "./color";
 import {cssVars} from "./cssvars";
@@ -21,7 +20,6 @@ import {
 } from "./catppuccin";
 import {buildMonacoTheme} from "./monaco-theme";
 import {MATERIAL_OCEAN, type Palette, type Theme} from "./palette";
-import {buildXtermTheme} from "./xterm";
 
 // Insertion order is what the Settings picker lists, so keep it meaningful:
 // rook's own default first, then each family light→dark.
@@ -42,7 +40,6 @@ export function registerTheme(theme: Theme): void {
 
 let active: Theme = MATERIAL_OCEAN;
 let opacity = 1;
-const xtermSubs = new Set<(t: ITheme) => void>();
 const monacoSubs = new Set<(d: editor.IStandaloneThemeData) => void>();
 const paletteSubs = new Set<(p: Palette) => void>();
 
@@ -56,9 +53,6 @@ export const themeService = {
     active(): Theme {
         return active;
     },
-    xtermTheme(): ITheme {
-        return buildXtermTheme(active.palette);
-    },
     monacoTheme(): editor.IStandaloneThemeData {
         return buildMonacoTheme(active.palette);
     },
@@ -69,11 +63,6 @@ export const themeService = {
         opacity = o;
     },
 
-    /** Terminals re-theme through this hook (the manager subscribes). */
-    onXterm(cb: (t: ITheme) => void): () => void {
-        xtermSubs.add(cb);
-        return () => xtermSubs.delete(cb);
-    },
     /** Monaco re-themes through this hook (term/monaco.ts subscribes on load).
      *  No subscriber until an editor pane has opened — a swap with no editor
      *  open is a no-op, and the next open builds the current theme. */
@@ -110,8 +99,6 @@ export const themeService = {
         if (!t) return;
         active = t;
         this.applyChrome();
-        const xt = buildXtermTheme(active.palette);
-        for (const cb of xtermSubs) cb(xt);
         const mt = buildMonacoTheme(active.palette);
         for (const cb of monacoSubs) cb(mt);
         for (const cb of paletteSubs) cb(active.palette);

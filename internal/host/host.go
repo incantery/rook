@@ -55,13 +55,11 @@ type session struct {
 	pty  *os.File
 	cmd  *exec.Cmd
 
-	mu     sync.Mutex // guards ring, attach, frameConn
-	ring   []byte
-	attach *websocket.Conn
-	wmu    sync.Mutex // serializes writes to the attached socket
+	mu   sync.Mutex // guards ring, frameConn
+	ring []byte     // recent output, for correlate/normRing — NOT replay
 
 	// The framed transport (termframe.go): a host-side emulator and the client
-	// that renders its grid diffs. Additive alongside the raw path until HI-C.
+	// that renders its grid diffs.
 	emu       *vt.Emulator
 	emuMu     sync.Mutex    // guards emu across readPump, render loop, resize
 	dirty     chan struct{} // buffered(1): pty output happened, render loop wake
@@ -334,21 +332,15 @@ func (h *Host) readPump(s *session) {
 				}
 				s.signalDirty()
 			}
+			// The ring is retained for correlate/normRing (transcript↔window
+			// binding), not for replay — the framed transport snapshots from a
+			// blank Surface, so there is nothing to replay.
 			s.mu.Lock()
 			s.ring = append(s.ring, buf[:n]...)
 			if len(s.ring) > ringCap {
 				s.ring = s.ring[len(s.ring)-ringCap:]
 			}
-			c := s.attach
 			s.mu.Unlock()
-			if c != nil {
-				s.wmu.Lock()
-				werr := c.Write(context.Background(), websocket.MessageBinary, buf[:n])
-				s.wmu.Unlock()
-				if werr != nil {
-					s.detach(c)
-				}
-			}
 		}
 		if err != nil {
 			break
@@ -395,28 +387,14 @@ func (h *Host) readPump(s *session) {
 		}
 	}
 	s.mu.Lock()
-	c := s.attach
-	s.attach = nil
 	fc := s.frameConn
 	s.frameConn = nil
 	s.mu.Unlock()
-	// Close BOTH transports so a client on either learns the session is gone and
-	// tears its pane down. Missing the framed one left `exit` hanging: the shell
-	// died, the socket stayed open, and the frontend never got the close.
-	if c != nil {
-		c.Close(websocket.StatusNormalClosure, "session-exited")
-	}
+	// Close the framed socket so the client learns the session is gone and tears
+	// its pane down (without this, `exit` hung: shell dead, socket still open).
 	if fc != nil {
 		fc.Close(websocket.StatusNormalClosure, "session-exited")
 	}
-}
-
-func (s *session) detach(c *websocket.Conn) {
-	s.mu.Lock()
-	if s.attach == c {
-		s.attach = nil
-	}
-	s.mu.Unlock()
 }
 
 func (h *Host) get(id string) *session {
@@ -1223,78 +1201,11 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.info.Cols, s.info.Rows = req.Cols, req.Rows
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
-	case action == "attach":
-		h.handleAttach(w, r, s)
 	case action == "framed":
-		// The host-side-emulator transport (termframe.go). Additive alongside
-		// "attach" until HI-C makes it the only path.
+		// The host-side-emulator transport (termframe.go): the only terminal
+		// transport since HI-C retired the raw byte-stream + ring replay.
 		h.handleAttachFramed(w, r, s)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
-}
-
-func (h *Host) handleAttach(w http.ResponseWriter, r *http.Request, s *session) {
-	// Page origin is the Wails asset scheme (or vite in dev), never this
-	// server's host — the token is the real gate, not Origin.
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-	if err != nil {
-		return
-	}
-
-	// One client per session: a new attach replaces the old (page reload).
-	//
-	// Gap-free replay: the ring copy and the attach swap happen in ONE
-	// critical section, with wmu held across the swap AND the replay. A
-	// pty chunk landing during replay sees the new socket and parks its
-	// live write on wmu until the replay is out — every byte reaches the
-	// client exactly once, in order. (The old shape set attach only after
-	// replaying; bytes arriving in between reached the ring but never
-	// this client — silent scrollback loss under output.)
-	s.wmu.Lock()
-	s.mu.Lock()
-	if old := s.attach; old != nil {
-		go old.Close(websocket.StatusPolicyViolation, "replaced")
-	}
-	ring := make([]byte, len(s.ring))
-	copy(ring, s.ring)
-	s.attach = c
-	s.mu.Unlock()
-
-	ok := true
-	for off := 0; off < len(ring); off += 32 * 1024 {
-		end := min(off+32*1024, len(ring))
-		if c.Write(context.Background(), websocket.MessageBinary, ring[off:end]) != nil {
-			ok = false
-			break
-		}
-	}
-	// Mark the replay→live seam with the sole text frame on this socket
-	// (output is all binary). Replayed bytes contain terminal queries (OSC
-	// 10/11, CSI 6n, …) whose askers are long gone; the client must
-	// swallow xterm's auto-replies to them or they land in the shell as
-	// junk input ("11;rgb:0000/…;1R" at the prompt). Sent under wmu, so
-	// every live pump write sorts strictly after it.
-	if ok {
-		ok = c.Write(context.Background(), websocket.MessageText, []byte("live")) == nil
-	}
-	s.wmu.Unlock()
-	if !ok {
-		s.detach(c)
-		c.CloseNow()
-		return
-	}
-
-	// Client → PTY. Detach on any read error; the session lives on.
-	for {
-		_, data, rerr := c.Read(r.Context())
-		if rerr != nil {
-			break
-		}
-		if _, werr := s.pty.Write(data); werr != nil {
-			break
-		}
-	}
-	s.detach(c)
-	c.CloseNow()
 }
