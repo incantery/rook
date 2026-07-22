@@ -1,0 +1,158 @@
+package host
+
+// The framed terminal transport (HI-A of the host-integration plan). Where the
+// legacy path streams raw pty bytes and lets xterm.js parse them, this path runs
+// the emulator on the host (internal/vt) and streams coalesced grid diffs: the
+// client is a renderer, not the owner of terminal state.
+//
+// It is additive and unwired for now — readPump feeds the emulator alongside the
+// legacy ring, and this endpoint serves whoever connects (the HI-A test client),
+// but the app's mount still uses the raw path until HI-B swaps it. Query
+// answering therefore still belongs to termquery.go on the raw path; the
+// emulator's own answers are drained and discarded here (HI-C routes them to the
+// pty and deletes termquery.go). Frames never carry query replies — those are
+// pty input, never grid state — so no query ever reaches a framed client.
+//
+// WebSocket messages preserve boundaries, so each message is a 1-byte tag plus
+// payload; no length framing is needed.
+
+import (
+	"context"
+	"encoding/binary"
+	"net/http"
+	"time"
+
+	"github.com/coder/websocket"
+	cpty "github.com/creack/pty"
+
+	"github.com/incantery/rook/internal/vt"
+)
+
+const (
+	// server -> client
+	msgFrame byte = 0x01 // payload: vt.Frame.Encode()
+
+	// client -> server
+	msgInput  byte = 0x10 // payload: raw bytes for the pty
+	msgResize byte = 0x11 // payload: cols, rows as two big-endian uint16
+)
+
+// frameInterval bounds how often the render loop diffs the grid: a burst of pty
+// output between ticks folds into one net frame (the coalescing D6 wants). It is
+// a latency floor, not a latency source — the spec measured the browser paint,
+// not transport, as the keystroke→glyph cost.
+const frameInterval = 16 * time.Millisecond
+
+// handleAttachFramed serves the framed transport for one session. It runs a
+// render loop (grid diffs out) and, on this goroutine, an input loop (keystrokes
+// and resizes in). One framed client per session, like the raw path: a new
+// attach replaces the old.
+func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *session) {
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	if old := s.frameConn; old != nil {
+		go old.Close(websocket.StatusPolicyViolation, "replaced")
+	}
+	s.frameConn = c
+	s.mu.Unlock()
+
+	// A fresh (blank) Surface: the first Render against it is the whole non-blank
+	// screen — the snapshot, gap-free by construction, no ring replay.
+	s.emuMu.Lock()
+	surface := s.emu.NewSurface()
+	s.emuMu.Unlock()
+
+	ctx := r.Context()
+	go h.framedRenderLoop(ctx, s, c, surface)
+
+	// Client -> host: input and resize. Detach on any read error; the session and
+	// its emulator live on.
+	for {
+		_, data, rerr := c.Read(ctx)
+		if rerr != nil {
+			break
+		}
+		if len(data) == 0 {
+			continue
+		}
+		switch data[0] {
+		case msgInput:
+			s.pty.Write(data[1:])
+		case msgResize:
+			if len(data) < 5 {
+				continue
+			}
+			cols := int(binary.BigEndian.Uint16(data[1:3]))
+			rows := int(binary.BigEndian.Uint16(data[3:5]))
+			if cols <= 0 || rows <= 0 {
+				continue
+			}
+			cpty.Setsize(s.pty, &cpty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+			s.emuMu.Lock()
+			s.emu.Resize(cols, rows)
+			s.emuMu.Unlock()
+			s.mu.Lock()
+			s.info.Cols, s.info.Rows = cols, rows
+			s.mu.Unlock()
+			s.signalDirty() // force the resend that the geometry change needs
+		}
+	}
+
+	s.mu.Lock()
+	if s.frameConn == c {
+		s.frameConn = nil
+	}
+	s.mu.Unlock()
+	c.CloseNow()
+}
+
+// framedRenderLoop diffs the emulator's grid against what this client knows and
+// ships the delta, coalesced at frameInterval. It is the sole writer to c.
+func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Conn, surface *vt.Surface) {
+	render := func() bool {
+		s.emuMu.Lock()
+		f := s.emu.Render(surface)
+		s.emuMu.Unlock()
+		if f.Empty() {
+			return true // nothing changed — not an error
+		}
+		msg := append([]byte{msgFrame}, f.Encode()...)
+		return c.Write(ctx, websocket.MessageBinary, msg) == nil
+	}
+
+	// The snapshot: whatever is already on screen when the client attaches.
+	if !render() {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.dirty:
+		}
+		// Let a burst pile into the emulator, then send the one net diff.
+		t := time.NewTimer(frameInterval)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		if !render() {
+			return
+		}
+	}
+}
+
+// signalDirty wakes the render loop without blocking the caller; the buffered
+// channel coalesces many signals between renders into one.
+func (s *session) signalDirty() {
+	select {
+	case s.dirty <- struct{}{}:
+	default:
+	}
+}

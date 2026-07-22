@@ -235,6 +235,10 @@ func (g *ClientGrid) scrollUp(n int) {
 	}
 }
 
+// Cols and Rows are the client grid's geometry.
+func (g *ClientGrid) Cols() int { return g.cols }
+func (g *ClientGrid) Rows() int { return g.rows }
+
 // Cell returns the client's cell at (x,y).
 func (g *ClientGrid) Cell(x, y int) WCell { return g.cells[y*g.cols+x] }
 

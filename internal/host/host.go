@@ -30,6 +30,7 @@ import (
 	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/plugin"
 	"github.com/incantery/rook/internal/version"
+	"github.com/incantery/rook/internal/vt"
 )
 
 // Client/daemon compatibility is version.Build equality — binaries built
@@ -58,10 +59,17 @@ type session struct {
 	// never answered twice.
 	q *termQ
 
-	mu     sync.Mutex // guards ring, attach
+	mu     sync.Mutex // guards ring, attach, frameConn
 	ring   []byte
 	attach *websocket.Conn
 	wmu    sync.Mutex // serializes writes to the attached socket
+
+	// The framed transport (termframe.go): a host-side emulator and the client
+	// that renders its grid diffs. Additive alongside the raw path until HI-C.
+	emu       *vt.Emulator
+	emuMu     sync.Mutex    // guards emu across readPump, render loop, resize
+	dirty     chan struct{} // buffered(1): pty output happened, render loop wake
+	frameConn *websocket.Conn
 }
 
 type Host struct {
@@ -291,9 +299,11 @@ func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
 			Rows:      rows,
 			Created:   time.Now(),
 		},
-		pty: f,
-		cmd: cmd,
-		q:   newTermQ(),
+		pty:   f,
+		cmd:   cmd,
+		q:     newTermQ(),
+		emu:   vt.New(cols, rows),
+		dirty: make(chan struct{}, 1),
 	}
 	h.sessions[s.info.ID] = s
 	h.mu.Unlock()
@@ -315,6 +325,18 @@ func (h *Host) readPump(s *session) {
 			// has stopped asking.
 			if reply := s.q.scan(buf[:n]); len(reply) > 0 {
 				s.pty.Write(reply)
+			}
+			// Feed the host-side emulator too (termframe.go). Additive for now:
+			// the raw path above still owns query answers, so the emulator's own
+			// replies are drained and discarded here; HI-C routes them to the pty
+			// and retires termquery.go. Frames carry only grid state, never these.
+			// (emu is nil only for the bare sessions some tests hand-build.)
+			if s.emu != nil {
+				s.emuMu.Lock()
+				s.emu.Write(buf[:n])
+				s.emu.TakeOutput()
+				s.emuMu.Unlock()
+				s.signalDirty()
 			}
 			s.mu.Lock()
 			s.ring = append(s.ring, buf[:n]...)
@@ -1199,6 +1221,10 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	case action == "attach":
 		h.handleAttach(w, r, s)
+	case action == "framed":
+		// The host-side-emulator transport (termframe.go). Additive alongside
+		// "attach" until HI-C makes it the only path.
+		h.handleAttachFramed(w, r, s)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
