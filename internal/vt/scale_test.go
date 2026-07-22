@@ -1,41 +1,11 @@
 package vt
 
 import (
-	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"testing"
 	"time"
 )
-
-// corpusThroughput loads a representative capture repeated up to ~size bytes.
-func corpusThroughput(tb testing.TB, name string, size int) []byte {
-	tb.Helper()
-	one, err := os.ReadFile(filepath.Join("testdata/corpus", name+".raw"))
-	if err != nil {
-		tb.Fatal(err)
-	}
-	data := make([]byte, 0, size)
-	for len(data) < size {
-		data = append(data, one...)
-	}
-	return data
-}
-
-// BenchmarkThroughput measures single-emulator parse throughput on SGR-heavy
-// output and — via -benchmem — that the hot path allocates nothing. The whole
-// reason to own the grid (D3) is zero per-cell allocation; a regression here is
-// the number that matters.
-func BenchmarkThroughput(b *testing.B) {
-	data := corpusThroughput(b, "git-graph", 4<<20)
-	b.SetBytes(int64(len(data)))
-	b.ReportAllocs()
-	for b.Loop() {
-		e := New(120, 40)
-		e.Write(data)
-	}
-}
 
 // TestScale is the scale gate: N emulators parsing concurrently, reporting
 // aggregate throughput, bytes allocated, GC count, and total stop-the-world
@@ -45,7 +15,8 @@ func BenchmarkThroughput(b *testing.B) {
 //
 //	go test -run TestScale -v ./internal/vt
 func TestScale(t *testing.T) {
-	data := corpusThroughput(t, "git-graph", 4<<20)
+	raw, _ := loadCapture(t, "git-graph")
+	data := grow(raw, 4<<20)
 
 	run := func(n int) (allocMB float64, gc uint32, pauseMs float64) {
 		runtime.GC()

@@ -144,19 +144,21 @@ func loadGolden(t *testing.T, path string) goldenGrid {
 	return g
 }
 
-func loadCapture(t *testing.T, name string) ([]byte, meta) {
-	t.Helper()
+// loadCapture reads a corpus capture and its geometry. It takes testing.TB so
+// both the fidelity tests and the benchmarks can use it.
+func loadCapture(tb testing.TB, name string) ([]byte, meta) {
+	tb.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata/corpus", name+".raw"))
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	mb, err := os.ReadFile(filepath.Join("testdata/corpus", name+".meta.json"))
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	var m meta
 	if err := json.Unmarshal(mb, &m); err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return raw, m
 }

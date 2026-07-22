@@ -30,8 +30,10 @@ type Emulator struct {
 	autowrap   bool // DECAWM (?7)
 	originMode bool // DECOM (?6)
 
-	combined   []string // multi-codepoint cell contents, indexed by negative Content
-	pendingZWJ bool     // last combined rune was a ZWJ — fuse the next base into it
+	combined    []string       // multi-codepoint cell contents, indexed by negative Content
+	combinedIdx map[string]int // intern table: cluster -> index, dedups and bounds growth
+	clusterBuf  []byte         // scratch for building a cluster without allocating to probe
+	pendingZWJ  bool           // last combined rune was a ZWJ — fuse the next base into it
 
 	carry   []byte // an escape sequence split across Write calls, held for the next
 	scratch []byte // reusable carry+input concat buffer
@@ -54,11 +56,12 @@ func New(w, h int) *Emulator {
 		h = 1
 	}
 	e := &Emulator{
-		w:        w,
-		h:        h,
-		primary:  newScreen(w, h),
-		alt:      newScreen(w, h),
-		autowrap: true,
+		w:           w,
+		h:           h,
+		primary:     newScreen(w, h),
+		alt:         newScreen(w, h),
+		autowrap:    true,
+		combinedIdx: map[string]int{},
 	}
 	e.cur = e.primary
 	return e
@@ -268,18 +271,29 @@ func (e *Emulator) combine(r rune) {
 		return
 	}
 	cell := s.at(tx, s.cy)
-	var buf []rune
+	// Build the new cluster (existing content + r) into a reused scratch buffer.
+	e.clusterBuf = e.clusterBuf[:0]
 	if idx, ok := cell.combinedLookup(); ok {
-		buf = []rune(e.combined[idx])
+		e.clusterBuf = append(e.clusterBuf, e.combined[idx]...)
 	} else if cell.Content > 0 {
-		buf = []rune{cell.Content}
+		e.clusterBuf = utf8.AppendRune(e.clusterBuf, cell.Content)
 	} else {
 		return
 	}
-	buf = append(buf, r)
-	e.combined = append(e.combined, string(buf))
-	cell.Content = combinedIndex(len(e.combined) - 1)
+	e.clusterBuf = utf8.AppendRune(e.clusterBuf, r)
 	e.pendingZWJ = r == 0x200d
+
+	// Intern it. The map probe with string(scratch) does not allocate (compiler
+	// special case); only a genuinely new cluster allocates its string once.
+	if idx, ok := e.combinedIdx[string(e.clusterBuf)]; ok {
+		cell.Content = combinedIndex(idx)
+		return
+	}
+	s2 := string(e.clusterBuf)
+	idx := len(e.combined)
+	e.combined = append(e.combined, s2)
+	e.combinedIdx[s2] = idx
+	cell.Content = combinedIndex(idx)
 }
 
 func (e *Emulator) snapshotCursor() savedCursor {
@@ -308,5 +322,6 @@ func (e *Emulator) reset() {
 	e.autowrap = true
 	e.originMode = false
 	e.combined = e.combined[:0]
+	clear(e.combinedIdx)
 	e.pendingZWJ = false
 }

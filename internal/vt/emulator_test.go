@@ -130,7 +130,7 @@ func TestScrollRegionConfinesScroll(t *testing.T) {
 	e := New(10, 5)
 	// Region rows 2..4 (1-based 2..4 -> logical 1..3). Row 0 must never move.
 	e.Write([]byte("\x1b[HTOP"))
-	e.Write([]byte("\x1b[2;4r"))     // DECSTBM 2..4
+	e.Write([]byte("\x1b[2;4r"))      // DECSTBM 2..4
 	e.Write([]byte("\x1b[4;1Ha\r\n")) // cursor to bottom of region, feed
 	e.Write([]byte("b\r\nc\r\nd"))    // force scrolling within the region
 	if line(e, 0) != "TOP" {
@@ -141,7 +141,7 @@ func TestScrollRegionConfinesScroll(t *testing.T) {
 func TestAltScreenIsolation(t *testing.T) {
 	e := New(20, 3)
 	e.Write([]byte("primary\r\n"))
-	e.Write([]byte("\x1b[?1049h"))      // enter alt
+	e.Write([]byte("\x1b[?1049h")) // enter alt
 	if line(e, 0) != "" {
 		t.Fatalf("alt screen not cleared on entry: %q", line(e, 0))
 	}
@@ -200,8 +200,8 @@ func TestEscapeSplitAcrossWrites(t *testing.T) {
 func TestUTF8SplitAcrossWrites(t *testing.T) {
 	e := New(10, 2)
 	world := []byte("世") // 3 bytes
-	e.Write(world[:2])    // first two bytes of the codepoint
-	e.Write(world[2:])    // the rest
+	e.Write(world[:2])   // first two bytes of the codepoint
+	e.Write(world[2:])   // the rest
 	if got := content(e, 0, 0); got != "世" {
 		t.Fatalf("split utf8: %q, want 世", got)
 	}
