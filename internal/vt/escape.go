@@ -252,6 +252,8 @@ func (e *Emulator) csiPrivate(ps []int, final byte) {
 			e.moveTo(0, 0)
 		case 7: // DECAWM — autowrap
 			e.autowrap = set
+		case 25: // DECTCEM — cursor visibility
+			e.cursorVisible = set
 		case 47, 1047: // alt screen buffer (no cursor save)
 			e.switchAlt(set, false)
 		case 1049: // alt screen + save/restore cursor + clear

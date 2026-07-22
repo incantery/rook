@@ -27,8 +27,9 @@ type Emulator struct {
 	saved    savedCursor // DECSC / ESC 7 slot
 	savedAlt savedCursor // cursor stashed across the ?1049 alt-screen switch
 
-	autowrap   bool // DECAWM (?7)
-	originMode bool // DECOM (?6)
+	autowrap      bool // DECAWM (?7)
+	originMode    bool // DECOM (?6)
+	cursorVisible bool // DECTCEM (?25)
 
 	combined    []string       // multi-codepoint cell contents, indexed by negative Content
 	combinedIdx map[string]int // intern table: cluster -> index, dedups and bounds growth
@@ -56,12 +57,13 @@ func New(w, h int) *Emulator {
 		h = 1
 	}
 	e := &Emulator{
-		w:           w,
-		h:           h,
-		primary:     newScreen(w, h),
-		alt:         newScreen(w, h),
-		autowrap:    true,
-		combinedIdx: map[string]int{},
+		w:             w,
+		h:             h,
+		primary:       newScreen(w, h),
+		alt:           newScreen(w, h),
+		autowrap:      true,
+		cursorVisible: true,
+		combinedIdx:   map[string]int{},
 	}
 	e.cur = e.primary
 	return e
@@ -321,6 +323,7 @@ func (e *Emulator) reset() {
 	e.fg, e.bg, e.attr = DefaultColor, DefaultColor, 0
 	e.autowrap = true
 	e.originMode = false
+	e.cursorVisible = true
 	e.combined = e.combined[:0]
 	clear(e.combinedIdx)
 	e.pendingZWJ = false
