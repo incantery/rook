@@ -123,8 +123,10 @@ test("telescope keys: editor ⌃P/⌃G/⌃S, grep ⌃Q → quickfix, ` f reveal"
     await expect(pane).toContainText("Grep — walkGrep", {timeout: 15_000});
     await expect(pane).toContainText("grep.go");
 
-    // ` f — the explorer opens with its cursor on the file under edit
-    await page.keyboard.press("`");
+    // ,f — the explorer opens with its cursor on the file under edit. The
+    // tree is editor furniture now, so its key rides the editor leader —
+    // armed here from the quickfix strip, one of the editor's own surfaces
+    await page.keyboard.press(",");
     await page.keyboard.press("f");
     const cursorRow = page.locator('.side-pane[data-side="left"] [data-cursor="true"]');
     await expect(cursorRow).toBeVisible({timeout: 15_000});

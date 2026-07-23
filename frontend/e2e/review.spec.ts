@@ -77,19 +77,18 @@ test("review pane prepares hunks, dispositions, and moves the gate", async ({pag
     await page.keyboard.press("j"); // down one
     await expect(rows.nth(1)).toHaveAttribute("data-cursor", "1");
 
-    // the context leader (vim's maplocalleader): ,q from a TERMINAL toggles
-    // the strip. Leaders are deliberately dead inside side panes, so hop to
-    // the terminal first — that's also the honest user path.
-    await rook.term().click();
+    // the context leader (vim's maplocalleader) lives INSIDE the editor
+    // now: ,q works from the strip itself (the editor's bottom window) —
+    // a comma in a terminal stays a comma. Once the strip is closed and no
+    // editor surface holds the keyboard, re-entry is explicit: the same
+    // palette door "Toggle review pane" came through.
     await page.keyboard.press(",");
     await page.keyboard.press("q");
     await expect(pane).toHaveCount(0);
-    await page.keyboard.press(",");
-    await page.keyboard.press("q");
+    await rook.runCommand("Quickfix: open list");
     await expect(pane).toBeVisible();
 
-    // ,a — the quick-action modal, rendered from the context's verbs
-    await rook.term().click();
+    // ,a — the quick-action modal, from the strip's own keyboard
     await page.keyboard.press(",");
     await page.keyboard.press("a");
     const qa = page.getByRole("dialog", {name: "quick actions"});

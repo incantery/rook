@@ -538,7 +538,7 @@ export class EditorPane implements PaneContent {
         }
         if (this.opts.kind === "file") {
             const p = this.opts.path ?? "";
-            const name = p.slice(p.lastIndexOf("/") + 1) || "file";
+            const name = p.slice(p.lastIndexOf("/") + 1) || "[No Name]";
             return this.dirty ? `● ${name}` : name;
         }
         return `⎇ ${this.opts.workspace}`;
@@ -1031,6 +1031,32 @@ export class EditorPane implements PaneContent {
         const m = this.monaco;
         const path = this.opts.path ?? "";
         if (!m) return;
+        if (!path) {
+            // vim's empty buffer — `re` with nothing to open. Editable,
+            // unnamed; :w flashes for a name, ⌃P retargets this pane onto a
+            // real file (the openFile ladder finds any file pane, this one
+            // included).
+            this.editable = true;
+            this.pathEl.textContent = "[No Name]";
+            this.clearStatus();
+            this.disposeModels();
+            const model = m.editor.createModel("", undefined, this.uri(""));
+            this.models.push(model);
+            paneByModel.set(model, this);
+            const ed = this.ensureEditor();
+            ed.setModel(model);
+            ed.updateOptions({readOnly: false, wordWrap: this.wrap ? "on" : "off"});
+            this.savedVersionId = model.getAlternativeVersionId();
+            this.setDirty(false);
+            this.changeSub?.dispose();
+            this.changeSub = model.onDidChangeContent(() =>
+                this.setDirty(model.getAlternativeVersionId() !== this.savedVersionId),
+            );
+            this.fit();
+            this.applyPendingFocus();
+            await this.attachVim(ed);
+            return;
+        }
         try {
             // same non-gating fetch as refresh()
             void this.fetchThreads().then(() => {
@@ -1155,6 +1181,11 @@ export class EditorPane implements PaneContent {
      *  or already-clean pane is trivially clean; a failed write is not. */
     private async doSave(): Promise<boolean> {
         if (this.opts.kind === "draft") return this.submitDraft();
+        if (this.opts.kind === "file" && !this.opts.path) {
+            // vim: E32 No file name. ⌃P retargets this pane onto a real file.
+            this.opts.onFlash("no file name — ⌃P opens one into this pane");
+            return false;
+        }
         const model = this.editor?.getModel();
         if (!this.editable || !model || !this.dirty) return true;
         if (this.saving) return false;

@@ -36,11 +36,14 @@ type editState struct {
 // editPayload is the msgEdit frame body, JSON. Paths are pre-resolved:
 // workspace-relative when the target lives under the session's workspace
 // root (read-write), absolute otherwise (the file endpoint's external
-// read-only tier). Cwd is workspace-relative ("" at the root or outside)
-// and scopes the finder for a bare `re`.
+// read-only tier). Dir is the ABSOLUTE anchor — the shell's cwd, or the
+// last directory argument — and scopes the editor's finder/grep/tree.
+// Tree marks a directory asked for by name (`re .`): netrw parity, the
+// app opens the file tree there.
 type editPayload struct {
 	ID    string   `json:"id"`
-	Cwd   string   `json:"cwd"`
+	Dir   string   `json:"dir"`
+	Tree  bool     `json:"tree"`
 	Paths []string `json:"paths"`
 }
 
@@ -62,7 +65,7 @@ func (h *Host) handleSessionEdit(w http.ResponseWriter, r *http.Request, s *sess
 		root = ws.Root
 	}
 
-	payload := editPayload{Cwd: relUnder(root, req.Cwd)}
+	payload := editPayload{Dir: filepath.Clean(req.Cwd)}
 	for _, p := range req.Paths {
 		abs := p
 		if !filepath.IsAbs(abs) {
@@ -75,14 +78,10 @@ func (h *Host) handleSessionEdit(w http.ResponseWriter, r *http.Request, s *sess
 			return
 		}
 		if st.IsDir() {
-			// vim's `nvim .`: a directory arg anchors the finder there —
-			// same as bare `re`, scoped. Outside the workspace the finder
-			// can't reach, so the scope falls back to the shell's cwd.
-			if rel := relUnder(root, abs); rel != "" {
-				payload.Cwd = rel
-			} else if abs == root {
-				payload.Cwd = ""
-			}
+			// vim's `nvim .`: a directory arg re-anchors the editor there
+			// and asks for the tree — you land IN the editor, netrw-style
+			payload.Dir = abs
+			payload.Tree = true
 			continue
 		}
 		if rel := relUnder(root, abs); rel != "" {

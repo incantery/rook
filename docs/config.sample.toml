@@ -112,6 +112,8 @@
 # "<leader>c" = "editor.comment"
 # "<leader>?" = "editor.ask"
 # "<leader>t" = "threads.find"
+# "<leader>b" = "explorer.toggle"
+# "<leader>f" = "explorer.reveal"
 
 [editor.keybinds.visual]
 

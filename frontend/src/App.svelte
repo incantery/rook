@@ -718,15 +718,15 @@
 
     /** `re` takeovers in flight: editID → where the shell goes back. */
     const takeovers = new Map<string, {at: PaneAt; sessionId: string}>();
-    /** a bare `re` parked on the finder — pick a file, then take over */
-    let editPick = $state<null | {
-        id: string;
-        sessionId: string;
-        workspace: string;
-        at: PaneAt;
-        dir: string;
-        picked: boolean;
-    }>(null);
+
+    /** The editor's furniture (tree, quickfix, ,-leader verbs) exists only
+     *  within the editor — an editor pane focused, or one of the editor's
+     *  own side surfaces already holding the keyboard. */
+    function editorFocused(): boolean {
+        if (app.focusZone === "left" || app.focusZone === "bottom") return true;
+        const c = mgr.focusedContent();
+        return c != null && c.type !== "term";
+    }
 
     /** An `re` ask off the session's frame socket (manager.onEditRequest):
      *  vim's contract — take over the pane the command was typed in, give
@@ -744,19 +744,24 @@
             return;
         }
         void api.editAck(req.id).catch(() => {});
-        // a second bare `re` while one is parked on the finder: the old ask
-        // resolves as a cancel, the new one takes the surface
-        if (editPick) {
-            void api.editDone(editPick.id, 0).catch(() => {});
-            editPick = null;
-        }
         const paths = req.paths ?? [];
-        if (paths.length === 0) {
-            // bare `re` — the finder, scoped to the shell's cwd (the anchor)
-            editPick = {id: req.id, sessionId, workspace, at, dir: req.cwd, picked: false};
-            return;
+        // vim's contract, all three shapes: `re file` opens it, bare `re`
+        // is the empty buffer, `re .` is the empty buffer with the tree —
+        // every one of them lands IN the editor immediately
+        await performTakeover(
+            req.id,
+            sessionId,
+            workspace,
+            at,
+            paths[0] ?? "",
+            paths.slice(1),
+            req.dir,
+        );
+        if (req.tree) {
+            explorerDir = req.dir || undefined;
+            app.explorerOpen = true;
+            app.focusZone = "left"; // netrw: you land on the listing
         }
-        await performTakeover(req.id, sessionId, workspace, at, paths[0], paths.slice(1), req.cwd);
     }
 
     async function performTakeover(
@@ -774,7 +779,7 @@
         // the rest of the argv joins the buffer list (vim: `nvim a b c`
         // opens a, and b c wait in :ls — here, in ` e's Open buffers tier)
         for (const p of extra) touchBuffer(p);
-        touchBuffer(path);
+        if (path) touchBuffer(path);
         const ok = mgr.takeoverPane(at, {type: "file", path}, (leafId) => {
             const pane = new EditorPane(api, {
                 workspace,
@@ -832,11 +837,14 @@
         takeovers.set(editID, {at, sessionId});
     }
 
-    /** The return leg: shell back into the pane, exit code back to `re`. */
+    /** The return leg: shell back into the pane, exit code back to `re`.
+     *  The editor's furniture leaves with it — you exited the place. */
     function finishTakeover(editID: string, code: number): void {
         const t = takeovers.get(editID);
         takeovers.delete(editID);
         if (t) mgr.restoreTermPane(t.at, t.sessionId);
+        app.explorerOpen = false;
+        qf.listOpen = false;
         void api.editDone(editID, code).catch(() => {});
     }
 
@@ -1438,8 +1446,13 @@
             id: "explorer.toggle",
             title: "Toggle file explorer",
             category: "View",
-            keys: keymap.display("explorer.toggle"),
+            keys: ", b",
             run: async () => {
+                // editor furniture — the tree has no meaning over a shell
+                if (!app.explorerOpen && !editorFocused()) {
+                    flash("the file tree lives in the editor — re, ` g or ⌃P first");
+                    return;
+                }
                 if (!app.explorerOpen) explorerDir = await shellDir();
                 app.explorerOpen = !app.explorerOpen;
             },
@@ -1448,8 +1461,14 @@
             id: "explorer.reveal",
             title: "Explorer: reveal current file",
             category: "View",
-            keys: keymap.display("explorer.reveal"),
-            run: () => void revealInExplorer(),
+            keys: ", f",
+            run: () => {
+                if (!editorFocused()) {
+                    flash("the file tree lives in the editor — re, ` g or ⌃P first");
+                    return;
+                }
+                void revealInExplorer();
+            },
         },
         {
             id: "review.toggle",
@@ -1492,9 +1511,15 @@
             id: "quickfix.toggle",
             title: "Quickfix: toggle list",
             category: "View",
+            keys: ", q",
             run: () => {
                 if (qf.listOpen) {
                     qf.listOpen = false;
+                    return;
+                }
+                // editor furniture, same as the tree
+                if (!editorFocused()) {
+                    flash("quickfix lives in the editor — re, ` g or ⌃P first");
                     return;
                 }
                 if (!qf.context) {
@@ -1871,10 +1896,17 @@
             return;
         }
         if (contextLeader.matches(e)) {
-            e.preventDefault();
-            e.stopPropagation();
-            ctxArmed = true;
-            return;
+            // The editor's leader arms ONLY inside the editor's own
+            // surfaces (a Monaco pane, or its bottom quickfix strip). A
+            // comma in a shell is a comma — the editor is a place, and its
+            // keys don't leak out of it.
+            if (tgt?.closest?.('.editor-mount, [data-side="bottom"]') != null) {
+                e.preventDefault();
+                e.stopPropagation();
+                ctxArmed = true;
+                return;
+            }
+            // not the editor: fall through — the terminal keeps the key
         }
 
         // chords need a real modifier; everything else belongs to the shell
@@ -2209,32 +2241,6 @@
         })}
         onclose={() => {
             app.filePickerOpen = false;
-            focusBack();
-        }}
-    />
-{/if}
-{#if editPick}
-    {@const p = editPick}
-    <Finder
-        {api}
-        workspace={p.workspace}
-        source={filesSource({
-            api,
-            workspace: p.workspace,
-            dir: p.dir || undefined,
-            buffers: () => [],
-            open: (path) => {
-                p.picked = true;
-                void performTakeover(p.id, p.sessionId, p.workspace, p.at, path, [], p.dir);
-            },
-        })}
-        onclose={() => {
-            editPick = null;
-            // the Finder closes BEFORE it runs the pick, so the cancel
-            // check waits a microtask for open() to mark the object
-            queueMicrotask(() => {
-                if (!p.picked) void api.editDone(p.id, 0).catch(() => {});
-            });
             focusBack();
         }}
     />

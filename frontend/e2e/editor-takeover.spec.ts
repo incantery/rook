@@ -42,30 +42,48 @@ test(":cq aborts — the shell sees a nonzero exit", async ({page, rook}) => {
     await rook.expectScreen(/re exit=1/);
 });
 
-test("bare re opens the finder; Escape cancels back to the shell", async ({page, rook}) => {
+test("bare re is vim's empty buffer — straight into the editor", async ({page, rook}) => {
     const root = await rook.repo({files: {"notes.txt": "alpha\n"}});
     await rook.open({name: `re-bare-${Date.now()}`, root});
     await rook.shellReady();
 
     await rook.ex(`${RE}; echo "re exit=$?"`);
 
-    // bare re = nvim-without-args: the file finder, scoped to the cwd
-    await expect(page.getByPlaceholder("Open file…")).toBeVisible({timeout: 15_000});
-    await page.keyboard.press("Escape");
+    // no finder, no chrome question — you are IN the editor, unnamed buffer
+    await expect(page.locator(".editor-mount").first()).toBeVisible({timeout: 15_000});
+    await expect(page.getByText("[No Name]").first()).toBeVisible();
 
-    // no pick — the ask resolves as a clean cancel, shell undisturbed
+    await rook.ex(":q");
     await rook.expectScreen(/re exit=0/);
 });
 
-test("re . is nvim muscle memory — a directory arg opens the finder", async ({page, rook}) => {
+test("re . lands in the editor with the tree, netrw-style", async ({page, rook}) => {
     const root = await rook.repo({files: {"sub/inner.txt": "alpha\n"}});
     await rook.open({name: `re-dot-${Date.now()}`, root});
     await rook.shellReady();
 
     await rook.ex(`${RE} .; echo "re exit=$?"`);
-    await expect(page.getByPlaceholder("Open file…")).toBeVisible({timeout: 15_000});
-    await page.keyboard.press("Escape");
+
+    // the editor takes the pane AND the file tree opens beside it
+    await expect(page.locator(".editor-mount").first()).toBeVisible({timeout: 15_000});
+    await expect(page.getByText("Explorer").first()).toBeVisible();
+
+    // focus starts on the listing (netrw); ⌃L crosses back into the editor
+    await page.keyboard.press("Control+l");
+    await rook.ex(":q");
     await rook.expectScreen(/re exit=0/);
+    // the editor's furniture leaves with it
+    await expect(page.getByText("Explorer")).toHaveCount(0);
+});
+
+test("the editor leader stays inside the editor — a shell comma is a comma", async ({rook}) => {
+    const root = await rook.repo({files: {"notes.txt": "alpha\n"}});
+    await rook.open({name: `re-comma-${Date.now()}`, root});
+    await rook.shellReady();
+
+    // before isolation, the global context leader ate the first comma
+    await rook.ex(`echo tuple=a,b,c`);
+    await rook.expectScreen(/tuple=a,b,c/);
 });
 
 test("re outside a rook pty fails with a message, not a hang", async ({rook}) => {

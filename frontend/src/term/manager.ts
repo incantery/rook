@@ -75,11 +75,13 @@ export interface TabInfo {
 
 /** An `re` takeover ask, decoded from the session's frame socket. Paths
  *  are host-resolved: workspace-relative (read-write) or absolute
- *  (external read-only); cwd is workspace-relative and scopes the finder
- *  when paths is empty. */
+ *  (external read-only). Dir is the absolute anchor (the shell's cwd, or
+ *  a directory argument) scoping the editor's finder/grep/tree; tree
+ *  means a directory was asked for by name (`re .`). */
 export interface EditRequest {
     id: string;
-    cwd: string;
+    dir: string;
+    tree: boolean;
     paths: string[] | null;
 }
 

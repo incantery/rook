@@ -32,8 +32,8 @@
 //	rookctl hover         hover docs at a position, same shape
 //	rookctl decisions     the drafter's ledger, last 7 days, with the verdict mix
 //	rookctl edit          take over this pane with the editor, vim-style, until :q
-//	                        (`re` is a symlink shim: re [file|dir…]; bare re or a
-//	                        directory opens the finder, anchored there)
+//	                        (`re` is a symlink shim: re [file|dir…]; bare re is the
+//	                        empty buffer, `re .` opens the tree there, netrw-style)
 //	rookctl set-openai-key store the drafter's API key in the keychain
 //	rookctl set-jira-token store the Jira API token (queue credential) in the keychain
 //	rookctl claim         claude SessionStart hook body (stdin → host)

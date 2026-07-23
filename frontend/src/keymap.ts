@@ -76,8 +76,6 @@ export const DEFAULTS: [string, string][] = [
     ["<leader>/", "grep.open"],
     ["<leader>i", "explore.trail"],
     ["<leader>t", "threads.toggle"],
-    ["<leader>b", "explorer.toggle"],
-    ["<leader>f", "explorer.reveal"],
     ["cmd+d", "pane.split-right"],
     ["cmd+shift+d", "pane.split-down"],
 ];
@@ -282,6 +280,10 @@ export const CONTEXT_PREFIX = new Map<string, string>([
     // cursor is gt (a motion, and it lives with gd/gr where it belongs);
     // the leader is for the surfaces you reach for without a cursor.
     ["t", "threads.find"],
+    // the file tree is editor furniture (vim: netrw/NvimTree live inside
+    // vim) — moved here from the app leader when the editor got isolated
+    ["b", "explorer.toggle"],
+    ["f", "explorer.reveal"],
 ]);
 
 // buildContextMap overlays config's [editor.keybinds.normal] table on the
