@@ -22,6 +22,9 @@ export interface FileNode {
  *  segment is a directory. Stable order: dirs before files, then by name. */
 export function buildFileTree(paths: string[]): FileNode[] {
     const root: FileNode = {name: "", path: "", dir: true, children: []};
+    // node lookup by full path — a linear children.find per segment turns a
+    // wide directory (vendored deps, generated code) into quadratic build time
+    const byPath = new Map<string, FileNode>();
     for (const p of paths) {
         const parts = p.split("/").filter(Boolean);
         let cur = root;
@@ -30,9 +33,11 @@ export function buildFileTree(paths: string[]): FileNode[] {
             const name = parts[i];
             acc = acc ? `${acc}/${name}` : name;
             const isDir = i < parts.length - 1;
-            let child = cur.children.find((c) => c.name === name && c.dir === isDir);
+            const key = isDir ? acc + "/" : acc;
+            let child = byPath.get(key);
             if (!child) {
                 child = {name, path: acc, dir: isDir, children: []};
+                byPath.set(key, child);
                 cur.children.push(child);
             }
             cur = child;
@@ -42,14 +47,12 @@ export function buildFileTree(paths: string[]): FileNode[] {
     return root.children;
 }
 
+// one collator, not a localeCompare(…, options) per comparison — the latter
+// builds a fresh Intl.Collator on every call, which dominates a big sort
+const byName = new Intl.Collator(undefined, {sensitivity: "base"}).compare;
+
 function sortNodes(nodes: FileNode[]): void {
-    nodes.sort((a, b) =>
-        a.dir !== b.dir
-            ? a.dir
-                ? -1
-                : 1
-            : a.name.localeCompare(b.name, undefined, {sensitivity: "base"}),
-    );
+    nodes.sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : byName(a.name, b.name)));
     for (const n of nodes) {
         if (n.dir) sortNodes(n.children);
     }

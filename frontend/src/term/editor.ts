@@ -593,6 +593,10 @@ export class EditorPane implements PaneContent {
         // No cell means the pane isn't mounted in a window yet (the side-pane
         // tenants), where nothing competes for focus — fail open and focus.
         if (cell && !cell.classList.contains("focused")) return;
+        // The furniture isn't a pane, so the cell still reads focused while
+        // the keyboard sits in the tree (`re .` lands there, netrw-style) —
+        // the latch must not yank it out of a side pane either.
+        if (document.activeElement?.closest?.(".side-pane")) return;
         ed.focus();
     }
 

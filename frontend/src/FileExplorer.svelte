@@ -67,6 +67,10 @@
     let git = $state<GitInfo | null>(null);
     let threads = $state<Map<string, number>>(new Map());
     let scope = $state<ExplorerScope>("all");
+    // the (workspace, dir) the current listing is for — the load effect's
+    // dependencies invalidate whenever the parent rebuilds its tab snapshot
+    // (every layout/focus changed()), so refetch only on an actual change
+    let loadedKey = "";
     /** the scoped listing's prefix — node paths are relative to it; join to
      *  open, and to look up ws-relative decorations (statuses, threads) */
     let base = $state("");
@@ -76,8 +80,6 @@
     // the dir set we last auto-expanded for; guards the seed from re-running
     // on every refetch and stomping a collapse the user just made
     let seeded = "";
-    // first load per workspace picks the scope; later loads must not re-pick
-    let scopedFor = "";
 
     async function load(ws: string): Promise<void> {
         loading = true;
@@ -100,14 +102,6 @@
                 .workspaceStatus(ws)
                 .then((s) => s.git ?? null)
                 .catch(() => null);
-            // Default to Changed when there IS a diff to review — rook is a
-            // review tool first — but never strand the pane on an empty list
-            // for a clean tree. Decided once per workspace so a refetch that
-            // lands on zero changes can't yank the scope out from under you.
-            if (scopedFor !== ws) {
-                scopedFor = ws;
-                scope = changed.length > 0 ? "changed" : "all";
-            }
         } catch (err) {
             error = String(err);
             tree = [];
@@ -118,7 +112,9 @@
 
     // (re)load on mount and whenever the workspace or the scope dir changes
     $effect(() => {
-        void dir;
+        const key = `${workspace}\0${dir ?? ""}`;
+        if (key === loadedKey) return;
+        loadedKey = key;
         void load(workspace);
     });
 
