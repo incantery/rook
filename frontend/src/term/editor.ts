@@ -37,6 +37,14 @@ type VimAdapter = ReturnType<VimLib["initVimMode"]>;
 let vimLib: VimLib | null = null;
 const paneByEditor = new WeakMap<object, EditorPane>();
 const livePanes = new Set<EditorPane>();
+
+// Model URIs must be unique across EVERY pane, not just within one:
+// Monaco's model registry is global, and two panes opening the SAME file
+// with a per-pane counter minted the same rook://1/<path> — createModel
+// threw, the second editor never loaded, never took the keyboard, and the
+// user's :q executed in whichever editor still held focus (the "quitting
+// closes my other editors" dogfood bug, in its second body).
+let uriSeq = 0;
 let exCommandsDefined = false;
 
 async function loadVim(): Promise<VimLib> {
@@ -449,8 +457,6 @@ export class EditorPane implements PaneContent {
     private idx = 0;
     private fetchedAt = 0;
     private disposed = false;
-    /** model URIs must be unique for the pane's whole life */
-    private seq = 0;
 
     /** every thread in the workspace — bands slice per (path, side) */
     private threadsAll: ThreadInfo[] = [];
@@ -799,7 +805,7 @@ export class EditorPane implements PaneContent {
             const model = m.editor.createModel(
                 md,
                 "markdown",
-                m.Uri.parse(`rook-thread://${++this.seq}/${id}`),
+                m.Uri.parse(`rook-thread://${++uriSeq}/${id}`),
             );
             this.models.push(model);
             paneByModel.set(model, this);
@@ -884,7 +890,7 @@ export class EditorPane implements PaneContent {
         const model = m.editor.createModel(
             "",
             "markdown",
-            m.Uri.parse(`rook-draft://${++this.seq}/${d.id}`),
+            m.Uri.parse(`rook-draft://${++uriSeq}/${d.id}`),
         );
         this.models.push(model);
         const ed = this.ensureEditor();
@@ -1829,7 +1835,7 @@ export class EditorPane implements PaneContent {
     /** Unique model URI whose path still carries the file's extension —
      *  that's what language inference reads. */
     private uri(path: string): monacoTypes.Uri {
-        return this.monaco!.Uri.parse(`rook://${++this.seq}/${path}`);
+        return this.monaco!.Uri.parse(`rook://${++uriSeq}/${path}`);
     }
 
     private disposeModels(): void {
