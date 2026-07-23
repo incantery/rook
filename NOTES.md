@@ -28,7 +28,8 @@
 
 - [x] libghostty-vt differential oracle (2026-07-22): `make ghostty-lib` + `go test -tags ghostty ./internal/host/ -run Ghostty`; fixed 16 conformance bug classes on day one (charset/ACS, alt-screen cursor, tab stops, DECALN, REP, wide-pair tearing, combining-mark widths, pending-wrap semantics, …). Benchmarks: their parser 4–6× faster (SIMD — real headroom), our pipeline 4× faster (their per-cell FFI read path drowns it). PERF.md has the table.
 - [ ] Parser rework (VT state machine proper): C0 controls EXECUTE inside escape sequences (we abort); C1 as raw bytes/codepoints should execute in 8-bit-tolerant mode (we drop, ghostty stores, xterm executes). Known-divergent classes documented in the fuzz filter.
-- [ ] Replace go-runewidth classification with own width table (its zero-width table misses hundreds of combining ranges — patched via Mn/Me/Cf bitmap; a unified table would also reclaim the ~10% unicode parse cost of the patch and the fuzz-adjudicated margins like Hangul fillers).
+- [x] Width table (2026-07-22): 64KB BMP table folds go-runewidth + all oracle corrections into one byte-load; UTF-8 batch decode. Unicode pipeline 124→202 MB/s.
+- [ ] Scrollback compression (Seth, 2026-07-22): ghostty compresses idle scrollback pages caller-driven — a MEMORY play, not throughput. Our ring is ~4.9MB/session at 405 cols (wide-grid locality item below). Do it as part of the idle-RSS measurement arc: measure first, then decide page compression vs content-stride storage.
 - [ ] Ghostty upstream candidates (report when we engage): CSI 0a/0e (HPR/VPR) miss the zero-coercion CSI 0C/0B have.
 - [ ] Adapter v2 (only if ever needed as a real backend): per-row dirty flags + bulk row read to fix the 17ms full-screen FFI snapshot; WRITE_PTY effect callback for query responses; scrollback paging parity.
 

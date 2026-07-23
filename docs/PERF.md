@@ -86,11 +86,14 @@ slice), punts scrollback paging and pty query responses.
 
 | metric @405×113 | internal/vt | libghostty-vt |
 |---|---|---|
-| Write-only parse, ascii | 226 MB/s | **840 MB/s** |
-| Write-only parse, unicode | 107 MB/s | **599 MB/s** |
+| Write-only parse, ascii | 228 MB/s | **844 MB/s** |
+| Write-only parse, unicode | 165 MB/s | **596 MB/s** |
 | Full-screen render snapshot | **0.78ms** | 17.1ms |
-| Full pipeline (pty→parse→16ms render), ascii | **441 MB/s** | 103 MB/s |
-| Full pipeline, unicode | **124 MB/s** | 65 MB/s |
+| Full pipeline (pty→parse→16ms render), ascii | **450 MB/s** | 103 MB/s |
+| Full pipeline, unicode | **202 MB/s** | 65 MB/s |
+
+(unicode numbers post the width-table + batch-decode arc below; the earlier
+run measured 107 / 124.)
 
 The three questions this was built to answer:
 - **"Is cgo really that big a deal?"** No — at gather-chunk sizes, per-Write
@@ -116,10 +119,29 @@ The three questions this was built to answer:
   executed inside sequences, raw/codepoint C1 handling, param-edge
   adjudications where we match xterm.
 
+## Unicode parse arc (2026-07-22, post-v0.18.0)
+
+The width-classification headroom item, executed: a 64KB BMP width table
+built at init (from go-runewidth + every correction the oracle forced —
+Mn/Me/Cf zero-join, Mc spacing, Hangul jamo joins, regional indicators
+wide, soft hyphen visible) turns the per-rune binary search into one byte
+load; then the UTF-8 path got the printASCII treatment (decode runs, hoist
+the pen and row slice). **Unicode write-only 107→165 MB/s, unicode
+pipeline 124→202 MB/s; ascii unchanged.** A second fuzzing round rode
+along: SS2/SS3, LS2/LS3, UK charset, IRM, LNM, SGR colon-subparam grammar
+(with ghostty's leak-through rule), 16-bit param saturation, DECSED/DECSEL,
+wide-pair repair in ECH/ICH/DCH/EL, spacer-head padding, RIS clearing
+DECSC/REP state, prefix-position validation, SCOSC arity. The
+pending-wrap × op interaction matrix is skipped by simulation (Emulator.
+WrapOps) — terminals genuinely disagree there. Fuzz runs need
+`-parallel 4`: the adapter's C-side state is freed explicitly now (a
+missing free once compounded into an OOM across hour-long runs).
+
 ## Known headroom (in rough value order)
 
-- **Unicode parse** (215 MB/s vs 400 ascii): `runewidth` per-rune
-  classification; memoize width runs / fast-path repeated scripts.
+- **Unicode parse** (165 vs 228 ascii write-only): remaining gap is per-rune
+  decode + width dispatch; SIMD-style classification like ghostty's is the
+  next tier.
 - **ASCII producer bound**: Ghostty spins non-blocking on the pty (costs a
   core under firehose); we declined. Revisit if the gap matters.
 - **Wide-grid ring locality**: the 405-col scrollback ring is 4.9MB walked

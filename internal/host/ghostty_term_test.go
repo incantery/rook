@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/incantery/rook/internal/vt"
@@ -60,6 +61,7 @@ func oracle(t *testing.T, name, stream string) {
 	const cols, rows = 40, 10
 	ours := newTerminal(cols, rows)
 	theirs := newGhosttyTerminal(cols, rows)
+	defer theirs.(*ghosttyTerminal).free()
 	_, _ = ours.Write([]byte(stream))
 	_, _ = theirs.Write([]byte(stream))
 
@@ -83,6 +85,7 @@ func oracle(t *testing.T, name, stream string) {
 
 func TestGhosttySmoke(t *testing.T) {
 	term := newGhosttyTerminal(20, 4)
+	defer term.(*ghosttyTerminal).free()
 	_, _ = term.Write([]byte("hi \x1b[31mred\x1b[0m\r\nworld 漢"))
 	f := term.Render(term.NewSurface())
 	if len(f.Rows) < 2 {
@@ -156,7 +159,14 @@ var multiParam = regexp.MustCompile(`\x1b\[[0-9;]*;[0-9;]*[^0-9;mHfr\x1b]`)
 
 // empty SGR params: xterm reads them as 0 (reset) — we match; ghostty drops
 // them. "\x1b[1;m" keeps bold there, resets here.
-var sgrEmpty = regexp.MustCompile(`\x1b\[;|\x1b\[[0-9;]*(;;|;m)`)
+var sgrEmpty = regexp.MustCompile(`\x1b\[[;:]|\x1b\[[0-9;:]*(;;|;m|::|:m|;:|:;)`)
+
+// a charset designation other than ASCII (ESC ( B)
+var altCharset = regexp.MustCompile(`\x1b[()*+][^B]`)
+
+// ED/EL with out-of-range params: we ignore (xterm), ghostty wraps the
+// value mod 10 through its enum — quirk, not semantics
+var badErase = regexp.MustCompile(`\x1b\[[0-9]{2,}[JK]|\x1b\[[4-9][JK]`)
 
 // three or more params on two-param commands (CUP/DECSTBM): xterm uses the
 // first two (we match), ghostty rejects the sequence.
@@ -180,9 +190,20 @@ func FuzzGhosttyOracle(f *testing.F) {
 		}
 		// C1 controls as UTF-8 codepoints (U+0080-U+009F): ghostty stores
 		// the raw codepoint in the grid, we drop it, xterm would EXECUTE it
-		// — three-way divergence, parser-rework backlog.
+		// — three-way divergence, parser-rework backlog. And codepoints our
+		// Go version's Unicode tables don't know yet (ghostty ships newer
+		// data): classification skew, not emulation.
 		for _, r := range stream {
 			if r >= 0x80 && r <= 0x9f {
+				t.Skip()
+			}
+			if r > 0xFF && !unicode.IsGraphic(r) && !unicode.IsControl(r) {
+				t.Skip()
+			}
+			// astral combining marks: Unicode versions disagree on which
+			// medial signs are spacing (U+1171E is Mn to Go, width 1 to
+			// ghostty) — width-data skew, not emulation
+			if r >= 0x10000 && unicode.In(r, unicode.Mn, unicode.Me) {
 				t.Skip()
 			}
 		}
@@ -192,6 +213,8 @@ func FuzzGhosttyOracle(f *testing.F) {
 				t.Skip()
 			}
 		}
+		// (the pending-wrap interaction matrix is skipped after the run,
+		// via WrapOps — see below)
 		// Candidate GHOSTTY bug (2026-07-22, worth an upstream report once
 		// we engage): CSI 0C/0B coerce the 0 to 1 (xterm-style) but the
 		// aliases CSI 0a (HPR) / 0e (VPR) move zero. We match xterm on all
@@ -211,6 +234,19 @@ func FuzzGhosttyOracle(f *testing.F) {
 		}
 		if overArity.MatchString(stream) {
 			t.Skip()
+		}
+		if badErase.MatchString(stream) {
+			t.Skip()
+		}
+		// A non-ASCII-charset designation (anything but ESC ( B) mixed with
+		// UTF-8 text: ghostty drops the UTF-8, xterm passes it through (we
+		// match xterm). No real program mixes these.
+		if altCharset.MatchString(stream) {
+			for _, r := range stream {
+				if r > 0x7f {
+					t.Skip()
+				}
+			}
 		}
 		// Unterminated OSC/DCS/SOS/PM/APC at end of stream: we carry it for
 		// the next Write (correct against a live pty), ghostty processes
@@ -241,7 +277,7 @@ func FuzzGhosttyOracle(f *testing.F) {
 			if j < len(stream) && strings.IndexByte("[]PX^_", stream[j]) >= 0 {
 				j++
 			}
-			for ; j < len(stream) && j < i+32; j++ {
+			for ; j < len(stream); j++ {
 				c := stream[j]
 				if c == 0x1b || (c >= 0x40 && c <= 0x7e) {
 					break // restart or a plausible final — window closed
@@ -254,8 +290,18 @@ func FuzzGhosttyOracle(f *testing.F) {
 		const cols, rows = 40, 10
 		ours := newTerminal(cols, rows)
 		theirs := newGhosttyTerminal(cols, rows)
+		defer theirs.(*ghosttyTerminal).free()
 		_, _ = ours.Write([]byte(stream))
 		_, _ = theirs.Write([]byte(stream))
+		// The pending-wrap interaction matrix: how each op behaves while the
+		// cursor holds a deferred wrap genuinely differs per terminal
+		// (ghostty resolves it as a newline for tabs, clears it for LF,
+		// erases through it for ECH…) — micro-semantics no real program
+		// depends on. Detected by SIMULATION, not stream shape: our emulator
+		// counts ops that arrived in that state.
+		if ours.(vtTerminal).Emulator.WrapOps() > 0 {
+			t.Skip()
+		}
 		a := gridOf(ours, cols, rows)
 		b := gridOf(theirs, cols, rows)
 		for y := range a {

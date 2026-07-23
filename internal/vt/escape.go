@@ -10,6 +10,9 @@ func (e *Emulator) escape(b []byte, i int) (int, bool) {
 	if i+1 >= n {
 		return i, true // lone ESC — wait for the rest
 	}
+	if e.cur.wrapNext {
+		e.wrapOps++ // see WrapOps
+	}
 	switch b[i+1] {
 	case '[':
 		return e.escCSI(b, i)
@@ -128,8 +131,8 @@ func (e *Emulator) escSingle(b []byte, i int) (int, bool) {
 	case 'D': // IND — index (line feed, no CR)
 		e.cur.wrapNext = false
 		e.cur.lineFeed(e.fill())
-	case 'M': // RI — reverse index
-		e.cur.wrapNext = false
+	case 'M': // RI — reverse index (pending wrap survives, unlike LF —
+		// both matched to ghostty by the differential fuzzer)
 		e.cur.reverseIndex(e.fill())
 	case 'E': // NEL — next line
 		e.cur.cx = 0
@@ -140,10 +143,22 @@ func (e *Emulator) escSingle(b []byte, i int) (int, bool) {
 		if e.cur.cx < len(e.tabs) {
 			e.tabs[e.cur.cx] = true
 		}
+	case 'V': // SPA — start protected area
+		e.protect = true
+	case 'W': // EPA — end protected area
+		e.protect = false
 	case 'c': // RIS — reset to initial state
 		e.reset()
-	case '=', '>', 'F', 'G', 'l', 'm', 'n', 'o', '|', '}', '~':
-		// keypad modes, locking shifts, etc. — no grid effect
+	case 'n': // LS2 — GL locking shift to G2
+		e.shift = 2
+	case 'o': // LS3 — GL locking shift to G3
+		e.shift = 3
+	case 'N': // SS2 — single shift: next glyph from G2
+		e.ss = 2
+	case 'O': // SS3 — single shift: next glyph from G3
+		e.ss = 3
+	case '=', '>', 'F', 'G', 'l', 'm', '|', '}', '~':
+		// keypad modes, right-half shifts, etc. — no grid effect
 	case 0x1b:
 		// ESC ESC: the second ESC restarts the sequence (VT state machine —
 		// found by the libghostty differential fuzzer). Drop the first.
@@ -178,10 +193,11 @@ func (e *Emulator) escSingle(b []byte, i int) (int, bool) {
 			}
 			if j == i+2 { // single intermediate: the dispatchable forms
 				switch c {
-				case '(': // designate G0
-					e.g0 = b[j]
-				case ')': // designate G1 (G2/G3 via '*'/'+' are ignored)
-					e.g1 = b[j]
+				case '(', ')', '*', '+': // designate G0..G3 — unknown sets
+					// are ignored (ghostty)
+					if d := b[j]; d == 'B' || d == '0' || d == 'A' {
+						e.g[c-'('] = d
+					}
 				case '#':
 					if b[j] == '8' {
 						e.decaln()
@@ -194,6 +210,14 @@ func (e *Emulator) escSingle(b []byte, i int) (int, bool) {
 	return i + 2, false
 }
 
+// first returns ps[0], or 0 for an empty list.
+func first(ps []int) int {
+	if len(ps) == 0 {
+		return 0
+	}
+	return ps[0]
+}
+
 // decaln is DECALN (ESC # 8), the screen alignment test: reset margins, home
 // the cursor, fill the screen with E.
 func (e *Emulator) decaln() {
@@ -201,6 +225,7 @@ func (e *Emulator) decaln() {
 	s.stop, s.sbot = 0, e.h-1
 	s.cx, s.cy = 0, 0
 	s.wrapNext = false
+	e.fg, e.bg, e.attr = DefaultColor, DefaultColor, 0 // pen resets too (ghostty)
 	s.clearRows(0, e.h-1, Cell{Content: 'E', Width: 1})
 }
 
@@ -210,21 +235,35 @@ func (e *Emulator) csi(params []byte, final byte) {
 	var ps [32]int
 	np := 0
 	cur := 0
-	var prefix byte   // '?', '>', '<', '=' for private/device forms; 0 otherwise
-	var inter byte    // an intermediate byte (0x20–0x2f), e.g. '$' in DECRQM
-	sawColon := false // ':' subparams are only valid inside SGR
-	for _, ch := range params {
+	var prefix byte    // '?', '>', '<', '=' for private/device forms; 0 otherwise
+	var inter byte     // an intermediate byte (0x20–0x2f), e.g. '$' in DECRQM
+	var colon uint32   // bit k set = ps[k] was joined to ps[k-1] by ':'
+	nextColon := false // the separator that will introduce the NEXT param
+	for pi, ch := range params {
 		switch {
 		case ch >= '0' && ch <= '9':
-			cur = cur*10 + int(ch-'0')
-		case ch == ';' || ch == ':': // ':' subparams folded into ';' (approximate)
-			sawColon = sawColon || ch == ':'
+			// params saturate at 16 bits (ghostty/xterm convention; also
+			// keeps a hostile 10^18 from overflowing int)
+			if cur = cur*10 + int(ch-'0'); cur > 0xffff {
+				cur = 0xffff
+			}
+		case ch == ';' || ch == ':':
 			if np < len(ps) {
 				ps[np] = cur
+				if nextColon {
+					colon |= 1 << np
+				}
 				np++
 			}
 			cur = 0
+			nextColon = ch == ':'
 		case ch == '?' || ch == '>' || ch == '<' || ch == '=':
+			if pi != 0 {
+				// a private marker anywhere but first is malformed — the
+				// sequence is consumed and dispatches nothing (ghostty;
+				// found by the differential fuzzer on "\x1b[0?1K")
+				return
+			}
 			prefix = ch
 		case ch >= 0x20 && ch <= 0x2f:
 			inter = ch
@@ -232,9 +271,12 @@ func (e *Emulator) csi(params []byte, final byte) {
 	}
 	if np < len(ps) {
 		ps[np] = cur
+		if nextColon {
+			colon |= 1 << np
+		}
 		np++
 	}
-	if sawColon && final != 'm' {
+	if colon != 0 && final != 'm' {
 		// colon subparameters exist only in SGR — anywhere else the sequence
 		// is malformed and dispatching it ran a command that shouldn't run
 		// (found by the libghostty differential fuzzer on "\x1b[:1B")
@@ -247,10 +289,14 @@ func (e *Emulator) csi(params []byte, final byte) {
 		return
 	}
 	if inter != 0 {
-		// An intermediate byte makes this a different command (CSI SP q is
+		if inter == '"' && final == 'q' {
+			// DECSCA — select character protection attribute (1 = protect)
+			e.protect = np > 0 && ps[0] == 1
+			return
+		}
+		// Any other intermediate makes this a different command (CSI SP q is
 		// not CSI q) — dispatching the bare final ran the wrong one (found
-		// by the libghostty differential fuzzer on "\x1b[1 B"). None of the
-		// intermediate forms we know have a grid effect.
+		// by the libghostty differential fuzzer on "\x1b[1 B").
 		return
 	}
 
@@ -294,8 +340,15 @@ func (e *Emulator) csi(params []byte, final byte) {
 		e.moveTo(p(0, 1)-1, s.cy)
 	case 'd': // VPA — row
 		e.moveTo(s.cx, p(0, 1)-1)
-	case 'J': // ED — erase in display (params above 3 are undefined: ignore)
-		if m := p(0, 0); m <= 3 {
+	case 'J': // ED — erase in display (params above 3 are undefined: ignore,
+		// as xterm does; ghostty wraps them mod 10 — not worth matching)
+		switch m := p(0, 0); {
+		case m == 3: // xterm extension: clear SCROLLBACK, screen untouched
+			if e.primary.sb != nil {
+				e.primary.sb = newScrollback(e.w, e.sbLines)
+			}
+			e.sbEpoch++ // history discarded; cached pages are void
+		case m <= 2:
 			s.eraseDisplay(m, e.fill())
 		}
 	case 'K': // EL — erase in line (params above 2 are undefined: ignore —
@@ -320,24 +373,34 @@ func (e *Emulator) csi(params []byte, final byte) {
 	case 'r': // DECSTBM — set scroll region
 		e.setScrollRegion(p(0, 1), p(1, s.h))
 	case 'm': // SGR
-		e.sgr(ps[:np])
-	case 's': // SCOSC — save cursor (ANSI.SYS)
-		e.saved = e.snapshotCursor()
+		e.sgr(ps[:np], colon)
+	case 's': // SCOSC — save cursor (ANSI.SYS). Parameter-less by definition:
+		// with params this slot is DECSLRM (unimplemented), not a save.
+		if len(params) == 0 {
+			e.saved = e.snapshotCursor()
+		}
 	case 'u': // SCORC — restore cursor
 		e.restore(e.saved)
-	case 'h', 'l': // ANSI mode set/reset — tracked for DECRQM, no grid effect
+	case 'h', 'l': // ANSI mode set/reset — tracked for DECRQM
 		set := final == 'h'
 		for _, m := range ps[:np] {
 			e.ansiModes[m] = set
+			switch m {
+			case 4: // IRM — insert/replace mode
+				e.insertMode = set
+			case 20: // LNM — LF implies CR
+				e.newlineMode = set
+			}
 		}
 	case 'I': // CHT — cursor forward tab stops (pending wrap survives, like TAB)
 		for range p(0, 1) {
 			s.cx = e.nextTabStop(s.cx)
 		}
 	case 'b': // REP — repeat the preceding graphic character (ncurses runs;
-		// found unimplemented by the libghostty differential fuzzer)
+		// found unimplemented by the libghostty differential fuzzer).
+		// The param parser's 16-bit saturation bounds the loop.
 		if e.lastGlyph != 0 {
-			for range min(p(0, 1), s.w*s.h) {
+			for range p(0, 1) {
 				e.printRune(e.lastGlyph)
 			}
 		}
@@ -404,6 +467,19 @@ func (e *Emulator) setScrollRegion(top, bot int) {
 // requests. Only the modes that affect the grid are acted on; the rest are
 // tracked-as-ignored so they don't corrupt the stream.
 func (e *Emulator) csiPrivate(ps []int, final byte) {
+	s := e.cur
+	switch final {
+	case 'J': // DECSED — selective erase in display (honors DECSCA)
+		if m := first(ps); m <= 2 {
+			s.eraseDisplay(m, e.fill())
+		}
+		return
+	case 'K': // DECSEL — selective erase in line
+		if m := first(ps); m <= 2 {
+			s.eraseLine(m, e.fill())
+		}
+		return
+	}
 	if final != 'h' && final != 'l' {
 		return // '?...$p' DECRQM and friends: replies are Phase 2
 	}
@@ -467,14 +543,75 @@ func (e *Emulator) switchAlt(enter, saveCursor bool) {
 	}
 }
 
-// sgr applies a Select Graphic Rendition sequence to the pen.
-func (e *Emulator) sgr(ps []int) {
+// sgr applies a Select Graphic Rendition sequence to the pen. colon marks
+// which params were ':'-joined subparameters of their predecessor: a param
+// with unrecognized subparams is skipped as a whole group (kitty/ghostty
+// semantics — folding ':' into ';' turned "\x1b[:1m" into bold).
+func (e *Emulator) sgr(ps []int, colon uint32) {
 	if len(ps) == 0 {
 		e.fg, e.bg, e.attr = DefaultColor, DefaultColor, 0
 		return
 	}
+	group := func(i int) int { // index just past ps[i]'s colon-joined subparams
+		j := i + 1
+		for j < len(ps) && j < 32 && colon&(1<<j) != 0 {
+			j++
+		}
+		return j
+	}
 	for i := 0; i < len(ps); i++ {
 		n := ps[i]
+		if end := group(i); end > i+1 {
+			// colon-attached subparams: only the forms we know act
+			sub := ps[i+1 : end]
+			switch {
+			case n == 4: // underline style: 4:0 off, 4:1..5 on
+				if sub[0] == 0 {
+					e.attr &^= AttrUnderline
+				} else {
+					e.attr |= AttrUnderline
+				}
+			case (n == 38 || n == 48 || n == 58) && sub[0] == 5 && len(sub) >= 2:
+				switch n {
+				case 38:
+					e.fg = Palette(uint8(sub[1]))
+				case 48:
+					e.bg = Palette(uint8(sub[1]))
+					// 58 (underline color): consumed, not rendered
+				}
+			case (n == 38 || n == 48 || n == 58) && sub[0] == 5 && end < len(ps):
+				// mixed-separator compat ("38:5;n") — the index rides the
+				// next semicolon param
+				switch n {
+				case 38:
+					e.fg = Palette(uint8(ps[end]))
+				case 48:
+					e.bg = Palette(uint8(ps[end]))
+				}
+				i = end
+				continue
+			case (n == 38 || n == 48 || n == 58) && sub[0] == 2 && len(sub) >= 4:
+				// 38:2:colorspace:r:g:b (ITU form) or 38:2:r:g:b
+				o := 1
+				if len(sub) >= 5 {
+					o = 2 // colorspace id present
+				}
+				c := RGB(uint8(sub[o]), uint8(sub[o+1]), uint8(sub[o+2]))
+				switch n {
+				case 38:
+					e.fg = c
+				case 48:
+					e.bg = c
+				}
+			case n == 38 || n == 48 || n == 58:
+				// unknown color form: ghostty skips only the owner and the
+				// subparams re-enter the stream as plain params ("38:1"
+				// bolds) — matched empirically via the differential fuzzer
+				continue
+			}
+			i = end - 1
+			continue
+		}
 		switch {
 		case n == 0:
 			e.fg, e.bg, e.attr = DefaultColor, DefaultColor, 0
@@ -527,6 +664,10 @@ func (e *Emulator) sgr(ps []int) {
 				e.bg = c
 				i += adv
 			}
+		case n == 58: // underline color — consumed, not rendered
+			if _, adv, ok := extColor(ps, i); ok {
+				i += adv
+			}
 		case n == 49:
 			e.bg = DefaultColor
 		case n >= 90 && n <= 97:
@@ -544,17 +685,17 @@ func extColor(ps []int, i int) (c Color, adv int, ok bool) {
 	if i+1 >= len(ps) {
 		return 0, 0, false
 	}
-	// out-of-range components clamp to 255 (truncating wrapped them to
-	// arbitrary colors — found by the differential fuzzer on 38;5;100000)
-	c255 := func(v int) uint8 { return uint8(min(v, 255)) }
+	// components truncate mod 256 AFTER the parser's 16-bit saturation —
+	// the ghostty convention the differential fuzzer triangulated
+	// (38;5;100000 → 255 via saturation, 38;5;700 → 188 via truncation)
 	switch ps[i+1] {
 	case 5:
 		if i+2 < len(ps) {
-			return Palette(c255(ps[i+2])), 2, true
+			return Palette(uint8(ps[i+2])), 2, true
 		}
 	case 2:
 		if i+4 < len(ps) {
-			return RGB(c255(ps[i+2]), c255(ps[i+3]), c255(ps[i+4])), 4, true
+			return RGB(uint8(ps[i+2]), uint8(ps[i+3]), uint8(ps[i+4])), 4, true
 		}
 	}
 	return 0, 0, false

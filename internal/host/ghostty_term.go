@@ -33,6 +33,7 @@ static GhosttyStyle ghostty_style_sized() {
 import "C"
 
 import (
+	"runtime"
 	"unicode/utf8"
 	"unsafe"
 
@@ -74,7 +75,26 @@ func newGhosttyTerminal(cols, rows int) Terminal {
 		C.ghostty_render_state_row_cells_new(nil, &t.cells) != C.GHOSTTY_SUCCESS {
 		panic("ghostty: render state alloc failed")
 	}
+	// The C-side allocations (terminal + scrollback + render state) are
+	// invisible to Go's GC. The finalizer is the backstop; hot loops (the
+	// differential fuzzer creates a terminal PER INPUT) must call free
+	// explicitly — leaking these once OOMed the machine across hour-long
+	// fuzz runs.
+	runtime.SetFinalizer(t, func(t *ghosttyTerminal) { t.free() })
 	return t
+}
+
+// free releases the C-side state. Safe to call more than once.
+func (t *ghosttyTerminal) free() {
+	if t.term == nil {
+		return
+	}
+	C.ghostty_render_state_row_cells_free(t.cells)
+	C.ghostty_render_state_row_iterator_free(t.it)
+	C.ghostty_render_state_free(t.rs)
+	C.ghostty_terminal_free(t.term)
+	t.term, t.rs, t.it, t.cells = nil, nil, nil, nil
+	runtime.SetFinalizer(t, nil)
 }
 
 func (t *ghosttyTerminal) Write(p []byte) (int, error) {
@@ -265,14 +285,11 @@ func (t *ghosttyTerminal) snapshot() []vt.WCell {
 			var n C.uint32_t
 			C.ghostty_render_state_row_cells_get(t.cells, C.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, unsafe.Pointer(&n))
 			if n > 0 {
-				var cps [16]C.uint32_t
-				if n > 16 {
-					n = 16
-				}
+				cps := make([]C.uint32_t, n)
 				C.ghostty_render_state_row_cells_get(t.cells, C.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, unsafe.Pointer(&cps[0]))
 				var buf []byte
-				for i := 0; i < int(n); i++ {
-					buf = utf8.AppendRune(buf, rune(cps[i]))
+				for _, cp := range cps {
+					buf = utf8.AppendRune(buf, rune(cp))
 				}
 				cell.Content = string(buf)
 			} else {

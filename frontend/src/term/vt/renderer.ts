@@ -22,6 +22,7 @@ import {BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_WHEEL_DOWN, BTN_WHEEL_UP, encodeMou
 import {SbStore} from "./sbstore";
 import {rowExtent, type Selection, selectedText, wordAt} from "./selection";
 import {rowHtml} from "./style";
+import {WheelGauge} from "./wheel";
 
 export interface RendererOptions {
     /** class applied to the container; styling (font, --term-* vars) hangs off it. */
@@ -309,22 +310,22 @@ export class GridRenderer implements TermRenderer {
         e.preventDefault();
     };
 
+    private wheel = new WheelGauge();
+
     private onWheel = (e: WheelEvent): void => {
-        const notches = Math.max(
-            1,
-            Math.min(5, Math.round(Math.abs(e.deltaY) / (this.cellH || 16))),
-        );
+        if (!this.cellH) this.measureCell();
+        const lines = this.wheel.lines(e.deltaY, e.deltaMode, this.cellH);
         // A program tracking the mouse owns the wheel — it scrolls its own view
         // (Claude Code's conversation, a pager). Shift forces local scrollback.
         if (this.mouseLevel >= 2 && !e.shiftKey) {
-            const button = e.deltaY < 0 ? BTN_WHEEL_UP : BTN_WHEEL_DOWN;
-            for (let i = 0; i < notches; i++) {
+            const button = lines < 0 ? BTN_WHEEL_UP : BTN_WHEEL_DOWN;
+            for (let i = 0; i < Math.abs(lines); i++) {
                 this.forwardMouse(button, e.clientX, e.clientY, true, false);
             }
             e.preventDefault();
             return;
         }
-        this.scrollLines(e.deltaY < 0 ? notches : -notches);
+        if (lines !== 0) this.scrollLines(-lines);
         if (this.sb.max > 0) e.preventDefault();
     };
 

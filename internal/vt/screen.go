@@ -32,6 +32,11 @@ type screen struct {
 	// The bound is conservative: styled fills and blank overwrites may inflate
 	// it, which costs speed, never correctness.
 	used []int
+
+	// protected: a protected cell (SPA/DECSCA) may exist somewhere on this
+	// screen — erase ops take the per-cell path. Never set in normal
+	// sessions, so the erase fast paths stay branch-free.
+	protected bool
 }
 
 func newScreen(w, h int) *screen {
@@ -208,6 +213,7 @@ func (s *screen) reverseIndex(fill Cell) {
 // insertLines opens n blank lines at the cursor row, pushing lines below down
 // and off the bottom margin (IL). Only acts inside the scroll region.
 func (s *screen) insertLines(n int, fill Cell) {
+	s.wrapNext = false // edit ops cancel a pending wrap (xterm/ghostty)
 	if s.cy < s.stop || s.cy > s.sbot {
 		return
 	}
@@ -221,6 +227,7 @@ func (s *screen) insertLines(n int, fill Cell) {
 // deleteLines removes n lines at the cursor row, pulling lines below up and
 // opening blanks at the bottom margin (DL).
 func (s *screen) deleteLines(n int, fill Cell) {
+	s.wrapNext = false // edit ops cancel a pending wrap (xterm/ghostty)
 	if s.cy < s.stop || s.cy > s.sbot {
 		return
 	}
@@ -234,6 +241,7 @@ func (s *screen) deleteLines(n int, fill Cell) {
 // insertChars shifts the cursor row right by n from the cursor, opening n blank
 // cells (ICH). Cells pushed past the right edge fall off.
 func (s *screen) insertChars(n int, fill Cell) {
+	s.wrapNext = false // edit ops cancel a pending wrap (xterm/ghostty)
 	if n <= 0 {
 		return
 	}
@@ -242,9 +250,21 @@ func (s *screen) insertChars(n int, fill Cell) {
 	}
 	base := s.rowBase(s.cy)
 	row := s.cells[base : base+s.w]
+	// inserting AT a spacer splits its pair (the lead stays put, the spacer
+	// shifts); inserting at a lead moves the pair intact — spacer-side only
+	if row[s.cx].Width == 0 && s.cx > 0 && row[s.cx-1].Width == 2 {
+		row[s.cx-1] = blank
+	}
 	copy(row[s.cx+n:], row[s.cx:s.w-n])
 	for i := s.cx; i < s.cx+n; i++ {
 		row[i] = fill
+	}
+	// a lead shifted against the right edge loses its (pushed-off) spacer
+	if row[s.w-1].Width == 2 {
+		row[s.w-1] = blank
+	}
+	if s.cx+n < s.w && row[s.cx+n].Width == 0 {
+		row[s.cx+n] = blank // the shifted head was a spacer; its lead is gone
 	}
 	py := base / s.w
 	if s.used[py] > s.cx { // shifted content moved the mark right
@@ -258,17 +278,22 @@ func (s *screen) insertChars(n int, fill Cell) {
 // deleteChars shifts the cursor row left by n from the cursor, pulling cells in
 // from the right and filling the vacated right end (DCH).
 func (s *screen) deleteChars(n int, fill Cell) {
+	s.wrapNext = false // edit ops cancel a pending wrap (xterm/ghostty)
 	if n <= 0 {
 		return
 	}
 	if n > s.w-s.cx {
 		n = s.w - s.cx
 	}
+	s.dissolveBoundary(s.cy, s.cx, min(s.cx+n-1, s.w-1))
 	base := s.rowBase(s.cy)
 	row := s.cells[base : base+s.w]
 	copy(row[s.cx:], row[s.cx+n:s.w])
 	for i := s.w - n; i < s.w; i++ {
 		row[i] = fill
+	}
+	if row[s.cx].Width == 0 {
+		row[s.cx] = blank // the pulled-in head was a spacer; its lead is gone
 	}
 	// content only moved left, so the old mark still bounds it — unless the
 	// vacated right end was filled with something visible
@@ -277,8 +302,46 @@ func (s *screen) deleteChars(n int, fill Cell) {
 	}
 }
 
+// dissolveBoundary repairs wide pairs torn at the edges of an operation
+// touching [lo,hi] on logical row y: a spacer at lo loses its lead, a lead
+// at hi loses its spacer — two glyphs never overlap and spacers never
+// orphan (the differential fuzzer found ECH slicing a wide glyph in half).
+func (s *screen) dissolveBoundary(y, lo, hi int) {
+	base := s.rowBase(y)
+	row := s.cells[base : base+s.w]
+	if lo > 0 && lo < s.w && row[lo].Width == 0 && row[lo-1].Width == 2 {
+		row[lo-1] = blank
+	}
+	if hi >= 0 && hi < s.w-1 && row[hi].Width == 2 && row[hi+1].Width == 0 {
+		row[hi+1] = blank
+	}
+}
+
+// protErase clears [lo,hi] on logical row y, skipping protected cells — the
+// slow path erase ops take once a screen has ever held protection.
+func (s *screen) protErase(y, lo, hi int, fill Cell) {
+	base := s.rowBase(y)
+	py := base / s.w
+	for x := max(lo, 0); x <= hi && x < s.w; x++ {
+		if s.cells[base+x].Attr&AttrProtected == 0 {
+			s.cells[base+x] = fill
+		}
+	}
+	if fill != blank && hi >= s.used[py] {
+		s.used[py] = min(hi+1, s.w)
+	}
+	// blank fills leave used untouched: protected cells may remain, and the
+	// old mark stays a valid (conservative) bound either way
+}
+
 // eraseChars clears n cells from the cursor without moving anything (ECH).
 func (s *screen) eraseChars(n int, fill Cell) {
+	s.wrapNext = false // edit ops cancel a pending wrap (xterm/ghostty)
+	s.dissolveBoundary(s.cy, s.cx, min(s.cx+n-1, s.w-1))
+	if s.protected {
+		s.protErase(s.cy, s.cx, s.cx+n-1, fill)
+		return
+	}
 	for i := 0; i < n && s.cx+i < s.w; i++ {
 		s.put(s.cx+i, s.cy, fill)
 	}
@@ -286,6 +349,24 @@ func (s *screen) eraseChars(n int, fill Cell) {
 
 // eraseLine clears part of the cursor row: 0 cursor→end, 1 start→cursor, 2 all.
 func (s *screen) eraseLine(mode int, fill Cell) {
+	s.wrapNext = false // edit ops cancel a pending wrap (xterm/ghostty)
+	switch mode {
+	case 0:
+		s.dissolveBoundary(s.cy, s.cx, s.w-1)
+	case 1:
+		s.dissolveBoundary(s.cy, 0, s.cx)
+	}
+	if s.protected {
+		switch mode {
+		case 0:
+			s.protErase(s.cy, s.cx, s.w-1, fill)
+		case 1:
+			s.protErase(s.cy, 0, s.cx, fill)
+		default:
+			s.protErase(s.cy, 0, s.w-1, fill)
+		}
+		return
+	}
 	switch mode {
 	case 0:
 		// erase-to-end is the shell redraw workhorse: with a blank fill only
@@ -316,6 +397,26 @@ func (s *screen) eraseLine(mode int, fill Cell) {
 
 // eraseDisplay clears part of the screen: 0 cursor→end, 1 start→cursor, 2/3 all.
 func (s *screen) eraseDisplay(mode int, fill Cell) {
+	s.wrapNext = false // edit ops cancel a pending wrap (xterm/ghostty)
+	if s.protected {
+		switch mode {
+		case 0:
+			s.eraseLine(0, fill)
+			for y := s.cy + 1; y <= s.h-1; y++ {
+				s.protErase(y, 0, s.w-1, fill)
+			}
+		case 1:
+			for y := 0; y < s.cy; y++ {
+				s.protErase(y, 0, s.w-1, fill)
+			}
+			s.eraseLine(1, fill)
+		default:
+			for y := 0; y <= s.h-1; y++ {
+				s.protErase(y, 0, s.w-1, fill)
+			}
+		}
+		return
+	}
 	switch mode {
 	case 0:
 		s.eraseLine(0, fill)

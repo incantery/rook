@@ -74,6 +74,11 @@ const (
 	AttrStrike
 	AttrBlink
 	AttrHidden // concealed
+
+	// AttrProtected marks a cell guarded from erasure (SPA/EPA, DECSCA).
+	// Bit 8: above the wire's attr byte, so it never reaches a renderer —
+	// protection changes what erases do, not what cells look like.
+	AttrProtected
 )
 
 // Token renders the attributes the way the oracle does: one letter per set

@@ -39,6 +39,7 @@ import {keyToBytes} from "./keymap";
 import {BTN_WHEEL_DOWN, BTN_WHEEL_UP, encodeMouse} from "./mouse";
 import type {RendererOptions} from "./renderer";
 import {SbStore} from "./sbstore";
+import {WheelGauge} from "./wheel";
 
 let ready = false;
 
@@ -371,15 +372,14 @@ export class BeamtermGridRenderer implements TermRenderer {
         }
     };
 
+    private wheel = new WheelGauge();
+
     private onWheel = (e: WheelEvent): void => {
-        const notches = Math.max(
-            1,
-            Math.min(5, Math.round(Math.abs(e.deltaY) / (this.cellH || 16))),
-        );
+        const lines = this.wheel.lines(e.deltaY, e.deltaMode, this.cellH);
         // A program tracking the mouse owns the wheel — it scrolls its own view
         // (Claude Code's conversation, a pager). Shift forces local scrollback.
         if (this.mouseLevel >= 2 && !e.shiftKey) {
-            if (this.onInput) {
+            if (this.onInput && lines !== 0) {
                 const rect = this.canvas.getBoundingClientRect();
                 const col = Math.max(
                     1,
@@ -389,8 +389,8 @@ export class BeamtermGridRenderer implements TermRenderer {
                     1,
                     Math.min(this.grid.rows, Math.floor((e.clientY - rect.top) / this.cellH) + 1),
                 );
-                const button = e.deltaY < 0 ? BTN_WHEEL_UP : BTN_WHEEL_DOWN;
-                for (let i = 0; i < notches; i++) {
+                const button = lines < 0 ? BTN_WHEEL_UP : BTN_WHEEL_DOWN;
+                for (let i = 0; i < Math.abs(lines); i++) {
                     this.onInput(
                         encodeMouse({button, col, row, press: true, motion: false, sgr: this.mouseSgr}),
                     );
@@ -399,7 +399,7 @@ export class BeamtermGridRenderer implements TermRenderer {
             e.preventDefault();
             return;
         }
-        this.scrollLines(e.deltaY < 0 ? notches : -notches);
+        if (lines !== 0) this.scrollLines(-lines);
         if (this.sb.max > 0) e.preventDefault();
     };
 
