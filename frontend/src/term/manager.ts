@@ -234,6 +234,11 @@ export class TermManager {
         return this.active?.id ?? null;
     }
 
+    /** Does a window still exist? Chrome prunes per-window state on this. */
+    hasWindow(id: string): boolean {
+        return this.windows.some((w) => w.id === id);
+    }
+
     /** the focused pane's host session — what "the current shell" means
      *  for kill, cwd inheritance, set-root, literal-` input */
     get focusedSessionId(): string | null {

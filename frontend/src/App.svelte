@@ -35,7 +35,8 @@
     import {fly} from "svelte/transition";
     import QuickfixPanel from "./QuickfixPanel.svelte";
     import QuickActionModal from "./QuickActionModal.svelte";
-    import {qf} from "./quickfix.svelte";
+    import {qf, qfStoreFor, setActiveQfWindow, pruneQf} from "./quickfix.svelte";
+    import {chromeFor, pruneChrome} from "./winchrome.svelte";
     import {Jumplist} from "./jumplist";
     import ExploreModal from "./ExploreModal.svelte";
     import {makeExploreContext} from "./exploreContext";
@@ -729,53 +730,13 @@
     }
 
     /** The furniture is PER WINDOW (vim's tab page: each layout carries its
-     *  own tree and list). One set of live state renders; everything else
-     *  parks here, keyed by window id, and window activation swaps. */
-    interface WinChrome {
-        explorerOpen: boolean;
-        explorerDir: string | undefined;
-        qfContext: typeof qf.context;
-        qfCursor: number;
-        qfListOpen: boolean;
-        qfDetailOpen: boolean;
-    }
-    const winChrome = new Map<string, WinChrome>();
-    const CHROME_CLOSED: WinChrome = {
-        explorerOpen: false,
-        explorerDir: undefined,
-        qfContext: null,
-        qfCursor: 0,
-        qfListOpen: false,
-        qfDetailOpen: false,
-    };
-    /** which window the LIVE furniture state belongs to */
-    let chromeWin: string | null = null;
-
-    function applyChrome(c: WinChrome): void {
-        app.explorerOpen = c.explorerOpen;
-        explorerDir = c.explorerDir;
-        qf.context = c.qfContext;
-        qf.cursor = c.qfCursor;
-        qf.listOpen = c.qfListOpen;
-        qf.detailOpen = c.qfDetailOpen;
-    }
-
-    function swapChrome(): void {
-        const now = mgr.activeId ?? null;
-        if (now === chromeWin) return;
-        if (chromeWin != null) {
-            winChrome.set(chromeWin, {
-                explorerOpen: app.explorerOpen,
-                explorerDir,
-                qfContext: qf.context,
-                qfCursor: qf.cursor,
-                qfListOpen: qf.listOpen,
-                qfDetailOpen: qf.detailOpen,
-            });
-        }
-        applyChrome(now != null ? (winChrome.get(now) ?? CHROME_CLOSED) : CHROME_CLOSED);
-        chromeWin = now;
-    }
+     *  own tree and list) — and per-window means per-INSTANCE, not one
+     *  side pane costume-changed between windows: the tree renders one
+     *  FileExplorer per window (winchrome.svelte.ts holds each window's
+     *  open/anchor state), and the quickfix `qf` import is a facade over
+     *  per-window stores (quickfix.svelte.ts). `chrome` is the ACTIVE
+     *  window's tree state, for the keyboard/command paths. */
+    const chrome = $derived(chromeFor(app.activeId));
 
     /** An `re` ask off the session's frame socket (manager.onEditRequest):
      *  vim's contract — take over the pane the command was typed in, give
@@ -807,8 +768,9 @@
             req.dir,
         );
         if (req.tree) {
-            explorerDir = req.dir || undefined;
-            app.explorerOpen = true;
+            const c = chromeFor(at.winId);
+            c.explorerDir = req.dir || undefined;
+            c.explorerOpen = true;
             app.focusZone = "left"; // netrw: you land on the listing
         }
     }
@@ -884,18 +846,25 @@
             return;
         }
         takeovers.set(editID, {at, sessionId});
+        // the takeover's cwd anchors ITS window's tree — a later ,b roots
+        // where `re` was launched from, not wherever some other shell sits
+        if (cwd) chromeFor(at.winId).explorerDir = cwd;
     }
 
     /** The return leg: shell back into the pane, exit code back to `re`.
-     *  The editor's furniture leaves with it — you exited the place. The
-     *  takeover's WINDOW gets cleared, live or parked: a :qa can end a
-     *  takeover in a background window without touching the one you see. */
+     *  The editor's furniture leaves with it — you exited the place. Only
+     *  the takeover's OWN window is touched: a :qa can end a takeover in a
+     *  background window without disturbing the one you see. */
     function finishTakeover(editID: string, code: number): void {
         const t = takeovers.get(editID);
         takeovers.delete(editID);
         if (t) mgr.restoreTermPane(t.at, t.sessionId);
-        if (t == null || t.at.winId === chromeWin) applyChrome(CHROME_CLOSED);
-        else winChrome.set(t.at.winId, CHROME_CLOSED);
+        const c = chromeFor(t?.at.winId ?? app.activeId);
+        c.explorerOpen = false;
+        c.explorerDir = undefined;
+        const s = qfStoreFor(t?.at.winId ?? app.activeId);
+        s.listOpen = false;
+        s.detailOpen = false;
         void api.editDone(editID, code).catch(() => {});
     }
 
@@ -1158,20 +1127,21 @@
 
     /** ` f — nvim's NvimTreeFindFile: open the explorer with its cursor on
      *  the file you're editing (last file pane, else newest buffer). */
-    let explorerRef = $state<{revealPath: (path: string) => void} | null>(null);
-    /** the explorer's root — the shell's cwd when toggled open (` b),
-     *  reset to the workspace root by reveal (` f targets ws-relative) */
-    let explorerDir = $state<string | undefined>();
+    /** one FileExplorer INSTANCE per window — bound by window id, so each
+     *  window's tree keeps its own listing, cursor and expansion */
+    let explorerRefs = $state<Record<string, {revealPath: (path: string) => void} | undefined>>(
+        {},
+    );
     async function revealInExplorer(): Promise<void> {
         const path = jumpPane?.position()?.path ?? app.buffers[0];
         if (!path) {
             flash("no file to reveal — open one first (` e)");
             return;
         }
-        explorerDir = undefined; // the target is workspace-relative
-        app.explorerOpen = true;
+        chrome.explorerDir = undefined; // the target is workspace-relative
+        chrome.explorerOpen = true;
         await tick(); // the pane mounts before the ref exists
-        explorerRef?.revealPath(path);
+        if (app.activeId) explorerRefs[app.activeId]?.revealPath(path);
         app.focusZone = "left";
     }
 
@@ -1500,12 +1470,16 @@
             keys: ", b",
             run: async () => {
                 // editor furniture — the tree has no meaning over a shell
-                if (!app.explorerOpen && !editorFocused()) {
+                if (!chrome.explorerOpen && !editorFocused()) {
                     flash("the file tree lives in the editor — re, ` g or ⌃P first");
                     return;
                 }
-                if (!app.explorerOpen) explorerDir = await shellDir();
-                app.explorerOpen = !app.explorerOpen;
+                // a takeover anchored this window's tree already (its cwd);
+                // otherwise the focused shell's cwd, else the workspace root
+                if (!chrome.explorerOpen && !chrome.explorerDir) {
+                    chrome.explorerDir = await shellDir();
+                }
+                chrome.explorerOpen = !chrome.explorerOpen;
             },
         },
         {
@@ -1762,7 +1736,7 @@
             return;
         }
         if (mgr.focusPane(dir)) return; // moved inside the layout tree
-        if (dir === "left" && app.explorerOpen) app.focusZone = "left";
+        if (dir === "left" && chrome.explorerOpen) app.focusZone = "left";
         else if (dir === "down" && qf.listOpen) app.focusZone = "bottom";
         // else: at the workbench edge with nothing beyond it — stay put
     }
@@ -1795,7 +1769,7 @@
     // A side pane that closes under a focus that lives in it would strand the
     // keyboard in a detached node; hand focus back instead.
     $effect(() => {
-        if (app.focusZone === "left" && !app.explorerOpen) toTerms();
+        if (app.focusZone === "left" && !chrome.explorerOpen) toTerms();
         if (app.focusZone === "bottom" && !qf.listOpen) toTerms();
     });
 
@@ -2095,12 +2069,22 @@
                 }
                 app.workspace = mgr.workspace;
                 if (switched) void loadExplore();
-                swapChrome(); // furniture follows the window (vim tab page)
+                // furniture follows the window (vim tab page): pre-create
+                // each window's chrome/quickfix stores so template reads
+                // never mutate reactive maps mid-render, point the qf
+                // facade at the active window, and drop dead windows' state
+                for (const t of app.tabs) {
+                    chromeFor(t.id);
+                    qfStoreFor(t.id);
+                }
+                setActiveQfWindow(mgr.activeId);
+                pruneChrome((id) => mgr.hasWindow(id));
+                pruneQf((id) => mgr.hasWindow(id));
             },
             workspaceGone: showHome,
             activated: () => {
                 app.dashVisible = false;
-                swapChrome();
+                setActiveQfWindow(mgr.activeId);
             },
         });
         mgr.onEditRequest = (sessionId, workspace, req) =>
@@ -2203,21 +2187,30 @@
         onmonitor={() => void openMonitor()}
     />
     <div class="flex min-h-0 min-w-0 flex-1">
-        <SidePane
-            side="left"
-            visible={app.explorerOpen}
-            title="Explorer"
-            onclose={() => (app.explorerOpen = false)}
-        >
-            <FileExplorer
-                bind:this={explorerRef}
-                {api}
-                workspace={app.workspace}
-                dir={explorerDir}
-                active={app.focusZone === "left"}
-                onopen={(path) => void openFile(path)}
-            />
-        </SidePane>
+        <!-- one tree INSTANCE per window (vim's tab page): each keeps its
+             own listing, cursor and expansion. display:contents lets the
+             active window's SidePane sit in this flex row as if direct;
+             hidden windows' trees stay mounted but display:none. -->
+        {#each app.tabs as t (t.id)}
+            {@const c = chromeFor(t.id)}
+            <div class={t.id === app.activeId ? "contents" : "hidden"}>
+                <SidePane
+                    side="left"
+                    visible={c.explorerOpen}
+                    title="Explorer"
+                    onclose={() => (c.explorerOpen = false)}
+                >
+                    <FileExplorer
+                        bind:this={explorerRefs[t.id]}
+                        {api}
+                        workspace={t.workspace}
+                        dir={c.explorerDir}
+                        active={t.id === app.activeId && app.focusZone === "left"}
+                        onopen={(path) => void openFile(path)}
+                    />
+                </SidePane>
+            </div>
+        {/each}
         <div class="relative min-h-0 min-w-0 flex-1" bind:this={terminalsEl}>
             {#if fatal}
                 <div class="whitespace-pre-wrap p-6 font-mono text-sm text-red">{fatal}</div>
@@ -2247,15 +2240,20 @@
     </div>
     <!-- the quickfix strip: vim's bottom window, full width under the
          workbench row (list + hero coexist — the hero overlays the center
-         while the strip stays visible below it) -->
-    <SidePane
-        side="bottom"
-        visible={qf.listOpen && !!qf.context}
-        title={qf.context?.title ?? "Quickfix"}
-        onclose={() => (qf.listOpen = false)}
-    >
-        <QuickfixPanel active={app.focusZone === "bottom"} />
-    </SidePane>
+         while the strip stays visible below it). The `qf` facade reads the
+         ACTIVE window's store; {#key} remounts on window switch so the
+         slide animation only ever plays for a toggle IN this window, never
+         for another window's state arriving. -->
+    {#key app.activeId}
+        <SidePane
+            side="bottom"
+            visible={qf.listOpen && !!qf.context}
+            title={qf.context?.title ?? "Quickfix"}
+            onclose={() => (qf.listOpen = false)}
+        >
+            <QuickfixPanel active={app.focusZone === "bottom"} />
+        </SidePane>
+    {/key}
 </div>
 
 <!-- the one global bottom strip — both screens end in the same instrument

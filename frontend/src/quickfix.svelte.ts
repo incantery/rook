@@ -14,6 +14,7 @@
 // that could go stale.
 
 import type {Component} from "svelte";
+import {SvelteMap} from "svelte/reactivity";
 
 export interface QfAction {
     /** single key when a quickfix surface holds the keyboard, e.g. "a" */
@@ -99,4 +100,92 @@ class QuickfixState {
     }
 }
 
-export const qf = new QuickfixState();
+// ---- per-window stores behind a stable facade -------------------------
+//
+// The list is editor furniture, and the editor is a place: each WINDOW
+// carries its own QuickfixState (vim's tab page). The `qf` export every
+// consumer already imports becomes a facade over the ACTIVE window's
+// store — same surface, so producers (grep, review, refs, threads,
+// explore) keep writing "the list" and always mean the window in front
+// of the user. App tells the facade which window is active.
+
+const NONE = "(none)";
+const qfStores = new SvelteMap<string, QuickfixState>([[NONE, new QuickfixState()]]);
+let activeQfWin = $state(NONE);
+
+/** Get (or create) a window's own store. Idempotent — App pre-creates on
+ *  its changed() event so template reads never mutate the map mid-render. */
+export function qfStoreFor(id: string | null): QuickfixState {
+    const key = id ?? NONE;
+    let s = qfStores.get(key);
+    if (!s) {
+        s = new QuickfixState();
+        qfStores.set(key, s);
+    }
+    return s;
+}
+
+/** Point the `qf` facade at a window — App calls this on activation. */
+export function setActiveQfWindow(id: string | null): void {
+    activeQfWin = id ?? NONE;
+}
+
+/** Drop stores for windows that no longer exist. */
+export function pruneQf(alive: (id: string) => boolean): void {
+    for (const id of qfStores.keys()) {
+        if (id !== NONE && !alive(id)) qfStores.delete(id);
+    }
+}
+
+/** Same surface as QuickfixState, delegating to the active window's store.
+ *  Getters read reactive state ($state fields + activeQfWin), so deriveds
+ *  and templates re-evaluate on both list changes AND window switches. */
+class QfFacade {
+    private cur(): QuickfixState {
+        return qfStoreFor(activeQfWin);
+    }
+    get context(): QfContext | null {
+        return this.cur().context;
+    }
+    set context(v: QfContext | null) {
+        this.cur().context = v;
+    }
+    get cursor(): number {
+        return this.cur().cursor;
+    }
+    set cursor(v: number) {
+        this.cur().cursor = v;
+    }
+    get listOpen(): boolean {
+        return this.cur().listOpen;
+    }
+    set listOpen(v: boolean) {
+        this.cur().listOpen = v;
+    }
+    get detailOpen(): boolean {
+        return this.cur().detailOpen;
+    }
+    set detailOpen(v: boolean) {
+        this.cur().detailOpen = v;
+    }
+    get ids(): number[] {
+        return this.cur().ids;
+    }
+    get currentId(): number | null {
+        return this.cur().currentId;
+    }
+    set(ctx: QfContext): void {
+        this.cur().set(ctx);
+    }
+    move(d: number): void {
+        this.cur().move(d);
+    }
+    clamp(): void {
+        this.cur().clamp();
+    }
+    act(key: string): Promise<void> {
+        return this.cur().act(key);
+    }
+}
+
+export const qf = new QfFacade();

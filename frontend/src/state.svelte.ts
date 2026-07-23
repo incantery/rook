@@ -59,10 +59,6 @@ class AppState {
      *  than in a pane because the list outlives whichever pane has focus. */
     threads = $state<ThreadInfo[]>([]);
 
-    /** the left side pane: the file explorer. A plain toggle (` b), not
-     *  mode-derived — like VS Code's sidebar it persists across modes. */
-    explorerOpen = $state(false);
-
     /** Review DATA, owned here so every review surface (the quickfix list's
      *  rows, the gate header, the hunk hero) reads one source. Traversal state
      *  (cursor, open/closed) lives in quickfix.svelte.ts — the generic layer;

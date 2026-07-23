@@ -32,12 +32,23 @@ test("two takeovers: keyboard, furniture and :q stay with their editor", async (
     await expect(page.getByText("external · read-only")).toHaveCount(0);
 
     // the keyboard belongs to the SECOND editor now — its furniture toggles
+    const visibleTree = page.locator('[data-side="left"]:visible');
     await page.keyboard.press(",");
     await page.keyboard.press("b");
-    await expect(page.getByText("Explorer").first()).toBeVisible({timeout: 5_000});
+    await expect(visibleTree).toHaveCount(1, {timeout: 5_000});
+
+    // the tree is THIS window's instance: window 1 shows none, and
+    // switching back does not close (or animate) window 2's
+    await page.keyboard.press("`");
+    await page.keyboard.press("1");
+    await expect(visibleTree).toHaveCount(0);
+    await page.keyboard.press("`");
+    await page.keyboard.press("2");
+    await expect(visibleTree).toHaveCount(1);
+
     await page.keyboard.press(",");
     await page.keyboard.press("b");
-    await expect(page.getByText("Explorer")).toHaveCount(0);
+    await expect(visibleTree).toHaveCount(0);
 
     // …and its :q ends THIS takeover only: shell 2 back, editor 1 alive
     await rook.ex(":q");
@@ -49,4 +60,26 @@ test("two takeovers: keyboard, furniture and :q stay with their editor", async (
     // window 1's editor still owns its own loop
     await rook.ex(":q");
     await rook.expectScreen(/first exit=0/);
+});
+
+test("re . after a cd anchors THAT window's tree there", async ({page, rook}) => {
+    test.setTimeout(120_000);
+    const root = await rook.repo({
+        files: {"top.txt": "alpha\n", "sub/inner.txt": "bravo\n"},
+    });
+    await rook.open({name: `anchor-${Date.now()}`, root});
+    await rook.shellReady();
+
+    // cd into a subdir, then enter the editor there — the tree must open,
+    // rooted at the subdir (this was "cannot open the tree at all")
+    await rook.ex("cd sub");
+    await rook.ex(`${RE} .; echo "re exit=$?"`);
+
+    const tree = page.locator('[data-side="left"]:visible');
+    await expect(tree).toHaveCount(1, {timeout: 15_000});
+    await expect(tree).toContainText("inner.txt", {timeout: 10_000});
+
+    await page.keyboard.press("Control+l");
+    await rook.ex(":q");
+    await rook.expectScreen(/re exit=0/);
 });

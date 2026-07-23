@@ -66,14 +66,14 @@ test("re . lands in the editor with the tree, netrw-style", async ({page, rook})
 
     // the editor takes the pane AND the file tree opens beside it
     await expect(page.locator(".editor-mount").first()).toBeVisible({timeout: 15_000});
-    await expect(page.getByText("Explorer").first()).toBeVisible();
+    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(1);
 
     // focus starts on the listing (netrw); ⌃L crosses back into the editor
     await page.keyboard.press("Control+l");
     await rook.ex(":q");
     await rook.expectScreen(/re exit=0/);
     // the editor's furniture leaves with it
-    await expect(page.getByText("Explorer")).toHaveCount(0);
+    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(0);
 });
 
 test("furniture is per window — the tree stays with its editor", async ({page, rook}) => {
@@ -82,19 +82,20 @@ test("furniture is per window — the tree stays with its editor", async ({page,
     await rook.shellReady();
 
     await rook.ex(`${RE} .; echo "re exit=$?"`);
-    await expect(page.getByText("Explorer").first()).toBeVisible({timeout: 15_000});
+    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(1, {timeout: 15_000});
 
     // leaders are dead inside the tree — cross into the editor first,
-    // then open a NEW window: a different place, no tree
+    // then open a NEW window: a different place, no visible tree (the
+    // takeover window's instance stays mounted, display:none)
     await page.keyboard.press("Control+l");
     await page.keyboard.press("`");
     await page.keyboard.press("c");
-    await expect(page.getByText("Explorer")).toHaveCount(0);
+    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(0);
 
     // back to the takeover's window — its tree comes back with it
     await page.keyboard.press("`");
     await page.keyboard.press("1");
-    await expect(page.getByText("Explorer").first()).toBeVisible();
+    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(1);
 
     await rook.ex(":q");
     await rook.expectScreen(/re exit=0/);
