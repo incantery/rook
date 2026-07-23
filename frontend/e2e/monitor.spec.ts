@@ -7,7 +7,8 @@ import {deleteWorkspaces} from "./harness";
 // numbers are the machine's, never a fixture, so assert the shape only.
 test("mission control reports the live process footprint", async ({page}) => {
     await page.goto("/");
-    const chip = page.locator("#home-footprint");
+    // ambient telemetry lives in the global status bar now
+    const chip = page.locator("#sb-footprint");
     await expect(chip).toBeVisible({timeout: 15_000});
 
     // reads as a size — 4.8G / 812M, ⚠-prefixed when WebKit is orphaned
@@ -28,7 +29,7 @@ async function openWorkspace(page: Page, name: string) {
     made.push(name);
     await page.goto("/");
     await expect(page.locator("#home")).toBeVisible();
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();
     await page.getByPlaceholder("e.g. rook-core").fill(name);
@@ -45,6 +46,8 @@ async function openWorkspace(page: Page, name: string) {
 // (the stored series ticks at 30s) — the pane itself must not depend on them.
 test("the footprint chip opens the performance pane", async ({page}) => {
     await openWorkspace(page, "monitor-pane");
+    // the footprint row lives inside the titlebar's usage cluster now
+    await page.locator("#tb-usage").click();
     const chip = page.locator("#tb-footprint");
     await expect(chip).toBeVisible({timeout: 15_000});
     await chip.click();
@@ -59,6 +62,8 @@ test("the footprint chip opens the performance pane", async ({page}) => {
     await expect(pane.locator("table tbody tr").first()).toBeVisible({timeout: 10_000});
 
     // the chip is a singleton opener: clicking again reveals, not duplicates
+    // (the cluster closes itself after opening the pane — reopen it first)
+    await page.locator("#tb-usage").click();
     await chip.click();
     await expect(page.locator('[data-testid="monitor-pane"]')).toHaveCount(1);
 });

@@ -54,7 +54,7 @@ test("webgl boot registers the terminal font for canvas", async ({page}) => {
     for (const status of faces) expect(status).toBe("loaded");
 
     // the pane comes up on the webgl renderer with the fonts in place
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await page.getByPlaceholder("e.g. rook-core").fill("webgl-fonts");
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);

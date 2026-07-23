@@ -72,9 +72,9 @@ describe("framed transport", () => {
         const bytes = encodePalette([1, 2, 3], [4, 5, 6], [7, 8, 9], ansi);
         expect(bytes.length).toBe(1 + 9 + 48);
         expect(bytes[0]).toBe(MSG_PALETTE);
-        expect([...bytes.slice(1, 10)]).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
-        expect([...bytes.slice(10, 13)]).toEqual([0, 0, 0]); // ansi[0]
-        expect([...bytes.slice(-3)]).toEqual([15, 15, 15]); // ansi[15]
+        expect(Array.from(bytes.slice(1, 10))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        expect(Array.from(bytes.slice(10, 13))).toEqual([0, 0, 0]); // ansi[0]
+        expect(Array.from(bytes.slice(-3))).toEqual([15, 15, 15]); // ansi[15]
     });
 });
 

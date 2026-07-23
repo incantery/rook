@@ -29,7 +29,7 @@ async function openWorkspace(page: Page, name: string) {
     made.push(name);
     await page.goto("/");
     await expect(page.locator("#home")).toBeVisible();
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();
     await page.getByPlaceholder("e.g. rook-core").fill(name);

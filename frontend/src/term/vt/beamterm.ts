@@ -392,7 +392,14 @@ export class BeamtermGridRenderer implements TermRenderer {
                 const button = lines < 0 ? BTN_WHEEL_UP : BTN_WHEEL_DOWN;
                 for (let i = 0; i < Math.abs(lines); i++) {
                     this.onInput(
-                        encodeMouse({button, col, row, press: true, motion: false, sgr: this.mouseSgr}),
+                        encodeMouse({
+                            button,
+                            col,
+                            row,
+                            press: true,
+                            motion: false,
+                            sgr: this.mouseSgr,
+                        }),
                     );
                 }
             }

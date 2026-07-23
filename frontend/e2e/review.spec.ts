@@ -47,7 +47,7 @@ test("review pane prepares hunks, dispositions, and moves the gate", async ({pag
     const rows = page.locator("#quickfix-list [role=option]");
     await expect(rows.first()).toBeVisible({timeout: 20_000});
     await expect(rows).toHaveCount(3);
-    await expect(pane).toContainText("3 hunks");
+    await expect(pane).toContainText("0 reviewed · 3 remaining");
 
     // clicking a hunk opens the bespoke detail overlay (NOT Monaco): the hunk
     // as a decision object — analysis, its own diff, disposition.
@@ -56,10 +56,12 @@ test("review pane prepares hunks, dispositions, and moves the gate", async ({pag
     await expect(detail).toBeVisible();
     await expect(detail.getByRole("button", {name: /Approve/})).toBeVisible();
 
-    // approve from the overlay (it holds the keyboard); a hunk goes ✓ in the
-    // list and the gate moves.
+    // approve from the overlay (it holds the keyboard); a hunk's ring fills
+    // green in the list and the gate moves.
     await page.keyboard.press("a");
-    await expect(page.locator("#quickfix-list")).toContainText("✓", {timeout: 10_000});
+    await expect(page.locator('#quickfix-list [data-state="approved"]')).toBeVisible({
+        timeout: 10_000,
+    });
 
     // esc closes the hero and hands the keyboard BACK to the strip
     await page.keyboard.press("Escape");
@@ -97,7 +99,9 @@ test("review pane prepares hunks, dispositions, and moves the gate", async ({pag
     // d defers the current item straight from the modal, which then closes
     await page.keyboard.press("d");
     await expect(qa).toHaveCount(0);
-    await expect(page.locator("#quickfix-list")).toContainText("»", {timeout: 10_000});
+    await expect(page.locator('#quickfix-list [data-state="deferred"]')).toBeVisible({
+        timeout: 10_000,
+    });
 
     // closing the modal hands the keyboard to the STRIP (the surface it acted
     // on): g/j work immediately, no click needed
@@ -113,7 +117,9 @@ test("review pane prepares hunks, dispositions, and moves the gate", async ({pag
     await page.keyboard.press("j");
     await page.keyboard.press("Enter");
     await expect(qa).toHaveCount(0);
-    await expect(page.locator("#quickfix-list")).toContainText("✗", {timeout: 10_000});
+    await expect(page.locator('#quickfix-list [data-state="rejected"]')).toBeVisible({
+        timeout: 10_000,
+    });
 
     await page.screenshot({path: "bin/e2e/review-pane.png", fullPage: true});
 });

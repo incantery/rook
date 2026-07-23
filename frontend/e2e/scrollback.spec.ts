@@ -21,7 +21,7 @@ async function openWorkspace(page: Page, name: string) {
     made.push(name);
     await page.goto("/");
     await expect(page.locator("#home")).toBeVisible();
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();
     await page.getByPlaceholder("e.g. rook-core").fill(name);
@@ -42,7 +42,7 @@ test("pre-attach history pages in from the host ring", async ({page}) => {
     // A rook relaunch as the user performs it: the renderer restarts with an
     // empty cache, the host session (and its ring) lives on.
     await page.reload();
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page
         .locator("#home-workspaces div.group")
         .filter({has: page.getByText("sb-paging", {exact: true})})
@@ -94,7 +94,7 @@ test("webgl: pre-attach history pages in and paints on canvas", async ({page}) =
     await expect.poll(webglText, {timeout: 15_000}).toContain("dn48");
 
     await page.reload();
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page
         .locator("#home-workspaces div.group")
         .filter({has: page.getByText("sb-webgl", {exact: true})})

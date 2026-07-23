@@ -65,7 +65,7 @@
     // the verbs land here, not in a terminal behind it. Also reclaims focus
     // when the quick-action modal closes over this hero.
     $effect(() => {
-        id; // re-focus on hunk swap
+        void id; // re-focus on hunk swap
         if (!app.quickActionOpen) rootEl?.focus();
     });
 

@@ -81,7 +81,7 @@ export class SbStore {
         for (let j = 0; j < ch.lines.length; j++) this.cache.set(ch.start + j, ch.lines[j]);
         // release in-flight pages this reply covered (or that eviction voided)
         const end = ch.start + ch.lines.length;
-        for (const p of [...this.inflight.keys()]) {
+        for (const p of Array.from(this.inflight.keys())) {
             if ((p < end && p + SB_PAGE > ch.start) || p + SB_PAGE <= ch.base) {
                 this.inflight.delete(p);
             }

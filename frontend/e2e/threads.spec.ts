@@ -38,7 +38,7 @@ async function openWorkspace(page: Page, name: string) {
     made.push(name);
     await page.goto("/");
     await expect(page.locator("#home")).toBeVisible();
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();
     await page.getByPlaceholder("e.g. rook-core").fill(name);
@@ -275,8 +275,15 @@ test("an agent's reply arrives without touching the page", async ({page}) => {
     });
     expect(reply.status).toBe(204);
 
+    // arrival proof, hands off: the reply's author header renders on its own
+    await expect(threadPane).toContainText("claude", {timeout: 15_000});
+    // the pane is a short split and Monaco only mounts visible lines — the
+    // body can sit just past the render boundary, so wheel the tail in for
+    // the content assertion (scrolling is not the refetch-on-focus the test
+    // exists to rule out)
+    await threadPane.hover();
+    await page.mouse.wheel(0, 600);
     await expect(threadPane).toContainText("No — the pty owns it", {timeout: 15_000});
-    await expect(threadPane).toContainText("claude");
 });
 
 // The reading half: ,t opens the thread as a read-only BUFFER, :reply answers

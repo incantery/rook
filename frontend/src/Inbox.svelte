@@ -181,7 +181,7 @@
                 <!-- .sel stays as a JS scroll-into-view hook, not a style -->
                 <div
                     class={[
-                        "block cursor-pointer rounded-md px-3 py-2 hover:bg-acc/15",
+                        "block cursor-pointer rounded-md px-3 py-2 hover:bg-fg/6",
                         i === selIndex && "bg-acc/15",
                     ]}
                     class:sel={i === selIndex}

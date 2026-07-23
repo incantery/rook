@@ -8,31 +8,32 @@
 
     let {id}: {id: number; focused: boolean; open: boolean} = $props();
 
-    const GLYPH: Record<string, string> = {
-        proposed: "○",
-        approved: "✓",
-        rejected: "✗",
-        deferred: "»",
-        pending: "…",
+    // Ring vocabulary (the design's three glances): hollow = pending your
+    // eyes, filled = reviewed (the fill color carries the verdict), pulsing
+    // accent = triage in flight. Literal class strings — Tailwind scans
+    // source (never `border-${tone}`).
+    const RING: Record<string, string> = {
+        proposed: "border-lo",
+        approved: "border-grn bg-grn/25",
+        rejected: "border-red bg-red/25",
+        deferred: "border-amber bg-amber/25",
+        pending: "animate-pulse border-acc",
     };
-    // literal class strings — Tailwind scans source (never `text-${tone}`)
-    const TONE: Record<string, string> = {
-        proposed: "text-lo",
-        approved: "text-grn",
-        rejected: "text-red",
-        deferred: "text-amber",
-        pending: "text-acc",
-    };
+    /** reviewed rows strike their path and recede — done is quiet */
+    const DONE = new Set(["approved", "rejected", "deferred"]);
 
     const t = $derived(app.reviewHunks.find((h) => h.id === id));
 </script>
 
 {#if t}
     <span
-        class={"w-3 shrink-0 text-center text-xs transition-colors duration-300 " +
-            (TONE[t.state] ?? "text-lo")}>{GLYPH[t.state] ?? "○"}</span
-    >
-    <span class="shrink-0 truncate font-mono text-[11px] text-fg"
+        data-state={t.state}
+        class={"size-3 shrink-0 rounded-full border-[1.5px] transition-colors duration-300 " +
+            (RING[t.state] ?? "border-lo")}
+    ></span>
+    <span
+        class={"shrink-0 truncate font-mono text-[11px] " +
+            (DONE.has(t.state) ? "text-lo line-through" : "text-fg")}
         >{t.path ?? t.title ?? ""}{#if t.startLine}<span class="text-lo">:{t.startLine}</span
             >{/if}</span
     >

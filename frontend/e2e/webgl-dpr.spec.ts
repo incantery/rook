@@ -1,4 +1,4 @@
-import {expect, test, type Page} from "@playwright/test";
+import {expect, test} from "@playwright/test";
 import * as path from "node:path";
 import {deleteWorkspaces} from "./harness";
 
@@ -21,7 +21,7 @@ test("webgl canvas geometry is dpr-correct", async ({page}) => {
     await page.addInitScript(() => localStorage.setItem("rook.renderer", "webgl"));
     await page.goto("/");
     await expect(page.locator("#home")).toBeVisible();
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await page.getByPlaceholder("e.g. rook-core").fill("webgl-dpr");
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);

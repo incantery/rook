@@ -18,6 +18,7 @@
     import {buildKeymap, CONTEXT_LEADER_KEY, CONTEXT_PREFIX, parseLeader, sigOf} from "./keymap";
     import {app, type Mode} from "./state.svelte";
     import {shellQuote} from "./util";
+    import StatusBar from "./StatusBar.svelte";
     import Titlebar from "./Titlebar.svelte";
     import Dashboard from "./Dashboard.svelte";
     import Home from "./Home.svelte";
@@ -241,7 +242,7 @@
 
     // (re)load the review when its list is open and the workspace changes
     $effect(() => {
-        app.workspace;
+        void app.workspace;
         if (qf.listOpen && qf.context?.id === "review") void loadReview();
     });
 
@@ -1801,6 +1802,29 @@
         }
     }
 
+    /** The current workspace's live status (per-pane agent chips + git) —
+     *  the titlebar's tab dots and the status bar's left/center zones.
+     *  App-screen only: mission control has the richer overview poll, and
+     *  a hidden chrome reading a stale snapshot is worse than none. */
+    async function pollWsStatus(): Promise<void> {
+        if (app.screen !== "app") return;
+        // a snapshot of the PREVIOUS workspace is wrong, not stale — drop it
+        if (app.wsStatus && app.wsStatus.name !== app.workspace) app.wsStatus = null;
+        try {
+            app.wsStatus = await api.workspaceStatus(app.workspace);
+        } catch {
+            // host briefly unreachable — keep the last known state
+        }
+    }
+
+    // eager on entering the app screen or switching workspaces; the 10s
+    // interval only keeps a standing view fresh
+    $effect(() => {
+        void app.screen;
+        void app.workspace;
+        void pollWsStatus();
+    });
+
     async function pollMoney(): Promise<void> {
         try {
             app.usage = await api.usage();
@@ -1868,6 +1892,7 @@
         const attnTimer = setInterval(() => void pollAttention(), 5000);
         const moneyTimer = setInterval(() => void pollMoney(), 30_000);
         const wsTimer = setInterval(() => void pollWorkspaces(), 15_000);
+        const wsStatusTimer = setInterval(() => void pollWsStatus(), 10_000);
 
         initDone = (async () => {
             try {
@@ -1892,6 +1917,7 @@
             clearInterval(attnTimer);
             clearInterval(moneyTimer);
             clearInterval(wsTimer);
+            clearInterval(wsStatusTimer);
         };
     });
 </script>
@@ -1977,6 +2003,10 @@
         <QuickfixPanel active={app.focusZone === "bottom"} />
     </SidePane>
 </div>
+
+<!-- the one global bottom strip — both screens end in the same instrument
+     panel, which is what makes its numbers ambient instead of chrome -->
+<StatusBar />
 
 {#if app.paletteOpen}
     <Palette

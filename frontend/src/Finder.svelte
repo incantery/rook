@@ -225,7 +225,7 @@
                     <!-- .sel stays as a JS scroll-into-view hook, not a style -->
                     <div
                         class={[
-                            "flex cursor-pointer items-baseline gap-2.5 rounded-md py-1.5 pr-3 pl-2.5 hover:bg-acc/10",
+                            "flex cursor-pointer items-baseline gap-2.5 rounded-md py-1.5 pr-3 pl-2.5 hover:bg-fg/6",
                             // the active row gets the same accent rail the
                             // quickfix uses — one vocabulary for "here"
                             i === sel

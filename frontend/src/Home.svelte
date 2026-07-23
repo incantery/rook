@@ -24,6 +24,7 @@
     import {onMount, tick} from "svelte";
 
     import AgentSession from "./AgentSession.svelte";
+    import UsageCluster from "./UsageCluster.svelte";
     import {
         counts,
         cycle,
@@ -39,7 +40,6 @@
         type Tab,
     } from "./deck";
     import type {HostAPI, IssueInfo, IssuesResult, OverviewItem, StageInfo} from "./hostapi";
-    import {footprintOf, footprintTitle, shortBytes, shortWindow} from "./hostapi";
     import {app} from "./state.svelte";
     import {ago, tilde} from "./util";
 
@@ -214,12 +214,6 @@
             groups.reduce((n, g) => n + g.attention, 0),
         ),
     );
-    const worstUsage = $derived(
-        app.usage && app.usage.windows.length
-            ? app.usage.windows.reduce((a, b) => (b.pct > a.pct ? b : a))
-            : null,
-    );
-    const footprint = $derived(footprintOf(app.runtime?.gauges));
 
     /** The card's agent-state chips: ◉ needs you leads, then ● working,
      *  then ◌ quiet. Works from the rollup when the host sends one, from
@@ -687,7 +681,7 @@
     {@const line = agentLine(w)}
     <div
         class={[
-            "group cursor-pointer rounded-xl border border-l-2 border-line/15 px-4 py-3.5 hover:-translate-y-px hover:border-line/40",
+            "group cursor-pointer rounded-lg border border-l-2 border-line/15 px-4 py-3.5 hover:-translate-y-px hover:border-line/40",
             w.worktreeOf ? "bg-acc/[0.035] [border-left-style:dashed]" : "bg-fg/[0.025]",
             attnOf(w) > 0 ? "border-l-amber" : w.worktreeOf ? "border-l-acc/60" : "border-l-acc",
         ]}
@@ -833,19 +827,37 @@
     </div>
 {/snippet}
 
-{#snippet tabBtn(id: Tab, label: string, n: number, tone: string)}
+{#snippet destBtn(id: Tab, label: string, n: number | null, active: boolean)}
+    <!-- a DESTINATION: where you are, so an underline tab, not a filter chip -->
     <button
         class={[
-            "cursor-pointer rounded-md border-0 px-2.5 py-1 font-mono text-xs",
-            deck.tab === id
-                ? "bg-acc text-on-acc font-semibold"
-                : `bg-transparent ${tone} hover:bg-fg/8`,
+            "-mb-px cursor-pointer appearance-none border-x-0 border-b-2 border-t-0 border-solid bg-transparent px-3.5 py-2 text-[13px]",
+            active ? "border-acc font-medium text-fg" : "border-transparent text-dim hover:text-fg",
         ]}
         onclick={() => {
             deck.tab = id;
             deck.cursor = 0;
             focusDeck();
-        }}>{label} {n}</button
+        }}
+        >{label}{#if n !== null}
+            <span class="ml-1 font-mono text-[11px] text-lo">{n}</span>{/if}</button
+    >
+{/snippet}
+
+{#snippet filterBtn(id: Tab, label: string, n: number, tone: string)}
+    <!-- a STATUS FILTER over the agent list: a flat chip, not a place -->
+    <button
+        class={[
+            "cursor-pointer whitespace-nowrap rounded-md border-0 px-2.5 py-1 text-xs",
+            deck.tab === id
+                ? "bg-fg/10 font-medium text-fg"
+                : `bg-transparent ${tone} hover:bg-fg/6`,
+        ]}
+        onclick={() => {
+            deck.tab = id;
+            deck.cursor = 0;
+            focusDeck();
+        }}>{label} <span class="font-mono text-[11px] text-lo">{n}</span></button
     >
 {/snippet}
 
@@ -880,88 +892,62 @@
             <span class="font-mono text-xs text-grn">● {liveShells} live, none blocked</span>
         {/if}
         <span class="flex-1"></span>
-        {#if worstUsage && app.usage}
-            <span
-                id="home-usage"
-                class={[
-                    "rounded-xl border px-2.5 py-0.5 font-mono text-xs",
-                    worstUsage.pct >= 90
-                        ? "border-hot/35 bg-hot/12 text-hot"
-                        : worstUsage.pct >= 70
-                          ? "border-amber/35 bg-amber/12 text-amber"
-                          : "border-dim/30 bg-dim/10 text-dim",
-                ]}
-                title={app.usage.windows
-                    .map((w) => `${w.label}: ${w.pct}% — resets ${w.resets}`)
-                    .join("\n")}
-            >
-                {app.usage.windows.map((w) => `${shortWindow(w.label)} ${w.pct}%`).join(" · ")}
-            </span>
-        {/if}
-        {#if app.costs}
-            <span
-                id="home-costs"
-                class="font-mono text-xs text-dim"
-                title="What claude usage would cost on API billing — absorbed by the subscription"
-            >
-                {[
-                    `claude $${app.costs.todayUsd.toFixed(2)} today`,
-                    `$${app.costs.weekUsd.toFixed(2)} 7d`,
-                    ...(app.costs.drafterTodayUsd > 0
-                        ? [`drafter $${app.costs.drafterTodayUsd.toFixed(2)}`]
-                        : []),
-                ].join(" · ")}
-            </span>
-        {/if}
-        {#if footprint && footprint.total > 0}
-            <span
-                id="home-footprint"
-                class={[
-                    "rounded-xl border px-2.5 py-0.5 font-mono text-xs",
-                    footprint.orphaned
-                        ? "border-amber/35 bg-amber/12 text-amber"
-                        : "border-dim/30 bg-dim/10 text-dim",
-                ]}
-                title={footprintTitle(footprint)}
-            >
-                {footprint.orphaned ? "⚠ " : ""}{shortBytes(footprint.total)}
-            </span>
-        {/if}
+        <!-- telemetry: the one usage cluster; ambient numbers ride the status bar -->
+        <UsageCluster />
     </div>
-    <div
-        id="home-tabs"
-        class="flex h-10 shrink-0 items-center gap-1 border-y border-line/12 bg-fg/[0.02] px-3"
-    >
-        {@render tabBtn("all", "all", tally.all, "text-dim")}
-        {@render tabBtn("needs_input", "needs you", tally.needs_input, "text-amber")}
-        {@render tabBtn("working", "working", tally.working, "text-grn")}
-        {@render tabBtn("quiet", "quiet", tally.quiet, "text-lo")}
-        <span class="mx-1.5 h-4 w-px bg-line/20"></span>
-        {@render tabBtn("queue", "queue", queueRows.length, "text-magenta")}
-        {@render tabBtn("workspaces", "workspaces", items.length, "text-dim")}
-        <span class="flex-1"></span>
+    <!-- destinations vs filters: Agents / Queue / Workspaces are PLACES
+         (underline tabs); the four agent states are a filter row below.
+         The wrapper keeps the #home-tabs id — the deck.tab model underneath
+         is unchanged, only its rendering split in two. -->
+    <div id="home-tabs" class="shrink-0">
+        <div class="flex items-center border-b border-line/12 px-3">
+            {@render destBtn("all", "Agents", null, isAgentTab(deck.tab))}
+            {@render destBtn("queue", "Queue", queueRows.length, deck.tab === "queue")}
+            {@render destBtn("workspaces", "Workspaces", items.length, deck.tab === "workspaces")}
+            <span class="flex-1"></span>
+            <div class="flex items-center gap-2 pb-1.5">
+                <button
+                    class="cursor-pointer rounded-md border border-line/15 bg-transparent px-3 py-1.5 text-xs text-dim hover:bg-fg/8 hover:text-fg"
+                    style="--wails-draggable: no-drag"
+                    title="One-off shell; discarded when it exits"
+                    onclick={() => void scratch()}>scratch shell</button
+                >
+                <button
+                    class="cursor-pointer rounded-md border border-acc/45 bg-acc/8 px-3 py-1.5 text-xs text-acc hover:bg-acc/16"
+                    style="--wails-draggable: no-drag"
+                    onclick={openModal}>+ New workspace</button
+                >
+            </div>
+        </div>
         {#if isAgentTab(deck.tab)}
-            <button
-                class="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 font-mono text-xs text-lo hover:bg-fg/8"
-                style="--wails-draggable: no-drag"
-                title="w — group by workspace"
-                onclick={() => {
-                    deck.grouped = !deck.grouped;
-                    focusDeck();
-                }}>{deck.grouped ? "deck.grouped" : "flat"}</button
-            >
-            <div
-                class="flex items-center gap-1.5 rounded-lg border border-line/15 bg-sunken/60 px-2 py-1"
-                style="--wails-draggable: no-drag"
-            >
-                <span class="font-mono text-xs text-acc">/</span>
-                <input
-                    bind:this={filterEl}
-                    bind:value={deck.query}
-                    class="w-48 border-0 bg-transparent font-mono text-xs text-fg outline-none placeholder:text-lo"
-                    placeholder="state:needs ws:rook"
-                    spellcheck="false"
-                />
+            <div class="flex h-9 items-center gap-1.5 px-3">
+                {@render filterBtn("all", "All", tally.all, "text-dim")}
+                {@render filterBtn("needs_input", "Needs you", tally.needs_input, "text-amber")}
+                {@render filterBtn("working", "Working", tally.working, "text-grn")}
+                {@render filterBtn("quiet", "Quiet", tally.quiet, "text-lo")}
+                <span class="flex-1"></span>
+                <button
+                    class="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 font-mono text-xs text-lo hover:bg-fg/8"
+                    style="--wails-draggable: no-drag"
+                    title="w — group by workspace"
+                    onclick={() => {
+                        deck.grouped = !deck.grouped;
+                        focusDeck();
+                    }}>{deck.grouped ? "grouped" : "flat"}</button
+                >
+                <div
+                    class="flex items-center gap-1.5 rounded-md border border-line/15 bg-sunken/60 px-2 py-1"
+                    style="--wails-draggable: no-drag"
+                >
+                    <span class="font-mono text-xs text-acc">/</span>
+                    <input
+                        bind:this={filterEl}
+                        bind:value={deck.query}
+                        class="w-48 border-0 bg-transparent font-mono text-xs text-fg outline-none placeholder:text-lo"
+                        placeholder="state:needs ws:rook"
+                        spellcheck="false"
+                    />
+                </div>
             </div>
         {/if}
     </div>
@@ -1020,7 +1006,9 @@
                     {/if}
                 </div>
             {:else if deck.tab === "queue"}
-                <div class="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-4">
+                <div
+                    class="mx-auto flex min-h-0 w-full max-w-300 flex-1 flex-col gap-1.5 overflow-y-auto p-4"
+                >
                     {#each queueRows as r (r.ws + r.issue.tracker + r.issue.key)}
                         <div
                             class="flex shrink-0 items-center gap-2.5 rounded-lg border border-line/15 bg-fg/[0.02] px-3 py-2 text-sm"
@@ -1062,24 +1050,9 @@
             {:else}
                 <div
                     id="home-workspaces"
-                    class="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-10 pt-3"
+                    class="mx-auto flex min-h-0 w-full max-w-300 flex-1 flex-col overflow-y-auto px-5 pb-10 pt-3"
                 >
-                    <div class="mb-3.5 flex shrink-0 items-center gap-3">
-                        <span class="flex-1"></span>
-                        <button
-                            class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/10"
-                            style="--wails-draggable: no-drag"
-                            title="One-off shell; discarded when it exits"
-                            onclick={() => void scratch()}>scratch shell</button
-                        >
-                        <button
-                            class="flex cursor-pointer items-center gap-2 rounded-lg border border-line/15 bg-fg/5 px-3 py-1.5 font-[inherit] text-sm font-semibold text-fg hover:bg-fg/10"
-                            style="--wails-draggable: no-drag"
-                            onclick={openModal}
-                        >
-                            <span class="text-sm leading-none text-acc">+</span> New workspace</button
-                        >
-                    </div>
+                    <!-- scratch/new-workspace actions live on the destinations row -->
                     <div
                         id="home-grid"
                         class="grid shrink-0 grid-cols-[repeat(auto-fill,minmax(270px,1fr))] gap-3"
@@ -1175,22 +1148,7 @@
         {/if}
     </div>
 
-    <div
-        id="home-hints"
-        class="flex h-7 shrink-0 items-center gap-4 border-t border-line/12 bg-sunken/60 px-4 font-mono text-[11px] text-lo"
-    >
-        {#if isAgentTab(deck.tab)}
-            <span><span class="text-dim">j/k</span> row</span>
-            <span><span class="text-dim">↵</span> conversation</span>
-            <span><span class="text-dim">R</span> raw</span>
-            <span><span class="text-dim">w</span> group</span>
-            <span><span class="text-dim">/</span> filter</span>
-        {/if}
-        <span><span class="text-dim">n</span> new agent</span>
-        <span><span class="text-dim">gt</span> deck.tab</span>
-        <span class="flex-1"></span>
-        <span><span class="text-acc">⌘K</span> palette</span>
-    </div>
+    <!-- key hints + telemetry live in the global status bar now -->
 </div>
 
 {#if modalOpen}

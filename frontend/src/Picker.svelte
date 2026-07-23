@@ -172,7 +172,7 @@
                 <!-- .sel stays as a JS scroll-into-view hook, not a style -->
                 <div
                     class={[
-                        "flex cursor-pointer items-center gap-3 rounded-md py-2 pr-3 hover:bg-acc/15",
+                        "flex cursor-pointer items-center gap-3 rounded-md py-2 pr-3 hover:bg-fg/6",
                         i === sel && "bg-acc/15",
                         item.nested ? "pl-6" : "pl-3",
                     ]}

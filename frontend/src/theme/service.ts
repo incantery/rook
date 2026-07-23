@@ -19,12 +19,14 @@ import {
     CATPPUCCIN_MOCHA,
 } from "./catppuccin";
 import {buildMonacoTheme} from "./monaco-theme";
+import {NOCTURNE} from "./nocturne";
 import {MATERIAL_OCEAN, type Palette, type Theme} from "./palette";
 
 // Insertion order is what the Settings picker lists, so keep it meaningful:
 // rook's own default first, then each family light→dark.
 const BUILTINS: Record<string, Theme> = {
     [MATERIAL_OCEAN.name]: MATERIAL_OCEAN,
+    [NOCTURNE.name]: NOCTURNE,
     [ONE_DARK.name]: ONE_DARK,
     [ONE_LIGHT.name]: ONE_LIGHT,
     [CATPPUCCIN_LATTE.name]: CATPPUCCIN_LATTE,

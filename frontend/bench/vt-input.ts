@@ -47,5 +47,4 @@ window.applyRow = (y, text) => {
     const f: Frame = {cursor: {x: 0, y, visible: true}, scroll: 0, rows: [{y, runs: [run(text)]}]};
     renderer.applyFrame(f);
 };
-window.rowText = (y) =>
-    (container.querySelectorAll(".vt-row")[y]?.textContent || "").trimEnd();
+window.rowText = (y) => (container.querySelectorAll(".vt-row")[y]?.textContent || "").trimEnd();

@@ -84,7 +84,7 @@ test("lands needs-you first, whatever order the host sent", async ({page}) => {
 test("gt cycles tabs and Tab is left alone for focus", async ({page}) => {
     await page.locator("#home").press("g");
     await page.locator("#home").press("t");
-    await expect(page.locator("#home-tabs")).toContainText("needs you 1");
+    await expect(page.locator("#home-tabs")).toContainText("Needs you 1");
     await expect(page.locator("#home-rows")).not.toContainText("Rate limiting");
 
     await page.locator("#home").press("g");
@@ -96,7 +96,7 @@ test("the row verbs do nothing on a tab with no rows to act on", async ({page}) 
     // The bug this pins: the cursor used to keep walking the full agent list
     // behind the workspace grid, so ↵ here opened the conversation of a row
     // you never selected and could not see.
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.locator("#home").press("Enter");
     await expect(page.locator("#home")).toBeVisible();
     await page.locator("#home").press("R");

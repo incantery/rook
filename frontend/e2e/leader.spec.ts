@@ -45,7 +45,7 @@ async function openWorkspace(page: Page, name: string) {
     made.push(name);
     await page.goto("/");
     await expect(page.locator("#home")).toBeVisible();
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();
     await page.getByPlaceholder("e.g. rook-core").fill(name);
@@ -122,9 +122,9 @@ test("mission control takes focus off the terminal", async ({page}) => {
     await shown(page, ".vt-screen").click();
     // the terminal really has it, or the assertion below proves nothing. The
     // renderer's focusable element is the .vt-screen div (no hidden textarea).
-    expect(
-        await page.evaluate(() => document.activeElement?.classList.contains("vt-screen")),
-    ).toBe(true);
+    expect(await page.evaluate(() => document.activeElement?.classList.contains("vt-screen"))).toBe(
+        true,
+    );
 
     await page.keyboard.press("`");
     await page.keyboard.press("h");

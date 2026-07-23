@@ -24,6 +24,20 @@
 - [ ] The file tree should be based on CWD rather than workspace I think, but let's dicsuss.
 - [ ] When dashboard or mission control is open, input keeps going into the most recently open terminal
 
+# UI refinement (2026-07-22 pass 1 — from the Claude Design "Rook Refinement" boards)
+
+- [x] Nocturne theme (src/theme/nocturne.ts): the boards' palette as a builtin — deep indigo elevation ladder (sunken→bg→raise→overlay), blurple accent, muted semantic hues, full ANSI + syntax. Selectable in Settings → Appearance.
+- [x] Chrome B titlebar: named deck tabs (mono number + focused-pane name + agent state dot), flat workspace chip, ONE capsule (the "N needs you" attention pill), telemetry collapsed into the "usage ▾" cluster (usage bars + costs + footprint dropdown).
+- [x] Global status bar (StatusBar.svelte): context-sensitive bottom strip on both screens — git branch/dirty (app) or host link + key hints (home) · review progress > agent-working > asks (center) · costs + worst usage window + footprint (right). Fed by a new 10s workspaceStatus poll (app screen only).
+- [x] Review language: "N reviewed · M remaining" + progress bar (was "N of M hunks blocking"); rows use the ring vocabulary (hollow pending / filled verdict-colored / pulsing triage) with struck paths when done.
+- [x] Mission control: destinations (Agents/Queue/Workspaces, underline tabs) split from status filters (All/Needs you/Working/Quiet chips); scratch/new-workspace actions on the destinations row; queue + workspaces content constrained to 1200px.
+- [x] Selection grammar: accent tint + edge = selected ONLY; hovers are neutral washes (Finder/Palette/Picker/Inbox).
+- [ ] Editor status-bar zones: Ln/Col, language, LSP state need Monaco cursor plumbing to the store.
+- [ ] Agent-pane status-bar zone: model · ctx% · ±lines · auto-mode when a claude pane is focused — rook already reads the jsonl; feed it to the bar.
+- [ ] Titlebar height: boards say 42px; we're at 52 (h-13) pending traffic-light alignment check on macOS.
+- [ ] Hover suppression while keyboard nav is live (boards 1d: "exactly one row reads as selected").
+- [ ] Review drawer: visible resize handle at the strip's top edge (boards 1e).
+
 # Emulator (internal/vt)
 
 - [x] libghostty-vt differential oracle (2026-07-22): `make ghostty-lib` + `go test -tags ghostty ./internal/host/ -run Ghostty`; fixed 16 conformance bug classes on day one (charset/ACS, alt-screen cursor, tab stops, DECALN, REP, wide-pair tearing, combining-mark widths, pending-wrap semantics, …). Benchmarks: their parser 4–6× faster (SIMD — real headroom), our pipeline 4× faster (their per-cell FFI read path drowns it). PERF.md has the table.

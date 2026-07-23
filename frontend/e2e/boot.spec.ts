@@ -21,6 +21,6 @@ test("renders mission control", async ({page}) => {
     // an empty state here proves XDG_DATA_HOME really is isolated. A failure
     // means the tests are pointed at your real records — read serve.sh. It
     // lives behind the workspaces tab now; the canary is the same one.
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await expect(page.locator("#home-workspaces")).toContainText("No workspaces yet");
 });

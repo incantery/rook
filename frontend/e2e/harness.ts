@@ -81,7 +81,7 @@ export async function hostFetch(route: string, init?: RequestInit): Promise<Resp
 export async function deleteWorkspaces(page: Page, names: string[]): Promise<void> {
     for (const name of names) {
         await page.goto("/");
-        await page.getByRole("button", {name: /^workspaces/}).click();
+        await page.getByRole("button", {name: /^workspaces/i}).click();
         const card = page
             .locator("#home-workspaces div.group")
             .filter({has: page.getByText(name, {exact: true})});
@@ -167,7 +167,7 @@ export class Rook {
         this.workspaces.push(name);
         await this.page.goto("/");
         await expect(this.page.locator("#home")).toBeVisible();
-        await this.page.getByRole("button", {name: /^workspaces/}).click();
+        await this.page.getByRole("button", {name: /^workspaces/i}).click();
         await this.page.getByRole("button", {name: "New workspace"}).click();
         await expect(this.page.locator("#ws-modal")).toBeVisible();
         await this.page.getByPlaceholder("e.g. rook-core").fill(name);
@@ -214,7 +214,7 @@ export class Rook {
      *  running is still running; the attach replays the daemon's ring. */
     async reenter(name: string): Promise<void> {
         await this.page.reload();
-        await this.page.getByRole("button", {name: /^workspaces/}).click();
+        await this.page.getByRole("button", {name: /^workspaces/i}).click();
         await this.page
             .locator("#home-workspaces div.group")
             .filter({has: this.page.getByText(name, {exact: true})})

@@ -53,7 +53,7 @@ test("time cat 150MB at 6K-fullscreen geometry", async ({page}) => {
     made.push("cat-bench");
     await page.goto("/");
     await expect(page.locator("#home")).toBeVisible();
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await page.getByPlaceholder("e.g. rook-core").fill("cat-bench");
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);

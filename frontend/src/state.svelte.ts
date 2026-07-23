@@ -12,6 +12,7 @@ import type {
     ThreadInfo,
     UsageSnapshot,
     WorkspaceInfo,
+    WorkspaceStatus,
 } from "./hostapi";
 import type {TabInfo} from "./term/manager";
 
@@ -133,6 +134,10 @@ class AppState {
 
     // host polls (App.svelte owns the timers)
     attention = $state<AttentionItem[]>([]);
+    /** the CURRENT workspace's live status — per-pane agent chips + git.
+     *  Polled only while the app screen is up; feeds the titlebar tab dots
+     *  and the status bar. Null until the first poll lands (fail open). */
+    wsStatus = $state<WorkspaceStatus | null>(null);
     usage = $state<UsageSnapshot | null>(null);
     costs = $state<CostsSnapshot | null>(null);
     runtime = $state<RuntimeSnapshot | null>(null);

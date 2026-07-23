@@ -17,7 +17,7 @@ async function openWorkspace(page: Page, name: string) {
     made.push(name);
     await page.goto("/");
     await expect(page.locator("#home")).toBeVisible();
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();
     await page.getByPlaceholder("e.g. rook-core").fill(name);
@@ -135,7 +135,9 @@ test("telescope keys: editor ⌃P/⌃G/⌃S, grep ⌃Q → quickfix, ` f reveal"
     // (the vim experience) — names shorten, opens still resolve ws-relative.
     // The terminal lives in strip window 1 (the editor minted window 2) —
     // switch via the strip button, the prefix is dropped inside side panes.
-    const stripOne = page.getByRole("button", {name: "1", exact: true});
+    // named tabs: the accessible name is now "1 <pane name>", so match the
+    // leading window number instead of the exact digit
+    const stripOne = page.getByRole("button", {name: /^1\b/});
     await stripOne.click();
     const term = shown(page, ".vt-screen");
     // The shell may not be reading yet — a cold sandbox pays oh-my-zsh's

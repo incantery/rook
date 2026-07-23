@@ -8,19 +8,19 @@ import {defineConfig} from "@playwright/test";
 const PORT = Number(process.env.BENCH_PORT) || 9334;
 
 export default defineConfig({
-	testDir: "./bench",
-	testMatch: /.*\.spec\.ts/,
-	workers: 1,
-	reporter: "list",
-	use: {
-		baseURL: `http://127.0.0.1:${PORT}`,
-	},
-	webServer: {
-		command: `pnpm vite --port ${PORT} --strictPort`,
-		url: `http://127.0.0.1:${PORT}/bench/vt-render.html`,
-		timeout: 60_000,
-		reuseExistingServer: !process.env.CI,
-		stdout: "ignore",
-		stderr: "pipe",
-	},
+    testDir: "./bench",
+    testMatch: /.*\.spec\.ts/,
+    workers: 1,
+    reporter: "list",
+    use: {
+        baseURL: `http://127.0.0.1:${PORT}`,
+    },
+    webServer: {
+        command: `pnpm vite --port ${PORT} --strictPort`,
+        url: `http://127.0.0.1:${PORT}/bench/vt-render.html`,
+        timeout: 60_000,
+        reuseExistingServer: !process.env.CI,
+        stdout: "ignore",
+        stderr: "pipe",
+    },
 });

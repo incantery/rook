@@ -28,7 +28,7 @@ async function openExperimental(page: Page) {
 
 async function openWorkspace(page: Page, name: string) {
     made.push(name);
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();
     await page.getByPlaceholder("e.g. rook-core").fill(name);
@@ -58,7 +58,7 @@ test("the experimental renderer toggle swaps and swaps back", async ({page}) => 
     await page.getByRole("button", {name: "Reload to apply"}).click();
 
     await expect(page.locator("#home")).toBeVisible({timeout: 15_000});
-    await page.getByRole("button", {name: /^workspaces/}).click();
+    await page.getByRole("button", {name: /^workspaces/i}).click();
     await page
         .locator("#home-workspaces div.group")
         .filter({has: page.getByText("exp-toggle", {exact: true})})
