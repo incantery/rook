@@ -155,12 +155,23 @@ export class HostAPI {
      *  the session's end. `more` means older records exist: page by passing
      *  the first record's offset straight back as `before`.
      *
+     *  `after` is the incremental poll: only records past that offset (the
+     *  caller's newest), usually an empty list plus the status chip. An OLD
+     *  host ignores it and returns the full window — callers must filter to
+     *  offsets past their cursor so both hosts converge (fail open).
+     *
      *  NOT /agents/{id}/context — that serves the drafter's 12-entry ring
      *  capped at 700 chars. It is a prompt, not a conversation. */
-    async agentTranscript(id: string, limit?: number, before?: number): Promise<TranscriptResult> {
+    async agentTranscript(
+        id: string,
+        limit?: number,
+        before?: number,
+        after?: number,
+    ): Promise<TranscriptResult> {
         const q = new URLSearchParams();
         if (limit) q.set("limit", String(limit));
         if (before) q.set("before", String(before));
+        if (after) q.set("after", String(after));
         const qs = q.toString();
         const path = `/agents/${encodeURIComponent(id)}/transcript${qs ? `?${qs}` : ""}`;
         return (await this.req(path)).json();

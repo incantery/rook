@@ -49,10 +49,33 @@
 
     async function refresh() {
         try {
-            const r = await api.agentTranscript(session, WINDOW);
-            records = r.records;
-            status = r.status ?? null;
-            more = r.more;
+            const last = records.at(-1)?.offset;
+            if (last === undefined) {
+                // first load (or retarget): the tail window
+                const r = await api.agentTranscript(session, WINDOW);
+                records = r.records;
+                status = r.status ?? null;
+                more = r.more;
+            } else {
+                // incremental: only what landed past our newest record. An
+                // old host ignores `after` and returns the full window — the
+                // offset filter makes both converge (fail open, the
+                // host-outlives-the-app rule). This poll used to refetch the
+                // whole window every 2s, which on a long session was
+                // megabytes per tick — the thing that ate the webview.
+                const r = await api.agentTranscript(session, WINDOW, undefined, last);
+                const fresh = r.records.filter((x) => x.offset > last);
+                if (fresh.length > 0) {
+                    records = [...records, ...fresh];
+                    // a session watched all day accretes forever — keep the
+                    // live view bounded; the reader pages up for history
+                    if (records.length > WINDOW * 3) {
+                        records = records.slice(-WINDOW * 2);
+                        more = true;
+                    }
+                }
+                status = r.status ?? status;
+            }
             err = "";
         } catch (e) {
             // A 404 is not "the host is down". rook-host outlives the app,
@@ -110,7 +133,13 @@
     });
 
     $effect(() => {
-        const t = setInterval(() => void refresh(), 2000);
+        const t = setInterval(() => {
+            // panes in hidden windows stay MOUNTED (visibility is a display
+            // toggle, never {#if}) — without this gate every conversation
+            // pane you ever opened keeps polling behind its wall forever
+            if (document.hidden || (scroller && scroller.offsetParent === null)) return;
+            void refresh();
+        }, 2000);
         return () => clearInterval(t);
     });
 

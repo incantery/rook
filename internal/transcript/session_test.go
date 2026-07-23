@@ -92,6 +92,62 @@ func TestReadSessionWindow(t *testing.T) {
 	}
 }
 
+// The incremental poll: a caller holding the tail asks for records past its
+// newest offset and usually gets nothing — the whole point (the full-window
+// poll it replaces re-served megabytes every 2s on a long session).
+func TestReadSessionAfter(t *testing.T) {
+	dir := t.TempDir()
+	var b strings.Builder
+	for i := range 6 {
+		fmt.Fprintf(&b, `{"type":"user","uuid":"u%d","message":{"role":"user","content":"m%d"}}`+"\n", i, i)
+	}
+	path := filepath.Join(dir, "s.jsonl")
+	writeSession(t, dir, "s.jsonl", b.String())
+
+	tail, _, err := ReadSession(path, 4, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := tail[len(tail)-1].Offset
+
+	// caught up: nothing new
+	fresh, more, err := ReadSessionAfter(path, 4, last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 0 || more {
+		t.Fatalf("caught up: got %d lines (more=%v), want none", len(fresh), more)
+	}
+
+	// two appends land; the poll returns exactly them, in order
+	writeSession(t, dir, "s.jsonl",
+		b.String()+
+			`{"type":"user","uuid":"u6","message":{"role":"user","content":"m6"}}`+"\n"+
+			`{"type":"user","uuid":"u7","message":{"role":"user","content":"m7"}}`+"\n")
+	fresh, more, err = ReadSessionAfter(path, 4, last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 2 || fresh[0].Record.UUID != "u6" || fresh[1].Record.UUID != "u7" {
+		t.Fatalf("fresh = %+v, want u6,u7", fresh)
+	}
+	if more {
+		t.Error("more = true with the tail fully delivered")
+	}
+
+	// more new records than the limit: capped at the FRONT (no gaps), more set
+	fresh, more, err = ReadSessionAfter(path, 1, last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 1 || fresh[0].Record.UUID != "u6" {
+		t.Fatalf("capped fresh = %+v, want just u6", fresh)
+	}
+	if !more {
+		t.Error("more = false, but u7 remains past the cap")
+	}
+}
+
 func TestReadSessionShorterThanWindow(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s.jsonl")

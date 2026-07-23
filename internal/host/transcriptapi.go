@@ -118,12 +118,19 @@ func toWire(ln transcript.Line) wireRecord {
 	return out
 }
 
-// handleAgentTranscript serves GET /agents/{id}/transcript?limit=&before=.
+// handleAgentTranscript serves GET /agents/{id}/transcript?limit=&before=&after=.
 //
 // Records come back oldest-first within the window, which ends at `before`
 // (exclusive) or at the end of the session. `more` reports whether older
 // records exist — page by passing the first record's offset back as
 // `before`.
+//
+// `after` is the OTHER direction: the incremental poll. A view that already
+// holds the tail passes its last record's offset and gets only what landed
+// since — usually nothing but the status chip, at the cost of a stat. The
+// full-window poll it replaces re-served (and re-parsed) megabytes every
+// tick on a long session; that is what ate the webview. `after` wins over
+// `before` when both are sent.
 //
 // A session with no transcript on disk is 404, not an error: rook shows
 // agent sessions it correlated from a tree it does not own, and a file can
@@ -136,8 +143,15 @@ func (h *Host) handleAgentTranscript(w http.ResponseWriter, r *http.Request, id 
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 
-	lines, more, err := transcript.ReadSession(path, limit, before)
+	var lines []transcript.Line
+	var more bool
+	if after > 0 {
+		lines, more, err = transcript.ReadSessionAfter(path, limit, after)
+	} else {
+		lines, more, err = transcript.ReadSession(path, limit, before)
+	}
 	if err != nil {
 		http.Error(w, "read transcript: "+err.Error(), http.StatusInternalServerError)
 		return

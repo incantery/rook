@@ -113,6 +113,35 @@ func ReadSession(path string, limit int, before int64) (lines []Line, more bool,
 	return all, false, nil
 }
 
+// ReadSessionAfter returns complete records strictly after the record at byte
+// offset `after`, oldest-first — the incremental poll for a view that already
+// holds the tail. It SEEKS to the cursor rather than re-parsing the file, so
+// a quiet 2s poll costs a stat and zero bytes; that is the whole point (a
+// session view refetching its full window every tick was megabytes per poll
+// on a long transcript). `more` means newer records beyond limit remain —
+// capped at the FRONT, so the caller never receives a gap.
+func ReadSessionAfter(path string, limit int, after int64) (lines []Line, more bool, err error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	t := NewTail(path)
+	t.off = after
+	all, err := t.Read()
+	if err != nil {
+		return nil, false, err
+	}
+	// the record at `after` itself is the caller's newest — drop it. (A
+	// replaced/rotated file resets the tail to zero instead; the caller's
+	// offset-filter makes that converge.)
+	if len(all) > 0 && all[0].Offset == after {
+		all = all[1:]
+	}
+	if len(all) > limit {
+		return all[:limit], true, nil
+	}
+	return all, false, nil
+}
+
 // Watcher follows every live session in the transcript tree and emits their
 // records.
 //
