@@ -75,10 +75,17 @@ func (h *Host) handleSessionEdit(w http.ResponseWriter, r *http.Request, s *sess
 			return
 		}
 		if st.IsDir() {
-			http.Error(w, p+" is a directory (open a file, or bare `re` for the finder)", http.StatusBadRequest)
-			return
+			// vim's `nvim .`: a directory arg anchors the finder there —
+			// same as bare `re`, scoped. Outside the workspace the finder
+			// can't reach, so the scope falls back to the shell's cwd.
+			if rel := relUnder(root, abs); rel != "" {
+				payload.Cwd = rel
+			} else if abs == root {
+				payload.Cwd = ""
+			}
+			continue
 		}
-		if rel := relUnder(root, abs); rel != "" || abs == root {
+		if rel := relUnder(root, abs); rel != "" {
 			payload.Paths = append(payload.Paths, rel)
 		} else {
 			// outside the workspace: the file endpoint serves absolute

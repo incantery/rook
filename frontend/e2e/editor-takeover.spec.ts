@@ -57,6 +57,17 @@ test("bare re opens the finder; Escape cancels back to the shell", async ({page,
     await rook.expectScreen(/re exit=0/);
 });
 
+test("re . is nvim muscle memory — a directory arg opens the finder", async ({page, rook}) => {
+    const root = await rook.repo({files: {"sub/inner.txt": "alpha\n"}});
+    await rook.open({name: `re-dot-${Date.now()}`, root});
+    await rook.shellReady();
+
+    await rook.ex(`${RE} .; echo "re exit=$?"`);
+    await expect(page.getByPlaceholder("Open file…")).toBeVisible({timeout: 15_000});
+    await page.keyboard.press("Escape");
+    await rook.expectScreen(/re exit=0/);
+});
+
 test("re outside a rook pty fails with a message, not a hang", async ({rook}) => {
     // Strip ROOK_SESSION explicitly: when this suite itself runs inside a
     // rook terminal (dogfood), the runner inherits a real one.
