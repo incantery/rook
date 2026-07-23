@@ -8,6 +8,5 @@ export {
 
 export type {
     Config,
-    LSPServer,
-    Patch
+    LSPServer
 } from "./models.js";

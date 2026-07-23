@@ -66,11 +66,13 @@ keybind = ==session.next
 keybind = nonsense
 `)
 	cfg := Load()
+	// legacy bare keys normalize to the explicit <leader> notation the
+	// TOML format speaks; chords pass through untouched
 	want := map[string]string{
-		"m":           "workspace.manager",
+		"<leader>m":   "workspace.manager",
 		"cmd+shift+k": "palette.toggle",
-		"h":           "",
-		"=":           "session.next",
+		"<leader>h":   "",
+		"<leader>=":   "session.next",
 	}
 	if len(cfg.Keybinds) != len(want) {
 		t.Fatalf("keybinds: %v", cfg.Keybinds)

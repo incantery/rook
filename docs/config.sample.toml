@@ -1,0 +1,251 @@
+# rook config — the complete, documented surface (TOML, the canonical format).
+#
+# Copy this to ~/.config/rook/config.toml (XDG_CONFIG_HOME is respected) and
+# uncomment what you want to change. Every key below is set to its actual
+# default and commented out, so dropping this file in verbatim is a no-op.
+#
+# When this file exists it fully shadows the legacy flat file (config, no
+# extension) — the legacy format keeps working only until you adopt this one.
+# Unknown keys are ignored, so a newer sample than your build degrades
+# quietly. The file is re-read on every page reload — no restart needed to
+# pick up an edit. A file that fails to parse applies nothing (you keep pure
+# defaults, never a half-read config).
+#
+# TOML note: top-level keys must appear ABOVE the first [section] header —
+# anything below one belongs to that section.
+#
+# Secrets are NOT managed here (see the bottom of this file).
+
+
+# ── Fonts and window chrome ──────────────────────────────────────────────
+
+# Terminal font. A Nerd Font gives you the powerline/devicon glyphs.
+# font-family = "Hack Nerd Font Mono"
+
+# Point size.
+# font-size = 18
+
+# Window background opacity, 0 (transparent) to 1 (opaque).
+# background-opacity = 0.95
+
+# Color theme (built-in). One of: Material Ocean (default), One Dark, One Light.
+# theme = "Material Ocean"
+
+# Inner padding between the terminal grid and the window edge, in points.
+# window-padding-x = 4
+# window-padding-y = 4
+
+
+# ── Coder ────────────────────────────────────────────────────────────────
+
+# The CLI the host types into spawned task windows (spawn drafts, the
+# conflict-resolve chip, workflow stages).
+# coder = "claude"
+
+
+# ── Workflow: staged review pipeline (host-read) ─────────────────────────
+
+# Slash commands, run in sequence after a worktree's coding agent opens its
+# PR — each spawned in its own window. Empty (or absent) means off.
+# workflow = ["/security-review", "/review"]
+
+
+# ── Workspace visibility filter (presentation-only) ──────────────────────
+
+# Workspace names to show in the dashboard, mission control, and /overview.
+# When set, only these workspaces (and any worktree carved from one of them)
+# appear. Useful for demos and screenshots. Not access control: registration
+# and per-workspace endpoints are unaffected. Absent means every workspace
+# shows.
+# workspace-allow = ["rook", "dora"]
+
+
+# ── The leader ───────────────────────────────────────────────────────────
+
+# The app leader (vim's mapleader, tmux's prefix): the key that arms the
+# workbench's <leader> bindings. A single key (the backtick default) or a
+# modifier chord — set it to "ctrl+b" for the tmux default. Press it twice
+# to pass it through to the terminal.
+# leader = "`"
+
+
+# ── Keybindings (app scope) ──────────────────────────────────────────────
+#
+# Triggers come in three forms:
+#   "<leader>m"     fires after the leader — the explicit form of what the
+#                   legacy file wrote as a bare `m`
+#   "cmd+shift+k"   a modifier chord, fires directly
+#   "K" / "gd"      a bare key or sequence, fires directly without the
+#                   leader (dispatch is editor-scope only for now)
+# An empty command ("") unbinds a default. The frontend owns validation and
+# fails open: unknown commands, unparseable triggers, and reserved ones
+# (digits, the backtick escape) are ignored.
+
+[keybinds]
+# "<leader>m" = "workspace.manager"
+# "cmd+shift+k" = "palette.toggle"
+
+# ctrl+h/j/k/l move between panes, vim-tmux-navigator style, and cross into
+# an open side pane at the layout's edge. A full-screen app keeps them —
+# while vim, less or htop is up they go to the app, not to rook — but at a
+# SHELL PROMPT rook takes them, so ctrl+l no longer clears the screen and
+# ctrl+h no longer backspaces. Unbind either to take it back (` and the
+# arrows still navigate, in vim too):
+# "ctrl+l" = ""
+# "ctrl+h" = ""
+
+
+# ── The editor scope ─────────────────────────────────────────────────────
+#
+# The editor carries its own leader (vim's maplocalleader to the app's
+# mapleader) and its own keybinds, keyed by vim mode — [editor.keybinds.
+# normal] is nmap, .visual is vmap, .insert is imap. Editor bindings only
+# act while an editor pane has focus. Bare sequences ("gd", "K") fire
+# directly in the named mode; "<leader>q" fires after the editor leader.
+
+[editor]
+# leader = ","
+
+[editor.keybinds.normal]
+# "<leader>q" = "quickfix.toggle"
+# "<leader>a" = "quickaction.toggle"
+# "<leader>c" = "editor.comment"
+# "<leader>?" = "editor.ask"
+# "<leader>t" = "threads.find"
+
+[editor.keybinds.visual]
+
+[editor.keybinds.insert]
+
+
+# ── Built-in agent (opt-in; see docs/agent.md) ───────────────────────────
+
+[agent]
+# The whole agent feature is off until you turn it on.
+# enabled = false
+
+# Which model backend the drafter runs on.
+#   "auto"    prefer claude when it's on PATH, else an OpenAI key (default)
+#   "claude"  shell out to the coder CLI you already have. No API key, no
+#             setup: rook already needs claude to have anything to watch.
+#             Costs the drafter your subscription's rate limit alongside
+#             your coding sessions.
+#   "openai"  an API key (rookctl set-openai-key). Keeps the drafter's
+#             spend off your subscription — two tiers, two billing models.
+# Either way the drafter only ever proposes; you send.
+# engine = "auto"
+
+# Model the drafter runs. Empty means the engine's own default: haiku for
+# claude, gpt-5.4-nano for openai.
+# model = ""
+
+# Hard daily spend ceiling for the agent, in US dollars. Note that on the
+# claude engine with a subscription, spend is what the calls WOULD have
+# cost via the API — the cap reads as a rate limiter, not a bill.
+# daily-cap-usd = 1.00
+
+
+# ── Jira issue queue (host-read) ─────────────────────────────────────────
+#
+# url and email are global. A workspace opts into the queue with its
+# jira-project key (see [workspaces.<name>] below). The API token is NOT
+# set here — it lives in the keychain (see the secrets note at the bottom).
+# Absent leaves the queue off.
+
+[jira]
+# Your Jira site.
+# url = "https://your-org.atlassian.net"
+
+# The account email the token belongs to.
+# email = "you@example.com"
+
+# Overrides the default issue query. Absent, rook uses its built-in JQL.
+# jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
+
+
+# ── Per-workspace overrides ──────────────────────────────────────────────
+#
+# One [workspaces.<name>] table per workspace, named for the workspace it
+# configures. A workspace simply has no override until its table names one.
+
+[workspaces.myproject]
+# Opt this workspace into the Jira queue by naming its Jira project key.
+# jira-project = "KEY"
+
+# The worktree-branch prefix. Used verbatim, so bring your own trailing
+# separator. Absent falls back to rook/. An explicitly EMPTY value ("")
+# means no prefix at all, so branches match a CI naming scheme exactly —
+# issue FIX-123 "fix the drop down spacing" then lands on branch
+# FIX-123-fix-the-drop-down-spacing.
+# branch-prefix = "seth/"
+
+# What joins a spawning issue's key to its title in that branch. Defaults
+# to a hyphen — issue FOO-123 "bar baz" lands on rook/FOO-123-bar-baz — so
+# set "/" for the scheme that reads rook/FOO-123/bar-baz. Branch names
+# only: the workspace is a directory too, and stays FOO-123-bar-baz either
+# way.
+# branch-delimiter = "/"
+
+# Override the global workflow for this workspace. An explicitly EMPTY list
+# ([]) opts this workspace out of the global pipeline entirely; a non-empty
+# list replaces it here.
+# workflow = ["/review"]
+
+
+# ── Language servers (plugins, host-managed) ─────────────────────────────
+
+[lsp]
+# The plugin intent tier: language names expanded through rook's curated
+# catalog (go, typescript, svelte). Rook installs and manages these servers
+# itself under ~/.local/share/rook/plugins — pinned versions, lazy install
+# on first use, nothing touches your global environment. Absent means no
+# language support.
+# enable = ["go", "typescript"]
+
+# The explicit tier addresses one server by name: [lsp.server.<name>].
+[lsp.server.zls]
+# A command line brings your own server: rook execs it from PATH as found
+# and never installs or upgrades it.
+# command = "zls --stdio"
+
+# Which file extensions route to the server.
+# filetypes = ["zig", "zon"]
+
+# Root markers, in order: the nearest ancestor directory containing one
+# keys the server instance (a monorepo's Go module and TS app each get
+# their own). No marker found means the workspace root.
+# roots = ["build.zig", ".git"]
+
+# Disables a server either tier declared.
+# off = true
+
+[lsp.server.gopls]
+# Raw JSON handed to the server verbatim (workspace/didChangeConfiguration);
+# rook never interprets it. Replaces the catalog entry's default wholesale.
+# Key it by the SECTION the server pulls — gopls asks for "gopls", so a flat
+# {"staticcheck":true} is answered with null and quietly does nothing.
+# Note the catalog default for gopls is {"gopls":{"semanticTokens":true}},
+# which turns on the semantic highlighting layer; overriding this key drops
+# that unless you carry it along.
+# settings = '{"gopls":{"staticcheck":true,"semanticTokens":true}}'
+
+# A repository may check in `<repo>/.rook/config.toml` with an [lsp] section
+# only: it is parsed after this file (its values win) and may select catalog
+# languages or tune declared servers — but its command lines are refused, so
+# a cloned repo can never make rook exec something. Refusals show in lsp
+# status.
+
+
+# ── Secrets are NOT file-managed ─────────────────────────────────────────
+#
+# The OpenAI key (the agent's credential) and the Jira API token never live
+# in this file — the config stays user-owned and safe to commit or share.
+# They live in the login keychain instead:
+#
+#   rookctl set-jira-token        # stores the Jira API token
+#
+# The OpenAI key is set from the app. Each has a file fallback for
+# headless setups, and both must be tight 0600:
+#
+#   ~/.config/rook/openai-key
+#   ~/.config/rook/jira-token

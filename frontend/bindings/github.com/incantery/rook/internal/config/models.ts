@@ -103,6 +103,20 @@ export interface Config {
     "keybinds": { [_ in string]?: string } | null;
 
     /**
+     * EditorLeader is the editor scope's own leader (vim's maplocalleader
+     * to Leader's mapleader) — the comma, unless config moves it.
+     */
+    "editorLeader": string;
+
+    /**
+     * EditorKeybinds is mode → trigger → command ([editor.keybinds.normal]
+     * etc., TOML-only). Triggers: "<leader>q", chords, or bare vim
+     * sequences ("gd", "K"). The frontend owns validation and ignores
+     * modes it doesn't know — fail open, both directions.
+     */
+    "editorKeybinds": { [_ in string]?: { [_ in string]?: string } | null } | null;
+
+    /**
      * WorkspaceAllow is a presentation-only visibility filter: when
      * non-empty, only the named workspaces (and any worktree carved from
      * one of them) appear in the host's workspace list — the dashboard,
@@ -152,31 +166,4 @@ export interface LSPServer {
      * (workspace/didChangeConfiguration) — rook never interprets it.
      */
     "settings"?: string;
-}
-
-/**
- * Patch is the subset of config the Settings UI edits. A nil pointer / nil map
- * means "leave untouched"; a non-nil value (even empty) is applied. Everything
- * not named here — comments, blank lines, out-of-scope keys — is preserved.
- */
-export interface Patch {
-    "jiraUrl"?: string | null;
-    "jiraEmail"?: string | null;
-    "jiraJql"?: string | null;
-    "leader"?: string | null;
-    "fontFamily"?: string | null;
-    "fontSize"?: number | null;
-    "theme"?: string | null;
-
-    /**
-     * Projects: the full desired jira-project-<ws> map. Rows not present are
-     * deleted; rows present are upserted.
-     */
-    "projects"?: { [_ in string]?: string } | null;
-
-    /**
-     * Keybinds: the full desired keybind set (trigger -> command; "" command =
-     * unbind line). Replaces the entire keybind block.
-     */
-    "keybinds"?: { [_ in string]?: string } | null;
 }

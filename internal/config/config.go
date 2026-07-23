@@ -82,6 +82,14 @@ type Config struct {
 	// fails open: unknown commands, unparseable chords, and reserved
 	// triggers (digits, the literal-backtick escape) are ignored there.
 	Keybinds map[string]string `json:"keybinds"`
+	// EditorLeader is the editor scope's own leader (vim's maplocalleader
+	// to Leader's mapleader) — the comma, unless config moves it.
+	EditorLeader string `json:"editorLeader"`
+	// EditorKeybinds is mode → trigger → command ([editor.keybinds.normal]
+	// etc., TOML-only). Triggers: "<leader>q", chords, or bare vim
+	// sequences ("gd", "K"). The frontend owns validation and ignores
+	// modes it doesn't know — fail open, both directions.
+	EditorKeybinds map[string]map[string]string `json:"editorKeybinds"`
 	// WorkspaceAllow is a presentation-only visibility filter: when
 	// non-empty, only the named workspaces (and any worktree carved from
 	// one of them) appear in the host's workspace list — the dashboard,
@@ -132,6 +140,7 @@ func Default() Config {
 		AgentDailyCapUSD:  1.00,
 		Coder:             "claude",
 		Leader:            "`",
+		EditorLeader:      ",",
 	}
 }
 
@@ -149,7 +158,12 @@ func Path() string {
 
 func Load() Config {
 	cfg := Default()
-	applyFile(&cfg, Path(), false)
+	// config.toml is canonical; the legacy flat file applies only when no
+	// TOML file exists. A present-but-broken TOML file applies nothing —
+	// falling back to the legacy file would silently revive stale settings.
+	if !applyTOML(&cfg, TOMLPath(), false) {
+		applyFile(&cfg, Path(), false)
+	}
 	return cfg
 }
 
@@ -162,7 +176,11 @@ func Load() Config {
 func LoadWorkspace(repoTop string) Config {
 	cfg := Load()
 	if repoTop != "" {
-		applyFile(&cfg, filepath.Join(repoTop, ".rook", "config"), true)
+		// each layer picks its format independently: .rook/config.toml
+		// wins when present, else the legacy .rook/config
+		if !applyTOML(&cfg, repoTOMLPath(repoTop), true) {
+			applyFile(&cfg, filepath.Join(repoTop, ".rook", "config"), true)
+		}
 	}
 	return cfg
 }
@@ -310,7 +328,8 @@ func applyKey(cfg *Config, key, value string, repoLayer bool) {
 			if cfg.Keybinds == nil {
 				cfg.Keybinds = map[string]string{}
 			}
-			cfg.Keybinds[strings.TrimSpace(value[:i])] = strings.TrimSpace(value[i+1:])
+			trigger := normalizeLegacyTrigger(strings.TrimSpace(value[:i]))
+			cfg.Keybinds[trigger] = strings.TrimSpace(value[i+1:])
 		}
 	}
 }
@@ -356,6 +375,21 @@ func applyLSPKey(cfg *Config, rest, value string, repoLayer bool) {
 		s.Off, s.Command = false, value
 	}
 	cfg.LSPServers[server] = s
+}
+
+// normalizeLegacyTrigger rewrites the legacy flat file's implicit leader
+// convention into the explicit notation the TOML format (and the frontend)
+// speak: a bare key acted after the leader, so `h` becomes `<leader>h`.
+// Modifier chords ("cmd+shift+k") fired directly and pass through — as
+// does "+" itself, which the legacy parser treated as a bindable bare key.
+func normalizeLegacyTrigger(trigger string) string {
+	if strings.HasPrefix(strings.ToLower(trigger), "<leader>") {
+		return trigger // already explicit, don't double-wrap
+	}
+	if strings.Contains(trigger, "+") && trigger != "+" {
+		return trigger // a chord
+	}
+	return "<leader>" + trigger
 }
 
 // splitList parses a comma-separated config value: items trimmed, empties

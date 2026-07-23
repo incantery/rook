@@ -1,19 +1,19 @@
 // The keybinding table: the tmux-derived defaults, overlaid with the
-//
-//
-//
-//
-// config file's `keybind = <trigger>=<command>` lines. Two layers, same
-// as the ladder in App.svelte — bare-key triggers act after the backtick
-// prefix, modifier chords act directly. This module only builds the
-// lookup tables and the palette's display strings; App.svelte owns
-// dispatch. Config edits arrive through ` r (reload re-runs main()).
+// config file's [keybinds] table. Triggers carry an explicit scope:
+// "<leader>m" acts after the leader prefix, a modifier chord
+// ("cmd+shift+k") acts directly, and a bare key or sequence ("K", "gd")
+// is reserved for direct dispatch — carried in config but not dispatched
+// at the app layer yet, so it drops here with a warn. (The legacy flat
+// file's implicit bare-key convention is normalized to <leader> form by
+// the Go parser before it reaches us.) Two layers, same as the ladder in
+// App.svelte. This module only builds the lookup tables and the palette's
+// display strings; App.svelte owns dispatch. Config edits arrive through
+// ` r (reload re-runs main()).
 //
 // Fail open on user input: a trigger that doesn't parse, or one that's
 // reserved, drops with a console.warn — it never breaks the defaults
-// around it. Reserved and not rebindable: digits (window switching and
-// the dashboard slot are computed from dashboard-tab) and the prefix
-// backtick (the literal-` escape).
+// around it. Reserved and not rebindable: digits (window switching) and
+// the prefix backtick (the literal-` escape).
 
 export interface Keymap {
     /** prefix layer: e.key → command id (case-sensitive, so `H` binds shift-h) */
@@ -29,17 +29,17 @@ export interface Keymap {
 // same trigger replaces the entry; `keybind = <trigger>=` removes it.
 export const DEFAULTS: [string, string][] = [
     ["cmd+k", "palette.toggle"],
-    ["c", "session.new"],
-    ["x", "session.close"],
-    ["r", "config.reload"],
-    ["k", "palette.toggle"],
-    ["s", "workspace.switch"],
-    ["a", "attention.inbox"],
-    ["n", "agent.spawn"],
-    ["v", "agent.view"],
-    ["h", "workspace.manager"],
-    [".", "workspace.set-root"],
-    ["d", "workspace.dashboard"],
+    ["<leader>c", "session.new"],
+    ["<leader>x", "session.close"],
+    ["<leader>r", "config.reload"],
+    ["<leader>k", "palette.toggle"],
+    ["<leader>s", "workspace.switch"],
+    ["<leader>a", "attention.inbox"],
+    ["<leader>n", "agent.spawn"],
+    ["<leader>v", "agent.view"],
+    ["<leader>h", "workspace.manager"],
+    ["<leader>.", "workspace.set-root"],
+    ["<leader>d", "workspace.dashboard"],
     ["cmd+t", "session.new"],
     ["cmd+shift+]", "session.next"],
     ["cmd+shift+[", "session.prev"],
@@ -47,9 +47,9 @@ export const DEFAULTS: [string, string][] = [
     ["cmd+,", "config.settings"],
     // panes — tmux-faithful: % splits right, " splits down, o cycles,
     // arrows move focus, z zooms; ⌘D/⌘⇧D as the native-feeling chords
-    ["%", "pane.split-right"],
-    ['"', "pane.split-down"],
-    ["o", "pane.next"],
+    ["<leader>%", "pane.split-right"],
+    ['<leader>"', "pane.split-down"],
+    ["<leader>o", "pane.next"],
     // vim-navigator chords, listed BEFORE the arrows so the palette
     // advertises these — they're the primary binding now. They also cross
     // into an open side pane at the layout's edge, which ` arrows do too.
@@ -61,23 +61,23 @@ export const DEFAULTS: [string, string][] = [
     ["ctrl+j", "pane.focus-down"],
     ["ctrl+k", "pane.focus-up"],
     ["ctrl+l", "pane.focus-right"],
-    ["left", "pane.focus-left"],
-    ["right", "pane.focus-right"],
-    ["up", "pane.focus-up"],
-    ["down", "pane.focus-down"],
-    ["z", "pane.zoom"],
+    ["<leader>left", "pane.focus-left"],
+    ["<leader>right", "pane.focus-right"],
+    ["<leader>up", "pane.focus-up"],
+    ["<leader>down", "pane.focus-down"],
+    ["<leader>z", "pane.zoom"],
     // the Monaco panes: review diff and read-only file viewer
-    ["g", "review.changes"],
+    ["<leader>g", "review.changes"],
     // telescope muscle memory, workbench-wide — a full-screen TUI keeps
     // them (vim's ⌃P completion), same yield as the navigator chords
     ["ctrl+p", "file.open"],
     ["ctrl+g", "grep.open"],
-    ["e", "file.open"],
-    ["/", "grep.open"],
-    ["i", "explore.trail"],
-    ["t", "threads.toggle"],
-    ["b", "explorer.toggle"],
-    ["f", "explorer.reveal"],
+    ["<leader>e", "file.open"],
+    ["<leader>/", "grep.open"],
+    ["<leader>i", "explore.trail"],
+    ["<leader>t", "threads.toggle"],
+    ["<leader>b", "explorer.toggle"],
+    ["<leader>f", "explorer.reveal"],
     ["cmd+d", "pane.split-right"],
     ["cmd+shift+d", "pane.split-down"],
 ];
@@ -188,21 +188,34 @@ const PREFIX_NAMED: Record<string, string> = {
     right: "ArrowRight",
 };
 
+/** Strips a leading <leader> scope marker; null when the trigger has none. */
+export function stripLeader(trigger: string): string | null {
+    const m = /^<leader>/i.exec(trigger);
+    return m ? trigger.slice(m[0].length) : null;
+}
+
 function parseTrigger(trigger: string): Bind | null {
-    // "+" itself stays a bindable prefix key; anything longer with a "+"
-    // reads as a chord
-    if (trigger.includes("+") && trigger !== "+") return parseChord(trigger);
-    const named = PREFIX_NAMED[trigger.toLowerCase()];
-    if (named) {
-        return {
-            layer: "prefix",
-            key: named,
-            command: "",
-            disp: "` " + KEY_DISP[trigger.toLowerCase()],
-        };
+    // "<leader>x" is the prefix layer, explicitly scoped
+    const rest = stripLeader(trigger);
+    if (rest !== null) {
+        const named = PREFIX_NAMED[rest.toLowerCase()];
+        if (named) {
+            return {
+                layer: "prefix",
+                key: named,
+                command: "",
+                disp: "` " + KEY_DISP[rest.toLowerCase()],
+            };
+        }
+        if (rest.length !== 1) return null;
+        return {layer: "prefix", key: rest, command: "", disp: "` " + rest};
     }
-    if (trigger.length !== 1) return null;
-    return {layer: "prefix", key: trigger, command: "", disp: "` " + trigger};
+    // a modifier chord fires directly ("+" itself can only be bound
+    // through <leader>+ now that bare keys mean direct dispatch)
+    if (trigger.includes("+")) return parseChord(trigger);
+    // bare keys and sequences ("K", "gd") are direct-dispatch triggers —
+    // an editor-scope concept the app layer doesn't dispatch yet
+    return null;
 }
 
 function reserved(b: Bind): boolean {
@@ -246,11 +259,9 @@ const BACKTICK_LEADER: Leader = {
 
 // The CONTEXT leader (vim's maplocalleader): where the backtick is the IDE's
 // leader (workbench-global verbs), this one prefixes the verbs of the CURRENT
-// quickfix context. Hardcoded for the dogfood pass — the config seam is the
-// same path the IDE leader rides (parseLeader over a config string); wire a
-// `context-leader` setting once the key survives a week of real typing.
-// Comma is far hotter than backtick in a shell, so this is the constant most
-// likely to move.
+// quickfix context. The comma default now rides config — [editor] leader —
+// through the same parseLeader path the IDE leader rides; this constant is
+// the fallback when config doesn't set one.
 export const CONTEXT_LEADER_KEY = ",";
 
 // The context layer's bindings: deliberately tiny — the doors into the
@@ -272,6 +283,27 @@ export const CONTEXT_PREFIX = new Map<string, string>([
     // the leader is for the surfaces you reach for without a cursor.
     ["t", "threads.find"],
 ]);
+
+// buildContextMap overlays config's [editor.keybinds.normal] table on the
+// CONTEXT_PREFIX defaults. Only "<leader>x" triggers land here for now —
+// bare sequences ("gd") and chords in the editor scope are carried in
+// config but wait on modal dispatch, so they drop with a warn. "" unbinds,
+// same as the app scope. Modes other than normal are ignored here (fail
+// open toward configs written for a newer rook).
+export function buildContextMap(normalBinds: Record<string, string | undefined>): Map<string, string> {
+    const map = new Map(CONTEXT_PREFIX);
+    for (const [t, c] of Object.entries(normalBinds)) {
+        if (typeof c !== "string") continue;
+        const key = stripLeader(t.trim());
+        if (key === null || key.length !== 1) {
+            console.warn("editor keybind carried but not dispatchable yet:", t);
+            continue;
+        }
+        if (c === "") map.delete(key);
+        else map.set(key, c);
+    }
+    return map;
+}
 
 export function parseLeader(trigger: string | undefined): Leader {
     const t = (trigger ?? "").trim();
@@ -349,37 +381,6 @@ export function triggerSig(trigger: string): string | null {
 export function isReservedTrigger(trigger: string): boolean {
     const b = parseTrigger(trigger.trim());
     return b ? reserved(b) : false;
-}
-
-// Turn the editor's desired binding rows into the minimal config `keybind`
-// override map (trigger -> command; "" command = unbind a default). Triggers
-// are compared by PARSED identity (triggerSig), not raw text, so a row that
-// re-spells a default (case/alias variant) is recognized as the same slot
-// instead of double-emitting an add + a stale unbind. buildKeymap applies
-// DEFAULTS then these overrides, so we emit only the diff.
-export function computeKeybindOverrides(rows: KeybindRow[]): Record<string, string> {
-    const overrides: Record<string, string> = {};
-    const defCmdBySig = new Map<string, string>(); // slot signature -> default command
-    const defTriggerBySig = new Map<string, string>(); // slot signature -> default trigger string
-    for (const [t, c] of DEFAULTS) {
-        const sig = triggerSig(t);
-        if (sig == null) continue;
-        defCmdBySig.set(sig, c);
-        defTriggerBySig.set(sig, t);
-    }
-    const rowSigs = new Set<string>();
-    for (const {trigger, command} of rows) {
-        const t = trigger.trim();
-        if (!t || !command) continue;
-        const sig = triggerSig(t);
-        if (sig == null) continue; // unparseable — the editor blocks these before save
-        rowSigs.add(sig);
-        if (defCmdBySig.get(sig) !== command) overrides[t] = command; // new or changed slot
-    }
-    for (const [sig, t] of defTriggerBySig) {
-        if (!rowSigs.has(sig)) overrides[t] = ""; // a default slot with no surviving row → unbind
-    }
-    return overrides;
 }
 
 // The current bindings as editable rows — DEFAULTS overlaid with config

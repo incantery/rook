@@ -1,4 +1,7 @@
-# rook config — the complete, documented surface.
+# rook config — the LEGACY flat format. Still read, no longer canonical:
+# the TOML format (config.sample.toml → ~/.config/rook/config.toml) is the
+# documented surface now, and when config.toml exists this file is ignored
+# entirely. New keys (the [editor] scope, per-mode keybinds) are TOML-only.
 #
 # Copy this to ~/.config/rook/config (XDG_CONFIG_HOME is respected) and
 # uncomment what you want to change. Every key below is set to its actual

@@ -61,11 +61,11 @@ async function openAppearance(page: Page) {
 
 /** Put the app in a known theme, leaving Settings open.
  *
- *  Every spec establishes its own theme rather than trusting the default: the
- *  picker PERSISTS through config.Service, and the whole suite shares one
- *  sandbox config, so a spec that assumed the default would pass or fail on
- *  whatever ran before it. (The true first-boot default is a Go concern —
- *  config.Default().Theme — and is tested there.) */
+ *  The picker is a LIVE PREVIEW only — the app no longer writes config
+ *  (ghostty model: the file is user-owned; persist a theme by editing
+ *  config.toml). Every spec still establishes its own theme so it never
+ *  depends on the sandbox config's default. (The true first-boot default is
+ *  a Go concern — config.Default().Theme — and is tested there.) */
 async function useTheme(page: Page, name: string) {
     await openAppearance(page);
     await page.locator("#theme-select").selectOption(name);
@@ -151,14 +151,17 @@ test("a light Catppuccin flavour lightens the chrome too", async ({page}) => {
     expect(await luma(page, "#theme-select", "color")).toBeLessThan(0.4);
 });
 
-test("the theme choice survives a restart", async ({page}) => {
+test("the theme picker is a live preview — a reload reverts to config", async ({page}) => {
     await page.goto("/");
+    await booted(page);
+    const configured = await rootVar(page, "--bg");
+
     await useTheme(page, "One Dark");
     await expect.poll(() => rootVar(page, "--bg")).toBe("#282c34");
 
-    // Reload re-reads config from disk: this covers the SetConfig write
-    // through config.Service, not just the in-memory swap above.
+    // The app no longer writes config: a reload re-reads the file, and the
+    // previewed theme must NOT have leaked into it.
     await page.reload();
     await booted(page);
-    expect(await rootVar(page, "--bg")).toBe("#282c34");
+    expect(await rootVar(page, "--bg")).toBe(configured);
 });

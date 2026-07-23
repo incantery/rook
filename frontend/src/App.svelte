@@ -15,7 +15,7 @@
     import {encodePalette} from "./term/vt/framed";
     import {preloadRenderer} from "./term/vt/registry";
     import {Registry} from "./registry";
-    import {buildKeymap, CONTEXT_LEADER_KEY, CONTEXT_PREFIX, parseLeader, sigOf} from "./keymap";
+    import {buildContextMap, buildKeymap, CONTEXT_LEADER_KEY, parseLeader, sigOf} from "./keymap";
     import {app, type Mode} from "./state.svelte";
     import {shellQuote} from "./util";
     import StatusBar from "./StatusBar.svelte";
@@ -48,17 +48,31 @@
         keybinds: Record<string, string | undefined>;
         /** the tmux-style prefix: a key ("`") or chord ("ctrl+b") */
         leader: string;
+        /** the editor scope's own leader ([editor] leader, comma default) */
+        editorLeader?: string;
+        /** the editor scope's normal-mode bindings ([editor.keybinds.normal]) */
+        editorKeybinds?: Record<string, string | undefined>;
         /** the config font, for the Monaco pane and the terminal renderer */
         paneFont: {family: string; size: number};
     }
-    let {api, keybinds, leader: leaderCfg, paneFont}: Props = $props();
+    let {
+        api,
+        keybinds,
+        leader: leaderCfg,
+        editorLeader: editorLeaderCfg,
+        editorKeybinds = {},
+        paneFont,
+    }: Props = $props();
     // config-fixed: the leader reloads the page, which re-reads it
     // svelte-ignore state_referenced_locally
     const leader = parseLeader(leaderCfg);
     // svelte-ignore state_referenced_locally
     const keymap = buildKeymap(keybinds, leader.disp);
     // the context leader (vim's maplocalleader) — see keymap.ts
-    const contextLeader = parseLeader(CONTEXT_LEADER_KEY);
+    // svelte-ignore state_referenced_locally
+    const contextLeader = parseLeader(editorLeaderCfg || CONTEXT_LEADER_KEY);
+    // svelte-ignore state_referenced_locally
+    const contextMap = buildContextMap(editorKeybinds);
     /** the context leader armed; the next key dispatches CONTEXT_PREFIX.
      *  Plain let: nothing renders it yet (the pill is the IDE leader's). */
     let ctxArmed = false;
@@ -1720,7 +1734,7 @@
             if (contextLeader.matches(e)) return;
             e.preventDefault();
             e.stopPropagation();
-            const cmd = CONTEXT_PREFIX.get(e.key);
+            const cmd = contextMap.get(e.key);
             if (cmd) registry.run(cmd);
             // unbound: prefix consumed, key ignored — tmux behavior
             return;

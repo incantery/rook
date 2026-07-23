@@ -71,6 +71,8 @@ async function main() {
             api,
             keybinds: cfg.keybinds ?? {},
             leader: cfg.leader,
+            editorLeader: cfg.editorLeader,
+            editorKeybinds: cfg.editorKeybinds?.normal ?? {},
             paneFont: {family: font, size: cfg.fontSize},
         },
     });

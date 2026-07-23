@@ -42,13 +42,6 @@ export function OpenAIKeyStatus(): $CancellablePromise<string> {
 }
 
 /**
- * SetConfig applies a Patch surgically to the config file.
- */
-export function SetConfig(p: $models.Patch): $CancellablePromise<void> {
-    return $Call.ByID(1981843071, p);
-}
-
-/**
  * SetJiraToken stores the Jira API token in the login keychain (service rook,
  * account jira). Entering it here — not on a shell — is why special characters
  * like underscores survive.
