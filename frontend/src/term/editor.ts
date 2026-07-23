@@ -30,13 +30,14 @@ type VimAdapter = ReturnType<VimLib["initVimMode"]>;
 
 // monaco-vim is loaded once, lazily, the first time any file editor mounts.
 // The ex-command handlers (:w, :q, :qa …) are GLOBAL — registered on the one
-// shared Vim singleton — so they route to the right pane at call time:
-//   paneByEditor  the focused editor → its pane (:w/:q act on that editor;
-//                 the command is typed INTO that editor, so cm.editor is it)
-//   livePanes     every editor pane, because :qa spans panes and windows
+// shared Vim singleton — so they route to the right pane at call time via
+// paneByEditor: the command is typed INTO an editor, cm.editor names it.
+// Even :qa fans out only through the pane's own opts.cohort (its window) —
+// no module-level registry of every pane exists, on purpose: each editor
+// place answers for itself, and a global set is how ":qa killed every
+// editor in the app" happened.
 let vimLib: VimLib | null = null;
 const paneByEditor = new WeakMap<object, EditorPane>();
-const livePanes = new Set<EditorPane>();
 
 // Model URIs must be unique across EVERY pane, not just within one:
 // Monaco's model registry is global, and two panes opening the SAME file
@@ -340,6 +341,10 @@ export interface EditorPaneOpts {
     /** :cq — abort. Only an `re` takeover pane sets this (the shell gets a
      *  nonzero exit); elsewhere :cq flashes and does nothing. */
     onAbort?: () => void;
+    /** :qa's blast radius — the editor panes sharing this pane's PLACE
+     *  (chrome answers with the pane's window). Vim: :qa quits ONE vim
+     *  instance, not every vim on the machine; absent, it's just this pane. */
+    cohort?: () => EditorPane[];
     /** the pane calls this when a Monaco editor gains focus, so chrome can
      *  bind the thread panel to the active editor */
     onActivate?: (seam: EditorSeam) => void;
@@ -531,7 +536,6 @@ export class EditorPane implements PaneContent {
             this.vimBar.className = "editor-vim";
         }
         this.el.append(head, this.body);
-        livePanes.add(this); // :qa closes every editor pane, this one included
         void this.load();
     }
 
@@ -607,7 +611,6 @@ export class EditorPane implements PaneContent {
         this.changeSub?.dispose();
         this.vim?.dispose();
         if (this.editor) paneByEditor.delete(this.editor);
-        livePanes.delete(this);
         this.disposeModels();
         this.diffEditor?.dispose();
         this.editor?.dispose();
@@ -1299,10 +1302,12 @@ export class EditorPane implements PaneContent {
         if (await this.doSave()) this.opts.onClose();
     }
 
-    /** :qa — close every editor pane; refuse if any holds unsaved edits.
-     *  Same-class access lets this read siblings' state and close them. */
+    /** :qa — close every editor pane in THIS pane's place (its window),
+     *  refusing if any holds unsaved edits. NOT app-global: another
+     *  window's editor is another vim, and vim's :qa never reaches across
+     *  processes. Same-class access lets this read siblings' state. */
     exQuitAll(force: boolean): void {
-        const panes = [...livePanes];
+        const panes = this.opts.cohort?.() ?? [this];
         if (!force) {
             const dirty = panes.filter((p) => p.dirty).length;
             if (dirty > 0) {
@@ -1318,7 +1323,7 @@ export class EditorPane implements PaneContent {
     /** :wqa / :xa — save every editable pane, then close the ones now clean;
      *  a pane whose write failed stays open with its own error flash. */
     async exSaveQuitAll(): Promise<void> {
-        const panes = [...livePanes];
+        const panes = this.opts.cohort?.() ?? [this];
         const saved = await Promise.all(panes.map(async (p) => [p, await p.doSave()] as const));
         let failed = 0;
         for (const [p, ok] of saved) {

@@ -239,6 +239,11 @@ export class TermManager {
         return this.windows.some((w) => w.id === id);
     }
 
+    /** Which window holds this pane — :qa's blast radius is a window. */
+    paneWindow(leafId: string): string | null {
+        return this.windows.find((w) => w.panes.has(leafId))?.id ?? null;
+    }
+
     /** the focused pane's host session — what "the current shell" means
      *  for kill, cwd inheritance, set-root, literal-` input */
     get focusedSessionId(): string | null {

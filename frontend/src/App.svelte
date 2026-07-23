@@ -185,6 +185,7 @@
                     thread: {id},
                     font: paneFont,
                     onFlash: flash,
+                cohort: () => editorCohort(leafId),
                     onClose: () => mgr.closePane(leafId),
                     onDispose: () => editorPanes.delete(leafId),
                     onCompose: (spec) => void openDraft(spec), // :reply
@@ -230,6 +231,7 @@
                     draft: spec,
                     font: paneFont,
                     onFlash: flash,
+                cohort: () => editorCohort(leafId),
                     onClose: () => {
                         source?.clearHighlight(); // drop the anchor rule
                         mgr.closePane(leafId);
@@ -394,6 +396,17 @@
      *  PaneContent (it stays Monaco-free), but retargeting needs the real
      *  thing, so chrome keeps the index. */
     const editorPanes = new Map<string, import("./term/editor").EditorPane>();
+
+    /** :qa's blast radius — the registered editor panes sharing a pane's
+     *  WINDOW. Another window's editor is another vim: :qa never crosses.
+     *  (Drafts aren't registered, so a :qa can't discard an unsent comment.) */
+    function editorCohort(leafId: string): import("./term/editor").EditorPane[] {
+        const win = mgr.paneWindow(leafId);
+        if (!win) return [];
+        return [...editorPanes.entries()]
+            .filter(([id]) => mgr.paneWindow(id) === win)
+            .map(([, p]) => p);
+    }
 
     // ==== the jumplist (⌃O/⌃I) ====
     //
@@ -680,6 +693,7 @@
                 path,
                 font: paneFont,
                 onFlash: flash,
+                cohort: () => editorCohort(leafId),
                 onClose: () => mgr.closePane(leafId),
                 onActivate: (seam) => {
                     activeEditor = seam;
@@ -798,6 +812,7 @@
                 path,
                 font: paneFont,
                 onFlash: flash,
+                cohort: () => editorCohort(leafId),
                 // :q hands the pane back to the shell; :cq does too, but the
                 // waiting `re` exits 1 (git commit reads that as an abort)
                 onClose: () => finishTakeover(editID, 0),

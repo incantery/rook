@@ -142,3 +142,37 @@ test("the SAME file in two takeovers — each :q minds its own", async ({page, r
     await rook.ex(":q");
     await rook.expectScreen(/firstexit=0/);
 });
+
+test(":qa stays in its own window — another window's editor is another vim", async ({
+    page,
+    rook,
+}) => {
+    test.setTimeout(120_000);
+    const root = await rook.repo({files: {"a.txt": "alpha\n", "b.txt": "bravo\n"}});
+    await rook.open({name: `qa-${Date.now()}`, root});
+    await rook.shellReady();
+
+    await rook.ex(`${RE} a.txt; echo "firstexit=$?"`);
+    await expect(page.locator(".window.active .editor-mount .view-lines")).toBeVisible({
+        timeout: 15_000,
+    });
+
+    await page.keyboard.press("`");
+    await page.keyboard.press("c");
+    await rook.shellReady();
+    await rook.ex(`${RE} b.txt; echo "secondexit=$?"`);
+    await expect(page.locator(".window.active .editor-mount .view-lines")).toBeVisible({
+        timeout: 15_000,
+    });
+
+    // :qa — the whole PLACE quits, but the place is THIS window
+    await rook.ex(":qa");
+    await rook.expectScreen(/secondexit=0/);
+
+    // window 1's editor is another vim — untouched, and still :q-able
+    await page.keyboard.press("`");
+    await page.keyboard.press("1");
+    await expect(page.locator(".window.active .editor-mount .view-lines")).toBeVisible();
+    await rook.ex(":q");
+    await rook.expectScreen(/firstexit=0/);
+});
