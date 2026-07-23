@@ -14,6 +14,7 @@ import type * as monacoTypes from "monaco-editor";
 import {legendModifiers, legendTypes, unifyTokens} from "../highlight/semantic";
 import {ThreadBand} from "./threads";
 import {vimbar} from "./vimbar.svelte";
+import {RookVimStatusBar} from "./vimstatus";
 import {
     hoverPreview,
     pickFromStack,
@@ -642,6 +643,10 @@ export class EditorPane implements PaneContent {
         // has no vim node, so focusing one clears the slot instead of leaving
         // another pane's mode indicator lying about where the keyboard is
         vimbar.publish(this.vimBar);
+        // seed the bar's Ln/Col with where this pane's cursor already is —
+        // the change listener below only speaks on movement
+        const pos = this.editor?.getPosition();
+        if (pos) vimbar.setPos(this.vimBar, {ln: pos.lineNumber, col: pos.column});
         // A draft has no file and so no threads: announcing it would rebind
         // the thread panel to an empty context and blank the list for the
         // source pane the user is still looking at. The draft is a transient
@@ -1098,7 +1103,13 @@ export class EditorPane implements PaneContent {
         // route :w/:q typed in this editor back to this pane (save() itself
         // no-ops when the buffer isn't editable — a read-only :w is harmless)
         paneByEditor.set(ed, this);
-        this.vim = lib.initVimMode(ed, this.vimBar);
+        // rook's own status bar class: colored mode badge in the global
+        // status bar, `:`/`/` prompts in a modal (vimstatus.ts)
+        this.vim = lib.initVimMode(
+            ed,
+            this.vimBar,
+            RookVimStatusBar as unknown as Parameters<VimLib["initVimMode"]>[2],
+        );
     }
 
     private setDirty(dirty: boolean): void {
@@ -1727,6 +1738,11 @@ export class EditorPane implements PaneContent {
             });
             this.addCommentAction(this.editor);
             this.editor.onDidFocusEditorText(() => this.activate());
+            // the status bar's Ln/Col — vimbar drops updates from any pane
+            // that doesn't currently hold the slot
+            this.editor.onDidChangeCursorPosition((e) =>
+                vimbar.setPos(this.vimBar, {ln: e.position.lineNumber, col: e.position.column}),
+            );
             // ⌘S saves from any mode, so non-vim users get a save too; the
             // vim :w path routes through the same save().
             this.editor.addCommand(

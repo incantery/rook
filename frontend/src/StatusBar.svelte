@@ -125,6 +125,9 @@
             >
         {/if}
     </span>
+    {#if vimbar.active && vimbar.pos}
+        <span class="text-lo">Ln {vimbar.pos.ln}, Col {vimbar.pos.col}</span>
+    {/if}
     {#if footprint && footprint.total > 0}
         <span
             id="sb-footprint"

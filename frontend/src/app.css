@@ -288,13 +288,14 @@ body {
     position: relative;
     min-height: 0;
 }
-/* the vim status line — mode indicator on the left, :command input right.
-   The node is owned by an editor pane but LIVES in the global status bar
-   (vimbar.svelte.ts adopts the focused pane's node), so it styles as an
-   inline segment of that bar, not a strip of its own. */
+/* the vim status line — RookVimStatusBar (term/vimstatus.ts) renders a mode
+   badge, vim's messages, and the pending-key buffer into the pane's node,
+   which LIVES in the global status bar (vimbar.svelte.ts adopts the focused
+   pane's node). The `:`/`/` prompt is a modal (.vim-cmdline), not inline. */
 .editor-vim {
     display: flex;
     align-items: center;
+    gap: 10px;
     flex: 1;
     min-width: 0;
     font-family: var(--mono);
@@ -303,7 +304,90 @@ body {
     white-space: nowrap;
     overflow: hidden;
 }
-.editor-vim input {
+/* the mode badge — data-mode picks the tint from the theme's own hues
+   (normal accent · insert green · visual magenta · replace red) */
+.editor-vim .vim-mode {
+    flex: none;
+    padding: 0 8px;
+    border-radius: 4px;
+    line-height: 18px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    background: color-mix(in srgb, var(--dim) 14%, transparent);
+    color: var(--dim);
+}
+.editor-vim .vim-mode[data-mode="normal"] {
+    background: color-mix(in srgb, var(--acc) 16%, transparent);
+    color: var(--acc);
+}
+.editor-vim .vim-mode[data-mode="insert"] {
+    background: color-mix(in srgb, var(--color-grn) 14%, transparent);
+    color: var(--color-grn);
+}
+.editor-vim .vim-mode[data-mode="visual"] {
+    background: color-mix(in srgb, var(--color-magenta) 14%, transparent);
+    color: var(--color-magenta);
+}
+.editor-vim .vim-mode[data-mode="replace"] {
+    background: color-mix(in srgb, var(--color-red) 14%, transparent);
+    color: var(--color-red);
+}
+.editor-vim .vim-notif {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.editor-vim .vim-notif.err {
+    color: var(--color-red);
+}
+.editor-vim .vim-keys {
+    flex: none;
+    margin-left: auto;
+    color: var(--dim);
+}
+
+/* the vim command line as a modal — the prompt fragment monaco-vim hands
+   over (<span>: <input></span>) lands inside the panel */
+.vim-cmdline {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: none; /* vimstatus.ts flips to flex */
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 12vh;
+    /* light on purpose: `/` search highlights incrementally behind it */
+    background: rgba(0, 0, 0, 0.25);
+}
+.vim-cmdline-panel {
+    display: flex;
+    align-items: center;
+    width: 32rem;
+    max-width: 90vw;
+    padding: 10px 16px;
+    border: 1px solid color-mix(in srgb, var(--color-line) 30%, transparent);
+    border-radius: 12px;
+    background: var(--color-overlay);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--fg);
+}
+/* the fragment's own wrapper span — flex so the prefix and input sit inline */
+.vim-cmdline-panel > span {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+}
+.vim-cmdline-panel .vim-prefix {
+    flex: none;
+    color: var(--acc);
+}
+.vim-cmdline-panel input {
     flex: 1;
     min-width: 0;
     background: none;
@@ -311,6 +395,7 @@ body {
     outline: none;
     font: inherit;
     color: var(--fg);
+    caret-color: var(--acc);
 }
 /* labeled states (loading, binary, clean, errors) over the editor */
 /* display:flex would beat the hidden attribute's UA display:none —

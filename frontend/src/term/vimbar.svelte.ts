@@ -9,6 +9,8 @@
 class VimBarState {
     /** a pane's vim node currently holds the slot — StatusBar renders it */
     active = $state(false);
+    /** the focused editor's cursor, 1-based — the bar's "Ln 16, Col 34" */
+    pos = $state<{ln: number; col: number} | null>(null);
     private slot: HTMLElement | null = null;
     private node: HTMLElement | null = null;
 
@@ -21,9 +23,17 @@ class VimBarState {
     /** an editor pane gained focus: adopt its vim node (null = a pane with
      *  no vim line, e.g. a review diff — clears the slot) */
     publish(el: HTMLElement | null): void {
+        if (this.node !== el) this.pos = null; // the old pane's cursor is a lie
         this.node = el;
         this.active = !!el;
         this.attach();
+    }
+
+    /** cursor updates from the pane that OWNS `el` — ignored unless that pane
+     *  currently holds the slot, so a background pane's edits never move the
+     *  bar's numbers */
+    setPos(el: HTMLElement | null, pos: {ln: number; col: number}): void {
+        if (el && this.node === el) this.pos = pos;
     }
 
     /** a pane is going away — release the slot iff it still holds its node */

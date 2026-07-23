@@ -33,6 +33,7 @@
 - [x] Mission control: destinations (Agents/Queue/Workspaces, underline tabs) split from status filters (All/Needs you/Working/Quiet chips); scratch/new-workspace actions on the destinations row; queue + workspaces content constrained to 1200px.
 - [x] Selection grammar: accent tint + edge = selected ONLY; hovers are neutral washes (Finder/Palette/Picker/Inbox).
 - [x] Vim command line in the chrome: the focused editor's monaco-vim node is ADOPTED into the status bar's center zone (term/vimbar.svelte.ts — per-window state, ONE command line, vim's own model); the per-pane 20px strip is gone. Clears when a terminal takes focus or the pane dies.
+- [x] Vim status styled (term/vimstatus.ts, a custom monaco-vim StatusBar class): colored mode badge (normal accent / insert green / visual magenta / replace red, from theme vars), Ln/Col in the bar's right zone (vimbar.pos, cursor-listener fed), and the `:`/`/` prompt in a MODAL (.vim-cmdline — light scrim so incremental search stays visible); vim messages (E486, ":set wrap?" answers) stay inline in the bar.
 - [ ] Editor status-bar zones: Ln/Col, language, LSP state need Monaco cursor plumbing to the store.
 - [ ] Agent-pane status-bar zone: model · ctx% · ±lines · auto-mode when a claude pane is focused — rook already reads the jsonl; feed it to the bar.
 - [ ] Titlebar height: boards say 42px; we're at 52 (h-13) pending traffic-light alignment check on macOS.
