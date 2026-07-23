@@ -2,7 +2,9 @@
      viewport (the design's "ambient numbers live here"). Three zones:
 
        left    where you are — git on the app screen, host link on home
-       center  what's happening — review progress > agent working > asks
+       center  what's happening — review progress > the vim command line
+               (the focused editor's monaco-vim node, adopted via
+               vimbar.svelte.ts) > agent working > asks
        right   ambient telemetry — costs, worst usage window, orphan alert
 
      Pure projection of the app store; owns nothing but a 30s clock for the
@@ -12,6 +14,18 @@
     import {isAgentTab} from "./deck";
     import {footprintOf, footprintTitle, shortBytes, shortWindow} from "./hostapi";
     import {app} from "./state.svelte";
+    import {vimbar} from "./term/vimbar.svelte";
+
+    // the vim slot: a plain container the focused editor's monaco-vim node is
+    // adopted into. bind:this hands it over; a terminal taking focus clears it
+    // (an editor's mode indicator must not outlive the editor's keyboard).
+    let vimSlot = $state<HTMLElement | null>(null);
+    $effect(() => {
+        vimbar.mountSlot(vimSlot);
+    });
+    $effect(() => {
+        if (app.focusedSessionId) vimbar.publish(null);
+    });
 
     // a coarse clock: the duration readout only speaks in minutes
     let now = $state(Date.now());
@@ -97,6 +111,8 @@
                         : 0}%"
                 ></span></span
             >
+        {:else if app.screen === "app" && vimbar.active}
+            <span bind:this={vimSlot} class="flex min-w-0 flex-1 items-center"></span>
         {:else if app.screen === "app" && working}
             <span class="text-grn"
                 >agent working{working.count > 1 ? ` ×${working.count}` : ""}{dur(

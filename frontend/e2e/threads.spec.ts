@@ -157,10 +157,13 @@ test("a comment is written in a buffer and `:w` sends it", async ({page}) => {
     // actually made: 18G selects the func signature and the two lines under it
     await ctxChord(page, "c", "18GVjj");
 
-    // the draft is a REAL buffer: it has a vim mode line of its own, which is
-    // the whole difference from the textarea this replaced
+    // the draft is a REAL buffer: the global command line follows it — the
+    // whole difference from the textarea this replaced. One .editor-vim, in
+    // the status bar: the focused pane's node is adopted there (vim's model —
+    // per-window state, ONE command line).
     await expect(draftHeader(page, "comment")).toBeVisible({timeout: 15_000});
-    expect(await page.locator(".editor-vim").count()).toBe(2);
+    await expect(page.locator("#statusbar .editor-vim")).toBeAttached();
+    expect(await page.locator(".editor-vim").count()).toBe(1);
 
     await page.keyboard.press("i");
     await page.keyboard.type("why is this named spawnTask");

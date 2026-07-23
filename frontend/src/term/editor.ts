@@ -13,6 +13,7 @@ import type {PaneContent} from "./manager";
 import type * as monacoTypes from "monaco-editor";
 import {legendModifiers, legendTypes, unifyTokens} from "../highlight/semantic";
 import {ThreadBand} from "./threads";
+import {vimbar} from "./vimbar.svelte";
 import {
     hoverPreview,
     pickFromStack,
@@ -507,11 +508,13 @@ export class EditorPane implements PaneContent {
         this.body.append(this.statusEl, this.mount);
         // the mode line + `:` prompt. A draft needs it as much as a file does —
         // it's where :w lands, and it's the signal that this really is a
-        // buffer rather than a form that happens to look like one.
+        // buffer rather than a form that happens to look like one. The node is
+        // created here (monaco-vim will hold it) but NOT parked under the
+        // editor: the global status bar adopts the focused pane's node
+        // (vimbar.svelte.ts) — one command line, vim's own model.
         if (opts.kind === "file" || opts.kind === "draft" || opts.kind === "thread") {
             this.vimBar = document.createElement("div");
             this.vimBar.className = "editor-vim";
-            this.body.appendChild(this.vimBar);
         }
         this.el.append(head, this.body);
         livePanes.add(this); // :qa closes every editor pane, this one included
@@ -584,6 +587,7 @@ export class EditorPane implements PaneContent {
 
     dispose(): void {
         this.disposed = true;
+        vimbar.retract(this.vimBar); // free the status bar's command line
         if (this._seam) this.opts.onDispose?.(this._seam);
         for (const b of this.bands) b.dispose();
         this.changeSub?.dispose();
@@ -634,6 +638,10 @@ export class EditorPane implements PaneContent {
     }
 
     private activate(): void {
+        // the status bar's command line follows editor focus — a review diff
+        // has no vim node, so focusing one clears the slot instead of leaving
+        // another pane's mode indicator lying about where the keyboard is
+        vimbar.publish(this.vimBar);
         // A draft has no file and so no threads: announcing it would rebind
         // the thread panel to an empty context and blank the list for the
         // source pane the user is still looking at. The draft is a transient

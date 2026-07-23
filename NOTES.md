@@ -32,6 +32,7 @@
 - [x] Review language: "N reviewed · M remaining" + progress bar (was "N of M hunks blocking"); rows use the ring vocabulary (hollow pending / filled verdict-colored / pulsing triage) with struck paths when done.
 - [x] Mission control: destinations (Agents/Queue/Workspaces, underline tabs) split from status filters (All/Needs you/Working/Quiet chips); scratch/new-workspace actions on the destinations row; queue + workspaces content constrained to 1200px.
 - [x] Selection grammar: accent tint + edge = selected ONLY; hovers are neutral washes (Finder/Palette/Picker/Inbox).
+- [x] Vim command line in the chrome: the focused editor's monaco-vim node is ADOPTED into the status bar's center zone (term/vimbar.svelte.ts — per-window state, ONE command line, vim's own model); the per-pane 20px strip is gone. Clears when a terminal takes focus or the pane dies.
 - [ ] Editor status-bar zones: Ln/Col, language, LSP state need Monaco cursor plumbing to the store.
 - [ ] Agent-pane status-bar zone: model · ctx% · ±lines · auto-mode when a claude pane is focused — rook already reads the jsonl; feed it to the bar.
 - [ ] Titlebar height: boards say 42px; we're at 52 (h-13) pending traffic-light alignment check on macOS.
