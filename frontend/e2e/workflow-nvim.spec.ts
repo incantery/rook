@@ -77,7 +77,7 @@ test("reattaching to a pane running nvim types nothing into it", async ({rook}) 
     const original = "alpha\nbravo\ncharlie\n";
     const root = await rook.repo({files: {"notes.txt": original}});
     await rook.tapPty();
-    const ws = await rook.open({name: `nvim-reattach-${Date.now()}`, root});
+    await rook.open({name: `nvim-reattach-${Date.now()}`, root});
 
     // wait for the shell before typing at it: a cold sandbox pays oh-my-zsh's
     // plugin compilation, and `nvim notes.txt` typed into that runs late
@@ -91,7 +91,7 @@ test("reattaching to a pane running nvim types nothing into it", async ({rook}) 
     // again — to an nvim that is not asking. AUTO_REPLY exists to swallow
     // those; anything it misses arrives as literal text, and literal text in
     // normal mode is a command.
-    await rook.reenter(ws);
+    await rook.reenter();
     await rook.expectScreen(/alpha/);
 
     // Focus in/out is the ONLY thing rook may legitimately send here: nvim

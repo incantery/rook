@@ -1,6 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces, screenText, shellReady, shellRun} from "./harness";
+import {deleteWorkspaces, gotoHome, screenText, shellReady, shellRun} from "./harness";
 
 // Scrollback is host-backed and paged (reverse-paginated virtualized
 // scrolling): the client caches what it watches scroll by, and FETCHES what it
@@ -19,8 +19,7 @@ test.afterEach(async ({page}) => {
 
 async function openWorkspace(page: Page, name: string) {
     made.push(name);
-    await page.goto("/");
-    await expect(page.locator("#home")).toBeVisible();
+    await gotoHome(page);
     await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();
@@ -40,14 +39,9 @@ test("pre-attach history pages in from the host ring", async ({page}) => {
     await shellRun(page, term, "seq 1 300");
 
     // A rook relaunch as the user performs it: the renderer restarts with an
-    // empty cache, the host session (and its ring) lives on.
+    // empty cache and boot lands straight back in the workspace; the host
+    // session (and its ring) lives on.
     await page.reload();
-    await page.getByRole("button", {name: /^workspaces/i}).click();
-    await page
-        .locator("#home-workspaces div.group")
-        .filter({has: page.getByText("sb-paging", {exact: true})})
-        .first()
-        .click();
     const term2 = shown(page, ".vt-screen");
     await expect(term2).toBeVisible({timeout: 15_000});
 
@@ -72,7 +66,11 @@ test("webgl: pre-attach history pages in and paints on canvas", async ({page}) =
     // the Shift-key bindings are beamterm's own.
     await page.addInitScript(() => localStorage.setItem("rook.renderer", "webgl"));
     await openWorkspace(page, "sb-webgl");
-    await expect(page.locator(".vt-webgl canvas")).toHaveCount(1, {timeout: 15_000});
+    // visible-scoped: the boot shell in "main" keeps its pane mounted
+    // (hidden) behind this workspace, canvas and all
+    await expect(page.locator(".vt-webgl canvas >> visible=true")).toHaveCount(1, {
+        timeout: 15_000,
+    });
 
     const webglText = () =>
         page.evaluate(() => {
@@ -93,13 +91,7 @@ test("webgl: pre-attach history pages in and paints on canvas", async ({page}) =
     await page.keyboard.press("Enter");
     await expect.poll(webglText, {timeout: 15_000}).toContain("dn48");
 
-    await page.reload();
-    await page.getByRole("button", {name: /^workspaces/i}).click();
-    await page
-        .locator("#home-workspaces div.group")
-        .filter({has: page.getByText("sb-webgl", {exact: true})})
-        .first()
-        .click();
+    await page.reload(); // boot lands straight back in sb-webgl
     await expect(page.locator(".vt-webgl canvas >> visible=true")).toHaveCount(1, {
         timeout: 15_000,
     });

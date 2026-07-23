@@ -1,6 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces, shellReady} from "./harness";
+import {deleteWorkspaces, gotoHome, shellReady} from "./harness";
 
 // The leader's send-prefix, in both pane kinds.
 //
@@ -43,8 +43,7 @@ test.afterEach(async ({page}) => {
  *  to be a real repo: the file picker lists git's view of it. */
 async function openWorkspace(page: Page, name: string) {
     made.push(name);
-    await page.goto("/");
-    await expect(page.locator("#home")).toBeVisible();
+    await gotoHome(page);
     await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();
@@ -142,8 +141,7 @@ test("mission control takes focus off the terminal", async ({page}) => {
 // not a mount. No workspace needed — with no terminals to focus, the
 // screen-blind version stranded focus on <body> and j/k simply died.
 test("mission control keeps focus when an overlay closes over it", async ({page}) => {
-    await page.goto("/");
-    await expect(page.locator("#home")).toBeVisible();
+    await gotoHome(page);
 
     await page.locator("#home").press("n");
     await expect(page.getByText("New agent session")).toBeVisible();

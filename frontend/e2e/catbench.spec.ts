@@ -2,7 +2,7 @@ import {expect, test, type Page} from "@playwright/test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {deleteWorkspaces, screenText, shellReady} from "./harness";
+import {deleteWorkspaces, gotoHome, screenText, shellReady} from "./harness";
 
 // The Mitchell Hashimoto cat test: `time cat 150MB` through a live pane at his
 // benchmark geometry (6K fullscreen ≈ 405x113 cells). Measures true terminal
@@ -51,8 +51,7 @@ test.afterEach(async ({page}) => {
 test("time cat 150MB at 6K-fullscreen geometry", async ({page}) => {
     test.setTimeout(600_000);
     made.push("cat-bench");
-    await page.goto("/");
-    await expect(page.locator("#home")).toBeVisible();
+    await gotoHome(page);
     await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await page.getByPlaceholder("e.g. rook-core").fill("cat-bench");

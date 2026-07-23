@@ -1908,8 +1908,23 @@
                 app.screen = "app"; // the fatal element lives in #terminals
                 throw err;
             }
-            // The app lands on the manager (screen starts at "home") — an
-            // overview of your work, not a shell.
+            // Boot lands in a shell — opening rook is opening a terminal,
+            // like ghostty or iterm; mission control stays one ` h away.
+            // The last-used workspace wins if it still has windows, then
+            // any live one; a fresh install spawns a first shell (the host
+            // upserts the workspace and a rootless one opens in $HOME).
+            // Can't route through showWorkspace/spawnShell: they await
+            // initDone, which is this very promise.
+            try {
+                const last = localStorage.getItem("rook.workspace") ?? app.workspace;
+                const live = mgr.workspaces();
+                const target = live.some((w) => w.name === last) ? last : live[0]?.name;
+                if (target) mgr.openWorkspace(target);
+                else await mgr.spawnIn(last);
+            } catch (err) {
+                console.error("boot landing failed", err);
+                showHome(); // fail open to the deck, never a broken boot
+            }
         })();
 
         return () => {

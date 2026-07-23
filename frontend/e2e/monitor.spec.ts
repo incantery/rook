@@ -1,6 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces} from "./harness";
+import {deleteWorkspaces, gotoHome} from "./harness";
 
 // The footprint chip is fed by GET /runtime, which samples the real process
 // table — so this covers the whole path: host sensor → gauge → chip. The
@@ -27,8 +27,7 @@ test.afterEach(async ({page}) => {
 
 async function openWorkspace(page: Page, name: string) {
     made.push(name);
-    await page.goto("/");
-    await expect(page.locator("#home")).toBeVisible();
+    await gotoHome(page);
     await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();

@@ -1,6 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces, screenText, shellReady, shellRun} from "./harness";
+import {deleteWorkspaces, gotoHome, screenText, shellReady, shellRun} from "./harness";
 
 // Live grep end-to-end: the ` / modal over the real host's git grep,
 // a hit click landing the editor at the hit's file.
@@ -15,8 +15,7 @@ test.afterEach(async ({page}) => {
 
 async function openWorkspace(page: Page, name: string) {
     made.push(name);
-    await page.goto("/");
-    await expect(page.locator("#home")).toBeVisible();
+    await gotoHome(page);
     await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();

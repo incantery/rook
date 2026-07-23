@@ -1,4 +1,5 @@
 import {expect, test, type Page} from "@playwright/test";
+import {booted, summonHome} from "./harness";
 
 // Theming Phase A claimed one palette drives chrome, terminals, and Monaco,
 // swappable at runtime with no reload. vitest already covers the pure mapping
@@ -47,7 +48,7 @@ const surfaceLuma = (page: Page, sel: string) => luma(page, sel, "backgroundColo
  *  commands that work without a terminal (App.svelte onKeydown), and
  *  config.settings isn't one of them. */
 async function openAppearance(page: Page) {
-    await expect(page.locator("#home")).toBeVisible();
+    await summonHome(page);
     await page.keyboard.press("Meta+k");
     const query = page.getByPlaceholder("Run a command…");
     await expect(query).toBeVisible();
@@ -158,6 +159,6 @@ test("the theme choice survives a restart", async ({page}) => {
     // Reload re-reads config from disk: this covers the SetConfig write
     // through config.Service, not just the in-memory swap above.
     await page.reload();
-    await expect(page.locator("#home")).toBeVisible();
+    await booted(page);
     expect(await rootVar(page, "--bg")).toBe("#282c34");
 });

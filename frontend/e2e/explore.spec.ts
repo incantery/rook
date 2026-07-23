@@ -1,6 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces} from "./harness";
+import {deleteWorkspaces, gotoHome} from "./harness";
 
 // The explore work-type end-to-end: start an investigation, navigate (a
 // picker open + a grep hit), and the breadcrumb trail shows the visits in
@@ -16,8 +16,7 @@ test.afterEach(async ({page}) => {
 
 async function openWorkspace(page: Page, name: string) {
     made.push(name);
-    await page.goto("/");
-    await expect(page.locator("#home")).toBeVisible();
+    await gotoHome(page);
     await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();

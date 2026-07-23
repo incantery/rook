@@ -1,4 +1,5 @@
 import {expect, test} from "@playwright/test";
+import {gotoHome} from "./harness";
 
 // The deck's keyboard model, against real rows.
 //
@@ -71,7 +72,7 @@ test.beforeEach(async ({page}) => {
             headers: {"access-control-allow-origin": "*"},
         }),
     );
-    await page.goto("/");
+    await gotoHome(page);
     await expect(page.locator("#home-rows")).toBeVisible();
 });
 

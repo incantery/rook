@@ -1,6 +1,6 @@
 import {expect, test} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces} from "./harness";
+import {deleteWorkspaces, gotoHome} from "./harness";
 
 // The WebGL renderer at retina scale. Default e2e runs at deviceScaleFactor 1,
 // where CSS-pixel and device-pixel conventions coincide — which hid a real
@@ -19,8 +19,7 @@ test.afterEach(async ({page}) => {
 test("webgl canvas geometry is dpr-correct", async ({page}) => {
     made.push("webgl-dpr");
     await page.addInitScript(() => localStorage.setItem("rook.renderer", "webgl"));
-    await page.goto("/");
-    await expect(page.locator("#home")).toBeVisible();
+    await gotoHome(page);
     await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await page.getByPlaceholder("e.g. rook-core").fill("webgl-dpr");

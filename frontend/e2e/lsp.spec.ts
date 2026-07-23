@@ -2,7 +2,7 @@ import {expect, test, type Page} from "@playwright/test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {deleteWorkspaces} from "./harness";
+import {deleteWorkspaces, gotoHome} from "./harness";
 
 // Code intelligence end-to-end: a real gopls behind the sandbox host, the
 // real Monaco pane in front. The sandbox config is hot-read, so the spec
@@ -23,8 +23,7 @@ test.afterEach(async ({page}) => {
 
 async function openWorkspace(page: Page, name: string) {
     made.push(name);
-    await page.goto("/");
-    await expect(page.locator("#home")).toBeVisible();
+    await gotoHome(page);
     await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();

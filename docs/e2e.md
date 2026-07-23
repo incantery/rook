@@ -24,8 +24,9 @@ discovers a real daemon.
 `frontend/e2e/serve.sh` builds that binary plus `rook-host`, and runs them
 against a **sandboxed XDG triple** in `bin/e2e` — its own daemon, sessions,
 config, and database. It never touches the daily driver or `make dev`. The
-`boot.spec.ts` assertion that mission control shows *"No workspaces yet"* is
-the sandbox's canary: if it ever fails, the tests found your real database.
+`boot.spec.ts` assertion that mission control lists **only** the
+boot-spawned default workspace (`main`) is the sandbox's canary: if it ever
+fails, the tests found your real database.
 
 Playwright's `webServer` runs `serve.sh` automatically, so `make e2e` is the
 only command you need.

@@ -31,6 +31,36 @@ export const REPO = path.resolve(process.cwd(), "..");
 export const shown = (page: Page, sel: string): Locator =>
     page.locator(`${sel} >> visible=true`).first();
 
+/** Wait for a boot (or reload) to settle on its landing surface. Boot lands
+ *  in a SHELL — opening rook is opening a terminal — so the normal landing
+ *  is a pane; mission control is the fail-open one (a failed landing).
+ *  The first boot of a fresh sandbox spawns the default workspace's first
+ *  shell, hence the generous timeout. */
+export async function booted(page: Page): Promise<void> {
+    await expect(shown(page, ".vt-screen").or(page.locator("#home"))).toBeVisible({
+        timeout: 30_000,
+    });
+}
+
+/** Summon mission control from wherever boot landed — ` h from a shell,
+ *  a no-op when the fail-open path already put us there. */
+export async function summonHome(page: Page): Promise<void> {
+    await booted(page);
+    const home = page.locator("#home");
+    if (!(await home.isVisible())) {
+        await page.keyboard.press("`");
+        await page.keyboard.press("h");
+    }
+    await expect(home).toBeVisible();
+}
+
+/** The old goto("/")-and-wait-for-#home gate, under the new boot: land in
+ *  the shell, then summon mission control. */
+export async function gotoHome(page: Page): Promise<void> {
+    await page.goto("/");
+    await summonHome(page);
+}
+
 /** A git repo to point a workspace at. `files` land in one baseline commit;
  *  `dirty` is written afterwards and left unstaged, which is what a review
  *  batch diffs. */
@@ -80,7 +110,7 @@ export async function hostFetch(route: string, init?: RequestInit): Promise<Resp
  *  the default 5s covered warm and not cold. */
 export async function deleteWorkspaces(page: Page, names: string[]): Promise<void> {
     for (const name of names) {
-        await page.goto("/");
+        await gotoHome(page);
         await page.getByRole("button", {name: /^workspaces/i}).click();
         const card = page
             .locator("#home-workspaces div.group")
@@ -165,8 +195,7 @@ export class Rook {
     async open(opts: {name?: string; root?: string} = {}): Promise<string> {
         const name = opts.name ?? `e2e-${Date.now()}-${this.workspaces.length}`;
         this.workspaces.push(name);
-        await this.page.goto("/");
-        await expect(this.page.locator("#home")).toBeVisible();
+        await gotoHome(this.page);
         await this.page.getByRole("button", {name: /^workspaces/i}).click();
         await this.page.getByRole("button", {name: "New workspace"}).click();
         await expect(this.page.locator("#ws-modal")).toBeVisible();
@@ -209,17 +238,12 @@ export class Rook {
         });
     }
 
-    /** Reload the page and walk back into a workspace — a rook relaunch as
-     *  the user performs it. Host sessions outlive the UI, so whatever was
-     *  running is still running; the attach replays the daemon's ring. */
-    async reenter(name: string): Promise<void> {
+    /** Reload the page — a rook relaunch as the user performs it. Boot lands
+     *  straight back in the last-used workspace (that IS the boot contract),
+     *  and host sessions outlive the UI, so whatever was running is still
+     *  running; the attach replays the daemon's ring. */
+    async reenter(): Promise<void> {
         await this.page.reload();
-        await this.page.getByRole("button", {name: /^workspaces/i}).click();
-        await this.page
-            .locator("#home-workspaces div.group")
-            .filter({has: this.page.getByText(name, {exact: true})})
-            .first()
-            .click();
         await expect(this.term()).toBeVisible({timeout: 15_000});
         this.editorOpen = false; // a reload drops the editor pane's identity
     }

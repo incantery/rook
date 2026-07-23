@@ -1,6 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces} from "./harness";
+import {deleteWorkspaces, summonHome} from "./harness";
 
 // Settings → Experimental: the renderer toggle, exercised the way a user
 // reaches it (palette → Settings — prod builds have no devtools, this UI is
@@ -15,7 +15,7 @@ test.afterEach(async ({page}) => {
 });
 
 async function openExperimental(page: Page) {
-    await expect(page.locator("#home")).toBeVisible();
+    await summonHome(page);
     await page.keyboard.press("Meta+k");
     const query = page.getByPlaceholder("Run a command…");
     await expect(query).toBeVisible();
@@ -28,6 +28,7 @@ async function openExperimental(page: Page) {
 
 async function openWorkspace(page: Page, name: string) {
     made.push(name);
+    await summonHome(page); // the reload that precedes this lands in a shell
     await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();
     await expect(page.locator("#ws-modal")).toBeVisible();
@@ -47,7 +48,10 @@ test("the experimental renderer toggle swaps and swaps back", async ({page}) => 
     await page.getByRole("button", {name: "Reload to apply"}).click();
 
     await openWorkspace(page, "exp-toggle");
-    await expect(page.locator(".vt-webgl canvas")).toHaveCount(1, {timeout: 10_000});
+    // visible-scoped: the boot shell in "main" keeps a hidden pane mounted
+    await expect(page.locator(".vt-webgl canvas >> visible=true")).toHaveCount(1, {
+        timeout: 10_000,
+    });
 
     // and back: the toggle must be a two-way door
     await page.keyboard.press("Meta+k");
@@ -57,13 +61,7 @@ test("the experimental renderer toggle swaps and swaps back", async ({page}) => 
     await page.getByRole("radio").nth(0).check();
     await page.getByRole("button", {name: "Reload to apply"}).click();
 
-    await expect(page.locator("#home")).toBeVisible({timeout: 15_000});
-    await page.getByRole("button", {name: /^workspaces/i}).click();
-    await page
-        .locator("#home-workspaces div.group")
-        .filter({has: page.getByText("exp-toggle", {exact: true})})
-        .first()
-        .click();
+    // the reload lands straight back in exp-toggle — the boot contract
     await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
     await expect(page.locator(".vt-webgl")).toHaveCount(0);
     await expect(shown(page, ".vt-screen").locator(".vt-row").first()).toBeAttached();

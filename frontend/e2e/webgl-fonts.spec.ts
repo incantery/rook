@@ -1,6 +1,6 @@
 import {expect, test} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces} from "./harness";
+import {deleteWorkspaces, gotoHome} from "./harness";
 
 // The WebGL renderer's font supply line. WebKit's canvas 2D ignores
 // user-installed fonts (DOM text renders them; fillText silently falls back),
@@ -24,8 +24,7 @@ test.afterEach(async ({page}) => {
 test("webgl boot registers the terminal font for canvas", async ({page}) => {
     made.push("webgl-fonts");
     await page.addInitScript(() => localStorage.setItem("rook.renderer", "webgl"));
-    await page.goto("/");
-    await expect(page.locator("#home")).toBeVisible();
+    await gotoHome(page);
 
     // the configured family, as boot resolved it onto :root
     const family = await page.evaluate(() => {

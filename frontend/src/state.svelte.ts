@@ -33,8 +33,10 @@ export interface RefHit {
 
 class AppState {
     /** which screen owns the viewport; the app-screen is CSS-hidden on
-     *  "home", never unmounted — terminals live inside it */
-    screen = $state<"home" | "app">("home");
+     *  "home", never unmounted — terminals live inside it. Boots on "app":
+     *  opening rook is opening a terminal, and mission control is a surface
+     *  you summon (` h), not the place you land. */
+    screen = $state<"home" | "app">("app");
     workspace = $state("main");
     /** transient titlebar message — the workspace chip shows it for 2.5s.
      *  Its own slot so a flash can never leak into API workspace params. */
