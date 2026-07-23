@@ -62,16 +62,20 @@ func (h *Host) handleSessionEdit(w http.ResponseWriter, r *http.Request, s *sess
 
 	root := ""
 	if ws := h.reg.get(s.info.Workspace); ws != nil {
-		root = ws.Root
+		root = canonical(ws.Root)
 	}
 
-	payload := editPayload{Dir: filepath.Clean(req.Cwd)}
+	payload := editPayload{Dir: canonical(filepath.Clean(req.Cwd))}
 	for _, p := range req.Paths {
 		abs := p
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(req.Cwd, abs)
 		}
-		abs = filepath.Clean(abs)
+		// canonical, so a shell whose $PWD spells the path through a
+		// symlink (/tmp, /var on macOS) still lands INSIDE the workspace —
+		// the alternative silently demotes a repo file to external
+		// read-only because "/var/…" isn't a prefix of "/private/var/…"
+		abs = canonical(filepath.Clean(abs))
 		st, err := os.Stat(abs)
 		if err != nil {
 			http.Error(w, "no such file: "+p, http.StatusNotFound)
@@ -196,6 +200,19 @@ func (h *Host) handleEdits(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+}
+
+// canonical resolves symlinks so path containment compares real locations
+// (macOS: /tmp and /var are symlinks into /private). A path that doesn't
+// resolve is returned as given — the Stat that follows will say why.
+func canonical(p string) string {
+	if p == "" {
+		return p
+	}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
 }
 
 // relUnder returns p relative to root when p sits strictly under it

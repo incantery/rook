@@ -1053,8 +1053,13 @@ export class EditorPane implements PaneContent {
                 this.setDirty(model.getAlternativeVersionId() !== this.savedVersionId),
             );
             this.fit();
-            this.applyPendingFocus();
+            // vim BEFORE the pending focus: initVimMode rewires the editor's
+            // input handling, and doing that to an already-focused editor
+            // drops focus to body when the vim chunk is cache-fast — the
+            // keyboard then types into whatever held focus before, which in
+            // a second takeover is the FIRST editor's vim (:q closed it).
             await this.attachVim(ed);
+            this.applyPendingFocus();
             return;
         }
         try {
@@ -1107,11 +1112,17 @@ export class EditorPane implements PaneContent {
             );
             this.fit();
             this.rebuildBands();
+            // vim rides every file editor (motions work read-only too); the
+            // :w saver is registered only when the buffer is editable. It
+            // attaches BEFORE the pending focus/position: initVimMode
+            // rewires the editor's input handling, and doing that to an
+            // already-focused editor drops focus to body when the vim
+            // chunk is cache-fast — the keyboard then types into whatever
+            // held focus before, which in a second takeover is the FIRST
+            // editor's vim (its :q closed the wrong editor).
+            await this.attachVim(ed);
             this.applyPendingFocus();
             this.applyPendingPos();
-            // vim rides every file editor (motions work read-only too); the
-            // :w saver is registered only when the buffer is editable.
-            await this.attachVim(ed);
         } catch (err) {
             this.fail(`reading ${path}`, err);
         }
