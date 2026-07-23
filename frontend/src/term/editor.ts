@@ -1681,6 +1681,10 @@ export class EditorPane implements PaneContent {
             fontFamily: this.opts.font.family,
             fontSize: this.opts.font.size,
             minimap: {enabled: false},
+            // Monaco defaults this ON since ~0.45: the enclosing function
+            // pins itself over the top lines. That row lies about what's
+            // under the cursor for vim jumps (H, line numbers) — off.
+            stickyScroll: {enabled: false},
             scrollBeyondLastLine: false,
             // Must be explicit. The default is "configuredByTheme", and
             // standalone Monaco hardcodes its theme's semanticHighlighting
