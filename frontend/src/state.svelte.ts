@@ -10,6 +10,7 @@ import type {
     RookTask,
     RuntimeSnapshot,
     ThreadInfo,
+    UpdateStatus,
     UsageSnapshot,
     WorkspaceInfo,
     WorkspaceStatus,
@@ -143,6 +144,9 @@ class AppState {
     usage = $state<UsageSnapshot | null>(null);
     costs = $state<CostsSnapshot | null>(null);
     runtime = $state<RuntimeSnapshot | null>(null);
+    /** the host's release check — the status bar's update chip. Null until
+     *  the poll lands or on an old host without the route (fail open). */
+    update = $state<UpdateStatus | null>(null);
     /** registry snapshot — lineage (worktreeOf/branch) for every surface
      *  that names a workspace; Home refreshes it eagerly after mutations */
     workspaces = $state<WorkspaceInfo[]>([]);

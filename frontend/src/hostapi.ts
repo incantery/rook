@@ -193,6 +193,12 @@ export class HostAPI {
         return (await this.req("/costs")).json();
     }
 
+    /** The host's cached release check — feeds the chrome's update chip.
+     *  Old hosts 404 this route; callers fail open to no chip. */
+    async update(): Promise<UpdateStatus> {
+        return (await this.req("/update")).json();
+    }
+
     /** What rook costs the machine right now: RSS/CPU by process role, host
      *  runtime, and the long-lived map sizes that are the leak gauges. */
     async runtime(): Promise<RuntimeSnapshot> {
@@ -740,6 +746,14 @@ export interface UsageWindow {
 export interface UsageSnapshot {
     windows: UsageWindow[];
     capturedAt: string;
+}
+
+/** GET /update: the host's cached release check. `available` is false on
+ *  dev builds (they never check) and while the cache is empty. */
+export interface UpdateStatus {
+    current: string;
+    latest?: string;
+    available: boolean;
 }
 
 /** One gauge reading in the host's monitor (internal/host/monitor.go). The

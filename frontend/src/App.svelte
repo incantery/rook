@@ -1844,6 +1844,11 @@
         } catch {
             // diagnostics must never cost a surface — keep last known
         }
+        try {
+            app.update = await api.update();
+        } catch {
+            // old hosts have no /update — no chip, never an error
+        }
     }
 
     onMount(() => {

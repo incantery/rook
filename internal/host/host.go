@@ -112,6 +112,11 @@ type Host struct {
 	// um caches subscription usage windows (WatchUsage).
 	um *usageMon
 
+	// latestTag caches the newest published release (runUpdateCheck) —
+	// the /update indicator's answer.
+	updMu     sync.Mutex
+	latestTag string
+
 	// anchorMemo caches re-anchor diffs per (old,cur) blob pair
 	// (threads.go / reanchor.go).
 	anchorMemo hunkMemo
@@ -177,6 +182,7 @@ func New() *Host {
 	// surprise spend.
 	h.reg.failRunningStages("host restarted — window lost")
 	go h.aw.runTranscript(h.ctx)
+	go h.runUpdateCheck()
 	return h
 }
 
@@ -538,6 +544,7 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/agent/spend", h.handleSpend)
 	mux.HandleFunc("/decisions", h.handleDecisions)
 	mux.HandleFunc("/runtime", h.handleRuntime)
+	mux.HandleFunc("/update", h.handleUpdate)
 	// pprof rides the same authenticated loopback surface as everything
 	// else — no side door (README decision 3). Reach it with the token:
 	//   go tool pprof "http://127.0.0.1:$PORT/debug/pprof/heap?token=$TOKEN"

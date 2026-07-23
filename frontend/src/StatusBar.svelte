@@ -128,6 +128,14 @@
     {#if vimbar.active && vimbar.pos}
         <span class="text-lo">Ln {vimbar.pos.ln}, Col {vimbar.pos.col}</span>
     {/if}
+    {#if app.update?.available}
+        <span
+            id="sb-update"
+            class="text-acc"
+            title={`Update available: ${app.update.current} → ${app.update.latest}\nrookctl update, then relaunch rook`}
+            >⬆ {app.update.latest}</span
+        >
+    {/if}
     {#if footprint && footprint.total > 0}
         <span
             id="sb-footprint"
