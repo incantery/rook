@@ -215,7 +215,7 @@
                     {#if row.group && row.group !== rows[i - 1]?.group}
                         <div
                             class={[
-                                "px-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-lo",
+                                "px-3 pb-1 text-[0.625rem] font-bold uppercase tracking-wider text-lo",
                                 i === 0 ? "pt-1.5" : "mt-1 border-t border-line/15 pt-2",
                             ]}
                         >
@@ -255,7 +255,9 @@
                                     >{:else}{seg.text}{/if}{/each}</span
                         >
                         {#if row.detail}
-                            <span class="shrink-0 font-mono text-[10px] text-lo">{row.detail}</span>
+                            <span class="shrink-0 font-mono text-[0.625rem] text-lo"
+                                >{row.detail}</span
+                            >
                         {/if}
                     </div>
                 {/each}

@@ -10,11 +10,13 @@
 </script>
 
 {#if b}
-    <span class="w-3 shrink-0 text-center text-[11px] text-amber"
+    <span class="w-3 shrink-0 text-center text-[0.6875rem] text-amber"
         >{b.state === "starred" ? "★" : ""}</span
     >
-    <span class="shrink-0 truncate font-mono text-[11px] text-fg"
+    <span class="shrink-0 truncate font-mono text-[0.6875rem] text-fg"
         >{b.path}<span class="text-lo">:{b.startLine}</span></span
     >
-    <span class="min-w-0 flex-1 truncate font-mono text-[10px] text-lo">{b.anchorText ?? ""}</span>
+    <span class="min-w-0 flex-1 truncate font-mono text-[0.625rem] text-lo"
+        >{b.anchorText ?? ""}</span
+    >
 {/if}

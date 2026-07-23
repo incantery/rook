@@ -25,20 +25,20 @@
     {@const meta = statusMeta(threadStatus(t))}
     <!-- status, not stored state: the list has to agree with the gutter about
          whose move it is, and "open" alone never said that -->
-    <span class={"shrink-0 text-[10px] " + TONE[meta.tone]} title={meta.label}>●</span>
+    <span class={"shrink-0 text-[0.625rem] " + TONE[meta.tone]} title={meta.label}>●</span>
     <!-- location in mono (it's a coordinate), the comment in the BODY font:
          prose set in a code face is measurably harder to scan, and the comment
          is the part you read to decide whether to open the thread -->
-    <span class="shrink-0 truncate font-mono text-[10.5px] text-dim"
+    <span class="shrink-0 truncate font-mono text-[0.65625rem] text-dim"
         >{t.path}<span class="text-lo">:{t.currentStart}</span></span
     >
-    <span class="min-w-0 flex-1 truncate text-[11.5px] text-fg"
+    <span class="min-w-0 flex-1 truncate text-[0.71875rem] text-fg"
         >{t.comments[0]?.body ?? snippetOf(t)}</span
     >
     {#if t.outdated}
-        <span class="shrink-0 text-[9px] text-lo">outdated</span>
+        <span class="shrink-0 text-[0.5625rem] text-lo">outdated</span>
     {/if}
     {#if t.comments.length > 1}
-        <span class="shrink-0 text-[9px] text-lo">{t.comments.length}</span>
+        <span class="shrink-0 text-[0.5625rem] text-lo">{t.comments.length}</span>
     {/if}
 {/if}

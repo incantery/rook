@@ -146,7 +146,7 @@
         {#each RANGES as r (r)}
             <button
                 class={[
-                    "rounded border px-2 py-0.5 text-[11px]",
+                    "rounded border px-2 py-0.5 text-[0.6875rem]",
                     range === r
                         ? "border-acc/40 bg-acc/15 text-acc"
                         : "border-line/20 text-dim hover:bg-raise",
@@ -160,7 +160,7 @@
     <div class="grid grid-cols-4 gap-3">
         {#each tiles as t (t.label)}
             <div class="rounded border border-line/15 px-3 py-2">
-                <div class="text-[11px] text-dim">{t.label}</div>
+                <div class="text-[0.6875rem] text-dim">{t.label}</div>
                 <div class="text-lg font-semibold text-fg">{t.value}</div>
             </div>
         {/each}
@@ -169,7 +169,7 @@
     <!-- one legend for both charts: same series, same fixed order -->
     <div class="flex items-center gap-3">
         {#each BUCKETS as b, i (b.key)}
-            <span class="flex items-center gap-1.5 text-[11px] text-dim">
+            <span class="flex items-center gap-1.5 text-[0.6875rem] text-dim">
                 <span class="inline-block h-[2px] w-3.5" style:background={colors[i]}></span>
                 {b.label}
             </span>
@@ -193,13 +193,13 @@
 
     <!-- the table view: live, per session — which window is the migration -->
     <div>
-        <div class="mb-1 text-[11px] font-medium text-dim">sessions, live</div>
+        <div class="mb-1 text-[0.6875rem] font-medium text-dim">sessions, live</div>
         {#if !detail?.sessions?.length}
-            <div class="text-[11px] text-lo">no sessions</div>
+            <div class="text-[0.6875rem] text-lo">no sessions</div>
         {:else}
-            <table class="w-full text-left text-[12px]">
+            <table class="w-full text-left text-[0.75rem]">
                 <thead>
-                    <tr class="text-[11px] text-lo">
+                    <tr class="text-[0.6875rem] text-lo">
                         <th class="py-1 pr-3 font-normal">session</th>
                         <th class="py-1 pr-3 font-normal">workspace</th>
                         <th class="py-1 pr-3 text-right font-normal">cpu</th>

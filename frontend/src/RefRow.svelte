@@ -11,12 +11,12 @@
 </script>
 
 {#if h}
-    <span class="shrink-0 truncate font-mono text-[10.5px] text-dim"
+    <span class="shrink-0 truncate font-mono text-[0.65625rem] text-dim"
         >{h.path}<span class="text-lo">:{h.line}</span></span
     >
     <!-- the hit's own line stays mono — this one IS code, unlike a comment -->
-    <span class="min-w-0 flex-1 truncate font-mono text-[10.5px] text-fg">{h.text}</span>
+    <span class="min-w-0 flex-1 truncate font-mono text-[0.65625rem] text-fg">{h.text}</span>
     {#if h.external}
-        <span class="shrink-0 text-[9px] text-lo">external · read-only</span>
+        <span class="shrink-0 text-[0.5625rem] text-lo">external · read-only</span>
     {/if}
 {/if}

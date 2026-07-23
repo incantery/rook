@@ -155,7 +155,10 @@
                 <div class="truncate font-mono text-sm text-fg">
                     {hunk.path}<span class="text-lo">:{hunk.startLine}</span>
                 </div>
-                <div class="text-[11px] uppercase tracking-wider {TONE[hunk.state] ?? 'text-lo'}">
+                <div
+                    class="text-[0.6875rem] uppercase tracking-wider {TONE[hunk.state] ??
+                        'text-lo'}"
+                >
                     {hunk.state}
                 </div>
             </div>
@@ -186,41 +189,41 @@
                     <div class="mb-2 flex items-center gap-2">
                         {#if detail.category}
                             <span
-                                class="rounded-md bg-acc/15 px-2 py-0.5 text-[11px] font-semibold text-acc"
+                                class="rounded-md bg-acc/15 px-2 py-0.5 text-[0.6875rem] font-semibold text-acc"
                                 >{detail.category}</span
                             >
                         {/if}
                         {#if detail.score?.risk}
-                            <span class="font-mono text-[11px] text-lo"
+                            <span class="font-mono text-[0.6875rem] text-lo"
                                 >risk {detail.score.risk}/5 · understand {detail.score
                                     ?.understand ?? "–"}/5</span
                             >
                         {/if}
                     </div>
                     {#if detail.summary}
-                        <p class="text-[13px] leading-relaxed text-fg">{detail.summary}</p>
+                        <p class="text-[0.8125rem] leading-relaxed text-fg">{detail.summary}</p>
                     {/if}
                     {#if detail.concerns && detail.concerns.length > 0}
                         <ul class="mt-2 flex flex-col gap-1">
                             {#each detail.concerns as c (c)}
-                                <li class="flex gap-2 text-[12px] text-dim">
+                                <li class="flex gap-2 text-[0.75rem] text-dim">
                                     <span class="text-amber">→</span>{c}
                                 </li>
                             {/each}
                         </ul>
                     {/if}
                 {:else if app.reviewRoot?.scoring}
-                    <p class="flex items-center gap-2 text-[12px] text-lo">
+                    <p class="flex items-center gap-2 text-[0.75rem] text-lo">
                         <span class="size-1.5 animate-pulse rounded-full bg-acc"></span>
                         Haiku is triaging the batch — analyses land here as they finish.
                     </p>
                 {:else}
                     <div class="flex items-center gap-3">
                         <button
-                            class="cursor-pointer rounded-lg border border-acc/35 bg-acc/15 px-3 py-1.5 text-[12px] font-semibold text-acc hover:bg-acc/25"
+                            class="cursor-pointer rounded-lg border border-acc/35 bg-acc/15 px-3 py-1.5 text-[0.75rem] font-semibold text-acc hover:bg-acc/25"
                             onclick={() => void onTriage()}>✦ Triage with Haiku</button
                         >
-                        <span class="text-[12px] text-lo"
+                        <span class="text-[0.75rem] text-lo"
                             >score every hunk — risk, summary, what to check</span
                         >
                     </div>
@@ -231,7 +234,7 @@
             <div class="overflow-x-auto rounded-xl border border-line/15 bg-sunken">
                 {#each lines as ln, i (i)}
                     <div
-                        class={"whitespace-pre px-4 font-mono text-[12px] leading-[1.5] " +
+                        class={"whitespace-pre px-4 font-mono text-[0.75rem] leading-[1.5] " +
                             lineClass(ln)}
                     >
                         {ln || " "}
@@ -244,13 +247,13 @@
         <div class="shrink-0 border-t border-line/15 px-5 py-3">
             <div class="mb-3 flex items-start gap-2">
                 <textarea
-                    class="min-h-9 flex-1 resize-y rounded-lg border border-line/15 bg-sunken px-3 py-2 text-[13px] text-fg focus:border-acc focus:outline-none"
+                    class="min-h-9 flex-1 resize-y rounded-lg border border-line/15 bg-sunken px-3 py-2 text-[0.8125rem] text-fg focus:border-acc focus:outline-none"
                     rows="1"
                     placeholder="Drop a thought on this hunk — a question, a doubt, a gut reaction…"
                     bind:value={note}
                     oninput={() => (noteDone = false)}></textarea>
                 <button
-                    class="shrink-0 cursor-pointer rounded-lg border border-line/15 bg-fg/5 px-3 py-2 text-[12px] font-semibold text-fg hover:border-acc disabled:opacity-50"
+                    class="shrink-0 cursor-pointer rounded-lg border border-line/15 bg-fg/5 px-3 py-2 text-[0.75rem] font-semibold text-fg hover:border-acc disabled:opacity-50"
                     disabled={noteBusy || !note.trim()}
                     onclick={addNote}>{noteDone ? "added ✓" : "Note"}</button
                 >
@@ -259,7 +262,7 @@
             <div class="flex gap-2">
                 {#each actions as act (act.key)}
                     <button
-                        class={"flex-1 cursor-pointer rounded-lg border px-3 py-2 text-[13px] font-semibold " +
+                        class={"flex-1 cursor-pointer rounded-lg border px-3 py-2 text-[0.8125rem] font-semibold " +
                             TONE_BTN[act.tone]}
                         onclick={() => void qf.act(act.key)}
                         >{act.label} <span class="opacity-60">{act.key}</span></button

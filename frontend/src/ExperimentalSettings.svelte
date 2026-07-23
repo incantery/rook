@@ -43,7 +43,8 @@
             />
             <span>
                 <span class="text-sm text-fg">DOM</span>
-                <span class="ml-1.5 rounded border border-line/20 px-1.5 py-px text-[10px] text-lo"
+                <span
+                    class="ml-1.5 rounded border border-line/20 px-1.5 py-px text-[0.625rem] text-lo"
                     >default</span
                 >
                 <span class="block text-xs text-dim">Full feature set. The safe choice.</span>
@@ -60,7 +61,7 @@
             <span>
                 <span class="text-sm text-fg">WebGL (beamterm)</span>
                 <span
-                    class="ml-1.5 rounded border border-amber/35 bg-amber/12 px-1.5 py-px text-[10px] text-amber"
+                    class="ml-1.5 rounded border border-amber/35 bg-amber/12 px-1.5 py-px text-[0.625rem] text-amber"
                     >experimental</span
                 >
                 <span class="block text-xs text-dim">

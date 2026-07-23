@@ -177,8 +177,7 @@ export class RookVimStatusBar {
         // vim sends errors as a red-styled <pre> (showConfirm); read the tone
         // off the node so E486 lands red and ":set wrap?" answers stay calm
         const err = text instanceof HTMLElement && text.style.color === "red";
-        this.notifNode.textContent =
-            typeof text === "string" ? text : (text.textContent ?? "");
+        this.notifNode.textContent = typeof text === "string" ? text : (text.textContent ?? "");
         this.notifNode.classList.toggle("err", err);
         if (this.notifTimeout) clearTimeout(this.notifTimeout);
         this.notifTimeout = setTimeout(() => {
@@ -204,20 +203,12 @@ export class RookVimStatusBar {
 
     private inputKeyUp = (e: KeyboardEvent): void => {
         if (!this.input) return;
-        this.input.options?.onKeyUp?.(
-            e,
-            (e.target as HTMLInputElement).value,
-            this.closeInput,
-        );
+        this.input.options?.onKeyUp?.(e, (e.target as HTMLInputElement).value, this.closeInput);
     };
 
     private inputKeyInput = (e: InputEvent): void => {
         if (!this.input) return;
-        this.input.options?.onKeyInput?.(
-            e,
-            (e.target as HTMLInputElement).value,
-            this.closeInput,
-        );
+        this.input.options?.onKeyInput?.(e, (e.target as HTMLInputElement).value, this.closeInput);
     };
 
     private inputBlur = (e: FocusEvent): void => {

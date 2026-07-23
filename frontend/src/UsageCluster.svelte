@@ -46,7 +46,7 @@
                   : "text-dim",
         ]}
         title="Usage, costs and footprint"
-        onclick={() => (open = !open)}>usage<span class="text-[10px] text-lo">▾</span></button
+        onclick={() => (open = !open)}>usage<span class="text-[0.625rem] text-lo">▾</span></button
     >
     {#if open}
         <!-- click-away scrim (transparent) then the cluster panel -->
@@ -78,7 +78,7 @@
                                     style="width: {Math.min(100, w.pct)}%"
                                 ></div>
                             </div>
-                            <div class="text-[11px] text-lo">resets {w.resets}</div>
+                            <div class="text-[0.6875rem] text-lo">resets {w.resets}</div>
                         </div>
                     {/each}
                 </div>
@@ -87,7 +87,7 @@
             {/if}
             {#if app.costs && (app.costs.todayUsd > 0 || app.costs.weekUsd > 0)}
                 <div
-                    class="border-t border-line/15 pt-2.5 font-mono text-[11px] text-dim"
+                    class="border-t border-line/15 pt-2.5 font-mono text-[0.6875rem] text-dim"
                     title="raw-inference value (subscription usage priced at API rates)"
                 >
                     ${app.costs.todayUsd.toFixed(2)} today · ${app.costs.weekUsd.toFixed(2)} 7d
@@ -100,7 +100,7 @@
                     <button
                         id={ids ? "tb-footprint" : undefined}
                         class={[
-                            "flex cursor-pointer appearance-none items-center justify-between rounded-md border border-line/15 bg-transparent px-2.5 py-1.5 font-mono text-[11px] hover:bg-fg/8",
+                            "flex cursor-pointer appearance-none items-center justify-between rounded-md border border-line/15 bg-transparent px-2.5 py-1.5 font-mono text-[0.6875rem] hover:bg-fg/8",
                             footprint.orphaned ? "text-amber" : "text-dim",
                         ]}
                         title={footprintTitle(footprint)}
@@ -115,7 +115,7 @@
                 {:else}
                     <div
                         class={[
-                            "flex items-center justify-between rounded-md border border-line/15 px-2.5 py-1.5 font-mono text-[11px]",
+                            "flex items-center justify-between rounded-md border border-line/15 px-2.5 py-1.5 font-mono text-[0.6875rem]",
                             footprint.orphaned ? "text-amber" : "text-dim",
                         ]}
                         title={footprintTitle(footprint)}

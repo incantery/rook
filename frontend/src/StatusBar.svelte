@@ -67,11 +67,11 @@
 
 <div
     id="statusbar"
-    class="flex h-7 shrink-0 items-center gap-5 border-t border-line/15 bg-sunken px-3.5 font-mono text-[11px] text-dim"
+    class="flex h-7 shrink-0 items-center gap-5 border-t border-line/15 bg-sunken px-3.5 font-mono text-[0.6875rem] text-dim"
 >
     {#if app.screen === "home"}
         <span class={["flex items-center gap-1.5", app.runtime ? "text-grn" : "text-lo"]}
-            ><span class="text-[8px]">●</span>rook-host</span
+            ><span class="text-[0.5rem]">●</span>rook-host</span
         >
         <span class="flex items-center gap-4 text-lo">
             {#if isAgentTab(app.deck.tab)}

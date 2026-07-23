@@ -80,13 +80,16 @@
 
 <div class="relative min-w-0" bind:clientWidth={width}>
     <div class="mb-1 flex items-baseline justify-between">
-        <span class="text-[11px] font-medium text-dim">{title}</span>
+        <span class="text-[0.6875rem] font-medium text-dim">{title}</span>
         {#if hoverIdx !== null}
-            <span class="text-[11px] tabular-nums text-lo">{clock(times[hoverIdx])}</span>
+            <span class="text-[0.6875rem] tabular-nums text-lo">{clock(times[hoverIdx])}</span>
         {/if}
     </div>
     {#if times.length < 2}
-        <div class="flex items-center justify-center text-[11px] text-lo" style:height="{height}px">
+        <div
+            class="flex items-center justify-center text-[0.6875rem] text-lo"
+            style:height="{height}px"
+        >
             collecting samples…
         </div>
     {:else}
@@ -111,7 +114,7 @@
                     x={PAD.l - 6}
                     y={y(yMax * f) + 3}
                     text-anchor="end"
-                    class="fill-lo text-[10px] tabular-nums">{fmt(yMax * f)}</text
+                    class="fill-lo text-[0.625rem] tabular-nums">{fmt(yMax * f)}</text
                 >
             {/each}
             <line
@@ -123,14 +126,14 @@
                 stroke-width="1"
             />
             <!-- time labels: start / end -->
-            <text x={PAD.l} y={height - 4} class="fill-lo text-[10px] tabular-nums"
+            <text x={PAD.l} y={height - 4} class="fill-lo text-[0.625rem] tabular-nums"
                 >{clock(t0)}</text
             >
             <text
                 x={PAD.l + plotW}
                 y={height - 4}
                 text-anchor="end"
-                class="fill-lo text-[10px] tabular-nums">{clock(t1)}</text
+                class="fill-lo text-[0.625rem] tabular-nums">{clock(t1)}</text
             >
             <!-- the data: 2px lines, round join/cap -->
             {#each series as s (s.label)}
@@ -172,7 +175,9 @@
                 style:left="{Math.min(Math.max(0, hoverPx + 8), Math.max(0, width - 150))}px"
             >
                 {#each series as s (s.label)}
-                    <div class="flex items-center gap-1.5 whitespace-nowrap text-[11px] leading-4">
+                    <div
+                        class="flex items-center gap-1.5 whitespace-nowrap text-[0.6875rem] leading-4"
+                    >
                         <span class="inline-block h-[2px] w-3" style:background={s.color}></span>
                         <span class="font-medium tabular-nums text-fg"
                             >{fmt(s.values[hoverIdx] ?? 0)}</span

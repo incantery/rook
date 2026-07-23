@@ -74,7 +74,7 @@
     style="--wails-draggable: drag"
 >
     <button
-        class="absolute left-21 top-1/2 box-border inline-flex h-7 -translate-y-1/2 cursor-pointer appearance-none items-center gap-2 self-center rounded-md border-0 bg-transparent px-2.5 text-[12.5px] font-medium text-fg hover:bg-fg/8"
+        class="absolute left-21 top-1/2 box-border inline-flex h-7 -translate-y-1/2 cursor-pointer appearance-none items-center gap-2 self-center rounded-md border-0 bg-transparent px-2.5 text-[0.78125rem] font-medium text-fg hover:bg-fg/8"
         class:max-w-60={!tree}
         class:max-w-80={tree}
         style="--wails-draggable: no-drag"
@@ -88,7 +88,7 @@
             ><span class="truncate">⎇ {app.workspace}</span>{:else}<span
                 class="h-1.5 w-1.5 flex-none rounded-full {wsDot}"
             ></span><span class="truncate">{app.flashMsg ?? app.workspace}</span>{/if}<span
-            class="flex-none text-[10px] text-lo">▾</span
+            class="flex-none text-[0.625rem] text-lo">▾</span
         ></button
     >
     <div class="absolute inset-y-0 left-1/2 flex -translate-x-1/2 items-center gap-1.5">
@@ -121,7 +121,7 @@
                 style="--wails-draggable: no-drag"
                 title={tab.name}
                 onclick={() => onactivate(tab.id)}
-                ><span class={["font-mono text-[11px]", active ? "text-acc" : "text-lo"]}
+                ><span class={["font-mono text-[0.6875rem]", active ? "text-acc" : "text-lo"]}
                     >{i + 1}</span
                 ><span class={["truncate", active ? "max-w-44" : "max-w-24"]}>{tab.name}</span
                 >{#if st}<span
@@ -148,7 +148,7 @@
     {/if}
     {#if app.attention.length > 0}
         <button
-            class="box-border inline-flex h-6 cursor-pointer appearance-none items-center gap-1.5 self-center rounded-full border border-amber/35 bg-amber/12 px-2.5 text-[11.5px] font-medium text-amber hover:bg-amber/20"
+            class="box-border inline-flex h-6 cursor-pointer appearance-none items-center gap-1.5 self-center rounded-full border border-amber/35 bg-amber/12 px-2.5 text-[0.71875rem] font-medium text-amber hover:bg-amber/20"
             style="--wails-draggable: no-drag"
             title="Attention inbox (` a)"
             onclick={oninbox}

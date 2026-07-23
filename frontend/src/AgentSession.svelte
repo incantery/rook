@@ -192,7 +192,7 @@
             <span class={"size-2 shrink-0 rounded-full " + (STATE_BG[status.state] ?? "bg-lo")}
             ></span>
             <span
-                class={"text-[10px] font-bold uppercase tracking-wider " +
+                class={"text-[0.625rem] font-bold uppercase tracking-wider " +
                     (STATE_TEXT[status.state] ?? "text-lo")}
             >
                 {STATE_LABEL[status.state] ?? status.state}
@@ -202,11 +202,11 @@
             {status?.title || session}
         </span>
         {#if status?.model}
-            <span class="shrink-0 font-mono text-[10px] text-lo">{status.model}</span>
+            <span class="shrink-0 font-mono text-[0.625rem] text-lo">{status.model}</span>
         {/if}
         {#if onjump}
             <button
-                class="shrink-0 cursor-pointer rounded-md border border-line/30 px-2 py-0.5 font-mono text-[10px] text-dim hover:bg-fg/5"
+                class="shrink-0 cursor-pointer rounded-md border border-line/30 px-2 py-0.5 font-mono text-[0.625rem] text-dim hover:bg-fg/5"
                 onclick={onjump}
                 title="Jump to the live terminal">terminal ↗</button
             >
@@ -215,7 +215,7 @@
 
     {#if err}
         <div
-            class="shrink-0 border-b border-red/30 bg-red/10 px-3 py-1 font-mono text-[10px] text-red"
+            class="shrink-0 border-b border-red/30 bg-red/10 px-3 py-1 font-mono text-[0.625rem] text-red"
         >
             {err}
         </div>
@@ -229,7 +229,7 @@
         {:else}
             {#if more}
                 <button
-                    class="mb-2 w-full cursor-pointer rounded-lg border border-line/15 py-1.5 text-[11px] text-dim hover:bg-fg/5 disabled:opacity-50"
+                    class="mb-2 w-full cursor-pointer rounded-lg border border-line/15 py-1.5 text-[0.6875rem] text-dim hover:bg-fg/5 disabled:opacity-50"
                     disabled={paging}
                     onclick={older}>{paging ? "loading…" : "older"}</button
                 >
@@ -239,18 +239,19 @@
                 {#if it.kind === "prompt"}
                     <div class="mt-3 rounded-xl border border-acc/30 bg-acc/5 px-3 py-2">
                         <div class="mb-1 flex items-center gap-2">
-                            <span class="text-[10px] font-bold uppercase tracking-wider text-acc"
+                            <span
+                                class="text-[0.625rem] font-bold uppercase tracking-wider text-acc"
                                 >you</span
                             >
-                            <span class="font-mono text-[10px] text-lo">{tsOf(it)}</span>
+                            <span class="font-mono text-[0.625rem] text-lo">{tsOf(it)}</span>
                         </div>
-                        <div class="whitespace-pre-wrap break-words text-[13px] text-fg">
+                        <div class="whitespace-pre-wrap break-words text-[0.8125rem] text-fg">
                             {it.text}
                         </div>
                     </div>
                 {:else if it.kind === "say"}
                     <div
-                        class="mt-3 whitespace-pre-wrap break-words text-[13px] leading-relaxed text-fg"
+                        class="mt-3 whitespace-pre-wrap break-words text-[0.8125rem] leading-relaxed text-fg"
                     >
                         {it.text}
                     </div>
@@ -279,7 +280,7 @@
                             }}
                         >
                             <span
-                                class={"shrink-0 font-mono text-[10px] font-bold " +
+                                class={"shrink-0 font-mono text-[0.625rem] font-bold " +
                                     (pending
                                         ? "text-amber"
                                         : c.result?.isError
@@ -288,7 +289,9 @@
                             >
                                 {c.name || "↩"}
                             </span>
-                            <span class="min-w-0 flex-1 truncate font-mono text-[11px] text-dim">
+                            <span
+                                class="min-w-0 flex-1 truncate font-mono text-[0.6875rem] text-dim"
+                            >
                                 {c.name ? summarize(c.name, c.input) : bodyOf(c).split("\n")[0]}
                             </span>
                             {#if pending}
@@ -296,11 +299,12 @@
                                      with no result yet. An AskUserQuestion has
                                      no long-running variant, so an outstanding
                                      one is a person who has not answered. -->
-                                <span class="shrink-0 font-mono text-[10px] text-amber"
+                                <span class="shrink-0 font-mono text-[0.625rem] text-amber"
                                     >waiting…</span
                                 >
                             {:else}
-                                <span class="shrink-0 font-mono text-[10px] text-lo">{took(c)}</span
+                                <span class="shrink-0 font-mono text-[0.625rem] text-lo"
+                                    >{took(c)}</span
                                 >
                             {/if}
                         </div>
@@ -309,17 +313,17 @@
                             <div class="border-t border-line/15 px-2.5 py-2">
                                 {#each opts as o, i (o.label)}
                                     <div class="mb-1 last:mb-0">
-                                        <span class="font-mono text-[11px] text-fg"
+                                        <span class="font-mono text-[0.6875rem] text-fg"
                                             >{i + 1}) {o.label}</span
                                         >
                                         {#if o.description}
-                                            <div class="ml-4 text-[11px] leading-snug text-lo">
+                                            <div class="ml-4 text-[0.6875rem] leading-snug text-lo">
                                                 {o.description}
                                             </div>
                                         {/if}
                                     </div>
                                 {/each}
-                                <div class="mt-1.5 font-mono text-[10px] text-lo">
+                                <div class="mt-1.5 font-mono text-[0.625rem] text-lo">
                                     rook will not type into a picker — jump to answer
                                 </div>
                             </div>
@@ -327,7 +331,7 @@
                             <div class="border-t border-line/15 px-2.5 py-2">
                                 {#if c.input !== undefined}
                                     <pre
-                                        class="mb-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[10px] text-dim">{JSON.stringify(
+                                        class="mb-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[0.625rem] text-dim">{JSON.stringify(
                                             c.input,
                                             null,
                                             2,
@@ -335,7 +339,7 @@
                                 {/if}
                                 {#if c.result}
                                     <pre
-                                        class={"max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] " +
+                                        class={"max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-[0.625rem] " +
                                             (c.result.isError ? "text-red" : "text-lo")}>{bodyOf(
                                             c,
                                         )}</pre>
@@ -346,7 +350,7 @@
                 {:else if it.kind === "turn"}
                     <div class="my-3 flex items-center gap-2">
                         <div class="h-px flex-1 bg-line/15"></div>
-                        <span class="font-mono text-[10px] text-lo">
+                        <span class="font-mono text-[0.625rem] text-lo">
                             turn ended{it.ms ? ` · ${(it.ms / 1000).toFixed(1)}s` : ""}
                         </span>
                         <div class="h-px flex-1 bg-line/15"></div>
@@ -358,10 +362,10 @@
 
     {#if status?.state === "needs_input" && status.ask}
         <div class="shrink-0 border-t border-amber/30 bg-amber/5 px-3 py-2">
-            <div class="mb-0.5 text-[10px] font-bold uppercase tracking-wider text-amber">
+            <div class="mb-0.5 text-[0.625rem] font-bold uppercase tracking-wider text-amber">
                 waiting on you
             </div>
-            <div class="line-clamp-3 text-[12px] text-fg">{status.ask}</div>
+            <div class="line-clamp-3 text-[0.75rem] text-fg">{status.ask}</div>
         </div>
     {/if}
 </div>

@@ -8,7 +8,7 @@
 
 <span class="inline-flex items-baseline gap-1.5 whitespace-nowrap">
     <kbd
-        class="rounded border border-line/20 bg-fg/[0.06] px-1 py-px font-mono text-[10px] leading-none font-semibold text-dim"
+        class="rounded border border-line/20 bg-fg/[0.06] px-1 py-px font-mono text-[0.625rem] leading-none font-semibold text-dim"
         >{k}</kbd
     >
     {#if label}<span class="text-lo">{label}</span>{/if}

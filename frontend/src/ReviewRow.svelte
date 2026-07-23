@@ -32,15 +32,16 @@
             (RING[t.state] ?? "border-lo")}
     ></span>
     <span
-        class={"shrink-0 truncate font-mono text-[11px] " +
+        class={"shrink-0 truncate font-mono text-[0.6875rem] " +
             (DONE.has(t.state) ? "text-lo line-through" : "text-fg")}
         >{t.path ?? t.title ?? ""}{#if t.startLine}<span class="text-lo">:{t.startLine}</span
             >{/if}</span
     >
-    <span class="min-w-0 flex-1 truncate text-[10px] text-lo">{t.detail?.category ?? ""}</span>
+    <span class="min-w-0 flex-1 truncate text-[0.625rem] text-lo">{t.detail?.category ?? ""}</span>
     {#if t.detail?.score?.risk}
-        <span class="shrink-0 rounded bg-fg/10 px-1 font-mono text-[9px] text-dim" title="risk"
-            >r{t.detail.score.risk}</span
+        <span
+            class="shrink-0 rounded bg-fg/10 px-1 font-mono text-[0.5625rem] text-dim"
+            title="risk">r{t.detail.score.risk}</span
         >
     {/if}
 {/if}

@@ -80,14 +80,16 @@
         onkeydown={onKey}
     >
         <div class="flex items-center gap-2 px-2 pb-2 pt-1">
-            <span class="text-[10px] font-bold uppercase tracking-wider text-lo"
+            <span class="text-[0.625rem] font-bold uppercase tracking-wider text-lo"
                 >{qf.context?.title ?? "Quickfix"}</span
             >
             {#if qf.ids.length > 0}
-                <span class="font-mono text-[10px] text-lo">{qf.cursor + 1} / {qf.ids.length}</span>
+                <span class="font-mono text-[0.625rem] text-lo"
+                    >{qf.cursor + 1} / {qf.ids.length}</span
+                >
             {/if}
             <span class="flex-1"></span>
-            <span class="font-mono text-[10px] text-lo">j/k select · ↵ run · esc</span>
+            <span class="font-mono text-[0.625rem] text-lo">j/k select · ↵ run · esc</span>
         </div>
         {#if actions.length === 0 || qf.ids.length === 0}
             <div class="px-2 py-3 text-center text-xs text-lo">
@@ -108,7 +110,7 @@
                             class={"inline-flex size-6 items-center justify-center rounded-md border font-mono text-xs " +
                                 TONE_KEY[act.tone]}>{act.key}</kbd
                         >
-                        <span class="text-[13px] text-fg">{act.label}</span>
+                        <span class="text-[0.8125rem] text-fg">{act.label}</span>
                     </button>
                 {/each}
             </div>

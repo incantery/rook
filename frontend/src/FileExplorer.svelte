@@ -269,7 +269,7 @@
     </div>
 
     {#if base}
-        <div class="shrink-0 border-b border-line/15 px-2 py-1 font-mono text-[10px] text-acc">
+        <div class="shrink-0 border-b border-line/15 px-2 py-1 font-mono text-[0.625rem] text-acc">
             in {base}
         </div>
     {/if}
@@ -280,7 +280,7 @@
         <div class="flex shrink-0 items-center gap-1.5 border-b border-line/15 px-2 py-1.5">
             {#each SCOPES as [id, label] (id)}
                 <button
-                    class={"cursor-pointer rounded-md border px-2 py-0.5 text-[11px] font-semibold " +
+                    class={"cursor-pointer rounded-md border px-2 py-0.5 text-[0.6875rem] font-semibold " +
                         (scope === id
                             ? "border-acc/40 bg-acc/15 text-acc"
                             : "border-line/15 bg-transparent text-lo hover:text-fg")}
@@ -288,7 +288,7 @@
                 >
             {/each}
             <span class="flex-1"></span>
-            <span class="flex items-center gap-1.5 font-mono text-[10px]">
+            <span class="flex items-center gap-1.5 font-mono text-[0.625rem]">
                 {#if counts.added > 0}<span class="text-grn">{counts.added}+</span>{/if}
                 {#if counts.modified > 0}<span class="text-amber">{counts.modified}~</span>{/if}
                 {#if counts.deleted > 0}<span class="text-red">{counts.deleted}−</span>{/if}
@@ -322,7 +322,7 @@
                 {@render row(r.node, r.depth)}
             {/each}
             {#if truncated && scope === "all"}
-                <div class="px-3 py-2 font-mono text-[10px] text-dim opacity-70">
+                <div class="px-3 py-2 font-mono text-[0.625rem] text-dim opacity-70">
                     list truncated — some files hidden
                 </div>
             {/if}
@@ -331,7 +331,7 @@
 
     {#if git}
         <div
-            class="flex shrink-0 items-center gap-2 border-t border-line/15 px-2.5 py-1.5 font-mono text-[10px] text-lo"
+            class="flex shrink-0 items-center gap-2 border-t border-line/15 px-2.5 py-1.5 font-mono text-[0.625rem] text-lo"
         >
             <span class="size-1.5 shrink-0 rounded-full bg-amber"></span>
             <span class="min-w-0 truncate" title={git.branch}>{git.branch}</span>
@@ -384,13 +384,13 @@
         {/if}
         {#if count > 0}
             <span
-                class="inline-flex h-4 min-w-4 flex-none items-center justify-center rounded-md bg-acc/15 px-1 font-mono text-[9.5px] font-bold text-acc"
+                class="inline-flex h-4 min-w-4 flex-none items-center justify-center rounded-md bg-acc/15 px-1 font-mono text-[0.59375rem] font-bold text-acc"
                 title="{count} unresolved thread{count === 1 ? '' : 's'}">{count}</span
             >
         {:else if meta}
             <span
-                class={"w-3.5 flex-none text-center text-[10px] font-bold " + TONE_TEXT[meta.tone]}
-                >{meta.letter}</span
+                class={"w-3.5 flex-none text-center text-[0.625rem] font-bold " +
+                    TONE_TEXT[meta.tone]}>{meta.letter}</span
             >
         {:else}
             <span class="w-3.5 flex-none"></span>

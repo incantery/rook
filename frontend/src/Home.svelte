@@ -831,7 +831,7 @@
     <!-- a DESTINATION: where you are, so an underline tab, not a filter chip -->
     <button
         class={[
-            "-mb-px cursor-pointer appearance-none border-x-0 border-b-2 border-t-0 border-solid bg-transparent px-3.5 py-2 text-[13px]",
+            "-mb-px cursor-pointer appearance-none border-x-0 border-b-2 border-t-0 border-solid bg-transparent px-3.5 py-2 text-[0.8125rem]",
             active ? "border-acc font-medium text-fg" : "border-transparent text-dim hover:text-fg",
         ]}
         onclick={() => {
@@ -840,7 +840,7 @@
             focusDeck();
         }}
         >{label}{#if n !== null}
-            <span class="ml-1 font-mono text-[11px] text-lo">{n}</span>{/if}</button
+            <span class="ml-1 font-mono text-[0.6875rem] text-lo">{n}</span>{/if}</button
     >
 {/snippet}
 
@@ -857,7 +857,7 @@
             deck.tab = id;
             deck.cursor = 0;
             focusDeck();
-        }}>{label} <span class="font-mono text-[11px] text-lo">{n}</span></button
+        }}>{label} <span class="font-mono text-[0.6875rem] text-lo">{n}</span></button
     >
 {/snippet}
 
@@ -970,7 +970,7 @@
         >
             {#if isAgentTab(deck.tab)}
                 <div
-                    class="flex h-7 shrink-0 items-center border-b border-line/12 pl-10 pr-4 font-mono text-[10px] uppercase tracking-wider text-lo"
+                    class="flex h-7 shrink-0 items-center border-b border-line/12 pl-10 pr-4 font-mono text-[0.625rem] uppercase tracking-wider text-lo"
                 >
                     <span class="w-24 shrink-0">state</span>
                     <span class="w-33 shrink-0">workspace</span>

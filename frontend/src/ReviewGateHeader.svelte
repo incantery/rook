@@ -17,7 +17,7 @@
 
 {#if gate}
     <span
-        class={"flex items-center gap-1.5 font-mono text-[10px] " +
+        class={"flex items-center gap-1.5 font-mono text-[0.625rem] " +
             (gate.ready ? "text-grn" : "text-lo")}
     >
         <span class={"size-1.5 rounded-full " + (gate.ready ? "bg-grn" : "bg-amber")}></span>
@@ -32,11 +32,11 @@
         >
     {/if}
     {#if app.reviewRoot?.scoring}
-        <span class="flex items-center gap-1.5 font-mono text-[10px] text-acc">
+        <span class="flex items-center gap-1.5 font-mono text-[0.625rem] text-acc">
             <span class="size-1.5 animate-pulse rounded-full bg-acc"></span>
             triaging {scored}/{gate.total}
         </span>
     {/if}
 {:else}
-    <span class="font-mono text-[10px] text-lo">no review yet</span>
+    <span class="font-mono text-[0.625rem] text-lo">no review yet</span>
 {/if}

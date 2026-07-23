@@ -73,14 +73,14 @@
             <span class="flex-1"></span>
             {#if qf.ids.length > 0}
                 <span
-                    class="border-r border-line/15 pr-2 font-mono text-[10px] text-lo tabular-nums"
+                    class="border-r border-line/15 pr-2 font-mono text-[0.625rem] text-lo tabular-nums"
                     >{qf.cursor + 1}/{qf.ids.length}</span
                 >
             {/if}
             {#if ctx.prepare}
                 {@const prep = ctx.prepare}
                 <button
-                    class="cursor-pointer rounded-lg border border-line/15 bg-fg/5 px-2.5 py-1 text-[11px] font-semibold text-fg hover:border-acc"
+                    class="cursor-pointer rounded-lg border border-line/15 bg-fg/5 px-2.5 py-1 text-[0.6875rem] font-semibold text-fg hover:border-acc"
                     aria-label="prepare"
                     title="prepare / re-run"
                     onclick={() => void prep.run()}>{prep.label()}</button
@@ -131,7 +131,7 @@
 
         <!-- footer: traversal on the left, the context's verbs on the right -->
         <div
-            class="flex shrink-0 items-center gap-2 border-t border-line/15 px-3 py-2 text-[10px] text-lo"
+            class="flex shrink-0 items-center gap-2 border-t border-line/15 px-3 py-2 text-[0.625rem] text-lo"
         >
             <div class="flex items-baseline gap-3">
                 <Kbd k="j/k" label="move" />

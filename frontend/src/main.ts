@@ -33,6 +33,14 @@ async function main() {
     root.setProperty("--vt-font", font);
     root.setProperty("--vt-font-size", `${cfg.fontSize}px`);
 
+    // The CHROME follows the configured size too: every Tailwind text/size
+    // utility (and the app.css chrome islands) is rem-based, so the root
+    // font-size is the one scale knob — the whole chrome zooms coherently,
+    // text and geometry together. Terminal + Monaco take their px size
+    // directly (above / paneFont) and are untouched by this. Clamped so a
+    // typo'd config can't render the chrome unusable.
+    document.documentElement.style.fontSize = `${Math.min(28, Math.max(10, cfg.fontSize))}px`;
+
     // WebGL only: hand the canvas a FontFace copy of the terminal font —
     // WebKit's fillText can't see user-installed fonts (see registry.ts).
     // Must land before the atlas rasterizes, i.e. before any pane exists.
