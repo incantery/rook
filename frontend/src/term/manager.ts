@@ -73,6 +73,16 @@ export interface TabInfo {
     sessions: string[];
 }
 
+/** An `re` takeover ask, decoded from the session's frame socket. Paths
+ *  are host-resolved: workspace-relative (read-write) or absolute
+ *  (external read-only); cwd is workspace-relative and scopes the finder
+ *  when paths is empty. */
+export interface EditRequest {
+    id: string;
+    cwd: string;
+    paths: string[] | null;
+}
+
 /** UI-rate events out of the island. All of them are "state changed,
  *  re-project" signals — none carry terminal output. */
 export interface TermEvents {
@@ -504,6 +514,15 @@ export class TermManager {
                 tab.renderer.setMouseMode(msg.mouseLevel, msg.mouseSgr);
             } else if (msg.kind === "sbchunk") {
                 tab.renderer.applySbChunk(msg.payload);
+            } else if (msg.kind === "edit") {
+                // an `re` takeover ask (host edit.go) — chrome owns what
+                // happens next; a malformed payload is dropped, fail open
+                try {
+                    const req = JSON.parse(new TextDecoder().decode(msg.payload)) as EditRequest;
+                    if (req.id) this.onEditRequest?.(tab.id, tab.workspace, req);
+                } catch {
+                    console.warn("edit request dropped: bad payload");
+                }
             }
         };
         ws.onclose = async (ev) => {
@@ -628,6 +647,66 @@ export class TermManager {
         this.unzoom(win);
         this.setFocusedPane(win, at.leafId);
         win.panes.get(at.leafId)?.focus();
+    }
+
+    /** Chrome's hook for `re` takeover asks — set by App, called per
+     *  request with the session, its workspace, and the resolved paths. */
+    onEditRequest: ((sessionId: string, workspace: string, req: EditRequest) => void) | null =
+        null;
+
+    /** findPane across EVERY window, not just the current workspace — an
+     *  `re` typed into a pane must find that pane wherever it lives. */
+    findPaneAll(pred: (c: PaneRef) => boolean): PaneAt | null {
+        for (const win of this.windows) {
+            const leaf = findLeafBy(win.root, pred);
+            if (leaf) return {winId: win.id, leafId: leaf.id, content: leaf.content};
+        }
+        return null;
+    }
+
+    /** Vim-style takeover: replace a TERM leaf's content in place with
+     *  chrome-built content (the editor), keeping the leaf, its geometry,
+     *  and the session itself intact. The TermPane wrapper is dropped
+     *  UNdisposed — the Tab (renderer, ws, DOM) persists in this.sessions,
+     *  and syncVisibility pauses its frames now that no pane shows it.
+     *  restoreTermPane is the inverse. */
+    takeoverPane(at: PaneAt, content: PaneRef, mk: (leafId: string) => PaneContent): boolean {
+        const win = this.windows.find((w) => w.id === at.winId);
+        if (!win || !win.panes.has(at.leafId)) return false;
+        this.unzoom(win);
+        win.panes.set(at.leafId, mk(at.leafId));
+        win.root = retarget(win.root, at.leafId, content);
+        if (this.active !== win) this.activate(win);
+        win.focused = at.leafId;
+        project(win, this.hooks(win));
+        this.save();
+        this.syncVisibility();
+        this.syncSize(true);
+        win.panes.get(at.leafId)?.focus();
+        this.events.changed();
+        return true;
+    }
+
+    /** The takeover's return leg: put the session's terminal back into the
+     *  leaf. The displaced content (the editor) IS disposed — it's done.
+     *  The shell was live the whole time; the reveal ships the net diff. */
+    restoreTermPane(at: PaneAt, sessionId: string): boolean {
+        const win = this.windows.find((w) => w.id === at.winId);
+        const tab = this.sessions.get(sessionId);
+        if (!win || !win.panes.has(at.leafId) || !tab) return false;
+        win.panes.get(at.leafId)?.dispose();
+        win.panes.set(at.leafId, new TermPane(tab));
+        win.root = retarget(win.root, at.leafId, {type: "term", session: sessionId});
+        project(win, this.hooks(win));
+        this.save();
+        this.syncVisibility();
+        this.syncSize(true);
+        if (win === this.active) {
+            win.focused = at.leafId;
+            win.panes.get(at.leafId)?.focus();
+        }
+        this.events.changed();
+        return true;
     }
 
     /** Record that a pane now shows different content. The PaneContent object

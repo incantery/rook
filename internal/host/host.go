@@ -63,6 +63,9 @@ type session struct {
 	emuMu     sync.Mutex    // guards emu across readPump, render loop, resize
 	dirty     chan struct{} // buffered(1): pty output happened, render loop wake
 	frameConn *websocket.Conn
+	// oob carries pre-framed control messages (edit requests) to the render
+	// loop — the frame socket's sole writer. Set per attach, nil when detached.
+	oob chan []byte
 }
 
 type Host struct {
@@ -73,6 +76,10 @@ type Host struct {
 	reg      *registry
 	aw       *agentWatch
 	tw       *threadWatch // thread change fan-out (threadwatch.go)
+
+	// pending `rookctl edit` requests (edit.go), keyed by edit id
+	editMu sync.Mutex
+	edits  map[string]*editState
 
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
@@ -534,6 +541,7 @@ func (h *Host) Handler() http.Handler {
 	})
 	mux.HandleFunc("/costs", h.handleCosts)
 	mux.HandleFunc("/drafts/", h.handleDraftDecide)
+	mux.HandleFunc("/edits/", h.handleEdits)
 	// per-thread verbs — ids are global, no workspace in the path
 	mux.HandleFunc("/threads/", h.handleThread)
 	// per-task verbs (RookTask) — global ids, same as threads
@@ -1234,6 +1242,10 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 		// the shell's live working directory — feeds "set workspace root
 		// to here" and anything else that wants where the user actually is
 		writeJSON(w, map[string]string{"cwd": cwdOf(s.cmd.Process.Pid)})
+	case action == "edit" && r.Method == http.MethodPost:
+		// `rookctl edit` (the `re` shim): take over this session's pane
+		// with the editor, vim-style — see edit.go
+		h.handleSessionEdit(w, r, s)
 	case action == "claim" && r.Method == http.MethodPost:
 		// A claude session announcing which window it lives in — sent by
 		// `rookctl claim` from a SessionStart hook (ROOK_SESSION names the

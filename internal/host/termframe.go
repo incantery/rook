@@ -33,6 +33,7 @@ const (
 	msgFrame   byte = 0x01 // payload: vt.Frame.Encode()
 	msgState   byte = 0x02 // payload: 1 flags byte (bit0 = alt screen)
 	msgSbChunk byte = 0x03 // payload: vt.EncodeScrollback — a page of history
+	msgEdit    byte = 0x04 // payload: editPayload JSON (edit.go) — pane takeover ask
 
 	// client -> server
 	msgInput   byte = 0x10 // payload: raw bytes for the pty
@@ -74,11 +75,17 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 		return
 	}
 
+	// Out-of-band pushes (edit requests) ride to the render loop — the sole
+	// writer to c — like scrollback fetches do. Registered on the session so
+	// HTTP handlers can reach the live attach; cleared on detach.
+	oob := make(chan []byte, 4)
+
 	s.mu.Lock()
 	if old := s.frameConn; old != nil {
 		go old.Close(websocket.StatusPolicyViolation, "replaced")
 	}
 	s.frameConn = c
+	s.oob = oob
 	s.mu.Unlock()
 
 	// A fresh (blank) Surface: the first Render against it is the whole non-blank
@@ -97,7 +104,7 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 	// drains a stale value before pushing, so the render loop always sees the
 	// latest state and the input loop never blocks.
 	vis := make(chan bool, 1)
-	go h.framedRenderLoop(ctx, s, c, surface, fetch, vis)
+	go h.framedRenderLoop(ctx, s, c, surface, fetch, vis, oob)
 
 	// Client -> host: input and resize. Detach on any read error; the session and
 	// its emulator live on.
@@ -168,6 +175,7 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 	s.mu.Lock()
 	if s.frameConn == c {
 		s.frameConn = nil
+		s.oob = nil
 	}
 	s.mu.Unlock()
 	c.CloseNow()
@@ -189,7 +197,7 @@ type sbFetch struct {
 // The Surface just goes stale; the reveal render diffs the live grid against
 // it and ships the net of everything missed as one frame. N background
 // sessions cost their ring storage and parsing — nothing per-frame.
-func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Conn, surface Surface, fetch <-chan sbFetch, vis <-chan bool) {
+func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Conn, surface Surface, fetch <-chan sbFetch, vis <-chan bool, oob <-chan []byte) {
 	lastState, stateKnown := byte(0), false
 	lastCursor, cursorKnown := vt.Cursor{}, false
 	render := func() bool {
@@ -248,6 +256,13 @@ func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Co
 			return
 		case req := <-fetch:
 			if !serve(req) {
+				return
+			}
+			continue
+		case msg := <-oob:
+			// pre-framed control messages (edit requests) — visibility
+			// doesn't gate them, the app must hear the ask regardless
+			if c.Write(ctx, websocket.MessageBinary, msg) != nil {
 				return
 			}
 			continue

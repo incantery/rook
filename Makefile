@@ -125,6 +125,9 @@ release:
 	mkdir -p $(DIST)/stage
 	cp -R bin/rook.app $(DIST)/stage/
 	go build -tags production -trimpath -ldflags "-w -s $(VERSION_FLAG) $(BUILD_FLAG)" -o $(DIST)/stage/rookctl ./cmd/rookctl
+	@# `re` is rookctl by another name (argv[0] dispatch → edit); ditto -c -k
+	@# preserves the symlink through the zip
+	ln -sf rookctl $(DIST)/stage/re
 	@# ditto -c -k, not zip: preserves xattrs and the ad-hoc signature exactly
 	ditto -c -k $(DIST)/stage $(DIST)/$(RELEASE_ZIP)
 	cd $(DIST) && shasum -a 256 $(RELEASE_ZIP) > checksums.txt

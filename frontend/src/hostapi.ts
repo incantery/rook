@@ -245,6 +245,21 @@ export class HostAPI {
         return (await this.req(`/workspaces/${encodeURIComponent(ws)}/diff?${q}`)).json();
     }
 
+    /** Acknowledge an edit request (`re` takeover) — rookctl's ack-or-hang
+     *  detector reads this. */
+    async editAck(id: string): Promise<void> {
+        await this.req(`/edits/${encodeURIComponent(id)}/ack`, {method: "POST"});
+    }
+
+    /** Report an edit request finished (:q = 0, :cq = 1) — unblocks the
+     *  waiting rookctl with this exit code. */
+    async editDone(id: string, code: number): Promise<void> {
+        await this.req(`/edits/${encodeURIComponent(id)}/done`, {
+            method: "POST",
+            body: JSON.stringify({code}),
+        });
+    }
+
     /** One file, read-only (the ` e viewer). */
     async readFile(ws: string, path: string): Promise<FileResult> {
         const q = new URLSearchParams({path});

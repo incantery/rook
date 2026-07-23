@@ -150,6 +150,13 @@ func Apply(r *Release) error {
 			if err := replaceBinary(newCtl, self); err != nil {
 				return fmt.Errorf("app updated, but replacing rookctl at %s failed: %v", self, err)
 			}
+			// the `re` shim rides along: a symlink next to rookctl whose
+			// name is the verb. Best-effort — a failure here can't be
+			// worth failing an otherwise-complete update over.
+			re := filepath.Join(filepath.Dir(self), "re")
+			if _, err := os.Lstat(re); os.IsNotExist(err) {
+				os.Symlink(self, re)
+			}
 		}
 	}
 	return nil

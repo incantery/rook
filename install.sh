@@ -55,9 +55,12 @@ if [ ! -d "$bindir" ] || [ ! -w "$bindir" ]; then
     mkdir -p "$bindir"
 fi
 install -m 0755 "$tmp/stage/rookctl" "$bindir/rookctl"
+# `re` — the editor shim (rookctl edit by its short name)
+ln -sf "$bindir/rookctl" "$bindir/re"
 
 echo "installed rook $tag"
 echo "  rookctl → $bindir/rookctl"
+echo "  re      → $bindir/re (the editor: re [file…])"
 case ":$PATH:" in
     *":$bindir:"*) ;;
     *) echo "  note: $bindir is not on your PATH — add it to use rookctl" ;;

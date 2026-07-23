@@ -31,6 +31,8 @@
 //	rookctl refs          find references, same shape; output is path:line:col: text
 //	rookctl hover         hover docs at a position, same shape
 //	rookctl decisions     the drafter's ledger, last 7 days, with the verdict mix
+//	rookctl edit          take over this pane with the editor, vim-style, until :q
+//	                        (`re` is a symlink shim: re [file…]; bare re opens the finder)
 //	rookctl set-openai-key store the drafter's API key in the keychain
 //	rookctl set-jira-token store the Jira API token (queue credential) in the keychain
 //	rookctl claim         claude SessionStart hook body (stdin → host)
@@ -105,8 +107,14 @@ func (c *client) req(method, path string, body any) ([]byte, error) {
 
 func main() {
 	cmd := "ls"
-	if len(os.Args) > 1 {
+	// the `re` shim: a symlink to rookctl whose name IS the verb —
+	// `re file.go` reads as `rookctl edit file.go`
+	editArgs := os.Args[1:]
+	if filepath.Base(os.Args[0]) == "re" {
+		cmd = "edit"
+	} else if len(os.Args) > 1 {
 		cmd = os.Args[1]
+		editArgs = os.Args[2:]
 	}
 	var err error
 	switch cmd {
@@ -164,6 +172,8 @@ func main() {
 		err = runSetOpenAIKey()
 	case "set-jira-token":
 		err = runSetJiraToken()
+	case "edit":
+		err = runEdit(editArgs)
 	case "claim":
 		err = runClaim(false)
 	case "unclaim":
@@ -180,7 +190,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|edit [file…]|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {

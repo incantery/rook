@@ -33,6 +33,9 @@ go build -o "$SANDBOX/rook-host" ./cmd/rook-host
 # rookctl too: the stub coder claims its window through it, the same call
 # claude's SessionStart hook makes.
 go build -o "$SANDBOX/rookctl" ./cmd/rookctl
+# the `re` shim — a symlink whose NAME is the verb (argv[0] dispatch);
+# the takeover spec drives it exactly the way a user's shell does
+ln -sf "$SANDBOX/rookctl" "$SANDBOX/re"
 
 export XDG_STATE_HOME="$SANDBOX/xdg/state"
 export XDG_CONFIG_HOME="$SANDBOX/xdg/config"

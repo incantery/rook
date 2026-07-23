@@ -58,6 +58,10 @@ async function loadVim(): Promise<VimLib> {
         vim.defineEx("qall", "qa", (cm, p) => paneOf(cm)?.exQuitAll(forced(p)));
         vim.defineEx("wqall", "wqa", (cm) => void paneOf(cm)?.exSaveQuitAll());
         vim.defineEx("xall", "xa", (cm) => void paneOf(cm)?.exSaveQuitAll());
+        // :cq — vim's quit-with-error. In an `re` takeover this is the
+        // abort signal (git commit reads the nonzero exit); no dirty
+        // guard, exactly like vim.
+        vim.defineEx("cquit", "cq", (cm) => paneOf(cm)?.exAbort());
         // gd/gr/K — vim's navigation verbs onto the host's LSP surface.
         // defineAction/mapCommand ride the same undocumented static as
         // defineEx; a monaco-vim bump that drops them must not take the
@@ -325,6 +329,9 @@ export interface EditorPaneOpts {
     onFlash: (msg: string) => void;
     /** the × button; the caller routes it to closeActive() */
     onClose: () => void;
+    /** :cq — abort. Only an `re` takeover pane sets this (the shell gets a
+     *  nonzero exit); elsewhere :cq flashes and does nothing. */
+    onAbort?: () => void;
     /** the pane calls this when a Monaco editor gains focus, so chrome can
      *  bind the thread panel to the active editor */
     onActivate?: (seam: EditorSeam) => void;
@@ -1230,6 +1237,13 @@ export class EditorPane implements PaneContent {
             return;
         }
         this.opts.onClose();
+    }
+
+    /** :cq — vim's quit-with-error, no dirty guard. The takeover's abort
+     *  path; a pane the shell isn't waiting on has nothing to signal. */
+    exAbort(): void {
+        if (this.opts.onAbort) this.opts.onAbort();
+        else this.opts.onFlash(":cq aborts an `re` edit — this pane wasn't opened by one");
     }
 
     /** :wq / :x — save, then close only if the write succeeded. */

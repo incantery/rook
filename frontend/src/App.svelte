@@ -8,6 +8,7 @@
     import {Call} from "@wailsio/runtime";
     import type {HostAPI, IssueInfo, ThreadInfo} from "./hostapi";
     import {TermManager} from "./term/manager";
+    import type {EditRequest, PaneAt} from "./term/manager";
     import type {Edge, PaneRef} from "./term/layout";
     import {themeService} from "./theme/service";
     import {rgb} from "./theme/color";
@@ -713,6 +714,130 @@
             editorPanes.set(leafId, pane);
             return pane;
         });
+    }
+
+    /** `re` takeovers in flight: editID → where the shell goes back. */
+    const takeovers = new Map<string, {at: PaneAt; sessionId: string}>();
+    /** a bare `re` parked on the finder — pick a file, then take over */
+    let editPick = $state<null | {
+        id: string;
+        sessionId: string;
+        workspace: string;
+        at: PaneAt;
+        dir: string;
+        picked: boolean;
+    }>(null);
+
+    /** An `re` ask off the session's frame socket (manager.onEditRequest):
+     *  vim's contract — take over the pane the command was typed in, give
+     *  it back on :q, and the blocked rookctl exits with the editor's code. */
+    async function handleEditRequest(
+        sessionId: string,
+        workspace: string,
+        req: EditRequest,
+    ): Promise<void> {
+        await initDone;
+        const at = mgr.findPaneAll((c) => c.type === "term" && c.session === sessionId);
+        if (!at) {
+            // no pane shows this session (stale layout) — fail the shell fast
+            void api.editDone(req.id, 1).catch(() => {});
+            return;
+        }
+        void api.editAck(req.id).catch(() => {});
+        // a second bare `re` while one is parked on the finder: the old ask
+        // resolves as a cancel, the new one takes the surface
+        if (editPick) {
+            void api.editDone(editPick.id, 0).catch(() => {});
+            editPick = null;
+        }
+        const paths = req.paths ?? [];
+        if (paths.length === 0) {
+            // bare `re` — the finder, scoped to the shell's cwd (the anchor)
+            editPick = {id: req.id, sessionId, workspace, at, dir: req.cwd, picked: false};
+            return;
+        }
+        await performTakeover(req.id, sessionId, workspace, at, paths[0], paths.slice(1), req.cwd);
+    }
+
+    async function performTakeover(
+        editID: string,
+        sessionId: string,
+        workspace: string,
+        at: PaneAt,
+        path: string,
+        extra: string[],
+        cwd: string,
+    ): Promise<void> {
+        app.screen = "app";
+        await tick();
+        const {EditorPane} = await import("./term/editor");
+        // the rest of the argv joins the buffer list (vim: `nvim a b c`
+        // opens a, and b c wait in :ls — here, in ` e's Open buffers tier)
+        for (const p of extra) touchBuffer(p);
+        touchBuffer(path);
+        const ok = mgr.takeoverPane(at, {type: "file", path}, (leafId) => {
+            const pane = new EditorPane(api, {
+                workspace,
+                kind: "file",
+                path,
+                font: paneFont,
+                onFlash: flash,
+                // :q hands the pane back to the shell; :cq does too, but the
+                // waiting `re` exits 1 (git commit reads that as an abort)
+                onClose: () => finishTakeover(editID, 0),
+                onAbort: () => finishTakeover(editID, 1),
+                onActivate: (seam) => {
+                    activeEditor = seam;
+                    activeEditorKind = "file";
+                    jumpPane = pane;
+                },
+                onDispose: (seam) => {
+                    editorPanes.delete(leafId);
+                    if (activeEditor === seam) activeEditor = null;
+                    if (jumpPane === pane) jumpPane = null;
+                    // disposed without :q/:cq (` x closed the pane) — the
+                    // shell is still blocked on us; settle the exit code.
+                    // No restore: the leaf is mid-removal (re-entrant
+                    // dispose), and the session stays reachable in the deck.
+                    if (takeovers.has(editID)) {
+                        takeovers.delete(editID);
+                        void api.editDone(editID, 0).catch(() => {});
+                    }
+                },
+                onOpenLocation: (p, line, col) => void openFile(p, {line, col}),
+                onReferences: showReferences,
+                onRecordJump: recordJump,
+                onJump: jumpNav,
+                // ⌃P/⌃G inside a takeover scope to the shell's cwd — the
+                // anchor `re` launched from, not the workspace root
+                onFindFile: () => {
+                    scopeDir = cwd || undefined;
+                    app.filePickerOpen = true;
+                },
+                onGrep: (seed) => {
+                    grepSeed = seed ?? "";
+                    scopeDir = cwd || undefined;
+                    app.grepOpen = true;
+                },
+                onCompose: (spec) => void openDraft(spec),
+                onOpenThread: (id) => void openThreadBuffer(id),
+            });
+            editorPanes.set(leafId, pane);
+            return pane;
+        });
+        if (!ok) {
+            void api.editDone(editID, 1).catch(() => {});
+            return;
+        }
+        takeovers.set(editID, {at, sessionId});
+    }
+
+    /** The return leg: shell back into the pane, exit code back to `re`. */
+    function finishTakeover(editID: string, code: number): void {
+        const t = takeovers.get(editID);
+        takeovers.delete(editID);
+        if (t) mgr.restoreTermPane(t.at, t.sessionId);
+        void api.editDone(editID, code).catch(() => {});
     }
 
     /** Open a file as a BUFFER, not a window. The ladder, in vim's terms:
@@ -1888,6 +2013,8 @@
             workspaceGone: showHome,
             activated: () => (app.dashVisible = false),
         });
+        mgr.onEditRequest = (sessionId, workspace, req) =>
+            void handleEditRequest(sessionId, workspace, req);
 
         // The terminal renderer reads its colors from --term-* CSS variables,
         // which the theme service writes onto :root on every swap. But the host
@@ -2082,6 +2209,32 @@
         })}
         onclose={() => {
             app.filePickerOpen = false;
+            focusBack();
+        }}
+    />
+{/if}
+{#if editPick}
+    {@const p = editPick}
+    <Finder
+        {api}
+        workspace={p.workspace}
+        source={filesSource({
+            api,
+            workspace: p.workspace,
+            dir: p.dir || undefined,
+            buffers: () => [],
+            open: (path) => {
+                p.picked = true;
+                void performTakeover(p.id, p.sessionId, p.workspace, p.at, path, [], p.dir);
+            },
+        })}
+        onclose={() => {
+            editPick = null;
+            // the Finder closes BEFORE it runs the pick, so the cancel
+            // check waits a microtask for open() to mark the object
+            queueMicrotask(() => {
+                if (!p.picked) void api.editDone(p.id, 0).catch(() => {});
+            });
             focusBack();
         }}
     />
