@@ -4,7 +4,7 @@
      component renders the container div once and never conditionally
      unmounts it (screen switches are the `hidden` attribute, i.e. CSS). -->
 <script lang="ts">
-    import {onMount, tick} from "svelte";
+    import {onMount, tick, untrack} from "svelte";
     import {Call} from "@wailsio/runtime";
     import type {HostAPI, IssueInfo, ThreadInfo} from "./hostapi";
     import {TermManager} from "./term/manager";
@@ -1822,7 +1822,10 @@
     $effect(() => {
         void app.screen;
         void app.workspace;
-        void pollWsStatus();
+        // untracked: pollWsStatus reads app.wsStatus synchronously (the
+        // stale-workspace guard) and writes it on completion — tracked, the
+        // write re-runs this effect and the poll loops at request speed
+        void untrack(() => pollWsStatus());
     });
 
     async function pollMoney(): Promise<void> {

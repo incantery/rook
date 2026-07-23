@@ -9,7 +9,7 @@
      *
      *  Dumb by design: every decision lives in agentview.ts, which is tested
      *  against the shapes claude actually writes. */
-    import {onMount} from "svelte";
+    import {onMount, untrack} from "svelte";
 
     import {
         build,
@@ -129,7 +129,10 @@
         records = [];
         loading = true;
         pinned = true;
-        void refresh();
+        // untracked: refresh reads `records` synchronously (the incremental
+        // cursor) — tracked, this effect would depend on the state it just
+        // reset and re-run itself until svelte's depth guard kills the app
+        void untrack(() => refresh());
     });
 
     $effect(() => {
