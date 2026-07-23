@@ -63,6 +63,12 @@ function xterm256(n: number): number {
     return (g << 16) | (g << 8) | g;
 }
 
+/** mix blends a toward b per channel: t=1 is pure a, t=0 pure b. */
+function mix(a: number, b: number, t: number): number {
+    const ch = (sh: number) => Math.round(((a >> sh) & 0xff) * t + ((b >> sh) & 0xff) * (1 - t));
+    return (ch(16) << 16) | (ch(8) << 8) | ch(0);
+}
+
 function cssHex(name: string, fallback: number): number {
     const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     const m = /^#?([0-9a-f]{6})/i.exec(raw);
@@ -168,6 +174,11 @@ export class BeamtermGridRenderer implements TermRenderer {
         let s = this.styles.get(key);
         if (s) return s;
         if (this.styles.size > 512) this.styles.clear(); // bound wasm object churn
+        // beamterm has no faint/hidden styles, so fold them into the fg color:
+        // dim blends toward bg (the DOM renderer's opacity:.6 over bg), hidden
+        // becomes bg. Cache-miss only — the hot path never pays for the mix.
+        if (attr & Attr.Hidden) fg = bg;
+        else if (attr & Attr.Dim) fg = mix(fg, bg, 0.6);
         s = style().fg(fg).bg(bg);
         if (attr & Attr.Bold) s = s.bold();
         if (attr & Attr.Italic) s = s.italic();
