@@ -23,6 +23,12 @@ export class Registry {
         return [...this.cmds.values()];
     }
 
+    /** Does a command exist? Keybind dispatch checks before running so a
+     *  typo'd id in config gets user-visible feedback, not a console line. */
+    has(id: string): boolean {
+        return this.cmds.has(id);
+    }
+
     run(id: string): void {
         const c = this.cmds.get(id);
         if (!c) {

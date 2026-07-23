@@ -76,6 +76,30 @@ test("re . lands in the editor with the tree, netrw-style", async ({page, rook})
     await expect(page.getByText("Explorer")).toHaveCount(0);
 });
 
+test("furniture is per window — the tree stays with its editor", async ({page, rook}) => {
+    const root = await rook.repo({files: {"sub/inner.txt": "alpha\n"}});
+    await rook.open({name: `re-chrome-${Date.now()}`, root});
+    await rook.shellReady();
+
+    await rook.ex(`${RE} .; echo "re exit=$?"`);
+    await expect(page.getByText("Explorer").first()).toBeVisible({timeout: 15_000});
+
+    // leaders are dead inside the tree — cross into the editor first,
+    // then open a NEW window: a different place, no tree
+    await page.keyboard.press("Control+l");
+    await page.keyboard.press("`");
+    await page.keyboard.press("c");
+    await expect(page.getByText("Explorer")).toHaveCount(0);
+
+    // back to the takeover's window — its tree comes back with it
+    await page.keyboard.press("`");
+    await page.keyboard.press("1");
+    await expect(page.getByText("Explorer").first()).toBeVisible();
+
+    await rook.ex(":q");
+    await rook.expectScreen(/re exit=0/);
+});
+
 test("the editor leader stays inside the editor — a shell comma is a comma", async ({rook}) => {
     const root = await rook.repo({files: {"notes.txt": "alpha\n"}});
     await rook.open({name: `re-comma-${Date.now()}`, root});

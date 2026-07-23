@@ -286,18 +286,37 @@ export const CONTEXT_PREFIX = new Map<string, string>([
     ["f", "explorer.reveal"],
 ]);
 
+// Named keys a context trigger may use after <leader>, vim-spelling
+// tolerant ("<leader>TAB", "<leader>cr") — mapped to the KeyboardEvent.key
+// value the dispatch matches on.
+const CONTEXT_NAMED: Record<string, string> = {
+    tab: "Tab",
+    space: " ",
+    enter: "Enter",
+    cr: "Enter",
+    escape: "Escape",
+    esc: "Escape",
+    backspace: "Backspace",
+    bs: "Backspace",
+    up: "ArrowUp",
+    down: "ArrowDown",
+    left: "ArrowLeft",
+    right: "ArrowRight",
+};
+
 // buildContextMap overlays config's [editor.keybinds.normal] table on the
-// CONTEXT_PREFIX defaults. Only "<leader>x" triggers land here for now —
-// bare sequences ("gd") and chords in the editor scope are carried in
-// config but wait on modal dispatch, so they drop with a warn. "" unbinds,
-// same as the app scope. Modes other than normal are ignored here (fail
-// open toward configs written for a newer rook).
+// CONTEXT_PREFIX defaults. "<leader>x" and "<leader>TAB"-style named keys
+// land here — bare sequences ("gd") and chords in the editor scope are
+// carried in config but wait on modal dispatch, so they drop with a warn.
+// "" unbinds, same as the app scope. Modes other than normal are ignored
+// here (fail open toward configs written for a newer rook).
 export function buildContextMap(normalBinds: Record<string, string | undefined>): Map<string, string> {
     const map = new Map(CONTEXT_PREFIX);
     for (const [t, c] of Object.entries(normalBinds)) {
         if (typeof c !== "string") continue;
-        const key = stripLeader(t.trim());
-        if (key === null || key.length !== 1) {
+        const rest = stripLeader(t.trim());
+        const key = rest === null ? null : rest.length === 1 ? rest : CONTEXT_NAMED[rest.toLowerCase()] ?? null;
+        if (key === null) {
             console.warn("editor keybind carried but not dispatchable yet:", t);
             continue;
         }

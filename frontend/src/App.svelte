@@ -728,6 +728,55 @@
         return c != null && c.type !== "term";
     }
 
+    /** The furniture is PER WINDOW (vim's tab page: each layout carries its
+     *  own tree and list). One set of live state renders; everything else
+     *  parks here, keyed by window id, and window activation swaps. */
+    interface WinChrome {
+        explorerOpen: boolean;
+        explorerDir: string | undefined;
+        qfContext: typeof qf.context;
+        qfCursor: number;
+        qfListOpen: boolean;
+        qfDetailOpen: boolean;
+    }
+    const winChrome = new Map<string, WinChrome>();
+    const CHROME_CLOSED: WinChrome = {
+        explorerOpen: false,
+        explorerDir: undefined,
+        qfContext: null,
+        qfCursor: 0,
+        qfListOpen: false,
+        qfDetailOpen: false,
+    };
+    /** which window the LIVE furniture state belongs to */
+    let chromeWin: string | null = null;
+
+    function applyChrome(c: WinChrome): void {
+        app.explorerOpen = c.explorerOpen;
+        explorerDir = c.explorerDir;
+        qf.context = c.qfContext;
+        qf.cursor = c.qfCursor;
+        qf.listOpen = c.qfListOpen;
+        qf.detailOpen = c.qfDetailOpen;
+    }
+
+    function swapChrome(): void {
+        const now = mgr.activeId ?? null;
+        if (now === chromeWin) return;
+        if (chromeWin != null) {
+            winChrome.set(chromeWin, {
+                explorerOpen: app.explorerOpen,
+                explorerDir,
+                qfContext: qf.context,
+                qfCursor: qf.cursor,
+                qfListOpen: qf.listOpen,
+                qfDetailOpen: qf.detailOpen,
+            });
+        }
+        applyChrome(now != null ? (winChrome.get(now) ?? CHROME_CLOSED) : CHROME_CLOSED);
+        chromeWin = now;
+    }
+
     /** An `re` ask off the session's frame socket (manager.onEditRequest):
      *  vim's contract — take over the pane the command was typed in, give
      *  it back on :q, and the blocked rookctl exits with the editor's code. */
@@ -838,13 +887,15 @@
     }
 
     /** The return leg: shell back into the pane, exit code back to `re`.
-     *  The editor's furniture leaves with it — you exited the place. */
+     *  The editor's furniture leaves with it — you exited the place. The
+     *  takeover's WINDOW gets cleared, live or parked: a :qa can end a
+     *  takeover in a background window without touching the one you see. */
     function finishTakeover(editID: string, code: number): void {
         const t = takeovers.get(editID);
         takeovers.delete(editID);
         if (t) mgr.restoreTermPane(t.at, t.sessionId);
-        app.explorerOpen = false;
-        qf.listOpen = false;
+        if (t == null || t.at.winId === chromeWin) applyChrome(CHROME_CLOSED);
+        else winChrome.set(t.at.winId, CHROME_CLOSED);
         void api.editDone(editID, code).catch(() => {});
     }
 
@@ -1885,7 +1936,10 @@
             e.preventDefault();
             e.stopPropagation();
             const cmd = contextMap.get(e.key);
-            if (cmd) registry.run(cmd);
+            // a typo'd command id in [editor.keybinds] must say so where
+            // the user is looking — the palette lists the real ids
+            if (cmd && !registry.has(cmd)) flash(`unknown command: ${cmd} (⌘K lists ids)`);
+            else if (cmd) registry.run(cmd);
             // unbound: prefix consumed, key ignored — tmux behavior
             return;
         }
@@ -2041,9 +2095,13 @@
                 }
                 app.workspace = mgr.workspace;
                 if (switched) void loadExplore();
+                swapChrome(); // furniture follows the window (vim tab page)
             },
             workspaceGone: showHome,
-            activated: () => (app.dashVisible = false),
+            activated: () => {
+                app.dashVisible = false;
+                swapChrome();
+            },
         });
         mgr.onEditRequest = (sessionId, workspace, req) =>
             void handleEditRequest(sessionId, workspace, req);

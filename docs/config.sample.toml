@@ -101,7 +101,10 @@
 # mapleader) and its own keybinds, keyed by vim mode — [editor.keybinds.
 # normal] is nmap, .visual is vmap, .insert is imap. Editor bindings only
 # act while an editor pane has focus. Bare sequences ("gd", "K") fire
-# directly in the named mode; "<leader>q" fires after the editor leader.
+# directly in the named mode; "<leader>q" fires after the editor leader,
+# and named keys work there too — "<leader>TAB", "<leader>cr", space,
+# esc, bs, and the arrows. Command values are registry ids (the ⌘K
+# palette lists them); a typo'd id flashes when the key fires.
 
 [editor]
 # leader = ","
