@@ -32,11 +32,11 @@ Install (this directory is both the marketplace and its one plugin —
 marketplace.json points at "./"):
 
     claude plugin marketplace add /path/to/rook/claude-plugin
-    claude plugin install rook@rook
+    claude plugin install rook@incantery
 
 After changing the plugin source, re-sync the installed copy:
 
-    claude plugin marketplace update rook
+    claude plugin marketplace update incantery
 
 A dismissed ask answers `{"canceled":true}` and claude proceeds on its
 own judgment. There is no timeout to configure: the ask call never waits.
