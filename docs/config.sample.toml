@@ -176,6 +176,23 @@
 # jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
 
 
+# ── Remote asks (host-read) ──────────────────────────────────────────────
+#
+# A rook-server — self-hosted, or rook-cloud. When set, a question from an
+# agent still opens its pane here AND lands in the mailbox, so you can
+# answer it from your phone after you've walked away. Answering in either
+# place settles it in both. Absent means no remote and the whole path is
+# inert.
+#
+# The bearer token is NOT set here — it lives in the keychain
+# (`rookctl set-relay-token`; see the secrets note at the bottom).
+# Changes need a daemon restart.
+
+[relay]
+# Base URL of the rook-server.
+# url = "https://cloud.rookide.com"
+
+
 # ── Per-workspace overrides ──────────────────────────────────────────────
 #
 # One [workspaces.<name>] table per workspace, named for the workspace it
@@ -251,11 +268,13 @@
 
 # ── Secrets are NOT file-managed ─────────────────────────────────────────
 #
-# The OpenAI key (the agent's credential) and the Jira API token never live
-# in this file — the config stays user-owned and safe to commit or share.
-# They live in the login keychain instead:
+# The OpenAI key (the agent's credential), the Jira API token, and the
+# rook-server bearer token never live in this file — the config stays
+# user-owned and safe to commit or share. They live in the login keychain
+# instead:
 #
 #   rookctl set-jira-token        # stores the Jira API token
+#   rookctl set-relay-token       # stores the rook-server bearer token
 #
 # The OpenAI key is set from the app. Each has a file fallback for
 # headless setups, and both must be tight 0600:

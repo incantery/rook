@@ -29,6 +29,7 @@ import (
 
 	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/plugin"
+	"github.com/incantery/rook/internal/relay"
 	"github.com/incantery/rook/internal/version"
 )
 
@@ -87,6 +88,10 @@ type Host struct {
 	// pending `rookctl ask` requests (ask.go), keyed by ask id
 	askMu sync.Mutex
 	asks  map[string]*askState
+
+	// The configured rook-server, if any (relay.go): asks escalate to it so
+	// they can be answered from a phone. nil = no remote, path inert.
+	relay *relay.Client
 
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
@@ -197,6 +202,7 @@ func New() *Host {
 	h.reg.failRunningStages("host restarted — window lost")
 	go h.aw.runTranscript(h.ctx)
 	go h.runUpdateCheck()
+	h.initRelay()
 	return h
 }
 

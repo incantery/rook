@@ -44,6 +44,7 @@
 //	                        `rookctl ask` behind tools/call (the rook plugin wires it)
 //	rookctl set-openai-key store the drafter's API key in the keychain
 //	rookctl set-jira-token store the Jira API token (queue credential) in the keychain
+//	rookctl set-relay-token store the rook-server bearer token in the keychain
 //	rookctl claim         claude SessionStart hook body (stdin → host)
 //	rookctl unclaim       claude SessionEnd hook body
 //	rookctl notify-hook   claude Notification hook body (permission prompts)
@@ -186,6 +187,8 @@ func main() {
 		err = runSetOpenAIKey()
 	case "set-jira-token":
 		err = runSetJiraToken()
+	case "set-relay-token":
+		err = runSetRelayToken()
 	case "edit":
 		err = runEdit(editArgs)
 	case "ask":
@@ -1686,6 +1689,23 @@ func runSetJiraToken() error {
 		return fmt.Errorf("stored, but read-back failed — is the login keychain locked?")
 	}
 	fmt.Println("jira token stored — set jira-url, jira-email, and jira-project-<workspace> in ~/.config/rook/config")
+	return nil
+}
+
+// runSetRelayToken stores the bearer token for the configured rook-server
+// (relay-url in config.toml). Same posture as the other two: the security
+// tool reads it, so the secret never enters argv or shell history.
+func runSetRelayToken() error {
+	cmd := exec.Command("security", "add-generic-password", "-U",
+		"-s", keychain.Service, "-a", keychain.RelayAccount, "-w")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("security add-generic-password: %w", err)
+	}
+	if k, err := keychain.Get(keychain.Service, keychain.RelayAccount); err != nil || k == "" {
+		return fmt.Errorf("stored, but read-back failed — is the login keychain locked?")
+	}
+	fmt.Println("relay token stored — set [relay] url in ~/.config/rook/config.toml, then restart rook-host")
 	return nil
 }
 

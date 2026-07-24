@@ -34,23 +34,24 @@ func TOMLPath() string {
 // map, nil when absent) so present-vs-absent survives decoding — several
 // keys give an explicitly empty value a meaning an absent key doesn't have.
 type tomlFile struct {
-	FontFamily        *string             `toml:"font-family"`
-	FontSize          *int                `toml:"font-size"`
-	BackgroundOpacity *float64            `toml:"background-opacity"`
-	WindowPaddingX    *int                `toml:"window-padding-x"`
-	WindowPaddingY    *int                `toml:"window-padding-y"`
-	Theme             *string             `toml:"theme"`
-	Coder             *string             `toml:"coder"`
-	Leader            *string             `toml:"leader"`
-	Workflow          *[]string           `toml:"workflow"`
-	WorkspaceAllow    *[]string           `toml:"workspace-allow"`
-	Keybinds          map[string]string   `toml:"keybinds"`
-	Commands          map[string]string   `toml:"commands"`
-	Editor            *tomlEditor         `toml:"editor"`
-	Agent             *tomlAgent          `toml:"agent"`
-	Jira              *tomlJira           `toml:"jira"`
+	FontFamily        *string                  `toml:"font-family"`
+	FontSize          *int                     `toml:"font-size"`
+	BackgroundOpacity *float64                 `toml:"background-opacity"`
+	WindowPaddingX    *int                     `toml:"window-padding-x"`
+	WindowPaddingY    *int                     `toml:"window-padding-y"`
+	Theme             *string                  `toml:"theme"`
+	Coder             *string                  `toml:"coder"`
+	Leader            *string                  `toml:"leader"`
+	Workflow          *[]string                `toml:"workflow"`
+	WorkspaceAllow    *[]string                `toml:"workspace-allow"`
+	Keybinds          map[string]string        `toml:"keybinds"`
+	Commands          map[string]string        `toml:"commands"`
+	Editor            *tomlEditor              `toml:"editor"`
+	Agent             *tomlAgent               `toml:"agent"`
+	Jira              *tomlJira                `toml:"jira"`
+	Relay             *tomlRelay               `toml:"relay"`
 	Workspaces        map[string]tomlWorkspace `toml:"workspaces"`
-	LSP               *tomlLSP            `toml:"lsp"`
+	LSP               *tomlLSP                 `toml:"lsp"`
 }
 
 type tomlEditor struct {
@@ -71,6 +72,12 @@ type tomlJira struct {
 	URL   *string `toml:"url"`
 	Email *string `toml:"email"`
 	JQL   *string `toml:"jql"`
+}
+
+// tomlRelay is [relay] — the rook-server an ask escalates to. Only the URL
+// lives here; the token is a secret and belongs in the keychain.
+type tomlRelay struct {
+	URL *string `toml:"url"`
 }
 
 type tomlWorkspace struct {
@@ -199,6 +206,9 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 		}
 	}
 
+	if f.Relay != nil && f.Relay.URL != nil {
+		cfg.RelayURL = strings.TrimRight(strings.TrimSpace(*f.Relay.URL), "/")
+	}
 	if f.Jira != nil {
 		if f.Jira.URL != nil {
 			cfg.JiraURL = strings.TrimRight(*f.Jira.URL, "/")

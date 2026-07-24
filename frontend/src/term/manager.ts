@@ -559,6 +559,17 @@ export class TermManager {
                 } catch {
                     console.warn("ask request dropped: bad payload");
                 }
+            } else if (msg.kind === "askdone") {
+                // that question was decided — possibly on a phone in another
+                // room. The form stands down wherever it happens to be open.
+                try {
+                    const {id} = JSON.parse(new TextDecoder().decode(msg.payload)) as {
+                        id?: string;
+                    };
+                    if (id) this.onAskSettled?.(id);
+                } catch {
+                    console.warn("ask stand-down dropped: bad payload");
+                }
             }
         };
         ws.onclose = async (ev) => {
@@ -693,6 +704,20 @@ export class TermManager {
     /** Chrome's hook for ask requests (`rookctl ask` / the MCP tool) —
      *  a question for the human, to render beside the asking session. */
     onAskRequest: ((sessionId: string, workspace: string, req: AskRequest) => void) | null = null;
+    /** an ask was settled somewhere else (another surface, or the phone) —
+     *  close its pane without delivering a second answer */
+    onAskSettled: ((askId: string) => void) | null = null;
+
+    /** The live content object behind a leaf. The chrome builds these (ask
+     *  forms, editors) and occasionally needs to speak to one it named by
+     *  PaneRef — the manager still never learns what's inside. */
+    paneObject(leafId: string): PaneContent | null {
+        for (const win of this.windows) {
+            const p = win.panes.get(leafId);
+            if (p) return p;
+        }
+        return null;
+    }
 
     /** findPane across EVERY window, not just the current workspace — an
      *  `re` typed into a pane must find that pane wherever it lives. */

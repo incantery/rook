@@ -53,6 +53,14 @@ export class AskPane implements PaneContent {
         deliver();
     }
 
+    /** The decision happened on another surface — a second rook window, or
+     *  a phone across the house. Mark the pane settled WITHOUT delivering,
+     *  so the close that follows doesn't post a dismissal over the answer
+     *  someone already gave. */
+    settleElsewhere(): void {
+        this.settled = true;
+    }
+
     get title(): string {
         return "claude asks";
     }

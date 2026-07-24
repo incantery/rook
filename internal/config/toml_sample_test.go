@@ -54,10 +54,11 @@ func TestSampleTOMLDefaults(t *testing.T) {
 	writeTOML(t, uncommentSample(t))
 
 	got := Load()
-	// The placeholder/example keys (jira, workflow, keybinds, workspace
-	// tables, lsp) carry no meaningful default — zero them so the comparison
-	// is exactly the concrete-default scalar knobs.
+	// The placeholder/example keys (jira, relay, workflow, keybinds,
+	// workspace tables, lsp) carry no meaningful default — zero them so the
+	// comparison is exactly the concrete-default scalar knobs.
 	got.JiraURL, got.JiraEmail, got.JiraJQL = "", "", ""
+	got.RelayURL = ""
 	got.JiraProjects, got.BranchPrefixes, got.BranchDelimiters = nil, nil, nil
 	got.Workflow, got.Workflows, got.Keybinds, got.WorkspaceAllow = nil, nil, nil, nil
 	got.EditorKeybinds = nil

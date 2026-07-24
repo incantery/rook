@@ -20,6 +20,11 @@ const (
 	Service       = "rook"
 	OpenAIAccount = "openai"
 	JiraAccount   = "jira"
+	// RelayAccount is the bearer token for the configured rook-server
+	// (relay-url in config). A secret that reaches a network service has
+	// no business sitting in a hand-edited file — and even less once
+	// config starts syncing between machines.
+	RelayAccount = "relay"
 )
 
 var ErrUnsupported = errors.New("keychain: only supported on macOS")

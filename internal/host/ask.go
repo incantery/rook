@@ -36,6 +36,10 @@ type askState struct {
 	// endpoint. Blocking asks (the rookctl ask CLI) are owned by their
 	// long-poll and the drain never touches them.
 	notify bool
+	// escalated: this ask also reached the configured rook-server, so a
+	// local decision has to retract it (relay.go). False when there is no
+	// remote, or when the publish failed — either way nothing to withdraw.
+	escalated bool
 	// the answer JSON the app posted — {"canceled":true} for a dismissal
 	answer json.RawMessage
 	// the msgAsk frame, kept so a fresh attach can re-push a pending ask:
@@ -92,13 +96,14 @@ func (h *Host) handleSessionAsk(w http.ResponseWriter, r *http.Request, s *sessi
 			delete(h.asks, id)
 		}
 	}
-	h.asks[payload.ID] = &askState{
+	st := &askState{
 		session: s.info.ID,
 		notify:  req.Notify,
 		frame:   msg,
 		doneCh:  make(chan struct{}),
 		created: time.Now(),
 	}
+	h.asks[payload.ID] = st
 	h.askMu.Unlock()
 
 	select {
@@ -110,6 +115,9 @@ func (h *Host) handleSessionAsk(w http.ResponseWriter, r *http.Request, s *sessi
 		http.Error(w, "app not keeping up — try again", http.StatusConflict)
 		return
 	}
+	// …and to whatever screen the human is actually near. Unconditional:
+	// there is no gesture to make before walking away, which is the point.
+	h.escalate(st, payload.ID, req.Questions)
 	writeJSON(w, map[string]string{"askId": payload.ID})
 }
 
@@ -196,6 +204,81 @@ func (h *Host) handleSessionAsks(w http.ResponseWriter, s *session) {
 	writeJSON(w, out)
 }
 
+// Where a decision came from. It matters for exactly one thing: an answer
+// that arrived THROUGH the relay was already consumed by the drain, so
+// retracting it would be a pointless round trip.
+type settleSource int
+
+const (
+	sourceApp settleSource = iota // the pane in this rook, via POST /asks/{id}/answer
+	sourceRelay
+)
+
+type settleResult int
+
+const (
+	settledOK      settleResult = iota
+	settledAlready              // someone else got there first
+	settledUnknown              // no such ask — swept, drained, or a host restart
+)
+
+// settleAsk is the ONE place an ask becomes decided, whichever surface
+// decided it. A phone answer and a desk answer are the same event: same
+// waiter woken, same doorbell typed, same stand-down pushed to every
+// attached screen. Two paths here would drift within a week.
+func (h *Host) settleAsk(id string, answer json.RawMessage, src settleSource) settleResult {
+	h.askMu.Lock()
+	a := h.asks[id]
+	if a == nil {
+		h.askMu.Unlock()
+		return settledUnknown
+	}
+	if a.done {
+		h.askMu.Unlock()
+		return settledAlready
+	}
+	a.done, a.acked, a.answer = true, true, answer
+	ring, session, escalated := a.notify, a.session, a.escalated
+	close(a.doneCh)
+	h.askMu.Unlock()
+
+	// the form stands down wherever it is rendered — the human may have
+	// decided this on a screen in another room
+	h.pushAskDone(session, id)
+	if escalated && src != sourceRelay {
+		h.withdraw(id) // answered at the desk; the card leaves the phone
+	}
+	if ring {
+		// off the request path: the pty write can stall on a wedged tty
+		go h.askDoorbell(session, id)
+	}
+	return settledOK
+}
+
+// pushAskDone tells the attached app that an ask is over. Best effort: an
+// app that isn't listening will settle its own pane the moment it tries to
+// answer and learns the question is gone.
+func (h *Host) pushAskDone(sessionID, askID string) {
+	s := h.get(sessionID)
+	if s == nil {
+		return
+	}
+	body, err := json.Marshal(map[string]string{"id": askID})
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	oob := s.oob
+	s.mu.Unlock()
+	if oob == nil {
+		return
+	}
+	select {
+	case oob <- append([]byte{msgAskDone}, body...):
+	default:
+	}
+}
+
 // handleAsks routes /asks/{id} (GET, ?wait=seconds long-poll),
 // /asks/{id}/ack (POST, from the app) and /asks/{id}/answer (POST, from
 // the app, body = the answer JSON verbatim).
@@ -246,19 +329,7 @@ func (h *Host) handleAsks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "answer JSON required", http.StatusBadRequest)
 			return
 		}
-		h.askMu.Lock()
-		ring := false
-		if !a.done {
-			a.done, a.acked, a.answer = true, true, answer
-			ring = a.notify
-			close(a.doneCh)
-		}
-		session := a.session
-		h.askMu.Unlock()
-		if ring {
-			// off the request path: the pty write can stall on a wedged tty
-			go h.askDoorbell(session, id)
-		}
+		h.settleAsk(id, answer, sourceApp)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)

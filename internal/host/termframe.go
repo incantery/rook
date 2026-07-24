@@ -35,6 +35,7 @@ const (
 	msgSbChunk byte = 0x03 // payload: vt.EncodeScrollback — a page of history
 	msgEdit    byte = 0x04 // payload: editPayload JSON (edit.go) — pane takeover ask
 	msgAsk     byte = 0x05 // payload: askPayload JSON (ask.go) — a question for the human
+	msgAskDone byte = 0x06 // payload: {"id"} — that ask is settled, stand down
 
 	// client -> server
 	msgInput   byte = 0x10 // payload: raw bytes for the pty

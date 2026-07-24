@@ -763,6 +763,20 @@
      *  window's tree state, for the keyboard/command paths. */
     const chrome = $derived(chromeFor(app.activeId));
 
+    /** That ask is over, and this rook didn't decide it (host ask.go pushes
+     *  msgAskDone on every settle). Usually the phone: you walked away, the
+     *  question escalated to the relay, and you answered it from the garden.
+     *  The pane stands down without delivering — a close that posted a
+     *  dismissal would land on top of the answer you just gave. */
+    function handleAskSettled(askId: string): void {
+        const at = mgr.findPaneAll((c) => c.type === "ask" && c.id === askId);
+        if (!at) return;
+        const pane = mgr.paneObject(at.leafId) as {settleElsewhere?: () => void} | null;
+        pane?.settleElsewhere?.();
+        mgr.closePane(at.leafId);
+        flash("answered elsewhere");
+    }
+
     /** An agent's question off the session's frame socket
      *  (manager.onAskRequest): open the form in a split to the RIGHT of the
      *  pane that asked — the agent keeps its window, the question gets its
@@ -2186,6 +2200,7 @@
             void handleEditRequest(sessionId, workspace, req);
         mgr.onAskRequest = (sessionId, workspace, req) =>
             void handleAskRequest(sessionId, workspace, req);
+        mgr.onAskSettled = (askId) => handleAskSettled(askId);
 
         // The terminal renderer reads its colors from --term-* CSS variables,
         // which the theme service writes onto :root on every swap. But the host

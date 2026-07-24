@@ -59,6 +59,12 @@ type Config struct {
 	// drafts, the conflict-resolve chip, workflow stages). claude unless
 	// overridden.
 	Coder string `json:"coder"`
+	// RelayURL is a rook-server (self-hosted or rook-cloud): when set, an
+	// ask ALSO lands there, so a question raised while you're away from the
+	// desk can be answered from your phone. Empty = no remote, and the
+	// whole path is inert. The token lives in the keychain
+	// (`rookctl set-relay-token`), never in this file.
+	RelayURL string `json:"relayUrl"`
 	// Workflow is the staged review pipeline run after a worktree's coding
 	// agent opens its PR: slash commands, comma-separated (`workflow =
 	// /security-review, /review`), each spawned sequentially in its own
@@ -448,6 +454,33 @@ func JiraToken() string {
 		return ""
 	}
 	data, err := os.ReadFile(tokFile)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// RelayToken resolves the rook-server bearer token: keychain first
+// (account relay — `rookctl set-relay-token`), then the
+// ~/.config/rook/relay-token file, 0600-tight like the others. The file
+// fallback is not a convenience here: keychain.Get is macOS-only, so
+// without it a Linux host could never reach a relay — and self-hosting is
+// most of the point. "" means no remote.
+func RelayToken() string {
+	return secretFrom(keychain.RelayAccount, "relay-token")
+}
+
+// secretFrom is the keychain-then-tight-file resolution the secrets share.
+func secretFrom(account, fileName string) string {
+	if t, err := keychain.Get(keychain.Service, account); err == nil && strings.TrimSpace(t) != "" {
+		return strings.TrimSpace(t)
+	}
+	f := filepath.Join(filepath.Dir(Path()), fileName)
+	st, err := os.Stat(f)
+	if err != nil || st.Mode().Perm()&0o077 != 0 {
+		return ""
+	}
+	data, err := os.ReadFile(f)
 	if err != nil {
 		return ""
 	}
