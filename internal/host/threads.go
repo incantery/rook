@@ -955,7 +955,11 @@ func (h *Host) nudge(ws, prompt string) (mode, rookSession string, err error) {
 		return h.nudgeFn(ws, prompt) // test seam — nil in production
 	}
 	if s := h.claudeSessionIn(ws); s != nil {
-		if _, werr := s.pty.Write([]byte(prompt + "\r")); werr == nil {
+		if _, werr := s.pty.Write([]byte(prompt)); werr == nil {
+			// Enter detached from the text — one burst reads as a paste to
+			// claude's TUI and never submits (see typeLineAt)
+			time.Sleep(150 * time.Millisecond)
+			s.pty.Write([]byte("\r"))
 			return "typed", s.info.ID, nil
 		}
 		// a dead pty falls through to a fresh responder

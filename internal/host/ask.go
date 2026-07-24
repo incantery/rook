@@ -151,7 +151,20 @@ func (h *Host) askDoorbell(sessionID, askID string) {
 	if !alive {
 		return
 	}
-	s.pty.Write([]byte("rook ask " + askID + " answered — collect it with the rook answers tool\r"))
+	typeLineAt(s, "rook ask "+askID+" answered — collect it with the rook answers tool")
+}
+
+// typeLineAt delivers one line to an agent's TUI as TYPED input: the text,
+// a beat, then Enter as its own write. Text and \r in a single burst read
+// as a PASTE to claude code's heuristic — the newline lands in the input
+// box as a literal newline and nothing submits (found live, 07-24). The
+// gap makes the \r a keypress.
+func typeLineAt(s *session, line string) {
+	if _, err := s.pty.Write([]byte(line)); err != nil {
+		return
+	}
+	time.Sleep(150 * time.Millisecond)
+	s.pty.Write([]byte("\r"))
 }
 
 // handleSessionAsks is GET /sessions/{id}/asks — the drain the MCP answers
