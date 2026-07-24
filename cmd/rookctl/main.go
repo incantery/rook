@@ -37,6 +37,11 @@
 //	rookctl edit          take over this pane with the editor, vim-style, until :q
 //	                        (`re` is a symlink shim: re [file|dir…]; bare re is the
 //	                        empty buffer, `re .` opens the tree there, netrw-style)
+//	rookctl ask           ask the human a question in a split beside this pane,
+//	                        blocking until answered: rookctl ask '<json>' (or stdin);
+//	                        answer JSON on stdout, exit 0 answered / 1 dismissed
+//	rookctl mcp           stdio MCP server for Claude Code — the `ask` tool is
+//	                        `rookctl ask` behind tools/call (the rook plugin wires it)
 //	rookctl set-openai-key store the drafter's API key in the keychain
 //	rookctl set-jira-token store the Jira API token (queue credential) in the keychain
 //	rookctl claim         claude SessionStart hook body (stdin → host)
@@ -183,6 +188,10 @@ func main() {
 		err = runSetJiraToken()
 	case "edit":
 		err = runEdit(editArgs)
+	case "ask":
+		err = runAsk(os.Args[2:])
+	case "mcp":
+		err = runMcp()
 	case "claim":
 		err = runClaim(false)
 	case "unclaim":
@@ -199,7 +208,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|thread doc|note|ask <id>|edit [file…]|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|thread doc|note|ask <id>|edit [file…]|ask [json]|mcp|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {

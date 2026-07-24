@@ -37,7 +37,11 @@ export type PaneRef =
     /** the performance pane: rook's own footprint vs the sessions' workload,
      *  charted. Like `review` it's a surface with no identity — there is one
      *  machine — so it carries no field and never persists. */
-    | {type: "monitor"};
+    | {type: "monitor"}
+    /** a pending ask (ask.go): an agent's question rendered as a form in a
+     *  split beside its pane. Identity is the ask id, but it never persists —
+     *  the blocked rookctl behind it doesn't survive a reload either. */
+    | {type: "ask"; id: string};
 
 export interface LeafNode {
     kind: "leaf";

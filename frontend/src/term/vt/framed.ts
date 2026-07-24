@@ -7,6 +7,7 @@ export const MSG_FRAME = 0x01; // server -> client: a vt.Frame
 export const MSG_STATE = 0x02; // server -> client: session state (alt screen)
 export const MSG_SB_CHUNK = 0x03; // server -> client: a page of scrollback history
 export const MSG_EDIT = 0x04; // server -> client: edit request JSON (`re` pane takeover)
+export const MSG_ASK = 0x05; // server -> client: ask request JSON (a question for the human)
 export const MSG_INPUT = 0x10; // client -> server: raw pty bytes
 export const MSG_RESIZE = 0x11; // client -> server: cols, rows
 export const MSG_PALETTE = 0x12; // client -> server: theme colors for OSC answers
@@ -23,6 +24,7 @@ export type ServerMessage =
     | {kind: "state"; alt: boolean; mouseLevel: number; mouseSgr: boolean}
     | {kind: "sbchunk"; payload: Uint8Array}
     | {kind: "edit"; payload: Uint8Array}
+    | {kind: "ask"; payload: Uint8Array}
     | {kind: "unknown"; tag: number};
 
 /** decodeServerMessage classifies one incoming binary message. The frame payload
@@ -46,6 +48,8 @@ export function decodeServerMessage(buf: ArrayBuffer): ServerMessage {
             return {kind: "sbchunk", payload: b.subarray(1)};
         case MSG_EDIT:
             return {kind: "edit", payload: b.subarray(1)};
+        case MSG_ASK:
+            return {kind: "ask", payload: b.subarray(1)};
         default:
             return {kind: "unknown", tag: b[0]};
     }

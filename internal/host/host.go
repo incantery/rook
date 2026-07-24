@@ -84,6 +84,10 @@ type Host struct {
 	editMu sync.Mutex
 	edits  map[string]*editState
 
+	// pending `rookctl ask` requests (ask.go), keyed by ask id
+	askMu sync.Mutex
+	asks  map[string]*askState
+
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
 
@@ -545,6 +549,7 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/costs", h.handleCosts)
 	mux.HandleFunc("/drafts/", h.handleDraftDecide)
 	mux.HandleFunc("/edits/", h.handleEdits)
+	mux.HandleFunc("/asks/", h.handleAsks)
 	// per-thread verbs — ids are global, no workspace in the path
 	mux.HandleFunc("/threads/", h.handleThread)
 	// per-task verbs (RookTask) — global ids, same as threads
@@ -1251,6 +1256,10 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 		// `rookctl edit` (the `re` shim): take over this session's pane
 		// with the editor, vim-style — see edit.go
 		h.handleSessionEdit(w, r, s)
+	case action == "ask" && r.Method == http.MethodPost:
+		// `rookctl ask` (and the MCP tool): a question for the human,
+		// rendered as a split beside this session's pane — see ask.go
+		h.handleSessionAsk(w, r, s)
 	case action == "claim" && r.Method == http.MethodPost:
 		// A claude session announcing which window it lives in — sent by
 		// `rookctl claim` from a SessionStart hook (ROOK_SESSION names the

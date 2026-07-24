@@ -260,6 +260,21 @@ export class HostAPI {
         });
     }
 
+    /** Acknowledge an ask request — rookctl's ack-or-hang detector reads
+     *  this, same contract as editAck. */
+    async askAck(id: string): Promise<void> {
+        await this.req(`/asks/${encodeURIComponent(id)}/ack`, {method: "POST"});
+    }
+
+    /** Deliver the human's answer (or {canceled:true} for a dismissal) —
+     *  unblocks the waiting rookctl / MCP tool call with this JSON. */
+    async askAnswer(id: string, answer: unknown): Promise<void> {
+        await this.req(`/asks/${encodeURIComponent(id)}/answer`, {
+            method: "POST",
+            body: JSON.stringify(answer),
+        });
+    }
+
     /** One file, read-only (the ` e viewer). */
     async readFile(ws: string, path: string): Promise<FileResult> {
         const q = new URLSearchParams({path});

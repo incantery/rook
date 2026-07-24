@@ -84,6 +84,22 @@ export interface EditRequest {
     paths: string[] | null;
 }
 
+/** One question of an ask — Claude Code's AskUserQuestion shape, carried
+ *  verbatim from the asker through the host (ask.go keeps it opaque). */
+export interface AskQuestion {
+    question: string;
+    header?: string;
+    multiSelect?: boolean;
+    options: {label: string; description?: string}[];
+}
+
+/** An ask decoded from the session's frame socket: an agent in that
+ *  session wants the human to answer in a split beside its pane. */
+export interface AskRequest {
+    id: string;
+    questions: AskQuestion[];
+}
+
 /** UI-rate events out of the island. All of them are "state changed,
  *  re-project" signals — none carry terminal output. */
 export interface TermEvents {
@@ -534,6 +550,15 @@ export class TermManager {
                 } catch {
                     console.warn("edit request dropped: bad payload");
                 }
+            } else if (msg.kind === "ask") {
+                // a question for the human (host ask.go) — same posture as
+                // edit: chrome decides, a bad payload drops fail-open
+                try {
+                    const req = JSON.parse(new TextDecoder().decode(msg.payload)) as AskRequest;
+                    if (req.id) this.onAskRequest?.(tab.id, tab.workspace, req);
+                } catch {
+                    console.warn("ask request dropped: bad payload");
+                }
             }
         };
         ws.onclose = async (ev) => {
@@ -664,6 +689,10 @@ export class TermManager {
      *  request with the session, its workspace, and the resolved paths. */
     onEditRequest: ((sessionId: string, workspace: string, req: EditRequest) => void) | null =
         null;
+
+    /** Chrome's hook for ask requests (`rookctl ask` / the MCP tool) —
+     *  a question for the human, to render beside the asking session. */
+    onAskRequest: ((sessionId: string, workspace: string, req: AskRequest) => void) | null = null;
 
     /** findPane across EVERY window, not just the current workspace — an
      *  `re` typed into a pane must find that pane wherever it lives. */
@@ -865,6 +894,28 @@ export class TermManager {
             win.panes.get(leaf.id)?.focus();
         }
         this.events.changed();
+    }
+
+    /** Split a SPECIFIC pane with chrome-built content (no session) — the
+     *  ask form landing beside the agent that asked. splitFocused's shape
+     *  minus the shell spawn; the manager stays ignorant of what's inside,
+     *  same as openPaneWindow. Focus moves to the new pane. */
+    splitPane(at: PaneAt, dir: Dir, content: PaneRef, mk: (leafId: string) => PaneContent): boolean {
+        const win = this.windows.find((w) => w.id === at.winId);
+        if (!win || !win.panes.has(at.leafId)) return false;
+        this.unzoom(win);
+        const leaf: LeafNode = {kind: "leaf", id: crypto.randomUUID(), content};
+        win.root = splitAt(win.root, at.leafId, dir, leaf);
+        win.panes.set(leaf.id, mk(leaf.id));
+        if (this.active !== win) this.activate(win);
+        win.focused = leaf.id;
+        project(win, this.hooks(win));
+        this.save();
+        this.syncVisibility();
+        this.syncSize(true);
+        win.panes.get(leaf.id)?.focus();
+        this.events.changed();
+        return true;
     }
 
     /** Move focus to the pane across the shared edge — ` arrows. No

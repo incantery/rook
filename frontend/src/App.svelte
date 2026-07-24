@@ -8,7 +8,7 @@
     import {Call} from "@wailsio/runtime";
     import type {HostAPI, IssueInfo, ThreadInfo} from "./hostapi";
     import {TermManager} from "./term/manager";
-    import type {EditRequest, PaneAt} from "./term/manager";
+    import type {AskRequest, EditRequest, PaneAt} from "./term/manager";
     import type {Edge, PaneRef} from "./term/layout";
     import {themeService} from "./theme/service";
     import {rgb} from "./theme/color";
@@ -762,6 +762,60 @@
      *  per-window stores (quickfix.svelte.ts). `chrome` is the ACTIVE
      *  window's tree state, for the keyboard/command paths. */
     const chrome = $derived(chromeFor(app.activeId));
+
+    /** An agent's question off the session's frame socket
+     *  (manager.onAskRequest): open the form in a split to the RIGHT of the
+     *  pane that asked — the agent keeps its window, the question gets its
+     *  own — and settle the blocked asker with the answer (or a dismissal)
+     *  exactly once, whichever way the pane closes. */
+    async function handleAskRequest(
+        sessionId: string,
+        _workspace: string,
+        req: AskRequest,
+    ): Promise<void> {
+        await initDone;
+        if (!Array.isArray(req.questions) || req.questions.length === 0) {
+            void api.askAnswer(req.id, {canceled: true, reason: "no questions"}).catch(() => {});
+            return;
+        }
+        // the host re-pushes pending asks on every fresh attach (reload,
+        // reconnect) — an ask already on screen is revealed, not twinned
+        const open = mgr.findPaneAll((c) => c.type === "ask" && c.id === req.id);
+        if (open) {
+            void api.askAck(req.id).catch(() => {});
+            mgr.revealPane(open);
+            return;
+        }
+        const at = mgr.findPaneAll((c) => c.type === "term" && c.session === sessionId);
+        if (!at) {
+            // no pane shows this session (stale layout) — fail the asker fast
+            void api.askAnswer(req.id, {canceled: true, reason: "no pane"}).catch(() => {});
+            return;
+        }
+        void api.askAck(req.id).catch(() => {});
+        app.screen = "app";
+        await tick();
+        const {AskPane} = await import("./term/askpane.svelte");
+        let leaf = "";
+        const ok = mgr.splitPane(at, "row", {type: "ask", id: req.id}, (leafId) => {
+            leaf = leafId;
+            return new AskPane({
+                questions: req.questions,
+                onAnswer: (answers) => {
+                    void api.askAnswer(req.id, {answers}).catch(() => {});
+                    flash("answered — claude has it");
+                    mgr.closePane(leaf);
+                },
+                onCancel: () => {
+                    void api.askAnswer(req.id, {canceled: true}).catch(() => {});
+                    mgr.closePane(leaf);
+                },
+            });
+        });
+        if (!ok) {
+            void api.askAnswer(req.id, {canceled: true, reason: "no pane"}).catch(() => {});
+        }
+    }
 
     /** An `re` ask off the session's frame socket (manager.onEditRequest):
      *  vim's contract — take over the pane the command was typed in, give
@@ -2130,6 +2184,8 @@
         });
         mgr.onEditRequest = (sessionId, workspace, req) =>
             void handleEditRequest(sessionId, workspace, req);
+        mgr.onAskRequest = (sessionId, workspace, req) =>
+            void handleAskRequest(sessionId, workspace, req);
 
         // The terminal renderer reads its colors from --term-* CSS variables,
         // which the theme service writes onto :root on every swap. But the host

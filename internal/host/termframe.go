@@ -34,6 +34,7 @@ const (
 	msgState   byte = 0x02 // payload: 1 flags byte (bit0 = alt screen)
 	msgSbChunk byte = 0x03 // payload: vt.EncodeScrollback — a page of history
 	msgEdit    byte = 0x04 // payload: editPayload JSON (edit.go) — pane takeover ask
+	msgAsk     byte = 0x05 // payload: askPayload JSON (ask.go) — a question for the human
 
 	// client -> server
 	msgInput   byte = 0x10 // payload: raw bytes for the pty
@@ -87,6 +88,15 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 	s.frameConn = c
 	s.oob = oob
 	s.mu.Unlock()
+
+	// A pending ask survives the app (the blocked rookctl is still parked
+	// in this pty) — re-push it so the fresh attach re-renders the form.
+	for _, frame := range h.pendingAskFrames(s.info.ID) {
+		select {
+		case oob <- frame:
+		default:
+		}
+	}
 
 	// A fresh (blank) Surface: the first Render against it is the whole non-blank
 	// screen — the snapshot, gap-free by construction, no ring replay.
