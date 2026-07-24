@@ -436,6 +436,11 @@ export class EditorPane implements PaneContent {
      *  dirty means "the buffer differs from this". */
     private threadServerDoc = "";
     private threadResolved = false;
+    /** a verb crystallized on this thread while the buffer was open — the
+     *  abandon rule must not even ATTEMPT the delete then (threadShown may
+     *  still say "no comments" from before the verb; the host would 409,
+     *  but firing a delete at a thread you just spoke in is wrong twice) */
+    private threadSpoke = false;
     /** editable iff the file loaded whole — truncated/binary stays read-only */
     private editable = false;
     /** 'wrap', window-local. Seeded from the global default at construction,
@@ -787,7 +792,13 @@ export class EditorPane implements PaneContent {
             }
             return;
         }
-        if (this.disposed) return;
+        // The pane may have RETARGETED while the doc was in flight — the ask
+        // verbs walk back to the file, and their own notify fans a reload
+        // out to this pane concurrently. A late thread render must not paint
+        // over whatever the pane is now (the chimera bug: a "file" pane
+        // showing a thread doc, where 18G clamps to 12 lines and gt mints a
+        // bogus thread at the clamp).
+        if (this.disposed || this.opts.kind !== "thread" || this.opts.thread?.id !== id) return;
         const draft = doc.draft ?? "";
         const prefix = doc.content.slice(0, doc.content.length - draft.length);
         const grew = prefix.length > this.threadPrefix.length;
@@ -878,18 +889,34 @@ export class EditorPane implements PaneContent {
         return nl === -1 ? "" : value.slice(nl + 1);
     }
 
+    /** A save already in flight — :ThreadAsk right after :w must WAIT for
+     *  it, not silently no-op (the ask's own save-first would see `saving`
+     *  and bail, and the verb would vanish without a word). */
+    private threadSaving: Promise<boolean> | null = null;
+
     /** :w on a thread — POST the whole buffer; the host prefix-checks and
      *  stores the tail as the draft. Silent on success (a draft is private
      *  until :ThreadNote / :ThreadAsk crystallize it). A 409 means history
      *  moved underneath: splice the local tail under the fresh prefix and
      *  stay dirty — nothing is lost, and the next :w lands. */
-    private async saveThreadDoc(): Promise<boolean> {
+    private saveThreadDoc(): Promise<boolean> {
+        // serialize: a second save (or a verb's save-first) queues behind the
+        // one in flight, then re-checks dirtiness — usually a clean no-op
+        const run = (this.threadSaving ?? Promise.resolve(true)).then(() =>
+            this.saveThreadDocNow(),
+        );
+        this.threadSaving = run.finally(() => {
+            if (this.threadSaving === run) this.threadSaving = null;
+        });
+        return run;
+    }
+
+    private async saveThreadDocNow(): Promise<boolean> {
         const model = this.editor?.getModel();
         const id = this.opts.thread?.id;
         if (!model || id == null) return true;
         if (this.threadResolved) return true; // read-only — nothing to save
         if (!this.dirty) return true;
-        if (this.saving) return false;
         this.saving = true;
         try {
             const content = model.getValue();
@@ -934,6 +961,7 @@ export class EditorPane implements PaneContent {
         if (!(await this.saveThreadDoc())) return;
         try {
             await this.api.threadNote(id);
+            this.threadSpoke = true;
             this.opts.onFlash(`noted on #${id}`);
         } catch (err) {
             this.verbFail("note", err);
@@ -946,6 +974,7 @@ export class EditorPane implements PaneContent {
         if (!(await this.saveThreadDoc())) return;
         try {
             const res = await this.api.threadAsk(id);
+            this.threadSpoke = true;
             this.opts.onFlash(
                 res.mode === "typed"
                     ? "asked — nudged the live claude session"
@@ -1133,6 +1162,7 @@ export class EditorPane implements PaneContent {
         if (this.opts.kind === "thread") this.leaveThread();
         this.opts.kind = "thread";
         this.opts.thread = {id};
+        this.threadSpoke = false;
         this.closeArmed = false;
         this.editable = false;
         // a fresh model, never a setValue into the file's: the thread doc is
@@ -1156,6 +1186,7 @@ export class EditorPane implements PaneContent {
         if (
             id != null &&
             !this.threadResolved &&
+            !this.threadSpoke &&
             (this.threadShown?.comments.length ?? 0) === 0 &&
             !this.dirty
         ) {
@@ -1217,7 +1248,9 @@ export class EditorPane implements PaneContent {
                 this.emitChange();
             });
             const res = await this.api.readFile(this.opts.workspace, path);
-            if (this.disposed) return;
+            // same staleness guard as loadThread: the pane may have moved on
+            // (gt retargeted it to a thread, :e to another file) mid-read
+            if (this.disposed || this.opts.kind !== "file" || this.opts.path !== path) return;
             if (res.binary) {
                 this.showStatus(`${path}: binary file`);
                 return;
@@ -1441,6 +1474,7 @@ export class EditorPane implements PaneContent {
             this.opts.kind === "thread" &&
             id != null &&
             !this.threadResolved &&
+            !this.threadSpoke &&
             (this.threadShown?.comments.length ?? 0) === 0
         ) {
             void this.api.deleteThread(id).catch(() => {});

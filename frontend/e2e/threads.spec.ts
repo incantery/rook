@@ -198,6 +198,87 @@ test("gt creates a thread; :w keeps the tail; :ThreadAsk sends it", async ({page
     await page.screenshot({path: "bin/e2e/threads-doc.png", fullPage: true});
 });
 
+// The SECOND round — the regression that shipped with round one. :ThreadAsk
+// walks back to the file, and its own notify fans a reload out to the pane
+// CONCURRENTLY: without the staleness guard, the late thread render painted
+// over the file (a chimera pane where 18G clamps to the doc's line count and
+// gt mints a bogus thread at the clamp). This drives ask → reply → follow-up
+// ask → :ThreadNote, with the cursor position asserted at the seam.
+test("a conversation: follow-up ask after the reply, :ThreadNote stays put", async ({page}) => {
+    test.setTimeout(120_000);
+    neuterCoder();
+    const ws = `reply2-e2e-${Date.now()}`;
+    await openWorkspace(page, ws);
+    await openSource(page, "internal/host/spawntask.go");
+
+    // round one: gt create, ask — :w and :ThreadAsk back-to-back (the ask
+    // must QUEUE behind the in-flight save, not silently vanish)
+    await goToThread(page, "18G");
+    await expect(threadHead(page)).toBeVisible({timeout: 20_000});
+    await page.keyboard.press("i");
+    await page.keyboard.type("round one question");
+    await page.keyboard.press("Escape");
+    await page.keyboard.type(":w");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type(":ThreadAsk");
+    await page.keyboard.press("Enter");
+    await expect(threadHead(page)).toHaveCount(0, {timeout: 15_000});
+    await expect
+        .poll(async () => (await threadsOf(ws))[0]?.comments.length ?? 0, {timeout: 15_000})
+        .toBe(1);
+    const [t] = await threadsOf(ws);
+
+    const reply = await hostFetch(`/threads/${t.id}/comments`, {
+        method: "POST",
+        body: JSON.stringify({body: "the agent's answer.", author: "agent"}),
+    });
+    expect(reply.status).toBe(204);
+
+    // round two: the walk-back left the keyboard in the FILE — the chimera
+    // tripwire is this motion working at all
+    await expect(page.locator(".editor-path").first()).toContainText("spawntask.go", {
+        timeout: 15_000,
+    });
+    await page.keyboard.type("18G");
+    await expect(page.locator("#statusbar")).toContainText("Ln 18,", {timeout: 10_000});
+    await page.keyboard.type("gt");
+    await expect(threadHead(page)).toBeVisible({timeout: 20_000});
+    await expect(page.locator(".editor-mount").first()).toContainText("the agent's answer.", {
+        timeout: 15_000,
+    });
+    await page.keyboard.press("i");
+    await page.keyboard.type("round two follow-up");
+    await page.keyboard.press("Escape");
+    await page.keyboard.type(":ThreadAsk"); // save-first: no :w needed
+    await page.keyboard.press("Enter");
+    await expect(threadHead(page)).toHaveCount(0, {timeout: 15_000});
+    await expect
+        .poll(async () => (await threadsOf(ws))[0]?.comments.length ?? 0, {timeout: 15_000})
+        .toBe(3);
+    const after = (await threadsOf(ws))[0];
+    expect(after.comments[2].body).toBe("round two follow-up");
+    expect(after.comments[2].author).toBe("user");
+    // ONE thread — the chimera bug's signature was a bogus second one
+    expect(await threadsOf(ws)).toHaveLength(1);
+
+    // :ThreadNote from inside the buffer: crystallizes, no nudge, STAYS
+    await page.keyboard.type("18G");
+    await page.keyboard.type("gt");
+    await expect(threadHead(page)).toBeVisible({timeout: 20_000});
+    await page.keyboard.press("i");
+    await page.keyboard.type("a note for the record");
+    await page.keyboard.press("Escape");
+    await page.keyboard.type(":ThreadNote");
+    await page.keyboard.press("Enter");
+    await expect
+        .poll(async () => (await threadsOf(ws))[0]?.comments.length ?? 0, {timeout: 15_000})
+        .toBe(4);
+    expect((await threadsOf(ws))[0].comments[3].body).toBe("a note for the record");
+    // the note is history now, above the scissors, and the buffer stayed
+    await expect(threadHead(page)).toBeVisible();
+    await expect(page.locator(".editor-mount").first()).toContainText("a note for the record");
+});
+
 // The abort paths: gt minted a thread, nothing was said — navigating away
 // (⌃O, the gd-shaped exit) or :q takes it back. Neither litters.
 test("an untouched gt thread deletes itself on the way out", async ({page}) => {
