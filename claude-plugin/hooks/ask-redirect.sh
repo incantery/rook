@@ -9,6 +9,6 @@
 [ -n "${ROOK_SESSION:-}" ] || exit 0
 cat >/dev/null # drain tool_input; the model re-sends it to the MCP tool
 cat <<'EOF'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"This session runs inside rook, which renders questions in its own panel. Call mcp__rook__ask with the SAME questions array instead. Before that call, write one short line pointing the user right — e.g. \"Asked in rook →\" — and do NOT restate the question or options in text; the rook panel shows them."}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"This session runs inside rook, which renders questions in its own panel. Call mcp__plugin_rook_rook__ask with the SAME questions array instead. Before that call, write one short line pointing the user right — e.g. \"Asked in rook →\" — and do NOT restate the question or options in text; the rook panel shows them."}}
 EOF
 exit 0
