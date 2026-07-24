@@ -31,6 +31,11 @@ type askState struct {
 	session string
 	acked   bool
 	done    bool
+	// async ask (the MCP tool): nobody long-polls it — on answer, ring the
+	// doorbell at the asking session and hold the answer for the drain
+	// endpoint. Blocking asks (the rookctl ask CLI) are owned by their
+	// long-poll and the drain never touches them.
+	notify bool
 	// the answer JSON the app posted — {"canceled":true} for a dismissal
 	answer json.RawMessage
 	// the msgAsk frame, kept so a fresh attach can re-push a pending ask:
@@ -54,6 +59,7 @@ type askPayload struct {
 func (h *Host) handleSessionAsk(w http.ResponseWriter, r *http.Request, s *session) {
 	var req struct {
 		Questions json.RawMessage `json:"questions"`
+		Notify    bool            `json:"notify"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Questions) == 0 {
 		http.Error(w, "questions required", http.StatusBadRequest)
@@ -88,6 +94,7 @@ func (h *Host) handleSessionAsk(w http.ResponseWriter, r *http.Request, s *sessi
 	}
 	h.asks[payload.ID] = &askState{
 		session: s.info.ID,
+		notify:  req.Notify,
 		frame:   msg,
 		doneCh:  make(chan struct{}),
 		created: time.Now(),
@@ -120,6 +127,60 @@ func (h *Host) pendingAskFrames(sessionID string) [][]byte {
 		}
 	}
 	return out
+}
+
+// askDoorbell types a one-line pointer at the asking session's pty — the
+// automated "I've left comments on the file". Only when a live claude
+// claim holds that window: at a bare shell the line would run as a
+// command, so a dead claim means the answer just waits in the drain.
+// One line, no embedded newline — same delivery rule as the thread nudge.
+func (h *Host) askDoorbell(sessionID, askID string) {
+	s := h.get(sessionID)
+	if s == nil {
+		return
+	}
+	h.bindMu.Lock()
+	alive := false
+	for tid, sid := range h.claims {
+		if sid == sessionID && h.claimAliveLocked(tid, s) {
+			alive = true
+			break
+		}
+	}
+	h.bindMu.Unlock()
+	if !alive {
+		return
+	}
+	s.pty.Write([]byte("rook ask " + askID + " answered — collect it with the rook answers tool\r"))
+}
+
+// handleSessionAsks is GET /sessions/{id}/asks — the drain the MCP answers
+// tool reads: every DECIDED async ask for this session (consumed by the
+// read), plus the ids still waiting. Blocking asks belong to their
+// long-poll and are invisible here.
+func (h *Host) handleSessionAsks(w http.ResponseWriter, s *session) {
+	type answered struct {
+		AskID  string          `json:"askId"`
+		Answer json.RawMessage `json:"answer"`
+	}
+	out := struct {
+		Answered []answered `json:"answered"`
+		Pending  []string   `json:"pending"`
+	}{Answered: []answered{}, Pending: []string{}}
+	h.askMu.Lock()
+	for id, a := range h.asks {
+		if a.session != s.info.ID || !a.notify {
+			continue
+		}
+		if a.done {
+			out.Answered = append(out.Answered, answered{AskID: id, Answer: a.answer})
+			delete(h.asks, id)
+		} else {
+			out.Pending = append(out.Pending, id)
+		}
+	}
+	h.askMu.Unlock()
+	writeJSON(w, out)
 }
 
 // handleAsks routes /asks/{id} (GET, ?wait=seconds long-poll),
@@ -173,11 +234,18 @@ func (h *Host) handleAsks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.askMu.Lock()
+		ring := false
 		if !a.done {
 			a.done, a.acked, a.answer = true, true, answer
+			ring = a.notify
 			close(a.doneCh)
 		}
+		session := a.session
 		h.askMu.Unlock()
+		if ring {
+			// off the request path: the pty write can stall on a wedged tty
+			go h.askDoorbell(session, id)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)

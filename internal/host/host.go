@@ -1260,6 +1260,9 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 		// `rookctl ask` (and the MCP tool): a question for the human,
 		// rendered as a split beside this session's pane — see ask.go
 		h.handleSessionAsk(w, r, s)
+	case action == "asks" && r.Method == http.MethodGet:
+		// the async drain: decided asks out (consumed), pending ids listed
+		h.handleSessionAsks(w, s)
 	case action == "claim" && r.Method == http.MethodPost:
 		// A claude session announcing which window it lives in — sent by
 		// `rookctl claim` from a SessionStart hook (ROOK_SESSION names the

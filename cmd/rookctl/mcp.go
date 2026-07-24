@@ -29,11 +29,18 @@ const mcpProtocolVersion = "2024-11-05"
 // say inline (one short pointer, not a restatement of the options), and to
 // never double-ask.
 const askToolDescription = "Ask the user one or more questions through rook's UI. " +
-	"The question opens as a form in a split beside this terminal, and this call BLOCKS until the user answers there (or dismisses it). " +
+	"The form opens in a split beside this terminal and this call returns IMMEDIATELY with {\"askId\":…,\"pending\":true} — it does not wait. " +
 	"Use this INSTEAD of the built-in AskUserQuestion tool whenever it is available. " +
 	"Before calling, write one short line telling the user you've asked in rook — e.g. \"Asked in rook →\" — and do NOT restate the question or options in text: the form shows them. " +
-	"The result is JSON: {\"answers\":[{\"question\":…,\"selected\":[labels…],\"other\":text?}]} — treat `other` as the user's own words when present. " +
-	"A result of {\"canceled\":true} means the user dismissed the question; continue with your best judgment instead of re-asking."
+	"When the user answers, a line like 'rook ask <id> answered' appears in this session — collect the answer with the rook answers tool. " +
+	"If you have other useful work, continue it while you wait; if everything depends on the answer, end your turn and say you're waiting on the panel."
+
+// answersToolDescription — the read half of the ask/answer split.
+const answersToolDescription = "Collect the user's answers to rook asks posed in this session. " +
+	"Returns {\"answered\":[{\"askId\":…,\"answer\":…}],\"pending\":[askId…]} — each answer is " +
+	"{\"answers\":[{\"question\":…,\"selected\":[labels…],\"other\":text?}]} (treat `other` as the user's own words) " +
+	"or {\"canceled\":true}, meaning they dismissed that ask: proceed on your best judgment instead of re-asking. " +
+	"Answered asks are consumed by the read. Call this when a 'rook ask … answered' line appears, or before deciding anything that waited on an ask."
 
 // askToolSchema mirrors AskUserQuestion's input shape, so the model can
 // forward a denied call's arguments verbatim.
@@ -125,6 +132,10 @@ func runMcp() error {
 					"name":        "ask",
 					"description": askToolDescription,
 					"inputSchema": askToolSchema,
+				}, {
+					"name":        "answers",
+					"description": answersToolDescription,
+					"inputSchema": json.RawMessage(`{"type":"object","properties":{}}`),
 				}},
 			}, nil)
 		case "tools/call":
@@ -132,12 +143,20 @@ func runMcp() error {
 				Name      string          `json:"name"`
 				Arguments json.RawMessage `json:"arguments"`
 			}
-			if err := json.Unmarshal(req.Params, &params); err != nil || params.Name != "ask" {
-				reply(req.ID, nil, &rpcError{Code: -32602, Message: "unknown tool"})
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				reply(req.ID, nil, &rpcError{Code: -32602, Message: "bad params"})
 				continue
 			}
-			result, rerr := mcpAsk(params.Arguments)
-			reply(req.ID, result, rerr)
+			switch params.Name {
+			case "ask":
+				result, rerr := mcpAsk(params.Arguments)
+				reply(req.ID, result, rerr)
+			case "answers":
+				result, rerr := mcpAnswers()
+				reply(req.ID, result, rerr)
+			default:
+				reply(req.ID, nil, &rpcError{Code: -32602, Message: "unknown tool"})
+			}
 		default:
 			// notifications/initialized, notifications/cancelled, …
 			reply(req.ID, nil, &rpcError{Code: -32601, Message: "method not found: " + req.Method})
@@ -146,32 +165,66 @@ func runMcp() error {
 	return in.Err()
 }
 
-// mcpAsk runs one blocking ask and shapes the outcome as a tool result.
-// Failures are tool-result errors (isError), not protocol errors — the
-// model should read them and adapt, not crash the session.
-func mcpAsk(arguments json.RawMessage) (any, *rpcError) {
-	text := func(s string, isErr bool) any {
-		return map[string]any{
-			"content": []map[string]any{{"type": "text", "text": s}},
-			"isError": isErr,
-		}
+// mcpText shapes a tool result. Failures are tool-result errors (isError),
+// not protocol errors — the model should read them and adapt, not crash
+// the session.
+func mcpText(s string, isErr bool) any {
+	return map[string]any{
+		"content": []map[string]any{{"type": "text", "text": s}},
+		"isError": isErr,
 	}
+}
 
+// mcpSession is the rook window this server serves — the pty claude runs
+// in, inherited through the environment.
+func mcpSession() (string, *client, any) {
 	self := os.Getenv("ROOK_SESSION")
 	if self == "" {
-		return text("not inside a rook terminal (no $ROOK_SESSION) — fall back to asking directly", true), nil
-	}
-	questions, err := askQuestions(arguments)
-	if err != nil {
-		return text(err.Error(), true), nil
+		return "", nil, mcpText("not inside a rook terminal (no $ROOK_SESSION) — fall back to asking directly", true)
 	}
 	c, err := connect()
 	if err != nil {
-		return text(fmt.Sprintf("rook host unreachable: %v — fall back to asking directly", err), true), nil
+		return "", nil, mcpText(fmt.Sprintf("rook host unreachable: %v — fall back to asking directly", err), true)
 	}
-	answer, err := blockingAsk(c, self, questions)
+	return self, c, nil
+}
+
+// mcpAsk posts the questions and returns immediately — the ask/answer
+// split. The answer comes back through the doorbell line + answers tool.
+func mcpAsk(arguments json.RawMessage) (any, *rpcError) {
+	self, c, errRes := mcpSession()
+	if errRes != nil {
+		return errRes, nil
+	}
+	questions, err := askQuestions(arguments)
 	if err != nil {
-		return text(fmt.Sprintf("ask failed: %v — fall back to asking directly", err), true), nil
+		return mcpText(err.Error(), true), nil
 	}
-	return text(string(answer), false), nil
+	out, err := c.req("POST", "/sessions/"+self+"/ask", map[string]any{
+		"questions": questions,
+		"notify":    true,
+	})
+	if err != nil {
+		return mcpText(fmt.Sprintf("ask failed: %v — fall back to asking directly", err), true), nil
+	}
+	var created struct {
+		AskID string `json:"askId"`
+	}
+	if json.Unmarshal(out, &created) != nil || created.AskID == "" {
+		return mcpText(fmt.Sprintf("unexpected response: %s", out), true), nil
+	}
+	return mcpText(fmt.Sprintf(`{"askId":%q,"pending":true}`, created.AskID), false), nil
+}
+
+// mcpAnswers drains this session's decided asks — the read half.
+func mcpAnswers() (any, *rpcError) {
+	self, c, errRes := mcpSession()
+	if errRes != nil {
+		return errRes, nil
+	}
+	out, err := c.req("GET", "/sessions/"+self+"/asks", nil)
+	if err != nil {
+		return mcpText(fmt.Sprintf("answers unavailable: %v", err), true), nil
+	}
+	return mcpText(string(out), false), nil
 }

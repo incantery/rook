@@ -1,4 +1,4 @@
-import {expect, test, REPO} from "./harness";
+import {expect, hostFetch, test, REPO, STUB_CODER} from "./harness";
 import * as path from "node:path";
 
 // `rookctl ask` — the RUI question: typed in a rook shell (the way the MCP
@@ -81,6 +81,86 @@ test("a pending ask survives a reload — the host re-pushes it", async ({page, 
     await page.keyboard.press("2");
     await rook.expectScreen(/"selected":\["Hold"\]/);
     await rook.expectScreen(/ask exit=0/);
+});
+
+/** the host session backing this workspace's only pane */
+async function sessionOf(ws: string): Promise<string> {
+    const list = (await (await hostFetch("/sessions")).json()) as {id: string; workspace: string}[];
+    const mine = list.filter((s) => s.workspace === ws);
+    expect(mine).toHaveLength(1);
+    return mine[0].id;
+}
+
+const askAsync = async (sid: string) =>
+    (await (
+        await hostFetch(`/sessions/${sid}/ask`, {
+            method: "POST",
+            body: JSON.stringify({...JSON.parse(ONE_QUESTION), notify: true}),
+        })
+    ).json()) as {askId: string};
+
+test("an async ask rings the doorbell at a claimed window; the drain is read-once", async ({
+    page,
+    rook,
+}) => {
+    const root = await rook.repo({files: {"a.txt": "x\n"}});
+    const ws = await rook.open({name: `ask-async-${Date.now()}`, root});
+    const sid = await sessionOf(ws);
+
+    // an agent claims this window, exactly as claude's SessionStart hook does
+    await rook.shellReady();
+    await rook.ex(`${STUB_CODER} 'holding this window'`);
+    await rook.expectScreen(/STUB CODER READY/);
+
+    // the MCP tool's create: notify=true, returns without waiting
+    const {askId} = await askAsync(sid);
+    const form = page.locator("[data-ask-root]");
+    await expect(form).toBeVisible({timeout: 15_000});
+
+    await page.keyboard.press("1");
+    await expect(form).toHaveCount(0);
+
+    // the doorbell reached the PROCESS holding the window — the stub echoes
+    // what it reads, so this is delivery, not just pty noise
+    await rook.expectScreen(new RegExp(`STUB GOT: rook ask ${askId} answered`));
+
+    // the drain hands the answer over exactly once
+    const drained = (await (await hostFetch(`/sessions/${sid}/asks`)).json()) as {
+        answered: {askId: string; answer: {answers: {selected: string[]}[]}}[];
+        pending: string[];
+    };
+    expect(drained.answered).toHaveLength(1);
+    expect(drained.answered[0].askId).toBe(askId);
+    expect(drained.answered[0].answer.answers[0].selected).toEqual(["Ship"]);
+    const again = (await (await hostFetch(`/sessions/${sid}/asks`)).json()) as {
+        answered: unknown[];
+    };
+    expect(again.answered).toHaveLength(0);
+});
+
+test("no live claim — the doorbell stays silent and the answer waits in the drain", async ({
+    page,
+    rook,
+}) => {
+    const root = await rook.repo({files: {"a.txt": "x\n"}});
+    const ws = await rook.open({name: `ask-quiet-${Date.now()}`, root});
+    const sid = await sessionOf(ws);
+    await rook.shellReady(); // a bare shell: no claim, nothing to type at
+
+    const {askId} = await askAsync(sid);
+    const form = page.locator("[data-ask-root]");
+    await expect(form).toBeVisible({timeout: 15_000});
+    await page.keyboard.press("1");
+    await expect(form).toHaveCount(0);
+
+    // typing "rook ask …" at a shell would RUN it — silence is the contract
+    await page.waitForTimeout(1500);
+    expect(await rook.screen()).not.toContain("rook ask");
+
+    const drained = (await (await hostFetch(`/sessions/${sid}/asks`)).json()) as {
+        answered: {askId: string}[];
+    };
+    expect(drained.answered.map((a) => a.askId)).toEqual([askId]);
 });
 
 test("Other carries the user's own words", async ({page, rook}) => {
