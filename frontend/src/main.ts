@@ -11,6 +11,23 @@ import {loadCanvasFonts} from "./term/vt/registry";
 import {themeService} from "./theme/service";
 import App from "./App.svelte";
 
+/** SYMBOL_FALLBACKS sit behind the configured family so an UNPATCHED font still
+ *  draws Nerd Font icons. A neovim statusline (lualine, devicons) emits the
+ *  private-use ranges U+E000–F8FF / U+F0000+; a stock font like JetBrains Mono
+ *  or Menlo has none of them, and with nothing behind it the row paints tofu.
+ *
+ *  Per-glyph fallback only fires for codepoints the earlier families LACK, so
+ *  a symbols-only font can't hijack ASCII — the configured font still owns
+ *  every letter you type.
+ *
+ *  MONO VARIANTS ONLY, deliberately. Rows are runs of plain text under
+ *  `white-space: pre` (term/vt/renderer.css) — nothing pins a glyph to its
+ *  cell, so advance width is whatever the font says. The single-width "Mono"
+ *  builds match the emulator's width-1 verdict (internal/vt/emulator.go); the
+ *  double-width builds would draw the icon but slide the rest of the line.
+ *  Tofu is a better failure than drift until cells are pinned. */
+const SYMBOL_FALLBACKS = ["Symbols Nerd Font Mono", "Hack Nerd Font Mono"];
+
 function fatal(msg: string): void {
     const el = document.createElement("div");
     el.id = "fatal";
@@ -21,7 +38,13 @@ function fatal(msg: string): void {
 async function main() {
     const cfg = await Config.Get();
     console.info("config loaded:", JSON.stringify(cfg));
-    const font = `"${cfg.fontFamily}", Menlo, ui-monospace, monospace`;
+    const families = [cfg.fontFamily, ...SYMBOL_FALLBACKS];
+    const font = [
+        ...families.map((f) => `"${f}"`),
+        "Menlo",
+        "ui-monospace",
+        "monospace",
+    ].join(", ");
     // paint chrome + the body tint from the active theme before anything mounts
     themeService.setOpacity(cfg.backgroundOpacity);
     themeService.apply(cfg.theme); // no-op if the name is unknown
@@ -44,7 +67,7 @@ async function main() {
     // WebGL only: hand the canvas a FontFace copy of the terminal font —
     // WebKit's fillText can't see user-installed fonts (see registry.ts).
     // Must land before the atlas rasterizes, i.e. before any pane exists.
-    await loadCanvasFonts(cfg.fontFamily);
+    await loadCanvasFonts(families);
 
     // Measure with the real font: a grid computed from fallback-font cell
     // metrics spawns PTYs at the wrong size.

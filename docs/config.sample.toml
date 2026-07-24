@@ -21,6 +21,14 @@
 
 # Terminal font. A Nerd Font gives you the powerline/devicon glyphs.
 # font-family = "Hack Nerd Font Mono"
+#
+# An unpatched font (JetBrains Mono, Menlo, SF Mono) has no icons of its own,
+# so rook falls back to "Symbols Nerd Font Mono" then "Hack Nerd Font Mono"
+# for those codepoints alone — your font still draws every letter. If a
+# neovim statusline shows tofu boxes, neither is installed:
+#   brew install --cask font-symbols-only-nerd-font
+# Install the MONO build. The double-width one draws the icon but pushes the
+# rest of the line out of its columns.
 
 # Point size.
 # font-size = 18

@@ -42,8 +42,11 @@ export function setRendererKind(kind: RendererKind): void {
     }
 }
 
-/** loadCanvasFonts re-registers the configured terminal family as FontFaces
- *  from bytes the Go side serves (/rookfont, see internal/fontdir).
+/** loadCanvasFonts re-registers the terminal font stack's families as FontFaces
+ *  from bytes the Go side serves (/rookfont, see internal/fontdir). Pass the
+ *  configured family AND its symbol fallbacks (main.ts): the atlas needs every
+ *  family the CSS stack can reach, or an unpatched configured font rasterizes
+ *  tofu for the icons its fallback was meant to supply.
  *
  *  WebKit's canvas 2D ignores user-installed fonts (a fingerprinting
  *  mitigation): DOM text renders them, fillText silently falls back — so the
@@ -56,7 +59,7 @@ export function setRendererKind(kind: RendererKind): void {
  *  font that needs no help) or a FontFace rejection (e.g. .ttc collections)
  *  leaves the browser's own fallback in charge. Call before terminals are
  *  constructed, when the webgl renderer is configured. */
-export async function loadCanvasFonts(family: string): Promise<void> {
+export async function loadCanvasFonts(families: string[]): Promise<void> {
     if (rendererKind() !== "webgl") return;
     const styles: [string, FontFaceDescriptors][] = [
         ["regular", {}],
@@ -65,19 +68,21 @@ export async function loadCanvasFonts(family: string): Promise<void> {
         ["bolditalic", {weight: "700", style: "italic"}],
     ];
     await Promise.all(
-        styles.map(async ([style, desc]) => {
-            try {
-                const r = await fetch(
-                    `/rookfont?family=${encodeURIComponent(family)}&style=${style}`,
-                );
-                if (!r.ok) return;
-                const face = new FontFace(family, await r.arrayBuffer(), desc);
-                await face.load();
-                document.fonts.add(face);
-            } catch {
-                // fail open — the DOM path never needed this
-            }
-        }),
+        families.flatMap((family) =>
+            styles.map(async ([style, desc]) => {
+                try {
+                    const r = await fetch(
+                        `/rookfont?family=${encodeURIComponent(family)}&style=${style}`,
+                    );
+                    if (!r.ok) return;
+                    const face = new FontFace(family, await r.arrayBuffer(), desc);
+                    await face.load();
+                    document.fonts.add(face);
+                } catch {
+                    // fail open — the DOM path never needed this
+                }
+            }),
+        ),
     );
 }
 
