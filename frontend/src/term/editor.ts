@@ -320,6 +320,10 @@ export interface EditorPaneOpts {
     /** a thread buffer wants its source shown — chrome routes through the
      *  openFile ladder so ⌃O comes back here */
     onOpenThreadSource?: (path: string, line: number) => void;
+    /** the thread is off your plate (:ThreadAsk sent it, :resolve closed
+     *  it) — chrome walks the jumplist back to the code. gt is gd-shaped
+     *  now, so "done" means navigate, never close the window you're in. */
+    onThreadDone?: () => void;
     /** gt — open (or just-created) thread as a buffer */
     onOpenThread?: (threadId: number) => void;
     /** what the git gutter diffs against: undefined = HEAD; "branch" or an
@@ -386,6 +390,19 @@ const THREAD_OPTS = {
     wordWrap: "on",
     overviewRulerLanes: 0,
     padding: {top: 8, bottom: 8},
+} as const satisfies monacoTypes.editor.IEditorOptions;
+
+/** THREAD_OPTS' inverse — what a file buffer looks like. Needed because a
+ *  pane retargets between kinds in place (gt is gd-shaped: the thread opens
+ *  IN this pane, ⌃O walks back), so every option a thread sets, a file load
+ *  must set back. Values mirror ensureEditor's construction defaults. */
+const FILE_OPTS = {
+    lineNumbers: "relative",
+    glyphMargin: true,
+    folding: true,
+    wordWrap: "off", // loadFile overrides per the pane's own 'wrap'
+    overviewRulerLanes: 3,
+    padding: {top: 0, bottom: 0},
 } as const satisfies monacoTypes.editor.IEditorOptions;
 
 export class EditorPane implements PaneContent {
@@ -908,9 +925,9 @@ export class EditorPane implements PaneContent {
     }
 
     /** :ThreadNote / :ThreadAsk — save first (the tail IS the message), then
-     *  crystallize it as a comment. ask also nudges the responder and closes
-     *  the pane: the question is with the agent now, and an open buffer
-     *  would say otherwise. */
+     *  crystallize it as a comment. ask also nudges the responder and walks
+     *  back to the code: the question is with the agent now, and sitting in
+     *  the buffer would say otherwise (⌃I returns if you meant to stay). */
     async threadNote(): Promise<void> {
         const id = this.opts.thread?.id;
         if (this.opts.kind !== "thread" || id == null) return;
@@ -934,7 +951,8 @@ export class EditorPane implements PaneContent {
                     ? "asked — nudged the live claude session"
                     : "asked — spawned a responder",
             );
-            this.opts.onClose();
+            if (this.opts.onThreadDone) this.opts.onThreadDone();
+            else this.opts.onClose();
         } catch (err) {
             this.verbFail("ask", err);
         }
@@ -951,16 +969,24 @@ export class EditorPane implements PaneContent {
         );
     }
 
-    /** :resolve / :reopen — act, then close: the thread is off your plate,
-     *  and leaving its buffer open would say otherwise. */
+    /** :resolve — act, then walk back to the code: the thread is off your
+     *  plate, and stranding you in a read-only render would say otherwise.
+     *  :reopen is the opposite gesture — the conversation continues, so the
+     *  buffer stays and re-renders editable (scissors back). */
     async threadSetState(resolved: boolean): Promise<void> {
         const t = this.threadShown;
         if (!t) return;
         try {
-            if (resolved) await this.api.threadResolve(t.id);
-            else await this.api.threadReopen(t.id);
-            this.opts.onFlash(resolved ? `resolved #${t.id}` : `reopened #${t.id}`);
-            this.opts.onClose();
+            if (resolved) {
+                await this.api.threadResolve(t.id);
+                this.opts.onFlash(`resolved #${t.id}`);
+                if (this.opts.onThreadDone) this.opts.onThreadDone();
+                else this.opts.onClose();
+            } else {
+                await this.api.threadReopen(t.id);
+                this.opts.onFlash(`reopened #${t.id}`);
+                await this.loadThread();
+            }
         } catch (err) {
             this.opts.onFlash(`${resolved ? "resolve" : "reopen"} failed: ${String(err)}`);
         }
@@ -1064,15 +1090,25 @@ export class EditorPane implements PaneContent {
      *  is never the right trade. Returns whether it moved, so the caller can
      *  fall back to another pane rather than appear to do nothing.
      *
-     *  file-mode only: a review pane is a walker over the changed set, not a
-     *  document, and its head/editor are a different shape entirely. */
+     *  Accepts a THREAD pane too — gt navigates in place now, so ⌃O (and any
+     *  file open) has to be able to navigate back out. A review pane still
+     *  refuses: it's a walker over the changed set, not a document, and its
+     *  head/editor are a different shape entirely. */
     async setFile(path: string): Promise<boolean> {
-        if (this.opts.kind !== "file" || this.disposed) return false;
-        if (this.opts.path === path) return true; // already here
-        if (this.dirty) {
-            this.opts.onFlash(`${this.opts.path ?? "buffer"} has unsaved changes`);
+        if ((this.opts.kind !== "file" && this.opts.kind !== "thread") || this.disposed) {
             return false;
         }
+        if (this.opts.kind === "file" && this.opts.path === path) return true; // already here
+        if (this.dirty) {
+            this.opts.onFlash(
+                this.opts.kind === "thread"
+                    ? "thread has an unsaved tail — :w keeps it, :q! discards"
+                    : `${this.opts.path ?? "buffer"} has unsaved changes`,
+            );
+            return false;
+        }
+        if (this.opts.kind === "thread") this.leaveThread();
+        this.opts.kind = "file";
         this.opts.path = path;
         this.closeArmed = false;
         this.editable = false; // until the read says otherwise
@@ -1080,6 +1116,56 @@ export class EditorPane implements PaneContent {
         await this.loadFile();
         this.emitChange(); // the strip's title + the thread panel's file context
         return true;
+    }
+
+    /** Point this pane at a thread — gt's landing, the same gesture as
+     *  setFile in the other direction. The dirty guard protects unsaved
+     *  FILE edits exactly like `:e` would. */
+    async setThread(id: number): Promise<boolean> {
+        if ((this.opts.kind !== "file" && this.opts.kind !== "thread") || this.disposed) {
+            return false;
+        }
+        if (this.opts.kind === "thread" && this.opts.thread?.id === id) return true;
+        if (this.dirty) {
+            this.opts.onFlash(`${this.opts.path ?? "buffer"} has unsaved changes`);
+            return false;
+        }
+        if (this.opts.kind === "thread") this.leaveThread();
+        this.opts.kind = "thread";
+        this.opts.thread = {id};
+        this.closeArmed = false;
+        this.editable = false;
+        // a fresh model, never a setValue into the file's: the thread doc is
+        // its own document (markdown, rook-thread:// URI, its own undo stack)
+        this.disposeModels();
+        this.gutterDecs?.clear();
+        for (const b of this.bands) b.dispose();
+        this.bands = [];
+        this.showStatus("reading thread…");
+        await this.loadThread();
+        this.emitChange();
+        return true;
+    }
+
+    /** Retargeting away from a thread: reset its per-document state, and —
+     *  the abandon rule — a comment-less thread with nothing saved deletes
+     *  itself, exactly as :q would. gt-then-⌃O must not litter. The host
+     *  guards (409 on any content), so a mistaken fire loses nothing. */
+    private leaveThread(): void {
+        const id = this.opts.thread?.id;
+        if (
+            id != null &&
+            !this.threadResolved &&
+            (this.threadShown?.comments.length ?? 0) === 0 &&
+            !this.dirty
+        ) {
+            void this.api.deleteThread(id).catch(() => {});
+        }
+        this.opts.thread = undefined;
+        this.threadShown = null;
+        this.threadPrefix = "";
+        this.threadServerDoc = "";
+        this.threadResolved = false;
     }
 
     private async loadFile(): Promise<void> {
@@ -1093,6 +1179,7 @@ export class EditorPane implements PaneContent {
             // included).
             this.editable = true;
             this.pathEl.textContent = "[No Name]";
+            this.noteEl.innerHTML = ""; // a prior thread's key hints don't apply
             this.clearStatus();
             this.disposeModels();
             const model = m.editor.createModel("", undefined, this.uri(""));
@@ -1100,7 +1187,11 @@ export class EditorPane implements PaneContent {
             paneByModel.set(model, this);
             const ed = this.ensureEditor();
             ed.setModel(model);
-            ed.updateOptions({readOnly: false, wordWrap: this.wrap ? "on" : "off"});
+            ed.updateOptions({
+                ...FILE_OPTS,
+                readOnly: false,
+                wordWrap: this.wrap ? "on" : "off",
+            });
             this.savedVersionId = model.getAlternativeVersionId();
             this.setDirty(false);
             this.changeSub?.dispose();
@@ -1143,6 +1234,7 @@ export class EditorPane implements PaneContent {
                     : res.external
                       ? " · external · read-only"
                       : "");
+            this.noteEl.innerHTML = ""; // a prior thread's key hints don't apply
             this.clearStatus();
             this.disposeModels();
             const model = m.editor.createModel(res.content, undefined, this.uri(path));
@@ -1150,12 +1242,12 @@ export class EditorPane implements PaneContent {
             paneByModel.set(model, this); // hover routes model → this pane
             const ed = this.ensureEditor();
             ed.setModel(model);
-            // Restated on every load rather than set once, because a file
-            // pane retargets in place (:e) and outlives any one file. Monaco
-            // does retain updateOptions across setModel, so this is belt and
-            // braces — but it makes the pane's own field the thing that
-            // decides, instead of whatever the editor was last told.
+            // Restated IN FULL on every load, because a pane retargets in
+            // place — between files (:e) and between kinds (gt lands a
+            // thread here, ⌃O comes back) — and every option a thread buffer
+            // set has to be set back, not merely left over.
             ed.updateOptions({
+                ...FILE_OPTS,
                 readOnly: !this.editable,
                 wordWrap: this.wrap ? "on" : "off",
             });

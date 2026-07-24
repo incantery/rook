@@ -7,10 +7,12 @@ import {deleteWorkspaces, gotoHome} from "./harness";
 //
 // A thread is a buffer you edit: host-rendered history above a scissors
 // line, your draft below it. gt is dual — go to the thread under the cursor,
-// or create one anchored there. :w stores the tail silently; :ThreadNote /
-// :ThreadAsk crystallize it into history (ask also nudges a responder).
-// There is no form and no draft split anymore; if the buffer didn't take the
-// keyboard, every assertion below fails.
+// or create one anchored there — and gd-SHAPED: it navigates the pane you
+// are in (no split, no second pane), so the keyboard never moves and ⌃O
+// walks back to the code. :w stores the tail silently; :ThreadNote /
+// :ThreadAsk crystallize it into history (ask also nudges a responder, then
+// walks back). If the buffer didn't take the keyboard, every assertion
+// below fails.
 
 const REPO = path.resolve(process.cwd(), "..");
 const SANDBOX = path.join(REPO, "bin", "e2e", "xdg");
@@ -129,7 +131,10 @@ test("gt creates a thread; :w keeps the tail; :ThreadAsk sends it", async ({page
     // ---- gt on a bare region CREATES, anchored to the visual selection ----
     await goToThread(page, "18GVjj");
     await expect(threadHead(page)).toBeVisible({timeout: 20_000});
-    const threadPane = page.locator(".editor-mount").last();
+    // gd-shaped: the SAME pane navigated — no split appeared, and typing
+    // works immediately because the keyboard never left this editor
+    await expect(page.locator(".editor-mount")).toHaveCount(1);
+    const threadPane = page.locator(".editor-mount").first();
     await expect(threadPane).toContainText(SCISSORS, {timeout: 15_000});
 
     await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
@@ -166,10 +171,13 @@ test("gt creates a thread; :w keeps the tail; :ThreadAsk sends it", async ({page
     expect(text.indexOf("spawn is the pty half.")).toBeGreaterThan(-1);
     expect(text.indexOf("spawn is the pty half.")).toBeLessThan(text.indexOf(SCISSORS));
 
-    // ---- :ThreadAsk crystallizes the tail and closes the buffer ----
+    // ---- :ThreadAsk crystallizes the tail and walks BACK to the code ----
     await page.keyboard.type(":ThreadAsk");
     await page.keyboard.press("Enter");
     await expect(threadHead(page)).toHaveCount(0, {timeout: 15_000});
+    await expect(page.locator(".editor-path").first()).toContainText("spawntask.go", {
+        timeout: 15_000,
+    });
     await expect
         .poll(async () => (await threadsOf(ws))[0].state, {timeout: 15_000})
         .toBe("open");
@@ -181,7 +189,7 @@ test("gt creates a thread; :w keeps the tail; :ThreadAsk sends it", async ({page
     // ---- reopen with gt: the question is history now, the draft zone clean ----
     await goToThread(page, "18G");
     await expect(threadHead(page)).toBeVisible({timeout: 20_000});
-    const pane2 = page.locator(".editor-mount").last();
+    const pane2 = page.locator(".editor-mount").first();
     await expect(pane2).toContainText("why is this named spawnTask", {timeout: 15_000});
     const text2 = plain(await pane2.textContent());
     expect(text2.indexOf("why is this named spawnTask")).toBeGreaterThan(-1);
@@ -190,17 +198,28 @@ test("gt creates a thread; :w keeps the tail; :ThreadAsk sends it", async ({page
     await page.screenshot({path: "bin/e2e/threads-doc.png", fullPage: true});
 });
 
-// The abort path: gt minted a thread, nothing was said, :q takes it back.
-test("`:q` on an untouched gt thread deletes it", async ({page}) => {
+// The abort paths: gt minted a thread, nothing was said — navigating away
+// (⌃O, the gd-shaped exit) or :q takes it back. Neither litters.
+test("an untouched gt thread deletes itself on the way out", async ({page}) => {
     test.setTimeout(120_000);
     const ws = `abort-e2e-${Date.now()}`;
     await openWorkspace(page, ws);
     await openSource(page, "internal/host/spawntask.go");
 
+    // ⌃O — the buffer walk back abandons the empty thread
     await goToThread(page, "gg");
     await expect(threadHead(page)).toBeVisible({timeout: 20_000});
     await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
+    await page.keyboard.press("Control+o");
+    await expect(page.locator(".editor-path").first()).toContainText("spawntask.go", {
+        timeout: 15_000,
+    });
+    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(0);
 
+    // :q — vim's window close, same guarantee
+    await goToThread(page, "gg");
+    await expect(threadHead(page)).toBeVisible({timeout: 20_000});
+    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
     await page.keyboard.type(":q");
     await page.keyboard.press("Enter");
     await expect(threadHead(page)).toHaveCount(0, {timeout: 15_000});
@@ -265,9 +284,9 @@ test("an agent's reply arrives without touching the page", async ({page}) => {
     const [t] = await threadsOf(ws);
 
     await openSource(page, "internal/host/spawntask.go");
-    // open the thread as a buffer, then never touch the page again
+    // open the thread as a buffer (in place), then never touch the page again
     await goToThread(page, "18G");
-    const threadPane = page.locator(".editor-mount").last();
+    const threadPane = page.locator(".editor-mount").first();
     await expect(threadPane).toContainText("does this leak the goroutine", {timeout: 15_000});
 
     // …and now the agent answers, the way rookctl reply does
@@ -297,8 +316,8 @@ test("an agent's reply arrives without touching the page", async ({page}) => {
 // and the stream fans out to every open thread pane — so an unconditional
 // focus there meant any thread changing anywhere in the workspace (an agent
 // reply, a :w of your own) yanked the caret out of whatever you were typing.
-// The pane focuses only through the wantFocus LATCH, which the open path
-// sets and a reload does not.
+// With gt navigating in place there's no split to steal from, so the other
+// surface in the window is a terminal (` % splits one in beside the editor).
 test("a thread buffer re-rendering does not steal the keyboard", async ({page}) => {
     test.setTimeout(120_000);
 
@@ -319,22 +338,18 @@ test("a thread buffer re-rendering does not steal the keyboard", async ({page}) 
 
     await openSource(page, "internal/host/spawntask.go");
     await goToThread(page, "18G");
-    const threadPane = page.locator(".editor-mount").last();
+    const threadPane = page.locator(".editor-mount").first();
     await expect(threadPane).toContainText("does this leak the goroutine", {timeout: 15_000});
 
-    // deliberately put the keyboard back in the SOURCE, as a user would after
-    // reading the thread
-    await page.locator(".editor-mount").first().click();
-    const focusedPath = () =>
-        page.evaluate(
-            () =>
-                document.activeElement?.closest(".editor-wrap")?.querySelector(".editor-path")
-                    ?.textContent ?? null,
-        );
-    // NB: assert on the "thread #" prefix, not the filename — the thread
-    // buffer's own header also contains the path, so toContain("spawntask.go")
-    // matches BOTH panes and the assertion catches nothing.
-    await expect.poll(focusedPath).not.toMatch(/^thread #/);
+    // a shell beside the buffer, and the keyboard deliberately in it
+    await page.keyboard.press("`");
+    await page.keyboard.press("%");
+    const term = shown(page, ".vt-screen");
+    await expect(term).toBeVisible({timeout: 15_000});
+    await term.click();
+    const inEditor = () =>
+        page.evaluate(() => !!document.activeElement?.closest(".editor-wrap"));
+    await expect.poll(inEditor).toBe(false);
 
     // …now the agent answers. The thread pane must update WITHOUT taking focus.
     const reply = await hostFetch(`/threads/${t.id}/comments`, {
@@ -344,20 +359,13 @@ test("a thread buffer re-rendering does not steal the keyboard", async ({page}) 
     expect(reply.status).toBe(204);
     await expect(threadPane).toContainText("No — the pty owns it", {timeout: 15_000});
 
-    // the load-bearing assertion: the caret never left the source buffer
-    const where = await focusedPath();
-    expect(where).toContain("spawntask.go");
-    expect(where).not.toMatch(/^thread #/);
+    // the load-bearing assertion: the caret never left the shell
+    expect(await inEditor()).toBe(false);
 });
 
-// The same steal, forced rather than waited for.
-//
-// The latch that focuses a thread pane on open resolves at the END of the
-// load — after a fetch and attachVim. That is long enough for you to have
-// clicked back into the code, which is just what reading a thread and
-// returning to work looks like. The pane must notice it is no longer the
-// focused one and drop the latch instead of yanking the caret back.
-test("a thread pane loading after you click away does not yank the caret back", async ({page}) => {
+// The same steal, forced rather than waited for: a thread still LOADING when
+// you move the keyboard elsewhere must not yank it back when the load lands.
+test("a thread loading after you click away does not yank the caret back", async ({page}) => {
     test.setTimeout(120_000);
     const ws = `latch-e2e-${Date.now()}`;
     await openWorkspace(page, ws);
@@ -374,11 +382,16 @@ test("a thread pane loading after you click away does not yank the caret back", 
     expect(mk.status).toBeLessThan(300);
 
     await openSource(page, "internal/host/spawntask.go");
+    // a shell beside the buffer — the place the keyboard will move to
+    await page.keyboard.press("`");
+    await page.keyboard.press("%");
+    const term = shown(page, ".vt-screen");
+    await expect(term).toBeVisible({timeout: 15_000});
 
-    // Hold the thread fetch open. The window between "pane mounted and
-    // focused" and "load finished, latch applied" is a few ms in practice —
-    // too narrow to land a click in reliably. Delaying the requests the load
-    // waits on makes that window a second wide and the race a certainty.
+    // Hold the thread fetch open: the gap between "gt typed" and "doc
+    // loaded" is a few ms in practice — too narrow to land a click in
+    // reliably. Delaying the requests the load waits on makes that window a
+    // second wide and the race a certainty.
     const slowThreads = (u: URL) =>
         u.pathname.endsWith("/threads") || u.pathname.endsWith("/doc");
     await page.route(slowThreads, async (route) => {
@@ -387,22 +400,15 @@ test("a thread pane loading after you click away does not yank the caret back", 
     });
 
     await goToThread(page, "18G");
-    // mounted and manager-focused, Monaco still loading — mid-window
-    await expect(page.locator(".editor-mount")).toHaveCount(2);
-    await page.locator(".editor-mount").first().click();
+    await term.click(); // mid-load, the keyboard moves to the shell
     await page.unroute(slowThreads);
 
-    // let the thread finish loading; its latch resolves somewhere in here
-    const threadPane = page.locator(".editor-mount").last();
+    const threadPane = page.locator(".editor-mount").first();
     await expect(threadPane).toContainText("does this leak the goroutine", {timeout: 15_000});
 
-    const where = await page.evaluate(
-        () =>
-            document.activeElement?.closest(".editor-wrap")?.querySelector(".editor-path")
-                ?.textContent ?? null,
-    );
-    expect(where).toContain("spawntask.go");
-    expect(where).not.toMatch(/^thread #/);
+    expect(
+        await page.evaluate(() => !!document.activeElement?.closest(".editor-wrap")),
+    ).toBe(false);
 });
 
 // Threads read through the ONE traversal muscle memory rather than a bespoke
@@ -490,20 +496,22 @@ test("`,t` finds threads across files; `gt` opens the one under the cursor", asy
     await expect(list).toContainText("zebra goroutine question");
     await page.screenshot({path: "bin/e2e/threads-finder.png", fullPage: true});
 
-    // Enter opens it as a buffer — the thread, not the file
+    // Enter opens it as a buffer — the thread, not the file, IN this pane
     await find.press("Enter");
     await expect(threadHead(page)).toBeVisible({timeout: 20_000});
-    await expect(page.locator(".editor-mount").last()).toContainText("zebra goroutine question");
+    await expect(page.locator(".editor-mount").first()).toContainText("zebra goroutine question");
+
+    // ⌃O walks back out — the gd contract, and the pane is the file again
+    await page.keyboard.press("Control+o");
+    await expect(threadHead(page)).toHaveCount(0, {timeout: 15_000});
+    await expect(page.locator(".editor-path").first()).toContainText("spawntask.go");
 
     // ---- and gt still opens the thread under the cursor — the go-to half
-    await page.keyboard.type(":q");
-    await page.keyboard.press("Enter");
-    await expect(threadHead(page)).toHaveCount(0, {timeout: 15_000});
     await goToThread(page, "18G");
     await expect(threadHead(page)).toBeVisible({timeout: 20_000});
     // hover previews without opening — the glance surface (K keyboard path)
-    await page.keyboard.type(":q");
-    await page.keyboard.press("Enter");
+    await page.keyboard.press("Control+o");
+    await expect(threadHead(page)).toHaveCount(0, {timeout: 15_000});
     await page.locator(".editor-mount").first().click();
     await page.keyboard.type("18G");
     await page.keyboard.press("Shift+K");

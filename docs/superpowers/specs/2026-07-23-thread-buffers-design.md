@@ -40,6 +40,11 @@ The fix is the mail-file model. The thread IS a file, projected on demand:
 - **`gt` is dual: go-to-or-create** (like `gd`). Thread under cursor → open
   it; none → create one anchored at cursor/selection, cursor lands below the
   scissors. This replaces `,c`/`,?`/`:reply` — one gesture, one model.
+  And it is gd-shaped in GEOMETRY too (amended 2026-07-24, dogfood): the
+  thread opens IN the pane you're standing in — no split, no transient pane
+  — and `⌃O` walks back. `:ThreadAsk` and `:resolve` walk back for you (the
+  thread is off your plate); `:reopen` stays. Navigating away from an
+  untouched gt thread deletes it, same as `:q`.
 
 ## The thread document format (the public contract)
 

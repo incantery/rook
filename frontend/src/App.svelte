@@ -143,17 +143,19 @@
         return at ? (editorPanes.get(at.leafId) ?? null) : null;
     }
 
-    /** A thread as a buffer: reveal-then-mint, like the file ladder. ,t twice
-     *  on the same thread returns to it rather than stacking panes.
-     *
-     *  recordJump first, so ⌃O walks back to the code you came from — the
-     *  thing a view zone could never have offered. */
+    /** A thread as a BUFFER, gd-shaped: the same ladder openFile walks.
+     *    1. already displayed → reveal it
+     *    2. an editor pane exists → retarget it IN PLACE (the pane gt was
+     *       typed in, by construction the focused one) — the keyboard never
+     *       moves, which is the entire focus story
+     *    3. nothing to reuse (review diff, dirty buffer) → mint one window
+     *  recordJump first, so ⌃O walks back to the code you came from. */
     async function openThreadBuffer(id: number): Promise<void> {
         // Yield first, always. Opening from the quick-action modal runs
         // closeQuickActions() right after this, which pulls focus back to the
-        // strip — so a SYNCHRONOUS reveal lost the race while the mint path
-        // (async by nature) won it, and the same key did two different things
-        // depending on whether the thread happened to be open already.
+        // strip — so a SYNCHRONOUS reveal lost the race while the retarget
+        // path (async by nature) won it, and the same key did two different
+        // things depending on whether the thread happened to be open already.
         await tick();
         const open = mgr.findPane((c) => c.type === "thread" && c.id === id);
         if (open) {
@@ -161,32 +163,91 @@
             return;
         }
         recordJump();
+        // The FOCUSED pane first — gd navigates the current window, and in a
+        // two-file split "a file pane" is not necessarily the one gt was
+        // typed in. Then any file pane, then any thread pane (a click from
+        // the finder shouldn't steal a thread mid-read when a file pane sits
+        // right there).
+        const focused = mgr.focusedContent();
+        const reusable =
+            (focused && (focused.type === "file" || focused.type === "thread")
+                ? mgr.findPane((c) => c === focused)
+                : null) ??
+            mgr.findPane((c) => c.type === "file") ??
+            mgr.findPane((c) => c.type === "thread");
+        if (reusable) {
+            // was this the focused pane when the ask started? gt's pane is,
+            // and it already holds the keyboard — revealing it AFTER the
+            // async load would yank focus back from wherever the user moved
+            // it mid-load. Reveal only the finder/list path, where the pane
+            // may sit in another window and showing it is the whole point.
+            const wasFocused = mgr.focusedContent() === reusable.content;
+            const pane = editorPanes.get(reusable.leafId);
+            if (pane && (await pane.setThread(id))) {
+                mgr.retargetPane(reusable, {type: "thread", id});
+                if (wasFocused) {
+                    // The model swap drops DOM focus to <body> (Monaco tears
+                    // the view down with the disposed model). Take it back —
+                    // this is the pane gt was typed in — UNLESS the keyboard
+                    // moved somewhere real while the doc loaded: revealing
+                    // must never yank a caret out of a shell mid-thought.
+                    const el = document.activeElement;
+                    if (!el || el === document.body || pane.el.contains(el)) pane.focus();
+                } else {
+                    app.screen = "app";
+                    await tick();
+                    mgr.revealPane(reusable);
+                }
+                return;
+            }
+        }
         const {EditorPane} = await import("./term/editor");
-        // roomier than a draft — this one is for reading
-        const THREAD_FRACTION = 0.4;
-        mgr.splitWith(
-            "col",
-            {type: "thread", id},
-            (leafId) => {
-                const pane = new EditorPane(api, {
-                    workspace: app.workspace,
-                    kind: "thread",
-                    thread: {id},
-                    font: paneFont,
-                    onFlash: flash,
+        app.screen = "app";
+        await tick();
+        mgr.openPaneWindow({type: "thread", id}, (leafId) => {
+            const pane = new EditorPane(api, {
+                workspace: app.workspace,
+                kind: "thread",
+                thread: {id},
+                font: paneFont,
+                onFlash: flash,
                 cohort: () => editorCohort(leafId),
-                    onClose: () => mgr.closePane(leafId),
-                    onDispose: () => editorPanes.delete(leafId),
-                    onJump: jumpNav,
-                    onOpenThreadSource: (path, line) => void openFile(path, {line, col: 1}),
-                });
-                // registered so the thread-watch stream reaches it; the buffer
-                // ladder still can't find it, since its arm isn't `file`
-                editorPanes.set(leafId, pane);
-                return pane;
-            },
-            THREAD_FRACTION,
-        );
+                onClose: () => mgr.closePane(leafId),
+                // same bookkeeping as a file window — this pane can be
+                // retargeted onto a file later (⌃O, ⌃P), so it must announce
+                // itself like one
+                onActivate: (seam) => {
+                    activeEditor = seam;
+                    activeEditorKind = "file";
+                    jumpPane = pane;
+                },
+                onDispose: (seam) => {
+                    editorPanes.delete(leafId);
+                    if (activeEditor === seam) activeEditor = null;
+                    if (jumpPane === pane) jumpPane = null;
+                },
+                onOpenLocation: (p, line, col) => void openFile(p, {line, col}),
+                onReferences: showReferences,
+                onRecordJump: recordJump,
+                onJump: jumpNav,
+                onFindFile: () => {
+                    scopeDir = undefined;
+                    app.filePickerOpen = true;
+                },
+                onGrep: (seed) => {
+                    grepSeed = seed ?? "";
+                    scopeDir = undefined;
+                    app.grepOpen = true;
+                },
+                onOpenThread: (tid) => void openThreadBuffer(tid),
+                onOpenThreadSource: (path, line) => void openFile(path, {line, col: 1}),
+                onThreadDone: () => jumpNav("back"),
+                gutterBase: reviewGutterBase,
+                reviewTask: () => app.reviewRoot?.id,
+            });
+            editorPanes.set(leafId, pane);
+            return pane;
+        });
     }
 
     // ==== mode: what surface owns the viewport, and its chrome defaults ====
@@ -664,6 +725,8 @@
                     app.grepOpen = true;
                 },
                 onOpenThread: (id) => void openThreadBuffer(id),
+                onOpenThreadSource: (p, line) => void openFile(p, {line, col: 1}),
+                onThreadDone: () => jumpNav("back"),
                 gutterBase: reviewGutterBase,
                 reviewTask: () => app.reviewRoot?.id,
             });
@@ -799,6 +862,8 @@
                     app.grepOpen = true;
                 },
                 onOpenThread: (id) => void openThreadBuffer(id),
+                onOpenThreadSource: (p, line) => void openFile(p, {line, col: 1}),
+                onThreadDone: () => jumpNav("back"),
                 gutterBase: reviewGutterBase,
                 reviewTask: () => app.reviewRoot?.id,
             });
@@ -873,7 +938,12 @@
                 landOn(open.leafId);
                 return;
             }
-            const reusable = mgr.findPane((c) => c.type === "file");
+            // thread panes are reusable too — gt navigates in place, so ⌃O
+            // (and any open) must be able to navigate back out of one. File
+            // panes first: opening a file shouldn't steal a thread mid-read
+            // when a file pane sits right there.
+            const reusable =
+                mgr.findPane((c) => c.type === "file") ?? mgr.findPane((c) => c.type === "thread");
             if (reusable) {
                 const pane = editorPanes.get(reusable.leafId);
                 // A dirty pane refuses (vim's `:e` without a bang). Don't nag

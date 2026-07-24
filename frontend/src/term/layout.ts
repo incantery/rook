@@ -91,27 +91,6 @@ export function newReviewLeaf(): LeafNode {
     return {kind: "leaf", id: crypto.randomUUID(), content: {type: "review"}};
 }
 
-/** Give a leaf a specific share of its parent split, scaling its siblings to
- *  fill the rest. splitAt divides evenly, which is right for two code panes
- *  and wrong for a transient one: a three-line comment does not want half the
- *  window. No-op if the leaf is the root (nothing to take a share of). */
-export function setLeafFraction(root: LayoutNode, leafId: string, frac: number): void {
-    const f = Math.min(0.9, Math.max(0.1, frac));
-    const walk = (node: LayoutNode): boolean => {
-        if (node.kind === "leaf") return false;
-        const i = node.children.findIndex((c) => c.kind === "leaf" && c.id === leafId);
-        if (i >= 0) {
-            const rest = 1 - f;
-            const others = node.weights.reduce((s, w, j) => (j === i ? s : s + w), 0);
-            node.weights = node.weights.map((w, j) =>
-                j === i ? f : others > 0 ? (w / others) * rest : rest / (node.weights.length - 1),
-            );
-            return true;
-        }
-        return node.children.some(walk);
-    };
-    walk(root);
-}
 
 /** Point an existing leaf at different content, in place — the pane keeps its
  *  id, so focus, zoom and its position in the tree all survive. This is `:e`:
