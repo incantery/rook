@@ -812,6 +812,8 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleWorkspaceFiles(w, r, name)
 	case action == "grep" && r.Method == http.MethodGet:
 		h.handleWorkspaceGrep(w, r, name)
+	case action == "gutter":
+		h.handleWorkspaceGutter(w, r, name)
 	// threads: file-anchored AI conversations (threads.go)
 	case action == "threads/submit" && r.Method == http.MethodPost:
 		h.handleThreadsSubmit(w, r, name)

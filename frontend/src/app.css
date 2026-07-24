@@ -477,6 +477,29 @@ body {
     margin-left: 3px;
 }
 
+/* The git gutter (editor.ts refreshGutter): change stripes vs the base, in
+   the same line-decorations margin. Imperative Monaco DOM — raw CSS, not
+   Tailwind (the migration rule). Added green, modified accent; a deletion
+   has no lines to stripe, so its boundary line wears a marker instead. */
+.rook-gutter-add {
+    border-left: 3px solid var(--color-grn);
+}
+.rook-gutter-mod {
+    border-left: 3px solid var(--acc);
+}
+.rook-gutter-del {
+    position: relative;
+}
+.rook-gutter-del::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    bottom: -4px;
+    border-left: 6px solid var(--color-red);
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+}
+
 /* The finder preview's hit line (FinderPreview.svelte). Monaco owns this
    DOM, so the class can't be a utility. A centered viewport still leaves you
    hunting for WHICH line matched — this is the answer, and it's a wash

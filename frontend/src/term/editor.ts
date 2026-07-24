@@ -8,7 +8,7 @@
 // a truncated (>2 MB) or binary read stays read-only, because saving a
 // truncated buffer would overwrite the tail with nothing.
 
-import type {ChangedFile, HostAPI, LspLocation, ThreadInfo} from "../hostapi";
+import type {ChangedFile, GutterHunk, HostAPI, LspLocation, ThreadInfo} from "../hostapi";
 import type {PaneContent} from "./manager";
 import type * as monacoTypes from "monaco-editor";
 import {legendModifiers, legendTypes, unifyTokens} from "../highlight/semantic";
@@ -124,6 +124,11 @@ async function loadVim(): Promise<VimLib> {
             vim.defineAction("rookJumpForward", (cm) => paneOf(cm)?.jump("forward"));
             vim.mapCommand("<C-o>", "action", "rookJumpBack", {}, {context: "normal"});
             vim.mapCommand("<C-i>", "action", "rookJumpForward", {}, {context: "normal"});
+            // ]c/[c — vim's change-hunk motions, onto the git gutter
+            vim.defineAction("rookNextHunk", (cm) => paneOf(cm)?.jumpHunk(1));
+            vim.defineAction("rookPrevHunk", (cm) => paneOf(cm)?.jumpHunk(-1));
+            vim.mapCommand("]c", "action", "rookNextHunk", {}, {context: "normal"});
+            vim.mapCommand("[c", "action", "rookPrevHunk", {}, {context: "normal"});
             // ⌃P/⌃G/⌃S — telescope muscle memory, scoped to the editor so
             // terminals keep shell history (⌃P) and flow control (⌃S).
             vim.defineAction("rookFindFile", (cm) => paneOf(cm)?.findFile());
@@ -317,6 +322,9 @@ export interface EditorPaneOpts {
     onOpenThreadSource?: (path: string, line: number) => void;
     /** gt — open (or just-created) thread as a buffer */
     onOpenThread?: (threadId: number) => void;
+    /** what the git gutter diffs against: undefined = HEAD; "branch" or an
+     *  explicit ref when a review is open (chrome knows, the pane asks) */
+    gutterBase?: () => string | undefined;
     /** the terminal's font — the pane should read like the rest of rook */
     font: {family: string; size: number};
     /** surface a failure where the user is looking (titlebar flash) */
@@ -439,6 +447,11 @@ export class EditorPane implements PaneContent {
     private threadsAll: ThreadInfo[] = [];
     private bands: ThreadBand[] = [];
 
+    /** the git gutter (file mode): stripes vs the base, and the hunk list
+     *  ]c/[c walk. One decorations collection, replaced wholesale. */
+    private gutterDecs: monacoTypes.editor.IEditorDecorationsCollection | null = null;
+    private gutterHunks: GutterHunk[] = [];
+
     // seam subscribers (chrome side)
     private markerCbs: ((line: number, side: Side, ids: number[]) => void)[] = [];
     private changeCbs: (() => void)[] = [];
@@ -524,7 +537,10 @@ export class EditorPane implements PaneContent {
         // drafts live in the panel (chrome), so refetch is always safe here.
         if (!this.monaco || Date.now() - this.fetchedAt <= STALE_MS) return;
         if (this.opts.kind === "review") void this.refresh();
-        else if (this.opts.kind === "file") void this.refetchThreads();
+        else if (this.opts.kind === "file") {
+            void this.refetchThreads();
+            void this.refreshGutter(); // the tree may have moved underneath
+        }
     }
 
     /** Honor a focus() that landed before the editor existed — unless the
@@ -1159,9 +1175,68 @@ export class EditorPane implements PaneContent {
             await this.attachVim(ed);
             this.applyPendingFocus();
             this.applyPendingPos();
+            void this.refreshGutter(); // never gates the load
         } catch (err) {
             this.fail(`reading ${path}`, err);
         }
+    }
+
+    /** The git gutter: stripes in the line-decorations margin — added green,
+     *  modified accent, a marker on each deletion boundary — so review
+     *  reading needs no special diff mode. Base is HEAD unless chrome says a
+     *  review is open (opts.gutterBase). Fails open: an older daemon has no
+     *  gutter route, and a bare margin beats a broken pane. */
+    private async refreshGutter(): Promise<void> {
+        if (this.opts.kind !== "file" || !this.opts.path || !this.monaco) return;
+        const path = this.opts.path;
+        let hunks: GutterHunk[];
+        try {
+            hunks = (await this.api.gutter(this.opts.workspace, path, this.opts.gutterBase?.()))
+                .hunks;
+        } catch (err) {
+            console.warn("editor pane: gutter unavailable:", err);
+            return;
+        }
+        // the pane may have retargeted (:e) while the fetch was in flight
+        if (this.disposed || this.opts.path !== path) return;
+        const ed = this.editor;
+        const m = this.monaco;
+        if (!ed?.getModel()) return;
+        this.gutterHunks = hunks;
+        this.gutterDecs ??= ed.createDecorationsCollection();
+        this.gutterDecs.set(
+            hunks.map((h) => ({
+                range: new m.Range(h.start, 1, h.end, 1),
+                options: {
+                    isWholeLine: true,
+                    linesDecorationsClassName:
+                        h.kind === "added"
+                            ? "rook-gutter-add"
+                            : h.kind === "deleted"
+                              ? "rook-gutter-del"
+                              : "rook-gutter-mod",
+                },
+            })),
+        );
+    }
+
+    /** ]c / [c — jump to the next/previous change stripe. No wrap, like vim. */
+    jumpHunk(dir: 1 | -1): void {
+        if (this.opts.kind !== "file") return;
+        const ed = this.editor;
+        const pos = ed?.getPosition();
+        if (!ed || !pos) return;
+        const starts = this.gutterHunks.map((h) => h.start).sort((a, b) => a - b);
+        const line =
+            dir === 1
+                ? starts.find((s) => s > pos.lineNumber)
+                : [...starts].reverse().find((s) => s < pos.lineNumber);
+        if (line == null) {
+            this.opts.onFlash(dir === 1 ? "no change below" : "no change above");
+            return;
+        }
+        ed.setPosition({lineNumber: line, column: 1});
+        ed.revealLineInCenterIfOutsideViewport(line);
     }
 
     // ---- file-mode editing: vim, dirty tracking, save ----
@@ -1241,6 +1316,7 @@ export class EditorPane implements PaneContent {
             this.savedVersionId = versionId;
             this.setDirty(model.getAlternativeVersionId() !== versionId);
             this.opts.onFlash(`saved ${this.opts.path ?? ""}`);
+            void this.refreshGutter(); // the tree just changed under the base
             return !this.dirty;
         } catch (err) {
             const msg = String(err);

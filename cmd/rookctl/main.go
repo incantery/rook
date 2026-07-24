@@ -21,6 +21,7 @@
 //	rookctl resolve       resolve a thread (as the agent): rookctl resolve [--user] <id>
 //	rookctl reopen        undo a resolve (as the human, by default — agent_reopens only counts a user's reopen): rookctl reopen [--agent] <id>
 //	rookctl thread        the thread as a document: rookctl thread doc|note|ask <id>
+//	rookctl gutter        a file's changed-line stripes vs a base: rookctl gutter [-w ws] [--base <ref>] <path>
 //	                        doc prints the buffer projection; note/ask crystallize the saved draft (ask also nudges)
 //	rookctl work          start claude on an issue in a fresh worktree: rookctl work INF-7
 //	rookctl review        prepare/show a hunk review: rookctl review [--unstaged|--commit <sha>|--branch] [--dry-run] [-w ws]
@@ -52,6 +53,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -155,6 +157,8 @@ func main() {
 		err = runThreadVerb("reopen", os.Args[2:])
 	case "thread":
 		err = runThreadDoc(os.Args[2:])
+	case "gutter":
+		err = runGutter(os.Args[2:])
 	case "work":
 		err = runWork(os.Args[2:])
 	case "review":
@@ -1082,6 +1086,71 @@ func runThreadDoc(args []string) error {
 	default:
 		return fmt.Errorf("usage: rookctl thread doc|note|ask <thread-id>")
 	}
+}
+
+// runGutter prints a file's gutter stripes — which lines differ from the
+// base (HEAD unless --base names head|branch|a ref). The same endpoint the
+// editor's margin reads; rookctl parity for the agent.
+func runGutter(args []string) error {
+	ws := os.Getenv("ROOK_WORKSPACE")
+	base := ""
+	var pathArg string
+	for len(args) > 0 {
+		switch {
+		case args[0] == "-w" && len(args) >= 2:
+			ws, args = args[1], args[2:]
+		case args[0] == "--base" && len(args) >= 2:
+			base, args = args[1], args[2:]
+		default:
+			if pathArg != "" {
+				return fmt.Errorf("usage: rookctl gutter [-w workspace] [--base <ref>] <path>")
+			}
+			pathArg, args = args[0], args[1:]
+		}
+	}
+	if ws == "" || pathArg == "" {
+		return fmt.Errorf("usage: rookctl gutter [-w workspace] [--base <ref>] <path> (or run inside a rook window)")
+	}
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	q := "?path=" + url.QueryEscape(pathArg)
+	if base != "" {
+		q += "&base=" + url.QueryEscape(base)
+	}
+	raw, err := c.req("GET", "/workspaces/"+ws+"/gutter"+q, nil)
+	if err != nil {
+		return err
+	}
+	var res struct {
+		Base  string `json:"base"`
+		Hunks []struct {
+			Start    int    `json:"start"`
+			End      int    `json:"end"`
+			Kind     string `json:"kind"`
+			DelLines int    `json:"delLines"`
+		} `json:"hunks"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return err
+	}
+	if len(res.Hunks) == 0 {
+		fmt.Printf("%s: unchanged vs %s\n", pathArg, res.Base)
+		return nil
+	}
+	for _, hk := range res.Hunks {
+		span := fmt.Sprintf("%d", hk.Start)
+		if hk.End != hk.Start {
+			span = fmt.Sprintf("%d-%d", hk.Start, hk.End)
+		}
+		extra := ""
+		if hk.DelLines > 0 {
+			extra = fmt.Sprintf(" (-%d)", hk.DelLines)
+		}
+		fmt.Printf("%s:%s %s%s\n", pathArg, span, hk.Kind, extra)
+	}
+	return nil
 }
 
 // runThreadVerb handles reply/resolve/reopen. reply/resolve are

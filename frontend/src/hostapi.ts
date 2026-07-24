@@ -472,6 +472,14 @@ export class HostAPI {
         await this.req(`/threads/${id}`, {method: "DELETE"});
     }
 
+    /** Changed-line stripes for one file vs a base — default HEAD; "branch"
+     *  or an explicit ref (the active review's scope base) otherwise. */
+    async gutter(ws: string, path: string, base?: string): Promise<GutterResult> {
+        const q = new URLSearchParams({path});
+        if (base) q.set("base", base);
+        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/gutter?${q}`)).json();
+    }
+
     /** Flip pending→open and nudge the responder — or re-nudge when open
      *  threads still await the agent. 400 = nothing to submit. */
     async submitThreads(ws: string): Promise<ThreadsSubmitResult> {
@@ -720,6 +728,20 @@ export interface ThreadInfo {
     currentStart: number;
     currentEnd: number;
     outdated?: boolean;
+}
+
+/** GET /workspaces/{ws}/gutter — one file's change stripes, in working-file
+ *  coordinates. deleted marks the boundary line the cut sits on. */
+export interface GutterHunk {
+    start: number;
+    end: number;
+    kind: "added" | "modified" | "deleted";
+    delLines?: number;
+}
+
+export interface GutterResult {
+    base: string;
+    hunks: GutterHunk[];
 }
 
 /** GET /threads/{id}/doc — the thread-buffer projection. content =

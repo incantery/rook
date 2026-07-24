@@ -664,10 +664,18 @@
                     app.grepOpen = true;
                 },
                 onOpenThread: (id) => void openThreadBuffer(id),
+                gutterBase: reviewGutterBase,
             });
             editorPanes.set(leafId, pane);
             return pane;
         });
+    }
+
+    /** What the file panes' git gutter diffs against: the active review's
+     *  scope base while one is open (its detail carries the resolved ref —
+     *  merge-base sha, commit parent, or HEAD), else HEAD by omission. */
+    function reviewGutterBase(): string | undefined {
+        return app.reviewRoot?.detail?.base;
     }
 
     /** `re` takeovers in flight: editID → where the shell goes back. */
@@ -790,6 +798,7 @@
                     app.grepOpen = true;
                 },
                 onOpenThread: (id) => void openThreadBuffer(id),
+                gutterBase: reviewGutterBase,
             });
             editorPanes.set(leafId, pane);
             return pane;
