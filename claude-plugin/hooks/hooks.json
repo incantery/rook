@@ -6,6 +6,20 @@
                     {
                         "type": "command",
                         "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-context.sh"
+                    },
+                    {
+                        "type": "command",
+                        "command": "rookctl claim"
+                    }
+                ]
+            }
+        ],
+        "SessionEnd": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "rookctl unclaim"
                     }
                 ]
             }

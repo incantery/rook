@@ -8,7 +8,13 @@ whenever they're ready, and rook rings a doorbell line into claude's
 session — claude collects the answer with the `answers` tool. No parked
 call, no timeout to outwait.
 
-Three parts, all inert outside rook:
+Four parts, all inert outside rook:
+
+- **claim hooks** — `rookctl claim` on SessionStart, `rookctl unclaim` on
+  SessionEnd. The claim is what lets rook deliver anything back to this
+  window (the answer doorbell, thread nudges); without it every delivery
+  stays silent by design. Previously these needed a separate
+  `rookctl install-hooks` — the plugin now carries them.
 
 - **`mcpServers.rook`** — `rookctl mcp`, a stdio server exposing `ask`
   (post questions, return `{askId, pending}`) and `answers` (drain decided
