@@ -76,6 +76,9 @@ type Host struct {
 	reg      *registry
 	aw       *agentWatch
 	tw       *threadWatch // thread change fan-out (threadwatch.go)
+	// nudgeFn overrides nudge() in tests — nil in production, where the
+	// real actuator (claimed window, else spawned task) runs.
+	nudgeFn func(ws, prompt string) (mode, rookSession string, err error)
 
 	// pending `rookctl edit` requests (edit.go), keyed by edit id
 	editMu sync.Mutex

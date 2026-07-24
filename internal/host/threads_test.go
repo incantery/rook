@@ -239,9 +239,9 @@ func TestThreadCreateAndList(t *testing.T) {
 		t.Fatalf("state filter: %d %+v", code, list)
 	}
 
-	// validation
+	// validation (an EMPTY body is legal since the gt-create path — see
+	// TestThreadDocEmptyCreateAndDelete for that contract)
 	for name, req := range map[string]map[string]any{
-		"no body":   {"path": "f.txt", "startLine": 1, "endLine": 1},
 		"no path":   {"startLine": 1, "endLine": 1, "body": "x"},
 		"bad range": {"path": "f.txt", "startLine": 3, "endLine": 2, "body": "x"},
 		"oob range": {"path": "f.txt", "startLine": 1, "endLine": 99, "body": "x"},

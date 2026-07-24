@@ -20,6 +20,8 @@
 //	rookctl reply         reply in a thread (as the agent): rookctl reply [--user] <id> <text…>
 //	rookctl resolve       resolve a thread (as the agent): rookctl resolve [--user] <id>
 //	rookctl reopen        undo a resolve (as the human, by default — agent_reopens only counts a user's reopen): rookctl reopen [--agent] <id>
+//	rookctl thread        the thread as a document: rookctl thread doc|note|ask <id>
+//	                        doc prints the buffer projection; note/ask crystallize the saved draft (ask also nudges)
 //	rookctl work          start claude on an issue in a fresh worktree: rookctl work INF-7
 //	rookctl review        prepare/show a hunk review: rookctl review [--unstaged|--commit <sha>|--branch] [--dry-run] [-w ws]
 //	                        --dry-run previews the batch in memory, writing nothing to rook.db
@@ -151,6 +153,8 @@ func main() {
 		err = runThreadVerb("resolve", os.Args[2:])
 	case "reopen":
 		err = runThreadVerb("reopen", os.Args[2:])
+	case "thread":
+		err = runThreadDoc(os.Args[2:])
 	case "work":
 		err = runWork(os.Args[2:])
 	case "review":
@@ -191,7 +195,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|edit [file…]|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|thread doc|note|ask <id>|edit [file…]|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -1023,6 +1027,61 @@ func runSubmit(args []string) error {
 	json.Unmarshal(raw, &res)
 	fmt.Printf("%d comment(s) submitted — nudge %s (%s)\n", res.Count, res.Mode, res.RookSession)
 	return nil
+}
+
+// runThreadDoc is the thread-document surface (threaddoc.go): `thread doc`
+// prints the projection, `thread note` crystallizes the stored draft as a
+// comment, `thread ask` crystallizes and nudges the responder. rookctl
+// parity for the buffer verbs — same endpoints the editor's :w /
+// :ThreadNote / :ThreadAsk hit.
+func runThreadDoc(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: rookctl thread doc|note|ask <thread-id>")
+	}
+	sub, id := args[0], args[1]
+	c, err := connect()
+	if err != nil {
+		return err
+	}
+	switch sub {
+	case "doc":
+		raw, err := c.req("GET", "/threads/"+id+"/doc", nil)
+		if err != nil {
+			return err
+		}
+		var res struct {
+			Content  string `json:"content"`
+			Resolved bool   `json:"resolved"`
+		}
+		if err := json.Unmarshal(raw, &res); err != nil {
+			return err
+		}
+		fmt.Print(res.Content)
+		if !strings.HasSuffix(res.Content, "\n") {
+			fmt.Println()
+		}
+		return nil
+	case "note":
+		if _, err := c.req("POST", "/threads/"+id+"/note", map[string]any{}); err != nil {
+			return err
+		}
+		fmt.Printf("#%s noted — draft is now a comment\n", id)
+		return nil
+	case "ask":
+		raw, err := c.req("POST", "/threads/"+id+"/ask", map[string]any{})
+		if err != nil {
+			return err
+		}
+		var res struct {
+			Mode        string `json:"mode"`
+			RookSession string `json:"rookSession"`
+		}
+		json.Unmarshal(raw, &res)
+		fmt.Printf("#%s asked — nudge %s (%s)\n", id, res.Mode, res.RookSession)
+		return nil
+	default:
+		return fmt.Errorf("usage: rookctl thread doc|note|ask <thread-id>")
+	}
 }
 
 // runThreadVerb handles reply/resolve/reopen. reply/resolve are

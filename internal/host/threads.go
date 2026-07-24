@@ -51,7 +51,10 @@ type ThreadInfo struct {
 	// Why the nudge didn't reach a responder; "" when it did. A thread with
 	// this set is open and submitted but NOBODY WAS TOLD — the one failure
 	// the old model rendered as a normal wait.
-	DeliverError string          `json:"deliverError,omitempty"`
+	DeliverError string `json:"deliverError,omitempty"`
+	// The thread-buffer tail: text saved below the scissors line (:w) but
+	// not yet crystallized into a comment (threaddoc.go).
+	Draft        string          `json:"draft,omitempty"`
 	ResolvedBy   string          `json:"resolvedBy,omitempty"`
 	AgentReopens int             `json:"agentReopens,omitempty"`
 	Created      time.Time       `json:"created"`
@@ -66,7 +69,7 @@ type ThreadInfo struct {
 }
 
 const threadCols = `id, workspace, path, start_line, end_line, side, blob_sha,
-	commit_sha, anchor_text, state, deliver_error, resolved_by, agent_reopens,
+	commit_sha, anchor_text, state, deliver_error, draft, resolved_by, agent_reopens,
 	created_at, updated_at, submitted_at`
 
 func scanThread(row interface{ Scan(...any) error }) (*ThreadInfo, error) {
@@ -75,7 +78,7 @@ func scanThread(row interface{ Scan(...any) error }) (*ThreadInfo, error) {
 	var submitted sql.NullString
 	if err := row.Scan(&t.ID, &t.Workspace, &t.Path, &t.StartLine, &t.EndLine,
 		&t.Side, &t.BlobSHA, &t.CommitSHA, &t.AnchorText, &t.State, &t.DeliverError,
-		&t.ResolvedBy, &t.AgentReopens, &created, &updated, &submitted); err != nil {
+		&t.Draft, &t.ResolvedBy, &t.AgentReopens, &created, &updated, &submitted); err != nil {
 		return nil, err
 	}
 	t.Created, _ = time.Parse(time.RFC3339Nano, created)
@@ -90,11 +93,12 @@ func scanThread(row interface{ Scan(...any) error }) (*ThreadInfo, error) {
 }
 
 // createThread inserts the anchor blob (if any), the thread, and its
-// first comment all in one tx — a thread without an opening comment
-// cannot exist, and the blob lands before the thread row does, so a
-// concurrent resolve's pruneAnchorBlobs (which only sees committed
+// first comment all in one tx; the blob lands before the thread row does,
+// so a concurrent resolve's pruneAnchorBlobs (which only sees committed
 // threads) can never delete a snapshot out from under a thread that
-// hasn't committed yet.
+// hasn't committed yet. An EMPTY body creates a comment-less thread —
+// the gt-create path, where the first words arrive later as the tail —
+// and deleteThreadIfEmpty is its abort door.
 func (r *registry) createThread(t *ThreadInfo, body string, blob []byte) (int64, error) {
 	if r.db == nil {
 		return 0, fmt.Errorf("no registry db")
@@ -124,12 +128,92 @@ func (r *registry) createThread(t *ThreadInfo, body string, blob []byte) (int64,
 	if err != nil {
 		return 0, err
 	}
+	if body != "" {
+		if _, err := tx.Exec(
+			`INSERT INTO thread_comments (thread_id, author, body, created_at)
+			 VALUES (?, 'user', ?, ?)`, id, body, now); err != nil {
+			return 0, err
+		}
+	}
+	return id, tx.Commit()
+}
+
+// setThreadDraft stores the tail as the thread's draft — :w, the silent
+// save. Deliberately no updated_at bump and no notify: a draft is private
+// until a verb crystallizes it, and a notify here would bounce straight
+// back into the pane that is mid-edit.
+func (r *registry) setThreadDraft(id int64, draft string) error {
+	if r.db == nil {
+		return fmt.Errorf("no registry db")
+	}
+	res, err := r.db.Exec(`UPDATE threads SET draft = ? WHERE id = ?`, draft, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// errEmptyDraft is note/ask with nothing below the scissors — callers map
+// it to 400.
+var errEmptyDraft = errors.New("draft is empty")
+
+// commitThreadDraft crystallizes the stored draft as a user comment — the
+// only moment history grows from this side. One tx, so a concurrent :w
+// can't slip a new tail between the read and the clear.
+func (r *registry) commitThreadDraft(id int64) (string, error) {
+	if r.db == nil {
+		return "", fmt.Errorf("no registry db")
+	}
+	tx, err := r.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var draft string
+	if err := tx.QueryRow(`SELECT draft FROM threads WHERE id = ?`, id).Scan(&draft); err != nil {
+		return "", err
+	}
+	body := strings.TrimSpace(draft)
+	if body == "" {
+		return "", errEmptyDraft
+	}
+	now := time.Now().Format(time.RFC3339Nano)
+	if _, err := tx.Exec(
+		`UPDATE threads SET draft = '', updated_at = ? WHERE id = ?`, now, id); err != nil {
+		return "", err
+	}
 	if _, err := tx.Exec(
 		`INSERT INTO thread_comments (thread_id, author, body, created_at)
 		 VALUES (?, 'user', ?, ?)`, id, body, now); err != nil {
-		return 0, err
+		return "", err
 	}
-	return id, tx.Commit()
+	return body, tx.Commit()
+}
+
+// deleteThreadIfEmpty is the gt-then-:q abort: only a thread with no
+// comments and no draft may vanish. Anything written is content, and
+// content leaves through resolve — never through this door. The guard
+// lives in the DELETE itself so a racing comment can't be orphaned.
+func (r *registry) deleteThreadIfEmpty(id int64) error {
+	if r.db == nil {
+		return fmt.Errorf("no registry db")
+	}
+	res, err := r.db.Exec(
+		`DELETE FROM threads WHERE id = ? AND draft = ''
+		   AND NOT EXISTS (SELECT 1 FROM thread_comments WHERE thread_id = threads.id)`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		if r.getThread(id) == nil {
+			return sql.ErrNoRows
+		}
+		return errThreadState
+	}
+	return nil
 }
 
 func (r *registry) getThread(id int64) *ThreadInfo {
@@ -468,11 +552,10 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 	if req.Side == "" {
 		req.Side = "modified"
 	}
+	// An empty body is legal — the gt-create path opens a comment-less
+	// thread and the first words arrive later as its tail.
 	req.Body = strings.TrimSpace(req.Body)
 	switch {
-	case req.Body == "":
-		http.Error(w, "body required", http.StatusBadRequest)
-		return
 	case req.Side != "modified" && req.Side != "original":
 		http.Error(w, "side must be modified or original", http.StatusBadRequest)
 		return
@@ -552,14 +635,53 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 	writeJSON(w, t)
 }
 
-// handleThread routes /threads/{id}/comments|resolve|reopen|submit. Thread
-// ids are global, so per-thread verbs need no workspace — `rookctl reply 12`
-// works from anywhere.
+// handleThread routes /threads/{id}[/comments|resolve|reopen|submit|doc|
+// note|ask]. Thread ids are global, so per-thread verbs need no workspace —
+// `rookctl reply 12` works from anywhere.
 func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/threads/")
 	idStr, action, _ := strings.Cut(rest, "/")
 	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil || r.Method != http.MethodPost {
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	// DELETE /threads/{id} — the gt-then-:q abort. Guarded: only a thread
+	// with no comments and no draft may vanish (409 otherwise); its anchor
+	// blob is released with it.
+	if action == "" && r.Method == http.MethodDelete {
+		t := h.reg.getThread(id)
+		if t == nil {
+			http.Error(w, "no such thread", http.StatusNotFound)
+			return
+		}
+		switch err := h.reg.deleteThreadIfEmpty(id); err {
+		case nil:
+			h.reg.pruneAnchorBlobs()
+			h.notifyThreads(t.Workspace)
+			w.WriteHeader(http.StatusNoContent)
+		case errThreadState:
+			http.Error(w, "thread has content — resolve it instead", http.StatusConflict)
+		default:
+			http.Error(w, "no such thread", http.StatusNotFound)
+		}
+		return
+	}
+	// GET /threads/{id}/doc — the thread as an editable document
+	// (threaddoc.go): rendered history through the scissors line, then the
+	// stored draft. Resolved threads render with no scissors and the client
+	// opens them read-only.
+	if action == "doc" && r.Method == http.MethodGet {
+		t := h.reg.getThread(id)
+		if t == nil {
+			http.Error(w, "no such thread", http.StatusNotFound)
+			return
+		}
+		doc, _ := renderThreadDoc(t)
+		writeJSON(w, map[string]any{"content": doc, "resolved": t.State == "resolved"})
+		return
+	}
+	if r.Method != http.MethodPost {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -614,7 +736,7 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "no such thread", http.StatusNotFound)
 		}
 	case "submit":
-		// ,? — ask about THIS thread now. The nudge names the thread, so the
+		// ask about THIS thread now. The nudge names the thread, so the
 		// responder needs no list round-trip and can't mistake which comment
 		// the user is waiting on.
 		t := h.reg.getThread(id)
@@ -626,19 +748,76 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "thread is resolved", http.StatusConflict)
 			return
 		}
-		h.reg.submitThread(id)
-		t.State = "open"
-		h.notifyThreads(t.Workspace)
-		mode, sid, err := h.nudge(t.Workspace, threadNudgeOne(t))
-		if err != nil {
-			h.reg.markThreadDeliverError(id, err.Error())
-			h.notifyThreads(t.Workspace)
+		h.submitThreadAndNudge(w, t)
+	case "doc":
+		// :w — the prefix check. The saved content must start byte-for-byte
+		// with a FRESH render of the history through the scissors line;
+		// everything after is the tail, stored as the draft. A mismatch —
+		// concurrent reply, hand-mangled history, either — answers 409 with
+		// the fresh doc so the client re-renders and splices its tail.
+		t := h.reg.getThread(id)
+		if t == nil {
+			http.Error(w, "no such thread", http.StatusNotFound)
+			return
+		}
+		if t.State == "resolved" {
+			http.Error(w, "thread is resolved", http.StatusConflict)
+			return
+		}
+		var req struct{ Content string }
+		json.NewDecoder(r.Body).Decode(&req)
+		tail, ok := splitThreadDoc(t, req.Content)
+		if !ok {
+			doc, _ := renderThreadDoc(t)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]any{"content": doc})
+			return
+		}
+		if err := h.reg.setThreadDraft(id, tail); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		h.reg.clearDeliverError(t.Workspace)
-		h.notifyThreads(t.Workspace)
-		writeJSON(w, map[string]any{"mode": mode, "rookSession": sid, "count": 1})
+		w.WriteHeader(http.StatusNoContent)
+	case "note":
+		// :ThreadNote — crystallize the stored draft as a comment without
+		// summoning the agent. The whiteboard verb: land it, keep reviewing.
+		switch _, err := h.reg.commitThreadDraft(id); err {
+		case nil:
+			h.notifyThreadsFor(id)
+			w.WriteHeader(http.StatusNoContent)
+		case errEmptyDraft:
+			http.Error(w, "draft is empty — write below the scissors and :w first", http.StatusBadRequest)
+		default:
+			http.Error(w, "no such thread", http.StatusNotFound)
+		}
+	case "ask":
+		// :ThreadAsk — crystallize, then the single-thread submit path:
+		// the same nudge, deliver-error bookkeeping included.
+		t := h.reg.getThread(id)
+		if t == nil {
+			http.Error(w, "no such thread", http.StatusNotFound)
+			return
+		}
+		if t.State == "resolved" {
+			http.Error(w, "thread is resolved", http.StatusConflict)
+			return
+		}
+		if _, err := h.reg.commitThreadDraft(id); err != nil {
+			if err == errEmptyDraft {
+				http.Error(w, "draft is empty — write below the scissors and :w first", http.StatusBadRequest)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		// re-read: the nudge quotes comments, and the crystallized draft
+		// must be among them (on a gt-created thread it IS the first)
+		if t = h.reg.getThread(id); t == nil {
+			http.Error(w, "no such thread", http.StatusNotFound)
+			return
+		}
+		h.submitThreadAndNudge(w, t)
 	case "reopen":
 		var req struct{ By string }
 		json.NewDecoder(r.Body).Decode(&req)
@@ -715,11 +894,34 @@ func promptSafe(s string, max int) string {
 	return s
 }
 
+// submitThreadAndNudge flips ONE thread open and nudges the responder,
+// answering the HTTP request either way — the shared tail of the submit
+// and ask verbs, so the two can't drift in state flips or deliver-error
+// bookkeeping. The caller has already checked existence and resolved-ness.
+func (h *Host) submitThreadAndNudge(w http.ResponseWriter, t *ThreadInfo) {
+	h.reg.submitThread(t.ID)
+	t.State = "open"
+	h.notifyThreads(t.Workspace)
+	mode, sid, err := h.nudge(t.Workspace, threadNudgeOne(t))
+	if err != nil {
+		h.reg.markThreadDeliverError(t.ID, err.Error())
+		h.notifyThreads(t.Workspace)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.reg.clearDeliverError(t.Workspace)
+	h.notifyThreads(t.Workspace)
+	writeJSON(w, map[string]any{"mode": mode, "rookSession": sid, "count": 1})
+}
+
 // nudge actuates a prompt at the workspace's responder: the live claimed
 // claude window if there is one, else a freshly spawned task. Both submit
 // paths route through here so the batch and single-thread flows can't drift
 // in how they reach the agent.
 func (h *Host) nudge(ws, prompt string) (mode, rookSession string, err error) {
+	if h.nudgeFn != nil {
+		return h.nudgeFn(ws, prompt) // test seam — nil in production
+	}
 	if s := h.claudeSessionIn(ws); s != nil {
 		if _, werr := s.pty.Write([]byte(prompt + "\r")); werr == nil {
 			return "typed", s.info.ID, nil

@@ -195,6 +195,9 @@ var migrations = []string{
 	// the nudge error, leaving a thread that looks submitted and waiting
 	// forever. The gutter can only warn about what the row remembers.
 	`ALTER TABLE threads ADD COLUMN deliver_error TEXT NOT NULL DEFAULT ''`,
+	// The thread-buffer tail (threaddoc.go): what sits below the scissors
+	// line, saved by :w but not yet crystallized into a comment.
+	`ALTER TABLE threads ADD COLUMN draft TEXT NOT NULL DEFAULT ''`,
 }
 
 func loadRegistry() *registry {
