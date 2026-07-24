@@ -469,75 +469,6 @@ body {
 .thread-glyph-outdated::before {
     content: "◌"; /* the anchor no longer matches the file */
 }
-/* The inline status row (a Monaco view zone, term/threads.ts). Reads as an
-   annotation ON the code, not a line OF it: no background block, a single
-   accent rule tying it to the anchor above, and the body in the UI font so
-   it can never be mistaken for source. Muted until hovered — a file with
-   eight threads should stay readable as code. */
-/* Monaco owns the zone's own node — it writes display/position/width there
-   as inline styles, which beat the sheet. Anything we lay out has to live
-   one level in, or `display: flex` is quietly reverted to block. */
-.thread-zone-host {
-    height: 100%;
-}
-.thread-zone {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 100%;
-    padding-left: 12px;
-    font-family: system-ui, sans-serif;
-    font-size: 0.6875rem;
-    line-height: 1;
-    white-space: nowrap;
-    overflow: hidden;
-    cursor: pointer;
-    border-left: 2px solid transparent;
-    opacity: 0.75;
-}
-.thread-zone:hover {
-    opacity: 1;
-}
-/* the glyph inside the row is inline, unlike its gutter twin */
-.thread-zone .thread-glyph {
-    display: inline-flex;
-    flex: none;
-}
-.thread-zone-label {
-    flex: none;
-    font-weight: 600;
-    text-transform: lowercase;
-}
-.thread-zone-failed .thread-zone-label {
-    color: var(--color-red);
-}
-.thread-zone-pending .thread-zone-label {
-    color: var(--color-amber);
-}
-.thread-zone-waiting .thread-zone-label {
-    color: var(--acc);
-}
-.thread-zone-answered .thread-zone-label {
-    color: var(--color-magenta);
-}
-/* a failure is the one status that should catch the eye unprompted */
-.thread-zone-failed {
-    border-left-color: var(--color-red);
-    opacity: 1;
-}
-.thread-zone-body {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: var(--dim);
-}
-.thread-zone-tail {
-    flex: none;
-    margin-left: auto;
-    padding-right: 12px;
-    color: var(--color-lo);
-}
-
 /* The active thread's extent: a rule beside the code, never over it. Sits in
    Monaco's line-decorations margin (between the glyph margin and the text),
    so it marks the range without tinting a single character. */
@@ -553,16 +484,6 @@ body {
    on (the thread rule earns its 2px by being actionable). */
 .finder-hit-line {
     background: color-mix(in srgb, var(--acc) 16%, transparent);
-}
-
-/* the head's submit button carries the review's call to action */
-.editor-submit {
-    color: #ffcb6b;
-    border-color: #ffcb6b55;
-}
-.editor-submit:hover {
-    color: #ffcb6b;
-    border-color: #ffcb6b;
 }
 
 /* Keycaps in the imperatively-built drawer headers — the same chip Kbd.svelte

@@ -43,7 +43,7 @@
     import {makeRefsContext, toRefHits} from "./refsContext";
     import {makeThreadsContext} from "./threadsContext";
     import {makeReviewContext} from "./reviewContext";
-    import type {ComposeMode, DraftSpec, EditorSeam} from "./term/editor";
+    import type {EditorSeam} from "./term/editor";
 
     interface Props {
         api: HostAPI;
@@ -118,32 +118,8 @@
         });
     });
 
-    /** ,c / ,? — start a comment on the active editor's selection. The pane
-     *  resolves the anchor; openDraft turns it into a buffer.
-     *
-     *  Guarded on the FOCUSED pane, not activeEditor: a draft/thread split
-     *  deliberately never becomes activeEditor (it has no threads of its own),
-     *  so without this ,c inside a draft opened a SECOND draft against the
-     *  source's stale selection. */
-    function composeThread(mode: ComposeMode): void {
-        const here = mgr.focusedContent()?.type;
-        if (here === "draft") {
-            flash("already writing one — :w sends, :q! discards");
-            return;
-        }
-        if (here === "thread") {
-            flash("in a thread — :reply answers it");
-            return;
-        }
-        const seam = activeEditor;
-        if (!seam) {
-            flash("no editor focused — open a file or the review pane first");
-            return;
-        }
-        if (!seam.compose(mode)) flash("nothing to comment on");
-    }
-
-    /** ,t — the thread under the cursor, as a read-only buffer. */
+    /** gt's palette twin — go to the thread under the cursor, or create one
+     *  anchored there. The pane owns the whole gesture (editor.thread). */
     function goToThread(): void {
         if (mgr.focusedContent()?.type === "thread") {
             flash("already in a thread — :q closes it");
@@ -154,7 +130,17 @@
             flash("no editor focused");
             return;
         }
-        if (!seam.openThread()) flash("no thread on this line");
+        if (!seam.openThread()) flash("nothing to anchor to here");
+    }
+
+    /** The pane the keyboard is in, iff it's a thread buffer — the target
+     *  of thread.note / thread.ask (and so of :ThreadNote / :ThreadAsk via
+     *  the ex bridge, though those also route per-pane). */
+    function focusedThreadPane(): import("./term/editor").EditorPane | null {
+        const c = mgr.focusedContent();
+        if (c?.type !== "thread") return null;
+        const at = mgr.findPane((x) => x === c);
+        return at ? (editorPanes.get(at.leafId) ?? null) : null;
     }
 
     /** A thread as a buffer: reveal-then-mint, like the file ladder. ,t twice
@@ -191,7 +177,6 @@
                 cohort: () => editorCohort(leafId),
                     onClose: () => mgr.closePane(leafId),
                     onDispose: () => editorPanes.delete(leafId),
-                    onCompose: (spec) => void openDraft(spec), // :reply
                     onJump: jumpNav,
                     onOpenThreadSource: (path, line) => void openFile(path, {line, col: 1}),
                 });
@@ -201,53 +186,6 @@
                 return pane;
             },
             THREAD_FRACTION,
-        );
-    }
-
-    /** A comment draft is a BUFFER, not a form.
-     *
-     *  It opens as a split BELOW its source, which buys three things from
-     *  machinery that already exists: the text is edited in a real Monaco
-     *  model, so vim, undo, registers and :w all work with no second keyboard
-     *  model; the pane is transient, so it takes no strip digit; and closing
-     *  it returns focus to the code, because removePaneLocal hands focus to
-     *  the spatial neighbour and a split-below's neighbour is the source.
-     *
-     *  Deliberately NOT registered in editorPanes: a draft is not a document
-     *  the buffer ladder should ever find, retarget, or refetch. */
-    async function openDraft(spec: DraftSpec): Promise<void> {
-        const {EditorPane} = await import("./term/editor");
-        // the pane that asked, captured now: a draft never calls onActivate
-        // (it has no threads of its own), so activeEditor still points at the
-        // source — but capture it anyway rather than depend on that at close.
-        const source = activeEditor;
-        // a quarter, not a half: the comment is the small thing here, and the
-        // code it annotates has to stay readable while you write about it
-        const DRAFT_FRACTION = 0.25;
-        mgr.splitWith(
-            "col",
-            {type: "draft", id: spec.id},
-            (leafId) =>
-                new EditorPane(api, {
-                    workspace: app.workspace,
-                    kind: "draft",
-                    draft: spec,
-                    font: paneFont,
-                    onFlash: flash,
-                cohort: () => editorCohort(leafId),
-                    onClose: () => {
-                        source?.clearHighlight(); // drop the anchor rule
-                        mgr.closePane(leafId);
-                    },
-                    onSubmitted: () => {
-                        // The thread-watch stream announces this too, but only
-                        // to daemons that have it; reloading here means the new
-                        // anchor (or reply) lands on an older host as well.
-                        for (const p of editorPanes.values()) void p.reloadThreads();
-                        void refreshThreads();
-                    },
-                }),
-            DRAFT_FRACTION,
         );
     }
 
@@ -725,8 +663,6 @@
                     scopeDir = undefined;
                     app.grepOpen = true;
                 },
-                // ,c / ,? / ⌘⇧M all arrive here — one composition model
-                onCompose: (spec) => void openDraft(spec),
                 onOpenThread: (id) => void openThreadBuffer(id),
             });
             editorPanes.set(leafId, pane);
@@ -853,7 +789,6 @@
                     scopeDir = cwd || undefined;
                     app.grepOpen = true;
                 },
-                onCompose: (spec) => void openDraft(spec),
                 onOpenThread: (id) => void openThreadBuffer(id),
             });
             editorPanes.set(leafId, pane);
@@ -1100,19 +1035,6 @@
         },
         reopen: async (id) => {
             await api.threadReopen(id);
-            await refreshThreads();
-        },
-        submit: async () => {
-            try {
-                const res = await api.submitThreads(app.workspace);
-                flash(
-                    res.mode === "typed"
-                        ? "sent — nudged the live claude session"
-                        : "sent — spawned a responder",
-                );
-            } catch (err) {
-                flash(`submit failed: ${String(err)}`);
-            }
             await refreshThreads();
         },
         flash,
@@ -1533,22 +1455,34 @@
         // quickfix traversal as registry commands — palette-visible now, and
         // the seam that makes list traversal agent-invokable later
         {
-            id: "editor.comment",
-            title: "Comment on selection (note)",
-            category: "Review",
-            run: () => void composeThread("note"),
-        },
-        {
-            id: "editor.ask",
-            title: "Ask the agent about selection",
-            category: "Review",
-            run: () => void composeThread("ask"),
-        },
-        {
             id: "editor.thread",
-            title: "Go to thread under cursor",
+            title: "Thread under cursor: open or create (gt)",
             category: "Review",
             run: goToThread,
+        },
+        // The thread buffer's crystallizing verbs. Registry commands so the
+        // palette lists them and the ex bridge derives :ThreadNote /
+        // :ThreadAsk; both resolve to the FOCUSED thread pane, which is
+        // where a colon command is typed by construction.
+        {
+            id: "thread.note",
+            title: "Thread: commit draft as note (no nudge)",
+            category: "Review",
+            run: () => {
+                const p = focusedThreadPane();
+                if (p) void p.threadNote();
+                else flash("not in a thread buffer — gt opens one");
+            },
+        },
+        {
+            id: "thread.ask",
+            title: "Thread: commit draft and ask the agent",
+            category: "Review",
+            run: () => {
+                const p = focusedThreadPane();
+                if (p) void p.threadAsk();
+                else flash("not in a thread buffer — gt opens one");
+            },
         },
         {
             id: "quickfix.toggle",

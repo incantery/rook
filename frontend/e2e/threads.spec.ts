@@ -3,23 +3,24 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import {deleteWorkspaces, gotoHome} from "./harness";
 
-// Commenting, end-to-end against the real host.
+// Threads as DOCUMENTS, end-to-end against the real host.
 //
-// A comment is composed in a BUFFER — a Monaco draft model in a split below
-// the source — so what these tests drive is the vim flow: chord, `i`, type,
-// Escape, `:w`, and you are back in the code with a mark in the gutter. There
-// is no form, so nothing here clicks a button or fills a field; if the buffer
-// didn't take the keyboard, every assertion below fails.
-//
-// ,c leaves a note (the whiteboard: it lands pending and stays there); ,? asks
-// about ONE region now. The load-bearing assertion is the negative one: after
-// ,? the earlier note is STILL pending. The workspace batch would have swept
-// it up, which is why the per-thread submit endpoint exists.
+// A thread is a buffer you edit: host-rendered history above a scissors
+// line, your draft below it. gt is dual — go to the thread under the cursor,
+// or create one anchored there. :w stores the tail silently; :ThreadNote /
+// :ThreadAsk crystallize it into history (ask also nudges a responder).
+// There is no form and no draft split anymore; if the buffer didn't take the
+// keyboard, every assertion below fails.
 
 const REPO = path.resolve(process.cwd(), "..");
 const SANDBOX = path.join(REPO, "bin", "e2e", "xdg");
 const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`).first();
 const made: string[] = [];
+
+const SCISSORS = "-- ✂ --";
+
+/** Monaco renders spaces as NBSP — normalize before ordering assertions. */
+const plain = (s: string | null) => (s ?? "").replace(/ /g, " ");
 
 interface Thread {
     id: number;
@@ -27,6 +28,7 @@ interface Thread {
     startLine: number;
     endLine: number;
     state: string;
+    draft?: string;
     comments: {body: string; author: string}[];
 }
 
@@ -48,7 +50,7 @@ async function openWorkspace(page: Page, name: string) {
 
 /** Talk to the sandbox daemon directly — how the AGENT sees and mutates
  *  threads (rookctl is just an HTTP client). Lets a test assert the real
- *  stored state instead of panel text, and produce an agent reply without
+ *  stored state instead of pane text, and produce an agent reply without
  *  touching the page at all. */
 async function hostFetch(route: string, init?: RequestInit): Promise<Response> {
     const st = JSON.parse(
@@ -62,6 +64,9 @@ async function hostFetch(route: string, init?: RequestInit): Promise<Response> {
 
 const threadsOf = async (ws: string): Promise<Thread[]> =>
     (await (await hostFetch(`/workspaces/${ws}/threads`)).json()) as Thread[];
+
+const docOf = async (id: number): Promise<{content: string; draft?: string}> =>
+    (await (await hostFetch(`/threads/${id}/doc`)).json()) as {content: string; draft?: string};
 
 async function runCommand(page: Page, title: string) {
     await page.getByRole("button", {name: /commands/}).click();
@@ -81,61 +86,23 @@ async function openSource(page: Page, file: string) {
     await expect(page.locator(".editor-vim").first()).toContainText(/NORMAL/i, {timeout: 15_000});
 }
 
-/** The context leader is deliberately dead inside side panes, so every chord
- *  departs from the editor — which is also the honest user path. `at` parks
- *  the cursor first, so comments anchor to different lines and the test proves
- *  compose reads the CURRENT cursor rather than a fixed spot. */
-/** `gt` — go to the thread under the cursor. It moved off ,t when the context
- *  leader became the door to the thread FINDER; gt lives with gd/gr because it
- *  is the same kind of verb (jump to the thing attached to this line). */
+/** gt — go-to-or-create. `at` is a vim motion (optionally a visual
+ *  selection) that parks the cursor first, so the anchor comes from where
+ *  the cursor actually IS, not a fixed spot. */
 async function goToThread(page: Page, at: string) {
     await page.locator(".editor-mount").first().click();
     await page.keyboard.type(at);
     await page.keyboard.type("gt");
 }
 
-async function ctxChord(page: Page, key: string, at: string) {
-    await page.locator(".editor-mount").first().click();
-    await page.keyboard.type(at);
-    await page.keyboard.press(",");
-    await page.keyboard.press(key);
-}
+const threadHead = (page: Page) => page.locator(".editor-path", {hasText: /^thread #/}).first();
 
-const draftHeader = (page: Page, kind: "comment" | "ask") =>
-    page.locator(".editor-path", {hasText: new RegExp(`^${kind} ·`)});
-
-/** Write a comment the way a human does. The draft opens in NORMAL mode — the
- *  git-commit contract — so `i` enters insert and `:w` sends. Nothing here
- *  targets an element: the keystrokes go wherever focus actually is. */
-async function writeComment(page: Page, kind: "comment" | "ask", body: string) {
-    const header = draftHeader(page, kind);
-    await expect(header).toBeVisible({timeout: 15_000});
-    await page.keyboard.press("i");
-    await page.keyboard.type(body);
-    await page.keyboard.press("Escape");
-    await page.keyboard.type(":w");
-    await page.keyboard.press("Enter");
-    // :w sends AND closes — the buffer existed to be handed off
-    await expect(header).toHaveCount(0, {timeout: 15_000});
-}
-
-/** Step 8: focus returns to the source. With the draft split gone the only
- *  editor left is the source buffer, so focus sitting in an .editor-mount is
- *  exactly the claim. This is what makes it feel like vim instead of a form. */
-async function expectFocusInSource(page: Page) {
-    await expect
-        .poll(() => page.evaluate(() => !!document.activeElement?.closest(".editor-mount")))
-        .toBe(true);
-}
-
-test("a comment is written in a buffer and `:w` sends it", async ({page}) => {
-    test.setTimeout(120_000);
-
-    // Point the coder at something inert: ,? actuates a responder, and the
-    // default coder is `claude` — without this the suite would spawn the
-    // machine's real claude. MERGE rather than overwrite: the sandbox config
-    // is one file shared by every spec, so rewriting it wholesale silently
-    // disarms another spec's setup (lsp.spec's gopls lines live here too).
+/** Point the coder at something inert: :ThreadAsk actuates a responder, and
+ *  the default coder is `claude` — without this the suite would spawn the
+ *  machine's real claude. MERGE rather than overwrite: the sandbox config is
+ *  one file shared by every spec, so rewriting it wholesale silently disarms
+ *  another spec's setup (lsp.spec's gopls lines live here too). */
+function neuterCoder() {
     const confDir = path.join(SANDBOX, "config", "rook");
     const confFile = path.join(confDir, "config");
     fs.mkdirSync(confDir, {recursive: true});
@@ -146,122 +113,158 @@ test("a comment is written in a buffer and `:w` sends it", async ({page}) => {
         .join("\n")
         .trimEnd();
     fs.writeFileSync(confFile, `${kept}\ncoder = echo\n`.trimStart());
+}
+
+// The core loop: gt creates, the tail is a draft, :ThreadAsk crystallizes
+// and summons; a scripted agent reply lands ABOVE the scissors and the
+// draft zone comes back clean.
+test("gt creates a thread; :w keeps the tail; :ThreadAsk sends it", async ({page}) => {
+    test.setTimeout(120_000);
+    neuterCoder();
 
     const ws = `threads-e2e-${Date.now()}`;
     await openWorkspace(page, ws);
     await openSource(page, "internal/host/spawntask.go");
 
-    // ---- ,c : the whiteboard ----
-    // from a real VISUAL-LINE selection, which is how a range comment is
-    // actually made: 18G selects the func signature and the two lines under it
-    await ctxChord(page, "c", "18GVjj");
+    // ---- gt on a bare region CREATES, anchored to the visual selection ----
+    await goToThread(page, "18GVjj");
+    await expect(threadHead(page)).toBeVisible({timeout: 20_000});
+    const threadPane = page.locator(".editor-mount").last();
+    await expect(threadPane).toContainText(SCISSORS, {timeout: 15_000});
 
-    // the draft is a REAL buffer: the global command line follows it — the
-    // whole difference from the textarea this replaced. One .editor-vim, in
-    // the status bar: the focused pane's node is adopted there (vim's model —
-    // per-window state, ONE command line).
-    await expect(draftHeader(page, "comment")).toBeVisible({timeout: 15_000});
-    await expect(page.locator("#statusbar .editor-vim")).toBeAttached();
-    expect(await page.locator(".editor-vim").count()).toBe(1);
+    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
+    const [t] = await threadsOf(ws);
+    expect(t.startLine).toBe(18);
+    expect(t.endLine).toBe(20);
+    expect(t.comments).toHaveLength(0); // history grows only on note/ask
+    expect(t.state).toBe("pending");
 
+    // ---- the tail: cursor already sits below the scissors ----
     await page.keyboard.press("i");
     await page.keyboard.type("why is this named spawnTask");
-    await page.screenshot({path: "bin/e2e/threads-draft.png", fullPage: true});
     await page.keyboard.press("Escape");
     await page.keyboard.type(":w");
     await page.keyboard.press("Enter");
-    await expect(draftHeader(page, "comment")).toHaveCount(0, {timeout: 15_000});
-    await expectFocusInSource(page);
+    await page.screenshot({path: "bin/e2e/threads-tail.png", fullPage: true});
 
-    // the thread exists on the host, anchored to the whole visual selection —
-    // the range came from the editor, not from the header text
-    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
-    const [note] = await threadsOf(ws);
-    expect(note.comments[0].body).toBe("why is this named spawnTask");
-    expect(note.startLine).toBe(18);
-    expect(note.endLine).toBe(20);
-    expect(note.state).toBe("pending");
+    // :w is SILENT — a stored draft, no comment, no agent
+    await expect
+        .poll(async () => (await docOf(t.id)).draft ?? "", {timeout: 15_000})
+        .toContain("why is this named spawnTask");
+    expect((await threadsOf(ws))[0].comments).toHaveLength(0);
 
-    // …and step 9: a mark in the gutter, not a panel
-    await expect(page.locator(".thread-glyph").first()).toBeVisible({timeout: 15_000});
+    // ---- the reload survives: an agent reply grows history ABOVE the
+    // scissors while the pane is open, and the tail stays put ----
+    const reply = await hostFetch(`/threads/${t.id}/comments`, {
+        method: "POST",
+        body: JSON.stringify({body: "spawn is the pty half.", author: "agent"}),
+    });
+    expect(reply.status).toBe(204);
+    await expect(threadPane).toContainText("spawn is the pty half.", {timeout: 15_000});
+    await expect(threadPane).toContainText("why is this named spawnTask");
+    const text = plain(await threadPane.textContent());
+    expect(text.indexOf("spawn is the pty half.")).toBeGreaterThan(-1);
+    expect(text.indexOf("spawn is the pty half.")).toBeLessThan(text.indexOf(SCISSORS));
 
-    // ---- ,? : ask about this one, now ----
-    await ctxChord(page, "?", "20G");
-    await writeComment(page, "ask", "can the 400ms sleep race the shell");
-    await expectFocusInSource(page);
+    // ---- :ThreadAsk crystallizes the tail and closes the buffer ----
+    await page.keyboard.type(":ThreadAsk");
+    await page.keyboard.press("Enter");
+    await expect(threadHead(page)).toHaveCount(0, {timeout: 15_000});
+    await expect
+        .poll(async () => (await threadsOf(ws))[0].state, {timeout: 15_000})
+        .toBe("open");
+    const after = (await threadsOf(ws))[0];
+    const last = after.comments[after.comments.length - 1];
+    expect(last.author).toBe("user");
+    expect(last.body).toBe("why is this named spawnTask");
 
-    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(2);
-    const all = await threadsOf(ws);
-    const asked = all.find((t) => t.comments[0].body.startsWith("can the 400ms"));
-    const noted = all.find((t) => t.comments[0].body.startsWith("why is this"));
-
-    // THE assertion: the asked thread went open, and the earlier note is still
-    // pending. Reusing the workspace batch would have shipped both.
-    expect(asked?.state).toBe("open");
-    expect(noted?.state).toBe("pending");
-
-    // …and the ask anchored where 20G put the CURSOR, not to the visual
-    // selection the previous comment consumed. Composing has to leave the
-    // editor in NORMAL, or the next motion extends a stale selection and this
-    // reads 18 — which is exactly how that bug was found.
-    expect(asked?.startLine).toBe(20);
-    expect(asked?.endLine).toBe(20);
-
-    // Actuation is proven by that transition: /threads/{id}/submit only
-    // returns 200 after h.nudge succeeded, so a responder that failed to spawn
-    // would have left this pending. The nudge's exact TEXT is pinned in Go
-    // (TestThreadSubmitOneLeavesOthersPending), where the one-line pty
-    // constraint can be asserted without window-focus races.
-
-    await page.screenshot({path: "bin/e2e/threads-compose.png", fullPage: true});
+    // ---- reopen with gt: the question is history now, the draft zone clean ----
+    await goToThread(page, "18G");
+    await expect(threadHead(page)).toBeVisible({timeout: 20_000});
+    const pane2 = page.locator(".editor-mount").last();
+    await expect(pane2).toContainText("why is this named spawnTask", {timeout: 15_000});
+    const text2 = plain(await pane2.textContent());
+    expect(text2.indexOf("why is this named spawnTask")).toBeGreaterThan(-1);
+    expect(text2.indexOf("why is this named spawnTask")).toBeLessThan(text2.indexOf(SCISSORS));
+    expect((await docOf(t.id)).draft ?? "").toBe("");
+    await page.screenshot({path: "bin/e2e/threads-doc.png", fullPage: true});
 });
 
-// :q! must throw the draft away without creating anything — the escape hatch
-// for "actually, never mind", and the reason :q refuses while the buffer is
-// dirty rather than silently discarding a thought.
-test("`:q!` discards a draft without creating a thread", async ({page}) => {
+// The abort path: gt minted a thread, nothing was said, :q takes it back.
+test("`:q` on an untouched gt thread deletes it", async ({page}) => {
     test.setTimeout(120_000);
-    const ws = `discard-e2e-${Date.now()}`;
+    const ws = `abort-e2e-${Date.now()}`;
     await openWorkspace(page, ws);
     await openSource(page, "internal/host/spawntask.go");
 
-    await ctxChord(page, "c", "gg");
-    const header = draftHeader(page, "comment");
-    await expect(header).toBeVisible({timeout: 15_000});
-    await page.keyboard.press("i");
-    await page.keyboard.type("half a thought");
-    await page.keyboard.press("Escape");
+    await goToThread(page, "gg");
+    await expect(threadHead(page)).toBeVisible({timeout: 20_000});
+    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
 
-    // :q refuses while dirty — vim's contract, and here it protects a comment
-    // the user has typed but not sent
     await page.keyboard.type(":q");
     await page.keyboard.press("Enter");
-    await expect(header).toBeVisible();
-
-    await page.keyboard.type(":q!");
-    await page.keyboard.press("Enter");
-    await expect(header).toHaveCount(0, {timeout: 15_000});
-    await expectFocusInSource(page);
-
-    expect(await threadsOf(ws)).toHaveLength(0);
+    await expect(threadHead(page)).toHaveCount(0, {timeout: 15_000});
+    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(0);
 });
 
-// The push channel: the agent replies, and rook says so on its own. Threads
-// used to refetch only when an editor pane regained FOCUS, so you could ask a
-// question, watch claude answer in its own window, and see nothing until you
-// clicked back in. Now a thread BUFFER re-renders itself when the reply lands.
+// History is read-only by CONTRACT, not by region locking: a save whose
+// prefix doesn't match a fresh render is refused (409) and the buffer heals
+// to the honest state — mangled history reverted, tail carried forward.
+test("a tampered history is rejected on save and healed", async ({page}) => {
+    test.setTimeout(120_000);
+    const ws = `tamper-e2e-${Date.now()}`;
+    await openWorkspace(page, ws);
+
+    const mk = await hostFetch(`/workspaces/${ws}/threads`, {
+        method: "POST",
+        body: JSON.stringify({
+            path: "internal/host/spawntask.go",
+            startLine: 18,
+            endLine: 18,
+            body: "the original question",
+        }),
+    });
+    expect(mk.status).toBeLessThan(300);
+
+    await openSource(page, "internal/host/spawntask.go");
+    await goToThread(page, "18G");
+    const pane = page.locator(".editor-mount").last();
+    await expect(pane).toContainText("the original question", {timeout: 15_000});
+
+    // vandalize the history (line 2 sits inside the frontmatter), then :w
+    await page.keyboard.type("2Gccvandalism");
+    await page.keyboard.press("Escape");
+    await page.keyboard.type(":w");
+    await page.keyboard.press("Enter");
+
+    // the save was refused and the buffer healed from the host's fresh render
+    await expect(pane).not.toContainText("vandalism", {timeout: 15_000});
+    await expect(pane).toContainText("the original question");
+    const [t] = await threadsOf(ws);
+    expect(t.comments).toHaveLength(1); // nothing crystallized, nothing lost
+});
+
+// The push channel: the agent replies, and the open buffer says so on its
+// own — no refocus, no manual refresh.
 test("an agent's reply arrives without touching the page", async ({page}) => {
     test.setTimeout(120_000);
 
     const ws = `watch-e2e-${Date.now()}`;
     await openWorkspace(page, ws);
-    await openSource(page, "internal/host/spawntask.go");
 
-    await ctxChord(page, "c", "18G");
-    await writeComment(page, "comment", "does this leak the goroutine");
-    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
+    const mk = await hostFetch(`/workspaces/${ws}/threads`, {
+        method: "POST",
+        body: JSON.stringify({
+            path: "internal/host/spawntask.go",
+            startLine: 18,
+            endLine: 18,
+            body: "does this leak the goroutine",
+        }),
+    });
+    expect(mk.status).toBeLessThan(300);
     const [t] = await threadsOf(ws);
 
+    await openSource(page, "internal/host/spawntask.go");
     // open the thread as a buffer, then never touch the page again
     await goToThread(page, "18G");
     const threadPane = page.locator(".editor-mount").last();
@@ -288,134 +291,33 @@ test("an agent's reply arrives without touching the page", async ({page}) => {
     await expect(threadPane).toContainText("No — the pty owns it", {timeout: 15_000});
 });
 
-// The reading half: ,t opens the thread as a read-only BUFFER, :reply answers
-// through the same draft-buffer model composition uses, and hover previews the
-// conversation without displacing a single line of code.
-test("`,t` opens a thread buffer; `:reply` answers it; hover previews it", async ({page}) => {
-    test.setTimeout(120_000);
-
-    const ws = `threadbuf-e2e-${Date.now()}`;
-    await openWorkspace(page, ws);
-    await openSource(page, "internal/host/spawntask.go");
-
-    await ctxChord(page, "c", "18GVjj");
-    await writeComment(page, "comment", "why is this named spawnTask");
-    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
-    const [t] = await threadsOf(ws);
-
-    // ---- hover: the preview, in place ----
-    // K routes through the same provider the mouse does, so the keyboard path
-    // is the one under test. The thread comes FIRST in the stacked contents.
-    await page.locator(".editor-mount").first().click();
-    await page.keyboard.type("18G");
-    await page.keyboard.press("Shift+K");
-    const hover = page.locator(".monaco-hover:not(.hidden)").first();
-    await expect(hover).toBeVisible({timeout: 20_000});
-    await expect(hover).toContainText("why is this named spawnTask");
-    await expect(hover).toContainText(`#${t.id}`);
-    // the hover fades in (.monaco-hover.fade-in); let it settle or the shot
-    // catches it mid-animation and reads as a transparency bug
-    await page.waitForTimeout(300);
-    await page.screenshot({path: "bin/e2e/threads-hover.png", fullPage: true});
-    await page.keyboard.press("Escape");
-
-    // ---- ,t : the thread as a buffer ----
-    await goToThread(page, "18G");
-    const threadHead = page.locator(".editor-path", {hasText: new RegExp(`^thread #${t.id} `)});
-    await expect(threadHead).toBeVisible({timeout: 15_000});
-    // it is a real buffer: rendered markdown, with the anchored source fenced
-    const threadPane = page.locator(".editor-mount").last();
-    await expect(threadPane).toContainText(`Thread #${t.id}`);
-    // conversation-first: no fenced snapshot while the thread is still
-    // anchored, so a short split shows the comment rather than the code you
-    // are already looking at (the outdated case is pinned in the unit tests)
-    await expect(threadPane).not.toContainText("```");
-
-    // ---- :reply : the same draft-buffer model ----
-    await page.keyboard.type(":reply");
-    await page.keyboard.press("Enter");
-    const replyHead = page.locator(".editor-path", {hasText: /^reply to #/});
-    await expect(replyHead).toBeVisible({timeout: 15_000});
-    await page.keyboard.press("i");
-    await page.keyboard.type("because it spawns the coder, not a task");
-    await page.keyboard.press("Escape");
-    await page.keyboard.type(":w");
-    await page.keyboard.press("Enter");
-    await expect(replyHead).toHaveCount(0, {timeout: 15_000});
-
-    // the thread buffer re-rendered itself with the new comment
-    await expect(threadPane).toContainText("because it spawns the coder", {timeout: 15_000});
-    await page.screenshot({path: "bin/e2e/threads-buffer.png", fullPage: true});
-
-    // ---- :resolve acts and closes ----
-    await page.keyboard.type(":resolve");
-    await page.keyboard.press("Enter");
-    await expect(threadHead).toHaveCount(0, {timeout: 15_000});
-    await expectFocusInSource(page);
-    await expect
-        .poll(async () => (await threadsOf(ws))[0].state, {timeout: 15_000})
-        .toBe("resolved");
-});
-
-// Threads read through the ONE traversal muscle memory rather than a bespoke
-// panel: ` t opens the quickfix list, j/k moves, o opens the thread buffer.
-test("` t lists threads in the quickfix and `o` opens one", async ({page}) => {
-    test.setTimeout(120_000);
-
-    const ws = `qflist-e2e-${Date.now()}`;
-    await openWorkspace(page, ws);
-    await openSource(page, "internal/host/spawntask.go");
-
-    await ctxChord(page, "c", "18G");
-    await writeComment(page, "comment", "first note here");
-    await ctxChord(page, "c", "24G");
-    await writeComment(page, "comment", "second note here");
-    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(2);
-
-    // ` t — the IDE leader opens the list (,t goes to the thread under the
-    // cursor; the two are deliberately the same letter on the two leaders)
-    await page.locator(".editor-mount").first().click();
-    await page.keyboard.press("`");
-    await page.keyboard.press("t");
-
-    const strip = page.locator('.side-pane[data-side="bottom"]');
-    await expect(strip).toContainText("Threads", {timeout: 15_000});
-    const rows = page.locator("#quickfix-list [role=option]");
-    await expect(rows).toHaveCount(2);
-    await expect(strip).toContainText("first note here");
-    await expect(strip).toContainText("second note here");
-
-    // the strip holds the keyboard: j moves, o opens the thread buffer
-    await page.keyboard.press("j");
-    await expect(rows.nth(1)).toHaveAttribute("data-cursor", "1");
-    await page.keyboard.press("o");
-    await expect(page.locator(".editor-path", {hasText: /^thread #/})).toBeVisible({
-        timeout: 15_000,
-    });
-
-    await page.screenshot({path: "bin/e2e/threads-list.png", fullPage: true});
-});
-
 // A thread buffer must NOT grab the keyboard when it re-renders.
 //
-// reloadThreads() routes every watch-stream event back through loadThread, and
-// the stream fans out to every open thread pane — so an unconditional focus
-// there meant any thread changing anywhere in the workspace (an agent reply, a
-// :w of your own) yanked the caret out of whatever you were typing. The pane
-// now focuses only through the wantFocus LATCH, which the open path sets and
-// a reload does not.
+// reloadThreads() routes every watch-stream event back through loadThread,
+// and the stream fans out to every open thread pane — so an unconditional
+// focus there meant any thread changing anywhere in the workspace (an agent
+// reply, a :w of your own) yanked the caret out of whatever you were typing.
+// The pane focuses only through the wantFocus LATCH, which the open path
+// sets and a reload does not.
 test("a thread buffer re-rendering does not steal the keyboard", async ({page}) => {
     test.setTimeout(120_000);
 
     const ws = `focus-e2e-${Date.now()}`;
     await openWorkspace(page, ws);
-    await openSource(page, "internal/host/spawntask.go");
 
-    await ctxChord(page, "c", "18G");
-    await writeComment(page, "comment", "does this leak the goroutine");
-    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
+    const mk = await hostFetch(`/workspaces/${ws}/threads`, {
+        method: "POST",
+        body: JSON.stringify({
+            path: "internal/host/spawntask.go",
+            startLine: 18,
+            endLine: 18,
+            body: "does this leak the goroutine",
+        }),
+    });
+    expect(mk.status).toBeLessThan(300);
     const [t] = await threadsOf(ws);
 
+    await openSource(page, "internal/host/spawntask.go");
     await goToThread(page, "18G");
     const threadPane = page.locator(".editor-mount").last();
     await expect(threadPane).toContainText("does this leak the goroutine", {timeout: 15_000});
@@ -455,26 +357,30 @@ test("a thread buffer re-rendering does not steal the keyboard", async ({page}) 
 // clicked back into the code, which is just what reading a thread and
 // returning to work looks like. The pane must notice it is no longer the
 // focused one and drop the latch instead of yanking the caret back.
-//
-// The test above catches this too, but only when the timing falls that way:
-// it failed 3 runs in 20 before the fix. Here the click is placed in the
-// window deliberately, so the failure is not a matter of luck.
 test("a thread pane loading after you click away does not yank the caret back", async ({page}) => {
     test.setTimeout(120_000);
     const ws = `latch-e2e-${Date.now()}`;
     await openWorkspace(page, ws);
+
+    const mk = await hostFetch(`/workspaces/${ws}/threads`, {
+        method: "POST",
+        body: JSON.stringify({
+            path: "internal/host/spawntask.go",
+            startLine: 18,
+            endLine: 18,
+            body: "does this leak the goroutine",
+        }),
+    });
+    expect(mk.status).toBeLessThan(300);
+
     await openSource(page, "internal/host/spawntask.go");
 
-    await ctxChord(page, "c", "18G");
-    await writeComment(page, "comment", "does this leak the goroutine");
-    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
-
     // Hold the thread fetch open. The window between "pane mounted and
-    // focused" and "load finished, latch applied" is about 7ms in practice —
-    // too narrow to land a click in reliably, which is exactly why the test
-    // above only caught this 3 times in 20. Delaying the one request the load
+    // focused" and "load finished, latch applied" is a few ms in practice —
+    // too narrow to land a click in reliably. Delaying the requests the load
     // waits on makes that window a second wide and the race a certainty.
-    const slowThreads = (u: URL) => u.pathname.endsWith("/threads");
+    const slowThreads = (u: URL) =>
+        u.pathname.endsWith("/threads") || u.pathname.endsWith("/doc");
     await page.route(slowThreads, async (route) => {
         await new Promise((r) => setTimeout(r, 1500));
         await route.continue();
@@ -499,80 +405,71 @@ test("a thread pane loading after you click away does not yank the caret back", 
     expect(where).not.toMatch(/^thread #/);
 });
 
-// The gutter said "there is a thread here" and nothing else — you had to open
-// it to learn whether anything was happening. These are the two surfaces that
-// answer that without leaving the code: an inline row under the anchor, and a
-// finder over every thread in the workspace.
-test("the inline row says whose move it is, and follows the agent's reply", async ({page}) => {
+// Threads read through the ONE traversal muscle memory rather than a bespoke
+// panel: ` t opens the quickfix list, j/k moves, o opens the thread buffer.
+test("` t lists threads in the quickfix and `o` opens one", async ({page}) => {
     test.setTimeout(120_000);
-    const ws = `zone-e2e-${Date.now()}`;
+
+    const ws = `qflist-e2e-${Date.now()}`;
     await openWorkspace(page, ws);
+
+    for (const [line, body] of [
+        [18, "first note here"],
+        [24, "second note here"],
+    ] as const) {
+        const mk = await hostFetch(`/workspaces/${ws}/threads`, {
+            method: "POST",
+            body: JSON.stringify({
+                path: "internal/host/spawntask.go",
+                startLine: line,
+                endLine: line,
+                body,
+            }),
+        });
+        expect(mk.status).toBeLessThan(300);
+    }
+
     await openSource(page, "internal/host/spawntask.go");
 
-    await ctxChord(page, "c", "18GVj");
-    await writeComment(page, "comment", "does this leak the goroutine");
-    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(1);
-    const [t] = await threadsOf(ws);
+    // ` t — the IDE leader opens the list (gt goes to the thread under the
+    // cursor; the leader is for the surfaces you reach without one)
+    await page.locator(".editor-mount").first().click();
+    await page.keyboard.press("`");
+    await page.keyboard.press("t");
 
-    const zone = page.locator(".thread-zone").first();
-    await expect(zone).toBeVisible({timeout: 15_000});
-    // written but not submitted: the ball is with the user
-    await expect(zone).toContainText("not sent yet", {timeout: 15_000});
-    await expect(zone).toContainText("does this leak the goroutine");
-    // and the row is laid out, not run together — Monaco writes `display`
-    // onto the zone node inline, which once silently reverted this to block
-    await expect.poll(() => zone.evaluate((el) => getComputedStyle(el).display)).toBe("flex");
+    const strip = page.locator('.side-pane[data-side="bottom"]');
+    await expect(strip).toContainText("Threads", {timeout: 15_000});
+    const rows = page.locator("#quickfix-list [role=option]");
+    await expect(rows).toHaveCount(2);
+    await expect(strip).toContainText("first note here");
+    await expect(strip).toContainText("second note here");
 
-    // submit → the ball moves to the agent
-    await page.locator(".editor-head .editor-submit").first().click();
-    await expect(zone).toContainText("waiting on agent", {timeout: 20_000});
+    // the strip holds the keyboard: j moves, o opens the thread buffer
+    await page.keyboard.press("j");
+    await expect(rows.nth(1)).toHaveAttribute("data-cursor", "1");
+    await page.keyboard.press("o");
+    await expect(threadHead(page)).toBeVisible({timeout: 15_000});
 
-    // the agent answers → it comes back to you, over the watch stream alone
-    const reply = await hostFetch(`/threads/${t.id}/comments`, {
-        method: "POST",
-        body: JSON.stringify({body: "No — the pty owns it.", author: "agent"}),
-    });
-    expect(reply.status).toBe(204);
-    await expect(zone).toContainText("agent replied", {timeout: 20_000});
-    await expect(zone).toContainText("No — the pty owns it");
-
-    // resolved threads get NO row: a finished conversation shouldn't still be
-    // occupying a line of the file
-    const done = await hostFetch(`/threads/${t.id}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({by: "user"}),
-    });
-    expect(done.status).toBe(204);
-    await expect(page.locator(".thread-zone")).toHaveCount(0, {timeout: 20_000});
-
-    await page.screenshot({path: "bin/e2e/threads-zone.png", fullPage: true});
+    await page.screenshot({path: "bin/e2e/threads-list.png", fullPage: true});
 });
 
-test("`,t` finds threads across files; `gt` still opens the one under the cursor", async ({
-    page,
-}) => {
+// The finder over every thread in the workspace (,t), and gt as the motion.
+test("`,t` finds threads across files; `gt` opens the one under the cursor", async ({page}) => {
     test.setTimeout(120_000);
     const ws = `tfind-e2e-${Date.now()}`;
     await openWorkspace(page, ws);
 
+    for (const [file, line, body] of [
+        ["internal/host/spawntask.go", 18, "zebra goroutine question"],
+        ["internal/host/grep.go", 20, "walrus cap question"],
+    ] as const) {
+        const mk = await hostFetch(`/workspaces/${ws}/threads`, {
+            method: "POST",
+            body: JSON.stringify({path: file, startLine: line, endLine: line + 1, body}),
+        });
+        expect(mk.status).toBeLessThan(300);
+    }
     await openSource(page, "internal/host/spawntask.go");
-    await ctxChord(page, "c", "18GVj");
-    await writeComment(page, "comment", "zebra goroutine question");
-
-    // the second thread lands on ANOTHER file through the host, not the UI:
-    // this test is about the finder, and re-opening a source in the same pane
-    // is a different mechanism with its own tests
-    const made = await hostFetch(`/workspaces/${ws}/threads`, {
-        method: "POST",
-        body: JSON.stringify({
-            path: "internal/host/grep.go",
-            startLine: 20,
-            endLine: 21,
-            body: "walrus cap question",
-        }),
-    });
-    expect(made.status).toBeLessThan(300);
-    await expect.poll(async () => (await threadsOf(ws)).length, {timeout: 15_000}).toBe(2);
 
     // ,t — the finder, grouped by file, both threads present
     await page.locator(".editor-mount").first().click();
@@ -595,17 +492,22 @@ test("`,t` finds threads across files; `gt` still opens the one under the cursor
 
     // Enter opens it as a buffer — the thread, not the file
     await find.press("Enter");
-    const threadHeader = page.locator(".editor-path", {hasText: /^thread #/}).first();
-    await expect(threadHeader).toBeVisible({timeout: 20_000});
+    await expect(threadHead(page)).toBeVisible({timeout: 20_000});
     await expect(page.locator(".editor-mount").last()).toContainText("zebra goroutine question");
 
-    // ---- and gt, the verb ,t used to be, still opens the thread under the
-    // cursor. This is the half of the rebind that could silently vanish.
+    // ---- and gt still opens the thread under the cursor — the go-to half
     await page.keyboard.type(":q");
     await page.keyboard.press("Enter");
-    await expect(threadHeader).toHaveCount(0, {timeout: 15_000});
+    await expect(threadHead(page)).toHaveCount(0, {timeout: 15_000});
     await goToThread(page, "18G");
-    await expect(page.locator(".editor-path", {hasText: /^thread #/}).first()).toBeVisible({
-        timeout: 20_000,
-    });
+    await expect(threadHead(page)).toBeVisible({timeout: 20_000});
+    // hover previews without opening — the glance surface (K keyboard path)
+    await page.keyboard.type(":q");
+    await page.keyboard.press("Enter");
+    await page.locator(".editor-mount").first().click();
+    await page.keyboard.type("18G");
+    await page.keyboard.press("Shift+K");
+    const hover = page.locator(".monaco-hover:not(.hidden)").first();
+    await expect(hover).toBeVisible({timeout: 20_000});
+    await expect(hover).toContainText("zebra goroutine question");
 });

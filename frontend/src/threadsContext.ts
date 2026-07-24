@@ -13,16 +13,15 @@
 import ThreadRow from "./ThreadRow.svelte";
 import {app} from "./state.svelte";
 import type {QfContext} from "./quickfix.svelte";
-import {STATE_ORDER} from "./term/threadview";
+import {STATUS_ORDER, threadStatus} from "./term/threadview";
 
 export function makeThreadsContext(deps: {
-    /** open the thread as a read-only buffer (the ,t destination) */
+    /** open the thread as a buffer (the gt destination) */
     open(id: number): void;
     /** jump the editor to the anchored code */
     source(id: number): void;
     resolve(id: number): Promise<void>;
     reopen(id: number): Promise<void>;
-    submit(): Promise<void>;
     flash(msg: string): void;
 }): QfContext {
     const byId = (id: number) => app.threads.find((t) => t.id === id);
@@ -32,13 +31,14 @@ export function makeThreadsContext(deps: {
             const open = app.threads.filter((t) => t.state !== "resolved").length;
             return open > 0 ? `Threads (${open} open)` : "Threads";
         },
-        // Most-demanding first, then newest — the same rank the gutter glyph
-        // uses, so the list agrees with the margin.
+        // Most-demanding first, then by place — STATUS rank (whose move is
+        // it), the same rank the gutter glyph uses, so the list agrees with
+        // the margin.
         ids: () =>
             [...app.threads]
                 .sort(
                     (a, b) =>
-                        STATE_ORDER[a.state] - STATE_ORDER[b.state] ||
+                        STATUS_ORDER[threadStatus(a)] - STATUS_ORDER[threadStatus(b)] ||
                         a.path.localeCompare(b.path) ||
                         a.currentStart - b.currentStart,
                 )
@@ -79,14 +79,6 @@ export function makeThreadsContext(deps: {
             ["s", "source"],
             ["x", "resolve"],
         ],
-        empty: "No threads here — ,c leaves a note, ,? asks the agent.",
-        // the batch send, in the place every other context puts its verb
-        prepare: {
-            label: () => {
-                const pending = app.threads.filter((t) => t.state === "pending").length;
-                return pending > 0 ? `submit ${pending}` : "";
-            },
-            run: () => deps.submit(),
-        },
+        empty: "No threads here — gt on a line starts one.",
     };
 }

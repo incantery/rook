@@ -263,19 +263,13 @@ const BACKTICK_LEADER: Leader = {
 export const CONTEXT_LEADER_KEY = ",";
 
 // The context layer's bindings: deliberately tiny — the doors into the
-// current context. q = its list (quickfix), a = its verbs (quick actions),
-// c/? = say something about the code under the cursor.
-//
-// c and ? are the two halves of the review loop, and they are separate keys
-// rather than one key plus a modifier because they mean genuinely different
-// things: c is the whiteboard (land it pending, keep moving), ? interrupts
-// the agent about THIS line. Conflating them behind a modifier makes the
-// louder of the two an easy mis-press.
+// current context. q = its list (quickfix), a = its verbs (quick actions).
+// Saying something about the code under the cursor is gt now (go-to-or-
+// create, a motion) — the old ,c/,? composer keys left with the draft
+// buffer.
 export const CONTEXT_PREFIX = new Map<string, string>([
     ["q", "quickfix.toggle"],
     ["a", "quickaction.toggle"],
-    ["c", "editor.comment"],
-    ["?", "editor.ask"],
     // t = every thread in the workspace, as a finder. The thread under the
     // cursor is gt (a motion, and it lives with gd/gr where it belongs);
     // the leader is for the surfaces you reach for without a cursor.

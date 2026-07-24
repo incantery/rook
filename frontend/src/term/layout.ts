@@ -30,15 +30,8 @@ export type PaneRef =
     /** a claude session as a conversation; `session` is the transcript
      *  session id, not a rook pty session */
     | {type: "agent"; session: string}
-    /** an unsent comment. A document like `file` — it carries identity and
-     *  holds text being edited — but a TRANSIENT one: it exists only until
-     *  :w hands it to the host or :q throws it away, and it is deliberately
-     *  its own arm rather than a `file` with a fake path, so the openFile
-     *  ladder's `c.type === "file"` retarget predicate can never :e a real
-     *  file onto a draft the user is still typing into. */
-    | {type: "draft"; id: string}
-    /** a thread as a read-only document. Identity is the thread id, so it's a
-     *  buffer in the same sense `file` is: revealable, retargetable, and a
+    /** a thread as an editable document. Identity is the thread id, so it's
+     *  a buffer in the same sense `file` is: revealable, retargetable, and a
      *  jumplist target — which a view zone could never be. */
     | {type: "thread"; id: number}
     /** the performance pane: rook's own footprint vs the sessions' workload,
@@ -118,10 +111,6 @@ export function setLeafFraction(root: LayoutNode, leafId: string, frac: number):
         return node.children.some(walk);
     };
     walk(root);
-}
-
-export function newDraftLeaf(id: string): LeafNode {
-    return {kind: "leaf", id: crypto.randomUUID(), content: {type: "draft", id}};
 }
 
 /** Point an existing leaf at different content, in place — the pane keeps its

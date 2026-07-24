@@ -35,6 +35,10 @@
     <span class="min-w-0 flex-1 truncate text-[0.71875rem] text-fg"
         >{t.comments[0]?.body ?? snippetOf(t)}</span
     >
+    {#if t.draft}
+        <!-- an uncommitted tail is waiting in the buffer — your words, not sent -->
+        <span class="shrink-0 text-[0.5625rem] text-amber">draft</span>
+    {/if}
     {#if t.outdated}
         <span class="shrink-0 text-[0.5625rem] text-lo">outdated</span>
     {/if}

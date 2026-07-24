@@ -678,7 +678,12 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		doc, _ := renderThreadDoc(t)
-		writeJSON(w, map[string]any{"content": doc, "resolved": t.State == "resolved"})
+		// draft rides along so the client can compute the prefix EXACTLY
+		// (content minus draft) instead of scanning for the scissors — a
+		// comment body could legally contain a scissors-shaped line.
+		writeJSON(w, map[string]any{
+			"content": doc, "draft": t.Draft, "resolved": t.State == "resolved",
+		})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -771,7 +776,7 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 			doc, _ := renderThreadDoc(t)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
-			json.NewEncoder(w).Encode(map[string]any{"content": doc})
+			json.NewEncoder(w).Encode(map[string]any{"content": doc, "draft": t.Draft})
 			return
 		}
 		if err := h.reg.setThreadDraft(id, tail); err != nil {

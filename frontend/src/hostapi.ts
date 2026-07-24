@@ -422,12 +422,54 @@ export class HostAPI {
         return () => es?.close();
     }
 
-    /** ,? — ask about ONE thread now. Deliberately not submitThreads scoped
+    /** Ask about ONE thread now. Deliberately not submitThreads scoped
      *  to an id: the workspace-level batch would also ship every scratch
      *  note the user had left pending, which is not what asking about this
      *  line means. 409 = the thread is already resolved. */
     async submitThread(id: number): Promise<ThreadsSubmitResult> {
         return (await this.req(`/threads/${id}/submit`, {method: "POST", body: "{}"})).json();
+    }
+
+    /** The thread as an editable document (host threaddoc.go): rendered
+     *  history through the scissors line, then the stored draft. draft rides
+     *  along so the client can compute the prefix exactly (content minus
+     *  draft) rather than scanning for the scissors. */
+    async threadDoc(id: number): Promise<ThreadDoc> {
+        return (await this.req(`/threads/${id}/doc`)).json();
+    }
+
+    /** :w on a thread buffer — the host prefix-checks the content against a
+     *  fresh render and stores everything below the scissors as the draft.
+     *  A mismatch (concurrent reply, hand-edited history) is NOT an error to
+     *  throw on: it comes back as {ok:false} with the fresh doc so the
+     *  caller can splice its local tail underneath and carry on. */
+    async saveThreadDoc(id: number, content: string): Promise<{ok: true} | ({ok: false} & ThreadDoc)> {
+        const r = await fetch(`${this.endpoint}/threads/${id}/doc`, {
+            method: "POST",
+            headers: {Authorization: `Bearer ${this.token}`},
+            body: JSON.stringify({content}),
+        });
+        if (r.status === 409) return {ok: false, ...(await r.json())};
+        if (!r.ok) throw new HostError(r.status, `/threads/${id}/doc`, await r.text());
+        return {ok: true};
+    }
+
+    /** :ThreadNote — crystallize the stored draft as a comment, no nudge.
+     *  400 = the draft is empty. */
+    async threadNote(id: number): Promise<void> {
+        await this.req(`/threads/${id}/note`, {method: "POST", body: "{}"});
+    }
+
+    /** :ThreadAsk — crystallize the stored draft, then the single-thread
+     *  submit path (nudge included). */
+    async threadAsk(id: number): Promise<ThreadsSubmitResult> {
+        return (await this.req(`/threads/${id}/ask`, {method: "POST", body: "{}"})).json();
+    }
+
+    /** The gt-then-:q abort — only a comment-less, draft-empty thread may
+     *  be deleted (409 otherwise). */
+    async deleteThread(id: number): Promise<void> {
+        await this.req(`/threads/${id}`, {method: "DELETE"});
     }
 
     /** Flip pending→open and nudge the responder — or re-nudge when open
@@ -667,6 +709,8 @@ export interface ThreadInfo {
     state: "pending" | "open" | "resolved";
     /** why the nudge never reached a responder; absent when it did */
     deliverError?: string;
+    /** the thread-buffer tail: saved (:w) but not yet crystallized */
+    draft?: string;
     resolvedBy?: "user" | "agent";
     agentReopens?: number;
     created: string;
@@ -676,6 +720,16 @@ export interface ThreadInfo {
     currentStart: number;
     currentEnd: number;
     outdated?: boolean;
+}
+
+/** GET /threads/{id}/doc — the thread-buffer projection. content =
+ *  read-only history through the scissors line + the stored draft;
+ *  prefix = content minus draft. Resolved docs carry no scissors and
+ *  open read-only. */
+export interface ThreadDoc {
+    content: string;
+    draft?: string;
+    resolved?: boolean;
 }
 
 /** POST /workspaces/{ws}/threads/submit — how the nudge landed. */

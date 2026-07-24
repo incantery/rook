@@ -80,8 +80,8 @@ export const MATERIAL_OCEAN: Theme = {
         type: "dark",
 
         bg: "#0f111a",
-        // the input wells' bg-[#0a0c14]/80; ThreadPanel drifted to #0b0d14
-        // for the same job, and folds in here.
+        // the input wells' bg-[#0a0c14]/80; the old thread panel drifted to
+        // #0b0d14 for the same job, and folds in here.
         sunken: "#0a0c14",
         raise: "#ffffff09", // rgba(255,255,255,0.035)
         // the modal/palette shell drifted to #151924 in markup vs #151928 in
@@ -95,8 +95,8 @@ export const MATERIAL_OCEAN: Theme = {
         lo: "#5b6273",
 
         accent: "#82aaff",
-        // primary buttons drifted between #10131c and #0b0d14 (ThreadPanel);
-        // the majority value wins.
+        // primary buttons drifted between #10131c and #0b0d14 (the old
+        // thread panel); the majority value wins.
         onAccent: "#10131c",
         cursor: "#ffcc00",
         selection: "#717cb4",

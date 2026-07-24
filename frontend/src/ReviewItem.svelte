@@ -5,8 +5,7 @@
      Traversal and verbs dispatch through the quickfix state (qf) — the same
      path the list, the registry commands, and (by extension) agents use.
      Renders the diff itself from the stored patch body (anchorText), so
-     review owes nothing to the editor. Styled with inline Tailwind (README
-     decision 7); model of quality is ThreadPanel.svelte. -->
+     review owes nothing to the editor. Styled with inline Tailwind (README decision 7). -->
 <script lang="ts">
     import type {HostAPI} from "./hostapi";
     import {qf, type QfAction} from "./quickfix.svelte";
