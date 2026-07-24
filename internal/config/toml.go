@@ -45,6 +45,7 @@ type tomlFile struct {
 	Workflow          *[]string           `toml:"workflow"`
 	WorkspaceAllow    *[]string           `toml:"workspace-allow"`
 	Keybinds          map[string]string   `toml:"keybinds"`
+	Commands          map[string]string   `toml:"commands"`
 	Editor            *tomlEditor         `toml:"editor"`
 	Agent             *tomlAgent          `toml:"agent"`
 	Jira              *tomlJira           `toml:"jira"`
@@ -157,6 +158,14 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 		}
 		for t, c := range f.Keybinds {
 			cfg.Keybinds[strings.TrimSpace(t)] = strings.TrimSpace(c)
+		}
+	}
+	if len(f.Commands) > 0 {
+		if cfg.Commands == nil {
+			cfg.Commands = map[string]string{}
+		}
+		for a, c := range f.Commands {
+			cfg.Commands[strings.TrimSpace(a)] = strings.TrimSpace(c)
 		}
 	}
 

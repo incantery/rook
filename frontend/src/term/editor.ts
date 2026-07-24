@@ -48,6 +48,31 @@ const paneByEditor = new WeakMap<object, EditorPane>();
 let uriSeq = 0;
 let exCommandsDefined = false;
 
+// The :Command bridge — registry commands as ex commands (:ThreadAsk runs
+// thread.ask). Frontend-only dispatch sugar, NOT the host plugin system:
+// App pushes the registry's map here at boot, and loadVim registers each
+// name on the shared Vim singleton with its FULL name as its own prefix,
+// so nothing collides with vim's abbreviations (:w, :q) or the fixed
+// commands above. Names are vim's user-command shape (leading uppercase),
+// which also keeps them out of the built-ins' namespace.
+let registryExCommands = new Map<string, () => void>();
+
+export function setExCommands(map: Map<string, () => void>): void {
+    registryExCommands = map;
+    applyExCommands();
+}
+
+function applyExCommands(): void {
+    if (!vimApi) return; // loadVim applies the stored map when the chunk lands
+    for (const [name, run] of registryExCommands) {
+        try {
+            vimApi.defineEx(name, name, () => run());
+        } catch (err) {
+            console.warn("editor pane: ex command unavailable:", name, err);
+        }
+    }
+}
+
 async function loadVim(): Promise<VimLib> {
     if (!vimLib) vimLib = await import("monaco-vim");
     if (!exCommandsDefined) {
@@ -159,6 +184,8 @@ async function loadVim(): Promise<VimLib> {
             console.warn("editor pane: clipboard mirror unavailable:", err);
         }
         exCommandsDefined = true;
+        // the registry map may have arrived before the vim chunk did
+        applyExCommands();
     }
     return vimLib;
 }

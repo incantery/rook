@@ -54,6 +54,8 @@
         editorLeader?: string;
         /** the editor scope's normal-mode bindings ([editor.keybinds.normal]) */
         editorKeybinds?: Record<string, string | undefined>;
+        /** [commands] — ex-command aliases onto registry command ids */
+        commandAliases?: Record<string, string | undefined>;
         /** the config font, for the Monaco pane and the terminal renderer */
         paneFont: {family: string; size: number};
     }
@@ -63,6 +65,7 @@
         leader: leaderCfg,
         editorLeader: editorLeaderCfg,
         editorKeybinds = {},
+        commandAliases = {},
         paneFont,
     }: Props = $props();
     // config-fixed: the leader reloads the page, which re-reads it
@@ -1704,6 +1707,15 @@
                 }
             },
         },
+    );
+
+    // The :Command bridge — every registry command doubles as an ex command
+    // in the editor (:ThreadAsk runs thread.ask), plus config's [commands]
+    // aliases. Pushed once at boot: config.reload is a page reload, so the
+    // map rebuilds with it. The dynamic import loads only the editor module,
+    // never Monaco (that stays behind the pane's own lazy import).
+    void import("./term/editor").then((m) =>
+        m.setExCommands(registry.exNames(commandAliases)),
     );
 
     // ==== workbench-level directional focus ====

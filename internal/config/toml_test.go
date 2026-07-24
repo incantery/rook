@@ -112,6 +112,22 @@ leader = " "
 	}
 }
 
+func TestTOMLCommands(t *testing.T) {
+	writeTOML(t, `
+[commands]
+"Ta" = "thread.ask"
+"ReviewGo" = " review.approve "
+`)
+	cfg := Load()
+	if got := cfg.Commands["Ta"]; got != "thread.ask" {
+		t.Fatalf("commands Ta: %q", got)
+	}
+	// values are trimmed like keybinds — the frontend validates the rest
+	if got := cfg.Commands["ReviewGo"]; got != "review.approve" {
+		t.Fatalf("commands ReviewGo: %q", got)
+	}
+}
+
 func TestTOMLEditorLeaderDefault(t *testing.T) {
 	writeTOML(t, "# nothing configured\n")
 	if cfg := Load(); cfg.EditorLeader != "," {

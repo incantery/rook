@@ -73,6 +73,7 @@ async function main() {
             leader: cfg.leader,
             editorLeader: cfg.editorLeader,
             editorKeybinds: cfg.editorKeybinds?.normal ?? {},
+            commandAliases: cfg.commands ?? {},
             paneFont: {family: font, size: cfg.fontSize},
         },
     });

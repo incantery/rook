@@ -85,6 +85,11 @@ type Config struct {
 	// EditorLeader is the editor scope's own leader (vim's maplocalleader
 	// to Leader's mapleader) — the comma, unless config moves it.
 	EditorLeader string `json:"editorLeader"`
+	// Commands maps an ex-command alias to a registry command id
+	// ([commands] table, TOML-only): `Ta = "thread.ask"` makes :Ta run
+	// thread.ask in the editor. The frontend owns validation and fails
+	// open — unknown ids and non-CamelCase names drop with a warn.
+	Commands map[string]string `json:"commands"`
 	// EditorKeybinds is mode → trigger → command ([editor.keybinds.normal]
 	// etc., TOML-only). Triggers: "<leader>q", chords, or bare vim
 	// sequences ("gd", "K"). The frontend owns validation and ignores
