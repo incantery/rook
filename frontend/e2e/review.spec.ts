@@ -1,4 +1,4 @@
-import {expect, test, type Rook} from "./harness";
+import {expect, test, hostFetch, type Rook} from "./harness";
 
 // The review pane end-to-end, against a repo the test BUILDS. This used to
 // point at the rook checkout and review whatever was uncommitted there, so
@@ -121,4 +121,102 @@ test("review pane prepares hunks, dispositions, and moves the gate", async ({pag
     });
 
     await page.screenshot({path: "bin/e2e/review-pane.png", fullPage: true});
+});
+
+// The convergence: a review hunk jumps to the REAL file (no diff mode — the
+// gutter carries the change context), and gt inside the hunk creates a
+// thread that LINKS to the leaf: it flips pending, the gate closes, and the
+// resolve hands the prior disposition back.
+test("review jumps to the file; gt in-hunk links a thread and works the gate", async ({
+    page,
+    rook,
+}) => {
+    test.setTimeout(120_000);
+    const root = await reviewRepo(rook);
+    const ws = `revlink-e2e-${Date.now()}`;
+    await rook.open({name: ws, root});
+
+    await rook.runCommand("Toggle review pane");
+    await page.getByRole("button", {name: "prepare"}).click();
+    const rows = page.locator("#quickfix-list [role=option]");
+    await expect(rows.first()).toBeVisible({timeout: 20_000});
+
+    interface Task {
+        id: number;
+        path?: string;
+        state: string;
+        currentStart?: number;
+        children?: Task[];
+    }
+    const reviewTree = async (): Promise<Task> => {
+        const roots = (await (
+            await hostFetch(`/workspaces/${ws}/tasks?workType=review`)
+        ).json()) as Task[];
+        return roots[0];
+    };
+    const gateOf = async (id: number) =>
+        (await (await hostFetch(`/tasks/${id}/gate`)).json()) as {
+            ready: boolean;
+            blocking: number;
+        };
+    const parent = await reviewTree();
+    const leaf = parent.children!.find((c) => c.path === "greet.go")!;
+    expect(leaf.currentStart).toBeGreaterThan(0); // the blob-backed reanchor seam
+
+    // put the cursor on greet.go's row, then o — the REAL file opens, at the
+    // leaf's reanchored line, with the git gutter for context
+    const greetRow = rows.filter({hasText: "greet.go"});
+    await greetRow.click();
+    await page.keyboard.press("Escape"); // the hero opened on click; o is the editor door
+    await page.keyboard.press("o");
+    await expect(page.locator(".editor-path").first()).toContainText("greet.go", {
+        timeout: 20_000,
+    });
+    await expect(page.locator(".editor-vim").first()).toContainText(/NORMAL/i, {timeout: 15_000});
+    await expect(page.locator("#statusbar")).toContainText(`Ln ${leaf.currentStart},`, {
+        timeout: 15_000,
+    });
+    await expect(page.locator(".rook-gutter-mod").first()).toBeVisible({timeout: 15_000});
+
+    // approve the leaf so the pending flip is observable on the gate
+    await hostFetch(`/tasks/${leaf.id}/state`, {
+        method: "POST",
+        body: JSON.stringify({state: "approved"}),
+    });
+    const before = await gateOf(parent.id);
+
+    // gt inside the hunk (the click that grabs focus also moves the cursor,
+    // so re-park it on the reanchored line first). The thread links to the
+    // LEAF and blocks the gate.
+    await page.locator(".editor-mount").first().click();
+    await page.keyboard.type(`${leaf.currentStart}G`);
+    await page.keyboard.type("gt");
+    await expect(page.locator(".editor-path", {hasText: /^thread #/})).toBeVisible({
+        timeout: 20_000,
+    });
+    await expect
+        .poll(async () => (await reviewTree()).children!.find((c) => c.id === leaf.id)!.state, {
+            timeout: 15_000,
+        })
+        .toBe("pending");
+    expect((await gateOf(parent.id)).blocking).toBe(before.blocking + 1);
+
+    // say something, keep it, resolve — the prior disposition comes back and
+    // the gate reopens
+    await page.keyboard.press("i");
+    await page.keyboard.type("is hello, world the right greeting");
+    await page.keyboard.press("Escape");
+    await page.keyboard.type(":w");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type(":resolve");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".editor-path", {hasText: /^thread #/})).toHaveCount(0, {
+        timeout: 15_000,
+    });
+    await expect
+        .poll(async () => (await reviewTree()).children!.find((c) => c.id === leaf.id)!.state, {
+            timeout: 15_000,
+        })
+        .toBe("approved");
+    expect((await gateOf(parent.id)).blocking).toBe(before.blocking);
 });

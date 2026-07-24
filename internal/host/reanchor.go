@@ -134,58 +134,99 @@ func (c *hunkMemo) put(key string, h []hunk) {
 	c.m[key] = h
 }
 
-// anchorNow maps t's stored anchor onto the file as it is right now.
-// Every failure lands on outdated-with-stored-range — a thread renders
-// from anchor_text, never errors. The "current" content source follows
-// the side: a modified-side thread compares against the working tree,
-// but an original-side thread's snapshot came from the diff base, so it
-// must re-anchor against that SAME base — comparing it to the working
-// tree would brand a freshly created thread outdated the instant the
-// tree diverges, which it always has by definition on that side.
-func (h *Host) anchorNow(ws *WorkspaceInfo, top string, t *ThreadInfo) {
-	t.CurrentStart, t.CurrentEnd = t.StartLine, t.EndLine
-	abs, err := confinePath(top, t.Path)
+// codeAnchor is the SHARED re-anchoring view — the seam the RookTask spec
+// always intended: the immutable stored anchor in, the current mapping
+// out. ThreadInfo and review-leaf RookTasks both project into it, so one
+// machinery (and one set of failure modes) answers "where is this today".
+type codeAnchor struct {
+	Path      string
+	StartLine int
+	EndLine   int
+	Side      string
+	BlobSHA   string
+
+	// out: the anchor mapped onto today's file
+	CurrentStart int
+	CurrentEnd   int
+	Outdated     bool
+}
+
+// anchorNow maps a stored anchor onto the file as it is right now.
+// Every failure lands on outdated-with-stored-range — an anchor renders
+// from its stored text, never errors. The "current" content source
+// follows the side: a modified-side anchor compares against the working
+// tree, but an original-side anchor's snapshot came from the diff base,
+// so it must re-anchor against that SAME base — comparing it to the
+// working tree would brand a fresh anchor outdated the instant the tree
+// diverges, which it always has by definition on that side.
+func (h *Host) anchorNow(ws *WorkspaceInfo, top string, a *codeAnchor) {
+	a.CurrentStart, a.CurrentEnd = a.StartLine, a.EndLine
+	abs, err := confinePath(top, a.Path)
 	if err != nil {
-		t.Outdated = true
+		a.Outdated = true
 		return
 	}
 	var cur []byte
-	if t.Side == "original" {
+	if a.Side == "original" {
 		base := h.reviewBaseFor(ws, top, "")
-		out, err := gitOut(top, reviewTimeout, "show", base.ref+":"+t.Path)
+		out, err := gitOut(top, reviewTimeout, "show", base.ref+":"+a.Path)
 		if err != nil {
-			t.Outdated = true // base content gone
+			a.Outdated = true // base content gone
 			return
 		}
 		cur = out
 	} else {
 		cur, err = os.ReadFile(abs)
 		if err != nil {
-			t.Outdated = true // deleted (or unreadable) file
+			a.Outdated = true // deleted (or unreadable) file
 			return
 		}
 	}
 	curSHA := gitBlobSHA(cur)
-	if curSHA == t.BlobSHA {
+	if curSHA == a.BlobSHA {
 		return // the common case: content unchanged, one hash, no git
 	}
-	key := t.BlobSHA + ":" + curSHA
+	key := a.BlobSHA + ":" + curSHA
 	hunks, ok := h.anchorMemo.get(key)
 	if !ok {
-		old := h.reg.getAnchorBlob(t.BlobSHA)
+		old := h.reg.getAnchorBlob(a.BlobSHA)
 		if old == nil {
-			t.Outdated = true // snapshot pruned/missing — fail open
+			a.Outdated = true // snapshot pruned/missing — fail open
 			return
 		}
 		hunks, err = diffHunks(old, cur)
 		if err != nil {
-			t.Outdated = true
+			a.Outdated = true
 			return
 		}
 		h.anchorMemo.put(key, hunks)
 	}
-	t.CurrentStart, t.CurrentEnd, t.Outdated = mapRange(hunks, t.StartLine, t.EndLine)
-	if t.Outdated {
-		t.CurrentStart, t.CurrentEnd = t.StartLine, t.EndLine
+	a.CurrentStart, a.CurrentEnd, a.Outdated = mapRange(hunks, a.StartLine, a.EndLine)
+	if a.Outdated {
+		a.CurrentStart, a.CurrentEnd = a.StartLine, a.EndLine
 	}
+}
+
+// anchorThreadNow projects a thread through the shared seam.
+func (h *Host) anchorThreadNow(ws *WorkspaceInfo, top string, t *ThreadInfo) {
+	a := codeAnchor{Path: t.Path, StartLine: t.StartLine, EndLine: t.EndLine,
+		Side: t.Side, BlobSHA: t.BlobSHA}
+	h.anchorNow(ws, top, &a)
+	t.CurrentStart, t.CurrentEnd, t.Outdated = a.CurrentStart, a.CurrentEnd, a.Outdated
+}
+
+// anchorTaskNow projects a code-anchored RookTask (a review hunk leaf)
+// through the same seam. Leaves from before blobs were captured (or whose
+// file was binary/oversized at prepare) have no BlobSHA — those keep the
+// stored range and stay un-flagged: a stale range beats a lying "outdated"
+// on every old review.
+func (h *Host) anchorTaskNow(ws *WorkspaceInfo, top string, t *RookTask) {
+	t.CurrentStart, t.CurrentEnd = t.StartLine, t.EndLine
+	if t.AnchorKind != "code" || t.BlobSHA == "" {
+		return
+	}
+	a := codeAnchor{Path: t.Path, StartLine: t.StartLine, EndLine: t.EndLine,
+		Side: t.Side, BlobSHA: t.BlobSHA}
+	h.anchorNow(ws, top, &a)
+	t.CurrentStart, t.CurrentEnd, t.Outdated = a.CurrentStart, a.CurrentEnd, a.Outdated
 }

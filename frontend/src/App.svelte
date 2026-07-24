@@ -665,6 +665,7 @@
                 },
                 onOpenThread: (id) => void openThreadBuffer(id),
                 gutterBase: reviewGutterBase,
+                reviewTask: () => app.reviewRoot?.id,
             });
             editorPanes.set(leafId, pane);
             return pane;
@@ -799,6 +800,7 @@
                 },
                 onOpenThread: (id) => void openThreadBuffer(id),
                 gutterBase: reviewGutterBase,
+                reviewTask: () => app.reviewRoot?.id,
             });
             editorPanes.set(leafId, pane);
             return pane;
@@ -960,15 +962,14 @@
         }
     }
 
+    /** The review jump opens the REAL file, at the leaf's reanchored range —
+     *  the gutter (base = the review's scope base) supplies the change
+     *  context the diff pane used to. currentStart falls back to startLine
+     *  on leaves from an older host. */
     function openHunkInEditor(id: number): void {
         const h = app.reviewHunks.find((x) => x.id === id);
         if (!h?.path || !h.startLine) return;
-        void openReview({
-            path: h.path,
-            startLine: h.startLine,
-            endLine: h.endLine ?? h.startLine,
-            side: h.side ?? "modified",
-        });
+        void openFile(h.path, {line: h.currentStart || h.startLine, col: 1});
     }
 
     // Trigger the host's triage fan-out and poll scores into the store as

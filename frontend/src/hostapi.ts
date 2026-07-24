@@ -367,6 +367,8 @@ export class HostAPI {
             side?: "modified" | "original";
             base?: "head" | "branch";
             body: string;
+            /** the active review root — the host auto-links (leaf or parent) */
+            rookTaskId?: number;
         },
     ): Promise<ThreadInfo> {
         return (
@@ -719,6 +721,9 @@ export interface ThreadInfo {
     deliverError?: string;
     /** the thread-buffer tail: saved (:w) but not yet crystallized */
     draft?: string;
+    /** the review this thread hangs off: a leaf (in-hunk, blocks the gate)
+     *  or the review parent (global); absent = not review-linked */
+    rookTaskId?: number;
     resolvedBy?: "user" | "agent";
     agentReopens?: number;
     created: string;
@@ -796,10 +801,18 @@ export interface RookTask {
         note?: string;
         /** explore breadcrumbs: the column the visit landed on */
         col?: number;
+        /** review leaf: the disposition a pending flip will restore */
+        prior?: string;
     };
     created: string;
     updated: string;
     children?: RookTask[];
+    /** computed on read (code anchors with a captured blob): the stored
+     *  range mapped onto today's file — absent on leaves from older hosts,
+     *  fall back to startLine */
+    currentStart?: number;
+    currentEnd?: number;
+    outdated?: boolean;
 }
 
 /** The derived readiness of a review parent — a pure function of the children's

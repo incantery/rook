@@ -54,7 +54,11 @@ type ThreadInfo struct {
 	DeliverError string `json:"deliverError,omitempty"`
 	// The thread-buffer tail: text saved below the scissors line (:w) but
 	// not yet crystallized into a comment (threaddoc.go).
-	Draft        string          `json:"draft,omitempty"`
+	Draft string `json:"draft,omitempty"`
+	// The review this thread hangs off (0 = none): a leaf when the anchor
+	// sat inside that hunk's current range at creation (local — the leaf
+	// goes pending and blocks the gate), else the review parent (global).
+	RookTaskID   int64           `json:"rookTaskId,omitempty"`
 	ResolvedBy   string          `json:"resolvedBy,omitempty"`
 	AgentReopens int             `json:"agentReopens,omitempty"`
 	Created      time.Time       `json:"created"`
@@ -69,8 +73,8 @@ type ThreadInfo struct {
 }
 
 const threadCols = `id, workspace, path, start_line, end_line, side, blob_sha,
-	commit_sha, anchor_text, state, deliver_error, draft, resolved_by, agent_reopens,
-	created_at, updated_at, submitted_at`
+	commit_sha, anchor_text, state, deliver_error, draft, rook_task_id, resolved_by,
+	agent_reopens, created_at, updated_at, submitted_at`
 
 func scanThread(row interface{ Scan(...any) error }) (*ThreadInfo, error) {
 	var t ThreadInfo
@@ -78,7 +82,7 @@ func scanThread(row interface{ Scan(...any) error }) (*ThreadInfo, error) {
 	var submitted sql.NullString
 	if err := row.Scan(&t.ID, &t.Workspace, &t.Path, &t.StartLine, &t.EndLine,
 		&t.Side, &t.BlobSHA, &t.CommitSHA, &t.AnchorText, &t.State, &t.DeliverError,
-		&t.Draft, &t.ResolvedBy, &t.AgentReopens, &created, &updated, &submitted); err != nil {
+		&t.Draft, &t.RookTaskID, &t.ResolvedBy, &t.AgentReopens, &created, &updated, &submitted); err != nil {
 		return nil, err
 	}
 	t.Created, _ = time.Parse(time.RFC3339Nano, created)
@@ -117,10 +121,10 @@ func (r *registry) createThread(t *ThreadInfo, body string, blob []byte) (int64,
 	}
 	res, err := tx.Exec(
 		`INSERT INTO threads (workspace, path, start_line, end_line, side,
-		 blob_sha, commit_sha, anchor_text, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 blob_sha, commit_sha, anchor_text, rook_task_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.Workspace, t.Path, t.StartLine, t.EndLine, t.Side,
-		t.BlobSHA, t.CommitSHA, t.AnchorText, now, now)
+		t.BlobSHA, t.CommitSHA, t.AnchorText, t.RookTaskID, now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -486,14 +490,18 @@ func (r *registry) getAnchorBlob(sha string) []byte {
 	return content
 }
 
-// pruneAnchorBlobs drops snapshots no unresolved thread references —
-// resolved threads render from anchor_text. Called after resolves.
+// pruneAnchorBlobs drops snapshots nothing references anymore: unresolved
+// threads (resolved ones render from anchor_text) and code-anchored
+// RookTasks (review leaves re-anchor through the same blobs). Called after
+// resolves, deletes, and review re-prepares.
 func (r *registry) pruneAnchorBlobs() {
 	if r.db == nil {
 		return
 	}
 	if _, err := r.db.Exec(`DELETE FROM anchor_blobs WHERE sha NOT IN
-	           (SELECT blob_sha FROM threads WHERE state != 'resolved')`); err != nil {
+	           (SELECT blob_sha FROM threads WHERE state != 'resolved')
+	         AND sha NOT IN
+	           (SELECT blob_sha FROM rook_tasks WHERE blob_sha != '')`); err != nil {
 		log.Printf("threads: prune blobs: %v", err)
 	}
 }
@@ -527,7 +535,7 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 		list := h.reg.listThreads(name,
 			r.URL.Query().Get("state"), r.URL.Query().Get("path"))
 		for _, t := range list {
-			h.anchorNow(ws, top, t)
+			h.anchorThreadNow(ws, top, t)
 		}
 		if list == nil {
 			list = []*ThreadInfo{}
@@ -547,6 +555,9 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 		Side      string
 		Base      string
 		Body      string
+		// the active review root, when one is open — the thread auto-links
+		// to a leaf (in-hunk) or the parent (elsewhere); see resolveThreadLink
+		RookTaskID int64 `json:"rookTaskId"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	if req.Side == "" {
@@ -619,18 +630,24 @@ func (h *Host) handleWorkspaceThreads(w http.ResponseWriter, r *http.Request, na
 		commit = strings.TrimSpace(string(out))
 	}
 	sha := gitBlobSHA(content)
+	linkID := int64(0)
+	if req.RookTaskID > 0 {
+		linkID = h.resolveThreadLink(ws, top, req.RookTaskID, req.Path, req.StartLine, req.EndLine)
+	}
 	id, err := h.reg.createThread(&ThreadInfo{
 		Workspace: name, Path: req.Path,
 		StartLine: req.StartLine, EndLine: req.EndLine,
 		Side: req.Side, BlobSHA: sha, CommitSHA: commit,
 		AnchorText: strings.Join(lines[req.StartLine-1:req.EndLine], "\n"),
+		RookTaskID: linkID,
 	}, req.Body, content)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	h.syncLinkedLeaf(linkID)
 	t := h.reg.getThread(id)
-	h.anchorNow(ws, top, t)
+	h.anchorThreadNow(ws, top, t)
 	h.notifyThreads(name)
 	writeJSON(w, t)
 }
@@ -659,6 +676,7 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 		case nil:
 			h.reg.pruneAnchorBlobs()
 			h.notifyThreads(t.Workspace)
+			h.syncLinkedLeaf(t.RookTaskID) // a gt-abort must not leave a leaf pending
 			w.WriteHeader(http.StatusNoContent)
 		case errThreadState:
 			http.Error(w, "thread has content — resolve it instead", http.StatusConflict)
@@ -734,6 +752,11 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 		case nil:
 			h.notifyThreadsFor(id)   // before the prune, while the row is still readable
 			h.reg.pruneAnchorBlobs() // resolved threads release their snapshots
+			// the last open thread on a review leaf unblocks it (prior
+			// disposition restored) — the gate follows the conversation
+			if t := h.reg.getThread(id); t != nil {
+				h.syncLinkedLeaf(t.RookTaskID)
+			}
 			w.WriteHeader(http.StatusNoContent)
 		case errThreadState:
 			http.Error(w, "already resolved", http.StatusConflict)
@@ -836,6 +859,10 @@ func (h *Host) handleThread(w http.ResponseWriter, r *http.Request) {
 		switch err := h.reg.reopenThread(id, req.By); err {
 		case nil:
 			h.notifyThreadsFor(id)
+			// a reopened conversation re-blocks its review leaf
+			if t := h.reg.getThread(id); t != nil {
+				h.syncLinkedLeaf(t.RookTaskID)
+			}
 			w.WriteHeader(http.StatusNoContent)
 		case errThreadState:
 			http.Error(w, "thread is not resolved", http.StatusConflict)

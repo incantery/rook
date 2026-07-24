@@ -53,6 +53,10 @@
     const detail = $derived(hunk?.detail ?? {});
     const lines = $derived((hunk?.anchorText ?? "").split("\n"));
     const actions = $derived(qf.context?.actions ?? []);
+    // threads linked to this leaf — open ones are what "pending" means here
+    const linkedOpen = $derived(
+        app.threads.filter((t) => t.rookTaskId === id && t.state !== "resolved").length,
+    );
 
     let note = $state("");
     let noteBusy = $state(false);
@@ -158,7 +162,10 @@
                     class="text-[0.6875rem] uppercase tracking-wider {TONE[hunk.state] ??
                         'text-lo'}"
                 >
-                    {hunk.state}
+                    {hunk.state}{#if linkedOpen > 0}
+                        <span class="text-acc normal-case tracking-normal"
+                            >· {linkedOpen} open thread{linkedOpen === 1 ? "" : "s"}</span
+                        >{/if}
                 </div>
             </div>
             <span class="flex-1"></span>

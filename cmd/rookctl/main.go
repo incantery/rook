@@ -1219,6 +1219,11 @@ type taskJSON struct {
 	AnchorRef  string          `json:"anchorRef"`
 	Detail     json.RawMessage `json:"detail"`
 	Children   []taskJSON      `json:"children"`
+	// computed on read: the stored range mapped onto today's file
+	// (0/absent on hosts or leaves that predate blob capture)
+	CurrentStart int  `json:"currentStart,omitempty"`
+	CurrentEnd   int  `json:"currentEnd,omitempty"`
+	Outdated     bool `json:"outdated,omitempty"`
 }
 
 type gateJSON struct {

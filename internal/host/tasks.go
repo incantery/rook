@@ -46,6 +46,14 @@ type RookTask struct {
 	Created time.Time       `json:"created"`
 	Updated time.Time       `json:"updated"`
 
+	// Computed on read through the HTTP surface (code anchors with a
+	// captured blob): the stored range mapped onto today's file — the same
+	// seam threads use (reanchor.go anchorTaskNow). Zero-valued when the
+	// leaf predates blob capture; clients fall back to StartLine.
+	CurrentStart int  `json:"currentStart,omitempty"`
+	CurrentEnd   int  `json:"currentEnd,omitempty"`
+	Outdated     bool `json:"outdated,omitempty"`
+
 	Children []*RookTask `json:"children,omitempty"`
 }
 

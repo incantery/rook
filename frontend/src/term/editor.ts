@@ -325,6 +325,9 @@ export interface EditorPaneOpts {
     /** what the git gutter diffs against: undefined = HEAD; "branch" or an
      *  explicit ref when a review is open (chrome knows, the pane asks) */
     gutterBase?: () => string | undefined;
+    /** the active review root, if one is open — a gt-created thread carries
+     *  it so the host can auto-link (leaf in-hunk, parent elsewhere) */
+    reviewTask?: () => number | undefined;
     /** the terminal's font — the pane should read like the rest of rook */
     font: {family: string; size: number};
     /** surface a failure where the user is looking (titlebar flash) */
@@ -1709,6 +1712,7 @@ export class EditorPane implements PaneContent {
                 side: band.side,
                 base: band.side === "original" ? this.base : undefined,
                 body: "", // the first words arrive as the buffer's tail
+                rookTaskId: this.opts.reviewTask?.(),
             });
             if (this.disposed) return;
             this.opts.onOpenThread?.(t.id);

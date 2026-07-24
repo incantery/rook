@@ -23,6 +23,10 @@
     const DONE = new Set(["approved", "rejected", "deferred"]);
 
     const t = $derived(app.reviewHunks.find((h) => h.id === id));
+    // threads linked to THIS leaf (gt inside its hunk while the review was
+    // open); open ones are why the ring pulses pending
+    const linked = $derived(app.threads.filter((th) => th.rookTaskId === id));
+    const openLinked = $derived(linked.filter((th) => th.state !== "resolved").length);
 </script>
 
 {#if t}
@@ -38,6 +42,15 @@
             >{/if}</span
     >
     <span class="min-w-0 flex-1 truncate text-[0.625rem] text-lo">{t.detail?.category ?? ""}</span>
+    {#if linked.length > 0}
+        <span
+            class={"shrink-0 rounded px-1 font-mono text-[0.5625rem] " +
+                (openLinked > 0 ? "bg-acc/15 text-acc" : "bg-fg/10 text-lo")}
+            title={openLinked > 0
+                ? `${openLinked} open thread${openLinked === 1 ? "" : "s"}`
+                : "threads resolved"}>⊙ {linked.length}</span
+        >
+    {/if}
     {#if t.detail?.score?.risk}
         <span
             class="shrink-0 rounded bg-fg/10 px-1 font-mono text-[0.5625rem] text-dim"

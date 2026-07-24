@@ -46,7 +46,25 @@ func (h *Host) handleWorkspaceReview(w http.ResponseWriter, r *http.Request, nam
 	}
 	// return the tree and its gate in one payload — the caller renders both
 	parent.Children = h.reg.childrenOf(parent.ID)
+	h.anchorTasks(name, parent.Children)
 	writeJSON(w, map[string]any{"task": parent, "gate": h.reviewGateFor(parent)})
+}
+
+// anchorTasks maps code-anchored tasks onto today's files — the read-time
+// re-anchoring threads get, through the same seam (anchorTaskNow). Fails
+// open when the workspace has no repo: stored ranges stand.
+func (h *Host) anchorTasks(wsName string, tasks []*RookTask) {
+	ws := h.reg.get(wsName)
+	if ws == nil || ws.Root == "" {
+		return
+	}
+	top, err := repoTop(ws.Root)
+	if err != nil {
+		return
+	}
+	for _, t := range tasks {
+		h.anchorTaskNow(ws, top, t)
+	}
 }
 
 // handleWorkspaceTasks is GET /workspaces/{name}/tasks?workType= — the root
@@ -57,6 +75,9 @@ func (h *Host) handleWorkspaceTasks(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 	roots := h.reg.listRootTasks(name, r.URL.Query().Get("workType"))
+	for _, t := range roots {
+		h.anchorTasks(name, t.Children)
+	}
 	type rootWithGate struct {
 		*RookTask
 		Gate *reviewGate `json:"gate,omitempty"`
@@ -93,6 +114,7 @@ func (h *Host) handleTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		t.Children = h.reg.childrenOf(t.ID)
+		h.anchorTasks(t.Workspace, append([]*RookTask{t}, t.Children...))
 		writeJSON(w, struct {
 			*RookTask
 			Scoring bool `json:"scoring,omitempty"`

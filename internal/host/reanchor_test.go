@@ -80,14 +80,14 @@ func TestAnchorNow(t *testing.T) {
 		BlobSHA: sha, CurrentStart: 3, CurrentEnd: 4}
 
 	// same content → fast path, no change
-	h.anchorNow(ws, repo, th)
+	h.anchorThreadNow(ws, repo, th)
 	if th.CurrentStart != 3 || th.CurrentEnd != 4 || th.Outdated {
 		t.Fatalf("same-sha: %+v", th)
 	}
 
 	// two lines inserted above → range rides down
 	os.WriteFile(filepath.Join(repo, "f.txt"), []byte("a\nb\nl1\nl2\nl3\nl4\nl5\n"), 0o644)
-	h.anchorNow(ws, repo, th)
+	h.anchorThreadNow(ws, repo, th)
 	if th.CurrentStart != 5 || th.CurrentEnd != 6 || th.Outdated {
 		t.Fatalf("shift: %+v", th)
 	}
@@ -95,7 +95,7 @@ func TestAnchorNow(t *testing.T) {
 	// anchored line edited → outdated, range stays at stored positions
 	th.CurrentStart, th.CurrentEnd, th.Outdated = th.StartLine, th.EndLine, false
 	os.WriteFile(filepath.Join(repo, "f.txt"), []byte("l1\nl2\nCHANGED\nl4\nl5\n"), 0o644)
-	h.anchorNow(ws, repo, th)
+	h.anchorThreadNow(ws, repo, th)
 	if !th.Outdated || th.CurrentStart != 3 {
 		t.Fatalf("overlap: %+v", th)
 	}
@@ -103,7 +103,7 @@ func TestAnchorNow(t *testing.T) {
 	// file gone → outdated
 	th.Outdated = false
 	os.Remove(filepath.Join(repo, "f.txt"))
-	h.anchorNow(ws, repo, th)
+	h.anchorThreadNow(ws, repo, th)
 	if !th.Outdated {
 		t.Fatalf("deleted file: %+v", th)
 	}
@@ -111,7 +111,7 @@ func TestAnchorNow(t *testing.T) {
 	// blob missing (pruned) → outdated, never an error
 	th2 := &ThreadInfo{Workspace: "src", Path: "a.txt", StartLine: 1, EndLine: 1,
 		BlobSHA: "nope", CurrentStart: 1, CurrentEnd: 1}
-	h.anchorNow(ws, repo, th2)
+	h.anchorThreadNow(ws, repo, th2)
 	if !th2.Outdated {
 		t.Fatalf("missing blob: %+v", th2)
 	}
@@ -126,7 +126,7 @@ func TestAnchorNow(t *testing.T) {
 	os.WriteFile(filepath.Join(repo, "a.txt"), []byte("edited\n"), 0o644)
 	th3 := &ThreadInfo{Workspace: "src", Path: "a.txt", StartLine: 1, EndLine: 1,
 		Side: "original", BlobSHA: helloSHA, CurrentStart: 1, CurrentEnd: 1}
-	h.anchorNow(ws, repo, th3)
+	h.anchorThreadNow(ws, repo, th3)
 	if th3.Outdated || th3.CurrentStart != 1 || th3.CurrentEnd != 1 {
 		t.Fatalf("original-side against diverged tree: %+v", th3)
 	}

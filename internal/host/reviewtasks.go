@@ -11,6 +11,7 @@ package host
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -128,6 +129,10 @@ type reviewScope struct {
 	baseRef string   // informational, stored in detail
 	verb    string   // "commit" | "next steps" | "PR"
 	args    []string // git args producing the diff
+	// newRef is where the diff's NEW side lives: a commit sha for the
+	// commit scope, "" for the working tree — the content the leaves'
+	// anchor blobs snapshot (reanchor's shared seam).
+	newRef string
 }
 
 func shortSHA(s string) string {
@@ -159,7 +164,7 @@ func (h *Host) resolveReviewScope(ws *WorkspaceInfo, top, scope, arg string) (re
 			parent = emptyTreeSHA
 		}
 		return reviewScope{key: "commit:" + sha, label: "commit " + shortSHA(sha), baseRef: parent,
-			verb: "next steps", args: []string{"diff", parent, sha}}, nil
+			verb: "next steps", args: []string{"diff", parent, sha}, newRef: sha}, nil
 	case "branch":
 		base := h.reviewBaseFor(ws, top, "branch")
 		if base.mode != "branch" {
@@ -203,16 +208,59 @@ func (h *Host) prepareReview(ws *WorkspaceInfo, top, scope, arg string) (*RookTa
 	detail, _ := json.Marshal(map[string]string{
 		"scope": sc.key, "base": sc.baseRef, "verb": sc.verb, "label": sc.label,
 	})
-	parentID, err := h.reg.createReviewTree(ws.Name, sc, string(detail), commit, hunks, prior)
+	blobs := h.captureReviewBlobs(top, sc, hunks)
+	parentID, err := h.reg.createReviewTree(ws.Name, sc, string(detail), commit, hunks, prior, blobs)
 	if err != nil {
 		return nil, err
 	}
+	// the replaced tree's blobs (if any) are unreferenced now
+	h.reg.pruneAnchorBlobs()
 	return h.reg.getTask(parentID), nil
 }
 
-// createReviewTree writes the parent + one leaf per hunk in a single tx.
+// captureReviewBlobs snapshots the NEW side of each touched file, so review
+// leaves re-anchor through the same blob-diff seam threads use. A file that
+// can't be read (deleted in the diff), is binary, or exceeds the anchor cap
+// simply gets no blob — its leaves keep the stored range, fail open.
+func (h *Host) captureReviewBlobs(top string, sc reviewScope, hunks []reviewHunk) map[string]anchorBlob {
+	out := map[string]anchorBlob{}
+	for _, hk := range hunks {
+		if _, done := out[hk.path]; done {
+			continue
+		}
+		var content []byte
+		var err error
+		if sc.newRef != "" {
+			content, err = gitOut(top, reviewTimeout, "show", sc.newRef+":"+hk.path)
+		} else {
+			abs, cerr := confinePath(top, hk.path)
+			if cerr != nil {
+				continue
+			}
+			content, err = os.ReadFile(abs)
+		}
+		if err != nil {
+			continue
+		}
+		if _, binary, _ := capSide(content); binary || len(content) > reviewMaxSide {
+			continue
+		}
+		out[hk.path] = anchorBlob{sha: gitBlobSHA(content), content: content}
+	}
+	return out
+}
+
+// anchorBlob is one captured snapshot headed for anchor_blobs.
+type anchorBlob struct {
+	sha     string
+	content []byte
+}
+
+// createReviewTree writes the parent + one leaf per hunk in a single tx,
+// blobs included — the blob lands before any leaf referencing it, the same
+// ordering createThread guarantees.
 func (r *registry) createReviewTree(ws string, sc reviewScope, detail, commit string,
-	hunks []reviewHunk, prior map[string]string) (int64, error) {
+	hunks []reviewHunk, prior map[string]string, blobs map[string]anchorBlob) (int64, error) {
 	if r.db == nil {
 		return 0, fmt.Errorf("no registry db")
 	}
@@ -222,6 +270,12 @@ func (r *registry) createReviewTree(ws string, sc reviewScope, detail, commit st
 		return 0, err
 	}
 	defer tx.Rollback()
+	for _, b := range blobs {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO anchor_blobs (sha, content) VALUES (?, ?)`,
+			b.sha, b.content); err != nil {
+			return 0, err
+		}
+	}
 	parentID, err := insertTask(tx, &RookTask{
 		Workspace: ws, WorkType: "review", State: reviewParentState,
 		Title: sc.label, AnchorKind: "ref", AnchorRef: sc.key,
@@ -244,11 +298,92 @@ func (r *registry) createReviewTree(ws string, sc reviewScope, detail, commit st
 			Title:      fmt.Sprintf("%s:%d", hk.path, hk.newStart),
 			AnchorKind: "code", Path: hk.path, StartLine: hk.newStart, EndLine: end,
 			Side: "modified", CommitSHA: commit, AnchorText: hk.body,
+			BlobSHA: blobs[hk.path].sha,
 		}, now); err != nil {
 			return 0, err
 		}
 	}
 	return parentID, tx.Commit()
+}
+
+// resolveThreadLink picks what a review-linked thread attaches to:
+// anchored inside a leaf's CURRENT range → that leaf (a local comment — it
+// flips the leaf pending and blocks the gate); anywhere else → the review
+// parent (a global comment). The local-vs-global distinction, for free.
+// Unknown or foreign roots fail open to no link at all.
+func (h *Host) resolveThreadLink(ws *WorkspaceInfo, top string, rootID int64,
+	path string, start, end int) int64 {
+	root := h.reg.getTask(rootID)
+	if root == nil || root.WorkType != "review" || root.ParentID != 0 ||
+		root.Workspace != ws.Name {
+		return 0
+	}
+	for _, c := range h.reg.childrenOf(root.ID) {
+		if c.AnchorKind != "code" || c.Path != path {
+			continue
+		}
+		h.anchorTaskNow(ws, top, c)
+		if c.Outdated {
+			continue
+		}
+		if start <= c.CurrentEnd && end >= c.CurrentStart {
+			return c.ID
+		}
+	}
+	return root.ID
+}
+
+// syncLinkedLeaf recomputes a review leaf's state from its linked threads:
+// any open thread keeps it pending (the gate stays closed — reviewBlocking
+// finally has something setting the state it always counted); the last
+// resolve restores the prior disposition. Creation, resolve, reopen and the
+// gt-abort delete all route through here, so the flip can't drift.
+func (h *Host) syncLinkedLeaf(taskID int64) {
+	if taskID == 0 {
+		return
+	}
+	leaf := h.reg.getTask(taskID)
+	if leaf == nil || leaf.WorkType != "review" || leaf.ParentID == 0 {
+		return // parent links carry no state — a global comment doesn't gate
+	}
+	if h.reg.openThreadsLinkedTo(taskID) > 0 {
+		if leaf.State == reviewStatePending {
+			return
+		}
+		prior, _ := json.Marshal(leaf.State)
+		if err := h.reg.mergeTaskDetail(leaf.ID, map[string]json.RawMessage{"prior": prior}); err != nil {
+			return // don't flip a state we couldn't remember
+		}
+		_ = h.reg.setTaskState(leaf.ID, reviewStatePending)
+		return
+	}
+	if leaf.State != reviewStatePending {
+		return
+	}
+	var d struct {
+		Prior string `json:"prior"`
+	}
+	json.Unmarshal(leaf.Detail, &d)
+	restore := d.Prior
+	if !validReviewLeafState(restore) || restore == reviewStatePending {
+		restore = reviewStateProposed
+	}
+	_ = h.reg.setTaskState(leaf.ID, restore)
+}
+
+// openThreadsLinkedTo counts a task's unresolved threads — what keeps a
+// review leaf pending.
+func (r *registry) openThreadsLinkedTo(taskID int64) int {
+	if r.db == nil {
+		return 0
+	}
+	var n int
+	if err := r.db.QueryRow(
+		`SELECT COUNT(*) FROM threads WHERE rook_task_id = ? AND state != 'resolved'`,
+		taskID).Scan(&n); err != nil {
+		return 0
+	}
+	return n
 }
 
 // reviewGate is the derived readiness of a review parent — a pure function of
