@@ -57,3 +57,64 @@
 - [ ] A11y text mirror (canvas has no readable text; DOM renderer is the accessible fallback)
 - [ ] Theme-change re-read of CSS vars (palette swap currently needs a reload)
 - [ ] Key-to-pixel latency probe to settle the DOM-vs-WebGL headed measurement asymmetry
+
+# Plugins — PARKED (2026-07-25), and what the discussion actually found
+
+Kind two was designed and then deliberately not built. The 07-20 language spec
+deferred the generic plugin API until a second kind existed to design it
+against, and the candidate (user "glue" — hooks, sources, composite commands)
+had ZERO implementations. Designing against one real case plus one imagined one
+is the thing `internal/agent/engine.go` refuses in as many words: *"the shape is
+pulled from the pair, not designed ahead of a third."* The draft spec was
+written and then deleted on purpose; these four findings are the part that
+survives any framing, and each cost real archaeology to reach.
+
+- [ ] **Locus is three questions, not one.** "Is this plugin backend or frontend"
+      is the wrong axis — a plugin is a *process*, which is neither. Every
+      contribution separately has: where its CODE runs (always out-of-process,
+      never the webview), where its DATA comes from (host: fs/git/subprocess/
+      network — or frontend: live buffer, cursor, selection, viewport, mode),
+      and where its EFFECT lands (host state or the view). `language` proves all
+      three can differ: gopls is a host child, the buffer text is frontend data
+      shipped in the request's `text` field, the effect is a Monaco hover. The
+      design move that follows: rook declares each contribution point's locus;
+      a plugin fills in a shape and never picks a side. Host is the right
+      default, for a thesis reason before a performance one — a frontend-only
+      contribution is invisible to claude and rookctl.
+- [ ] **`rows + preview + actions` has three independent witnesses.** `FinderSource`
+      (row/preview/actions), `QfContext` (Row/Detail/actions), and the ask form
+      (options/preview/selection) converged on the same shape at different times
+      for different reasons, with nobody designing a DSL. If there is a
+      presentation contract hiding in rook, that is its outline — and the ask
+      form already proves the hard half: described as pure JSON by a process
+      that knows nothing of rook's tree, rendered natively in a split AND on a
+      phone. That makes `presentation` a far better second REAL kind than glue,
+      and it is obtained by observing rather than building.
+- [ ] **Commands have no parameters, and that breaks three things at once.**
+      `Command.run` is `() => void`. So glue can't express arguments (`finder.open`
+      — which source?), MCP `tools/list` would project 46 zero-argument tools
+      (the interesting agent verbs are all parameterized), and `rookctl cmd run`
+      has nowhere to put them. The fix is one artifact serving all three: an
+      input schema on `Command`, which is exactly what MCP needs for
+      `inputSchema`. Whenever the registry moves host-side, this lands in the
+      same slice or not at all.
+- [ ] **The repo layer must never supply `exec`.** A `.rook/config` arrives by
+      `git clone`. If cloning a repo could register a `file.save` hook that
+      execs a binary, rook has shipped arbitrary-code-execution-on-clone.
+      `Config.LSPRefused` already enforces the equivalent for argv — but only
+      over `lsp*` keys, and that bound is the thing to preserve, not rebuild,
+      the moment config-driven behaviour extends past LSP.
+
+Decisions reached in the discussion, unbuilt and non-binding: glue as kind two,
+expressed as data (declarative hooks are statically indexable — which is *why*
+VS Code needed `activationEvents` and rook wouldn't); the command registry moves
+to Go with a `locus: window|host` split, keybinding dispatch staying local so
+nothing lands on the keystroke path; live editor state reaches a plugin by being
+shipped OUT in the request (LSP's contract generalized), never by plugin code
+entering the webview; and third-party-readiness frozen only where retrofitting
+is brutal — isolation boundary, plugin-qualified identity, permission scopes,
+`api = 1` — leaving the contribution SHAPES explicitly provisional.
+
+- [ ] Revisit trigger: a second REAL kind exists. Watch for it in the
+      presentation direction (asks/RUI/"dynamic web interfaces"), which already
+      ships, rather than inventing one.
