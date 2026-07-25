@@ -15,6 +15,19 @@ form adds an "Other" free-text row on its own). Write exactly one short
 line before the call — e.g. "Asked in rook →" — and do not restate the
 questions or options in text.
 
+The form does more than a list of radio buttons, so use it:
+
+  multiSelect:true   several options can apply together — "pick as many
+                     as apply". An empty `selected` in the answer means
+                     they ticked none, which is a real answer.
+  preview            on an option: a concrete artifact (ASCII mockup,
+                     code snippet, config, diagram) shown verbatim in a
+                     panel beside the rows. Reach for it whenever the
+                     choice is really between two things worth reading.
+  recommended:true   at most one option — the cursor starts there, and in
+                     a multiSelect it starts ticked.
+  no options at all  a free-text question: naming, a value, a sentence.
+
 The ask tool returns immediately ({"askId":…,"pending":true}); it does not
 wait. If you have other useful work that doesn't depend on the answer,
 keep working. If everything depends on it, end your turn saying you're

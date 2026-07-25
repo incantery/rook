@@ -8,8 +8,7 @@
 import {mount, unmount} from "svelte";
 
 import AskView from "../AskView.svelte";
-import type {AskAnswer} from "../AskView.svelte";
-import type {AskQuestion} from "./manager";
+import type {AskAnswer, AskQuestion} from "../askform";
 
 import type {PaneContent} from "./manager";
 

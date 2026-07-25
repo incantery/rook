@@ -4,10 +4,16 @@
 // keeps its window while the question gets its own.
 //
 // Questions ride in as JSON — an argument or stdin — shaped like Claude
-// Code's AskUserQuestion input:
+// Code's AskUserQuestion input, plus what rook's form can do that a TUI
+// cannot (mcp.go's schema is the full contract):
 //
 //	{"questions":[{"question":"…","header":"…","multiSelect":false,
-//	  "options":[{"label":"…","description":"…"}]}]}
+//	  "options":[{"label":"…","description":"…",
+//	              "preview":"an artifact, shown verbatim beside the rows",
+//	              "recommended":true}]}]}
+//
+// Every added field is optional, and so is "options" itself — a question
+// with none is a free-text box.
 //
 // The answer JSON prints to stdout; exit 0 = answered, 1 = dismissed.
 // The MCP `ask` tool (mcp.go) is this same flow behind a tools/call.

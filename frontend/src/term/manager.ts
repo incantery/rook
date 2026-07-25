@@ -13,6 +13,7 @@
 // lives in manager-owned window containers and is removed only when its
 // host session dies — screen and pane switches are CSS, never unmounts.
 
+import type {AskQuestion} from "../askform";
 import type {HostAPI, SessionInfo} from "../hostapi";
 import {
     decodeServerMessage,
@@ -84,14 +85,11 @@ export interface EditRequest {
     paths: string[] | null;
 }
 
-/** One question of an ask — Claude Code's AskUserQuestion shape, carried
- *  verbatim from the asker through the host (ask.go keeps it opaque). */
-export interface AskQuestion {
-    question: string;
-    header?: string;
-    multiSelect?: boolean;
-    options: {label: string; description?: string}[];
-}
+/** One question of an ask — Claude Code's AskUserQuestion shape plus rook's
+ *  own fields (previews, recommended, option-less free text), carried
+ *  verbatim from the asker through the host (ask.go keeps it opaque). The
+ *  shape and its rules live with the form: askform.ts. */
+export type {AskQuestion};
 
 /** An ask decoded from the session's frame socket: an agent in that
  *  session wants the human to answer in a split beside its pane. */

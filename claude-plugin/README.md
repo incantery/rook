@@ -41,3 +41,17 @@ After changing the plugin source, re-sync the installed copy:
 
 A dismissed ask answers `{"canceled":true}` and claude proceeds on its
 own judgment. There is no timeout to configure: the ask call never waits.
+
+The form is more than a list of radio buttons, and the session-context
+hook teaches claude to use all of it:
+
+| field                | what it does                                                  |
+| -------------------- | ------------------------------------------------------------- |
+| `multiSelect: true`  | space toggles any number of rows; an empty `selected` in the answer means "none of these" — a decision, not a dismissal |
+| `preview` (option)   | a concrete artifact — mockup, snippet, config — shown verbatim in a panel that follows the cursor |
+| `recommended` (option) | the cursor starts there, and in a multiSelect it starts ticked, so Enter alone is a complete answer |
+| no `options` at all  | a free-text question: the input is the whole form              |
+
+Every path has a pointer twin — rows click, and multi-select and
+free-text commit with the Send button — because the same question can be
+answered on a phone through rook-server.

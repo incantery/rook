@@ -163,6 +163,147 @@ test("no live claim — the doorbell stays silent and the answer waits in the dr
     expect(drained.answered.map((a) => a.askId)).toEqual([askId]);
 });
 
+const MULTI = JSON.stringify({
+    questions: [
+        {
+            question: "Which parts deserve specs next?",
+            header: "Coverage",
+            multiSelect: true,
+            options: [
+                {label: "multiSelect UI"},
+                {label: "Pending-asks list"},
+                {label: "MCP timeouts"},
+            ],
+        },
+    ],
+});
+
+test("multiSelect: space ticks several, Enter sends them all", async ({page, rook}) => {
+    const root = await rook.repo({files: {"ask.json": MULTI + "\n"}});
+    await rook.open({name: `ask-multi-${Date.now()}`, root});
+    await rook.shellReady();
+
+    await rook.ex(`${ROOKCTL} ask < ask.json; echo "ask exit=$?"`);
+    const form = page.locator("[data-ask-root]");
+    await expect(form).toBeVisible({timeout: 15_000});
+    // the mode is visible before you touch anything
+    await expect(form).toContainText("☐");
+
+    // space toggles the focused row, j moves, space again — neither commits
+    await page.keyboard.press(" ");
+    await page.keyboard.press("j");
+    await page.keyboard.press(" ");
+    await expect(form).toBeVisible();
+
+    await page.keyboard.press("Enter");
+    await expect(form).toHaveCount(0);
+    await rook.expectScreen(/"selected":\["multiSelect UI","Pending-asks list"\]/);
+    await rook.expectScreen(/ask exit=0/);
+});
+
+test("multiSelect commits with the pointer — no keyboard needed", async ({page, rook}) => {
+    const root = await rook.repo({files: {"ask.json": MULTI + "\n"}});
+    await rook.open({name: `ask-multi-click-${Date.now()}`, root});
+    await rook.shellReady();
+
+    await rook.ex(`${ROOKCTL} ask < ask.json; echo "ask exit=$?"`);
+    const form = page.locator("[data-ask-root]");
+    await expect(form).toBeVisible({timeout: 15_000});
+
+    // clicking a row in a multi TOGGLES — it must not commit the question
+    await form.getByRole("option").nth(2).click();
+    await expect(form).toBeVisible();
+    await form.locator("[data-ask-send]").click();
+
+    await expect(form).toHaveCount(0);
+    await rook.expectScreen(/"selected":\["MCP timeouts"\]/);
+    await rook.expectScreen(/ask exit=0/);
+});
+
+test("multiSelect: sending nothing is 'none of these', not a dismissal", async ({page, rook}) => {
+    const root = await rook.repo({files: {"ask.json": MULTI + "\n"}});
+    await rook.open({name: `ask-none-${Date.now()}`, root});
+    await rook.shellReady();
+
+    await rook.ex(`${ROOKCTL} ask < ask.json; echo "ask exit=$?"`);
+    const form = page.locator("[data-ask-root]");
+    await expect(form).toBeVisible({timeout: 15_000});
+
+    const send = form.locator("[data-ask-send]");
+    await expect(send).toContainText("none of these");
+    await send.click();
+
+    await expect(form).toHaveCount(0);
+    await rook.expectScreen(/"selected":\[\]/);
+    // answered, not canceled: exit 0, and no canceled flag anywhere
+    await rook.expectScreen(/ask exit=0/);
+    expect(await rook.screen()).not.toContain("canceled");
+});
+
+const PREVIEWS = JSON.stringify({
+    questions: [
+        {
+            question: "Which layout?",
+            header: "Layout",
+            options: [
+                {label: "Stacked", preview: "+--------+\n| rows   |\n+--------+"},
+                {label: "Side by side", recommended: true, preview: "+---+ +---+\n| a | | b |"},
+            ],
+        },
+    ],
+});
+
+test("previews render the focused option's artifact; recommended starts under the cursor", async ({
+    page,
+    rook,
+}) => {
+    const root = await rook.repo({files: {"ask.json": PREVIEWS + "\n"}});
+    await rook.open({name: `ask-preview-${Date.now()}`, root});
+    await rook.shellReady();
+
+    await rook.ex(`${ROOKCTL} ask < ask.json; echo "ask exit=$?"`);
+    const form = page.locator("[data-ask-root]");
+    await expect(form).toBeVisible({timeout: 15_000});
+    await expect(form).toContainText("rec");
+
+    // the cursor starts on the recommended row, so the panel shows ITS
+    // artifact before anyone moves
+    const preview = form.locator("[data-ask-preview]");
+    await expect(preview).toContainText("| a | | b |");
+
+    // …and following the cursor is the whole point
+    await page.keyboard.press("k");
+    await expect(preview).toContainText("| rows   |");
+
+    // Enter takes the row under the cursor: a recommendation costs one key
+    await page.keyboard.press("j");
+    await page.keyboard.press("Enter");
+    await rook.expectScreen(/"selected":\["Side by side"\]/);
+    await rook.expectScreen(/ask exit=0/);
+});
+
+const FREE_TEXT = JSON.stringify({
+    questions: [{question: "What should the command be called?", header: "Naming"}],
+});
+
+test("a question with no options is a free-text box", async ({page, rook}) => {
+    const root = await rook.repo({files: {"ask.json": FREE_TEXT + "\n"}});
+    await rook.open({name: `ask-free-${Date.now()}`, root});
+    await rook.shellReady();
+
+    await rook.ex(`${ROOKCTL} ask < ask.json; echo "ask exit=$?"`);
+    const form = page.locator("[data-ask-root]");
+    await expect(form).toBeVisible({timeout: 15_000});
+    // no rows at all — the input IS the question, and it already has focus
+    await expect(form.getByRole("option")).toHaveCount(0);
+
+    await page.keyboard.type("rookctl summon");
+    await page.keyboard.press("Enter");
+    await expect(form).toHaveCount(0);
+    await rook.expectScreen(/"other":"rookctl summon"/);
+    await rook.expectScreen(/ask exit=0/);
+});
+
 test("an owed doorbell rings when a claude finally claims the window", async ({page, rook}) => {
     const root = await rook.repo({files: {"a.txt": "x\n"}});
     const ws = await rook.open({name: `ask-owed-${Date.now()}`, root});
