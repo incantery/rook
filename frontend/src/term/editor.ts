@@ -12,6 +12,7 @@ import type {ChangedFile, GutterHunk, HostAPI, LspLocation, ThreadInfo} from "..
 import type {PaneContent} from "./manager";
 import type * as monacoTypes from "monaco-editor";
 import {legendModifiers, legendTypes, unifyTokens} from "../highlight/semantic";
+import {commentsAt} from "../highlight/comments";
 import {ThreadBand} from "./threads";
 import {vimbar} from "./vimbar.svelte";
 import {RookVimStatusBar} from "./vimstatus";
@@ -1423,18 +1424,30 @@ export class EditorPane implements PaneContent {
     }
 
     /** gc's work (and editor.comment's): Monaco's own comment toggle over
-     *  whatever the vim operator just selected. Monaco reads the comment
-     *  tokens off the language CONFIGURATION, not the grammar — a language
-     *  registered by TextMate alone has none, and the action silently does
-     *  nothing there (see highlight/textmate.ts). Read-only panes flash
-     *  rather than no-op: a verb that does nothing without saying why is
-     *  worse than a verb that isn't bound. */
+     *  whatever the vim operator just selected. Read-only panes flash rather
+     *  than no-op — a verb that does nothing without saying why is worse
+     *  than a verb that isn't bound.
+     *
+     *  The svelte wrinkle: one file, three languages, and Monaco's comment
+     *  rule is per-LANGUAGE, so the token has to be chosen for the position
+     *  the cursor is actually in (`//` in <script>, `/* *\/` in <style>,
+     *  `<!-- -->` in markup) and installed just before the action runs.
+     *  Re-registering the configuration is cheap and the action reads it
+     *  synchronously — which buys Monaco's own toggle logic (uncommenting,
+     *  indentation, multi-line selections) instead of a second copy of it. */
     toggleComment(): void {
         const ed = this.editor;
-        if (!ed?.getModel()) return;
+        const model = ed?.getModel();
+        if (!ed || !model) return;
         if (!this.editable) {
             this.opts.onFlash(this.truncated ? "truncated — read-only" : "read-only");
             return;
+        }
+        const m = this.monaco;
+        if (m) {
+            const line = ed.getSelection()?.startLineNumber ?? ed.getPosition()?.lineNumber ?? 1;
+            const rule = commentsAt(model.getLanguageId(), model.getValue(), line);
+            if (rule) m.languages.setLanguageConfiguration(model.getLanguageId(), {comments: rule});
         }
         void ed.getAction("editor.action.commentLine")?.run();
     }

@@ -23,11 +23,19 @@ import {INITIAL, Registry, parseRawGrammar, type IGrammar, type StateStack} from
 import {createOnigScanner, createOnigString, loadWASM} from "vscode-oniguruma";
 import {GRAMMARS} from "./table";
 import {pickScope} from "./scope";
+import {BASE_COMMENTS} from "./comments";
 
 /** Languages Monaco doesn't register itself — without this a .svelte file is
- *  plain text, grammar or no grammar. */
+ *  plain text, grammar or no grammar.
+ *
+ *  json is here for the same reason and was missing: rook vendors a json
+ *  grammar (table.ts) but Monaco's basic-languages ships no json
+ *  contribution — that language comes from the json language SERVICE, which
+ *  this build deliberately doesn't include. So the grammar had nothing to
+ *  attach to and every .json file rendered as plain text. */
 const EXTRA_LANGUAGES: {id: string; extensions: string[]}[] = [
     {id: "svelte", extensions: [".svelte"]},
+    {id: "json", extensions: [".json", ".jsonc"]},
 ];
 
 let registry: Registry | null = null;
@@ -139,6 +147,13 @@ export function installTextMate(monaco: typeof monacoTypes): void {
     for (const lang of EXTRA_LANGUAGES) {
         const known = monaco.languages.getLanguages().some((l) => l.id === lang.id);
         if (!known) monaco.languages.register({id: lang.id, extensions: lang.extensions});
+        // A grammar colours a language; it does not tell Monaco what a
+        // comment looks like — that lives in the CONFIGURATION, and without
+        // one `gc` silently does nothing. svelte's rule is refined per
+        // position when the verb runs (comments.ts); this is the file-wide
+        // default it starts from.
+        const rule = BASE_COMMENTS[lang.id];
+        if (rule) monaco.languages.setLanguageConfiguration(lang.id, {comments: rule});
     }
 
     for (const entry of GRAMMARS) {

@@ -73,6 +73,53 @@ test("gc takes a count and a motion — gc2j comments the range", async ({page, 
     await rook.ex(":q!");
 });
 
+// A .svelte file is three languages, and Monaco's comment rule is per
+// LANGUAGE — so the token has to follow the cursor. Getting this wrong
+// isn't cosmetic: `<!-- -->` inside <script> is broken code, in the region
+// you spend your time.
+const SVELTE = [
+    /* 1 */ '<script lang="ts">',
+    /* 2 */ "    let n = 1;",
+    /* 3 */ "</script>",
+    /* 4 */ "",
+    /* 5 */ '<div class="x">{n}</div>',
+    /* 6 */ "",
+    /* 7 */ "<style>",
+    /* 8 */ "    .x { color: red; }",
+    /* 9 */ "</style>",
+    "",
+].join("\n");
+
+test("gcc picks the comment by region in a .svelte file", async ({page, rook}) => {
+    const ws = await rook.repo({files: {"App.svelte": SVELTE}});
+    await rook.open({name: `gc-svelte-${Date.now()}`, root: ws});
+    await rook.shellReady();
+    await rook.ex(`${RE} App.svelte; echo "re exit=$?"`);
+
+    await expect(page.locator(".editor-mount .view-lines").first()).toBeVisible({timeout: 15_000});
+    await expect(page.locator(".editor-path").first()).not.toContainText("read-only");
+    await page.locator(".editor-mount").first().click();
+    await page.keyboard.type("gg");
+    await expect.poll(() => lineAt(page, 1), {timeout: 15_000}).toBe("    let n = 1;");
+
+    // <script> — a JS line comment, not an HTML one
+    await page.keyboard.type("jgcc");
+    await expect.poll(() => lineAt(page, 1), {timeout: 10_000}).toContain("// let n = 1;");
+    expect(await lineAt(page, 1)).not.toContain("<!--");
+
+    // markup — an HTML comment
+    await page.keyboard.type("gg4jgcc");
+    await expect.poll(() => lineAt(page, 4), {timeout: 10_000}).toContain("<!--");
+    expect(await lineAt(page, 4)).toContain("-->");
+
+    // <style> — CSS has no line comment, so the block form
+    await page.keyboard.type("gg7jgcc");
+    await expect.poll(() => lineAt(page, 7), {timeout: 10_000}).toContain("/*");
+    expect(await lineAt(page, 7)).toContain("*/");
+
+    await rook.ex(":q!");
+});
+
 test("gc works from visual mode, like d and y", async ({page, rook}) => {
     await openGo(page, rook, "visual");
 
