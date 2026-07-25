@@ -15,7 +15,7 @@
     import type {Palette as ThemePalette} from "./theme/palette";
     import {encodePalette} from "./term/vt/framed";
     import {preloadRenderer} from "./term/vt/registry";
-    import {Registry} from "./registry";
+    import {Registry, type Command} from "./registry";
     import {buildContextMap, buildKeymap, CONTEXT_LEADER_KEY, parseLeader, sigOf} from "./keymap";
     import {app, type Mode} from "./state.svelte";
     import {shellQuote} from "./util";
@@ -408,6 +408,10 @@
      *  PaneContent (it stays Monaco-free), but retargeting needs the real
      *  thing, so chrome keeps the index. */
     const editorPanes = new Map<string, import("./term/editor").EditorPane>();
+    /** leafId → "open this path HERE" for a start screen. The greeter holds
+     *  a `re` takeover, so an open from anywhere must be able to hand that
+     *  takeover to the editor rather than mint a second pane beside it. */
+    const startHandoff = new Map<string, (path: string) => void>();
 
     /** :qa's blast radius — the registered editor panes sharing a pane's
      *  WINDOW. Another window's editor is another vim: :qa never crosses.
@@ -685,9 +689,37 @@
     }
 
     /** Promote a path to most-recent. Bounded: this is a working set, not
-     *  history — the picker searches the whole repo anyway. */
+     *  history — the picker searches the whole repo anyway.
+     *
+     *  Also the one place a recent is RECORDED: this fires when a pane
+     *  actually opens a document, which is narrower than every /file read
+     *  (that would fold in Finder previews and gutter refetches) and is
+     *  exactly what the start screen wants to list. Best-effort — the host
+     *  copy is a convenience, and app.buffers is still the session truth. */
     function touchBuffer(path: string): void {
         app.buffers = [path, ...app.buffers.filter((p) => p !== path)].slice(0, 50);
+        if (app.workspace && path) void api.noteRecent(app.workspace, path);
+    }
+
+    /** The start screen's action rows: real registry commands carrying their
+     *  live keycaps, so a rebind in config shows up on the greeter and every
+     *  chord it advertises is one that actually works. Unknown ids drop
+     *  silently — the same fail-open rule the keymap uses. */
+    const START_ACTIONS = [
+        "file.open",
+        "palette.toggle",
+        "grep.open",
+        "review.changes",
+        "quickfix.toggle",
+        "workspace.dashboard",
+    ];
+    function startActions(): {cmd: Command; keys: string}[] {
+        const all = registry.all();
+        return START_ACTIONS.flatMap((id) => {
+            const cmd = all.find((c) => c.id === id);
+            if (!cmd) return [];
+            return [{cmd, keys: keymap.display(id) || cmd.keys || ""}];
+        });
     }
 
     async function newEditorWindow(kind: "review" | "file", path?: string): Promise<void> {
@@ -869,6 +901,7 @@
             paths[0] ?? "",
             paths.slice(1),
             req.dir,
+            req.tree,
         );
         if (req.tree) {
             const c = chromeFor(at.winId);
@@ -886,9 +919,85 @@
         path: string,
         extra: string[],
         cwd: string,
+        tree: boolean,
     ): Promise<void> {
         app.screen = "app";
         await tick();
+        // BARE `re` — no file named and no directory asked for. vim would
+        // give you an empty buffer; rook gives you the start screen, which
+        // is the same nothing with somewhere to go. It holds the SAME
+        // takeover, so the blocked rookctl waits on this pane either way.
+        //
+        // `re .` is excluded deliberately: a directory argument means netrw
+        // — you asked to land in the editor with the tree, and a greeter in
+        // front of that is a menu you didn't ask for.
+        if (!path && !tree) {
+            await mountStart(editID, sessionId, workspace, at, cwd);
+            return;
+        }
+        await mountEditor(editID, sessionId, workspace, at, path, extra, cwd);
+    }
+
+    /** The greeter half of a takeover. Picking a recent hands off to
+     *  mountEditor under the same editID — one `re`, one pane, one exit
+     *  code, however many screens it passed through. */
+    async function mountStart(
+        editID: string,
+        sessionId: string,
+        workspace: string,
+        at: PaneAt,
+        cwd: string,
+    ): Promise<void> {
+        const {StartPane} = await import("./term/startpane.svelte");
+        let pane: InstanceType<typeof StartPane> | null = null;
+        // A deliberate hand-off to the editor disposes this pane, and that
+        // must NOT settle the edit — only a real close (` x) does.
+        let handingOff = false;
+        const handoff = (p: string) => {
+            handingOff = true;
+            pane?.dispose();
+            pane = null;
+            void mountEditor(editID, sessionId, workspace, at, p, [], cwd);
+        };
+        const ok = mgr.takeoverPane(at, {type: "start"}, (leafId) => {
+            startHandoff.set(leafId, handoff);
+            pane = new StartPane({
+                api,
+                workspace,
+                dir: cwd || undefined,
+                actions: startActions,
+                onOpen: handoff,
+                onQuit: () => finishTakeover(editID, 0),
+                onDispose: () => {
+                    startHandoff.delete(leafId);
+                    // closed without q and without picking anything — the
+                    // shell is still blocked on us; settle the exit code
+                    if (handingOff) return;
+                    if (takeovers.has(editID)) {
+                        takeovers.delete(editID);
+                        void api.editDone(editID, 0).catch(() => {});
+                    }
+                },
+            });
+            return pane;
+        });
+        if (!ok) {
+            void api.editDone(editID, 1).catch(() => {});
+            return;
+        }
+        takeovers.set(editID, {at, sessionId});
+        if (cwd) chromeFor(at.winId).explorerDir = cwd;
+    }
+
+    async function mountEditor(
+        editID: string,
+        sessionId: string,
+        workspace: string,
+        at: PaneAt,
+        path: string,
+        extra: string[],
+        cwd: string,
+    ): Promise<void> {
         const {EditorPane} = await import("./term/editor");
         // the rest of the argv joins the buffer list (vim: `nvim a b c`
         // opens a, and b c wait in :ls — here, in ` e's Open buffers tier)
@@ -1017,6 +1126,20 @@
                 await tick();
                 mgr.revealPane(open);
                 landOn(open.leafId);
+                return;
+            }
+            // The start screen is a takeover wearing a greeter: opening a
+            // file from ANYWHERE (⌃P, the palette, its own rows) has to hand
+            // that takeover to the editor in place. Minting a pane instead
+            // would leave the greeter holding a `re` nobody can reach.
+            // Ahead of the reusable rung because the greeter is where you
+            // are looking — a file pane in some other split is not.
+            const greeter = mgr.findPane((c) => c.type === "start");
+            const hand = greeter && startHandoff.get(greeter.leafId);
+            if (greeter && hand) {
+                app.screen = "app";
+                await tick();
+                hand(path);
                 return;
             }
             // thread panes are reusable too — gt navigates in place, so ⌃O

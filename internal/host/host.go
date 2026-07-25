@@ -824,6 +824,9 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleWorkspaceWrite(w, r, name)
 	case action == "files" && r.Method == http.MethodGet:
 		h.handleWorkspaceFiles(w, r, name)
+	// what the editor's start screen leads with (recents.go)
+	case action == "recents":
+		h.handleWorkspaceRecents(w, r, name)
 	case action == "grep" && r.Method == http.MethodGet:
 		h.handleWorkspaceGrep(w, r, name)
 	case action == "gutter":

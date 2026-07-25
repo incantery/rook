@@ -41,7 +41,12 @@ export type PaneRef =
     /** a pending ask (ask.go): an agent's question rendered as a form in a
      *  split beside its pane. Identity is the ask id, but it never persists —
      *  the blocked rookctl behind it doesn't survive a reload either. */
-    | {type: "ask"; id: string};
+    | {type: "ask"; id: string}
+    /** the editor's start screen: what bare `re` lands on instead of an empty
+     *  buffer. A surface with no identity, like `review` and `monitor` —
+     *  there is nothing to name and nothing to restore, and it retargets
+     *  itself into a `file` the moment you pick something. */
+    | {type: "start"};
 
 export interface LeafNode {
     kind: "leaf";

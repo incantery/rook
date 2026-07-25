@@ -42,18 +42,22 @@ test(":cq aborts — the shell sees a nonzero exit", async ({page, rook}) => {
     await rook.expectScreen(/re exit=1/);
 });
 
-test("bare re is vim's empty buffer — straight into the editor", async ({page, rook}) => {
+// Bare `re` used to be vim's unnamed empty buffer. It is now the start
+// screen (start.spec.ts covers the greeter itself) — same takeover, same
+// exit code, somewhere to go instead of an empty box. `re .` and `re file`
+// are unchanged, which is what the two tests around this one hold down.
+test("bare re is the start screen, and it still owns the takeover", async ({page, rook}) => {
     const root = await rook.repo({files: {"notes.txt": "alpha\n"}});
     await rook.open({name: `re-bare-${Date.now()}`, root});
     await rook.shellReady();
 
     await rook.ex(`${RE}; echo "re exit=$?"`);
 
-    // no finder, no chrome question — you are IN the editor, unnamed buffer
-    await expect(page.locator(".editor-mount").first()).toBeVisible({timeout: 15_000});
-    await expect(page.getByText("[No Name]").first()).toBeVisible();
+    // no finder, no chrome question — you land on the greeter, not a buffer
+    await expect(page.locator("[data-start-root]")).toBeVisible({timeout: 15_000});
+    await expect(page.locator(".editor-mount")).toHaveCount(0);
 
-    await rook.ex(":q");
+    await page.keyboard.press("q");
     await rook.expectScreen(/re exit=0/);
 });
 

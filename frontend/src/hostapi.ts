@@ -304,6 +304,37 @@ export class HostAPI {
         return (await this.req(`/workspaces/${encodeURIComponent(ws)}/files?${params}`)).json();
     }
 
+    /** Recently-opened documents, newest first (host recents.go). Durable,
+     *  unlike app.buffers — this is what the start screen reads on a cold
+     *  boot, when the session's own open set is empty. Fails open: any error
+     *  is an empty list, because a greeter that can't greet is still a
+     *  greeter, and one that throws is a wall. */
+    async recents(ws: string, limit?: number): Promise<RecentFile[]> {
+        try {
+            const params = new URLSearchParams(limit ? {limit: String(limit)} : {});
+            const res = await this.req(
+                `/workspaces/${encodeURIComponent(ws)}/recents?${params}`,
+            );
+            return ((await res.json()) as {recents?: RecentFile[]}).recents ?? [];
+        } catch {
+            return [];
+        }
+    }
+
+    /** Promote a path to most-recent, or drop it (`forget`). Best-effort by
+     *  design — remembering is a side effect of opening a file, and it must
+     *  never be able to fail the open. */
+    async noteRecent(ws: string, path: string, forget = false): Promise<void> {
+        try {
+            await this.req(`/workspaces/${encodeURIComponent(ws)}/recents`, {
+                method: "POST",
+                body: JSON.stringify({path, forget}),
+            });
+        } catch {
+            /* a forgotten recent is not worth a user-visible failure */
+        }
+    }
+
     /** Workspace-wide content search — `git grep` in repos (smart case,
      *  regex with a literal fallback), a bounded walk elsewhere. `dir`
      *  scopes it like listFiles. */
@@ -658,6 +689,14 @@ export interface FilesResult {
     /** prepend to open a path: "" ws-relative, relative = subtree prefix,
      *  absolute = outside the workspace (external read-only) */
     base?: string;
+}
+
+/** GET /workspaces/{ws}/recents — one remembered document. `path` is
+ *  ws-relative under the root and absolute when external, the same two-tier
+ *  spelling readFile already takes, so a recent opens without translation. */
+export interface RecentFile {
+    path: string;
+    openedAt: string;
 }
 
 /** base ? `${base}/${rel}` : rel — the scoped listings' open path. */

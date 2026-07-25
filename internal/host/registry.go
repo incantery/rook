@@ -176,6 +176,16 @@ CREATE TABLE IF NOT EXISTS rook_tasks (
 );
 CREATE INDEX IF NOT EXISTS rook_tasks_parent ON rook_tasks(parent_id);
 CREATE INDEX IF NOT EXISTS rook_tasks_ws     ON rook_tasks(workspace, work_type);
+-- Recently-opened documents, per workspace (recents.go). The frontend's
+-- app.buffers is the session's open set; this is the durable one the start
+-- screen reads on a cold boot.
+CREATE TABLE IF NOT EXISTS recents (
+	workspace TEXT NOT NULL,
+	path      TEXT NOT NULL,  -- ws-relative under the root, absolute if external
+	opened_at TEXT NOT NULL,
+	PRIMARY KEY (workspace, path)
+);
+CREATE INDEX IF NOT EXISTS recents_ws ON recents(workspace, opened_at DESC);
 `
 
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS
