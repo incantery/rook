@@ -71,6 +71,15 @@ export interface Config {
     "coder": string;
 
     /**
+     * RelayURL is a rook-server (self-hosted or rook-cloud): when set, an
+     * ask ALSO lands there, so a question raised while you're away from the
+     * desk can be answered from your phone. Empty = no remote, and the
+     * whole path is inert. The token lives in the keychain
+     * (`rookctl set-relay-token`), never in this file.
+     */
+    "relayUrl": string;
+
+    /**
      * Workflow is the staged review pipeline run after a worktree's coding
      * agent opens its PR: slash commands, comma-separated (`workflow =
      * /security-review, /review`), each spawned sequentially in its own
