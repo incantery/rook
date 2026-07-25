@@ -143,6 +143,16 @@
         return at ? (editorPanes.get(at.leafId) ?? null) : null;
     }
 
+    /** The pane the keyboard is in, iff it's an editor of any kind — the
+     *  target of editor.comment. Wider than focusedThreadPane on purpose: a
+     *  thread buffer is a document too, and commenting one is meaningful. */
+    function focusedEditorPane(): import("./term/editor").EditorPane | null {
+        const c = mgr.focusedContent();
+        if (c?.type !== "file" && c?.type !== "thread") return null;
+        const at = mgr.findPane((x) => x === c);
+        return at ? (editorPanes.get(at.leafId) ?? null) : null;
+    }
+
     /** A thread as a BUFFER, gd-shaped: the same ladder openFile walks.
      *    1. already displayed → reveal it
      *    2. an editor pane exists → retarget it IN PLACE (the pane gt was
@@ -1616,6 +1626,20 @@
             title: "Thread under cursor: open or create (gt)",
             category: "Review",
             run: goToThread,
+        },
+        // gc is the daily surface; this is the same verb for the palette, the
+        // ex bridge (:EditorComment), and a config keybind. Line-scoped, since
+        // a registry command has no motion to take.
+        {
+            id: "editor.comment",
+            title: "Editor: toggle comment on the current line (gcc)",
+            category: "Editor",
+            keys: "gcc",
+            run: () => {
+                const p = focusedEditorPane();
+                if (p) p.toggleComment();
+                else flash("not in an editor");
+            },
         },
         // The thread buffer's crystallizing verbs. Registry commands so the
         // palette lists them and the ex bridge derives :ThreadNote /

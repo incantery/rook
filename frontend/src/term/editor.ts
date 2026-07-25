@@ -129,6 +129,19 @@ async function loadVim(): Promise<VimLib> {
             vim.defineAction("rookPrevHunk", (cm) => paneOf(cm)?.jumpHunk(-1));
             vim.mapCommand("]c", "action", "rookNextHunk", {}, {context: "normal"});
             vim.mapCommand("[c", "action", "rookPrevHunk", {}, {context: "normal"});
+            // gc — toggle comment, registered as an OPERATOR rather than a
+            // binding, which is what buys the whole grammar at once:
+            // gc{motion} (gc3j, gcap, gcip), gc over a visual selection, and
+            // gcc linewise. The doubling is free — CodeMirror's
+            // processOperator turns a repeated operator into expandToLine,
+            // which is exactly what gcc means — so there is no "gcc" to map.
+            // No context, because operators belong to normal AND visual the
+            // way d and y do; naming one would take the other away.
+            vim.defineOperator("rookComment", (cm) => {
+                paneOf(cm)?.toggleComment();
+                return undefined;
+            });
+            vim.mapCommand("gc", "operator", "rookComment", {});
             // ⌃P/⌃G/⌃S — telescope muscle memory, scoped to the editor so
             // terminals keep shell history (⌃P) and flow control (⌃S).
             vim.defineAction("rookFindFile", (cm) => paneOf(cm)?.findFile());
@@ -196,6 +209,13 @@ type ExParams = {argString?: string};
 interface VimApi {
     defineEx(name: string, prefix: string, fn: (cm: ExCm, params: ExParams) => void): void;
     defineAction(name: string, fn: (cm: ExCm) => void): void;
+    /** CodeMirror's operator registry — the grammar behind d{motion} and
+     *  y{motion}, and so behind gc{motion}. The dispatcher has already set
+     *  the selection to the operated range before it calls one, so an
+     *  operator's whole job is to act on the current selection. Returning a
+     *  cursor moves the caret; undefined leaves it where the operator left
+     *  it (and, from visual mode, exits without moving the head). */
+    defineOperator(name: string, fn: (cm: ExCm) => unknown): void;
     mapCommand(
         keys: string,
         type: string,
@@ -1400,6 +1420,23 @@ export class EditorPane implements PaneContent {
         }
         ed.setPosition({lineNumber: line, column: 1});
         ed.revealLineInCenterIfOutsideViewport(line);
+    }
+
+    /** gc's work (and editor.comment's): Monaco's own comment toggle over
+     *  whatever the vim operator just selected. Monaco reads the comment
+     *  tokens off the language CONFIGURATION, not the grammar — a language
+     *  registered by TextMate alone has none, and the action silently does
+     *  nothing there (see highlight/textmate.ts). Read-only panes flash
+     *  rather than no-op: a verb that does nothing without saying why is
+     *  worse than a verb that isn't bound. */
+    toggleComment(): void {
+        const ed = this.editor;
+        if (!ed?.getModel()) return;
+        if (!this.editable) {
+            this.opts.onFlash(this.truncated ? "truncated — read-only" : "read-only");
+            return;
+        }
+        void ed.getAction("editor.action.commentLine")?.run();
     }
 
     // ---- file-mode editing: vim, dirty tracking, save ----
