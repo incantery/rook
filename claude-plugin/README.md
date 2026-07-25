@@ -20,8 +20,9 @@ Four parts, all inert outside rook:
   (post questions, return `{askId, pending}`) and `answers` (drain decided
   asks). Needs `rookctl` on PATH and `$ROOK_SESSION` in the environment,
   which every rook pty exports. The doorbell only types into a window
-  holding a LIVE claude claim — at a bare shell the answer just waits in
-  the drain.
+  holding a LIVE claude claim — at a bare shell the answer waits in the
+  drain and the line is delivered to the next claude that claims the
+  window, so an answer given between agents is never stranded.
 - **`hooks/session-context.sh`** — a SessionStart hook that teaches claude
   to route questions through the ask tool proactively. Without it, models
   mostly ask in prose and nothing else ever fires.

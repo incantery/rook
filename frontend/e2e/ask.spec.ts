@@ -163,6 +163,33 @@ test("no live claim — the doorbell stays silent and the answer waits in the dr
     expect(drained.answered.map((a) => a.askId)).toEqual([askId]);
 });
 
+test("an owed doorbell rings when a claude finally claims the window", async ({page, rook}) => {
+    const root = await rook.repo({files: {"a.txt": "x\n"}});
+    const ws = await rook.open({name: `ask-owed-${Date.now()}`, root});
+    const sid = await sessionOf(ws);
+    await rook.shellReady(); // bare shell: answering now has nobody to tell
+
+    const {askId} = await askAsync(sid);
+    const form = page.locator("[data-ask-root]");
+    await expect(form).toBeVisible({timeout: 15_000});
+    await page.keyboard.press("1");
+    await expect(form).toHaveCount(0);
+    await page.waitForTimeout(1000);
+    expect(await rook.screen()).not.toContain("rook ask");
+
+    // an agent starts up in the window the question came from — the answer
+    // it never heard about is exactly its business
+    await rook.ex(`${STUB_CODER} 'late to the party'`);
+    await rook.expectScreen(/STUB CODER READY/);
+    await rook.expectScreen(new RegExp(`STUB GOT: rook ask ${askId} answered`));
+
+    // and it is still collectable: the drain is read-once, nobody read it
+    const drained = (await (await hostFetch(`/sessions/${sid}/asks`)).json()) as {
+        answered: {askId: string}[];
+    };
+    expect(drained.answered.map((a) => a.askId)).toEqual([askId]);
+});
+
 test("Other carries the user's own words", async ({page, rook}) => {
     const root = await rook.repo({files: {"ask.json": ONE_QUESTION + "\n"}});
     await rook.open({name: `ask-other-${Date.now()}`, root});

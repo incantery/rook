@@ -45,6 +45,11 @@ type askState struct {
 	// the msgAsk frame, kept so a fresh attach can re-push a pending ask:
 	// the blocked rookctl outlives a UI reload, so its question must too
 	frame []byte
+	// the doorbell was due and could not ring — no live claude claim owned
+	// the window at settle time. The answer is sitting in the drain with
+	// nobody who knows to read it, so the next claim on this session rings
+	// it (see ringOwedDoorbells).
+	doorbellOwed bool
 	// closed when done flips — the wait endpoint parks on it
 	doneCh  chan struct{}
 	created time.Time
@@ -142,10 +147,14 @@ func (h *Host) pendingAskFrames(sessionID string) [][]byte {
 // claim holds that window: at a bare shell the line would run as a
 // command, so a dead claim means the answer just waits in the drain.
 // One line, no embedded newline — same delivery rule as the thread nudge.
-func (h *Host) askDoorbell(sessionID, askID string) {
+//
+// Reports whether it actually rang. A false here is the quiet failure mode
+// that used to strand an answer forever: the human decided, the agent was
+// between lives, and nothing ever told the next one to look.
+func (h *Host) askDoorbell(sessionID, askID string) bool {
 	s := h.get(sessionID)
 	if s == nil {
-		return
+		return false
 	}
 	h.bindMu.Lock()
 	alive := false
@@ -157,9 +166,51 @@ func (h *Host) askDoorbell(sessionID, askID string) {
 	}
 	h.bindMu.Unlock()
 	if !alive {
+		return false
+	}
+	h.typeLine(s, "rook ask "+askID+" answered — collect it with the rook answers tool")
+	return true
+}
+
+// ringOwedDoorbells delivers the pointers that had nobody to point at.
+// Called when a claude session claims this window (host.go's claim
+// handler): a fresh agent in the window the question came from is exactly
+// who the answer was for. It is the same line, so the new agent does what
+// the old one would have — call the answers tool, which still holds the
+// decision because the drain is read-once and nobody read it.
+//
+// Deliberately not a ticker: the trigger is a claim, and a claim is the
+// only evidence that typing at this pty is safe.
+func (h *Host) ringOwedDoorbells(sessionID string) {
+	h.askMu.Lock()
+	var owed []string
+	for id, a := range h.asks {
+		if a.session == sessionID && a.done && a.doorbellOwed {
+			owed = append(owed, id)
+		}
+	}
+	h.askMu.Unlock()
+
+	for _, id := range owed {
+		if !h.askDoorbell(sessionID, id) {
+			return // still nobody home; the next claim tries again
+		}
+		h.askMu.Lock()
+		if a := h.asks[id]; a != nil {
+			a.doorbellOwed = false
+		}
+		h.askMu.Unlock()
+	}
+}
+
+// typeLine is the pty write behind the doorbell — a seam so tests can
+// observe a delivery without a tty (nil typeLineFn = the real thing).
+func (h *Host) typeLine(s *session, line string) {
+	if h.typeLineFn != nil {
+		h.typeLineFn(s, line)
 		return
 	}
-	typeLineAt(s, "rook ask "+askID+" answered — collect it with the rook answers tool")
+	typeLineAt(s, line)
 }
 
 // typeLineAt delivers one line to an agent's TUI as TYPED input: the text,
@@ -250,7 +301,18 @@ func (h *Host) settleAsk(id string, answer json.RawMessage, src settleSource) se
 	}
 	if ring {
 		// off the request path: the pty write can stall on a wedged tty
-		go h.askDoorbell(session, id)
+		go func() {
+			if h.askDoorbell(session, id) {
+				return
+			}
+			// nobody to tell yet — the answer waits in the drain and the
+			// next claim on this window rings it
+			h.askMu.Lock()
+			if a := h.asks[id]; a != nil {
+				a.doorbellOwed = true
+			}
+			h.askMu.Unlock()
+		}()
 	}
 	return settledOK
 }

@@ -88,6 +88,9 @@ type Host struct {
 	// pending `rookctl ask` requests (ask.go), keyed by ask id
 	askMu sync.Mutex
 	asks  map[string]*askState
+	// typeLineFn overrides the doorbell's pty write in tests — nil in
+	// production, where typeLineAt types at the real tty.
+	typeLineFn func(s *session, line string)
 
 	// The configured rook-server, if any (relay.go): asks escalate to it so
 	// they can be answered from a phone. nil = no remote, path inert.
@@ -1304,6 +1307,11 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 			delete(h.binds, req.AgentSession)
 		}
 		h.bindMu.Unlock()
+		if !req.Release {
+			// an answer decided while this window had no live agent has
+			// been waiting for someone to tell (ask.go) — this is them
+			go h.ringOwedDoorbells(id)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case action == "input" && r.Method == http.MethodPost:
 		// Raw, byte-faithful pty write — the attention surface's actuator
