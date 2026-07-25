@@ -881,6 +881,15 @@ export class TermManager {
         return leaves(win.root).find((l) => l.id === win.focused)?.content ?? null;
     }
 
+    /** WHERE the focused pane is. focusedContent answers what it shows; this
+     *  answers which leaf it is, which is what splitting beside it needs. */
+    focusedPane(): PaneAt | null {
+        const win = this.active;
+        if (!win || !win.focused) return null;
+        const leaf = leaves(win.root).find((l) => l.id === win.focused);
+        return leaf ? {winId: win.id, leafId: leaf.id, content: leaf.content} : null;
+    }
+
     /** Split the focused pane: a new session (cwd inherited from the
      *  focused shell) lands in the second half — tmux ` % / ` ". */
     async splitFocused(dir: Dir): Promise<void> {
@@ -923,12 +932,18 @@ export class TermManager {
      *  ask form landing beside the agent that asked. splitFocused's shape
      *  minus the shell spawn; the manager stays ignorant of what's inside,
      *  same as openPaneWindow. Focus moves to the new pane. */
-    splitPane(at: PaneAt, dir: Dir, content: PaneRef, mk: (leafId: string) => PaneContent): boolean {
+    splitPane(
+        at: PaneAt,
+        dir: Dir,
+        content: PaneRef,
+        mk: (leafId: string) => PaneContent,
+        before = false,
+    ): boolean {
         const win = this.windows.find((w) => w.id === at.winId);
         if (!win || !win.panes.has(at.leafId)) return false;
         this.unzoom(win);
         const leaf: LeafNode = {kind: "leaf", id: crypto.randomUUID(), content};
-        win.root = splitAt(win.root, at.leafId, dir, leaf);
+        win.root = splitAt(win.root, at.leafId, dir, leaf, before);
         win.panes.set(leaf.id, mk(leaf.id));
         if (this.active !== win) this.activate(win);
         win.focused = leaf.id;

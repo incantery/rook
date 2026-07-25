@@ -61,46 +61,75 @@ test("bare re is the start screen, and it still owns the takeover", async ({page
     await rook.expectScreen(/re exit=0/);
 });
 
-test("re . lands in the editor with the tree, netrw-style", async ({page, rook}) => {
+// `re .` is netrw taken literally now that a tree can be a window: the
+// DIRECTORY is the thing you asked for, so the tree IS the pane — no empty
+// buffer beside it, nothing to look at until you pick something.
+test("re . is the tree itself, and q gives the shell back", async ({page, rook}) => {
     const root = await rook.repo({files: {"sub/inner.txt": "alpha\n"}});
     await rook.open({name: `re-dot-${Date.now()}`, root});
     await rook.shellReady();
 
     await rook.ex(`${RE} .; echo "re exit=$?"`);
 
-    // the editor takes the pane AND the file tree opens beside it
-    await expect(page.locator(".editor-mount").first()).toBeVisible({timeout: 15_000});
-    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(1);
+    await expect(page.locator(".tree-wrap")).toHaveCount(1, {timeout: 15_000});
+    await expect(page.locator(".editor-mount")).toHaveCount(0);
 
-    // focus starts on the listing (netrw); ⌃L crosses back into the editor
-    await page.keyboard.press("Control+l");
-    await rook.ex(":q");
+    await page.keyboard.press("q");
     await rook.expectScreen(/re exit=0/);
-    // the editor's furniture leaves with it
-    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(0);
+    await expect(page.locator(".tree-wrap")).toHaveCount(0);
 });
 
-test("furniture is per window — the tree stays with its editor", async ({page, rook}) => {
+test("the tree belongs to its window, like every other pane", async ({page, rook}) => {
     const root = await rook.repo({files: {"sub/inner.txt": "alpha\n"}});
     await rook.open({name: `re-chrome-${Date.now()}`, root});
     await rook.shellReady();
 
     await rook.ex(`${RE} .; echo "re exit=$?"`);
-    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(1, {timeout: 15_000});
+    await expect(page.locator(".window.active .tree-wrap")).toHaveCount(1, {timeout: 15_000});
 
-    // leaders are dead inside the tree — cross into the editor first,
-    // then open a NEW window: a different place, no visible tree (the
-    // takeover window's instance stays mounted, display:none)
-    await page.keyboard.press("Control+l");
+    // a NEW window is a different place: the takeover window's tree stays
+    // mounted but display:none, exactly as its terminals do
     await page.keyboard.press("`");
     await page.keyboard.press("c");
-    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(0);
+    await expect(page.locator(".window.active .tree-wrap")).toHaveCount(0);
 
     // back to the takeover's window — its tree comes back with it
     await page.keyboard.press("`");
     await page.keyboard.press("1");
-    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(1);
+    await expect(page.locator(".window.active .tree-wrap")).toHaveCount(1);
 
+    await page.locator(".tree-wrap [role='tree']").first().click();
+    await page.keyboard.press("q");
+    await rook.expectScreen(/re exit=0/);
+});
+
+// vim's rule, which is why a takeover owns a SET of panes: `re .` splitting
+// into a tree and an editor is still ONE blocked shell, and it comes back
+// when the last of them closes — not the first.
+test("re . + a file: the shell waits for the last pane", async ({page, rook}) => {
+    const root = await rook.repo({files: {"a.txt": "alpha\n"}});
+    await rook.open({name: `re-last-${Date.now()}`, root});
+    await rook.shellReady();
+
+    await rook.ex(`${RE} .; echo "re exit=$?"`);
+    await expect(page.locator(".tree-wrap")).toHaveCount(1, {timeout: 15_000});
+
+    // open a.txt out of the tree — it lands BESIDE the tree, not elsewhere
+    await page.locator(".tree-wrap [role='tree']").first().click();
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".editor-mount .view-lines").first()).toContainText("alpha", {
+        timeout: 15_000,
+    });
+    await expect(page.locator(".tree-wrap")).toHaveCount(1);
+
+    // closing the TREE leaves the editor standing and the shell still blocked
+    await page.locator(".tree-wrap [role='tree']").first().click();
+    await page.keyboard.press("q");
+    await expect(page.locator(".tree-wrap")).toHaveCount(0);
+    await expect(page.locator(".editor-mount")).toHaveCount(1);
+
+    // …and the LAST pane is the one that hands the shell back
+    await page.locator(".editor-mount").first().click();
     await rook.ex(":q");
     await rook.expectScreen(/re exit=0/);
 });

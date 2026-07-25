@@ -31,12 +31,10 @@
     import SpawnModal from "./SpawnModal.svelte";
     import Settings from "./Settings.svelte";
     import SidePane from "./SidePane.svelte";
-    import FileExplorer from "./FileExplorer.svelte";
     import {fly} from "svelte/transition";
     import QuickfixPanel from "./QuickfixPanel.svelte";
     import QuickActionModal from "./QuickActionModal.svelte";
     import {qf, qfStoreFor, setActiveQfWindow, pruneQf} from "./quickfix.svelte";
-    import {chromeFor, pruneChrome} from "./winchrome.svelte";
     import {Jumplist} from "./jumplist";
     import ExploreModal from "./ExploreModal.svelte";
     import {makeExploreContext} from "./exploreContext";
@@ -722,7 +720,15 @@
         });
     }
 
-    async function newEditorWindow(kind: "review" | "file", path?: string): Promise<void> {
+    /** `beside` splits the given pane instead of minting a window — nerdtree's
+     *  rule: a file opened FROM the tree lands next to it, because the tree is
+     *  where you came from and has to stay. When that tree belongs to a `re`
+     *  takeover the new pane joins it, so the shell waits for both. */
+    async function newEditorWindow(
+        kind: "review" | "file",
+        path?: string,
+        beside?: PaneAt,
+    ): Promise<void> {
         // the showWorkspace dance: activation fits and focuses, and
         // both silently no-op on a display:none subtree
         app.screen = "app";
@@ -730,7 +736,8 @@
         const {EditorPane} = await import("./term/editor");
         const ref: PaneRef =
             kind === "review" ? {type: "review"} : {type: "file", path: path ?? ""};
-        mgr.openPaneWindow(ref, (leafId) => {
+        const editID = beside ? takeoverOf(beside.leafId) : null;
+        const mount = (leafId: string) => {
             const pane = new EditorPane(api, {
                 workspace: app.workspace,
                 kind,
@@ -738,7 +745,11 @@
                 font: paneFont,
                 onFlash: flash,
                 cohort: () => editorCohort(leafId),
-                onClose: () => mgr.closePane(leafId),
+                // an ordinary pane closes; one that joined a takeover has to
+                // settle the shell instead (or hand off to its last sibling)
+                onClose: () =>
+                    editID ? finishTakeover(editID, leafId, 0) : mgr.closePane(leafId),
+                onAbort: () => (editID ? finishTakeover(editID, leafId, 1) : mgr.closePane(leafId)),
                 onActivate: (seam) => {
                     activeEditor = seam;
                     activeEditorKind = kind;
@@ -748,6 +759,7 @@
                     editorPanes.delete(leafId);
                     if (activeEditor === seam) activeEditor = null;
                     if (jumpPane === pane) jumpPane = null;
+                    if (editID) abandonTakeover(editID, leafId);
                 },
                 // gd across files rides the openFile ladder; gr fills the
                 // refs quickfix (vim: the last producer owns the list)
@@ -774,7 +786,20 @@
             });
             editorPanes.set(leafId, pane);
             return pane;
-        });
+        };
+        if (beside) {
+            mgr.splitPane(beside, "row", ref, mount);
+            const at = mgr.findPane((c) => c.type === "file" && c.path === (path ?? ""));
+            if (editID && at) joinTakeover(editID, takeovers.get(editID)!.sessionId, at);
+        } else {
+            mgr.openPaneWindow(ref, mount);
+        }
+    }
+
+    /** Which takeover, if any, owns this leaf. */
+    function takeoverOf(leafId: string): string | null {
+        for (const [id, t] of takeovers) if (t.leaves.has(leafId)) return id;
+        return null;
     }
 
     /** What the file panes' git gutter diffs against: the active review's
@@ -784,26 +809,44 @@
         return app.reviewRoot?.detail?.base;
     }
 
-    /** `re` takeovers in flight: editID → where the shell goes back. */
-    const takeovers = new Map<string, {at: PaneAt; sessionId: string}>();
+    /** `re` takeovers in flight: editID → the session to hand back, and
+     *  EVERY leaf the takeover currently owns.
+     *
+     *  It was one leaf, because a takeover was one pane. `re .` broke that:
+     *  the tree is a window now, and opening a file from it splits, so one
+     *  `re` can own two panes. vim's rule decides when the shell comes back
+     *  — the LAST window out, not the first — which is why this is a set and
+     *  not a leaf. For the common `re file` the set has one member and the
+     *  behaviour is exactly what it always was. */
+    const takeovers = new Map<string, {sessionId: string; winId: string; leaves: Set<string>}>();
+
+    /** Enrol a pane in a takeover, creating it on first join. */
+    function joinTakeover(editID: string, sessionId: string, at: PaneAt): void {
+        const t = takeovers.get(editID);
+        if (t) t.leaves.add(at.leafId);
+        else
+            takeovers.set(editID, {
+                sessionId,
+                winId: at.winId,
+                leaves: new Set([at.leafId]),
+            });
+    }
 
     /** The editor's furniture (tree, quickfix, ,-leader verbs) exists only
      *  within the editor — an editor pane focused, or one of the editor's
      *  own side surfaces already holding the keyboard. */
     function editorFocused(): boolean {
-        if (app.focusZone === "left" || app.focusZone === "bottom") return true;
+        if (app.focusZone === "bottom") return true;
         const c = mgr.focusedContent();
         return c != null && c.type !== "term";
     }
 
     /** The furniture is PER WINDOW (vim's tab page: each layout carries its
-     *  own tree and list) — and per-window means per-INSTANCE, not one
-     *  side pane costume-changed between windows: the tree renders one
-     *  FileExplorer per window (winchrome.svelte.ts holds each window's
-     *  open/anchor state), and the quickfix `qf` import is a facade over
-     *  per-window stores (quickfix.svelte.ts). `chrome` is the ACTIVE
-     *  window's tree state, for the keyboard/command paths. */
-    const chrome = $derived(chromeFor(app.activeId));
+     *  own list) — and per-window means per-INSTANCE, not one side pane
+     *  costume-changed between windows: the quickfix `qf` import is a facade
+     *  over per-window stores (quickfix.svelte.ts). The tree needs none of
+     *  this any more; it is a pane, so the layout already holds one per
+     *  window the way it holds every other window's panes. */
 
     /** That ask is over, and this rook didn't decide it (host ask.go pushes
      *  msgAskDone on every settle). Usually the phone: you walked away, the
@@ -890,9 +933,9 @@
         }
         void api.editAck(req.id).catch(() => {});
         const paths = req.paths ?? [];
-        // vim's contract, all three shapes: `re file` opens it, bare `re`
-        // is the empty buffer, `re .` is the empty buffer with the tree —
-        // every one of them lands IN the editor immediately
+        // vim's contract, all three shapes: `re file` opens it, bare `re` is
+        // the start screen, `re .` IS the tree (netrw taken literally, now
+        // that a tree can be a window) — every one lands in the pane at once
         await performTakeover(
             req.id,
             sessionId,
@@ -903,12 +946,6 @@
             req.dir,
             req.tree,
         );
-        if (req.tree) {
-            const c = chromeFor(at.winId);
-            c.explorerDir = req.dir || undefined;
-            c.explorerOpen = true;
-            app.focusZone = "left"; // netrw: you land on the listing
-        }
     }
 
     async function performTakeover(
@@ -923,15 +960,16 @@
     ): Promise<void> {
         app.screen = "app";
         await tick();
+        // `re .` — a directory argument is netrw: the TREE is the window.
+        if (!path && tree) {
+            await mountTree(editID, sessionId, workspace, at, cwd);
+            return;
+        }
         // BARE `re` — no file named and no directory asked for. vim would
         // give you an empty buffer; rook gives you the start screen, which
         // is the same nothing with somewhere to go. It holds the SAME
         // takeover, so the blocked rookctl waits on this pane either way.
-        //
-        // `re .` is excluded deliberately: a directory argument means netrw
-        // — you asked to land in the editor with the tree, and a greeter in
-        // front of that is a menu you didn't ask for.
-        if (!path && !tree) {
+        if (!path) {
             await mountStart(editID, sessionId, workspace, at, cwd);
             return;
         }
@@ -967,16 +1005,13 @@
                 dir: cwd || undefined,
                 actions: startActions,
                 onOpen: handoff,
-                onQuit: () => finishTakeover(editID, 0),
+                onQuit: () => finishTakeover(editID, leafId, 0),
                 onDispose: () => {
                     startHandoff.delete(leafId);
                     // closed without q and without picking anything — the
                     // shell is still blocked on us; settle the exit code
                     if (handingOff) return;
-                    if (takeovers.has(editID)) {
-                        takeovers.delete(editID);
-                        void api.editDone(editID, 0).catch(() => {});
-                    }
+                    abandonTakeover(editID, leafId);
                 },
             });
             return pane;
@@ -985,8 +1020,42 @@
             void api.editDone(editID, 1).catch(() => {});
             return;
         }
-        takeovers.set(editID, {at, sessionId});
-        if (cwd) chromeFor(at.winId).explorerDir = cwd;
+        joinTakeover(editID, sessionId, at);
+    }
+
+    /** `re .` — netrw taken literally. A directory argument gives you the
+     *  TREE as the window, not a sidebar beside an empty buffer, and it
+     *  holds the takeover the way the greeter does. Opening a file from it
+     *  splits (nerdtree: the tree stays), and the split joins the same
+     *  takeover — so the shell comes back only when both are gone. */
+    async function mountTree(
+        editID: string,
+        sessionId: string,
+        workspace: string,
+        at: PaneAt,
+        cwd: string,
+    ): Promise<void> {
+        const {TreePane} = await import("./term/treepane.svelte");
+        const ok = mgr.takeoverPane(at, {type: "tree", dir: cwd || undefined}, (leafId) => {
+            const pane = new TreePane({
+                api,
+                workspace,
+                dir: cwd || undefined,
+                onOpen: (path) => void openFile(path),
+                onClose: () => finishTakeover(editID, leafId, 0),
+                onDispose: () => {
+                    treePanes.delete(leafId);
+                    abandonTakeover(editID, leafId);
+                },
+            });
+            treePanes.set(leafId, pane);
+            return pane;
+        });
+        if (!ok) {
+            void api.editDone(editID, 1).catch(() => {});
+            return;
+        }
+        joinTakeover(editID, sessionId, at);
     }
 
     async function mountEditor(
@@ -1016,8 +1085,8 @@
                 cohort: () => editorCohort(leafId),
                 // :q hands the pane back to the shell; :cq does too, but the
                 // waiting `re` exits 1 (git commit reads that as an abort)
-                onClose: () => finishTakeover(editID, 0),
-                onAbort: () => finishTakeover(editID, 1),
+                onClose: () => finishTakeover(editID, leafId, 0),
+                onAbort: () => finishTakeover(editID, leafId, 1),
                 onActivate: (seam) => {
                     activeEditor = seam;
                     activeEditorKind = "file";
@@ -1031,10 +1100,7 @@
                     // shell is still blocked on us; settle the exit code.
                     // No restore: the leaf is mid-removal (re-entrant
                     // dispose), and the session stays reachable in the deck.
-                    if (takeovers.has(editID)) {
-                        takeovers.delete(editID);
-                        void api.editDone(editID, 0).catch(() => {});
-                    }
+                    abandonTakeover(editID, leafId);
                 },
                 onOpenLocation: (p, line, col) => void openFile(p, {line, col}),
                 onReferences: showReferences,
@@ -1064,27 +1130,45 @@
             void api.editDone(editID, 1).catch(() => {});
             return;
         }
-        takeovers.set(editID, {at, sessionId});
-        // the takeover's cwd anchors ITS window's tree — a later ,b roots
-        // where `re` was launched from, not wherever some other shell sits
-        if (cwd) chromeFor(at.winId).explorerDir = cwd;
+        joinTakeover(editID, sessionId, at);
     }
 
-    /** The return leg: shell back into the pane, exit code back to `re`.
-     *  The editor's furniture leaves with it — you exited the place. Only
-     *  the takeover's OWN window is touched: a :qa can end a takeover in a
-     *  background window without disturbing the one you see. */
-    function finishTakeover(editID: string, code: number): void {
+    /** One of a takeover's panes is done (:q, :cq, q on the tree).
+     *
+     *  While siblings remain this is just closing a window — vim's rule, and
+     *  the shell stays blocked. The LAST one out is the return leg: the
+     *  terminal comes back in that leaf, the editor's furniture goes, and
+     *  `re` finally gets its exit code. Only the takeover's OWN window is
+     *  touched, so a :qa in a background window can't disturb this one. */
+    function finishTakeover(editID: string, leafId: string, code: number): void {
         const t = takeovers.get(editID);
+        if (!t) return;
+        t.leaves.delete(leafId);
+        if (t.leaves.size > 0) {
+            // a sibling still holds the shell; this is an ordinary :q
+            mgr.closePane(leafId);
+            return;
+        }
         takeovers.delete(editID);
-        if (t) mgr.restoreTermPane(t.at, t.sessionId);
-        const c = chromeFor(t?.at.winId ?? app.activeId);
-        c.explorerOpen = false;
-        c.explorerDir = undefined;
-        const s = qfStoreFor(t?.at.winId ?? app.activeId);
+        mgr.restoreTermPane(
+            {winId: t.winId, leafId, content: {type: "term", session: t.sessionId}},
+            t.sessionId,
+        );
+        const s = qfStoreFor(t.winId);
         s.listOpen = false;
         s.detailOpen = false;
         void api.editDone(editID, code).catch(() => {});
+    }
+
+    /** A takeover pane vanished WITHOUT :q — ` x, a window teardown. Same
+     *  accounting, minus the restore: the leaf is mid-removal (dispose is
+     *  re-entrant), and the session stays reachable in the deck. */
+    function abandonTakeover(editID: string, leafId: string): void {
+        const t = takeovers.get(editID);
+        if (!t || !t.leaves.delete(leafId)) return;
+        if (t.leaves.size > 0) return;
+        takeovers.delete(editID);
+        void api.editDone(editID, 0).catch(() => {});
     }
 
     /** Open a file as a BUFFER, not a window. The ladder, in vim's terms:
@@ -1162,7 +1246,11 @@
                     return;
                 }
             }
-            await newEditorWindow("file", path);
+            // nerdtree's rule: a file opened while a tree is up lands BESIDE
+            // the tree, not in a new window. Without this the tree's window
+            // gets left behind the moment you pick something out of it —
+            // which is the whole point of the tree.
+            await newEditorWindow("file", path, treeAt() ?? undefined);
             const minted = mgr.findPane((c) => c.type === "file" && c.path === path);
             if (minted) landOn(minted.leafId);
         } catch (err) {
@@ -1355,24 +1443,72 @@
         }
     }
 
+    /** leafId → the TreePane in it. Same reason as editorPanes: the manager
+     *  holds panes as opaque PaneContent, so anything that needs the tree
+     *  ITSELF (reveal) needs its own index. */
+    const treePanes = new Map<string, import("./term/treepane.svelte").TreePane>();
+    /** an open is in flight — see explorer.toggle for why one press can
+     *  arrive twice, and what the loser would otherwise do */
+    let treeOpening = false;
+
+    /** The tree pane in the active window, if one is open. */
+    function treeAt(): PaneAt | null {
+        return mgr.findPane((c) => c.type === "tree");
+    }
+
+    /** Open a tree pane, or focus the one already up. nerdtree's placement:
+     *  a vertical split on the LEFT of where you are — which is why splitAt
+     *  grew a `before`. Returns the pane either way. */
+    async function openTree(dir?: string, target?: PaneAt): Promise<PaneAt | null> {
+        const open = treeAt();
+        if (open) {
+            mgr.revealPane(open);
+            return open;
+        }
+        // `target` is captured by the CALLER before it awaits: opening the
+        // tree needs a shell's cwd, which is a host round trip, and the
+        // focused pane (even the focused WINDOW) can move while that is in
+        // flight — splitting whatever is focused on arrival puts the tree
+        // somewhere you weren't looking.
+        const at = target ?? mgr.focusedPane();
+        if (!at) return null;
+        const {TreePane} = await import("./term/treepane.svelte");
+        const ws = app.workspace;
+        mgr.splitPane(
+            at,
+            "row",
+            {type: "tree", dir},
+            (leafId) => {
+                const pane = new TreePane({
+                    api,
+                    workspace: ws,
+                    dir,
+                    onOpen: (path) => void openFile(path),
+                    onClose: () => mgr.closePane(leafId),
+                    onDispose: () => treePanes.delete(leafId),
+                });
+                treePanes.set(leafId, pane);
+                return pane;
+            },
+            true, // the tree belongs to the left of what it opens
+        );
+        return treeAt();
+    }
+
     /** ` f — nvim's NvimTreeFindFile: open the explorer with its cursor on
      *  the file you're editing (last file pane, else newest buffer). */
-    /** one FileExplorer INSTANCE per window — bound by window id, so each
-     *  window's tree keeps its own listing, cursor and expansion */
-    let explorerRefs = $state<Record<string, {revealPath: (path: string) => void} | undefined>>(
-        {},
-    );
     async function revealInExplorer(): Promise<void> {
         const path = jumpPane?.position()?.path ?? app.buffers[0];
         if (!path) {
             flash("no file to reveal — open one first (` e)");
             return;
         }
-        chrome.explorerDir = undefined; // the target is workspace-relative
-        chrome.explorerOpen = true;
-        await tick(); // the pane mounts before the ref exists
-        if (app.activeId) explorerRefs[app.activeId]?.revealPath(path);
-        app.focusZone = "left";
+        // the target is workspace-relative, so the tree has to be rooted there
+        const existing = treeAt();
+        if (existing) mgr.closePane(existing.leafId);
+        const at = await openTree(undefined);
+        await tick(); // the pane mounts before its entry exists
+        if (at) treePanes.get(at.leafId)?.revealPath(path);
     }
 
     // grep ⌃Q — the picker's hits become the location list (same context as
@@ -1699,17 +1835,29 @@
             category: "View",
             keys: ", b",
             run: async () => {
-                // editor furniture — the tree has no meaning over a shell
-                if (!chrome.explorerOpen && !editorFocused()) {
-                    flash("the file tree lives in the editor — re, ` g or ⌃P first");
+                // a real toggle now: the tree is a window, so closing it is
+                // closing a pane rather than hiding chrome
+                const open = treeAt();
+                if (open) {
+                    mgr.closePane(open.leafId);
                     return;
                 }
-                // a takeover anchored this window's tree already (its cwd);
-                // otherwise the focused shell's cwd, else the workspace root
-                if (!chrome.explorerOpen && !chrome.explorerDir) {
-                    chrome.explorerDir = await shellDir();
+                // Opening awaits a cwd from the host, and this command can
+                // be dispatched twice for one press (the editor's context
+                // leader and the workbench prefix both resolve `,b`). Both
+                // would pass the check above while the first is still in
+                // flight, and the loser then REVEALS the winner's tree —
+                // which activates that window, out from under wherever you
+                // have since moved.
+                if (treeOpening) return;
+                treeOpening = true;
+                try {
+                    // capture WHERE before awaiting the cwd — see openTree
+                    const target = mgr.focusedPane() ?? undefined;
+                    await openTree(await shellDir(), target);
+                } finally {
+                    treeOpening = false;
                 }
-                chrome.explorerOpen = !chrome.explorerOpen;
             },
         },
         {
@@ -1717,13 +1865,7 @@
             title: "Explorer: reveal current file",
             category: "View",
             keys: ", f",
-            run: () => {
-                if (!editorFocused()) {
-                    flash("the file tree lives in the editor — re, ` g or ⌃P first");
-                    return;
-                }
-                void revealInExplorer();
-            },
+            run: () => void revealInExplorer(),
         },
         {
             id: "review.toggle",
@@ -1986,11 +2128,9 @@
     }
 
     function focusDir(dir: Edge): void {
-        if (app.focusZone === "left") {
-            // the explorer owns up/down (its own rows); only l leaves it
-            if (dir === "right") toTerms();
-            return;
-        }
+        // No "left" case: the file tree is a PANE now, so ⌃hjkl reaches it
+        // through the layout tree like any other window — which is the whole
+        // point of it no longer being chrome.
         if (app.focusZone === "right") {
             if (dir === "left") toTerms();
             return;
@@ -2001,8 +2141,7 @@
             return;
         }
         if (mgr.focusPane(dir)) return; // moved inside the layout tree
-        if (dir === "left" && chrome.explorerOpen) app.focusZone = "left";
-        else if (dir === "down" && qf.listOpen) app.focusZone = "bottom";
+        if (dir === "down" && qf.listOpen) app.focusZone = "bottom";
         // else: at the workbench edge with nothing beyond it — stay put
     }
 
@@ -2034,7 +2173,6 @@
     // A side pane that closes under a focus that lives in it would strand the
     // keyboard in a detached node; hand focus back instead.
     $effect(() => {
-        if (app.focusZone === "left" && !chrome.explorerOpen) toTerms();
         if (app.focusZone === "bottom" && !qf.listOpen) toTerms();
     });
 
@@ -2190,10 +2328,16 @@
         }
         if (contextLeader.matches(e)) {
             // The editor's leader arms ONLY inside the editor's own
-            // surfaces (a Monaco pane, or its bottom quickfix strip). A
-            // comma in a shell is a comma — the editor is a place, and its
-            // keys don't leak out of it.
-            if (tgt?.closest?.('.editor-mount, [data-side="bottom"]') != null) {
+            // surfaces (a Monaco pane, the file tree, or the bottom
+            // quickfix strip). A comma in a shell is a comma — the editor is
+            // a place, and its keys don't leak out of it.
+            //
+            // The tree earns its place here by being a PANE: you can now
+            // stand in it, and a surface you can stand in but whose verbs
+            // are dead is a trap — ,b opened the tree and then couldn't
+            // close it, because focus had moved somewhere this gate didn't
+            // recognise.
+            if (tgt?.closest?.('.editor-mount, .tree-wrap, [data-side="bottom"]') != null) {
                 e.preventDefault();
                 e.stopPropagation();
                 ctxArmed = true;
@@ -2338,12 +2482,8 @@
                 // each window's chrome/quickfix stores so template reads
                 // never mutate reactive maps mid-render, point the qf
                 // facade at the active window, and drop dead windows' state
-                for (const t of app.tabs) {
-                    chromeFor(t.id);
-                    qfStoreFor(t.id);
-                }
+                for (const t of app.tabs) qfStoreFor(t.id);
                 setActiveQfWindow(mgr.activeId);
-                pruneChrome((id) => mgr.hasWindow(id));
                 pruneQf((id) => mgr.hasWindow(id));
             },
             workspaceGone: showHome,
@@ -2455,30 +2595,11 @@
         onmonitor={() => void openMonitor()}
     />
     <div class="flex min-h-0 min-w-0 flex-1">
-        <!-- one tree INSTANCE per window (vim's tab page): each keeps its
-             own listing, cursor and expansion. display:contents lets the
-             active window's SidePane sit in this flex row as if direct;
-             hidden windows' trees stay mounted but display:none. -->
-        {#each app.tabs as t (t.id)}
-            {@const c = chromeFor(t.id)}
-            <div class={t.id === app.activeId ? "contents" : "hidden"}>
-                <SidePane
-                    side="left"
-                    visible={c.explorerOpen}
-                    title="Explorer"
-                    onclose={() => (c.explorerOpen = false)}
-                >
-                    <FileExplorer
-                        bind:this={explorerRefs[t.id]}
-                        {api}
-                        workspace={t.workspace}
-                        dir={c.explorerDir}
-                        active={t.id === app.activeId && app.focusZone === "left"}
-                        onopen={(path) => void openFile(path)}
-                    />
-                </SidePane>
-            </div>
-        {/each}
+        <!-- The file tree used to hang here as a left SidePane tenant, one
+             instance per window. It is a PANE now (term/treepane.svelte.ts):
+             it lives in the layout tree like any other window, which is what
+             lets it be zoomed, reached with ⌃hjkl, closed with q, and be
+             full screen when it is the only thing open. -->
         <div class="relative min-h-0 min-w-0 flex-1" bind:this={terminalsEl}>
             {#if fatal}
                 <div class="whitespace-pre-wrap p-6 font-mono text-sm text-red">{fatal}</div>
