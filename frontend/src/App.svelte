@@ -2028,7 +2028,7 @@
         },
         {
             id: "file.open",
-            title: "Open file (read-only)",
+            title: "Open file",
             category: "View",
             keys: keymap.display("file.open"),
             run: async () => {

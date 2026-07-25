@@ -271,7 +271,7 @@ export class Rook {
         if (this.editorOpen) {
             await this.page.keyboard.press("Control+p");
         } else {
-            await this.runCommand("Open file (read-only)");
+            await this.runCommand("Open file");
         }
         const picker = this.page.getByPlaceholder("Open file…");
         await expect(picker).toBeVisible({timeout: 10_000});

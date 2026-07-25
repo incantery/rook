@@ -69,7 +69,7 @@ test("telescope keys: editor ⌃P/⌃G/⌃S, grep ⌃Q → quickfix, ` f reveal"
     await openWorkspace(page, ws);
 
     // open a file and wait for vim — the keys under test are editor-scoped
-    await runCommand(page, "Open file (read-only)");
+    await runCommand(page, "Open file");
     const picker = page.getByPlaceholder("Open file…");
     await expect(picker).toBeVisible();
     await picker.fill("internal/host/grep.go");

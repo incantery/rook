@@ -31,7 +31,7 @@ async function openWorkspace(page: Page, name: string) {
 async function openFile(page: Page, file: string) {
     await page.getByRole("button", {name: /commands/}).click();
     await expect(page.getByPlaceholder("Run a command…")).toBeVisible();
-    await page.getByPlaceholder("Run a command…").fill("Open file (read-only)");
+    await page.getByPlaceholder("Run a command…").fill("Open file");
     await page.keyboard.press("Enter");
     const picker = page.getByPlaceholder("Open file…");
     await expect(picker).toBeVisible();

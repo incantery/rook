@@ -55,7 +55,7 @@ test("editing a file paints stripes, and ]c walks them", async ({page}) => {
     const ws = `gutter-e2e-${Date.now()}`;
     await openWorkspaceAt(page, ws, repo);
 
-    await runCommand(page, "Open file (read-only)");
+    await runCommand(page, "Open file");
     const picker = page.getByPlaceholder("Open file…");
     await expect(picker).toBeVisible();
     await picker.fill("notes.txt");

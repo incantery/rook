@@ -46,7 +46,7 @@ test("an investigation collects breadcrumbs from navigation", async ({page}) => 
     await q.press("Enter");
 
     // breadcrumb 1: a picker open
-    await runCommand(page, "Open file (read-only)");
+    await runCommand(page, "Open file");
     const picker = page.getByPlaceholder("Open file…");
     await expect(picker).toBeVisible();
     await picker.fill("internal/host/exploretasks.go");
