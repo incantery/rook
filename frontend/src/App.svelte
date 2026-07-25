@@ -889,6 +889,9 @@
                 workspace,
                 kind: "file",
                 path,
+                // the anchor `re` launched from — this pane's pickers scope
+                // to it, and it outlives the terminal the takeover replaced
+                dir: cwd || undefined,
                 font: paneFont,
                 onFlash: flash,
                 cohort: () => editorCohort(leafId),
@@ -1204,6 +1207,12 @@
      *  root, which is also the answer when the cwd IS the root. */
     let scopeDir = $state<string | undefined>();
     async function shellDir(): Promise<string | undefined> {
+        // An editor holding the keyboard answers with ITS anchor. ⌃P resolves
+        // globally (TUI_YIELD), so it lands here even when the editor's own
+        // vim mapping would have called onFindFile — and a takeover has no
+        // session left to ask: it replaced the terminal whose cwd we want.
+        const anchored = activeEditor?.anchorDir();
+        if (anchored) return anchored;
         const id = mgr.focusedSessionId;
         if (!id) return undefined;
         try {

@@ -275,14 +275,17 @@ export class HostAPI {
         });
     }
 
-    /** One file, read-only (the ` e viewer). */
+    /** One file (the ` e viewer). A relative path is confined to the
+     *  workspace; an absolute one is the external tier — served, and
+     *  flagged, so the editor can label it. */
     async readFile(ws: string, path: string): Promise<FileResult> {
         const q = new URLSearchParams({path});
         return (await this.req(`/workspaces/${encodeURIComponent(ws)}/file?${q}`)).json();
     }
 
     /** Save a file's full new content (the editor's :w / ⌘S). The host
-     *  writes atomically and confines the path exactly like every read.
+     *  writes atomically and takes the path in the same two shapes as every
+     *  read: relative = confined to the workspace, absolute = external.
      *  Only ever called for files that loaded whole — never a truncated
      *  buffer, which would overwrite the tail with nothing. 404s on old
      *  daemons (no write endpoint) — the caller surfaces that. */
@@ -633,14 +636,19 @@ export interface DiffResult {
     fallback?: string;
 }
 
-/** GET /workspaces/{ws}/file — the read-only viewer's payload. */
+/** GET /workspaces/{ws}/file — the file viewer's payload. */
 export interface FileResult {
     path: string;
     content: string;
     binary?: boolean;
     truncated?: boolean;
-    /** absolute-path read outside the workspace (stdlib/deps) — read-only */
+    /** absolute-path read outside the workspace (another repo, the stdlib, a
+     *  dotfile). Saves and stripes like any other file — what it loses is
+     *  the workspace-anchored furniture: no thread anchors. */
     external?: boolean;
+    /** not on disk yet — an empty buffer the first :w creates (`vim
+     *  newfile.md`). content is "" and the path is a promise, not a file. */
+    missing?: boolean;
 }
 
 /** GET /workspaces/{ws}/files — repo-top-relative paths for the picker. */
@@ -674,8 +682,8 @@ export interface GrepResult {
 }
 
 /** One definition/reference hit. 1-based editor coordinates; path is
- *  workspace-relative unless `external` (stdlib/deps — absolute, and the
- *  file endpoints can't serve it). */
+ *  workspace-relative unless `external` (stdlib/deps — absolute, which the
+ *  file endpoints serve on the external tier). */
 export interface LspLocation {
     path: string;
     startLine: number;

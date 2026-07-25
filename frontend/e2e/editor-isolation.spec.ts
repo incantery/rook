@@ -20,8 +20,9 @@ test("two takeovers: keyboard, furniture and :q stay with their editor", async (
     const editors = page.locator(".editor-mount");
     await expect(editors.first()).toBeVisible({timeout: 15_000});
     // canonical paths: a workspace file through a symlinked cwd is still
-    // workspace-relative — editable, never "external · read-only"
-    await expect(page.getByText("external · read-only")).toHaveCount(0);
+    // workspace-relative, so the pane never labels it external (which would
+    // mean rook lost track of which repo you are in — see canonicalFile)
+    await expect(page.locator(".editor-path").first()).not.toContainText("external");
 
     // window 2: fresh shell, second takeover
     await page.keyboard.press("`");
@@ -29,7 +30,7 @@ test("two takeovers: keyboard, furniture and :q stay with their editor", async (
     await rook.shellReady();
     await rook.ex(`${RE} b.txt; echo "second exit=$?"`);
     await expect(page.locator(".window.active .editor-mount")).toBeVisible({timeout: 15_000});
-    await expect(page.getByText("external · read-only")).toHaveCount(0);
+    await expect(page.locator(".window.active .editor-path").first()).not.toContainText("external");
 
     // the keyboard belongs to the SECOND editor now — its furniture toggles
     const visibleTree = page.locator('[data-side="left"]:visible');

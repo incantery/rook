@@ -35,8 +35,9 @@ type editState struct {
 
 // editPayload is the msgEdit frame body, JSON. Paths are pre-resolved:
 // workspace-relative when the target lives under the session's workspace
-// root (read-write), absolute otherwise (the file endpoint's external
-// read-only tier). Dir is the ABSOLUTE anchor — the shell's cwd, or the
+// root, absolute otherwise (the file endpoints' external tier — read and
+// write both). A path that doesn't exist yet rides through as a new file.
+// Dir is the ABSOLUTE anchor — the shell's cwd, or the
 // last directory argument — and scopes the editor's finder/grep/tree.
 // Tree marks a directory asked for by name (`re .`): netrw parity, the
 // app opens the file tree there.
@@ -74,25 +75,29 @@ func (h *Host) handleSessionEdit(w http.ResponseWriter, r *http.Request, s *sess
 		// canonical, so a shell whose $PWD spells the path through a
 		// symlink (/tmp, /var on macOS) still lands INSIDE the workspace —
 		// the alternative silently demotes a repo file to external
-		// read-only because "/var/…" isn't a prefix of "/private/var/…"
-		abs = canonical(filepath.Clean(abs))
-		st, err := os.Stat(abs)
-		if err != nil {
+		// because "/var/…" isn't a prefix of "/private/var/…"
+		abs = canonicalFile(filepath.Clean(abs))
+		if st, err := os.Stat(abs); err == nil {
+			if st.IsDir() {
+				// vim's `nvim .`: a directory arg re-anchors the editor there
+				// and asks for the tree — you land IN the editor, netrw-style
+				payload.Dir = abs
+				payload.Tree = true
+				continue
+			}
+		} else if di, derr := os.Stat(filepath.Dir(abs)); derr != nil || !di.IsDir() {
+			// `vim newfile.md` opens an empty named buffer that :w creates,
+			// so a path that isn't there yet is fine — as long as its
+			// DIRECTORY is. Under a missing dir it's a typo, and rook never
+			// mkdir -p's behind you.
 			http.Error(w, "no such file: "+p, http.StatusNotFound)
 			return
-		}
-		if st.IsDir() {
-			// vim's `nvim .`: a directory arg re-anchors the editor there
-			// and asks for the tree — you land IN the editor, netrw-style
-			payload.Dir = abs
-			payload.Tree = true
-			continue
 		}
 		if rel := relUnder(root, abs); rel != "" {
 			payload.Paths = append(payload.Paths, rel)
 		} else {
-			// outside the workspace: the file endpoint serves absolute
-			// paths as external READ-ONLY — vim anywhere, saving later
+			// outside the workspace: the file endpoints serve absolute paths
+			// on their external tier — read, save, stripe, all of it
 			payload.Paths = append(payload.Paths, abs)
 		}
 	}
@@ -211,6 +216,28 @@ func canonical(p string) string {
 	}
 	if r, err := filepath.EvalSymlinks(p); err == nil {
 		return r
+	}
+	return p
+}
+
+// canonicalFile is canonical for a FILE path: it resolves the directory and
+// rejoins the base name, so a path that doesn't exist yet (a new file) still
+// canonicalizes. Plain canonical would hand back the literal path there —
+// and a literal /var/… compared against a resolved /private/var/… reads as
+// "outside", which is how a file in the repo gets called external.
+func canonicalFile(p string) string {
+	if p == "" {
+		return p
+	}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	dir, base := filepath.Split(p)
+	if dir == "" {
+		return p
+	}
+	if r, err := filepath.EvalSymlinks(filepath.Clean(dir)); err == nil {
+		return filepath.Join(r, base)
 	}
 	return p
 }

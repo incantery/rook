@@ -204,7 +204,12 @@ func TestReviewFileAndFiles(t *testing.T) {
 	if res.Content != "hello\n" || res.Binary || res.Truncated {
 		t.Fatalf("file: %+v", res)
 	}
-	reviewGET[fileResult](t, c, "/workspaces/src/file?path=missing.txt", 404)
+	// a file that isn't there YET is vim's new-file buffer: empty, named,
+	// 200. Only under a directory that exists — a bogus dir is still 404.
+	if nf := reviewGET[fileResult](t, c, "/workspaces/src/file?path=missing.txt", 200); !nf.Missing || nf.Content != "" {
+		t.Fatalf("new file: %+v", nf)
+	}
+	reviewGET[fileResult](t, c, "/workspaces/src/file?path=nodir/missing.txt", 404)
 	reviewGET[fileResult](t, c, "/workspaces/src/file?path=../x", 400)
 
 	// ?dir= scopes the listing to a subtree: names relative to it, base set
@@ -231,12 +236,20 @@ func TestReviewFileAndFiles(t *testing.T) {
 		t.Fatalf("fallback files: %+v", fb)
 	}
 
-	// an absolute path is an external read-only view (gd into the stdlib)
-	ext := filepath.Join(t.TempDir(), "outside.go")
+	// an absolute path is an external view (gd into the stdlib, or a file in
+	// another checkout — that one saves too, see TestReviewWrite)
+	extDir := t.TempDir()
+	ext := filepath.Join(extDir, "outside.go")
 	os.WriteFile(ext, []byte("package outside\n"), 0o644)
 	xres := reviewGET[fileResult](t, c, "/workspaces/src/file?path="+url.QueryEscape(ext), 200)
 	if xres.Content != "package outside\n" || !xres.External || xres.Path != ext {
 		t.Fatalf("external file: %+v", xres)
+	}
+	// a new file outside the workspace: same new-file buffer, still external
+	xnew := reviewGET[fileResult](t, c,
+		"/workspaces/src/file?path="+url.QueryEscape(filepath.Join(extDir, "fresh.go")), 200)
+	if !xnew.Missing || !xnew.External || xnew.Content != "" {
+		t.Fatalf("external new file: %+v", xnew)
 	}
 	reviewGET[fileResult](t, c, "/workspaces/src/file?path=%2Fno%2Fsuch%2Fexternal.go", 404)
 
@@ -308,14 +321,44 @@ func TestReviewWrite(t *testing.T) {
 		t.Fatalf("mode not preserved: %v %v", fi.Mode().Perm(), err)
 	}
 
-	// confinePath guards writes exactly like reads: no escape, no empty path
-	for _, rel := range []string{"../escape.txt", "", "/etc/evil"} {
+	// confinePath still guards RELATIVE writes exactly like reads: a
+	// relative path means "in this workspace", so ../ is a lie, not a door
+	for _, rel := range []string{"../escape.txt", ""} {
 		if code, _ := c.do(t, "POST", "/workspaces/src/write", writeRequest{Path: rel, Content: "x"}); code != 400 {
 			t.Fatalf("write %q: got %d, want 400", rel, code)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(repo), "escape.txt")); !os.IsNotExist(err) {
 		t.Fatalf("traversal write escaped the repo")
+	}
+
+	// the external tier: an ABSOLUTE path saves outside the workspace —
+	// the write side of the read endpoint's external door
+	outside := filepath.Join(t.TempDir(), "notes.md")
+	os.WriteFile(outside, []byte("old\n"), 0o644)
+	if code, body := c.do(t, "POST", "/workspaces/src/write", writeRequest{Path: outside, Content: "new\n"}); code != 200 {
+		t.Fatalf("external write: %d %s", code, body)
+	}
+	if got, _ := os.ReadFile(outside); string(got) != "new\n" {
+		t.Fatalf("external write on disk: %q", got)
+	}
+
+	// …and creates a file that isn't there yet (vim's `nvim newfile`)
+	fresh := filepath.Join(filepath.Dir(outside), "fresh.txt")
+	if code, body := c.do(t, "POST", "/workspaces/src/write", writeRequest{Path: fresh, Content: "hi\n"}); code != 200 {
+		t.Fatalf("external create: %d %s", code, body)
+	}
+	if got, _ := os.ReadFile(fresh); string(got) != "hi\n" {
+		t.Fatalf("external create on disk: %q", got)
+	}
+
+	// a missing parent dir is a 404, not a 500 — rook never mkdir -p's
+	if code, _ := c.do(t, "POST", "/workspaces/src/write", writeRequest{Path: filepath.Join(fresh, "deeper", "x.txt"), Content: "x"}); code != 404 {
+		t.Fatalf("missing parent: got %d, want 404", code)
+	}
+	// a directory is not a file
+	if code, _ := c.do(t, "POST", "/workspaces/src/write", writeRequest{Path: filepath.Dir(outside), Content: "x"}); code != 400 {
+		t.Fatalf("write to a directory: got %d, want 400", code)
 	}
 
 	// unknown workspace → 404

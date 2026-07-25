@@ -17,6 +17,6 @@
     <!-- the hit's own line stays mono — this one IS code, unlike a comment -->
     <span class="min-w-0 flex-1 truncate font-mono text-[0.65625rem] text-fg">{h.text}</span>
     {#if h.external}
-        <span class="shrink-0 text-[0.5625rem] text-lo">external · read-only</span>
+        <span class="shrink-0 text-[0.5625rem] text-lo">external</span>
     {/if}
 {/if}

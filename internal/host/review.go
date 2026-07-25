@@ -154,8 +154,14 @@ type fileResult struct {
 	Content   string `json:"content"`
 	Binary    bool   `json:"binary,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
-	// External marks an absolute-path read (stdlib/deps) — always read-only.
+	// External marks an absolute-path read — a file outside the workspace
+	// (another repo, the stdlib, a dotfile). Editable like any other file;
+	// what it loses is the workspace-anchored furniture (gutter, threads).
 	External bool `json:"external,omitempty"`
+	// Missing marks a file that isn't on disk YET: `vim newfile.md` opens an
+	// empty named buffer and the first :w creates it. Content is "". Only a
+	// path whose parent directory exists gets this — anything else is 404.
+	Missing bool `json:"missing,omitempty"`
 }
 
 type filesResult struct {
@@ -448,17 +454,17 @@ func (h *Host) handleWorkspaceFile(w http.ResponseWriter, r *http.Request, name 
 	rel := r.URL.Query().Get("path")
 	// An absolute path is an EXTERNAL read: gd into the stdlib or a module
 	// cache lands outside the repo, and a labeled dead end helps nobody.
-	// Read-only by construction — the write door still confines to the
-	// workspace. Not an escalation: this API already spawns shells as this
-	// user; a read-only view of user-readable files is strictly weaker.
+	// The write door takes the same shape (handleWorkspaceWrite), so these
+	// buffers save. Not an escalation: this API already spawns shells as
+	// this user.
 	if strings.HasPrefix(rel, "/") {
 		abs := filepath.Clean(rel)
-		b, err := os.ReadFile(abs)
+		b, missing, err := readOrMissing(abs)
 		if err != nil {
 			http.Error(w, "no such file: "+rel, http.StatusNotFound)
 			return
 		}
-		res := fileResult{Path: abs, External: true}
+		res := fileResult{Path: abs, External: true, Missing: missing}
 		res.Content, res.Binary, res.Truncated = capSide(b)
 		writeJSON(w, res)
 		return
@@ -468,23 +474,44 @@ func (h *Host) handleWorkspaceFile(w http.ResponseWriter, r *http.Request, name 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	b, err := os.ReadFile(abs)
+	b, missing, err := readOrMissing(abs)
 	if err != nil {
 		http.Error(w, "no such file: "+rel, http.StatusNotFound)
 		return
 	}
-	res := fileResult{Path: rel}
+	res := fileResult{Path: rel, Missing: missing}
 	res.Content, res.Binary, res.Truncated = capSide(b)
 	writeJSON(w, res)
 }
 
+// readOrMissing reads abs, or reports it as an empty NEW file when it isn't
+// there but its directory is — `vim newfile.md`, which opens a named empty
+// buffer that the first :w creates. A path whose parent doesn't exist is a
+// typo, not an intention: that stays an error for the caller to 404.
+func readOrMissing(abs string) (b []byte, missing bool, err error) {
+	b, err = os.ReadFile(abs)
+	if err == nil || !os.IsNotExist(err) {
+		return b, false, err
+	}
+	if fi, derr := os.Stat(filepath.Dir(abs)); derr != nil || !fi.IsDir() {
+		return nil, false, err
+	}
+	return nil, true, nil
+}
+
 // handleWorkspaceWrite is POST /workspaces/{name}/write {path, content} —
-// the editor's :w / ⌘S. This is the host API's first WRITE door, kept
-// deliberately narrow: a repo-relative path, confined exactly like the
-// read side (repoTop, else ws.Root), written atomically (temp + rename in
-// the same dir) so a crash never leaves a half file. Existing permissions
-// are preserved — an executable stays executable. The editor only enables
-// saving for files it loaded whole, so this never truncates.
+// the editor's :w / ⌘S. Written atomically (temp + rename in the same dir)
+// so a crash never leaves a half file. Existing permissions are preserved
+// — an executable stays executable. The editor only enables saving for
+// files it loaded whole, so this never truncates.
+//
+// The path takes the same two shapes as the read side: relative = confined
+// to the workspace (repoTop, else ws.Root), absolute = the EXTERNAL tier —
+// another repo, a dotfile, a scratch note. External writes are symmetric
+// with external reads by the same argument: this API already spawns shells
+// as this user, so a save to a file the user can write is strictly weaker
+// than the terminal sitting next to it. The workspace stays the anchor for
+// everything else (gutter, threads, LSP), it just isn't a fence.
 func (h *Host) handleWorkspaceWrite(w http.ResponseWriter, r *http.Request, name string) {
 	ws := h.reg.get(name)
 	if ws == nil {
@@ -504,17 +531,38 @@ func (h *Host) handleWorkspaceWrite(w http.ResponseWriter, r *http.Request, name
 		http.Error(w, "content exceeds write cap", http.StatusRequestEntityTooLarge)
 		return
 	}
-	top, err := repoTop(ws.Root)
-	if err != nil {
-		top = ws.Root
-	}
-	abs, err := confinePath(top, req.Path)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	var abs string
+	if strings.HasPrefix(req.Path, "/") {
+		abs = filepath.Clean(req.Path)
+		if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
+			http.Error(w, "is a directory: "+req.Path, http.StatusBadRequest)
+			return
+		}
+		// a new file needs a real parent — CreateTemp would otherwise fail
+		// as a 500, and "no such directory" is the honest answer
+		if fi, err := os.Stat(filepath.Dir(abs)); err != nil || !fi.IsDir() {
+			http.Error(w, "no such directory: "+filepath.Dir(req.Path), http.StatusNotFound)
+			return
+		}
+	} else {
+		top, err := repoTop(ws.Root)
+		if err != nil {
+			top = ws.Root
+		}
+		abs, err = confinePath(top, req.Path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	if err := atomicWrite(abs, []byte(req.Content)); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// a file the OS won't let this user write is the user's answer, not
+		// a server fault — the editor flashes it verbatim
+		code := http.StatusInternalServerError
+		if os.IsPermission(err) {
+			code = http.StatusForbidden
+		}
+		http.Error(w, err.Error(), code)
 		return
 	}
 	writeJSON(w, writeResult{Path: req.Path, Bytes: len(req.Content)})

@@ -11,7 +11,7 @@ package host
 
 import (
 	"net/http"
-	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -69,39 +69,75 @@ func (h *Host) gutterBaseFor(ws *WorkspaceInfo, top, param string) reviewBase {
 
 // handleWorkspaceGutter is GET /workspaces/{name}/gutter?path=&base= — the
 // stripes for one file vs a base (default HEAD).
+//
+// Path takes the same two shapes as every read. Relative = this workspace's
+// repo, reviewed against the review base. Absolute = the EXTERNAL tier, and
+// the workspace's repo has nothing to say about it: the file's OWN repo
+// answers, always against its HEAD (a merge-base computed in one checkout
+// means nothing in another). A file in no repo at all gets a bare margin —
+// an unstriped file is a normal thing, not an error.
 func (h *Host) handleWorkspaceGutter(w http.ResponseWriter, r *http.Request, name string) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	ws, top, ok := h.reviewRepo(w, name)
-	if !ok {
-		return
-	}
-	relPath := r.URL.Query().Get("path")
-	if relPath == "" {
+	reqPath := r.URL.Query().Get("path")
+	if reqPath == "" {
 		http.Error(w, "path required", http.StatusBadRequest)
 		return
 	}
-	abs, err := confinePath(top, relPath)
+	var (
+		abs     string // the file on disk
+		top     string // the repo that answers for it
+		gitPath string // abs relative to top, forward slashes — git's spelling
+		base    reviewBase
+	)
+	if strings.HasPrefix(reqPath, "/") {
+		abs = filepath.Clean(reqPath)
+		// top stays empty when the file is in no repo — the read below still
+		// decides 404 vs bare margin, so a bogus path can't hide behind
+		// "not a repo"
+		if t, err := repoTop(filepath.Dir(abs)); err == nil {
+			// canonical both sides: git reports the resolved top while the
+			// client may spell the file through a symlink (/tmp, /var on
+			// macOS), and a literal Rel would climb out with ../
+			if rel, rerr := filepath.Rel(canonical(t), canonicalFile(abs)); rerr == nil &&
+				!strings.HasPrefix(rel, "..") {
+				top, gitPath = t, filepath.ToSlash(rel)
+				base = reviewBase{mode: "head", ref: "HEAD", name: "HEAD"}
+			}
+		}
+	} else {
+		ws, t, ok := h.reviewRepo(w, name)
+		if !ok {
+			return
+		}
+		a, err := confinePath(t, reqPath)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		abs, top, gitPath = a, t, reqPath
+		base = h.gutterBaseFor(ws, t, r.URL.Query().Get("base"))
+	}
+	cur, missing, err := readOrMissing(abs)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "no such file: "+reqPath, http.StatusNotFound)
 		return
 	}
-	cur, err := os.ReadFile(abs)
-	if err != nil {
-		http.Error(w, "no such file: "+relPath, http.StatusNotFound)
-		return
-	}
-	base := h.gutterBaseFor(ws, top, r.URL.Query().Get("base"))
 	answer := func(hunks []gutterHunk) {
 		writeJSON(w, map[string]any{"base": base.name, "hunks": hunks})
+	}
+	if missing || top == "" {
+		// a new file has nothing to stripe yet; a file in no repo never will
+		answer([]gutterHunk{})
+		return
 	}
 	if _, binary, _ := capSide(cur); binary || len(cur) > reviewMaxSide {
 		answer([]gutterHunk{}) // a bare margin, not an error
 		return
 	}
-	old, err := gitOut(top, reviewTimeout, "show", base.ref+":"+relPath)
+	old, err := gitOut(top, reviewTimeout, "show", base.ref+":"+gitPath)
 	if err != nil {
 		// not at the base — the whole file is an addition
 		n := strings.Count(string(cur), "\n")

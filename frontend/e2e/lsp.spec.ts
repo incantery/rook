@@ -124,14 +124,16 @@ test("gd jumps across files and gr fills the refs quickfix", async ({page}) => {
     await page.keyboard.press("Control+i");
     await expect(editorPath).toContainText("internal/plugin/plugin.go", {timeout: 20_000});
 
-    // gd into the stdlib — the definition opens as an external read-only
-    // view (absolute path served by the file endpoint's external branch)
+    // gd into the stdlib — the definition opens on the external tier (an
+    // absolute path, served by the file endpoint's external branch) and says
+    // so. Labeled, not fenced: the module cache is 0444 on disk, so what
+    // stops a save there is the filesystem, not rook.
     await page.locator(".editor-mount").click();
     await page.keyboard.type("/strings.Fields");
     await page.keyboard.press("Enter");
     await page.keyboard.type("2w"); // land on Fields, not strings
     await page.keyboard.type("gd");
-    await expect(editorPath).toContainText("external · read-only", {timeout: 20_000});
+    await expect(editorPath).toContainText("external", {timeout: 20_000});
     await expect(editorPath).toContainText("strings.go");
 
     await page.screenshot({path: "bin/e2e/lsp-refs.png", fullPage: true});

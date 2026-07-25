@@ -2,6 +2,7 @@ package host
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -104,7 +105,37 @@ func TestGutterEndpoint(t *testing.T) {
 	if code, _ := c.do(t, "GET", "/workspaces/src/gutter?path=../x", nil); code != 400 {
 		t.Fatal("escape: want 400")
 	}
-	if code, _ := c.do(t, "GET", "/workspaces/src/gutter?path=ghost.txt", nil); code != 404 {
-		t.Fatal("missing file: want 404")
+	// a file that isn't there yet has nothing to stripe — a bare margin, so
+	// a new-file buffer doesn't warn at every save; a bogus DIR is still 404
+	if r := get("path=ghost.txt"); len(r.Hunks) != 0 {
+		t.Fatalf("new file: %+v", r.Hunks)
+	}
+	if code, _ := c.do(t, "GET", "/workspaces/src/gutter?path=nodir/ghost.txt", nil); code != 404 {
+		t.Fatal("missing dir: want 404")
+	}
+
+	// EXTERNAL: an absolute path in ANOTHER repo stripes against that repo's
+	// HEAD — the workspace is the anchor, not the fence
+	other := t.TempDir()
+	gitT(t, other, "init", "-b", "main")
+	op := filepath.Join(other, "x.txt")
+	os.WriteFile(op, []byte("one\ntwo\n"), 0o644)
+	gitT(t, other, "add", ".")
+	gitT(t, other, "commit", "-m", "other repo")
+	os.WriteFile(op, []byte("one\nTWO\n"), 0o644)
+	if r := get("path=" + url.QueryEscape(op)); r.Base != "HEAD" || len(r.Hunks) != 1 ||
+		r.Hunks[0].Kind != "modified" || r.Hunks[0].Start != 2 {
+		t.Fatalf("external gutter: %q %+v", r.Base, r.Hunks)
+	}
+
+	// a file in no repo at all: a bare margin, never an error
+	loose := filepath.Join(t.TempDir(), "loose.txt")
+	os.WriteFile(loose, []byte("a\n"), 0o644)
+	if r := get("path=" + url.QueryEscape(loose)); len(r.Hunks) != 0 {
+		t.Fatalf("non-repo external: %+v", r.Hunks)
+	}
+	// …and a path under a directory that doesn't exist is still a 404
+	if code, body := c.do(t, "GET", "/workspaces/src/gutter?path="+url.QueryEscape(filepath.Join(other, "nodir", "ghost.txt")), nil); code != 404 {
+		t.Fatalf("missing external dir: want 404, got %d %s", code, body)
 	}
 }

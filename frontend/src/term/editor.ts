@@ -306,6 +306,13 @@ export interface EditorSeam {
      *  anchored there when none covers it. False means there was nothing to
      *  act on (no model yet), so chrome can say so. */
     openThread(): boolean;
+    /** The absolute directory this pane is anchored to — the cwd `re` was
+     *  launched from — or undefined when it has none (a pane chrome opened,
+     *  which belongs to the workspace). Chrome asks before scoping ⌃P/⌃G:
+     *  a takeover REPLACED its terminal, so there is no session left to ask
+     *  for a cwd, and without this the picker silently snaps back to the
+     *  workspace root the moment you cd out of it. */
+    anchorDir(): string | undefined;
     onMarkerClick(cb: (line: number, side: Side, ids: number[]) => void): () => void;
     onChange(cb: () => void): () => void;
 }
@@ -315,6 +322,10 @@ export interface EditorPaneOpts {
     kind: "review" | "file" | "thread";
     /** file mode: the repo-top-relative path to view */
     path?: string;
+    /** the absolute directory this pane is anchored to — `re`'s cwd. Scopes
+     *  the pickers this pane opens; unset for a pane chrome minted, which
+     *  belongs to the workspace root. */
+    dir?: string;
     /** thread mode: which thread this buffer renders */
     thread?: {id: number};
     /** a thread buffer wants its source shown — chrome routes through the
@@ -443,6 +454,16 @@ export class EditorPane implements PaneContent {
     private threadSpoke = false;
     /** editable iff the file loaded whole — truncated/binary stays read-only */
     private editable = false;
+    /** this buffer is an absolute path OUTSIDE the workspace (another repo,
+     *  the stdlib, a dotfile). It reads, saves and stripes like any other
+     *  file — the gutter comes from the file's OWN repo. What it doesn't get
+     *  is the workspace-anchored furniture: threads anchor to
+     *  workspace-relative paths, so none ever match here. */
+    private external = false;
+    /** vim's new-file buffer: named, empty, not on disk until the first :w */
+    private missing = false;
+    /** the read hit the 2 MB cap — the reason this buffer is read-only */
+    private truncated = false;
     /** 'wrap', window-local. Seeded from the global default at construction,
      *  then owned by this pane — `:set wrap` here must not reach across the
      *  split to the file you are reading beside it. */
@@ -639,6 +660,7 @@ export class EditorPane implements PaneContent {
                 for (const b of this.bands) b.clearHighlight();
             },
             openThread: () => this.openThreadAtCursor(),
+            anchorDir: () => this.opts.dir,
             onMarkerClick: (cb) => this.sub(this.markerCbs, cb),
             onChange: (cb) => this.sub(this.changeCbs, cb),
         });
@@ -1141,6 +1163,7 @@ export class EditorPane implements PaneContent {
         this.opts.path = path;
         this.closeArmed = false;
         this.editable = false; // until the read says otherwise
+        this.external = this.missing = this.truncated = false;
         this.showStatus("reading file…");
         await this.loadFile();
         this.emitChange(); // the strip's title + the thread panel's file context
@@ -1209,6 +1232,7 @@ export class EditorPane implements PaneContent {
             // real file (the openFile ladder finds any file pane, this one
             // included).
             this.editable = true;
+            this.external = this.missing = this.truncated = false;
             this.pathEl.textContent = "[No Name]";
             this.noteEl.innerHTML = ""; // a prior thread's key hints don't apply
             this.clearStatus();
@@ -1256,17 +1280,16 @@ export class EditorPane implements PaneContent {
                 return;
             }
             // A whole file is editable; a truncated one stays read-only —
-            // saving its 2 MB prefix would erase everything past it. External
-            // (outside-workspace) reads are read-only by design: the write
-            // door confines to the workspace.
-            this.editable = !res.truncated && !res.external;
-            this.pathEl.textContent =
-                path +
-                (res.truncated
-                    ? " · truncated at 2 MB · read-only"
-                    : res.external
-                      ? " · external · read-only"
-                      : "");
+            // saving its 2 MB prefix would erase everything past it. An
+            // external (outside-workspace) file edits like any other; the
+            // label is orientation, not a fence — it says why threads don't
+            // anchor here. A missing one is vim's new-file buffer: empty,
+            // named, editable, created by the first :w.
+            this.external = res.external ?? false;
+            this.missing = res.missing ?? false;
+            this.truncated = res.truncated ?? false;
+            this.editable = !res.truncated;
+            this.renderPathLabel();
             this.noteEl.innerHTML = ""; // a prior thread's key hints don't apply
             this.clearStatus();
             this.disposeModels();
@@ -1307,6 +1330,18 @@ export class EditorPane implements PaneContent {
         } catch (err) {
             this.fail(`reading ${path}`, err);
         }
+    }
+
+    /** The path line and what qualifies it: why this buffer is read-only, or
+     *  that it isn't on disk yet, or that it lives outside the workspace.
+     *  Re-rendered rather than written once, because the first :w turns a
+     *  new-file buffer into a file. */
+    private renderPathLabel(): void {
+        const tags: string[] = [];
+        if (this.external) tags.push("external");
+        if (this.truncated) tags.push("truncated at 2 MB · read-only");
+        else if (this.missing) tags.push("new file");
+        this.pathEl.textContent = [this.opts.path ?? "", ...tags].join(" · ");
     }
 
     /** The git gutter: stripes in the line-decorations margin — added green,
@@ -1441,6 +1476,12 @@ export class EditorPane implements PaneContent {
         try {
             await this.api.writeFile(this.opts.workspace, this.opts.path ?? "", model.getValue());
             if (this.disposed) return true;
+            if (this.missing) {
+                // it exists now — drop the "new file" tag, and let the gutter
+                // below stripe it as the whole-file addition it is
+                this.missing = false;
+                this.renderPathLabel();
+            }
             this.savedVersionId = versionId;
             this.setDirty(model.getAlternativeVersionId() !== versionId);
             this.opts.onFlash(`saved ${this.opts.path ?? ""}`);
