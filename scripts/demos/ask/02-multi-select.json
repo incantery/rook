@@ -1,0 +1,14 @@
+{
+  "questions": [
+    {
+      "question": "Which parts deserve specs next?",
+      "header": "Coverage",
+      "multiSelect": true,
+      "options": [
+        {"label": "Pending-asks list"},
+        {"label": "MCP timeout handling"},
+        {"label": "Relay retraction"}
+      ]
+    }
+  ]
+}

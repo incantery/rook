@@ -1,0 +1,21 @@
+{
+  "questions": [
+    {
+      "question": "Where should the preview panel sit?",
+      "header": "Layout",
+      "options": [
+        {
+          "label": "Beside the rows",
+          "description": "Two columns; the panel follows the cursor",
+          "recommended": true,
+          "preview": "+----------------+  +--------------------+\n| ( ) Stacked    |  |  +--------+        |\n| (o) Side by    |  |  |  a  b  |        |\n|     side       |  |  +--------+        |\n| ( ) Other…     |  |                    |\n+----------------+  +--------------------+"
+        },
+        {
+          "label": "Under the rows",
+          "description": "One column; the artifact reads full width",
+          "preview": "+---------------------------------------+\n| ( ) Stacked                           |\n| (o) Side by side                      |\n| ( ) Other…                            |\n+---------------------------------------+\n|  +--------+                           |\n|  |  a  b  |                           |\n|  +--------+                           |\n+---------------------------------------+"
+        }
+      ]
+    }
+  ]
+}

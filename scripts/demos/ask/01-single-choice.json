@@ -1,0 +1,13 @@
+{
+  "questions": [
+    {
+      "question": "How does the ask form feel so far?",
+      "header": "Vibe",
+      "options": [
+        {"label": "Ship it", "description": "The split-to-the-right flow works"},
+        {"label": "Needs polish", "description": "Right idea, rough edges"},
+        {"label": "Wrong direction", "description": "Rethink the surface"}
+      ]
+    }
+  ]
+}
