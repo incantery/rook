@@ -186,14 +186,18 @@ func (a *agentWatch) applyRecord(ln transcript.Line) {
 		}
 		// One API response is written as several lines, each repeating the
 		// same id and usage object. Bill the first and only the first —
-		// naive summing roughly doubles the cost.
+		// naive summing roughly doubles the cost. The usage outbox rides
+		// the same dedupe: one queued event per response, cost zero when
+		// the model isn't in the price table (the tokens still travel).
 		if m.ID == "" || !st.seenMsg[m.ID] {
 			if m.ID != "" {
 				st.seenMsg[m.ID] = true
 			}
-			if usd, priced := transcript.Cost(m.Model, m.Usage); priced {
+			usd, priced := transcript.Cost(m.Model, m.Usage)
+			if priced {
 				st.CostUSD += usd
 			}
+			a.queueUsageLocked(m, usd, now)
 		}
 		text := m.Text()
 		if text != "" {

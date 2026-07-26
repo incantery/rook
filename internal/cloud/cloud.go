@@ -55,6 +55,43 @@ type Agent struct {
 	LastEvent time.Time `json:"lastEvent"`
 }
 
+// Usage is the second verb: POST /v1/usage, a batch of what Claude Code
+// spent locally. Unlike status this is not a snapshot — each event is one
+// API response's tokens or one subscription-meter reading — but the same
+// dumb-client safety holds by a different route: the ids below are stable
+// names (transcript message id, capture time), rook-cloud prefixes them
+// with the machine id and drops duplicates, so retrying a whole batch is
+// a no-op rather than double-billing.
+const (
+	UsageKindClaude = "claude" // one API response: tokens and priced cost
+	UsageKindLimits = "limits" // one /usage probe: the subscription windows
+
+	// MaxUsageBatch mirrors rook-cloud's ingest cap.
+	MaxUsageBatch = 500
+)
+
+type UsageEvent struct {
+	ID    string `json:"id,omitempty"`
+	Kind  string `json:"kind"`
+	Model string `json:"model,omitempty"`
+	// No omitempty: encoding/json never omits a struct (see Agent.LastEvent).
+	At                  time.Time     `json:"at"`
+	InputTokens         int64         `json:"inputTokens,omitempty"`
+	OutputTokens        int64         `json:"outputTokens,omitempty"`
+	CacheReadTokens     int64         `json:"cacheReadTokens,omitempty"`
+	CacheCreationTokens int64         `json:"cacheCreationTokens,omitempty"`
+	CostUSD             float64       `json:"costUsd,omitempty"`
+	Windows             []LimitWindow `json:"windows,omitempty"`
+}
+
+// LimitWindow is one subscription meter, label verbatim from Claude Code —
+// Anthropic renames windows, and this client does not chase vocabulary.
+type LimitWindow struct {
+	Label  string `json:"label"`
+	Pct    int    `json:"pct"`
+	Resets string `json:"resets,omitempty"`
+}
+
 type Client struct {
 	base  string
 	token string
@@ -115,6 +152,13 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 // server-side, so this is idempotent in the only sense that matters here.
 func (c *Client) PostStatus(ctx context.Context, s Status) error {
 	_, err := c.do(ctx, http.MethodPost, "/v1/status", s)
+	return err
+}
+
+// PostUsage pushes a batch of usage events. Safe to retry wholesale: the
+// event ids make a duplicate insert a no-op server-side.
+func (c *Client) PostUsage(ctx context.Context, events []UsageEvent) error {
+	_, err := c.do(ctx, http.MethodPost, "/v1/usage", map[string]any{"events": events})
 	return err
 }
 
