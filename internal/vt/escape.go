@@ -63,11 +63,11 @@ func (e *Emulator) escCSI(b []byte, i int) (int, bool) {
 func (e *Emulator) escOSC(b []byte, i int) (int, bool) {
 	n := len(b)
 	for j := i + 2; j < n; j++ {
-		switch {
-		case b[j] == 0x07:
+		switch b[j] {
+		case 0x07:
 			e.osc(b[i+2 : j])
 			return j + 1, false
-		case b[j] == 0x1b:
+		case 0x1b:
 			if j+1 >= n {
 				return i, true // ST possibly split across writes
 			}

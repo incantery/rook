@@ -39,12 +39,9 @@ async function main() {
     const cfg = await Config.Get();
     console.info("config loaded:", JSON.stringify(cfg));
     const families = [cfg.fontFamily, ...SYMBOL_FALLBACKS];
-    const font = [
-        ...families.map((f) => `"${f}"`),
-        "Menlo",
-        "ui-monospace",
-        "monospace",
-    ].join(", ");
+    const font = [...families.map((f) => `"${f}"`), "Menlo", "ui-monospace", "monospace"].join(
+        ", ",
+    );
     // paint chrome + the body tint from the active theme before anything mounts
     themeService.setOpacity(cfg.backgroundOpacity);
     themeService.apply(cfg.theme); // no-op if the name is unknown

@@ -312,9 +312,7 @@ export class HostAPI {
     async recents(ws: string, limit?: number): Promise<RecentFile[]> {
         try {
             const params = new URLSearchParams(limit ? {limit: String(limit)} : {});
-            const res = await this.req(
-                `/workspaces/${encodeURIComponent(ws)}/recents?${params}`,
-            );
+            const res = await this.req(`/workspaces/${encodeURIComponent(ws)}/recents?${params}`);
             return ((await res.json()) as {recents?: RecentFile[]}).recents ?? [];
         } catch {
             return [];
@@ -502,7 +500,10 @@ export class HostAPI {
      *  A mismatch (concurrent reply, hand-edited history) is NOT an error to
      *  throw on: it comes back as {ok:false} with the fresh doc so the
      *  caller can splice its local tail underneath and carry on. */
-    async saveThreadDoc(id: number, content: string): Promise<{ok: true} | ({ok: false} & ThreadDoc)> {
+    async saveThreadDoc(
+        id: number,
+        content: string,
+    ): Promise<{ok: true} | ({ok: false} & ThreadDoc)> {
         const r = await fetch(`${this.endpoint}/threads/${id}/doc`, {
             method: "POST",
             headers: {Authorization: `Bearer ${this.token}`},

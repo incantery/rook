@@ -200,4 +200,3 @@ describe("snippetOf", () => {
         expect(snippetOf(th({id: 1, anchorText: "   "}))).toBe("(blank line)");
     });
 });
-

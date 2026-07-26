@@ -14,12 +14,28 @@ linters:
         - (io.Closer).Close
         - (*os.File).Close
         - (*database/sql.Rows).Close
+        - (*database/sql.Stmt).Close
+        - (*github.com/fsnotify/fsnotify.Watcher).Close
         # fire-and-forget writes to a pty or stdout
         - (*os.File).Write
+        - fmt.Fprint
+        # Terminal.Write parses pty output into the grid; it is io.Writer-shaped
+        # for convenience, and the only implementation always returns nil
+        - (github.com/incantery/rook/internal/host.Terminal).Write
+        # best-effort resize: the pty may already be gone
+        - github.com/creack/pty.Setsize
         # best-effort filesystem cleanup
         - os.Remove
         - os.RemoveAll
         - os.Rename
+        - os.Symlink
+        # crypto/rand.Read never returns an error as of Go 1.24 — it fills b
+        # entirely or panics, so the check is dead code
+        - crypto/rand.Read
+        # LSP notifications are one-way by protocol, and a response written to
+        # a conn that has already died is the conn's problem, not the caller's
+        - (*github.com/incantery/rook/internal/lsp.conn).notify
+        - (*github.com/incantery/rook/internal/lsp.conn).writeMsg
         # best-effort process teardown
         - (*os/exec.Cmd).Run
         - (*os/exec.Cmd).Wait

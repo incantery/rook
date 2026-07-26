@@ -1521,7 +1521,11 @@ func reviewDispose(verb string, args []string) error {
 			return err
 		}
 		if verb == "defer" && len(note) > 0 {
-			c.req("POST", "/tasks/"+id+"/score", map[string]string{"note": strings.Join(note, " ")})
+			// the note is the whole point of `defer <id> <note>` — dropping
+			// it silently leaves the task deferred with no reason recorded
+			if _, err := c.req("POST", "/tasks/"+id+"/score", map[string]string{"note": strings.Join(note, " ")}); err != nil {
+				return err
+			}
 		}
 	}
 	fmt.Printf("%s %s: %s\n", stateMark(state), state, strings.Join(ids, " "))

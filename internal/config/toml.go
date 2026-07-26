@@ -311,16 +311,6 @@ func applyTOMLLSP(cfg *Config, l *tomlLSP, repoLayer bool) {
 	}
 }
 
-// exists reports whether a config layer's TOML file is present — the
-// per-layer switch between the canonical and legacy formats.
-func exists(path string) bool {
-	if path == "" {
-		return false
-	}
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 // repoTOMLPath is a repository's checked-in TOML layer, .rook/config.toml.
 func repoTOMLPath(repoTop string) string {
 	return filepath.Join(repoTop, ".rook", "config.toml")

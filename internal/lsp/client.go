@@ -341,7 +341,9 @@ func (c *Client) Pid() int {
 func (c *Client) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c.callResult(ctx, "shutdown", nil, nil)
+	// teardown: a server that has already died gives the same outcome as one
+	// that shuts down politely, so neither result changes what happens next
+	_ = c.callResult(ctx, "shutdown", nil, nil)
 	c.conn.notify("exit", nil)
 	select {
 	case <-c.done:

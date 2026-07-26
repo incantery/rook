@@ -703,8 +703,7 @@ export class TermManager {
 
     /** Chrome's hook for `re` takeover asks — set by App, called per
      *  request with the session, its workspace, and the resolved paths. */
-    onEditRequest: ((sessionId: string, workspace: string, req: EditRequest) => void) | null =
-        null;
+    onEditRequest: ((sessionId: string, workspace: string, req: EditRequest) => void) | null = null;
 
     /** Chrome's hook for ask requests (`rookctl ask` / the MCP tool) —
      *  a question for the human, to render beside the asking session. */
@@ -931,7 +930,12 @@ export class TermManager {
      *  ask form landing beside the agent that asked. splitFocused's shape
      *  minus the shell spawn; the manager stays ignorant of what's inside,
      *  same as openPaneWindow. Focus moves to the new pane. */
-    splitPane(at: PaneAt, dir: Dir, content: PaneRef, mk: (leafId: string) => PaneContent): boolean {
+    splitPane(
+        at: PaneAt,
+        dir: Dir,
+        content: PaneRef,
+        mk: (leafId: string) => PaneContent,
+    ): boolean {
         const win = this.windows.find((w) => w.id === at.winId);
         if (!win || !win.panes.has(at.leafId)) return false;
         this.unzoom(win);

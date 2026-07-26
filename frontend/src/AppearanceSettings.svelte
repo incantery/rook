@@ -26,9 +26,9 @@
     <div class="border-b border-line/15 px-4.5 py-3.5 text-sm font-bold text-fg">Appearance</div>
 
     <div class="mx-4.5 rounded-lg border border-line/15 bg-sunken/50 px-3 py-2.5 text-xs text-dim">
-        Settings live in <span class="font-mono text-fg">~/.config/rook/config.toml</span> — edit the
-        file and press <span class="font-mono text-fg">` r</span> to reload. Every key is documented
-        in <span class="font-mono text-fg">docs/config.sample.toml</span>.
+        Settings live in <span class="font-mono text-fg">~/.config/rook/config.toml</span> — edit
+        the file and press <span class="font-mono text-fg">` r</span> to reload. Every key is
+        documented in <span class="font-mono text-fg">docs/config.sample.toml</span>.
     </div>
 
     <label class="my-2 flex items-center gap-2 px-4.5"

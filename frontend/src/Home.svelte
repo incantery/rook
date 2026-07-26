@@ -849,9 +849,7 @@
     <button
         class={[
             "cursor-pointer whitespace-nowrap rounded-md px-2.5 py-1 text-xs",
-            deck.tab === id
-                ? "bg-fg/10 font-medium text-fg"
-                : `${tone} hover:bg-fg/6`,
+            deck.tab === id ? "bg-fg/10 font-medium text-fg" : `${tone} hover:bg-fg/6`,
         ]}
         onclick={() => {
             deck.tab = id;

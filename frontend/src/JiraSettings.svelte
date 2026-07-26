@@ -74,9 +74,9 @@
         <span class="font-mono text-fg">~/.config/rook/config.toml</span> — the
         <span class="font-mono text-fg">[jira]</span> section for url/email/jql, a
         <span class="font-mono text-fg">jira-project</span> key under
-        <span class="font-mono text-fg">[workspaces.&lt;name&gt;]</span> to opt a workspace in. The
-        host re-reads it on the next refresh. Only the API token is managed here (it lives in the
-        keychain, never in the file).
+        <span class="font-mono text-fg">[workspaces.&lt;name&gt;]</span> to opt a workspace in. The host
+        re-reads it on the next refresh. Only the API token is managed here (it lives in the keychain,
+        never in the file).
     </div>
 
     <div class="my-2 flex flex-col gap-2 px-4.5 text-sm">

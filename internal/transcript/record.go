@@ -300,18 +300,11 @@ func parseContent(raw json.RawMessage) []Block {
 	}
 	out := make([]Block, 0, len(blocks))
 	for _, b := range blocks {
-		out = append(out, Block{
-			Type:      b.Type,
-			Text:      b.Text,
-			Thinking:  b.Thinking,
-			Signature: b.Signature,
-			ID:        b.ID,
-			Name:      b.Name,
-			Input:     b.Input,
-			ToolUseID: b.ToolUseID,
-			Content:   b.Content,
-			IsError:   b.IsError,
-		})
+		// rawBlock and Block differ only in struct tags, so the conversion
+		// is exact. It is also self-policing: give one of them a field the
+		// other lacks and this stops compiling, which is the moment to
+		// decide whether the new wire field belongs in the public type.
+		out = append(out, Block(b))
 	}
 	return out
 }

@@ -304,12 +304,19 @@ const CONTEXT_NAMED: Record<string, string> = {
 // carried in config but wait on modal dispatch, so they drop with a warn.
 // "" unbinds, same as the app scope. Modes other than normal are ignored
 // here (fail open toward configs written for a newer rook).
-export function buildContextMap(normalBinds: Record<string, string | undefined>): Map<string, string> {
+export function buildContextMap(
+    normalBinds: Record<string, string | undefined>,
+): Map<string, string> {
     const map = new Map(CONTEXT_PREFIX);
     for (const [t, c] of Object.entries(normalBinds)) {
         if (typeof c !== "string") continue;
         const rest = stripLeader(t.trim());
-        const key = rest === null ? null : rest.length === 1 ? rest : CONTEXT_NAMED[rest.toLowerCase()] ?? null;
+        const key =
+            rest === null
+                ? null
+                : rest.length === 1
+                  ? rest
+                  : (CONTEXT_NAMED[rest.toLowerCase()] ?? null);
         if (key === null) {
             console.warn("editor keybind carried but not dispatchable yet:", t);
             continue;

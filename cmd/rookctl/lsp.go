@@ -160,7 +160,9 @@ func runLSP(args []string) error {
 			return err
 		}
 		var res struct{ Stopped int }
-		jsonInto(raw, &res)
+		if err := jsonInto(raw, &res); err != nil {
+			return err
+		}
 		fmt.Printf("stopped %d instance(s) — the next query starts fresh\n", res.Stopped)
 		return nil
 	default:

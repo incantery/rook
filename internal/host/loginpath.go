@@ -49,7 +49,10 @@ func AdoptLoginPATH() {
 	}
 	merged := mergePaths(os.Getenv("PATH"), login)
 	if merged != os.Getenv("PATH") {
-		os.Setenv("PATH", merged)
+		if err := os.Setenv("PATH", merged); err != nil {
+			log.Printf("host: PATH from %s login shell rejected: %v", shell, err)
+			return
+		}
 		log.Printf("host: PATH adopted from %s login shell", shell)
 	}
 }

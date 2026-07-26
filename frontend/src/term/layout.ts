@@ -100,7 +100,6 @@ export function newReviewLeaf(): LeafNode {
     return {kind: "leaf", id: crypto.randomUUID(), content: {type: "review"}};
 }
 
-
 /** Point an existing leaf at different content, in place — the pane keeps its
  *  id, so focus, zoom and its position in the tree all survive. This is `:e`:
  *  the viewport stays put and the buffer under it changes. */
