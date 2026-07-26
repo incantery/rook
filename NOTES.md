@@ -39,9 +39,9 @@
 - [x] Vim status styled (term/vimstatus.ts, a custom monaco-vim StatusBar class): colored mode badge (normal accent / insert green / visual magenta / replace red, from theme vars), Ln/Col in the bar's right zone (vimbar.pos, cursor-listener fed), and the `:`/`/` prompt in a MODAL (.vim-cmdline — light scrim so incremental search stays visible); vim messages (E486, ":set wrap?" answers) stay inline in the bar.
 - [x] Editor status-bar zones: Ln/Col (landed with the vim bar above), language, LSP state. The pane publishes what it's SHOWING alongside the cursor — monaco's language id plus the file extension — through the same slot-holder guard, so a background pane can't relabel the bar; `onDidChangeModel` matters as much as focus, since `:e` swaps the buffer under a pane that never loses it. The LSP chip resolves the server whose `filetypes` claim that extension (extensions, not language ids — "ts", not "typescript") and shows ● running vs ○ configured-but-not-started, which is the normal resting state, not a fault. First frontend consumer of `/lsp/status`; refetched on workspace or extension change rather than polled, because those are the only events that move the answer.
 - [ ] Agent-pane status-bar zone: model · ctx% · ±lines · auto-mode when a claude pane is focused — rook already reads the jsonl; feed it to the bar.
-- [ ] Titlebar height: boards say 42px; we're at 52 (h-13) pending traffic-light alignment check on macOS.
+- [x] Titlebar height: boards say 42px; we stay at 52 (h-13), and here is what pins it. `MacTitleBarHiddenInset` sets `UseToolbar: true`, so the traffic lights are placed by AppKit — centered in the toolbar band, which is the 52px our bar already matches. Shrinking to 42 doesn't move them; it leaves them ~5px low, straddling the bar's bottom edge. 42 is only reachable by repositioning the buttons ourselves (`standardWindowButton` + a frame offset, a Go shim), which is a different and larger job than a height token. Decided 2026-07-26 (Seth): leave it, record the reason, stop re-reading this line as unfinished work. Loose thread, not blocking: `InvisibleTitleBarHeight` is 44, so the bottom 8px of the visible titlebar isn't draggable.
 - [ ] Hover suppression while keyboard nav is live (boards 1d: "exactly one row reads as selected").
-- [ ] Review drawer: visible resize handle at the strip's top edge (boards 1e).
+- [ ] Review drawer: visible resize handle at the strip's top edge (boards 1e). Not the small item it sits next to: SidePane hardcodes w-88/h-72 and there is no drag mechanic anywhere in the frontend, so this is new machinery plus persistence, and it lands generically on the slot rather than on the review tenant.
 
 # Emulator (internal/vt)
 
@@ -49,7 +49,7 @@
 - [ ] Parser rework (VT state machine proper): C0 controls EXECUTE inside escape sequences (we abort); C1 as raw bytes/codepoints should execute in 8-bit-tolerant mode (we drop, ghostty stores, xterm executes). Known-divergent classes documented in the fuzz filter.
 - [x] Width table (2026-07-22): 64KB BMP table folds go-runewidth + all oracle corrections into one byte-load; UTF-8 batch decode. Unicode pipeline 124→202 MB/s.
 - [ ] Scrollback compression (Seth, 2026-07-22): ghostty compresses idle scrollback pages caller-driven — a MEMORY play, not throughput. Our ring is ~4.9MB/session at 405 cols (wide-grid locality item below). Do it as part of the idle-RSS measurement arc: measure first, then decide page compression vs content-stride storage.
-- [ ] Ghostty upstream candidates (report when we engage): CSI 0a/0e (HPR/VPR) miss the zero-coercion CSI 0C/0B have.
+- [ ] Ghostty upstream candidates (report when we engage): CSI 0a/0e (HPR/VPR) miss the zero-coercion CSI 0C/0B have. Nothing to fix on our side — escape.go's `p()` already coerces 0→default for `a` and `e` alike; this is a report, not a task.
 - [ ] Adapter v2 (only if ever needed as a real backend): per-row dirty flags + bulk row read to fix the 17ms full-screen FFI snapshot; WRITE_PTY effect callback for query responses; scrollback paging parity.
 
 # WebGL Renderer (beamterm) — adoption gaps
