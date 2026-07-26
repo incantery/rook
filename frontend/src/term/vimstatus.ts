@@ -81,6 +81,51 @@ function closeModal(): void {
     scrimClose = null;
 }
 
+/** A `:` prompt for a surface that has no vim of its own — the file tree.
+ *
+ *  It borrows the same modal monaco-vim's prompt uses, and for the same
+ *  reason that element is a singleton: there is one keyboard, so there is
+ *  never more than one open prompt. The markup matches what the library
+ *  produces (a span holding the prefix text and an input), so app.css's
+ *  structural rules dress it without knowing which one it got.
+ *
+ *  `onCancel` fires on Escape and on a scrim click — the caller uses it to
+ *  put the keyboard back where it was, because a prompt that eats focus on
+ *  the way out is worse than no prompt. */
+export function promptEx(onAccept: (line: string) => void, onCancel?: () => void): void {
+    const wrap = document.createElement("span");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.spellcheck = false;
+    input.autocapitalize = "off";
+    wrap.append(document.createTextNode(":"), input);
+
+    let settled = false;
+    const cancel = (): void => {
+        if (settled) return;
+        settled = true;
+        closeModal();
+        onCancel?.();
+    };
+    openModal(wrap, cancel);
+    input.focus();
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+            e.stopPropagation();
+            cancel();
+            return;
+        }
+        if (e.key !== "Enter") return;
+        e.stopPropagation();
+        e.preventDefault();
+        if (settled) return;
+        settled = true;
+        const line = input.value;
+        closeModal();
+        onAccept(line);
+    });
+}
+
 export class RookVimStatusBar {
     private readonly node: HTMLElement;
     private readonly modeNode: HTMLSpanElement;

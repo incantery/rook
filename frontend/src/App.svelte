@@ -890,9 +890,9 @@
         }
         void api.editAck(req.id).catch(() => {});
         const paths = req.paths ?? [];
-        // vim's contract, all three shapes: `re file` opens it, bare `re`
-        // is the empty buffer, `re .` is the empty buffer with the tree —
-        // every one of them lands IN the editor immediately
+        // vim's contract, all three shapes: `re file` opens it, bare `re` is
+        // the greeter, `re .` is the greeter with the tree beside it — every
+        // one of them lands IN the editor immediately
         await performTakeover(
             req.id,
             sessionId,
@@ -901,7 +901,6 @@
             paths[0] ?? "",
             paths.slice(1),
             req.dir,
-            req.tree,
         );
         if (req.tree) {
             const c = chromeFor(at.winId);
@@ -919,19 +918,22 @@
         path: string,
         extra: string[],
         cwd: string,
-        tree: boolean,
     ): Promise<void> {
         app.screen = "app";
         await tick();
-        // BARE `re` — no file named and no directory asked for. vim would
-        // give you an empty buffer; rook gives you the start screen, which
-        // is the same nothing with somewhere to go. It holds the SAME
-        // takeover, so the blocked rookctl waits on this pane either way.
+        // NO FILE NAMED — bare `re`, or `re .`. vim would give you an empty
+        // buffer; rook gives you the start screen, which is the same nothing
+        // with somewhere to go. It holds the SAME takeover, so the blocked
+        // rookctl waits on this pane either way.
         //
-        // `re .` is excluded deliberately: a directory argument means netrw
-        // — you asked to land in the editor with the tree, and a greeter in
-        // front of that is a menu you didn't ask for.
-        if (!path && !tree) {
+        // `re .` gets the greeter too, which it didn't when the tree was a
+        // window and WAS the answer. As a sidebar the tree can't be the
+        // whole pane, so something has to sit behind it — and the greeter is
+        // strictly better there than an empty buffer. It doesn't read as a
+        // menu in front of netrw either, because focus lands on the LISTING
+        // (focusZone = "left", set by the caller): the greeter is what you
+        // see past the tree, not what you have to get through.
+        if (!path) {
             await mountStart(editID, sessionId, workspace, at, cwd);
             return;
         }
@@ -1115,6 +1117,18 @@
                 recordVisit(path, at?.line ?? 1, at?.col ?? 1);
             }
             touchBuffer(path);
+            // Opening a file means the keyboard belongs in it — and leaving
+            // the explorer holding it is not a no-op you can ignore, because
+            // Monaco's init latch deliberately DECLINES to yank focus off
+            // somewhere real (it only claims from <body> or from inside
+            // itself). So a tree that keeps DOM focus keeps it forever, and
+            // `re .` + Enter lands you in an editor you cannot type into.
+            //
+            // toTerms both drops the zone (the listing focuses itself from
+            // an $effect on `active`, so the zone has to go too) and moves
+            // focus onto the pane — which is what lets each rung's own focus
+            // below, or Monaco's latch, actually land.
+            if (app.focusZone === "left") toTerms();
             // `at` is a position to land the cursor on (gd's target, a refs
             // hit) — revealPosition latches on a pane that's still loading.
             const landOn = (leafId: string) => {
@@ -1355,13 +1369,91 @@
         }
     }
 
+    /** The `:Command` bridge's map, kept here as well as pushed into the
+     *  editor module: a registry command typed at the TREE's prompt has to
+     *  reach the same place it does inside Monaco. */
+    let exCommands = new Map<string, () => void>();
+
+    /** `:` from the file tree.
+     *
+     *  The tree holds the keyboard but has no Monaco behind it, and every ex
+     *  command is registered on the shared Vim singleton and routed by a
+     *  WeakMap keyed by the editor you typed INTO. So none of them can be
+     *  reached from here — `:` in the tree was a key that did nothing, which
+     *  is the one key every vim reflex starts with. This is the door.
+     *
+     *  `:q` closes the TREE: netrw's reading, where the thing you are in is
+     *  the thing that quits. The window verbs (:qa, :wqa) fan out over the
+     *  editors beside it through the same cohort a Monaco pane would use —
+     *  and the tree goes with them on its own, because it is the editor's
+     *  furniture and always has been. */
+    function treeEx(line: string): void {
+        const m = /^\s*:?\s*([a-zA-Z]+)\s*(!?)\s*(.*)$/.exec(line);
+        if (!m) return; // a bare `:` then Enter is a no-op, as in vim
+        const name = m[1];
+        // the bang parses into either half depending on the spacing
+        const force = m[2] === "!" || m[3].trim().startsWith("!");
+        /** any editor pane in THIS window — exQuitAll fans out from it */
+        const anyEditor = (): import("./term/editor").EditorPane | null => {
+            for (const [leafId, pane] of editorPanes)
+                if (mgr.paneWindow(leafId) === app.activeId) return pane;
+            return null;
+        };
+        switch (name) {
+            case "q":
+            case "quit":
+                chrome.explorerOpen = false;
+                toTerms();
+                return;
+            case "qa":
+            case "qall":
+            case "quitall": {
+                const ed = anyEditor();
+                if (ed) ed.exQuitAll(force);
+                else toTerms();
+                return;
+            }
+            case "wqa":
+            case "wqall":
+            case "xa":
+            case "xall": {
+                const ed = anyEditor();
+                if (ed) void ed.exSaveQuitAll();
+                else toTerms();
+                return;
+            }
+            case "w":
+            case "write":
+                flash("nothing to write — the tree is a listing, not a buffer");
+                return;
+        }
+        const run = exCommands.get(name);
+        if (run) run();
+        else flash(`E492: Not an editor command: ${name}`);
+    }
+
+    /** Raise the command line over the tree, and put the keyboard back on
+     *  the listing afterwards unless the command took it somewhere. */
+    async function openTreeEx(): Promise<void> {
+        const win = app.activeId;
+        if (!win) return;
+        const {promptEx} = await import("./term/vimstatus");
+        const back = () => explorerRefs[win]?.focus();
+        promptEx((line) => {
+            treeEx(line);
+            // the command may have taken the keyboard somewhere (:q, :qa) —
+            // only claim it back if the tree still holds the zone
+            if (app.focusZone === "left") back();
+        }, back);
+    }
+
     /** ` f — nvim's NvimTreeFindFile: open the explorer with its cursor on
      *  the file you're editing (last file pane, else newest buffer). */
     /** one FileExplorer INSTANCE per window — bound by window id, so each
      *  window's tree keeps its own listing, cursor and expansion */
-    let explorerRefs = $state<Record<string, {revealPath: (path: string) => void} | undefined>>(
-        {},
-    );
+    let explorerRefs = $state<
+        Record<string, {revealPath: (path: string) => void; focus: () => void} | undefined>
+    >({});
     async function revealInExplorer(): Promise<void> {
         const path = jumpPane?.position()?.path ?? app.buffers[0];
         if (!path) {
@@ -1706,10 +1798,18 @@
                 }
                 // a takeover anchored this window's tree already (its cwd);
                 // otherwise the focused shell's cwd, else the workspace root
-                if (!chrome.explorerOpen && !chrome.explorerDir) {
+                const opening = !chrome.explorerOpen;
+                if (opening && !chrome.explorerDir) {
                     chrome.explorerDir = await shellDir();
                 }
-                chrome.explorerOpen = !chrome.explorerOpen;
+                chrome.explorerOpen = opening;
+                // Opening the tree puts you IN it — netrw and nerdtree both
+                // land you on the listing, and a tree you have to ⌃H into is
+                // one you press ,b twice for. Closing it while it holds the
+                // keyboard hands that back rather than leaving the zone
+                // pointing at a pane that isn't there.
+                if (opening) app.focusZone = "left";
+                else if (app.focusZone === "left") toTerms();
             },
         },
         {
@@ -1952,9 +2052,10 @@
     // aliases. Pushed once at boot: config.reload is a page reload, so the
     // map rebuilds with it. The dynamic import loads only the editor module,
     // never Monaco (that stays behind the pane's own lazy import).
-    void import("./term/editor").then((m) =>
-        m.setExCommands(registry.exNames(commandAliases)),
-    );
+    void import("./term/editor").then((m) => {
+        exCommands = registry.exNames(commandAliases);
+        m.setExCommands(exCommands);
+    });
 
     // ==== workbench-level directional focus ====
     //
@@ -2095,7 +2196,16 @@
         // The bottom strip is exempt: it has no text inputs, and without the
         // exemption `,a` from the strip would drop the comma and feed a bare
         // `a` to the strip's action keys — a stray approve.
-        if (inSidePane && !tgt?.closest?.('[data-side="bottom"]')) return;
+        //
+        // The file TREE is exempt on the same grounds, and it became load
+        // bearing the moment opening the tree started landing the keyboard
+        // in it: without this, ` could not switch windows and ,b could not
+        // close the tree you were standing in — a surface you can enter and
+        // never leave. Its own text inputs still win, via isTyping.
+        const exemptPane =
+            tgt?.closest?.('[data-side="bottom"]') != null ||
+            (tgt?.closest?.('[data-side="left"]') != null && !isTyping(tgt));
+        if (inSidePane && !exemptPane) return;
         if (app.screen === "home") {
             // the prefix works here too, so ` h toggles back to the
             // workspace you left — but never while typing in a modal input
@@ -2190,10 +2300,21 @@
         }
         if (contextLeader.matches(e)) {
             // The editor's leader arms ONLY inside the editor's own
-            // surfaces (a Monaco pane, or its bottom quickfix strip). A
-            // comma in a shell is a comma — the editor is a place, and its
-            // keys don't leak out of it.
-            if (tgt?.closest?.('.editor-mount, [data-side="bottom"]') != null) {
+            // surfaces — a Monaco pane, its bottom quickfix strip, the file
+            // tree, or the greeter. A comma in a shell is a comma: the
+            // editor is a place, and its keys don't leak out of it.
+            //
+            // The tree and the greeter count because they ARE the editor:
+            // one is its furniture, the other is what `re` lands on when you
+            // name no file. Leaving either out is a trap rather than a
+            // restriction — opening the tree lands you in it, so `,b` has to
+            // close the thing you are standing in, and a greeter where the
+            // leader is dead is a first screen with no verbs on it.
+            if (
+                tgt?.closest?.(
+                    '.editor-mount, [data-side="bottom"], [data-side="left"], .start-wrap',
+                ) != null
+            ) {
                 e.preventDefault();
                 e.stopPropagation();
                 ctxArmed = true;
@@ -2475,6 +2596,7 @@
                         dir={c.explorerDir}
                         active={t.id === app.activeId && app.focusZone === "left"}
                         onopen={(path) => void openFile(path)}
+                        onex={() => void openTreeEx()}
                     />
                 </SidePane>
             </div>

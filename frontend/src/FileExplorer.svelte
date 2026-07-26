@@ -34,6 +34,7 @@
         dir,
         active,
         onopen,
+        onex,
     }: {
         api: HostAPI;
         workspace: string;
@@ -43,6 +44,10 @@
         /** the workbench's focus zone is this pane — take the keyboard */
         active: boolean;
         onopen: (path: string) => void;
+        /** `:` — raise the command line. The tree holds the keyboard but has
+         *  no Monaco behind it, so vim's vocabulary has to arrive some other
+         *  way or it isn't there at all. */
+        onex?: () => void;
     } = $props();
 
     // Tone → literal class names. Tailwind scans source for literal strings,
@@ -194,6 +199,12 @@
             case "G":
                 moveTo(rows.length - 1);
                 break;
+            case ":":
+                // vim's command line, from a surface vim doesn't know about.
+                // Without this the tree is a place where `:` silently does
+                // nothing — the one key every vim reflex starts with.
+                onex?.();
+                break;
             default:
                 return; // not ours — let it through
         }
@@ -225,6 +236,13 @@
     let pendingReveal = $state<string | null>(null);
     export function revealPath(path: string): void {
         pendingReveal = path;
+    }
+
+    /** Put the keyboard back on the listing. The `active` effect can't do it:
+     *  it only fires when the prop CHANGES, and a `:` prompt takes focus
+     *  without the zone ever moving off this pane. */
+    export function focus(): void {
+        treeEl?.focus();
     }
     $effect(() => {
         if (loading || pendingReveal == null) return;

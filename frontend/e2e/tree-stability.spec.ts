@@ -50,6 +50,8 @@ test("re . keeps the keyboard on the listing; opening a file does not reload the
     expect(fileReqs.length).toBe(before);
     await expect(tree).toContainText("b.txt");
 
+    // opening a file hands the keyboard over — the tree is where you were,
+    // not where you asked to be
     await rook.ex(":q");
     await rook.expectScreen(/re exit=0/);
 });

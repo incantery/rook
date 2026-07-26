@@ -42,10 +42,12 @@ test(":cq aborts — the shell sees a nonzero exit", async ({page, rook}) => {
     await rook.expectScreen(/re exit=1/);
 });
 
-// Bare `re` used to be vim's unnamed empty buffer. It is now the start
-// screen (start.spec.ts covers the greeter itself) — same takeover, same
-// exit code, somewhere to go instead of an empty box. `re .` and `re file`
-// are unchanged, which is what the two tests around this one hold down.
+// Naming no file used to give you vim's unnamed empty buffer. It is now the
+// start screen (start.spec.ts covers the greeter itself) — same takeover,
+// same exit code, somewhere to go instead of an empty box. That covers BOTH
+// bare `re` and `re .`: the tree is a sidebar, so it can't be the whole pane
+// and something has to sit behind it. `re file` is unchanged, which is what
+// the test above this one holds down.
 test("bare re is the start screen, and it still owns the takeover", async ({page, rook}) => {
     const root = await rook.repo({files: {"notes.txt": "alpha\n"}});
     await rook.open({name: `re-bare-${Date.now()}`, root});
@@ -61,19 +63,32 @@ test("bare re is the start screen, and it still owns the takeover", async ({page
     await rook.expectScreen(/re exit=0/);
 });
 
-test("re . lands in the editor with the tree, netrw-style", async ({page, rook}) => {
-    const root = await rook.repo({files: {"sub/inner.txt": "alpha\n"}});
+test("re . is the greeter with the tree beside it, netrw-style", async ({page, rook}) => {
+    const root = await rook.repo({files: {"a.txt": "alpha\n"}});
     await rook.open({name: `re-dot-${Date.now()}`, root});
     await rook.shellReady();
 
     await rook.ex(`${RE} .; echo "re exit=$?"`);
 
-    // the editor takes the pane AND the file tree opens beside it
-    await expect(page.locator(".editor-mount").first()).toBeVisible({timeout: 15_000});
-    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(1);
+    // the tree opens beside the greeter — no buffer, because none was named
+    const tree = page.locator('[data-side="left"]:visible');
+    await expect(tree).toHaveCount(1, {timeout: 15_000});
+    await expect(page.locator("[data-start-root]")).toBeVisible();
+    await expect(page.locator(".editor-mount")).toHaveCount(0);
 
-    // focus starts on the listing (netrw); ⌃L crosses back into the editor
-    await page.keyboard.press("Control+l");
+    // Focus starts on the listing (netrw), and opening a file from THERE has
+    // to hand the same takeover to the editor — minting a pane instead would
+    // leave the greeter holding a `re` nobody can reach. Wait for the rows:
+    // the sidebar is on screen before its listing has loaded, and Enter on an
+    // empty listing does nothing at all.
+    await expect(tree).toContainText("a.txt", {timeout: 10_000});
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".editor-mount .view-lines").first()).toContainText("alpha", {
+        timeout: 15_000,
+    });
+    await expect(page.locator("[data-start-root]")).toHaveCount(0);
+
+    await page.locator(".editor-mount").first().click();
     await rook.ex(":q");
     await rook.expectScreen(/re exit=0/);
     // the editor's furniture leaves with it
@@ -88,9 +103,9 @@ test("furniture is per window — the tree stays with its editor", async ({page,
     await rook.ex(`${RE} .; echo "re exit=$?"`);
     await expect(page.locator('[data-side="left"]:visible')).toHaveCount(1, {timeout: 15_000});
 
-    // leaders are dead inside the tree — cross into the editor first,
-    // then open a NEW window: a different place, no visible tree (the
-    // takeover window's instance stays mounted, display:none)
+    // leaders are dead inside the tree — cross out of it first, then open a
+    // NEW window: a different place, no visible tree (the takeover window's
+    // instance stays mounted, display:none)
     await page.keyboard.press("Control+l");
     await page.keyboard.press("`");
     await page.keyboard.press("c");
@@ -101,7 +116,9 @@ test("furniture is per window — the tree stays with its editor", async ({page,
     await page.keyboard.press("1");
     await expect(page.locator('[data-side="left"]:visible')).toHaveCount(1);
 
-    await rook.ex(":q");
+    // the pane behind the tree is the greeter, so `q` is what finishes it
+    await page.locator("[data-start-root]").click();
+    await page.keyboard.press("q");
     await rook.expectScreen(/re exit=0/);
 });
 
