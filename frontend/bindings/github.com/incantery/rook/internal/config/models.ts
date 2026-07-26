@@ -80,6 +80,16 @@ export interface Config {
     "relayUrl": string;
 
     /**
+     * CloudURL is rook-cloud's machine API ([cloud] url): when set, the
+     * host reports what is happening here — workspaces, agent states,
+     * pending asks — so the dashboard can show this machine from anywhere.
+     * Empty = nothing leaves the machine. The token comes from the
+     * dashboard's "Add machine" and lives in the keychain
+     * (`rookctl set-cloud-token`), never in this file.
+     */
+    "cloudUrl": string;
+
+    /**
      * Workflow is the staged review pipeline run after a worktree's coding
      * agent opens its PR: slash commands, comma-separated (`workflow =
      * /security-review, /review`), each spawned sequentially in its own
