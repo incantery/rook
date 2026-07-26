@@ -1,6 +1,9 @@
 # Up Next
 
 - [x] Fix the attach replay gap: handleAttach copies the ring, replays, THEN sets s.attach — pty bytes arriving during replay never reach that client. Silent scrollback loss on reload today; constant loss once detach/reattach becomes routine (CHATGPTFEEDBACK.md). Step zero of the background-session detach work.
+- [ ] TODO item/ticket tracking
+- [ ] TOML plugin
+- [ ] Better Window Naming (maybe AI assisted naming)
 
 # Workspace Switcher
 
