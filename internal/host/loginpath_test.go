@@ -40,7 +40,11 @@ func TestLastNonEmptyLine(t *testing.T) {
 func TestAdoptLoginPATH(t *testing.T) {
 	dir := t.TempDir()
 	shell := filepath.Join(dir, "fakeshell")
-	script := "#!/bin/sh\necho 'welcome to fakeshell'\nPATH=\"$PATH:/fake/login/bin\" exec /bin/sh \"$@\"\n"
+	// The fake shell consumes the -l itself, the way a real login shell does,
+	// and delegates the rest. Passing "$@" through verbatim would re-apply -l
+	// to the inner /bin/sh, and on Linux that second login shell sources
+	// /etc/profile, which rewrites PATH and drops the entry under test.
+	script := "#!/bin/sh\necho 'welcome to fakeshell'\nshift\nPATH=\"$PATH:/fake/login/bin\" exec /bin/sh \"$@\"\n"
 	if err := os.WriteFile(shell, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -343,9 +343,9 @@ func TestFramedPaletteAnswersOSC(t *testing.T) {
 	}
 	defer ptmx.Close()
 	defer tty.Close()
-	if tio, terr := unix.IoctlGetTermios(int(tty.Fd()), unix.TIOCGETA); terr == nil {
+	if tio, terr := unix.IoctlGetTermios(int(tty.Fd()), tcGetAttr); terr == nil {
 		tio.Lflag &^= unix.ICANON | unix.ECHO
-		if serr := unix.IoctlSetTermios(int(tty.Fd()), unix.TIOCSETA, tio); serr != nil {
+		if serr := unix.IoctlSetTermios(int(tty.Fd()), tcSetAttr, tio); serr != nil {
 			t.Skipf("cannot raw the test tty: %v", serr)
 		}
 	} else {
@@ -424,9 +424,9 @@ func TestFramedInputReachesPty(t *testing.T) {
 	defer ptmx.Close()
 	defer tty.Close()
 	// Raw the slave so what we read back is byte-faithful, not line-disciplined.
-	if tio, terr := unix.IoctlGetTermios(int(tty.Fd()), unix.TIOCGETA); terr == nil {
+	if tio, terr := unix.IoctlGetTermios(int(tty.Fd()), tcGetAttr); terr == nil {
 		tio.Lflag &^= unix.ICANON | unix.ECHO
-		if serr := unix.IoctlSetTermios(int(tty.Fd()), unix.TIOCSETA, tio); serr != nil {
+		if serr := unix.IoctlSetTermios(int(tty.Fd()), tcSetAttr, tio); serr != nil {
 			t.Skipf("cannot raw the test tty: %v", serr)
 		}
 	} else {
@@ -488,9 +488,9 @@ func TestFramedAnswersQueries(t *testing.T) {
 	}
 	defer ptmx.Close()
 	defer tty.Close()
-	if tio, terr := unix.IoctlGetTermios(int(tty.Fd()), unix.TIOCGETA); terr == nil {
+	if tio, terr := unix.IoctlGetTermios(int(tty.Fd()), tcGetAttr); terr == nil {
 		tio.Lflag &^= unix.ICANON | unix.ECHO
-		if serr := unix.IoctlSetTermios(int(tty.Fd()), unix.TIOCSETA, tio); serr != nil {
+		if serr := unix.IoctlSetTermios(int(tty.Fd()), tcSetAttr, tio); serr != nil {
 			t.Skipf("cannot raw the test tty: %v", serr)
 		}
 	} else {
