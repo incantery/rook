@@ -46,7 +46,10 @@ export class StartPane implements PaneContent {
 
     constructor(opts: StartPaneOpts) {
         this.el = document.createElement("div");
-        this.el.className = "start-wrap";
+        // h-full/min-h-0 like TreePane: without them the wrapper is auto-height,
+        // the view's own h-full resolves against nothing, and the greeter stops
+        // partway down the pane with the window showing through beneath it.
+        this.el.className = "start-wrap flex h-full min-h-0 flex-col";
         // focusable so the pane can take the keyboard: the greeter's keys are
         // its own (q, 1-9), not vim's — there is no buffer here to motion over
         this.el.tabIndex = -1;

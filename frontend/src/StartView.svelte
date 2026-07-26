@@ -109,63 +109,75 @@
      role would announce it as something it isn't. -->
 <section
     data-start-root
-    class="flex h-full w-full flex-col overflow-auto bg-bg px-8 py-6 font-mono text-fg outline-none"
+    class="flex h-full w-full overflow-auto bg-bg px-8 py-6 font-mono text-fg outline-none"
     tabindex="-1"
     {onkeydown}
 >
-    <header class="flex items-baseline gap-4">
-        <pre
-            aria-label="rook"
-            class="text-acc select-none text-[0.75rem] leading-[1.15]">▄▀▀▄ ▄▀▀▄ ▄▀▀▄ █  █
+    <!-- A capped column, left-aligned under the wordmark. Without it a row's
+         hover and selection wash run the full width of the window — a 1400px
+         bar behind a 90px filename, which reads as a bug rather than a
+         highlight. The section keeps the scroll and the keys; this holds the
+         measure. -->
+    <div class="flex w-full max-w-4xl flex-col">
+        <header class="flex items-baseline gap-4">
+            <pre
+                aria-label="rook"
+                class="text-acc select-none text-[0.75rem] leading-[1.15]">▄▀▀▄ ▄▀▀▄ ▄▀▀▄ █  █
 █▀▄  █  █ █  █ █▄▀
 ▀  ▀  ▀▀   ▀▀  ▀  ▀</pre>
-        <span class="text-[0.6875rem] text-lo">
-            {version || "rook"}
-        </span>
-    </header>
+            <span class="text-[0.6875rem] text-lo">
+                {version || "rook"}
+            </span>
+        </header>
 
-    <h2 class="mt-6 text-[0.6875rem] tracking-wide text-dim uppercase">Recent</h2>
-    {#if recents.length === 0}
-        <p class="mt-2 text-[0.75rem] text-lo">
-            nothing yet — <span class="text-dim">⌃p</span> finds a file
-        </p>
-    {:else}
-        <ul class="mt-2 flex flex-col">
-            {#each recents as r, i (r.path)}
-                <li>
+        <h2 class="mt-6 text-[0.6875rem] tracking-wide text-dim uppercase">Recent</h2>
+        {#if recents.length === 0}
+            <p class="mt-2 text-[0.75rem] text-lo">
+                nothing yet — <span class="text-dim">⌃p</span> finds a file
+            </p>
+        {:else}
+            <div class="mt-2 flex flex-col">
+                {#each recents as r, i (r.path)}
                     <button
                         type="button"
-                        class="flex w-full items-baseline gap-3 rounded px-2 py-[0.1875rem] text-left text-[0.75rem] hover:bg-raise"
-                        class:bg-raise={i === cursor}
-                        class:text-acc={i === cursor}
+                        class={[
+                            "flex w-full cursor-pointer items-baseline gap-3 rounded",
+                            "border-l-2 px-2 py-[0.1875rem] text-left text-[0.75rem] hover:bg-fg/6",
+                            // the accent rail the finder and quickfix use — one
+                            // vocabulary for "here". The unselected rail is
+                            // transparent rather than absent, so nothing shifts.
+                            i === cursor ? "border-acc bg-acc/15" : "border-transparent",
+                        ]}
                         onclick={() => open(i)}
                     >
                         <span class="w-3 shrink-0 text-right text-[0.6875rem] text-lo">{i + 1}</span
                         >
-                        <span class="min-w-0 truncate">{short(r.path)}</span>
+                        <span class="min-w-0 truncate text-fg">{short(r.path)}</span>
                     </button>
-                </li>
-            {/each}
-        </ul>
-    {/if}
+                {/each}
+            </div>
+        {/if}
 
-    <h2 class="mt-6 text-[0.6875rem] tracking-wide text-dim uppercase">Actions</h2>
-    <ul class="mt-2 grid grid-cols-1 gap-x-8 gap-y-[0.1875rem] sm:grid-cols-2">
-        {#each rows as row (row.cmd.id)}
-            <li>
+        <h2 class="mt-6 text-[0.6875rem] tracking-wide text-dim uppercase">Actions</h2>
+        <div class="mt-2 grid grid-cols-1 gap-x-8 gap-y-[0.1875rem] sm:grid-cols-2">
+            {#each rows as row (row.cmd.id)}
                 <button
                     type="button"
-                    class="flex w-full items-baseline gap-3 rounded px-2 py-[0.1875rem] text-left text-[0.75rem] hover:bg-raise"
+                    class="flex w-full cursor-pointer items-center gap-3 rounded px-2
+                           py-[0.1875rem] text-left text-[0.75rem] hover:bg-fg/6"
                     onclick={() => void row.cmd.run()}
                 >
-                    <span class="w-10 shrink-0 text-[0.6875rem] text-acc">{row.keys}</span>
+                    <kbd
+                        class="inline-flex min-w-10 shrink-0 justify-center rounded border border-line/15
+                           px-1 py-px font-mono text-[0.625rem] text-acc">{row.keys}</kbd
+                    >
                     <span class="min-w-0 truncate text-dim">{row.cmd.title}</span>
                 </button>
-            </li>
-        {/each}
-    </ul>
+            {/each}
+        </div>
 
-    <footer class="mt-auto pt-6 text-[0.6875rem] text-lo">
-        {workspace}{dir ? ` · ${short(dir, 40)}` : ""} · <span class="text-dim">q</span> to close
-    </footer>
+        <footer class="mt-auto pt-6 text-[0.6875rem] text-lo">
+            {workspace}{dir ? ` · ${short(dir, 40)}` : ""} · <span class="text-dim">q</span> to close
+        </footer>
+    </div>
 </section>
