@@ -250,6 +250,13 @@ export class GridRenderer implements TermRenderer {
         this.paintSelection();
     }
 
+    /** Nothing to do: every color this renderer emits is a `var(--term-*)`
+     *  reference (style.ts), so the swap has already happened by the time
+     *  anyone could call this — the vars are on documentElement and CSS
+     *  recomputes. The seam has the method because the GPU renderer samples
+     *  those vars into buffers instead, and only it can know that. */
+    retheme(): void {}
+
     /** cellSize returns the measured pixel size of one cell (for hit-testing and
      *  tests). Triggers a measurement against the laid-out DOM if needed. */
     cellSize(): {w: number; h: number} {

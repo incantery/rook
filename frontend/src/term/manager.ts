@@ -234,11 +234,18 @@ export class TermManager {
 
     /** setPalette stores the theme's colors and pushes them to every open
      *  session, so the host emulator answers OSC palette queries with the theme
-     *  the user sees (vim reading the background). New sessions get it on connect. */
+     *  the user sees (vim reading the background). New sessions get it on connect.
+     *
+     *  It is also the one call that knows a theme swap happened, so it tells
+     *  the renderers too: the DOM one paints through the vars and shrugs, the
+     *  GPU one samples them and would otherwise show the old palette until a
+     *  reload. Both halves go to EVERY session, not just visible ones — a
+     *  hidden pane is revealed by display, with no repaint of its own. */
     setPalette(bytes: Uint8Array): void {
         this.palette = bytes;
         for (const tab of this.sessions.values()) {
             if (tab.ws?.readyState === WebSocket.OPEN) tab.ws.send(bytes);
+            tab.renderer.retheme();
         }
     }
 
@@ -866,10 +873,11 @@ export class TermManager {
         this.active?.panes.get(this.active.focused)?.focus();
     }
 
-    // The renderer reads its colors from --term-* CSS custom properties, which
-    // the theme service writes onto :root on every swap (theme/cssvars.ts). A
-    // theme change re-tints every live terminal with no per-tab call — so the
-    // old setTerminalTheme is gone.
+    // The DOM renderer reads its colors from --term-* CSS custom properties,
+    // which the theme service writes onto :root on every swap
+    // (theme/cssvars.ts) — it re-tints with no per-tab call, which is why the
+    // old setTerminalTheme is gone. The GPU renderer samples those vars once,
+    // so it gets told: setPalette calls retheme() on every session.
 
     /** What the focused pane SHOWS. Chrome needs this to refuse a verb that
      *  belongs to a source buffer when the keyboard is actually in a draft or

@@ -19,6 +19,12 @@ export interface TermRenderer {
     reset(): void;
     /** change grid geometry; the host resends the screen after. */
     resize(cols: number, rows: number): void;
+    /** the theme changed: re-read the --term-* vars and repaint. A renderer
+     *  that paints THROUGH the vars (the DOM one) has nothing to do; one that
+     *  samples them into GPU state (beamterm) would otherwise keep painting
+     *  the old palette until a reload. Called on every swap, so it must be
+     *  cheap and safe when nothing changed. */
+    retheme(): void;
     /** take keyboard focus, so key presses reach the input sink. */
     focus(): void;
     /** measured pixel size of one cell, for fit and hit-testing. */

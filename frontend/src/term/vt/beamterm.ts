@@ -281,6 +281,17 @@ export class BeamtermGridRenderer implements TermRenderer {
         this.container.dispatchEvent(new CustomEvent("rook:frame"));
     }
 
+    /** A theme swap: the vars moved, so every color this renderer is holding
+     *  is stale — the sampled defaults, the 16 ANSI slots, and every cached
+     *  CellStyle built from them. The cache keys on RESOLVED colors, so its
+     *  entries aren't wrong, just unreachable; clearing keeps it from holding
+     *  the old palette's wasm objects alive for nothing. */
+    retheme(): void {
+        this.readTheme();
+        this.styles.clear();
+        this.repaintViewport();
+    }
+
     private scrollLines(delta: number): void {
         if (this.sb.scroll(delta)) this.repaintViewport();
     }

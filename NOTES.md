@@ -58,7 +58,7 @@
 - [x] Scrollback view on canvas — shared SbStore (sbstore.ts) extracted from the DOM renderer; wheel + Shift+PageUp/Home; host paging works on canvas
 - [ ] Mouse forwarding to tracking programs: wheel IS forwarded now (Claude Code scroll works); clicks/drags (vim mouse) still local-only
 - [ ] A11y text mirror (canvas has no readable text; DOM renderer is the accessible fallback)
-- [ ] Theme-change re-read of CSS vars (palette swap currently needs a reload)
+- [x] Theme-change re-read of CSS vars (palette swap needed a reload). `retheme()` joins the renderer seam: the DOM one is a no-op (it paints THROUGH `var(--term-*)`, which is exactly why the gap went unnoticed — the theming code is CSS, and beamterm doesn't read CSS), the GPU one re-samples, drops the style cache and repaints the viewport. Fan-out rides `setPalette`, the one call that already knows a swap happened, and it reaches hidden sessions too — a hidden pane is revealed by `display`, with no repaint of its own. e2e asserts it in light: the canvas's mean luminance has to jump when you pick a light theme.
 - [ ] Key-to-pixel latency probe to settle the DOM-vs-WebGL headed measurement asymmetry
 
 # Plugins — PARKED (2026-07-25), and what the discussion actually found
