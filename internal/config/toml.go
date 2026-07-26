@@ -50,6 +50,7 @@ type tomlFile struct {
 	Agent             *tomlAgent               `toml:"agent"`
 	Jira              *tomlJira                `toml:"jira"`
 	Relay             *tomlRelay               `toml:"relay"`
+	Cloud             *tomlCloud               `toml:"cloud"`
 	Workspaces        map[string]tomlWorkspace `toml:"workspaces"`
 	LSP               *tomlLSP                 `toml:"lsp"`
 }
@@ -77,6 +78,12 @@ type tomlJira struct {
 // tomlRelay is [relay] — the rook-server an ask escalates to. Only the URL
 // lives here; the token is a secret and belongs in the keychain.
 type tomlRelay struct {
+	URL *string `toml:"url"`
+}
+
+// tomlCloud is [cloud] — the rook-cloud machine API this host reports its
+// status to. Same rule as [relay]: only the URL lives here.
+type tomlCloud struct {
 	URL *string `toml:"url"`
 }
 
@@ -208,6 +215,9 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 
 	if f.Relay != nil && f.Relay.URL != nil {
 		cfg.RelayURL = strings.TrimRight(strings.TrimSpace(*f.Relay.URL), "/")
+	}
+	if f.Cloud != nil && f.Cloud.URL != nil {
+		cfg.CloudURL = strings.TrimRight(strings.TrimSpace(*f.Cloud.URL), "/")
 	}
 	if f.Jira != nil {
 		if f.Jira.URL != nil {

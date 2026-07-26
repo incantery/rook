@@ -58,7 +58,7 @@ func TestSampleTOMLDefaults(t *testing.T) {
 	// workspace tables, lsp) carry no meaningful default — zero them so the
 	// comparison is exactly the concrete-default scalar knobs.
 	got.JiraURL, got.JiraEmail, got.JiraJQL = "", "", ""
-	got.RelayURL = ""
+	got.RelayURL, got.CloudURL = "", ""
 	got.JiraProjects, got.BranchPrefixes, got.BranchDelimiters = nil, nil, nil
 	got.Workflow, got.Workflows, got.Keybinds, got.WorkspaceAllow = nil, nil, nil, nil
 	got.EditorKeybinds = nil

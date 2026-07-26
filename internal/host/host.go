@@ -27,6 +27,7 @@ import (
 	"github.com/coder/websocket"
 	cpty "github.com/creack/pty"
 
+	"github.com/incantery/rook/internal/cloud"
 	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/plugin"
 	"github.com/incantery/rook/internal/relay"
@@ -95,6 +96,10 @@ type Host struct {
 	// The configured rook-server, if any (relay.go): asks escalate to it so
 	// they can be answered from a phone. nil = no remote, path inert.
 	relay *relay.Client
+
+	// The configured rook-cloud, if any (cloud.go): status snapshots go up
+	// so the dashboard can show this machine. nil = nothing leaves here.
+	cloud *cloud.Client
 
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
@@ -206,6 +211,7 @@ func New() *Host {
 	go h.aw.runTranscript(h.ctx)
 	go h.runUpdateCheck()
 	h.initRelay()
+	h.initCloud()
 	return h
 }
 

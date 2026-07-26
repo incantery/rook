@@ -45,6 +45,7 @@
 //	rookctl set-openai-key store the drafter's API key in the keychain
 //	rookctl set-jira-token store the Jira API token (queue credential) in the keychain
 //	rookctl set-relay-token store the rook-server bearer token in the keychain
+//	rookctl set-cloud-token store the rook-cloud machine token in the keychain
 //	rookctl claim         claude SessionStart hook body (stdin → host)
 //	rookctl unclaim       claude SessionEnd hook body
 //	rookctl notify-hook   claude Notification hook body (permission prompts)
@@ -189,6 +190,8 @@ func main() {
 		err = runSetJiraToken()
 	case "set-relay-token":
 		err = runSetRelayToken()
+	case "set-cloud-token":
+		err = runSetCloudToken()
 	case "edit":
 		err = runEdit(editArgs)
 	case "ask":
@@ -1706,6 +1709,23 @@ func runSetRelayToken() error {
 		return fmt.Errorf("stored, but read-back failed — is the login keychain locked?")
 	}
 	fmt.Println("relay token stored — set [relay] url in ~/.config/rook/config.toml, then restart rook-host")
+	return nil
+}
+
+// runSetCloudToken stores the machine token rook-cloud showed exactly once
+// when the machine was added on the dashboard. Same posture as the others:
+// the security tool reads it, so the secret never enters argv or history.
+func runSetCloudToken() error {
+	cmd := exec.Command("security", "add-generic-password", "-U",
+		"-s", keychain.Service, "-a", keychain.CloudAccount, "-w")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("security add-generic-password: %w", err)
+	}
+	if k, err := keychain.Get(keychain.Service, keychain.CloudAccount); err != nil || k == "" {
+		return fmt.Errorf("stored, but read-back failed — is the login keychain locked?")
+	}
+	fmt.Println("cloud token stored — set [cloud] url in ~/.config/rook/config.toml, then restart rook-host")
 	return nil
 }
 

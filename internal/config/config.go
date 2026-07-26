@@ -65,6 +65,13 @@ type Config struct {
 	// whole path is inert. The token lives in the keychain
 	// (`rookctl set-relay-token`), never in this file.
 	RelayURL string `json:"relayUrl"`
+	// CloudURL is rook-cloud's machine API ([cloud] url): when set, the
+	// host reports what is happening here — workspaces, agent states,
+	// pending asks — so the dashboard can show this machine from anywhere.
+	// Empty = nothing leaves the machine. The token comes from the
+	// dashboard's "Add machine" and lives in the keychain
+	// (`rookctl set-cloud-token`), never in this file.
+	CloudURL string `json:"cloudUrl"`
 	// Workflow is the staged review pipeline run after a worktree's coding
 	// agent opens its PR: slash commands, comma-separated (`workflow =
 	// /security-review, /review`), each spawned sequentially in its own
@@ -468,6 +475,14 @@ func JiraToken() string {
 // most of the point. "" means no remote.
 func RelayToken() string {
 	return secretFrom(keychain.RelayAccount, "relay-token")
+}
+
+// CloudToken resolves the rook-cloud machine token: keychain first
+// (account cloud — `rookctl set-cloud-token`), then the
+// ~/.config/rook/cloud-token file, 0600-tight like the others. "" means
+// this machine does not report.
+func CloudToken() string {
+	return secretFrom(keychain.CloudAccount, "cloud-token")
 }
 
 // secretFrom is the keychain-then-tight-file resolution the secrets share.

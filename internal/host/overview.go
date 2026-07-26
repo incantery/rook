@@ -93,6 +93,14 @@ func (h *Host) handleOverview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	writeJSON(w, h.overviewItems())
+}
+
+// overviewItems assembles the mission-control rollup. Split from the
+// handler because the cloud reporter (cloud.go) sends the same picture the
+// deck renders — one assembly, two consumers, no drift between what you
+// see at the desk and what you see on your phone.
+func (h *Host) overviewItems() []overviewItem {
 	items := h.workspaceList()
 	out := make([]overviewItem, len(items))
 	var wg sync.WaitGroup
@@ -133,7 +141,7 @@ func (h *Host) handleOverview(w http.ResponseWriter, r *http.Request) {
 		}(&out[i], it.Name)
 	}
 	wg.Wait()
-	writeJSON(w, out)
+	return out
 }
 
 // stageList assembles a work item's checklist. The synthetic coding stage

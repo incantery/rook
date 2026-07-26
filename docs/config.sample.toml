@@ -193,6 +193,22 @@
 # url = "https://cloud.rookide.com"
 
 
+# ── Cloud status (host-read) ─────────────────────────────────────────────
+#
+# rook-cloud's machine API. When set, the host reports what is happening
+# here — workspaces, agent states, pending asks — so the dashboard at
+# cloud.rookide.com can show this machine from anywhere. Absent means
+# nothing leaves the machine.
+#
+# The machine token is NOT set here — add the machine on the dashboard,
+# then store the token it shows with `rookctl set-cloud-token`.
+# Changes need a daemon restart.
+
+[cloud]
+# Base URL of rook-cloud's machine API.
+# url = "https://api.rookide.com"
+
+
 # ── Per-workspace overrides ──────────────────────────────────────────────
 #
 # One [workspaces.<name>] table per workspace, named for the workspace it
@@ -268,13 +284,14 @@
 
 # ── Secrets are NOT file-managed ─────────────────────────────────────────
 #
-# The OpenAI key (the agent's credential), the Jira API token, and the
-# rook-server bearer token never live in this file — the config stays
-# user-owned and safe to commit or share. They live in the login keychain
-# instead:
+# The OpenAI key (the agent's credential), the Jira API token, the
+# rook-server bearer token, and the rook-cloud machine token never live in
+# this file — the config stays user-owned and safe to commit or share. They
+# live in the login keychain instead:
 #
 #   rookctl set-jira-token        # stores the Jira API token
 #   rookctl set-relay-token       # stores the rook-server bearer token
+#   rookctl set-cloud-token       # stores the rook-cloud machine token
 #
 # The OpenAI key is set from the app. Each has a file fallback for
 # headless setups, and both must be tight 0600:
