@@ -7,11 +7,17 @@ import "strings"
 // internal/pricing — AgentStatus.CostUSD came from its stamping, and the
 // table has to live somewhere once rook reads transcripts itself.
 //
-// Rates are Anthropic's published list prices as cached 2026-06-24. List
+// Rates are Anthropic's published list prices as cached 2026-07-26. List
 // prices are used deliberately even where introductory pricing applies
 // (Sonnet 5 is $2/$10 through 2026-08-31): stable, and a conservative
 // overestimate. The number is notional either way — a subscription session
 // does not bill per token, and this is what it *would* have cost.
+//
+// Fast mode is billed at its own premium rates, so Usage carries the speed
+// the line reported and fastTable holds the fast rates. Nothing in the
+// corpus on this machine has ever reported speed=fast (0 of 50,615 lines);
+// this is here so that the first /fast session prices right rather than
+// reading half of what it cost.
 
 // rates are USD per million tokens.
 type rates struct {
@@ -27,6 +33,7 @@ type rates struct {
 var table = map[string]rates{
 	"claude-fable-5":    {10, 50, 1.00, 12.50, 20},
 	"claude-mythos-5":   {10, 50, 1.00, 12.50, 20},
+	"claude-opus-5":     {5, 25, 0.50, 6.25, 10},
 	"claude-opus-4-8":   {5, 25, 0.50, 6.25, 10},
 	"claude-opus-4-7":   {5, 25, 0.50, 6.25, 10},
 	"claude-opus-4-6":   {5, 25, 0.50, 6.25, 10},
@@ -34,6 +41,22 @@ var table = map[string]rates{
 	"claude-sonnet-4-6": {3, 15, 0.30, 3.75, 6},
 	"claude-haiku-4-5":  {1, 5, 0.10, 1.25, 2},
 }
+
+// fastTable holds speed=fast rates, keyed by the same prefixes as table.
+//
+// Only Opus 5 and Opus 4.8 support fast mode at all (4.7's was removed), and
+// Anthropic publishes a fast price for Opus 5 only — $10/$50, 2x standard.
+// Opus 4.8 is deliberately absent rather than guessed at 2x: a model missing
+// here falls back to its standard rates, which reads low for a fast session
+// but is a real floor rather than an invented number. Add the row when the
+// figure is published, not when it seems obvious.
+var fastTable = map[string]rates{
+	"claude-opus-5": {10, 50, 1.00, 12.50, 20},
+}
+
+// SpeedFast is the value Claude Code writes to usage.speed for a fast-mode
+// response. Standard responses report "standard"; older lines report nothing.
+const SpeedFast = "fast"
 
 // Cost returns the USD cost of u under model's published rates.
 //
@@ -58,6 +81,11 @@ func Cost(model string, u Usage) (usd float64, priced bool) {
 		return 0, false
 	}
 	r := table[best]
+	if u.Speed == SpeedFast {
+		if fr, ok := fastTable[best]; ok {
+			r = fr
+		}
+	}
 
 	write5m, write1h := u.Cache5mTokens, u.Cache1hTokens
 	if rem := u.CacheCreationTokens - (write5m + write1h); rem > 0 {

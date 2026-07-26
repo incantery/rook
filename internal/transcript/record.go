@@ -118,6 +118,12 @@ type Usage struct {
 	CacheCreationTokens int64
 	Cache5mTokens       int64
 	Cache1hTokens       int64
+
+	// Speed is usage.speed — "standard", "fast", or empty on lines written
+	// before the field existed. It is billing-relevant, not decoration: a
+	// fast-mode response costs 2x a standard one on the models that offer
+	// it, so Cost reads this rather than assuming standard.
+	Speed string
 }
 
 // Block is one content block. Which fields are set depends on Type:
@@ -190,6 +196,7 @@ type rawMessage struct {
 			Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
 			Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
 		} `json:"cache_creation"`
+		Speed string `json:"speed"`
 	} `json:"usage"`
 	Content json.RawMessage `json:"content"` // string, or []rawBlock
 }
@@ -266,6 +273,7 @@ func parseMessage(raw json.RawMessage) *Message {
 			CacheCreationTokens: rm.Usage.CacheCreationInputTokens,
 			Cache5mTokens:       rm.Usage.CacheCreation.Ephemeral5m,
 			Cache1hTokens:       rm.Usage.CacheCreation.Ephemeral1h,
+			Speed:               rm.Usage.Speed,
 		},
 		Content: parseContent(rm.Content),
 	}

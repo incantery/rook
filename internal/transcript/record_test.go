@@ -152,6 +152,20 @@ func TestUsageParsedIncludingCacheSplit(t *testing.T) {
 	}
 }
 
+// usage.speed reaches Usage, because Cost bills on it. A line written
+// before the field existed leaves it empty, which Cost reads as standard.
+func TestUsageSpeedParsed(t *testing.T) {
+	rec := parse(t, `{"type":"assistant","message":{"id":"m1","role":"assistant","model":"claude-opus-5","usage":{"output_tokens":20,"speed":"fast"},"content":[]}}`)
+	if got := rec.Message.Usage.Speed; got != SpeedFast {
+		t.Errorf("Speed = %q, want %q", got, SpeedFast)
+	}
+
+	rec = parse(t, `{"type":"assistant","message":{"id":"m1","role":"assistant","model":"claude-opus-5","usage":{"output_tokens":20},"content":[]}}`)
+	if got := rec.Message.Usage.Speed; got != "" {
+		t.Errorf("Speed = %q on a line with no speed field, want empty", got)
+	}
+}
+
 func TestHeaderOnlyRecords(t *testing.T) {
 	// Types Claude Code writes without a timestamp or a message. Not errors.
 	pm := parse(t, `{"type":"permission-mode","permissionMode":"auto","sessionId":"s1"}`)
