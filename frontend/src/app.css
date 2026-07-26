@@ -1,17 +1,27 @@
 /* rook global styles.
  *
- * Tailwind v4 provides theme + utilities WITHOUT preflight. Component
- * chrome now lives as inline utilities in the .svelte markup (issue #13);
- * what remains here is the intentional remainder that utilities can't own:
+ * Tailwind v4: theme + PREFLIGHT + utilities. Component chrome lives as
+ * inline utilities in the .svelte markup (issue #13); what remains here is
+ * the intentional remainder that utilities can't own:
  *   - @theme palette + @keyframes (referenced by animate-* utilities)
  *   - the base layer (html / body / #app) incl. the pre-JS body tint that
  *     main.ts overwrites from config, and the --* vars still read below
  *   - DOM built imperatively outside Svelte: the terminal .window/.pane
  *     tree (term/view.ts) on the xterm/fit seam, the Monaco editor pane
  *     (term/editor.ts), and the thread gutter glyphs (term/threadview.ts).
- * New chrome should be authored as utilities, not added here. */
+ * New chrome should be authored as utilities, not added here.
+ *
+ * Preflight was deliberately OFF until 2026-07-25, to keep a global reset
+ * off the imperative DOM above — Monaco especially. The cost was that every
+ * bare element rook authored kept UA defaults, so each component had to
+ * hand-neutralise `appearance-none border-0 bg-transparent` and any that
+ * forgot shipped buttonface-grey slabs (the start screen did, visibly).
+ * Paying that forever is worse than fixing the reset's fallout once: it
+ * makes every Tailwind idiom subtly untrue here. It is on now; anything the
+ * reset broke is repaired below, next to the thing it broke. */
 @layer theme, base, components, utilities;
 @import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
 @import "tailwindcss/utilities.css" layer(utilities);
 
 @theme {
