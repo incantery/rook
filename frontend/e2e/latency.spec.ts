@@ -1,6 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces, gotoHome, screenText, shellReady} from "./harness";
+import {clickShown, deleteWorkspaces, gotoHome, screenText, shellReady, shown} from "./harness";
 
 // The keystroke-latency harness — the metric the target audience feels first
 // and the judge for every renderer/transport change (perf strategy,
@@ -19,7 +19,6 @@ import {deleteWorkspaces, gotoHome, screenText, shellReady} from "./harness";
 // distribution prints in the run log and belongs in docs/PERF.md.
 
 const REPO = path.resolve(process.cwd(), "..");
-const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`).first();
 const made: string[] = [];
 test.afterEach(async ({page}) => {
     await deleteWorkspaces(page, made.splice(0));
@@ -34,6 +33,10 @@ async function openWorkspace(page: Page, name: string) {
     await page.getByPlaceholder("e.g. rook-core").fill(name);
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
+    // Wait for the SWITCH, not just for a shell: until the new workspace
+    // is the one displayed, the PREVIOUS one is still what selectors and
+    // pickers see. That is how a finder ended up listing ~/Downloads.
+    await expect(page.locator(`[data-workspace="${name}"]`)).toBeVisible({timeout: 15_000});
     await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
 }
 
@@ -63,7 +66,7 @@ test("keystroke to DOM commit latency", async ({page}) => {
 
     // 30 isolated keystrokes: gaps far exceed any sane echo, so pairing is
     // unambiguous. Letters only — no shift chords, nothing zsh completes.
-    await term.click();
+    await clickShown(term);
     await page.keyboard.type("abcdefghijklmnopqrstuvwxyzabcd", {delay: 90});
     await expect.poll(() => screenText(term)).toContain("abcdefghijklmnopqrstuvwxyzabcd");
 

@@ -1,6 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces, gotoHome, shellReady} from "./harness";
+import {clickShown, deleteWorkspaces, gotoHome, shellReady, shown} from "./harness";
 
 // The leader's send-prefix, in both pane kinds.
 //
@@ -23,7 +23,6 @@ const REPO = path.resolve(process.cwd(), "..");
 // session the sandbox daemon restored is parked there too. Terminal locators
 // filter to the visible one — .first() finds whichever came first, which is
 // not the same thing and is not always on screen.
-const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`).first();
 
 // Workspaces this file created, for afterEach to take back out.
 const made: string[] = [];
@@ -50,6 +49,10 @@ async function openWorkspace(page: Page, name: string) {
     await page.getByPlaceholder("e.g. rook-core").fill(name);
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
+    // Wait for the SWITCH, not just for a shell: until the new workspace
+    // is the one displayed, the PREVIOUS one is still what selectors and
+    // pickers see. That is how a finder ended up listing ~/Downloads.
+    await expect(page.locator(`[data-workspace="${name}"]`)).toBeVisible({timeout: 15_000});
     // the shell is the app screen's proof of life
     await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
 }
@@ -102,7 +105,7 @@ test("` ` types a literal backtick into the editor", async ({page}) => {
 test("` ` still types a literal backtick into a terminal", async ({page}) => {
     await openWorkspace(page, "leader-term");
 
-    await shown(page, ".vt-screen").click();
+    await clickShown(shown(page, ".vt-screen"));
     await page.keyboard.type("x``y");
 
     await expect(shown(page, ".vt-screen")).toContainText("x`y", {timeout: 10_000});
@@ -118,7 +121,7 @@ test("` ` still types a literal backtick into a terminal", async ({page}) => {
 // because it is the same question: where does a keystroke actually land.
 test("mission control takes focus off the terminal", async ({page}) => {
     await openWorkspace(page, "deck-focus");
-    await shown(page, ".vt-screen").click();
+    await clickShown(shown(page, ".vt-screen"));
     // the terminal really has it, or the assertion below proves nothing. The
     // renderer's focusable element is the .vt-screen div (no hidden textarea).
     expect(await page.evaluate(() => document.activeElement?.classList.contains("vt-screen"))).toBe(
@@ -160,7 +163,7 @@ test("exiting the shell closes the pane and returns to mission control", async (
     await openWorkspace(page, "leader-exit");
     const term = shown(page, ".vt-screen");
     await shellReady(page, term);
-    await term.click();
+    await clickShown(term);
     await page.keyboard.type("exit");
     await page.keyboard.press("Enter");
     await expect(page.locator("#home")).toBeVisible({timeout: 15_000});

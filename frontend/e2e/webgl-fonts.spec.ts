@@ -1,6 +1,6 @@
 import {expect, test} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces, gotoHome} from "./harness";
+import {clickShown, deleteWorkspaces, gotoHome, shown} from "./harness";
 
 // The WebGL renderer's font supply line. WebKit's canvas 2D ignores
 // user-installed fonts (DOM text renders them; fillText silently falls back),
@@ -58,7 +58,11 @@ test("webgl boot registers the terminal font for canvas", async ({page}) => {
     await page.getByPlaceholder("e.g. rook-core").fill("webgl-fonts");
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
-    await expect(page.locator(".vt-webgl canvas")).toHaveCount(1, {timeout: 15_000});
+    // Wait for the SWITCH, not just for a shell: until the new workspace
+    // is the one displayed, the PREVIOUS one is still what selectors and
+    // pickers see. That is how a finder ended up listing ~/Downloads.
+    await expect(page.locator(`[data-workspace="webgl-fonts"]`)).toBeVisible({timeout: 15_000});
+    await expect(shown(page, ".vt-webgl canvas")).toHaveCount(1, {timeout: 15_000});
 
     // glyph gauntlet reaches the grid intact (PUA, astral PUA, CJK, emoji);
     // ASCII escapes only — typed unicode literals never reach the pty
@@ -70,7 +74,7 @@ test("webgl boot registers the terminal font for canvas", async ({page}) => {
             return el?.__screenText?.() ?? "";
         });
     const term = page.locator(".vt-webgl >> visible=true").first();
-    await term.click();
+    await clickShown(term);
     await page.keyboard.type("echo rdy$((6*7))");
     await page.keyboard.press("Enter");
     await expect.poll(webglText, {timeout: 60_000}).toContain("rdy42");

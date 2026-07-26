@@ -25,10 +25,39 @@ const exec = promisify(execFile);
  *  (grep, LSP, highlighting). Anything that WRITES should build a repo. */
 export const REPO = path.resolve(process.cwd(), "..");
 
-/** the first VISIBLE match: rook keeps inactive windows mounted (terminals
- *  are never unmounted, only hidden), so a bare selector matches panes you
- *  cannot see. */
+/** The first match inside the ACTIVE window — how you address a pane.
+ *
+ *  This used to be `sel >> visible=true`, and that was the suite's one
+ *  recurring flake. rook never unmounts an inactive window's panes; it hides
+ *  the whole window with `display:none` (app.css `.window`). Playwright's
+ *  visibility filter was caught matching one of those hidden panes anyway —
+ *  diagnosed live as `vt[0] 0x0@0,0 display=block inActiveWin=false` sitting
+ *  alongside the real `vt[1] 1392x804 inActiveWin=true`. The hidden pane is
+ *  OLDER, so it sorts first in DOM order, `.first()` returned it, and every
+ *  click on a zero-area element timed out.
+ *
+ *  That is why this scopes to the window rook ITSELF calls active rather than
+ *  trusting :visible — the app's own notion of "shown" is the one that can't
+ *  disagree with the app. Two scopes, because a window's furniture is not a
+ *  pane: `.window.active` holds the terminals and editors, `[data-win=active]`
+ *  holds the per-window chrome (the tree), which is mounted for EVERY window
+ *  and hidden for all but one. Chrome outside the window tree entirely (the
+ *  adopted vim bar) needs `shownChrome` instead.
+ *
+ *  BOTH guards are load-bearing and the pair is the whole point. Scope alone
+ *  is not enough: a closed side pane is still mounted inside the ACTIVE
+ *  window, so `toHaveCount(0)` after closing the tree would never pass.
+ *  :visible alone is not enough either — that was the original flake. Scope
+ *  first so the stale window can't match at all, then filter by visibility
+ *  within the window that is genuinely on screen. */
 export const shown = (page: Page, sel: string): Locator =>
+    page.locator(`.window.active ${sel}, [data-win="active"] ${sel} >> visible=true`).first();
+
+/** The first visible match ANYWHERE — for chrome that is not a pane, so the
+ *  window-scoping above would find nothing. The vim command line is the case:
+ *  the editor's node is adopted into the global status bar (vimbar.svelte.ts),
+ *  which sits outside every .window. */
+export const shownChrome = (page: Page, sel: string): Locator =>
     page.locator(`${sel} >> visible=true`).first();
 
 /** Wait for a boot (or reload) to settle on its landing surface. Boot lands
@@ -116,7 +145,22 @@ export async function deleteWorkspaces(page: Page, names: string[]): Promise<voi
             .locator("#home-workspaces div.group")
             .filter({has: page.getByText(name, {exact: true})});
         await expect(card).toHaveCount(1, {timeout: 30_000});
-        await card.getByTitle(/^Delete workspace/).click();
+        // RETRY the click rather than wait out one. The workspace list
+        // re-renders on its own poll, so a delete can land on a node that is
+        // detaching and quietly do nothing — and the only symptom is a card
+        // that never goes away, thirty seconds later, in cleanup, failing a
+        // test whose body already passed.
+        let gone = false;
+        for (let attempt = 0; attempt < 3 && !gone; attempt++) {
+            await card
+                .getByTitle(/^Delete workspace/)
+                .click({timeout: 10_000})
+                .catch(() => {}); // a detached node: re-resolve and try again
+            gone = await card
+                .waitFor({state: "detached", timeout: 10_000})
+                .then(() => true)
+                .catch(() => false);
+        }
         await expect(card).toHaveCount(0, {timeout: 30_000});
     }
 }
@@ -137,12 +181,71 @@ export const screenText = (term: Locator): Promise<string> =>
  *
  *  The probe is arithmetic so the ANSWER differs from the ECHO of the command
  *  — waiting for a literal you just typed matches the typing, not the shell. */
+/** Click something inside the window tree, tolerating a window switch.
+ *
+ *  Never `locator.click()` directly on a pane. `click()` resolves its locator
+ *  ONCE and then retries its actionability checks against THAT element — so a
+ *  click issued while the workbench is switching workspaces can latch onto the
+ *  outgoing window's pane, which then collapses to 0x0 and never becomes
+ *  visible again. The symptom is fifteen seconds of "element is not visible"
+ *  about a terminal that is, by then, perfectly healthy somewhere else. That
+ *  was the suite's deepest flake and it is invisible in the failure message.
+ *
+ *  `toBeVisible` re-queries the locator on every poll, so waiting on it first
+ *  lets the switch finish and the click resolves against what is on screen. */
+export async function clickShown(target: Locator): Promise<void> {
+    await expect(target).toBeVisible({timeout: 20_000});
+    await target.click({timeout: 15_000});
+}
+
 export async function shellReady(page: Page, term: Locator): Promise<void> {
     const token = `rdy${Math.floor(Math.random() * 1e6)}`;
-    await term.click();
+    try {
+        await clickShown(term);
+    } catch (err) {
+        // The suite's one recurring flake lands here: the click can't reach a
+        // visible .vt-screen. A bare Playwright timeout says nothing about WHY
+        // — whether no terminal exists, one exists in a hidden window, or the
+        // app sat on mission control — so dump the window/pane state instead
+        // of leaving the next person to guess.
+        throw new Error(`shellReady: no clickable terminal.\n${await diagnose(page)}\n\n${err}`);
+    }
     await page.keyboard.type(`echo ${token}$((6*7))`);
     await page.keyboard.press("Enter");
     await expect.poll(() => screenText(term), {timeout: 60_000}).toContain(`${token}42`);
+}
+
+/** What the workbench actually looks like right now — windows, their active
+ *  flag, and every .vt-screen with its box and owning window. */
+export async function diagnose(page: Page): Promise<string> {
+    return page.evaluate(() => {
+        const box = (e: Element) => {
+            const r = e.getBoundingClientRect();
+            return `${Math.round(r.width)}x${Math.round(r.height)}@${Math.round(r.x)},${Math.round(r.y)}`;
+        };
+        const wins = [...document.querySelectorAll(".window")].map(
+            (w, i) =>
+                `  win[${i}] class="${w.className}" ` +
+                `display=${getComputedStyle(w).display} terms=${w.querySelectorAll(".vt-screen").length}`,
+        );
+        const screens = [...document.querySelectorAll(".vt-screen")].map((e, i) => {
+            const win = e.closest(".window");
+            const pane = e.closest(".pane");
+            const cs = getComputedStyle(e);
+            return (
+                `  vt[${i}] ${box(e)} display=${cs.display} visibility=${cs.visibility} ` +
+                `opacity=${cs.opacity} inActiveWin=${win ? win.classList.contains("active") : "no-window"} ` +
+                `paneClass="${pane?.className ?? "-"}"`
+            );
+        });
+        const home = document.querySelector("#home");
+        const homeShown = home ? getComputedStyle(home).display !== "none" : false;
+        return [
+            `screen: home=${homeShown} windows=${wins.length} vt-screens=${screens.length}`,
+            ...wins,
+            ...screens,
+        ].join("\n");
+    });
 }
 
 /** Run a command and wait for the shell to finish it, by the same trick. */
@@ -204,6 +307,15 @@ export class Rook {
             .getByPlaceholder("~/go/src/github.com/incantery/rook")
             .fill(opts.root ?? REPO);
         await this.page.getByRole("button", {name: "Create workspace"}).click();
+        // Wait for the SWITCH to finish, not just for some terminal to be on
+        // screen. Until the new workspace is the one displayed, the previous
+        // workspace's window is still .active and its terminal is still the
+        // one a selector finds — and a click that resolves against it latches
+        // onto a pane that is about to collapse to 0x0. That was the suite's
+        // deepest flake; see shellReady.
+        await expect(this.page.locator(`[data-workspace="${name}"]`)).toBeVisible({
+            timeout: 15_000,
+        });
         await expect(this.term()).toBeVisible({timeout: 15_000});
         return name;
     }
@@ -303,9 +415,31 @@ export class Rook {
         return this.term().evaluate((el) => (el as HTMLElement).innerText.replace(/ /g, " "));
     }
 
-    /** Wait for the terminal to show something. */
+    /** Wait for the terminal to show something.
+     *
+     *  Matched against the screen AND a de-wrapped copy. A terminal hard-wraps
+     *  at the column, so a long line of program output gets a newline pushed
+     *  into the middle of a WORD — `…,"sele` / `cted":["Side by side"]}]}` —
+     *  and no regex written against the logical output can match that. Whether
+     *  it happens depends on how far along the row the text starts, which
+     *  depends on the prompt, which contains the workspace name: a random
+     *  string of varying length. Hence a pattern that passed all day and then
+     *  didn't. */
     async expectScreen(want: RegExp, timeout = 20_000): Promise<void> {
-        await expect.poll(() => this.screen(), {timeout}).toMatch(want);
+        await expect
+            .poll(
+                async () => {
+                    const s = await this.screen();
+                    // \s* on BOTH sides of the newline, not just the newline:
+                    // a terminal row is padded out to the full column width
+                    // before it wraps, so the split word is `…"sele` + a run
+                    // of spaces + `cted":[…`. Dropping the newline alone left
+                    // the padding sitting in the middle of the word.
+                    return `${s}\n···de-wrapped···\n${s.replace(/\s*\n\s*/g, "")}`;
+                },
+                {timeout},
+            )
+            .toMatch(want);
     }
 
     /** Delete every workspace this test made, then its repos. Workspaces go

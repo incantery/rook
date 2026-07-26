@@ -1,4 +1,4 @@
-import {expect, test, REPO} from "./harness";
+import {expect, test, REPO, shown} from "./harness";
 import * as path from "node:path";
 
 // Two things the tree owes a vim user.
@@ -12,8 +12,10 @@ import * as path from "node:path";
 // and a tree you have to ⌃H into is one you press ,b twice for.
 
 const RE = path.join(REPO, "bin", "e2e", "re");
-const tree = (page: import("@playwright/test").Page) =>
-    page.locator('[data-side="left"]:visible');
+// NOT `[data-side="left"]:visible` — every window keeps its own tree mounted
+// and hides all but the active one, and :visible has been caught racing that
+// (see `shown`). This asks for the active window's tree by name.
+const tree = (page: import("@playwright/test").Page) => shown(page, '[data-side="left"]');
 
 /** `re .` — the greeter with the tree beside it, keyboard on the listing. */
 async function openTree(page: import("@playwright/test").Page, rook: any, tag: string) {
@@ -57,8 +59,15 @@ test(":q from the tree closes the tree, not the editor", async ({page, rook}) =>
     await expect(page.locator(".editor-mount .view-lines").first()).toContainText("alpha", {
         timeout: 15_000,
     });
-    await page.keyboard.press("Control+h"); // back into the listing
+    // back into the listing — and WAIT for the keyboard to actually be there.
+    // The zone moves synchronously but the listing focuses itself from an
+    // $effect, so typing `:` straight after ⌃H can still land in Monaco, where
+    // it means "quit the editor" instead.
+    await page.keyboard.press("Control+h");
     await expect(tree(page)).toHaveCount(1);
+    await expect(page.locator('[data-win="active"] [data-side="left"] [role="tree"]')).toBeFocused({
+        timeout: 10_000,
+    });
 
     await rook.ex(":q");
     // netrw's reading: the thing you are IN is the thing that quits

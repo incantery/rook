@@ -1,8 +1,8 @@
-import {expect, test, type Page} from "@playwright/test";
+import {expect, test} from "@playwright/test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {deleteWorkspaces, gotoHome, screenText, shellReady} from "./harness";
+import {clickShown, deleteWorkspaces, gotoHome, screenText, shellReady, shown} from "./harness";
 
 // The Mitchell Hashimoto cat test: `time cat 150MB` through a live pane at his
 // benchmark geometry (6K fullscreen ≈ 405x113 cells). Measures true terminal
@@ -16,7 +16,6 @@ import {deleteWorkspaces, gotoHome, screenText, shellReady} from "./harness";
 // viewport below reproduces 405x113; always compare like against like.
 
 const REPO = path.resolve(process.cwd(), "..");
-const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`).first();
 const made: string[] = [];
 
 test.use({viewport: {width: 4400, height: 2560}});
@@ -57,6 +56,10 @@ test("time cat 150MB at 6K-fullscreen geometry", async ({page}) => {
     await page.getByPlaceholder("e.g. rook-core").fill("cat-bench");
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
+    // Wait for the SWITCH, not just for a shell: until the new workspace
+    // is the one displayed, the PREVIOUS one is still what selectors and
+    // pickers see. That is how a finder ended up listing ~/Downloads.
+    await expect(page.locator(`[data-workspace="cat-bench"]`)).toBeVisible({timeout: 15_000});
     const term = shown(page, ".vt-screen");
     await expect(term).toBeVisible({timeout: 15_000});
     await shellReady(page, term);
@@ -69,7 +72,7 @@ test("time cat 150MB at 6K-fullscreen geometry", async ({page}) => {
 
     for (const file of Object.keys(FILES)) {
         for (let run = 1; run <= 2; run++) {
-            await term.click();
+            await clickShown(term);
             await page.keyboard.type(`time cat ${path.join(DIR, file)}`);
             await page.keyboard.press("Enter");
             await expect

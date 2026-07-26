@@ -1,4 +1,4 @@
-import {expect, test, REPO} from "./harness";
+import {REPO, expect, shown, test} from "./harness";
 import * as path from "node:path";
 
 // Two takeovers in two windows — the dogfood bugs of 07-24: the second
@@ -33,7 +33,7 @@ test("two takeovers: keyboard, furniture and :q stay with their editor", async (
     await expect(page.locator(".window.active .editor-path").first()).not.toContainText("external");
 
     // the keyboard belongs to the SECOND editor now — its furniture toggles
-    const visibleTree = page.locator('[data-side="left"]:visible');
+    const visibleTree = shown(page, '[data-side="left"]');
     await page.keyboard.press(",");
     await page.keyboard.press("b");
     await expect(visibleTree).toHaveCount(1, {timeout: 5_000});
@@ -76,7 +76,7 @@ test("re . after a cd anchors THAT window's tree there", async ({page, rook}) =>
     await rook.ex("cd sub");
     await rook.ex(`${RE} .; echo "re exit=$?"`);
 
-    const tree = page.locator('[data-side="left"]:visible');
+    const tree = shown(page, '[data-side="left"]');
     await expect(tree).toHaveCount(1, {timeout: 15_000});
     await expect(tree).toContainText("inner.txt", {timeout: 10_000});
 

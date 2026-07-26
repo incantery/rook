@@ -1,12 +1,19 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces, gotoHome, screenText, shellReady, shellRun} from "./harness";
+import {
+    clickShown,
+    deleteWorkspaces,
+    gotoHome,
+    screenText,
+    shellReady,
+    shellRun,
+    shown,
+} from "./harness";
 
 // Live grep end-to-end: the ` / modal over the real host's git grep,
 // a hit click landing the editor at the hit's file.
 
 const REPO = path.resolve(process.cwd(), "..");
-const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`).first();
 const made: string[] = [];
 
 test.afterEach(async ({page}) => {
@@ -22,6 +29,10 @@ async function openWorkspace(page: Page, name: string) {
     await page.getByPlaceholder("e.g. rook-core").fill(name);
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
+    // Wait for the SWITCH, not just for a shell: until the new workspace
+    // is the one displayed, the PREVIOUS one is still what selectors and
+    // pickers see. That is how a finder ended up listing ~/Downloads.
+    await expect(page.locator(`[data-workspace="${name}"]`)).toBeVisible({timeout: 15_000});
     await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
 }
 
@@ -161,7 +172,7 @@ test("telescope keys: editor ⌃P/⌃G/⌃S, grep ⌃Q → quickfix, ` f reveal"
     await expect(editorPath).toContainText("internal/host/grep.go", {timeout: 15_000});
 
     await stripOne.click();
-    await term.click();
+    await clickShown(term);
     await page.keyboard.press("Control+g");
     await expect(grepInput).toBeVisible();
     await grepInput.fill("bounded walk-and-scan");

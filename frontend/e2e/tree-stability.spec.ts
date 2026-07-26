@@ -1,4 +1,4 @@
-import {expect, test, REPO} from "./harness";
+import {REPO, expect, shown, test} from "./harness";
 import * as path from "node:path";
 
 // The tree is furniture, not a query — dogfood bugs of 07-23: every layout
@@ -28,7 +28,7 @@ test("re . keeps the keyboard on the listing; opening a file does not reload the
     });
 
     await rook.ex(`${RE} .; echo "re exit=$?"`);
-    const tree = page.locator('[data-side="left"]:visible');
+    const tree = shown(page, '[data-side="left"]');
     await expect(tree).toHaveCount(1, {timeout: 15_000});
     // default scope is All — an unchanged file is listed even with a diff
     await expect(tree).toContainText("a.txt", {timeout: 10_000});

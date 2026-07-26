@@ -1,7 +1,7 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import {deleteWorkspaces, gotoHome} from "./harness";
+import {clickShown, deleteWorkspaces, gotoHome, shown} from "./harness";
 
 // Threads as DOCUMENTS, end-to-end against the real host.
 //
@@ -16,7 +16,6 @@ import {deleteWorkspaces, gotoHome} from "./harness";
 
 const REPO = path.resolve(process.cwd(), "..");
 const SANDBOX = path.join(REPO, "bin", "e2e", "xdg");
-const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`).first();
 const made: string[] = [];
 
 const SCISSORS = "-- ✂ --";
@@ -47,6 +46,10 @@ async function openWorkspace(page: Page, name: string) {
     await page.getByPlaceholder("e.g. rook-core").fill(name);
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
+    // Wait for the SWITCH, not just for a shell: until the new workspace
+    // is the one displayed, the PREVIOUS one is still what selectors and
+    // pickers see. That is how a finder ended up listing ~/Downloads.
+    await expect(page.locator(`[data-workspace="${name}"]`)).toBeVisible({timeout: 15_000});
     await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
 }
 
@@ -178,9 +181,7 @@ test("gt creates a thread; :w keeps the tail; :ThreadAsk sends it", async ({page
     await expect(page.locator(".editor-path").first()).toContainText("spawntask.go", {
         timeout: 15_000,
     });
-    await expect
-        .poll(async () => (await threadsOf(ws))[0].state, {timeout: 15_000})
-        .toBe("open");
+    await expect.poll(async () => (await threadsOf(ws))[0].state, {timeout: 15_000}).toBe("open");
     const after = (await threadsOf(ws))[0];
     const last = after.comments[after.comments.length - 1];
     expect(last.author).toBe("user");
@@ -427,9 +428,8 @@ test("a thread buffer re-rendering does not steal the keyboard", async ({page}) 
     await page.keyboard.press("%");
     const term = shown(page, ".vt-screen");
     await expect(term).toBeVisible({timeout: 15_000});
-    await term.click();
-    const inEditor = () =>
-        page.evaluate(() => !!document.activeElement?.closest(".editor-wrap"));
+    await clickShown(term);
+    const inEditor = () => page.evaluate(() => !!document.activeElement?.closest(".editor-wrap"));
     await expect.poll(inEditor).toBe(false);
 
     // …now the agent answers. The thread pane must update WITHOUT taking focus.
@@ -473,23 +473,22 @@ test("a thread loading after you click away does not yank the caret back", async
     // loaded" is a few ms in practice — too narrow to land a click in
     // reliably. Delaying the requests the load waits on makes that window a
     // second wide and the race a certainty.
-    const slowThreads = (u: URL) =>
-        u.pathname.endsWith("/threads") || u.pathname.endsWith("/doc");
+    const slowThreads = (u: URL) => u.pathname.endsWith("/threads") || u.pathname.endsWith("/doc");
     await page.route(slowThreads, async (route) => {
         await new Promise((r) => setTimeout(r, 1500));
         await route.continue();
     });
 
     await goToThread(page, "18G");
-    await term.click(); // mid-load, the keyboard moves to the shell
+    await clickShown(term); // mid-load, the keyboard moves to the shell
     await page.unroute(slowThreads);
 
     const threadPane = page.locator(".editor-mount").first();
     await expect(threadPane).toContainText("does this leak the goroutine", {timeout: 15_000});
 
-    expect(
-        await page.evaluate(() => !!document.activeElement?.closest(".editor-wrap")),
-    ).toBe(false);
+    expect(await page.evaluate(() => !!document.activeElement?.closest(".editor-wrap"))).toBe(
+        false,
+    );
 });
 
 // Threads read through the ONE traversal muscle memory rather than a bespoke

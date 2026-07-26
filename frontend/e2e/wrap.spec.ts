@@ -1,6 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces, gotoHome} from "./harness";
+import {deleteWorkspaces, gotoHome, shown, shownChrome} from "./harness";
 
 // `:set wrap` end to end. Wrapping is not readable from the DOM as a flag, so
 // these assert the thing you'd actually notice: whether any rendered line is
@@ -9,7 +9,6 @@ import {deleteWorkspaces, gotoHome} from "./harness";
 // one does.
 
 const REPO = path.resolve(process.cwd(), "..");
-const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`).first();
 const made: string[] = [];
 
 test.afterEach(async ({page}) => {
@@ -25,6 +24,10 @@ async function openWorkspace(page: Page, name: string) {
     await page.getByPlaceholder("e.g. rook-core").fill(name);
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
+    // Wait for the SWITCH, not just for a shell: until the new workspace
+    // is the one displayed, the PREVIOUS one is still what selectors and
+    // pickers see. That is how a finder ended up listing ~/Downloads.
+    await expect(page.locator(`[data-workspace="${name}"]`)).toBeVisible({timeout: 15_000});
     await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
 }
 
@@ -88,7 +91,7 @@ test("`:set wrap?` reads the option back", async ({page}) => {
 
     // vim's own spelling for a boolean read: " wrap" when on, " nowrap" when
     // off. It lands in monaco-vim's status bar, which rook mounts as .editor-vim.
-    const bar = shown(page, ".editor-vim");
+    const bar = shownChrome(page, ".editor-vim");
     await ex(page, ":set wrap?");
     await expect(bar).toContainText("nowrap", {timeout: 10_000});
 

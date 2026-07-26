@@ -11,12 +11,22 @@ import {expect, hostFetch, STUB_CODER, test, type Rook} from "./harness";
 // `coder` config. It is faithful about exactly one thing — the claim
 // lifecycle — because that is the part rook reasons about.
 
-/** the host session backing this workspace's only pane */
+/** The host session backing this workspace's only pane.
+ *
+ *  POLLED, not read once. A visible terminal is the FRONTEND's news; the
+ *  session reaching /sessions is the host's, and the two settle
+ *  independently. Reading the list a single time raced that gap and returned
+ *  [] often enough to be one of the suite's recurring flakes. */
 async function sessionOf(ws: string): Promise<string> {
-    const list = (await (await hostFetch("/sessions")).json()) as {id: string; workspace: string}[];
-    const mine = list.filter((s) => s.workspace === ws);
-    expect(mine).toHaveLength(1);
-    return mine[0].id;
+    const mine = async () => {
+        const list = (await (await hostFetch("/sessions")).json()) as {
+            id: string;
+            workspace: string;
+        }[];
+        return list.filter((s) => s.workspace === ws);
+    };
+    await expect.poll(async () => (await mine()).length, {timeout: 15_000}).toBe(1);
+    return (await mine())[0].id;
 }
 
 async function makeThread(ws: string, body: string): Promise<void> {

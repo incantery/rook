@@ -1,6 +1,6 @@
 import {expect, test} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces, gotoHome} from "./harness";
+import {deleteWorkspaces, gotoHome, shown} from "./harness";
 
 // The WebGL renderer at retina scale. Default e2e runs at deviceScaleFactor 1,
 // where CSS-pixel and device-pixel conventions coincide — which hid a real
@@ -25,7 +25,11 @@ test("webgl canvas geometry is dpr-correct", async ({page}) => {
     await page.getByPlaceholder("e.g. rook-core").fill("webgl-dpr");
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
-    await expect(page.locator(".vt-webgl canvas")).toHaveCount(1, {timeout: 15_000});
+    // Wait for the SWITCH, not just for a shell: until the new workspace
+    // is the one displayed, the PREVIOUS one is still what selectors and
+    // pickers see. That is how a finder ended up listing ~/Downloads.
+    await expect(page.locator(`[data-workspace="webgl-dpr"]`)).toBeVisible({timeout: 15_000});
+    await expect(shown(page, ".vt-webgl canvas")).toHaveCount(1, {timeout: 15_000});
     await page.waitForTimeout(1500); // let fit() settle
 
     const geo = await page.evaluate(() => {

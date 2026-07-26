@@ -1,4 +1,4 @@
-import {expect, test, REPO} from "./harness";
+import {REPO, expect, shown, test} from "./harness";
 import * as path from "node:path";
 
 // `re` — the vim-shaped editor entry: typed in a rook shell, it takes over
@@ -71,7 +71,7 @@ test("re . is the greeter with the tree beside it, netrw-style", async ({page, r
     await rook.ex(`${RE} .; echo "re exit=$?"`);
 
     // the tree opens beside the greeter — no buffer, because none was named
-    const tree = page.locator('[data-side="left"]:visible');
+    const tree = shown(page, '[data-side="left"]');
     await expect(tree).toHaveCount(1, {timeout: 15_000});
     await expect(page.locator("[data-start-root]")).toBeVisible();
     await expect(page.locator(".editor-mount")).toHaveCount(0);
@@ -92,7 +92,7 @@ test("re . is the greeter with the tree beside it, netrw-style", async ({page, r
     await rook.ex(":q");
     await rook.expectScreen(/re exit=0/);
     // the editor's furniture leaves with it
-    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(0);
+    await expect(shown(page, '[data-side="left"]')).toHaveCount(0);
 });
 
 test("furniture is per window — the tree stays with its editor", async ({page, rook}) => {
@@ -101,7 +101,7 @@ test("furniture is per window — the tree stays with its editor", async ({page,
     await rook.shellReady();
 
     await rook.ex(`${RE} .; echo "re exit=$?"`);
-    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(1, {timeout: 15_000});
+    await expect(shown(page, '[data-side="left"]')).toHaveCount(1, {timeout: 15_000});
 
     // leaders are dead inside the tree — cross out of it first, then open a
     // NEW window: a different place, no visible tree (the takeover window's
@@ -109,12 +109,12 @@ test("furniture is per window — the tree stays with its editor", async ({page,
     await page.keyboard.press("Control+l");
     await page.keyboard.press("`");
     await page.keyboard.press("c");
-    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(0);
+    await expect(shown(page, '[data-side="left"]')).toHaveCount(0);
 
     // back to the takeover's window — its tree comes back with it
     await page.keyboard.press("`");
     await page.keyboard.press("1");
-    await expect(page.locator('[data-side="left"]:visible')).toHaveCount(1);
+    await expect(shown(page, '[data-side="left"]')).toHaveCount(1);
 
     // the pane behind the tree is the greeter, so `q` is what finishes it
     await page.locator("[data-start-root]").click();

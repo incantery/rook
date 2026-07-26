@@ -2,7 +2,7 @@ import {expect, test, type Page} from "@playwright/test";
 import {execSync} from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import {deleteWorkspaces, gotoHome} from "./harness";
+import {deleteWorkspaces, gotoHome, shown} from "./harness";
 
 // The git gutter in NORMAL buffers: edit a file, and the margin says which
 // lines moved vs HEAD — added green, modified accent, a marker on each
@@ -10,7 +10,6 @@ import {deleteWorkspaces, gotoHome} from "./harness";
 // reading happen in the real file instead of a diff mode.
 
 const REPO = path.resolve(process.cwd(), "..");
-const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`).first();
 const made: string[] = [];
 
 test.afterEach(async ({page}) => {
@@ -26,7 +25,7 @@ function mkRepo(): string {
     const git = (cmd: string) => execSync(`git ${cmd}`, {cwd: dir});
     git("init -qb main");
     git("add .");
-    git('-c user.email=t@t -c user.name=t commit -qm init');
+    git("-c user.email=t@t -c user.name=t commit -qm init");
     return dir;
 }
 
@@ -39,6 +38,10 @@ async function openWorkspaceAt(page: Page, name: string, root: string) {
     await page.getByPlaceholder("e.g. rook-core").fill(name);
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(root);
     await page.getByRole("button", {name: "Create workspace"}).click();
+    // Wait for the SWITCH, not just for a shell: until the new workspace
+    // is the one displayed, the PREVIOUS one is still what selectors and
+    // pickers see. That is how a finder ended up listing ~/Downloads.
+    await expect(page.locator(`[data-workspace="${name}"]`)).toBeVisible({timeout: 15_000});
     await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
 }
 

@@ -1,6 +1,14 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {deleteWorkspaces, gotoHome, screenText, shellReady, shellRun} from "./harness";
+import {
+    clickShown,
+    deleteWorkspaces,
+    gotoHome,
+    screenText,
+    shellReady,
+    shellRun,
+    shown,
+} from "./harness";
 
 // Scrollback is host-backed and paged (reverse-paginated virtualized
 // scrolling): the client caches what it watches scroll by, and FETCHES what it
@@ -10,7 +18,6 @@ import {deleteWorkspaces, gotoHome, screenText, shellReady, shellRun} from "./ha
 // msgSbFetch/msgSbChunk round trips.
 
 const REPO = path.resolve(process.cwd(), "..");
-const shown = (page: Page, sel: string) => page.locator(`${sel} >> visible=true`).first();
 const made: string[] = [];
 
 test.afterEach(async ({page}) => {
@@ -26,6 +33,10 @@ async function openWorkspace(page: Page, name: string) {
     await page.getByPlaceholder("e.g. rook-core").fill(name);
     await page.getByPlaceholder("~/go/src/github.com/incantery/rook").fill(REPO);
     await page.getByRole("button", {name: "Create workspace"}).click();
+    // Wait for the SWITCH, not just for a shell: until the new workspace
+    // is the one displayed, the PREVIOUS one is still what selectors and
+    // pickers see. That is how a finder ended up listing ~/Downloads.
+    await expect(page.locator(`[data-workspace="${name}"]`)).toBeVisible({timeout: 15_000});
     await expect(shown(page, ".vt-screen")).toBeVisible({timeout: 15_000});
 }
 
@@ -68,7 +79,7 @@ test("webgl: pre-attach history pages in and paints on canvas", async ({page}) =
     await openWorkspace(page, "sb-webgl");
     // visible-scoped: the boot shell in "main" keeps its pane mounted
     // (hidden) behind this workspace, canvas and all
-    await expect(page.locator(".vt-webgl canvas >> visible=true")).toHaveCount(1, {
+    await expect(shown(page, ".vt-webgl canvas")).toHaveCount(1, {
         timeout: 15_000,
     });
 
@@ -80,7 +91,7 @@ test("webgl: pre-attach history pages in and paints on canvas", async ({page}) =
             return el?.__screenText?.() ?? "";
         });
     const term = shown(page, ".vt-webgl");
-    await term.click();
+    await clickShown(term);
     await page.keyboard.type("echo rdy$((6*7))");
     await page.keyboard.press("Enter");
     await expect.poll(webglText, {timeout: 60_000}).toContain("rdy42");
@@ -92,7 +103,7 @@ test("webgl: pre-attach history pages in and paints on canvas", async ({page}) =
     await expect.poll(webglText, {timeout: 15_000}).toContain("dn48");
 
     await page.reload(); // boot lands straight back in sb-webgl
-    await expect(page.locator(".vt-webgl canvas >> visible=true")).toHaveCount(1, {
+    await expect(shown(page, ".vt-webgl canvas")).toHaveCount(1, {
         timeout: 15_000,
     });
 
@@ -100,7 +111,7 @@ test("webgl: pre-attach history pages in and paints on canvas", async ({page}) =
     await expect.poll(webglText, {timeout: 15_000}).toContain("dn48");
     expect(await webglText()).not.toContain("seq 1 300");
 
-    await shown(page, ".vt-webgl").click();
+    await clickShown(shown(page, ".vt-webgl"));
     await page.keyboard.press("Shift+Home");
     await expect.poll(webglText, {timeout: 15_000}).toContain("seq 1 300");
 
@@ -116,7 +127,7 @@ test("output produced while a window is hidden lands on reveal", async ({page}) 
     // start delayed output, then hide the window before it prints — the host
     // render loop pauses the pane (msgVis 0), so everything below happens
     // frameless; the reveal must ship it as one net diff.
-    await term.click();
+    await clickShown(term);
     await page.keyboard.type("sleep 1 && seq 1 40");
     await page.keyboard.press("Enter");
     await page.keyboard.press("Backquote");
