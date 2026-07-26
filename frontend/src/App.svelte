@@ -8,6 +8,12 @@
     import {Call} from "@wailsio/runtime";
     import type {HostAPI, IssueInfo, ThreadInfo} from "./hostapi";
     import {TermManager} from "./term/manager";
+    // STATIC, not a lazy import: `:` in the tree has to raise the prompt in
+    // the same task as the keypress. Awaiting a chunk — even a cached one —
+    // lets the keys after the colon land on the listing instead, so typing
+    // `:q` at speed opened the file under the cursor. vimstatus imports
+    // nothing (no Monaco behind it), so this costs a few KB and no chunk.
+    import {promptEx} from "./term/vimstatus";
     import type {AskRequest, EditRequest, PaneAt} from "./term/manager";
     import type {Edge, PaneRef} from "./term/layout";
     import {themeService} from "./theme/service";
@@ -1434,10 +1440,9 @@
 
     /** Raise the command line over the tree, and put the keyboard back on
      *  the listing afterwards unless the command took it somewhere. */
-    async function openTreeEx(): Promise<void> {
+    function openTreeEx(): void {
         const win = app.activeId;
         if (!win) return;
-        const {promptEx} = await import("./term/vimstatus");
         const back = () => explorerRefs[win]?.focus();
         promptEx((line) => {
             treeEx(line);
@@ -2565,7 +2570,14 @@
 <!-- always mounted: terminals live here; visibility is a display toggle,
      never {#if}. flex/hidden are toggled explicitly so exactly one display
      utility is ever active (a raw [hidden] attr would lose to .flex). -->
-<div class={["min-h-0 flex-1 flex-col", app.screen === "app" ? "flex" : "hidden"]}>
+<!-- data-workspace names the workspace currently on screen. The titlebar
+     already shows it, but as TEXT that flash messages borrow — so it can't be
+     waited on. This is the stable answer to "which workspace am I looking
+     at", which is what tells a test the switch has finished. -->
+<div
+    class={["min-h-0 flex-1 flex-col", app.screen === "app" ? "flex" : "hidden"]}
+    data-workspace={app.workspace}
+>
     <Titlebar
         onpicker={() => (app.pickerOpen = true)}
         ondashboard={toggleDash}
@@ -2582,7 +2594,14 @@
              hidden windows' trees stay mounted but display:none. -->
         {#each app.tabs as t (t.id)}
             {@const c = chromeFor(t.id)}
-            <div class={t.id === app.activeId ? "contents" : "hidden"}>
+            <!-- data-win mirrors the class for ADDRESSABILITY: a hidden
+                 window's chrome is display:none but still mounted and still
+                 matches a bare selector, so "the tree" has to be sayable as
+                 "the active window's tree" or a test reaches a stale one. -->
+            <div
+                class={t.id === app.activeId ? "contents" : "hidden"}
+                data-win={t.id === app.activeId ? "active" : "hidden"}
+            >
                 <SidePane
                     side="left"
                     visible={c.explorerOpen}
@@ -2596,7 +2615,7 @@
                         dir={c.explorerDir}
                         active={t.id === app.activeId && app.focusZone === "left"}
                         onopen={(path) => void openFile(path)}
-                        onex={() => void openTreeEx()}
+                        onex={openTreeEx}
                     />
                 </SidePane>
             </div>
