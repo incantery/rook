@@ -393,6 +393,14 @@ export class HostAPI {
         ).json();
     }
 
+    /** Which language servers this workspace has, and whether they're up.
+     *  Fails open like the query verbs: an old daemon 404s, and the caller
+     *  shows nothing rather than an error — a missing readout is honest,
+     *  "LSP down" would not be. */
+    async lspStatus(ws: string): Promise<LspStatusResult> {
+        return (await this.req(`/workspaces/${encodeURIComponent(ws)}/lsp/status`)).json();
+    }
+
     /** All of a workspace's threads — comments inline, ranges re-anchored
      *  on read (currentStart/currentEnd, outdated). The pane fetches
      *  everything and slices locally; filters exist for cheaper pulls. */
@@ -752,6 +760,31 @@ export interface LspSemanticResult {
     modifiers: string[];
     data: number[];
     note?: string;
+}
+
+/** A configured language server and what the host can say about it.
+ *  `state` is the BINARY's story (ready · missing · installing · error ·
+ *  needs-toolchain); `instances` is the running-process story — a server can
+ *  be ready with nothing started, which is the normal state until you open a
+ *  file of its kind. `filetypes` are EXTENSIONS without the dot ("ts", not
+ *  "typescript"), which is what a caller matches an open buffer against. */
+export interface LspServerStatus {
+    server: string;
+    plugin?: string;
+    tier: string;
+    state: string;
+    detail?: string;
+    version?: string;
+    filetypes: string[];
+    instances?: {root: string; pid: number; uptimeSec: number}[];
+}
+
+export interface LspStatusResult {
+    servers: LspServerStatus[];
+    /** config problems the resolver found (bad spec, unknown plugin) */
+    issues?: {subject: string; detail: string}[];
+    /** repo-layer argv the config refused to honour — never silently */
+    refused?: string[];
 }
 
 /** One utterance in a thread. Author is declared, not authenticated —

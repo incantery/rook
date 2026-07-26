@@ -6,6 +6,7 @@ import type {Tab} from "./deck";
 import type {
     AttentionItem,
     CostsSnapshot,
+    LspStatusResult,
     ReviewRoot,
     RookTask,
     RuntimeSnapshot,
@@ -143,6 +144,11 @@ class AppState {
     /** the host's release check — the status bar's update chip. Null until
      *  the poll lands or on an old host without the route (fail open). */
     update = $state<UpdateStatus | null>(null);
+    /** the workspace's configured language servers. Not a poll: App refetches
+     *  when the workspace changes and when the focused buffer's KIND changes,
+     *  because that is exactly when the answer can differ — opening a .go file
+     *  is what starts gopls. Null on an old host without the route. */
+    lsp = $state<LspStatusResult | null>(null);
     /** registry snapshot — lineage (worktreeOf/branch) for every surface
      *  that names a workspace; Home refreshes it eagerly after mutations */
     workspaces = $state<WorkspaceInfo[]>([]);

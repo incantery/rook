@@ -187,6 +187,34 @@ test("markdown prose is painted, not just its code fences", async ({page}) => {
     await page.screenshot({path: "bin/e2e/highlight-markdown.png", fullPage: true});
 });
 
+// The same language id the grammars above are chosen by, said out loud in
+// the status bar. Here rather than in a bar-specific spec because the thing
+// that can break it is a language decision, and the retarget case is the
+// point: the picker swaps the model under a pane that never loses focus, so
+// a label published only on focus would go stale and quietly lie.
+test("the status bar names the language, and follows a retarget", async ({page}) => {
+    test.setTimeout(120_000);
+    await openWorkspace(page, `hl-lang-${Date.now()}`);
+    await openFile(page, "internal/host/plugins.go");
+    await page.locator(".editor-mount").click();
+    await expect(page.locator("#sb-lang")).toHaveText("go", {timeout: 20_000});
+
+    // retarget through the picker. Not openFile(): its Enter can beat the
+    // file list here (the list is fetched, the keystroke isn't), and a
+    // no-op pick would leave the assertion below passing for the wrong file.
+    await page.getByRole("button", {name: /commands/}).click();
+    await page.getByPlaceholder("Run a command…").fill("Open file");
+    await page.keyboard.press("Enter");
+    const picker = page.getByPlaceholder("Open file…");
+    await expect(picker).toBeVisible();
+    await picker.fill("NOTES.md");
+    await expect(page.locator(".sel")).toHaveText("NOTES.md");
+    await picker.press("Enter");
+    await expect(page.locator(".editor-path")).toContainText("NOTES.md", {timeout: 20_000});
+
+    await expect(page.locator("#sb-lang")).toHaveText("markdown", {timeout: 20_000});
+});
+
 test("a language with no vendored grammar still tokenizes on Monarch", async ({page}) => {
     test.setTimeout(120_000);
     await openWorkspace(page, `hl-fallback-${Date.now()}`);

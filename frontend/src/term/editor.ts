@@ -708,7 +708,25 @@ export class EditorPane implements PaneContent {
         // the change listener below only speaks on movement
         const pos = this.editor?.getPosition();
         if (pos) vimbar.setPos(this.vimBar, {ln: pos.lineNumber, col: pos.column});
+        this.publishDoc();
         this.opts.onActivate?.(this.seam);
+    }
+
+    /** Tell the status bar what this pane is showing: monaco's language id,
+     *  and the extension the host's language servers are keyed on. Called on
+     *  focus and whenever the model or its language changes underneath —
+     *  `:e other.go` retargets the pane in place, and the label has to follow
+     *  the buffer, not the pane. */
+    private publishDoc(): void {
+        const model = this.editor?.getModel();
+        if (!model) return void vimbar.setDoc(this.vimBar, null);
+        const path = this.opts.kind === "file" ? (this.opts.path ?? "") : "";
+        const dot = path.lastIndexOf(".");
+        const slash = path.lastIndexOf("/");
+        vimbar.setDoc(this.vimBar, {
+            lang: model.getLanguageId(),
+            ext: dot > slash + 1 ? path.slice(dot + 1) : "",
+        });
     }
 
     /** Jump the right editor to a thread's anchor and paint the highlight;
@@ -2032,6 +2050,11 @@ export class EditorPane implements PaneContent {
             this.editor.onDidChangeCursorPosition((e) =>
                 vimbar.setPos(this.vimBar, {ln: e.position.lineNumber, col: e.position.column}),
             );
+            // ...and the language label, which changes without focus ever
+            // moving: `:e` swaps the model in place, and json/svelte settle
+            // their language after the model exists
+            this.editor.onDidChangeModel(() => this.publishDoc());
+            this.editor.onDidChangeModelLanguage(() => this.publishDoc());
             // ⌘S saves from any mode, so non-vim users get a save too; the
             // vim :w path routes through the same save().
             this.editor.addCommand(

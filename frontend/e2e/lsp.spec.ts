@@ -98,6 +98,14 @@ test("gd jumps across files and gr fills the refs quickfix", async ({page}) => {
     await expect(page.locator(".editor-vim")).toContainText(/NORMAL/i, {timeout: 15_000});
     await page.locator(".editor-mount").click();
 
+    // the status bar's LSP readout: the server that claims THIS buffer's
+    // extension, and whether a process is up for it. warmup() started one, so
+    // a hollow ring here would mean the bar is reading config rather than
+    // reality — which is the whole difference between the two states.
+    const lspChip = page.locator("#sb-lsp");
+    await expect(lspChip).toContainText("gopls", {timeout: 20_000});
+    await expect(lspChip).toContainText("●");
+
     // land the cursor on a cross-package symbol with vim search, then gd
     await page.keyboard.type("/CatalogEntry");
     await page.keyboard.press("Enter");

@@ -11,6 +11,11 @@ class VimBarState {
     active = $state(false);
     /** the focused editor's cursor, 1-based — the bar's "Ln 16, Col 34" */
     pos = $state<{ln: number; col: number} | null>(null);
+    /** what the focused editor is SHOWING: monaco's language id, and the
+     *  file extension the host matches language servers on (Filetypes are
+     *  extensions, not language ids — "ts", not "typescript"). Empty ext for
+     *  a buffer that is not a file on disk, e.g. a thread. */
+    doc = $state<{lang: string; ext: string} | null>(null);
     private slot: HTMLElement | null = null;
     private node: HTMLElement | null = null;
 
@@ -23,7 +28,7 @@ class VimBarState {
     /** an editor pane gained focus: adopt its vim node (null = a pane with
      *  no vim line, e.g. a review diff — clears the slot) */
     publish(el: HTMLElement | null): void {
-        if (this.node !== el) this.pos = null; // the old pane's cursor is a lie
+        if (this.node !== el) this.pos = this.doc = null; // the old pane's readouts are a lie
         this.node = el;
         this.active = !!el;
         this.attach();
@@ -34,6 +39,12 @@ class VimBarState {
      *  bar's numbers */
     setPos(el: HTMLElement | null, pos: {ln: number; col: number}): void {
         if (el && this.node === el) this.pos = pos;
+    }
+
+    /** the same guard for what the pane is showing — a background pane
+     *  swapping models must not relabel the bar */
+    setDoc(el: HTMLElement | null, doc: {lang: string; ext: string} | null): void {
+        if (el && this.node === el) this.doc = doc;
     }
 
     /** a pane is going away — release the slot iff it still holds its node */

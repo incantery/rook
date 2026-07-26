@@ -14,6 +14,7 @@
     // `:q` at speed opened the file under the cursor. vimstatus imports
     // nothing (no Monaco behind it), so this costs a few KB and no chunk.
     import {promptEx} from "./term/vimstatus";
+    import {vimbar} from "./term/vimbar.svelte";
     import type {AskRequest, EditRequest, PaneAt} from "./term/manager";
     import type {Edge, PaneRef} from "./term/layout";
     import {themeService} from "./theme/service";
@@ -2420,6 +2421,24 @@
         // stale-workspace guard) and writes it on completion — tracked, the
         // write re-runs this effect and the poll loops at request speed
         void untrack(() => pollWsStatus());
+    });
+
+    // The status bar's LSP readout. Refetched when the workspace changes or
+    // the focused buffer's extension does — not on a timer, because those two
+    // are the events that change the answer: a server starts when you open a
+    // file of its kind, and nothing else touches it. Old hosts 404 and the
+    // readout stays absent, which is the honest thing for "we can't know".
+    $effect(() => {
+        const ws = app.workspace;
+        const ext = vimbar.doc?.ext ?? "";
+        if (!ext) return; // no file buffer focused: nothing to resolve
+        void (async () => {
+            try {
+                app.lsp = await api.lspStatus(ws);
+            } catch {
+                app.lsp = null;
+            }
+        })();
     });
 
     async function pollMoney(): Promise<void> {

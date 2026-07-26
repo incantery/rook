@@ -63,6 +63,36 @@
             : null,
     );
     const footprint = $derived(footprintOf(app.runtime?.gauges));
+
+    /** The language server for the focused buffer's kind, if the workspace
+     *  has one. Matching is on EXTENSION — the host keys `filetypes` that way
+     *  — so "typescript" the monaco language and "ts" the filetype stay
+     *  separate things and neither is asked to stand in for the other. */
+    const lsp = $derived.by(() => {
+        const ext = vimbar.doc?.ext;
+        if (!ext) return null;
+        const s = app.lsp?.servers.find((sv) => sv.filetypes.includes(ext));
+        if (!s) return null;
+        // ready-with-no-instance is the normal resting state, not a fault:
+        // the host starts a server lazily, on the first query. Filled ring =
+        // a process is up for this workspace; hollow = it would be.
+        const live = (s.instances?.length ?? 0) > 0;
+        const tone =
+            s.state === "ready"
+                ? live
+                    ? "text-grn"
+                    : "text-lo"
+                : s.state === "installing"
+                  ? "text-amber"
+                  : "text-hot";
+        const note =
+            s.state === "ready"
+                ? live
+                    ? `${s.instances?.length} instance${s.instances?.length === 1 ? "" : "s"} running`
+                    : "configured — starts on the first query"
+                : (s.detail ?? s.state);
+        return {name: s.server, ring: live ? "●" : "○", tone, title: `${s.server}: ${note}`};
+    });
 </script>
 
 <div
@@ -127,6 +157,14 @@
     </span>
     {#if vimbar.active && vimbar.pos}
         <span class="text-lo">Ln {vimbar.pos.ln}, Col {vimbar.pos.col}</span>
+    {/if}
+    {#if vimbar.active && vimbar.doc}
+        <span id="sb-lang" class="text-lo">{vimbar.doc.lang}</span>
+    {/if}
+    {#if vimbar.active && lsp}
+        <span id="sb-lsp" class={lsp.tone} title={lsp.title}
+            ><span class="text-[0.5rem]">{lsp.ring}</span> {lsp.name}</span
+        >
     {/if}
     {#if app.update?.available}
         <span
