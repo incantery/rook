@@ -32,18 +32,17 @@
         api,
         workspace,
         dir,
+        active,
         onopen,
-        onclose,
     }: {
         api: HostAPI;
         workspace: string;
         /** the focused shell's cwd — roots the tree there (vim's experience);
          *  undefined = the workspace root */
         dir?: string;
+        /** the workbench's focus zone is this pane — take the keyboard */
+        active: boolean;
         onopen: (path: string) => void;
-        /** q — nerdtree's close. The tree is a WINDOW now, so this is the
-         *  pane closing, not a sidebar toggling. */
-        onclose?: () => void;
     } = $props();
 
     // Tone → literal class names. Tailwind scans source for literal strings,
@@ -132,18 +131,13 @@
     // different file after any of them.
     let cursor = $state("");
     let treeEl = $state<HTMLElement | null>(null);
-    /** Does this tree hold the keyboard? Read off DOM focus rather than a
-     *  prop: as a pane it answers for itself, where the side-pane tenant
-     *  had to be told by the workbench's focus zone. Drives the cursor's
-     *  filled-vs-outline treatment only. */
-    let focused = $state(false);
     const cursorAt = $derived(rows.findIndex((r) => r.node.path === cursor));
 
-    // A cursor whose row is gone (a collapse, a scope flip, a refetch) starts
-    // back at the top. Focus is NOT taken here: the tree is a pane now, and
-    // the manager decides who holds the keyboard — an effect that grabbed it
-    // on every row change would steal focus from whatever you moved to.
+    // Taking the zone takes the keyboard. Landing with no cursor (or one whose
+    // row is gone — a collapse or a scope flip can eat it) starts at the top.
     $effect(() => {
+        if (!active) return;
+        treeEl?.focus();
         if (rows.length > 0 && !rows.some((r) => r.node.path === cursor))
             cursor = rows[0].node.path;
     });
@@ -199,11 +193,6 @@
                 break;
             case "G":
                 moveTo(rows.length - 1);
-                break;
-            case "q":
-                // nerdtree's close, and the reason the tree had to become a
-                // window: closing chrome is a toggle, closing a pane is :q
-                onclose?.();
                 break;
             default:
                 return; // not ours — let it through
@@ -315,8 +304,6 @@
         role="tree"
         aria-label="Files"
         onkeydown={onTreeKey}
-        onfocusin={() => (focused = true)}
-        onfocusout={() => (focused = false)}
     >
         {#if loading}
             <div class="px-3 py-2 font-mono text-xs text-dim">loading…</div>
@@ -361,7 +348,7 @@
     {@const on = cursor === node.path}
     <div
         class={"flex w-full cursor-pointer items-center gap-1 border-l-2 py-0.5 pr-2 text-left font-mono text-xs " +
-            (on && focused
+            (on && active
                 ? "border-acc bg-acc/15 text-fg"
                 : on
                   ? "border-line/30 bg-fg/5 text-fg"

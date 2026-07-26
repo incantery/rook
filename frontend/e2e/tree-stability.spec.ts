@@ -28,7 +28,7 @@ test("re . keeps the keyboard on the listing; opening a file does not reload the
     });
 
     await rook.ex(`${RE} .; echo "re exit=$?"`);
-    const tree = page.locator(".window.active .tree-wrap");
+    const tree = page.locator('[data-side="left"]:visible');
     await expect(tree).toHaveCount(1, {timeout: 15_000});
     // default scope is All — an unchanged file is listed even with a diff
     await expect(tree).toContainText("a.txt", {timeout: 10_000});
@@ -50,10 +50,6 @@ test("re . keeps the keyboard on the listing; opening a file does not reload the
     expect(fileReqs.length).toBe(before);
     await expect(tree).toContainText("b.txt");
 
-    // Both panes belong to this one `re`, so the shell comes back only when
-    // the LAST closes: :q here drops the editor, q on the tree finishes it.
     await rook.ex(":q");
-    await page.locator(".tree-wrap [role='tree']").first().click();
-    await page.keyboard.press("q");
     await rook.expectScreen(/re exit=0/);
 });

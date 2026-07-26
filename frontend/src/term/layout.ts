@@ -46,15 +46,7 @@ export type PaneRef =
      *  buffer. A surface with no identity, like `review` and `monitor` —
      *  there is nothing to name and nothing to restore, and it retargets
      *  itself into a `file` the moment you pick something. */
-    | {type: "start"}
-    /** the file tree, as a WINDOW rather than chrome. It was a left SidePane
-     *  tenant, which is why it could never be full screen (a fixed-width
-     *  flex sibling is not a node in the layout) and why closing the editor
-     *  took it with it. As a pane it is nerdtree: ` z zooms it, ⌃hjkl
-     *  reaches it, q closes it, and a tree alone in a window IS full screen.
-     *  `dir` is its root — one tree can look at the repo while another looks
-     *  at wherever `re .` was run. */
-    | {type: "tree"; dir?: string};
+    | {type: "start"};
 
 export interface LeafNode {
     kind: "leaf";
@@ -160,29 +152,11 @@ function normalized(weights: number[]): number[] {
  *  the new leaf takes the second half. If the target's parent already
  *  splits in `dir`, the new leaf slots in right after it (no wrapper);
  *  otherwise the target wraps in a fresh 50/50 split. Unknown paneId
- *  returns the root unchanged.
- *
- *  `before` puts the new leaf on the near side instead — the first half,
- *  or the slot ahead of the target. tmux never needed it because every
- *  split is "the new thing goes after"; the file tree does, because a tree
- *  belongs to the LEFT of what it opens (`:Vex`, nerdtree, netrw all
- *  agree), and a pane that arrives on the wrong side is one the user has
- *  to move every single time. */
-export function splitAt(
-    root: LayoutNode,
-    paneId: string,
-    dir: Dir,
-    leaf: LeafNode,
-    before = false,
-): LayoutNode {
+ *  returns the root unchanged. */
+export function splitAt(root: LayoutNode, paneId: string, dir: Dir, leaf: LeafNode): LayoutNode {
     if (root.kind === "leaf") {
         if (root.id !== paneId) return root;
-        return {
-            kind: "split",
-            dir,
-            weights: [0.5, 0.5],
-            children: before ? [leaf, root] : [root, leaf],
-        };
+        return {kind: "split", dir, weights: [0.5, 0.5], children: [root, leaf]};
     }
     const i = root.children.findIndex((c) => c.kind === "leaf" && c.id === paneId);
     if (i !== -1 && root.dir === dir) {
@@ -190,10 +164,10 @@ export function splitAt(
         const children = root.children.slice();
         const half = weights[i] / 2;
         weights.splice(i, 1, half, half);
-        children.splice(before ? i : i + 1, 0, leaf);
+        children.splice(i + 1, 0, leaf);
         return {...root, weights, children};
     }
-    return {...root, children: root.children.map((c) => splitAt(c, paneId, dir, leaf, before))};
+    return {...root, children: root.children.map((c) => splitAt(c, paneId, dir, leaf))};
 }
 
 /** Remove a pane. The freed weight redistributes proportionally across

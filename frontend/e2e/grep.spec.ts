@@ -128,7 +128,7 @@ test("telescope keys: editor ⌃P/⌃G/⌃S, grep ⌃Q → quickfix, ` f reveal"
     // armed here from the quickfix strip, one of the editor's own surfaces
     await page.keyboard.press(",");
     await page.keyboard.press("f");
-    const cursorRow = page.locator(".tree-wrap [data-cursor=\"true\"]");
+    const cursorRow = page.locator('.side-pane[data-side="left"] [data-cursor="true"]');
     await expect(cursorRow).toBeVisible({timeout: 15_000});
     await expect(cursorRow).toContainText("grep.go");
 

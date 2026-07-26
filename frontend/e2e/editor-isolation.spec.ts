@@ -33,7 +33,7 @@ test("two takeovers: keyboard, furniture and :q stay with their editor", async (
     await expect(page.locator(".window.active .editor-path").first()).not.toContainText("external");
 
     // the keyboard belongs to the SECOND editor now — its furniture toggles
-    const visibleTree = page.locator(".window.active .tree-wrap");
+    const visibleTree = page.locator('[data-side="left"]:visible');
     await page.keyboard.press(",");
     await page.keyboard.press("b");
     await expect(visibleTree).toHaveCount(1, {timeout: 5_000});
@@ -76,12 +76,11 @@ test("re . after a cd anchors THAT window's tree there", async ({page, rook}) =>
     await rook.ex("cd sub");
     await rook.ex(`${RE} .; echo "re exit=$?"`);
 
-    const tree = page.locator(".window.active .tree-wrap");
+    const tree = page.locator('[data-side="left"]:visible');
     await expect(tree).toHaveCount(1, {timeout: 15_000});
     await expect(tree).toContainText("inner.txt", {timeout: 10_000});
 
-    // `re .` is the tree itself now, so there is nothing to cross into —
-    // q on the listing is what hands the shell back
-    await page.keyboard.press("q");
+    await page.keyboard.press("Control+l");
+    await rook.ex(":q");
     await rook.expectScreen(/re exit=0/);
 });
