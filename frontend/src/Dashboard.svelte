@@ -3,6 +3,7 @@
      context the attention router (docs/agent.md) consumes — if the
      dashboard can't show it, the agent can't know it. -->
 <script lang="ts">
+    import {onMount} from "svelte";
     import type {AgentStatus, HostAPI, IssueInfo, IssuesResult, WorkspaceStatus} from "./hostapi";
     import {shortWindow} from "./hostapi";
     import {app} from "./state.svelte";
@@ -87,9 +88,26 @@
     // Lineage from the registry snapshot — /status doesn't carry it, and
     // the head must say "task tree of X", not read like a peer workspace.
     const treeOf = $derived(app.workspaceInfo?.worktreeOf ?? null);
+
+    // The dashboard has to TAKE focus, the same way mission control does
+    // (Home.focusDeck) — #terminals is never unmounted, so the renderer that
+    // had focus keeps it and everything you type goes on reaching that shell
+    // with the dashboard sitting on top of it. Mounting IS the open (App
+    // renders this behind {#if app.dashVisible}), so onMount covers both
+    // doors: ` d and the session-less workspace that lands here. Closing is
+    // App's side of it — toggleDash hands the keyboard back to the pane.
+    let root = $state<HTMLElement | null>(null);
+    onMount(() => root?.focus({preventScroll: true}));
 </script>
 
-<div class="absolute inset-0 z-10 overflow-y-auto bg-bg/72 backdrop-blur-xl">
+<div
+    id="dashboard"
+    bind:this={root}
+    tabindex="-1"
+    role="application"
+    aria-label="Workspace dashboard"
+    class="absolute inset-0 z-10 overflow-y-auto bg-bg/72 backdrop-blur-xl outline-none"
+>
     <div class="mx-auto max-w-215 px-6.5 pt-7 pb-15">
         <div class="mb-6 flex items-start gap-3">
             <div class="min-w-0 flex-1">

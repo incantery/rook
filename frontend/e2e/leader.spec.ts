@@ -135,6 +135,34 @@ test("mission control takes focus off the terminal", async ({page}) => {
     expect(await page.evaluate(() => document.activeElement?.id)).toBe("home");
 });
 
+// The dashboard is the third surface with the same problem, and the last one
+// still carrying it (NOTES: "when dashboard or mission control is open, input
+// keeps going into the most recently open terminal"). Unlike mission control
+// it renders behind {#if}, so mounting is the open and the focus lives in the
+// component — but the failure is identical from the keyboard's side, so the
+// test is too: prove the terminal really holds focus, then prove it doesn't.
+test("the dashboard takes focus off the terminal", async ({page}) => {
+    await openWorkspace(page, "dash-focus");
+    await clickShown(shown(page, ".vt-screen"));
+    expect(await page.evaluate(() => document.activeElement?.classList.contains("vt-screen"))).toBe(
+        true,
+    );
+
+    await page.keyboard.press("`");
+    await page.keyboard.press("d");
+    await expect(page.locator("#dashboard")).toBeVisible();
+
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("dashboard");
+
+    // and closing hands it back — the pane is still there under the scrim
+    await page.keyboard.press("`");
+    await page.keyboard.press("d");
+    await expect(page.locator("#dashboard")).toHaveCount(0);
+    expect(await page.evaluate(() => document.activeElement?.classList.contains("vt-screen"))).toBe(
+        true,
+    );
+});
+
 // ...and it has to KEEP focus when an overlay closes on top of it.
 //
 // Every overlay's onclose calls focusBack(), which used to mean

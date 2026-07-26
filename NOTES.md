@@ -25,7 +25,7 @@
 
 - [ ] One of the next things we should probably setup is some kind of issue tracking integration. Then the rook agent can tie into the list of issues to determine what we should work on next
 - [ ] The file tree should be based on CWD rather than workspace I think, but let's dicsuss.
-- [ ] When dashboard or mission control is open, input keeps going into the most recently open terminal
+- [x] When dashboard or mission control is open, input keeps going into the most recently open terminal. Both halves fixed, and they needed different fixes: mission control holds focus itself (`Home.focusDeck`, onMount + `focusBack`), while the dashboard renders behind `{#if}` — so mounting IS the open, and it focuses in its own onMount rather than in `toggleDash` (a session-less workspace lands there without passing through it). `#terminals` is never unmounted, so on both surfaces the rule is the same: something must TAKE focus, or the renderer that had it keeps it. Guarded in leader.spec.
 
 # UI refinement (2026-07-22 pass 1 — from the Claude Design "Rook Refinement" boards)
 

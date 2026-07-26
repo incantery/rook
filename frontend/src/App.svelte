@@ -367,6 +367,10 @@
         }
     }
 
+    /** Only the CLOSE half lives here: the dashboard takes focus itself, in
+     *  its own onMount, because mounting is the open (it renders behind
+     *  {#if app.dashVisible}) and a session-less workspace lands there
+     *  without passing through this function. */
     function toggleDash(): void {
         app.dashVisible = !app.dashVisible;
         if (!app.dashVisible) mgr.focusActive();
