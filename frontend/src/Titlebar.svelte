@@ -74,7 +74,7 @@
     style="--wails-draggable: drag"
 >
     <button
-        class="absolute left-21 top-1/2 box-border inline-flex h-7 -translate-y-1/2 cursor-pointer appearance-none items-center gap-2 self-center rounded-md border-0 bg-transparent px-2.5 text-[0.78125rem] font-medium text-fg hover:bg-fg/8"
+        class="absolute left-21 top-1/2 box-border inline-flex h-7 -translate-y-1/2 cursor-pointer items-center gap-2 self-center rounded-md px-2.5 text-[0.78125rem] font-medium text-fg hover:bg-fg/8"
         class:max-w-60={!tree}
         class:max-w-80={tree}
         style="--wails-draggable: no-drag"
@@ -99,7 +99,7 @@
              the numbers never quite meant anything. -->
         <button
             class={[
-                "flex h-7 cursor-pointer appearance-none items-center rounded-md border-0 bg-transparent px-2 text-sm",
+                "flex h-7 cursor-pointer items-center rounded-md px-2 text-sm",
                 app.dashVisible ? "text-acc" : "text-lo hover:bg-fg/8 hover:text-dim",
             ]}
             style="--wails-draggable: no-drag"
@@ -113,10 +113,10 @@
             {@const pulse = st === "attn" && (tab.id !== app.activeId || app.dashVisible)}
             <button
                 class={[
-                    "box-border flex h-7 cursor-pointer appearance-none items-center gap-2 rounded-md border px-2.5 text-xs",
+                    "box-border flex h-7 cursor-pointer items-center gap-2 rounded-md border px-2.5 text-xs",
                     active
                         ? "border-acc/45 bg-acc/13 font-medium text-fg"
-                        : "border-transparent bg-transparent text-dim hover:bg-fg/8",
+                        : "border-transparent text-dim hover:bg-fg/8",
                 ]}
                 style="--wails-draggable: no-drag"
                 title={tab.name}
@@ -134,7 +134,7 @@
             >
         {/each}
         <button
-            class="flex h-7 cursor-pointer appearance-none items-center rounded-md border-0 bg-transparent px-2 text-sm text-lo hover:bg-fg/8 hover:text-dim"
+            class="flex h-7 cursor-pointer items-center rounded-md px-2 text-sm text-lo hover:bg-fg/8 hover:text-dim"
             style="--wails-draggable: no-drag"
             title="New window (` c)"
             onclick={onnew}>+</button
@@ -148,7 +148,7 @@
     {/if}
     {#if app.attention.length > 0}
         <button
-            class="box-border inline-flex h-6 cursor-pointer appearance-none items-center gap-1.5 self-center rounded-full border border-amber/35 bg-amber/12 px-2.5 text-[0.71875rem] font-medium text-amber hover:bg-amber/20"
+            class="box-border inline-flex h-6 cursor-pointer items-center gap-1.5 self-center rounded-full border border-amber/35 bg-amber/12 px-2.5 text-[0.71875rem] font-medium text-amber hover:bg-amber/20"
             style="--wails-draggable: no-drag"
             title="Attention inbox (` a)"
             onclick={oninbox}
@@ -161,7 +161,7 @@
     <UsageCluster ids {onmonitor} />
     <button
         aria-label="commands"
-        class="box-border inline-flex h-6 cursor-pointer appearance-none items-center self-center rounded-md border border-line/15 bg-transparent px-2 font-mono text-xs text-dim hover:bg-fg/8 hover:text-fg"
+        class="box-border inline-flex h-6 cursor-pointer items-center self-center rounded-md border border-line/15 px-2 font-mono text-xs text-dim hover:bg-fg/8 hover:text-fg"
         style="--wails-draggable: no-drag"
         title="Command palette (⌘K)"
         onclick={onpalette}>⌘K</button

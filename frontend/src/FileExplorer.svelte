@@ -276,7 +276,7 @@
             >{workspace}</span
         >
         <button
-            class="flex-none cursor-pointer rounded-sm border border-line/15 bg-transparent px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
+            class="flex-none cursor-pointer rounded-sm border border-line/15 px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
             title="refresh"
             onclick={() => void load(workspace)}>⟳</button
         >
@@ -297,7 +297,7 @@
                     class={"cursor-pointer rounded-md border px-2 py-0.5 text-[0.6875rem] font-semibold " +
                         (scope === id
                             ? "border-acc/40 bg-acc/15 text-acc"
-                            : "border-line/15 bg-transparent text-lo hover:text-fg")}
+                            : "border-line/15 text-lo hover:text-fg")}
                     onclick={() => (scope = id)}>{label}</button
                 >
             {/each}

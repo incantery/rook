@@ -38,7 +38,7 @@
     <button
         id={ids ? "tb-usage" : undefined}
         class={[
-            "box-border inline-flex h-6 cursor-pointer appearance-none items-center gap-1.5 rounded-md border-0 bg-transparent px-2.5 text-xs hover:bg-fg/8",
+            "box-border inline-flex h-6 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-xs hover:bg-fg/8",
             worstUsage && worstUsage.pct >= 90
                 ? "text-hot"
                 : worstUsage && worstUsage.pct >= 70
@@ -100,7 +100,7 @@
                     <button
                         id={ids ? "tb-footprint" : undefined}
                         class={[
-                            "flex cursor-pointer appearance-none items-center justify-between rounded-md border border-line/15 bg-transparent px-2.5 py-1.5 font-mono text-[0.6875rem] hover:bg-fg/8",
+                            "flex cursor-pointer items-center justify-between rounded-md border border-line/15 px-2.5 py-1.5 font-mono text-[0.6875rem] hover:bg-fg/8",
                             footprint.orphaned ? "text-amber" : "text-dim",
                         ]}
                         title={footprintTitle(footprint)}

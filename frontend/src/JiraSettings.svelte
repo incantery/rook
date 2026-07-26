@@ -106,7 +106,7 @@
             autocomplete="off"
         />
         <button
-            class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-on-acc"
+            class="flex cursor-pointer items-center gap-2 rounded-lg bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-on-acc"
             disabled={!token.trim()}
             onclick={() => void saveToken()}>Save</button
         >

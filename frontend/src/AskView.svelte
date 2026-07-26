@@ -202,7 +202,7 @@
                                 class={"flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 text-left " +
                                     (i === sel
                                         ? "border-acc/50 bg-acc/10"
-                                        : "border-line/15 bg-transparent hover:border-line/40 hover:bg-fg/5")}
+                                        : "border-line/15 hover:border-line/40 hover:bg-fg/5")}
                                 role="option"
                                 aria-selected={picked.has(i)}
                                 onclick={() => choose(i)}
@@ -254,7 +254,7 @@
                                     >
                                 {/if}
                                 <input
-                                    class="min-w-0 flex-1 bg-transparent text-[0.8125rem] text-fg placeholder:text-lo focus:outline-none"
+                                    class="min-w-0 flex-1 text-[0.8125rem] text-fg placeholder:text-lo focus:outline-none"
                                     placeholder="Type your own answer — Enter sends it"
                                     bind:value={otherText}
                                     bind:this={otherEl}
@@ -265,7 +265,7 @@
                                 class={"flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2 text-left " +
                                     (sel === q.otherIdx
                                         ? "border-acc/50 bg-acc/10"
-                                        : "border-line/15 bg-transparent hover:border-line/40 hover:bg-fg/5")}
+                                        : "border-line/15 hover:border-line/40 hover:bg-fg/5")}
                                 onclick={() => choose(q.otherIdx)}
                             >
                                 <span

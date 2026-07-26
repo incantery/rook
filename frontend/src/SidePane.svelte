@@ -40,7 +40,7 @@
                  chrome nobody re-checks after a theme change -->
             <span class="text-xs uppercase tracking-wider text-dim">{title}</span>
             <button
-                class="flex-none cursor-pointer rounded-sm border border-line/15 bg-transparent px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
+                class="flex-none cursor-pointer rounded-sm border border-line/15 px-1.5 py-px font-mono text-xs text-dim hover:border-acc hover:text-fg"
                 title="close pane"
                 onclick={onclose}>×</button
             >

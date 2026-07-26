@@ -45,7 +45,7 @@
         <div class="flex items-center gap-2.5 border-b border-line/15 px-4 py-3">
             <span class="font-mono text-sm text-lo">?</span>
             <input
-                class="flex-1 border-0 bg-transparent font-[inherit] text-base text-fg outline-none"
+                class="flex-1 font-[inherit] text-base text-fg outline-none"
                 placeholder="What are you trying to find out?"
                 spellcheck="false"
                 bind:this={inputEl}

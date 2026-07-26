@@ -18,7 +18,16 @@
  * forgot shipped buttonface-grey slabs (the start screen did, visibly).
  * Paying that forever is worse than fixing the reset's fallout once: it
  * makes every Tailwind idiom subtly untrue here. It is on now; anything the
- * reset broke is repaired below, next to the thing it broke. */
+ * reset broke is repaired below, next to the thing it broke.
+ *
+ * Those hand-neutralisations are GONE (2026-07-26), so don't add them back:
+ * preflight's `*` gives `border: 0 solid` and its form-control rule gives
+ * buttons `background-color: transparent`, which is what `border-0` and
+ * `bg-transparent` were for. `appearance-none` went too — preflight sets
+ * `appearance: button`, not `none`, so that one was NOT redundant on paper;
+ * it came out because removing it changed nothing on any surface, verified
+ * by pixel-diffing the app before and after. If a native control skin ever
+ * does show through somewhere, that is the utility to reach for. */
 @layer theme, base, components, utilities;
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/preflight.css" layer(base);

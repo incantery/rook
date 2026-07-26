@@ -78,7 +78,7 @@
         <span class="flex-1"></span>
         {#if saved}<span class="ml-2 text-grn">saved ✓</span>{/if}
         <button
-            class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-on-acc"
+            class="flex cursor-pointer items-center gap-2 rounded-lg bg-acc px-3 py-1.5 font-[inherit] text-xs font-semibold text-on-acc"
             onclick={() => void save()}>Save to keychain</button
         >
     </div>

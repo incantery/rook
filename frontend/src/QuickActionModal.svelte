@@ -99,8 +99,8 @@
             <div class="flex flex-col gap-1" role="listbox" aria-label="actions">
                 {#each actions as act, i (act.key)}
                     <button
-                        class={"flex w-full cursor-pointer items-center gap-3 rounded-lg border-0 px-2 py-1.5 text-left " +
-                            (i === sel ? "bg-acc/15" : "bg-transparent hover:bg-fg/[0.06]")}
+                        class={"flex w-full cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 text-left " +
+                            (i === sel ? "bg-acc/15" : "hover:bg-fg/[0.06]")}
                         role="option"
                         aria-selected={i === sel}
                         onmouseenter={() => (sel = i)}

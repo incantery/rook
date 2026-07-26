@@ -61,8 +61,8 @@
             {#each nav as n (n.id)}
                 <button
                     class={[
-                        "cursor-pointer rounded-md border-0 px-3 py-2 text-left",
-                        section === n.id ? "bg-line/20 text-fg" : "bg-transparent text-dim",
+                        "cursor-pointer rounded-md px-3 py-2 text-left",
+                        section === n.id ? "bg-line/20 text-fg" : "text-dim",
                     ]}
                     onclick={() => (section = n.id)}>{n.label}</button
                 >

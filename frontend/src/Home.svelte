@@ -587,7 +587,7 @@
 {#snippet delBtn(name: string)}
     <button
         class={[
-            "cursor-pointer appearance-none border-0 bg-transparent px-1 py-0.5 text-xs",
+            "cursor-pointer px-1 py-0.5 text-xs",
             forceArmed === name
                 ? "text-red"
                 : "text-transparent group-hover:text-lo hover:text-red",
@@ -632,7 +632,7 @@
     {/if}
     {#if w.pr?.state === "merged"}
         <button
-            class="cursor-pointer rounded-md border-0 bg-magenta/18 px-1.5 py-0.5 font-mono text-xs text-magenta hover:bg-magenta/32"
+            class="cursor-pointer rounded-md bg-magenta/18 px-1.5 py-0.5 font-mono text-xs text-magenta hover:bg-magenta/32"
             title="PR #{w.pr
                 .number} merged — remove the task tree and delete {w.branch} (kills its shells)"
             onclick={(e) => {
@@ -649,7 +649,7 @@
             >
         {:else}
             <button
-                class="cursor-pointer rounded-md border-0 bg-amber/15 px-1.5 py-0.5 font-mono text-xs text-amber hover:bg-amber/28"
+                class="cursor-pointer rounded-md bg-amber/15 px-1.5 py-0.5 font-mono text-xs text-amber hover:bg-amber/28"
                 title="PR #{w.pr
                     .number} has merge conflicts — spawn an agent in this tree to merge the base branch and resolve them"
                 onclick={(e) => {
@@ -831,7 +831,7 @@
     <!-- a DESTINATION: where you are, so an underline tab, not a filter chip -->
     <button
         class={[
-            "-mb-px cursor-pointer appearance-none border-x-0 border-b-2 border-t-0 border-solid bg-transparent px-3.5 py-2 text-[0.8125rem]",
+            "-mb-px cursor-pointer border-x-0 border-b-2 border-t-0 border-solid px-3.5 py-2 text-[0.8125rem]",
             active ? "border-acc font-medium text-fg" : "border-transparent text-dim hover:text-fg",
         ]}
         onclick={() => {
@@ -848,10 +848,10 @@
     <!-- a STATUS FILTER over the agent list: a flat chip, not a place -->
     <button
         class={[
-            "cursor-pointer whitespace-nowrap rounded-md border-0 px-2.5 py-1 text-xs",
+            "cursor-pointer whitespace-nowrap rounded-md px-2.5 py-1 text-xs",
             deck.tab === id
                 ? "bg-fg/10 font-medium text-fg"
-                : `bg-transparent ${tone} hover:bg-fg/6`,
+                : `${tone} hover:bg-fg/6`,
         ]}
         onclick={() => {
             deck.tab = id;
@@ -907,7 +907,7 @@
             <span class="flex-1"></span>
             <div class="flex items-center gap-2 pb-1.5">
                 <button
-                    class="cursor-pointer rounded-md border border-line/15 bg-transparent px-3 py-1.5 text-xs text-dim hover:bg-fg/8 hover:text-fg"
+                    class="cursor-pointer rounded-md border border-line/15 px-3 py-1.5 text-xs text-dim hover:bg-fg/8 hover:text-fg"
                     style="--wails-draggable: no-drag"
                     title="One-off shell; discarded when it exits"
                     onclick={() => void scratch()}>scratch shell</button
@@ -927,7 +927,7 @@
                 {@render filterBtn("quiet", "Quiet", tally.quiet, "text-lo")}
                 <span class="flex-1"></span>
                 <button
-                    class="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 font-mono text-xs text-lo hover:bg-fg/8"
+                    class="cursor-pointer rounded-md px-2 py-1 font-mono text-xs text-lo hover:bg-fg/8"
                     style="--wails-draggable: no-drag"
                     title="w — group by workspace"
                     onclick={() => {
@@ -943,7 +943,7 @@
                     <input
                         bind:this={filterEl}
                         bind:value={deck.query}
-                        class="w-48 border-0 bg-transparent font-mono text-xs text-fg outline-none placeholder:text-lo"
+                        class="w-48 font-mono text-xs text-fg outline-none placeholder:text-lo"
                         placeholder="state:needs ws:rook"
                         spellcheck="false"
                     />
@@ -1199,7 +1199,7 @@
                     onclick={closeModal}>Cancel</button
                 >
                 <button
-                    class="flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-acc px-3 py-1.5 font-[inherit] text-sm font-semibold text-on-acc"
+                    class="flex cursor-pointer items-center gap-2 rounded-lg bg-acc px-3 py-1.5 font-[inherit] text-sm font-semibold text-on-acc"
                     onclick={() => void createFromModal()}>Create workspace</button
                 >
             </div>
