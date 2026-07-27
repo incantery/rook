@@ -13,10 +13,18 @@
 //              forwarded to the pty. Client cost is ~nil; what it buys is
 //              fan-out — separate onInput calls, each one a ws.send, a
 //              pty.Write, and a stdin read the TUI must service.
-//   frame    — the CONTROL. Same geometry, same full-screen repaint, but
-//              driven by host frames (applyFrame) instead of the wheel. It
-//              separates "the wheel path is doing something extra" from "a
-//              405-col grid is simply expensive to repaint".
+//   frame    — the CONTROL. Same geometry, a genuinely full-screen repaint
+//              (scroll: 0, every row rewritten) driven by host frames instead
+//              of the wheel. It separates "the wheel path is doing something
+//              extra" from "a 405-col grid is simply expensive to repaint",
+//              and it is the floor no row recycling can beat: when every row
+//              really did change, every row really must be painted.
+//   scrolled — the case that actually happens. A shell printing a line, or a
+//              TUI scrolling its view, emits scroll:1 plus ONE new row — yet
+//              ClientGrid.apply reports every row dirty ("a scroll moves every
+//              row's content"), which is true of the cells and false of the
+//              DOM. This is what the renderer's row recycling targets, and
+//              the gap between it and `frame` is the whole value of the fix.
 //
 // Synthetic WheelEvents, not page.mouse.wheel: the flick profile has to be
 // reproducible to compare runs, and the handler path is identical
@@ -80,6 +88,16 @@ function framePool(cols: number, rows: number, hist: number): Frame[] {
     return Array.from({length: POOL}, (_, i) => fullFrame(cols, rows, i * 7, hist));
 }
 
+/** The frames for `scrolled`: scroll:1 plus one fresh bottom row, the shape a
+ *  shell or a scrolling TUI actually emits. Built in full rather than cycled,
+ *  because hist must advance monotonically — SbStore reads it as the absolute
+ *  index of the live top row, and a hist that jumps backwards is not a state
+ *  the host can produce. Only one row each, so building all of them costs
+ *  about what a single full frame does. */
+function scrolledFrames(cols: number, rows: number, hist0: number, count: number): Frame[] {
+    return Array.from({length: count}, (_, i) => scrollFrame(cols, rows, i * 13, hist0 + i + 1));
+}
+
 // A macOS trackpad flick: ~120 events over ~1s, delta decaying geometrically
 // from the initial fling. Total ~2900px ~ 150 lines at a 19px cell — one
 // ordinary flick through a conversation, not a pathological input.
@@ -129,7 +147,9 @@ interface Stats {
 const HISTORY = 400;
 const WARMUP = 10; // untimed events to settle JIT and the cell measurement
 
-function run(scenario: "local" | "tracking" | "frame", cols: number, rows: number): Stats {
+type Scenario = "local" | "tracking" | "frame" | "scrolled";
+
+function run(scenario: Scenario, cols: number, rows: number): Stats {
     const container = document.getElementById("screen")!;
     container.replaceChildren();
 
@@ -167,11 +187,15 @@ function run(scenario: "local" | "tracking" | "frame", cols: number, rows: numbe
         });
 
     const pool = scenario === "frame" ? framePool(cols, rows, hist) : [];
+    // WARMUP + the measured run, all with monotonic hist
+    const scrollPool =
+        scenario === "scrolled" ? scrolledFrames(cols, rows, hist, WARMUP + FLICK_EVENTS) : [];
 
     // warm up on the same handler, then reset the counters so the measured
     // gesture is the only thing in the numbers
     for (let i = 0; i < WARMUP; i++) {
         if (scenario === "frame") renderer.applyFrame(pool[i % pool.length]);
+        else if (scenario === "scrolled") renderer.applyFrame(scrollPool[i]);
         else container.dispatchEvent(wheel(-deltas[0]));
     }
     renderer.scrollToBottom();
@@ -192,6 +216,8 @@ function run(scenario: "local" | "tracking" | "frame", cols: number, rows: numbe
         const t0 = performance.now();
         if (scenario === "frame") {
             renderer.applyFrame(pool[i % pool.length]);
+        } else if (scenario === "scrolled") {
+            renderer.applyFrame(scrollPool[WARMUP + i]);
         } else {
             // negative deltaY = scroll up, back through history / earlier messages
             container.dispatchEvent(wheel(-deltas[i]));
@@ -226,11 +252,7 @@ function run(scenario: "local" | "tracking" | "frame", cols: number, rows: numbe
 
 declare global {
     interface Window {
-        wheelBench: (
-            scenario: "local" | "tracking" | "frame",
-            cols?: number,
-            rows?: number,
-        ) => Stats;
+        wheelBench: (scenario: Scenario, cols?: number, rows?: number) => Stats;
     }
 }
 

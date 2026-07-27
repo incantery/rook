@@ -155,36 +155,50 @@ Why it exists: the scoreboard measures keystroke latency on a *quiet* prompt
 and frame time at *120x40*. Neither covers a scroll, and neither covers the
 geometry this file calls canonical.
 
-| grid | local p50 | local p95 | frame p50 | frame p95 | one flick, main thread |
+Four scenarios: `local` (the wheel moves the viewport), `tracking` (claude owns
+the wheel), `frame` (a genuinely full-screen rewrite — the floor), and
+`scrolled` (a `scroll:1` frame plus one new row — what a shell or a scrolling
+TUI actually emits).
+
+**Before → after row recycling**, p50 main-thread ms per event, and the wall
+clock of one whole flick:
+
+| grid | scenario | before p50 | after p50 | before flick | after flick |
 |---|---|---|---|---|---|
-| 232x41 (a split) | 9.1ms | 15.6ms | 9.2ms | 16.4ms | **0.83s** |
-| 405x113 (canonical) | 41.7ms | 70.4ms | 46.7ms | 84.4ms | **4.08s** |
+| 232x41 | local | 8.1ms | **0.30ms** | 0.74s | **0.06s** |
+| 232x41 | scrolled | 8.1ms | **0.30ms** | 1.06s | **0.04s** |
+| 405x113 | local | 36.7ms | **0.80ms** | 3.43s | **0.12s** |
+| 405x113 | scrolled | 41.5ms | **0.90ms** | 5.60s | **0.19s** |
+| 405x113 | frame | 37.7ms | 37.7ms | 5.07s | 5.07s |
 
-What it says:
+What it found, and what the fix was:
 
-- **`local` ≈ `frame` at both sizes.** The wheel handler adds nothing; the cost
-  is the full-viewport repaint itself, whoever drives it. Any full-screen
-  redraw — a scroll, or claude repainting its conversation view — pays this.
-- **The 16ms budget is blown between a split and fullscreen.** At 405x113 one
-  repaint is ~3 frames; a flick blocks the main thread for four seconds. That
-  is felt as scroll lag *and* as the keystrokes queued behind it, which is why
-  "typing lags for the first few letters, then clears" and "scrolling is laggy"
-  are one bug, not two.
+- **`local` ≈ `frame` ≈ `scrolled` before the fix.** All three cost the same,
+  because `ClientGrid.apply` reports every row dirty whenever a frame scrolled
+  ("a scroll moves every row's content"). True of the CELLS, false of the DOM:
+  the rows that merely moved were already painted, just parented at the wrong
+  index. Both scroll paths rewrote all N rows to move content by one.
+- **The fix is row recycling** (`renderer.shiftRows`): rotate the row elements
+  by the scroll amount and repaint only the newly exposed band. A `scroll:1`
+  frame goes from N innerHTML writes to one. 27–46x at both geometries, and it
+  puts every scroll path back under the 16ms budget with two decimal places to
+  spare.
+- **`frame` is unchanged, by design.** When every row genuinely did change,
+  every row must be painted; recycling cannot help and does not pretend to.
+  That column is the honest remaining cost, and it is the WebGL renderer's
+  case, not a DOM tweak's.
 - **Cost tracks CELLS, not spans.** vt-render's firehose is 2880 spans at
-  120x40 and costs 5ms; this is ~3800 spans at 405x113 and costs 47ms. Span
-  count is up 1.3x, cells 9.5x, time 9.4x.
-- **Forwarding to a tracking program is free** — 0.3ms of main thread for a
-  whole flick. What it costs is downstream: 154 `onInput` calls for 120 wheel
-  events (1.28 fan-out), each a separate `ws.send`, `pty.Write`, and TUI stdin
-  read, and each provoking a repaint at the price above. Batching the per-line
-  presses into one write is the cheap half of the fix.
-- Minor: `getBoundingClientRect` runs once per LINE (154) rather than once per
-  event, a forced layout read inside `renderer.ts`'s per-line loop that
-  `beamterm.ts` already hoists out.
+  120x40 for 5ms; `frame` is ~3800 spans at 405x113 for 38ms. Spans up 1.3x,
+  cells 9.5x, time 7.5x.
+- **Forwarding to a tracking program was already free** — 0.3ms of main thread
+  for a whole flick. The cost was downstream: 154 `onInput` calls for 120 wheel
+  events, each a separate `ws.send`, `pty.Write` and TUI stdin read, and each
+  provoking a repaint at the price above. Now batched into one write per event
+  (154 → 81 calls, same bytes), with the `getBoundingClientRect` hoisted out of
+  the per-line loop that `beamterm.ts` already avoided.
 
-The spec's thresholds are today's numbers held as a ceiling, not the target.
-Target is p95 < 16ms at every geometry; that needs the WebGL renderer or
-row-level virtualization, not a tweak.
+Remaining: a full-screen rewrite still costs 38ms at 405x113 against a 16ms
+budget. That is the WebGL bake-off's case, and this bench is its judge.
 
 Also measured the same day, for context: keystroke→DOM commit p50 **1.9ms**,
 p95 **2.7ms** (`make e2e ARGS=e2e/latency.spec.ts`, headless chromium) — the
@@ -199,10 +213,11 @@ quiet-prompt path is healthy and is not what anyone is feeling.
   core under firehose); we declined. Revisit if the gap matters.
 - **Wide-grid ring locality**: the 405-col scrollback ring is 4.9MB walked
   cyclically; content-stride storage would cut it, at real complexity.
-- **Full-repaint cost at real geometries** (new, and now the top item): 47ms
-  per full-screen repaint at 405x113, 9ms at 232x41, against a 16ms budget —
-  see the wheel bench above. The D5 gate never caught it because it runs at
-  120x40. This is the scroll lag and the typing-under-load lag both.
+- **Full-screen rewrite at real geometries**: 38ms at 405x113 against a 16ms
+  budget — see the wheel bench above. Scrolling is fixed (row recycling); what
+  is left is the frame where every row genuinely changed, which only a cheaper
+  paint primitive solves. The D5 gate never caught it because it runs at
+  120x40 — worth raising that gate's geometry regardless.
 - **Renderer**: WebGL bake-off pending (beamterm → TinyGo/TS), judged by the
   latency harness + firehose webview CPU. The wheel bench is the other judge:
   beamterm's `repaintViewport` is one batch and one draw call, which is

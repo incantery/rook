@@ -108,16 +108,66 @@ export class GridRenderer implements TermRenderer {
 
     /** applyFrame applies a decoded Frame immediately: capture any scrolled-off
      *  rows into the history cache at their absolute indices, apply the frame,
-     *  and repaint. Synchronous — the coalescing already happened server-side. */
+     *  and repaint. Synchronous — the coalescing already happened server-side.
+     *
+     *  A SCROLLED frame takes the recycling path. ClientGrid.apply reports every
+     *  row dirty when the frame scrolled ("a scroll moves every row's content"),
+     *  which is true of the CELLS and false of the DOM: the rows that merely
+     *  moved are already painted, just parented at the wrong index. Rotating the
+     *  row elements puts them back and leaves only the newly exposed band to
+     *  paint — turning the common case (a shell printing a line, a TUI scrolling
+     *  its view) from N innerHTML writes into scroll-many. Measured at 405x113:
+     *  47ms -> ~1ms per frame. See bench/vt-wheel.ts. */
     applyFrame(frame: Frame): void {
         this.sb.noteFrame(frame, this.grid.rows, (y) => this.grid.rowCells(y));
         const dirty = this.grid.apply(frame);
-        if (this.sb.offset === 0) {
-            for (const y of dirty) this.paintRow(y);
-            this.paintCursor();
-        }
         // while scrolled up the live grid changes below the viewport; nothing to
         // repaint until the user returns to the bottom.
+        if (this.sb.offset !== 0) return;
+        const n = frame.scroll;
+        if (n > 0 && n < this.grid.rows) {
+            this.shiftRows(n);
+            // The frame's own runs, plus the band scrollUp just blanked — a
+            // blanked row no run covered still has to lose its old glyphs.
+            const repaint = new Set<number>();
+            for (let y = this.grid.rows - n; y < this.grid.rows; y++) repaint.add(y);
+            for (const r of frame.rows) {
+                if (r.y >= 0 && r.y < this.grid.rows) repaint.add(r.y);
+            }
+            for (const y of repaint) this.paintRow(y);
+        } else {
+            for (const y of dirty) this.paintRow(y);
+        }
+        this.paintCursor();
+    }
+
+    /** shiftRows rotates the row elements by n so the DOM keeps the rows that
+     *  only MOVED. Positive n = content travels up the screen (the terminal
+     *  scrolled; the top n rows are recycled to the bottom); negative n = down
+     *  (the viewport went back into history; the bottom |n| are recycled to the
+     *  top). The recycled elements hold stale glyphs and are the caller's to
+     *  repaint. rowEls is rotated in step so rowEls[y] is still display row y.
+     *
+     *  Cheap because .vt-row carries `contain: layout style` — moving a row
+     *  cannot reflow its siblings. The elements land before selectionEl, which
+     *  keeps the overlay and cursor last in the container. */
+    private shiftRows(n: number): void {
+        const rows = this.grid.rows;
+        if (n === 0 || Math.abs(n) >= rows) return;
+        const frag = document.createDocumentFragment();
+        if (n > 0) {
+            const moved = this.rowEls.splice(0, n);
+            for (const el of moved) frag.appendChild(el);
+            this.rowEls.push(...moved);
+            this.container.insertBefore(frag, this.selectionEl);
+        } else {
+            const k = -n;
+            const moved = this.rowEls.splice(rows - k, k);
+            const first = this.rowEls[0];
+            for (const el of moved) frag.appendChild(el);
+            this.rowEls.unshift(...moved);
+            this.container.insertBefore(frag, first);
+        }
     }
 
     /** applySbChunk fills the cache from a fetched history page and repaints any
@@ -128,9 +178,39 @@ export class GridRenderer implements TermRenderer {
     }
 
     /** scrollLines moves the viewport by delta lines (positive = back into
-     *  history), clamped to what the host holds, and repaints. */
+     *  history), clamped to what the host holds, and repaints.
+     *
+     *  Recycles rows like a scrolled frame does: a wheel notch moves the
+     *  viewport a line or two, so all but that band is already painted. The
+     *  full repaint is kept for a jump bigger than the screen, where nothing
+     *  is reusable. This is the hot path of a trackpad flick — ~120 events for
+     *  one gesture, each of which used to rewrite every row. */
     scrollLines(delta: number): void {
-        if (this.sb.scroll(delta)) this.repaintViewport();
+        const before = this.sb.offset;
+        if (!this.sb.scroll(delta)) return;
+        // going further back in history moves content DOWN the screen
+        this.repaintScrolled(before - this.sb.offset);
+    }
+
+    /** repaintScrolled shifts by n and paints only the band the shift exposed.
+     *  viewport() is still called in full: it is a map lookup per row, and it
+     *  carries the prefetch that keeps a smooth scroll ahead of the round trip
+     *  — dropping it to save a few lookups would trade paint cost for network
+     *  stalls. Only the innerHTML writes are narrowed. */
+    private repaintScrolled(n: number): void {
+        const rows = this.grid.rows;
+        if (Math.abs(n) >= rows) {
+            this.repaintViewport();
+            return;
+        }
+        this.shiftRows(n);
+        const view = this.sb.viewport(rows, (y) => this.grid.rowCells(y));
+        const lo = n > 0 ? rows - n : 0;
+        const hi = n > 0 ? rows : -n;
+        for (let y = lo; y < hi; y++) {
+            this.rowEls[y].innerHTML = rowHtml(coalesceCells(view[y] ?? []));
+        }
+        this.paintCursor();
     }
 
     /** focus gives the screen keyboard focus, so key presses reach onInput. */
@@ -324,10 +404,26 @@ export class GridRenderer implements TermRenderer {
         const lines = this.wheel.lines(e.deltaY, e.deltaMode, this.cellH);
         // A program tracking the mouse owns the wheel — it scrolls its own view
         // (Claude Code's conversation, a pager). Shift forces local scrollback.
+        //
+        // The N presses go out as ONE write. Identical bytes, but one ws.send,
+        // one pty.Write, and one stdin read for the program to service instead
+        // of N — a TUI that redraws per read redraws once. The cell is resolved
+        // once too: pointToCell reads getBoundingClientRect, and doing that per
+        // LINE put a forced layout inside the loop (beamterm.ts already hoists
+        // it; this is the DOM renderer catching up).
         if (this.mouseLevel >= 2 && !e.shiftKey) {
-            const button = lines < 0 ? BTN_WHEEL_UP : BTN_WHEEL_DOWN;
-            for (let i = 0; i < Math.abs(lines); i++) {
-                this.forwardMouse(button, e.clientX, e.clientY, true, false);
+            if (this.onInput && lines !== 0) {
+                const button = lines < 0 ? BTN_WHEEL_UP : BTN_WHEEL_DOWN;
+                const {x, y} = this.pointToCell(e.clientX, e.clientY);
+                const press = encodeMouse({
+                    button,
+                    col: x + 1,
+                    row: y + 1,
+                    press: true,
+                    motion: false,
+                    sgr: this.mouseSgr,
+                });
+                this.onInput(press.repeat(Math.abs(lines)));
             }
             e.preventDefault();
             return;

@@ -1,26 +1,29 @@
 import {expect, test} from "@playwright/test";
 
-// The wheel gate. One trackpad flick, three worlds (bench/vt-wheel.ts explains
-// the profile). Measured numbers print in the run log and belong in
+// The wheel gate. One trackpad flick, four scenarios (bench/vt-wheel.ts
+// explains the profile). Measured numbers print in the run log and belong in
 // docs/PERF.md; the assertions are a regression floor, not the measurement.
 //
 // Two geometries on purpose, per PERF.md rule 1 (grid size is part of every
 // number): 405x113 is the canonical 6K-fullscreen size the scoreboard quotes,
 // and 232x41 is an ordinary half-screen split — the size a real pane runs at,
 // and the one a user's "this feels laggy" is about. The D5 renderer gate
-// (vt-render.spec.ts) runs at 120x40 and has never covered either.
+// (vt-render.spec.ts) runs at 120x40 and covers neither.
 //
-// WHAT THIS FOUND, first run (2026-07-27, M3 Pro, headless chromium):
-// `local` and `frame` cost the same — 8.7 vs 9.2ms p50 at 232x41, 42 vs 48ms
-// at 405x113. So the wheel handler adds nothing; a FULL-VIEWPORT REPAINT is
-// simply over the 16ms frame budget at real pane sizes, whoever drives it.
-// One flick blocks the main thread for 0.8s at 232x41 and 4.2s at 405x113,
-// which is felt as scroll lag AND as the keystrokes queued behind it.
+// WHAT THIS FOUND (2026-07-27, M3 Pro, headless chromium). Before row
+// recycling, `local`, `scrolled` and `frame` all cost the SAME — ~8ms p50 at
+// 232x41, ~37-42ms at 405x113 — because ClientGrid.apply reports every row
+// dirty whenever a frame scrolled. True of the cells, false of the DOM. One
+// flick blocked the main thread for 0.7s at a split and 3.4-5.6s at
+// fullscreen, felt as scroll lag AND as the keystrokes queued behind it.
 //
-// The thresholds below are TODAY'S NUMBERS held as a ceiling, not the target.
-// The target is p95 < 16ms at every geometry; getting there means the WebGL
-// renderer (PERF.md's pending bake-off) or row-level virtualization, not a
-// tweak. Tighten these as that lands.
+// After: 0.30ms and 0.80-0.90ms p50 respectively, 27-46x. The gates below are
+// set to hold that, not to describe it — a ceiling loose enough to let 42ms
+// back through would not be a gate.
+//
+// `frame` is deliberately NOT tightened. A genuinely full-screen rewrite still
+// costs ~38ms at 405x113; recycling cannot help when every row really changed,
+// and only a cheaper paint primitive (the WebGL bake-off) will move it.
 
 const CANON = {cols: 405, rows: 113};
 const SPLIT = {cols: 232, rows: 41};
@@ -36,6 +39,7 @@ test("one trackpad flick — local scrollback vs a tracking TUI", async ({page})
         local: await page.evaluate((g) => window.wheelBench("local", g.cols, g.rows), g),
         tracking: await page.evaluate((g) => window.wheelBench("tracking", g.cols, g.rows), g),
         frame: await page.evaluate((g) => window.wheelBench("frame", g.cols, g.rows), g),
+        scrolled: await page.evaluate((g) => window.wheelBench("scrolled", g.cols, g.rows), g),
     });
 
     // Measure BOTH geometries before asserting anything: a failing gate must
@@ -46,6 +50,7 @@ test("one trackpad flick — local scrollback vs a tracking TUI", async ({page})
         console.log(`WHEEL local    ${g.cols}x${g.rows}:`, JSON.stringify(r.local));
         console.log(`WHEEL tracking ${g.cols}x${g.rows}:`, JSON.stringify(r.tracking));
         console.log(`WHEEL frame    ${g.cols}x${g.rows}:`, JSON.stringify(r.frame));
+        console.log(`WHEEL scrolled ${g.cols}x${g.rows}:`, JSON.stringify(r.scrolled));
         all.push({g, r});
     }
 
@@ -64,29 +69,34 @@ test("one trackpad flick — local scrollback vs a tracking TUI", async ({page})
             20,
         );
 
-        // Fan-out: one wheel event costs the transport 1.28 writes today —
-        // each a separate ws.send, pty.Write, and TUI stdin read. It should be
-        // 1 (batch the per-line presses into one write). Held at today's value
-        // so a WORSE fan-out fails; drop to 1 when the batching lands.
+        // Fan-out: one wheel event costs the transport at most ONE write,
+        // however many lines it means — the presses are batched into a single
+        // ws.send / pty.Write / TUI stdin read. Above 1.0 that batching broke.
         expect(r.tracking.amplification, `onInput calls per wheel event ${at}`).toBeLessThanOrEqual(
-            1.3,
+            1,
         );
 
-        // getBoundingClientRect runs once per LINE (154) rather than once per
-        // event (120) — a forced layout read inside the per-line loop, which
-        // beamterm.ts already hoists out and renderer.ts does not.
+        // getBoundingClientRect is resolved once per EVENT, not once per line:
+        // a forced layout read inside the per-line loop is the same defect in
+        // another costume.
         expect(r.tracking.layoutReads, `layout reads per gesture ${at}`).toBeLessThanOrEqual(
             r.tracking.inputCalls,
         );
 
-        // A wheel event costs a full-viewport repaint, so this is the D5 budget
-        // again — 16ms is one frame at 60fps. Both geometries blow it today
-        // (p95 ~15ms and ~68ms); these ceilings only catch it getting WORSE,
-        // and carry ~2x headroom because a bench sharing a loaded machine
-        // swings run to run. A gate that flakes gets deleted, which is worse
-        // than a loose one.
-        const budget = g.rows > 60 ? 140 : 32;
-        expect(r.local.p95, `local scroll p95 main-thread ms/event ${at}`).toBeLessThan(budget);
-        expect(r.frame.p95, `host-frame p95 main-thread ms/frame ${at}`).toBeLessThan(budget);
+        // Both scroll paths recycle rows, so both must sit inside one 60fps
+        // frame with room to spare. Measured 1.2ms and 1.8ms; 16ms is ~10x
+        // headroom for a bench sharing a loaded machine, and still an order of
+        // magnitude below the ~37ms regression it exists to catch. A gate that
+        // flakes gets deleted, which is worse than a loose one.
+        expect(r.local.p95, `local scroll p95 main-thread ms/event ${at}`).toBeLessThan(16);
+        expect(r.scrolled.p95, `scrolled-frame p95 main-thread ms/frame ${at}`).toBeLessThan(16);
+
+        // The unfixed case, held only against getting worse.
+        const fullBudget = g.rows > 60 ? 140 : 32;
+        expect(r.frame.p95, `full-rewrite p95 main-thread ms/frame ${at}`).toBeLessThan(fullBudget);
+        expect(
+            r.scrolled.p50 * 4,
+            `a scroll:1 frame must be far cheaper than a full rewrite ${at}`,
+        ).toBeLessThan(r.frame.p50);
     }
 });
