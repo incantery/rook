@@ -19,11 +19,18 @@ function run(text: string): Run {
 const container = document.getElementById("screen")!;
 const renderer = new GridRenderer(container, COLS, ROWS);
 
+// hist and epoch are load bearing, not decoration: SbStore reads hist as the
+// absolute index of the live top row, so without it `max` is NaN and every
+// scroll silently clamps to a no-op. They became required fields of Frame when
+// the paging state machine moved into SbStore; this harness was not updated,
+// and these five tests have asserted NaN ever since.
 for (let i = 0; i < 20; i++) {
     if (i < ROWS) {
         renderer.applyFrame({
             cursor: {x: 0, y: i, visible: true},
             scroll: 0,
+            hist: 0, // still filling the screen — nothing has scrolled off yet
+            epoch: 1,
             rows: [{y: i, runs: [run("L" + i)]}],
         });
     } else {
@@ -31,6 +38,8 @@ for (let i = 0; i < 20; i++) {
         renderer.applyFrame({
             cursor: {x: 0, y: ROWS - 1, visible: true},
             scroll: 1,
+            hist: i - ROWS + 1, // L0..L15 accumulate: 16 lines of history by i=19
+            epoch: 1,
             rows: [{y: ROWS - 1, runs: [run("L" + i)]}],
         });
     }

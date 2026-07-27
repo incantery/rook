@@ -137,6 +137,59 @@ WrapOps) — terminals genuinely disagree there. Fuzz runs need
 `-parallel 4`: the adapter's C-side state is freed explicitly now (a
 missing free once compounded into an OOM across hour-long runs).
 
+## Renderer cost vs grid size — the wheel bench (2026-07-27)
+
+Machine: Apple M3 **Pro**, 36GB, macOS, headless **chromium**, machine under
+load (~11 load avg). Different chip and different browser from the scoreboard
+above, so read this section against itself, not against that table — rule 1.
+
+New harness: `frontend/bench/vt-wheel.{ts,spec.ts}`, run with
+`cd frontend && pnpm exec playwright test -c playwright.bench.config.ts
+bench/vt-wheel.spec.ts`. One macOS trackpad flick (120 momentum wheel events,
+~2900px, ~154 lines) against the DOM renderer in three modes: `local` (the
+wheel scrolls the viewport), `tracking` (claude owns the wheel and the presses
+are forwarded to the pty), and `frame` — the control, the same full repaint
+driven by host frames instead of the wheel.
+
+Why it exists: the scoreboard measures keystroke latency on a *quiet* prompt
+and frame time at *120x40*. Neither covers a scroll, and neither covers the
+geometry this file calls canonical.
+
+| grid | local p50 | local p95 | frame p50 | frame p95 | one flick, main thread |
+|---|---|---|---|---|---|
+| 232x41 (a split) | 9.1ms | 15.6ms | 9.2ms | 16.4ms | **0.83s** |
+| 405x113 (canonical) | 41.7ms | 70.4ms | 46.7ms | 84.4ms | **4.08s** |
+
+What it says:
+
+- **`local` ≈ `frame` at both sizes.** The wheel handler adds nothing; the cost
+  is the full-viewport repaint itself, whoever drives it. Any full-screen
+  redraw — a scroll, or claude repainting its conversation view — pays this.
+- **The 16ms budget is blown between a split and fullscreen.** At 405x113 one
+  repaint is ~3 frames; a flick blocks the main thread for four seconds. That
+  is felt as scroll lag *and* as the keystrokes queued behind it, which is why
+  "typing lags for the first few letters, then clears" and "scrolling is laggy"
+  are one bug, not two.
+- **Cost tracks CELLS, not spans.** vt-render's firehose is 2880 spans at
+  120x40 and costs 5ms; this is ~3800 spans at 405x113 and costs 47ms. Span
+  count is up 1.3x, cells 9.5x, time 9.4x.
+- **Forwarding to a tracking program is free** — 0.3ms of main thread for a
+  whole flick. What it costs is downstream: 154 `onInput` calls for 120 wheel
+  events (1.28 fan-out), each a separate `ws.send`, `pty.Write`, and TUI stdin
+  read, and each provoking a repaint at the price above. Batching the per-line
+  presses into one write is the cheap half of the fix.
+- Minor: `getBoundingClientRect` runs once per LINE (154) rather than once per
+  event, a forced layout read inside `renderer.ts`'s per-line loop that
+  `beamterm.ts` already hoists out.
+
+The spec's thresholds are today's numbers held as a ceiling, not the target.
+Target is p95 < 16ms at every geometry; that needs the WebGL renderer or
+row-level virtualization, not a tweak.
+
+Also measured the same day, for context: keystroke→DOM commit p50 **1.9ms**,
+p95 **2.7ms** (`make e2e ARGS=e2e/latency.spec.ts`, headless chromium) — the
+quiet-prompt path is healthy and is not what anyone is feeling.
+
 ## Known headroom (in rough value order)
 
 - **Unicode parse** (165 vs 228 ascii write-only): remaining gap is per-rune
@@ -146,13 +199,20 @@ missing free once compounded into an OOM across hour-long runs).
   core under firehose); we declined. Revisit if the gap matters.
 - **Wide-grid ring locality**: the 405-col scrollback ring is 4.9MB walked
   cyclically; content-stride storage would cut it, at real complexity.
+- **Full-repaint cost at real geometries** (new, and now the top item): 47ms
+  per full-screen repaint at 405x113, 9ms at 232x41, against a 16ms budget —
+  see the wheel bench above. The D5 gate never caught it because it runs at
+  120x40. This is the scroll lag and the typing-under-load lag both.
 - **Renderer**: WebGL bake-off pending (beamterm → TinyGo/TS), judged by the
-  latency harness + firehose webview CPU.
+  latency harness + firehose webview CPU. The wheel bench is the other judge:
+  beamterm's `repaintViewport` is one batch and one draw call, which is
+  precisely the case the DOM renderer loses at.
 
 ## History
 
 | date | release | cat ascii/unicode @405×113 | latency p50/p95 | note |
 |---|---|---|---|---|
+| 2026-07-27 | v0.37.2 | — | 1.9 / 2.7ms | M3 **Pro** + chromium, not comparable to the rows below; wheel bench added |
 | 2026-07-22 | post-v0.13.0 | 0.91s / 1.09s | 3.2 / 6.2ms | first full scoreboard |
 | 2026-07-22 | v0.13.0 | 0.90s / 1.11s | — | gather + micro-batch + high-water marks |
 | 2026-07-22 | v0.12.0 | 1.21s / 1.76s | — | baseline at matched geometry |
