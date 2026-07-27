@@ -115,10 +115,21 @@ func branchExists(repoRoot, branch string) bool {
 }
 
 func worktreeAdd(repoRoot, dir, branch string) error {
+	return worktreeAddAt(repoRoot, dir, branch, "")
+}
+
+// worktreeAddAt cuts the branch from ref instead of HEAD — the edge
+// client's shape, where the cloud names the base and the device obeys
+// only if the ref is real. Empty ref = HEAD, the interactive default.
+func worktreeAddAt(repoRoot, dir, branch, ref string) error {
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return err
 	}
-	_, err := runGit(repoRoot, 30*time.Second, "worktree", "add", "-b", branch, dir)
+	args := []string{"worktree", "add", "-b", branch, dir}
+	if ref != "" {
+		args = append(args, ref)
+	}
+	_, err := runGit(repoRoot, 30*time.Second, args...)
 	return err
 }
 

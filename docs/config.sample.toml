@@ -208,6 +208,15 @@
 # Base URL of rook-cloud's machine API.
 # url = "https://api.rookide.com"
 
+# Set true to opt this machine into the edge client: the host connects
+# out to the cloud's edge protocol, journals its typed commands durably
+# (SQLite), verifies every command signature and approval grant
+# on-device, and executes them here — today that means real git
+# worktrees for cloud-coordinated runs. Off by default: status reporting
+# above is telemetry, this is the cloud asking the machine to ACT, and
+# that deserves its own explicit yes. Uses the same machine token.
+# edge = false
+
 
 # ── Per-workspace overrides ──────────────────────────────────────────────
 #

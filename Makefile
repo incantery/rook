@@ -134,3 +134,15 @@ release:
 	git tag -a $(VERSION) -m "rook $(VERSION)"
 	git push origin main $(VERSION)
 	gh release create $(VERSION) $(DIST)/$(RELEASE_ZIP) $(DIST)/checksums.txt --title "rook $(VERSION)" --generate-notes
+
+# Regenerate the copied edge protocol (proto/rook/edge/v1 — rook-cloud
+# is the source of truth; re-copy its proto first when the contract
+# changes). Plugins are installed at the exact versions go.mod declares,
+# so generated code and runtime library cannot drift; the gen/ tree is
+# committed and this target is only needed when proto/ changes.
+.PHONY: proto
+proto:
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@$$(go list -m -f '{{.Version}}' google.golang.org/protobuf)
+	go install connectrpc.com/connect/cmd/protoc-gen-connect-go@$$(go list -m -f '{{.Version}}' connectrpc.com/connect)
+	buf lint
+	buf generate

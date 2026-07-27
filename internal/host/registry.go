@@ -186,6 +186,36 @@ CREATE TABLE IF NOT EXISTS recents (
 	PRIMARY KEY (workspace, path)
 );
 CREATE INDEX IF NOT EXISTS recents_ws ON recents(workspace, opened_at DESC);
+-- The edge journal (edgejournal.go): the device half of the Cloud–IDE
+-- delivery contract — at-least-once arrival, at-most-once local effect.
+-- Commands are journaled by id BEFORE any ack or effect; events are
+-- allocated a device sequence once, kept verbatim (they are signed), and
+-- resubmitted until the cloud's cursor covers them. Rows are never
+-- deleted: like decisions, this ledger IS the audit surface.
+CREATE TABLE IF NOT EXISTS edge_commands (
+	command_id  TEXT PRIMARY KEY,
+	received_at TEXT NOT NULL,
+	command     BLOB NOT NULL,                      -- wire EdgeCommand, as received
+	phase       TEXT NOT NULL DEFAULT 'journaled',  -- journaled|executing|resolved
+	status      TEXT NOT NULL DEFAULT '',           -- succeeded|failed|rejected once resolved
+	result      TEXT NOT NULL DEFAULT '',
+	resolved_at TEXT
+);
+CREATE TABLE IF NOT EXISTS edge_events (
+	device_seq INTEGER PRIMARY KEY,                 -- allocated once, NEVER reused
+	event      BLOB NOT NULL,                       -- signed EdgeEvent, resubmitted verbatim
+	created_at TEXT NOT NULL,
+	acked      INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS edge_grants (
+	grant_id   TEXT PRIMARY KEY,                    -- single-use: one spender, ever
+	command_id TEXT NOT NULL,
+	spent_at   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS edge_fences (
+	resource TEXT PRIMARY KEY,                      -- <type>:<id>
+	token    INTEGER NOT NULL
+);
 `
 
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS

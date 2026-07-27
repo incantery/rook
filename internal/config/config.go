@@ -72,6 +72,13 @@ type Config struct {
 	// dashboard's "Add machine" and lives in the keychain
 	// (`rookctl set-cloud-token`), never in this file.
 	CloudURL string `json:"cloudUrl"`
+	// CloudEdge ([cloud] edge = true) turns on the edge client: the host
+	// connects out to CloudURL's edge protocol, journals typed commands
+	// (create worktree, cleanup worktree) durably, verifies every
+	// signature and approval grant, and executes them HERE. Off by
+	// default — status reporting is telemetry, this is the cloud asking
+	// the machine to act, and that deserves its own explicit yes.
+	CloudEdge bool `json:"cloudEdge"`
 	// Workflow is the staged review pipeline run after a worktree's coding
 	// agent opens its PR: slash commands, comma-separated (`workflow =
 	// /security-review, /review`), each spawned sequentially in its own
@@ -483,6 +490,30 @@ func RelayToken() string {
 // this machine does not report.
 func CloudToken() string {
 	return secretFrom(keychain.CloudAccount, "cloud-token")
+}
+
+// EdgeSeed resolves the device's Ed25519 signing seed (base64): keychain
+// first (account edge), then the ~/.config/rook/edge-seed file,
+// 0600-tight like the others. "" means the edge client has not run yet —
+// it mints a seed on first start and stores it via SetEdgeSeed.
+func EdgeSeed() string {
+	return secretFrom(keychain.EdgeAccount, "edge-seed")
+}
+
+// SetEdgeSeed persists the freshly minted seed: keychain when the
+// platform offers one, else the tight-file fallback. Failing to persist
+// is an error the caller must treat as fatal for the edge client — a key
+// that rotates on every restart breaks the registration commitment.
+func SetEdgeSeed(seed string) error {
+	err := keychain.Set(keychain.Service, keychain.EdgeAccount, seed)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, keychain.ErrUnsupported) {
+		return err
+	}
+	f := filepath.Join(filepath.Dir(Path()), "edge-seed")
+	return os.WriteFile(f, []byte(seed+"\n"), 0o600)
 }
 
 // secretFrom is the keychain-then-tight-file resolution the secrets share.

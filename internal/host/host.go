@@ -29,6 +29,7 @@ import (
 
 	"github.com/incantery/rook/internal/cloud"
 	"github.com/incantery/rook/internal/config"
+	"github.com/incantery/rook/internal/edge"
 	"github.com/incantery/rook/internal/plugin"
 	"github.com/incantery/rook/internal/relay"
 	"github.com/incantery/rook/internal/version"
@@ -100,6 +101,11 @@ type Host struct {
 	// The configured rook-cloud, if any (cloud.go): status snapshots go up
 	// so the dashboard can show this machine. nil = nothing leaves here.
 	cloud *cloud.Client
+
+	// The edge client, if this machine opted in ([cloud] edge = true,
+	// edge.go): typed commands arrive, are journaled, verified, and
+	// executed here. nil = this machine takes no orders from anywhere.
+	edge *edge.Client
 
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
@@ -212,6 +218,7 @@ func New() *Host {
 	go h.runUpdateCheck()
 	h.initRelay()
 	h.initCloud()
+	h.initEdge()
 	return h
 }
 

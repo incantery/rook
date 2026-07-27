@@ -85,6 +85,9 @@ type tomlRelay struct {
 // status to. Same rule as [relay]: only the URL lives here.
 type tomlCloud struct {
 	URL *string `toml:"url"`
+	// Edge opts this machine into executing the cloud's typed edge
+	// commands (worktrees for cloud-coordinated runs). See Config.CloudEdge.
+	Edge *bool `toml:"edge"`
 }
 
 type tomlWorkspace struct {
@@ -218,6 +221,9 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 	}
 	if f.Cloud != nil && f.Cloud.URL != nil {
 		cfg.CloudURL = strings.TrimRight(strings.TrimSpace(*f.Cloud.URL), "/")
+	}
+	if f.Cloud != nil && f.Cloud.Edge != nil {
+		cfg.CloudEdge = *f.Cloud.Edge
 	}
 	if f.Jira != nil {
 		if f.Jira.URL != nil {

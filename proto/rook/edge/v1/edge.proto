@@ -1,0 +1,334 @@
+// The Cloud–IDE edge protocol (NEXT.md §11): the ONLY channel through
+// which the Cloud requests local action and the IDE reports local truth.
+//
+// Design stances this file encodes, per ADR 0003:
+//
+//   - Reliable unary methods over ConnectRPC/HTTP. A stream, when one
+//     appears, is a wake-up accelerator — delivery semantics never
+//     depend on a connection staying up. The IDE polls SyncEdge.
+//   - Delivery is at-least-once and repeatable. There is no "delivered"
+//     state anywhere in this contract: a command is pending until a
+//     device receipt resolves it, and the same command may arrive any
+//     number of times.
+//   - Every payload is TYPED. There is deliberately no ExecuteShell or
+//     RunPrompt message, and one must never be added: a generic string
+//     executor would erase the entire policy boundary this protocol
+//     exists to hold (§11.2).
+//   - Commands and events carry digest and signature fields. The
+//     digests are filled today; signatures land with device identity
+//     keys (backlog item 20) — the wire shape is ready so signing is a
+//     rollout, not a migration.
+syntax = "proto3";
+
+package rook.edge.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/incantery/rook/gen/rook/edge/v1;edgev1";
+
+service EdgeService {
+  // RegisterDevice announces a device under an authenticated machine
+  // identity (the bearer token minted at /api/machines). The device ID
+  // IS the machine ID — one credential, one identity, no parallel
+  // registry to drift.
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+
+  // SyncEdge is the heartbeat of the protocol: cursors in, bounded
+  // command batch out. Safe to call at any frequency; reading changes
+  // nothing.
+  rpc SyncEdge(SyncEdgeRequest) returns (SyncEdgeResponse);
+
+  // AckCommand records that the IDE has durably journaled a command.
+  // This is delivery BOOKKEEPING, not command state: an acked command
+  // is still pending until its result event resolves it, and it keeps
+  // appearing in SyncEdge batches until then.
+  rpc AckCommand(AckCommandRequest) returns (AckCommandResponse);
+
+  // SubmitEvents uploads the device's outbound journal in sequence
+  // order. The Cloud acknowledges the highest contiguous sequence;
+  // the IDE retains everything above that and resubmits freely —
+  // every consumer downstream dedupes.
+  rpc SubmitEvents(SubmitEventsRequest) returns (SubmitEventsResponse);
+
+  // RenewLeases extends the device's resource leases (backlog item 19).
+  rpc RenewLeases(RenewLeasesRequest) returns (RenewLeasesResponse);
+
+  // WatchEdge is the wake-up accelerator (§11.1): a server stream that
+  // only ever says "durable work may exist; SyncEdge now". No command,
+  // event, or lease crosses it — a device that never opens it loses
+  // nothing but latency, and a device whose stream drops falls back to
+  // the poll interval it already honors. Heartbeats keep intermediaries
+  // from cutting an idle stream; they carry no meaning.
+  rpc WatchEdge(WatchEdgeRequest) returns (stream WatchEdgeResponse);
+
+  // ResolveArtifactUpload negotiates where a large artifact goes so the
+  // event stream carries a locator, not the bytes.
+  rpc ResolveArtifactUpload(ResolveArtifactUploadRequest) returns (ResolveArtifactUploadResponse);
+}
+
+// ---------------------------------------------------------------------
+// Envelopes (§11.2, §11.3)
+
+message EdgeCommand {
+  string protocol_version = 1;
+  string command_id = 2;
+  string logical_operation_id = 3;
+  uint32 attempt = 4;
+  string device_id = 5;
+  string task_id = 6;
+  string workflow_run_id = 7;
+  string resource_type = 8;
+  string resource_id = 9;
+  uint64 fencing_token = 10;
+  uint64 expected_aggregate_version = 11;
+  google.protobuf.Timestamp expires_at = 12;
+  string idempotency_key = 13;
+  string approval_grant_id = 14;
+  string policy_context_hash = 15;
+  google.protobuf.Any payload = 16;
+  bytes payload_digest = 17;
+  bytes cloud_signature = 18;
+  // The signed approval grant (rook.approval_grant.v1, canonical JSON),
+  // present when approval_grant_id is set. The grant binds a HUMAN's
+  // yes to this command's exact digest: the device verifies the
+  // signature and the binding before executing, and any mismatch is a
+  // rejection, not a warning (12.2). Empty = the action needed no
+  // approval class.
+  bytes approval_grant = 19;
+  // The ledger's own payload bytes — the JSON the Cloud hashed into
+  // payload_digest and into any approval's action digest. The typed
+  // payload above is what the device EXECUTES; these bytes are what it
+  // VERIFIES: sha256(ledger_payload) must equal payload_digest (which
+  // the cloud signature covers), and a grant's binding is recomputed
+  // over them. Without this field the device could only trust that the
+  // Cloud checked the binding — and "the local device cannot be
+  // bypassed" (§3.3) demands it check for itself.
+  bytes ledger_payload = 20;
+}
+
+message EdgeEvent {
+  string event_id = 1;
+  string device_id = 2;
+  // Strictly increasing per device, assigned by the IDE journal. The
+  // Cloud's ack cursor is defined over this sequence.
+  uint64 device_sequence = 3;
+  string command_id = 4;
+  string type = 5;
+  google.protobuf.Timestamp occurred_at = 6;
+  uint64 fencing_token = 7;
+  google.protobuf.Any payload = 8;
+  bytes payload_digest = 9;
+  bytes device_signature = 10;
+  string traceparent = 11;
+}
+
+// ---------------------------------------------------------------------
+// RPC messages
+
+message RegisterDeviceRequest {
+  string protocol_version = 1;
+  string device_name = 2;
+  string platform = 3;
+  repeated string capabilities = 4;
+  string policy_hash = 5;
+  // The device's Ed25519 public key (§13.5). Registering a key is a
+  // commitment: from then on this device's events must verify against
+  // it, and re-registering with a new key is rotation. Empty keeps any
+  // previously registered key.
+  bytes public_key = 6;
+}
+
+message RegisterDeviceResponse {
+  string device_id = 1;
+  // How often to SyncEdge when nothing is happening, in seconds. A
+  // hint, not a contract.
+  uint32 poll_interval_seconds = 2;
+  // The Cloud's Ed25519 public key, learned at registration over the
+  // authenticated channel. Commands whose cloud_signature does not
+  // verify against it are rejected without executing (§13.5) — TLS is
+  // necessary but insufficient, because commands are queued, persisted,
+  // and replayed outside any one connection. Empty means this cloud is
+  // not signing yet.
+  bytes cloud_public_key = 3;
+}
+
+message SyncEdgeRequest {
+  string protocol_version = 1;
+  // The highest cloud ack the IDE has durably recorded — lets the Cloud
+  // notice a device that restored an old journal backup.
+  uint64 acked_device_sequence = 2;
+  // Upper bound on the command batch; 0 means server default.
+  uint32 max_commands = 3;
+  string policy_hash = 4;
+}
+
+message SyncEdgeResponse {
+  repeated EdgeCommand commands = 1;
+  // The Cloud's current contiguous device-event cursor.
+  uint64 acked_device_sequence = 2;
+  uint32 poll_interval_seconds = 3;
+  // Leases the device must stop honoring (backlog item 19).
+  repeated string revoked_lease_ids = 4;
+}
+
+message AckCommandRequest {
+  string command_id = 1;
+}
+
+message AckCommandResponse {}
+
+message SubmitEventsRequest {
+  repeated EdgeEvent events = 1;
+}
+
+message SubmitEventsResponse {
+  // Highest contiguous device sequence the Cloud has durably recorded.
+  // Everything at or below this may be compacted by the IDE journal.
+  uint64 acked_device_sequence = 1;
+  repeated EventRejection rejections = 2;
+}
+
+// EventRejection names an event the Cloud refused — malformed, or
+// contradicting a recorded fact. Rejected events are NOT acknowledged
+// by the cursor if they sit above it; the IDE surfaces them instead of
+// retrying forever.
+message EventRejection {
+  uint64 device_sequence = 1;
+  string reason = 2;
+}
+
+message RenewLeasesRequest {
+  repeated string lease_ids = 1;
+}
+
+message RenewLeasesResponse {
+  repeated Lease leases = 1;
+}
+
+message Lease {
+  string lease_id = 1;
+  string resource_type = 2;
+  string resource_id = 3;
+  uint64 fencing_token = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message WatchEdgeRequest {
+  string protocol_version = 1;
+}
+
+message WatchEdgeResponse {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // The stream is established. Sent first, exactly once — the client
+    // should sync on it, because anything minted while the stream was
+    // down raced the subscription.
+    KIND_LISTENING = 1;
+    // Durable work may exist for this device. Coalesced, not counted:
+    // one wake can stand for many commands, and SyncEdge is the truth.
+    KIND_WAKE = 2;
+    // Nothing to fetch; the stream is alive.
+    KIND_HEARTBEAT = 3;
+  }
+  Kind kind = 1;
+}
+
+message ResolveArtifactUploadRequest {
+  string artifact_kind = 1;
+  string content_digest = 2;
+  uint64 size_bytes = 3;
+}
+
+message ResolveArtifactUploadResponse {
+  // Where to put the bytes; the event stream then carries this locator.
+  string upload_url = 1;
+  string locator = 2;
+}
+
+// ---------------------------------------------------------------------
+// Typed command payloads (§11.2). Each is deliberately narrow: fields
+// grow as their backlog items land, but no payload will ever be "a
+// string the device executes".
+
+message CreateWorktree {
+  string task_id = 1;
+  string workflow_run_id = 2;
+  string repository = 3; // a repo the device already knows, by name
+  string base_ref = 4;
+}
+
+message InspectRepository {
+  string repository = 1;
+}
+
+message StartAgentSession {
+  string worktree_id = 1;
+  string agent_profile = 2; // resolved profile name — never a raw prompt
+}
+
+message SendAgentInput {
+  string session_id = 1;
+  string input = 2;
+}
+
+message InterruptAgentSession {
+  string session_id = 1;
+}
+
+message RunVerification {
+  string worktree_id = 1;
+  string suite = 2; // a named, device-configured suite — not a command line
+}
+
+message CollectArtifact {
+  string session_id = 1;
+  string artifact_kind = 2;
+}
+
+message ReconcileSession {
+  string session_id = 1;
+}
+
+message ReleaseResource {
+  string resource_type = 1;
+  string resource_id = 2;
+}
+
+message CleanupWorktree {
+  string worktree_id = 1;
+}
+
+// ---------------------------------------------------------------------
+// Typed event payloads
+
+// CommandResult resolves a command. Status vocabulary matches the
+// ledger: succeeded | failed | rejected.
+message CommandResult {
+  string command_id = 1;
+  string status = 2;
+  // Structured result, JSON-encoded. Opaque to the envelope; typed to
+  // its command's contract.
+  bytes result_json = 3;
+}
+
+// AgentEvent reports an observed change in a live agent session (§8.4):
+// the adapter's structured sources — MCP tools and hooks, per ADR 0004 —
+// become journal facts here. It never resolves a command. A session
+// outlives the command that started it, so its lifecycle rides the same
+// journal as receipts, ordered by the same device sequence.
+message AgentEvent {
+  // The session identity the start receipt introduced. The Cloud
+  // refuses events about sessions it never saw start — an event with no
+  // ancestry is a contradiction, not an update.
+  string session_id = 1;
+  // started | progress | waiting_input | blocked | completion_claimed |
+  // disconnected | stopped | failed. The Cloud refuses kinds it does
+  // not know: the vocabulary grows by protocol change, not convention.
+  string kind = 2;
+  // One presentation-ready line for humans. Anything a workflow must
+  // act on belongs in data_json — terminal text stays presentation.
+  string summary = 3;
+  // Structured detail typed by kind, JSON-encoded.
+  bytes data_json = 4;
+}

@@ -1,0 +1,14 @@
+# buf module config for the COPIED edge protocol (see proto/rook/edge/v1
+# — rook-cloud's proto tree is the source of truth; this repo carries a
+# byte-adjusted copy by choice, to stay free of a module dependency on
+# the service). Lint keeps the copy boring; breaking-change detection
+# guards the wire the same way the origin does.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE
