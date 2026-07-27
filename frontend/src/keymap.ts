@@ -53,9 +53,11 @@ export const DEFAULTS: [string, string][] = [
     // vim-navigator chords, listed BEFORE the arrows so the palette
     // advertises these — they're the primary binding now. They also cross
     // into an open side pane at the layout's edge, which ` arrows do too.
-    // A full-screen app (vim, less) keeps them; see mgr.focusedInAltScreen.
-    // Cost, inherited from vim-tmux-navigator: ⌃L no longer clears the
-    // screen and ⌃H no longer backspaces at a shell prompt. Unbind with
+    // A full-screen app (vim, less) keeps them — but NOT a claude pane, which
+    // navigates like a shell; see mgr.focusedOwnsNavKeys for why claude is the
+    // one TUI that doesn't get to own them. Cost, inherited from
+    // vim-tmux-navigator: ⌃L no longer clears the screen and ⌃H no longer
+    // backspaces at a shell prompt — nor, now, in claude. Unbind with
     // `keybind = ctrl+l=` to take them back.
     ["ctrl+h", "pane.focus-left"],
     ["ctrl+j", "pane.focus-down"],

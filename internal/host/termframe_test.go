@@ -266,6 +266,90 @@ func TestFramedAltScreenState(t *testing.T) {
 	}
 }
 
+// TestFramedAgentPaneState is the claude carve-out to the alt-screen yield: a
+// full-screen TUI normally takes ⌃hjkl, but a pane holding a LIVE claim is a
+// claude window and keeps them, so the client needs the fact on the same tick
+// as the alt bit. Three states, because two of them look identical from the
+// client without this bit: claude (alt + claimed), vim (alt, unclaimed), and a
+// claude whose claim died to a ^C (alt, claim present but stale).
+func TestFramedAgentPaneState(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	h := New()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	s := &session{
+		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: 20, Rows: 4, Created: time.Now()},
+		pty:   r,
+		cmd:   exec.Command("true"),
+		emu:   newTerminal(20, 4),
+		dirty: make(chan struct{}, 1),
+	}
+	h.mu.Lock()
+	h.sessions["s1"] = s
+	h.mu.Unlock()
+	go h.readPump(s)
+
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+
+	c, ctx, cancel := dialFramed(t, srv, h, "s1")
+	defer cancel()
+	defer c.Close(websocket.StatusNormalClosure, "done")
+
+	// waitState reads until a msgState arrives and returns its flags byte.
+	waitState := func() byte {
+		for {
+			_, data, rerr := c.Read(ctx)
+			if rerr != nil {
+				t.Fatalf("read state: %v", rerr)
+			}
+			if len(data) >= 2 && data[0] == msgState {
+				return data[1]
+			}
+		}
+	}
+
+	// Unclaimed and on the normal screen: neither bit.
+	if got := waitState(); got&stateAgentPane != 0 {
+		t.Fatalf("initial state %#02x has the agent bit, want clear", got)
+	}
+
+	// A vim: alt screen, no claim. The TUI keeps the nav chords.
+	w.Write([]byte("\x1b[?1049h"))
+	if got := waitState(); got&stateAlt == 0 || got&stateAgentPane != 0 {
+		t.Fatalf("unclaimed alt state %#02x, want alt set and agent clear", got)
+	}
+	w.Write([]byte("\x1b[?1049l"))
+	waitState()
+
+	// A claude: the SessionStart hook claimed this window. No claimFg recorded
+	// means a claim older than the liveness check, which fails open (host.go).
+	h.bindMu.Lock()
+	h.claims["t1"] = "s1"
+	h.bindMu.Unlock()
+	w.Write([]byte("\x1b[?1049h"))
+	if got := waitState(); got&stateAlt == 0 || got&stateAgentPane == 0 {
+		t.Fatalf("claimed alt state %#02x, want both bits set", got)
+	}
+
+	// The claim goes stale — ^C killed the agent and SessionEnd never ran, so
+	// the window has moved on. Recording a foreground group that cannot match
+	// this pipe's (fgPgrp returns 0) is exactly that state. The pane must go
+	// back to yielding: whatever is there now is not the thing that claimed it.
+	h.bindMu.Lock()
+	h.claimFg["t1"] = 1 << 30
+	h.bindMu.Unlock()
+	w.Write([]byte("\x1b[?1049l")) // force a state change so the next tick ships
+	waitState()
+	w.Write([]byte("\x1b[?1049h"))
+	if got := waitState(); got&stateAlt == 0 || got&stateAgentPane != 0 {
+		t.Fatalf("dead-claim alt state %#02x, want alt set and agent clear", got)
+	}
+}
+
 // TestFramedCursorMoveIsSent guards the "space doesn't show" bug: a frame that
 // moves the cursor with no cell change must still reach the client, or a space
 // (or an arrow key at a prompt) leaves the cursor visually stuck.

@@ -49,10 +49,14 @@ const (
 const paletteBytes = 9 + 16*3
 
 // msgState payload is one flags byte: bit0 = alt screen; bits1-3 = mouse
-// tracking level (0=off..4=any-event); bit4 = SGR mouse encoding.
+// tracking level (0=off..4=any-event); bit4 = SGR mouse encoding; bit5 = the
+// pane is a live claimed agent window (host.agentPane).
 const (
 	stateAlt      byte = 1 << 0
 	stateMouseSGR byte = 1 << 4
+	// stateAgentPane is only ever set alongside stateAlt — it exists to
+	// qualify the yield the alt bit triggers, and means nothing without it.
+	stateAgentPane byte = 1 << 5
 )
 
 // mouseFlags packs the mouse level (0-4) into bits 1-3.
@@ -223,6 +227,12 @@ func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Co
 		state := mouseFlags(mlevel)
 		if alt {
 			state |= stateAlt
+			// Gated on alt deliberately: the client only consults this when
+			// deciding whether a full-screen app takes the nav chords, so a
+			// shell prompt never pays the ioctl.
+			if h.agentPane(s) {
+				state |= stateAgentPane
+			}
 		}
 		if msgr {
 			state |= stateMouseSGR
