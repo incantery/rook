@@ -263,6 +263,34 @@ func (h *Host) claimAliveLocked(agentSession string, s *session) bool {
 	return fgPgrp(s.pty) == want
 }
 
+// agentPane reports whether this session is a live claimed agent window — a
+// claude the SessionStart hook named via `rookctl claim`, still the thing on
+// the tty.
+//
+// This is the keyboard-routing half of the claim machinery. The framed
+// transport ships it to the client (termframe.go), where it carves the
+// navigation chords back out of the blanket "a full-screen app owns the
+// keyboard" yield: claude is a full-screen TUI, and in an AI-native terminal
+// it is the pane you live in, so that rule cost ⌃hjkl exactly where it was
+// needed most.
+//
+// Note what this is NOT: a name match on the foreground process. `fgOf`
+// would go through the 2s proc table and would flap the moment claude ran
+// something — this is claimAliveLocked, the same pgrp test every actuator
+// already trusts, exact and one ioctl. A claude with no live claim (hooks
+// never installed, or a claim orphaned by ^C) reports false and keeps the
+// pre-existing yield, which is the safe direction to fail.
+func (h *Host) agentPane(s *session) bool {
+	h.bindMu.Lock()
+	defer h.bindMu.Unlock()
+	for tid, sid := range h.claims {
+		if sid == s.info.ID && h.claimAliveLocked(tid, s) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Host) Token() string { return h.token }
 
 // ---- session lifecycle ----

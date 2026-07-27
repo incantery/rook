@@ -16,13 +16,22 @@ export const MSG_SB_FETCH = 0x13; // client -> server: request a scrollback page
 export const MSG_VIS = 0x14; // client -> server: pane visibility (pause frames)
 
 // state flags byte: bit0 alt screen; bits1-3 mouse tracking level (0-4); bit4
-// SGR mouse encoding.
+// SGR mouse encoding; bit5 the pane is a live claimed agent window. The host
+// only sets bit5 alongside bit0 — it qualifies the alt-screen yield rather
+// than standing on its own.
 export const STATE_ALT = 0x01;
 export const STATE_MOUSE_SGR = 0x10;
+export const STATE_AGENT_PANE = 0x20;
 
 export type ServerMessage =
     | {kind: "frame"; payload: Uint8Array}
-    | {kind: "state"; alt: boolean; mouseLevel: number; mouseSgr: boolean}
+    | {
+          kind: "state";
+          alt: boolean;
+          mouseLevel: number;
+          mouseSgr: boolean;
+          agentPane: boolean;
+      }
     | {kind: "sbchunk"; payload: Uint8Array}
     | {kind: "edit"; payload: Uint8Array}
     | {kind: "ask"; payload: Uint8Array}
@@ -44,6 +53,7 @@ export function decodeServerMessage(buf: ArrayBuffer): ServerMessage {
                 alt: (flags & STATE_ALT) !== 0,
                 mouseLevel: (flags >> 1) & 0x7,
                 mouseSgr: (flags & STATE_MOUSE_SGR) !== 0,
+                agentPane: (flags & STATE_AGENT_PANE) !== 0,
             };
         }
         case MSG_SB_CHUNK:

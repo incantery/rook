@@ -139,6 +139,9 @@ interface Tab {
     rows: number;
     /** alt-screen state, from the host's msgState — drives keybind routing */
     alt: boolean;
+    /** this pane is a live claimed agent (claude) window, from the same
+     *  msgState byte — the exemption to the alt-screen yield */
+    agentPane: boolean;
     ws: WebSocket | null;
     wrap: HTMLElement;
     lastSize: string;
@@ -271,32 +274,51 @@ export class TermManager {
         return this.active.panes.get(this.active.focused)?.sessionId ?? null;
     }
 
-    /** Is the focused pane a terminal running a FULLSCREEN app (vim, less,
-     *  htop) rather than sitting at a shell prompt?
+    /** Does the focused pane's own program own ⌃hjkl, leaving the workbench
+     *  to keep its hands off them?
+     *
+     *  TRUE for a terminal running a FULLSCREEN app (vim, less, htop) —
+     *  EXCEPT a claude window, which is the carve-out below.
      *
      *  This is rook's answer to vim-tmux-navigator's `is_vim`, and a better
      *  one. That plugin shells out per keypress to grep `ps` for the pane's
      *  foreground process — which breaks on wrappers, ssh and sudo, and costs
      *  a fork. Entering the alternate screen buffer is instead a fact of the
      *  terminal protocol (smcup/rmcup): every full-screen TUI sets it, no
-     *  shell prompt does, and xterm already tracks it for us. No poll, no
-     *  staleness, no race — which matters, because the host's `fg` signal is
-     *  polled at 3s and would mis-route every key between opening vim and the
-     *  next tick.
+     *  shell prompt does. No poll, no staleness, no race. The fact comes from
+     *  the host emulator over the wire (msgState → tab.alt), not from reading
+     *  xterm's buffer.
      *
      *  The tradeoff vs is_vim: this is broader. `less` and `htop` are also
      *  full-screen, so they keep ⌃hjkl too, where tmux would have navigated
      *  away. "A full-screen app owns the keyboard" is the simpler rule, and
      *  the leader (` + arrows) always navigates regardless.
      *
-     *  The alt-screen fact now comes from the host emulator over the wire
-     *  (msgState → tab.alt), not from reading xterm's buffer. */
-    get focusedInAltScreen(): boolean {
+     *  THE EXCEPTION, and why it is narrow. That rule was priced against vim
+     *  and `less` — occasional visitors. claude is a full-screen TUI too, and
+     *  in an AI-native terminal it is the pane you sit in all day, in most
+     *  panes: "a full-screen app owns the keyboard" quietly meant "you don't
+     *  get ⌃hjkl in rook's primary pane type". So a pane the host reports as
+     *  a live claimed agent window keeps the workbench's nav chords.
+     *
+     *  The signal is `agentSession` — a claim made by claude's own
+     *  SessionStart hook, re-verified per state tick against the tty's
+     *  foreground process group (host.agentPane → claimAliveLocked). NOT a
+     *  name match on `fg`: that reads a 2s-TTL proc table and would flap.
+     *  A claude with no live claim keeps the old yield — failing toward the
+     *  behaviour that shipped, not toward stealing keys from a TUI.
+     *
+     *  The bill: claude no longer sees ⌃L (its clear) or ⌃H, in a pane where
+     *  it used to. That is the same bill the shell already pays for these
+     *  chords, and `keybind = "ctrl+l" = ""` still buys it back. */
+    get focusedOwnsNavKeys(): boolean {
         const win = this.active;
         if (!win) return false;
         // an editor pane has no session and no TUI — it never yields
         if (!win.panes.get(win.focused)?.sessionId) return false;
-        return this.focusedTab(win)?.alt ?? false;
+        const tab = this.focusedTab(win);
+        if (!tab?.alt) return false;
+        return !tab.agentPane;
     }
 
     /** Snapshot for the strip and pickers: windows in the current workspace. */
@@ -432,6 +454,7 @@ export class TermManager {
             cols,
             rows,
             alt: false,
+            agentPane: false,
             ws: null,
             wrap,
             lastSize: "",
@@ -542,7 +565,9 @@ export class TermManager {
             if (msg.kind === "frame") {
                 tab.renderer.applyBytes(msg.payload);
             } else if (msg.kind === "state") {
-                tab.alt = msg.alt; // keybind routing reads this via focusedInAltScreen
+                // keybind routing reads both via focusedOwnsNavKeys
+                tab.alt = msg.alt;
+                tab.agentPane = msg.agentPane;
                 tab.renderer.setMouseMode(msg.mouseLevel, msg.mouseSgr);
             } else if (msg.kind === "sbchunk") {
                 tab.renderer.applySbChunk(msg.payload);

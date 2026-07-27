@@ -2187,9 +2187,10 @@
             if (nav && (NAV.has(nav) || TUI_YIELD.has(nav)) && !(inSidePane && isTyping(tgt))) {
                 // A full-screen app in the focused terminal owns these — this
                 // is vim-tmux-navigator's is_vim check, read off the alternate
-                // screen buffer instead of grepping ps. Only the terminals
+                // screen buffer instead of grepping ps, minus the claude
+                // carve-out (see mgr.focusedOwnsNavKeys). Only the terminals
                 // zone can yield: a side pane isn't running vim.
-                if (!(app.focusZone === "terms" && mgr.focusedInAltScreen)) {
+                if (!(app.focusZone === "terms" && mgr.focusedOwnsNavKeys)) {
                     e.preventDefault();
                     e.stopPropagation();
                     registry.run(nav);
