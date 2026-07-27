@@ -18,7 +18,6 @@ test.afterEach(async ({page}) => {
 
 test("webgl canvas geometry is dpr-correct", async ({page}) => {
     made.push("webgl-dpr");
-    await page.addInitScript(() => localStorage.setItem("rook.renderer", "webgl"));
     await gotoHome(page);
     await page.getByRole("button", {name: /^workspaces/i}).click();
     await page.getByRole("button", {name: "New workspace"}).click();

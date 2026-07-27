@@ -1,4 +1,4 @@
-import {expect, test, REPO} from "./harness";
+import {REPO, expect, expectPaneText, test} from "./harness";
 import * as path from "node:path";
 
 const RE = path.join(REPO, "bin", "e2e", "re");
@@ -60,7 +60,6 @@ test("three takeovers: :q the middle one only", async ({page, rook}) => {
 
 test("split window, two takeovers: :q one half only", async ({page, rook}) => {
     test.setTimeout(120_000);
-    const win = page.locator(".window.active");
     // split-aware shell probe: the harness's shellReady watches the FIRST
     // visible terminal, which in a split is not where the keyboard is
     let seq = 0;
@@ -70,7 +69,7 @@ test("split window, two takeovers: :q one half only", async ({page, rook}) => {
             await page.keyboard.type(`echo ${tag}$((6*7))`);
             await page.keyboard.press("Enter");
             try {
-                await expect(win).toContainText(`${tag}42`, {timeout: 2_000});
+                await expectPaneText(page, `${tag}42`, 2_000);
                 return;
             } catch {
                 /* cold shell ate the probe — try again */
@@ -102,14 +101,14 @@ test("split window, two takeovers: :q one half only", async ({page, rook}) => {
 
     // :q the LEFT takeover — the right one must survive
     await rook.ex(":q");
-    await expect(win).toContainText("leftexit=0", {timeout: 15_000});
+    await expectPaneText(page, "leftexit=0");
     await expect(page.locator(".editor-mount .view-lines")).toHaveCount(1);
     await expect(page.locator(".editor-mount")).toContainText("bravo");
 
     // the right editor still answers its own :q
     await page.keyboard.press("Control+l");
     await rook.ex(":q");
-    await expect(win).toContainText("rightexit=0", {timeout: 15_000});
+    await expectPaneText(page, "rightexit=0");
 });
 
 test("the SAME file in two takeovers — each :q minds its own", async ({page, rook}) => {

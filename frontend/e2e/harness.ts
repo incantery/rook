@@ -166,9 +166,44 @@ export async function deleteWorkspaces(page: Page, names: string[]): Promise<voi
 }
 
 /** Flatten a terminal's rendered text. xterm draws every space as U+00A0 to
- *  hold the column, so a plain match with a space in it never fires. */
+ *  hold the column, so a plain match with a space in it never fires.
+ *
+ *  Renderer-agnostic: the WebGL renderer paints to a canvas, which has no
+ *  innerText at all, and exposes __screenText() on its container instead
+ *  (term/vt/beamterm.ts). Reading through that here is what lets shellReady —
+ *  and everything built on it — drive either side of the renderer seam. */
 export const screenText = (term: Locator): Promise<string> =>
-    term.evaluate((el) => (el as HTMLElement).innerText.replace(/ /g, " "));
+    term.evaluate((el) => {
+        const probe = (el as HTMLElement & {__screenText?: () => string}).__screenText;
+        const text = probe ? probe() : (el as HTMLElement).innerText;
+        return text.replace(/\u00a0/g, " ");
+    });
+
+/** The text of every VISIBLE terminal pane, joined.
+ *
+ *  Reach for this instead of `expect(locator).toContainText(...)` against a
+ *  .vt-screen or a .window.active that contains one. The renderer paints to a
+ *  canvas: Playwright's text matchers see an empty string there and simply
+ *  time out, which is how a renderer swap turns into a pile of 26-second
+ *  failures that look like hangs. In a split it is also what you want — the
+ *  keyboard may be in either half. */
+export const paneText = (page: Page): Promise<string> =>
+    page.evaluate(() =>
+        [...document.querySelectorAll<HTMLElement>(".vt-screen")]
+            .filter((el) => el.offsetParent !== null)
+            .map((el) => {
+                const probe = (el as HTMLElement & {__screenText?: () => string}).__screenText;
+                return probe ? probe() : el.innerText;
+            })
+            .join("\n")
+            .replace(/\u00a0/g, " "),
+    );
+
+/** Poll paneText until it contains `want`. The terminal-safe replacement for
+ *  toContainText on a pane. */
+export async function expectPaneText(page: Page, want: string, timeout = 15_000): Promise<void> {
+    await expect.poll(() => paneText(page), {timeout}).toContain(want);
+}
 
 /** Wait until the shell in `term` is reading input.
  *
@@ -408,11 +443,12 @@ export class Rook {
         await this.page.keyboard.press("Enter");
     }
 
-    /** The visible terminal's rendered text, with Monaco/xterm's hard spaces
-     *  flattened — xterm renders every space as U+00A0 to hold the column,
-     *  so a plain toContainText with a space in it never matches. */
+    /** The visible terminal's rendered text. Delegates to screenText rather
+     *  than reading innerText itself: the renderer paints to a canvas, which
+     *  has none, and this had its own copy of the read for long enough to
+     *  break every spec built on expectScreen the day the DOM renderer left. */
     async screen(): Promise<string> {
-        return this.term().evaluate((el) => (el as HTMLElement).innerText.replace(/ /g, " "));
+        return screenText(this.term());
     }
 
     /** Wait for the terminal to show something.

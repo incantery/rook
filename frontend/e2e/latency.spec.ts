@@ -5,15 +5,20 @@ import {clickShown, deleteWorkspaces, gotoHome, screenText, shellReady, shown} f
 // The keystroke-latency harness — the metric the target audience feels first
 // and the judge for every renderer/transport change (perf strategy,
 // 2026-07-22). Measures the WHOLE round trip a user feels: keydown → ws →
-// pty → shell echo → pty → emulator → frame → ws → DOM commit. A capture-phase
-// keydown listener stamps t0 before the renderer's own handler runs; a
-// MutationObserver on the live screen stamps t1 at the DOM commit of the echo.
-// Keys are spaced widely on a quiet prompt, so "first mutation after t0" IS
-// the echo — no content matching needed.
+// pty → shell echo → pty → emulator → frame → ws → GL submit. A capture-phase
+// keydown listener stamps t0 before the renderer's own handler runs; the
+// renderer's own `rook:frame` event stamps t1 when the echo reaches the GPU.
+// Keys are spaced widely on a quiet prompt, so "first frame after t0" IS the
+// echo — no content matching needed.
 //
-// t1 is DOM commit, not pixels: headless WebKit's paint isn't observable, and
-// commit→paint is the compositor's ~frame. Treat the numbers as commit
-// latency and compare like against like.
+// t1 was a MutationObserver until 2026-07-27, when the DOM renderer was
+// deleted: a canvas mutates no nodes, so that probe measured nothing at all
+// and the spec failed as a timeout rather than as a wrong number.
+//
+// t1 is GL submission, not pixels: headless WebKit's paint isn't observable,
+// and submit→paint is the compositor's ~frame. Treat these as submission
+// latency and compare like against like — docs/PERF.md explains why headless
+// cannot judge anything past this point.
 //
 // The assertion is a loose sanity gate, not the measurement — the measured
 // distribution prints in the run log and belongs in docs/PERF.md.
@@ -59,9 +64,7 @@ test("keystroke to DOM commit latency", async ({page}) => {
         const screens = [...document.querySelectorAll<HTMLElement>(".vt-screen")];
         const live = screens.find((el) => el.offsetParent !== null);
         if (!live) throw new Error("no visible terminal to observe");
-        new MutationObserver(() => {
-            w.__lat.muts.push(performance.now());
-        }).observe(live, {childList: true, subtree: true, characterData: true});
+        live.addEventListener("rook:frame", () => w.__lat.muts.push(performance.now()));
     });
 
     // 30 isolated keystrokes: gaps far exceed any sane echo, so pairing is
@@ -85,7 +88,7 @@ test("keystroke to DOM commit latency", async ({page}) => {
     const q = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
     const fmt = (v: number) => `${v.toFixed(1)}ms`;
     console.log(
-        `LATENCY keystroke→DOM-commit n=${lat.length} ` +
+        `LATENCY keystroke→GL-submit n=${lat.length} ` +
             `p50=${fmt(q(0.5))} p95=${fmt(q(0.95))} min=${fmt(sorted[0])} max=${fmt(sorted[sorted.length - 1])}`,
     );
 

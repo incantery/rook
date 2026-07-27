@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -66,6 +67,12 @@ type session struct {
 	emuMu     sync.Mutex    // guards emu across readPump, render loop, resize
 	dirty     chan struct{} // buffered(1): pty output happened, render loop wake
 	frameConn *websocket.Conn
+	// lastInput is when this session last received a keystroke (UnixNano, 0 if
+	// never). The render loop reads it to let an echo skip the coalescing wait
+	// — see framedRenderLoop. Atomic because the input loop writes it on a
+	// different goroutine than the render loop that reads it, and neither may
+	// block the other over it.
+	lastInput atomic.Int64
 	// oob carries pre-framed control messages (edit requests) to the render
 	// loop — the frame socket's sole writer. Set per attach, nil when detached.
 	oob chan []byte
@@ -388,6 +395,26 @@ type gather struct {
 	err     error         // terminal read error; delivered after pending drains
 	notify  chan struct{} // cap 1: bytes or err landed
 	drained chan struct{} // cap 1: parser took — releases backpressure
+	// input is the session's last-keystroke clock (UnixNano), or nil for a
+	// gather with no client — see typing().
+	input *atomic.Int64
+}
+
+// typingWindow is how long after a keystroke the pty counts as interactive.
+// Comfortably longer than an echo round trip and far shorter than a pause
+// between keys, so a burst of typing stays "interactive" throughout and a
+// firehose that happens to follow a keystroke goes back to batching quickly.
+const typingWindow = 50 * time.Millisecond
+
+// typing reports whether a keystroke landed recently enough that the next
+// bytes off the pty are probably its echo — the one case the micro-batch
+// must not delay.
+func (g *gather) typing() bool {
+	if g.input == nil {
+		return false
+	}
+	last := g.input.Load()
+	return last != 0 && time.Since(time.Unix(0, last)) < typingWindow
 }
 
 // gatherMax bounds unparsed bytes; past it the gather loop stops reading until
@@ -433,7 +460,13 @@ func (g *gather) take(recycled []byte) ([]byte, error) {
 			// (measured: a faster parser made `cat 150MB` slower). One beat of
 			// sleep gathers a chunk worth parsing; at most one per take, so an
 			// interactive keystroke's echo is delayed ≤~a quarter millisecond.
-			if n > 0 && n < 32<<10 && g.err == nil && !waited {
+			// ...but not while the user is mid-keystroke. The whole reason
+			// this sleep is affordable is that it is small relative to a
+			// frame; now that the coalescer no longer hides it (termframe.go),
+			// 200us is a quarter of a quiet-prompt echo. Typing is never the
+			// case this optimizes — it exists for a firehose, where the pty,
+			// not the parser, is the producer.
+			if n > 0 && n < 32<<10 && g.err == nil && !waited && !g.typing() {
 				g.mu.Unlock()
 				waited = true
 				time.Sleep(200 * time.Microsecond)
@@ -462,7 +495,7 @@ func (g *gather) signal(ch chan struct{}) {
 // while detached, and the ring is what a reattaching client replays. It is the
 // parse half of the gather pair (see gather).
 func (h *Host) readPump(s *session) {
-	g := &gather{notify: make(chan struct{}, 1), drained: make(chan struct{}, 1)}
+	g := &gather{notify: make(chan struct{}, 1), drained: make(chan struct{}, 1), input: &s.lastInput}
 	go g.run(s.pty)
 	var chunk []byte
 	for {

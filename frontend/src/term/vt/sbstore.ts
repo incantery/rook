@@ -5,7 +5,7 @@
 // renderer watches scroll off enter the cache for free; everything else is
 // fetched on demand (onFetch → msgSbFetch) and evicted when far from the
 // viewport — N sessions of deep history cost the client ~a screenful each,
-// not a copy. Extracted from GridRenderer when the WebGL renderer grew a
+// not a copy. Extracted from the renderer when the scrollback viewport grew a
 // scrollback view; the painting stays in the renderers, the state machine
 // lives here where it can be unit-tested.
 

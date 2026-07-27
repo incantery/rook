@@ -133,6 +133,12 @@ func (h *Host) handleAttachFramed(w http.ResponseWriter, r *http.Request, s *ses
 		}
 		switch data[0] {
 		case msgInput:
+			// Marked BEFORE the write, not after: the echo comes back through
+			// the line discipline immediately, so readPump can signal dirty
+			// while this goroutine is still between the two statements. Marking
+			// after loses that race and the echo waits out the tick — the exact
+			// stall this exists to remove.
+			s.lastInput.Store(time.Now().UnixNano())
 			s.pty.Write(data[1:])
 		case msgResize:
 			if len(data) < 5 {
@@ -310,20 +316,68 @@ func (h *Host) framedRenderLoop(ctx context.Context, s *session, c *websocket.Co
 		// lands after an idle gap immediately — that is the keystroke echo the
 		// user feels. A fixed wait here made every echo a frame late, which read
 		// as sluggish typing under an interactive TUI.
-		if wait := frameInterval - time.Since(last); wait > 0 {
+		//
+		// The idle gap alone is not enough, because it only covers a session
+		// that is QUIET. Type into a pane that is itself producing output — a
+		// build, a test run, an agent streaming — and `last` is never stale, so
+		// every keystroke waited out the remainder of the tick: measured p50
+		// 9.9-13.0ms against 0.8ms at a quiet prompt (echolat_test.go). That is
+		// the largest single latency term in the pipeline, and it is pure wait,
+		// not work. So an echo skips the wait outright: if a keystroke arrived
+		// since the last frame, this frame is carrying it.
+		//
+		// Bounded by construction — one extra frame per keystroke, and only for
+		// the pane the human is typing into. The firehose in the next pane
+		// still coalesces at frameInterval.
+		//
+		// The wait itself has to be interruptible, which is the part that is
+		// easy to get wrong: under a stream the loop is nearly always ALREADY
+		// inside this timer when the keystroke lands, so a check made only on
+		// the way in fixes almost nothing (measured: p50 13.0ms → 13.0ms, with
+		// only the lucky minority dropping to 0.4ms). Waking on the keystroke
+		// itself is also wrong — the echo has not been parsed yet, so the frame
+		// would go out empty and the glyph would wait for the NEXT tick. Wake
+		// on the first dirty that follows the keystroke: that is the echo
+		// arriving.
+		if wait := frameInterval - time.Since(last); wait > 0 && !s.echoPending(last) {
 			t := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				t.Stop()
-				return
-			case <-t.C:
+		coalesce:
+			for {
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return
+				case <-t.C:
+					break coalesce
+				case <-s.dirty:
+					if s.echoPending(last) {
+						t.Stop()
+						break coalesce
+					}
+					// Not an echo — stream output. It folds into the frame this
+					// wait is already going to send, which is the whole point of
+					// coalescing; keep waiting.
+				}
 			}
 		}
+		// Stamped BEFORE the frame is built, not after: render() snapshots the
+		// emulator on entry, so a keystroke echo parsed while it is encoding is
+		// NOT in the frame going out. Stamping after would date the frame later
+		// than its own contents and that echo would read as already-sent, then
+		// wait out a full tick — the p99 ~18ms that survived the first cut.
+		snapshot := time.Now()
 		if !render() {
 			return
 		}
-		last = time.Now()
+		last = snapshot
 	}
+}
+
+// echoPending reports whether a keystroke arrived since the frame sent at
+// `last` — i.e. whether the next frame is carrying an echo the user is waiting
+// on, and must not be held back for coalescing.
+func (s *session) echoPending(last time.Time) bool {
+	return s.lastInput.Load() > last.UnixNano()
 }
 
 // signalDirty wakes the render loop without blocking the caller; the buffered

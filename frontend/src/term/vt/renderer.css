@@ -1,7 +1,11 @@
-/* Raw CSS for the imperative VT renderer, per rook's convention for imperative
- * islands (xterm/Monaco stay raw CSS, not Tailwind). Colors hang off --term-*
- * custom properties so the theme drives them; metrics off --vt-* so a pane can
- * size the grid. */
+/* Raw CSS for the terminal renderer, per rook's convention for imperative
+ * islands (Monaco stays raw CSS, not Tailwind).
+ *
+ * The renderer paints to a canvas, so almost nothing here is decoration: the
+ * font declarations ARE the renderer's input. beamterm reads font-family and
+ * font-size off the container with getComputedStyle to build its glyph atlas
+ * (beamterm.ts), so these rules decide what the terminal is rasterized from.
+ * The per-row/cursor/selection rules the DOM renderer needed left with it. */
 
 .vt-screen {
     position: relative;
@@ -18,8 +22,8 @@
      * between rows that show the translucent tint as faint horizontal lines. */
     --vt-cell-h: round(calc(var(--vt-font-size, 13px) * var(--vt-line-height, 1.2)), 1px);
     color: var(--term-fg, #d0d0d0);
-    /* transparent so the body tint shows through, as the xterm canvas did;
-       --term-bg is the solid base reverse video paints from (style.ts). */
+    /* transparent so the body tint shows through; --term-bg is the solid base
+       reverse video paints from (style.ts). */
     background: transparent;
     white-space: pre;
     overflow: hidden;
@@ -28,52 +32,12 @@
      * hasn't sized it (and break hit-testing). The pane sizes the screen. */
     contain: layout style;
     tab-size: 8;
-}
-
-.vt-row {
-    height: var(--vt-cell-h);
-    white-space: pre;
-    /* isolate a row's reflow from its siblings. NOT `content` (which adds paint
-     * containment): promoting each row to its own layer left sub-pixel seams
-     * between rows — the faint horizontal lines. */
-    contain: layout style;
-}
-
-.vt-cursor {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: var(--vt-cell-w);
-    height: var(--vt-cell-h);
-    background: var(--term-cursor, var(--term-fg, #d0d0d0));
-    opacity: 0.7;
-    pointer-events: none;
-    transform: translate(
-        calc(var(--vt-cx, 0) * var(--vt-cell-w)),
-        calc(var(--vt-cy, 0) * var(--vt-cell-h))
-    );
-}
-
-/* The selection overlay: a translucent layer of rectangles over the glyphs,
- * decoupled from row painting so a repaint never disturbs the highlight. */
-.vt-selection {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-}
-
-.vt-sel-rect {
-    position: absolute;
-    background: var(--term-selection, rgba(120, 150, 255, 0.35));
-}
-
-/* Selecting text should not also select surrounding UI chrome. */
-.vt-screen {
+    /* Selecting text should not also select surrounding UI chrome. */
     user-select: none;
 }
 
-/* The screen is focusable (tabindex) so it can receive keys, but its own cursor
- * is the focus indicator — suppress the browser's focus ring, as xterm did. */
+/* The screen is focusable (tabindex) so it can receive keys, but the rendered
+ * cursor is the focus indicator — suppress the browser's focus ring. */
 .vt-screen:focus,
 .vt-screen:focus-visible {
     outline: none;

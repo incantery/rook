@@ -1,45 +1,28 @@
-// Renderer selection behind the TermRenderer seam. The DOM renderer is the
-// default and the accessibility fallback; the WebGL renderer (beamterm spike)
-// is opt-in via localStorage until the bake-off settles:
+// Renderer construction. There is one renderer — beamterm, the WebGL grid
+// (beamterm.ts) — and this module exists to load its WASM before any pane is
+// built and to hand out instances after.
 //
-//   localStorage.setItem("rook.renderer", "webgl")   // then reload
+// It used to be a bake-off seam with a DOM renderer behind a localStorage flag
+// and silent fallback between them. The DOM renderer was deleted 2026-07-27:
+// two renderers meant every fix, theme change and wire change landed twice,
+// and the measurements that were supposed to arbitrate could not — headed,
+// both sat on the display's frame clock (docs/PERF.md). One renderer to
+// optimize was worth more than a comparison neither probe could resolve.
 //
-// Selection fails open: if the WASM module doesn't load or a construction
-// throws (no WebGL2, headless quirks), the DOM renderer takes over silently —
-// a renderer experiment must never brick the terminal.
+// The cost of that decision, stated where it is felt: there is no fallback
+// now. If the WASM module fails to load there is no terminal, so the failure
+// has to be LOUD — a silent catch here would present an empty pane and no
+// reason for it.
 
-import type {TermRenderer} from "./api";
-import {GridRenderer, type RendererOptions} from "./renderer";
+import type {RendererOptions, TermRenderer} from "./api";
+import {BeamtermGridRenderer, initBeamterm} from "./beamterm";
 
-type BeamtermModule = typeof import("./beamterm");
-let beamterm: BeamtermModule | null = null;
-let active: RendererKind = "dom";
+/** Why the renderer is unavailable, or null while it is fine. Read by the
+ *  chrome to explain an empty pane instead of leaving the user guessing. */
+let failure: string | null = null;
 
-/** activeRendererKind is what this session actually runs (after fallback) —
- *  compare against rendererKind() to know whether a reload would change it. */
-export function activeRendererKind(): RendererKind {
-    return active;
-}
-
-export type RendererKind = "dom" | "webgl";
-
-export function rendererKind(): RendererKind {
-    try {
-        return localStorage.getItem("rook.renderer") === "webgl" ? "webgl" : "dom";
-    } catch {
-        return "dom";
-    }
-}
-
-/** setRendererKind stores the choice; it applies on the next app load (the
- *  WASM preload and every pane's renderer are constructed at boot). */
-export function setRendererKind(kind: RendererKind): void {
-    try {
-        if (kind === "dom") localStorage.removeItem("rook.renderer");
-        else localStorage.setItem("rook.renderer", kind);
-    } catch {
-        // private-mode storage — the toggle just won't stick
-    }
+export function rendererFailure(): string | null {
+    return failure;
 }
 
 /** loadCanvasFonts re-registers the terminal font stack's families as FontFaces
@@ -50,17 +33,16 @@ export function setRendererKind(kind: RendererKind): void {
  *
  *  WebKit's canvas 2D ignores user-installed fonts (a fingerprinting
  *  mitigation): DOM text renders them, fillText silently falls back — so the
- *  WebGL renderer's glyph atlas would lose the terminal font entirely and
- *  draw tofu for every nerd-font icon. FontFace-loaded bytes ARE visible to
- *  canvas, and registering them under the SAME family name means the
- *  existing font stack just starts resolving — no renderer plumbing.
+ *  glyph atlas would lose the terminal font entirely and draw tofu for every
+ *  nerd-font icon. FontFace-loaded bytes ARE visible to canvas, and registering
+ *  them under the SAME family name means the existing font stack just starts
+ *  resolving — no renderer plumbing.
  *
- *  Everything fails open: a 404 (family not found on disk, or a web-safe
- *  font that needs no help) or a FontFace rejection (e.g. .ttc collections)
- *  leaves the browser's own fallback in charge. Call before terminals are
- *  constructed, when the webgl renderer is configured. */
+ *  Everything fails open: a 404 (family not found on disk, or a web-safe font
+ *  that needs no help) or a FontFace rejection (e.g. .ttc collections) leaves
+ *  the browser's own fallback in charge. Call before terminals are
+ *  constructed. */
 export async function loadCanvasFonts(families: string[]): Promise<void> {
-    if (rendererKind() !== "webgl") return;
     const styles: [string, FontFaceDescriptors][] = [
         ["regular", {}],
         ["bold", {weight: "700"}],
@@ -79,25 +61,25 @@ export async function loadCanvasFonts(families: string[]): Promise<void> {
                     await face.load();
                     document.fonts.add(face);
                 } catch {
-                    // fail open — the DOM path never needed this
+                    // fail open — the browser's own fallback stays in charge
                 }
             }),
         ),
     );
 }
 
-/** preloadRenderer loads the WASM module ahead of the first terminal, when the
- *  webgl renderer is configured. Call before TermManager.init(). */
+/** preloadRenderer loads the WASM module ahead of the first terminal. Call
+ *  before TermManager.init(). It does not throw: a dead renderer must not take
+ *  the whole app down with it, because the workbench around the terminal (the
+ *  editor, threads, review) still works. It records the reason instead, and
+ *  makeRenderer throws per pane. */
 export async function preloadRenderer(): Promise<void> {
-    if (rendererKind() !== "webgl") return;
     try {
-        const mod = await import("./beamterm");
-        await mod.initBeamterm();
-        beamterm = mod;
-        active = "webgl";
+        await initBeamterm();
+        failure = null;
     } catch (err) {
-        console.warn("webgl renderer unavailable — DOM fallback", err);
-        beamterm = null;
+        failure = String(err);
+        console.error("terminal renderer unavailable — panes will not paint", err);
     }
 }
 
@@ -107,12 +89,5 @@ export function makeRenderer(
     rows: number,
     opts: RendererOptions,
 ): TermRenderer {
-    if (beamterm) {
-        try {
-            return new beamterm.BeamtermGridRenderer(container, cols, rows, opts);
-        } catch (err) {
-            console.warn("webgl renderer failed — DOM fallback", err);
-        }
-    }
-    return new GridRenderer(container, cols, rows, opts);
+    return new BeamtermGridRenderer(container, cols, rows, opts);
 }

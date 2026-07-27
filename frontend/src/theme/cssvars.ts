@@ -40,7 +40,7 @@ export function cssVars(p: Palette): Record<string, string> {
         "--fg": p.fg,
         "--dim": p.dim,
         "--line": withAlpha(p.line, LINE_ALPHA),
-        // the host-emulator terminal (GridRenderer) reads these: the default
+        // the host-emulator terminal reads these: the default
         // fg/cursor/selection and the 16-colour ANSI ramp (term/vt/style.ts +
         // renderer.css). --term-bg is the SOLID base used by reverse video; the
         // pane itself is transparent so the body tint shows through, as the

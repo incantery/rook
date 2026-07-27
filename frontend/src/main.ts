@@ -61,9 +61,9 @@ async function main() {
     // typo'd config can't render the chrome unusable.
     document.documentElement.style.fontSize = `${Math.min(28, Math.max(10, cfg.fontSize))}px`;
 
-    // WebGL only: hand the canvas a FontFace copy of the terminal font —
-    // WebKit's fillText can't see user-installed fonts (see registry.ts).
-    // Must land before the atlas rasterizes, i.e. before any pane exists.
+    // Hand the canvas a FontFace copy of the terminal font — WebKit's
+    // fillText can't see user-installed fonts (see registry.ts). Must land
+    // before the atlas rasterizes, i.e. before any pane exists.
     await loadCanvasFonts(families);
 
     // Measure with the real font: a grid computed from fallback-font cell

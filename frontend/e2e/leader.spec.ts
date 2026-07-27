@@ -1,6 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 import * as path from "node:path";
-import {clickShown, deleteWorkspaces, gotoHome, shellReady, shown} from "./harness";
+import {clickShown, deleteWorkspaces, expectPaneText, gotoHome, shellReady, shown} from "./harness";
 
 // The leader's send-prefix, in both pane kinds.
 //
@@ -108,7 +108,8 @@ test("` ` still types a literal backtick into a terminal", async ({page}) => {
     await clickShown(shown(page, ".vt-screen"));
     await page.keyboard.type("x``y");
 
-    await expect(shown(page, ".vt-screen")).toContainText("x`y", {timeout: 10_000});
+    // paneText, not toContainText: the terminal is a canvas with no text
+    await expectPaneText(page, "x`y", 10_000);
 });
 
 // Mission control has to TAKE focus, not just be on top of everything.

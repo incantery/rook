@@ -94,6 +94,10 @@ export function attrToken(a: number): string {
     return s;
 }
 
+/** Interned single-character strings for every ASCII byte. Built once; the
+ *  decoder's fast path hands these out instead of allocating per cell. */
+const ASCII: string[] = Array.from({length: 128}, (_, i) => String.fromCharCode(i));
+
 class Reader {
     private dec = new TextDecoder();
     private i = 0;
@@ -121,6 +125,21 @@ class Reader {
 
     str(n: number): string {
         if (this.i + n > this.buf.length) throw new Error("vt: truncated frame");
+        // A terminal cell is one ASCII byte almost every time, and this is the
+        // hottest function in the client: it runs once per CELL, ~45k times
+        // for a full screen. TextDecoder.decode() has fixed per-call overhead
+        // that dwarfs the work for one byte, plus it mints a fresh string;
+        // the table returns an interned one and allocates nothing. Decode was
+        // measured at 2.10ms of a 4.10ms frame under firehose before this
+        // (docs/render-latency.md) — the wire is not the cost, the per-cell
+        // call was.
+        if (n === 1) {
+            const b = this.buf[this.i];
+            if (b < 0x80) {
+                this.i++;
+                return ASCII[b];
+            }
+        }
         const s = this.dec.decode(this.buf.subarray(this.i, this.i + n));
         this.i += n;
         return s;

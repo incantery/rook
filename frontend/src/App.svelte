@@ -2321,11 +2321,21 @@
             // restriction — opening the tree lands you in it, so `,b` has to
             // close the thing you are standing in, and a greeter where the
             // leader is dead is a first screen with no verbs on it.
-            if (
+            //
+            // Falling back to editorFocused() when NOTHING holds the keyboard
+            // is not belt-and-braces, it is the whole takeover window: `re
+            // file` mounts the pane and focuses it, but Monaco arrives through
+            // an await import() and the focus request has to sit in a latch
+            // until it does (EditorPane.applyPendingFocus). Until then the
+            // editor is on screen with focus still on <body>, and every key
+            // typed into it — leader or not — went nowhere. The manager knows
+            // which pane it means even when the DOM doesn't.
+            const inEditorSurface =
                 tgt?.closest?.(
                     '.editor-mount, [data-side="bottom"], [data-side="left"], .start-wrap',
-                ) != null
-            ) {
+                ) != null;
+            const nobodyHasIt = tgt == null || tgt === document.body;
+            if (inEditorSurface || (nobodyHasIt && editorFocused())) {
                 e.preventDefault();
                 e.stopPropagation();
                 ctxArmed = true;
@@ -2537,8 +2547,10 @@
 
         initDone = (async () => {
             try {
-                // the configured renderer's WASM (if any) must be live before
-                // the first terminal mounts; fails open to the DOM renderer
+                // The renderer's WASM must be live before the first terminal
+                // mounts. There is no fallback renderer any more, so this
+                // records its own failure rather than throwing (registry.ts) —
+                // a dead terminal must not also cost you the editor.
                 await preloadRenderer();
                 await mgr.init(); // attach live sessions (background-warm)
             } catch (err) {

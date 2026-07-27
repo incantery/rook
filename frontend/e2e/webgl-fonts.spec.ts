@@ -23,7 +23,6 @@ test.afterEach(async ({page}) => {
 
 test("webgl boot registers the terminal font for canvas", async ({page}) => {
     made.push("webgl-fonts");
-    await page.addInitScript(() => localStorage.setItem("rook.renderer", "webgl"));
     await gotoHome(page);
 
     // the configured family, as boot resolved it onto :root

@@ -1,6 +1,6 @@
 // Selection geometry and text extraction — pure, so the fiddly parts (reading
 // order, wide-char trailing cells, trailing-whitespace trim) are unit-tested
-// without a browser. The renderer (renderer.ts) drives this from mouse events
+// without a browser. The renderer (beamterm.ts) drives this from mouse events
 // and paints the result; nothing here touches the DOM.
 
 import type {ClientGrid} from "./grid";

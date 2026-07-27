@@ -1,8 +1,12 @@
-// The WebGL renderer spike: beamterm (github.com/junkdog/beamterm) behind the
+// Rook's terminal renderer: beamterm (github.com/junkdog/beamterm) behind the
 // TermRenderer seam. Beamterm is renderer-only — a Rust/WASM WebGL2 grid with
 // a single instanced draw call and a dynamic glyph atlas — which is exactly
 // the complement of rook's model: the host emulator owns terminal logic, the
 // client renders frames.
+//
+// Sole renderer since 2026-07-27 (the DOM renderer was deleted; registry.ts
+// records why). That promotion is what turns the gaps below from spike scope
+// into shipped regressions, tracked and being closed in that order.
 //
 // The boundary strategy: frames decode in TS (the existing frame.ts), the
 // grid lives in TS (ClientGrid), and paint crosses into WASM as ONE
@@ -10,13 +14,15 @@
 // already coalesces, so a full 405x113 repaint is a few hundred boundary
 // crossings, not 45k.
 //
-// SPIKE SCOPE — not yet wired: click/drag forwarding to mouse-tracking
-// programs (the wheel IS forwarded), a11y (canvas has no readable text — the
-// DOM renderer remains the accessible fallback). Selection is beamterm's
-// built-in (drag + auto-copy). Scrollback is the shared SbStore (sbstore.ts):
-// host-paged history, wheel + Shift+PageUp/Home to view it.
+// KNOWN GAPS, in the order they hurt:
+//  1. no a11y text: a canvas has nothing to read. __screenText() below is an
+//     e2e probe, not an accessibility tree.
+//  2. the pane paints opaque — backgroundOpacity needs a canvas alpha context.
+// (click/drag forwarding was the third and is now closed — see onMouseDown.)
+// Selection is beamterm's built-in (drag + auto-copy). Scrollback is the
+// shared SbStore (sbstore.ts): host-paged history, wheel + Shift+PageUp/Home.
 
-import type {TermRenderer} from "./api";
+import type {GlobalWithProbe, RendererOptions, TermRenderer} from "./api";
 import init, {
     BeamtermRenderer as Beamterm,
     type Batch,
@@ -36,16 +42,14 @@ import {
 } from "./frame";
 import {ClientGrid} from "./grid";
 import {keyToBytes} from "./keymap";
-import {BTN_WHEEL_DOWN, BTN_WHEEL_UP, encodeMouse} from "./mouse";
-import type {RendererOptions} from "./renderer";
+import {BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_WHEEL_DOWN, BTN_WHEEL_UP, encodeMouse} from "./mouse";
 import {SbStore} from "./sbstore";
 import {WheelGauge} from "./wheel";
 
 let ready = false;
 
 /** initBeamterm loads and instantiates the WASM module. Call once, before any
- *  BeamtermGridRenderer is constructed; the app preloads it when the webgl
- *  renderer is configured. */
+ *  BeamtermGridRenderer is constructed; the app preloads it at boot. */
 export async function initBeamterm(): Promise<void> {
     if (ready) return;
     await init();
@@ -100,6 +104,10 @@ export class BeamtermGridRenderer implements TermRenderer {
     // it instead of scrolling history; Shift forces local scrollback.
     private mouseLevel = 0;
     private mouseSgr = false;
+    /** a forwarded press is in flight: drags and the release belong to the
+     *  program, not to local selection */
+    private mouseReporting = false;
+    private mouseBtn = BTN_LEFT;
 
     constructor(container: HTMLElement, cols: number, rows: number, opts: RendererOptions = {}) {
         if (!ready) throw new Error("beamterm: initBeamterm() has not completed");
@@ -110,7 +118,7 @@ export class BeamtermGridRenderer implements TermRenderer {
 
         container.classList.add("vt-screen", "vt-webgl");
         container.setAttribute("role", "log");
-        container.setAttribute("aria-label", "terminal (webgl)");
+        container.setAttribute("aria-label", "terminal");
         if (!container.hasAttribute("tabindex")) container.tabIndex = 0;
 
         this.canvas = document.createElement("canvas");
@@ -136,6 +144,10 @@ export class BeamtermGridRenderer implements TermRenderer {
         container.addEventListener("keydown", this.onKeyDown);
         container.addEventListener("paste", this.onPaste);
         container.addEventListener("wheel", this.onWheel, {passive: false});
+        container.addEventListener("mousedown", this.onMouseDown);
+        container.addEventListener("contextmenu", this.onContextMenu);
+        window.addEventListener("mousemove", this.onMouseMove);
+        window.addEventListener("mouseup", this.onMouseUp);
 
         // spike probe: expose readable text for e2e (canvas has no innerText)
         (container as HTMLElement & {__screenText?: () => string}).__screenText = () =>
@@ -159,6 +171,11 @@ export class BeamtermGridRenderer implements TermRenderer {
         this.canvas.style.width = `${w}px`;
         this.canvas.style.height = `${h}px`;
         this.wasm.resize(w, h);
+        // Nothing styles off these (the canvas owns its own geometry) — they
+        // are how "what grid is this pane?" gets one answer, and the latency
+        // benchmarks read them.
+        this.container.style.setProperty("--vt-cols", String(cols));
+        this.container.style.setProperty("--vt-rows", String(rows));
     }
 
     private resolve(c: Color, def: number): number {
@@ -244,9 +261,23 @@ export class BeamtermGridRenderer implements TermRenderer {
     }
 
     applyBytes(bytes: Uint8Array): void {
+        // The probe is the instrument the campaign was missing: every other
+        // measurement bottoms out at the display's frame clock, so "is the TS
+        // bridge the cost?" was unfalsifiable. These four stamps resolve the
+        // client's own pipeline in microseconds, and they are exactly the
+        // stages a Worker + OffscreenCanvas would move off the main thread.
+        // Off unless a harness installs the sink, and one undefined check per
+        // frame when it hasn't.
+        const probe = (globalThis as GlobalWithProbe).__rookFrameProbe;
+        const t0 = probe ? performance.now() : 0;
+
         const frame = decodeFrame(bytes);
+        const t1 = probe ? performance.now() : 0;
+
         this.sb.noteFrame(frame, this.grid.rows, (y) => this.grid.rowCells(y));
         const dirty = this.grid.apply(frame);
+        const t2 = probe ? performance.now() : 0;
+
         // while scrolled up the live grid changes below the viewport; nothing
         // to repaint until the user returns to the bottom.
         if (this.sb.offset > 0) return;
@@ -255,6 +286,17 @@ export class BeamtermGridRenderer implements TermRenderer {
         this.paintCursor(batch);
         this.wasm.render();
         batch.free();
+        if (probe) {
+            const t3 = performance.now();
+            probe({
+                bytes: bytes.length,
+                rows: dirty.length,
+                decode: t1 - t0,
+                apply: t2 - t1,
+                paint: t3 - t2,
+                total: t3 - t0,
+            });
+        }
         // the latency harness's t1 for canvas renderers (no DOM mutations)
         this.container.dispatchEvent(new CustomEvent("rook:frame"));
     }
@@ -396,33 +438,43 @@ export class BeamtermGridRenderer implements TermRenderer {
 
     private wheel = new WheelGauge();
 
+    /** 1-based cell under a client point, clamped to the grid — the coordinate
+     *  space every mouse report is written in. */
+    private cellAt(clientX: number, clientY: number): {col: number; row: number} {
+        const rect = this.canvas.getBoundingClientRect();
+        return {
+            col: Math.max(
+                1,
+                Math.min(this.grid.cols, Math.floor((clientX - rect.left) / this.cellW) + 1),
+            ),
+            row: Math.max(
+                1,
+                Math.min(this.grid.rows, Math.floor((clientY - rect.top) / this.cellH) + 1),
+            ),
+        };
+    }
+
+    private forwardMouse(
+        button: number,
+        clientX: number,
+        clientY: number,
+        press: boolean,
+        motion: boolean,
+    ): void {
+        if (!this.onInput) return;
+        const {col, row} = this.cellAt(clientX, clientY);
+        this.onInput(encodeMouse({button, col, row, press, motion, sgr: this.mouseSgr}));
+    }
+
     private onWheel = (e: WheelEvent): void => {
         const lines = this.wheel.lines(e.deltaY, e.deltaMode, this.cellH);
         // A program tracking the mouse owns the wheel — it scrolls its own view
         // (Claude Code's conversation, a pager). Shift forces local scrollback.
         if (this.mouseLevel >= 2 && !e.shiftKey) {
-            if (this.onInput && lines !== 0) {
-                const rect = this.canvas.getBoundingClientRect();
-                const col = Math.max(
-                    1,
-                    Math.min(this.grid.cols, Math.floor((e.clientX - rect.left) / this.cellW) + 1),
-                );
-                const row = Math.max(
-                    1,
-                    Math.min(this.grid.rows, Math.floor((e.clientY - rect.top) / this.cellH) + 1),
-                );
+            if (lines !== 0) {
                 const button = lines < 0 ? BTN_WHEEL_UP : BTN_WHEEL_DOWN;
                 for (let i = 0; i < Math.abs(lines); i++) {
-                    this.onInput(
-                        encodeMouse({
-                            button,
-                            col,
-                            row,
-                            press: true,
-                            motion: false,
-                            sgr: this.mouseSgr,
-                        }),
-                    );
+                    this.forwardMouse(button, e.clientX, e.clientY, true, false);
                 }
             }
             e.preventDefault();
@@ -432,10 +484,56 @@ export class BeamtermGridRenderer implements TermRenderer {
         if (this.sb.max > 0) e.preventDefault();
     };
 
+    // Click/drag forwarding. Ported from the DOM renderer when it was deleted
+    // (2026-07-27) — without it, click-to-position in vim, tmux pane select and
+    // every mouse-driven TUI silently stop working, which is a regression the
+    // wheel path alone hides because scrolling still feels right.
+    //
+    // Move/up ride on WINDOW, not the container: a drag that leaves the pane
+    // must keep reporting, and the release must land even if the pointer is
+    // over another pane when the button comes up.
+
+    private onContextMenu = (e: MouseEvent): void => {
+        // a right-click belongs to a mouse-tracking program, not the browser menu
+        if (this.mouseLevel >= 1) e.preventDefault();
+    };
+
+    private onMouseDown = (e: MouseEvent): void => {
+        // A program tracking the mouse owns clicks. Shift forces local
+        // selection so text stays selectable over a mouse-driven TUI.
+        if (this.mouseLevel < 1 || e.shiftKey) return; // beamterm's own selection takes it
+        this.mouseBtn = e.button === 1 ? BTN_MIDDLE : e.button === 2 ? BTN_RIGHT : BTN_LEFT;
+        this.forwardMouse(this.mouseBtn, e.clientX, e.clientY, true, false);
+        this.mouseReporting = true;
+        // preventDefault blocks the native focus, so take it explicitly — the
+        // click must still put the keyboard on this pane.
+        this.container.focus();
+        e.preventDefault();
+    };
+
+    private onMouseMove = (e: MouseEvent): void => {
+        // report drags only when the program asked for motion (level >= 3)
+        if (!this.mouseReporting || this.mouseLevel < 3) return;
+        this.forwardMouse(this.mouseBtn, e.clientX, e.clientY, true, true);
+    };
+
+    private onMouseUp = (e: MouseEvent): void => {
+        if (!this.mouseReporting) return;
+        this.mouseReporting = false;
+        // X10 (level 1) has no release event; normal+ (>=2) does
+        if (this.mouseLevel >= 2) {
+            this.forwardMouse(this.mouseBtn, e.clientX, e.clientY, false, false);
+        }
+    };
+
     destroy(): void {
         this.container.removeEventListener("keydown", this.onKeyDown);
         this.container.removeEventListener("paste", this.onPaste);
         this.container.removeEventListener("wheel", this.onWheel);
+        this.container.removeEventListener("mousedown", this.onMouseDown);
+        this.container.removeEventListener("contextmenu", this.onContextMenu);
+        window.removeEventListener("mousemove", this.onMouseMove);
+        window.removeEventListener("mouseup", this.onMouseUp);
         this.wasm.free();
         this.canvas.remove();
     }

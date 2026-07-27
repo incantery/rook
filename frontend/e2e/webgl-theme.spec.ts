@@ -59,7 +59,6 @@ async function pickTheme(page: Page, name: string) {
 
 test("a theme swap repaints the WebGL terminal, with no reload", async ({page, rook}) => {
     test.setTimeout(120_000);
-    await page.addInitScript(() => localStorage.setItem("rook.renderer", "webgl"));
     await rook.open({name: "webgl-theme"});
     const canvas = ".window.active .vt-webgl canvas";
     await expect(page.locator(canvas)).toHaveCount(1, {timeout: 15_000});

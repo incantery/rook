@@ -9,11 +9,10 @@
     import JiraSettings from "./JiraSettings.svelte";
     import OpenAISettings from "./OpenAISettings.svelte";
     import AppearanceSettings from "./AppearanceSettings.svelte";
-    import ExperimentalSettings from "./ExperimentalSettings.svelte";
 
     let {onclose}: {onclose: () => void} = $props();
 
-    type Section = "jira" | "openai" | "appearance" | "experimental";
+    type Section = "jira" | "openai" | "appearance";
     let section = $state<Section>("jira");
     let cfg = $state<ConfigModel | null>(null);
     let rootEl: HTMLDivElement;
@@ -37,7 +36,6 @@
         {id: "jira", label: "Jira"},
         {id: "openai", label: "OpenAI"},
         {id: "appearance", label: "Appearance"},
-        {id: "experimental", label: "Experimental"},
     ];
 </script>
 
@@ -75,8 +73,6 @@
                 <JiraSettings {cfg} />
             {:else if section === "openai"}
                 <OpenAISettings />
-            {:else if section === "experimental"}
-                <ExperimentalSettings />
             {:else}
                 <AppearanceSettings {cfg} />
             {/if}
