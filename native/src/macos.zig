@@ -83,6 +83,49 @@ fn termColors() vt.Terminal.Colors {
     };
 }
 
+/// Build the blur backdrop and adopt `view` (the Metal layer's host)
+/// into it. Returns the view to install as the window's contentView,
+/// or null to keep plain alpha. `glass` wants NSGlassEffectView
+/// (macOS 26 Liquid Glass); missing class falls back to the boring
+/// blur, which is also the recommended default — glass is a foreground
+/// material and whole-window use has known staleness bugs (26.2).
+fn makeBackdrop(blur: @import("config.zig").Blur, rect: NSRect, view: objc.Object) ?objc.Object {
+    switch (blur) {
+        .none => return null,
+        .blur => {
+            const cls = objc.getClass("NSVisualEffectView") orelse return null;
+            const bd = cls.msgSend(objc.Object, "alloc", .{})
+                .msgSend(objc.Object, "initWithFrame:", .{rect});
+            bd.msgSend(void, "setBlendingMode:", .{@as(i64, 0)}); // behindWindow
+            bd.msgSend(void, "setMaterial:", .{@as(i64, 21)}); // underWindowBackground
+            // Active always: the backdrop must not dim when the window
+            // loses key (terminals live unfocused half the day).
+            bd.msgSend(void, "setState:", .{@as(i64, 1)});
+            bd.msgSend(void, "addSubview:", .{view.value});
+            // width | height sizable — track the backdrop through resizes.
+            view.msgSend(void, "setAutoresizingMask:", .{@as(u64, 18)});
+            std.debug.print("rookz: background-blur — NSVisualEffectView behind-window\n", .{});
+            return bd;
+        },
+        .glass, .glass_clear => {
+            const cls = objc.getClass("NSGlassEffectView") orelse {
+                std.debug.print("rookz: NSGlassEffectView unavailable (needs macOS 26) — falling back to blur\n", .{});
+                return makeBackdrop(.blur, rect, view);
+            };
+            const bd = cls.msgSend(objc.Object, "alloc", .{})
+                .msgSend(objc.Object, "initWithFrame:", .{rect});
+            if (blur == .glass_clear) {
+                // Style enum was in flux across Tahoe betas — probe first.
+                if (bd.msgSend(bool, "respondsToSelector:", .{objc.sel("setStyle:")}))
+                    bd.msgSend(void, "setStyle:", .{@as(i64, 1)}); // clear
+            }
+            bd.msgSend(void, "setContentView:", .{view.value});
+            std.debug.print("rookz: background-blur {s} — NSGlassEffectView (Liquid Glass)\n", .{@tagName(blur)});
+            return bd;
+        },
+    }
+}
+
 fn nsString(s: [*:0]const u8) objc.Object {
     const NSString = objc.getClass("NSString").?;
     return NSString.msgSend(objc.Object, "stringWithUTF8String:", .{s});
@@ -303,7 +346,21 @@ pub const App = struct {
         view.msgSend(void, "setWantsLayer:", .{true});
         view.msgSend(void, "setLayer:", .{layer.value});
         view.msgSend(void, "setPostsFrameChangedNotifications:", .{true});
-        window.msgSend(void, "setContentView:", .{view.value});
+
+        // Frosted backdrop: our translucent layer draws over a system
+        // material that blurs whatever is behind the window — the thing
+        // that makes transparency legible over a busy desktop. The
+        // backdrop becomes the contentView; the resize observer watches
+        // the contentView, so it must post frame changes too.
+        var blur = cfg.background_blur;
+        if (blur != .none and opaque_bg) {
+            std.debug.print("rookz config: background-blur needs background-opacity < 1 — ignoring\n", .{});
+            blur = .none;
+        }
+        var content = view;
+        if (makeBackdrop(blur, rect, view)) |bd| content = bd;
+        content.msgSend(void, "setPostsFrameChangedNotifications:", .{true});
+        window.msgSend(void, "setContentView:", .{content.value});
 
         // Retina: drawable size in pixels, not points.
         const scale = window.msgSend(f64, "backingScaleFactor", .{});

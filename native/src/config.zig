@@ -8,6 +8,29 @@ const std = @import("std");
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 
+/// What sits behind a translucent window. `blur` = NSVisualEffectView
+/// behind-window material (10.10+, boring, reliable); `glass` /
+/// `glass-clear` = NSGlassEffectView, macOS 26's Liquid Glass (falls
+/// back to blur pre-Tahoe). Needs background-opacity < 1 to be seen.
+pub const Blur = enum { none, blur, glass, glass_clear };
+
+pub fn blurFromName(name: []const u8) ?Blur {
+    const map = [_]struct { n: []const u8, b: Blur }{
+        .{ .n = "none", .b = .none },
+        .{ .n = "blur", .b = .blur },
+        .{ .n = "glass", .b = .glass },
+        .{ .n = "glass-clear", .b = .glass_clear },
+        .{ .n = "glass_clear", .b = .glass_clear },
+        // Ghostty's names, for switchers' muscle memory.
+        .{ .n = "macos-glass-regular", .b = .glass },
+        .{ .n = "macos-glass-clear", .b = .glass_clear },
+    };
+    for (map) |m| {
+        if (std.mem.eql(u8, name, m.n)) return m.b;
+    }
+    return null;
+}
+
 pub const Config = struct {
     font_size: f64 = 13,
     font_family: [:0]const u8 = "FiraCode Nerd Font Mono",
@@ -17,6 +40,7 @@ pub const Config = struct {
     /// scan-out (the compositor takes over: ~+5ms present lag
     /// fullscreen) — measured tradeoff, opt-in on purpose.
     background_opacity: f64 = 1.0,
+    background_blur: Blur = .none,
 };
 
 /// One number over both config files — the live-reload poll compares
@@ -103,8 +127,14 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
             if (stripped.len > 0) {
                 cfg.theme = gpa.dupe(u8, stripped) catch cfg.theme;
             }
+        } else if (std.mem.eql(u8, key, "background_blur")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            cfg.background_blur = blurFromName(stripped) orelse blk: {
+                std.debug.print("rookz config: unknown background-blur '{s}' (none, blur, glass, glass-clear)\n", .{stripped});
+                break :blk .none;
+            };
         } else {
-            std.debug.print("rookz config: unknown key '{s}' (known: font-size, font-family, theme, background-opacity)\n", .{key_raw});
+            std.debug.print("rookz config: unknown key '{s}' (known: font-size, font-family, theme, background-opacity, background-blur)\n", .{key_raw});
         }
     }
 

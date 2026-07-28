@@ -147,6 +147,13 @@ theme = "nocturne"       # builtin themes: default, nocturne
 background-opacity = 0.9 # <1 = translucent window; OPTS OUT of
                          # direct scan-out (~+5ms present lag) —
                          # perf tradeoff on purpose, default 1.0
+background-blur = "blur" # what's BEHIND a translucent window:
+                         # none (raw desktop), blur (frosted,
+                         # NSVisualEffectView — the recommended one),
+                         # glass / glass-clear (macOS 26 Liquid
+                         # Glass, NSGlassEffectView; pre-Tahoe falls
+                         # back to blur). Ghostty's macos-glass-*
+                         # names accepted. Needs opacity < 1.
 ```
 
 Opacity < 1 is whole-window glass: the layer extends under a
@@ -155,6 +162,16 @@ a tinted strip that stays a pure drag region, chrome shifts down
 28pt), and the tab/status bars and editor status row carry the same
 alpha as default-bg cells. Explicit-bg cells, selection, and accent
 highlights stay solid. Opaque config keeps the stock titlebar.
+
+background-blur inserts a backdrop view BEHIND the Metal layer (our
+view becomes its subview/contentView) — no render-path change at
+all; our alpha stays the mixing knob and the backdrop just decides
+what shows through. `blur` is deliberately the recommendation over
+`glass`: Liquid Glass is designed as a foreground material, and
+whole-window use has a known backdrop-staleness bug on 26.2. Both
+respect Reduce Transparency. The backdrop lives outside our drawable,
+so `shot` can't see it — the startup log line (`NSVisualEffectView` /
+`NSGlassEffectView`) is the observable, same as opacity.
 
 Themes color everything at once — emulator defaults + ANSI 16,
 chrome, editor, selection (src/theme.zig, one flat struct). Nocturne

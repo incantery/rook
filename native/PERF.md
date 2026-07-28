@@ -127,6 +127,16 @@ FiraCode 13 — that was day one, before the config file existed). And
 the WM tile drifts with desktop state (67×42 overnight → 67×39
 today) — state the grid per run, don't chase it.
 
+background-blur (2026-07-28, same day as glass chrome): the backdrop
+is a sibling AppKit view UNDER the Metal layer — zero render-path
+delta by construction (bench config stays opaque/backdrop-free, and
+demand pacing held: 18 drawn / 824 skipped on an idle blurred
+instance). The material's own compositing cost lives in WindowServer
+where our rings can't see it, EXCEPT present_lag: an occluded
+--no-activate probe read p50 19.6ms fullscreen+blur, but occluded
+windows get throttled presents (the borderless-probe trap) — a
+frontmost measurement is still owed before quoting a blur tax.
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,
