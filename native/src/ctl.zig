@@ -139,10 +139,20 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             }
             reply(fd, if (app.shotPending()) "err timeout\n" else "ok\n");
         } else reply(fd, "err busy\n");
+    } else if (std.mem.startsWith(u8, line, "winsize ")) {
+        var it = std.mem.tokenizeScalar(u8, line[8..], ' ');
+        const w = std.fmt.parseFloat(f64, it.next() orelse "") catch 0;
+        const h = std.fmt.parseFloat(f64, it.next() orelse "") catch 0;
+        if (w < 100 or h < 100) {
+            reply(fd, "err winsize <w> <h> (points, >=100)\n");
+            return;
+        }
+        app.requestWinSize(w, h);
+        reply(fd, "ok\n");
     } else if (std.mem.eql(u8, line, "quit")) {
         reply(fd, "ok\n");
         _exit(0);
     } else {
-        reply(fd, "err unknown (dump|type <s>|enter|ctrlc|key <hex>|shot <path>|quit)\n");
+        reply(fd, "err unknown (dump|type <s>|enter|ctrlc|key <hex>|shot <path>|winsize <w> <h>|quit)\n");
     }
 }

@@ -66,4 +66,19 @@ pub const Session = struct {
     pub fn write(self: *Session, bytes: []const u8) void {
         self.pty.writeMaster(bytes) catch {};
     }
+
+    /// Resize the emulator (reflow included) and tell the child via
+    /// TIOCSWINSZ. Any-thread safe.
+    pub fn resize(self: *Session, cols: u16, rows: u16, cell_w: u32, cell_h: u32) void {
+        self.mutex.lock();
+        self.term.resize(self.gpa, .{
+            .cols = cols,
+            .rows = rows,
+            .cell_size_px = .{ .width = cell_w, .height = cell_h },
+        }) catch |err| {
+            std.debug.print("rookz: terminal resize failed: {}\n", .{err});
+        };
+        self.mutex.unlock();
+        self.pty.setSize(.{ .ws_row = rows, .ws_col = cols }) catch {};
+    }
 };

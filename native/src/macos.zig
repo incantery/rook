@@ -17,6 +17,11 @@ const MTLClearColor = extern struct { r: f64, g: f64, b: f64, a: f64 };
 extern "c" fn MTLCreateSystemDefaultDevice() objc.c.id;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 
+// libdispatch, for hopping to the main thread from the ctl socket.
+// dispatch_get_main_queue() is a macro for &_dispatch_main_q.
+extern "c" var _dispatch_main_q: u8;
+extern "c" fn dispatch_async_f(queue: *anyopaque, ctx: ?*anyopaque, work: *const fn (?*anyopaque) callconv(.c) void) void;
+
 // CVDisplayLink (CoreVideo). Deprecated in recent macOS but present and the
 // simplest C-callable frame clock; swap for CAMetalDisplayLink later.
 const CVDisplayLinkRef = ?*anyopaque;
@@ -36,6 +41,7 @@ fn nsString(s: [*:0]const u8) objc.Object {
 }
 
 const MonitorBlock = objc.Block(struct { app: *App }, .{objc.c.id}, objc.c.id);
+const ResizeBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -51,6 +57,8 @@ pub const App = struct {
     rows: u32,
     frame_count: std.atomic.Value(u64) = .init(0),
     activate: bool = true,
+    pending_w: f64 = 0,
+    pending_h: f64 = 0,
 
     // ctl `shot` handoff: the socket thread stores a path and flips the
     // flag; the render thread services it after the next commit.
@@ -107,6 +115,7 @@ pub const App = struct {
             .msgSend(objc.Object, "initWithFrame:", .{rect});
         view.msgSend(void, "setWantsLayer:", .{true});
         view.msgSend(void, "setLayer:", .{layer.value});
+        view.msgSend(void, "setPostsFrameChangedNotifications:", .{true});
         window.msgSend(void, "setContentView:", .{view.value});
 
         // Retina: drawable size in pixels, not points.
@@ -159,6 +168,19 @@ pub const App = struct {
             &block_ctx,
         });
 
+        // Resize: view frame changes retarget the drawable, the grid, the
+        // emulator (reflow) and the pty. Runs on the main thread.
+        var resize_ctx = ResizeBlock.init(.{ .app = self }, &resizeCallback);
+        const center = objc.getClass("NSNotificationCenter").?
+            .msgSend(objc.Object, "defaultCenter", .{});
+        const view = self.window.msgSend(objc.Object, "contentView", .{});
+        _ = center.msgSend(objc.Object, "addObserverForName:object:queue:usingBlock:", .{
+            nsString("NSViewFrameDidChangeNotification").value,
+            view.value,
+            @as(objc.c.id, null),
+            &resize_ctx,
+        });
+
         // Frame clock off the main thread.
         var link: CVDisplayLinkRef = null;
         _ = CVDisplayLinkCreateWithActiveCGDisplays(&link);
@@ -166,6 +188,41 @@ pub const App = struct {
         _ = CVDisplayLinkStart(link);
 
         self.app.msgSend(void, "run", .{});
+    }
+
+    /// ctl `winsize`: resize the window from any thread (points, not px).
+    pub fn requestWinSize(self: *App, w: f64, h: f64) void {
+        self.pending_w = w;
+        self.pending_h = h;
+        dispatch_async_f(@ptrCast(&_dispatch_main_q), self, &applyWinSize);
+    }
+
+    fn applyWinSize(ctx: ?*anyopaque) callconv(.c) void {
+        const self: *App = @ptrCast(@alignCast(ctx.?));
+        self.window.msgSend(void, "setContentSize:", .{NSSize{ .width = self.pending_w, .height = self.pending_h }});
+    }
+
+    /// Main thread, on every content-view frame change.
+    pub fn viewResized(self: *App) void {
+        const view = self.window.msgSend(objc.Object, "contentView", .{});
+        if (view.value == null) return;
+        const bounds = view.msgSend(NSRect, "bounds", .{});
+        const scale = self.window.msgSend(f64, "backingScaleFactor", .{});
+        const px_w = bounds.size.width * scale;
+        const px_h = bounds.size.height * scale;
+        if (px_w < 1 or px_h < 1) return;
+
+        // The drawable must track the view in PIXELS or CoreAnimation
+        // scales the framebuffer to fit — the squished-glyph bug.
+        self.layer.msgSend(void, "setContentsScale:", .{scale});
+        self.layer.msgSend(void, "setDrawableSize:", .{NSSize{ .width = px_w, .height = px_h }});
+
+        const cols: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_w)), self.renderer.cell_w)));
+        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)), self.renderer.cell_h)));
+        if (cols == self.cols and rows == self.rows) return;
+        self.cols = cols;
+        self.rows = rows;
+        self.session.resize(cols, rows, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
     }
 
     fn drawFrame(self: *App) void {
@@ -182,9 +239,12 @@ pub const App = struct {
         };
         self.session.mutex.unlock();
 
-        const cols: usize = @min(self.cols, self.rs.cols);
-        const rows: usize = @min(self.rows, self.rs.rows);
+        // The snapshot is the authority on grid dims; during a resize it
+        // may briefly disagree with the drawable, which is fine.
+        const cols: usize = self.rs.cols;
+        var rows: usize = self.rs.rows;
         if (cols == 0 or rows == 0) return;
+        if (cols * rows > self.renderer.cells_cap) rows = self.renderer.cells_cap / cols;
 
         // Fill the GPU cell buffer from the render state.
         const colors = &self.rs.colors;
@@ -358,6 +418,11 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
         }
     }
     return null;
+}
+
+fn resizeCallback(context: *const ResizeBlock.Context, notification: objc.c.id) callconv(.c) void {
+    _ = notification;
+    context.app.viewResized();
 }
 
 fn displayLinkCallback(link: CVDisplayLinkRef, now: ?*const anyopaque, output: ?*const anyopaque, flags_in: u64, flags_out: ?*u64, ctx: ?*anyopaque) callconv(.c) i32 {
