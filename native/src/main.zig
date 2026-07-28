@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "demo")) return demo(init);
     if (std.mem.eql(u8, cmd, "exec")) return exec(init, argv[2..]);
     if (std.mem.eql(u8, cmd, "win")) {
-        var app = try @import("macos.zig").App.init();
+        const app = try @import("macos.zig").App.create(init);
         app.run();
         return;
     }
