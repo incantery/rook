@@ -234,6 +234,9 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         }
         app.clickAt(x, y);
         reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "close") and rest.len == 0) {
+        app.closeFocused(); // \u2318W's path
+        reply(fd, "ok\n");
     } else if (std.mem.eql(u8, verb, "drag")) {
         // Full gesture: down at (x1,y1), drag to (x2,y2), up.
         var it = std.mem.tokenizeScalar(u8, rest, ' ');

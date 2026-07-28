@@ -28,6 +28,7 @@ const MTLClearColor = extern struct { r: f64, g: f64, b: f64, a: f64 };
 
 extern "c" fn MTLCreateSystemDefaultDevice() objc.c.id;
 extern "c" fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *anyopaque, buffersize: c_int) c_int;
+extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 const PROC_PIDVNODEPATHINFO: c_int = 9;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn _exit(code: c_int) noreturn;
@@ -732,6 +733,25 @@ pub const App = struct {
             },
             .edit => |ed| ed.key(bytes),
         }
+    }
+
+    /// Close the focused pane (⌘W): a terminal gets SIGHUP (the
+    /// shell exits and the normal reap collapses the pane); an editor
+    /// takes :q semantics — unsaved changes refuse with a status
+    /// message (:q! or :wq inside the editor to force).
+    pub fn closeFocused(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        switch (self.activeTab().focused.content) {
+            .term => |*tm| _ = kill(tm.session.pid, 1), // SIGHUP
+            .edit => |ed| {
+                if (ed.buf.modified) {
+                    ed.setStatusUnsaved();
+                } else ed.closed = true;
+                ed.render_dirty = true;
+            },
+        }
+        self.scene_dirty = true;
     }
 
     /// Enter tmux-style copy mode on the focused terminal pane.
@@ -1496,6 +1516,10 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                     // ⌘1–9 select tab, ⌘⇧[ / ⌘⇧] cycle.
                     'c' => {
                         if (app.copyFocused()) |t| app.gpa.free(t);
+                        return null;
+                    },
+                    'w' => {
+                        app.closeFocused();
                         return null;
                     },
                     'd' => {

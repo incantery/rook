@@ -932,6 +932,11 @@ pub const Editor = struct {
         self.cursorToOffset(at + self.reg.items.len - 1);
     }
 
+    /// The :q refusal, callable from the app's ⌘W path.
+    pub fn setStatusUnsaved(self: *Editor) void {
+        self.setStatus("unsaved changes (:w first, or :q! to discard)", .{}, true);
+    }
+
     /// Wheel scroll: move the viewport, dragging the cursor along only
     /// when it would leave the view (vim's scroll feel). Positive =
     /// down (later lines).
