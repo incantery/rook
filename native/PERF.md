@@ -96,6 +96,14 @@ noise. Editor keystrokes ride the same key→photon instrument (8.3ms
 p50 observed mid-session); an editor pane's echo is synchronous, so
 its dirty frame consumes the mark exactly like a pty echo.
 
+Seventh re-run — the TODO.md sweep (2026-07-28 night: faint SGR 2,
+cwd inheritance, mouse click/wheel/drag-selection, viewport scrollback
++ copy mode, themes/Nocturne, background-opacity): cat **0.884s**
+(new best), fill p50 39µs, idle 0 frames. The selection-range check
+and default-bg alpha branch in fillPane are noise. Transparency is
+config-gated because a non-opaque layer forfeits direct scan-out —
+the ~5-7ms fullscreen present-lag win stays default.
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,

@@ -178,6 +178,12 @@ pub const App = struct {
     /// Wheel accumulator (points); one scroll step per cell height.
     wheel_accum: f64 = 0,
 
+    /// Background alpha (255 = opaque). <255 means the layer/window
+    /// went non-opaque at create: default backgrounds and the clear
+    /// color carry this alpha; explicit cell colors stay solid.
+    bg_alpha: u8 = 255,
+    bg_opacity: f64 = 1.0,
+
     /// Active mouse-drag selection: the pane and its anchor cell
     /// (viewport coords at mousedown). Under draw_lock; cleared by
     /// reap if the pane dies mid-drag.
@@ -242,8 +248,10 @@ pub const App = struct {
         layer.msgSend(void, "setFramebufferOnly:", .{false});
         // Opaque is a hard requirement for direct-to-display scan-out —
         // a non-opaque layer always goes through the compositor. The
-        // present_lag ring is the detector: ~12ms composited, ~4ms direct.
-        layer.msgSend(void, "setOpaque:", .{true});
+        // present_lag ring is the detector: ~12ms composited, ~4ms
+        // direct. background-opacity < 1 knowingly trades that away.
+        const opaque_bg = cfg.background_opacity >= 1.0;
+        layer.msgSend(void, "setOpaque:", .{opaque_bg});
 
         const rect = NSRect{ .origin = .{ .x = 0, .y = 0 }, .size = .{ .width = win_w, .height = win_h } };
         // titled | closable | miniaturizable | resizable = 15
@@ -254,6 +262,12 @@ pub const App = struct {
         window.msgSend(void, "setTitle:", .{nsString("rookz")});
         window.msgSend(void, "center", .{});
         window.msgSend(void, "setReleasedWhenClosed:", .{false});
+        if (!opaque_bg) {
+            window.msgSend(void, "setOpaque:", .{false});
+            const clear = objc.getClass("NSColor").?.msgSend(objc.Object, "clearColor", .{});
+            window.msgSend(void, "setBackgroundColor:", .{clear.value});
+            std.debug.print("rookz: background-opacity {d:.2} — compositor path (direct scan-out off)\n", .{cfg.background_opacity});
+        }
 
         const view = objc.getClass("NSView").?
             .msgSend(objc.Object, "alloc", .{})
@@ -304,6 +318,8 @@ pub const App = struct {
             .sep = @floatCast(@max(1.0, @round(scale))),
             .bar_h = bar_h,
             .tab_h = bar_h,
+            .bg_opacity = cfg.background_opacity,
+            .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
         };
         try self.tabs.append(gpa, tab_one);
         self.focused_session.store(session, .release);
@@ -1037,10 +1053,10 @@ pub const App = struct {
         attachment.msgSend(void, "setLoadAction:", .{@as(u64, 2)});
         attachment.msgSend(void, "setStoreAction:", .{@as(u64, 1)});
         attachment.msgSend(void, "setClearColor:", .{MTLClearColor{
-            .r = @as(f64, @floatFromInt(clear_bg.r)) / 255.0,
-            .g = @as(f64, @floatFromInt(clear_bg.g)) / 255.0,
-            .b = @as(f64, @floatFromInt(clear_bg.b)) / 255.0,
-            .a = 1.0,
+            .r = @as(f64, @floatFromInt(clear_bg.r)) / 255.0 * self.bg_opacity,
+            .g = @as(f64, @floatFromInt(clear_bg.g)) / 255.0 * self.bg_opacity,
+            .b = @as(f64, @floatFromInt(clear_bg.b)) / 255.0 * self.bg_opacity,
+            .a = self.bg_opacity,
         }});
 
         const size = self.layer.msgSend(NSSize, "drawableSize", .{});
@@ -1056,7 +1072,7 @@ pub const App = struct {
                 .term => |*tm| tm.rs.colors.background,
                 .edit => rgb4(th.ed_bg),
             };
-            self.renderer.drawRect(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.rect.w, p.rect.h, .{ bg.r, bg.g, bg.b, 255 });
+            self.renderer.drawRect(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.rect.w, p.rect.h, .{ bg.r, bg.g, bg.b, self.bg_alpha });
         }
         for (atab.panes.items) |p| {
             if (p.drawn_cols == 0) continue;
@@ -1303,9 +1319,16 @@ pub const App = struct {
                 const styled = raw.style_id != 0;
                 const st: vt.Style = if (styled) styles[x] else .{};
 
-                var bg = st.bg(raw, &colors.palette) orelse default_bg;
+                var bg_explicit = true;
+                var bg = st.bg(raw, &colors.palette) orelse blk: {
+                    bg_explicit = false;
+                    break :blk default_bg;
+                };
                 if (row_sels[y]) |sr| {
-                    if (x >= sr[0] and x <= sr[1]) bg = .{ .r = th.sel_bg[0], .g = th.sel_bg[1], .b = th.sel_bg[2] };
+                    if (x >= sr[0] and x <= sr[1]) {
+                        bg = .{ .r = th.sel_bg[0], .g = th.sel_bg[1], .b = th.sel_bg[2] };
+                        bg_explicit = true;
+                    }
                 }
                 var fg = st.fg(.{ .default = default_fg, .palette = &colors.palette });
                 // Faint (SGR 2) is the renderer's job like inverse:
@@ -1372,8 +1395,9 @@ pub const App = struct {
                 const eff_bg = if (inv) fg else bg;
                 const eff_fg = if (styled and st.flags.invisible) eff_bg else if (inv) bg else fg;
 
+                const cell_a: u8 = if (bg_explicit or inv) 255 else self.bg_alpha;
                 cells[y * cols + x] = .{
-                    .bg = .{ eff_bg.r, eff_bg.g, eff_bg.b, 255 },
+                    .bg = .{ eff_bg.r, eff_bg.g, eff_bg.b, cell_a },
                     .fg = .{ eff_fg.r, eff_fg.g, eff_fg.b, 255 },
                     .uvx = uvx,
                     .uvy = uvy,
@@ -1391,6 +1415,7 @@ pub const App = struct {
         for (g, 0..) |rc, i| {
             const status_row = rows >= 1 and i >= (rows - 1) * cols;
             var bg: [4]u8 = if (status_row) th.chip_active_bg else th.ed_bg;
+            if (!status_row) bg[3] = self.bg_alpha;
             var fg: [4]u8 = switch (rc.st) {
                 .text => if (status_row) th.bar_value else th.ed_fg,
                 .dim => if (status_row) th.bar_fg else th.ed_dim,

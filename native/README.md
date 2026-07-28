@@ -116,7 +116,9 @@ shell output, remember lines WRAP at the pane width (a 15-second
 "stall" was once just `total` split into `t`/`otal`).
 
 `shot` reads back our own CAMetalLayer drawable — no screen-recording
-permission, works occluded or on another Space. `dump` and `shot` are
+permission, works occluded or on another Space. Its PNG flattens the
+alpha channel (png.zig writes BGRX), so background-opacity can't be
+verified from a shot — the startup log line is the observable. `dump` and `shot` are
 different truths: dump is what the emulator holds, shot is what the
 renderer did with it. The atlas-flip bug (day two) was invisible to dump
 and obvious in shot; keep both in every verification.
@@ -132,6 +134,9 @@ file = defaults. Unknown keys warn on stderr.
 font-size = 13
 font-family = "FiraCode Nerd Font Mono"
 theme = "nocturne"       # builtin themes: default, nocturne
+background-opacity = 0.9 # <1 = translucent window; OPTS OUT of
+                         # direct scan-out (~+5ms present lag) —
+                         # perf tradeoff on purpose, default 1.0
 ```
 
 Themes color everything at once — emulator defaults + ANSI 16,

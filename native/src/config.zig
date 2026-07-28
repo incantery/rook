@@ -13,6 +13,10 @@ pub const Config = struct {
     font_family: [:0]const u8 = "FiraCode Nerd Font Mono",
     /// Builtin theme name (theme.zig); unknown names warn + default.
     theme: []const u8 = "default",
+    /// 1.0 = opaque. Anything lower forfeits direct-to-display
+    /// scan-out (the compositor takes over: ~+5ms present lag
+    /// fullscreen) — measured tradeoff, opt-in on purpose.
+    background_opacity: f64 = 1.0,
 };
 
 pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
@@ -60,13 +64,19 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
             if (stripped.len > 0) {
                 cfg.font_family = gpa.dupeZ(u8, stripped) catch cfg.font_family;
             }
+        } else if (std.mem.eql(u8, key, "background_opacity")) {
+            cfg.background_opacity = std.fmt.parseFloat(f64, val) catch 1.0;
+            if (cfg.background_opacity < 0.3 or cfg.background_opacity > 1.0) {
+                std.debug.print("rookz config: background-opacity {d} out of [0.3, 1.0], using 1.0\n", .{cfg.background_opacity});
+                cfg.background_opacity = 1.0;
+            }
         } else if (std.mem.eql(u8, key, "theme")) {
             const stripped = std.mem.trim(u8, val, "\"");
             if (stripped.len > 0) {
                 cfg.theme = gpa.dupe(u8, stripped) catch cfg.theme;
             }
         } else {
-            std.debug.print("rookz config: unknown key '{s}' (known: font-size, font-family, theme)\n", .{key_raw});
+            std.debug.print("rookz config: unknown key '{s}' (known: font-size, font-family, theme, background-opacity)\n", .{key_raw});
         }
     }
 
