@@ -54,16 +54,23 @@ if [ ! -d "$bindir" ] || [ ! -w "$bindir" ]; then
     bindir="$HOME/.local/bin"
     mkdir -p "$bindir"
 fi
+# A real copy, not a link into the bundle: `rookctl update` resolves
+# symlinks and writes over what it finds, and rewriting a binary inside
+# the signed bundle would invalidate its signature.
 install -m 0755 "$tmp/stage/rookctl" "$bindir/rookctl"
-# `re` — the editor shim (rookctl edit by its short name)
-ln -sf "$bindir/rookctl" "$bindir/re"
+# `rook` is the app AND the CLI — verbs it doesn't own it hands to the
+# rookctl inside the bundle. `re` is `rook edit` by argv[0]; the name
+# used to belong to rookctl, and the zig editor claimed it.
+ln -sf /Applications/rook.app/Contents/MacOS/rook "$bindir/rook"
+ln -sf /Applications/rook.app/Contents/MacOS/rook "$bindir/re"
 
 echo "installed rook $tag"
-echo "  rookctl → $bindir/rookctl"
+echo "  rook    → $bindir/rook (the app, and the CLI)"
 echo "  re      → $bindir/re (the editor: re [file…])"
+echo "  rookctl → $bindir/rookctl"
 case ":$PATH:" in
     *":$bindir:"*) ;;
-    *) echo "  note: $bindir is not on your PATH — add it to use rookctl" ;;
+    *) echo "  note: $bindir is not on your PATH — add it to use rook" ;;
 esac
 [ -n "$was_running" ] && echo "  rook was running — quit + relaunch to pick up $tag"
 echo

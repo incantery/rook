@@ -18,7 +18,7 @@ APP := /Applications/rook.app
 BUILD := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit).$(shell date +%Y%m%d%H%M%S)
 BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 
-.PHONY: build start dev prod dev-web package install install-web clean agent release e2e e2e-clean
+.PHONY: build start dev prod dev-web package install install-web clean agent release release-stage e2e e2e-clean
 
 build:
 	wails3 task build
@@ -40,9 +40,9 @@ start: build
 # worktree.go checkouts) — else dev shares the daily driver's rook.db, so
 # its workspaces, verdict ledger, threads, and cost totals would pollute the
 # real ones, and worktrees would land in the shared tree.
-# On this branch (rook/zig), dev is the NATIVE experiment: build and run
-# rookz, the Zig app in native/. The webview dev instance survives as
-# dev-web for side-by-side comparisons (the latency A/B needs both).
+# dev builds and runs the Zig app in native/ — which IS rook now. The
+# webview dev instance survives as dev-web for side-by-side comparisons
+# (the latency A/B needs both).
 #
 # dev  = Debug: fast compiles, slow binary (ghostty-vt parses ~100x
 #        slower — fine for typing, do NOT judge firehose/cat here).
@@ -51,12 +51,15 @@ start: build
 #        alternating dev/prod doesn't rebuild ghostty-vt each time.
 # Both use their own ctl socket: the server unlinks-then-binds, so a
 # second default-socket instance would STEAL the installed app's
-# /tmp/rookz.sock out from under it.
+# /tmp/rook.sock out from under it. They also get their own XDG_STATE_HOME,
+# so the daemon a dev instance spawns — and kills on quit — is never the
+# installed app's.
+DEV_ENV = ROOK_SOCK=/tmp/rook-dev.sock XDG_STATE_HOME=$(HOME)/.local/state/rook-dev
 dev:
-	cd native && zig build && ROOKZ_SOCK=/tmp/rookz-dev.sock ./zig-out/bin/rookz win
+	cd native && zig build && $(DEV_ENV) ./zig-out/bin/rook win
 
 prod:
-	cd native && zig build -Doptimize=ReleaseFast && ROOKZ_SOCK=/tmp/rookz-dev.sock ./zig-out/bin/rookz win
+	cd native && zig build -Doptimize=ReleaseFast && $(DEV_ENV) ./zig-out/bin/rook win
 
 # The daily driver: the ZIG app as /Applications/rook.app. ReleaseFast,
 # minimal hand-rolled bundle, ad-hoc signed, ctl socket on the default
@@ -96,7 +99,11 @@ install:
 	@# `rookctl mcp` and `rookctl claim` BY NAME, and an installed plugin
 	@# breaking mid-session is not an acceptable cutover cost. It goes
 	@# when the plugin has moved to `rook`.
-	ln -sf $(APP)/Contents/MacOS/rookctl $(HOME)/.local/bin/rookctl
+	@# A COPY, not a symlink: selfupdate.Apply EvalSymlinks's the running
+	@# rookctl and writes over what it resolves to, so a link into the
+	@# bundle would make `rookctl update` rewrite a sealed binary and
+	@# invalidate the app's signature.
+	install -m 0755 native/zig-out/bin/rookctl $(HOME)/.local/bin/rookctl
 	@echo "installed $(APP) (v$(REL_VERSION), build $(BUILD)) + ~/.local/bin/{rook,re,rookctl}"
 	@echo "quit + relaunch rook to pick it up"
 
@@ -173,27 +180,58 @@ clean: e2e-clean
 # (curl → no quarantine → no Gatekeeper prompt on our ad-hoc signature)
 # and upgrade with `rookctl update`. rook-agent is not shipped yet — the
 # drafter stays a from-source feature until it settles.
+#
+# The bundle is the ZIG app: `rook` plus the two Go binaries it resolves
+# beside its own executable (hostc.siblingBinary), assembled here rather
+# than by wails3. The zip's SHAPE is unchanged — rook.app + a rookctl at
+# the top level — because install.sh and internal/selfupdate both read
+# it, and keeping their contract is what let the app underneath change
+# without touching the upgrade path.
 DIST := bin/dist
 RELEASE_ZIP = rook-$(VERSION)-darwin-arm64.zip
 VERSION_FLAG = -X github.com/incantery/rook/internal/version.Version=$(VERSION)
+STAGE = $(DIST)/stage
+STAGED_APP = $(STAGE)/rook.app
+GO_RELEASE = go build -tags production -trimpath -ldflags "-w -s $(VERSION_FLAG) $(BUILD_FLAG)"
 
 release:
 	@test -n "$(VERSION)" || { echo "usage: make release VERSION=v0.1.0"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "working tree dirty — commit first (the tag must match the build)"; exit 1; }
-	rm -rf bin/rook.app $(DIST)
-	wails3 task package VERSION=$(VERSION) BUILD=$(BUILD)
-	mkdir -p $(DIST)/stage
-	cp -R bin/rook.app $(DIST)/stage/
-	go build -tags production -trimpath -ldflags "-w -s $(VERSION_FLAG) $(BUILD_FLAG)" -o $(DIST)/stage/rookctl ./cmd/rookctl
-	@# `re` is rookctl by another name (argv[0] dispatch → edit); ditto -c -k
-	@# preserves the symlink through the zip
-	ln -sf rookctl $(DIST)/stage/re
-	@# ditto -c -k, not zip: preserves xattrs and the ad-hoc signature exactly
-	ditto -c -k $(DIST)/stage $(DIST)/$(RELEASE_ZIP)
-	cd $(DIST) && shasum -a 256 $(RELEASE_ZIP) > checksums.txt
+	$(MAKE) release-stage VERSION=$(VERSION)
 	git tag -a $(VERSION) -m "rook $(VERSION)"
 	git push origin main $(VERSION)
 	gh release create $(VERSION) $(DIST)/$(RELEASE_ZIP) $(DIST)/checksums.txt --title "rook $(VERSION)" --generate-notes
+
+# Everything up to the zip, with nothing irreversible in it — so the
+# packaging can be exercised without tagging or publishing:
+#   make release-stage VERSION=v0.38.0 && ditto -x -k bin/dist/*.zip /tmp/x
+release-stage:
+	@test -n "$(VERSION)" || { echo "usage: make release-stage VERSION=v0.1.0"; exit 1; }
+	rm -rf bin/rook.app $(DIST)
+	@# The app. -Dversion drops the leading v: CFBundleShortVersionString
+	@# has to be a dotted number, and XTVERSION reports it too.
+	cd native && zig build -Doptimize=ReleaseFast -Dbuild=$(BUILD) -Dversion=$(VERSION:v%=%)
+	$(GO_RELEASE) -o native/zig-out/bin/rook-host ./cmd/rook-host
+	$(GO_RELEASE) -o native/zig-out/bin/rookctl ./cmd/rookctl
+	mkdir -p $(STAGED_APP)/Contents/MacOS
+	sed 's/__VERSION__/$(VERSION:v%=%)/g' native/bundle/Info.plist > $(STAGED_APP)/Contents/Info.plist
+	cp native/zig-out/bin/rook $(STAGED_APP)/Contents/MacOS/rook
+	cp native/zig-out/bin/rook-host $(STAGED_APP)/Contents/MacOS/rook-host
+	cp native/zig-out/bin/rookctl $(STAGED_APP)/Contents/MacOS/rookctl
+	@# Sign the BUNDLE last — the seal covers the nested binaries, so
+	@# anything that rewrites one afterwards invalidates it.
+	codesign -s - --force $(STAGED_APP)
+	@# rookctl at the top level is what install.sh copies to the user's
+	@# PATH and what selfupdate swaps the running one with. Same build,
+	@# a second copy on purpose: the bundle's is sealed.
+	cp native/zig-out/bin/rookctl $(STAGE)/rookctl
+	@# No `re` symlink here any more — `re` is `rook edit` now, and
+	@# install.sh points it at the app binary inside the bundle.
+	@# ditto -c -k, not zip: preserves xattrs and the ad-hoc signature exactly
+	ditto -c -k $(STAGE) $(DIST)/$(RELEASE_ZIP)
+	cd $(DIST) && shasum -a 256 $(RELEASE_ZIP) > checksums.txt
+	@# No backticks in this message: the shell would run what is in them.
+	@echo "staged $(DIST)/$(RELEASE_ZIP) — 'make release VERSION=$(VERSION)' tags and publishes"
 
 # Regenerate the copied edge protocol (proto/rook/edge/v1 — rook-cloud
 # is the source of truth; re-copy its proto first when the contract
