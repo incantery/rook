@@ -18,7 +18,7 @@ APP := /Applications/rook.app
 BUILD := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit).$(shell date +%Y%m%d%H%M%S)
 BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 
-.PHONY: build start dev dev-web package install clean agent release e2e e2e-clean
+.PHONY: build start dev prod dev-web package install clean agent release e2e e2e-clean
 
 build:
 	wails3 task build
@@ -43,8 +43,17 @@ start: build
 # On this branch (rook/zig), dev is the NATIVE experiment: build and run
 # rookz, the Zig app in native/. The webview dev instance survives as
 # dev-web for side-by-side comparisons (the latency A/B needs both).
+#
+# dev  = Debug: fast compiles, slow binary (ghostty-vt parses ~100x
+#        slower — fine for typing, do NOT judge firehose/cat here).
+# prod = ReleaseFast: the binary the scoreboard measures (native/PERF.md,
+#        same mode bench.sh builds). Zig caches per optimize mode, so
+#        alternating dev/prod doesn't rebuild ghostty-vt each time.
 dev:
 	cd native && zig build && ./zig-out/bin/rookz win
+
+prod:
+	cd native && zig build -Doptimize=ReleaseFast && ./zig-out/bin/rookz win
 
 dev-web:
 	XDG_STATE_HOME=$(HOME)/.local/state/rook-dev \
