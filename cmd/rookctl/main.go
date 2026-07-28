@@ -565,10 +565,17 @@ func runUpdate(args []string) error {
 		fmt.Printf("update available: %s → %s (rookctl update to install)\n", cur, rel.Tag)
 		return nil
 	}
-	// A dev install is `make install` output — newer than any release, and
-	// blindly "updating" it would roll the daily driver back.
+	// A dev install is `make install` output from a tree that is ahead of
+	// the last tag (or dirty) — NEWER than any release, so there is
+	// nothing to update to and "updating" would be a downgrade. Say that,
+	// rather than reporting it as a blocked upgrade: the old wording read
+	// as "you are behind and I won't fix it", which is the opposite of
+	// what is true.
 	if cur == "dev" && !force {
-		return fmt.Errorf("this is a dev build; latest release is %s — rookctl update --force to overwrite it", rel.Tag)
+		return fmt.Errorf(
+			"nothing to update: this is a source build (%s), ahead of the latest release %s\n"+
+				"  `rook update --force` would DOWNGRADE it to %s",
+			version.Build, rel.Tag, rel.Tag)
 	}
 	fmt.Printf("updating %s → %s…\n", cur, rel.Tag)
 	if err := selfupdate.Apply(rel); err != nil {

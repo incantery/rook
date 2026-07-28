@@ -72,13 +72,25 @@ prod:
 # own executable first (hostc.siblingBinary), so a bundle without them
 # is an app that cannot start a daemon or answer a CLI verb.
 #
-# Version: the newest tag, since Info.plist's CFBundleVersion has to be
-# a dotted number and `rookctl update` compares against it.
+# TWO version strings, because they answer different questions.
+#
+# REL_VERSION is the newest tag, dotted: Info.plist's CFBundleVersion has
+# to be a number, so this is always one.
+#
+# VERSION_STAMP is what `rookctl update` compares, and it is the exact
+# tag ONLY when this tree is clean and sitting on one. Anything else —
+# ahead of the tag, or dirty — stamps "dev", which is the string that
+# makes `rookctl update` refuse rather than "upgrade" a source build
+# backwards into the last release. NewerThan is string inequality, so a
+# `git describe` suffix like v0.38.1-3-gabc would read as "not the
+# latest" and roll the daily driver back; "dev" is the guard.
 REL_VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0)
+VERSION_STAMP := $(shell test -z "$$(git status --porcelain)" && git describe --tags --exact-match 2>/dev/null || echo dev)
+STAMP_FLAGS = $(BUILD_FLAG) -X github.com/incantery/rook/internal/version.Version=$(VERSION_STAMP)
 install:
 	cd native && zig build -Doptimize=ReleaseFast -Dbuild=$(BUILD) -Dversion=$(REL_VERSION)
-	go build -ldflags "$(BUILD_FLAG)" -o native/zig-out/bin/rook-host ./cmd/rook-host
-	go build -ldflags "$(BUILD_FLAG)" -o native/zig-out/bin/rookctl ./cmd/rookctl
+	go build -ldflags "$(STAMP_FLAGS)" -o native/zig-out/bin/rook-host ./cmd/rook-host
+	go build -ldflags "$(STAMP_FLAGS)" -o native/zig-out/bin/rookctl ./cmd/rookctl
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS
 	sed 's/__VERSION__/$(REL_VERSION)/g' native/bundle/Info.plist > $(APP)/Contents/Info.plist
