@@ -19,9 +19,12 @@ A status bar sits under the panes — tenant one of `src/ui.zig`, the
 seed of rook's own UI layer (immediate-mode quads + text runs from the
 same pipelines/atlases as the grid; widgets are never their own draw
 paths). Left: pane count + focused id. Right: the live perf HUD —
-key→photon p50, active fps, MB/s, RSS — the instrument wearing a face.
+key→photon p50, fps, MB/s, RSS — the instrument wearing a face.
 It refreshes at 2Hz but draws only when the text changes, so the
-zero-idle-frames row on the scoreboard still holds.
+zero-idle-frames row on the scoreboard still holds. The fps number is
+CAPABILITY: the display's rate, dipping only when measured frame cost
+can't fit the vsync budget — demand pacing (dirty-skip drawing less
+because less happened) never reads as lag.
 
 ```
 zig build                    # needs zig 0.16

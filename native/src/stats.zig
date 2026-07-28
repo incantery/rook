@@ -58,8 +58,12 @@ pub const Stats = struct {
     frame_update: Ring = .{},
     /// Per drawn frame: cell-buffer fill (incl. lazy glyph rasterization).
     frame_fill: Ring = .{},
-    /// Per drawn frame: encoder setup + draw calls + commit.
+    /// Per drawn frame: encoder setup + draw calls + commit — measured
+    /// from drawable ACQUISITION, so backpressure never reads as cost.
     frame_encode: Ring = .{},
+    /// Per drawn frame: nextDrawable wait. Backpressure/pacing, not
+    /// work — kept out of frame_encode so capability math stays honest.
+    drawable_wait: Ring = .{},
     /// GPU execution time per command buffer (GPUEndTime - GPUStartTime).
     frame_gpu: Ring = .{},
     /// Interval between consecutive presented frames (only frames we drew;
@@ -77,6 +81,7 @@ pub const Stats = struct {
         self.frame_update.reset();
         self.frame_fill.reset();
         self.frame_encode.reset();
+        self.drawable_wait.reset();
         self.frame_gpu.reset();
         self.present_interval.reset();
         self.bytes_in.store(0, .monotonic);
@@ -111,6 +116,7 @@ pub fn writeReport(w: *std.Io.Writer) !void {
         .{ .name = "frame_update_us", .ring = &s.frame_update },
         .{ .name = "frame_fill_us", .ring = &s.frame_fill },
         .{ .name = "frame_encode_us", .ring = &s.frame_encode },
+        .{ .name = "drawable_wait_us", .ring = &s.drawable_wait },
         .{ .name = "frame_gpu_us", .ring = &s.frame_gpu },
         .{ .name = "present_interval_us", .ring = &s.present_interval },
     };

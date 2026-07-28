@@ -64,6 +64,14 @@ quiet-key p50), and present_interval now drops >500ms gaps (pacing,
 not idleness — the ring used to swallow idle stretches as fake slow
 frames).
 
+Third re-run — fps semantics + drawable_wait split (same day): cat
+**0.893s** (best yet), firehose encode p50 33µs. nextDrawable
+backpressure (p50 4.8ms when demand-paced, ~0 when saturated) now has
+its own ring instead of polluting frame_encode — it's pacing, not
+work. Quiet-key p50 wobbles run-to-run (16.6/16.9/21.4 across today)
+while p95 holds ~26.5; likely the 80ms key cadence beating against
+the 8.33ms vsync phase — WATCH, don't average away.
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,
@@ -92,5 +100,7 @@ Kitty 1.7s.
   (rook benches at 405×113) before quoting numbers publicly.
 - No same-machine A/B against Ghostty yet — `time cat` in both is the
   honest first comparison.
-- The HUD's fps number freezes at the last active pacing when idle
-  (the ring stops recording) — read it as "when drawing, this fast".
+- The HUD's fps is CAPABILITY, not cadence: it shows the display's
+  rate unless typical frame cost (max of CPU-side p50s and GPU p50)
+  exceeds the vsync budget — dirty-skip demand pacing must never read
+  as lag (Seth's rule). A dip on the bar means a user would feel it.

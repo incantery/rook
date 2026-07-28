@@ -39,6 +39,7 @@ const CVDisplayLinkRef = ?*anyopaque;
 extern "c" fn CVDisplayLinkCreateWithActiveCGDisplays(out: *CVDisplayLinkRef) i32;
 extern "c" fn CVDisplayLinkSetOutputCallback(link: CVDisplayLinkRef, cb: *const fn (CVDisplayLinkRef, ?*const anyopaque, ?*const anyopaque, u64, ?*u64, ?*anyopaque) callconv(.c) i32, ctx: ?*anyopaque) i32;
 extern "c" fn CVDisplayLinkStart(link: CVDisplayLinkRef) i32;
+extern "c" fn CVDisplayLinkGetActualOutputVideoRefreshPeriod(link: CVDisplayLinkRef) f64;
 
 const NSEventMaskKeyDown: u64 = 1 << 10;
 const flag_shift: u64 = 1 << 17;
@@ -99,6 +100,13 @@ pub const App = struct {
     hud_last_t: f64 = 0,
     hud_last_bytes: u64 = 0,
     hud_mbs: f64 = 0,
+
+    // fps truth: the display link's refresh period is the ceiling the
+    // HUD shows optimistically; it dips only when measured FRAME COST
+    // exceeds the vsync budget (capability, not demand — dirty-skip
+    // gaps must never read as lag).
+    link: CVDisplayLinkRef = null,
+    display_period_us: f64 = 0,
 
     /// Focused pane's session, readable without draw_lock (the input
     /// kick compares pointers only — never dereferences).
@@ -271,6 +279,7 @@ pub const App = struct {
         _ = CVDisplayLinkCreateWithActiveCGDisplays(&link);
         _ = CVDisplayLinkSetOutputCallback(link, &displayLinkCallback, self);
         _ = CVDisplayLinkStart(link);
+        self.link = link;
 
         self.app.msgSend(void, "run", .{});
     }
@@ -497,6 +506,10 @@ pub const App = struct {
 
         const drawable = self.layer.msgSend(objc.Object, "nextDrawable", .{});
         if (drawable.value == null) return;
+        // Backpressure (waiting for a free drawable) is pacing, not
+        // work — its own ring, so the fps capability math stays honest.
+        const t_acquired = CACurrentMediaTime();
+        stats.global.drawable_wait.recordSeconds(t_acquired - t_fill);
 
         const focused_colors = &self.focused.rs.colors;
         const clear_bg = focused_colors.background;
@@ -563,7 +576,7 @@ pub const App = struct {
         cmd.msgSend(void, "commit", .{});
 
         const t_commit = CACurrentMediaTime();
-        stats.global.frame_encode.recordSeconds(t_commit - t_fill);
+        stats.global.frame_encode.recordSeconds(t_commit - t_acquired);
         _ = stats.global.frames_drawn.fetchAdd(1, .monotonic);
         if (focused_dirty) {
             const mark = self.input_mark.load(.acquire);
@@ -579,6 +592,16 @@ pub const App = struct {
         }
     }
 
+    /// The display's refresh period in µs (the fps ceiling). Queried
+    /// lazily — the link reports 0 before its first tick.
+    fn displayPeriodUs(self: *App) f64 {
+        if (self.display_period_us <= 0 and self.link != null) {
+            const p = CVDisplayLinkGetActualOutputVideoRefreshPeriod(self.link);
+            if (p > 0) self.display_period_us = p * 1e6;
+        }
+        return if (self.display_period_us > 0) self.display_period_us else 8333;
+    }
+
     /// Recompute the status-bar text; flip scene_dirty only when it
     /// changed. Caller holds draw_lock.
     fn refreshHudLocked(self: *App, now: f64) void {
@@ -590,8 +613,24 @@ pub const App = struct {
         self.hud_last_bytes = bytes;
 
         const key = stats.global.key_present.summarize();
-        const present = stats.global.present_interval.summarize();
-        const fps: u64 = if (present.p50 > 0) @intFromFloat(@round(1e6 / @as(f64, @floatFromInt(present.p50)))) else 0;
+
+        // Optimistic fps: the display's rate, dipping only when typical
+        // FRAME COST can't fit the vsync budget — the only case a user
+        // would feel as lag. (Seth's call: demand pacing must never
+        // read as a performance problem.) Cost = the slower of the CPU
+        // side (update+fill+encode, lock waits included) and the GPU;
+        // p50s, so a one-off stall doesn't linger as a fake cap.
+        const vsync = self.displayPeriodUs();
+        var fps: u64 = @intFromFloat(@round(1e6 / vsync));
+        const upd = stats.global.frame_update.summarize();
+        const fill = stats.global.frame_fill.summarize();
+        const enc_s = stats.global.frame_encode.summarize();
+        const gpu = stats.global.frame_gpu.summarize();
+        if (upd.n > 0 and gpu.n > 0) {
+            const cpu_cost: f64 = @floatFromInt(upd.p50 + fill.p50 + enc_s.p50);
+            const cost = @max(cpu_cost, @as(f64, @floatFromInt(gpu.p50)));
+            if (cost > vsync) fps = @intFromFloat(@round(1e6 / cost));
+        }
 
         var left: [96]u8 = undefined;
         const l = std.fmt.bufPrint(&left, "rookz · {d} pane{s} · #{d}", .{

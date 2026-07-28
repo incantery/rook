@@ -244,6 +244,18 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         }
         app.requestWinSize(w, h);
         reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, line, "hud")) {
+        app.draw_lock.lock();
+        var buf: [256]u8 = undefined;
+        const out = std.fmt.bufPrint(&buf, "{s} | {s}\n", .{
+            app.hud_left[0..app.hud_left_len],
+            app.hud_right[0..app.hud_right_len],
+        }) catch {
+            app.draw_lock.unlock();
+            return;
+        };
+        app.draw_lock.unlock();
+        reply(fd, out);
     } else if (std.mem.eql(u8, line, "stats")) {
         var buf: [4096]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
