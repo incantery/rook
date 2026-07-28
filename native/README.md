@@ -19,6 +19,13 @@ zero frames (measured: `yes` in a hidden tab, 480 ticks, 1 draw). A
 pane closes when its shell exits, an emptied tab closes, the last tab
 closing quits the app.
 
+Tabs live in a TOP bar (first-class chrome, the wails app's named
+tabs): each chip is " n title " where title is the tab's focused-pane
+OSC 0/2 title straight from the emulator ("shell" until something sets
+one); the active chip gets a lifted background and an accent
+underline. Title changes are caught by the 2Hz HUD digest — OSC
+titles don't dirty the grid, so the digest is what redraws chips.
+
 A status bar sits under the panes — tenant one of `src/ui.zig`, the
 seed of rook's own UI layer (immediate-mode quads + text runs from the
 same pipelines/atlases as the grid; widgets are never their own draw

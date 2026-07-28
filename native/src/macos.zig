@@ -54,6 +54,7 @@ const accent_color: [4]u8 = .{ 122, 162, 247, 255 };
 const bar_bg: [4]u8 = .{ 30, 30, 38, 255 };
 const bar_fg: [4]u8 = .{ 148, 150, 166, 255 };
 const bar_value: [4]u8 = .{ 205, 208, 220, 255 };
+const chip_active_bg: [4]u8 = .{ 48, 50, 62, 255 };
 
 fn nsString(s: [*:0]const u8) objc.Object {
     const NSString = objc.getClass("NSString").?;
@@ -91,6 +92,9 @@ pub const App = struct {
     sep: f32 = 2,
     /// Status bar height in px; panes tile the content area above it.
     bar_h: f32,
+    /// Top tab bar height in px — tabs are first-class chrome (wails
+    /// rook's named tabs), not a corner of the status bar.
+    tab_h: f32,
     /// Layout/focus changed: the next frame redraws even if no pane's
     /// grid is dirty.
     scene_dirty: bool = true,
@@ -102,6 +106,10 @@ pub const App = struct {
     hud_left_len: usize = 0,
     hud_right: [96]u8 = undefined,
     hud_right_len: usize = 0,
+    /// Digest of all tab titles — OSC title changes don't dirty the
+    /// grid, so the 2Hz refresh detects them here and redraws chips.
+    hud_tabs: [160]u8 = undefined,
+    hud_tabs_len: usize = 0,
     hud_last_t: f64 = 0,
     hud_last_bytes: u64 = 0,
     hud_mbs: f64 = 0,
@@ -220,7 +228,7 @@ pub const App = struct {
         const renderer = try renderpkg.Renderer.init(gpa, device, cfg.font_family, cfg.font_size * scale, 64 * 1024);
         const bar_h: f32 = @ceil(renderer.cell_h + @as(f32, @floatCast(8 * scale)));
         const cols: u16 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_w)), renderer.cell_w));
-        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h, renderer.cell_h)));
+        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2, renderer.cell_h)));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
         const session = try sessionpkg.Session.start(gpa, init.io, shell, @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
@@ -248,10 +256,11 @@ pub const App = struct {
             .px_h = @floatCast(px_h),
             .sep = @floatCast(@max(1.0, @round(scale))),
             .bar_h = bar_h,
+            .tab_h = bar_h,
         };
         try self.tabs.append(gpa, tab_one);
         self.focused_session.store(session, .release);
-        panespkg.layout(tab_one.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.contentH() }, self.sep);
+        panespkg.layout(tab_one.root, .{ .x = 0, .y = self.tab_h, .w = self.px_w, .h = self.contentH() }, self.sep);
         return self;
     }
 
@@ -340,13 +349,14 @@ pub const App = struct {
         self.px_h = @floatCast(px_h);
         self.sep = @floatCast(@max(1.0, @round(scale)));
         self.bar_h = @ceil(self.renderer.cell_h + @as(f32, @floatCast(8 * scale)));
+        self.tab_h = self.bar_h;
         self.relayoutLocked();
         self.scene_dirty = true;
     }
 
-    /// Pane-area height: the window minus the status bar.
+    /// Pane-area height: the window minus the tab bar and status bar.
     fn contentH(self: *App) f32 {
-        return @max(1, self.px_h - self.bar_h);
+        return @max(1, self.px_h - self.bar_h - self.tab_h);
     }
 
     fn activeTab(self: *App) *panespkg.Tab {
@@ -369,7 +379,7 @@ pub const App = struct {
     /// Background tabs relayout on activation. Caller holds draw_lock.
     fn relayoutLocked(self: *App) void {
         const t = self.activeTab();
-        panespkg.layout(t.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.contentH() }, self.sep);
+        panespkg.layout(t.root, .{ .x = 0, .y = self.tab_h, .w = self.px_w, .h = self.contentH() }, self.sep);
         for (t.panes.items) |p| {
             const cols: u16 = @intFromFloat(@max(2, @divFloor(p.rect.w, self.renderer.cell_w)));
             const rows: u16 = @intFromFloat(@max(2, @divFloor(p.rect.h, self.renderer.cell_h)));
@@ -712,10 +722,19 @@ pub const App = struct {
             const s = self.sep;
             if (fr.x > 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x - s, fr.y, s, fr.h, accent_color);
             if (fr.x + fr.w < self.px_w - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x + fr.w, fr.y, s, fr.h, accent_color);
-            if (fr.y > 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y - s, fr.w, s, accent_color);
-            if (fr.y + fr.h < self.contentH() - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y + fr.h, fr.w, s, accent_color);
+            if (fr.y > self.tab_h + 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y - s, fr.w, s, accent_color);
+            if (fr.y + fr.h < self.tab_h + self.contentH() - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y + fr.h, fr.w, s, accent_color);
         }
-        self.drawBar(enc, vp_w, vp_h, off);
+        var ui = @import("ui.zig").Ui{
+            .r = &self.renderer,
+            .enc = enc,
+            .vp_w = vp_w,
+            .vp_h = vp_h,
+            .cells = self.renderer.cells(),
+            .off = off,
+        };
+        self.drawBar(&ui);
+        self.drawTabBar(&ui);
 
         enc.msgSend(void, "endEncoding", .{});
 
@@ -802,26 +821,32 @@ pub const App = struct {
             stats.maxRssMb(),
         }) catch return;
 
+        var tabs_buf: [160]u8 = undefined;
+        var tw: std.Io.Writer = .fixed(&tabs_buf);
+        for (self.tabs.items) |tb| {
+            const sess = tb.focused.session;
+            sess.mutex.lock();
+            if (sess.term.getTitle()) |tt| {
+                tw.print("{s};", .{tt[0..@min(tt.len, 24)]}) catch {};
+            } else tw.print(";", .{}) catch {};
+            sess.mutex.unlock();
+        }
+        const td = tabs_buf[0..tw.end];
+
         if (std.mem.eql(u8, l, self.hud_left[0..self.hud_left_len]) and
-            std.mem.eql(u8, r, self.hud_right[0..self.hud_right_len])) return;
+            std.mem.eql(u8, r, self.hud_right[0..self.hud_right_len]) and
+            std.mem.eql(u8, td, self.hud_tabs[0..self.hud_tabs_len])) return;
         @memcpy(self.hud_left[0..l.len], l);
         self.hud_left_len = l.len;
         @memcpy(self.hud_right[0..r.len], r);
         self.hud_right_len = r.len;
+        @memcpy(self.hud_tabs[0..td.len], td);
+        self.hud_tabs_len = td.len;
         self.scene_dirty = true;
     }
 
-    /// The status bar: tenant one of the ui layer. Draws from the cell
-    /// buffer past the panes' slots (`base_off`).
-    fn drawBar(self: *App, enc: objc.Object, vp_w: f32, vp_h: f32, base_off: usize) void {
-        var ui = @import("ui.zig").Ui{
-            .r = &self.renderer,
-            .enc = enc,
-            .vp_w = vp_w,
-            .vp_h = vp_h,
-            .cells = self.renderer.cells(),
-            .off = base_off,
-        };
+    /// The status bar: tenant one of the ui layer.
+    fn drawBar(self: *App, ui: *@import("ui.zig").Ui) void {
         const by = self.px_h - self.bar_h;
         ui.rect(0, by, self.px_w, self.bar_h, bar_bg);
         const ty = by + (self.bar_h - self.renderer.cell_h) / 2;
@@ -835,19 +860,44 @@ pub const App = struct {
                 x += ui.text(x, ty, &lbuf, bar_bg, accent_color) + self.renderer.cell_w / 2;
             }
         }
-        // Tab strip (drawn live from scene state, not the cached HUD
-        // text — a tab switch redraws via scene_dirty immediately).
-        if (self.tabs.items.len > 1) {
-            for (self.tabs.items, 0..) |_, i| {
-                var num: [8]u8 = undefined;
-                const s = std.fmt.bufPrint(&num, " {d} ", .{i + 1}) catch continue;
-                const is_active = i == self.active_tab;
-                x += ui.text(x, ty, s, if (is_active) bar_bg else bar_fg, if (is_active) accent_color else bar_bg);
-            }
-            x += self.renderer.cell_w;
-        }
         _ = ui.text(x, ty, self.hud_left[0..self.hud_left_len], bar_fg, bar_bg);
         _ = ui.textRight(self.px_w - pad, ty, self.hud_right[0..self.hud_right_len], bar_value, bar_bg);
+    }
+
+    /// The top tab bar — tabs as first-class chrome (the wails app's
+    /// named tabs). Each chip shows its tab's focused-pane TITLE (OSC
+    /// 0/2, read from the emulator under its lock); the active chip
+    /// gets a lifted background and an accent underline.
+    fn drawTabBar(self: *App, ui: *@import("ui.zig").Ui) void {
+        ui.rect(0, 0, self.px_w, self.tab_h, bar_bg);
+        const ty = (self.tab_h - self.renderer.cell_h) / 2;
+        var x: f32 = self.renderer.cell_w / 2;
+        for (self.tabs.items, 0..) |t, i| {
+            const is_active = i == self.active_tab;
+
+            // " {n} {title} ", title truncated to keep chips tidy.
+            var title_buf: [24]u8 = undefined;
+            var title: []const u8 = "shell";
+            {
+                const sess = t.focused.session;
+                sess.mutex.lock();
+                if (sess.term.getTitle()) |tt| {
+                    const n = @min(tt.len, title_buf.len);
+                    @memcpy(title_buf[0..n], tt[0..n]);
+                    if (n > 0) title = title_buf[0..n];
+                }
+                sess.mutex.unlock();
+            }
+            var chip: [40]u8 = undefined;
+            const label = std.fmt.bufPrint(&chip, " {d} {s} ", .{ i + 1, title }) catch continue;
+
+            const fg = if (is_active) bar_value else bar_fg;
+            const bg = if (is_active) chip_active_bg else bar_bg;
+            const w = ui.text(x, ty, label, fg, bg);
+            if (is_active) ui.rect(x, self.tab_h - self.sep * 2, w, self.sep * 2, accent_color);
+            x += w + self.renderer.cell_w / 2;
+            if (x > self.px_w) break;
+        }
     }
 
     /// Fill one pane's slot of the cell buffer from its render state.
