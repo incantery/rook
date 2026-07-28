@@ -1130,6 +1130,15 @@ pub const Editor = struct {
         self.cursorToOffset(at + self.reg.items.len - 1);
     }
 
+    /// Where the cursor sits in the pane's OWN cell grid, gutter
+    /// included — for anything that has to point at the cursor from
+    /// outside the editor (the IME's candidate window is the first).
+    pub fn cursorCell(self: *Editor) struct { col: u16, row: u16 } {
+        const gw = digits(self.lineCountB()) + 1;
+        const rc = renderCol(self.lineText(self.cline), self.ccol);
+        return .{ .col = @intCast(gw + rc), .row = @intCast(self.cline -| self.top) };
+    }
+
     /// ⌘V: the system pasteboard, vim-shaped.
     ///
     /// Insert and command modes take the text literally — the input path

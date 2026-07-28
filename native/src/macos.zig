@@ -86,6 +86,141 @@ fn termColors() vt.Terminal.Colors {
     };
 }
 
+// ---------------------------------------------------------------- IME
+//
+// A stock NSView returns nil from -inputContext: AppKit's way of saying
+// "this thing does not take text". No dead keys (⌥e e → é), no CJK, no
+// candidate window — which is where rookz was until now. So we define
+// one view class of our own that conforms to NSTextInputClient and
+// answers the questions an input method asks.
+//
+// The contract with the key path is deliberate. The IME gets FIRST
+// REFUSAL on every unmodified key. If it commits text, that text is the
+// input. If it is composing, we hold the preedit and nothing reaches the
+// pty. If it turns the key into a Cocoa selector (-insertNewline:,
+// -moveUp:, -deleteBackward:), we drop the selector on the floor and
+// encode the key ourselves — a terminal wants \r and \x1b[A, not
+// AppKit's idea of what a key means. That fallback is why Return, Tab,
+// ESC and the arrows behave exactly as they did before this existed.
+
+const NSRange = extern struct { location: u64, length: u64 };
+const NSNotFound: u64 = 0x7fff_ffff_ffff_ffff;
+
+/// One window, one app: the input-method callbacks arrive as plain C
+/// functions with no context pointer, so the App is a file-scope
+/// singleton for them (`th`, the theme, is the same shape).
+var ime_app: ?*App = null;
+var view_class: ?objc.Class = null;
+
+/// Read an NSString (or the string of an NSAttributedString — the IME
+/// sends either) into `buf`. Returns the byte count.
+fn imeStringBytes(obj_id: objc.c.id, buf: []u8) usize {
+    if (obj_id == null) return 0;
+    var s = objc.Object.fromId(obj_id);
+    if (s.msgSend(bool, "respondsToSelector:", .{objc.sel("string").value})) {
+        s = s.msgSend(objc.Object, "string", .{});
+        if (s.value == null) return 0;
+    }
+    const cstr = s.msgSend(?[*:0]const u8, "UTF8String", .{}) orelse return 0;
+    const span = std.mem.span(cstr);
+    const n = @min(span.len, buf.len);
+    @memcpy(buf[0..n], span[0..n]);
+    return n;
+}
+
+fn imeAcceptsFirstResponder(_: objc.c.id, _: objc.c.SEL) callconv(.c) bool {
+    return true;
+}
+
+fn imeHasMarkedText(_: objc.c.id, _: objc.c.SEL) callconv(.c) bool {
+    const app = ime_app orelse return false;
+    return app.ime_marked_len > 0;
+}
+
+fn imeMarkedRange(_: objc.c.id, _: objc.c.SEL) callconv(.c) NSRange {
+    const app = ime_app orelse return .{ .location = NSNotFound, .length = 0 };
+    if (app.ime_marked_len == 0) return .{ .location = NSNotFound, .length = 0 };
+    return .{ .location = 0, .length = app.ime_marked_len };
+}
+
+/// We have no document to select in — the pty owns the text. An empty
+/// range at the origin is the honest answer and the one every terminal
+/// gives.
+fn imeSelectedRange(_: objc.c.id, _: objc.c.SEL) callconv(.c) NSRange {
+    return .{ .location = 0, .length = 0 };
+}
+
+fn imeSetMarkedText(_: objc.c.id, _: objc.c.SEL, text: objc.c.id, _: NSRange, _: NSRange) callconv(.c) void {
+    const app = ime_app orelse return;
+    app.setMarked(imeStringBytes(text, &app.ime_marked));
+}
+
+fn imeUnmarkText(_: objc.c.id, _: objc.c.SEL) callconv(.c) void {
+    const app = ime_app orelse return;
+    app.setMarked(0);
+}
+
+fn imeValidAttributes(_: objc.c.id, _: objc.c.SEL) callconv(.c) objc.c.id {
+    return objc.getClass("NSArray").?.msgSend(objc.Object, "array", .{}).value;
+}
+
+fn imeAttributedSubstring(_: objc.c.id, _: objc.c.SEL, _: NSRange, _: ?*NSRange) callconv(.c) objc.c.id {
+    return null;
+}
+
+/// The input method committed text. It cannot go to the pane from here:
+/// this runs inside handleEvent:, and the leader machine has to see the
+/// bytes first. So it lands in a buffer the key path drains.
+fn imeInsertText(_: objc.c.id, _: objc.c.SEL, text: objc.c.id, _: NSRange) callconv(.c) void {
+    const app = ime_app orelse return;
+    app.ime_text_len = imeStringBytes(text, &app.ime_text);
+    app.setMarked(0);
+}
+
+fn imeCharacterIndexForPoint(_: objc.c.id, _: objc.c.SEL, _: NSPoint) callconv(.c) u64 {
+    return NSNotFound;
+}
+
+/// Where to put the candidate window: the focused pane's cursor, in
+/// screen coordinates. Get this wrong and a Japanese user types into a
+/// list floating over the wrong half of the display.
+fn imeFirstRect(_: objc.c.id, _: objc.c.SEL, _: NSRange, actual: ?*NSRange) callconv(.c) NSRect {
+    if (actual) |a| a.* = .{ .location = 0, .length = 0 };
+    const app = ime_app orelse return .{ .origin = .{ .x = 0, .y = 0 }, .size = .{ .width = 0, .height = 0 } };
+    return app.cursorScreenRect();
+}
+
+/// Deliberately empty. Every key the IME reduces to a Cocoa selector is
+/// a key we encode ourselves — see the contract at the top of this
+/// section.
+fn imeDoCommandBySelector(_: objc.c.id, _: objc.c.SEL, _: objc.c.SEL) callconv(.c) void {}
+
+/// The view class, built once. Fails open: no class means a stock
+/// NSView, which is exactly the behavior that shipped before IME.
+fn rookzViewClass() ?objc.Class {
+    if (view_class) |c| return c;
+    const cls = objc.allocateClassPair(objc.getClass("NSView").?, "RookzTextView") orelse return null;
+    // -inputContext checks conformance, not just respondsToSelector:.
+    if (objc.getProtocol("NSTextInputClient")) |p| {
+        _ = objc.c.class_addProtocol(cls.value, p.value);
+    }
+    _ = cls.addMethod("acceptsFirstResponder", imeAcceptsFirstResponder);
+    _ = cls.addMethod("hasMarkedText", imeHasMarkedText);
+    _ = cls.addMethod("markedRange", imeMarkedRange);
+    _ = cls.addMethod("selectedRange", imeSelectedRange);
+    _ = cls.addMethod("setMarkedText:selectedRange:replacementRange:", imeSetMarkedText);
+    _ = cls.addMethod("unmarkText", imeUnmarkText);
+    _ = cls.addMethod("validAttributesForMarkedText", imeValidAttributes);
+    _ = cls.addMethod("attributedSubstringForProposedRange:actualRange:", imeAttributedSubstring);
+    _ = cls.addMethod("insertText:replacementRange:", imeInsertText);
+    _ = cls.addMethod("characterIndexForPoint:", imeCharacterIndexForPoint);
+    _ = cls.addMethod("firstRectForCharacterRange:actualRange:", imeFirstRect);
+    _ = cls.addMethod("doCommandBySelector:", imeDoCommandBySelector);
+    objc.registerClassPair(cls);
+    view_class = cls;
+    return cls;
+}
+
 /// Build the blur backdrop and adopt `view` (the Metal layer's host)
 /// into it. Returns the view to install as the window's contentView,
 /// or null to keep plain alpha. `glass` wants NSGlassEffectView
@@ -132,6 +267,16 @@ fn makeBackdrop(blur: @import("config.zig").Blur, rect: NSRect, view: objc.Objec
 fn nsString(s: [*:0]const u8) objc.Object {
     const NSString = objc.getClass("NSString").?;
     return NSString.msgSend(objc.Object, "stringWithUTF8String:", .{s});
+}
+
+/// An NSString from bytes that are not NUL-terminated.
+fn nsStringLen(bytes: []const u8) objc.Object {
+    return objc.getClass("NSString").?.msgSend(objc.Object, "alloc", .{})
+        .msgSend(objc.Object, "initWithBytes:length:encoding:", .{
+        @as(*const anyopaque, bytes.ptr),
+        @as(u64, bytes.len),
+        @as(u64, 4), // NSUTF8StringEncoding
+    });
 }
 
 const MonitorBlock = objc.Block(struct { app: *App }, .{objc.c.id}, objc.c.id);
@@ -193,6 +338,19 @@ pub const App = struct {
     /// a background thread every 30s; shown right-aligned in the title
     /// zone. Guarded by draw_lock.
     usage: @import("usage.zig").Snapshot = .{},
+
+    /// IME state. `ime_marked` is PREEDIT — what the input method is
+    /// composing and has not committed. It is drawn at the cursor and
+    /// never reaches a pty: an unfinished か is not input yet.
+    /// `ime_text` is the sink insertText: writes into during one event,
+    /// because the callback runs inside handleEvent: and the leader
+    /// machine has to see those bytes before any pane does.
+    ime_marked: [128]u8 = undefined,
+    ime_marked_len: usize = 0,
+    ime_text: [128]u8 = undefined,
+    ime_text_len: usize = 0,
+    /// The view that owns the input context (and is first responder).
+    ime_view: objc.Object = .{ .value = null },
     /// Layout/focus changed: the next frame redraws even if no pane's
     /// grid is dirty.
     scene_dirty: bool = true,
@@ -232,6 +390,10 @@ pub const App = struct {
     activate: bool = true,
     pending_w: f64 = 0,
     pending_h: f64 = 0,
+    pend_key_code: u16 = 0,
+    pend_key_mods: u64 = 0,
+    pend_key_chars: [16]u8 = undefined,
+    pend_key_len: usize = 0,
 
     /// Pending keystroke timestamp (CACurrentMediaTime clock; NSEvent
     /// timestamps share it). Consumed by the presented handler of the
@@ -364,7 +526,10 @@ pub const App = struct {
             std.debug.print("rookz: background-opacity {d:.2} — compositor path (direct scan-out off)\n", .{cfg.background_opacity});
         }
 
-        const view = objc.getClass("NSView").?
+        // Our own NSView subclass, so the thing has an input context
+        // (see the IME section); a failed class build falls back to the
+        // stock view and the pre-IME behavior.
+        const view = (rookzViewClass() orelse objc.getClass("NSView").?)
             .msgSend(objc.Object, "alloc", .{})
             .msgSend(objc.Object, "initWithFrame:", .{rect});
         view.msgSend(void, "setWantsLayer:", .{true});
@@ -436,7 +601,13 @@ pub const App = struct {
             .pad = pad,
             .bg_opacity = cfg.background_opacity,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
+            .ime_view = view,
         };
+        // The input-method callbacks are context-free C functions; one
+        // window means one App to find. Set before the view can become
+        // first responder.
+        ime_app = self;
+        window.msgSend(void, "makeFirstResponder:", .{view.value});
         self.focused_session.store(session, .release);
         // Workspace registry up front — space one takes the name of
         // whatever workspace the launch cwd is inside (else scratch),
@@ -521,9 +692,51 @@ pub const App = struct {
         dispatch_async_f(@ptrCast(&_dispatch_main_q), self, &applyWinSize);
     }
 
+    fn applyPostKey(ctx: ?*anyopaque) callconv(.c) void {
+        const self: *App = @ptrCast(@alignCast(ctx.?));
+        const s = nsStringLen(self.pend_key_chars[0..self.pend_key_len]);
+        const ev = objc.getClass("NSEvent").?.msgSend(
+            objc.Object,
+            "keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:",
+            .{
+                @as(u64, 10), // NSEventTypeKeyDown
+                NSPoint{ .x = 0, .y = 0 },
+                self.pend_key_mods,
+                CACurrentMediaTime(),
+                self.window.msgSend(i64, "windowNumber", .{}),
+                @as(objc.c.id, null),
+                s.value,
+                s.value,
+                false,
+                self.pend_key_code,
+            },
+        );
+        if (ev.value == null) return;
+        self.app.msgSend(void, "postEvent:atStart:", .{ ev.value, true });
+    }
+
     fn applyWinSize(ctx: ?*anyopaque) callconv(.c) void {
         const self: *App = @ptrCast(@alignCast(ctx.?));
         self.window.msgSend(void, "setContentSize:", .{NSSize{ .width = self.pending_w, .height = self.pending_h }});
+    }
+
+    /// ctl `nskey`: synthesize a real NSEvent and post it to our own
+    /// event queue, from any thread.
+    ///
+    /// This exists because `press` and `type` write bytes straight into
+    /// the app and therefore cannot test anything AppKit does on the way
+    /// in — the IME above being the whole of it. A posted event goes
+    /// through NSApp's dispatch, the local monitor, the input context:
+    /// the real path, minus a finger. Dead keys are drivable this way
+    /// (⌥e is keycode 14 with the option mask), which is the only way to
+    /// prove composition works without a human at the keyboard.
+    pub fn postKey(self: *App, code: u16, mods: u64, chars: []const u8) void {
+        self.pend_key_code = code;
+        self.pend_key_mods = mods;
+        const n = @min(chars.len, self.pend_key_chars.len);
+        @memcpy(self.pend_key_chars[0..n], chars[0..n]);
+        self.pend_key_len = n;
+        dispatch_async_f(@ptrCast(&_dispatch_main_q), self, &applyPostKey);
     }
 
     /// ctl `fullscreen`: toggle native fullscreen from any thread — the
@@ -800,6 +1013,69 @@ pub const App = struct {
                 t.session.scrollTo(.active);
             },
         }
+    }
+
+    /// Record new preedit length and redraw. Called from the IME
+    /// callbacks, which run on the main thread inside handleEvent:.
+    fn setMarked(self: *App, len: usize) void {
+        self.ime_marked_len = len;
+        self.draw_lock.lock();
+        self.scene_dirty = true;
+        self.draw_lock.unlock();
+    }
+
+    /// The focused pane's cursor as a pixel rect in the scene (top-left
+    /// origin, the renderer's coordinates). Terminals answer from the
+    /// emulator's viewport cursor; editors from their own grid, gutter
+    /// included. Caller holds draw_lock.
+    fn cursorPxLocked(self: *App) struct { x: f32, y: f32 } {
+        const p = self.activeTab().focused;
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        var col: f32 = 0;
+        var row: f32 = 0;
+        switch (p.content) {
+            .term => |*tm| if (tm.rs.cursor.viewport) |cur| {
+                col = @floatFromInt(cur.x);
+                row = @floatFromInt(cur.y);
+            },
+            .edit => |ed| {
+                const c = ed.cursorCell();
+                col = @floatFromInt(c.col);
+                row = @floatFromInt(c.row);
+            },
+        }
+        return .{ .x = p.rect.x + col * cw, .y = p.rect.y + row * ch };
+    }
+
+    /// Same point, in SCREEN coordinates and points — what AppKit wants
+    /// for the candidate window. Scene pixels are top-left origin and
+    /// retina-scaled; screen points are bottom-left origin.
+    fn cursorScreenRect(self: *App) NSRect {
+        self.draw_lock.lock();
+        const px = self.cursorPxLocked();
+        const ch = self.renderer.cell_h;
+        const cw = self.renderer.cell_w;
+        self.draw_lock.unlock();
+
+        const scale: f32 = @floatCast(self.layer.msgSend(f64, "contentsScale", .{}));
+        const view_h = self.px_h / scale;
+        const rect_in_window = NSRect{
+            .origin = .{ .x = px.x / scale, .y = view_h - (px.y + ch) / scale },
+            .size = .{ .width = cw / scale, .height = ch / scale },
+        };
+        return self.window.msgSend(NSRect, "convertRectToScreen:", .{rect_in_window});
+    }
+
+    /// Preedit: what the input method is composing, drawn AT the cursor
+    /// with an underline, the way every text field shows it. It is not
+    /// input yet, so it lives entirely in chrome — the emulator never
+    /// sees it, and `dump` will not show it (`shot` will).
+    fn drawPreedit(self: *App, ui: *@import("ui.zig").Ui) void {
+        const at = self.cursorPxLocked();
+        const text = self.ime_marked[0..self.ime_marked_len];
+        const w = ui.text(at.x, at.y, text, th.ed_bg, th.accent);
+        ui.rect(at.x, at.y + self.renderer.cell_h - 2, w, 2, th.bar_value);
     }
 
     /// Wheel steps (+ = scroll up) routed to the pane under the point:
@@ -1614,6 +1890,7 @@ pub const App = struct {
         };
         self.drawBar(&ui);
         self.drawTabBar(&ui);
+        if (self.ime_marked_len > 0) self.drawPreedit(&ui);
         if (self.pal_open) self.drawPalette(&ui);
 
         enc.msgSend(void, "endEncoding", .{});
@@ -2204,6 +2481,28 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
         }
     }
 
+    // The input method gets first refusal on unmodified keys — dead
+    // keys and CJK composition exist only if something asks for them.
+    // Modified keys never go: ⌃C is the terminal's, not the IME's.
+    //
+    // Three outcomes. Committed text (including ordinary ASCII, which
+    // takes this path now) comes back through insertText: and becomes
+    // the input. Composition holds the preedit and nothing reaches the
+    // pane. Anything else — the IME declined, or reduced the key to a
+    // Cocoa selector we dropped — falls through to the encoding below,
+    // which is why Return/Tab/ESC/arrows are untouched by all this.
+    var ime_bytes: ?[]const u8 = null;
+    if (flags & (flag_cmd | flag_ctrl) == 0 and app.ime_view.value != null) {
+        const ctx = app.ime_view.msgSend(objc.Object, "inputContext", .{});
+        if (ctx.value != null) {
+            const had_marked = app.ime_marked_len > 0;
+            app.ime_text_len = 0;
+            _ = ctx.msgSend(bool, "handleEvent:", .{event_id});
+            if (app.ime_text_len > 0) ime_bytes = app.ime_text[0..app.ime_text_len];
+            if (app.ime_marked_len > 0 or (had_marked and ime_bytes == null)) return null;
+        }
+    }
+
     // Arrows by keyCode; everything else via the cooked characters, which
     // already encode control (^C = 0x03), Enter (\r), Backspace (0x7f).
     // Throwaway: vt.input.encodeKey is the real path once modes matter.
@@ -2216,7 +2515,7 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
         else => null,
     };
     const chars = event.msgSend(objc.Object, "characters", .{});
-    const bytes: []const u8 = arrow orelse blk: {
+    const bytes: []const u8 = ime_bytes orelse arrow orelse blk: {
         if (chars.value == null) break :blk "";
         const s = chars.msgSend(?[*:0]const u8, "UTF8String", .{}) orelse break :blk "";
         break :blk std.mem.span(s);

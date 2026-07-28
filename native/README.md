@@ -37,6 +37,21 @@ how the rules above are verified — ⌘V carries a modifier the `press`
 verb can't express. NOT yet: a confirmation prompt for unframed
 multiline pastes (`paste.isSafe` exists, nothing gates on it).
 
+**Dead keys and IME** work now, which needed a view class of rookz's
+own: a stock NSView returns nil from `-inputContext`, AppKit's way of
+saying "this thing does not take text", so ⌥e e and every CJK input
+method were simply impossible. `RookzTextView` conforms to
+NSTextInputClient and the input method gets FIRST REFUSAL on every
+unmodified key. Text it commits (ordinary ASCII included) is the input;
+while it composes, the preedit is held and drawn at the cursor in
+accent with an underline — it is not input yet, so the emulator never
+sees it and `dump` can't show it (`shot` can). A key the IME reduces to
+a Cocoa selector (`-insertNewline:`, `-moveUp:`) is DROPPED and encoded
+by us instead: a terminal wants `\r` and `\x1b[A`, not AppKit's idea of
+what a key means, which is why Return/Tab/ESC/arrows are untouched by
+any of this. Modified keys never reach the IME at all — ⌃C is the
+terminal's.
+
 The cursor
 and the accent-colored separator edges mark the focused pane. Only the
 active tab renders: background tabs' emulators keep advancing but cost
@@ -178,6 +193,9 @@ printf 'drag 99 206 319 206\n' | nc -U /tmp/rookz.sock   # select: down, drag, u
 printf 'copy\n'               | nc -U /tmp/rookz.sock   # \u2318C's path; replies the text
 printf 'paste\n'              | nc -U /tmp/rookz.sock   # ⌘V's path; the real pasteboard
 printf 'paste a\\nb\n'         | nc -U /tmp/rookz.sock   #   or a literal payload
+printf 'nskey 14 80000\n'     | nc -U /tmp/rookz.sock   # a REAL NSEvent: keycode,
+                                                       #   modmask hex, characters
+printf 'ime\n'                | nc -U /tmp/rookz.sock   # input-context state + preedit
 printf 'dump@2\n'            | nc -U /tmp/rookz.sock   # any pane-taking verb
 printf 'type@2 ls\n'         | nc -U /tmp/rookz.sock   #   targets by @id
 printf 'shot /tmp/s.png\n'   | nc -U /tmp/rookz.sock   # pixel truth
@@ -187,6 +205,13 @@ printf 'stats\n'             | nc -U /tmp/rookz.sock   # live perf numbers
 printf 'stats reset\n'       | nc -U /tmp/rookz.sock
 printf 'quit\n'              | nc -U /tmp/rookz.sock
 ```
+
+`press` and `type` write bytes straight into the app, so they cannot
+test anything AppKit does on the way IN. `nskey` posts a real NSEvent to
+our own queue — NSApp dispatch, the local monitor, the input context,
+the whole path minus a finger. It is how the IME above is verified
+(`nskey 14 80000` is ⌥e); it drives single keys by keycode, since the
+input context re-derives characters from the keycode and layout.
 
 dump/type/enter/ctrlc/key default to the focused pane; `@<id>` targets
 another. Add `-w 2` to nc in scripts — and when grepping a dump for

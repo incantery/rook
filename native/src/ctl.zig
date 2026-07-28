@@ -317,6 +317,61 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             reply(fd, t);
             reply(fd, "\n");
         } else reply(fd, "err nothing selected\n");
+    } else if (std.mem.eql(u8, verb, "nskey")) {
+        // nskey <keycode> <modmask-hex> <characters>
+        var it = std.mem.tokenizeScalar(u8, rest, ' ');
+        const code = std.fmt.parseInt(u16, it.next() orelse "", 10) catch {
+            reply(fd, "err nskey <keycode> <mods-hex> <chars>\n");
+            return;
+        };
+        const mods = std.fmt.parseInt(u64, it.next() orelse "0", 16) catch 0;
+        // \r and \n spell themselves — a real Return event carries a CR
+        // in its characters, and the line protocol can't hold one.
+        const raw = it.rest();
+        var chars: [16]u8 = undefined;
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < raw.len and n < chars.len) : (i += 1) {
+            if (raw[i] == '\\' and i + 1 < raw.len) {
+                const esc: ?u8 = switch (raw[i + 1]) {
+                    'r' => '\r',
+                    'n' => '\n',
+                    't' => '\t',
+                    'e' => 0x1b,
+                    else => null,
+                };
+                if (esc) |e| {
+                    chars[n] = e;
+                    n += 1;
+                    i += 1;
+                    continue;
+                }
+            }
+            chars[n] = raw[i];
+            n += 1;
+        }
+        app.postKey(code, mods, chars[0..n]);
+        reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "ime")) {
+        // Is the input-method plumbing actually live? inputContext is
+        // AppKit's verdict on our NSTextInputClient conformance — nil
+        // means no dead keys and no CJK, however good the code looks.
+        const ctx = if (app.ime_view.value != null)
+            app.ime_view.msgSend(@import("objc").Object, "inputContext", .{})
+        else
+            @import("objc").Object{ .value = null };
+        const first = if (app.ime_view.value != null)
+            app.window.msgSend(@import("objc").Object, "firstResponder", .{}).value == app.ime_view.value
+        else
+            false;
+        var buf: [256]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "view={s} context={s} first_responder={s} marked=\"{s}\"\n", .{
+            if (app.ime_view.value != null) "yes" else "no",
+            if (ctx.value != null) "yes" else "nil",
+            if (first) "yes" else "no",
+            app.ime_marked[0..app.ime_marked_len],
+        }) catch return;
+        reply(fd, s);
     } else if (std.mem.eql(u8, verb, "paste")) {
         // Bare `paste` is ⌘V exactly — the real pasteboard, the real
         // routing. `paste <text>` skips the pasteboard so a test can

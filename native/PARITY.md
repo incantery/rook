@@ -60,8 +60,10 @@ a daily driver.
 - [ ] Paste **confirmation** for unframed multiline pastes.
       `paste.isSafe` is written and nothing gates on it; needs a
       confirm modal (the palette is the primitive) and a config knob.
-- [ ] **IME / dead keys.** No `NSTextInputClient`, no `interpretKeyEvents`.
-      Accented characters, CJK, and emoji picker input can't reach a pty.
+- [x] **IME / dead keys** — `RookzTextView` conforms to
+      NSTextInputClient, the IME gets first refusal on unmodified keys,
+      preedit draws at the cursor. ctl `nskey` posts real NSEvents so
+      the path is testable; ctl `ime` reports the state.
 - [ ] **OSC 52** (clipboard write): `session.zig` sets `.clipboard_write = null`.
       Copying from a remote tmux/vim over ssh silently fails.
 - [ ] **Bell** (`.bell = null`): no audible/visual bell, and no dock badge.
