@@ -164,6 +164,11 @@ fn writeTarget(app: *macos.App, pane_id: ?u32, bytes: []const u8) bool {
             app.askKeyLocked(bytes);
             break :blk true;
         }
+        if (app.side_focus and app.side_panel == .deck and pane_id == null) {
+            app.markInput(CACurrentMediaTime());
+            app.deckKeyLocked(bytes);
+            break :blk true;
+        }
         const p = findPane(app, pane_id) orelse break :blk false;
         if (p == app.activeTab().focused) app.markInput(CACurrentMediaTime());
         app.paneInput(p, bytes);
@@ -394,6 +399,21 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     }
                     if (app.attention.more > 0)
                         w.print("+{d} more\n", .{app.attention.more}) catch {};
+                },
+                .deck => {
+                    if (!app.deck.live) {
+                        _ = w.write("host unreachable\n") catch 0;
+                    } else if (app.deck.n == 0) {
+                        _ = w.write("no agents running\n") catch 0;
+                    } else for (app.deck.slice(), 0..) |*a, i| {
+                        w.print("{s}{s}\t{s}\t{s}\n", .{
+                            @as([]const u8, if (i == app.deck_sel) "*" else " "),
+                            @tagName(a.state),
+                            a.cwd.get(),
+                            a.what.get(),
+                        }) catch break;
+                    }
+                    if (app.deck.more > 0) w.print("+{d} more\n", .{app.deck.more}) catch {};
                 },
                 .ask => {
                     if (app.ask) |a| {

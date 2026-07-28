@@ -308,7 +308,7 @@ pub const Side = enum { left, right };
 /// where §2's inbox/deck/threads/review join it, the same way pal_mode
 /// grew a second list. Deliberately an enum rather than a vtable — a
 /// tenant interface designed against ONE tenant is a guess.
-pub const Panel = enum { attention, ask };
+pub const Panel = enum { attention, ask, deck };
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -377,11 +377,16 @@ pub const App = struct {
     /// closed panel must cost nothing, including no host traffic.
     attention: @import("attention.zig").Snapshot = .{},
     attention_digest: u64 = 0,
+    /// The agent deck, refreshed by deckThread while its panel is open.
+    deck: @import("agents.zig").Snapshot = .{},
+    deck_digest: u64 = 0,
+    deck_sel: usize = 0,
     /// Set when the panel opens so the poller fetches immediately
     /// instead of after its next sleep.
     attention_wake: std.atomic.Value(bool) = .init(false),
     /// Set when an answer is queued, so the poster posts it now.
     ask_wake: std.atomic.Value(bool) = .init(false),
+    deck_wake: std.atomic.Value(bool) = .init(false),
 
     /// The side pane takes the key path. Needed the moment a tenant is
     /// INTERACTIVE — the inbox is read-only, the ask form is not. Modal
@@ -797,6 +802,11 @@ pub const App = struct {
         // its panel is open — a closed panel owes the host nothing.
         if (std.Thread.spawn(.{}, attentionThread, .{self})) |t| t.detach() else |err| {
             std.debug.print("rook attention: thread failed: {}\n", .{err});
+        }
+
+        // The agent deck, gated on its panel like the inbox.
+        if (std.Thread.spawn(.{}, deckThread, .{self})) |t| t.detach() else |err| {
+            std.debug.print("rook deck: thread failed: {}\n", .{err});
         }
 
         // The asks loop. Polls unconditionally: a question is the app's
@@ -1520,6 +1530,8 @@ pub const App = struct {
                 self.palKeyLocked(bytes);
             } else if (self.side_focus and self.side_panel == .ask) {
                 self.askKeyLocked(bytes);
+            } else if (self.side_focus and self.side_panel == .deck) {
+                self.deckKeyLocked(bytes);
             } else {
                 self.paneInput(self.activeTab().focused, bytes);
             }
@@ -1899,6 +1911,7 @@ pub const App = struct {
             .palette_commands => self.openCommandPalette(),
             .app_fullscreen => self.requestFullscreen(),
             .panel_attention => self.toggleSidePane(.attention),
+            .panel_deck => self.toggleDeck(),
             .panel_ask => self.showPendingAsk(),
             .panel_flip => self.flipSidePane(),
         }
@@ -2027,12 +2040,29 @@ pub const App = struct {
     /// when you look back.
     fn askJumpLocked(self: *App) bool {
         const a = self.ask orelse return false;
-        const raw = a.cwd.get();
+        if (!self.jumpToCwdLocked(a.cwd.get())) return false;
+        // The panes own the keys now — you asked to go look at something.
+        self.side_focus = false;
+        return true;
+    }
+
+    /// Focus the pane whose shell cwd best matches `raw`.
+    ///
+    /// This is the link back to "where an agent is" in an app with no
+    /// host sessions: panes are in-process, so the only correspondence
+    /// between a host-side agent and a window is the directory they
+    /// share. Exact beats parent, and a deeper parent beats a shallower
+    /// one, so the pane the agent actually runs in outranks a shell
+    /// parked at the repo root.
+    ///
+    /// Shared by the ask form's ⌃G and the agent deck's Enter — one
+    /// notion of "go there", so they cannot drift apart.
+    pub fn jumpToCwdLocked(self: *App, raw: []const u8) bool {
         if (raw.len == 0) return false;
         // Resolve first: paneCwd is the kernel's already-resolved path,
-        // and an asker under /tmp (a symlink to /private/tmp on macOS)
-        // reports the unresolved one. Without this the prefix match
-        // silently never fires and ⌃G looks like it does nothing.
+        // and a path under /tmp (a symlink to /private/tmp on macOS)
+        // arrives unresolved. Without this the prefix match silently
+        // never fires and the jump looks like it does nothing.
         var rawz: [1024:0]u8 = undefined;
         var resolved: [1024]u8 = undefined;
         var want = raw;
@@ -2068,8 +2098,6 @@ pub const App = struct {
         const s = self.activeSpace();
         if (best_tab != s.active_tab) self.activateTabLocked(best_tab);
         self.setFocusLocked(p);
-        // The panes now own the keys — you asked to go look at something.
-        self.side_focus = false;
         self.scene_dirty = true;
         return true;
     }
@@ -2211,6 +2239,50 @@ pub const App = struct {
         self.askSubmitLocked();
     }
 
+    /// The deck's key path — vim keys over the list, Enter to go there.
+    /// Caller holds draw_lock.
+    pub fn deckKeyLocked(self: *App, bytes: []const u8) void {
+        const n = self.deck.slice().len;
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const b = bytes[i];
+            if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
+                switch (bytes[i + 2]) {
+                    'A' => self.deck_sel -|= 1,
+                    'B' => self.deck_sel = @min(self.deck_sel + 1, n -| 1),
+                    else => {},
+                }
+                i += 3;
+                continue;
+            }
+            switch (b) {
+                0x1b => { // ESC yields the keys back to the panes
+                    self.side_focus = false;
+                    self.scene_dirty = true;
+                    return;
+                },
+                'k', 0x10 => self.deck_sel -|= 1,
+                'j', 0x0e => self.deck_sel = @min(self.deck_sel + 1, n -| 1),
+                'g' => self.deck_sel = 0,
+                'G' => self.deck_sel = n -| 1,
+                '\r', '\n' => {
+                    if (self.deck_sel < n) {
+                        const a = self.deck.slice()[self.deck_sel];
+                        // Same "go there" as the ask form's ⌃G: panes are
+                        // not host sessions, so a shared cwd is the only
+                        // correspondence there is.
+                        if (self.jumpToCwdLocked(a.cwd.get())) self.side_focus = false;
+                    }
+                    self.scene_dirty = true;
+                    return;
+                },
+                else => {},
+            }
+            i += 1;
+        }
+        self.scene_dirty = true;
+    }
+
     /// Bring a pending question back to the front.
     ///
     /// Needed because the form HOLDS the ask while it is open, so the
@@ -2227,6 +2299,28 @@ pub const App = struct {
         self.side_focus = true;
         self.relayoutLocked();
         self.scene_dirty = true;
+    }
+
+    /// Toggle the deck. Unlike the inbox it opens FOCUSED: it is a
+    /// navigable list whose whole point is that you move through it and
+    /// pick one, so handing it the keys is the action you wanted.
+    pub fn toggleDeck(self: *App) void {
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            if (self.side_open and self.side_panel == .deck) {
+                self.side_open = false;
+                self.side_focus = false;
+            } else {
+                self.side_panel = .deck;
+                self.side_open = true;
+                self.side_focus = true;
+                self.deck_sel = 0;
+            }
+            self.relayoutLocked();
+            self.scene_dirty = true;
+        }
+        self.deck_wake.store(true, .release);
     }
 
     fn flipSidePane(self: *App) void {
@@ -3157,6 +3251,7 @@ pub const App = struct {
         _ = ui.text(tx, y + (row_h - ch) / 2, switch (self.side_panel) {
             .attention => "ATTENTION",
             .ask => "QUESTION",
+            .deck => "AGENTS",
         }, th.bar_value, self.glassBg(th.bar_bg));
         // The focus telegraph: an interactive panel has to look like it
         // is the thing your keys are going to.
@@ -3167,7 +3262,72 @@ pub const App = struct {
         switch (self.side_panel) {
             .attention => self.drawAttention(ui, r, y),
             .ask => self.drawAsk(ui, r, y),
+            .deck => self.drawDeck(ui, r, y),
         }
+    }
+
+    fn drawDeck(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        const row_h = self.bar_h;
+        const bg = self.glassBg(th.bar_bg);
+        const tx = r.x + cw;
+        var y = top;
+
+        if (!self.deck.live) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "host unreachable", th.bar_fg, bg);
+            return;
+        }
+        if (self.deck.n == 0) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "no agents running", th.bar_fg, bg);
+            return;
+        }
+
+        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - cw * 3, cw)));
+        const avail = r.y + r.h - top - row_h; // keep a line for the hint
+        const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h * 2)));
+        const shown = @min(self.deck.slice().len, fits);
+
+        for (self.deck.slice()[0..shown], 0..) |*a, i| {
+            const selected = i == self.deck_sel;
+            const rbg = if (selected) th.chip_active_bg else bg;
+            if (selected) ui.rect(r.x, y, r.w, row_h * 2, th.chip_active_bg);
+            // The state dot carries the whole triage: what needs you is
+            // the accent, what is moving is normal, what is idle recedes.
+            const dot: []const u8 = switch (a.state) {
+                .needs_input => "● ",
+                .working => "◐ ",
+                .quiet => "○ ",
+            };
+            const dotfg = switch (a.state) {
+                .needs_input => th.accent,
+                .working => th.bar_value,
+                .quiet => th.bar_fg,
+            };
+            var mx = tx;
+            mx += ui.text(mx, y + (row_h - ch) / 2, dot, dotfg, rbg);
+            // Workspace-relative, not the last path segment: an agent in
+            // rook/app must not read as "app", which every repo has.
+            var lblbuf: [96]u8 = undefined;
+            const name = self.cwdLabel(a.cwd.get(), &lblbuf);
+            _ = ui.text(mx, y + (row_h - ch) / 2, name[0..@min(name.len, cols -| 2)], if (selected) th.bar_value else th.bar_fg, rbg);
+            if (a.interactive)
+                _ = ui.textRight(r.x + r.w - cw, y + (row_h - ch) / 2, "picker", th.bar_fg, rbg);
+            y += row_h;
+            const what = a.what.get();
+            _ = ui.text(tx + cw * 2, y + (row_h - ch) / 2, what[0..@min(what.len, cols -| 2)], th.bar_fg, rbg);
+            y += row_h;
+        }
+
+        const hidden = self.deck.slice().len - shown + self.deck.more;
+        if (hidden > 0) {
+            var buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "+{d} more", .{hidden}) catch "+more";
+            _ = ui.text(tx, y + (row_h - ch) / 2, s, th.bar_fg, bg);
+            y += row_h;
+        }
+        if (self.side_focus)
+            _ = ui.text(tx, y + (row_h - ch) / 2, "j/k moves · enter goes there", th.bar_fg, bg);
     }
 
     fn drawAsk(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
@@ -3262,20 +3422,33 @@ pub const App = struct {
     /// at the wrong end. Caller holds draw_lock.
     pub fn askSourceLabel(self: *App, buf: []u8) []const u8 {
         const a = self.ask orelse return "";
-        const cwd = a.cwd.get();
+        if (a.cwd.len == 0) return "";
+        var inner: [96]u8 = undefined;
+        const lbl = self.cwdLabel(a.cwd.get(), &inner);
+        return std.fmt.bufPrint(buf, "from {s}", .{lbl}) catch lbl;
+    }
+
+    /// Name a directory the way a human would.
+    ///
+    /// The WORKSPACE name when the path is inside one — that is the word
+    /// people actually use — with the remainder appended only when it
+    /// adds something. Falling back to the last path segment alone is
+    /// what made the deck label this very session "app": true, and
+    /// useless, because every repo has one.
+    ///
+    /// Shared by the ask form's provenance line and the deck's rows, so
+    /// the same directory reads the same in both. Caller holds draw_lock.
+    pub fn cwdLabel(self: *App, cwd: []const u8, buf: []u8) []const u8 {
         if (cwd.len == 0) return "";
         for (self.pal_items) |e| {
             if (e.root.len == 0) continue;
             if (!std.mem.startsWith(u8, cwd, e.root)) continue;
             if (cwd.len != e.root.len and cwd[e.root.len] != '/') continue;
-            // Inside a known workspace: name it, and say how deep only
-            // when that adds something.
-            if (cwd.len == e.root.len)
-                return std.fmt.bufPrint(buf, "from {s}", .{e.name}) catch e.name;
-            return std.fmt.bufPrint(buf, "from {s}{s}", .{ e.name, cwd[e.root.len..] }) catch e.name;
+            if (cwd.len == e.root.len) return std.fmt.bufPrint(buf, "{s}", .{e.name}) catch e.name;
+            return std.fmt.bufPrint(buf, "{s}{s}", .{ e.name, cwd[e.root.len..] }) catch e.name;
         }
         const tail = if (cwd.len > 48) cwd[cwd.len - 48 ..] else cwd;
-        return std.fmt.bufPrint(buf, "from {s}{s}", .{ @as([]const u8, if (tail.len < cwd.len) "…" else ""), tail }) catch cwd;
+        return std.fmt.bufPrint(buf, "{s}{s}", .{ @as([]const u8, if (tail.len < cwd.len) "…" else ""), tail }) catch cwd;
     }
 
     /// Word-wrap into the panel. Returns the y after the last line.
@@ -3981,6 +4154,39 @@ fn asksThread(app: *App) void {
         var slept: u32 = 0;
         while (slept < 1000) : (slept += 100) {
             if (app.ask_wake.swap(false, .acq_rel)) break;
+            _ = usleep(100 * 1000);
+        }
+    }
+}
+
+/// The agent deck's poller. Same contract as the inbox's: fetches only
+/// while its panel is open, and dirties the scene only on a digest
+/// change, so idle frames stay 0.
+fn deckThread(app: *App) void {
+    const agents = @import("agents.zig");
+    while (true) {
+        const open = blk: {
+            app.draw_lock.lock();
+            defer app.draw_lock.unlock();
+            break :blk app.side_open and app.side_panel == .deck;
+        };
+        if (open) {
+            const snap = agents.fetch(app.gpa, app.io);
+            const d = snap.digest();
+            app.draw_lock.lock();
+            if (d != app.deck_digest) {
+                app.deck = snap;
+                app.deck_digest = d;
+                // Keep the cursor in range when the list shrinks under
+                // it — an agent can exit while you are looking at it.
+                if (app.deck_sel >= app.deck.n) app.deck_sel = app.deck.n -| 1;
+                app.scene_dirty = true;
+            }
+            app.draw_lock.unlock();
+        }
+        var slept: u32 = 0;
+        while (slept < 2000) : (slept += 100) {
+            if (app.deck_wake.swap(false, .acq_rel)) break;
             _ = usleep(100 * 1000);
         }
     }

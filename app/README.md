@@ -271,6 +271,39 @@ Not done: **acting** on a row. Jumping to the session and answering the
 ask need `/agents/{id}` verbs and a form renderer — §2's asks item. The
 inbox lists today.
 
+## The agent deck (`src/agents.zig`)
+
+Every claude session rook can see, at once. `<leader>v` or `agent.view`.
+`GET /agents` is agentwatch's snapshot — the host tails Claude Code's own
+jsonl transcripts and keeps a state per session. Unlike the asks loop
+this needed **no host change**: the endpoint is plain HTTP and assumes
+nothing about session sockets.
+
+The deck is the **navigation** surface — which agents exist, what each is
+doing, and a way to get to one. The rendered transcript timeline is a
+separate and much larger build (PARITY §2).
+
+- **Ordered by what needs you**: needs_input, then working, then quiet.
+  The sort is *stable* within a rank, so the row under your cursor does
+  not move when a poll lands.
+- **Opens FOCUSED**, unlike the inbox. It is a list you navigate and pick
+  from, so handing it the keys is the action you asked for. ESC yields
+  them back **without closing** — you want to keep looking while you work.
+- **Enter goes there**, through the same `jumpToCwdLocked` the ask form's
+  ⌃G uses. Panes are not host sessions, so a shared directory is the only
+  correspondence there is; one notion of "go there" means the two cannot
+  drift apart.
+- **Rows are named workspace-relative**, not by the last path segment.
+  An agent in `rook/app` read as "app" in the first version — true, and
+  useless, since every repo has one.
+- Same two rules as the inbox: "no agents running" and "host unreachable"
+  render differently, and the poller only runs while the panel is open
+  and only dirties on a digest change.
+
+The wire mapping is pinned by a test against a **real captured `/agents`
+response**, so a field renamed upstream fails a test instead of showing
+up as a silently empty deck.
+
 ## The asks loop (`src/asks.zig`)
 
 Claude asks a question, a human answers, the asker unblocks. `rookctl

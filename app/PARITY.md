@@ -278,10 +278,22 @@ Ranked by how much of rook's identity dies without it.
       the scene on a digest change. Measured after: 6s open, n=0 on
       every frame ring. Overflow is never silent (`+N more` covers both
       the height cap and the 16-item fetch cap).
-- [ ] **Agent deck / session view** (`/sessions`, `/agents`, `<leader>v`):
-      transcript jsonl → rendered timeline, flat vim-navigable deck.
-      Biggest single UI build on the list; `internal/transcript` +
-      `transcriptapi` do the parsing.
+- [~] **Agent deck** (`/agents`, `<leader>v`) — the flat vim-navigable
+      deck is DONE (`src/agents.zig`). Needed no host change, unlike the
+      asks loop: the endpoint is plain HTTP and assumes nothing about
+      session sockets. Ordered by what needs you (needs_input → working
+      → quiet), STABLE within a rank so a poll cannot move the row under
+      the cursor. Opens FOCUSED (it is a list you pick from) and ESC
+      yields the keys back WITHOUT closing. Enter goes there through the
+      same `jumpToCwdLocked` as the ask form's ⌃G — one notion of "go
+      there", so they cannot drift. Rows name the WORKSPACE, not the last
+      path segment: the first version read this repo's `rook/app` as
+      "app", which is true and useless. Wire mapping pinned by a test
+      against a real captured /agents response.
+- [ ] **Session view**: transcript jsonl → rendered timeline. The other
+      half, and the bigger one — `internal/transcript` + `transcriptapi`
+      do the parsing, `/agents/{id}/transcript` serves whole records with
+      an `after=` cursor. The deck is where it would open from.
 - [ ] **Threads** (`/threads/`, `<leader>t`): host-projected editable
       docs. In rook these are *buffers* — the editor already is the
       renderer, which is a genuine simplification over Monaco.

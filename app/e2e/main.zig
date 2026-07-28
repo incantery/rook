@@ -30,6 +30,7 @@ const scenarios = [_]Scenario{
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
     .{ .name = "sidepane", .what = "side pane retiles the grid, flips edges, and holds the inbox", .run = sidepane },
     .{ .name = "asks", .what = "a question renders, takes keys, and produces the answer JSON", .run = asks },
+    .{ .name = "deck", .what = "the agent deck opens focused and yields the keys back", .run = deck },
 };
 
 // ---------------------------------------------------------------- boot
@@ -522,6 +523,49 @@ fn asks(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("enter");
     const esc = try app.ctl("ask-answer");
     try h.expectContains(esc, "\\\"", "quotes are escaped in the answer");
+}
+
+// ---------------------------------------------------------------- deck
+
+fn deck(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    const wide = try paneCols(app);
+
+    _ = try app.ctl("run agent.view");
+    const st = try app.ctl("sidepane");
+    try h.expectContains(st, "panel:deck", "the deck takes the side pane");
+    // No daemon in the sandbox, so the honest render is "unreachable" —
+    // NOT "no agents running", which would claim we looked and found
+    // nothing. Same rule as the inbox.
+    try h.expectContains(st, "host unreachable", "fails open, and says which");
+    try h.expect(try paneCols(app) < wide, "deck retiles like any tenant", .{});
+
+    // It opens FOCUSED — unlike the inbox, it is a list you navigate, so
+    // handing it the keys is the action you asked for. Proof: typing
+    // must not reach the shell.
+    _ = try app.ctl("type jjjj");
+    try h.expectContains(try app.ctl("dump"), "e2e$", "deck keys did NOT reach the shell");
+
+    // ESC yields the keys back without closing the panel — you want to
+    // keep looking at the list while you work.
+    _ = try app.ctl("key 1b");
+    try h.expectContains(try app.ctl("sidepane"), "panel:deck", "ESC leaves the panel open");
+    _ = try app.ctl("type back-in-shell");
+    _ = try app.ctl("enter");
+    try app.waitTextCount("back-in-shell", 2, 5_000);
+
+    // Toggling the same panel closes it and gives the columns back.
+    _ = try app.ctl("run agent.view");
+    try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
+    try h.expect(try paneCols(app) > 1, "columns came back", .{});
+
+    // The deck is a registry command like any other, so the palette
+    // lists it — that is the whole point of the spine.
+    try h.expectContains(try app.ctl("commands"), "agent.view", "registered as a command");
 }
 
 // ---------------------------------------------------------------- runner
