@@ -26,6 +26,8 @@ const NSRect = extern struct { origin: NSPoint, size: NSSize };
 const MTLClearColor = extern struct { r: f64, g: f64, b: f64, a: f64 };
 
 extern "c" fn MTLCreateSystemDefaultDevice() objc.c.id;
+extern "c" fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *anyopaque, buffersize: c_int) c_int;
+const PROC_PIDVNODEPATHINFO: c_int = 9;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn _exit(code: c_int) noreturn;
 
@@ -150,6 +152,10 @@ pub const App = struct {
     /// resize, and ctl. See the file comment for lock order.
     draw_lock: sessionpkg.Lock = .{},
 
+    /// proc_pidinfo(PROC_PIDVNODEPATHINFO) scratch: 2 × (152-byte
+    /// vnode_info + 1024-byte path). Written under draw_lock.
+    cwd_info: [2352]u8 = undefined,
+
     // ctl `shot` handoff: the socket thread stores a path and flips the
     // flag; the render thread services it after the next commit.
     shot_state: std.atomic.Value(u8) = .init(0),
@@ -241,7 +247,7 @@ pub const App = struct {
         const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2, renderer.cell_h)));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
-        const session = try sessionpkg.Session.start(gpa, init.io, shell, @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
+        const session = try sessionpkg.Session.start(gpa, init.io, shell, null, @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
 
         const self = try gpa.create(App);
         const pane = try gpa.create(panespkg.Pane);
@@ -373,10 +379,25 @@ pub const App = struct {
         return self.tabs.items[self.active_tab];
     }
 
+    /// The focused pane's shell cwd via libproc — new tabs and splits
+    /// open where you are, the tmux/wails behavior (TODO.md item one).
+    /// Buffer-owned by App; valid until the next call.
+    fn focusedCwd(self: *App) ?[*:0]const u8 {
+        const tm = self.activeTab().focused.term() orelse return null;
+        // struct proc_vnodepathinfo { vnode_info_path pvi_cdir; ... };
+        // vip_path (MAXPATHLEN) sits after the 152-byte vnode_info.
+        const n = proc_pidinfo(tm.session.pid, PROC_PIDVNODEPATHINFO, 0, &self.cwd_info, self.cwd_info.len);
+        if (n <= 152) return null;
+        const path: [*:0]const u8 = @ptrCast(self.cwd_info[152..]);
+        if (path[0] != '/') return null;
+        return path;
+    }
+
     /// Spawn a shell session wrapped in a fresh pane. Caller inserts it
-    /// into a tree and a tab.
+    /// into a tree and a tab (holding draw_lock — focusedCwd reads the
+    /// focused pane).
     fn makePane(self: *App) !*panespkg.Pane {
-        const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
+        const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, self.focusedCwd(), 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
         session.kick = &inputKick;
         session.kick_ctx = self;
         const pane = try self.gpa.create(panespkg.Pane);

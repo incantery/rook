@@ -82,7 +82,7 @@ pub const Session = struct {
         self.snapshot_wanted.store(false, .release);
     }
 
-    pub fn start(gpa: std.mem.Allocator, io: anytype, shell: [*:0]const u8, cols: u16, rows: u16, cell_w_px: u32, cell_h_px: u32) !*Session {
+    pub fn start(gpa: std.mem.Allocator, io: anytype, shell: [*:0]const u8, cwd: ?[*:0]const u8, cols: u16, rows: u16, cell_w_px: u32, cell_h_px: u32) !*Session {
         const self = try gpa.create(Session);
         errdefer gpa.destroy(self);
 
@@ -103,7 +103,7 @@ pub const Session = struct {
         // .zprofile is where PATH/homebrew/starship come from — the
         // convention every terminal app follows.
         const argv = [_][*:0]const u8{ shell, "-l" };
-        self.pid = try self.pty.spawn(&argv);
+        self.pid = try self.pty.spawnIn(&argv, cwd);
 
         self.thread = try std.Thread.spawn(.{}, readLoop, .{self});
         return self;

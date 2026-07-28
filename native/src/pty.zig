@@ -19,6 +19,7 @@ extern "c" fn openpty(master: *fd_t, slave: *fd_t, name: ?[*]u8, termp: ?*const 
 extern "c" fn fcntl(fd: fd_t, cmd: c_int, ...) c_int;
 extern "c" fn ioctl(fd: fd_t, request: c_ulong, ...) c_int;
 extern "c" fn fork() pid_t;
+extern "c" fn chdir(path: [*:0]const u8) c_int;
 extern "c" fn setsid() pid_t;
 extern "c" fn dup2(old: fd_t, new: fd_t) c_int;
 extern "c" fn close(fd: fd_t) c_int;
@@ -92,6 +93,12 @@ pub const Pty = struct {
     /// Returns the child pid in the parent; never returns in the child.
     /// Closes the slave fd in the parent.
     pub fn spawn(self: *Pty, argv: []const [*:0]const u8) !pid_t {
+        return self.spawnIn(argv, null);
+    }
+
+    /// spawn with an optional working directory for the child (a
+    /// failed chdir falls through to the inherited cwd).
+    pub fn spawnIn(self: *Pty, argv: []const [*:0]const u8, cwd: ?[*:0]const u8) !pid_t {
         var argv_buf: [64:null]?[*:0]const u8 = undefined;
         if (argv.len >= argv_buf.len) return error.TooManyArgs;
         for (argv, 0..) |a, i| argv_buf[i] = a;
@@ -107,6 +114,7 @@ pub const Pty = struct {
             if (dup2(self.slave, 1) < 0) _exit(127);
             if (dup2(self.slave, 2) < 0) _exit(127);
             if (self.slave > 2) _ = close(self.slave);
+            if (cwd) |d| _ = chdir(d);
 
             _ = execvp(argv[0], &argv_buf);
             _exit(127);
