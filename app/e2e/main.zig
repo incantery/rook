@@ -32,6 +32,7 @@ const scenarios = [_]Scenario{
     .{ .name = "asks", .what = "a question renders, takes keys, and produces the answer JSON", .run = asks },
     .{ .name = "deck", .what = "the agent deck opens focused and yields the keys back", .run = deck },
     .{ .name = "threads", .what = "the threads panel, and :Thread* refuses a non-thread buffer", .run = threads },
+    .{ .name = "review", .what = "the review panel opens focused and keeps its verdict keys", .run = review },
 };
 
 // ---------------------------------------------------------------- boot
@@ -620,6 +621,41 @@ fn threads(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("type :ThreadNote");
     _ = try app.ctl("enter");
     try app.waitText("not a thread buffer", 5_000);
+}
+
+// -------------------------------------------------------------- review
+
+fn review(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    const wide = try paneCols(app);
+
+    _ = try app.ctl("run review.changes");
+    const st = try app.ctl("sidepane");
+    try h.expectContains(st, "panel:review", "review takes the side pane");
+    try h.expectContains(st, "host unreachable", "fails open, and says which");
+    try h.expect(try paneCols(app) < wide, "review retiles like any tenant", .{});
+
+    // Opens FOCUSED and holds the verdict keys. a/r/d are single letters
+    // on purpose — triaging 52 findings pays every extra keystroke 52
+    // times — which makes "do they leak to the shell" the sharp question.
+    _ = try app.ctl("type ard");
+    _ = try app.ctl("type jjkk");
+    try h.expectContains(try app.ctl("dump"), "e2e$", "verdict keys did NOT reach the shell");
+
+    _ = try app.ctl("key 1b");
+    try h.expectContains(try app.ctl("sidepane"), "panel:review", "ESC leaves the panel open");
+    _ = try app.ctl("type back-in-shell");
+    _ = try app.ctl("enter");
+    try app.waitTextCount("back-in-shell", 2, 5_000);
+
+    _ = try app.ctl("run review.changes");
+    try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
+    try h.expect(try paneCols(app) > 1, "columns came back", .{});
+    try h.expectContains(try app.ctl("commands"), "review.changes", "registered as a command");
 }
 
 // ---------------------------------------------------------------- runner

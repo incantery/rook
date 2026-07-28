@@ -308,7 +308,7 @@ pub const Side = enum { left, right };
 /// where §2's inbox/deck/threads/review join it, the same way pal_mode
 /// grew a second list. Deliberately an enum rather than a vtable — a
 /// tenant interface designed against ONE tenant is a guess.
-pub const Panel = enum { attention, ask, deck, threads };
+pub const Panel = enum { attention, ask, deck, threads, review };
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -416,6 +416,21 @@ pub const App = struct {
     /// the scissors line, which a comment body could legally contain.
     thr_prefix: []u8 = &.{},
     thr_prefix_id: i64 = 0,
+
+    // ---- review ----
+    rev: @import("review.zig").Snapshot = .{},
+    rev_digest: u64 = 0,
+    rev_sel: usize = 0,
+    rev_wake: std.atomic.Value(bool) = .init(false),
+    /// A verdict queued against a finding: id + state name.
+    rev_set_id: i64 = 0,
+    rev_set: [12]u8 = @splat(0),
+    rev_set_len: usize = 0,
+    /// A finding's location queued to open — the fetch/open happens off
+    /// the key path like every other network-adjacent action.
+    rev_open_path: [128]u8 = @splat(0),
+    rev_open_path_len: usize = 0,
+    rev_open_line: i64 = 0,
 
     /// The side pane takes the key path. Needed the moment a tenant is
     /// INTERACTIVE — the inbox is read-only, the ask form is not. Modal
@@ -846,6 +861,11 @@ pub const App = struct {
         // its panel is open — a closed panel owes the host nothing.
         if (std.Thread.spawn(.{}, attentionThread, .{self})) |t| t.detach() else |err| {
             std.debug.print("rook attention: thread failed: {}\n", .{err});
+        }
+
+        // Review: gate, verdicts, jumps.
+        if (std.Thread.spawn(.{}, reviewThread, .{self})) |t| t.detach() else |err| {
+            std.debug.print("rook review: thread failed: {}\n", .{err});
         }
 
         // Threads: list, open, save, verbs.
@@ -1438,6 +1458,21 @@ pub const App = struct {
     /// place (the rook-buffers model), else TAKE OVER the focused
     /// terminal pane — the shell parks in `pane.under` and keeps
     /// running; editor :q restores it, like vim in a terminal.
+    /// Open a file with the cursor on `line` (1-based). The review
+    /// panel's Enter: a finding names a place, and landing anywhere else
+    /// makes you hunt for it.
+    pub fn openEditorAtLine(self: *App, path: []const u8, line: i64) bool {
+        if (!self.openEditor(path)) return false;
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const ed = self.activeTab().focused.editor() orelse return true;
+        const n = ed.lineCountB();
+        ed.cline = @min(@as(usize, @intCast(@max(line, 1))) - 1, n -| 1);
+        ed.ccol = 0;
+        self.scene_dirty = true;
+        return true;
+    }
+
     pub fn openEditor(self: *App, path: []const u8) bool {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
@@ -1603,6 +1638,7 @@ pub const App = struct {
             .ask => self.askKeyLocked(bytes),
             .deck => self.deckKeyLocked(bytes),
             .threads => self.threadsKeyLocked(bytes),
+            .review => self.reviewKeyLocked(bytes),
             // Read-only tenant: it never takes the keys.
             .attention => return false,
         }
@@ -1982,6 +2018,7 @@ pub const App = struct {
             .panel_attention => self.toggleSidePane(.attention),
             .panel_deck => self.toggleDeck(),
             .panel_threads => self.toggleThreads(),
+            .panel_review => self.toggleReview(),
             .thread_note => self.threadVerb("note"),
             .thread_ask => self.threadVerb("ask"),
             .thread_resolve => self.threadVerb("resolve"),
@@ -2609,6 +2646,88 @@ pub const App = struct {
             }
             i += 1;
         }
+        self.scene_dirty = true;
+    }
+
+    pub fn toggleReview(self: *App) void {
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            if (self.side_open and self.side_panel == .review) {
+                self.side_open = false;
+                self.side_focus = false;
+            } else {
+                self.side_panel = .review;
+                self.side_open = true;
+                self.side_focus = true;
+                self.rev_sel = 0;
+            }
+            self.relayoutLocked();
+            self.scene_dirty = true;
+        }
+        self.rev_wake.store(true, .release);
+    }
+
+    /// The review panel's keys: move, open, and the three verdicts.
+    /// a/r/d rather than a menu, because triaging 52 findings is the
+    /// actual workload and every extra keystroke is paid 52 times.
+    pub fn reviewKeyLocked(self: *App, bytes: []const u8) void {
+        const n = self.rev.slice().len;
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const b = bytes[i];
+            if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
+                switch (bytes[i + 2]) {
+                    'A' => self.rev_sel -|= 1,
+                    'B' => self.rev_sel = @min(self.rev_sel + 1, n -| 1),
+                    else => {},
+                }
+                i += 3;
+                continue;
+            }
+            switch (b) {
+                0x1b => {
+                    self.side_focus = false;
+                    self.scene_dirty = true;
+                    return;
+                },
+                'k', 0x10 => self.rev_sel -|= 1,
+                'j', 0x0e => self.rev_sel = @min(self.rev_sel + 1, n -| 1),
+                'g' => self.rev_sel = 0,
+                'G' => self.rev_sel = n -| 1,
+                'a' => self.queueVerdictLocked("approved"),
+                'r' => self.queueVerdictLocked("rejected"),
+                'd' => self.queueVerdictLocked("deferred"),
+                '\r', '\n' => {
+                    if (self.rev_sel < n) {
+                        const f = self.rev.slice()[self.rev_sel];
+                        self.rev_open_path_len = @min(f.path.get().len, self.rev_open_path.len);
+                        @memcpy(self.rev_open_path[0..self.rev_open_path_len], f.path.get()[0..self.rev_open_path_len]);
+                        self.rev_open_line = f.line;
+                        self.side_focus = false;
+                    }
+                    self.scene_dirty = true;
+                    return;
+                },
+                else => {},
+            }
+            i += 1;
+        }
+        self.scene_dirty = true;
+    }
+
+    fn queueVerdictLocked(self: *App, state: []const u8) void {
+        if (self.rev_sel >= self.rev.slice().len) return;
+        const f = self.rev.slice()[self.rev_sel];
+        const k = @min(state.len, self.rev_set.len);
+        @memcpy(self.rev_set[0..k], state[0..k]);
+        self.rev_set_len = k;
+        self.rev_set_id = f.id;
+        // Move on immediately: the next finding is where you are going
+        // anyway, and waiting for a round trip to advance would make
+        // triaging 52 of them feel like 52 round trips.
+        self.rev_sel = @min(self.rev_sel + 1, self.rev.slice().len -| 1);
+        self.rev_wake.store(true, .release);
         self.scene_dirty = true;
     }
 
@@ -3543,6 +3662,7 @@ pub const App = struct {
             .ask => "QUESTION",
             .deck => "AGENTS",
             .threads => "THREADS",
+            .review => "REVIEW",
         }, th.bar_value, self.glassBg(th.bar_bg));
         // The focus telegraph: an interactive panel has to look like it
         // is the thing your keys are going to.
@@ -3555,7 +3675,77 @@ pub const App = struct {
             .ask => self.drawAsk(ui, r, y),
             .deck => self.drawDeck(ui, r, y),
             .threads => self.drawThreads(ui, r, y),
+            .review => self.drawReview(ui, r, y),
         }
+    }
+
+    fn drawReview(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        const row_h = self.bar_h;
+        const bg = self.glassBg(th.bar_bg);
+        const tx = r.x + cw;
+        var y = top;
+
+        if (!self.rev.live) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "host unreachable", th.bar_fg, bg);
+            return;
+        }
+        if (!self.rev.any) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "no review in this workspace", th.bar_fg, bg);
+            return;
+        }
+
+        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - cw * 3, cw)));
+        // THE GATE, first and unmissable: it is the answer to the only
+        // question this panel exists for — can I ship this yet.
+        var gbuf: [96]u8 = undefined;
+        const g = if (self.rev.ready)
+            std.fmt.bufPrint(&gbuf, "{s} READY · {d} reviewed", .{ self.rev.verb.get(), self.rev.total }) catch ""
+        else
+            std.fmt.bufPrint(&gbuf, "{s} blocked · {d} of {d} left", .{ self.rev.verb.get(), self.rev.blocking, self.rev.total }) catch "";
+        _ = ui.text(tx, y + (row_h - ch) / 2, g[0..@min(g.len, cols)], if (self.rev.ready) th.accent else th.ed_err, bg);
+        y += row_h;
+        const lbl = self.rev.label.get();
+        _ = ui.text(tx, y + (row_h - ch) / 2, lbl[0..@min(lbl.len, cols)], th.bar_fg, bg);
+        y += row_h;
+
+        const avail = r.y + r.h - y - row_h;
+        const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h * 2)));
+        const shown = @min(self.rev.slice().len, fits);
+
+        for (self.rev.slice()[0..shown], 0..) |*f, i| {
+            const selected = i == self.rev_sel;
+            const rbg = if (selected) th.chip_active_bg else bg;
+            if (selected) ui.rect(r.x, y, r.w, row_h * 2, th.chip_active_bg);
+            const mfg = switch (f.state) {
+                .approved, .deferred => th.bar_fg,
+                .rejected => th.ed_err,
+                else => th.accent,
+            };
+            var mx = tx;
+            mx += ui.text(mx, y + (row_h - ch) / 2, f.state.mark(), mfg, rbg);
+            var loc: [140]u8 = undefined;
+            const base = f.path.get();
+            const file = if (std.mem.lastIndexOfScalar(u8, base, '/')) |sl| base[sl + 1 ..] else base;
+            const s2 = std.fmt.bufPrint(&loc, "{s}:{d}", .{ file, f.line }) catch file;
+            _ = ui.text(mx, y + (row_h - ch) / 2, s2[0..@min(s2.len, cols -| 2)], if (selected) th.bar_value else th.bar_fg, rbg);
+            if (f.risk >= 7)
+                _ = ui.textRight(r.x + r.w - cw, y + (row_h - ch) / 2, "risk", th.ed_err, rbg);
+            y += row_h;
+            const wtxt = f.what.get();
+            _ = ui.text(tx + cw * 2, y + (row_h - ch) / 2, wtxt[0..@min(wtxt.len, cols -| 2)], th.bar_fg, rbg);
+            y += row_h;
+        }
+        const hidden = self.rev.slice().len - shown + self.rev.more;
+        if (hidden > 0) {
+            var buf: [32]u8 = undefined;
+            const s3 = std.fmt.bufPrint(&buf, "+{d} more", .{hidden}) catch "+more";
+            _ = ui.text(tx, y + (row_h - ch) / 2, s3, th.bar_fg, bg);
+            y += row_h;
+        }
+        if (self.side_focus)
+            _ = ui.text(tx, y + (row_h - ch) / 2, "a/r/d verdict · enter opens", th.bar_fg, bg);
     }
 
     fn drawThreads(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
@@ -3770,6 +3960,24 @@ pub const App = struct {
         var inner: [96]u8 = undefined;
         const lbl = self.cwdLabel(a.cwd.get(), &inner);
         return std.fmt.bufPrint(buf, "from {s}", .{lbl}) catch lbl;
+    }
+
+    /// Resolve a workspace-relative path against the active space's
+    /// root. Review findings are stored relative to the repo, and the
+    /// editor wants somewhere it can actually open.
+    pub fn spaceRoot(self: *App, buf: []u8, rel: []const u8) ?[]const u8 {
+        self.draw_lock.lock();
+        const label = self.activeSpace().label();
+        var root: []const u8 = "";
+        for (self.pal_items) |e| {
+            if (std.mem.eql(u8, e.name, label)) {
+                root = e.root;
+                break;
+            }
+        }
+        self.draw_lock.unlock();
+        if (root.len == 0) return null;
+        return std.fmt.bufPrint(buf, "{s}/{s}", .{ root, rel }) catch null;
     }
 
     /// Name a directory the way a human would.
@@ -4499,6 +4707,79 @@ fn asksThread(app: *App) void {
         while (slept < 1000) : (slept += 100) {
             if (app.ask_wake.swap(false, .acq_rel)) break;
             _ = usleep(100 * 1000);
+        }
+    }
+}
+
+/// Review: poll the workspace's review, apply verdicts, open findings.
+fn reviewThread(app: *App) void {
+    const rev = @import("review.zig");
+    while (true) {
+        var set_id: i64 = 0;
+        var set_name: [12]u8 = undefined;
+        var set_len: usize = 0;
+        var open_path: [128]u8 = undefined;
+        var open_len: usize = 0;
+        var open_line: i64 = 0;
+        var ws_buf: [64]u8 = undefined;
+        var ws_len: usize = 0;
+        const open_panel = blk: {
+            app.draw_lock.lock();
+            defer app.draw_lock.unlock();
+            set_id = app.rev_set_id;
+            set_len = app.rev_set_len;
+            if (set_id != 0) {
+                @memcpy(set_name[0..set_len], app.rev_set[0..set_len]);
+                app.rev_set_id = 0;
+                app.rev_set_len = 0;
+            }
+            open_len = app.rev_open_path_len;
+            if (open_len > 0) {
+                @memcpy(open_path[0..open_len], app.rev_open_path[0..open_len]);
+                open_line = app.rev_open_line;
+                app.rev_open_path_len = 0;
+            }
+            const label = app.activeSpace().label();
+            ws_len = @min(label.len, ws_buf.len);
+            @memcpy(ws_buf[0..ws_len], label[0..ws_len]);
+            break :blk app.side_open and app.side_panel == .review;
+        };
+
+        // A verdict outranks polling: it is what the human just did.
+        var forced = false;
+        if (set_id != 0) {
+            _ = rev.setState(app.gpa, app.io, set_id, set_name[0..set_len]);
+            forced = true; // re-fetch so the gate reflects it immediately
+        }
+
+        if (open_len > 0) {
+            // Paths are workspace-relative; resolve against the space's
+            // root by way of the focused pane's cwd.
+            var full: [512]u8 = undefined;
+            const p = open_path[0..open_len];
+            const resolved = if (p.len > 0 and p[0] == '/')
+                p
+            else if (app.spaceRoot(&full, p)) |r| r else p;
+            _ = app.openEditorAtLine(resolved, open_line);
+        }
+
+        if (open_panel or forced) {
+            const snap = rev.fetch(app.gpa, app.io, ws_buf[0..ws_len]);
+            const d = snap.digest();
+            app.draw_lock.lock();
+            if (d != app.rev_digest) {
+                app.rev = snap;
+                app.rev_digest = d;
+                if (app.rev_sel >= app.rev.n) app.rev_sel = app.rev.n -| 1;
+                app.scene_dirty = true;
+            }
+            app.draw_lock.unlock();
+        }
+
+        var slept: u32 = 0;
+        while (slept < 2000) : (slept += 50) {
+            if (app.rev_wake.swap(false, .acq_rel)) break;
+            _ = usleep(50 * 1000);
         }
     }
 }

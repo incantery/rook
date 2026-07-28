@@ -166,6 +166,17 @@ pub fn build(b: *std.Build) void {
     threads_tests.root_module.link_libc = true;
     test_step.dependOn(&b.addRunArtifact(threads_tests).step);
 
+    // The review gate's rules. Its own root because a client that
+    // disagreed with the host about what BLOCKS would render a gate the
+    // host will not honour — the worst kind of wrong for this panel.
+    const review_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/review.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    review_tests.root_module.link_libc = true;
+    test_step.dependOn(&b.addRunArtifact(review_tests).step);
+
     // e2e: spawns the real app and drives its ctl socket.
     //
     // NOT part of `test`, and not in CI — it needs a window server, a

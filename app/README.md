@@ -271,6 +271,37 @@ Not done: **acting** on a row. Jumping to the session and answering the
 ask need `/agents/{id}` verbs and a form renderer — §2's asks item. The
 inbox lists today.
 
+## Review (`src/review.zig`)
+
+`<leader>g` — the changes list and **the gate**. A review is a RookTask
+parent whose children are anchored FINDINGS: each carries a path, a line
+range, a summary and a state, and the gate is a pure function of those
+states (approved and deferred clear; proposed, rejected and
+conversation-pending block).
+
+- **The gate leads**, in the accent colour when ready and the error
+  colour when not. It is the answer to the only question this panel
+  exists for: can I ship this yet.
+- **Blocking findings sort first, riskiest first**, stably — a poll
+  cannot move the row under your cursor mid-triage.
+- **`a` / `r` / `d` are single letters** and the cursor advances
+  immediately, without waiting for the round trip. Triaging 52 findings
+  pays every extra keystroke 52 times.
+- **Enter opens the file at the finding's line** — using `currentStart`,
+  the stored range re-anchored onto today's file. Jumping to the line it
+  was *written* against would land on whatever has since moved into its
+  place.
+- `State.blocks` mirrors the host's `reviewBlocking` exactly. A client
+  that disagreed would render a gate the host will not honour, which is
+  the worst way this panel could be wrong.
+
+**On the diff surface.** PARITY listed review as blocked on one. It
+turned out not to be: a finding says *what* is wrong and *where*, and
+rook already opens a file at a line — so the thing standing between you
+and a verdict was never the diff. A side-by-side view is a nicer way to
+read a change and it is still worth building; it just was not the
+prerequisite it looked like.
+
 ## Threads (`src/threads.zig`)
 
 File-anchored conversations, projected as **editable buffers**.

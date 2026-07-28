@@ -49,6 +49,8 @@ pub const Action = enum {
     panel_deck,
     /// The workspace's threads.
     panel_threads,
+    /// The review: the changes list and the gate.
+    panel_review,
     /// Thread verbs, on whichever thread the focused pane holds. Reached
     /// as :ThreadNote / :ThreadAsk / :ThreadResolve through the
     /// ex-command bridge, which is exactly what that bridge is for.
@@ -104,6 +106,7 @@ pub const commands = [_]Command{
     .{ .id = "attention.inbox", .title = "Attention Inbox", .category = "Panel", .action = .panel_attention, .keys = "<leader>a" },
     .{ .id = "agent.view", .title = "Agent Deck", .category = "Panel", .action = .panel_deck, .keys = "<leader>v" },
     .{ .id = "threads.toggle", .title = "Threads", .category = "Panel", .action = .panel_threads, .keys = "<leader>t" },
+    .{ .id = "review.changes", .title = "Review", .category = "Panel", .action = .panel_review, .keys = "<leader>g" },
     .{ .id = "thread.note", .title = "Land Draft as a Note", .category = "Thread", .action = .thread_note },
     .{ .id = "thread.ask", .title = "Send Draft to the Agent", .category = "Thread", .action = .thread_ask },
     .{ .id = "thread.resolve", .title = "Resolve Thread", .category = "Thread", .action = .thread_resolve },

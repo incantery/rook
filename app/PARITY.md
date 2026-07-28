@@ -341,9 +341,27 @@ Ranked by how much of rook's identity dies without it.
 - [ ] Thread CREATION from a buffer (`gt` — go-to-or-create on the line
       under the cursor). Reading and replying work; starting one still
       needs the anchor plumbing.
-- [ ] **Review / RookTask** (`/tasks/`, `/edits/`, `<leader>g`): the
-      changes list, the gate, approve/reject/comment, review rings.
-      Needs a diff surface (see §3).
+- [x] **Review / RookTask** (`/tasks/`, `<leader>g`) — the changes list
+      and the gate. `src/review.zig`; a/r/d set verdicts, Enter opens the
+      finding's file at its line, the gate reads at the top.
+      **IT DID NOT NEED A DIFF SURFACE, and that was worth checking
+      before building one.** A review's children are anchored FINDINGS —
+      path, line range, summary, state — not diff hunks. The finding says
+      what is wrong and where, and rook already opens a file at a line,
+      so the diff was never what stood between you and a verdict. Still
+      worth building as a nicer way to READ a change (§3), just not a
+      prerequisite.
+      Enter uses `currentStart`, the stored range RE-ANCHORED onto
+      today's file; jumping to the line it was written against would land
+      on whatever moved into its place. `State.blocks` mirrors the host's
+      `reviewBlocking` exactly — a client that disagreed would render a
+      gate the host will not honour. Blocking sorts first and riskiest
+      first, stably, so a poll cannot move the row mid-triage; a/r/d are
+      single letters and advance immediately, because triaging 52
+      findings pays every extra keystroke 52 times.
+- [ ] Review COMMENTS (a verdict with words — the thread-per-finding
+      path). Verdicts work; `pending` state exists for exactly this and
+      nothing sets it yet.
 - [ ] **Spawn** (`/agents`, `<leader>n`) + workflows + issue queue +
       worktree create/switch (`worktree.go`, `exploretasks.go`)
 - [ ] **Dashboard / Home / Start** (`/overview`, `<leader>d`): the

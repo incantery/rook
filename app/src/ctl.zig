@@ -396,6 +396,32 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     if (app.attention.more > 0)
                         w.print("+{d} more\n", .{app.attention.more}) catch {};
                 },
+                .review => {
+                    if (!app.rev.live) {
+                        _ = w.write("host unreachable\n") catch 0;
+                    } else if (!app.rev.any) {
+                        _ = w.write("no review in this workspace\n") catch 0;
+                    } else {
+                        w.print("gate {s} {s} blocking={d} total={d}\n{s}\n", .{
+                            app.rev.verb.get(),
+                            @as([]const u8, if (app.rev.ready) "READY" else "blocked"),
+                            app.rev.blocking,
+                            app.rev.total,
+                            app.rev.label.get(),
+                        }) catch {};
+                        for (app.rev.slice(), 0..) |*f, i| {
+                            w.print("{s}{d}\t{s}\t{s}:{d}\t{s}\n", .{
+                                @as([]const u8, if (i == app.rev_sel) "*" else " "),
+                                f.id,
+                                @tagName(f.state),
+                                f.path.get(),
+                                f.line,
+                                f.what.get(),
+                            }) catch break;
+                        }
+                        if (app.rev.more > 0) w.print("+{d} more\n", .{app.rev.more}) catch {};
+                    }
+                },
                 .threads => {
                     if (!app.thr.live) {
                         _ = w.write("host unreachable\n") catch 0;
