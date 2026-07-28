@@ -244,6 +244,9 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         }
         app.requestWinSize(w, h);
         reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, line, "fullscreen")) {
+        app.requestFullscreen();
+        reply(fd, "ok\n");
     } else if (std.mem.eql(u8, line, "hud")) {
         app.draw_lock.lock();
         var buf: [256]u8 = undefined;

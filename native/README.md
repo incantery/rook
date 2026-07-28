@@ -54,6 +54,7 @@ printf 'dump@2\n'            | nc -U /tmp/rookz.sock   # any pane-taking verb
 printf 'type@2 ls\n'         | nc -U /tmp/rookz.sock   #   targets by @id
 printf 'shot /tmp/s.png\n'   | nc -U /tmp/rookz.sock   # pixel truth
 printf 'winsize 900 600\n'   | nc -U /tmp/rookz.sock   # resize (points)
+printf 'fullscreen\n'        | nc -U /tmp/rookz.sock   # toggle (latency: −7ms)
 printf 'stats\n'             | nc -U /tmp/rookz.sock   # live perf numbers
 printf 'stats reset\n'       | nc -U /tmp/rookz.sock
 printf 'quit\n'              | nc -U /tmp/rookz.sock

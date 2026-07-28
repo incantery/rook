@@ -69,6 +69,11 @@ pub const Stats = struct {
     /// Interval between consecutive presented frames (only frames we drew;
     /// idle frames are skipped entirely, so this measures active pacing).
     present_interval: Ring = .{},
+    /// Commit → presentedTime per drawn frame: the display pipeline's
+    /// share of latency. ~12ms avg says the WindowServer is compositing
+    /// us (latch + compose); ~4ms avg says direct-to-display scan-out.
+    /// This ring IS the direct-to-display detector.
+    present_lag: Ring = .{},
 
     bytes_in: std.atomic.Value(u64) = .init(0),
     frames_drawn: std.atomic.Value(u64) = .init(0),
@@ -84,6 +89,7 @@ pub const Stats = struct {
         self.drawable_wait.reset();
         self.frame_gpu.reset();
         self.present_interval.reset();
+        self.present_lag.reset();
         self.bytes_in.store(0, .monotonic);
         self.frames_drawn.store(0, .monotonic);
         self.frames_skipped.store(0, .monotonic);
@@ -119,6 +125,7 @@ pub fn writeReport(w: *std.Io.Writer) !void {
         .{ .name = "drawable_wait_us", .ring = &s.drawable_wait },
         .{ .name = "frame_gpu_us", .ring = &s.frame_gpu },
         .{ .name = "present_interval_us", .ring = &s.present_interval },
+        .{ .name = "present_lag_us", .ring = &s.present_lag },
     };
     for (series) |ser| {
         const sum = ser.ring.summarize();

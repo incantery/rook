@@ -20,7 +20,9 @@ session, no scrollback viewer yet — re-run as features land.
 
 | metric | value | condition |
 |---|---|---|
-| key → photon p50 / p95 | **15.5 / 26.4 ms** | quiet prompt, 60 keys @ 80ms |
+| key → photon p50 / p95 | **15.5 / 26.4 ms** | quiet prompt, 60 keys @ 80ms, windowed |
+| key → photon p50 / p95 | **8.5 / 14.4 ms** | 〃 FULLSCREEN (direct scan-out, no compositor) |
+| present lag (commit→photon) p50 | 13.8 ms windowed / **7.0 ms fullscreen** | the display pipeline's share, measured |
 | key → commit p50 / p95 | **2.3 / 3.3 ms** | 〃 (CPU-side share incl. pty round-trip) |
 | key → photon p50 | **6.9 ms** | UNDER full-width firehose (n=3 — small) |
 | sustained pipeline throughput | **190 MB/s** | `yes` full-width lines, parse→glass |
@@ -89,12 +91,34 @@ Kitty 1.7s.
    Input-kick (render on echo, gated on pending input so firehose stays
    coalesced) + maximumDrawableCount=2 → 15.5ms.
 
+## The presentation pipeline, measured (2026-07-27)
+
+`present_lag` (commit → presentedTime, per frame) is the
+direct-to-display detector — no API reports the mode, but the number
+can't lie:
+
+| config | present_lag p50 | key→photon p50 |
+|---|---|---|
+| windowed (titled, WM tile) | 13.8 ms | 15.8 ms |
+| windowed + opaque layer | 12.2 ms | 14.9 ms |
+| **fullscreen + opaque** | **7.0 ms** | **8.5 ms** |
+| fullscreen, framebufferOnly=true | 7.2 ms | 9.3 ms |
+
+Fullscreen drops the WindowServer compose hop: −5 to −7ms, single-hop
+scan-out. framebufferOnly is FREE — ctl `shot` keeps working with no
+latency cost. The layer is now always opaque (required for direct,
+harmless composited). A titled window's rounded corners force
+compositing; a borderless-window probe read WORSE (22ms) but was
+occluded at launch (`--no-activate` behind other windows — throttled
+presents), so windowed-direct via borderless remains OPEN, needs a
+frontmost test + a canBecomeKeyWindow override to be usable anyway.
+
 ## Known gaps / next levers
 
-- ~13ms of key→photon is presentation physics (window-server latch +
-  vsync). Levers if we want single-digit: present-time targeting off the
-  latch phase, presentsWithTransaction experiments. Diminishing returns —
-  measure against Ghostty on the same machine first.
+- Windowed key→photon keeps ~8ms of compositor. Levers: borderless
+  direct (open, above), or race-the-beam (present-time targeting off
+  the latch phase) which helps BOTH modes — the fullscreen 7ms lag is
+  ~4ms latch-wait + ~3ms scan-out, so targeting could reach p50 ~5ms.
 - key_commit p99 has a ~25ms outlier (1 of 63) — unidentified; watch.
 - Bench geometry is the WM tile (67×42). Add a fullscreen-geometry run
   (rook benches at 405×113) before quoting numbers publicly.

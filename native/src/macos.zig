@@ -62,7 +62,7 @@ fn nsString(s: [*:0]const u8) objc.Object {
 
 const MonitorBlock = objc.Block(struct { app: *App }, .{objc.c.id}, objc.c.id);
 const ResizeBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
-const PresentedBlock = objc.Block(struct { app: *App, dirty: u8 }, .{objc.c.id}, void);
+const PresentedBlock = objc.Block(struct { app: *App, dirty: u8, commit_t: f64 }, .{objc.c.id}, void);
 const CompletedBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 
 pub const App = struct {
@@ -179,6 +179,10 @@ pub const App = struct {
         // false so the ctl `shot` command can read our own drawable back —
         // dev-tool visibility outranks the marginal framebufferOnly win.
         layer.msgSend(void, "setFramebufferOnly:", .{false});
+        // Opaque is a hard requirement for direct-to-display scan-out —
+        // a non-opaque layer always goes through the compositor. The
+        // present_lag ring is the detector: ~12ms composited, ~4ms direct.
+        layer.msgSend(void, "setOpaque:", .{true});
 
         const rect = NSRect{ .origin = .{ .x = 0, .y = 0 }, .size = .{ .width = win_w, .height = win_h } };
         // titled | closable | miniaturizable | resizable = 15
@@ -294,6 +298,17 @@ pub const App = struct {
     fn applyWinSize(ctx: ?*anyopaque) callconv(.c) void {
         const self: *App = @ptrCast(@alignCast(ctx.?));
         self.window.msgSend(void, "setContentSize:", .{NSSize{ .width = self.pending_w, .height = self.pending_h }});
+    }
+
+    /// ctl `fullscreen`: toggle native fullscreen from any thread — the
+    /// most reliable direct-to-display geometry.
+    pub fn requestFullscreen(self: *App) void {
+        dispatch_async_f(@ptrCast(&_dispatch_main_q), self, &applyFullscreen);
+    }
+
+    fn applyFullscreen(ctx: ?*anyopaque) callconv(.c) void {
+        const self: *App = @ptrCast(@alignCast(ctx.?));
+        self.window.msgSend(void, "toggleFullScreen:", .{@as(objc.c.id, null)});
     }
 
     /// Main thread, on every content-view frame change.
@@ -569,7 +584,7 @@ pub const App = struct {
         // drawable actually presents. Both handlers are copied by Metal.
         var completed_ctx = CompletedBlock.init(.{ .app = self }, &completedCallback);
         cmd.msgSend(void, "addCompletedHandler:", .{&completed_ctx});
-        var presented_ctx = PresentedBlock.init(.{ .app = self, .dirty = @intFromBool(focused_dirty) }, &presentedCallback);
+        var presented_ctx = PresentedBlock.init(.{ .app = self, .dirty = @intFromBool(focused_dirty), .commit_t = CACurrentMediaTime() }, &presentedCallback);
         drawable.msgSend(void, "addPresentedHandler:", .{&presented_ctx});
 
         cmd.msgSend(void, "presentDrawable:", .{drawable.value});
@@ -885,6 +900,7 @@ fn presentedCallback(context: *const PresentedBlock.Context, drawable_id: objc.c
     // fast we draw — only sub-500ms gaps are pacing samples.
     const last = app.last_presented.swap(t, .acq_rel);
     if (last > 0 and t > last and t - last < 0.5) stats.global.present_interval.recordSeconds(t - last);
+    if (t > context.commit_t) stats.global.present_lag.recordSeconds(t - context.commit_t);
 
     // Key → photon: only a frame that carried the focused pane's echo
     // may consume the pending mark.
