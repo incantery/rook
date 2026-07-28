@@ -51,6 +51,23 @@ pub fn blurFromName(name: []const u8) ?Blur {
 /// the terminal to sound like a terminal.
 pub const Bell = enum { none, visual, audible, all };
 
+/// What OSC 52 may do. `allow` is the default and matches every other
+/// terminal worth switching from: without it, yanking in vim or tmux
+/// over ssh silently does nothing, which is the single most common
+/// "why is my terminal broken" report there is.
+///
+/// It is a knob at all because a clipboard WRITE is an unprompted one:
+/// any program that can put bytes on your screen — including `cat` of a
+/// file you didn't write — can replace what your next ⌘V pastes. Reads
+/// are not a question here; ghostty-vt never forwards them.
+pub const ClipboardWrite = enum { allow, deny };
+
+pub fn clipboardWriteFromName(name: []const u8) ?ClipboardWrite {
+    if (std.mem.eql(u8, name, "allow") or std.mem.eql(u8, name, "true")) return .allow;
+    if (std.mem.eql(u8, name, "deny") or std.mem.eql(u8, name, "false")) return .deny;
+    return null;
+}
+
 pub fn bellFromName(name: []const u8) ?Bell {
     if (std.mem.eql(u8, name, "none")) return .none;
     if (std.mem.eql(u8, name, "visual")) return .visual;
@@ -73,6 +90,7 @@ pub const Config = struct {
     /// (content otherwise runs to the very window edge). 0–32.
     window_padding: f64 = 0,
     bell: Bell = .visual,
+    clipboard_write: ClipboardWrite = .allow,
 };
 
 /// One number over the config file — the live-reload poll compares this
@@ -193,6 +211,12 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
             cfg.bell = bellFromName(stripped) orelse blk: {
                 std.debug.print("rook config: unknown bell '{s}' (none, visual, audible, all)\n", .{stripped});
                 break :blk .visual;
+            };
+        } else if (std.mem.eql(u8, key, "clipboard_write")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            cfg.clipboard_write = clipboardWriteFromName(stripped) orelse blk: {
+                std.debug.print("rook config: unknown clipboard-write '{s}' (allow, deny)\n", .{stripped});
+                break :blk .allow;
             };
         } else if (std.mem.eql(u8, key, "background_blur")) {
             const stripped = std.mem.trim(u8, val, "\"");
@@ -455,6 +479,17 @@ test "actionFromName takes the registry's names and rookz's aliases" {
     try t.expect(actionFromName("tab.select-3").?.arg == 3);
     // A registry command rook has not built yet: skipped, not an error.
     try t.expect(actionFromName("workspace.manager") == null);
+}
+
+test "clipboard-write takes both the enum names and the booleans" {
+    const t = std.testing;
+    try t.expectEqual(ClipboardWrite.allow, clipboardWriteFromName("allow").?);
+    try t.expectEqual(ClipboardWrite.deny, clipboardWriteFromName("deny").?);
+    // TOML users reach for a bare bool for a yes/no knob; both spellings
+    // mean the same thing, and only a real typo warns.
+    try t.expectEqual(ClipboardWrite.allow, clipboardWriteFromName("true").?);
+    try t.expectEqual(ClipboardWrite.deny, clipboardWriteFromName("false").?);
+    try t.expect(clipboardWriteFromName("ask") == null);
 }
 
 test "topLevelEq ignores '=' inside a quoted key" {

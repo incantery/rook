@@ -446,6 +446,15 @@ pub const App = struct {
     notify_seq: u32 = 0,
     notify_last: [384]u8 = undefined,
     notify_last_len: usize = 0,
+    /// Whether OSC 52 writes are honoured (config `clipboard-write`).
+    /// Held here as well as on each Session so a session spawned after
+    /// a live reload inherits the current answer.
+    cfg_clip_allow: bool = true,
+    /// The last OSC 52 payload we put on the pasteboard, for ctl
+    /// `clipboard` — which reads the real pasteboard back, so this is
+    /// only here to tell "rook wrote it" from "something else did".
+    clip_last: [1024]u8 = undefined,
+    clip_last_len: usize = 0,
 
     /// Active mouse-drag selection: the pane and its anchor cell
     /// (viewport coords at mousedown). Under draw_lock; cleared by
@@ -601,6 +610,9 @@ pub const App = struct {
         pane.* = .{ .id = 1, .content = .{ .term = .{ .session = session } }, .cols = cols, .rows = rows };
         session.kick = &inputKick;
         session.kick_ctx = self;
+        // From `cfg`, NOT self.cfg_clip_allow: `self.*` is assigned
+        // below, so reading a field off it here is uninitialised memory.
+        session.clip_allow = cfg.clipboard_write == .allow;
         const tab_one = try gpa.create(panespkg.Tab);
         tab_one.* = .{ .id = 1, .root = .{ .leaf = pane }, .focused = pane };
         try tab_one.panes.append(gpa, pane);
@@ -625,6 +637,7 @@ pub const App = struct {
             .pad = pad,
             .bg_opacity = cfg.background_opacity,
             .cfg_bell = cfg.bell,
+            .cfg_clip_allow = cfg.clipboard_write == .allow,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
             .ime_view = view,
         };
@@ -1208,6 +1221,7 @@ pub const App = struct {
         const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, cwd, termColors(), 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
         session.kick = &inputKick;
         session.kick_ctx = self;
+        session.clip_allow = self.cfg_clip_allow;
         const pane = try self.gpa.create(panespkg.Pane);
         pane.* = .{ .id = self.next_pane_id, .content = .{ .term = .{ .session = session } } };
         self.next_pane_id += 1;
@@ -1776,6 +1790,7 @@ pub const App = struct {
         const t_start = CACurrentMediaTime();
 
         self.reapExitedLocked();
+        self.drainClipboardLocked();
 
         // HUD refresh at ~2Hz. Runs on skipped ticks too, so the bar
         // stays live during idle — but only a text CHANGE causes a draw.
@@ -2007,6 +2022,7 @@ pub const App = struct {
         self.keybinds = cfgpkg.loadKeybinds(self.io, arena.allocator());
         self.leader_pending.store(false, .release);
         self.cfg_bell = cfg.bell;
+        self.cfg_clip_allow = cfg.clipboard_write == .allow;
 
         if (themepkg.byName(cfg.theme)) |t| {
             th = t.*;
@@ -2021,6 +2037,7 @@ pub const App = struct {
                     tm.session.mutex.lock();
                     tm.session.term.colors = tc;
                     tm.session.term.flags.dirty.palette = true;
+                    tm.session.clip_allow = self.cfg_clip_allow;
                     tm.session.mutex.unlock();
                 } else if (p.editor()) |ed| ed.render_dirty = true;
             }
@@ -2148,6 +2165,69 @@ pub const App = struct {
                 }
             }
         }
+    }
+
+    /// Drain OSC 52 writes onto the system pasteboard.
+    ///
+    /// The copy out of the session is made under that session's mutex
+    /// and the pasteboard call is made after releasing it: NSPasteboard
+    /// crosses into another process, and holding a terminal's parse lock
+    /// across an XPC round-trip would stall the reader on the firehose.
+    ///
+    /// This runs per FRAME, not on the 2Hz HUD tick the bell and
+    /// notifications ride: those are attention signals where half a
+    /// second is imperceptible, but a yank can be followed immediately
+    /// by ⌘V, and pasting the previous clipboard would be a real bug.
+    /// The atomic flag makes the common (nothing pending) pass a load
+    /// per pane, so per-frame costs nothing.
+    fn drainClipboardLocked(self: *App) void {
+        for (self.spaces.items) |space| {
+            for (space.tabs.items) |tab| {
+                for (tab.panes.items) |p| {
+                    const tm = p.term() orelse continue;
+                    if (!tm.session.clip_pending.load(.acquire)) continue;
+                    var text: ?[]u8 = null;
+                    tm.session.mutex.lock();
+                    tm.session.clip_pending.store(false, .release);
+                    text = self.gpa.dupe(u8, tm.session.clip_buf[0..tm.session.clip_len]) catch null;
+                    tm.session.mutex.unlock();
+                    const t = text orelse continue;
+                    defer self.gpa.free(t);
+                    self.setPasteboard(t);
+                    self.clip_last_len = @min(t.len, self.clip_last.len);
+                    @memcpy(self.clip_last[0..self.clip_last_len], t[0..self.clip_last_len]);
+                }
+            }
+        }
+    }
+
+    /// Read the general pasteboard's text into `buf` (truncating).
+    /// Lives here rather than in ctl.zig because objc and the NSString
+    /// helpers do — and it carries its own autorelease pool, since ctl
+    /// calls it from its own thread where AppKit gives you none.
+    pub fn pasteboardText(_: *App, buf: []u8) []const u8 {
+        const pool = objc.AutoreleasePool.init();
+        defer pool.deinit();
+        const pb = objc.getClass("NSPasteboard").?.msgSend(objc.Object, "generalPasteboard", .{});
+        const nss = pb.msgSend(objc.Object, "stringForType:", .{nsString("public.utf8-plain-text").value});
+        if (nss.value == null) return "";
+        const cstr = nss.msgSend(?[*:0]const u8, "UTF8String", .{}) orelse return "";
+        const text = std.mem.span(cstr);
+        const n = @min(text.len, buf.len);
+        @memcpy(buf[0..n], text[0..n]);
+        return buf[0..n];
+    }
+
+    /// Replace the general pasteboard's text. An empty write clears it,
+    /// which is what OSC 52 with an empty payload asks for.
+    fn setPasteboard(_: *App, text: []const u8) void {
+        const pb = objc.getClass("NSPasteboard").?.msgSend(objc.Object, "generalPasteboard", .{});
+        _ = pb.msgSend(i64, "clearContents", .{});
+        if (text.len == 0) return;
+        _ = pb.msgSend(bool, "setString:forType:", .{
+            nsStringLen(text).value,
+            nsString("public.utf8-plain-text").value,
+        });
     }
 
     fn refreshHudLocked(self: *App, now: f64) void {

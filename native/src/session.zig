@@ -39,6 +39,22 @@ fn EffectRet(comptime name: []const u8) type {
     return @typeInfo(Fn).@"fn".return_type.?;
 }
 
+/// Same recovery, for a callback's Nth parameter. clipboard.Write is the
+/// one that needs it: lib_vt.zig re-exports most of terminal/main.zig
+/// but not `clipboard`, so the type you must name to implement
+/// `clipboard_write` has no public spelling. Worth reporting upstream.
+fn EffectArg(comptime name: []const u8, comptime i: usize) type {
+    const F = @FieldType(Effects, name);
+    const Fn = @typeInfo(@typeInfo(F).optional.child).pointer.child;
+    return @typeInfo(Fn).@"fn".params[i].type.?;
+}
+
+/// Ceiling on a single OSC 52 payload we'll hold. The OSC parser's own
+/// capture buffer for 52 is ALLOCATING and unbounded, so this is the
+/// only cap in the path — and ours is the copy that outlives the
+/// sequence, waiting for the main thread to drain it.
+const max_clipboard = 8 * 1024 * 1024;
+
 pub const Session = struct {
     gpa: std.mem.Allocator,
     term: vt.Terminal,
@@ -73,6 +89,26 @@ pub const Session = struct {
     notify_title_len: usize = 0,
     notify_body: [256]u8 = undefined,
     notify_body_len: usize = 0,
+
+    /// OSC 52: the program asked to set the system clipboard. Heap, not
+    /// a fixed buffer, because a yank is whatever size the yank is —
+    /// truncating someone's copied text at an arbitrary cap would hand
+    /// them a corrupt paste, which is worse than refusing outright.
+    /// The buffer is guarded by `mutex`; the reader fills it, the app
+    /// drains it. The FLAG is atomic and outside the lock so the drain
+    /// can run every frame instead of on the 2Hz HUD tick — a yank
+    /// followed straight away by ⌘V is rare but real, and the cost of
+    /// closing that window is one relaxed load per pane per frame
+    /// rather than a mutex acquisition.
+    clip_pending: std.atomic.Value(bool) = .init(false),
+    clip_buf: []u8 = &.{},
+    clip_len: usize = 0,
+
+    /// Whether OSC 52 writes are honoured (config `clipboard-write`).
+    /// Read on the reader thread; the app rewrites it on live reload,
+    /// and a torn read of a two-valued enum can only pick one of the
+    /// two answers, so it needs no lock of its own.
+    clip_allow: bool = true,
 
     /// BEL arrived. Set on the reader thread (inside the parse, with the
     /// mutex held), drained by the app on the main thread — the bell has
@@ -207,6 +243,7 @@ pub const Session = struct {
         if (self.thread) |t| t.join();
         _ = ptypkg.Pty.wait(self.pid);
         self.pty.deinit();
+        if (self.clip_buf.len > 0) self.gpa.free(self.clip_buf);
         self.term.deinit(self.gpa);
         self.gpa.destroy(self);
     }
@@ -222,7 +259,7 @@ pub const Session = struct {
             .color_scheme = &effectColorScheme,
             .bell = &effectBell,
             .desktop_notification = &effectNotify,
-            .clipboard_write = null,
+            .clipboard_write = &effectClipboardWrite,
             .title_changed = null,
             .pwd_changed = null,
         };
@@ -269,6 +306,43 @@ pub const Session = struct {
         self.notify_body_len = @min(body.len, self.notify_body.len);
         @memcpy(self.notify_body[0..self.notify_body_len], body[0..self.notify_body_len]);
         self.notify_pending = true;
+    }
+
+    /// OSC 52. The library hands this over already base64-decoded and
+    /// with the destination normalised, and it never forwards clipboard
+    /// READ requests at all — so nothing on this path can leak the
+    /// user's clipboard back to the program. Only writes get here.
+    ///
+    /// Every destination collapses to the one pasteboard: macOS has no
+    /// primary selection, and `*` and `+` are already the same register
+    /// in vim on this platform. Honouring `p` as something separate
+    /// would invent a clipboard the OS doesn't have.
+    fn effectClipboardWrite(
+        h: *Handler,
+        w: EffectArg("clipboard_write", 1),
+    ) EffectRet("clipboard_write") {
+        const self = fromHandler(h);
+        if (!self.clip_allow) return .denied;
+
+        // No contents = clear. Otherwise take the text representation;
+        // the library only ever produces text/plain today, but it hands
+        // us a list, so read it as one rather than assuming contents[0].
+        var data: []const u8 = "";
+        for (w.contents) |c| {
+            if (std.mem.eql(u8, c.mime, "text/plain")) {
+                data = c.data;
+                break;
+            }
+        }
+        if (data.len > max_clipboard) return .invalid_data;
+
+        if (self.clip_buf.len < data.len) {
+            self.clip_buf = self.gpa.realloc(self.clip_buf, data.len) catch return .io_error;
+        }
+        @memcpy(self.clip_buf[0..data.len], data);
+        self.clip_len = data.len;
+        self.clip_pending.store(true, .release);
+        return .success;
     }
 
     fn effectWritePty(h: *Handler, data: [:0]const u8) void {

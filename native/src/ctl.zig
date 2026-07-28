@@ -420,6 +420,20 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             if (app.notify_warned) "no" else "yes",
         }) catch return;
         reply(fd, s2);
+    } else if (std.mem.eql(u8, verb, "clipboard")) {
+        // The REAL pasteboard, read back — so an OSC 52 test proves the
+        // bytes reached the system, not just that rook noticed them.
+        // `last` distinguishes "rook wrote this" from "⌘C did".
+        app.draw_lock.lock();
+        defer app.draw_lock.unlock();
+        var buf: [2048]u8 = undefined;
+        var pbbuf: [512]u8 = undefined;
+        const s2 = std.fmt.bufPrint(&buf, "pasteboard=\"{s}\" last=\"{s}\" allow={s}\n", .{
+            app.pasteboardText(&pbbuf),
+            app.clip_last[0..@min(app.clip_last_len, 512)],
+            if (app.cfg_clip_allow) "yes" else "no",
+        }) catch return;
+        reply(fd, s2);
     } else if (std.mem.eql(u8, verb, "ime")) {
         // Is the input-method plumbing actually live? inputContext is
         // AppKit's verdict on our NSTextInputClient conformance — nil

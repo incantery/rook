@@ -84,6 +84,31 @@ warning: `currentNotificationCenter` raises when the process has no
 bundle identifier, which is exactly how `zig build run` runs. ctl
 `notify` reports the last one posted.
 
+**OSC 52** puts a remote yank on the local pasteboard — vim or tmux over
+ssh, which silently does nothing in a terminal that ignores it. The
+library hands the payload over already base64-decoded, and it never
+forwards clipboard READ requests (`ESC ] 52 ; c ; ? BEL`) to an embedder
+at all, so no program running in rook can exfiltrate what you copied;
+the sequence is simply answered with silence. All three destinations
+(`c`, `p`, `s`) collapse onto the one general pasteboard, because macOS
+has no primary selection and vim already maps `*` and `+` to the same
+register here — honouring `p` separately would invent a clipboard the OS
+does not have. An empty payload clears, which is what the spec asks for.
+
+`clipboard-write` takes `allow` (default) or `deny`, live-reloadable. It
+is a knob at all because a clipboard write is *unprompted*: anything
+that can put bytes on your screen — including `cat` of a file you did
+not write — can replace what your next ⌘V pastes. Reads need no knob;
+they never get here. Unlike the bell, this drains every FRAME rather
+than on the 2Hz HUD tick: a yank can be followed immediately by ⌘V, and
+pasting the previous clipboard would be a real bug rather than a late
+notification. The common case is one atomic load per pane, so per-frame
+costs nothing. The payload buffer is heap and grows — truncating a yank
+at a fixed cap would hand you a corrupt paste, which is worse than
+refusing — with an 8MB ceiling, since the OSC parser's own capture for
+52 is allocating and unbounded. ctl `clipboard` reads the real
+pasteboard back, so a blind test proves the bytes reached the system.
+
 The cursor
 and the accent-colored separator edges mark the focused pane. Only the
 active tab renders: background tabs' emulators keep advancing but cost
@@ -320,6 +345,9 @@ background-blur = "blur" # what's BEHIND a translucent window:
                          # Glass, NSGlassEffectView; pre-Tahoe falls
                          # back to blur). Ghostty's macos-glass-*
                          # names accepted. Needs opacity < 1.
+bell = "visual"          # none | visual (default) | audible | all
+clipboard-write = "allow"# OSC 52: allow (default) | deny. `true` /
+                         # `false` mean the same two things.
 ```
 
 Opacity < 1 is whole-window glass: the layer extends under a
@@ -409,7 +437,7 @@ shaping — atlas-full policy is clear-and-rebuild,
 glyphs render single-style (no bold/italic faces yet — the style flags
 are in `vt.Style.flags` when we want them), box-drawing sprite set
 covers light/heavy/rounded lines + blocks but not doubles/diagonals
-(font fallback), clipboard effects (OSC 52) unwired.
+(font fallback).
 
 Pane debts: split ratio is fixed at 0.5 (no drag/resize), no ⌘W
 close-pane chord (exit the shell), no zoom, typing into a pane while

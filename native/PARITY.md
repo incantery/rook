@@ -76,8 +76,18 @@ a daily driver.
       NSTextInputClient, the IME gets first refusal on unmodified keys,
       preedit draws at the cursor. ctl `nskey` posts real NSEvents so
       the path is testable; ctl `ime` reports the state.
-- [ ] **OSC 52** (clipboard write): `session.zig` sets `.clipboard_write = null`.
-      Copying from a remote tmux/vim over ssh silently fails.
+- [x] **OSC 52** (clipboard write) — yanking in vim or tmux over ssh
+      reaches the macOS pasteboard. The library hands it over already
+      base64-decoded, and it NEVER forwards read requests (`?`), so no
+      program in rook can exfiltrate the clipboard; verified by sending
+      one and watching nothing come back down the pty. All three targets
+      (`c`/`p`/`s`) collapse onto the one pasteboard, because macOS has
+      no primary selection and vim already maps `*` and `+` together
+      here. `clipboard-write = allow|deny` (default allow, live-reloads)
+      because a write is unprompted: anything that can put bytes on your
+      screen can replace what your next ⌘V pastes. Drains per FRAME, not
+      on the 2Hz tick the bell rides — a yank can be followed straight
+      away by ⌘V. ctl `clipboard` reads the real pasteboard back.
 - [x] **Bell** — accent dot on the tab chip that rang + a single dock
       bounce, both suppressed while you're watching that tab; visiting
       the tab is the acknowledgement. `bell = none|visual|audible|all`.
