@@ -59,12 +59,15 @@ echo ""
 echo "== cat 150MB ascii =="
 c "type time cat $CORPUS" >/dev/null
 c enter >/dev/null
+# Dump lines WRAP at the pane width — "total" can split into "t/otal".
+# Trim row padding and join before matching (the 15-minute lesson).
+joined() { c dump | sed -e 's/ *$//' | tr -d '\n'; }
 t0=$(date +%s)
 while [ $(( $(date +%s) - t0 )) -lt 120 ]; do
-  if c dump | grep -q 'total$'; then break; fi
+  if joined | grep -q 'total'; then break; fi
   sleep 0.5
 done
-c dump | grep 'total$' | tail -1
+joined | grep -oE 'cpu [0-9]+\.[0-9]+ total' | tail -1
 c stats
 
 echo ""

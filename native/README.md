@@ -15,6 +15,14 @@ alt-screen truth straight from the emulator, no heuristic. The cursor
 and the accent-colored separator edges mark the focused pane. A pane
 closes when its shell exits; the last one exiting quits the app.
 
+A status bar sits under the panes — tenant one of `src/ui.zig`, the
+seed of rook's own UI layer (immediate-mode quads + text runs from the
+same pipelines/atlases as the grid; widgets are never their own draw
+paths). Left: pane count + focused id. Right: the live perf HUD —
+key→photon p50, active fps, MB/s, RSS — the instrument wearing a face.
+It refreshes at 2Hz but draws only when the text changes, so the
+zero-idle-frames row on the scoreboard still holds.
+
 ```
 zig build                    # needs zig 0.16
 ./zig-out/bin/rookz win      # the app (make dev from repo root does both)
@@ -77,6 +85,8 @@ font-family = "FiraCode Nerd Font Mono"
 - `src/pty.zig` — openpty/fork/exec, libc direct (0.16 std.posix lost these)
 - `src/session.zig` — pty + vt.Terminal + reader thread, os_unfair_lock
 - `src/panes.zig` — split tree: layout, geometric nav, separators
+- `src/ui.zig` — the UI layer seed: rects + text runs (mono v1; CTLine
+  shaping is the upgrade path when tabs/finder need proportional)
 - `src/macos.zig` — AppKit window, CAMetalLayer, CVDisplayLink loop, keys,
   the scene (draw_lock serializes; lock order draw_lock → session mutex)
 - `src/render.zig` — CoreText ASCII atlas + two instanced Metal passes

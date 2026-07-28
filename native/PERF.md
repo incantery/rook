@@ -55,6 +55,15 @@ second live pane alongside = **0.904s**, quiet-keys key→photon
 16.6/26.9ms p50/p95, fill p50 55µs, RSS 88MB. The chrome is free so
 far.
 
+Second re-run — status bar + ui.zig (same day): cat **0.902s**, keys
+16.9/26.5ms, RSS 80MB, and idle is still zero frames — the HUD
+recomputes at 2Hz but only a text CHANGE draws. Two instrument fixes
+landed with it: chrome-only frames no longer consume the key→photon
+mark (the 2Hz HUD was stealing marks — showed up as a phantom +4ms on
+quiet-key p50), and present_interval now drops >500ms gaps (pacing,
+not idleness — the ring used to swallow idle stretches as fake slow
+frames).
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,
@@ -83,4 +92,5 @@ Kitty 1.7s.
   (rook benches at 405×113) before quoting numbers publicly.
 - No same-machine A/B against Ghostty yet — `time cat` in both is the
   honest first comparison.
-- Self-monitoring exists (ctl `stats`) but no in-app HUD yet.
+- The HUD's fps number freezes at the last active pacing when idle
+  (the ring stops recording) — read it as "when drawing, this fast".

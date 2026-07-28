@@ -50,6 +50,9 @@ const win_h: f64 = 700;
 
 const sep_color: [4]u8 = .{ 60, 60, 68, 255 };
 const accent_color: [4]u8 = .{ 122, 162, 247, 255 };
+const bar_bg: [4]u8 = .{ 30, 30, 38, 255 };
+const bar_fg: [4]u8 = .{ 148, 150, 166, 255 };
+const bar_value: [4]u8 = .{ 205, 208, 220, 255 };
 
 fn nsString(s: [*:0]const u8) objc.Object {
     const NSString = objc.getClass("NSString").?;
@@ -80,9 +83,22 @@ pub const App = struct {
     px_w: f32,
     px_h: f32,
     sep: f32 = 2,
+    /// Status bar height in px; panes tile the content area above it.
+    bar_h: f32,
     /// Layout/focus changed: the next frame redraws even if no pane's
     /// grid is dirty.
     scene_dirty: bool = true,
+
+    // Status-bar HUD text, recomputed at ~2Hz on the display-link tick;
+    // a change flips scene_dirty, so an idle app with stable numbers
+    // still draws ZERO frames (the scoreboard's idle row).
+    hud_left: [96]u8 = undefined,
+    hud_left_len: usize = 0,
+    hud_right: [96]u8 = undefined,
+    hud_right_len: usize = 0,
+    hud_last_t: f64 = 0,
+    hud_last_bytes: u64 = 0,
+    hud_mbs: f64 = 0,
 
     /// Focused pane's session, readable without draw_lock (the input
     /// kick compares pointers only — never dereferences).
@@ -184,8 +200,9 @@ pub const App = struct {
         // Nerd Font base (default) so prompt icons resolve without
         // fallback; the CoreText cascade catches everything else.
         const renderer = try renderpkg.Renderer.init(gpa, device, cfg.font_family, cfg.font_size * scale, 64 * 1024);
+        const bar_h: f32 = @ceil(renderer.cell_h + @as(f32, @floatCast(8 * scale)));
         const cols: u16 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_w)), renderer.cell_w));
-        const rows: u16 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_h)), renderer.cell_h));
+        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h, renderer.cell_h)));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
         const session = try sessionpkg.Session.start(gpa, init.io, shell, @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
@@ -210,10 +227,11 @@ pub const App = struct {
             .px_w = @floatCast(px_w),
             .px_h = @floatCast(px_h),
             .sep = @floatCast(@max(1.0, @round(scale))),
+            .bar_h = bar_h,
         };
         try self.panes.append(gpa, pane);
         self.focused_session.store(session, .release);
-        panespkg.layout(self.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.px_h }, self.sep);
+        panespkg.layout(self.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.contentH() }, self.sep);
         return self;
     }
 
@@ -289,14 +307,20 @@ pub const App = struct {
         self.px_w = @floatCast(px_w);
         self.px_h = @floatCast(px_h);
         self.sep = @floatCast(@max(1.0, @round(scale)));
+        self.bar_h = @ceil(self.renderer.cell_h + @as(f32, @floatCast(8 * scale)));
         self.relayoutLocked();
         self.scene_dirty = true;
+    }
+
+    /// Pane-area height: the window minus the status bar.
+    fn contentH(self: *App) f32 {
+        return @max(1, self.px_h - self.bar_h);
     }
 
     /// Recompute pane rects from the tree and resize any pane whose grid
     /// changed. Caller holds draw_lock.
     fn relayoutLocked(self: *App) void {
-        panespkg.layout(self.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.px_h }, self.sep);
+        panespkg.layout(self.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.contentH() }, self.sep);
         for (self.panes.items) |p| {
             const cols: u16 = @intFromFloat(@max(2, @divFloor(p.rect.w, self.renderer.cell_w)));
             const rows: u16 = @intFromFloat(@max(2, @divFloor(p.rect.h, self.renderer.cell_h)));
@@ -401,15 +425,22 @@ pub const App = struct {
         const pool = objc.AutoreleasePool.init();
         defer pool.deinit();
 
-        _ = self.frame_count.fetchAdd(1, .monotonic);
+        const tick = self.frame_count.fetchAdd(1, .monotonic);
         const t_start = CACurrentMediaTime();
 
         self.reapExitedLocked();
 
+        // HUD refresh at ~2Hz. Runs on skipped ticks too, so the bar
+        // stays live during idle — but only a text CHANGE causes a draw.
+        if (tick % 60 == 0) self.refreshHudLocked(t_start);
+
         // Snapshot every pane under its session lock, with priority over
-        // the readers' parse loops.
+        // the readers' parse loops. focused_dirty means the FOCUSED
+        // PANE'S GRID changed — chrome/HUD-only frames must never
+        // consume the key-to-photon mark (that skew was measured: a 2Hz
+        // HUD refresh stole marks and moved quiet-key p50 by ~4ms).
         var any_dirty = self.scene_dirty;
-        var focused_dirty = self.scene_dirty;
+        var focused_dirty = false;
         for (self.panes.items) |p| {
             p.session.lockForSnapshot();
             p.rs.update(self.gpa, &p.session.term) catch {
@@ -515,8 +546,9 @@ pub const App = struct {
             if (fr.x > 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x - s, fr.y, s, fr.h, accent_color);
             if (fr.x + fr.w < self.px_w - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x + fr.w, fr.y, s, fr.h, accent_color);
             if (fr.y > 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y - s, fr.w, s, accent_color);
-            if (fr.y + fr.h < self.px_h - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y + fr.h, fr.w, s, accent_color);
+            if (fr.y + fr.h < self.contentH() - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y + fr.h, fr.w, s, accent_color);
         }
+        self.drawBar(enc, vp_w, vp_h, off);
 
         enc.msgSend(void, "endEncoding", .{});
 
@@ -545,6 +577,63 @@ pub const App = struct {
             self.captureShot(drawable);
             self.shot_state.store(0, .release);
         }
+    }
+
+    /// Recompute the status-bar text; flip scene_dirty only when it
+    /// changed. Caller holds draw_lock.
+    fn refreshHudLocked(self: *App, now: f64) void {
+        const bytes = stats.global.bytes_in.load(.monotonic);
+        if (self.hud_last_t > 0 and now > self.hud_last_t) {
+            self.hud_mbs = @as(f64, @floatFromInt(bytes -| self.hud_last_bytes)) / (now - self.hud_last_t) / 1e6;
+        }
+        self.hud_last_t = now;
+        self.hud_last_bytes = bytes;
+
+        const key = stats.global.key_present.summarize();
+        const present = stats.global.present_interval.summarize();
+        const fps: u64 = if (present.p50 > 0) @intFromFloat(@round(1e6 / @as(f64, @floatFromInt(present.p50)))) else 0;
+
+        var left: [96]u8 = undefined;
+        const l = std.fmt.bufPrint(&left, "rookz · {d} pane{s} · #{d}", .{
+            self.panes.items.len,
+            @as([]const u8, if (self.panes.items.len == 1) "" else "s"),
+            self.focused.id,
+        }) catch return;
+        var right: [96]u8 = undefined;
+        const r = std.fmt.bufPrint(&right, "{d}.{d}ms key · {d}fps · {d}MB/s · {d}MB", .{
+            key.p50 / 1000,
+            (key.p50 % 1000) / 100,
+            fps,
+            @as(u64, @intFromFloat(@round(self.hud_mbs))),
+            stats.maxRssMb(),
+        }) catch return;
+
+        if (std.mem.eql(u8, l, self.hud_left[0..self.hud_left_len]) and
+            std.mem.eql(u8, r, self.hud_right[0..self.hud_right_len])) return;
+        @memcpy(self.hud_left[0..l.len], l);
+        self.hud_left_len = l.len;
+        @memcpy(self.hud_right[0..r.len], r);
+        self.hud_right_len = r.len;
+        self.scene_dirty = true;
+    }
+
+    /// The status bar: tenant one of the ui layer. Draws from the cell
+    /// buffer past the panes' slots (`base_off`).
+    fn drawBar(self: *App, enc: objc.Object, vp_w: f32, vp_h: f32, base_off: usize) void {
+        var ui = @import("ui.zig").Ui{
+            .r = &self.renderer,
+            .enc = enc,
+            .vp_w = vp_w,
+            .vp_h = vp_h,
+            .cells = self.renderer.cells(),
+            .off = base_off,
+        };
+        const by = self.px_h - self.bar_h;
+        ui.rect(0, by, self.px_w, self.bar_h, bar_bg);
+        const ty = by + (self.bar_h - self.renderer.cell_h) / 2;
+        const pad = self.renderer.cell_w;
+        _ = ui.text(pad, ty, self.hud_left[0..self.hud_left_len], bar_fg, bar_bg);
+        _ = ui.textRight(self.px_w - pad, ty, self.hud_right[0..self.hud_right_len], bar_value, bar_bg);
     }
 
     /// Fill one pane's slot of the cell buffer from its render state.
@@ -752,8 +841,11 @@ fn presentedCallback(context: *const PresentedBlock.Context, drawable_id: objc.c
     const t = objc.Object.fromId(drawable_id).msgSend(f64, "presentedTime", .{});
     if (t <= 0) return;
 
+    // Pacing, not idleness: an interval that brackets an idle stretch
+    // (dirty-skip means we simply didn't draw) says nothing about how
+    // fast we draw — only sub-500ms gaps are pacing samples.
     const last = app.last_presented.swap(t, .acq_rel);
-    if (last > 0 and t > last) stats.global.present_interval.recordSeconds(t - last);
+    if (last > 0 and t > last and t - last < 0.5) stats.global.present_interval.recordSeconds(t - last);
 
     // Key → photon: only a frame that carried the focused pane's echo
     // may consume the pending mark.

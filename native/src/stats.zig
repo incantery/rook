@@ -96,6 +96,13 @@ const rusage = extern struct {
 };
 extern "c" fn getrusage(who: c_int, usage: *rusage) c_int;
 
+/// Peak RSS in MB, for the HUD and the report.
+pub fn maxRssMb() u64 {
+    var ru: rusage = undefined;
+    if (getrusage(0, &ru) != 0) return 0;
+    return @intCast(@divTrunc(ru.ru_maxrss, 1024 * 1024));
+}
+
 pub fn writeReport(w: *std.Io.Writer) !void {
     const s = &global;
     const series = [_]struct { name: []const u8, ring: *Ring }{
