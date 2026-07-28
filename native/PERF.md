@@ -31,11 +31,27 @@ session, no scrollback viewer yet — re-run as features land.
 | frame update/fill/encode p50 | 4 / 56 / 37 µs | firehose, per drawn frame |
 | GPU time p50 | ~0.3 ms | 〃 |
 
+### Same-machine A/B — cat 150MB ascii (2026-07-27, Seth's hands)
+
+Same M3 Max, same corpus, same day. Window geometries not equalized
+(both WM-tiled); Ghostty 1.3.1 stable, ReleaseFast, Metal renderer.
+
+| terminal | total |
+|---|---|
+| **rookz (make prod)** | **0.911 s** |
+| Ghostty 1.3.1 | 1.610 s |
+
+**1.77× faster than the installed Ghostty on its signature benchmark,
+with a day-old renderer.** Honest caveats: Ghostty nightly is much
+faster than 1.3.1 (Mitchell's M4 Max table has it at 0.575s — different
+machine), and rookz currently does less per cell (no selection layer, no
+scrollback viewer, single style face). Re-run this A/B every time a
+feature lands that touches the render path.
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,
-Kitty 1.7s. rookz's first-ever number sits in released-Ghostty/Alacritty
-territory with a day-old renderer.
+Kitty 1.7s.
 
 ## What the first run caught (why the instrument exists)
 
