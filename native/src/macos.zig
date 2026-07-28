@@ -1052,7 +1052,17 @@ pub const App = struct {
                 const st: vt.Style = if (styled) styles[x] else .{};
 
                 const bg = st.bg(raw, &colors.palette) orelse default_bg;
-                const fg = st.fg(.{ .default = default_fg, .palette = &colors.palette });
+                var fg = st.fg(.{ .default = default_fg, .palette = &colors.palette });
+                // Faint (SGR 2) is the renderer's job like inverse:
+                // blend fg halfway toward bg (claude code's subdued
+                // suggestion text is faint, not a palette gray).
+                if (styled and st.flags.faint) {
+                    fg = .{
+                        .r = @intCast((@as(u16, fg.r) + bg.r) / 2),
+                        .g = @intCast((@as(u16, fg.g) + bg.g) / 2),
+                        .b = @intCast((@as(u16, fg.b) + bg.b) / 2),
+                    };
+                }
 
                 const cp: u21 = switch (raw.content_tag) {
                     .codepoint, .codepoint_grapheme => raw.content.codepoint.data,
