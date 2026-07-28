@@ -16,6 +16,7 @@ const sessionpkg = @import("session.zig");
 const renderpkg = @import("render.zig");
 const panespkg = @import("panes.zig");
 const editorpkg = @import("editor.zig");
+const themepkg = @import("theme.zig");
 const stats = @import("stats.zig");
 
 extern "c" fn CACurrentMediaTime() f64;
@@ -56,22 +57,30 @@ const flag_cmd: u64 = 1 << 20;
 const win_w: f64 = 1024;
 const win_h: f64 = 700;
 
-const sep_color: [4]u8 = .{ 60, 60, 68, 255 };
-const accent_color: [4]u8 = .{ 122, 162, 247, 255 };
-const bar_bg: [4]u8 = .{ 30, 30, 38, 255 };
-const bar_fg: [4]u8 = .{ 148, 150, 166, 255 };
-const bar_value: [4]u8 = .{ 205, 208, 220, 255 };
-const chip_active_bg: [4]u8 = .{ 48, 50, 62, 255 };
+/// The active theme (theme.zig builtins, picked by config). Set once
+/// in App.create before any session or draw exists; read everywhere.
+var th: themepkg.Theme = themepkg.default;
 
-// Editor pane palette (theme engine comes later; these sit beside the
-// chrome colors so the pane reads as the same family).
-const ed_bg: [4]u8 = .{ 18, 19, 26, 255 };
-const ed_fg: [4]u8 = .{ 205, 208, 220, 255 };
-const ed_dim: [4]u8 = .{ 96, 99, 116, 255 };
-const ed_sel_bg: [4]u8 = .{ 58, 62, 88, 255 };
-const ed_err: [4]u8 = .{ 247, 118, 142, 255 };
-const ed_bg_rgb: @import("ghostty-vt").color.RGB = .{ .r = 18, .g = 19, .b = 26 };
-const term_sel_bg: [3]u8 = .{ 58, 62, 88 };
+fn rgb3(c: [3]u8) vt.color.RGB {
+    return .{ .r = c[0], .g = c[1], .b = c[2] };
+}
+
+fn rgb4(c: [4]u8) vt.color.RGB {
+    return .{ .r = c[0], .g = c[1], .b = c[2] };
+}
+
+/// The emulator default colors for new sessions under this theme.
+fn termColors() vt.Terminal.Colors {
+    if (!th.override_term) return .default;
+    var pal = vt.color.default;
+    for (th.ansi, 0..) |c, i| pal[i] = rgb3(c);
+    return .{
+        .background = .init(rgb3(th.term_bg)),
+        .foreground = .init(rgb3(th.term_fg)),
+        .cursor = .init(rgb3(th.cursor)),
+        .palette = .init(pal),
+    };
+}
 
 fn nsString(s: [*:0]const u8) objc.Object {
     const NSString = objc.getClass("NSString").?;
@@ -208,6 +217,9 @@ pub const App = struct {
         const gpa = init.gpa;
         const cfg = @import("config.zig").load(init.io, gpa);
         const keybinds = @import("config.zig").loadKeybinds(init.io, gpa);
+        if (themepkg.byName(cfg.theme)) |t| {
+            th = t.*;
+        } else std.debug.print("rookz config: unknown theme '{s}' (builtin: default, nocturne)\n", .{cfg.theme});
 
         const NSApplication = objc.getClass("NSApplication").?;
         const app = NSApplication.msgSend(objc.Object, "sharedApplication", .{});
@@ -266,7 +278,7 @@ pub const App = struct {
         const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2, renderer.cell_h)));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
-        const session = try sessionpkg.Session.start(gpa, init.io, shell, null, @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
+        const session = try sessionpkg.Session.start(gpa, init.io, shell, null, termColors(), @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
 
         const self = try gpa.create(App);
         const pane = try gpa.create(panespkg.Pane);
@@ -547,7 +559,7 @@ pub const App = struct {
     /// into a tree and a tab (holding draw_lock — focusedCwd reads the
     /// focused pane).
     fn makePane(self: *App) !*panespkg.Pane {
-        const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, self.focusedCwd(), 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
+        const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, self.focusedCwd(), termColors(), 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
         session.kick = &inputKick;
         session.kick_ctx = self;
         const pane = try self.gpa.create(panespkg.Pane);
@@ -1013,7 +1025,7 @@ pub const App = struct {
 
         const clear_bg = switch (atab.focused.content) {
             .term => |*tm| tm.rs.colors.background,
-            .edit => ed_bg_rgb,
+            .edit => rgb4(th.ed_bg),
         };
 
         const desc = objc.getClass("MTLRenderPassDescriptor").?
@@ -1042,7 +1054,7 @@ pub const App = struct {
         for (atab.panes.items) |p| {
             const bg = switch (p.content) {
                 .term => |*tm| tm.rs.colors.background,
-                .edit => ed_bg_rgb,
+                .edit => rgb4(th.ed_bg),
             };
             self.renderer.drawRect(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.rect.w, p.rect.h, .{ bg.r, bg.g, bg.b, 255 });
         }
@@ -1055,16 +1067,16 @@ pub const App = struct {
             var nsep: usize = 0;
             panespkg.collectSeparators(atab.root, &sep_buf, &nsep);
             for (sep_buf[0..nsep]) |r| {
-                self.renderer.drawRect(enc, vp_w, vp_h, r.x, r.y, r.w, r.h, sep_color);
+                self.renderer.drawRect(enc, vp_w, vp_h, r.x, r.y, r.w, r.h, th.sep);
             }
             // The focused pane claims its share of adjacent separators
             // in the accent color — cheap, unambiguous focus telegraph.
             const fr = atab.focused.rect;
             const s = self.sep;
-            if (fr.x > 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x - s, fr.y, s, fr.h, accent_color);
-            if (fr.x + fr.w < self.px_w - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x + fr.w, fr.y, s, fr.h, accent_color);
-            if (fr.y > self.tab_h + 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y - s, fr.w, s, accent_color);
-            if (fr.y + fr.h < self.tab_h + self.contentH() - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y + fr.h, fr.w, s, accent_color);
+            if (fr.x > 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x - s, fr.y, s, fr.h, th.accent);
+            if (fr.x + fr.w < self.px_w - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x + fr.w, fr.y, s, fr.h, th.accent);
+            if (fr.y > self.tab_h + 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y - s, fr.w, s, th.accent);
+            if (fr.y + fr.h < self.tab_h + self.contentH() - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y + fr.h, fr.w, s, th.accent);
         }
         var ui = @import("ui.zig").Ui{
             .r = &self.renderer,
@@ -1193,7 +1205,7 @@ pub const App = struct {
     /// The status bar: tenant one of the ui layer.
     fn drawBar(self: *App, ui: *@import("ui.zig").Ui) void {
         const by = self.px_h - self.bar_h;
-        ui.rect(0, by, self.px_w, self.bar_h, bar_bg);
+        ui.rect(0, by, self.px_w, self.bar_h, th.bar_bg);
         const ty = by + (self.bar_h - self.renderer.cell_h) / 2;
         const pad = self.renderer.cell_w;
         var x: f32 = pad;
@@ -1202,16 +1214,16 @@ pub const App = struct {
         if (self.leader_pending.load(.acquire)) {
             if (self.keybinds.leader) |ld| {
                 var lbuf: [3]u8 = .{ ' ', ld, ' ' };
-                x += ui.text(x, ty, &lbuf, bar_bg, accent_color) + self.renderer.cell_w / 2;
+                x += ui.text(x, ty, &lbuf, th.bar_bg, th.accent) + self.renderer.cell_w / 2;
             }
         }
         if (self.activeTab().focused.term()) |tm| {
             if (tm.copy_mode) {
-                x += ui.text(x, ty, " SCROLL ", bar_bg, accent_color) + self.renderer.cell_w / 2;
+                x += ui.text(x, ty, " SCROLL ", th.bar_bg, th.accent) + self.renderer.cell_w / 2;
             }
         }
-        _ = ui.text(x, ty, self.hud_left[0..self.hud_left_len], bar_fg, bar_bg);
-        _ = ui.textRight(self.px_w - pad, ty, self.hud_right[0..self.hud_right_len], bar_value, bar_bg);
+        _ = ui.text(x, ty, self.hud_left[0..self.hud_left_len], th.bar_fg, th.bar_bg);
+        _ = ui.textRight(self.px_w - pad, ty, self.hud_right[0..self.hud_right_len], th.bar_value, th.bar_bg);
     }
 
     /// The top tab bar — tabs as first-class chrome (the wails app's
@@ -1219,7 +1231,7 @@ pub const App = struct {
     /// 0/2, read from the emulator under its lock); the active chip
     /// gets a lifted background and an accent underline.
     fn drawTabBar(self: *App, ui: *@import("ui.zig").Ui) void {
-        ui.rect(0, 0, self.px_w, self.tab_h, bar_bg);
+        ui.rect(0, 0, self.px_w, self.tab_h, th.bar_bg);
         const ty = (self.tab_h - self.renderer.cell_h) / 2;
         var x: f32 = self.renderer.cell_w / 2;
         for (self.tabs.items, 0..) |t, i| {
@@ -1248,10 +1260,10 @@ pub const App = struct {
             var chip: [40]u8 = undefined;
             const label = std.fmt.bufPrint(&chip, " {d} {s} ", .{ i + 1, title }) catch continue;
 
-            const fg = if (is_active) bar_value else bar_fg;
-            const bg = if (is_active) chip_active_bg else bar_bg;
+            const fg = if (is_active) th.bar_value else th.bar_fg;
+            const bg = if (is_active) th.chip_active_bg else th.bar_bg;
             const w = ui.text(x, ty, label, fg, bg);
-            if (is_active) ui.rect(x, self.tab_h - self.sep * 2, w, self.sep * 2, accent_color);
+            if (is_active) ui.rect(x, self.tab_h - self.sep * 2, w, self.sep * 2, th.accent);
             if (i < self.chip_x.len) {
                 self.chip_x[i] = .{ x, x + w };
                 self.chip_n = i + 1;
@@ -1293,7 +1305,7 @@ pub const App = struct {
 
                 var bg = st.bg(raw, &colors.palette) orelse default_bg;
                 if (row_sels[y]) |sr| {
-                    if (x >= sr[0] and x <= sr[1]) bg = .{ .r = term_sel_bg[0], .g = term_sel_bg[1], .b = term_sel_bg[2] };
+                    if (x >= sr[0] and x <= sr[1]) bg = .{ .r = th.sel_bg[0], .g = th.sel_bg[1], .b = th.sel_bg[2] };
                 }
                 var fg = st.fg(.{ .default = default_fg, .palette = &colors.palette });
                 // Faint (SGR 2) is the renderer's job like inverse:
@@ -1378,23 +1390,23 @@ pub const App = struct {
         const g = ed.fillGrid(cols, rows);
         for (g, 0..) |rc, i| {
             const status_row = rows >= 1 and i >= (rows - 1) * cols;
-            var bg: [4]u8 = if (status_row) chip_active_bg else ed_bg;
+            var bg: [4]u8 = if (status_row) th.chip_active_bg else th.ed_bg;
             var fg: [4]u8 = switch (rc.st) {
-                .text => if (status_row) bar_value else ed_fg,
-                .dim => if (status_row) bar_fg else ed_dim,
-                .sel => ed_fg,
-                .cursor => ed_bg,
-                .mode => bar_bg,
-                .status => bar_value,
-                .err => ed_err,
+                .text => if (status_row) th.bar_value else th.ed_fg,
+                .dim => if (status_row) th.bar_fg else th.ed_dim,
+                .sel => th.ed_fg,
+                .cursor => th.ed_bg,
+                .mode => th.bar_bg,
+                .status => th.bar_value,
+                .err => th.ed_err,
             };
             switch (rc.st) {
-                .sel => bg = ed_sel_bg,
+                .sel => bg = th.ed_sel_bg,
                 .cursor => {
-                    bg = ed_fg;
-                    fg = if (status_row) chip_active_bg else ed_bg;
+                    bg = th.ed_fg;
+                    fg = if (status_row) th.chip_active_bg else th.ed_bg;
                 },
-                .mode => bg = accent_color,
+                .mode => bg = th.accent,
                 else => {},
             }
 
@@ -1417,7 +1429,7 @@ pub const App = struct {
         // The editor may produce fewer cells than the slot (tiny grid
         // clamp); blank the remainder.
         for (g.len..cells.len) |i| {
-            cells[i] = .{ .bg = ed_bg, .fg = ed_fg, .uvx = 0, .uvy = 0, .flags = 0 };
+            cells[i] = .{ .bg = th.ed_bg, .fg = th.ed_fg, .uvx = 0, .uvy = 0, .flags = 0 };
         }
     }
 

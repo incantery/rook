@@ -131,7 +131,14 @@ file = defaults. Unknown keys warn on stderr.
 ```toml
 font-size = 13
 font-family = "FiraCode Nerd Font Mono"
+theme = "nocturne"       # builtin themes: default, nocturne
 ```
+
+Themes color everything at once — emulator defaults + ANSI 16,
+chrome, editor, selection (src/theme.zig, one flat struct). Nocturne
+is rook's own (the Claude Design boards): deep indigo grounds,
+blurple accent, muted hues. The wails app's semantic theme engine
+(runtime swap, VS Code import) is the eventual upgrade path.
 
 ## Keybinds
 

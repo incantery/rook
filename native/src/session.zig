@@ -126,13 +126,13 @@ pub const Session = struct {
         self.snapshot_wanted.store(false, .release);
     }
 
-    pub fn start(gpa: std.mem.Allocator, io: anytype, shell: [*:0]const u8, cwd: ?[*:0]const u8, cols: u16, rows: u16, cell_w_px: u32, cell_h_px: u32) !*Session {
+    pub fn start(gpa: std.mem.Allocator, io: anytype, shell: [*:0]const u8, cwd: ?[*:0]const u8, colors: vt.Terminal.Colors, cols: u16, rows: u16, cell_w_px: u32, cell_h_px: u32) !*Session {
         const self = try gpa.create(Session);
         errdefer gpa.destroy(self);
 
         self.* = .{
             .gpa = gpa,
-            .term = try .init(io, gpa, .{ .cols = cols, .rows = rows }),
+            .term = try .init(io, gpa, .{ .cols = cols, .rows = rows, .colors = colors }),
             .pty = try ptypkg.Pty.open(.{ .ws_row = rows, .ws_col = cols }),
             .pid = undefined,
             .cols = cols,

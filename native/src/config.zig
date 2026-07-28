@@ -11,6 +11,8 @@ extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 pub const Config = struct {
     font_size: f64 = 13,
     font_family: [:0]const u8 = "FiraCode Nerd Font Mono",
+    /// Builtin theme name (theme.zig); unknown names warn + default.
+    theme: []const u8 = "default",
 };
 
 pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
@@ -58,8 +60,13 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
             if (stripped.len > 0) {
                 cfg.font_family = gpa.dupeZ(u8, stripped) catch cfg.font_family;
             }
+        } else if (std.mem.eql(u8, key, "theme")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            if (stripped.len > 0) {
+                cfg.theme = gpa.dupe(u8, stripped) catch cfg.theme;
+            }
         } else {
-            std.debug.print("rookz config: unknown key '{s}' (known: font-size, font-family)\n", .{key_raw});
+            std.debug.print("rookz config: unknown key '{s}' (known: font-size, font-family, theme)\n", .{key_raw});
         }
     }
 
