@@ -24,6 +24,9 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkFramework("Metal", .{});
     exe_mod.linkFramework("QuartzCore", .{});
     exe_mod.linkFramework("CoreVideo", .{});
+    exe_mod.linkFramework("CoreGraphics", .{});
+    exe_mod.linkFramework("CoreText", .{});
+    exe_mod.linkFramework("ImageIO", .{});
 
     const exe = b.addExecutable(.{
         .name = "rookz",

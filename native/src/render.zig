@@ -27,7 +27,8 @@ extern "c" fn CGBitmapContextGetData(ctx: CGContextRef) ?[*]u8;
 const utf8_encoding: u32 = 0x08000100;
 const alpha_only: u32 = 7; // kCGImageAlphaOnly
 
-const MTLRegion = extern struct { x: u64, y: u64, z: u64, w: u64, h: u64, d: u64 };
+pub const MTLRegion = extern struct { x: u64, y: u64, z: u64, w: u64, h: u64, d: u64 };
+pub const MTLRegionPub = MTLRegion;
 
 /// Per-cell GPU data; must match the MSL CellData layout (stride 12).
 pub const CellData = extern struct {
@@ -105,6 +106,7 @@ pub const Renderer = struct {
     atlas_uv: [2]f32,
 
     pub fn init(gpa: std.mem.Allocator, device: objc.Object, font_name: [*:0]const u8, font_px: f64, max_cells: usize) !Renderer {
+        _ = gpa; // will return for the dynamic atlas
         // --- Font + metrics ---
         const name = CFStringCreateWithCString(null, font_name, utf8_encoding);
         const font = CTFontCreateWithName(name, font_px, null);
@@ -128,6 +130,11 @@ pub const Renderer = struct {
         const ctx = CGBitmapContextCreate(null, atlas_w, atlas_h, 8, atlas_w, null, alpha_only);
         if (ctx == null) return error.BitmapFailed;
 
+        // CG's bottom-left origin lives in the coordinate transform; the
+        // bitmap MEMORY is already top-down (row 0 = image top), which is
+        // Metal's convention too. So: position baselines in CG coords and
+        // upload the buffer as-is. (A manual row flip here both mirrors
+        // every glyph and scrambles the slot rows — day-two lesson.)
         var chars: [94]u16 = undefined;
         var glyphs: [94]u16 = undefined;
         var positions: [94]CGPoint = undefined;
@@ -136,7 +143,6 @@ pub const Renderer = struct {
             const slot = i + 1; // glyph index 0 = empty
             const sx: f64 = @floatFromInt((slot % atlas_cols) * cell_w);
             const sy_top: f64 = @floatFromInt((slot / atlas_cols) * cell_h);
-            // CG origin is bottom-left; we flip rows after drawing.
             const baseline_y = @as(f64, @floatFromInt(atlas_h)) - sy_top - @as(f64, @floatFromInt(cell_h)) + descent;
             positions[i] = .{ .x = sx, .y = baseline_y };
         }
@@ -144,14 +150,6 @@ pub const Renderer = struct {
         CTFontDrawGlyphs(font, &glyphs, &positions, 94, ctx);
 
         const data = CGBitmapContextGetData(ctx) orelse return error.BitmapFailed;
-
-        // Flip rows so byte row 0 is the image top (Metal texture convention).
-        const flipped = try gpa.alloc(u8, atlas_w * atlas_h);
-        defer gpa.free(flipped);
-        for (0..atlas_h) |y| {
-            const src = data[(atlas_h - 1 - y) * atlas_w ..][0..atlas_w];
-            @memcpy(flipped[y * atlas_w ..][0..atlas_w], src);
-        }
 
         // --- Metal texture ---
         // MTLPixelFormatR8Unorm = 10
@@ -164,7 +162,7 @@ pub const Renderer = struct {
         atlas.msgSend(void, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", .{
             MTLRegion{ .x = 0, .y = 0, .z = 0, .w = atlas_w, .h = atlas_h, .d = 1 },
             @as(u64, 0),
-            @as(*const anyopaque, flipped.ptr),
+            @as(*const anyopaque, data),
             @as(u64, atlas_w),
         });
 

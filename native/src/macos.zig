@@ -50,6 +50,26 @@ pub const App = struct {
     cols: u32,
     rows: u32,
     frame_count: std.atomic.Value(u64) = .init(0),
+    activate: bool = true,
+
+    // ctl `shot` handoff: the socket thread stores a path and flips the
+    // flag; the render thread services it after the next commit.
+    shot_state: std.atomic.Value(u8) = .init(0),
+    shot_path: [1024]u8 = undefined,
+    shot_len: usize = 0,
+
+    pub fn requestShot(self: *App, path: []const u8) bool {
+        if (path.len == 0 or path.len > self.shot_path.len) return false;
+        if (self.shot_state.cmpxchgStrong(0, 1, .acq_rel, .monotonic) != null) return false;
+        @memcpy(self.shot_path[0..path.len], path);
+        self.shot_len = path.len;
+        self.shot_state.store(2, .release); // armed
+        return true;
+    }
+
+    pub fn shotPending(self: *App) bool {
+        return self.shot_state.load(.acquire) != 0;
+    }
 
     pub fn create(init: std.process.Init) !*App {
         const gpa = init.gpa;
@@ -68,7 +88,9 @@ pub const App = struct {
         layer.msgSend(void, "setDevice:", .{device.value});
         // MTLPixelFormatBGRA8Unorm = 80
         layer.msgSend(void, "setPixelFormat:", .{@as(u64, 80)});
-        layer.msgSend(void, "setFramebufferOnly:", .{true});
+        // false so the ctl `shot` command can read our own drawable back —
+        // dev-tool visibility outranks the marginal framebufferOnly win.
+        layer.msgSend(void, "setFramebufferOnly:", .{false});
 
         const rect = NSRect{ .origin = .{ .x = 0, .y = 0 }, .size = .{ .width = win_w, .height = win_h } };
         // titled | closable | miniaturizable | resizable = 15
@@ -119,7 +141,12 @@ pub const App = struct {
 
     pub fn run(self: *App) void {
         self.window.msgSend(void, "makeKeyAndOrderFront:", .{@as(objc.c.id, null)});
-        self.app.msgSend(void, "activateIgnoringOtherApps:", .{true});
+        // --no-activate: probe/tooling launches must not steal focus.
+        if (self.activate) self.app.msgSend(void, "activateIgnoringOtherApps:", .{true});
+
+        @import("ctl.zig").start(self) catch |err| {
+            std.debug.print("rookz ctl: failed to start: {}\n", .{err});
+        };
 
         // Keys → pty (Cmd+Q quits). AppKit copies the handler block, so the
         // stack context is fine here.
@@ -139,24 +166,11 @@ pub const App = struct {
         self.app.msgSend(void, "run", .{});
     }
 
-    /// One-shot probe ~1s after launch: what does the vt grid hold?
-    fn debugDump(self: *App) void {
-        self.session.mutex.lock();
-        const str = self.session.term.plainString(self.gpa) catch {
-            self.session.mutex.unlock();
-            return;
-        };
-        self.session.mutex.unlock();
-        defer self.gpa.free(str);
-        std.debug.print("rookz screen @f120 ({d}x{d}):\n{s}\n---\n", .{ self.cols, self.rows, str });
-    }
-
     fn drawFrame(self: *App) void {
         const pool = objc.AutoreleasePool.init();
         defer pool.deinit();
 
-        const frame_n = self.frame_count.fetchAdd(1, .monotonic);
-        if (frame_n == 120) self.debugDump();
+        _ = self.frame_count.fetchAdd(1, .monotonic);
 
         // Snapshot terminal state under the session lock.
         self.session.mutex.lock();
@@ -238,6 +252,32 @@ pub const App = struct {
         enc.msgSend(void, "endEncoding", .{});
         cmd.msgSend(void, "presentDrawable:", .{drawable.value});
         cmd.msgSend(void, "commit", .{});
+
+        // Service a pending ctl `shot`: wait for this frame's GPU work,
+        // read our own drawable back, write PNG. Render-thread only.
+        if (self.shot_state.load(.acquire) == 2) {
+            cmd.msgSend(void, "waitUntilCompleted", .{});
+            self.captureShot(drawable);
+            self.shot_state.store(0, .release);
+        }
+    }
+
+    fn captureShot(self: *App, drawable: objc.Object) void {
+        const tex = drawable.msgSend(objc.Object, "texture", .{});
+        const w = tex.msgSend(u64, "width", .{});
+        const h = tex.msgSend(u64, "height", .{});
+        const bpr = w * 4;
+        const pixels = self.gpa.alloc(u8, bpr * h) catch return;
+        defer self.gpa.free(pixels);
+        tex.msgSend(void, "getBytes:bytesPerRow:fromRegion:mipmapLevel:", .{
+            @as(*anyopaque, pixels.ptr),
+            bpr,
+            renderpkg.MTLRegionPub{ .x = 0, .y = 0, .z = 0, .w = w, .h = h, .d = 1 },
+            @as(u64, 0),
+        });
+        @import("png.zig").writeBGRA(self.shot_path[0..self.shot_len], @intCast(w), @intCast(h), @intCast(bpr), pixels) catch |err| {
+            std.debug.print("rookz shot: write failed: {}\n", .{err});
+        };
     }
 };
 

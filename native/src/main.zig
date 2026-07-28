@@ -16,6 +16,9 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "exec")) return exec(init, argv[2..]);
     if (std.mem.eql(u8, cmd, "win")) {
         const app = try @import("macos.zig").App.create(init);
+        for (argv[2..]) |arg| {
+            if (std.mem.eql(u8, std.mem.span(arg), "--no-activate")) app.activate = false;
+        }
         app.run();
         return;
     }
