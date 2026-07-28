@@ -6,6 +6,7 @@
 const std = @import("std");
 const vt = @import("ghostty-vt");
 const sessionpkg = @import("session.zig");
+const editorpkg = @import("editor.zig");
 
 pub const Rect = struct {
     x: f32 = 0,
@@ -14,10 +15,24 @@ pub const Rect = struct {
     h: f32 = 0,
 };
 
-pub const Pane = struct {
-    id: u32,
+/// A terminal tenant: pty session + its render snapshot.
+pub const Term = struct {
     session: *sessionpkg.Session,
     rs: vt.RenderState = .empty,
+};
+
+/// What lives inside a pane. The tree, layout, focus, chords, and tabs
+/// are all content-agnostic — an editor is just a pane whose fill pass
+/// comes from a text buffer instead of an emulator (the rook-buffers
+/// model: one scene, different documents).
+pub const Content = union(enum) {
+    term: Term,
+    edit: *editorpkg.Editor,
+};
+
+pub const Pane = struct {
+    id: u32,
+    content: Content,
     rect: Rect = .{},
     cols: u32 = 2,
     rows: u32 = 2,
@@ -32,6 +47,20 @@ pub const Pane = struct {
     /// anywhere in the emulator — this is the only record that the
     /// on-screen cursor is now stale.
     drawn_cursor: u32 = 0xffff_ffff,
+
+    pub fn term(self: *Pane) ?*Term {
+        return switch (self.content) {
+            .term => |*t| t,
+            .edit => null,
+        };
+    }
+
+    pub fn editor(self: *Pane) ?*editorpkg.Editor {
+        return switch (self.content) {
+            .term => null,
+            .edit => |e| e,
+        };
+    }
 };
 
 pub const Node = union(enum) {

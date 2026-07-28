@@ -121,7 +121,10 @@ fn writeTarget(app: *macos.App, pane_id: ?u32, bytes: []const u8) bool {
     defer app.draw_lock.unlock();
     const p = findPane(app, pane_id) orelse return false;
     if (p == app.tabs.items[app.active_tab].focused) app.markInput(CACurrentMediaTime());
-    p.session.write(bytes);
+    switch (p.content) {
+        .term => |*tm| tm.session.write(bytes),
+        .edit => |ed| ed.key(bytes),
+    }
     return true;
 }
 
@@ -147,14 +150,18 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             reply(fd, "err no pane\n");
             return;
         };
-        p.session.mutex.lock();
-        const str = p.session.term.plainString(app.gpa) catch {
-            p.session.mutex.unlock();
+        const str = switch (p.content) {
+            .term => |*tm| blk: {
+                tm.session.mutex.lock();
+                defer tm.session.mutex.unlock();
+                break :blk tm.session.term.plainString(app.gpa) catch null;
+            },
+            .edit => |ed| ed.dumpText(app.gpa, p.cols, p.rows) catch null,
+        } orelse {
             app.draw_lock.unlock();
             reply(fd, "err dump\n");
             return;
         };
-        p.session.mutex.unlock();
         var head: [64]u8 = undefined;
         const h = std.fmt.bufPrint(&head, "pane {d} grid {d}x{d}\n", .{ p.id, p.cols, p.rows }) catch {
             app.draw_lock.unlock();
@@ -215,6 +222,11 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else if (std.fmt.parseInt(usize, rest, 10) catch null) |n| {
             reply(fd, if (n >= 1 and app.selectTab(n - 1)) "ok\n" else "err no tab\n");
         } else reply(fd, "err tab new|next|prev|<n>\n");
+    } else if (std.mem.eql(u8, verb, "edit") and rest.len > 0) {
+        // Open a file in an editor pane: a focused editor retargets in
+        // place, else one splits off to the right. Paths resolve
+        // against the APP's cwd — send absolute paths (rookz edit does).
+        reply(fd, if (app.openEditor(rest)) "ok\n" else "err open\n");
     } else if (std.mem.eql(u8, verb, "split")) {
         if (std.mem.eql(u8, rest, "right")) {
             app.splitFocused(true);
@@ -326,6 +338,6 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         reply(fd, "ok\n");
         _exit(0);
     } else {
-        reply(fd, "err unknown (panes|split right|down|focus <id|dir>|dump[@id]|type[@id] <s>|enter[@id]|ctrlc[@id]|key[@id] <hex>|shot <path>|winsize <w> <h>|stats|quit)\n");
+        reply(fd, "err unknown (panes|edit <path>|split right|down|focus <id|dir>|dump[@id]|type[@id] <s>|enter[@id]|ctrlc[@id]|key[@id] <hex>|shot <path>|winsize <w> <h>|stats|quit)\n");
     }
 }

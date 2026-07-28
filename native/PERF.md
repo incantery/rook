@@ -89,6 +89,13 @@ against the last-drawn cursor — the emulator's dirty tracking is
 row-content only, so a frame-skipping renderer must diff the cursor
 itself. Idle stays zero frames (a parked cursor compares equal).
 
+Sixth re-run — the EDITOR lands (2026-07-28: pane content union, rope
+buffer, vim-core modal machine): cat **0.892s**, idle still 0 frames,
+fill p50 38µs — the content switch in the snapshot/fill loops is
+noise. Editor keystrokes ride the same key→photon instrument (8.3ms
+p50 observed mid-session); an editor pane's echo is synchronous, so
+its dirty frame consumes the mark exactly like a pty echo.
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,

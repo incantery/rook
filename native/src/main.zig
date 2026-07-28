@@ -20,6 +20,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, cmd, "demo")) return demo(init);
     if (std.mem.eql(u8, cmd, "exec")) return exec(init, argv[2..]);
+    if (std.mem.eql(u8, cmd, "edit")) return edit(argv[2..]);
     if (std.mem.eql(u8, cmd, "win")) {
         // Dock/Finder launches start at "/" — a terminal's shells
         // belong in $HOME.
@@ -38,8 +39,69 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    std.debug.print("usage: rookz [win|demo|exec <cmd...>]\n", .{});
+    std.debug.print("usage: rookz [win|edit <file>|demo|exec <cmd...>]\n", .{});
     return error.UnknownCommand;
+}
+
+const sockaddr_un = extern struct {
+    sun_len: u8 = 0,
+    sun_family: u8 = 1, // AF_UNIX
+    sun_path: [104]u8 = @splat(0),
+};
+extern "c" fn socket(domain: c_int, tp: c_int, protocol: c_int) c_int;
+extern "c" fn connect(fd: c_int, addr: *const sockaddr_un, len: u32) c_int;
+extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
+extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
+extern "c" fn close(fd: c_int) c_int;
+
+/// `rookz edit <file>` — the dogfood door: from a shell inside rookz,
+/// open the file in an editor pane of THIS instance (shells inherit
+/// ROOKZ_SOCK, so a dev instance's shells talk to the dev socket).
+fn edit(args: []const [*:0]const u8) !void {
+    if (args.len == 0) {
+        std.debug.print("usage: rookz edit <file>\n", .{});
+        return error.MissingPath;
+    }
+    const path = std.mem.span(args[0]);
+
+    // The app resolves relative paths against ITS cwd — make ours
+    // absolute before sending.
+    var abs_buf: [1024 + 1200]u8 = undefined;
+    var abs: []const u8 = path;
+    if (path.len == 0 or path[0] != '/') {
+        var cwdbuf: [1024]u8 = undefined;
+        const cwd = getcwd(&cwdbuf, cwdbuf.len) orelse return error.NoCwd;
+        abs = try std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ std.mem.span(cwd), path });
+    }
+
+    const sock_env = getenv("ROOKZ_SOCK");
+    const sock: []const u8 = if (sock_env) |sp| std.mem.span(sp) else "/tmp/rookz.sock";
+
+    const fd = socket(1, 1, 0); // AF_UNIX, SOCK_STREAM
+    if (fd < 0) return error.SocketFailed;
+    defer _ = close(fd);
+    var addr: sockaddr_un = .{};
+    if (sock.len >= addr.sun_path.len) return error.PathTooLong;
+    @memcpy(addr.sun_path[0..sock.len], sock);
+    if (connect(fd, &addr, @sizeOf(sockaddr_un)) != 0) {
+        std.debug.print("rookz edit: no app listening on {s} (is rookz running?)\n", .{sock});
+        return error.ConnectFailed;
+    }
+
+    var msg_buf: [2400]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&msg_buf, "edit {s}\n", .{abs});
+    var off: usize = 0;
+    while (off < msg.len) {
+        const n = write(fd, msg.ptr + off, msg.len - off);
+        if (n <= 0) return error.WriteFailed;
+        off += @intCast(n);
+    }
+    var reply_buf: [256]u8 = undefined;
+    const n = read(fd, &reply_buf, reply_buf.len);
+    if (n > 0 and !std.mem.startsWith(u8, reply_buf[0..@intCast(n)], "ok")) {
+        std.debug.print("rookz edit: {s}", .{reply_buf[0..@intCast(n)]});
+        return error.EditFailed;
+    }
 }
 
 fn demo(init: std.process.Init) !void {

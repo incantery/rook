@@ -15,6 +15,7 @@ const vt = @import("ghostty-vt");
 const sessionpkg = @import("session.zig");
 const renderpkg = @import("render.zig");
 const panespkg = @import("panes.zig");
+const editorpkg = @import("editor.zig");
 const stats = @import("stats.zig");
 
 extern "c" fn CACurrentMediaTime() f64;
@@ -55,6 +56,15 @@ const bar_bg: [4]u8 = .{ 30, 30, 38, 255 };
 const bar_fg: [4]u8 = .{ 148, 150, 166, 255 };
 const bar_value: [4]u8 = .{ 205, 208, 220, 255 };
 const chip_active_bg: [4]u8 = .{ 48, 50, 62, 255 };
+
+// Editor pane palette (theme engine comes later; these sit beside the
+// chrome colors so the pane reads as the same family).
+const ed_bg: [4]u8 = .{ 18, 19, 26, 255 };
+const ed_fg: [4]u8 = .{ 205, 208, 220, 255 };
+const ed_dim: [4]u8 = .{ 96, 99, 116, 255 };
+const ed_sel_bg: [4]u8 = .{ 58, 62, 88, 255 };
+const ed_err: [4]u8 = .{ 247, 118, 142, 255 };
+const ed_bg_rgb: @import("ghostty-vt").color.RGB = .{ .r = 18, .g = 19, .b = 26 };
 
 fn nsString(s: [*:0]const u8) objc.Object {
     const NSString = objc.getClass("NSString").?;
@@ -235,7 +245,7 @@ pub const App = struct {
 
         const self = try gpa.create(App);
         const pane = try gpa.create(panespkg.Pane);
-        pane.* = .{ .id = 1, .session = session, .cols = cols, .rows = rows };
+        pane.* = .{ .id = 1, .content = .{ .term = .{ .session = session } }, .cols = cols, .rows = rows };
         session.kick = &inputKick;
         session.kick_ctx = self;
         const tab_one = try gpa.create(panespkg.Tab);
@@ -370,9 +380,45 @@ pub const App = struct {
         session.kick = &inputKick;
         session.kick_ctx = self;
         const pane = try self.gpa.create(panespkg.Pane);
-        pane.* = .{ .id = self.next_pane_id, .session = session };
+        pane.* = .{ .id = self.next_pane_id, .content = .{ .term = .{ .session = session } } };
         self.next_pane_id += 1;
         return pane;
+    }
+
+    /// The focused pane's session, or null when an editor holds focus.
+    fn focusedTermSession(self: *App) ?*sessionpkg.Session {
+        return if (self.activeTab().focused.term()) |t| t.session else null;
+    }
+
+    /// Open `path` in an editor: retarget a focused editor pane in
+    /// place (the rook-buffers model), else split one off to the right.
+    pub fn openEditor(self: *App, path: []const u8) bool {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const t = self.activeTab();
+        if (t.focused.editor()) |ed| {
+            ed.open(path, false) catch return false;
+            self.scene_dirty = true;
+            return true;
+        }
+        const ed = editorpkg.Editor.create(self.gpa, self.io, path) catch return false;
+        const pane = self.gpa.create(panespkg.Pane) catch {
+            ed.destroy();
+            return false;
+        };
+        pane.* = .{ .id = self.next_pane_id, .content = .{ .edit = ed } };
+        self.next_pane_id += 1;
+        if (!panespkg.splitAt(self.gpa, &t.root, t.focused, pane, true)) {
+            ed.destroy();
+            self.gpa.destroy(pane);
+            return false;
+        }
+        t.panes.append(self.gpa, pane) catch {};
+        self.setFocusLocked(pane);
+        self.relayoutLocked();
+        self.refreshHudLocked(CACurrentMediaTime());
+        self.scene_dirty = true;
+        return true;
     }
 
     /// Recompute the ACTIVE tab's pane rects and resize changed grids.
@@ -386,7 +432,10 @@ pub const App = struct {
             if (cols == p.cols and rows == p.rows) continue;
             p.cols = cols;
             p.rows = rows;
-            p.session.resize(cols, rows, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
+            switch (p.content) {
+                .term => |*tm| tm.session.resize(cols, rows, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px)),
+                .edit => |ed| ed.render_dirty = true,
+            }
         }
     }
 
@@ -449,19 +498,32 @@ pub const App = struct {
 
     fn activateTabLocked(self: *App, i: usize) void {
         self.active_tab = i;
-        self.focused_session.store(self.activeTab().focused.session, .release);
+        self.focused_session.store(self.focusedTermSession(), .release);
         // The window may have resized while this tab was hidden.
         self.relayoutLocked();
         self.refreshHudLocked(CACurrentMediaTime());
         self.scene_dirty = true;
     }
 
-    /// Write input to the focused pane under the scene lock.
+    /// Route input to the focused pane under the scene lock: terminal
+    /// bytes go to the pty, editor bytes drive the modal machine. Both
+    /// mark input — the editor's echo is synchronous, so its dirty
+    /// frame carries the key→photon mark the same way a pty echo does.
     pub fn writeFocused(self: *App, bytes: []const u8, ts: f64) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         self.markInput(ts);
-        self.activeTab().focused.session.write(bytes);
+        switch (self.activeTab().focused.content) {
+            .term => |*t| t.session.write(bytes),
+            .edit => |ed| ed.key(bytes),
+        }
+    }
+
+    /// Is the focused pane an editor? (Locked peek for the key path.)
+    pub fn focusedIsEditor(self: *App) bool {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        return self.activeTab().focused.editor() != null;
     }
 
     fn barDirty(self: *App) void {
@@ -491,6 +553,9 @@ pub const App = struct {
     /// one, or was swallowed as an unknown chord).
     pub fn handleCharKey(self: *App, ch: u8, ts: f64) bool {
         const ld = self.keybinds.leader orelse return false;
+        // An editor owns its keys — the app leader would swallow
+        // literal backticks mid-edit. (Cmd chords still work above.)
+        if (self.focusedIsEditor()) return false;
         if (self.leader_pending.swap(false, .acq_rel)) {
             self.barDirty();
             if (ch == ld) {
@@ -514,7 +579,7 @@ pub const App = struct {
 
     fn setFocusLocked(self: *App, pane: *panespkg.Pane) void {
         self.activeTab().focused = pane;
-        self.focused_session.store(pane.session, .release);
+        self.focused_session.store(if (pane.term()) |t| t.session else null, .release);
         self.scene_dirty = true;
     }
 
@@ -557,7 +622,11 @@ pub const App = struct {
             var i: usize = 0;
             while (i < t.panes.items.len) {
                 const p = t.panes.items[i];
-                if (!p.session.exited.load(.acquire)) {
+                const done = switch (p.content) {
+                    .term => |*tm| tm.session.exited.load(.acquire),
+                    .edit => |ed| ed.closed,
+                };
+                if (!done) {
                     i += 1;
                     continue;
                 }
@@ -565,8 +634,13 @@ pub const App = struct {
                 _ = panespkg.removeAt(self.gpa, &t.root, p);
                 _ = t.panes.swapRemove(i);
                 const was_focused = t.focused == p;
-                p.session.deinit();
-                p.rs.deinit(self.gpa);
+                switch (p.content) {
+                    .term => |*tm| {
+                        tm.session.deinit();
+                        tm.rs.deinit(self.gpa);
+                    },
+                    .edit => |ed| ed.destroy(),
+                }
                 self.gpa.destroy(p);
                 if (t.panes.items.len > 0 and was_focused) t.focused = t.panes.items[0];
             }
@@ -584,7 +658,7 @@ pub const App = struct {
             ti += 1;
         }
         if (changed) {
-            self.focused_session.store(self.activeTab().focused.session, .release);
+            self.focused_session.store(self.focusedTermSession(), .release);
             self.relayoutLocked();
             self.refreshHudLocked(CACurrentMediaTime());
             self.scene_dirty = true;
@@ -615,21 +689,29 @@ pub const App = struct {
         var any_dirty = self.scene_dirty;
         var focused_dirty = false;
         for (atab.panes.items) |p| {
-            p.session.lockForSnapshot();
-            p.rs.update(self.gpa, &p.session.term) catch {
-                p.session.unlockForSnapshot();
-                p.dirty = false;
-                continue;
-            };
-            p.session.unlockForSnapshot();
-            p.dirty = p.rs.dirty != .@"false";
-            p.rs.dirty = .@"false";
-            // Cursor-only changes (backspace's \b, arrows, DECTCEM
-            // hide/show) dirty no row — compare against what the last
-            // fill drew, or the on-screen cursor goes stale. The cursor
-            // move IS the key's visible echo, so it legitimately sets
-            // focused_dirty and consumes the key→photon mark.
-            if (p == atab.focused and cursorKey(p) != p.drawn_cursor) p.dirty = true;
+            switch (p.content) {
+                .term => |*tm| {
+                    tm.session.lockForSnapshot();
+                    tm.rs.update(self.gpa, &tm.session.term) catch {
+                        tm.session.unlockForSnapshot();
+                        p.dirty = false;
+                        continue;
+                    };
+                    tm.session.unlockForSnapshot();
+                    p.dirty = tm.rs.dirty != .@"false";
+                    tm.rs.dirty = .@"false";
+                    // Cursor-only changes (backspace's \b, arrows, DECTCEM
+                    // hide/show) dirty no row — compare against what the last
+                    // fill drew, or the on-screen cursor goes stale. The cursor
+                    // move IS the key's visible echo, so it legitimately sets
+                    // focused_dirty and consumes the key→photon mark.
+                    if (p == atab.focused and cursorKey(tm) != p.drawn_cursor) p.dirty = true;
+                },
+                .edit => |ed| {
+                    p.dirty = ed.render_dirty;
+                    ed.render_dirty = false;
+                },
+            }
             if (p.dirty) {
                 any_dirty = true;
                 if (p == atab.focused) focused_dirty = true;
@@ -657,15 +739,26 @@ pub const App = struct {
         for (atab.panes.items) |p| {
             p.drawn_cols = 0;
             p.drawn_rows = 0;
-            const cols: usize = p.rs.cols;
-            var rows: usize = p.rs.rows;
+            const cols: usize = switch (p.content) {
+                .term => |*tm| tm.rs.cols,
+                .edit => p.cols,
+            };
+            var rows: usize = switch (p.content) {
+                .term => |*tm| tm.rs.rows,
+                .edit => p.rows,
+            };
             if (cols == 0 or rows == 0) continue;
             if (off + cols * rows > self.renderer.cells_cap) {
                 rows = (self.renderer.cells_cap - off) / cols;
                 if (rows == 0) continue;
             }
-            self.fillPane(p, cells[off .. off + cols * rows], cols, rows);
-            p.drawn_cursor = cursorKey(p);
+            switch (p.content) {
+                .term => |*tm| {
+                    self.fillPane(tm, p == atab.focused, cells[off .. off + cols * rows], cols, rows);
+                    p.drawn_cursor = cursorKey(tm);
+                },
+                .edit => |ed| self.fillEditorPane(ed, cells[off .. off + cols * rows], cols, rows),
+            }
             p.buf_off = off;
             p.drawn_cols = @intCast(cols);
             p.drawn_rows = @intCast(rows);
@@ -688,8 +781,10 @@ pub const App = struct {
         const t_acquired = CACurrentMediaTime();
         stats.global.drawable_wait.recordSeconds(t_acquired - t_fill);
 
-        const focused_colors = &atab.focused.rs.colors;
-        const clear_bg = focused_colors.background;
+        const clear_bg = switch (atab.focused.content) {
+            .term => |*tm| tm.rs.colors.background,
+            .edit => ed_bg_rgb,
+        };
 
         const desc = objc.getClass("MTLRenderPassDescriptor").?
             .msgSend(objc.Object, "renderPassDescriptor", .{});
@@ -715,7 +810,10 @@ pub const App = struct {
         // Scene: pane backgrounds (full rect, covers the sub-cell
         // remainder), grids, separators, focus edges.
         for (atab.panes.items) |p| {
-            const bg = p.rs.colors.background;
+            const bg = switch (p.content) {
+                .term => |*tm| tm.rs.colors.background,
+                .edit => ed_bg_rgb,
+            };
             self.renderer.drawRect(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.rect.w, p.rect.h, .{ bg.r, bg.g, bg.b, 255 });
         }
         for (atab.panes.items) |p| {
@@ -837,12 +935,16 @@ pub const App = struct {
         var tabs_buf: [160]u8 = undefined;
         var tw: std.Io.Writer = .fixed(&tabs_buf);
         for (self.tabs.items) |tb| {
-            const sess = tb.focused.session;
-            sess.mutex.lock();
-            if (sess.term.getTitle()) |tt| {
-                tw.print("{s};", .{tt[0..@min(tt.len, 24)]}) catch {};
-            } else tw.print(";", .{}) catch {};
-            sess.mutex.unlock();
+            switch (tb.focused.content) {
+                .term => |*tm| {
+                    tm.session.mutex.lock();
+                    if (tm.session.term.getTitle()) |tt| {
+                        tw.print("{s};", .{tt[0..@min(tt.len, 24)]}) catch {};
+                    } else tw.print(";", .{}) catch {};
+                    tm.session.mutex.unlock();
+                },
+                .edit => |ed| tw.print("{s};", .{ed.displayName()}) catch {},
+            }
         }
         const td = tabs_buf[0..tw.end];
 
@@ -891,15 +993,22 @@ pub const App = struct {
             // " {n} {title} ", title truncated to keep chips tidy.
             var title_buf: [24]u8 = undefined;
             var title: []const u8 = "shell";
-            {
-                const sess = t.focused.session;
-                sess.mutex.lock();
-                if (sess.term.getTitle()) |tt| {
-                    const n = @min(tt.len, title_buf.len);
-                    @memcpy(title_buf[0..n], tt[0..n]);
+            switch (t.focused.content) {
+                .term => |*tm| {
+                    tm.session.mutex.lock();
+                    if (tm.session.term.getTitle()) |tt| {
+                        const n = @min(tt.len, title_buf.len);
+                        @memcpy(title_buf[0..n], tt[0..n]);
+                        if (n > 0) title = title_buf[0..n];
+                    }
+                    tm.session.mutex.unlock();
+                },
+                .edit => |ed| {
+                    const dn = ed.displayName();
+                    const n = @min(dn.len, title_buf.len);
+                    @memcpy(title_buf[0..n], dn[0..n]);
                     if (n > 0) title = title_buf[0..n];
-                }
-                sess.mutex.unlock();
+                },
             }
             var chip: [40]u8 = undefined;
             const label = std.fmt.bufPrint(&chip, " {d} {s} ", .{ i + 1, title }) catch continue;
@@ -918,21 +1027,21 @@ pub const App = struct {
     /// the focus telegraph.
     /// The cursor state a fill bakes into the grid, as one comparable
     /// word: position when visible, a sentinel when hidden or offscreen.
-    fn cursorKey(p: *panespkg.Pane) u32 {
-        if (!p.rs.cursor.visible) return 0xffff_ffff;
-        const cur = p.rs.cursor.viewport orelse return 0xffff_ffff;
+    fn cursorKey(tm: *panespkg.Term) u32 {
+        if (!tm.rs.cursor.visible) return 0xffff_ffff;
+        const cur = tm.rs.cursor.viewport orelse return 0xffff_ffff;
         return (@as(u32, cur.y) << 16) | cur.x;
     }
 
-    fn fillPane(self: *App, p: *panespkg.Pane, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
-        const colors = &p.rs.colors;
+    fn fillPane(self: *App, tm: *panespkg.Term, focused: bool, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
+        const colors = &tm.rs.colors;
         const default_bg = colors.background;
         const default_fg = colors.foreground;
-        const row_cells = p.rs.row_data.items(.cells);
+        const row_cells = tm.rs.row_data.items(.cells);
         const cellw_px: u16 = @intCast(self.renderer.cellw_px);
         // DECTCEM hide (TUIs that paint their own cursor, e.g. claude
         // code's inverse-space block) must actually hide ours.
-        const show_cursor = p == self.activeTab().focused and p.rs.cursor.visible;
+        const show_cursor = focused and tm.rs.cursor.visible;
         for (0..rows) |y| {
             const raws = row_cells[y].items(.raw);
             const styles = row_cells[y].items(.style);
@@ -991,7 +1100,7 @@ pub const App = struct {
                 // normal.
                 var inv = styled and st.flags.inverse;
                 if (show_cursor) {
-                    if (p.rs.cursor.viewport) |cur| {
+                    if (tm.rs.cursor.viewport) |cur| {
                         if (cur.x == x and cur.y == y) inv = !inv;
                     }
                 }
@@ -1006,6 +1115,56 @@ pub const App = struct {
                     .flags = flags,
                 };
             }
+        }
+    }
+
+    /// Rasterize an editor pane: the editor lays out a styled RCell
+    /// grid (pure text — the tested surface); this maps styles to
+    /// colors and atlas glyphs. Last row is the editor's status line.
+    fn fillEditorPane(self: *App, ed: *editorpkg.Editor, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
+        const g = ed.fillGrid(cols, rows);
+        for (g, 0..) |rc, i| {
+            const status_row = rows >= 1 and i >= (rows - 1) * cols;
+            var bg: [4]u8 = if (status_row) chip_active_bg else ed_bg;
+            var fg: [4]u8 = switch (rc.st) {
+                .text => if (status_row) bar_value else ed_fg,
+                .dim => if (status_row) bar_fg else ed_dim,
+                .sel => ed_fg,
+                .cursor => ed_bg,
+                .mode => bar_bg,
+                .status => bar_value,
+                .err => ed_err,
+            };
+            switch (rc.st) {
+                .sel => bg = ed_sel_bg,
+                .cursor => {
+                    bg = ed_fg;
+                    fg = if (status_row) chip_active_bg else ed_bg;
+                },
+                .mode => bg = accent_color,
+                else => {},
+            }
+
+            var uvx: u16 = 0;
+            var uvy: u16 = 0;
+            var flags: u16 = 0;
+            if (rc.cp > 32) if (self.renderer.glyph(rc.cp, false)) |loc| {
+                uvx = loc.uvx;
+                uvy = loc.uvy;
+                flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
+            };
+            cells[i] = .{
+                .bg = bg,
+                .fg = fg,
+                .uvx = uvx,
+                .uvy = uvy,
+                .flags = flags,
+            };
+        }
+        // The editor may produce fewer cells than the slot (tiny grid
+        // clamp); blank the remainder.
+        for (g.len..cells.len) |i| {
+            cells[i] = .{ .bg = ed_bg, .fg = ed_fg, .uvx = 0, .uvy = 0, .flags = 0 };
         }
     }
 
@@ -1093,7 +1252,10 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                     };
                     if (dir) |d| {
                         app.draw_lock.lock();
-                        const alt = app.activeTab().focused.session.term.screens.active_key == .alternate;
+                        const alt = switch (app.activeTab().focused.content) {
+                            .term => |*tm| tm.session.term.screens.active_key == .alternate,
+                            .edit => false,
+                        };
                         app.draw_lock.unlock();
                         if (!alt and app.focusMove(d)) return null;
                         // fall through: cooked control byte to the pty

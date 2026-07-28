@@ -26,6 +26,22 @@ one); the active chip gets a lifted background and an accent
 underline. Title changes are caught by the 2Hz HUD digest — OSC
 titles don't dirty the grid, so the digest is what redraws chips.
 
+Panes hold CONTENT — a terminal or an EDITOR (the rook-buffers model:
+a file is a document, panes retarget in place). The editor is vim-core
+over a rope buffer (`src/rope.zig` → `src/buffer.zig` →
+`src/editor.zig`): normal/insert/visual/visual-line/command modes,
+h j k l w b e 0 ^ $ gg G arrows ⌃D/⌃U, operators d y c (dd yy cc D C
+Y), x r J p P, counts, grouped undo (u / ⌃R), `:w :q :wq :e :<n>`.
+Open one with `rookz edit <file>` from any shell inside the app (the
+CLI finds this instance via ROOKZ_SOCK) or ctl `edit <path>`: a
+focused editor retargets, otherwise a split opens. `:q` closes the
+pane like a shell exit. The editor is a pure model — keys in, a
+styled character grid out — so `zig test src/editor.zig` drives the
+whole modal machine headless; macos.zig only maps styles to colors
+and glyphs. Editor debts: no search yet, one register, no autoindent,
+no syntax (tree-sitter is the next slice), wide glyphs count one
+column, 4KB line clamp on motions/render.
+
 A status bar sits under the panes — tenant one of `src/ui.zig`, the
 seed of rook's own UI layer (immediate-mode quads + text runs from the
 same pipelines/atlases as the grid; widgets are never their own draw
@@ -71,6 +87,8 @@ printf 'panes\n'             | nc -U /tmp/rookz.sock   # all tabs' panes, * = ac
 printf 'tabs\n'              | nc -U /tmp/rookz.sock   # list tabs
 printf 'tab new\n'           | nc -U /tmp/rookz.sock   # also: tab <n>, tab next, tab prev
 printf 'split right\n'       | nc -U /tmp/rookz.sock   # split focused (or: down)
+printf 'edit /abs/file\n'     | nc -U /tmp/rookz.sock   # editor pane (focused editor
+                                                       #   retargets; else split right)
 printf 'focus left\n'        | nc -U /tmp/rookz.sock   # move focus (or an id — switches tab)
 printf 'dump@2\n'            | nc -U /tmp/rookz.sock   # any pane-taking verb
 printf 'type@2 ls\n'         | nc -U /tmp/rookz.sock   #   targets by @id
@@ -129,15 +147,23 @@ Canonical action names (the wails keymap's): `pane.split-right`,
 `session.new`), `tab.next`, `tab.prev`, `tab.select-1`…`tab.select-9`. Aliases accepted: `app.split.vertical` (=
 split-right, the vim `:vsplit` sense) and `app.split.horizontal` (=
 split-down). Named chord keys: `TAB`, `SPACE`, `ESC`. `[editor]` is
-parsed past and noted — no editor yet. Hardcoded ⌘/⌃ chords remain
-alongside; config overriding them comes later.
+parsed past and noted — the editor owns its keys wholesale for now
+(the app leader is disabled while an editor pane has focus, so
+backticks type; ⌘ chords and ⌃HJKL nav still work). Hardcoded ⌘/⌃
+chords remain alongside; config overriding them comes later.
 
 ## Layout
 
 - `src/main.zig` — subcommand dispatch
 - `src/pty.zig` — openpty/fork/exec, libc direct (0.16 std.posix lost these)
 - `src/session.zig` — pty + vt.Terminal + reader thread, os_unfair_lock
-- `src/panes.zig` — split tree: layout, geometric nav, separators
+- `src/panes.zig` — split tree: layout, geometric nav, separators;
+  panes hold content (terminal | editor)
+- `src/rope.zig` — rope text storage (byte + newline metrics, O(log n)
+  line⇄offset), differential-tested against a flat array
+- `src/buffer.zig` — document: rope + path + grouped undo
+- `src/editor.zig` — the vim-core modal machine; pure model, tested
+  headless
 - `src/ui.zig` — the UI layer seed: rects + text runs (mono v1; CTLine
   shaping is the upgrade path when tabs/finder need proportional)
 - `src/macos.zig` — AppKit window, CAMetalLayer, CVDisplayLink loop, keys,
