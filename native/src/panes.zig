@@ -93,6 +93,30 @@ pub const Tab = struct {
     ws_len: usize = 0,
 };
 
+/// A workspace SESSION — tmux's session, rook's workspace: its own
+/// full set of tabs (windows) with its own active tab. Switching
+/// workspaces swaps the whole window's contents; background spaces'
+/// shells keep running at zero render cost, exactly like background
+/// tabs. Spaces are created lazily by the palette and collapse when
+/// their last tab closes.
+pub const Space = struct {
+    /// Registry name; empty = the scratch space (cwd matched nothing).
+    name: [24]u8 = undefined,
+    name_len: usize = 0,
+    tabs: std.ArrayListUnmanaged(*Tab) = .empty,
+    active_tab: usize = 0,
+
+    pub fn label(self: *const Space) []const u8 {
+        return if (self.name_len > 0) self.name[0..self.name_len] else "scratch";
+    }
+
+    pub fn setName(self: *Space, name: []const u8) void {
+        const n = @min(name.len, self.name.len);
+        @memcpy(self.name[0..n], name[0..n]);
+        self.name_len = n;
+    }
+};
+
 pub const Split = struct {
     /// true = panes side by side (a left, b right); false = stacked.
     horiz: bool,

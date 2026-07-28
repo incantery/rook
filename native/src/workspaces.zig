@@ -24,12 +24,17 @@ const SQLITE_ROW: c_int = 100;
 pub const Entry = struct {
     name: []u8,
     root: []u8,
+    /// Parent workspace name for worktree children (db `worktree_of`),
+    /// empty for top-level. The palette groups children under their
+    /// parent; "rook/zig" is rook's zig worktree.
+    parent: []u8,
 };
 
 pub fn free(gpa: std.mem.Allocator, list: []Entry) void {
     for (list) |e| {
         gpa.free(e.name);
         gpa.free(e.root);
+        gpa.free(e.parent);
     }
     gpa.free(list);
 }
@@ -42,11 +47,14 @@ fn dbPath(buf: []u8) ?[:0]const u8 {
     return std.fmt.bufPrintZ(buf, "{s}/.local/share/rook/rook.db", .{std.mem.span(home)}) catch null;
 }
 
-/// Load workspaces, most recently used first. A missing db or any
-/// sqlite error is an EMPTY list, never a failure — rookz must run
-/// fine on a machine that has never seen the rest of rook.
+/// Load workspaces GROUPED: top-level entries by last_used, each
+/// followed by its worktree children (their own last_used order). A
+/// missing db or any sqlite error is an EMPTY list, never a failure —
+/// rookz must run fine on a machine that has never seen the rest of
+/// rook.
 pub fn load(gpa: std.mem.Allocator) []Entry {
-    var out: std.ArrayListUnmanaged(Entry) = .empty;
+    var flat: std.ArrayListUnmanaged(Entry) = .empty;
+    defer flat.deinit(gpa);
     var pathbuf: [1024]u8 = undefined;
     const path = dbPath(&pathbuf) orelse return &.{};
 
@@ -59,22 +67,61 @@ pub fn load(gpa: std.mem.Allocator) []Entry {
     _ = sqlite3_busy_timeout(db, 200);
 
     var stmt: ?*anyopaque = null;
-    if (sqlite3_prepare_v2(db, "SELECT name, root FROM workspaces WHERE root != '' ORDER BY last_used DESC", -1, &stmt, null) != 0)
+    if (sqlite3_prepare_v2(db, "SELECT name, root, worktree_of FROM workspaces WHERE root != '' ORDER BY last_used DESC", -1, &stmt, null) != 0)
         return &.{};
     defer _ = sqlite3_finalize(stmt);
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const name = sqlite3_column_text(stmt, 0) orelse continue;
         const root = sqlite3_column_text(stmt, 1) orelse continue;
+        const parent = sqlite3_column_text(stmt, 2) orelse "";
         const e: Entry = .{
             .name = gpa.dupe(u8, std.mem.span(name)) catch continue,
             .root = gpa.dupe(u8, std.mem.span(root)) catch continue,
+            .parent = gpa.dupe(u8, std.mem.span(parent)) catch continue,
         };
-        out.append(gpa, e) catch {
+        flat.append(gpa, e) catch {
             gpa.free(e.name);
             gpa.free(e.root);
+            gpa.free(e.parent);
             continue;
         };
+    }
+
+    // Group: parents keep recency order, children follow their parent.
+    // An orphan child (parent row missing) stays top-level.
+    var out: std.ArrayListUnmanaged(Entry) = .empty;
+    var taken = gpa.alloc(bool, flat.items.len) catch return flat.toOwnedSlice(gpa) catch &.{};
+    defer gpa.free(taken);
+    @memset(taken, false);
+    for (flat.items, 0..) |e, i| {
+        if (taken[i]) continue;
+        if (e.parent.len > 0) {
+            var has_parent = false;
+            for (flat.items) |p| {
+                if (std.mem.eql(u8, p.name, e.parent)) {
+                    has_parent = true;
+                    break;
+                }
+            }
+            if (has_parent) continue; // placed under its parent below
+        }
+        taken[i] = true;
+        out.append(gpa, e) catch continue;
+        for (flat.items, 0..) |c, j| {
+            if (!taken[j] and std.mem.eql(u8, c.parent, e.name)) {
+                taken[j] = true;
+                out.append(gpa, c) catch {};
+            }
+        }
+    }
+    // Anything never taken (append failures): free so nothing leaks.
+    for (flat.items, 0..) |e, i| {
+        if (!taken[i]) {
+            gpa.free(e.name);
+            gpa.free(e.root);
+            gpa.free(e.parent);
+        }
     }
     return out.toOwnedSlice(gpa) catch &.{};
 }

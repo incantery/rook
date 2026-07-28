@@ -155,6 +155,16 @@ closed), the sqlite read happens on open, and the per-tab
 cwd→workspace resolve rides the existing 2Hz HUD tick (a proc_pidinfo
 per tab, cached on the Tab) — none of it shows.
 
+Twelfth re-run — spaces (2026-07-28: workspace-scoped tab sets, the
+tmux-session model): cat **0.915/0.914s** at 67×39, fill p50 42/40µs,
+idle 0 frames, RSS 86MB. A hair above the overnight band and fill +1
+to +3µs — consistent with today's daytime spread (0.904–0.923), with
+possibly ~1µs of real cost from the extra space→tab indirection on
+the hot accessors. Background spaces are free by construction (only
+the active space's active tab is snapshotted/filled). Watch fill on
+the next overnight run; if 42 sticks, cache the active tab pointer
+per frame.
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,

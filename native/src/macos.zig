@@ -32,6 +32,7 @@ extern "c" fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *anyopaq
 extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 const PROC_PIDVNODEPATHINFO: c_int = 9;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]const u8;
 extern "c" fn _exit(code: c_int) noreturn;
 
 // libdispatch, for hopping to the main thread from the ctl socket.
@@ -154,8 +155,9 @@ pub const App = struct {
     leader_pending: std.atomic.Value(bool) = .init(false),
 
     // The scene: tabs of split trees. Mutated only under draw_lock.
-    tabs: std.ArrayListUnmanaged(*panespkg.Tab) = .empty,
-    active_tab: usize = 0,
+    /// Workspace sessions (tmux's sessions): each owns a full tab set.
+    spaces: std.ArrayListUnmanaged(*panespkg.Space) = .empty,
+    active_space: usize = 0,
     next_pane_id: u32 = 2,
     next_tab_id: u32 = 2,
     px_w: f32,
@@ -429,11 +431,25 @@ pub const App = struct {
             .bg_opacity = cfg.background_opacity,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
         };
-        try self.tabs.append(gpa, tab_one);
         self.focused_session.store(session, .release);
-        // Workspace registry up front — tab chips wear their workspace
-        // name from the first frame, palette or not.
+        // Workspace registry up front — space one takes the name of
+        // whatever workspace the launch cwd is inside (else scratch),
+        // and tab chips wear their workspace from the first frame.
         self.pal_items = workspacespkg.load(gpa);
+        const space_one = try gpa.create(panespkg.Space);
+        space_one.* = .{};
+        var cwdbuf: [1024]u8 = undefined;
+        if (getcwd(&cwdbuf, cwdbuf.len)) |cwd| {
+            const c = std.mem.span(cwd);
+            for (self.pal_items) |e| {
+                if (std.mem.startsWith(u8, c, e.root) and (c.len == e.root.len or c[e.root.len] == '/')) {
+                    space_one.setName(e.name);
+                    break;
+                }
+            }
+        }
+        try space_one.tabs.append(gpa, tab_one);
+        try self.spaces.append(gpa, space_one);
         panespkg.layout(tab_one.root, self.paneArea(), self.sep);
         return self;
     }
@@ -559,8 +575,13 @@ pub const App = struct {
         };
     }
 
-    fn activeTab(self: *App) *panespkg.Tab {
-        return self.tabs.items[self.active_tab];
+    pub fn activeSpace(self: *App) *panespkg.Space {
+        return self.spaces.items[self.active_space];
+    }
+
+    pub fn activeTab(self: *App) *panespkg.Tab {
+        const s = self.activeSpace();
+        return s.tabs.items[s.active_tab];
     }
 
     /// A click in scene px coords: tab chips select, panes focus.
@@ -892,35 +913,44 @@ pub const App = struct {
         t.* = .{ .id = self.next_tab_id, .root = .{ .leaf = pane }, .focused = pane };
         self.next_tab_id += 1;
         t.panes.append(self.gpa, pane) catch {};
-        self.tabs.append(self.gpa, t) catch return;
-        self.activateTabLocked(self.tabs.items.len - 1);
+        const s = self.activeSpace();
+        s.tabs.append(self.gpa, t) catch return;
+        self.activateTabLocked(s.tabs.items.len - 1);
     }
 
     /// Switch to tab index i (0-based). Any thread.
     pub fn selectTab(self: *App, i: usize) bool {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
-        if (i >= self.tabs.items.len) return false;
+        if (i >= self.activeSpace().tabs.items.len) return false;
         self.activateTabLocked(i);
         return true;
     }
 
-    /// Cycle tabs by delta (±1). Any thread.
+    /// Cycle tabs by delta (±1) within the active space. Any thread.
     pub fn cycleTab(self: *App, delta: i32) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
-        const n: i64 = @intCast(self.tabs.items.len);
-        const cur: i64 = @intCast(self.active_tab);
+        const n: i64 = @intCast(self.activeSpace().tabs.items.len);
+        const cur: i64 = @intCast(self.activeSpace().active_tab);
         self.activateTabLocked(@intCast(@mod(cur + delta, n)));
     }
 
     fn activateTabLocked(self: *App, i: usize) void {
-        self.active_tab = i;
+        self.activeSpace().active_tab = i;
         self.focused_session.store(self.focusedTermSession(), .release);
         // The window may have resized while this tab was hidden.
         self.relayoutLocked();
         self.refreshHudLocked(CACurrentMediaTime());
         self.scene_dirty = true;
+    }
+
+    /// Switch workspace sessions — the whole window swaps tab sets.
+    fn activateSpaceLocked(self: *App, i: usize) void {
+        self.active_space = i;
+        const s = self.activeSpace();
+        if (s.active_tab >= s.tabs.items.len) s.active_tab = s.tabs.items.len -| 1;
+        self.activateTabLocked(s.active_tab);
     }
 
     /// Route input to the focused pane under the scene lock: terminal
@@ -1078,7 +1108,14 @@ pub const App = struct {
         self.pal_nfiltered = 0;
         for (self.pal_items, 0..) |e, i| {
             if (self.pal_nfiltered >= self.pal_filtered.len) break;
-            if (fuzzyMatch(e.name, needle) or fuzzyMatch(e.root, needle)) {
+            // Children match on "parent/name" so "rook/zig" and "rz"
+            // both find the zig worktree.
+            var lbl: [64]u8 = undefined;
+            const label = if (e.parent.len > 0)
+                std.fmt.bufPrint(&lbl, "{s}/{s}", .{ e.parent, e.name }) catch e.name
+            else
+                e.name;
+            if (fuzzyMatch(label, needle) or fuzzyMatch(e.root, needle)) {
                 self.pal_filtered[self.pal_nfiltered] = i;
                 self.pal_nfiltered += 1;
             }
@@ -1128,9 +1165,11 @@ pub const App = struct {
         self.scene_dirty = true;
     }
 
-    /// Enter: focus a tab already living under that workspace root,
-    /// else open a new tab shelled into it. Switch, don't duplicate —
-    /// and cd stays sacred: the workspace annotates, it never fences.
+    /// Enter: attach the workspace's SESSION — tmux semantics. An
+    /// existing space (matched by name) swaps in with its whole tab
+    /// set intact; a first visit creates the space with one shell in
+    /// the workspace root. cd stays sacred inside — the space is where
+    /// your windows live, not a fence.
     fn palActivateLocked(self: *App) void {
         if (self.pal_sel >= self.pal_nfiltered) {
             self.closePaletteLocked();
@@ -1144,18 +1183,30 @@ pub const App = struct {
         }
         @memcpy(rootbuf[0..e.root.len], e.root);
         rootbuf[e.root.len] = 0;
-        const root: []const u8 = rootbuf[0..e.root.len];
+        var namebuf: [24]u8 = undefined;
+        const nlen = @min(e.name.len, namebuf.len);
+        @memcpy(namebuf[0..nlen], e.name[0..nlen]);
         self.closePaletteLocked();
+        const name = namebuf[0..nlen];
 
-        for (self.tabs.items, 0..) |t, ti| {
-            const cwd = self.paneCwd(t.focused) orelse continue;
-            const c = std.mem.span(cwd);
-            if (std.mem.startsWith(u8, c, root) and (c.len == root.len or c[root.len] == '/')) {
-                self.activateTabLocked(ti);
+        for (self.spaces.items, 0..) |s, si| {
+            if (std.mem.eql(u8, s.label(), name)) {
+                self.activateSpaceLocked(si);
                 return;
             }
         }
-        self.newTabLocked(rootbuf[0..e.root.len :0]);
+        // First visit: a fresh session, one shell in the root.
+        const pane = self.makePane(rootbuf[0..e.root.len :0]) catch return;
+        const t = self.gpa.create(panespkg.Tab) catch return;
+        t.* = .{ .id = self.next_tab_id, .root = .{ .leaf = pane }, .focused = pane };
+        self.next_tab_id += 1;
+        t.panes.append(self.gpa, pane) catch {};
+        const s = self.gpa.create(panespkg.Space) catch return;
+        s.* = .{};
+        s.setName(name);
+        s.tabs.append(self.gpa, t) catch return;
+        self.spaces.append(self.gpa, s) catch return;
+        self.activateSpaceLocked(self.spaces.items.len - 1);
     }
 
     fn dispatch(self: *App, b: @import("config.zig").Bind) void {
@@ -1225,16 +1276,19 @@ pub const App = struct {
         return true;
     }
 
-    /// Focus a pane by id, switching tabs if it lives elsewhere.
+    /// Focus a pane by id, switching space and tab if it lives elsewhere.
     pub fn focusById(self: *App, id: u32) bool {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
-        for (self.tabs.items, 0..) |t, ti| {
-            for (t.panes.items) |p| {
-                if (p.id == id) {
-                    if (ti != self.active_tab) self.activateTabLocked(ti);
-                    self.setFocusLocked(p);
-                    return true;
+        for (self.spaces.items, 0..) |s, si| {
+            for (s.tabs.items, 0..) |t, ti| {
+                for (t.panes.items) |p| {
+                    if (p.id == id) {
+                        if (si != self.active_space) self.activateSpaceLocked(si);
+                        if (ti != s.active_tab) self.activateTabLocked(ti);
+                        self.setFocusLocked(p);
+                        return true;
+                    }
                 }
             }
         }
@@ -1247,9 +1301,12 @@ pub const App = struct {
     /// thread (Session.deinit joins it).
     fn reapExitedLocked(self: *App) void {
         var changed = false;
+        var si: usize = 0;
+        while (si < self.spaces.items.len) : (si += 1) {
+        const space = self.spaces.items[si];
         var ti: usize = 0;
-        while (ti < self.tabs.items.len) {
-            const t = self.tabs.items[ti];
+        while (ti < space.tabs.items.len) {
+            const t = space.tabs.items[ti];
             var i: usize = 0;
             while (i < t.panes.items.len) {
                 const p = t.panes.items[i];
@@ -1293,15 +1350,31 @@ pub const App = struct {
             if (t.panes.items.len == 0) {
                 t.panes.deinit(self.gpa);
                 self.gpa.destroy(t);
-                _ = self.tabs.orderedRemove(ti);
-                if (self.tabs.items.len == 0) {
-                    // Last shell of the last tab: the terminal's work is done.
-                    _exit(0);
-                }
-                if (self.active_tab >= self.tabs.items.len) self.active_tab = self.tabs.items.len - 1;
+                _ = space.tabs.orderedRemove(ti);
+                if (space.active_tab >= space.tabs.items.len) space.active_tab = space.tabs.items.len -| 1;
                 continue;
             }
             ti += 1;
+        }
+        }
+        // A space whose last tab closed collapses (tmux: session ends);
+        // the LAST space closing exits the app.
+        var sj: usize = 0;
+        while (sj < self.spaces.items.len) {
+            const s = self.spaces.items[sj];
+            if (s.tabs.items.len > 0) {
+                sj += 1;
+                continue;
+            }
+            changed = true;
+            s.tabs.deinit(self.gpa);
+            self.gpa.destroy(s);
+            _ = self.spaces.orderedRemove(sj);
+            if (self.spaces.items.len == 0) {
+                // Last shell of the last space: the terminal's work is done.
+                _exit(0);
+            }
+            if (self.active_space >= self.spaces.items.len) self.active_space = self.spaces.items.len - 1;
         }
         if (changed) {
             self.focused_session.store(self.focusedTermSession(), .release);
@@ -1556,7 +1629,7 @@ pub const App = struct {
         // Retint every live emulator; the palette dirty flag forces a
         // full RenderState rebuild next snapshot.
         const tc = termColors();
-        for (self.tabs.items) |tab| {
+        for (self.spaces.items) |space| for (space.tabs.items) |tab| {
             for (tab.panes.items) |p| {
                 if (p.term()) |tm| {
                     tm.session.mutex.lock();
@@ -1565,7 +1638,7 @@ pub const App = struct {
                     tm.session.mutex.unlock();
                 } else if (p.editor()) |ed| ed.render_dirty = true;
             }
-        }
+        };
         self.scene_dirty = true;
         std.debug.print("rookz: config reloaded (theme {s}; font/opacity need relaunch)\n", .{th.name});
     }
@@ -1602,7 +1675,8 @@ pub const App = struct {
 
         var left: [96]u8 = undefined;
         const t = self.activeTab();
-        const l = std.fmt.bufPrint(&left, "rookz · {d} pane{s} · #{d}", .{
+        const l = std.fmt.bufPrint(&left, "rookz · {s} · {d} pane{s} · #{d}", .{
+            self.activeSpace().label(),
             t.panes.items.len,
             @as([]const u8, if (t.panes.items.len == 1) "" else "s"),
             t.focused.id,
@@ -1618,7 +1692,7 @@ pub const App = struct {
 
         var tabs_buf: [256]u8 = undefined;
         var tw: std.Io.Writer = .fixed(&tabs_buf);
-        for (self.tabs.items) |tb| {
+        for (self.activeSpace().tabs.items) |tb| {
             // Refresh the chip's workspace annotation (cwd moves; the
             // digest below makes a change redraw the bar).
             tb.ws_len = 0;
@@ -1693,8 +1767,9 @@ pub const App = struct {
         ui.rect(0, 0, self.px_w, self.contentY(), self.glassBg(th.bar_bg));
         const ty = self.top_inset + (self.tab_h - self.renderer.cell_h) / 2;
         var x: f32 = self.renderer.cell_w / 2;
-        for (self.tabs.items, 0..) |t, i| {
-            const is_active = i == self.active_tab;
+        const space = self.activeSpace();
+        for (space.tabs.items, 0..) |t, i| {
+            const is_active = i == space.active_tab;
 
             // " {n} {title} ", title truncated to keep chips tidy.
             var title_buf: [24]u8 = undefined;
@@ -1772,9 +1847,16 @@ pub const App = struct {
                 ui.rect(x, ry, self.sep * 2, row_h, th.accent);
             }
             const rty = ry + (row_h - self.renderer.cell_h) / 2;
-            _ = ui.text(x + cw, rty, e.name, if (selected) th.bar_value else th.bar_fg, bg);
+            // Worktree children sit indented under their parent as
+            // "parent/name" — legible grouped AND filtered-apart.
+            var lbl: [64]u8 = undefined;
+            const label = if (e.parent.len > 0)
+                std.fmt.bufPrint(&lbl, "  {s}/{s}", .{ e.parent, e.name }) catch e.name
+            else
+                e.name;
+            _ = ui.text(x + cw, rty, label, if (selected) th.bar_value else th.bar_fg, bg);
             // Root path, right-aligned and quiet; drop it when narrow.
-            const room = w - 2 * cw - @as(f32, @floatFromInt(e.name.len + 2)) * cw;
+            const room = w - 2 * cw - @as(f32, @floatFromInt(label.len + 2)) * cw;
             if (@as(f32, @floatFromInt(e.root.len)) * cw < room)
                 _ = ui.textRight(x + w - cw, rty, e.root, th.bar_fg, bg);
             ry += row_h;

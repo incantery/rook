@@ -66,21 +66,31 @@ point (a fully-undone buffer still reads modified), wide glyphs
 count one column, 4KB line clamp on motions/render, relative :e
 paths resolve against the app cwd rather than the buffer's dir.
 
+WORKSPACES ARE SESSIONS (tmux's model): the hierarchy is space → tabs
+→ panes. Each workspace owns a full tab set; switching swaps the
+whole window's contents, and background spaces' shells keep running
+at zero render cost (same property as background tabs). The launch
+cwd names space one; a space collapses when its last tab closes (the
+last space closing exits the app). The status bar shows where you
+are (`rookz · zig · …`).
+
 `<leader>w` (action `workspace.switch`) opens the WORKSPACE PALETTE —
 the first modal chrome tenant, and the seed of every future picker
 (file finder, themes, commands): type-to-filter fuzzy list, arrows or
 ⌃N/⌃P, Enter, ESC. The list is rook's own registry — rookz reads
-`workspaces(name, root, last_used)` from ~/.local/share/rook/rook.db
-through the system libsqlite3, read-only, re-queried each open, so it
-always reflects what wails-rook/rook-host last touched (a machine
-without the db just gets an empty palette). Enter focuses a tab whose
-focused shell already lives under that root, else opens a new tab
-shelled into it — switch, don't duplicate. And the workspace is an
-ANNOTATION, never a container (cd is sacred): tab chips wear the name
-of whatever workspace their shell is actually in (`1 zig · shell`),
-resolved from the cwd at the 2Hz HUD tick. ctl: `workspaces`,
-`palette-open`, `palette` (state dump — the modal is blind-drivable
-through the normal type/press verbs).
+`workspaces(name, root, worktree_of, last_used)` from
+~/.local/share/rook/rook.db through the system libsqlite3, read-only,
+re-queried each open, so it always reflects what wails-rook/rook-host
+last touched (a machine without the db just gets an empty palette).
+GROUPED: worktree children sit indented under their parent as
+`rook/zig`, and the filter matches the combined name. Enter attaches
+the workspace's session — existing space switches in with its tabs
+intact, first visit creates it with one shell in the root. Inside a
+space, cd stays sacred: tab chips wear the name of whatever workspace
+their shell is actually IN (`1 zig · shell`), resolved from the cwd
+at the 2Hz HUD tick. ctl: `workspaces`, `palette-open`, `palette`
+(state dump — the modal is blind-drivable through the normal
+type/press verbs); `tabs`/`panes` list all spaces.
 
 A status bar sits under the panes — tenant one of `src/ui.zig`, the
 seed of rook's own UI layer (immediate-mode quads + text runs from the
