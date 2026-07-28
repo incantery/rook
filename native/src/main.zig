@@ -8,22 +8,37 @@ const std = @import("std");
 const vt = @import("ghostty-vt");
 const ptypkg = @import("pty.zig");
 
+extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]const u8;
+extern "c" fn chdir(path: [*:0]const u8) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
 pub fn main(init: std.process.Init) !void {
     const argv = init.minimal.args.vector;
-    const cmd: []const u8 = if (argv.len > 1) std.mem.span(argv[1]) else "demo";
+    // No subcommand = the app (a Dock launch has no argv to give, or
+    // hands us flags like -psn_… / --no-activate directly).
+    const cmd: []const u8 = if (argv.len > 1 and argv[1][0] != '-') std.mem.span(argv[1]) else "win";
 
     if (std.mem.eql(u8, cmd, "demo")) return demo(init);
     if (std.mem.eql(u8, cmd, "exec")) return exec(init, argv[2..]);
     if (std.mem.eql(u8, cmd, "win")) {
+        // Dock/Finder launches start at "/" — a terminal's shells
+        // belong in $HOME.
+        var cwdbuf: [1024]u8 = undefined;
+        if (getcwd(&cwdbuf, cwdbuf.len)) |cwd| {
+            if (cwd[0] == '/' and cwd[1] == 0) {
+                if (getenv("HOME")) |home| _ = chdir(home);
+            }
+        }
         const app = try @import("macos.zig").App.create(init);
-        for (argv[2..]) |arg| {
+        const flag_start: usize = if (argv.len > 1 and argv[1][0] == '-') 1 else 2;
+        for (argv[@min(flag_start, argv.len)..]) |arg| {
             if (std.mem.eql(u8, std.mem.span(arg), "--no-activate")) app.activate = false;
         }
         app.run();
         return;
     }
 
-    std.debug.print("usage: rookz [demo|exec <cmd...>|win]\n", .{});
+    std.debug.print("usage: rookz [win|demo|exec <cmd...>]\n", .{});
     return error.UnknownCommand;
 }
 

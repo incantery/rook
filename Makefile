@@ -18,7 +18,7 @@ APP := /Applications/rook.app
 BUILD := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit).$(shell date +%Y%m%d%H%M%S)
 BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 
-.PHONY: build start dev prod dev-web package install clean agent release e2e e2e-clean
+.PHONY: build start dev prod dev-web package install install-web clean agent release e2e e2e-clean
 
 build:
 	wails3 task build
@@ -49,11 +49,30 @@ start: build
 # prod = ReleaseFast: the binary the scoreboard measures (native/PERF.md,
 #        same mode bench.sh builds). Zig caches per optimize mode, so
 #        alternating dev/prod doesn't rebuild ghostty-vt each time.
+# Both use their own ctl socket: the server unlinks-then-binds, so a
+# second default-socket instance would STEAL the installed app's
+# /tmp/rookz.sock out from under it.
 dev:
-	cd native && zig build && ./zig-out/bin/rookz win
+	cd native && zig build && ROOKZ_SOCK=/tmp/rookz-dev.sock ./zig-out/bin/rookz win
 
 prod:
-	cd native && zig build -Doptimize=ReleaseFast && ./zig-out/bin/rookz win
+	cd native && zig build -Doptimize=ReleaseFast && ROOKZ_SOCK=/tmp/rookz-dev.sock ./zig-out/bin/rookz win
+
+# The daily driver: rookz.app in /Applications (Spotlight: "rookz").
+# ReleaseFast, minimal hand-rolled bundle, ad-hoc signed. Its ctl
+# socket is the default /tmp/rookz.sock — the agent-visibility surface
+# rides along on purpose. The wails app install is install-web.
+ROOKZ_APP := /Applications/rookz.app
+install:
+	cd native && zig build -Doptimize=ReleaseFast
+	rm -rf $(ROOKZ_APP)
+	mkdir -p $(ROOKZ_APP)/Contents/MacOS
+	cp native/bundle/Info.plist $(ROOKZ_APP)/Contents/
+	cp native/zig-out/bin/rookz $(ROOKZ_APP)/Contents/MacOS/rookz
+	codesign -s - --force $(ROOKZ_APP)
+	$(LSREGISTER) -f $(ROOKZ_APP)
+	mdimport $(ROOKZ_APP)
+	@echo "installed $(ROOKZ_APP) — Spotlight 'rookz' or: open -a rookz"
 
 dev-web:
 	XDG_STATE_HOME=$(HOME)/.local/state/rook-dev \
@@ -69,7 +88,7 @@ package:
 
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
-install: package
+install-web: package
 	rm -rf $(APP)
 	cp -R bin/rook.app $(APP)
 	@# A bare cp skips the registration Finder/installers do — without this,

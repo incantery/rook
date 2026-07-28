@@ -99,7 +99,10 @@ pub const Session = struct {
 
         ptypkg.setEnv("TERM", "xterm-256color");
         ptypkg.setEnv("COLORTERM", "truecolor");
-        const argv = [_][*:0]const u8{shell};
+        // Login shell (-l): a Dock-launched app has a skeleton env, and
+        // .zprofile is where PATH/homebrew/starship come from — the
+        // convention every terminal app follows.
+        const argv = [_][*:0]const u8{ shell, "-l" };
         self.pid = try self.pty.spawn(&argv);
 
         self.thread = try std.Thread.spawn(.{}, readLoop, .{self});
