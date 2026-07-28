@@ -27,6 +27,7 @@ const scenarios = [_]Scenario{
     .{ .name = "editor", .what = "edit a file, change it, :w reaches disk", .run = editor },
     .{ .name = "pixels", .what = "the renderer actually drew (shot, decoded)", .run = pixels },
     .{ .name = "commands", .what = "registry lists, runs by name, and drives the ⌘K palette", .run = commands },
+    .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
 };
 
 // ---------------------------------------------------------------- boot
@@ -262,6 +263,59 @@ fn commands(gpa: std.mem.Allocator, bin: []const u8) !void {
     }
     try h.expectContains(try app.ctl("palette"), "mode:commands", "⌘K opens the command palette");
     _ = try app.ctl("key 1b");
+}
+
+// --------------------------------------------------------------- excmd
+
+fn excmd(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    var path_buf: [192]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/ex.txt", .{app.dirPath()});
+    try h.writeFile(path, "one\ntwo\n");
+    _ = try app.ctlFmt("edit {s}", .{path});
+    try app.waitText("two", 5_000);
+    // Takeover, so still one pane — the split below is what changes it.
+    try h.expectEq("editor took over", 1, try app.paneCount());
+
+    // The negative cases FIRST, while the editor still has focus. A
+    // successful split moves focus to the new pane, so anything typed
+    // after it goes to a SHELL — which is how the first version of this
+    // scenario ended up asserting against `sh: command not found`.
+
+    // An unknown CamelCase name is refused by the registry, not silently
+    // swallowed.
+    _ = try app.ctl("type :NoSuchCommand");
+    _ = try app.ctl("enter");
+    try app.waitText("not a command", 5_000);
+
+    // The editor's own namespace is untouched: a lowercase typo still
+    // gets the EDITOR's message, because the bridge only ever sees
+    // leading-capital verbs.
+    _ = try app.ctl("type :wq2");
+    _ = try app.ctl("enter");
+    try app.waitText("not an editor command", 5_000);
+
+    // :w still works — the bridge sits in the fallthrough, so a
+    // regression here would mean it captured a verb it should not.
+    _ = try app.ctl("type :w");
+    _ = try app.ctl("enter");
+    try app.waitText("wrote", 5_000);
+
+    // The bridge itself, last. Same deferred route as the palette's
+    // Enter: this runs inside the editor's key handling, under
+    // draw_lock, and a self-deadlock here would time out rather than
+    // fail.
+    _ = try app.ctl("type :PaneSplitRight");
+    _ = try app.ctl("enter");
+    var waited: u32 = 0;
+    while (waited < 5000 and try app.paneCount() == 1) : (waited += 100) {
+        h.sleepMs(100);
+    }
+    try h.expectEq(":PaneSplitRight split the pane", 2, try app.paneCount());
 }
 
 // ---------------------------------------------------------------- runner

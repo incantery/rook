@@ -250,9 +250,20 @@ vocabulary still parses. `tab.select-N` is parameterized rather than
 nine rows, and is bindable but hidden from the palette.
 
 Ex-names are derived, not written: `pane.split-right` → `PaneSplitRight`,
-capitalizing each segment, which lands on vim's user-command shape and
-so cannot collide with `:w` by construction. `commands` prints them; the
-editor bridge that registers them is still owed (PARITY §1).
+capitalizing each segment, which lands on vim's user-command shape.
+`commands` prints them, and the editor's `:` accepts them — `:PaneSplitRight`
+in an editor pane splits it.
+
+The bridge is a function-pointer hook (`cmd_ctx` / `app_command`), the
+same shape and the same reason as the highlighter's: `editor.zig` stays
+a pure model that headless tests drive with both hooks null, and never
+learns what a command is. It sits in `execCommand`'s FALLTHROUGH, gated
+on a leading capital — so no derived name can shadow `:w`, `:q` or
+`:noh` **by construction** rather than by a list someone has to
+maintain, and a lowercase typo still gets the editor's own message
+instead of a confusing miss from the registry. An unknown CamelCase name
+reports `not a command`; the editor's `not an editor command` is
+reserved for its own namespace.
 
 **GOTCHA, and the reason `pending_cmd` exists:** the palette's key path
 runs holding `draw_lock`, and every dispatch target takes it again

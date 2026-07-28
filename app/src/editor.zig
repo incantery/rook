@@ -112,6 +112,18 @@ pub const Editor = struct {
     hl_styles: std.ArrayListUnmanaged(Style) = .empty,
     hl_vstart: usize = 0,
 
+    // App-command seam, same shape and same reason as the highlighter's:
+    // a `:` verb this editor does not own is offered to the app's command
+    // registry (`:PaneSplitRight`), and the editor stays a pure model
+    // that headless tests can drive with both hooks null.
+    //
+    // Returns true if the app claimed it. The hook must NOT act
+    // synchronously — the editor's key path runs under the app's
+    // draw_lock and every command target takes it again — so the app
+    // side queues and drains after unlocking.
+    cmd_ctx: ?*anyopaque = null,
+    app_command: ?*const fn (*anyopaque, []const u8) bool = null,
+
     pub fn create(gpa: Allocator, io: std.Io, path: ?[]const u8) !*Editor {
         const self = try gpa.create(Editor);
         errdefer gpa.destroy(self);
@@ -559,9 +571,29 @@ pub const Editor = struct {
             self.open(arg, is(u8, verb, "e!")) catch |err| {
                 self.setStatus("open failed: {s}", .{@errorName(err)}, true);
             };
+        } else if (self.appCommand(verb)) {
+            // Claimed by the app's command registry.
         } else {
             self.setStatus("not an editor command: {s}", .{verb}, true);
         }
+    }
+
+    /// Offer an unknown verb to the app's command registry.
+    ///
+    /// Gated on vim's user-command shape — a leading capital — which is
+    /// what keeps app commands out of the editor's namespace BY
+    /// CONSTRUCTION rather than by a list that has to be maintained: no
+    /// derived name can ever collide with `:w`, `:q` or `:noh`, because
+    /// those are lowercase and a derived name never is. It also means a
+    /// typo'd editor command still reports "not an editor command"
+    /// instead of a confusing miss from the registry.
+    fn appCommand(self: *Editor, verb: []const u8) bool {
+        if (verb.len == 0 or verb[0] < 'A' or verb[0] > 'Z') return false;
+        const run = self.app_command orelse return false;
+        const ctx = self.cmd_ctx orelse return false;
+        if (run(ctx, verb)) return true;
+        self.setStatus("not a command: {s}", .{verb}, true);
+        return true; // handled: the message is ours, not the fallthrough's
     }
 
     /// Retarget this pane at another file (:e / ctl edit — the

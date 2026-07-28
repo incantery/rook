@@ -1283,6 +1283,7 @@ pub const App = struct {
         }
         const ed = editorpkg.Editor.create(self.gpa, self.io, path) catch return false;
         @import("syntax.zig").attach(ed, self.gpa);
+        self.attachCommands(ed);
         var tm = p.content.term;
         tm.copy_mode = false;
         p.under = tm;
@@ -1790,6 +1791,24 @@ pub const App = struct {
             .palette_commands => self.openCommandPalette(),
             .app_fullscreen => self.requestFullscreen(),
         }
+    }
+
+    /// Let an editor's `:` reach the command registry (`:PaneSplitRight`).
+    pub fn attachCommands(self: *App, ed: *editorpkg.Editor) void {
+        ed.cmd_ctx = self;
+        ed.app_command = &editorExCommand;
+    }
+
+    /// The editor's ex-command bridge. QUEUES rather than dispatching:
+    /// this runs inside the editor's key handling, which runs under
+    /// draw_lock, and every command target takes it again. Both callers
+    /// of paneInput drain after unlocking — the same route the palette's
+    /// Enter takes, and for the same reason.
+    fn editorExCommand(ctx: *anyopaque, name: []const u8) bool {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const c = registrypkg.byExName(name) orelse return false;
+        self.pending_cmd = .{ .action = c.action, .arg = c.arg };
+        return true;
     }
 
     /// Run whatever the palette queued, now that the lock is free.

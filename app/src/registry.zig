@@ -147,6 +147,18 @@ pub fn exName(id: []const u8, out: []u8) []const u8 {
     return out[0..n];
 }
 
+/// Resolve a derived ex name (`PaneSplitRight`) back to its command.
+/// The editor's `:` bridge is the caller: names are derived rather than
+/// stored, so this recomputes rather than looking up a second table that
+/// could disagree with the first.
+pub fn byExName(name: []const u8) ?Command {
+    var buf: [96]u8 = undefined;
+    for (commands) |c| {
+        if (std.mem.eql(u8, exName(c.id, &buf), name)) return c;
+    }
+    return null;
+}
+
 /// Vim's rule for user-defined commands: a lowercase name could shadow
 /// `:w`, so it is not a legal ex name. Applied to config aliases too.
 pub fn isExName(s: []const u8) bool {
@@ -175,6 +187,20 @@ test "every derived ex name is a legal one" {
     var buf: [64]u8 = undefined;
     for (commands) |c| {
         try std.testing.expect(isExName(exName(c.id, &buf)));
+    }
+}
+
+test "byExName round-trips every command, and refuses editor verbs" {
+    var buf: [96]u8 = undefined;
+    for (commands) |c| {
+        const got = byExName(exName(c.id, &buf)) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(c.id, got.id);
+    }
+    // The editor owns these; the bridge must never claim one. They are
+    // lowercase, so vim's own rule already excludes them — this is the
+    // regression test for that rule quietly changing.
+    for ([_][]const u8{ "w", "q", "wq", "x", "e", "noh" }) |verb| {
+        try std.testing.expect(byExName(verb) == null);
     }
 }
 

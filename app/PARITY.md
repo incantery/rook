@@ -176,9 +176,25 @@ a daily driver.
       `workspace.dashboard`, `workspace.set-root`, `config.settings`.
       Deliberately NOT pre-registered — a palette row that does nothing
       lies about what the app can do. They land with their features.
-- [ ] Ex-command bridge: `registry.exName` derives `PaneSplitRight` from
-      `pane.split-right` and `commands` prints it, but nothing
-      registers them with the editor's `:` yet.
+- [x] Ex-command bridge. `:PaneSplitRight` works in an editor pane.
+      A function-pointer hook (`cmd_ctx`/`app_command`), the same shape
+      and same reason as the highlighter's, so `editor.zig` stays a pure
+      model that headless tests drive with both hooks null and never
+      learns what a command is. It sits in `execCommand`'s FALLTHROUGH,
+      gated on a LEADING CAPITAL — vim's user-command shape — so no
+      derived name can shadow `:w`/`:q`/`:noh` by construction rather
+      than by a maintained list, and a lowercase typo still gets the
+      editor's own message. Names are derived per lookup
+      (`registry.byExName`) rather than cached in a second table that
+      could disagree with the first. Same deferred `pending_cmd` route
+      as the palette, for the same draw_lock reason.
+      The e2e scenario's first version asserted against
+      `sh: command not found`: a successful `:PaneSplitRight` MOVES
+      FOCUS to the new pane, so everything typed after it went to a
+      shell. The focus-moving case goes last now.
+- [ ] Config `[commands]` aliases layered onto the ex names (the wails
+      `Registry.exNames(aliases)` half). `registry.isExName` is the
+      validator it would need; nothing parses the table yet.
 - [ ] **Theme engine**: one semantic Palette, 8 builtins, runtime swap,
       **VS Code theme importer**. rook has 2 builtins and a config key.
 - [ ] **Settings UI** (⌘,): appearance, keybinds, and the token panes
