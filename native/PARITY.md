@@ -7,7 +7,7 @@ and became a list of debts, ordered by how much of rook's identity each
 one holds. Editor items are deliberately ranked LAST: the zig editor's
 job today is to get out of neovim's way, and it already does.
 
-Status as of 2026-07-28, shipped in v0.38.0.
+Status as of 2026-07-28, shipped in v0.38.1.
 
 ## The decision that shapes the whole list
 
