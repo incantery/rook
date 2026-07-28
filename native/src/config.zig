@@ -103,6 +103,7 @@ fn actionFromName(name: []const u8) ?Action {
         .{ .n = "pane.focus-up", .a = .focus_up },
         .{ .n = "pane.focus-down", .a = .focus_down },
         .{ .n = "tab.new", .a = .tab_new },
+        .{ .n = "session.new", .a = .tab_new }, // the wails keymap's name for it
         .{ .n = "tab.next", .a = .tab_next },
         .{ .n = "tab.prev", .a = .tab_prev },
     };
