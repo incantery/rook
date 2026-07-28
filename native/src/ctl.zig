@@ -317,6 +317,31 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             reply(fd, t);
             reply(fd, "\n");
         } else reply(fd, "err nothing selected\n");
+    } else if (std.mem.eql(u8, verb, "paste")) {
+        // Bare `paste` is ⌘V exactly — the real pasteboard, the real
+        // routing. `paste <text>` skips the pasteboard so a test can
+        // control the payload (and \n spells a newline, since the line
+        // protocol can't carry a raw one).
+        if (rest.len == 0) {
+            if (app.pasteFocused()) |t| {
+                defer app.gpa.free(t);
+                reply(fd, "ok ");
+                reply(fd, t);
+                reply(fd, "\n");
+            } else reply(fd, "err pasteboard empty\n");
+            return;
+        }
+        var text: std.ArrayListUnmanaged(u8) = .empty;
+        defer text.deinit(app.gpa);
+        var i: usize = 0;
+        while (i < rest.len) : (i += 1) {
+            if (rest[i] == '\\' and i + 1 < rest.len and rest[i + 1] == 'n') {
+                text.append(app.gpa, '\n') catch return;
+                i += 1;
+            } else text.append(app.gpa, rest[i]) catch return;
+        }
+        app.pasteText(text.items);
+        reply(fd, "ok\n");
     } else if (std.mem.eql(u8, verb, "wheel")) {
         var it = std.mem.tokenizeScalar(u8, rest, ' ');
         const x = std.fmt.parseFloat(f32, it.next() orelse "") catch -1;

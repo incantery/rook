@@ -17,6 +17,7 @@ const renderpkg = @import("render.zig");
 const panespkg = @import("panes.zig");
 const editorpkg = @import("editor.zig");
 const workspacespkg = @import("workspaces.zig");
+const pastepkg = @import("paste.zig");
 const themepkg = @import("theme.zig");
 const stats = @import("stats.zig");
 
@@ -750,6 +751,55 @@ pub const App = struct {
         });
         _ = pb.msgSend(bool, "setString:forType:", .{ nss.value, nsString("public.utf8-plain-text").value });
         return t;
+    }
+
+    /// ⌘V: the system pasteboard → the focused pane. Returns the text
+    /// pasted (caller frees) so ctl `paste` can report what landed.
+    pub fn pasteFocused(self: *App) ?[]const u8 {
+        const pb = objc.getClass("NSPasteboard").?.msgSend(objc.Object, "generalPasteboard", .{});
+        const nss = pb.msgSend(objc.Object, "stringForType:", .{nsString("public.utf8-plain-text").value});
+        if (nss.value == null) return null;
+        const cstr = nss.msgSend(?[*:0]const u8, "UTF8String", .{}) orelse return null;
+        const text = self.gpa.dupe(u8, std.mem.span(cstr)) catch return null;
+        if (text.len == 0) {
+            self.gpa.free(text);
+            return null;
+        }
+        self.pasteText(text);
+        return text;
+    }
+
+    /// Route pasted text to the focused pane. Split from pasteFocused so
+    /// ctl can drive the identical path with literal text — ⌘V carries a
+    /// modifier the ctl `press` verb can't express, and an unverifiable
+    /// input path is the one that rots.
+    pub fn pasteText(self: *App, text: []const u8) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        self.scene_dirty = true;
+
+        if (self.pal_open) {
+            // A filter is one line: take the first, drop the controls.
+            const line = text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
+            for (line) |ch| {
+                if (ch >= 0x20 and ch != 0x7f) self.palKeyLocked(&[_]u8{ch});
+            }
+            return;
+        }
+
+        const p = self.activeTab().focused;
+        switch (p.content) {
+            .edit => |ed| ed.pasteText(text),
+            .term => |*t| {
+                // Copy mode is a viewport, not an input mode — pasting
+                // means you're done reading history, same as typing.
+                t.copy_mode = false;
+                const bytes = pastepkg.encode(self.gpa, text, t.session.bracketedPaste()) catch return;
+                defer self.gpa.free(bytes);
+                t.session.write(bytes);
+                t.session.scrollTo(.active);
+            },
+        }
     }
 
     /// Wheel steps (+ = scroll up) routed to the pane under the point:
@@ -2083,6 +2133,10 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                     // ⌘1–9 select tab, ⌘⇧[ / ⌘⇧] cycle.
                     'c' => {
                         if (app.copyFocused()) |t| app.gpa.free(t);
+                        return null;
+                    },
+                    'v' => {
+                        if (app.pasteFocused()) |t| app.gpa.free(t);
                         return null;
                     },
                     'w' => {

@@ -111,6 +111,14 @@ pub const Session = struct {
         return .{ .mode = mode, .sgr = m.get(.mouse_format_sgr) };
     }
 
+    /// Has the foreground app asked for bracketed paste (DECSET 2004)?
+    /// Same shape as mouseMode: emulator truth, no heuristic.
+    pub fn bracketedPaste(self: *Session) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.term.modes.get(.bracketed_paste);
+    }
+
     /// Replace the selection with viewport-coord cells a→b (inclusive
     /// cells; either order). Any thread.
     pub fn setSelection(self: *Session, ax: u16, ay: u16, bx: u16, by: u16) void {

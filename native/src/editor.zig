@@ -1130,6 +1130,33 @@ pub const Editor = struct {
         self.cursorToOffset(at + self.reg.items.len - 1);
     }
 
+    /// ⌘V: the system pasteboard, vim-shaped.
+    ///
+    /// Insert and command modes take the text literally — the input path
+    /// is already a stream, so a pasted run lands the same way a typed
+    /// one does. Every other mode loads the clipboard into the unnamed
+    /// register and puts it, so ⌘V in normal mode is `p` with the
+    /// pasteboard as its register. That distinction is not cosmetic:
+    /// feeding clipboard bytes to normal mode would run them as
+    /// commands, and a stray `dd` in someone's clipboard would eat a
+    /// line. Text pasted while a document is open must never be keys.
+    ///
+    /// Linewise when the text ends in a newline, matching what a yanked
+    /// line looks like — so pasting whole lines lands between lines
+    /// rather than inside the current one.
+    pub fn pasteText(self: *Editor, text: []const u8) void {
+        if (text.len == 0) return;
+        self.render_dirty = true;
+        self.status_len = 0;
+        switch (self.mode) {
+            .insert, .command => self.key(text),
+            else => {
+                self.yankStore(text, text[text.len - 1] == '\n');
+                self.paste(true);
+            },
+        }
+    }
+
     /// Jump to the next/previous match of last_search, wrapping.
     fn searchNext(self: *Editor, fwd: bool) void {
         const pat = self.last_search.items;

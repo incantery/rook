@@ -54,11 +54,12 @@ that never needs a client.
 These are small, and every one of them is a "wait, really?" moment for
 a daily driver.
 
-- [ ] **⌘V paste.** There is no pasteboard *read* anywhere in the app.
-      `flags & flag_cmd` handles q/c/w/d/t/1-9/{/} and hands everything
-      else to AppKit, which does nothing. Needs: read `NSPasteboard`,
-      chunk to the pty, **bracketed paste** (`\e[200~`…`\e[201~`) when
-      the app has enabled mode 2004, and a paste-confirm for multiline.
+- [x] **⌘V paste** — `src/paste.zig` (xterm's strip set + fencing +
+      CR conversion, own test root), editor takes it as a register not
+      as keys, ctl `paste` drives the same path
+- [ ] Paste **confirmation** for unframed multiline pastes.
+      `paste.isSafe` is written and nothing gates on it; needs a
+      confirm modal (the palette is the primitive) and a config knob.
 - [ ] **IME / dead keys.** No `NSTextInputClient`, no `interpretKeyEvents`.
       Accented characters, CJK, and emoji picker input can't reach a pty.
 - [ ] **OSC 52** (clipboard write): `session.zig` sets `.clipboard_write = null`.

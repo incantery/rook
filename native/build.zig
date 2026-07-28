@@ -66,4 +66,13 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     }) });
     test_step.dependOn(&b.addRunArtifact(editor_tests).step);
+
+    // Same reason, same shape: paste encoding is pure data rules, and
+    // they're security rules, so they get a root that definitely runs.
+    const paste_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/paste.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(paste_tests).step);
 }

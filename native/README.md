@@ -18,7 +18,26 @@ works: clicks focus panes and select tab chips; drag selects text
 yank instead); the wheel scrolls editors, primary-screen viewports
 (typing snaps back), and alt-screen apps (arrow keys). <leader>[
 enters tmux-style copy mode: j/k/u/d/⌃B/⌃F/gg/G scroll, q/ESC exits,
-an accent SCROLL chip shows in the bar. The cursor
+an accent SCROLL chip shows in the bar.
+
+**⌘V** pastes, by xterm's rules (`src/paste.zig`, pure data in/data out,
+its own test root): bytes that could signal the foreground process —
+ESC, ⌃C, ⌃Z, NUL, the tty's own control set — become spaces whether or
+not the paste is framed, so a clipboard payload can never close its own
+bracket and turn into commands. With bracketed paste on (DECSET 2004,
+which zsh sets) the run is fenced and newlines ride through untouched;
+without it, `\n` becomes `\r`, because the pty is a line discipline and
+CR is what Return sends. An editor pane takes the pasteboard as a
+REGISTER, not as keys — ⌘V in normal mode is `p` (linewise when the
+text ends in a newline), so a stray `dd` in your clipboard inserts two
+characters instead of eating a line; insert mode takes it literally.
+ctl `paste` drives the identical path (bare = the real pasteboard,
+`paste <text>` for a controlled payload, `\n` for a newline), which is
+how the rules above are verified — ⌘V carries a modifier the `press`
+verb can't express. NOT yet: a confirmation prompt for unframed
+multiline pastes (`paste.isSafe` exists, nothing gates on it).
+
+The cursor
 and the accent-colored separator edges mark the focused pane. Only the
 active tab renders: background tabs' emulators keep advancing but cost
 zero frames (measured: `yes` in a hidden tab, 480 ticks, 1 draw). A
@@ -157,6 +176,8 @@ printf 'click 300 800\n'      | nc -U /tmp/rookz.sock   # px coords: chips selec
 printf 'wheel 300 800 -5\n'   | nc -U /tmp/rookz.sock   # scroll steps (+ = up) at a point
 printf 'drag 99 206 319 206\n' | nc -U /tmp/rookz.sock   # select: down, drag, up
 printf 'copy\n'               | nc -U /tmp/rookz.sock   # \u2318C's path; replies the text
+printf 'paste\n'              | nc -U /tmp/rookz.sock   # ⌘V's path; the real pasteboard
+printf 'paste a\\nb\n'         | nc -U /tmp/rookz.sock   #   or a literal payload
 printf 'dump@2\n'            | nc -U /tmp/rookz.sock   # any pane-taking verb
 printf 'type@2 ls\n'         | nc -U /tmp/rookz.sock   #   targets by @id
 printf 'shot /tmp/s.png\n'   | nc -U /tmp/rookz.sock   # pixel truth
