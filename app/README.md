@@ -222,6 +222,52 @@ at the 2Hz HUD tick. ctl: `workspaces`, `palette-open`, `palette`
 (state dump — the modal is blind-drivable through the normal
 type/press verbs); `tabs`/`panes` list all spaces.
 
+## The command registry (`src/registry.zig`)
+
+Every action rook can take is a named command, in one table. **⌘K**
+opens the command palette over it — the same widget as the workspace
+picker, switched by `pal_mode`, so the filter, key handling and drawing
+are shared and only the row text and what Enter does differ.
+
+The point is that four surfaces agree through one table:
+
+| surface | how |
+|---|---|
+| leader chords | config binds a name; `registry.specFromName` resolves it |
+| ⌘ chords | `⌘D`/`⌘T`/`⌘W`/`⌘K`/`⌘1-9` all go through `dispatch` |
+| the palette | lists the table, Enter dispatches |
+| ctl / agents | `commands` lists, `run <id>` runs |
+
+`App.dispatch` is the ONE switch over `Action`, which is what keeps the
+table honest — adding a value fails the build until it is handled. The
+⌘ chords used to call App methods directly; routing them through
+`dispatch` is what makes them reachable from the palette and `run`.
+
+Aliases live apart from the table (`session.new` → `tab.new`,
+`resize-pane -Z` → `pane.zoom`) so the palette never shows one
+capability twice, while a config written in tmux's or the wails keymap's
+vocabulary still parses. `tab.select-N` is parameterized rather than
+nine rows, and is bindable but hidden from the palette.
+
+Ex-names are derived, not written: `pane.split-right` → `PaneSplitRight`,
+capitalizing each segment, which lands on vim's user-command shape and
+so cannot collide with `:w` by construction. `commands` prints them; the
+editor bridge that registers them is still owed (PARITY §1).
+
+**GOTCHA, and the reason `pending_cmd` exists:** the palette's key path
+runs holding `draw_lock`, and every dispatch target takes it again
+(`newTab`, `selectTab`, `splitFocused`, …). Dispatching inline from
+Enter is a self-deadlock. The palette queues the command instead and the
+three places that release the lock drain it — `writeFocused`, ctl's
+`writeTarget`, and `drainPendingCmd` itself. The e2e `commands` scenario
+drives Enter through the socket specifically to keep that path honest;
+if it ever times out rather than failing, suspect this.
+
+A command is not registered until it does something. The ~15 remaining
+names in PARITY §1 (`attention.inbox`, `review.changes`, `threads.toggle`,
+`file.open`, …) arrive with their features — dead palette rows would
+make the palette lie about what the app can do.
+
 A status bar sits under the panes — tenant one of `src/ui.zig`, the
 seed of rook's own UI layer (immediate-mode quads + text runs from the
 same pipelines/atlases as the grid; widgets are never their own draw
@@ -300,6 +346,9 @@ printf 'press `\n'           | nc -U /tmp/rook.sock   # REAL key path (leader
                                                        #   machine included)
 printf 'panes\n'             | nc -U /tmp/rook.sock   # all tabs' panes, * = active/focused
 printf 'tabs\n'              | nc -U /tmp/rook.sock   # list tabs
+printf 'commands\n'          | nc -U /tmp/rook.sock   # the registry: id, title,
+                                                       #   key hint, :ExName
+printf 'run pane.split-right\n' | nc -U /tmp/rook.sock # by name; aliases resolve
 printf 'tab new\n'           | nc -U /tmp/rook.sock   # also: tab <n>, tab next, tab prev
 printf 'split right\n'       | nc -U /tmp/rook.sock   # split focused (or: down)
 printf 'edit /abs/file\n'     | nc -U /tmp/rook.sock   # editor pane (focused editor

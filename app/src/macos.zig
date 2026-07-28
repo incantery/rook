@@ -17,6 +17,7 @@ const renderpkg = @import("render.zig");
 const panespkg = @import("panes.zig");
 const editorpkg = @import("editor.zig");
 const workspacespkg = @import("workspaces.zig");
+const registrypkg = @import("registry.zig");
 const pastepkg = @import("paste.zig");
 const hostc = @import("hostc.zig");
 const themepkg = @import("theme.zig");
@@ -289,6 +290,10 @@ const ResizeBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 const PresentedBlock = objc.Block(struct { app: *App, dirty: u8, commit_t: f64 }, .{objc.c.id}, void);
 const CompletedBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 
+/// What the palette is listing. The widget, filter, key handling and
+/// draw path are shared; only the row text and what Enter does differ.
+pub const PalMode = enum { workspaces, commands };
+
 pub const App = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -332,12 +337,23 @@ pub const App = struct {
     // Open, it intercepts the whole key path; items come fresh from
     // rook.db each open. All state mutates under draw_lock.
     pal_open: bool = false,
+    /// Which list the palette is showing. One widget, two sources — the
+    /// filter/keys/draw path is shared and only the row text and what
+    /// Enter does differ. `pal_filtered` indexes whichever source the
+    /// mode names.
+    pal_mode: PalMode = .workspaces,
     pal_input: [96]u8 = undefined,
     pal_input_len: usize = 0,
     pal_sel: usize = 0,
     pal_items: []workspacespkg.Entry = &.{},
     pal_filtered: [64]usize = undefined,
     pal_nfiltered: usize = 0,
+    /// A command the palette picked, waiting for draw_lock to be RELEASED.
+    /// The palette's key path runs under the lock and every dispatch
+    /// target takes it again (newTab, selectTab, splitFocused, …), so
+    /// running one inline is a self-deadlock. Drained by drainPendingCmd
+    /// at each of the three places that let go of the lock.
+    pending_cmd: ?registrypkg.Spec = null,
 
     /// Subscription usage cluster (host-cached windows), refreshed by
     /// a background thread every 30s; shown right-aligned in the title
@@ -1082,6 +1098,9 @@ pub const App = struct {
             for (line) |ch| {
                 if (ch >= 0x20 and ch != 0x7f) self.palKeyLocked(&[_]u8{ch});
             }
+            // No drain here: pasting only ever types into the filter —
+            // palKeyLocked's Enter path is what queues a command, and
+            // the control bytes that would reach it are stripped above.
             return;
         }
 
@@ -1386,14 +1405,18 @@ pub const App = struct {
     /// mark input — the editor's echo is synchronous, so its dirty
     /// frame carries the key→photon mark the same way a pty echo does.
     pub fn writeFocused(self: *App, bytes: []const u8, ts: f64) void {
-        self.draw_lock.lock();
-        defer self.draw_lock.unlock();
-        self.markInput(ts);
-        if (self.pal_open) {
-            self.palKeyLocked(bytes);
-            return;
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            self.markInput(ts);
+            if (self.pal_open) {
+                self.palKeyLocked(bytes);
+            } else {
+                self.paneInput(self.activeTab().focused, bytes);
+            }
         }
-        self.paneInput(self.activeTab().focused, bytes);
+        // Outside the block on purpose — see pending_cmd.
+        self.drainPendingCmd();
     }
 
     /// Route input into a pane: editors take the modal machine, a
@@ -1559,12 +1582,27 @@ pub const App = struct {
     // (file finder, themes, commands): type-to-filter over a list, a
     // modal that owns the key path while open.
 
-    /// Open the palette with a fresh read of rook.db. Any thread.
+    /// Open the workspace picker with a fresh read of rook.db. Any thread.
     pub fn openPalette(self: *App) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         workspacespkg.free(self.gpa, self.pal_items);
         self.pal_items = workspacespkg.load(self.gpa);
+        self.pal_mode = .workspaces;
+        self.resetPaletteLocked();
+    }
+
+    /// Open the COMMAND palette (⌘K) over registry.zig. Any thread.
+    /// No load step — the command table is static, which is also why
+    /// this one can never fail or block on sqlite.
+    pub fn openCommandPalette(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        self.pal_mode = .commands;
+        self.resetPaletteLocked();
+    }
+
+    fn resetPaletteLocked(self: *App) void {
         self.pal_input_len = 0;
         self.pal_sel = 0;
         self.pal_open = true;
@@ -1596,19 +1634,32 @@ pub const App = struct {
     fn palRefilterLocked(self: *App) void {
         const needle = self.pal_input[0..self.pal_input_len];
         self.pal_nfiltered = 0;
-        for (self.pal_items, 0..) |e, i| {
-            if (self.pal_nfiltered >= self.pal_filtered.len) break;
-            // Children match on "parent/name" so "rook/zig" and "rz"
-            // both find the zig worktree.
-            var lbl: [64]u8 = undefined;
-            const label = if (e.parent.len > 0)
-                std.fmt.bufPrint(&lbl, "{s}/{s}", .{ e.parent, e.name }) catch e.name
-            else
-                e.name;
-            if (fuzzyMatch(label, needle) or fuzzyMatch(e.root, needle)) {
-                self.pal_filtered[self.pal_nfiltered] = i;
-                self.pal_nfiltered += 1;
-            }
+        switch (self.pal_mode) {
+            .workspaces => for (self.pal_items, 0..) |e, i| {
+                if (self.pal_nfiltered >= self.pal_filtered.len) break;
+                // Children match on "parent/name" so "rook/zig" and "rz"
+                // both find the zig worktree.
+                var lbl: [64]u8 = undefined;
+                const label = if (e.parent.len > 0)
+                    std.fmt.bufPrint(&lbl, "{s}/{s}", .{ e.parent, e.name }) catch e.name
+                else
+                    e.name;
+                if (fuzzyMatch(label, needle) or fuzzyMatch(e.root, needle)) {
+                    self.pal_filtered[self.pal_nfiltered] = i;
+                    self.pal_nfiltered += 1;
+                }
+            },
+            // Title AND id, so both "split right" and "pane.split" find
+            // it: the title is what a human scans, the id is what an
+            // agent and the config file already know it by.
+            .commands => for (registrypkg.commands, 0..) |c, i| {
+                if (self.pal_nfiltered >= self.pal_filtered.len) break;
+                if (!c.palette) continue;
+                if (fuzzyMatch(c.title, needle) or fuzzyMatch(c.id, needle)) {
+                    self.pal_filtered[self.pal_nfiltered] = i;
+                    self.pal_nfiltered += 1;
+                }
+            },
         }
         if (self.pal_sel >= self.pal_nfiltered) self.pal_sel = self.pal_nfiltered -| 1;
     }
@@ -1665,6 +1716,20 @@ pub const App = struct {
             self.closePaletteLocked();
             return;
         }
+        if (self.pal_mode == .commands) {
+            const c = registrypkg.commands[self.pal_filtered[self.pal_sel]];
+            // Close FIRST: a command may open the palette again
+            // (palette.commands does), and dispatching while still open
+            // would leave the modal on screen owning the key path with
+            // stale filter state behind it.
+            self.closePaletteLocked();
+            // dispatch takes the lock itself in the paths that mutate
+            // panes, so this must not be holding it. palKeyLocked's
+            // caller owns draw_lock — hand off through the same deferred
+            // route the leader machine uses.
+            self.pending_cmd = .{ .action = c.action, .arg = c.arg };
+            return;
+        }
         const e = self.pal_items[self.pal_filtered[self.pal_sel]];
         var rootbuf: [1024:0]u8 = undefined;
         if (e.root.len >= rootbuf.len) {
@@ -1699,22 +1764,42 @@ pub const App = struct {
         self.activateSpaceLocked(self.spaces.items.len - 1);
     }
 
-    fn dispatch(self: *App, b: @import("config.zig").Bind) void {
-        switch (b.action) {
+    /// THE one switch over Action. Every surface — keybinds, the ⌘
+    /// chords, the palette, ctl `run` — funnels here, so a capability is
+    /// wired once and reachable from all of them. Adding a value to
+    /// registry.Action fails the build until it lands in this switch,
+    /// which is the property that keeps the table honest.
+    ///
+    /// Must NOT be called holding draw_lock; the arms take it.
+    pub fn dispatch(self: *App, spec: registrypkg.Spec) void {
+        switch (spec.action) {
             .split_right => self.splitFocused(true),
             .split_down => self.splitFocused(false),
             .focus_left => _ = self.focusMove(.left),
             .focus_right => _ = self.focusMove(.right),
             .focus_up => _ = self.focusMove(.up),
             .focus_down => _ = self.focusMove(.down),
+            .pane_close => self.closeFocused(),
+            .pane_zoom => _ = self.toggleZoom(),
+            .copy_mode => self.enterCopyMode(),
             .tab_new => self.newTab(),
             .tab_next => self.cycleTab(1),
             .tab_prev => self.cycleTab(-1),
-            .tab_select => _ = self.selectTab(@as(usize, b.arg) - 1),
-            .copy_mode => self.enterCopyMode(),
+            .tab_select => _ = self.selectTab(@as(usize, spec.arg) - 1),
             .workspace_switch => self.openPalette(),
-            .pane_zoom => _ = self.toggleZoom(),
+            .palette_commands => self.openCommandPalette(),
+            .app_fullscreen => self.requestFullscreen(),
         }
+    }
+
+    /// Run whatever the palette queued, now that the lock is free.
+    /// Idempotent and cheap: the common case is a null check.
+    pub fn drainPendingCmd(self: *App) void {
+        self.draw_lock.lock();
+        const spec = self.pending_cmd;
+        self.pending_cmd = null;
+        self.draw_lock.unlock();
+        if (spec) |s| self.dispatch(s);
     }
 
     /// The leader state machine — ONE path for real keystrokes (the
@@ -1737,7 +1822,7 @@ pub const App = struct {
                 return true;
             }
             if (self.keybinds.lookup(ch)) |b| {
-                self.dispatch(b);
+                self.dispatch(.{ .action = b.action, .arg = b.arg });
                 return true;
             }
             return true; // unknown chord: swallowed, tmux-style
@@ -2597,10 +2682,15 @@ pub const App = struct {
         ui.rect(x - self.sep, y - self.sep, w + self.sep * 2, h + self.sep * 2, th.accent);
         ui.rect(x, y, w, h, th.bar_bg);
 
-        // Input row.
+        // Input row. The prompt names the mode — with two pickers on two
+        // different keys, "which list am I in" has to be answerable
+        // without reading the rows.
         var tx = x + cw;
         const ty = y + (row_h - self.renderer.cell_h) / 2;
-        tx += ui.text(tx, ty, "workspace ", th.bar_fg, th.bar_bg);
+        tx += ui.text(tx, ty, switch (self.pal_mode) {
+            .workspaces => "workspace ",
+            .commands => "command ",
+        }, th.bar_fg, th.bar_bg);
         tx += ui.text(tx, ty, self.pal_input[0..self.pal_input_len], th.bar_value, th.bar_bg);
         ui.rect(tx, ty, cw / 4, self.renderer.cell_h, th.accent); // caret
 
@@ -2610,7 +2700,6 @@ pub const App = struct {
             return;
         }
         for (self.pal_filtered[0..shown], 0..) |item_i, vi| {
-            const e = self.pal_items[item_i];
             const selected = vi == self.pal_sel;
             const bg = if (selected) th.chip_active_bg else th.bar_bg;
             if (selected) {
@@ -2618,18 +2707,33 @@ pub const App = struct {
                 ui.rect(x, ry, self.sep * 2, row_h, th.accent);
             }
             const rty = ry + (row_h - self.renderer.cell_h) / 2;
-            // Worktree children sit indented under their parent as
-            // "parent/name" — legible grouped AND filtered-apart.
-            var lbl: [64]u8 = undefined;
-            const label = if (e.parent.len > 0)
-                std.fmt.bufPrint(&lbl, "  {s}/{s}", .{ e.parent, e.name }) catch e.name
-            else
-                e.name;
+            var lbl: [96]u8 = undefined;
+            // Both modes draw the same shape: a label on the left and one
+            // quiet right-aligned detail that drops when it doesn't fit.
+            const label, const detail = switch (self.pal_mode) {
+                .workspaces => blk: {
+                    const e = self.pal_items[item_i];
+                    // Worktree children sit indented under their parent as
+                    // "parent/name" — legible grouped AND filtered-apart.
+                    const l = if (e.parent.len > 0)
+                        std.fmt.bufPrint(&lbl, "  {s}/{s}", .{ e.parent, e.name }) catch e.name
+                    else
+                        e.name;
+                    break :blk .{ l, e.root };
+                },
+                .commands => blk: {
+                    const c = registrypkg.commands[item_i];
+                    const l = std.fmt.bufPrint(&lbl, "{s}: {s}", .{ c.category, c.title }) catch c.title;
+                    // The key hint if there is one, else the id — an
+                    // unbound command still shows the name an agent or a
+                    // config file would call it by.
+                    break :blk .{ l, if (c.keys.len > 0) c.keys else c.id };
+                },
+            };
             _ = ui.text(x + cw, rty, label, if (selected) th.bar_value else th.bar_fg, bg);
-            // Root path, right-aligned and quiet; drop it when narrow.
             const room = w - 2 * cw - @as(f32, @floatFromInt(label.len + 2)) * cw;
-            if (@as(f32, @floatFromInt(e.root.len)) * cw < room)
-                _ = ui.textRight(x + w - cw, rty, e.root, th.bar_fg, bg);
+            if (@as(f32, @floatFromInt(detail.len)) * cw < room)
+                _ = ui.textRight(x + w - cw, rty, detail, th.bar_fg, bg);
             ry += row_h;
         }
     }
@@ -2853,32 +2957,41 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                         if (app.pasteFocused()) |t| app.gpa.free(t);
                         return null;
                     },
+                    // These go through dispatch rather than calling the
+                    // App method directly: "keybinds dispatch commands"
+                    // is the registry's whole point, and a chord that
+                    // bypassed it would be a capability the palette and
+                    // ctl `run` could not reach.
                     'w' => {
-                        app.closeFocused();
+                        app.dispatch(.{ .action = .pane_close });
                         return null;
                     },
                     'd' => {
-                        app.splitFocused(flags & flag_shift == 0);
+                        app.dispatch(.{ .action = if (flags & flag_shift == 0) .split_right else .split_down });
                         return null;
                     },
                     'D' => {
-                        app.splitFocused(false);
+                        app.dispatch(.{ .action = .split_down });
                         return null;
                     },
                     't' => {
-                        app.newTab();
+                        app.dispatch(.{ .action = .tab_new });
+                        return null;
+                    },
+                    'k' => {
+                        app.dispatch(.{ .action = .palette_commands });
                         return null;
                     },
                     '1'...'9' => {
-                        _ = app.selectTab(s[0] - '1');
+                        app.dispatch(.{ .action = .tab_select, .arg = s[0] - '0' });
                         return null;
                     },
                     '{' => {
-                        app.cycleTab(-1);
+                        app.dispatch(.{ .action = .tab_prev });
                         return null;
                     },
                     '}' => {
-                        app.cycleTab(1);
+                        app.dispatch(.{ .action = .tab_next });
                         return null;
                     },
                     else => {},

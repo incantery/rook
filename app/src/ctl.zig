@@ -149,18 +149,24 @@ fn findPane(app: *macos.App, pane_id: ?u32) ?*panespkg.Pane {
 /// to the FOCUSED pane arm the key-to-photon mark — a background pane's
 /// echo must not be measured as input latency.
 fn writeTarget(app: *macos.App, pane_id: ?u32, bytes: []const u8) bool {
-    app.draw_lock.lock();
-    defer app.draw_lock.unlock();
-    // An open palette owns untargeted input, same as the real key path.
-    if (app.pal_open and pane_id == null) {
-        app.markInput(CACurrentMediaTime());
-        app.palKeyLocked(bytes);
-        return true;
-    }
-    const p = findPane(app, pane_id) orelse return false;
-    if (p == app.activeTab().focused) app.markInput(CACurrentMediaTime());
-    app.paneInput(p, bytes);
-    return true;
+    const ok = blk: {
+        app.draw_lock.lock();
+        defer app.draw_lock.unlock();
+        // An open palette owns untargeted input, same as the real key path.
+        if (app.pal_open and pane_id == null) {
+            app.markInput(CACurrentMediaTime());
+            app.palKeyLocked(bytes);
+            break :blk true;
+        }
+        const p = findPane(app, pane_id) orelse break :blk false;
+        if (p == app.activeTab().focused) app.markInput(CACurrentMediaTime());
+        app.paneInput(p, bytes);
+        break :blk true;
+    };
+    // Outside the locked block: an Enter in the COMMAND palette queues a
+    // command, and every dispatch target takes draw_lock again.
+    app.drainPendingCmd();
+    return ok;
 }
 
 fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
@@ -274,8 +280,20 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         app.draw_lock.lock();
         if (!app.pal_open) {
             _ = w.write("closed\n") catch 0;
+        } else if (app.pal_mode == .commands) {
+            w.print("mode:commands\nfilter:{s}\n", .{app.pal_input[0..app.pal_input_len]}) catch {};
+            const reg = @import("registry.zig");
+            for (app.pal_filtered[0..app.pal_nfiltered], 0..) |ii, vi| {
+                const c = reg.commands[ii];
+                w.print("{s}{s}\t{s}: {s}\n", .{
+                    @as([]const u8, if (vi == app.pal_sel) "*" else " "),
+                    c.id,
+                    c.category,
+                    c.title,
+                }) catch break;
+            }
         } else {
-            w.print("filter:{s}\n", .{app.pal_input[0..app.pal_input_len]}) catch {};
+            w.print("mode:workspaces\nfilter:{s}\n", .{app.pal_input[0..app.pal_input_len]}) catch {};
             for (app.pal_filtered[0..app.pal_nfiltered], 0..) |ii, vi| {
                 const e = app.pal_items[ii];
                 w.print("{s}{s}\t{s}\n", .{
@@ -290,6 +308,34 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
     } else if (std.mem.eql(u8, verb, "palette-open") and rest.len == 0) {
         app.openPalette();
         reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "commands") and rest.len == 0) {
+        // The agent's tool surface, and the same table the palette and
+        // the keybinds read. `run` below takes any id printed here.
+        const reg = @import("registry.zig");
+        var buf: [4096]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        for (reg.commands) |c| {
+            var ex: [64]u8 = undefined;
+            w.print("{s}\t{s}: {s}\t{s}\t:{s}\n", .{
+                c.id,
+                c.category,
+                c.title,
+                if (c.keys.len > 0) c.keys else "-",
+                reg.exName(c.id, &ex),
+            }) catch break;
+        }
+        reply(fd, buf[0..w.end]);
+    } else if (std.mem.eql(u8, verb, "run") and rest.len > 0) {
+        // By NAME, so an agent never has to know rook's internals — and
+        // aliases resolve, so a config written in tmux's vocabulary and
+        // an agent using the canonical id reach the same code.
+        const reg = @import("registry.zig");
+        if (reg.specFromName(rest)) |spec| {
+            app.dispatch(spec);
+            reply(fd, "ok\n");
+        } else {
+            reply(fd, "err unknown command (see `commands`)\n");
+        }
     } else if (std.mem.eql(u8, verb, "usage") and rest.len == 0) {
         // The cluster as drawn (host-cached; empty = host unreachable).
         var buf: [128]u8 = undefined;

@@ -99,6 +99,18 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(config_tests).step);
 
+    // The command registry: pure data + string logic, and the thing four
+    // surfaces agree through (keybinds, ⌘ chords, palette, ctl `run`).
+    // Its own root for the same reason the three above have one — and
+    // because its tests are the only thing checking that ids stay unique
+    // and derived ex-names stay legal.
+    const registry_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/registry.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(registry_tests).step);
+
     // e2e: spawns the real app and drives its ctl socket.
     //
     // NOT part of `test`, and not in CI — it needs a window server, a

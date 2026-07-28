@@ -152,20 +152,33 @@ a daily driver.
 
 ## 1. Chrome and command surface
 
-- [ ] **Command palette (⌘K) over a real command registry.** The wails
-      app's spine: every action is a named command; keybinds dispatch
-      commands, the palette lists them, and the agent's tool surface IS
-      the registry (`frontend/src/registry.ts`). rook has the palette
-      *widget* (workspace picker) but no registry behind it — and
-      `config.zig`'s `Action` enum is 13 hardcoded values against the
-      wails keymap's ~30 commands.
-- [ ] Keybind parity for the missing commands: `palette.toggle`,
-      `pane.zoom`, `attention.inbox`, `agent.spawn`, `agent.view`,
-      `review.changes`, `threads.toggle`, `file.open`, `grep.open`,
-      `explore.trail`, `workspace.manager`, `workspace.dashboard`,
-      `workspace.set-root`, `config.settings`, `session.close`
-- [ ] Ex-command bridge (`:PaneSplitRight` etc. — `exNameOf`) so the
-      editor and agents can drive commands by name
+- [x] **Command palette (⌘K) over a real command registry.**
+      `src/registry.zig` is the table; `App.dispatch` is the ONE switch
+      over `Action`, so adding a value fails the build until it is
+      handled. Four surfaces agree through it: leader chords, the ⌘
+      chords, the palette, and ctl `commands` / `run <id>` — which is
+      the agent's tool surface. The ⌘ chords used to call App methods
+      directly; routing them through `dispatch` is what makes them
+      reachable from the other three. The palette is the SAME widget as
+      the workspace picker with a `pal_mode`, so filter/keys/draw stay
+      shared. Aliases sit apart from the table so one capability is
+      never listed twice, and `tab.select-N` is parameterized rather
+      than nine rows (bindable, hidden from the list). `config.zig` no
+      longer owns a second copy of the names.
+      GOTCHA that shaped the design: the palette's key path runs holding
+      `draw_lock` and every dispatch target takes it again, so Enter
+      dispatching inline is a SELF-DEADLOCK. It queues `pending_cmd` and
+      the three lock-release points drain it. The e2e `commands`
+      scenario drives Enter through the socket to keep that honest.
+- [ ] Commands for features that do not exist yet: `attention.inbox`,
+      `agent.spawn`, `agent.view`, `review.changes`, `threads.toggle`,
+      `file.open`, `grep.open`, `explore.trail`, `workspace.manager`,
+      `workspace.dashboard`, `workspace.set-root`, `config.settings`.
+      Deliberately NOT pre-registered — a palette row that does nothing
+      lies about what the app can do. They land with their features.
+- [ ] Ex-command bridge: `registry.exName` derives `PaneSplitRight` from
+      `pane.split-right` and `commands` prints it, but nothing
+      registers them with the editor's `:` yet.
 - [ ] **Theme engine**: one semantic Palette, 8 builtins, runtime swap,
       **VS Code theme importer**. rook has 2 builtins and a config key.
 - [ ] **Settings UI** (⌘,): appearance, keybinds, and the token panes

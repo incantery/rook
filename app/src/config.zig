@@ -298,69 +298,22 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
 // keybinds.toml shape, still accepted so a pre-rename file keeps
 // working.) Double-tap the leader to type it literally.
 //
-// Action names are the wails REGISTRY's, because that shared file is
-// written in them (session.new, workspace.manager, …) — a few rook
-// aliases are kept. A name we don't implement yet is skipped in
-// silence, not warned about: the registry has ~30 commands to our 13,
-// and a config listing them is correct, not wrong. [editor] and its
-// subtables belong to the editor scope and are parsed past.
+// Bindings name COMMANDS, and registry.zig is the list of them. A name
+// rook does not implement yet is skipped in silence rather than warned
+// about: the wails keymap has ~30 names to our registry's smaller set,
+// and a config file listing them is correct rather than wrong — the
+// commands arrive with their features. [editor] and its subtables
+// belong to the editor scope and are parsed past.
 
-pub const Action = enum {
-    split_right,
-    split_down,
-    focus_left,
-    focus_right,
-    focus_up,
-    focus_down,
-    tab_new,
-    tab_next,
-    tab_prev,
-    /// Jump to tab `arg` (1-based). Digits 1–9 are bound by default,
-    /// tmux-style; config can rebind them.
-    tab_select,
-    /// tmux copy mode: keys scroll the focused terminal's viewport.
-    /// <leader>[ by default.
-    copy_mode,
-    /// The workspace palette (reads rook.db). <leader>s by default
-    /// (tmux's choose-session).
-    workspace_switch,
-    /// tmux zoom: the focused pane takes the whole tab. <leader>z.
-    pane_zoom,
-};
+// The names, the actions, and the aliases all live in registry.zig now:
+// keybinds, the palette, and ctl must agree on what a command IS, and
+// two tables drift. config depends on registry (never the reverse) so
+// both stay leaf modules with their own test roots.
+pub const registry = @import("registry.zig");
+pub const Action = registry.Action;
+pub const ActionSpec = registry.Spec;
 
-pub const ActionSpec = struct { action: Action, arg: u8 = 0 };
-
-fn actionFromName(name: []const u8) ?ActionSpec {
-    if (std.mem.startsWith(u8, name, "tab.select-")) {
-        const n = std.fmt.parseInt(u8, name["tab.select-".len..], 10) catch return null;
-        if (n < 1 or n > 9) return null;
-        return .{ .action = .tab_select, .arg = n };
-    }
-    const map = [_]struct { n: []const u8, a: Action }{
-        .{ .n = "pane.split-right", .a = .split_right },
-        .{ .n = "app.split.vertical", .a = .split_right }, // vim :vsplit sense
-        .{ .n = "pane.split-down", .a = .split_down },
-        .{ .n = "app.split.horizontal", .a = .split_down },
-        .{ .n = "pane.focus-left", .a = .focus_left },
-        .{ .n = "pane.focus-right", .a = .focus_right },
-        .{ .n = "pane.focus-up", .a = .focus_up },
-        .{ .n = "pane.focus-down", .a = .focus_down },
-        .{ .n = "tab.new", .a = .tab_new },
-        .{ .n = "session.new", .a = .tab_new }, // the wails keymap's name for it
-        .{ .n = "tab.next", .a = .tab_next },
-        .{ .n = "tab.prev", .a = .tab_prev },
-        .{ .n = "copy-mode", .a = .copy_mode }, // tmux's name
-        .{ .n = "pane.scrollback", .a = .copy_mode },
-        .{ .n = "workspace.switch", .a = .workspace_switch },
-        .{ .n = "workspace.picker", .a = .workspace_switch },
-        .{ .n = "pane.zoom", .a = .pane_zoom }, // the registry's name
-        .{ .n = "resize-pane -Z", .a = .pane_zoom }, // tmux's
-    };
-    for (map) |m| {
-        if (std.mem.eql(u8, name, m.n)) return .{ .action = m.a };
-    }
-    return null;
-}
+const actionFromName = registry.specFromName;
 
 pub const Bind = struct { ch: u8, action: Action, arg: u8 = 0 };
 
