@@ -31,6 +31,7 @@ const sockaddr_un = extern struct {
 
 extern "c" fn socket(domain: c_int, tp: c_int, protocol: c_int) c_int;
 extern "c" fn bind(fd: c_int, addr: *const sockaddr_un, len: u32) c_int;
+extern "c" fn connect(fd: c_int, addr: *const sockaddr_un, len: u32) c_int;
 extern "c" fn listen(fd: c_int, backlog: c_int) c_int;
 extern "c" fn accept(fd: c_int, addr: ?*anyopaque, len: ?*u32) c_int;
 extern "c" fn close(fd: c_int) c_int;
@@ -50,8 +51,37 @@ fn sockPath() [*:0]const u8 {
     return getenv("ROOK_SOCK") orelse "/tmp/rook.sock";
 }
 
+/// Is something already serving at this path? A live listener answers
+/// connect(); a leftover file from a crashed instance refuses.
+fn socketIsLive(path: [*:0]const u8) bool {
+    const span = std.mem.span(path);
+    var addr: sockaddr_un = .{};
+    if (span.len >= addr.sun_path.len) return false;
+    @memcpy(addr.sun_path[0..span.len], span);
+    const fd = socket(1, 1, 0);
+    if (fd < 0) return false;
+    defer _ = close(fd);
+    return connect(fd, &addr, @sizeOf(sockaddr_un)) == 0;
+}
+
 fn serve(app: *macos.App) void {
     const path = sockPath();
+
+    // NEVER STEAL A LIVE SOCKET. unlink-then-bind unconditionally is how
+    // a second launch silently hijacks the first instance's automation
+    // surface — and worse, when that second instance exits it leaves its
+    // dead inode at the path while the FIRST is still listening on the
+    // one it bound, now unlinked. The app looks healthy, `lsof` shows it
+    // holding the socket, and every connect gets ECONNREFUSED. Seen in
+    // the wild within an hour of the cutover.
+    //
+    // A stale file from a crashed instance refuses connect, so unlinking
+    // that one is still right — which is the case this ever existed for.
+    if (socketIsLive(path)) {
+        std.debug.print("rook ctl: {s} is already served by another instance — not stealing it\n", .{path});
+        std.debug.print("rook ctl: set ROOK_SOCK to give this instance its own\n", .{});
+        return;
+    }
     _ = unlink(path);
 
     const fd = socket(1, 1, 0); // AF_UNIX, SOCK_STREAM
