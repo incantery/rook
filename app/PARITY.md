@@ -222,9 +222,31 @@ a daily driver.
 Each of these is a host API that already works, needing a Zig surface.
 Ranked by how much of rook's identity dies without it.
 
-- [ ] **Asks / RUI** (`/asks/`, doorbell, answers drain, MCP `ask` tool).
-      Claude asking a question and getting an answer is the flagship
-      loop. Needs a form renderer (radio/multi/text) in a pane.
+- [x] **Asks / RUI** — the flagship loop works: `rookctl ask` → form in
+      the side pane → answer → asker unblocks (exit 0 with the JSON, or
+      1 on dismissal). Verified against a real isolated rook-host, not
+      just the harness.
+      THE BLOCKER NOBODY HAD WRITTEN DOWN: the original flow pushes a
+      msgAsk onto the asking session's wire-v3 frame socket and 409s
+      when nothing is attached. This app owns its ptys in-process,
+      registers NO sessions, and `$ROOK_SESSION` is unset in its shells
+      — so `rookctl ask` refused at the source AND delivery was
+      impossible, in both directions. The host gained a session-less
+      queue (`POST /asks`, `GET /asks`) that rook polls like /attention
+      and /usage; `rookctl ask` falls back to it when there is no
+      session. Session-scoped asks are untouched, and the queue omits
+      them so an app holding both paths cannot double-render one.
+      TRADEOFF, on purpose: a queued ask is app-global, not pane-scoped.
+      Invisible with one window; revisit at the second.
+      Details that are load-bearing rather than decorative:
+      `recommended` puts the asker's suggestion under the cursor so
+      Enter alone answers; the Other row is always present and typing
+      jumps to it (picking your own words is NOT also picking an
+      option); ESC posts a real `{"canceled":true}` because silence
+      leaves the asker blocked forever; JSON escaping has its own test
+      root because a stray quote in a label loses the answer.
+- [ ] Ask provenance: which agent is asking, and jump-to-session from
+      the form. Needs `/agents/{id}` verbs.
 - [~] **Attention inbox** (`/attention`, `<leader>a`) — the "what needs
       me" queue that makes the app worth leaving open. LISTS today, as
       the side pane's first tenant (`src/attention.zig`, shaped after

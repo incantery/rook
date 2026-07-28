@@ -111,6 +111,16 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(registry_tests).step);
 
+    // The ask form's wire shape and JSON escaping. Its own root because a
+    // malformed answer body is silently catastrophic: the host rejects
+    // it, the answer is lost, and the asker stays blocked forever.
+    const asks_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/asks.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(asks_tests).step);
+
     // e2e: spawns the real app and drives its ctl socket.
     //
     // NOT part of `test`, and not in CI — it needs a window server, a

@@ -633,6 +633,10 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/drafts/", h.handleDraftDecide)
 	mux.HandleFunc("/edits/", h.handleEdits)
 	mux.HandleFunc("/asks/", h.handleAsks)
+	// The session-less ask queue: create and list. A client that does not
+	// hold a wire-v3 session socket (the zig app owns its ptys in-process
+	// and never attaches one) has no other way to see a pending ask.
+	mux.HandleFunc("/asks", h.handleAskQueue)
 	// per-thread verbs — ids are global, no workspace in the path
 	mux.HandleFunc("/threads/", h.handleThread)
 	// per-task verbs (RookTask) — global ids, same as threads

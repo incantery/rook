@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,9 @@ type askState struct {
 	// the msgAsk frame, kept so a fresh attach can re-push a pending ask:
 	// the blocked rookctl outlives a UI reload, so its question must too
 	frame []byte
+	// the questions themselves, for the session-LESS queue: a polling app
+	// has no frame to be re-pushed, so GET /asks serves these directly.
+	questions json.RawMessage
 	// the doorbell was due and could not ring — no live claude claim owned
 	// the window at settle time. The answer is sitting in the drain with
 	// nobody who knows to read it, so the next claim on this session rings
@@ -344,6 +348,92 @@ func (h *Host) pushAskDone(sessionID, askID string) {
 // handleAsks routes /asks/{id} (GET, ?wait=seconds long-poll),
 // /asks/{id}/ack (POST, from the app) and /asks/{id}/answer (POST, from
 // the app, body = the answer JSON verbatim).
+// handleAskQueue is the session-less ask path: POST /asks to create one,
+// GET /asks to list what is pending.
+//
+// The original flow pushes a msgAsk onto the asking session's frame socket
+// and 409s when nothing is attached — "a question needs a screen to land
+// on". That assumes the app holds a wire-v3 session socket, which the zig
+// app deliberately does not: it owns its ptys in-process, so it registers
+// no sessions and $ROOK_SESSION is unset in its shells. Both halves of the
+// old path are therefore unreachable from it.
+//
+// So: an ask with no session is queued rather than pushed, and the app
+// polls for it the same way it polls /attention and /usage. The tradeoff is
+// that such an ask is app-global rather than pane-scoped — with one window
+// that is invisible, and a second window is the moment to revisit it.
+//
+// Session-scoped asks are untouched: they still push, still 409 without a
+// screen, and the drain still ignores blocking ones.
+func (h *Host) handleAskQueue(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.askMu.Lock()
+		type pending struct {
+			ID        string          `json:"id"`
+			Questions json.RawMessage `json:"questions"`
+			Session   string          `json:"session,omitempty"`
+		}
+		out := make([]pending, 0, len(h.asks))
+		for id, a := range h.asks {
+			if a.done {
+				continue
+			}
+			// Session-scoped asks were already delivered over their
+			// socket; listing them here would double-render them in an
+			// app that holds both paths.
+			if a.session != "" {
+				continue
+			}
+			out = append(out, pending{ID: id, Questions: a.questions})
+		}
+		h.askMu.Unlock()
+		// Oldest first is the /attention rule and the right one here too:
+		// the thing you have kept waiting longest leads.
+		sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+		writeJSON(w, out)
+
+	case http.MethodPost:
+		var req struct {
+			Questions json.RawMessage `json:"questions"`
+			Notify    bool            `json:"notify"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Questions) == 0 {
+			http.Error(w, "questions required", http.StatusBadRequest)
+			return
+		}
+		idb := make([]byte, 8)
+		rand.Read(idb)
+		id := hex.EncodeToString(idb)
+
+		h.askMu.Lock()
+		if h.asks == nil {
+			h.asks = map[string]*askState{}
+		}
+		for old, a := range h.asks {
+			if time.Since(a.created) > 24*time.Hour {
+				delete(h.asks, old)
+			}
+		}
+		st := &askState{
+			notify:    req.Notify,
+			questions: req.Questions,
+			doneCh:    make(chan struct{}),
+			created:   time.Now(),
+		}
+		h.asks[id] = st
+		h.askMu.Unlock()
+
+		// Same unconditional escalation as the session path: there is no
+		// gesture to make before walking away, which is the point.
+		h.escalate(st, id, req.Questions)
+		writeJSON(w, map[string]string{"askId": id})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (h *Host) handleAsks(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/asks/")
 	id, action, _ := strings.Cut(rest, "/")

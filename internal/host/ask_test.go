@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -210,5 +211,75 @@ func TestPendingAskFramesAreTheUndecidedOnes(t *testing.T) {
 	frames := h.pendingAskFrames("s1")
 	if len(frames) != 1 || frames[0][1] != 'a' {
 		t.Fatalf("re-pushed %d frames %v, want just a1's", len(frames), frames)
+	}
+}
+
+// The session-less queue: an app that holds no wire-v3 session socket can
+// still be handed a question. The zig app is exactly that client — it owns
+// its ptys in-process, registers no sessions, and $ROOK_SESSION is unset in
+// its shells, so the push path is unreachable from it in both directions.
+func TestAskQueueCreatesListsAndSettles(t *testing.T) {
+	h, _, _ := askHost(t, map[string]*askState{})
+
+	// Create, session-less.
+	w := httptest.NewRecorder()
+	body := `{"questions":[{"question":"Ship it?","options":[{"label":"Yes"},{"label":"No"}]}]}`
+	h.handleAskQueue(w, httptest.NewRequest("POST", "/asks", strings.NewReader(body)))
+	if w.Code != 200 {
+		t.Fatalf("create: got %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var created struct {
+		AskID string `json:"askId"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil || created.AskID == "" {
+		t.Fatalf("create returned %s", w.Body.String())
+	}
+
+	// List: pending, with the questions carried verbatim so a polling app
+	// needs nothing else to render the form.
+	list := func() []struct {
+		ID        string          `json:"id"`
+		Questions json.RawMessage `json:"questions"`
+	} {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.handleAskQueue(rec, httptest.NewRequest("GET", "/asks", nil))
+		var out []struct {
+			ID        string          `json:"id"`
+			Questions json.RawMessage `json:"questions"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("list returned %s: %v", rec.Body.String(), err)
+		}
+		return out
+	}
+
+	got := list()
+	if len(got) != 1 || got[0].ID != created.AskID {
+		t.Fatalf("list: got %+v, want the created ask", got)
+	}
+	if !strings.Contains(string(got[0].Questions), "Ship it?") {
+		t.Errorf("questions not carried through: %s", got[0].Questions)
+	}
+
+	// Answering retires it from the queue — otherwise a polling app would
+	// re-render a question the human already decided.
+	h.settleAsk(created.AskID, json.RawMessage(`{"answers":[{"question":"Ship it?","selected":["Yes"]}]}`), sourceApp)
+	if got := list(); len(got) != 0 {
+		t.Errorf("answered ask still listed: %+v", got)
+	}
+}
+
+// Session-scoped asks were already delivered over their own socket. Listing
+// them in the queue too would double-render them in any app holding both
+// paths, so the queue is deliberately only the session-less ones.
+func TestAskQueueOmitsSessionScopedAsks(t *testing.T) {
+	h, _, _ := askHost(t, map[string]*askState{
+		"scoped": {session: "s1", questions: json.RawMessage(`[{"question":"pushed"}]`)},
+	})
+	w := httptest.NewRecorder()
+	h.handleAskQueue(w, httptest.NewRequest("GET", "/asks", nil))
+	if got := w.Body.String(); !strings.Contains(got, "[]") {
+		t.Errorf("session-scoped ask leaked into the queue: %s", got)
 	}
 }

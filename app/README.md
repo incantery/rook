@@ -271,6 +271,55 @@ Not done: **acting** on a row. Jumping to the session and answering the
 ask need `/agents/{id}` verbs and a form renderer — §2's asks item. The
 inbox lists today.
 
+## The asks loop (`src/asks.zig`)
+
+Claude asks a question, a human answers, the asker unblocks. `rookctl
+ask` (and the MCP `ask` tool behind it) POSTs questions; the form takes
+the side pane and the key path; Enter posts the answer and the blocked
+asker exits 0 with it on stdout. ESC posts `{"canceled":true}` and the
+asker exits 1.
+
+**rook polls for asks; it is not pushed them.** The original flow pushes
+a `msgAsk` onto the asking session's wire-v3 frame socket and 409s when
+nothing is attached — "a question needs a screen to land on". That
+assumes an app holding session sockets, which this one deliberately is
+not: it owns its ptys in-process, registers no sessions, and
+`$ROOK_SESSION` is unset in its shells, so **both halves of the old path
+were unreachable from here**. The host gained a session-less queue
+(`POST /asks`, `GET /asks`) and rook polls it the same way it polls
+`/attention` and `/usage`. Session-scoped asks are untouched: they still
+push, still 409 without a screen, and the queue deliberately omits them
+so an app holding both paths cannot double-render one.
+
+The tradeoff, stated plainly: a queued ask is **app-global rather than
+pane-scoped**. With one window that is invisible; a second window is the
+moment to revisit it.
+
+Things worth keeping if this is ever rewritten:
+
+- **`recommended` is load-bearing.** Pre-ticked in multi, under the
+  cursor in single, so Enter alone is a complete answer to a well-formed
+  ask. The e2e asserts it.
+- **The Other row is always there**, so nobody is forced to pick from
+  options that miss the point. Typing anywhere jumps to it — and picking
+  your own words is *not* also picking an option, so `selected` stays
+  empty and `other` carries the text.
+- **A dismissal is a real answer.** ESC posts `{"canceled":true}` rather
+  than going quiet, because silence leaves `rookctl ask` blocked until
+  someone kills it.
+- **JSON escaping is not optional.** A stray quote in a label produces a
+  body the host rejects, which loses the answer and blocks the asker
+  forever. `asks.zig` has its own test root for this.
+- **Answering never blocks the key path.** The form queues a body and a
+  poster thread does the HTTP.
+- **ctl `ask <json>`** puts a question on screen without a host, through
+  the same parse the poller uses — the role `paste <text>` plays for the
+  pasteboard. **`ask-answer`** reports the last body the form produced,
+  which is the thing worth asserting on.
+
+Not done: the ask does not yet say *which agent* is asking, and there is
+no jump-to-session. Both need `/agents/{id}` verbs.
+
 ## The command registry (`src/registry.zig`)
 
 Every action rook can take is a named command, in one table. **⌘K**

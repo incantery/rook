@@ -29,6 +29,7 @@ const scenarios = [_]Scenario{
     .{ .name = "commands", .what = "registry lists, runs by name, and drives the ⌘K palette", .run = commands },
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
     .{ .name = "sidepane", .what = "side pane retiles the grid, flips edges, and holds the inbox", .run = sidepane },
+    .{ .name = "asks", .what = "a question renders, takes keys, and produces the answer JSON", .run = asks },
 };
 
 // ---------------------------------------------------------------- boot
@@ -337,6 +338,11 @@ fn sidepane(gpa: std.mem.Allocator, bin: []const u8) !void {
         app.deinit();
     }
     try h.expectContains(try app.ctl("sidepane"), "closed", "starts closed");
+    // Measured immediately before each toggle, never once at the top.
+    // A tiling WM re-assigns the launch size ASYNCHRONOUSLY, so a column
+    // count taken at startup can go stale mid-scenario — that made this
+    // flake roughly one run in six with an exact-equality assertion.
+    // Every claim here is relative to an adjacent measurement.
     const wide = try paneCols(app);
 
     // The assertion that separates a real container from a slab painted
@@ -361,10 +367,14 @@ fn sidepane(gpa: std.mem.Allocator, bin: []const u8) !void {
     // It is chrome, not a pane: it must not appear in `panes`.
     try h.expectEq("side pane is not a pane", 1, try app.paneCount());
 
-    // Toggling the SAME panel closes and gives the columns back.
+    // Toggling the SAME panel closes and gives the columns back. Compared
+    // against the OPEN width, not the startup one: the direction is what
+    // this asserts, and it is the part that cannot drift.
+    const still_narrow = try paneCols(app);
     _ = try app.ctl("run attention.inbox");
     try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
-    try h.expectEq("columns restored", wide, try paneCols(app));
+    const restored = try paneCols(app);
+    try h.expect(restored > still_narrow, "closing should give columns back: {d} open, {d} closed", .{ still_narrow, restored });
 
     // And the real chord, through AppKit's leader machine.
     _ = try app.ctl("press `");
@@ -375,6 +385,98 @@ fn sidepane(gpa: std.mem.Allocator, bin: []const u8) !void {
         h.sleepMs(100);
     }
     try h.expectContains(try app.ctl("sidepane"), "open", "<leader>a toggles it");
+}
+
+// ---------------------------------------------------------------- asks
+
+fn asks(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // --- single select, with a recommendation ---
+    _ = try app.ctl(
+        \\ask {"questions":[{"question":"Ship it?","options":[{"label":"Yes","recommended":true},{"label":"No"}]}]}
+    );
+    const st = try app.ctl("sidepane");
+    try h.expectContains(st, "panel:ask", "the ask takes the side pane");
+    try h.expectContains(st, "Ship it?", "the question renders");
+    // The asker's recommendation starts under the cursor, so Enter alone
+    // is a complete answer — that is what `recommended` is FOR.
+    try h.expectContains(st, "*( ) Yes", "recommended option is preselected");
+
+    // Enter alone answers, because the recommendation was already under
+    // the cursor. Nothing typed, so no `other`.
+    _ = try app.ctl("enter");
+    const ans = try app.ctl("ask-answer");
+    try h.expectContains(ans, "\"selected\":[\"Yes\"]", "the picked label is in the answer");
+    try h.expectContains(ans, "\"question\":\"Ship it?\"", "the question is echoed back");
+    try h.expect(std.mem.indexOf(u8, ans, "other") == null, "no `other` when nothing was typed, got: {s}", .{ans});
+
+    // --- the form owns the key path ---
+    // If this leaks, a human's keystrokes go to a pty instead of the
+    // form — and typing JUMPS TO OTHER, which is the whole point of that
+    // row: never be forced to pick from options that miss the point.
+    _ = try app.ctl(
+        \\ask {"questions":[{"question":"Pick?","options":[{"label":"One"}]}]}
+    );
+    _ = try app.ctl("type xyzzy");
+    try h.expectContains(try app.ctl("dump"), "e2e$", "typing did NOT reach the shell");
+    try h.expectContains(try app.ctl("sidepane"), "*other: xyzzy", "typing moved to Other and wrote there");
+    _ = try app.ctl("enter");
+    const other = try app.ctl("ask-answer");
+    try h.expectContains(other, "\"other\":\"xyzzy\"", "typed text becomes `other`");
+    // Choosing your own words is NOT also choosing an option.
+    try h.expectContains(other, "\"selected\":[]", "Other does not pick an option too");
+
+    // The form yields the key path back when it is done.
+    try h.expectContains(try app.ctl("sidepane"), "panel:attention", "form closes to the inbox");
+    _ = try app.ctl("type back-to-shell");
+    _ = try app.ctl("enter");
+    try app.waitTextCount("back-to-shell", 2, 5_000);
+
+    // --- multi select ---
+    _ = try app.ctl(
+        \\ask {"questions":[{"question":"Which?","multiSelect":true,"options":[{"label":"A"},{"label":"B"},{"label":"C"}]}]}
+    );
+    try h.expectContains(try app.ctl("sidepane"), "multi", "multi-select is marked as such");
+    _ = try app.ctl("key 20"); // space: tick A
+    _ = try app.ctl("key 0e"); // ⌃N: down to B
+    _ = try app.ctl("key 20"); // space: tick B
+    try h.expectContains(try app.ctl("sidepane"), "[x] A", "A stayed ticked after moving");
+    _ = try app.ctl("enter");
+    const multi = try app.ctl("ask-answer");
+    try h.expectContains(multi, "\"selected\":[\"A\",\"B\"]", "both ticks are in the answer");
+
+    // --- dismissal ---
+    // ESC must post a real {"canceled":true}: silence would leave
+    // `rookctl ask` blocked until someone kills it.
+    _ = try app.ctl(
+        \\ask {"questions":[{"question":"Nope?","options":[{"label":"X"}]}]}
+    );
+    _ = try app.ctl("key 1b"); // ESC
+    try h.expectContains(try app.ctl("ask-answer"), "{\"canceled\":true}", "ESC produces a dismissal");
+    try h.expectContains(try app.ctl("sidepane"), "panel:attention", "dismissal closes the form");
+
+    // --- free text (a question with no options) ---
+    _ = try app.ctl(
+        \\ask {"questions":[{"question":"Name it"}]}
+    );
+    _ = try app.ctl("type widget");
+    _ = try app.ctl("enter");
+    try h.expectContains(try app.ctl("ask-answer"), "\"other\":\"widget\"", "free-text answers land in `other`");
+
+    // --- a label with characters that would break the JSON ---
+    // A stray quote in a body the host rejects means the answer is lost
+    // and the asker blocks forever, so this is the sharp edge.
+    _ = try app.ctl(
+        \\ask {"questions":[{"question":"Quote \"this\"?","options":[{"label":"a\"b"}]}]}
+    );
+    _ = try app.ctl("enter");
+    const esc = try app.ctl("ask-answer");
+    try h.expectContains(esc, "\\\"", "quotes are escaped in the answer");
 }
 
 // ---------------------------------------------------------------- runner

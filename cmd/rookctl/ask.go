@@ -44,11 +44,21 @@ func askQuestions(input []byte) (json.RawMessage, error) {
 	return outer.Questions, nil
 }
 
-// blockingAsk posts the questions at the session's pane and parks until
-// the human answers. Returns the answer JSON; the dismissed flag is inside
-// it ({"canceled":true}).
+// blockingAsk posts the questions and parks until the human answers.
+// Returns the answer JSON; the dismissed flag is inside it
+// ({"canceled":true}).
+//
+// An empty session posts to the session-LESS queue, which the app polls
+// instead of receiving over a frame socket. Everything after the create is
+// identical — same ask id, same ack, same long-poll — so the CLI's contract
+// (stdout JSON, exit 0 answered / 1 dismissed) does not depend on which
+// path delivered it.
 func blockingAsk(c *client, session string, questions json.RawMessage) (json.RawMessage, error) {
-	out, err := c.req("POST", "/sessions/"+session+"/ask", map[string]any{
+	path := "/asks"
+	if session != "" {
+		path = "/sessions/" + session + "/ask"
+	}
+	out, err := c.req("POST", path, map[string]any{
 		"questions": questions,
 	})
 	if err != nil {
@@ -101,10 +111,13 @@ func askCanceled(answer json.RawMessage) bool {
 }
 
 func runAsk(args []string) error {
+	// $ROOK_SESSION is set by an app that registers its shells with the
+	// host. The zig app owns its ptys in-process and registers none, so
+	// this is empty in every rook window today — and the session-scoped
+	// path would 409 anyway ("no app attached to this session"). Falling
+	// back to the session-less queue is what makes `ask` work at all
+	// there; the app polls GET /asks for it.
 	self := os.Getenv("ROOK_SESSION")
-	if self == "" {
-		return errors.New("ask runs inside a rook terminal — this shell has no $ROOK_SESSION")
-	}
 
 	var input []byte
 	if len(args) > 0 {

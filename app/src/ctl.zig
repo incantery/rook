@@ -152,10 +152,16 @@ fn writeTarget(app: *macos.App, pane_id: ?u32, bytes: []const u8) bool {
     const ok = blk: {
         app.draw_lock.lock();
         defer app.draw_lock.unlock();
-        // An open palette owns untargeted input, same as the real key path.
+        // Untargeted input follows the real key path's priority: palette,
+        // then a focused side pane, then the pane.
         if (app.pal_open and pane_id == null) {
             app.markInput(CACurrentMediaTime());
             app.palKeyLocked(bytes);
+            break :blk true;
+        }
+        if (app.side_focus and app.side_panel == .ask and pane_id == null) {
+            app.markInput(CACurrentMediaTime());
+            app.askKeyLocked(bytes);
             break :blk true;
         }
         const p = findPane(app, pane_id) orelse break :blk false;
@@ -336,6 +342,30 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else {
             reply(fd, "err unknown command (see `commands`)\n");
         }
+    } else if (std.mem.eql(u8, verb, "ask") and rest.len > 0) {
+        // Put a question on screen without a host — the same role `paste
+        // <text>` plays for the pasteboard. Takes {"questions":[…]} or a
+        // bare […], through the SAME parse the poller uses, so the form
+        // is never exercised by a second code path.
+        const asks = @import("asks.zig");
+        if (asks.parsePayload(app.gpa, "ctl", rest)) |a| {
+            app.presentAsk(a);
+            reply(fd, "ok\n");
+        } else reply(fd, "err bad questions JSON\n");
+    } else if (std.mem.eql(u8, verb, "ask-answer") and rest.len == 0) {
+        // What the form last decided, verbatim. This is the body that
+        // unblocks the asker, so it is the thing worth asserting on.
+        app.draw_lock.lock();
+        const n = app.ask_last_len;
+        var buf: [4096]u8 = undefined;
+        @memcpy(buf[0..n], app.ask_last[0..n]);
+        app.draw_lock.unlock();
+        if (n == 0) {
+            reply(fd, "none\n");
+        } else {
+            reply(fd, buf[0..n]);
+            reply(fd, "\n");
+        }
     } else if (std.mem.eql(u8, verb, "sidepane") and rest.len == 0) {
         // Container state + the tenant's rows, so the whole panel is
         // verifiable without a screenshot.
@@ -364,6 +394,29 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     }
                     if (app.attention.more > 0)
                         w.print("+{d} more\n", .{app.attention.more}) catch {};
+                },
+                .ask => {
+                    if (app.ask) |a| {
+                        const q = a.questions[app.ask_qi];
+                        w.print("ask:{s} q:{d}/{d}{s}\n{s}\n", .{
+                            a.id.get(),
+                            app.ask_qi + 1,
+                            a.n,
+                            @as([]const u8, if (q.multi) " multi" else ""),
+                            q.text.get(),
+                        }) catch {};
+                        for (q.options[0..q.n], 0..) |o, i| {
+                            w.print("{s}{s} {s}\n", .{
+                                @as([]const u8, if (i == app.ask_sel) "*" else " "),
+                                @as([]const u8, if (q.multi and app.ask_picked[i]) "[x]" else if (q.multi) "[ ]" else "( )"),
+                                o.label.get(),
+                            }) catch break;
+                        }
+                        w.print("{s}other: {s}\n", .{
+                            @as([]const u8, if (app.ask_sel == q.n) "*" else " "),
+                            app.ask_text[0..app.ask_text_len],
+                        }) catch {};
+                    } else _ = w.write("no question\n") catch 0;
                 },
             }
         }
