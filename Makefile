@@ -72,7 +72,12 @@ install:
 	codesign -s - --force $(ROOKZ_APP)
 	$(LSREGISTER) -f $(ROOKZ_APP)
 	mdimport $(ROOKZ_APP)
-	@echo "installed $(ROOKZ_APP) — Spotlight 'rookz' or: open -a rookz"
+	@# The CLI face of the same binary (rookz edit <file> from any shell
+	@# inside the app). ~/.local/bin is on PATH; a symlink keeps the CLI
+	@# in lockstep with the installed app.
+	mkdir -p $(HOME)/.local/bin
+	ln -sf $(ROOKZ_APP)/Contents/MacOS/rookz $(HOME)/.local/bin/rookz
+	@echo "installed $(ROOKZ_APP) + ~/.local/bin/rookz — Spotlight 'rookz' or: open -a rookz"
 
 dev-web:
 	XDG_STATE_HOME=$(HOME)/.local/state/rook-dev \
