@@ -50,9 +50,11 @@ act() {
     fi
 }
 
+APP="/Applications/rook.app"
 CFG_DIR="$HOME/.config/rook"
 CFG="$CFG_DIR/config.toml"
 OLD_CFG_DIR="$HOME/.config/rookz"
+OLD_CFG_BAK="$CFG_DIR/rookz.bak"
 
 if want config; then
 echo "config"
@@ -75,9 +77,14 @@ if [ -d "$OLD_CFG_DIR" ]; then
                 if (line ~ /^[ \t]*background-opacity[ \t]*=/) opacity = line
                 if (line ~ /^[ \t]*background-blur[ \t]*=/)    blur = line
             }
-            nchord = 0
+            # Only the [app] table. rookz keybinds.toml also has an
+            # [editor] one, and its chords belong to the editor scope —
+            # hoisting them into [keybinds] would silently rebind them
+            # app-wide.
+            nchord = 0; in_app = 0
             while ((getline line < old_kb) > 0) {
-                if (line ~ /^[ \t]*"<leader>/) chord[nchord++] = line
+                if (line ~ /^[ \t]*\[/) { in_app = (line ~ /^[ \t]*\[app\]/); continue }
+                if (in_app && line ~ /^[ \t]*"<leader>/) chord[nchord++] = line
             }
             # Which chords the target already binds. Only UNCOMMENTED
             # lines count: the shared file documents its defaults as
@@ -129,7 +136,11 @@ if [ -d "$OLD_CFG_DIR" ]; then
     else
         say "no $CFG — nothing to merge into"
     fi
-    act rm -rf "$OLD_CFG_DIR"
+    # MOVED, not deleted. The merge above carries every value the app
+    # reads, so nothing is lost in substance — but "my config directory
+    # vanished" is an alarming thing to discover, and a merge is exactly
+    # the kind of step whose inputs you want to be able to re-read.
+    act mv "$OLD_CFG_DIR" "$OLD_CFG_BAK"
 else
     say "no $OLD_CFG_DIR — already done"
 fi
@@ -159,14 +170,32 @@ echo "daemons"
 # rook-host used to outlive its app on purpose — the wails app rode a
 # healthy daemon rather than restarting it, so shells survived an app
 # restart. The zig app owns its ptys and kills the daemon it started, so
-# any daemon still standing here is from the old world. Their shells go
-# with them, which is why this is the last step and prints first.
+# any daemon still standing is either from the old world or from a dev
+# or e2e sandbox. Their shells go with them, which is why this phase
+# prints everything before it touches anything.
+#
+# EXCEPT one with a live parent. Killing the daemon the running rook
+# owns is not cleanup, it is breaking the app you are sitting in — and
+# the first version of this phase did exactly that.
+#
+# ORPHANHOOD IS THE TEST, and PPID states it exactly: rook forks the
+# daemon, so a rook-host whose parent is still alive has an app
+# responsible for it. When that app dies the daemon reparents to launchd
+# (pid 1) — which is the whole "background work while rook is closed"
+# problem, visible as a number. Matching on the binary's path instead
+# looked obvious and was wrong twice over: the app and the daemon share
+# a path prefix, so `.../MacOS/rook` matches rook-HOST.
 pids=$(pgrep -f 'rook-host' 2>/dev/null || true)
 if [ -n "$pids" ]; then
     for pid in $pids; do
         say "running: $(ps -o pid=,command= -p "$pid" 2>/dev/null || true)"
     done
     for pid in $pids; do
+        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [ -n "$ppid" ] && [ "$ppid" != "1" ]; then
+            say "keeping $pid — parent $ppid is alive and owns it"
+            continue
+        fi
         act kill -TERM "$pid"
     done
 else

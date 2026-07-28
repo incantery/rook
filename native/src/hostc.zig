@@ -342,17 +342,31 @@ pub fn ensure(gpa: std.mem.Allocator, io: std.Io) ?Handle {
 
     const child = spawnHost(bin.?) orelse return null;
 
-    // rook-host now decides: replace a stale daemon, or exit because a
-    // healthy same-build one is already listening. Either way what we
-    // wait for is the same — a health check that passes.
+    // rook-host now decides: replace a stale daemon of another build, or
+    // exit because a healthy same-build one is already listening. WHICH
+    // ONE IT CHOSE IS READABLE FROM THE CHILD'S LIVENESS, and waiting on
+    // that instead of on a health check is what makes this correct.
+    //
+    // The obvious version — poll until any health check passes — has a
+    // race that cost us a real daemon. rook-host SIGTERMs the old one
+    // and sleeps 300ms before taking over, and throughout that window
+    // the OLD host.json is still there and still answers /health. So the
+    // first poll adopts a daemon that is already dying: owned=no against
+    // a pid about to vanish, which means quitting rook leaves the real
+    // daemon running — exactly the thing this module exists to prevent.
+    // It presents as an app pointing at a dead port, and it survived
+    // testing because usage.zig re-reads host.json on every fetch.
+    //
+    // So: while the child LIVES, only a host.json naming the child is
+    // acceptable. Once it EXITS, it declined, and whatever is healthy is
+    // someone else's to own.
     var waited_ms: u32 = 0;
     while (waited_ms < 5000) : (waited_ms += 100) {
+        const declined = waitpid(child, null, WNOHANG) == child;
         if (readInfo(gpa, io)) |info| {
-            if (healthy(gpa, &info)) {
-                // Reap it if it took the "already running" exit; if it
-                // became the daemon this is a no-op (WNOHANG).
-                _ = waitpid(child, null, WNOHANG);
-                var h: Handle = .{ .info = info, .owned = info.pid == child };
+            const ours = info.pid == child;
+            if ((declined or ours) and healthy(gpa, &info)) {
+                var h: Handle = .{ .info = info, .owned = ours };
                 h.path_len = @min(bin.?.len, h.path.len);
                 @memcpy(h.path[0..h.path_len], bin.?[0..h.path_len]);
                 return h;
