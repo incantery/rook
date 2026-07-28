@@ -18,7 +18,7 @@ APP := /Applications/rook.app
 BUILD := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit).$(shell date +%Y%m%d%H%M%S)
 BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 
-.PHONY: build start dev package install clean agent release e2e e2e-clean
+.PHONY: build start dev dev-web package install clean agent release e2e e2e-clean
 
 build:
 	wails3 task build
@@ -40,7 +40,13 @@ start: build
 # worktree.go checkouts) — else dev shares the daily driver's rook.db, so
 # its workspaces, verdict ledger, threads, and cost totals would pollute the
 # real ones, and worktrees would land in the shared tree.
+# On this branch (rook/zig), dev is the NATIVE experiment: build and run
+# rookz, the Zig app in native/. The webview dev instance survives as
+# dev-web for side-by-side comparisons (the latency A/B needs both).
 dev:
+	cd native && zig build && ./zig-out/bin/rookz win
+
+dev-web:
 	XDG_STATE_HOME=$(HOME)/.local/state/rook-dev \
 	XDG_CONFIG_HOME=$(HOME)/.config/rook-dev \
 	XDG_DATA_HOME=$(HOME)/.local/share/rook-dev \
