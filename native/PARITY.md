@@ -128,12 +128,16 @@ a daily driver.
       a background thread, which is what to reach for if scrollback ever
       grows (see below). ctl `search` reports state; `press RET`/`BS`
       drive the prompt through the real key path.
-- [ ] **Scrollback is one page** (~930 rows at 92 cols, measured).
-      `Session.start` never passes `max_scrollback`, so it inherits
-      ghostty-vt's EMBEDDED-LIBRARY default of 10,000 *bytes* — ghostty
-      the app sets 10MB. Search is what made this visible. A one-line
-      change, but it moves per-pane memory, so it wants a number chosen
-      on purpose.
+- [x] **Scrollback: 10MB per pane**, `scrollback = "10mb"` (bytes, with
+      kb/mb/gb suffixes; `scrollback-limit` accepted as ghostty spells
+      it; 0 = none). Was ~930 rows — `Session.start` never passed
+      `max_scrollback`, so it took ghostty-vt's EMBEDDED-LIBRARY default
+      of 10,000 *bytes*, a sane floor for a widget on someone else's
+      screen and far too little for a terminal you live in. Measured:
+      979 → 12,408 retained rows at 92 cols, +9MB RSS for a full one.
+      Launch-time only, like font and opacity: a pane's limit is fixed
+      when its PageList is built, so a live reload would silently give
+      new panes a different depth from the ones already open.
 - [ ] Copy mode: full vim motions + visual mode + yank (already on TODO.md).
 - [ ] Tab/space **rename** (`,` in tmux) — spaces name themselves from
       cwd today, with no way to override.

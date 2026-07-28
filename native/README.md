@@ -43,10 +43,14 @@ results from the primary screen shown over the alternate are nonsense;
 a resize is survivable and the library re-searches itself. This uses
 the BLOCKING `searchAll` — the library also offers tick/feed so a
 background thread can chew through a huge buffer incrementally, which
-is what to reach for when scrollback grows past one page (it hasn't:
-`Session.start` never sets `max_scrollback`, so it inherits the
-embedded-library default of 10,000 *bytes*, about 930 rows in
-practice).
+is what to reach for if the blocking scan ever shows. Measured at the
+10MB default (12,408 rows), a full scan is **free** — a needle with few
+or no matches finishes inside the ctl round-trip. What costs is the
+number of MATCHES, not the size of the buffer: searching `bulk` when
+every one of 12,408 rows contains it took ~500ms, because each hit
+builds its own tracked highlight. That is a degenerate search, and it
+is half a second on an explicit Enter rather than a hang, so the
+blocking path stays.
 
 **⌘V** pastes, by xterm's rules (`src/paste.zig`, pure data in/data out,
 its own test root): bytes that could signal the foreground process —
@@ -370,6 +374,10 @@ background-blur = "blur" # what's BEHIND a translucent window:
 bell = "visual"          # none | visual (default) | audible | all
 clipboard-write = "allow"# OSC 52: allow (default) | deny. `true` /
                          # `false` mean the same two things.
+scrollback = "10mb"      # per pane, in BYTES; kb/mb/gb suffixes or a
+                         # bare number. 0 = none at all. Relaunch to
+                         # take effect. (ghostty's scrollback-limit
+                         # spelling is accepted.)
 ```
 
 Opacity < 1 is whole-window glass: the layer extends under a
@@ -467,11 +475,8 @@ the terminal core, `zig_objc` is ghostty's own pin.
 
 ## Known debts
 
-Scrollback keeps only ~930 rows — `Session.start` never passes
-`max_scrollback`, so it takes ghostty-vt's embedded default of 10,000
-bytes where ghostty the app sets 10MB; a one-line fix, but it moves
-per-pane memory so the number wants choosing on purpose. Copy mode has
-no vim motions or visual-mode yank yet (`/` search and scrolling only).
+Copy mode has no vim motions or visual-mode yank yet (`/` search and
+scrolling only).
 Cursor is a color swap, input is
 cooked NSEvent characters (upgrade path: `vt.input.encodeKey`), no
 window-close → quit delegate, grapheme-cluster emoji (flags, ZWJ,

@@ -68,6 +68,39 @@ pub fn clipboardWriteFromName(name: []const u8) ?ClipboardWrite {
     return null;
 }
 
+/// Parse a byte size: a bare number, or one with a `kb`/`mb`/`gb`
+/// suffix (case-insensitive, optional space, `k`/`m`/`g` accepted too).
+///
+/// Suffixes exist because this key is measured in BYTES and the useful
+/// values are in the millions — `scrollback = 10485760` is a number
+/// nobody can read, check, or edit with confidence.
+pub fn parseSize(raw: []const u8) ?usize {
+    const val = std.mem.trim(u8, raw, " \t\"");
+    if (val.len == 0) return null;
+    var i: usize = 0;
+    while (i < val.len and val[i] >= '0' and val[i] <= '9') i += 1;
+    if (i == 0) return null;
+    const n = std.fmt.parseInt(usize, val[0..i], 10) catch return null;
+
+    var unit_buf: [4]u8 = undefined;
+    const rest = std.mem.trim(u8, val[i..], " \t");
+    if (rest.len == 0) return n;
+    if (rest.len > unit_buf.len) return null;
+    const unit = std.ascii.lowerString(unit_buf[0..rest.len], rest);
+
+    const mult: usize = if (std.mem.eql(u8, unit, "b"))
+        1
+    else if (std.mem.eql(u8, unit, "k") or std.mem.eql(u8, unit, "kb"))
+        1024
+    else if (std.mem.eql(u8, unit, "m") or std.mem.eql(u8, unit, "mb"))
+        1024 * 1024
+    else if (std.mem.eql(u8, unit, "g") or std.mem.eql(u8, unit, "gb"))
+        1024 * 1024 * 1024
+    else
+        return null;
+    return std.math.mul(usize, n, mult) catch null;
+}
+
 pub fn bellFromName(name: []const u8) ?Bell {
     if (std.mem.eql(u8, name, "none")) return .none;
     if (std.mem.eql(u8, name, "visual")) return .visual;
@@ -91,6 +124,14 @@ pub const Config = struct {
     window_padding: f64 = 0,
     bell: Bell = .visual,
     clipboard_write: ClipboardWrite = .allow,
+    /// Scrollback per pane, in BYTES (the emulator's unit; it rounds up
+    /// to a page and floors at one page's worth of the active area).
+    /// Ghostty's own default, and for the same reason: rook previously
+    /// took the library's EMBEDDED default of 10,000 bytes, which is a
+    /// sane floor for a widget on someone else's screen and about 930
+    /// rows for a terminal you live in. Launch-time only — resizing a
+    /// live PageList's limit isn't something the library offers.
+    scrollback: usize = 10 * 1024 * 1024,
 };
 
 /// One number over the config file — the live-reload poll compares this
@@ -212,6 +253,20 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
                 std.debug.print("rook config: unknown bell '{s}' (none, visual, audible, all)\n", .{stripped});
                 break :blk .visual;
             };
+        } else if (std.mem.eql(u8, key, "scrollback") or
+            std.mem.eql(u8, key, "scrollback_limit"))
+        {
+            // `scrollback-limit` is ghostty's spelling; same knob.
+            cfg.scrollback = parseSize(val) orelse blk: {
+                std.debug.print("rook config: bad scrollback '{s}' (bytes, or 10mb / 512kb)\n", .{val});
+                break :blk cfg.scrollback;
+            };
+            // 0 means "no scrollback at all" and is a real answer. A
+            // gigabyte is not; it's a typo with a unit attached.
+            if (cfg.scrollback > 1024 * 1024 * 1024) {
+                std.debug.print("rook config: scrollback {d} over the 1gb ceiling, using 1gb\n", .{cfg.scrollback});
+                cfg.scrollback = 1024 * 1024 * 1024;
+            }
         } else if (std.mem.eql(u8, key, "clipboard_write")) {
             const stripped = std.mem.trim(u8, val, "\"");
             cfg.clipboard_write = clipboardWriteFromName(stripped) orelse blk: {
@@ -485,6 +540,30 @@ test "actionFromName takes the registry's names and rookz's aliases" {
     try t.expect(actionFromName("tab.select-3").?.arg == 3);
     // A registry command rook has not built yet: skipped, not an error.
     try t.expect(actionFromName("workspace.manager") == null);
+}
+
+test "parseSize takes bytes, units, and neither silently" {
+    const t = std.testing;
+    try t.expectEqual(@as(?usize, 1024), parseSize("1024"));
+    try t.expectEqual(@as(?usize, 10 * 1024 * 1024), parseSize("10mb"));
+    // Case, spacing and the short spellings are all the same value —
+    // this is a number a person types, not a wire format.
+    try t.expectEqual(@as(?usize, 10 * 1024 * 1024), parseSize("10MB"));
+    try t.expectEqual(@as(?usize, 10 * 1024 * 1024), parseSize("10 mb"));
+    try t.expectEqual(@as(?usize, 10 * 1024 * 1024), parseSize("10m"));
+    try t.expectEqual(@as(?usize, 512 * 1024), parseSize("512kb"));
+    try t.expectEqual(@as(?usize, 2 * 1024 * 1024 * 1024), parseSize("2gb"));
+    // 0 is a real answer: no scrollback at all.
+    try t.expectEqual(@as(?usize, 0), parseSize("0"));
+    // TOML quotes are the config's, not the value's.
+    try t.expectEqual(@as(?usize, 10 * 1024 * 1024), parseSize("\"10mb\""));
+    // Rejected, so the caller warns instead of taking a wrong number.
+    try t.expect(parseSize("") == null);
+    try t.expect(parseSize("mb") == null);
+    try t.expect(parseSize("10tb") == null);
+    try t.expect(parseSize("ten") == null);
+    // Overflow must not wrap into a small, plausible-looking limit.
+    try t.expect(parseSize("99999999999999999999gb") == null);
 }
 
 test "clipboard-write takes both the enum names and the booleans" {

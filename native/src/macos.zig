@@ -450,6 +450,11 @@ pub const App = struct {
     /// Held here as well as on each Session so a session spawned after
     /// a live reload inherits the current answer.
     cfg_clip_allow: bool = true,
+    /// Scrollback bytes for panes spawned later. NOT live-reloadable —
+    /// a pane's limit is fixed when its PageList is built, so a reload
+    /// would silently give new panes a different history depth from the
+    /// ones already open. Relaunch, like font and opacity.
+    cfg_scrollback: usize = 10 * 1024 * 1024,
     /// The last OSC 52 payload we put on the pasteboard, for ctl
     /// `clipboard` — which reads the real pasteboard back, so this is
     /// only here to tell "rook wrote it" from "something else did".
@@ -603,7 +608,7 @@ pub const App = struct {
         const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2 - top_inset - pad * 2, renderer.cell_h)));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
-        const session = try sessionpkg.Session.start(gpa, init.io, shell, null, termColors(), @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
+        const session = try sessionpkg.Session.start(gpa, init.io, shell, null, termColors(), @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px), cfg.scrollback);
 
         const self = try gpa.create(App);
         const pane = try gpa.create(panespkg.Pane);
@@ -638,6 +643,7 @@ pub const App = struct {
             .bg_opacity = cfg.background_opacity,
             .cfg_bell = cfg.bell,
             .cfg_clip_allow = cfg.clipboard_write == .allow,
+            .cfg_scrollback = cfg.scrollback,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
             .ime_view = view,
         };
@@ -1227,7 +1233,7 @@ pub const App = struct {
     /// into a tree and a tab (holding draw_lock — focusedCwd reads the
     /// focused pane).
     fn makePane(self: *App, cwd: ?[*:0]const u8) !*panespkg.Pane {
-        const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, cwd, termColors(), 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
+        const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, cwd, termColors(), 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px), self.cfg_scrollback);
         session.kick = &inputKick;
         session.kick_ctx = self;
         session.clip_allow = self.cfg_clip_allow;
@@ -2187,7 +2193,7 @@ pub const App = struct {
             }
         };
         self.scene_dirty = true;
-        std.debug.print("rook: config reloaded (theme {s}; font/opacity need relaunch)\n", .{th.name});
+        std.debug.print("rook: config reloaded (theme {s}; font/opacity/scrollback need relaunch)\n", .{th.name});
     }
 
     /// Drain BEL flags raised by reader threads and turn them into the
