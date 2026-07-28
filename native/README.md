@@ -42,7 +42,14 @@ zig build                    # needs zig 0.16
 ./zig-out/bin/rookz win      # the app (make dev from repo root does both)
 ./zig-out/bin/rookz demo     # headless: bytes → vt → screen dump
 ./zig-out/bin/rookz exec ls  # run a command under a pty, dump final screen
+make install                 # repo root: ReleaseFast → /Applications/rookz.app
 ```
+
+The installed app answers on the default `/tmp/rookz.sock`; `make
+dev`/`make prod` instances use `/tmp/rookz-dev.sock` so they never
+steal it (the ctl server unlinks-then-binds). App shells are login
+shells (`-l`) started in `$HOME` — Dock launches have a skeleton env
+and a cwd of `/`.
 
 Flags: `win --no-activate` opens the window without stealing focus —
 use this for every tooling/probe launch.
