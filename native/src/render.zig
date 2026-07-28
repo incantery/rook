@@ -26,6 +26,9 @@ extern "c" fn CTFontGetAscent(font: CTFontRef) f64;
 extern "c" fn CTFontGetDescent(font: CTFontRef) f64;
 extern "c" fn CTFontGetLeading(font: CTFontRef) f64;
 extern "c" fn CTFontGetGlyphsForCharacters(font: CTFontRef, chars: [*]const u16, glyphs: [*]u16, count: isize) bool;
+extern "c" fn CTFontGetSymbolicTraits(font: CTFontRef) u32;
+extern "c" fn CTFontCreateCopyWithAttributes(font: CTFontRef, size: f64, matrix: ?*const anyopaque, attrs: ?*anyopaque) CTFontRef;
+extern "c" fn CGColorSpaceCreateDeviceRGB() ?*anyopaque;
 extern "c" fn CTFontGetAdvancesForGlyphs(font: CTFontRef, orientation: c_int, glyphs: [*]const u16, advances: ?[*]CGSize, count: isize) f64;
 extern "c" fn CTFontDrawGlyphs(font: CTFontRef, glyphs: [*]const u16, positions: [*]const CGPoint, count: usize, ctx: CGContextRef) void;
 extern "c" fn CGBitmapContextCreate(data: ?*anyopaque, w: usize, h: usize, bits_per_comp: usize, bytes_per_row: usize, space: ?*anyopaque, info: u32) CGContextRef;
@@ -33,8 +36,10 @@ extern "c" fn CGBitmapContextGetData(ctx: CGContextRef) ?[*]u8;
 extern "c" fn CGContextClearRect(ctx: CGContextRef, rect: extern struct { origin: CGPoint, size: CGSize }) void;
 
 const utf8_encoding: u32 = 0x08000100;
-const utf16_encoding: u32 = 0x14000100; // kCFStringEncodingUTF16LE... unused
 const alpha_only: u32 = 7; // kCGImageAlphaOnly
+// premultiplied BGRA little-endian for color (emoji) glyphs
+const bgra_premul: u32 = 8192 | 2; // ByteOrder32Little | AlphaPremultipliedFirst
+const color_glyphs_trait: u32 = 1 << 13; // kCTFontTraitColorGlyphs
 
 pub const MTLRegion = extern struct { x: u64, y: u64, z: u64, w: u64, h: u64, d: u64 };
 pub const MTLRegionPub = MTLRegion;
@@ -64,7 +69,7 @@ const shader_src =
     \\using namespace metal;
     \\struct Uni { float2 vp; float2 cell; uint cols; uint pad; float2 atlas; };
     \\struct CellData { uchar4 bg; uchar4 fg; ushort2 uv; ushort flags; ushort pad; };
-    \\struct VOut { float4 pos [[position]]; float4 color; float2 uv; };
+    \\struct VOut { float4 pos [[position]]; float4 color; float2 uv; float sel; };
     \\
     \\vertex VOut bg_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
     \\                  constant Uni& u [[buffer(0)]],
@@ -84,25 +89,30 @@ const shader_src =
     \\                  constant Uni& u [[buffer(0)]],
     \\                  const device CellData* cells [[buffer(1)]]) {
     \\  VOut o;
-    \\  if ((cells[iid].flags & 1) == 0) { o.pos = float4(-2.0, -2.0, 0.0, 1.0); o.color = float4(0.0); o.uv = float2(0.0); return o; }
+    \\  if ((cells[iid].flags & 1) == 0) { o.pos = float4(-2.0, -2.0, 0.0, 1.0); o.color = float4(0.0); o.uv = float2(0.0); o.sel = 0.0; return o; }
     \\  uint col = iid % u.cols; uint row = iid / u.cols;
     \\  float2 corner = float2(vid & 1, vid >> 1);
     \\  float2 px = (float2(col, row) + corner) * u.cell;
     \\  o.pos = float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0.0, 1.0);
     \\  o.color = float4(cells[iid].fg) / 255.0;
     \\  o.uv = (float2(cells[iid].uv) + corner * u.cell) / u.atlas;
+    \\  o.sel = (cells[iid].flags & 2) != 0 ? 1.0 : 0.0;
     \\  return o;
     \\}
-    \\fragment float4 fg_fs(VOut in [[stage_in]], texture2d<float> atlas [[texture(0)]]) {
+    \\fragment float4 fg_fs(VOut in [[stage_in]],
+    \\                      texture2d<float> atlas [[texture(0)]],
+    \\                      texture2d<float> colors [[texture(1)]]) {
     \\  constexpr sampler s(coord::normalized, filter::nearest);
     \\  float a = atlas.sample(s, in.uv).r;
-    \\  return float4(in.color.rgb * a, a);
+    \\  float4 mono = float4(in.color.rgb * a, a);
+    \\  float4 emoji = colors.sample(s, in.uv); // premultiplied
+    \\  return mix(mono, emoji, in.sel);
     \\}
 ;
 
 const atlas_px: usize = 2048;
 
-pub const GlyphLoc = struct { uvx: u16, uvy: u16 };
+pub const GlyphLoc = struct { uvx: u16, uvy: u16, color: bool = false };
 
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
@@ -128,6 +138,13 @@ pub const Renderer = struct {
     glyphs: std.AutoHashMapUnmanaged(u21, ?GlyphLoc) = .empty,
     shelf_x: usize = 0,
     shelf_y: usize = 0,
+
+    // Color (emoji) path: premultiplied BGRA scratch + its own atlas.
+    color_atlas: objc.Object,
+    color_scratch: CGContextRef,
+    color_scratch_data: [*]u8,
+    color_shelf_x: usize = 0,
+    color_shelf_y: usize = 0,
 
     pub fn init(gpa: std.mem.Allocator, device: objc.Object, font_name: [*:0]const u8, font_px: f64, max_cells: usize) !Renderer {
         // --- Font + metrics ---
@@ -155,6 +172,12 @@ pub const Renderer = struct {
         if (scratch == null) return error.BitmapFailed;
         const scratch_data = CGBitmapContextGetData(scratch) orelse return error.BitmapFailed;
 
+        // Color scratch for emoji (premultiplied BGRA).
+        const rgb_space = CGColorSpaceCreateDeviceRGB();
+        const color_scratch = CGBitmapContextCreate(null, scratch_w, cell_h, 8, scratch_w * 4, rgb_space, bgra_premul);
+        if (color_scratch == null) return error.BitmapFailed;
+        const color_scratch_data = CGBitmapContextGetData(color_scratch) orelse return error.BitmapFailed;
+
         // --- Atlas texture (R8, dynamic) ---
         // MTLPixelFormatR8Unorm = 10
         const tdesc = objc.getClass("MTLTextureDescriptor").?.msgSend(
@@ -163,6 +186,14 @@ pub const Renderer = struct {
             .{ @as(u64, 10), @as(u64, atlas_px), @as(u64, atlas_px), false },
         );
         const atlas = device.msgSend(objc.Object, "newTextureWithDescriptor:", .{tdesc.value});
+
+        // MTLPixelFormatBGRA8Unorm = 80
+        const cdesc = objc.getClass("MTLTextureDescriptor").?.msgSend(
+            objc.Object,
+            "texture2DDescriptorWithPixelFormat:width:height:mipmapped:",
+            .{ @as(u64, 80), @as(u64, atlas_px), @as(u64, atlas_px), false },
+        );
+        const color_atlas = device.msgSend(objc.Object, "newTextureWithDescriptor:", .{cdesc.value});
 
         // --- Pipelines ---
         var err_id: objc.c.id = null;
@@ -202,6 +233,9 @@ pub const Renderer = struct {
             .scratch = scratch,
             .scratch_data = scratch_data,
             .scratch_w = scratch_w,
+            .color_atlas = color_atlas,
+            .color_scratch = color_scratch,
+            .color_scratch_data = color_scratch_data,
         };
     }
 
@@ -254,6 +288,24 @@ pub const Renderer = struct {
             if (!CTFontGetGlyphsForCharacters(font, &u16buf, &glyph_ids, @intCast(u16len))) return null;
         }
 
+        // Color glyphs (emoji) go to the BGRA atlas, scaled to fit the
+        // cell box — Apple Color Emoji's em square overflows text metrics.
+        if (CTFontGetSymbolicTraits(font) & color_glyphs_trait != 0) {
+            const target: f64 = @floatFromInt(self.cellh_px * 3 / 4);
+            const sized = CTFontCreateCopyWithAttributes(font, target, null, null) orelse return null;
+            defer CFRelease(sized);
+            if (!CTFontGetGlyphsForCharacters(sized, &u16buf, &glyph_ids, @intCast(u16len))) return null;
+
+            const adv = CTFontGetAdvancesForGlyphs(sized, 0, &glyph_ids, null, 1);
+            var x: f64 = (@as(f64, @floatFromInt(slot_width)) - adv) / 2.0;
+            if (x < 0) x = 0;
+
+            @memset(self.color_scratch_data[0 .. self.scratch_w * 4 * self.cellh_px], 0);
+            const pos = [1]CGPoint{.{ .x = x, .y = CTFontGetDescent(sized) }};
+            CTFontDrawGlyphs(sized, &glyph_ids, &pos, 1, self.color_scratch);
+            return self.uploadColorSlot(slot_width);
+        }
+
         // Center the glyph's advance inside its slot.
         const adv = CTFontGetAdvancesForGlyphs(font, 0, &glyph_ids, null, 1);
         var x: f64 = (@as(f64, @floatFromInt(slot_width)) - adv) / 2.0;
@@ -263,6 +315,29 @@ pub const Renderer = struct {
         CTFontDrawGlyphs(font, &glyph_ids, &pos, 1, self.scratch);
 
         return self.uploadSlot(slot_width);
+    }
+
+    fn uploadColorSlot(self: *Renderer, slot_width: usize) ?GlyphLoc {
+        if (self.color_shelf_x + slot_width > atlas_px) {
+            self.color_shelf_x = 0;
+            self.color_shelf_y += self.cellh_px;
+        }
+        if (self.color_shelf_y + self.cellh_px > atlas_px) {
+            self.glyphs.clearRetainingCapacity();
+            self.color_shelf_x = 0;
+            self.color_shelf_y = 0;
+        }
+        const loc: GlyphLoc = .{ .uvx = @intCast(self.color_shelf_x), .uvy = @intCast(self.color_shelf_y), .color = true };
+        self.color_shelf_x += slot_width;
+
+        self.color_atlas.msgSend(void, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", .{
+            MTLRegion{ .x = loc.uvx, .y = loc.uvy, .z = 0, .w = slot_width, .h = self.cellh_px, .d = 1 },
+            @as(u64, 0),
+            @as(*const anyopaque, self.color_scratch_data),
+            @as(u64, self.scratch_w * 4),
+        });
+
+        return loc;
     }
 
     /// Shelf-allocate an atlas slot and upload the scratch bitmap into it.
@@ -413,6 +488,7 @@ pub const Renderer = struct {
 
         encoder.msgSend(void, "setRenderPipelineState:", .{self.fg_pso.value});
         encoder.msgSend(void, "setFragmentTexture:atIndex:", .{ self.atlas.value, @as(u64, 0) });
+        encoder.msgSend(void, "setFragmentTexture:atIndex:", .{ self.color_atlas.value, @as(u64, 1) });
         encoder.msgSend(void, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{ @as(u64, 4), @as(u64, 0), @as(u64, 4), n });
     }
 };

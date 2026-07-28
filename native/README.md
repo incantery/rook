@@ -65,8 +65,10 @@ the terminal core, `zig_objc` is ghostty's own pin.
 
 No scrollback view, no selection, cursor is a color swap, input is
 cooked NSEvent characters (upgrade path: `vt.input.encodeKey`), no
-window-close → quit delegate, no color emoji (alpha-only rasterization;
-needs an RGBA atlas pass), atlas-full policy is clear-and-rebuild,
+window-close → quit delegate, grapheme-cluster emoji (flags, ZWJ,
+skin tones) render blank — only a cell's first codepoint rasterizes;
+the cluster sits in RenderState Cell.grapheme awaiting CTLine-style
+shaping — atlas-full policy is clear-and-rebuild,
 glyphs render single-style (no bold/italic faces yet — the style flags
 are in `vt.Style.flags` when we want them), box-drawing sprite set
 covers light/heavy/rounded lines + blocks but not doubles/diagonals

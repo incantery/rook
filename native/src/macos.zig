@@ -278,7 +278,7 @@ pub const App = struct {
                         if (cp > 32) if (self.renderer.glyph(cp, false)) |loc| {
                             uvx = loc.uvx;
                             uvy = loc.uvy;
-                            flags = 1;
+                            flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
                         };
                         prev_wide = null;
                     },
@@ -287,7 +287,7 @@ pub const App = struct {
                         if (cp > 32) if (self.renderer.glyph(cp, true)) |loc| {
                             uvx = loc.uvx;
                             uvy = loc.uvy;
-                            flags = 1;
+                            flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
                             prev_wide = loc;
                         };
                     },
@@ -297,7 +297,7 @@ pub const App = struct {
                         if (prev_wide) |loc| {
                             uvx = loc.uvx + cellw_px;
                             uvy = loc.uvy;
-                            flags = 1;
+                            flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
                         }
                         prev_wide = null;
                     },
