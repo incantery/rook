@@ -468,6 +468,51 @@ fn asks(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("enter");
     try h.expectContains(try app.ctl("ask-answer"), "\"other\":\"widget\"", "free-text answers land in `other`");
 
+    // --- provenance and jump-to-source ---
+    // Two panes in different directories, so "focus moved" is provable
+    // rather than vacuous. The ask names one of them by cwd.
+    var deep_buf: [192]u8 = undefined;
+    const deep = try std.fmt.bufPrint(&deep_buf, "{s}/home", .{app.dirPath()});
+    _ = try app.ctl("split right");
+    const other_pane = try app.focusedPane();
+    _ = try app.ctlFmt("type cd {s}", .{deep});
+    _ = try app.ctl("enter");
+    // The cwd is read from the kernel per pane, so the shell has to have
+    // actually chdir'd before the jump can find it.
+    h.sleepMs(400);
+    _ = try app.ctl("focus left");
+    const home_pane = try app.focusedPane();
+    try h.expect(home_pane != other_pane, "two panes to choose between", .{});
+
+    var payload_buf: [512]u8 = undefined;
+    const payload = try std.fmt.bufPrint(&payload_buf,
+        \\ask {{"cwd":"{s}","questions":[{{"question":"Where from?","options":[{{"label":"ok"}}]}}]}}
+    , .{deep});
+    _ = try app.ctl(payload);
+    const prov = try app.ctl("sidepane");
+    try h.expectContains(prov, deep, "the form knows where the ask came from");
+
+    // ⌃G: focus the pane sitting in that directory. Not a dismissal —
+    // you jump to LOOK at what is being asked about, and the question
+    // has to still be there when you look back.
+    _ = try app.ctl("key 07");
+    try h.expectEq("jumped to the pane in the ask's cwd", other_pane, try app.focusedPane());
+    try h.expectContains(try app.ctl("sidepane"), "Where from?", "the question survived the jump");
+    // Focus went to the panes, so typing reaches the shell again.
+    _ = try app.ctl("type after-jump");
+    _ = try app.ctl("enter");
+    try app.waitTextCount("after-jump", 2, 5_000);
+    // …and the question is RECOVERABLE after stepping away from it.
+    // The form holds the ask while open, so the poller will not offer
+    // another — without a way back, a pending question would be alive
+    // but unreachable and the asker blocked with no way to answer.
+    _ = try app.ctl("run attention.inbox");
+    try h.expectContains(try app.ctl("sidepane"), "panel:attention", "switched away from the question");
+    _ = try app.ctl("run ask.show");
+    try h.expectContains(try app.ctl("sidepane"), "Where from?", "the pending question comes back");
+    _ = try app.ctl("enter");
+    try h.expectContains(try app.ctl("ask-answer"), "\"selected\":[\"ok\"]", "and is still answerable");
+
     // --- a label with characters that would break the JSON ---
     // A stray quote in a body the host rejects means the answer is lost
     // and the asker blocks forever, so this is the sharp edge.

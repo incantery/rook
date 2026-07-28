@@ -317,8 +317,41 @@ Things worth keeping if this is ever rewritten:
   pasteboard. **`ask-answer`** reports the last body the form produced,
   which is the thing worth asserting on.
 
-Not done: the ask does not yet say *which agent* is asking, and there is
-no jump-to-session. Both need `/agents/{id}` verbs.
+### Provenance and ⌃G
+
+A queued ask has no session to derive provenance from, so the asker
+carries **its cwd** — the one fact it always knows — and rook resolves
+the rest from it: which workspace contains it (the form says `from
+rook/zig`), and which pane is sitting in it.
+
+**⌃G jumps there.** With no host sessions to jump *to*, the link back is
+the asker's cwd against each pane's shell cwd, read from the kernel.
+Best match wins — an exact directory beats a parent, a deeper parent
+beats a shallower one — so the pane the agent is actually running in
+outranks a shell parked at the repo root. It does **not** dismiss the
+question: you jump to look at what is being asked about, and the form
+has to still be there when you look back.
+
+Three things that only showed up against a real host, and that a
+harness with no daemon structurally could not catch:
+
+- **`realpath` first.** `paneCwd` is the kernel's already-resolved path;
+  an asker under `/tmp` (a symlink to `/private/tmp` on macOS) reports
+  the unresolved one. Without normalising, the prefix match silently
+  never fires and ⌃G looks like it does nothing.
+- **The app must ACK.** `rookctl ask` short-polls for an ack and gives
+  up after 5s with "the app didn't pick up the ask — old rook version?".
+  The push path acked from the frame handler; a polling client has to do
+  it explicitly, or the asker dies on its deadline while the human is
+  still reading the question.
+- **A stepped-away question must be recoverable.** The form holds the
+  ask while open, so the poller will not offer another one — switching
+  panels or jumping to source without a way back leaves the question
+  alive but unreachable, and the asker blocked with no way to answer.
+  `ask.show` / `<leader>q` brings it back.
+
+Not done: the ask still cannot name the *agent* (as opposed to the
+directory) — that needs `/agents/{id}` verbs.
 
 ## The command registry (`src/registry.zig`)
 

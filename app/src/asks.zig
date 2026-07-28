@@ -35,6 +35,10 @@ const WireQuestion = struct {
 const WireAsk = struct {
     id: []const u8 = "",
     questions: []const WireQuestion = &.{},
+    /// Where the asker was. A queued ask has no session to derive
+    /// provenance from, so this one fact stands in for it — the app
+    /// resolves workspace and pane from the path.
+    cwd: []const u8 = "",
 };
 
 fn Text(comptime n: usize) type {
@@ -75,14 +79,17 @@ pub const Ask = struct {
     id: Text(24) = .{},
     questions: [max_questions]Question = @splat(.{}),
     n: usize = 0,
+    /// The asker's directory, or empty. Provenance and jump target both.
+    cwd: Text(200) = .{},
 };
 
 /// Build an Ask from a questions array — the payload's inner shape,
 /// shared by the poller and ctl's `ask` verb so the form is exercised
 /// through the same parse either way.
-pub fn fromQuestions(id: []const u8, qs: []const WireQuestion) ?Ask {
+pub fn fromQuestions(id: []const u8, cwd: []const u8, qs: []const WireQuestion) ?Ask {
     var a: Ask = .{};
     a.id.set(id);
+    a.cwd.set(cwd);
     for (qs) |wq| {
         if (a.n >= max_questions) break;
         var q: Question = .{};
@@ -109,15 +116,18 @@ pub fn fromQuestions(id: []const u8, qs: []const WireQuestion) ?Ask {
 /// Parse a `{"questions":[…]}` (or a bare `[…]`) payload. ctl's `ask`
 /// verb uses this to put a question on screen without a host, the same
 /// way `paste <text>` drives the paste path without a pasteboard.
-pub fn parsePayload(gpa: std.mem.Allocator, id: []const u8, body: []const u8) ?Ask {
-    const Outer = struct { questions: []const WireQuestion = &.{} };
+pub fn parsePayload(gpa: std.mem.Allocator, id: []const u8, cwd: []const u8, body: []const u8) ?Ask {
+    // The payload may carry its own `cwd`, mirroring the wire — that is
+    // how ctl injects provenance without a second verb argument.
+    const Outer = struct { questions: []const WireQuestion = &.{}, cwd: []const u8 = "" };
     if (std.json.parseFromSlice(Outer, gpa, body, .{ .ignore_unknown_fields = true })) |p| {
         defer p.deinit();
-        if (p.value.questions.len > 0) return fromQuestions(id, p.value.questions);
+        const src = if (p.value.cwd.len > 0) p.value.cwd else cwd;
+        if (p.value.questions.len > 0) return fromQuestions(id, src, p.value.questions);
     } else |_| {}
     const p = std.json.parseFromSlice([]const WireQuestion, gpa, body, .{ .ignore_unknown_fields = true }) catch return null;
     defer p.deinit();
-    return fromQuestions(id, p.value);
+    return fromQuestions(id, cwd, p.value);
 }
 
 /// Parse the queue. Returns the OLDEST pending ask, or null — one
@@ -134,7 +144,23 @@ pub fn poll(gpa: std.mem.Allocator, io: std.Io) ?Ask {
     if (parsed.value.len == 0) return null;
 
     const w = parsed.value[0];
-    return fromQuestions(w.id, w.questions);
+    return fromQuestions(w.id, w.cwd, w.questions);
+}
+
+/// Tell the host the question is on screen.
+///
+/// NOT optional: `rookctl ask` short-polls for an ack and gives up after
+/// 5s with "the app didn't pick up the ask — old rook version?". Without
+/// this the asker dies on its deadline while the human is still reading
+/// the question, and the answer they eventually give goes nowhere. The
+/// push path acked from the frame handler; a polling client has to do it
+/// explicitly. Found only by answering slowly against a real host.
+pub fn ack(gpa: std.mem.Allocator, io: std.Io, id: []const u8) void {
+    const info = hostc.readInfo(gpa, io) orelse return;
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/asks/{s}/ack", .{id}) catch return;
+    var resp = hostc.post(gpa, &info, path, "{}", 4 * 1024) orelse return;
+    resp.deinit(gpa);
 }
 
 /// POST an answer (or a dismissal). Blocking; background thread only.

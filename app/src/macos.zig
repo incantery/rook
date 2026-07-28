@@ -38,6 +38,11 @@ extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 const PROC_PIDVNODEPATHINFO: c_int = 9;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]const u8;
+/// Needed because paneCwd reads the KERNEL's path (already resolved) while
+/// an asker sends whatever its shell thinks its cwd is. On macOS /tmp is a
+/// symlink to /private/tmp, so those two disagree for any path under it and
+/// a prefix match silently never fires. Buffer must be >= PATH_MAX.
+extern "c" fn realpath(path: [*:0]const u8, resolved: [*]u8) ?[*:0]const u8;
 extern "c" fn _exit(code: c_int) noreturn;
 
 // libdispatch, for hopping to the main thread from the ctl socket.
@@ -1894,6 +1899,7 @@ pub const App = struct {
             .palette_commands => self.openCommandPalette(),
             .app_fullscreen => self.requestFullscreen(),
             .panel_attention => self.toggleSidePane(.attention),
+            .panel_ask => self.showPendingAsk(),
             .panel_flip => self.flipSidePane(),
         }
     }
@@ -2007,6 +2013,67 @@ pub const App = struct {
         self.dismissAskLocked();
     }
 
+    /// Jump to where an ask came from (⌃G).
+    ///
+    /// There is no session to jump TO — the app owns its ptys and the
+    /// queue is session-less — so the link back is the asker's cwd
+    /// against each pane's shell cwd, read from the kernel. Best match
+    /// wins: an exact directory beats a parent, and a deeper parent
+    /// beats a shallower one, so the pane the agent is actually running
+    /// in outranks the shell that happens to sit at the repo root.
+    ///
+    /// Deliberately does NOT dismiss the question. You jump to look at
+    /// what is being asked about, and the form has to still be there
+    /// when you look back.
+    fn askJumpLocked(self: *App) bool {
+        const a = self.ask orelse return false;
+        const raw = a.cwd.get();
+        if (raw.len == 0) return false;
+        // Resolve first: paneCwd is the kernel's already-resolved path,
+        // and an asker under /tmp (a symlink to /private/tmp on macOS)
+        // reports the unresolved one. Without this the prefix match
+        // silently never fires and ⌃G looks like it does nothing.
+        var rawz: [1024:0]u8 = undefined;
+        var resolved: [1024]u8 = undefined;
+        var want = raw;
+        if (raw.len < rawz.len) {
+            @memcpy(rawz[0..raw.len], raw);
+            rawz[raw.len] = 0;
+            if (realpath(&rawz, &resolved)) |r| want = std.mem.span(r);
+        }
+
+        var best: ?*panespkg.Pane = null;
+        var best_space: usize = 0;
+        var best_tab: usize = 0;
+        var best_score: usize = 0;
+        for (self.spaces.items, 0..) |s, si| {
+            for (s.tabs.items, 0..) |t, ti| {
+                for (t.panes.items) |p| {
+                    const c = self.paneCwd(p) orelse continue;
+                    const cwd = std.mem.span(c);
+                    // The pane's cwd must be the ask's directory or an
+                    // ancestor of it; score by how specific it is.
+                    if (!std.mem.startsWith(u8, want, cwd)) continue;
+                    if (want.len != cwd.len and cwd[cwd.len - 1] != '/' and want[cwd.len] != '/') continue;
+                    if (cwd.len <= best_score) continue;
+                    best = p;
+                    best_space = si;
+                    best_tab = ti;
+                    best_score = cwd.len;
+                }
+            }
+        }
+        const p = best orelse return false;
+        if (best_space != self.active_space) self.activateSpaceLocked(best_space);
+        const s = self.activeSpace();
+        if (best_tab != s.active_tab) self.activateTabLocked(best_tab);
+        self.setFocusLocked(p);
+        // The panes now own the keys — you asked to go look at something.
+        self.side_focus = false;
+        self.scene_dirty = true;
+        return true;
+    }
+
     /// ESC: the asker sees {"canceled":true} and exits 1. Deliberately a
     /// real answer rather than silence — a dismissal has to unblock the
     /// asker, or `rookctl ask` hangs until someone kills it.
@@ -2081,6 +2148,10 @@ pub const App = struct {
                 },
                 0x10 => self.ask_sel -|= 1, // ⌃P
                 0x0e => self.ask_sel = @min(self.ask_sel + 1, rows -| 1), // ⌃N
+                0x07 => { // ⌃G — go to where the ask came from
+                    _ = self.askJumpLocked();
+                    return;
+                },
                 0x7f, 0x08 => {
                     if (self.ask_text_len > 0) self.ask_text_len -= 1;
                 },
@@ -2138,6 +2209,24 @@ pub const App = struct {
             return;
         }
         self.askSubmitLocked();
+    }
+
+    /// Bring a pending question back to the front.
+    ///
+    /// Needed because the form HOLDS the ask while it is open, so the
+    /// poller will not offer another one — switching panels (or jumping
+    /// to source) without this leaves the question alive but unreachable,
+    /// and the asker blocked with no way to answer it. Found by writing
+    /// the e2e for the jump.
+    pub fn showPendingAsk(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        if (self.ask == null) return;
+        self.side_panel = .ask;
+        self.side_open = true;
+        self.side_focus = true;
+        self.relayoutLocked();
+        self.scene_dirty = true;
     }
 
     fn flipSidePane(self: *App) void {
@@ -3095,6 +3184,16 @@ pub const App = struct {
         const q = a.questions[self.ask_qi];
         const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - cw * 3, cw)));
 
+        // WHO is asking. Without it a question is a demand from nowhere,
+        // and with several agents running it is unanswerable — you cannot
+        // judge "ship it?" without knowing which repo is shipping.
+        if (a.cwd.len > 0) {
+            var srcbuf: [96]u8 = undefined;
+            const src = self.askSourceLabel(&srcbuf);
+            _ = ui.text(tx, y + (row_h - ch) / 2, src[0..@min(src.len, cols)], th.accent, bg);
+            y += row_h;
+        }
+
         // "2/3" when an ask has several questions — a form that hides how
         // much is left is a form people abandon.
         if (a.n > 1) {
@@ -3149,7 +3248,34 @@ pub const App = struct {
         }
         y += row_h * 2;
 
-        _ = ui.text(tx, y + (row_h - ch) / 2, if (q.multi) "space ticks · enter sends · esc dismisses" else "enter sends · esc dismisses", th.bar_fg, bg);
+        var hint: [96]u8 = undefined;
+        const h = std.fmt.bufPrint(&hint, "{s}enter sends · esc dismisses{s}", .{
+            @as([]const u8, if (q.multi) "space ticks · " else ""),
+            @as([]const u8, if (a.cwd.len > 0) " · ^G goes there" else ""),
+        }) catch "enter sends · esc dismisses";
+        _ = ui.text(tx, y + (row_h - ch) / 2, h[0..@min(h.len, cols)], th.bar_fg, bg);
+    }
+
+    /// How to name where an ask came from. A workspace name if the cwd is
+    /// inside one — that is the word a human thinks in — else the tail of
+    /// the path, which is still more use than the whole thing truncated
+    /// at the wrong end. Caller holds draw_lock.
+    pub fn askSourceLabel(self: *App, buf: []u8) []const u8 {
+        const a = self.ask orelse return "";
+        const cwd = a.cwd.get();
+        if (cwd.len == 0) return "";
+        for (self.pal_items) |e| {
+            if (e.root.len == 0) continue;
+            if (!std.mem.startsWith(u8, cwd, e.root)) continue;
+            if (cwd.len != e.root.len and cwd[e.root.len] != '/') continue;
+            // Inside a known workspace: name it, and say how deep only
+            // when that adds something.
+            if (cwd.len == e.root.len)
+                return std.fmt.bufPrint(buf, "from {s}", .{e.name}) catch e.name;
+            return std.fmt.bufPrint(buf, "from {s}{s}", .{ e.name, cwd[e.root.len..] }) catch e.name;
+        }
+        const tail = if (cwd.len > 48) cwd[cwd.len - 48 ..] else cwd;
+        return std.fmt.bufPrint(buf, "from {s}{s}", .{ @as([]const u8, if (tail.len < cwd.len) "…" else ""), tail }) catch cwd;
     }
 
     /// Word-wrap into the panel. Returns the y after the last line.
@@ -3842,8 +3968,13 @@ fn asksThread(app: *App) void {
                 app.draw_lock.lock();
                 // Re-check under the lock: the form may have taken one
                 // while we were on the wire.
-                if (app.ask == null) app.presentAskLocked(a);
+                const took = app.ask == null;
+                if (took) app.presentAskLocked(a);
                 app.draw_lock.unlock();
+                // Ack OUTSIDE the lock, and only if we actually took it.
+                // rookctl gives up after 5s without one, so a question
+                // the human is still reading would kill its asker.
+                if (took) asks.ack(app.gpa, app.io, a.id.get());
             }
         }
 

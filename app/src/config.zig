@@ -406,6 +406,8 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     kb.bind('z', .{ .action = .pane_zoom });
     // The attention inbox — the wails app's <leader>a, kept.
     kb.bind('a', .{ .action = .panel_attention });
+    // …and back to a question you stepped away from.
+    kb.bind('q', .{ .action = .panel_ask });
 
     var pathbuf: [1024]u8 = undefined;
     const path = cfgPath(&pathbuf) orelse return kb;

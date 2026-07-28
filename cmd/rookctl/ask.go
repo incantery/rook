@@ -55,12 +55,19 @@ func askQuestions(input []byte) (json.RawMessage, error) {
 // path delivered it.
 func blockingAsk(c *client, session string, questions json.RawMessage) (json.RawMessage, error) {
 	path := "/asks"
+	body := map[string]any{"questions": questions}
 	if session != "" {
 		path = "/sessions/" + session + "/ask"
+	} else {
+		// Provenance for a queued ask, which has no session to derive it
+		// from: the app shows where the question came from and can jump
+		// there. Best-effort — a cwd we cannot read is not a reason to
+		// fail an ask.
+		if wd, err := os.Getwd(); err == nil {
+			body["cwd"] = wd
+		}
 	}
-	out, err := c.req("POST", path, map[string]any{
-		"questions": questions,
-	})
+	out, err := c.req("POST", path, body)
 	if err != nil {
 		return nil, err
 	}

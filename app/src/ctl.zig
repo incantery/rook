@@ -348,7 +348,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         // bare […], through the SAME parse the poller uses, so the form
         // is never exercised by a second code path.
         const asks = @import("asks.zig");
-        if (asks.parsePayload(app.gpa, "ctl", rest)) |a| {
+        if (asks.parsePayload(app.gpa, "ctl", "", rest)) |a| {
             app.presentAsk(a);
             reply(fd, "ok\n");
         } else reply(fd, "err bad questions JSON\n");
@@ -398,13 +398,17 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                 .ask => {
                     if (app.ask) |a| {
                         const q = a.questions[app.ask_qi];
-                        w.print("ask:{s} q:{d}/{d}{s}\n{s}\n", .{
+                        w.print("ask:{s} q:{d}/{d}{s}\n", .{
                             a.id.get(),
                             app.ask_qi + 1,
                             a.n,
                             @as([]const u8, if (q.multi) " multi" else ""),
-                            q.text.get(),
                         }) catch {};
+                        if (a.cwd.len > 0) {
+                            var srcbuf: [96]u8 = undefined;
+                            w.print("{s} ({s})\n", .{ app.askSourceLabel(&srcbuf), a.cwd.get() }) catch {};
+                        }
+                        w.print("{s}\n", .{q.text.get()}) catch {};
                         for (q.options[0..q.n], 0..) |o, i| {
                             w.print("{s}{s} {s}\n", .{
                                 @as([]const u8, if (i == app.ask_sel) "*" else " "),

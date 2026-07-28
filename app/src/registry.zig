@@ -45,6 +45,10 @@ pub const Action = enum {
     app_fullscreen,
     /// Toggle the side pane holding the attention inbox.
     panel_attention,
+    /// Bring a pending question back. Without this, switching panels
+    /// while an ask is open strands it: the form still holds the ask, so
+    /// the poller will not offer another, and nothing shows it.
+    panel_ask,
     /// Move the side pane to the other edge — panels are placement-
     /// agnostic, so this is a property of the container, not the tenant.
     panel_flip,
@@ -88,6 +92,7 @@ pub const commands = [_]Command{
     .{ .id = "palette.commands", .title = "Command Palette", .category = "App", .action = .palette_commands, .keys = "⌘K" },
     .{ .id = "app.fullscreen", .title = "Toggle Fullscreen", .category = "App", .action = .app_fullscreen },
     .{ .id = "attention.inbox", .title = "Attention Inbox", .category = "Panel", .action = .panel_attention, .keys = "<leader>a" },
+    .{ .id = "ask.show", .title = "Show Pending Question", .category = "Panel", .action = .panel_ask, .keys = "<leader>q" },
     .{ .id = "panel.flip", .title = "Move Side Pane to Other Edge", .category = "Panel", .action = .panel_flip },
 };
 

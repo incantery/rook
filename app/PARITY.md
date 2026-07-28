@@ -245,8 +245,25 @@ Ranked by how much of rook's identity dies without it.
       option); ESC posts a real `{"canceled":true}` because silence
       leaves the asker blocked forever; JSON escaping has its own test
       root because a stray quote in a label loses the answer.
-- [ ] Ask provenance: which agent is asking, and jump-to-session from
-      the form. Needs `/agents/{id}` verbs.
+- [x] Ask provenance + jump-to-source. A queued ask has no session to
+      derive provenance from, so the asker carries its CWD — the one
+      fact it always knows — and rook resolves workspace and pane from
+      it. ⌃G focuses the pane whose shell cwd best matches (exact beats
+      parent, deeper parent beats shallower, so the pane the agent runs
+      in outranks a shell at the repo root) and deliberately does NOT
+      dismiss: you jump to look, and the form must still be there.
+      THREE BUGS ONLY A REAL HOST COULD SHOW, none of them visible to a
+      sandbox with no daemon: (1) `realpath` the asker's cwd first —
+      paneCwd is the kernel's resolved path and /tmp is a symlink to
+      /private/tmp, so the prefix match silently never fired; (2) the
+      app MUST POST /asks/{id}/ack — rookctl gives up after 5s, so the
+      asker died on its deadline while the human was still reading (the
+      push path acked from the frame handler; a poller has to do it
+      explicitly); (3) the form HOLDS the ask while open, so switching
+      panels stranded a live question with no way back — `ask.show` /
+      `<leader>q` recovers it.
+- [ ] Name the AGENT, not just the directory, in an ask. Needs
+      `/agents/{id}` verbs.
 - [~] **Attention inbox** (`/attention`, `<leader>a`) — the "what needs
       me" queue that makes the app worth leaving open. LISTS today, as
       the side pane's first tenant (`src/attention.zig`, shaped after

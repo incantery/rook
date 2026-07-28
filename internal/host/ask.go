@@ -49,6 +49,11 @@ type askState struct {
 	// the questions themselves, for the session-LESS queue: a polling app
 	// has no frame to be re-pushed, so GET /asks serves these directly.
 	questions json.RawMessage
+	// where the ask came from. A session-scoped ask derives provenance
+	// from its session; a queued one has none, so the asker carries its
+	// cwd and the app resolves the rest (which workspace contains it,
+	// which pane is sitting in it) from that one fact.
+	cwd string
 	// the doorbell was due and could not ring — no live claude claim owned
 	// the window at settle time. The answer is sitting in the drain with
 	// nobody who knows to read it, so the next claim on this session rings
@@ -372,6 +377,7 @@ func (h *Host) handleAskQueue(w http.ResponseWriter, r *http.Request) {
 		type pending struct {
 			ID        string          `json:"id"`
 			Questions json.RawMessage `json:"questions"`
+			Cwd       string          `json:"cwd,omitempty"`
 			Session   string          `json:"session,omitempty"`
 		}
 		out := make([]pending, 0, len(h.asks))
@@ -385,7 +391,7 @@ func (h *Host) handleAskQueue(w http.ResponseWriter, r *http.Request) {
 			if a.session != "" {
 				continue
 			}
-			out = append(out, pending{ID: id, Questions: a.questions})
+			out = append(out, pending{ID: id, Questions: a.questions, Cwd: a.cwd})
 		}
 		h.askMu.Unlock()
 		// Oldest first is the /attention rule and the right one here too:
@@ -397,6 +403,10 @@ func (h *Host) handleAskQueue(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Questions json.RawMessage `json:"questions"`
 			Notify    bool            `json:"notify"`
+			// Optional provenance: the directory the asker was in. The
+			// app resolves workspace and pane from it — one fact the
+			// asker always knows, rather than an identity it may not.
+			Cwd string `json:"cwd"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Questions) == 0 {
 			http.Error(w, "questions required", http.StatusBadRequest)
@@ -418,6 +428,7 @@ func (h *Host) handleAskQueue(w http.ResponseWriter, r *http.Request) {
 		st := &askState{
 			notify:    req.Notify,
 			questions: req.Questions,
+			cwd:       req.Cwd,
 			doneCh:    make(chan struct{}),
 			created:   time.Now(),
 		}
