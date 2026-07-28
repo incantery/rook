@@ -191,6 +191,11 @@ pub const App = struct {
     drag_pane: ?*panespkg.Pane = null,
     drag_anchor: [2]u16 = .{ 0, 0 },
 
+    /// Mid-drag mouse-reporting state: the press went to the app (SGR
+    /// or legacy), so motion and release follow it there too.
+    drag_report: bool = false,
+    drag_last_cell: [2]u16 = .{ 0, 0 },
+
     /// Active separator drag: the split being resized and its union
     /// rect (ratio = pointer position within it). Cleared by reap
     /// (tree mutation invalidates the pointer) and on mouse-up.
@@ -443,7 +448,7 @@ pub const App = struct {
 
     /// A click in scene px coords: tab chips select, panes focus.
     /// Shared by the NSEvent monitor and ctl \`click\` (blind-testable).
-    pub fn clickAt(self: *App, x: f32, y: f32) void {
+    pub fn clickAt(self: *App, x: f32, y: f32, local: bool) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         if (y < self.tab_h) {
@@ -467,15 +472,50 @@ pub const App = struct {
             if (x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h) {
                 self.setFocusLocked(p);
                 if (p.term()) |tm| {
+                    const cell = self.cellAt(p, x, y);
+                    const mm = tm.session.mouseMode();
+                    if (!local and mm.mode != .none) {
+                        // The app owns the mouse (shift forces local).
+                        sendMouse(tm, 0, cell, true, mm.sgr);
+                        self.drag_pane = p;
+                        self.drag_report = true;
+                        self.drag_last_cell = cell;
+                        break;
+                    }
                     // A fresh click clears the old selection and
                     // anchors a possible drag.
                     tm.session.clearSelection();
                     self.drag_pane = p;
-                    self.drag_anchor = self.cellAt(p, x, y);
+                    self.drag_report = false;
+                    self.drag_anchor = cell;
                 }
                 break;
             }
         }
+    }
+
+    /// Encode one mouse event to the pty — SGR (1006) or legacy X10
+    /// bytes. btn: 0 left, 3 release(legacy), 32+ motion, 64/65 wheel.
+    fn sendMouse(tm: *panespkg.Term, btn: u8, cell: [2]u16, press: bool, sgr: bool) void {
+        var buf: [32]u8 = undefined;
+        if (sgr) {
+            const seq = std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{
+                btn,
+                cell[0] + 1,
+                cell[1] + 1,
+                @as(u8, if (press) 'M' else 'm'),
+            }) catch return;
+            tm.session.write(seq);
+            return;
+        }
+        if (cell[0] > 222 or cell[1] > 222) return;
+        buf[0] = 0x1b;
+        buf[1] = '[';
+        buf[2] = 'M';
+        buf[3] = 32 +% (if (press) btn else 3);
+        buf[4] = 33 +% @as(u8, @intCast(cell[0]));
+        buf[5] = 33 +% @as(u8, @intCast(cell[1]));
+        tm.session.write(buf[0..6]);
     }
 
     fn cellAt(self: *App, p: *panespkg.Pane, x: f32, y: f32) [2]u16 {
@@ -506,12 +546,29 @@ pub const App = struct {
         const p = self.drag_pane orelse return;
         const tm = p.term() orelse return;
         const cur = self.cellAt(p, x, y);
+        if (self.drag_report) {
+            if (cur[0] == self.drag_last_cell[0] and cur[1] == self.drag_last_cell[1]) return;
+            self.drag_last_cell = cur;
+            const mm = tm.session.mouseMode();
+            // Motion only for button-event (1002) / any-event (1003).
+            if (mm.mode == .button or mm.mode == .any) {
+                sendMouse(tm, 32, cur, true, mm.sgr);
+            }
+            return;
+        }
         tm.session.setSelection(self.drag_anchor[0], self.drag_anchor[1], cur[0], cur[1]);
     }
 
     pub fn dragEnd(self: *App) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
+        if (self.drag_report) {
+            if (self.drag_pane) |p| if (p.term()) |tm| {
+                const mm = tm.session.mouseMode();
+                sendMouse(tm, 0, self.drag_last_cell, false, mm.sgr);
+            };
+            self.drag_report = false;
+        }
         self.drag_pane = null;
         self.drag_split = null;
     }
@@ -564,6 +621,16 @@ pub const App = struct {
                     self.scene_dirty = true;
                 },
                 .term => |*tm| {
+                    const mm = tm.session.mouseMode();
+                    if (mm.mode != .none) {
+                        // Wheel events to the app: 64 up, 65 down.
+                        const cell = self.cellAt(p, x, y);
+                        const btn: u8 = if (lines > 0) 64 else 65;
+                        var n: i64 = if (lines < 0) -lines else lines;
+                        if (n > 10) n = 10;
+                        while (n > 0) : (n -= 1) sendMouse(tm, btn, cell, true, mm.sgr);
+                        break;
+                    }
                     const alt = tm.session.term.screens.active_key == .alternate;
                     if (alt) {
                         // Alt-screen apps take arrows (vim/less).
@@ -1645,6 +1712,10 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
 /// wheel scrolls the pane under the cursor — alt-screen terminals get
 /// arrow keys (vim/less), editors scroll their viewport, primary-
 /// screen terminal scrollback arrives with the scrollback slice.
+fn flags_shift(event: objc.Object) bool {
+    return event.msgSend(u64, "modifierFlags", .{}) & flag_shift != 0;
+}
+
 fn mouseCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) callconv(.c) objc.c.id {
     const app: *App = context.app;
     const event = objc.Object.fromId(event_id);
@@ -1659,7 +1730,9 @@ fn mouseCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) call
     if (y < 0 or y > app.px_h or x < 0 or x > app.px_w) return event_id; // titlebar etc.
 
     if (etype == 1) { // NSEventTypeLeftMouseDown
-        app.clickAt(x, y);
+        // Shift forces LOCAL handling (selection) when an app owns
+        // the mouse — the terminal convention.
+        app.clickAt(x, y, flags_shift(event));
         return null;
     }
     if (etype == 6) { // NSEventTypeLeftMouseDragged

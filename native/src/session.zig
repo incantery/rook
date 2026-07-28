@@ -90,6 +90,27 @@ pub const Session = struct {
         }
     }
 
+    pub const MouseMode = enum { none, x10, normal, button, any };
+
+    /// What mouse tracking the foreground app asked for (DECSET
+    /// 9/1000/1002/1003) and whether it wants SGR encoding (1006).
+    pub fn mouseMode(self: *Session) struct { mode: MouseMode, sgr: bool } {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const m = &self.term.modes;
+        const mode: MouseMode = if (m.get(.mouse_event_any))
+            .any
+        else if (m.get(.mouse_event_button))
+            .button
+        else if (m.get(.mouse_event_normal))
+            .normal
+        else if (m.get(.mouse_event_x10))
+            .x10
+        else
+            .none;
+        return .{ .mode = mode, .sgr = m.get(.mouse_format_sgr) };
+    }
+
     /// Replace the selection with viewport-coord cells a→b (inclusive
     /// cells; either order). Any thread.
     pub fn setSelection(self: *Session, ax: u16, ay: u16, bx: u16, by: u16) void {

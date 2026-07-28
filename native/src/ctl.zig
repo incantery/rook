@@ -232,7 +232,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             reply(fd, "err click <x_px> <y_px>\n");
             return;
         }
-        app.clickAt(x, y);
+        app.clickAt(x, y, false);
         reply(fd, "ok\n");
     } else if (std.mem.eql(u8, verb, "close") and rest.len == 0) {
         app.closeFocused(); // \u2318W's path
@@ -248,7 +248,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             reply(fd, "err drag <x1> <y1> <x2> <y2>\n");
             return;
         }
-        app.clickAt(x1, y1);
+        app.clickAt(x1, y1, true); // local: the blind selection tool
         app.dragTo(x2, y2);
         app.dragEnd();
         reply(fd, "ok\n");
