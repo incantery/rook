@@ -7,7 +7,7 @@ and became a list of debts, ordered by how much of rook's identity each
 one holds. Editor items are deliberately ranked LAST: the zig editor's
 job today is to get out of neovim's way, and it already does.
 
-Status as of 2026-07-28, shipped in v0.38.1.
+Status as of 2026-07-28, shipped in v0.38.2.
 
 ## The decision that shapes the whole list
 
@@ -124,10 +124,14 @@ a daily driver.
       which would push a bottom-of-buffer hit clean off the viewport.
       Drops itself if a program swaps to the alt screen under it —
       results from the primary shown over the alternate are nonsense.
-      Uses the BLOCKING `searchAll`; the library also has tick/feed for
-      a background thread, which is what to reach for if scrollback ever
-      grows (see below). ctl `search` reports state; `press RET`/`BS`
-      drive the prompt through the real key path.
+      Uses the BLOCKING `searchAll`. Measured at the 10MB scrollback
+      below (12,408 rows), a full SCAN is free — it finishes inside the
+      ctl round-trip. What costs is the number of MATCHES, not the size
+      of the buffer (~500ms for a needle hitting every row, since each
+      hit builds its own tracked highlight), and that is a degenerate
+      search on an explicit Enter. The library's tick/feed path is what
+      to reach for if that ever stops being true. ctl `search` reports
+      state; `press RET`/`BS` drive the prompt through the real key path.
 - [x] **Scrollback: 10MB per pane**, `scrollback = "10mb"` (bytes, with
       kb/mb/gb suffixes; `scrollback-limit` accepted as ghostty spells
       it; 0 = none). Was ~930 rows — `Session.start` never passed
