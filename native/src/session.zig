@@ -57,8 +57,12 @@ pub const Session = struct {
     /// the app can render an echo immediately instead of waiting for the
     /// next display-link tick. The callee gates on pending input to keep
     /// firehose output coalesced (the wake-per-KB lesson).
-    kick: ?*const fn (*anyopaque) void = null,
+    kick: ?*const fn (*anyopaque, *Session) void = null,
     kick_ctx: *anyopaque = undefined,
+
+    /// Set by the reader thread when the child side goes away (shell
+    /// exited). The app collapses the pane on its next frame.
+    exited: std.atomic.Value(bool) = .init(false),
 
     // Geometry for XTWINOPS size reports; updated by resize().
     cols: u16,
@@ -102,6 +106,18 @@ pub const Session = struct {
         return self;
     }
 
+    /// Tear down after exited flips true. Joins the reader thread (which
+    /// is past its loop by then), reaps the child, closes the pty, frees
+    /// the terminal. NEVER call from the reader thread itself — collapse
+    /// runs on the display-link tick, which also makes joining safe.
+    pub fn deinit(self: *Session) void {
+        if (self.thread) |t| t.join();
+        _ = ptypkg.Pty.wait(self.pid);
+        self.pty.deinit();
+        self.term.deinit(self.gpa);
+        self.gpa.destroy(self);
+    }
+
     fn readLoop(self: *Session) void {
         var handler = self.term.vtHandler();
         handler.effects = .{
@@ -129,8 +145,12 @@ pub const Session = struct {
             self.mutex.lock();
             stream.nextSlice(buf[0..n]);
             self.mutex.unlock();
-            if (self.kick) |k| k(self.kick_ctx);
+            if (self.kick) |k| k(self.kick_ctx, self);
         }
+        // Child gone. No kick here: the display link ticks at 120fps and
+        // collapses the pane on its next pass — kicking from this thread
+        // would let collapse (and our own join) run on the dying thread.
+        self.exited.store(true, .release);
     }
 
     fn fromHandler(h: *Handler) *Session {

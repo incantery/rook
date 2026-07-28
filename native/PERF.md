@@ -26,6 +26,7 @@ session, no scrollback viewer yet — re-run as features land.
 | sustained pipeline throughput | **190 MB/s** | `yes` full-width lines, parse→glass |
 | present interval p50=p95=p99 | **8333 µs** | firehose — 120fps, zero wobble |
 | `time cat` 150MB ascii | **0.90–0.92 s** | base64 corpus, in-app shell |
+| `time cat` 150MB, TWO panes | **0.904 s** | same 67×42 grid + a live idle split beside it |
 | idle frames / GPU work | **0** | dirty-skip: 600 ticks, 0 drawn |
 | RSS | **88 MB** | after all benches |
 | frame update/fill/encode p50 | 4 / 56 / 37 µs | firehose, per drawn frame |
@@ -47,6 +48,12 @@ faster than 1.3.1 (Mitchell's M4 Max table has it at 0.575s — different
 machine), and rookz currently does less per cell (no selection layer, no
 scrollback viewer, single style face). Re-run this A/B every time a
 feature lands that touches the render path.
+
+First re-run under that rule — splits (2026-07-27, the scene refactor:
+panes, N sessions, per-region draws): cat into a 67×42 pane with a
+second live pane alongside = **0.904s**, quiet-keys key→photon
+16.6/26.9ms p50/p95, fill p50 55µs, RSS 88MB. The chrome is free so
+far.
 
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max

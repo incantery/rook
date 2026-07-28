@@ -8,11 +8,17 @@
 //!   printf 'shot /tmp/s.png\n' | nc -U /tmp/rookz.sock   # own-pixels PNG
 //!   printf 'quit\n'            | nc -U /tmp/rookz.sock
 //!
+//! Panes: `panes` lists them; `split right|down` splits the focused
+//! pane; `focus <id|left|right|up|down>` moves focus; dump/type/enter/
+//! ctrlc/key default to the focused pane and take an `@<id>` suffix to
+//! target another (`dump@2`, `type@3 ls`).
+//!
 //! `shot` reads back our own CAMetalLayer drawable — no screen-recording
 //! permission, works occluded or on another Space.
 
 const std = @import("std");
 const macos = @import("macos.zig");
+const panespkg = @import("panes.zig");
 const stats = @import("stats.zig");
 
 extern "c" fn CACurrentMediaTime() f64;
@@ -95,37 +101,121 @@ fn reply(fd: c_int, bytes: []const u8) void {
     }
 }
 
+/// Resolve a pane by id, or the focused pane when id is null. Caller
+/// holds app.draw_lock.
+fn findPane(app: *macos.App, pane_id: ?u32) ?*panespkg.Pane {
+    const id = pane_id orelse return app.focused;
+    for (app.panes.items) |p| {
+        if (p.id == id) return p;
+    }
+    return null;
+}
+
+/// Write input bytes to a pane's pty under the scene lock. Only writes
+/// to the FOCUSED pane arm the key-to-photon mark — a background pane's
+/// echo must not be measured as input latency.
+fn writeTarget(app: *macos.App, pane_id: ?u32, bytes: []const u8) bool {
+    app.draw_lock.lock();
+    defer app.draw_lock.unlock();
+    const p = findPane(app, pane_id) orelse return false;
+    if (p == app.focused) app.markInput(CACurrentMediaTime());
+    p.session.write(bytes);
+    return true;
+}
+
 fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
-    if (std.mem.eql(u8, line, "dump")) {
-        app.session.mutex.lock();
-        const str = app.session.term.plainString(app.gpa) catch {
-            app.session.mutex.unlock();
+    // Split off the verb and an optional @<id> pane suffix.
+    const sp = std.mem.indexOfScalar(u8, line, ' ');
+    const verb_full = if (sp) |i| line[0..i] else line;
+    const rest = if (sp) |i| line[i + 1 ..] else "";
+    var verb = verb_full;
+    var pane_id: ?u32 = null;
+    if (std.mem.indexOfScalar(u8, verb_full, '@')) |at| {
+        verb = verb_full[0..at];
+        pane_id = std.fmt.parseInt(u32, verb_full[at + 1 ..], 10) catch {
+            reply(fd, "err pane id\n");
+            return;
+        };
+    }
+
+    if (std.mem.eql(u8, verb, "dump") and rest.len == 0) {
+        app.draw_lock.lock();
+        const p = findPane(app, pane_id) orelse {
+            app.draw_lock.unlock();
+            reply(fd, "err no pane\n");
+            return;
+        };
+        p.session.mutex.lock();
+        const str = p.session.term.plainString(app.gpa) catch {
+            p.session.mutex.unlock();
+            app.draw_lock.unlock();
             reply(fd, "err dump\n");
             return;
         };
-        app.session.mutex.unlock();
-        defer app.gpa.free(str);
+        p.session.mutex.unlock();
         var head: [64]u8 = undefined;
-        const h = std.fmt.bufPrint(&head, "grid {d}x{d}\n", .{ app.cols, app.rows }) catch return;
+        const h = std.fmt.bufPrint(&head, "pane {d} grid {d}x{d}\n", .{ p.id, p.cols, p.rows }) catch {
+            app.draw_lock.unlock();
+            app.gpa.free(str);
+            return;
+        };
+        app.draw_lock.unlock();
+        defer app.gpa.free(str);
         reply(fd, h);
         reply(fd, str);
         reply(fd, "\n");
-    } else if (std.mem.startsWith(u8, line, "type ")) {
-        app.markInput(CACurrentMediaTime());
-        app.session.write(line[5..]);
-        reply(fd, "ok\n");
-    } else if (std.mem.eql(u8, line, "enter")) {
-        app.markInput(CACurrentMediaTime());
-        app.session.write("\r");
-        reply(fd, "ok\n");
-    } else if (std.mem.eql(u8, line, "ctrlc")) {
-        app.markInput(CACurrentMediaTime());
-        app.session.write("\x03");
-        reply(fd, "ok\n");
-    } else if (std.mem.startsWith(u8, line, "key ")) {
+    } else if (std.mem.eql(u8, verb, "panes") and rest.len == 0) {
+        var buf: [2048]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        app.draw_lock.lock();
+        for (app.panes.items) |p| {
+            w.print("{s}{d} rect {d}x{d}+{d}+{d} grid {d}x{d}\n", .{
+                @as([]const u8, if (p == app.focused) "*" else " "),
+                p.id,
+                @as(u32, @intFromFloat(p.rect.w)),
+                @as(u32, @intFromFloat(p.rect.h)),
+                @as(u32, @intFromFloat(p.rect.x)),
+                @as(u32, @intFromFloat(p.rect.y)),
+                p.cols,
+                p.rows,
+            }) catch break;
+        }
+        app.draw_lock.unlock();
+        reply(fd, buf[0..w.end]);
+    } else if (std.mem.eql(u8, verb, "split")) {
+        if (std.mem.eql(u8, rest, "right")) {
+            app.splitFocused(true);
+            reply(fd, "ok\n");
+        } else if (std.mem.eql(u8, rest, "down")) {
+            app.splitFocused(false);
+            reply(fd, "ok\n");
+        } else reply(fd, "err split right|down\n");
+    } else if (std.mem.eql(u8, verb, "focus")) {
+        const dir: ?panespkg.NavDir = if (std.mem.eql(u8, rest, "left"))
+            .left
+        else if (std.mem.eql(u8, rest, "right"))
+            .right
+        else if (std.mem.eql(u8, rest, "up"))
+            .up
+        else if (std.mem.eql(u8, rest, "down"))
+            .down
+        else
+            null;
+        if (dir) |d| {
+            reply(fd, if (app.focusMove(d)) "ok\n" else "err edge\n");
+        } else if (std.fmt.parseInt(u32, rest, 10) catch null) |id| {
+            reply(fd, if (app.focusById(id)) "ok\n" else "err no pane\n");
+        } else reply(fd, "err focus <id|left|right|up|down>\n");
+    } else if (std.mem.eql(u8, verb, "type") and rest.len > 0) {
+        reply(fd, if (writeTarget(app, pane_id, rest)) "ok\n" else "err no pane\n");
+    } else if (std.mem.eql(u8, verb, "enter") and rest.len == 0) {
+        reply(fd, if (writeTarget(app, pane_id, "\r")) "ok\n" else "err no pane\n");
+    } else if (std.mem.eql(u8, verb, "ctrlc") and rest.len == 0) {
+        reply(fd, if (writeTarget(app, pane_id, "\x03")) "ok\n" else "err no pane\n");
+    } else if (std.mem.eql(u8, verb, "key") and rest.len > 0) {
         // Raw escape injection: `key 1b5b41` (hex bytes).
         var bytes: [64]u8 = undefined;
-        const hex = line[4..];
+        const hex = rest;
         if (hex.len / 2 > bytes.len or hex.len % 2 != 0) {
             reply(fd, "err hex\n");
             return;
@@ -134,9 +224,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             reply(fd, "err hex\n");
             return;
         };
-        app.markInput(CACurrentMediaTime());
-        app.session.write(out);
-        reply(fd, "ok\n");
+        reply(fd, if (writeTarget(app, pane_id, out)) "ok\n" else "err no pane\n");
     } else if (std.mem.startsWith(u8, line, "shot ")) {
         if (app.requestShot(line[5..])) {
             // Wait for the render thread to service it (≤2s).
@@ -168,6 +256,6 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         reply(fd, "ok\n");
         _exit(0);
     } else {
-        reply(fd, "err unknown (dump|type <s>|enter|ctrlc|key <hex>|shot <path>|winsize <w> <h>|quit)\n");
+        reply(fd, "err unknown (panes|split right|down|focus <id|dir>|dump[@id]|type[@id] <s>|enter[@id]|ctrlc[@id]|key[@id] <hex>|shot <path>|winsize <w> <h>|stats|quit)\n");
     }
 }

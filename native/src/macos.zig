@@ -1,13 +1,20 @@
 //! AppKit + Metal shell for rookz. Pure Zig via zig-objc — no Swift, no nib.
 //! The window owns a CAMetalLayer; a CVDisplayLink drives rendering off the
-//! main thread (ghostty's renderer-thread shape). A live shell session runs
-//! underneath: pty → ghostty-vt → RenderState → instanced Metal grid.
+//! main thread (ghostty's renderer-thread shape). The frame is a SCENE:
+//! a binary split tree of panes (pty → ghostty-vt → RenderState each),
+//! drawn as N grid regions + separator rects from one pipeline.
+//!
+//! Threading: draw_lock serializes every scene reader/mutator — display
+//! link, input kick, key monitor, resize observer, ctl socket. Lock
+//! order is always draw_lock → session mutex, and the reader thread
+//! never holds its session mutex when it takes draw_lock (via kick).
 
 const std = @import("std");
 const objc = @import("objc");
 const vt = @import("ghostty-vt");
 const sessionpkg = @import("session.zig");
 const renderpkg = @import("render.zig");
+const panespkg = @import("panes.zig");
 const stats = @import("stats.zig");
 
 extern "c" fn CACurrentMediaTime() f64;
@@ -19,6 +26,7 @@ const MTLClearColor = extern struct { r: f64, g: f64, b: f64, a: f64 };
 
 extern "c" fn MTLCreateSystemDefaultDevice() objc.c.id;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn _exit(code: c_int) noreturn;
 
 // libdispatch, for hopping to the main thread from the ctl socket.
 // dispatch_get_main_queue() is a macro for &_dispatch_main_q.
@@ -33,9 +41,15 @@ extern "c" fn CVDisplayLinkSetOutputCallback(link: CVDisplayLinkRef, cb: *const 
 extern "c" fn CVDisplayLinkStart(link: CVDisplayLinkRef) i32;
 
 const NSEventMaskKeyDown: u64 = 1 << 10;
+const flag_shift: u64 = 1 << 17;
+const flag_ctrl: u64 = 1 << 18;
+const flag_cmd: u64 = 1 << 20;
 
 const win_w: f64 = 1024;
 const win_h: f64 = 700;
+
+const sep_color: [4]u8 = .{ 60, 60, 68, 255 };
+const accent_color: [4]u8 = .{ 122, 162, 247, 255 };
 
 fn nsString(s: [*:0]const u8) objc.Object {
     const NSString = objc.getClass("NSString").?;
@@ -49,16 +63,31 @@ const CompletedBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 
 pub const App = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     app: objc.Object,
     window: objc.Object,
     layer: objc.Object,
     device: objc.Object,
     queue: objc.Object,
     renderer: renderpkg.Renderer,
-    session: *sessionpkg.Session,
-    rs: vt.RenderState = .empty,
-    cols: u32,
-    rows: u32,
+    shell: [*:0]const u8,
+
+    // The scene. Mutated only under draw_lock.
+    panes: std.ArrayListUnmanaged(*panespkg.Pane) = .empty,
+    root: panespkg.Node,
+    focused: *panespkg.Pane,
+    next_pane_id: u32 = 2,
+    px_w: f32,
+    px_h: f32,
+    sep: f32 = 2,
+    /// Layout/focus changed: the next frame redraws even if no pane's
+    /// grid is dirty.
+    scene_dirty: bool = true,
+
+    /// Focused pane's session, readable without draw_lock (the input
+    /// kick compares pointers only — never dereferences).
+    focused_session: std.atomic.Value(?*sessionpkg.Session) = .init(null),
+
     frame_count: std.atomic.Value(u64) = .init(0),
     activate: bool = true,
     pending_w: f64 = 0,
@@ -66,13 +95,12 @@ pub const App = struct {
 
     /// Pending keystroke timestamp (CACurrentMediaTime clock; NSEvent
     /// timestamps share it). Consumed by the presented handler of the
-    /// first DIRTY frame after the mark — measuring the echo, not the
-    /// next repaint.
+    /// first frame after the mark that carried the FOCUSED pane's echo.
     input_mark: std.atomic.Value(f64) = .init(0),
     last_presented: std.atomic.Value(f64) = .init(0),
 
-    /// drawFrame may be entered from the display link OR an input kick
-    /// (reader thread, echo just parsed) — one at a time.
+    /// Serializes scene access across display link, input kick, keys,
+    /// resize, and ctl. See the file comment for lock order.
     draw_lock: sessionpkg.Lock = .{},
 
     // ctl `shot` handoff: the socket thread stores a path and flips the
@@ -156,27 +184,36 @@ pub const App = struct {
         // Nerd Font base (default) so prompt icons resolve without
         // fallback; the CoreText cascade catches everything else.
         const renderer = try renderpkg.Renderer.init(gpa, device, cfg.font_family, cfg.font_size * scale, 64 * 1024);
-        const cols: u32 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_w)), renderer.cell_w));
-        const rows: u32 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_h)), renderer.cell_h));
+        const cols: u16 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_w)), renderer.cell_w));
+        const rows: u16 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_h)), renderer.cell_h));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
         const session = try sessionpkg.Session.start(gpa, init.io, shell, @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
 
         const self = try gpa.create(App);
+        const pane = try gpa.create(panespkg.Pane);
+        pane.* = .{ .id = 1, .session = session, .cols = cols, .rows = rows };
         session.kick = &inputKick;
         session.kick_ctx = self;
         self.* = .{
             .gpa = gpa,
+            .io = init.io,
             .app = app,
             .window = window,
             .layer = layer,
             .device = device,
             .queue = queue,
             .renderer = renderer,
-            .session = session,
-            .cols = cols,
-            .rows = rows,
+            .shell = shell,
+            .root = .{ .leaf = pane },
+            .focused = pane,
+            .px_w = @floatCast(px_w),
+            .px_h = @floatCast(px_h),
+            .sep = @floatCast(@max(1.0, @round(scale))),
         };
+        try self.panes.append(gpa, pane);
+        self.focused_session.store(session, .release);
+        panespkg.layout(self.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.px_h }, self.sep);
         return self;
     }
 
@@ -198,8 +235,8 @@ pub const App = struct {
             &block_ctx,
         });
 
-        // Resize: view frame changes retarget the drawable, the grid, the
-        // emulator (reflow) and the pty. Runs on the main thread.
+        // Resize: view frame changes retarget the drawable, the layout,
+        // every pane's emulator (reflow) and pty. Runs on the main thread.
         var resize_ctx = ResizeBlock.init(.{ .app = self }, &resizeCallback);
         const center = objc.getClass("NSNotificationCenter").?
             .msgSend(objc.Object, "defaultCenter", .{});
@@ -247,12 +284,117 @@ pub const App = struct {
         self.layer.msgSend(void, "setContentsScale:", .{scale});
         self.layer.msgSend(void, "setDrawableSize:", .{NSSize{ .width = px_w, .height = px_h }});
 
-        const cols: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_w)), self.renderer.cell_w)));
-        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)), self.renderer.cell_h)));
-        if (cols == self.cols and rows == self.rows) return;
-        self.cols = cols;
-        self.rows = rows;
-        self.session.resize(cols, rows, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        self.px_w = @floatCast(px_w);
+        self.px_h = @floatCast(px_h);
+        self.sep = @floatCast(@max(1.0, @round(scale)));
+        self.relayoutLocked();
+        self.scene_dirty = true;
+    }
+
+    /// Recompute pane rects from the tree and resize any pane whose grid
+    /// changed. Caller holds draw_lock.
+    fn relayoutLocked(self: *App) void {
+        panespkg.layout(self.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.px_h }, self.sep);
+        for (self.panes.items) |p| {
+            const cols: u16 = @intFromFloat(@max(2, @divFloor(p.rect.w, self.renderer.cell_w)));
+            const rows: u16 = @intFromFloat(@max(2, @divFloor(p.rect.h, self.renderer.cell_h)));
+            if (cols == p.cols and rows == p.rows) continue;
+            p.cols = cols;
+            p.rows = rows;
+            p.session.resize(cols, rows, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
+        }
+    }
+
+    /// Split the focused pane; the new pane takes focus. Any thread.
+    pub fn splitFocused(self: *App, horiz: bool) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        self.splitFocusedLocked(horiz);
+    }
+
+    fn splitFocusedLocked(self: *App, horiz: bool) void {
+        const session = sessionpkg.Session.start(self.gpa, self.io, self.shell, 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px)) catch |err| {
+            std.debug.print("rookz: split failed: {}\n", .{err});
+            return;
+        };
+        session.kick = &inputKick;
+        session.kick_ctx = self;
+        const pane = self.gpa.create(panespkg.Pane) catch return;
+        pane.* = .{ .id = self.next_pane_id, .session = session };
+        self.next_pane_id += 1;
+        if (!panespkg.splitAt(self.gpa, &self.root, self.focused, pane, horiz)) {
+            // Focused vanished mid-flight (can't happen under the lock,
+            // but fail closed): drop the new session.
+            std.debug.print("rookz: split target missing\n", .{});
+            return;
+        }
+        self.panes.append(self.gpa, pane) catch {};
+        self.setFocusLocked(pane);
+        self.relayoutLocked();
+        // No synchronous draw: encoding from the calling thread contends
+        // on nextDrawable (measured wedge from the ctl thread). The
+        // display link sees scene_dirty within a tick.
+        self.scene_dirty = true;
+    }
+
+    fn setFocusLocked(self: *App, pane: *panespkg.Pane) void {
+        self.focused = pane;
+        self.focused_session.store(pane.session, .release);
+        self.scene_dirty = true;
+    }
+
+    /// Move focus in a direction. Any thread. Returns false if no pane
+    /// lies that way.
+    pub fn focusMove(self: *App, dir: panespkg.NavDir) bool {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const target = panespkg.navigate(self.panes.items, self.focused, dir) orelse return false;
+        self.setFocusLocked(target);
+        return true;
+    }
+
+    pub fn focusById(self: *App, id: u32) bool {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        for (self.panes.items) |p| {
+            if (p.id == id) {
+                self.setFocusLocked(p);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Collapse panes whose shell exited. Caller holds draw_lock; never
+    /// runs on a reader thread (Session.deinit joins it).
+    fn reapExitedLocked(self: *App) void {
+        var changed = false;
+        var i: usize = 0;
+        while (i < self.panes.items.len) {
+            const p = self.panes.items[i];
+            if (!p.session.exited.load(.acquire)) {
+                i += 1;
+                continue;
+            }
+            changed = true;
+            _ = panespkg.removeAt(self.gpa, &self.root, p);
+            _ = self.panes.swapRemove(i);
+            const was_focused = self.focused == p;
+            p.session.deinit();
+            p.rs.deinit(self.gpa);
+            self.gpa.destroy(p);
+            if (self.panes.items.len == 0) {
+                // Last shell exited: the terminal's work is done.
+                _exit(0);
+            }
+            if (was_focused) self.setFocusLocked(self.panes.items[0]);
+        }
+        if (changed) {
+            self.relayoutLocked();
+            self.scene_dirty = true;
+        }
     }
 
     fn drawFrame(self: *App) void {
@@ -262,43 +404,159 @@ pub const App = struct {
         _ = self.frame_count.fetchAdd(1, .monotonic);
         const t_start = CACurrentMediaTime();
 
-        // Snapshot terminal state under the session lock, with priority
-        // over the reader's parse loop.
-        self.session.lockForSnapshot();
-        self.rs.update(self.gpa, &self.session.term) catch {
-            self.session.unlockForSnapshot();
-            return;
-        };
-        self.session.unlockForSnapshot();
+        self.reapExitedLocked();
+
+        // Snapshot every pane under its session lock, with priority over
+        // the readers' parse loops.
+        var any_dirty = self.scene_dirty;
+        var focused_dirty = self.scene_dirty;
+        for (self.panes.items) |p| {
+            p.session.lockForSnapshot();
+            p.rs.update(self.gpa, &p.session.term) catch {
+                p.session.unlockForSnapshot();
+                p.dirty = false;
+                continue;
+            };
+            p.session.unlockForSnapshot();
+            p.dirty = p.rs.dirty != .@"false";
+            p.rs.dirty = .@"false";
+            if (p.dirty) {
+                any_dirty = true;
+                if (p == self.focused) focused_dirty = true;
+            }
+        }
         const t_update = CACurrentMediaTime();
 
-        // A clean grid means nothing to draw: skip the whole frame. This
+        // A clean scene means nothing to draw: skip the whole frame. This
         // is both the honest idle number (zero work) and the honest
         // latency number — the key mark is consumed only by a frame that
-        // actually carried the echo.
-        const dirty = self.rs.dirty != .@"false";
-        self.rs.dirty = .@"false";
+        // actually carried the focused pane's echo.
         const shot_wanted = self.shot_state.load(.acquire) == 2;
-        if (!dirty and !shot_wanted) {
+        if (!any_dirty and !shot_wanted) {
             _ = stats.global.frames_skipped.fetchAdd(1, .monotonic);
             return;
         }
+        self.scene_dirty = false;
         stats.global.frame_update.recordSeconds(t_update - t_start);
 
-        // The snapshot is the authority on grid dims; during a resize it
-        // may briefly disagree with the drawable, which is fine.
-        const cols: usize = self.rs.cols;
-        var rows: usize = self.rs.rows;
-        if (cols == 0 or rows == 0) return;
-        if (cols * rows > self.renderer.cells_cap) rows = self.renderer.cells_cap / cols;
+        // Fill the shared GPU cell buffer: each pane bump-allocates a
+        // slot. The snapshot is the authority on grid dims; during a
+        // resize it may briefly disagree with the rect, which is fine.
+        const cells = self.renderer.cells();
+        var off: usize = 0;
+        for (self.panes.items) |p| {
+            p.drawn_cols = 0;
+            p.drawn_rows = 0;
+            const cols: usize = p.rs.cols;
+            var rows: usize = p.rs.rows;
+            if (cols == 0 or rows == 0) continue;
+            if (off + cols * rows > self.renderer.cells_cap) {
+                rows = (self.renderer.cells_cap - off) / cols;
+                if (rows == 0) continue;
+            }
+            self.fillPane(p, cells[off .. off + cols * rows], cols, rows);
+            p.buf_off = off;
+            p.drawn_cols = @intCast(cols);
+            p.drawn_rows = @intCast(rows);
+            off += cols * rows;
+        }
 
-        // Fill the GPU cell buffer from the render state.
-        const colors = &self.rs.colors;
+        const t_fill = CACurrentMediaTime();
+        stats.global.frame_fill.recordSeconds(t_fill - t_update);
+
+        const drawable = self.layer.msgSend(objc.Object, "nextDrawable", .{});
+        if (drawable.value == null) return;
+
+        const focused_colors = &self.focused.rs.colors;
+        const clear_bg = focused_colors.background;
+
+        const desc = objc.getClass("MTLRenderPassDescriptor").?
+            .msgSend(objc.Object, "renderPassDescriptor", .{});
+        const attachment = desc.msgSend(objc.Object, "colorAttachments", .{})
+            .msgSend(objc.Object, "objectAtIndexedSubscript:", .{@as(u64, 0)});
+        attachment.msgSend(void, "setTexture:", .{drawable.msgSend(objc.Object, "texture", .{}).value});
+        // MTLLoadActionClear = 2, MTLStoreActionStore = 1
+        attachment.msgSend(void, "setLoadAction:", .{@as(u64, 2)});
+        attachment.msgSend(void, "setStoreAction:", .{@as(u64, 1)});
+        attachment.msgSend(void, "setClearColor:", .{MTLClearColor{
+            .r = @as(f64, @floatFromInt(clear_bg.r)) / 255.0,
+            .g = @as(f64, @floatFromInt(clear_bg.g)) / 255.0,
+            .b = @as(f64, @floatFromInt(clear_bg.b)) / 255.0,
+            .a = 1.0,
+        }});
+
+        const size = self.layer.msgSend(NSSize, "drawableSize", .{});
+        const vp_w: f32 = @floatCast(size.width);
+        const vp_h: f32 = @floatCast(size.height);
+        const cmd = self.queue.msgSend(objc.Object, "commandBuffer", .{});
+        const enc = cmd.msgSend(objc.Object, "renderCommandEncoderWithDescriptor:", .{desc.value});
+
+        // Scene: pane backgrounds (full rect, covers the sub-cell
+        // remainder), grids, separators, focus edges.
+        for (self.panes.items) |p| {
+            const bg = p.rs.colors.background;
+            self.renderer.drawRect(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.rect.w, p.rect.h, .{ bg.r, bg.g, bg.b, 255 });
+        }
+        for (self.panes.items) |p| {
+            if (p.drawn_cols == 0) continue;
+            self.renderer.drawGrid(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.buf_off, p.drawn_cols, p.drawn_rows);
+        }
+        if (self.panes.items.len > 1) {
+            var sep_buf: [64]panespkg.Rect = undefined;
+            var nsep: usize = 0;
+            panespkg.collectSeparators(self.root, &sep_buf, &nsep);
+            for (sep_buf[0..nsep]) |r| {
+                self.renderer.drawRect(enc, vp_w, vp_h, r.x, r.y, r.w, r.h, sep_color);
+            }
+            // The focused pane claims its share of adjacent separators
+            // in the accent color — cheap, unambiguous focus telegraph.
+            const fr = self.focused.rect;
+            const s = self.sep;
+            if (fr.x > 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x - s, fr.y, s, fr.h, accent_color);
+            if (fr.x + fr.w < self.px_w - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x + fr.w, fr.y, s, fr.h, accent_color);
+            if (fr.y > 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y - s, fr.w, s, accent_color);
+            if (fr.y + fr.h < self.px_h - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y + fr.h, fr.w, s, accent_color);
+        }
+
+        enc.msgSend(void, "endEncoding", .{});
+
+        // GPU time when the buffer completes; photon time when the
+        // drawable actually presents. Both handlers are copied by Metal.
+        var completed_ctx = CompletedBlock.init(.{ .app = self }, &completedCallback);
+        cmd.msgSend(void, "addCompletedHandler:", .{&completed_ctx});
+        var presented_ctx = PresentedBlock.init(.{ .app = self, .dirty = @intFromBool(focused_dirty) }, &presentedCallback);
+        drawable.msgSend(void, "addPresentedHandler:", .{&presented_ctx});
+
+        cmd.msgSend(void, "presentDrawable:", .{drawable.value});
+        cmd.msgSend(void, "commit", .{});
+
+        const t_commit = CACurrentMediaTime();
+        stats.global.frame_encode.recordSeconds(t_commit - t_fill);
+        _ = stats.global.frames_drawn.fetchAdd(1, .monotonic);
+        if (focused_dirty) {
+            const mark = self.input_mark.load(.acquire);
+            if (mark > 0 and t_commit > mark) stats.global.key_commit.recordSeconds(t_commit - mark);
+        }
+
+        // Service a pending ctl `shot`: wait for this frame's GPU work,
+        // read our own drawable back, write PNG. Render-thread only.
+        if (self.shot_state.load(.acquire) == 2) {
+            cmd.msgSend(void, "waitUntilCompleted", .{});
+            self.captureShot(drawable);
+            self.shot_state.store(0, .release);
+        }
+    }
+
+    /// Fill one pane's slot of the cell buffer from its render state.
+    /// The cursor renders only in the focused pane — the second half of
+    /// the focus telegraph.
+    fn fillPane(self: *App, p: *panespkg.Pane, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
+        const colors = &p.rs.colors;
         const default_bg = colors.background;
         const default_fg = colors.foreground;
-        const cells = self.renderer.cells();
-        const row_cells = self.rs.row_data.items(.cells);
+        const row_cells = p.rs.row_data.items(.cells);
         const cellw_px: u16 = @intCast(self.renderer.cellw_px);
+        const show_cursor = p == self.focused;
         for (0..rows) |y| {
             const raws = row_cells[y].items(.raw);
             const styles = row_cells[y].items(.style);
@@ -351,8 +609,10 @@ pub const App = struct {
                 }
 
                 var inv = false;
-                if (self.rs.cursor.viewport) |cur| {
-                    if (cur.x == x and cur.y == y) inv = true;
+                if (show_cursor) {
+                    if (p.rs.cursor.viewport) |cur| {
+                        if (cur.x == x and cur.y == y) inv = true;
+                    }
                 }
                 const eff_bg = if (inv) fg else bg;
                 const eff_fg = if (inv) bg else fg;
@@ -365,59 +625,6 @@ pub const App = struct {
                     .flags = flags,
                 };
             }
-        }
-
-        const t_fill = CACurrentMediaTime();
-        stats.global.frame_fill.recordSeconds(t_fill - t_update);
-
-        const drawable = self.layer.msgSend(objc.Object, "nextDrawable", .{});
-        if (drawable.value == null) return;
-
-        const desc = objc.getClass("MTLRenderPassDescriptor").?
-            .msgSend(objc.Object, "renderPassDescriptor", .{});
-        const attachment = desc.msgSend(objc.Object, "colorAttachments", .{})
-            .msgSend(objc.Object, "objectAtIndexedSubscript:", .{@as(u64, 0)});
-        attachment.msgSend(void, "setTexture:", .{drawable.msgSend(objc.Object, "texture", .{}).value});
-        // MTLLoadActionClear = 2, MTLStoreActionStore = 1
-        attachment.msgSend(void, "setLoadAction:", .{@as(u64, 2)});
-        attachment.msgSend(void, "setStoreAction:", .{@as(u64, 1)});
-        attachment.msgSend(void, "setClearColor:", .{MTLClearColor{
-            .r = @as(f64, @floatFromInt(default_bg.r)) / 255.0,
-            .g = @as(f64, @floatFromInt(default_bg.g)) / 255.0,
-            .b = @as(f64, @floatFromInt(default_bg.b)) / 255.0,
-            .a = 1.0,
-        }});
-
-        const size = self.layer.msgSend(NSSize, "drawableSize", .{});
-        const cmd = self.queue.msgSend(objc.Object, "commandBuffer", .{});
-        const enc = cmd.msgSend(objc.Object, "renderCommandEncoderWithDescriptor:", .{desc.value});
-        self.renderer.draw(enc, @floatCast(size.width), @floatCast(size.height), @intCast(cols), @intCast(rows));
-        enc.msgSend(void, "endEncoding", .{});
-
-        // GPU time when the buffer completes; photon time when the
-        // drawable actually presents. Both handlers are copied by Metal.
-        var completed_ctx = CompletedBlock.init(.{ .app = self }, &completedCallback);
-        cmd.msgSend(void, "addCompletedHandler:", .{&completed_ctx});
-        var presented_ctx = PresentedBlock.init(.{ .app = self, .dirty = @intFromBool(dirty) }, &presentedCallback);
-        drawable.msgSend(void, "addPresentedHandler:", .{&presented_ctx});
-
-        cmd.msgSend(void, "presentDrawable:", .{drawable.value});
-        cmd.msgSend(void, "commit", .{});
-
-        const t_commit = CACurrentMediaTime();
-        stats.global.frame_encode.recordSeconds(t_commit - t_fill);
-        _ = stats.global.frames_drawn.fetchAdd(1, .monotonic);
-        if (dirty) {
-            const mark = self.input_mark.load(.acquire);
-            if (mark > 0 and t_commit > mark) stats.global.key_commit.recordSeconds(t_commit - mark);
-        }
-
-        // Service a pending ctl `shot`: wait for this frame's GPU work,
-        // read our own drawable back, write PNG. Render-thread only.
-        if (self.shot_state.load(.acquire) == 2) {
-            cmd.msgSend(void, "waitUntilCompleted", .{});
-            self.captureShot(drawable);
-            self.shot_state.store(0, .release);
         }
     }
 
@@ -444,19 +651,57 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
     const app: *App = context.app;
     const event = objc.Object.fromId(event_id);
 
-    // modifierFlags bit 20 (1<<20) = command
     const flags = event.msgSend(u64, "modifierFlags", .{});
-    if (flags & (1 << 20) != 0) {
+    if (flags & flag_cmd != 0) {
         const chars = event.msgSend(objc.Object, "charactersIgnoringModifiers", .{});
         if (chars.value != null) {
             if (chars.msgSend(?[*:0]const u8, "UTF8String", .{})) |s| {
-                if (s[0] == 'q' and s[1] == 0) {
-                    app.app.msgSend(void, "terminate:", .{@as(objc.c.id, null)});
-                    return null;
-                }
+                if (s[1] == 0) switch (s[0]) {
+                    'q' => {
+                        app.app.msgSend(void, "terminate:", .{@as(objc.c.id, null)});
+                        return null;
+                    },
+                    // The rook chords: ⌘D splits right, ⌘⇧D splits down.
+                    'd' => {
+                        app.splitFocused(flags & flag_shift == 0);
+                        return null;
+                    },
+                    'D' => {
+                        app.splitFocused(false);
+                        return null;
+                    },
+                    else => {},
+                };
             }
         }
         return event_id; // other cmd chords stay AppKit's
+    }
+
+    // ⌃HJKL pane nav — yielding to alternate-screen apps (vim owns its
+    // own splits). rookz reads alt-screen truth straight from the
+    // emulator; the webview app needed a 3s-stale `fg` heuristic here.
+    if (flags & flag_ctrl != 0) {
+        const chars = event.msgSend(objc.Object, "charactersIgnoringModifiers", .{});
+        if (chars.value != null) {
+            if (chars.msgSend(?[*:0]const u8, "UTF8String", .{})) |s| {
+                if (s[1] == 0) {
+                    const dir: ?panespkg.NavDir = switch (s[0]) {
+                        'h' => .left,
+                        'j' => .down,
+                        'k' => .up,
+                        'l' => .right,
+                        else => null,
+                    };
+                    if (dir) |d| {
+                        app.draw_lock.lock();
+                        const alt = app.focused.session.term.screens.active_key == .alternate;
+                        app.draw_lock.unlock();
+                        if (!alt and app.focusMove(d)) return null;
+                        // fall through: cooked control byte to the pty
+                    }
+                }
+            }
+        }
     }
 
     // Arrows by keyCode; everything else via the cooked characters, which
@@ -470,23 +715,21 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
         126 => "\x1b[A",
         else => null,
     };
-    if (arrow) |seq| {
-        app.markInput(event.msgSend(f64, "timestamp", .{}));
-        app.session.write(seq);
-        return null;
-    }
-
     const chars = event.msgSend(objc.Object, "characters", .{});
-    if (chars.value != null) {
-        if (chars.msgSend(?[*:0]const u8, "UTF8String", .{})) |s| {
-            const bytes = std.mem.span(s);
-            if (bytes.len > 0) {
-                // The kernel's receipt time, same clock as presentedTime:
-                // this makes key_present a true key-to-photon number.
-                app.markInput(event.msgSend(f64, "timestamp", .{}));
-                app.session.write(bytes);
-            }
-        }
+    const bytes: []const u8 = arrow orelse blk: {
+        if (chars.value == null) break :blk "";
+        const s = chars.msgSend(?[*:0]const u8, "UTF8String", .{}) orelse break :blk "";
+        break :blk std.mem.span(s);
+    };
+    if (bytes.len > 0) {
+        // The kernel's receipt time, same clock as presentedTime: this
+        // makes key_present a true key-to-photon number. Writes go to
+        // the focused pane, under the scene lock so reap can't free the
+        // session mid-write.
+        app.draw_lock.lock();
+        app.markInput(event.msgSend(f64, "timestamp", .{}));
+        app.focused.session.write(bytes);
+        app.draw_lock.unlock();
     }
     return null;
 }
@@ -512,7 +755,8 @@ fn presentedCallback(context: *const PresentedBlock.Context, drawable_id: objc.c
     const last = app.last_presented.swap(t, .acq_rel);
     if (last > 0 and t > last) stats.global.present_interval.recordSeconds(t - last);
 
-    // Key → photon: only a dirty frame may consume the pending mark.
+    // Key → photon: only a frame that carried the focused pane's echo
+    // may consume the pending mark.
     if (context.dirty != 0) {
         const mark = app.input_mark.swap(0, .acq_rel);
         if (mark > 0 and t > mark) stats.global.key_present.recordSeconds(t - mark);
@@ -531,9 +775,11 @@ fn displayLinkCallback(link: CVDisplayLinkRef, now: ?*const anyopaque, output: ?
 }
 
 /// Reader thread, after a parsed chunk: render immediately if a
-/// keystroke is waiting on its echo. Output without pending input stays
-/// on the display-link cadence.
-fn inputKick(ctx: *anyopaque) void {
+/// keystroke is waiting on its echo IN THE FOCUSED PANE — a background
+/// pane's firehose must not burn the latency path. Pointer compare
+/// only; the session may not be dereferenced here.
+fn inputKick(ctx: *anyopaque, sess: *sessionpkg.Session) void {
     const self: *App = @ptrCast(@alignCast(ctx));
+    if (self.focused_session.load(.acquire) != sess) return;
     if (self.input_mark.load(.acquire) > 0) self.drawNow();
 }

@@ -62,12 +62,15 @@ const Uniforms = extern struct {
     cols: u32,
     pad: u32 = 0,
     atlas: [2]f32,
+    /// Pixel offset of this region's top-left — the scene seam: a frame
+    /// is N grid regions (panes) plus rects, all one pipeline.
+    origin: [2]f32,
 };
 
 const shader_src =
     \\#include <metal_stdlib>
     \\using namespace metal;
-    \\struct Uni { float2 vp; float2 cell; uint cols; uint pad; float2 atlas; };
+    \\struct Uni { float2 vp; float2 cell; uint cols; uint pad; float2 atlas; float2 origin; };
     \\struct CellData { uchar4 bg; uchar4 fg; ushort2 uv; ushort flags; ushort pad; };
     \\struct VOut { float4 pos [[position]]; float4 color; float2 uv; float sel; };
     \\
@@ -76,7 +79,7 @@ const shader_src =
     \\                  const device CellData* cells [[buffer(1)]]) {
     \\  uint col = iid % u.cols; uint row = iid / u.cols;
     \\  float2 corner = float2(vid & 1, vid >> 1);
-    \\  float2 px = (float2(col, row) + corner) * u.cell;
+    \\  float2 px = u.origin + (float2(col, row) + corner) * u.cell;
     \\  VOut o;
     \\  o.pos = float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0.0, 1.0);
     \\  o.color = float4(cells[iid].bg) / 255.0;
@@ -92,7 +95,7 @@ const shader_src =
     \\  if ((cells[iid].flags & 1) == 0) { o.pos = float4(-2.0, -2.0, 0.0, 1.0); o.color = float4(0.0); o.uv = float2(0.0); o.sel = 0.0; return o; }
     \\  uint col = iid % u.cols; uint row = iid / u.cols;
     \\  float2 corner = float2(vid & 1, vid >> 1);
-    \\  float2 px = (float2(col, row) + corner) * u.cell;
+    \\  float2 px = u.origin + (float2(col, row) + corner) * u.cell;
     \\  o.pos = float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0.0, 1.0);
     \\  o.color = float4(cells[iid].fg) / 255.0;
     \\  o.uv = (float2(cells[iid].uv) + corner * u.cell) / u.atlas;
@@ -472,25 +475,50 @@ pub const Renderer = struct {
         return ptr[0..self.cells_cap];
     }
 
-    pub fn draw(self: *Renderer, encoder: objc.Object, vp_w: f32, vp_h: f32, cols: u32, rows: u32) void {
+    /// Draw one cell-grid region at a pixel origin, reading cells from
+    /// `cell_off` (in cells) into the shared buffer. A frame with N panes
+    /// is N of these — same pipelines, different uniforms and offsets.
+    pub fn drawGrid(self: *Renderer, encoder: objc.Object, vp_w: f32, vp_h: f32, origin_x: f32, origin_y: f32, cell_off: usize, cols: u32, rows: u32) void {
         const uni = Uniforms{
             .vp = .{ vp_w, vp_h },
             .cell = .{ self.cell_w, self.cell_h },
             .cols = cols,
             .atlas = .{ @floatFromInt(atlas_px), @floatFromInt(atlas_px) },
+            .origin = .{ origin_x, origin_y },
         };
         const n: u64 = @as(u64, cols) * rows;
+        const byte_off: u64 = cell_off * @sizeOf(CellData);
 
         encoder.msgSend(void, "setRenderPipelineState:", .{self.bg_pso.value});
         encoder.msgSend(void, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &uni), @as(u64, @sizeOf(Uniforms)), @as(u64, 0) });
-        encoder.msgSend(void, "setVertexBuffer:offset:atIndex:", .{ self.cells_buf.value, @as(u64, 0), @as(u64, 1) });
+        encoder.msgSend(void, "setVertexBuffer:offset:atIndex:", .{ self.cells_buf.value, byte_off, @as(u64, 1) });
         // MTLPrimitiveTypeTriangleStrip = 4
         encoder.msgSend(void, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{ @as(u64, 4), @as(u64, 0), @as(u64, 4), n });
 
         encoder.msgSend(void, "setRenderPipelineState:", .{self.fg_pso.value});
+        encoder.msgSend(void, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &uni), @as(u64, @sizeOf(Uniforms)), @as(u64, 0) });
+        encoder.msgSend(void, "setVertexBuffer:offset:atIndex:", .{ self.cells_buf.value, byte_off, @as(u64, 1) });
         encoder.msgSend(void, "setFragmentTexture:atIndex:", .{ self.atlas.value, @as(u64, 0) });
         encoder.msgSend(void, "setFragmentTexture:atIndex:", .{ self.color_atlas.value, @as(u64, 1) });
         encoder.msgSend(void, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{ @as(u64, 4), @as(u64, 0), @as(u64, 4), n });
+    }
+
+    /// Solid rect (separators, focus edges, pane backgrounds): the bg
+    /// pipeline with cell = the rect and one instance passed inline.
+    pub fn drawRect(self: *Renderer, encoder: objc.Object, vp_w: f32, vp_h: f32, x: f32, y: f32, w: f32, h: f32, rgba: [4]u8) void {
+        if (w < 0.5 or h < 0.5) return;
+        const uni = Uniforms{
+            .vp = .{ vp_w, vp_h },
+            .cell = .{ w, h },
+            .cols = 1,
+            .atlas = .{ @floatFromInt(atlas_px), @floatFromInt(atlas_px) },
+            .origin = .{ x, y },
+        };
+        const cell = CellData{ .bg = rgba, .fg = .{ 0, 0, 0, 0 }, .uvx = 0, .uvy = 0, .flags = 0 };
+        encoder.msgSend(void, "setRenderPipelineState:", .{self.bg_pso.value});
+        encoder.msgSend(void, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &uni), @as(u64, @sizeOf(Uniforms)), @as(u64, 0) });
+        encoder.msgSend(void, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &cell), @as(u64, @sizeOf(CellData)), @as(u64, 1) });
+        encoder.msgSend(void, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{ @as(u64, 4), @as(u64, 0), @as(u64, 4), @as(u64, 1) });
     }
 };
 
