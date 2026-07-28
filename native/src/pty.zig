@@ -1,5 +1,5 @@
 //! Minimal macOS PTY: openpty + fork/exec a child attached to the slave.
-//! Shape borrowed from ghostty's src/pty.zig, reduced to what rookz needs.
+//! Shape borrowed from ghostty's src/pty.zig, reduced to what rook needs.
 //! Libc is addressed directly — Zig 0.16's std.posix no longer wraps the
 //! process-control calls, and this file is exactly the C incantation anyway.
 

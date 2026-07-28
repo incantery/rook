@@ -1,13 +1,17 @@
 # Replacing wails-rook: the parity checklist
 
-What `rookz` still owes before `/Applications/rook.app` can be deleted.
-Status as of 2026-07-28 (`1a2dba6`). Editor items are deliberately
-ranked LAST — the zig editor's job today is to get out of neovim's way,
-and it already does.
+What the zig app still owes the webview app it replaced. The cutover
+has happened — `/Applications/rook.app` IS this app now, and `make
+install-web` is the way back — so this stopped being a list of blockers
+and became a list of debts, ordered by how much of rook's identity each
+one holds. Editor items are deliberately ranked LAST: the zig editor's
+job today is to get out of neovim's way, and it already does.
+
+Status as of 2026-07-28.
 
 ## The decision that shapes the whole list
 
-**Keep rook-host. Make rookz its only client and its parent process.**
+**Keep rook-host. Make rook its only client and its parent process.**
 
 `internal/host` is 1.2MB of Go that already does threads, review,
 asks, attention, transcripts, decisions, worktrees, workflows, cloud
@@ -17,14 +21,14 @@ Porting it *now* buys nothing and costs the product. Porting most of it
 eventually is the plan — see §6, which is the destination this checklist
 is walking toward.
 
-So the replacement is not a port. It is: **rookz grows a host client and
+So the replacement is not a port. It is: **rook grows a host client and
 renders host state in its own chrome** — `usage.zig` is the seed of
 exactly that (host.json → port + token → HTTP → struct → quads).
 
 Self-contained then means lifecycle, not language:
 
-- rookz spawns `rook-host` from inside its own bundle at launch.
-- rookz SIGTERMs it on quit. Nothing runs while rook is closed.
+- rook spawns `rook-host` from inside its own bundle at launch.
+- rook SIGTERMs it on quit. Nothing runs while rook is closed.
 - `rookctl` and MCP keep working unchanged (they read host.json), and
   they simply find nothing when rook isn't running — which is the
   stated tradeoff for now.
@@ -32,17 +36,17 @@ Self-contained then means lifecycle, not language:
 Today's host does the opposite: `hostclient.Info()` *rides* a healthy
 daemon and never kills it, deliberately, so sessions outlive app
 restarts. That property has to be given up (see §5) or bought back by
-the host/client split — the one where ptys move out of rookz. Note
-that rookz does NOT want the host's terminal half: `vt`, `ghostty_term`,
+the host/client split — the one where ptys move out of rook. Note
+that rook does NOT want the host's terminal half: `vt`, `ghostty_term`,
 `termframe`, `terminal`, `monitor`'s pty sampling are all dead weight
 against an app that owns its own ptys. That's a third of the surface
 that never needs a client.
 
-- [x] rookz spawns rook-host as a child and SIGTERMs it on quit
+- [x] rook spawns rook-host as a child and SIGTERMs it on quit
       (`src/hostc.zig`). No `shouldRide` port: rook-host is already
       idempotent, so we always spawn and let the Go side keep its own
       identity rule. `owned` = host.json's pid == the pid we forked, and
-      we kill only what we own — so a rookz running beside the wails app
+      we kill only what we own — so a rook running beside the wails app
       during cutover can't take that app's daemon down. ctl `version`
       reports it. Every exit path shuts down, including ctl `quit`,
       which `_exit`s past the will-terminate observer.
@@ -68,7 +72,7 @@ a daily driver.
 - [ ] Paste **confirmation** for unframed multiline pastes.
       `paste.isSafe` is written and nothing gates on it; needs a
       confirm modal (the palette is the primitive) and a config knob.
-- [x] **IME / dead keys** — `RookzTextView` conforms to
+- [x] **IME / dead keys** — `RookTextView` conforms to
       NSTextInputClient, the IME gets first refusal on unmodified keys,
       preedit draws at the cursor. ctl `nskey` posts real NSEvents so
       the path is testable; ctl `ime` reports the state.
@@ -96,7 +100,7 @@ a daily driver.
 - [ ] **Command palette (⌘K) over a real command registry.** The wails
       app's spine: every action is a named command; keybinds dispatch
       commands, the palette lists them, and the agent's tool surface IS
-      the registry (`frontend/src/registry.ts`). rookz has the palette
+      the registry (`frontend/src/registry.ts`). rook has the palette
       *widget* (workspace picker) but no registry behind it — and
       `config.zig`'s `Action` enum is 13 hardcoded values against the
       wails keymap's ~30 commands.
@@ -108,7 +112,7 @@ a daily driver.
 - [ ] Ex-command bridge (`:PaneSplitRight` etc. — `exNameOf`) so the
       editor and agents can drive commands by name
 - [ ] **Theme engine**: one semantic Palette, 8 builtins, runtime swap,
-      **VS Code theme importer**. rookz has 2 builtins and a config key.
+      **VS Code theme importer**. rook has 2 builtins and a config key.
 - [ ] **Settings UI** (⌘,): appearance, keybinds, and the token panes
       (Jira/OpenAI/cloud/relay → keychain). Today: hand-edit TOML.
 - [ ] Choose-window picker on `<leader>w` (reserved, unimplemented)
@@ -131,7 +135,7 @@ Ranked by how much of rook's identity dies without it.
       Biggest single UI build on the list; `internal/transcript` +
       `transcriptapi` do the parsing.
 - [ ] **Threads** (`/threads/`, `<leader>t`): host-projected editable
-      docs. In rookz these are *buffers* — the editor already is the
+      docs. In rook these are *buffers* — the editor already is the
       renderer, which is a genuine simplification over Monaco.
 - [ ] **Review / RookTask** (`/tasks/`, `/edits/`, `<leader>g`): the
       changes list, the gate, approve/reject/comment, review rings.
@@ -154,7 +158,7 @@ Ranked by how much of rook's identity dies without it.
 ## 3. Editor — secondary, and honestly already ahead for neovim users
 
 The zig editor exists to be a *good enough* in-app buffer. The bar it
-must clear is "I don't reach for a terminal nvim inside rookz", not
+must clear is "I don't reach for a terminal nvim inside rook", not
 "it replaces Monaco feature for feature".
 
 - [ ] **Diff / review viewer** — required by §2's review panel, so it's
@@ -176,53 +180,52 @@ must clear is "I don't reach for a terminal nvim inside rookz", not
 ## 4. Platform and distribution
 
 - [ ] **Self-update** (`internal/selfupdate`, `/update`, `rookctl update`) —
-      today rookz ships only via `make install`
+      today rook ships only via `make install`
 - [ ] **Code signing + notarization + DMG**; the bundle is hand-rolled
       in the Makefile
 - [ ] **Version stamping / BinHash** — the dev-build trap that ate days
-      on the wails side is unsolved here (rookz has no build id at all)
+      on the wails side is unsolved here (rook has no build id at all)
 - [ ] Crash reporting and a log file (host.log's counterpart)
-- [ ] **Config: one file, two readers.** The rename settles it — rookz
-      reads `~/.config/rook/config.toml`, the file it does not own.
-      Most of that file is rook-host's (`coder`, `workflow`,
-      `workspace-allow`, `[agent]`, `[jira]`, `[lsp]`, `[cloud]`,
-      `[workspaces.*]`), and `config.zig` knows six keys and *warns* on
-      everything else — so unknown keys and unknown `[sections]` must
-      go silent first. That is NEXT.md's layered `config.d/` direction
-      arriving early, because the rename demands it.
-      Smaller collisions: `window-padding-x`/`-y` there vs one
-      `window-padding` here; theme `"Nocturne"` vs `"nocturne"` (case);
-      keybinds live in `[keybinds]` inside config.toml there and in a
-      separate `keybinds.toml` here. And the shared file names commands
-      in the REGISTRY's vocabulary (`workspace.manager`, `session.new`)
-      where rookz says `tab.new`/`app.split.horizontal` — so the rename
-      drags part of §1's command registry forward. Cheapest resolution:
-      accept the registry names as aliases, skip commands not yet
-      implemented, silently.
-      Migration merges the rookz values (`background-opacity = 0.9`,
-      `background-blur`) into the rook file, then deletes
-      `~/.config/rookz/`.
-- [ ] **The rename.** DECIDED: the zig app replaces the wails app
-      outright — it ships as `rook.app` / `com.incantery.rook`, and
-      `rook` is both the app and the CLI. `rookctl` folds in: `rook`
-      handles its own verbs and `exec`s the bundled Go binary for the
-      rest, which is §6's migration shape applied to the CLI (move one
-      verb to Zig, flip the dispatch, delete the Go). `re` is the zig
-      editor; rookctl loses that alias. Surface: Info.plist (name, id,
-      executable, version stamped from `VERSION` — it is hardcoded
-      `0.1.0` today against a v0.37.2 release line), `/tmp/rookz.sock` →
-      `/tmp/rook.sock`, `ROOKZ_SOCK` → `ROOK_SOCK`, `rookz edit` →
-      `rook edit`, `~/.local/bin` symlinks.
-      HAZARD: `claude-plugin` invokes `rookctl` by name (`rookctl mcp`,
-      `rookctl claim`/`unclaim` on SessionStart/Stop). `rookctl` must
-      keep working through the cutover or every live Claude session's
-      hooks break; the plugin flips to `rook`, and `rookctl` is deleted
-      a release later.
-      FREE: `install.sh`, the release zip name, and
-      `internal/selfupdate` all hardcode `rook.app` / `rook-$tag-…zip`
-      already, so `rookctl update` survives the swap untouched — which
-      is what makes it the rollback lever.
-- [ ] E2E: `make e2e` drives the wails app headless. rookz has the ctl
+- [x] **Config: one file, two readers.** rook reads
+      `~/.config/rook/config.toml` — the file it does NOT own. Most of
+      it is rook-host's (`coder`, `workflow`, `workspace-allow`,
+      `[agent]`, `[jira]`, `[lsp]`, `[cloud]`, `[workspaces.*]`), so
+      `config.zig` now takes only TOP-LEVEL keys (a key inside any
+      `[table]` is someone else's) and is SILENT about ones it doesn't
+      know. Being a guest means it can't tell a typo from a host key,
+      which costs us warnings on our own typos — the price of one config
+      instead of two, and what NEXT.md's layered `config.d/` eventually
+      buys back. Keybinds come from the same file: top-level `leader`
+      plus `[keybinds]`, in the REGISTRY's vocabulary (`session.new`,
+      `workspace.manager`), with unimplemented commands skipped quietly
+      — so part of §1's registry arrived early, by necessity.
+      `window-padding-x`/`-y` both map to the one knob; theme lookup was
+      already case-insensitive.
+      Found doing it: a quoted value with a trailing comment never had
+      its comment stripped, so `"<leader>c" = "tab.new"  # …` parsed to
+      garbage and was dropped in silence. `config.zig` has its own test
+      root now, for exactly the reason paste.zig does — everything here
+      fails quietly by design.
+- [x] **The rename.** The zig app replaced the wails app outright:
+      `rook.app` / `com.incantery.rook`, `rook` is the app AND the CLI,
+      `/tmp/rook.sock` + `ROOK_SOCK`, `~/.config/rook/`, and `re` is the
+      zig editor (claimed from rookctl, which used the same argv[0]
+      trick). Info.plist takes its version from the newest tag.
+      `rookctl` folds in by EXEC, not reimplementation: `rook <verb>`
+      hands anything it doesn't own to the bundled Go binary, so stdio
+      and exit status pass through (`rook mcp` is a stdio server) and
+      each verb migrates by being handled in Zig and deleted from Go —
+      §6's shape, applied to the CLI.
+      `rookctl` still installs under its own name, deliberately:
+      `claude-plugin` invokes `rookctl mcp` and `rookctl claim`/
+      `unclaim` BY NAME, and an installed plugin breaking mid-session is
+      not an acceptable cutover cost. It goes once the plugin says
+      `rook`.
+      FREE, and the reason outright replacement beat a parallel bundle:
+      `install.sh`, the release zip name, and `internal/selfupdate`
+      already hardcode `rook.app` / `rook-$tag-…zip`, so `rookctl
+      update` survives untouched — it IS the rollback lever.
+- [ ] E2E: `make e2e` drives the wails app headless. rook has the ctl
       socket (better), but no CI job runs it, and no agent-panel
       coverage exists yet.
 - [ ] Accessibility: zero today (NEXT.md wants a semantic element tree;
@@ -231,9 +234,9 @@ must clear is "I don't reach for a terminal nvim inside rookz", not
 ## 5. Accepted regressions — call these out loud before cutover
 
 - **Shells die with the app.** rook-host owns the ptys today, so a
-  wails-app restart reattaches live sessions. rookz owns them
+  wails-app restart reattaches live sessions. rook owns them
   in-process. Until ptys move behind the host/client split, quitting
-  rookz kills every shell in every space. This is the strongest single
+  rook kills every shell in every space. This is the strongest single
   argument for doing that split sooner.
 - **Nothing happens while rook is closed** — by explicit choice. No
   remote asks landing on the phone, no PR watcher, no usage push, no
@@ -262,7 +265,7 @@ ledger is the same object the renderer draws.
 **Most of the dependency tree dies at cutover anyway.** `wails/v3`,
 `creack/pty`, `charmbracelet/{ultraviolet,ansi,vt}`, `go-runewidth`,
 `mattn/go-sqlite3`, `pelletier/go-toml` are all webview-era scaffolding:
-rookz owns ptys, ghostty-vt owns emulation and width tables,
+rook owns ptys, ghostty-vt owns emulation and width tables,
 `workspaces.zig` already speaks to system libsqlite3, `config.zig`
 already parses TOML. What genuinely needs Go is narrow — `connectrpc` +
 `protobuf` + TLS + websockets, i.e. cloud, relay, edge signing,
@@ -291,7 +294,7 @@ lifetime design is the real cost of the port, not the typing.
 years of edge cases and re-earns them in production, on the daily
 driver. That argues against a big-bang rewrite, not against porting.
 
-**The sequencing rule: port by coupling to the UI, and only after rookz
+**The sequencing rule: port by coupling to the UI, and only after rook
 already renders the thing.** `workspaces.zig` is the proof — ~130 lines
 of sqlite replaced a whole Go API surface because the palette needed
 exactly one query and no more. Ported first, it would have reproduced
@@ -335,16 +338,22 @@ while every hook, MCP tool, and ask silently dies.
 
 - [x] 1. §0 paste + IME (an hour, unblocked exclusive use)
 - [x] 2. Host lifecycle + `hostc.zig` + build stamping — the gate
-- [ ] 3. The rename (§4) — one commit: Info.plist, socket, config
-       paths, `re`, and `config.zig` learning to skip what isn't its
+- [x] 3. The rename (§4) — Info.plist, socket, config paths, `re`, the
+       CLI folding, and `make install` bundling the two Go binaries
+       (without them the app can't start a daemon or answer a verb)
+- [x] 3b. `scripts/rook-migrate.sh` — written early because the rename
+       needs its `config` phase: the rookz-only settings had to reach
+       the shared file or the window would silently lose its glass.
+       Phases are separable (`config` / `binaries` / `daemons`) because
+       they are not equally reversible — the last one takes live shells
+       down with it. STATE IS NEVER TOUCHED: `~/.config/rook/`,
+       `~/.local/state/rook/`, `rook.db`. No LaunchAgents exist.
 - [ ] 4. Merge to main (fast-forward; main has not moved)
 - [ ] 5. `make release` — bundle the zig `rook` + `rook-host`, stage
-       `rookctl`, drop the `wails3 task package` call
-- [ ] 6. Migration script — delete the old bundle, orphan daemons,
-       stale `~/go/bin/rookctl` shadow and dead symlinks. STATE
-       SURVIVES: `~/.config/rook/`, `~/.local/state/rook/`, `rook.db`
-       (`workspaces.zig` reads it). No LaunchAgents exist, so nothing
-       to unload.
+       `rookctl`, drop the `wails3 task package` call. `make install`
+       already has the bundle shape; release adds signing + the zip.
+- [ ] 6. Run the migration's `binaries` + `daemons` phases and delete
+       `/Applications/rookz.app`
 - [ ] 7. Restructure: promote `native/` to first class
 - [ ] 8. Command registry + ⌘K palette (every later panel registers)
 - [ ] 9. Asks → attention inbox → agent deck (product identity, in
@@ -356,7 +365,7 @@ while every hook, MCP tool, and ask silently dies.
 - [ ] 12. Signing, notarization, crash reporting
 
 Say out loud to anyone driving it daily (§5): **shells die with the
-app.** rook-host owns the ptys on main, so a restart reattaches; rookz
+app.** rook-host owns the ptys on main, so a restart reattaches; rook
 owns them in-process, so every rebuild-and-relaunch kills every shell in
 every space. That bites hardest during exactly this kind of rapid
 iteration, and it is the strongest argument for doing the host/client

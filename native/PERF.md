@@ -1,9 +1,9 @@
-# rookz PERF — the scoreboard
+# rook PERF — the scoreboard
 
 What gets written down gets defended (inherited from ../docs/PERF.md, and
 so are the rules: like against like, state the load condition and grid,
 tails matter more than medians). Reproduce any row with `./bench.sh`;
-live numbers anytime via `printf 'stats\n' | nc -U /tmp/rookz.sock`.
+live numbers anytime via `printf 'stats\n' | nc -U /tmp/rook.sock`.
 
 The instrument: always-on rings/counters (src/stats.zig), zero-alloc on
 hot paths. Key latency is TRUE key-to-photon — NSEvent.timestamp (kernel
@@ -41,13 +41,13 @@ Same M3 Max, same corpus, same day. Window geometries not equalized
 
 | terminal | total |
 |---|---|
-| **rookz (make prod)** | **0.911 s** |
+| **rook (make prod)** | **0.911 s** |
 | Ghostty 1.3.1 | 1.610 s |
 
 **1.77× faster than the installed Ghostty on its signature benchmark,
 with a day-old renderer.** Honest caveats: Ghostty nightly is much
 faster than 1.3.1 (Mitchell's M4 Max table has it at 0.575s — different
-machine), and rookz currently does less per cell (no selection layer, no
+machine), and rook currently does less per cell (no selection layer, no
 scrollback viewer, single style face). Re-run this A/B every time a
 feature lands that touches the render path.
 

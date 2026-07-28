@@ -52,7 +52,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("sqlite3", .{});
 
     const exe = b.addExecutable(.{
-        .name = "rookz",
+        .name = "rook",
         .root_module = exe_mod,
     });
     b.installArtifact(exe);
@@ -85,4 +85,15 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     }) });
     test_step.dependOn(&b.addRunArtifact(paste_tests).step);
+
+    // Config parsing, likewise — and this one is the sharpest of the
+    // three, because sharing a file with rook-host means every failure
+    // here is SILENT by design. A bad rule reads as "that keybind just
+    // doesn't work", with nothing printed to say why.
+    const config_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/config.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(config_tests).step);
 }

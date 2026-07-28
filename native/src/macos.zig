@@ -1,4 +1,4 @@
-//! AppKit + Metal shell for rookz. Pure Zig via zig-objc — no Swift, no nib.
+//! AppKit + Metal shell for rook. Pure Zig via zig-objc — no Swift, no nib.
 //! The window owns a CAMetalLayer; a CVDisplayLink drives rendering off the
 //! main thread (ghostty's renderer-thread shape). The frame is a SCENE:
 //! a binary split tree of panes (pty → ghostty-vt → RenderState each),
@@ -91,7 +91,7 @@ fn termColors() vt.Terminal.Colors {
 //
 // A stock NSView returns nil from -inputContext: AppKit's way of saying
 // "this thing does not take text". No dead keys (⌥e e → é), no CJK, no
-// candidate window — which is where rookz was until now. So we define
+// candidate window — which is where rook was until now. So we define
 // one view class of our own that conforms to NSTextInputClient and
 // answers the questions an input method asks.
 //
@@ -198,9 +198,9 @@ fn imeDoCommandBySelector(_: objc.c.id, _: objc.c.SEL, _: objc.c.SEL) callconv(.
 
 /// The view class, built once. Fails open: no class means a stock
 /// NSView, which is exactly the behavior that shipped before IME.
-fn rookzViewClass() ?objc.Class {
+fn rookViewClass() ?objc.Class {
     if (view_class) |c| return c;
-    const cls = objc.allocateClassPair(objc.getClass("NSView").?, "RookzTextView") orelse return null;
+    const cls = objc.allocateClassPair(objc.getClass("NSView").?, "RookTextView") orelse return null;
     // -inputContext checks conformance, not just respondsToSelector:.
     if (objc.getProtocol("NSTextInputClient")) |p| {
         _ = objc.c.class_addProtocol(cls.value, p.value);
@@ -243,12 +243,12 @@ fn makeBackdrop(blur: @import("config.zig").Blur, rect: NSRect, view: objc.Objec
             bd.msgSend(void, "addSubview:", .{view.value});
             // width | height sizable — track the backdrop through resizes.
             view.msgSend(void, "setAutoresizingMask:", .{@as(u64, 18)});
-            std.debug.print("rookz: background-blur — NSVisualEffectView behind-window\n", .{});
+            std.debug.print("rook: background-blur — NSVisualEffectView behind-window\n", .{});
             return bd;
         },
         .glass, .glass_clear => {
             const cls = objc.getClass("NSGlassEffectView") orelse {
-                std.debug.print("rookz: NSGlassEffectView unavailable (needs macOS 26) — falling back to blur\n", .{});
+                std.debug.print("rook: NSGlassEffectView unavailable (needs macOS 26) — falling back to blur\n", .{});
                 return makeBackdrop(.blur, rect, view);
             };
             const bd = cls.msgSend(objc.Object, "alloc", .{})
@@ -259,7 +259,7 @@ fn makeBackdrop(blur: @import("config.zig").Blur, rect: NSRect, view: objc.Objec
                     bd.msgSend(void, "setStyle:", .{@as(i64, 1)}); // clear
             }
             bd.msgSend(void, "setContentView:", .{view.value});
-            std.debug.print("rookz: background-blur {s} — NSGlassEffectView (Liquid Glass)\n", .{@tagName(blur)});
+            std.debug.print("rook: background-blur {s} — NSGlassEffectView (Liquid Glass)\n", .{@tagName(blur)});
             return bd;
         },
     }
@@ -484,7 +484,7 @@ pub const App = struct {
         const keybinds = @import("config.zig").loadKeybinds(init.io, gpa);
         if (themepkg.byName(cfg.theme)) |t| {
             th = t.*;
-        } else std.debug.print("rookz config: unknown theme '{s}' (builtin: default, nocturne)\n", .{cfg.theme});
+        } else std.debug.print("rook config: unknown theme '{s}' (builtin: default, nocturne)\n", .{cfg.theme});
 
         const NSApplication = objc.getClass("NSApplication").?;
         const app = NSApplication.msgSend(objc.Object, "sharedApplication", .{});
@@ -521,7 +521,7 @@ pub const App = struct {
         const window = objc.getClass("NSWindow").?
             .msgSend(objc.Object, "alloc", .{})
             .msgSend(objc.Object, "initWithContentRect:styleMask:backing:defer:", .{ rect, style, @as(u64, 2), false });
-        window.msgSend(void, "setTitle:", .{nsString("rookz")});
+        window.msgSend(void, "setTitle:", .{nsString("rook")});
         window.msgSend(void, "center", .{});
         window.msgSend(void, "setReleasedWhenClosed:", .{false});
         if (!opaque_bg) {
@@ -532,13 +532,13 @@ pub const App = struct {
             // traffic lights float over our tinted drag strip.
             window.msgSend(void, "setTitlebarAppearsTransparent:", .{true});
             window.msgSend(void, "setTitleVisibility:", .{@as(i64, 1)}); // hidden
-            std.debug.print("rookz: background-opacity {d:.2} — compositor path (direct scan-out off)\n", .{cfg.background_opacity});
+            std.debug.print("rook: background-opacity {d:.2} — compositor path (direct scan-out off)\n", .{cfg.background_opacity});
         }
 
         // Our own NSView subclass, so the thing has an input context
         // (see the IME section); a failed class build falls back to the
         // stock view and the pre-IME behavior.
-        const view = (rookzViewClass() orelse objc.getClass("NSView").?)
+        const view = (rookViewClass() orelse objc.getClass("NSView").?)
             .msgSend(objc.Object, "alloc", .{})
             .msgSend(objc.Object, "initWithFrame:", .{rect});
         view.msgSend(void, "setWantsLayer:", .{true});
@@ -552,7 +552,7 @@ pub const App = struct {
         // the contentView, so it must post frame changes too.
         var blur = cfg.background_blur;
         if (blur != .none and opaque_bg) {
-            std.debug.print("rookz config: background-blur needs background-opacity < 1 — ignoring\n", .{});
+            std.debug.print("rook config: background-blur needs background-opacity < 1 — ignoring\n", .{});
             blur = .none;
         }
         var content = view;
@@ -646,14 +646,14 @@ pub const App = struct {
         if (self.activate) self.app.msgSend(void, "activateIgnoringOtherApps:", .{true});
 
         @import("ctl.zig").start(self) catch |err| {
-            std.debug.print("rookz ctl: failed to start: {}\n", .{err});
+            std.debug.print("rook ctl: failed to start: {}\n", .{err});
         };
 
         // rook-host: spawn (or adopt) the daemon. Off-thread because a
         // cold start costs a health-poll of up to 5s, and the first
         // frame owes nothing to the host — the terminal opens either way.
         if (std.Thread.spawn(.{}, hostThread, .{self})) |t| t.detach() else |err| {
-            std.debug.print("rookz host: thread failed: {}\n", .{err});
+            std.debug.print("rook host: thread failed: {}\n", .{err});
         }
 
         // …and take it down with us. Nothing runs while rook is closed:
@@ -672,7 +672,7 @@ pub const App = struct {
 
         // Usage cluster: poll the host's cached snapshot off-thread.
         if (std.Thread.spawn(.{}, usageThread, .{self})) |t| t.detach() else |err| {
-            std.debug.print("rookz usage: thread failed: {}\n", .{err});
+            std.debug.print("rook usage: thread failed: {}\n", .{err});
         }
 
         // Keys → pty (Cmd+Q quits). AppKit copies the handler block, so the
@@ -1257,11 +1257,11 @@ pub const App = struct {
         defer self.draw_lock.unlock();
         const t = self.activeTab();
         const pane = self.makePane(self.focusedCwd()) catch |err| {
-            std.debug.print("rookz: split failed: {}\n", .{err});
+            std.debug.print("rook: split failed: {}\n", .{err});
             return;
         };
         if (!panespkg.splitAt(self.gpa, &t.root, t.focused, pane, horiz)) {
-            std.debug.print("rookz: split target missing\n", .{});
+            std.debug.print("rook: split target missing\n", .{});
             return;
         }
         t.panes.append(self.gpa, pane) catch {};
@@ -1283,7 +1283,7 @@ pub const App = struct {
 
     fn newTabLocked(self: *App, cwd: ?[*:0]const u8) void {
         const pane = self.makePane(cwd) catch |err| {
-            std.debug.print("rookz: new tab failed: {}\n", .{err});
+            std.debug.print("rook: new tab failed: {}\n", .{err});
             return;
         };
         const t = self.gpa.create(panespkg.Tab) catch return;
@@ -1991,7 +1991,7 @@ pub const App = struct {
 
         if (themepkg.byName(cfg.theme)) |t| {
             th = t.*;
-        } else std.debug.print("rookz config: unknown theme '{s}'\n", .{cfg.theme});
+        } else std.debug.print("rook config: unknown theme '{s}'\n", .{cfg.theme});
 
         // Retint every live emulator; the palette dirty flag forces a
         // full RenderState rebuild next snapshot.
@@ -2007,7 +2007,7 @@ pub const App = struct {
             }
         };
         self.scene_dirty = true;
-        std.debug.print("rookz: config reloaded (theme {s}; font/opacity need relaunch)\n", .{th.name});
+        std.debug.print("rook: config reloaded (theme {s}; font/opacity need relaunch)\n", .{th.name});
     }
 
     fn refreshHudLocked(self: *App, now: f64) void {
@@ -2042,7 +2042,7 @@ pub const App = struct {
 
         var left: [96]u8 = undefined;
         const t = self.activeTab();
-        const l = std.fmt.bufPrint(&left, "rookz · {d} pane{s} · #{d}", .{
+        const l = std.fmt.bufPrint(&left, "rook · {d} pane{s} · #{d}", .{
             t.panes.items.len,
             @as([]const u8, if (t.panes.items.len == 1) "" else "s"),
             t.focused.id,
@@ -2427,7 +2427,7 @@ pub const App = struct {
             @as(u64, 0),
         });
         @import("png.zig").writeBGRA(self.shot_path[0..self.shot_len], @intCast(w), @intCast(h), @intCast(bpr), pixels) catch |err| {
-            std.debug.print("rookz shot: write failed: {}\n", .{err});
+            std.debug.print("rook shot: write failed: {}\n", .{err});
         };
     }
 };
@@ -2493,7 +2493,7 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
     }
 
     // ⌃HJKL pane nav — yielding to alternate-screen apps (vim owns its
-    // own splits). rookz reads alt-screen truth straight from the
+    // own splits). rook reads alt-screen truth straight from the
     // emulator; the webview app needed a 3s-stale `fg` heuristic here.
     if (flags & flag_ctrl != 0) {
         const chars = event.msgSend(objc.Object, "charactersIgnoringModifiers", .{});
@@ -2682,7 +2682,7 @@ fn displayLinkCallback(link: CVDisplayLinkRef, now: ?*const anyopaque, output: ?
 /// the way usage.zig already does.
 fn hostThread(app: *App) void {
     const h = hostc.ensure(app.gpa, app.io) orelse {
-        std.debug.print("rookz host: no rook-host (panels that need it stay empty)\n", .{});
+        std.debug.print("rook host: no rook-host (panels that need it stay empty)\n", .{});
         return;
     };
     app.host_lock.lock();

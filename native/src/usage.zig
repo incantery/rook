@@ -1,5 +1,5 @@
 //! Subscription usage — READ side of rook-host's cost-weighted prober.
-//! The host scrapes `claude -p /usage` and caches the windows; rookz
+//! The host scrapes `claude -p /usage` and caches the windows; rook
 //! GETs the cached snapshot through hostc (port + bearer token re-read
 //! from host.json every fetch — a host restart changes both). Fail-open
 //! everywhere: no host.json, dead host, bad JSON → an empty cluster,

@@ -142,7 +142,7 @@ pub const Highlighter = struct {
         var err_type: u32 = 0;
         self.query = ts_query_new(l.lang, l.query_src.ptr, @intCast(l.query_src.len), &err_off, &err_type);
         if (self.query == null) {
-            std.debug.print("rookz syntax: query failed at byte {d} (type {d})\n", .{ err_off, err_type });
+            std.debug.print("rook syntax: query failed at byte {d} (type {d})\n", .{ err_off, err_type });
         }
     }
 

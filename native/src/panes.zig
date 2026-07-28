@@ -37,7 +37,7 @@ pub const Content = union(enum) {
 pub const Pane = struct {
     id: u32,
     content: Content,
-    /// A takeover editor's parked shell: `rookz edit`/:e on a terminal
+    /// A takeover editor's parked shell: `rook edit`/:e on a terminal
     /// pane overlays the editor and stashes the Term here — the session
     /// keeps running underneath. Editor :q restores it (the vim-in-a-
     /// terminal feel; TODO.md's "take over the pane").

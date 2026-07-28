@@ -4,13 +4,13 @@
 //! attention, transcripts, decisions, worktrees. It speaks localhost
 //! HTTP with a bearer token, and `~/.local/state/rook/host.json` is how
 //! anything finds it (port + token + pid + build). rookctl and the MCP
-//! server use the same door; this is rookz walking through it.
+//! server use the same door; this is rook walking through it.
 //!
 //! THE LIFECYCLE INVERSION. The wails app deliberately *rides* a healthy
 //! daemon and never kills it, so shells outlive an app restart
-//! (internal/hostclient). rookz owns its ptys in-process, so that trade
+//! (internal/hostclient). rook owns its ptys in-process, so that trade
 //! buys nothing here, and the standing rule is the opposite: nothing runs
-//! while rook is closed. So rookz spawns the daemon and SIGTERMs it on
+//! while rook is closed. So rook spawns the daemon and SIGTERMs it on
 //! quit.
 //!
 //! With one guard. We shut down only a daemon our own spawn became —
@@ -24,7 +24,7 @@
 //! alone. Today that someone is the wails app during the cutover; after
 //! it, nobody, and every launch owns what it started.
 //!
-//! Known gap: a rookz that crashes (SIGKILL, panic) leaves its daemon
+//! Known gap: a rook that crashes (SIGKILL, panic) leaves its daemon
 //! behind, and the next launch adopts rather than owns it. It is then
 //! reaped by the next build change. Same as today's behaviour, so not a
 //! regression — but it is why `owned` is reported by ctl `version`.
@@ -249,17 +249,18 @@ fn writeAll(fd: c_int, bytes: []const u8) bool {
     return true;
 }
 
-/// Where rook-host lives, in the order that makes each context work:
-/// beside our own binary (the bundle, post-cutover), then PATH, then the
-/// installed wails bundle — the last one only so `zig build run` from a
-/// dev tree finds a daemon at all before the rename lands.
-fn hostBinary(buf: []u8) ?[:0]const u8 {
+/// Find one of our sibling Go binaries (`rook-host`, `rookctl`) in the
+/// order that makes each context work: beside our own executable (the
+/// installed bundle, where they ship), then PATH, then the bundle by
+/// absolute path — the last one only so a `zig build run` from a dev
+/// tree, whose binary has nothing beside it, finds them at all.
+pub fn siblingBinary(name: []const u8, buf: []u8) ?[:0]const u8 {
     var exe_buf: [1024]u8 = undefined;
     var size: u32 = exe_buf.len;
     if (_NSGetExecutablePath(&exe_buf, &size) == 0) {
         const exe = std.mem.sliceTo(&exe_buf, 0);
         if (std.mem.lastIndexOfScalar(u8, exe, '/')) |slash| {
-            if (std.fmt.bufPrintZ(buf, "{s}/rook-host", .{exe[0..slash]})) |p| {
+            if (std.fmt.bufPrintZ(buf, "{s}/{s}", .{ exe[0..slash], name })) |p| {
                 if (access(p.ptr, X_OK) == 0) return p;
             } else |_| {}
         }
@@ -268,14 +269,17 @@ fn hostBinary(buf: []u8) ?[:0]const u8 {
         var it = std.mem.splitScalar(u8, std.mem.span(path_env), ':');
         while (it.next()) |dir| {
             if (dir.len == 0) continue;
-            const p = std.fmt.bufPrintZ(buf, "{s}/rook-host", .{dir}) catch continue;
+            const p = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, name }) catch continue;
             if (access(p.ptr, X_OK) == 0) return p;
         }
     }
-    const fallback = "/Applications/rook.app/Contents/MacOS/rook-host";
-    if (access(fallback, X_OK) == 0)
-        return std.fmt.bufPrintZ(buf, "{s}", .{fallback}) catch null;
+    const p = std.fmt.bufPrintZ(buf, "/Applications/rook.app/Contents/MacOS/{s}", .{name}) catch return null;
+    if (access(p.ptr, X_OK) == 0) return p;
     return null;
+}
+
+fn hostBinary(buf: []u8) ?[:0]const u8 {
+    return siblingBinary("rook-host", buf);
 }
 
 /// Fork+exec the daemon detached from our stdio. Returns its pid.
@@ -289,7 +293,7 @@ fn spawnHost(path: [:0]const u8) ?c_int {
     if (pid < 0) return null;
     if (pid == 0) {
         // Child. Its own session so a signal aimed at our process group
-        // (or a controlling terminal, when rookz runs from a shell)
+        // (or a controlling terminal, when rook runs from a shell)
         // doesn't take the daemon with it — we kill it deliberately or
         // not at all.
         _ = setsid();

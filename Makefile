@@ -58,29 +58,47 @@ dev:
 prod:
 	cd native && zig build -Doptimize=ReleaseFast && ROOKZ_SOCK=/tmp/rookz-dev.sock ./zig-out/bin/rookz win
 
-# The daily driver: rookz.app in /Applications (Spotlight: "rookz").
-# ReleaseFast, minimal hand-rolled bundle, ad-hoc signed. Its ctl
-# socket is the default /tmp/rookz.sock — the agent-visibility surface
-# rides along on purpose. The wails app install is install-web.
-ROOKZ_APP := /Applications/rookz.app
+# The daily driver: the ZIG app as /Applications/rook.app. ReleaseFast,
+# minimal hand-rolled bundle, ad-hoc signed, ctl socket on the default
+# /tmp/rook.sock (the agent-visibility surface rides along on purpose).
+#
+# It REPLACES the wails app at the same path, by design — `make
+# install-web` puts that one back, and is the escape hatch if this one
+# misbehaves. The two Go binaries ship INSIDE the bundle because that is
+# how they are found: the app resolves rook-host and rookctl beside its
+# own executable first (hostc.siblingBinary), so a bundle without them
+# is an app that cannot start a daemon or answer a CLI verb.
+#
+# Version: the newest tag, since Info.plist's CFBundleVersion has to be
+# a dotted number and `rookctl update` compares against it.
+REL_VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0)
 install:
-	cd native && zig build -Doptimize=ReleaseFast
-	rm -rf $(ROOKZ_APP)
-	mkdir -p $(ROOKZ_APP)/Contents/MacOS
-	cp native/bundle/Info.plist $(ROOKZ_APP)/Contents/
-	cp native/zig-out/bin/rookz $(ROOKZ_APP)/Contents/MacOS/rookz
-	codesign -s - --force $(ROOKZ_APP)
-	$(LSREGISTER) -f $(ROOKZ_APP)
-	mdimport $(ROOKZ_APP)
-	@# The CLI face of the same binary (rookz edit <file> from any shell
-	@# inside the app). ~/.local/bin is on PATH; a symlink keeps the CLI
-	@# in lockstep with the installed app.
+	cd native && zig build -Doptimize=ReleaseFast -Dbuild=$(BUILD) -Dversion=$(REL_VERSION)
+	go build -ldflags "$(BUILD_FLAG)" -o native/zig-out/bin/rook-host ./cmd/rook-host
+	go build -ldflags "$(BUILD_FLAG)" -o native/zig-out/bin/rookctl ./cmd/rookctl
+	rm -rf $(APP)
+	mkdir -p $(APP)/Contents/MacOS
+	sed 's/__VERSION__/$(REL_VERSION)/g' native/bundle/Info.plist > $(APP)/Contents/Info.plist
+	cp native/zig-out/bin/rook $(APP)/Contents/MacOS/rook
+	cp native/zig-out/bin/rook-host $(APP)/Contents/MacOS/rook-host
+	cp native/zig-out/bin/rookctl $(APP)/Contents/MacOS/rookctl
+	codesign -s - --force $(APP)
+	$(LSREGISTER) -f $(APP)
+	mdimport $(APP)
+	@# The CLI face of the same binary. ~/.local/bin is on PATH; symlinks
+	@# keep the CLI in lockstep with the installed app.
 	mkdir -p $(HOME)/.local/bin
-	ln -sf $(ROOKZ_APP)/Contents/MacOS/rookz $(HOME)/.local/bin/rookz
-	@# `re` = rookz edit (argv[0] dispatch, TODO.md ask) — this CLAIMS the
-	@# name from the old hand-made re→rookctl symlink.
-	ln -sf $(ROOKZ_APP)/Contents/MacOS/rookz $(HOME)/.local/bin/re
-	@echo "installed $(ROOKZ_APP) + ~/.local/bin/{rookz,re} — Spotlight 'rookz' or: open -a rookz"
+	ln -sf $(APP)/Contents/MacOS/rook $(HOME)/.local/bin/rook
+	@# `re` = rook edit (argv[0] dispatch). CLAIMED from rookctl, which
+	@# used the same trick — the zig editor is the editor now.
+	ln -sf $(APP)/Contents/MacOS/rook $(HOME)/.local/bin/re
+	@# rookctl stays on PATH under its own name too: claude-plugin invokes
+	@# `rookctl mcp` and `rookctl claim` BY NAME, and an installed plugin
+	@# breaking mid-session is not an acceptable cutover cost. It goes
+	@# when the plugin has moved to `rook`.
+	ln -sf $(APP)/Contents/MacOS/rookctl $(HOME)/.local/bin/rookctl
+	@echo "installed $(APP) (v$(REL_VERSION), build $(BUILD)) + ~/.local/bin/{rook,re,rookctl}"
+	@echo "quit + relaunch rook to pick it up"
 
 dev-web:
 	XDG_STATE_HOME=$(HOME)/.local/state/rook-dev \

@@ -1,8 +1,21 @@
-//! rookz config: $XDG_CONFIG_HOME/rookz/config.toml (default
-//! ~/.config/rookz/config.toml). A deliberate TOML subset — flat
-//! `key = value` lines, # comments, quoted strings, numbers; [sections]
-//! are skipped, not errors. Dashes and underscores in keys are
-//! interchangeable (font-size == font_size). Missing file = defaults.
+//! rook config: $XDG_CONFIG_HOME/rook/config.toml (default
+//! ~/.config/rook/config.toml). A deliberate TOML subset — flat
+//! `key = value` lines, # comments, quoted strings, numbers. Dashes and
+//! underscores in keys are interchangeable (font-size == font_size).
+//! Missing file = defaults.
+//!
+//! ONE FILE, TWO READERS. This is rook-host's config too, and most of
+//! what is in it belongs to the host: coder, workflow, workspace-allow,
+//! [agent], [jira], [lsp], [cloud], [workspaces.*]. So:
+//!
+//!   - Only TOP-LEVEL keys are ours. A key inside any [table] is
+//!     someone else's by definition — parsing `url` out of [jira] as if
+//!     it were a window setting is how a shared file goes wrong.
+//!   - An unrecognised key is SILENT, not a warning. We are a guest in
+//!     this file and cannot tell a typo from a host key we've never
+//!     heard of. The cost is that our own typos are quiet too, which is
+//!     the price of one config instead of two (NEXT.md's layered
+//!     config.d/ is where this eventually gets its rigour back).
 
 const std = @import("std");
 
@@ -46,50 +59,73 @@ pub const Config = struct {
     window_padding: f64 = 0,
 };
 
-/// One number over both config files — the live-reload poll compares
-/// this at 1Hz (files are tiny; reading beats fs-event plumbing).
+/// One number over the config file — the live-reload poll compares this
+/// at 1Hz (the file is tiny; reading beats fs-event plumbing). Keybinds
+/// live in the same file now, so one read covers both.
 pub fn digest(io: std.Io, gpa: std.mem.Allocator) u64 {
     var h = std.hash.Wyhash.init(0x400c);
     var pathbuf: [1024]u8 = undefined;
-    inline for (.{ "config.toml", "keybinds.toml" }) |name| {
-        if (cfgPath(&pathbuf, name)) |path| {
-            if (std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch null) |data| {
-                h.update(data);
-                gpa.free(data);
-            }
+    if (cfgPath(&pathbuf)) |path| {
+        if (std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch null) |data| {
+            h.update(data);
+            gpa.free(data);
         }
-        h.update(&.{0});
     }
     return h.final();
 }
 
-fn cfgPath(buf: []u8, comptime name: []const u8) ?[]const u8 {
+/// Trim a trailing `# comment` from a value.
+///
+/// A QUOTED value ends at its closing quote: `theme = "Nocturne" # nice`
+/// has to yield `"Nocturne"`, and a # inside the quotes is data, not a
+/// comment. The old code only stripped comments from unquoted values, so
+/// a commented quoted line parsed as garbage and was dropped in silence
+/// — which is how a keybind that was plainly in the file did nothing.
+pub fn stripComment(val: []const u8) []const u8 {
+    if (val.len > 0 and val[0] == '"') {
+        var i: usize = 1;
+        while (i < val.len) : (i += 1) {
+            if (val[i] == '\\') {
+                i += 1;
+                continue;
+            }
+            if (val[i] == '"') return val[0 .. i + 1];
+        }
+        return val; // unterminated — leave it; unquote will decline it
+    }
+    if (std.mem.indexOfScalar(u8, val, '#')) |h|
+        return std.mem.trim(u8, val[0..h], " \t");
+    return val;
+}
+
+pub fn cfgPath(buf: []u8) ?[]const u8 {
     if (getenv("XDG_CONFIG_HOME")) |x| {
-        return std.fmt.bufPrint(buf, "{s}/rookz/" ++ name, .{std.mem.span(x)}) catch null;
+        return std.fmt.bufPrint(buf, "{s}/rook/config.toml", .{std.mem.span(x)}) catch null;
     }
     const home = getenv("HOME") orelse return null;
-    return std.fmt.bufPrint(buf, "{s}/.config/rookz/" ++ name, .{std.mem.span(home)}) catch null;
+    return std.fmt.bufPrint(buf, "{s}/.config/rook/config.toml", .{std.mem.span(home)}) catch null;
 }
 
 pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
     var cfg: Config = .{};
 
     var pathbuf: [1024]u8 = undefined;
-    const path = blk: {
-        if (getenv("XDG_CONFIG_HOME")) |x| {
-            break :blk std.fmt.bufPrint(&pathbuf, "{s}/rookz/config.toml", .{std.mem.span(x)}) catch return cfg;
-        }
-        const home = getenv("HOME") orelse return cfg;
-        break :blk std.fmt.bufPrint(&pathbuf, "{s}/.config/rookz/config.toml", .{std.mem.span(home)}) catch return cfg;
-    };
+    const path = cfgPath(&pathbuf) orelse return cfg;
 
     const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch return cfg;
     defer gpa.free(data);
 
+    var in_table = false;
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0 or line[0] == '#' or line[0] == '[') continue;
+        if (line.len == 0 or line[0] == '#') continue;
+        // Everything from the first [table] on belongs to someone else.
+        if (line[0] == '[') {
+            in_table = true;
+            continue;
+        }
+        if (in_table) continue;
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
 
         var key_raw = std.mem.trim(u8, line[0..eq], " \t");
@@ -101,17 +137,11 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
         for (key_raw, 0..) |c, i| keybuf[i] = if (c == '-') '_' else c;
         const key = keybuf[0..key_raw.len];
 
-        var val = std.mem.trim(u8, line[eq + 1 ..], " \t");
-        // Strip a trailing comment on unquoted values.
-        if (val.len == 0 or val[0] != '"') {
-            if (std.mem.indexOfScalar(u8, val, '#')) |hash| {
-                val = std.mem.trim(u8, val[0..hash], " \t");
-            }
-        }
+        const val = stripComment(std.mem.trim(u8, line[eq + 1 ..], " \t"));
 
         if (std.mem.eql(u8, key, "font_size")) {
             cfg.font_size = std.fmt.parseFloat(f64, val) catch blk: {
-                std.debug.print("rookz config: bad font-size '{s}'\n", .{val});
+                std.debug.print("rook config: bad font-size '{s}'\n", .{val});
                 break :blk cfg.font_size;
             };
         } else if (std.mem.eql(u8, key, "font_family")) {
@@ -122,7 +152,7 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
         } else if (std.mem.eql(u8, key, "background_opacity")) {
             cfg.background_opacity = std.fmt.parseFloat(f64, val) catch 1.0;
             if (cfg.background_opacity < 0.3 or cfg.background_opacity > 1.0) {
-                std.debug.print("rookz config: background-opacity {d} out of [0.3, 1.0], using 1.0\n", .{cfg.background_opacity});
+                std.debug.print("rook config: background-opacity {d} out of [0.3, 1.0], using 1.0\n", .{cfg.background_opacity});
                 cfg.background_opacity = 1.0;
             }
         } else if (std.mem.eql(u8, key, "theme")) {
@@ -130,39 +160,49 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
             if (stripped.len > 0) {
                 cfg.theme = gpa.dupe(u8, stripped) catch cfg.theme;
             }
-        } else if (std.mem.eql(u8, key, "window_padding")) {
+        } else if (std.mem.eql(u8, key, "window_padding") or
+            std.mem.eql(u8, key, "window_padding_x") or
+            std.mem.eql(u8, key, "window_padding_y"))
+        {
+            // The wails app spells it per-axis; rook insets uniformly.
+            // Either name sets the one knob — last line wins, which for
+            // the usual `x = y` pair is the same answer.
             cfg.window_padding = std.fmt.parseFloat(f64, val) catch 0;
             if (cfg.window_padding < 0 or cfg.window_padding > 32) {
-                std.debug.print("rookz config: window-padding {d} out of [0, 32], using 0\n", .{cfg.window_padding});
+                std.debug.print("rook config: window-padding {d} out of [0, 32], using 0\n", .{cfg.window_padding});
                 cfg.window_padding = 0;
             }
         } else if (std.mem.eql(u8, key, "background_blur")) {
             const stripped = std.mem.trim(u8, val, "\"");
             cfg.background_blur = blurFromName(stripped) orelse blk: {
-                std.debug.print("rookz config: unknown background-blur '{s}' (none, blur, glass, glass-clear)\n", .{stripped});
+                std.debug.print("rook config: unknown background-blur '{s}' (none, blur, glass, glass-clear)\n", .{stripped});
                 break :blk .none;
             };
-        } else {
-            std.debug.print("rookz config: unknown key '{s}' (known: font-size, font-family, theme, background-opacity, background-blur, window-padding)\n", .{key_raw});
         }
+        // No else: unknown top-level keys are the host's. See the header.
     }
 
     if (cfg.font_size < 6 or cfg.font_size > 72) {
-        std.debug.print("rookz config: font-size {d} out of range, using 13\n", .{cfg.font_size});
+        std.debug.print("rook config: font-size {d} out of range, using 13\n", .{cfg.font_size});
         cfg.font_size = 13;
     }
     return cfg;
 }
 
-// ---- keybinds.toml ----
+// ---- keybinds ----
 //
-// Leader chords, tmux-shaped: `leader = "x"` in [app], then
-// `"<leader>v" = "pane.split-right"` lines. Double-tap the leader to
-// type it literally; an unknown chord key is swallowed. Canonical
-// action names are the wails keymap's (pane.split-right, pane.
-// split-down, pane.focus-*, tab.new/next/prev); a few aliases from
-// Seth's first file are accepted. [editor] is parsed past, not into —
-// there is no editor yet.
+// Same file. Leader chords, tmux-shaped: top-level `leader = "x"`, then
+// a [keybinds] table of `"<leader>v" = "pane.split-right"` lines — the
+// shape rook-host's config already uses. (`[app]` is the old rook
+// keybinds.toml shape, still accepted so a pre-rename file keeps
+// working.) Double-tap the leader to type it literally.
+//
+// Action names are the wails REGISTRY's, because that shared file is
+// written in them (session.new, workspace.manager, …) — a few rook
+// aliases are kept. A name we don't implement yet is skipped in
+// silence, not warned about: the registry has ~30 commands to our 13,
+// and a config listing them is correct, not wrong. [editor] and its
+// subtables belong to the editor scope and are parsed past.
 
 pub const Action = enum {
     split_right,
@@ -306,65 +346,101 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     kb.bind('s', .{ .action = .workspace_switch });
 
     var pathbuf: [1024]u8 = undefined;
-    const path = blk: {
-        if (getenv("XDG_CONFIG_HOME")) |x| {
-            break :blk std.fmt.bufPrint(&pathbuf, "{s}/rookz/keybinds.toml", .{std.mem.span(x)}) catch return kb;
-        }
-        const home = getenv("HOME") orelse return kb;
-        break :blk std.fmt.bufPrint(&pathbuf, "{s}/.config/rookz/keybinds.toml", .{std.mem.span(home)}) catch return kb;
-    };
+    const path = cfgPath(&pathbuf) orelse return kb;
 
     const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch return kb;
     defer gpa.free(data);
 
+    // `none` is the top level, where `leader` lives (the editor's own
+    // leader sits under [editor] and must not be mistaken for it).
     var section: enum { none, app, other } = .none;
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
         if (line[0] == '[') {
-            if (std.mem.eql(u8, line, "[app]")) {
-                section = .app;
-            } else {
-                section = .other;
-                if (std.mem.eql(u8, line, "[editor]"))
-                    std.debug.print("rookz keybinds: [editor] noted — no editor yet, skipped\n", .{});
-            }
+            section = if (std.mem.eql(u8, line, "[keybinds]") or std.mem.eql(u8, line, "[app]"))
+                .app
+            else
+                .other;
             continue;
         }
-        if (section != .app) continue;
+        if (section == .other) continue;
 
         const eq = topLevelEq(line) orelse continue;
         var keybuf: [64]u8 = undefined;
         var valbuf: [64]u8 = undefined;
         const key = unquote(std.mem.trim(u8, line[0..eq], " \t"), &keybuf);
-        var val = std.mem.trim(u8, line[eq + 1 ..], " \t");
-        if (val.len > 0 and val[0] != '"') {
-            if (std.mem.indexOfScalar(u8, val, '#')) |hash| val = std.mem.trim(u8, val[0..hash], " \t");
-        }
+        const val = stripComment(std.mem.trim(u8, line[eq + 1 ..], " \t"));
         const value = unquote(val, &valbuf);
 
         if (std.mem.eql(u8, key, "leader")) {
             kb.leader = chordChar(value) orelse blk: {
-                std.debug.print("rookz keybinds: leader must be one key, got '{s}'\n", .{value});
+                std.debug.print("rook keybinds: leader must be one key, got '{s}'\n", .{value});
                 break :blk null;
             };
-        } else if (std.mem.startsWith(u8, key, "<leader>")) {
-            const ch = chordChar(key["<leader>".len..]) orelse {
-                std.debug.print("rookz keybinds: unsupported chord key '{s}'\n", .{key});
-                continue;
-            };
-            const spec = actionFromName(value) orelse {
-                std.debug.print("rookz keybinds: unknown action '{s}' for '{s}'\n", .{ value, key });
-                continue;
-            };
+        } else if (section == .app and std.mem.startsWith(u8, key, "<leader>")) {
+            // An unsupported chord shape or an action we haven't built
+            // yet: skip it. See the header — this file names commands
+            // rook does not have, and that is not an error.
+            const ch = chordChar(key["<leader>".len..]) orelse continue;
+            const spec = actionFromName(value) orelse continue;
             kb.bind(ch, spec);
-        } else {
-            std.debug.print("rookz keybinds: only <leader> chords supported yet, ignoring '{s}'\n", .{key});
         }
     }
 
     if (kb.n > 0 and kb.leader == null)
-        std.debug.print("rookz keybinds: chords defined but no leader set — they are unreachable\n", .{});
+        std.debug.print("rook keybinds: chords defined but no leader set — they are unreachable\n", .{});
     return kb;
+}
+
+// ---- tests ----
+//
+// The pure parsing rules get their own test root (build.zig), for the
+// same reason paste.zig does: everything here fails SILENTLY by design
+// — we are a guest in a shared file — so a broken rule shows up as a
+// keybind that just doesn't work, with nothing on stderr to explain it.
+
+test "stripComment: quoted value keeps its quotes, loses the comment" {
+    const t = std.testing;
+    try t.expectEqualStrings("\"tab.new\"", stripComment("\"tab.new\"  # carried over"));
+    try t.expectEqualStrings("\"Nocturne\"", stripComment("\"Nocturne\""));
+    // A # inside quotes is data.
+    try t.expectEqualStrings("\"#ff00ff\"", stripComment("\"#ff00ff\" # a color"));
+    // An escaped quote does not end the string.
+    try t.expectEqualStrings("\"a\\\"b\"", stripComment("\"a\\\"b\" # x"));
+}
+
+test "stripComment: unquoted value" {
+    const t = std.testing;
+    try t.expectEqualStrings("0.9", stripComment("0.9 # eyeball it"));
+    try t.expectEqualStrings("18", stripComment("18"));
+    try t.expectEqualStrings("", stripComment("# only a comment"));
+}
+
+test "keybind values survive a trailing comment" {
+    const t = std.testing;
+    var buf: [64]u8 = undefined;
+    const v = unquote(stripComment("\"tab.new\"  # carried over from rookz"), &buf);
+    try t.expectEqualStrings("tab.new", v);
+    try t.expect(actionFromName(v).?.action == .tab_new);
+}
+
+test "actionFromName takes the registry's names and rookz's aliases" {
+    const t = std.testing;
+    try t.expect(actionFromName("session.new").?.action == .tab_new);
+    try t.expect(actionFromName("app.split.vertical").?.action == .split_right);
+    try t.expect(actionFromName("tab.select-3").?.arg == 3);
+    // A registry command rook has not built yet: skipped, not an error.
+    try t.expect(actionFromName("workspace.manager") == null);
+}
+
+test "topLevelEq ignores '=' inside a quoted key" {
+    const t = std.testing;
+    try t.expectEqual(@as(?usize, 7), topLevelEq("leader = \"`\""));
+    // The key is "<leader>\"" — the escaped quote must not end it.
+    const line = "\"<leader>\\\"\" = \"app.split.horizontal\"";
+    const eq = topLevelEq(line).?;
+    var buf: [64]u8 = undefined;
+    try t.expectEqualStrings("<leader>\"", unquote(std.mem.trim(u8, line[0..eq], " \t"), &buf));
 }

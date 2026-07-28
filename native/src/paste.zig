@@ -43,7 +43,7 @@ pub const STRIP = [_]u8{
 /// independent of terminal state — a paste carrying "\x1b[201~" is
 /// suspicious even when nothing is bracketed.
 ///
-/// rookz does not yet gate on this (no confirmation modal — see
+/// rook does not yet gate on this (no confirmation modal — see
 /// PARITY.md §0); it exists so the gate has something to ask.
 pub fn isSafe(data: []const u8) bool {
     return std.mem.indexOfScalar(u8, data, '\n') == null and

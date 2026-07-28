@@ -258,7 +258,9 @@ pub const Session = struct {
     }
 
     fn effectXtversion(_: *Handler) []const u8 {
-        return "rookz 0.0.1";
+        // XTVERSION (CSI > 0 q) — what `echo $TERM_PROGRAM_VERSION`-style
+        // probes and ghostty's own feature detection read.
+        return "rook " ++ @import("build_options").version;
     }
 
     fn effectColorScheme(_: *Handler) EffectRet("color_scheme") {
@@ -282,7 +284,7 @@ pub const Session = struct {
             .rows = rows,
             .cell_size_px = .{ .width = cell_w, .height = cell_h },
         }) catch |err| {
-            std.debug.print("rookz: terminal resize failed: {}\n", .{err});
+            std.debug.print("rook: terminal resize failed: {}\n", .{err});
         };
         self.mutex.unlock();
         self.pty.setSize(.{ .ws_row = rows, .ws_col = cols }) catch {};

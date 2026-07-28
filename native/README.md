@@ -1,8 +1,14 @@
-# rookz — native rook in Zig on libghostty-vt
+# rook — native, in Zig, on libghostty-vt
 
 Numbers live in [PERF.md](PERF.md); `./bench.sh` reproduces them.
 
-Experimental (branch `rook/zig`). Standalone Zig desktop terminal:
+This IS rook now: `make install` puts it at `/Applications/rook.app`,
+and it replaced the webview app that used to live there. `rook` is the
+app and the CLI both — verbs it doesn't own are handed to the bundled
+`rookctl` (see `src/main.zig`), and `re` is `rook edit`. The webview
+app is still buildable with `make install-web` if this one misbehaves.
+
+Standalone Zig desktop terminal:
 pty → ghostty-vt → RenderState → instanced Metal grid in an owned
 CAMetalLayer. No webview, no Swift.
 
@@ -37,10 +43,10 @@ how the rules above are verified — ⌘V carries a modifier the `press`
 verb can't express. NOT yet: a confirmation prompt for unframed
 multiline pastes (`paste.isSafe` exists, nothing gates on it).
 
-**Dead keys and IME** work now, which needed a view class of rookz's
+**Dead keys and IME** work now, which needed a view class of rook's
 own: a stock NSView returns nil from `-inputContext`, AppKit's way of
 saying "this thing does not take text", so ⌥e e and every CJK input
-method were simply impossible. `RookzTextView` conforms to
+method were simply impossible. `RookTextView` conforms to
 NSTextInputClient and the input method gets FIRST REFUSAL on every
 unmodified key. Text it commits (ordinary ASCII included) is the input;
 while it composes, the preedit is held and drawn at the cursor in
@@ -79,8 +85,8 @@ full reparse runs per buffer change (size-capped) and capture spans
 are extracted for the visible range only, mapped to the theme's
 syntax colors. Other languages = drop a grammar's parser.c + its
 highlights.scm into vendor/ and add two lines to syntax.zig.
-Open one with `rookz edit <file>` — or just `re <file>` — from any
-shell inside the app (the CLI finds this instance via ROOKZ_SOCK), or
+Open one with `rook edit <file>` — or just `re <file>` — from any
+shell inside the app (the CLI finds this instance via ROOK_SOCK), or
 ctl `edit <path>`. The editor TAKES OVER the pane like vim would: the
 shell parks underneath and keeps running, `:q`/⌘W drops you back to
 it, prompt and scrollback intact (a focused editor retargets in
@@ -124,7 +130,7 @@ choose-session; `w` stays reserved for a choose-window picker) opens
 the WORKSPACE PALETTE —
 the first modal chrome tenant, and the seed of every future picker
 (file finder, themes, commands): type-to-filter fuzzy list, arrows or
-⌃N/⌃P, Enter, ESC. The list is rook's own registry — rookz reads
+⌃N/⌃P, Enter, ESC. The list is rook's own registry — rook reads
 `workspaces(name, root, worktree_of, last_used)` from
 ~/.local/share/rook/rook.db through the system libsqlite3, read-only,
 re-queried each open, so it always reflects what wails-rook/rook-host
@@ -152,14 +158,14 @@ because less happened) never reads as lag.
 
 ```
 zig build                    # needs zig 0.16
-./zig-out/bin/rookz win      # the app (make dev from repo root does both)
-./zig-out/bin/rookz demo     # headless: bytes → vt → screen dump
-./zig-out/bin/rookz exec ls  # run a command under a pty, dump final screen
-make install                 # repo root: ReleaseFast → /Applications/rookz.app
+./zig-out/bin/rook win      # the app (make dev from repo root does both)
+./zig-out/bin/rook demo     # headless: bytes → vt → screen dump
+./zig-out/bin/rook exec ls  # run a command under a pty, dump final screen
+make install                 # repo root: ReleaseFast → /Applications/rook.app
 ```
 
-The installed app answers on the default `/tmp/rookz.sock`; `make
-dev`/`make prod` instances use `/tmp/rookz-dev.sock` so they never
+The installed app answers on the default `/tmp/rook.sock`; `make
+dev`/`make prod` instances use `/tmp/rook-dev.sock` so they never
 steal it (the ctl server unlinks-then-binds). App shells are login
 shells (`-l`) started in `$HOME` — Dock launches have a skeleton env
 and a cwd of `/`.
@@ -172,7 +178,7 @@ use this for every tooling/probe launch.
 `internal/host` is rook's server half — threads, review, asks,
 attention, transcripts, decisions, worktrees — and `rookctl` and the MCP
 server reach it over localhost HTTP with a bearer token from
-`~/.local/state/rook/host.json`. `src/hostc.zig` is rookz walking
+`~/.local/state/rook/host.json`. `src/hostc.zig` is rook walking
 through that same door: `readInfo` → `get`/`post` → JSON, hand-rolled
 HTTP/1.1 over one connection per request (one origin, one hop, no TLS,
 no redirects — std.http would be the bigger thing). `usage.zig` is its
@@ -180,8 +186,8 @@ first tenant.
 
 The lifecycle is INVERTED from the wails app. That one deliberately
 rides a healthy daemon and never kills it, so shells survive an app
-restart; rookz owns its ptys in-process, so that trade buys nothing
-here. Instead: rookz spawns the daemon at launch (off-thread — a cold
+restart; rook owns its ptys in-process, so that trade buys nothing
+here. Instead: rook spawns the daemon at launch (off-thread — a cold
 start costs a health poll of up to 5s and the first frame owes it
 nothing) and SIGTERMs it on quit. Nothing runs while rook is closed.
 
@@ -189,58 +195,58 @@ We always spawn and let rook-host decide, rather than reimplementing
 `shouldRide` in Zig: the daemon is idempotent, and replaces a stale
 build or exits with "already running" on its own. `owned` is then just
 `host.json`'s pid == the pid we forked — and we shut down only what we
-own, so a rookz launched beside the wails app during the cutover can
+own, so a rook launched beside the wails app during the cutover can
 never take that app's daemon with it. Check either with `version`:
 
 ```
-rookz dev build=dev
+rook dev build=dev
 host=up port=56744 pid=56341 build=a46c116.20260726142750 owned=yes
 ```
 
 Fail-open like everything else: no host.json, no binary, a dead daemon
 → `host=down`, one line on stderr, and a terminal that works fine
-without it. A rookz that is SIGKILLed leaves its daemon behind, which
+without it. A rook that is SIGKILLed leaves its daemon behind, which
 the next build change reaps — the same gap the wails app has.
 
 ## Dev control socket (the playwright substitute)
 
-Debug builds listen on `/tmp/rookz.sock` (`ROOKZ_SOCK` overrides).
+Debug builds listen on `/tmp/rook.sock` (`ROOK_SOCK` overrides).
 Line protocol, drivable with plain `nc -U`:
 
 ```
-printf 'dump\n'              | nc -U /tmp/rookz.sock   # screen text (vt truth)
-printf 'type ls -la\n'       | nc -U /tmp/rookz.sock   # keystrokes → pty
-printf 'enter\n'             | nc -U /tmp/rookz.sock
-printf 'ctrlc\n'             | nc -U /tmp/rookz.sock
-printf 'key 1b5b41\n'        | nc -U /tmp/rookz.sock   # raw hex bytes → pty
-printf 'press `\n'           | nc -U /tmp/rookz.sock   # REAL key path (leader
+printf 'dump\n'              | nc -U /tmp/rook.sock   # screen text (vt truth)
+printf 'type ls -la\n'       | nc -U /tmp/rook.sock   # keystrokes → pty
+printf 'enter\n'             | nc -U /tmp/rook.sock
+printf 'ctrlc\n'             | nc -U /tmp/rook.sock
+printf 'key 1b5b41\n'        | nc -U /tmp/rook.sock   # raw hex bytes → pty
+printf 'press `\n'           | nc -U /tmp/rook.sock   # REAL key path (leader
                                                        #   machine included)
-printf 'panes\n'             | nc -U /tmp/rookz.sock   # all tabs' panes, * = active/focused
-printf 'tabs\n'              | nc -U /tmp/rookz.sock   # list tabs
-printf 'tab new\n'           | nc -U /tmp/rookz.sock   # also: tab <n>, tab next, tab prev
-printf 'split right\n'       | nc -U /tmp/rookz.sock   # split focused (or: down)
-printf 'edit /abs/file\n'     | nc -U /tmp/rookz.sock   # editor pane (focused editor
+printf 'panes\n'             | nc -U /tmp/rook.sock   # all tabs' panes, * = active/focused
+printf 'tabs\n'              | nc -U /tmp/rook.sock   # list tabs
+printf 'tab new\n'           | nc -U /tmp/rook.sock   # also: tab <n>, tab next, tab prev
+printf 'split right\n'       | nc -U /tmp/rook.sock   # split focused (or: down)
+printf 'edit /abs/file\n'     | nc -U /tmp/rook.sock   # editor pane (focused editor
                                                        #   retargets; else split right)
-printf 'focus left\n'        | nc -U /tmp/rookz.sock   # move focus (or an id — switches tab)
-printf 'click 300 800\n'      | nc -U /tmp/rookz.sock   # px coords: chips select, panes focus
-printf 'wheel 300 800 -5\n'   | nc -U /tmp/rookz.sock   # scroll steps (+ = up) at a point
-printf 'drag 99 206 319 206\n' | nc -U /tmp/rookz.sock   # select: down, drag, up
-printf 'copy\n'               | nc -U /tmp/rookz.sock   # \u2318C's path; replies the text
-printf 'paste\n'              | nc -U /tmp/rookz.sock   # ⌘V's path; the real pasteboard
-printf 'paste a\\nb\n'         | nc -U /tmp/rookz.sock   #   or a literal payload
-printf 'nskey 14 80000\n'     | nc -U /tmp/rookz.sock   # a REAL NSEvent: keycode,
+printf 'focus left\n'        | nc -U /tmp/rook.sock   # move focus (or an id — switches tab)
+printf 'click 300 800\n'      | nc -U /tmp/rook.sock   # px coords: chips select, panes focus
+printf 'wheel 300 800 -5\n'   | nc -U /tmp/rook.sock   # scroll steps (+ = up) at a point
+printf 'drag 99 206 319 206\n' | nc -U /tmp/rook.sock   # select: down, drag, up
+printf 'copy\n'               | nc -U /tmp/rook.sock   # \u2318C's path; replies the text
+printf 'paste\n'              | nc -U /tmp/rook.sock   # ⌘V's path; the real pasteboard
+printf 'paste a\\nb\n'         | nc -U /tmp/rook.sock   #   or a literal payload
+printf 'nskey 14 80000\n'     | nc -U /tmp/rook.sock   # a REAL NSEvent: keycode,
                                                        #   modmask hex, characters
-printf 'ime\n'                | nc -U /tmp/rookz.sock   # input-context state + preedit
-printf 'version\n'            | nc -U /tmp/rookz.sock   # build id + rook-host state
+printf 'ime\n'                | nc -U /tmp/rook.sock   # input-context state + preedit
+printf 'version\n'            | nc -U /tmp/rook.sock   # build id + rook-host state
                                                        #   (owned=yes → quitting kills it)
-printf 'dump@2\n'            | nc -U /tmp/rookz.sock   # any pane-taking verb
-printf 'type@2 ls\n'         | nc -U /tmp/rookz.sock   #   targets by @id
-printf 'shot /tmp/s.png\n'   | nc -U /tmp/rookz.sock   # pixel truth
-printf 'winsize 900 600\n'   | nc -U /tmp/rookz.sock   # resize (points)
-printf 'fullscreen\n'        | nc -U /tmp/rookz.sock   # toggle (latency: −7ms)
-printf 'stats\n'             | nc -U /tmp/rookz.sock   # live perf numbers
-printf 'stats reset\n'       | nc -U /tmp/rookz.sock
-printf 'quit\n'              | nc -U /tmp/rookz.sock
+printf 'dump@2\n'            | nc -U /tmp/rook.sock   # any pane-taking verb
+printf 'type@2 ls\n'         | nc -U /tmp/rook.sock   #   targets by @id
+printf 'shot /tmp/s.png\n'   | nc -U /tmp/rook.sock   # pixel truth
+printf 'winsize 900 600\n'   | nc -U /tmp/rook.sock   # resize (points)
+printf 'fullscreen\n'        | nc -U /tmp/rook.sock   # toggle (latency: −7ms)
+printf 'stats\n'             | nc -U /tmp/rook.sock   # live perf numbers
+printf 'stats reset\n'       | nc -U /tmp/rook.sock
+printf 'quit\n'              | nc -U /tmp/rook.sock
 ```
 
 `press` and `type` write bytes straight into the app, so they cannot
@@ -265,7 +271,7 @@ and obvious in shot; keep both in every verification.
 
 ## Config
 
-`~/.config/rookz/config.toml` (respects `XDG_CONFIG_HOME`). A TOML
+`~/.config/rook/config.toml` (respects `XDG_CONFIG_HOME`). A TOML
 subset: flat `key = value`, `#` comments, quoted strings; `[sections]`
 skipped. Keys may be quoted (`"background-opacity"` works); dashes and
 underscores are interchangeable. Missing file = defaults. Unknown keys
@@ -315,7 +321,7 @@ blurple accent, muted hues. The wails app's semantic theme engine
 
 ## Keybinds
 
-`~/.config/rookz/keybinds.toml` — leader chords, tmux-shaped. The
+`~/.config/rook/keybinds.toml` — leader chords, tmux-shaped. The
 leader arms a pending chord (an accent cell appears in the bar);
 double-tap types the leader literally; an unknown chord key is
 swallowed. Modified or multi-byte keys never arm or resolve chords.

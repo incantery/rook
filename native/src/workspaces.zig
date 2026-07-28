@@ -1,5 +1,5 @@
 //! The workspace registry — READ side. rook's wails app and rook-host
-//! own ~/.local/share/rook/rook.db (XDG_DATA_HOME respected); rookz
+//! own ~/.local/share/rook/rook.db (XDG_DATA_HOME respected); rook
 //! reads `workspaces(name, root, last_used)` through the system
 //! libsqlite3, read-only, re-queried on every palette open so the list
 //! always reflects what the rest of rook last touched. The db is WAL —
@@ -50,7 +50,7 @@ fn dbPath(buf: []u8) ?[:0]const u8 {
 /// Load workspaces GROUPED: top-level entries by last_used, each
 /// followed by its worktree children (their own last_used order). A
 /// missing db or any sqlite error is an EMPTY list, never a failure —
-/// rookz must run fine on a machine that has never seen the rest of
+/// rook must run fine on a machine that has never seen the rest of
 /// rook.
 pub fn load(gpa: std.mem.Allocator) []Entry {
     var flat: std.ArrayListUnmanaged(Entry) = .empty;

@@ -1,12 +1,12 @@
 //! Dev control socket — playwright-grade visibility for a native app.
-//! A unix socket (default /tmp/rookz.sock, override ROOKZ_SOCK) speaks a
+//! A unix socket (default /tmp/rook.sock, override ROOK_SOCK) speaks a
 //! line protocol drivable with plain `nc -U`:
 //!
-//!   printf 'dump\n'            | nc -U /tmp/rookz.sock   # screen text
-//!   printf 'type ls\n'         | nc -U /tmp/rookz.sock   # keystrokes → pty
-//!   printf 'enter\n'           | nc -U /tmp/rookz.sock
-//!   printf 'shot /tmp/s.png\n' | nc -U /tmp/rookz.sock   # own-pixels PNG
-//!   printf 'quit\n'            | nc -U /tmp/rookz.sock
+//!   printf 'dump\n'            | nc -U /tmp/rook.sock   # screen text
+//!   printf 'type ls\n'         | nc -U /tmp/rook.sock   # keystrokes → pty
+//!   printf 'enter\n'           | nc -U /tmp/rook.sock
+//!   printf 'shot /tmp/s.png\n' | nc -U /tmp/rook.sock   # own-pixels PNG
+//!   printf 'quit\n'            | nc -U /tmp/rook.sock
 //!
 //! Panes: `panes` lists them; `split right|down` splits the focused
 //! pane; `focus <id|left|right|up|down>` moves focus; dump/type/enter/
@@ -47,7 +47,7 @@ pub fn start(app: *macos.App) !void {
 }
 
 fn sockPath() [*:0]const u8 {
-    return getenv("ROOKZ_SOCK") orelse "/tmp/rookz.sock";
+    return getenv("ROOK_SOCK") orelse "/tmp/rook.sock";
 }
 
 fn serve(app: *macos.App) void {
@@ -61,11 +61,11 @@ fn serve(app: *macos.App) void {
     if (span.len >= addr.sun_path.len) return;
     @memcpy(addr.sun_path[0..span.len], span);
     if (bind(fd, &addr, @sizeOf(sockaddr_un)) != 0) {
-        std.debug.print("rookz ctl: bind failed on {s}\n", .{path});
+        std.debug.print("rook ctl: bind failed on {s}\n", .{path});
         return;
     }
     if (listen(fd, 4) != 0) return;
-    std.debug.print("rookz ctl: listening on {s}\n", .{path});
+    std.debug.print("rook ctl: listening on {s}\n", .{path});
 
     while (true) {
         const conn = accept(fd, null, null);
@@ -281,7 +281,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
     } else if (std.mem.eql(u8, verb, "edit") and rest.len > 0) {
         // Open a file in an editor pane: a focused editor retargets in
         // place, else one splits off to the right. Paths resolve
-        // against the APP's cwd — send absolute paths (rookz edit does).
+        // against the APP's cwd — send absolute paths (rook edit does).
         reply(fd, if (app.openEditor(rest)) "ok\n" else "err open\n");
     } else if (std.mem.eql(u8, verb, "click")) {
         var it = std.mem.tokenizeScalar(u8, rest, ' ');
@@ -361,7 +361,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         var buf: [768]u8 = undefined;
         const s = std.fmt.bufPrint(
             &buf,
-            "rookz {s} build={s}\nhost={s} port={d} pid={d} build={s} release={s} owned={s}\nhost-binary={s}\n",
+            "rook {s} build={s}\nhost={s} port={d} pid={d} build={s} release={s} owned={s}\nhost-binary={s}\n",
             .{
                 @import("build_options").version,
                 @import("build_options").id,

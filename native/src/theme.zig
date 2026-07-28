@@ -43,7 +43,7 @@ pub const Theme = struct {
     syn_func: [4]u8,
 };
 
-/// The colors rookz shipped with — kept exactly, as the fallback.
+/// The colors rook shipped with — kept exactly, as the fallback.
 pub const default: Theme = .{
     .name = "default",
     .override_term = false,
