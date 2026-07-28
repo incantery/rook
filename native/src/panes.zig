@@ -34,6 +34,17 @@ pub const Node = union(enum) {
     split: *Split,
 };
 
+/// A tab: one split tree of panes plus its own focus. Only the active
+/// tab is snapshotted and drawn — background tabs' sessions keep
+/// parsing (the emulator advances) but cost zero render work until
+/// they're shown again.
+pub const Tab = struct {
+    id: u32,
+    root: Node,
+    panes: std.ArrayListUnmanaged(*Pane) = .empty,
+    focused: *Pane,
+};
+
 pub const Split = struct {
     /// true = panes side by side (a left, b right); false = stacked.
     horiz: bool,

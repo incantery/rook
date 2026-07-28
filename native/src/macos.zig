@@ -76,11 +76,11 @@ pub const App = struct {
     renderer: renderpkg.Renderer,
     shell: [*:0]const u8,
 
-    // The scene. Mutated only under draw_lock.
-    panes: std.ArrayListUnmanaged(*panespkg.Pane) = .empty,
-    root: panespkg.Node,
-    focused: *panespkg.Pane,
+    // The scene: tabs of split trees. Mutated only under draw_lock.
+    tabs: std.ArrayListUnmanaged(*panespkg.Tab) = .empty,
+    active_tab: usize = 0,
     next_pane_id: u32 = 2,
+    next_tab_id: u32 = 2,
     px_w: f32,
     px_h: f32,
     sep: f32 = 2,
@@ -224,6 +224,9 @@ pub const App = struct {
         pane.* = .{ .id = 1, .session = session, .cols = cols, .rows = rows };
         session.kick = &inputKick;
         session.kick_ctx = self;
+        const tab_one = try gpa.create(panespkg.Tab);
+        tab_one.* = .{ .id = 1, .root = .{ .leaf = pane }, .focused = pane };
+        try tab_one.panes.append(gpa, pane);
         self.* = .{
             .gpa = gpa,
             .io = init.io,
@@ -234,16 +237,14 @@ pub const App = struct {
             .queue = queue,
             .renderer = renderer,
             .shell = shell,
-            .root = .{ .leaf = pane },
-            .focused = pane,
             .px_w = @floatCast(px_w),
             .px_h = @floatCast(px_h),
             .sep = @floatCast(@max(1.0, @round(scale))),
             .bar_h = bar_h,
         };
-        try self.panes.append(gpa, pane);
+        try self.tabs.append(gpa, tab_one);
         self.focused_session.store(session, .release);
-        panespkg.layout(self.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.contentH() }, self.sep);
+        panespkg.layout(tab_one.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.contentH() }, self.sep);
         return self;
     }
 
@@ -341,11 +342,28 @@ pub const App = struct {
         return @max(1, self.px_h - self.bar_h);
     }
 
-    /// Recompute pane rects from the tree and resize any pane whose grid
-    /// changed. Caller holds draw_lock.
+    fn activeTab(self: *App) *panespkg.Tab {
+        return self.tabs.items[self.active_tab];
+    }
+
+    /// Spawn a shell session wrapped in a fresh pane. Caller inserts it
+    /// into a tree and a tab.
+    fn makePane(self: *App) !*panespkg.Pane {
+        const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
+        session.kick = &inputKick;
+        session.kick_ctx = self;
+        const pane = try self.gpa.create(panespkg.Pane);
+        pane.* = .{ .id = self.next_pane_id, .session = session };
+        self.next_pane_id += 1;
+        return pane;
+    }
+
+    /// Recompute the ACTIVE tab's pane rects and resize changed grids.
+    /// Background tabs relayout on activation. Caller holds draw_lock.
     fn relayoutLocked(self: *App) void {
-        panespkg.layout(self.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.contentH() }, self.sep);
-        for (self.panes.items) |p| {
+        const t = self.activeTab();
+        panespkg.layout(t.root, .{ .x = 0, .y = 0, .w = self.px_w, .h = self.contentH() }, self.sep);
+        for (t.panes.items) |p| {
             const cols: u16 = @intFromFloat(@max(2, @divFloor(p.rect.w, self.renderer.cell_w)));
             const rows: u16 = @intFromFloat(@max(2, @divFloor(p.rect.h, self.renderer.cell_h)));
             if (cols == p.cols and rows == p.rows) continue;
@@ -359,88 +377,143 @@ pub const App = struct {
     pub fn splitFocused(self: *App, horiz: bool) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
-        self.splitFocusedLocked(horiz);
-    }
-
-    fn splitFocusedLocked(self: *App, horiz: bool) void {
-        const session = sessionpkg.Session.start(self.gpa, self.io, self.shell, 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px)) catch |err| {
+        const t = self.activeTab();
+        const pane = self.makePane() catch |err| {
             std.debug.print("rookz: split failed: {}\n", .{err});
             return;
         };
-        session.kick = &inputKick;
-        session.kick_ctx = self;
-        const pane = self.gpa.create(panespkg.Pane) catch return;
-        pane.* = .{ .id = self.next_pane_id, .session = session };
-        self.next_pane_id += 1;
-        if (!panespkg.splitAt(self.gpa, &self.root, self.focused, pane, horiz)) {
-            // Focused vanished mid-flight (can't happen under the lock,
-            // but fail closed): drop the new session.
+        if (!panespkg.splitAt(self.gpa, &t.root, t.focused, pane, horiz)) {
             std.debug.print("rookz: split target missing\n", .{});
             return;
         }
-        self.panes.append(self.gpa, pane) catch {};
+        t.panes.append(self.gpa, pane) catch {};
         self.setFocusLocked(pane);
         self.relayoutLocked();
         // No synchronous draw: encoding from the calling thread contends
         // on nextDrawable (measured wedge from the ctl thread). The
         // display link sees scene_dirty within a tick.
+        self.refreshHudLocked(CACurrentMediaTime());
+        self.scene_dirty = true;
+    }
+
+    /// Open a new tab with one fresh shell and activate it. Any thread.
+    pub fn newTab(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const pane = self.makePane() catch |err| {
+            std.debug.print("rookz: new tab failed: {}\n", .{err});
+            return;
+        };
+        const t = self.gpa.create(panespkg.Tab) catch return;
+        t.* = .{ .id = self.next_tab_id, .root = .{ .leaf = pane }, .focused = pane };
+        self.next_tab_id += 1;
+        t.panes.append(self.gpa, pane) catch {};
+        self.tabs.append(self.gpa, t) catch return;
+        self.activateTabLocked(self.tabs.items.len - 1);
+    }
+
+    /// Switch to tab index i (0-based). Any thread.
+    pub fn selectTab(self: *App, i: usize) bool {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        if (i >= self.tabs.items.len) return false;
+        self.activateTabLocked(i);
+        return true;
+    }
+
+    /// Cycle tabs by delta (±1). Any thread.
+    pub fn cycleTab(self: *App, delta: i32) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const n: i64 = @intCast(self.tabs.items.len);
+        const cur: i64 = @intCast(self.active_tab);
+        self.activateTabLocked(@intCast(@mod(cur + delta, n)));
+    }
+
+    fn activateTabLocked(self: *App, i: usize) void {
+        self.active_tab = i;
+        self.focused_session.store(self.activeTab().focused.session, .release);
+        // The window may have resized while this tab was hidden.
+        self.relayoutLocked();
+        self.refreshHudLocked(CACurrentMediaTime());
         self.scene_dirty = true;
     }
 
     fn setFocusLocked(self: *App, pane: *panespkg.Pane) void {
-        self.focused = pane;
+        self.activeTab().focused = pane;
         self.focused_session.store(pane.session, .release);
         self.scene_dirty = true;
     }
 
-    /// Move focus in a direction. Any thread. Returns false if no pane
-    /// lies that way.
+    /// Move focus in a direction within the active tab. Any thread.
+    /// Returns false if no pane lies that way.
     pub fn focusMove(self: *App, dir: panespkg.NavDir) bool {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
-        const target = panespkg.navigate(self.panes.items, self.focused, dir) orelse return false;
+        const t = self.activeTab();
+        const target = panespkg.navigate(t.panes.items, t.focused, dir) orelse return false;
         self.setFocusLocked(target);
         return true;
     }
 
+    /// Focus a pane by id, switching tabs if it lives elsewhere.
     pub fn focusById(self: *App, id: u32) bool {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
-        for (self.panes.items) |p| {
-            if (p.id == id) {
-                self.setFocusLocked(p);
-                return true;
+        for (self.tabs.items, 0..) |t, ti| {
+            for (t.panes.items) |p| {
+                if (p.id == id) {
+                    if (ti != self.active_tab) self.activateTabLocked(ti);
+                    self.setFocusLocked(p);
+                    return true;
+                }
             }
         }
         return false;
     }
 
-    /// Collapse panes whose shell exited. Caller holds draw_lock; never
-    /// runs on a reader thread (Session.deinit joins it).
+    /// Collapse panes whose shell exited — across ALL tabs (background
+    /// shells exit too); an emptied tab closes, the last tab closing
+    /// exits the app. Caller holds draw_lock; never runs on a reader
+    /// thread (Session.deinit joins it).
     fn reapExitedLocked(self: *App) void {
         var changed = false;
-        var i: usize = 0;
-        while (i < self.panes.items.len) {
-            const p = self.panes.items[i];
-            if (!p.session.exited.load(.acquire)) {
-                i += 1;
+        var ti: usize = 0;
+        while (ti < self.tabs.items.len) {
+            const t = self.tabs.items[ti];
+            var i: usize = 0;
+            while (i < t.panes.items.len) {
+                const p = t.panes.items[i];
+                if (!p.session.exited.load(.acquire)) {
+                    i += 1;
+                    continue;
+                }
+                changed = true;
+                _ = panespkg.removeAt(self.gpa, &t.root, p);
+                _ = t.panes.swapRemove(i);
+                const was_focused = t.focused == p;
+                p.session.deinit();
+                p.rs.deinit(self.gpa);
+                self.gpa.destroy(p);
+                if (t.panes.items.len > 0 and was_focused) t.focused = t.panes.items[0];
+            }
+            if (t.panes.items.len == 0) {
+                t.panes.deinit(self.gpa);
+                self.gpa.destroy(t);
+                _ = self.tabs.orderedRemove(ti);
+                if (self.tabs.items.len == 0) {
+                    // Last shell of the last tab: the terminal's work is done.
+                    _exit(0);
+                }
+                if (self.active_tab >= self.tabs.items.len) self.active_tab = self.tabs.items.len - 1;
                 continue;
             }
-            changed = true;
-            _ = panespkg.removeAt(self.gpa, &self.root, p);
-            _ = self.panes.swapRemove(i);
-            const was_focused = self.focused == p;
-            p.session.deinit();
-            p.rs.deinit(self.gpa);
-            self.gpa.destroy(p);
-            if (self.panes.items.len == 0) {
-                // Last shell exited: the terminal's work is done.
-                _exit(0);
-            }
-            if (was_focused) self.setFocusLocked(self.panes.items[0]);
+            ti += 1;
         }
         if (changed) {
+            self.focused_session.store(self.activeTab().focused.session, .release);
             self.relayoutLocked();
+            self.refreshHudLocked(CACurrentMediaTime());
             self.scene_dirty = true;
         }
     }
@@ -458,14 +531,17 @@ pub const App = struct {
         // stays live during idle — but only a text CHANGE causes a draw.
         if (tick % 60 == 0) self.refreshHudLocked(t_start);
 
-        // Snapshot every pane under its session lock, with priority over
-        // the readers' parse loops. focused_dirty means the FOCUSED
-        // PANE'S GRID changed — chrome/HUD-only frames must never
-        // consume the key-to-photon mark (that skew was measured: a 2Hz
-        // HUD refresh stole marks and moved quiet-key p50 by ~4ms).
+        // Snapshot every ACTIVE-TAB pane under its session lock, with
+        // priority over the readers' parse loops. Background tabs are
+        // never snapshotted — their emulators advance, their render
+        // work is zero. focused_dirty means the FOCUSED PANE'S GRID
+        // changed — chrome/HUD-only frames must never consume the
+        // key-to-photon mark (that skew was measured: a 2Hz HUD refresh
+        // stole marks and moved quiet-key p50 by ~4ms).
+        const atab = self.activeTab();
         var any_dirty = self.scene_dirty;
         var focused_dirty = false;
-        for (self.panes.items) |p| {
+        for (atab.panes.items) |p| {
             p.session.lockForSnapshot();
             p.rs.update(self.gpa, &p.session.term) catch {
                 p.session.unlockForSnapshot();
@@ -477,7 +553,7 @@ pub const App = struct {
             p.rs.dirty = .@"false";
             if (p.dirty) {
                 any_dirty = true;
-                if (p == self.focused) focused_dirty = true;
+                if (p == atab.focused) focused_dirty = true;
             }
         }
         const t_update = CACurrentMediaTime();
@@ -499,7 +575,7 @@ pub const App = struct {
         // resize it may briefly disagree with the rect, which is fine.
         const cells = self.renderer.cells();
         var off: usize = 0;
-        for (self.panes.items) |p| {
+        for (atab.panes.items) |p| {
             p.drawn_cols = 0;
             p.drawn_rows = 0;
             const cols: usize = p.rs.cols;
@@ -526,7 +602,7 @@ pub const App = struct {
         const t_acquired = CACurrentMediaTime();
         stats.global.drawable_wait.recordSeconds(t_acquired - t_fill);
 
-        const focused_colors = &self.focused.rs.colors;
+        const focused_colors = &atab.focused.rs.colors;
         const clear_bg = focused_colors.background;
 
         const desc = objc.getClass("MTLRenderPassDescriptor").?
@@ -552,24 +628,24 @@ pub const App = struct {
 
         // Scene: pane backgrounds (full rect, covers the sub-cell
         // remainder), grids, separators, focus edges.
-        for (self.panes.items) |p| {
+        for (atab.panes.items) |p| {
             const bg = p.rs.colors.background;
             self.renderer.drawRect(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.rect.w, p.rect.h, .{ bg.r, bg.g, bg.b, 255 });
         }
-        for (self.panes.items) |p| {
+        for (atab.panes.items) |p| {
             if (p.drawn_cols == 0) continue;
             self.renderer.drawGrid(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.buf_off, p.drawn_cols, p.drawn_rows);
         }
-        if (self.panes.items.len > 1) {
+        if (atab.panes.items.len > 1) {
             var sep_buf: [64]panespkg.Rect = undefined;
             var nsep: usize = 0;
-            panespkg.collectSeparators(self.root, &sep_buf, &nsep);
+            panespkg.collectSeparators(atab.root, &sep_buf, &nsep);
             for (sep_buf[0..nsep]) |r| {
                 self.renderer.drawRect(enc, vp_w, vp_h, r.x, r.y, r.w, r.h, sep_color);
             }
             // The focused pane claims its share of adjacent separators
             // in the accent color — cheap, unambiguous focus telegraph.
-            const fr = self.focused.rect;
+            const fr = atab.focused.rect;
             const s = self.sep;
             if (fr.x > 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x - s, fr.y, s, fr.h, accent_color);
             if (fr.x + fr.w < self.px_w - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x + fr.w, fr.y, s, fr.h, accent_color);
@@ -648,10 +724,11 @@ pub const App = struct {
         }
 
         var left: [96]u8 = undefined;
+        const t = self.activeTab();
         const l = std.fmt.bufPrint(&left, "rookz · {d} pane{s} · #{d}", .{
-            self.panes.items.len,
-            @as([]const u8, if (self.panes.items.len == 1) "" else "s"),
-            self.focused.id,
+            t.panes.items.len,
+            @as([]const u8, if (t.panes.items.len == 1) "" else "s"),
+            t.focused.id,
         }) catch return;
         var right: [96]u8 = undefined;
         const r = std.fmt.bufPrint(&right, "{d}.{d}ms key · {d}fps · {d}MB/s · {d}MB", .{
@@ -686,7 +763,19 @@ pub const App = struct {
         ui.rect(0, by, self.px_w, self.bar_h, bar_bg);
         const ty = by + (self.bar_h - self.renderer.cell_h) / 2;
         const pad = self.renderer.cell_w;
-        _ = ui.text(pad, ty, self.hud_left[0..self.hud_left_len], bar_fg, bar_bg);
+        var x: f32 = pad;
+        // Tab strip (drawn live from scene state, not the cached HUD
+        // text — a tab switch redraws via scene_dirty immediately).
+        if (self.tabs.items.len > 1) {
+            for (self.tabs.items, 0..) |_, i| {
+                var num: [8]u8 = undefined;
+                const s = std.fmt.bufPrint(&num, " {d} ", .{i + 1}) catch continue;
+                const is_active = i == self.active_tab;
+                x += ui.text(x, ty, s, if (is_active) bar_bg else bar_fg, if (is_active) accent_color else bar_bg);
+            }
+            x += self.renderer.cell_w;
+        }
+        _ = ui.text(x, ty, self.hud_left[0..self.hud_left_len], bar_fg, bar_bg);
         _ = ui.textRight(self.px_w - pad, ty, self.hud_right[0..self.hud_right_len], bar_value, bar_bg);
     }
 
@@ -699,7 +788,7 @@ pub const App = struct {
         const default_fg = colors.foreground;
         const row_cells = p.rs.row_data.items(.cells);
         const cellw_px: u16 = @intCast(self.renderer.cellw_px);
-        const show_cursor = p == self.focused;
+        const show_cursor = p == self.activeTab().focused;
         for (0..rows) |y| {
             const raws = row_cells[y].items(.raw);
             const styles = row_cells[y].items(.style);
@@ -804,13 +893,31 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                         app.app.msgSend(void, "terminate:", .{@as(objc.c.id, null)});
                         return null;
                     },
-                    // The rook chords: ⌘D splits right, ⌘⇧D splits down.
+                    // The rook chords: ⌘D splits right, ⌘⇧D splits down,
+                    // ⌘T new tab (session.new in the wails keymap),
+                    // ⌘1–9 select tab, ⌘⇧[ / ⌘⇧] cycle.
                     'd' => {
                         app.splitFocused(flags & flag_shift == 0);
                         return null;
                     },
                     'D' => {
                         app.splitFocused(false);
+                        return null;
+                    },
+                    't' => {
+                        app.newTab();
+                        return null;
+                    },
+                    '1'...'9' => {
+                        _ = app.selectTab(s[0] - '1');
+                        return null;
+                    },
+                    '{' => {
+                        app.cycleTab(-1);
+                        return null;
+                    },
+                    '}' => {
+                        app.cycleTab(1);
                         return null;
                     },
                     else => {},
@@ -837,7 +944,7 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                     };
                     if (dir) |d| {
                         app.draw_lock.lock();
-                        const alt = app.focused.session.term.screens.active_key == .alternate;
+                        const alt = app.activeTab().focused.session.term.screens.active_key == .alternate;
                         app.draw_lock.unlock();
                         if (!alt and app.focusMove(d)) return null;
                         // fall through: cooked control byte to the pty
@@ -871,7 +978,7 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
         // session mid-write.
         app.draw_lock.lock();
         app.markInput(event.msgSend(f64, "timestamp", .{}));
-        app.focused.session.write(bytes);
+        app.activeTab().focused.session.write(bytes);
         app.draw_lock.unlock();
     }
     return null;

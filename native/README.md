@@ -6,14 +6,18 @@ Experimental (branch `rook/zig`). Standalone Zig desktop terminal:
 pty → ghostty-vt → RenderState → instanced Metal grid in an owned
 CAMetalLayer. No webview, no Swift.
 
-The window is a SCENE: a binary split tree of panes, each its own
+The window is a SCENE: tabs of split trees, each pane its own
 pty + emulator, all drawn by one pipeline (grids are uniforms + a
 buffer offset; chrome is more quads). Chords match the wails app:
 **⌘D** split right, **⌘⇧D** split down, **⌃HJKL** focus nav — which
 yields to alternate-screen apps (vim keeps its own splits) by reading
-alt-screen truth straight from the emulator, no heuristic. The cursor
-and the accent-colored separator edges mark the focused pane. A pane
-closes when its shell exits; the last one exiting quits the app.
+alt-screen truth straight from the emulator, no heuristic — plus
+**⌘T** new tab, **⌘1–9** select, **⌘⇧[** / **⌘⇧]** cycle. The cursor
+and the accent-colored separator edges mark the focused pane. Only the
+active tab renders: background tabs' emulators keep advancing but cost
+zero frames (measured: `yes` in a hidden tab, 480 ticks, 1 draw). A
+pane closes when its shell exits, an emptied tab closes, the last tab
+closing quits the app.
 
 A status bar sits under the panes — tenant one of `src/ui.zig`, the
 seed of rook's own UI layer (immediate-mode quads + text runs from the
@@ -47,9 +51,11 @@ printf 'type ls -la\n'       | nc -U /tmp/rookz.sock   # keystrokes → pty
 printf 'enter\n'             | nc -U /tmp/rookz.sock
 printf 'ctrlc\n'             | nc -U /tmp/rookz.sock
 printf 'key 1b5b41\n'        | nc -U /tmp/rookz.sock   # raw hex bytes → pty
-printf 'panes\n'             | nc -U /tmp/rookz.sock   # list panes, * = focused
+printf 'panes\n'             | nc -U /tmp/rookz.sock   # all tabs' panes, * = active/focused
+printf 'tabs\n'              | nc -U /tmp/rookz.sock   # list tabs
+printf 'tab new\n'           | nc -U /tmp/rookz.sock   # also: tab <n>, tab next, tab prev
 printf 'split right\n'       | nc -U /tmp/rookz.sock   # split focused (or: down)
-printf 'focus left\n'        | nc -U /tmp/rookz.sock   # move focus (or an id)
+printf 'focus left\n'        | nc -U /tmp/rookz.sock   # move focus (or an id — switches tab)
 printf 'dump@2\n'            | nc -U /tmp/rookz.sock   # any pane-taking verb
 printf 'type@2 ls\n'         | nc -U /tmp/rookz.sock   #   targets by @id
 printf 'shot /tmp/s.png\n'   | nc -U /tmp/rookz.sock   # pixel truth

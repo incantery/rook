@@ -101,12 +101,14 @@ fn reply(fd: c_int, bytes: []const u8) void {
     }
 }
 
-/// Resolve a pane by id, or the focused pane when id is null. Caller
-/// holds app.draw_lock.
+/// Resolve a pane by id (searching every tab), or the active tab's
+/// focused pane when id is null. Caller holds app.draw_lock.
 fn findPane(app: *macos.App, pane_id: ?u32) ?*panespkg.Pane {
-    const id = pane_id orelse return app.focused;
-    for (app.panes.items) |p| {
-        if (p.id == id) return p;
+    const id = pane_id orelse return app.tabs.items[app.active_tab].focused;
+    for (app.tabs.items) |t| {
+        for (t.panes.items) |p| {
+            if (p.id == id) return p;
+        }
     }
     return null;
 }
@@ -118,7 +120,7 @@ fn writeTarget(app: *macos.App, pane_id: ?u32, bytes: []const u8) bool {
     app.draw_lock.lock();
     defer app.draw_lock.unlock();
     const p = findPane(app, pane_id) orelse return false;
-    if (p == app.focused) app.markInput(CACurrentMediaTime());
+    if (p == app.tabs.items[app.active_tab].focused) app.markInput(CACurrentMediaTime());
     p.session.write(bytes);
     return true;
 }
@@ -165,23 +167,54 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         reply(fd, str);
         reply(fd, "\n");
     } else if (std.mem.eql(u8, verb, "panes") and rest.len == 0) {
-        var buf: [2048]u8 = undefined;
+        var buf: [4096]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
         app.draw_lock.lock();
-        for (app.panes.items) |p| {
-            w.print("{s}{d} rect {d}x{d}+{d}+{d} grid {d}x{d}\n", .{
-                @as([]const u8, if (p == app.focused) "*" else " "),
-                p.id,
-                @as(u32, @intFromFloat(p.rect.w)),
-                @as(u32, @intFromFloat(p.rect.h)),
-                @as(u32, @intFromFloat(p.rect.x)),
-                @as(u32, @intFromFloat(p.rect.y)),
-                p.cols,
-                p.rows,
+        for (app.tabs.items, 0..) |t, ti| {
+            for (t.panes.items) |p| {
+                w.print("{s}t{d} {s}{d} rect {d}x{d}+{d}+{d} grid {d}x{d}\n", .{
+                    @as([]const u8, if (ti == app.active_tab) "*" else " "),
+                    ti + 1,
+                    @as([]const u8, if (p == t.focused) "*" else " "),
+                    p.id,
+                    @as(u32, @intFromFloat(p.rect.w)),
+                    @as(u32, @intFromFloat(p.rect.h)),
+                    @as(u32, @intFromFloat(p.rect.x)),
+                    @as(u32, @intFromFloat(p.rect.y)),
+                    p.cols,
+                    p.rows,
+                }) catch break;
+            }
+        }
+        app.draw_lock.unlock();
+        reply(fd, buf[0..w.end]);
+    } else if (std.mem.eql(u8, verb, "tabs") and rest.len == 0) {
+        var buf: [1024]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        app.draw_lock.lock();
+        for (app.tabs.items, 0..) |t, ti| {
+            w.print("{s}{d} ({d} pane{s})\n", .{
+                @as([]const u8, if (ti == app.active_tab) "*" else " "),
+                ti + 1,
+                t.panes.items.len,
+                @as([]const u8, if (t.panes.items.len == 1) "" else "s"),
             }) catch break;
         }
         app.draw_lock.unlock();
         reply(fd, buf[0..w.end]);
+    } else if (std.mem.eql(u8, verb, "tab")) {
+        if (std.mem.eql(u8, rest, "new")) {
+            app.newTab();
+            reply(fd, "ok\n");
+        } else if (std.mem.eql(u8, rest, "next")) {
+            app.cycleTab(1);
+            reply(fd, "ok\n");
+        } else if (std.mem.eql(u8, rest, "prev")) {
+            app.cycleTab(-1);
+            reply(fd, "ok\n");
+        } else if (std.fmt.parseInt(usize, rest, 10) catch null) |n| {
+            reply(fd, if (n >= 1 and app.selectTab(n - 1)) "ok\n" else "err no tab\n");
+        } else reply(fd, "err tab new|next|prev|<n>\n");
     } else if (std.mem.eql(u8, verb, "split")) {
         if (std.mem.eql(u8, rest, "right")) {
             app.splitFocused(true);

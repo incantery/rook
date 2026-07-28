@@ -66,6 +66,11 @@ quiet-key p50), and present_interval now drops >500ms gaps (pacing,
 not idleness — the ring used to swallow idle stretches as fake slow
 frames).
 
+Fourth re-run — tabs (same day): cat **0.912s**, key p95 26.8ms
+(p50 in its wobble band). Background tabs are free by construction —
+only the active tab is snapshotted/filled/drawn; measured: `yes`
+firehosing in a hidden tab for 4s = 1 frame drawn, 480 skipped.
+
 Third re-run — fps semantics + drawable_wait split (same day): cat
 **0.893s** (best yet), firehose encode p50 33µs. nextDrawable
 backpressure (p50 4.8ms when demand-paced, ~0 when saturated) now has
