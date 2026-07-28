@@ -151,6 +151,42 @@ pub fn removeAt(gpa: std.mem.Allocator, node: *Node, target: *Pane) bool {
     }
 }
 
+/// The Split whose separator contains (x, y), within `slop` px of the
+/// gap — the mouse target for ratio drags. Depth-first; innermost wins.
+pub fn hitSeparator(node: Node, x: f32, y: f32, slop: f32) ?*Split {
+    switch (node) {
+        .leaf => return null,
+        .split => |s| {
+            if (hitSeparator(s.a, x, y, slop)) |inner| return inner;
+            if (hitSeparator(s.b, x, y, slop)) |inner| return inner;
+            const ar = rectOf(s.a);
+            const br = rectOf(s.b);
+            if (s.horiz) {
+                const x0 = ar.x + ar.w - slop;
+                const x1 = br.x + slop;
+                if (x >= x0 and x <= x1 and y >= ar.y and y <= ar.y + ar.h) return s;
+            } else {
+                const y0 = ar.y + ar.h - slop;
+                const y1 = br.y + slop;
+                if (y >= y0 and y <= y1 and x >= ar.x and x <= ar.x + ar.w) return s;
+            }
+            return null;
+        },
+    }
+}
+
+/// The union rect a split divides (both children + the gap).
+pub fn splitRect(s: *const Split) Rect {
+    const ar = rectOf(s.a);
+    const br = rectOf(s.b);
+    return .{
+        .x = @min(ar.x, br.x),
+        .y = @min(ar.y, br.y),
+        .w = @max(ar.x + ar.w, br.x + br.w) - @min(ar.x, br.x),
+        .h = @max(ar.y + ar.h, br.y + br.h) - @min(ar.y, br.y),
+    };
+}
+
 pub const NavDir = enum { left, right, up, down };
 
 /// Geometric focus navigation: nearest pane whose rect lies in `dir`
@@ -204,7 +240,7 @@ pub fn collectSeparators(node: Node, out: []Rect, n: *usize) void {
     }
 }
 
-fn rectOf(node: Node) Rect {
+pub fn rectOf(node: Node) Rect {
     return switch (node) {
         .leaf => |p| p.rect,
         .split => |s| blk: {

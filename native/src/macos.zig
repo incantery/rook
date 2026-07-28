@@ -191,6 +191,12 @@ pub const App = struct {
     drag_pane: ?*panespkg.Pane = null,
     drag_anchor: [2]u16 = .{ 0, 0 },
 
+    /// Active separator drag: the split being resized and its union
+    /// rect (ratio = pointer position within it). Cleared by reap
+    /// (tree mutation invalidates the pointer) and on mouse-up.
+    drag_split: ?*panespkg.Split = null,
+    drag_split_rect: panespkg.Rect = .{},
+
     // ctl `shot` handoff: the socket thread stores a path and flips the
     // flag; the render thread services it after the next commit.
     shot_state: std.atomic.Value(u8) = .init(0),
@@ -450,6 +456,12 @@ pub const App = struct {
             return;
         }
         const t = self.activeTab();
+        // Separators are resize handles first (±4px grab slop).
+        if (panespkg.hitSeparator(t.root, x, y, 4)) |sp| {
+            self.drag_split = sp;
+            self.drag_split_rect = panespkg.splitRect(sp);
+            return;
+        }
         for (t.panes.items) |p| {
             const r = p.rect;
             if (x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h) {
@@ -480,6 +492,17 @@ pub const App = struct {
     pub fn dragTo(self: *App, x: f32, y: f32) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
+        if (self.drag_split) |sp| {
+            const r = self.drag_split_rect;
+            const ratio = if (sp.horiz)
+                (x - r.x) / @max(1, r.w)
+            else
+                (y - r.y) / @max(1, r.h);
+            sp.ratio = std.math.clamp(ratio, 0.1, 0.9);
+            self.relayoutLocked();
+            self.scene_dirty = true;
+            return;
+        }
         const p = self.drag_pane orelse return;
         const tm = p.term() orelse return;
         const cur = self.cellAt(p, x, y);
@@ -490,6 +513,7 @@ pub const App = struct {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         self.drag_pane = null;
+        self.drag_split = null;
     }
 
     /// ⌘C: focused terminal's selection (or editor's register) → the
@@ -909,6 +933,7 @@ pub const App = struct {
                 }
                 changed = true;
                 if (self.drag_pane == p) self.drag_pane = null;
+                self.drag_split = null; // tree is about to mutate
                 _ = panespkg.removeAt(self.gpa, &t.root, p);
                 _ = t.panes.swapRemove(i);
                 const was_focused = t.focused == p;
