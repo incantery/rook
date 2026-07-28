@@ -35,6 +35,18 @@ different truths: dump is what the emulator holds, shot is what the
 renderer did with it. The atlas-flip bug (day two) was invisible to dump
 and obvious in shot; keep both in every verification.
 
+## Config
+
+`~/.config/rookz/config.toml` (respects `XDG_CONFIG_HOME`). A TOML
+subset: flat `key = value`, `#` comments, quoted strings; `[sections]`
+skipped. Dashes and underscores in keys are interchangeable. Missing
+file = defaults. Unknown keys warn on stderr.
+
+```toml
+font-size = 13
+font-family = "FiraCode Nerd Font Mono"
+```
+
 ## Layout
 
 - `src/main.zig` — subcommand dispatch

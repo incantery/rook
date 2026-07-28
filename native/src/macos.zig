@@ -33,7 +33,6 @@ const NSEventMaskKeyDown: u64 = 1 << 10;
 
 const win_w: f64 = 1024;
 const win_h: f64 = 700;
-const font_pt: f64 = 13;
 
 fn nsString(s: [*:0]const u8) objc.Object {
     const NSString = objc.getClass("NSString").?;
@@ -81,6 +80,7 @@ pub const App = struct {
 
     pub fn create(init: std.process.Init) !*App {
         const gpa = init.gpa;
+        const cfg = @import("config.zig").load(init.io, gpa);
 
         const NSApplication = objc.getClass("NSApplication").?;
         const app = NSApplication.msgSend(objc.Object, "sharedApplication", .{});
@@ -125,9 +125,9 @@ pub const App = struct {
         const px_h = win_h * scale;
         layer.msgSend(void, "setDrawableSize:", .{NSSize{ .width = px_w, .height = px_h }});
 
-        // Nerd Font base so prompt icons (PUA) resolve without fallback;
-        // the CoreText cascade catches everything else.
-        const renderer = try renderpkg.Renderer.init(gpa, device, "FiraCode Nerd Font Mono", font_pt * scale, 64 * 1024);
+        // Nerd Font base (default) so prompt icons resolve without
+        // fallback; the CoreText cascade catches everything else.
+        const renderer = try renderpkg.Renderer.init(gpa, device, cfg.font_family, cfg.font_size * scale, 64 * 1024);
         const cols: u32 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_w)), renderer.cell_w));
         const rows: u32 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_h)), renderer.cell_h));
 
