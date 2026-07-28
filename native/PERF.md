@@ -165,6 +165,14 @@ the active space's active tab is snapshotted/filled). Watch fill on
 the next overnight run; if 42 sticks, cache the active tab pointer
 per frame.
 
+Thirteenth re-run — usage cluster + title zone (2026-07-28): cat
+**0.890s**, fill p50 39µs, RSS 87MB — back at the overnight band,
+which retro-confirms the twelfth run's 0.914/42µs was daytime load,
+not the spaces indirection (watch closed). Idle shows exactly ONE
+drawn frame per app start: the usage thread's first fetch populating
+the cluster (a real text change); steady-state idle is 0 — the 30s
+poll only dirties on change.
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,

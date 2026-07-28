@@ -71,8 +71,19 @@ WORKSPACES ARE SESSIONS (tmux's model): the hierarchy is space → tabs
 whole window's contents, and background spaces' shells keep running
 at zero render cost (same property as background tabs). The launch
 cwd names space one; a space collapses when its last tab closes (the
-last space closing exits the app). The status bar shows where you
-are (`rookz · zig · …`).
+last space closing exits the app).
+
+The TITLE ZONE says where you are and what you're burning: workspace
+name CENTERED, the usage cluster right-aligned (`5h 27% · wk 44% ·
+fable 73%` — labels compacted the wails way, colored by the worst
+window: ≥70% accent, ≥90% error). In glass mode it rides the real
+titlebar strip; opaque shares the tab row. Usage is rook-host's
+cost-weighted prober, read from its localhost HTTP (`/usage`, port +
+bearer token re-read from ~/.local/state/rook/host.json each fetch)
+by a 30s background thread — fail-open: no host, no cluster, and
+only a text CHANGE draws a frame. ctl `usage` replies the cluster as
+drawn. Tab chips are back to bare `n title` — the space owns the
+workspace identity now.
 
 `<leader>s` (action `workspace.switch` — tmux's prefix-s
 choose-session; `w` stays reserved for a choose-window picker) opens

@@ -256,6 +256,15 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
     } else if (std.mem.eql(u8, verb, "palette-open") and rest.len == 0) {
         app.openPalette();
         reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "usage") and rest.len == 0) {
+        // The cluster as drawn (host-cached; empty = host unreachable).
+        var buf: [128]u8 = undefined;
+        app.draw_lock.lock();
+        const n = @min(app.usage.len, buf.len - 1);
+        @memcpy(buf[0..n], app.usage.slice()[0..n]);
+        app.draw_lock.unlock();
+        buf[n] = '\n';
+        reply(fd, if (n == 0) "none\n" else buf[0 .. n + 1]);
     } else if (std.mem.eql(u8, verb, "tab")) {
         if (std.mem.eql(u8, rest, "new")) {
             app.newTab();

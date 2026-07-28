@@ -187,6 +187,11 @@ pub const App = struct {
     pal_items: []workspacespkg.Entry = &.{},
     pal_filtered: [64]usize = undefined,
     pal_nfiltered: usize = 0,
+
+    /// Subscription usage cluster (host-cached windows), refreshed by
+    /// a background thread every 30s; shown right-aligned in the title
+    /// zone. Guarded by draw_lock.
+    usage: @import("usage.zig").Snapshot = .{},
     /// Layout/focus changed: the next frame redraws even if no pane's
     /// grid is dirty.
     scene_dirty: bool = true,
@@ -462,6 +467,11 @@ pub const App = struct {
         @import("ctl.zig").start(self) catch |err| {
             std.debug.print("rookz ctl: failed to start: {}\n", .{err});
         };
+
+        // Usage cluster: poll the host's cached snapshot off-thread.
+        if (std.Thread.spawn(.{}, usageThread, .{self})) |t| t.detach() else |err| {
+            std.debug.print("rookz usage: thread failed: {}\n", .{err});
+        }
 
         // Keys → pty (Cmd+Q quits). AppKit copies the handler block, so the
         // stack context is fine here.
@@ -1071,23 +1081,12 @@ pub const App = struct {
         self.scene_dirty = true;
     }
 
-    /// Close hides; pal_items PERSISTS — the chip annotation resolves
-    /// tabs against it between opens (openPalette refreshes it).
+    /// Close hides; pal_items PERSISTS between opens (openPalette
+    /// refreshes it; startup space-naming resolves against it).
     fn closePaletteLocked(self: *App) void {
         self.pal_open = false;
         self.pal_nfiltered = 0;
         self.scene_dirty = true;
-    }
-
-    /// The workspace whose root holds this pane's shell cwd.
-    fn workspaceFor(self: *App, p: *panespkg.Pane) ?[]const u8 {
-        const cwd = self.paneCwd(p) orelse return null;
-        const c = std.mem.span(cwd);
-        for (self.pal_items) |e| {
-            if (std.mem.startsWith(u8, c, e.root) and (c.len == e.root.len or c[e.root.len] == '/'))
-                return e.name;
-        }
-        return null;
     }
 
     /// Case-insensitive subsequence match — the telescope basic. Items
@@ -1675,8 +1674,7 @@ pub const App = struct {
 
         var left: [96]u8 = undefined;
         const t = self.activeTab();
-        const l = std.fmt.bufPrint(&left, "rookz · {s} · {d} pane{s} · #{d}", .{
-            self.activeSpace().label(),
+        const l = std.fmt.bufPrint(&left, "rookz · {d} pane{s} · #{d}", .{
             t.panes.items.len,
             @as([]const u8, if (t.panes.items.len == 1) "" else "s"),
             t.focused.id,
@@ -1693,15 +1691,6 @@ pub const App = struct {
         var tabs_buf: [256]u8 = undefined;
         var tw: std.Io.Writer = .fixed(&tabs_buf);
         for (self.activeSpace().tabs.items) |tb| {
-            // Refresh the chip's workspace annotation (cwd moves; the
-            // digest below makes a change redraw the bar).
-            tb.ws_len = 0;
-            if (self.workspaceFor(tb.focused)) |wname| {
-                const n = @min(wname.len, tb.ws.len);
-                @memcpy(tb.ws[0..n], wname[0..n]);
-                tb.ws_len = n;
-            }
-            tw.print("{s}|", .{tb.ws[0..tb.ws_len]}) catch {};
             switch (tb.focused.content) {
                 .term => |*tm| {
                     tm.session.mutex.lock();
@@ -1766,6 +1755,27 @@ pub const App = struct {
         // titlebar strip the traffic lights float over.
         ui.rect(0, 0, self.px_w, self.contentY(), self.glassBg(th.bar_bg));
         const ty = self.top_inset + (self.tab_h - self.renderer.cell_h) / 2;
+
+        // The TITLE ZONE: workspace name centered, usage cluster right.
+        // Glass mode owns a real titlebar strip; opaque shares the tab
+        // row (the native titlebar isn't ours to draw in).
+        const zone_ty = if (self.top_inset > 0)
+            (self.top_inset - self.renderer.cell_h) / 2
+        else
+            ty;
+        const cw = self.renderer.cell_w;
+        const name = self.activeSpace().label();
+        const nx = (self.px_w - @as(f32, @floatFromInt(name.len)) * cw) / 2;
+        _ = ui.text(nx, zone_ty, name, th.bar_value, self.glassBg(th.bar_bg));
+        if (self.usage.len > 0) {
+            const ufg = if (self.usage.worst >= 90)
+                th.ed_err
+            else if (self.usage.worst >= 70)
+                th.accent
+            else
+                th.bar_fg;
+            _ = ui.textRight(self.px_w - cw, zone_ty, self.usage.slice(), ufg, self.glassBg(th.bar_bg));
+        }
         var x: f32 = self.renderer.cell_w / 2;
         const space = self.activeSpace();
         for (space.tabs.items, 0..) |t, i| {
@@ -1791,11 +1801,8 @@ pub const App = struct {
                     if (n > 0) title = title_buf[0..n];
                 },
             }
-            var chip: [64]u8 = undefined;
-            const label = if (t.ws_len > 0)
-                std.fmt.bufPrint(&chip, " {d} {s} · {s} ", .{ i + 1, t.ws[0..t.ws_len], title }) catch continue
-            else
-                std.fmt.bufPrint(&chip, " {d} {s} ", .{ i + 1, title }) catch continue;
+            var chip: [40]u8 = undefined;
+            const label = std.fmt.bufPrint(&chip, " {d} {s} ", .{ i + 1, title }) catch continue;
 
             const fg = if (is_active) th.bar_value else th.bar_fg;
             const bg = self.glassBg(if (is_active) th.chip_active_bg else th.bar_bg);
@@ -2272,6 +2279,25 @@ fn displayLinkCallback(link: CVDisplayLinkRef, now: ?*const anyopaque, output: ?
 /// keystroke is waiting on its echo IN THE FOCUSED PANE — a background
 /// pane's firehose must not burn the latency path. Pointer compare
 /// only; the session may not be dereferenced here.
+/// Background poll of the host's usage snapshot. 30s cadence — the
+/// host itself probes cost-weighted, this just mirrors its cache. A
+/// text change dirties the scene; an unreachable host clears the
+/// cluster (fail-open, nothing drawn).
+fn usageThread(app: *App) void {
+    while (true) {
+        const snap = @import("usage.zig").fetch(app.gpa, app.io);
+        app.draw_lock.lock();
+        if (!std.mem.eql(u8, snap.slice(), app.usage.slice())) {
+            app.usage = snap;
+            app.scene_dirty = true;
+        }
+        app.draw_lock.unlock();
+        _ = usleep(30 * 1000 * 1000);
+    }
+}
+
+extern "c" fn usleep(us: u32) c_int;
+
 fn inputKick(ctx: *anyopaque, sess: *sessionpkg.Session) void {
     const self: *App = @ptrCast(@alignCast(ctx));
     if (self.focused_session.load(.acquire) != sess) return;
