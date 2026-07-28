@@ -1,20 +1,27 @@
-//! Metal cell-grid renderer: CoreText-rasterized ASCII atlas, one instanced
-//! draw for cell backgrounds, one for glyphs (premultiplied alpha). The
-//! renderer is a framebuffer, never a text engine — cell layout authority
-//! stays with ghostty-vt.
+//! Metal cell-grid renderer with a dynamic glyph atlas. Glyphs rasterize
+//! lazily on first sight via CoreText — base font first (FiraCode Nerd
+//! Font Mono, so PUA icons resolve directly), then the system cascade for
+//! everything else — and shelf-pack into one R8 texture. Wide glyphs get
+//! a 2-cell slot; the spacer cell samples the right half. The renderer is
+//! a framebuffer, never a text engine — cell layout authority stays with
+//! ghostty-vt.
 
 const std = @import("std");
 const objc = @import("objc");
 
 const CGPoint = extern struct { x: f64, y: f64 };
 const CGSize = extern struct { width: f64, height: f64 };
+const CFRange = extern struct { location: isize, length: isize };
 
 // CoreText / CoreGraphics externs.
 const CFStringRef = ?*anyopaque;
 const CTFontRef = ?*anyopaque;
 const CGContextRef = ?*anyopaque;
 extern "c" fn CFStringCreateWithCString(alloc: ?*anyopaque, cstr: [*:0]const u8, encoding: u32) CFStringRef;
+extern "c" fn CFStringCreateWithBytes(alloc: ?*anyopaque, bytes: [*]const u8, len: isize, encoding: u32, external: bool) CFStringRef;
+extern "c" fn CFRelease(obj: ?*anyopaque) void;
 extern "c" fn CTFontCreateWithName(name: CFStringRef, size: f64, matrix: ?*const anyopaque) CTFontRef;
+extern "c" fn CTFontCreateForString(current: CTFontRef, str: CFStringRef, range: CFRange) CTFontRef;
 extern "c" fn CTFontGetAscent(font: CTFontRef) f64;
 extern "c" fn CTFontGetDescent(font: CTFontRef) f64;
 extern "c" fn CTFontGetLeading(font: CTFontRef) f64;
@@ -23,18 +30,24 @@ extern "c" fn CTFontGetAdvancesForGlyphs(font: CTFontRef, orientation: c_int, gl
 extern "c" fn CTFontDrawGlyphs(font: CTFontRef, glyphs: [*]const u16, positions: [*]const CGPoint, count: usize, ctx: CGContextRef) void;
 extern "c" fn CGBitmapContextCreate(data: ?*anyopaque, w: usize, h: usize, bits_per_comp: usize, bytes_per_row: usize, space: ?*anyopaque, info: u32) CGContextRef;
 extern "c" fn CGBitmapContextGetData(ctx: CGContextRef) ?[*]u8;
+extern "c" fn CGContextClearRect(ctx: CGContextRef, rect: extern struct { origin: CGPoint, size: CGSize }) void;
 
 const utf8_encoding: u32 = 0x08000100;
+const utf16_encoding: u32 = 0x14000100; // kCFStringEncodingUTF16LE... unused
 const alpha_only: u32 = 7; // kCGImageAlphaOnly
 
 pub const MTLRegion = extern struct { x: u64, y: u64, z: u64, w: u64, h: u64, d: u64 };
 pub const MTLRegionPub = MTLRegion;
 
-/// Per-cell GPU data; must match the MSL CellData layout (stride 12).
+/// Per-cell GPU data; must match the MSL CellData layout (stride 16).
+/// uv is the glyph's texel origin in the atlas; flags bit0 = has glyph.
 pub const CellData = extern struct {
     bg: [4]u8,
     fg: [4]u8,
-    glyph: u32,
+    uvx: u16,
+    uvy: u16,
+    flags: u16,
+    pad: u16 = 0,
 };
 
 /// Must match the MSL Uni layout.
@@ -42,15 +55,15 @@ const Uniforms = extern struct {
     vp: [2]f32,
     cell: [2]f32,
     cols: u32,
-    atlas_cols: u32,
-    atlas_uv: [2]f32,
+    pad: u32 = 0,
+    atlas: [2]f32,
 };
 
 const shader_src =
     \\#include <metal_stdlib>
     \\using namespace metal;
-    \\struct Uni { float2 vp; float2 cell; uint cols; uint atlas_cols; float2 atlas_uv; };
-    \\struct CellData { uchar4 bg; uchar4 fg; uint glyph; };
+    \\struct Uni { float2 vp; float2 cell; uint cols; uint pad; float2 atlas; };
+    \\struct CellData { uchar4 bg; uchar4 fg; ushort2 uv; ushort flags; ushort pad; };
     \\struct VOut { float4 pos [[position]]; float4 color; float2 uv; };
     \\
     \\vertex VOut bg_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
@@ -70,15 +83,14 @@ const shader_src =
     \\vertex VOut fg_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
     \\                  constant Uni& u [[buffer(0)]],
     \\                  const device CellData* cells [[buffer(1)]]) {
-    \\  uint g = cells[iid].glyph;
     \\  VOut o;
-    \\  if (g == 0) { o.pos = float4(-2.0, -2.0, 0.0, 1.0); o.color = float4(0.0); o.uv = float2(0.0); return o; }
+    \\  if ((cells[iid].flags & 1) == 0) { o.pos = float4(-2.0, -2.0, 0.0, 1.0); o.color = float4(0.0); o.uv = float2(0.0); return o; }
     \\  uint col = iid % u.cols; uint row = iid / u.cols;
     \\  float2 corner = float2(vid & 1, vid >> 1);
     \\  float2 px = (float2(col, row) + corner) * u.cell;
     \\  o.pos = float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0.0, 1.0);
     \\  o.color = float4(cells[iid].fg) / 255.0;
-    \\  o.uv = (float2(g % u.atlas_cols, g / u.atlas_cols) + corner) * u.atlas_uv;
+    \\  o.uv = (float2(cells[iid].uv) + corner * u.cell) / u.atlas;
     \\  return o;
     \\}
     \\fragment float4 fg_fs(VOut in [[stage_in]], texture2d<float> atlas [[texture(0)]]) {
@@ -88,10 +100,12 @@ const shader_src =
     \\}
 ;
 
-const atlas_cols: u32 = 16;
-const atlas_rows: u32 = 6; // 96 slots; glyph 0 stays empty (space)
+const atlas_px: usize = 2048;
+
+pub const GlyphLoc = struct { uvx: u16, uvy: u16 };
 
 pub const Renderer = struct {
+    gpa: std.mem.Allocator,
     device: objc.Object,
     bg_pso: objc.Object,
     fg_pso: objc.Object,
@@ -102,13 +116,23 @@ pub const Renderer = struct {
     /// Cell size in device pixels.
     cell_w: f32,
     cell_h: f32,
-    /// Glyph slot size in the atlas (pixels) as normalized uv step.
-    atlas_uv: [2]f32,
+
+    // Glyph machinery. Render thread only.
+    font: CTFontRef,
+    descent: f64,
+    cellw_px: usize,
+    cellh_px: usize,
+    scratch: CGContextRef,
+    scratch_data: [*]u8,
+    scratch_w: usize,
+    glyphs: std.AutoHashMapUnmanaged(u21, ?GlyphLoc) = .empty,
+    shelf_x: usize = 0,
+    shelf_y: usize = 0,
 
     pub fn init(gpa: std.mem.Allocator, device: objc.Object, font_name: [*:0]const u8, font_px: f64, max_cells: usize) !Renderer {
-        _ = gpa; // will return for the dynamic atlas
         // --- Font + metrics ---
         const name = CFStringCreateWithCString(null, font_name, utf8_encoding);
+        defer CFRelease(name);
         const font = CTFontCreateWithName(name, font_px, null);
         if (font == null) return error.FontNotFound;
 
@@ -124,47 +148,21 @@ pub const Renderer = struct {
         const cell_w: usize = @intFromFloat(@ceil(advance));
         const cell_h: usize = @intFromFloat(@ceil(ascent + descent + leading));
 
-        // --- Rasterize ASCII 33..126 into an alpha-only bitmap ---
-        const atlas_w = cell_w * atlas_cols;
-        const atlas_h = cell_h * atlas_rows;
-        const ctx = CGBitmapContextCreate(null, atlas_w, atlas_h, 8, atlas_w, null, alpha_only);
-        if (ctx == null) return error.BitmapFailed;
+        // Scratch bitmap: one 2-cell-wide slot, rasterize target for every
+        // glyph before its subregion uploads into the atlas.
+        const scratch_w = cell_w * 2;
+        const scratch = CGBitmapContextCreate(null, scratch_w, cell_h, 8, scratch_w, null, alpha_only);
+        if (scratch == null) return error.BitmapFailed;
+        const scratch_data = CGBitmapContextGetData(scratch) orelse return error.BitmapFailed;
 
-        // CG's bottom-left origin lives in the coordinate transform; the
-        // bitmap MEMORY is already top-down (row 0 = image top), which is
-        // Metal's convention too. So: position baselines in CG coords and
-        // upload the buffer as-is. (A manual row flip here both mirrors
-        // every glyph and scrambles the slot rows — day-two lesson.)
-        var chars: [94]u16 = undefined;
-        var glyphs: [94]u16 = undefined;
-        var positions: [94]CGPoint = undefined;
-        for (0..94) |i| {
-            chars[i] = @intCast(33 + i);
-            const slot = i + 1; // glyph index 0 = empty
-            const sx: f64 = @floatFromInt((slot % atlas_cols) * cell_w);
-            const sy_top: f64 = @floatFromInt((slot / atlas_cols) * cell_h);
-            const baseline_y = @as(f64, @floatFromInt(atlas_h)) - sy_top - @as(f64, @floatFromInt(cell_h)) + descent;
-            positions[i] = .{ .x = sx, .y = baseline_y };
-        }
-        _ = CTFontGetGlyphsForCharacters(font, &chars, &glyphs, 94);
-        CTFontDrawGlyphs(font, &glyphs, &positions, 94, ctx);
-
-        const data = CGBitmapContextGetData(ctx) orelse return error.BitmapFailed;
-
-        // --- Metal texture ---
+        // --- Atlas texture (R8, dynamic) ---
         // MTLPixelFormatR8Unorm = 10
         const tdesc = objc.getClass("MTLTextureDescriptor").?.msgSend(
             objc.Object,
             "texture2DDescriptorWithPixelFormat:width:height:mipmapped:",
-            .{ @as(u64, 10), @as(u64, atlas_w), @as(u64, atlas_h), false },
+            .{ @as(u64, 10), @as(u64, atlas_px), @as(u64, atlas_px), false },
         );
         const atlas = device.msgSend(objc.Object, "newTextureWithDescriptor:", .{tdesc.value});
-        atlas.msgSend(void, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", .{
-            MTLRegion{ .x = 0, .y = 0, .z = 0, .w = atlas_w, .h = atlas_h, .d = 1 },
-            @as(u64, 0),
-            @as(*const anyopaque, data),
-            @as(u64, atlas_w),
-        });
 
         // --- Pipelines ---
         var err_id: objc.c.id = null;
@@ -188,6 +186,7 @@ pub const Renderer = struct {
         });
 
         return .{
+            .gpa = gpa,
             .device = device,
             .bg_pso = bg_pso,
             .fg_pso = fg_pso,
@@ -196,8 +195,90 @@ pub const Renderer = struct {
             .cells_cap = max_cells,
             .cell_w = @floatFromInt(cell_w),
             .cell_h = @floatFromInt(cell_h),
-            .atlas_uv = .{ 1.0 / @as(f32, @floatFromInt(atlas_cols)), 1.0 / @as(f32, @floatFromInt(atlas_rows)) },
+            .font = font,
+            .descent = descent,
+            .cellw_px = cell_w,
+            .cellh_px = cell_h,
+            .scratch = scratch,
+            .scratch_data = scratch_data,
+            .scratch_w = scratch_w,
         };
+    }
+
+    /// Find-or-rasterize a glyph. Returns null when nothing can draw it
+    /// (caller renders nothing). Render thread only.
+    pub fn glyph(self: *Renderer, cp: u21, wide: bool) ?GlyphLoc {
+        const gop = self.glyphs.getOrPut(self.gpa, cp) catch return null;
+        if (gop.found_existing) return gop.value_ptr.*;
+        const loc = self.rasterize(cp, wide);
+        gop.value_ptr.* = loc;
+        return loc;
+    }
+
+    fn rasterize(self: *Renderer, cp: u21, wide: bool) ?GlyphLoc {
+        // UTF-16 for CoreText.
+        var u16buf: [2]u16 = undefined;
+        var u16len: usize = 1;
+        if (cp >= 0x10000) {
+            const v = cp - 0x10000;
+            u16buf[0] = @intCast(0xD800 + (v >> 10));
+            u16buf[1] = @intCast(0xDC00 + (v & 0x3FF));
+            u16len = 2;
+        } else u16buf[0] = @intCast(cp);
+
+        // Base font, then the system cascade for whatever it lacks.
+        var glyph_ids: [2]u16 = .{ 0, 0 };
+        var font = self.font;
+        var cascade: CTFontRef = null;
+        defer if (cascade != null) CFRelease(cascade);
+        if (!CTFontGetGlyphsForCharacters(font, &u16buf, &glyph_ids, @intCast(u16len))) {
+            var utf8buf: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(cp, &utf8buf) catch return null;
+            const str = CFStringCreateWithBytes(null, &utf8buf, n, utf8_encoding, false) orelse return null;
+            defer CFRelease(str);
+            cascade = CTFontCreateForString(self.font, str, .{ .location = 0, .length = @intCast(u16len) });
+            if (cascade == null) return null;
+            font = cascade;
+            if (!CTFontGetGlyphsForCharacters(font, &u16buf, &glyph_ids, @intCast(u16len))) return null;
+        }
+
+        const slot_w = self.cellw_px * @as(usize, if (wide) 2 else 1);
+
+        // Center the glyph's advance inside its slot.
+        const adv = CTFontGetAdvancesForGlyphs(font, 0, &glyph_ids, null, 1);
+        var x: f64 = (@as(f64, @floatFromInt(slot_w)) - adv) / 2.0;
+        if (x < 0) x = 0;
+
+        CGContextClearRect(self.scratch, .{
+            .origin = .{ .x = 0, .y = 0 },
+            .size = .{ .width = @floatFromInt(self.scratch_w), .height = @floatFromInt(self.cellh_px) },
+        });
+        const pos = [1]CGPoint{.{ .x = x, .y = self.descent }};
+        CTFontDrawGlyphs(font, &glyph_ids, &pos, 1, self.scratch);
+
+        // Shelf-allocate an atlas slot.
+        if (self.shelf_x + slot_w > atlas_px) {
+            self.shelf_x = 0;
+            self.shelf_y += self.cellh_px;
+        }
+        if (self.shelf_y + self.cellh_px > atlas_px) {
+            // Atlas full: drop the whole cache and start over. Rare enough
+            // that one flashed frame is acceptable for now.
+            self.glyphs.clearRetainingCapacity();
+            self.shelf_x = 0;
+            self.shelf_y = 0;
+        }
+        const loc: GlyphLoc = .{ .uvx = @intCast(self.shelf_x), .uvy = @intCast(self.shelf_y) };
+        self.shelf_x += slot_w;
+
+        self.atlas.msgSend(void, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", .{
+            MTLRegion{ .x = loc.uvx, .y = loc.uvy, .z = 0, .w = slot_w, .h = self.cellh_px, .d = 1 },
+            @as(u64, 0),
+            @as(*const anyopaque, self.scratch_data),
+            @as(u64, self.scratch_w),
+        });
+
+        return loc;
     }
 
     /// The CPU-visible cell array to fill before draw().
@@ -211,8 +292,7 @@ pub const Renderer = struct {
             .vp = .{ vp_w, vp_h },
             .cell = .{ self.cell_w, self.cell_h },
             .cols = cols,
-            .atlas_cols = atlas_cols,
-            .atlas_uv = self.atlas_uv,
+            .atlas = .{ @floatFromInt(atlas_px), @floatFromInt(atlas_px) },
         };
         const n: u64 = @as(u64, cols) * rows;
 

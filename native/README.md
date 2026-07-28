@@ -51,7 +51,9 @@ the terminal core, `zig_objc` is ghostty's own pin.
 
 ## Known debts
 
-ASCII-only atlas ('?' for everything else — dynamic atlas + Nerd Font
-fallback is next), no resize handling, no scrollback view, no selection,
-cursor is a color swap, input is cooked NSEvent characters (upgrade path:
-`vt.input.encodeKey`), no window-close → quit delegate.
+No resize handling, no scrollback view, no selection, cursor is a color
+swap, input is cooked NSEvent characters (upgrade path:
+`vt.input.encodeKey`), no window-close → quit delegate, no color emoji
+(alpha-only rasterization; needs an RGBA atlas pass), atlas-full policy
+is clear-and-rebuild, glyphs render single-style (no bold/italic faces
+yet — the style flags are in `vt.Style.flags` when we want them).

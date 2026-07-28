@@ -116,7 +116,9 @@ pub const App = struct {
         const px_h = win_h * scale;
         layer.msgSend(void, "setDrawableSize:", .{NSSize{ .width = px_w, .height = px_h }});
 
-        const renderer = try renderpkg.Renderer.init(gpa, device, "Menlo", font_pt * scale, 64 * 1024);
+        // Nerd Font base so prompt icons (PUA) resolve without fallback;
+        // the CoreText cascade catches everything else.
+        const renderer = try renderpkg.Renderer.init(gpa, device, "FiraCode Nerd Font Mono", font_pt * scale, 64 * 1024);
         const cols: u32 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_w)), renderer.cell_w));
         const rows: u32 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_h)), renderer.cell_h));
 
@@ -190,9 +192,11 @@ pub const App = struct {
         const default_fg = colors.foreground;
         const cells = self.renderer.cells();
         const row_cells = self.rs.row_data.items(.cells);
+        const cellw_px: u16 = @intCast(self.renderer.cellw_px);
         for (0..rows) |y| {
             const raws = row_cells[y].items(.raw);
             const styles = row_cells[y].items(.style);
+            var prev_wide: ?renderpkg.GlyphLoc = null;
             for (0..cols) |x| {
                 const raw = &raws[x];
                 const styled = raw.style_id != 0;
@@ -205,12 +209,40 @@ pub const App = struct {
                     .codepoint, .codepoint_grapheme => raw.content.codepoint.data,
                     else => 0,
                 };
-                const glyph: u32 = if (cp >= 33 and cp <= 126)
-                    @intCast(cp - 32)
-                else if (cp == 0 or cp == 32)
-                    0
-                else
-                    '?' - 32; // non-ASCII placeholder until the atlas grows
+
+                var uvx: u16 = 0;
+                var uvy: u16 = 0;
+                var flags: u16 = 0;
+                switch (raw.wide) {
+                    .narrow => {
+                        if (cp > 32) if (self.renderer.glyph(cp, false)) |loc| {
+                            uvx = loc.uvx;
+                            uvy = loc.uvy;
+                            flags = 1;
+                        };
+                        prev_wide = null;
+                    },
+                    .wide => {
+                        prev_wide = null;
+                        if (cp > 32) if (self.renderer.glyph(cp, true)) |loc| {
+                            uvx = loc.uvx;
+                            uvy = loc.uvy;
+                            flags = 1;
+                            prev_wide = loc;
+                        };
+                    },
+                    // The wide glyph's right half lives one cell over in
+                    // the atlas slot.
+                    .spacer_tail => {
+                        if (prev_wide) |loc| {
+                            uvx = loc.uvx + cellw_px;
+                            uvy = loc.uvy;
+                            flags = 1;
+                        }
+                        prev_wide = null;
+                    },
+                    .spacer_head => prev_wide = null,
+                }
 
                 var inv = false;
                 if (self.rs.cursor.viewport) |cur| {
@@ -222,7 +254,9 @@ pub const App = struct {
                 cells[y * cols + x] = .{
                     .bg = .{ eff_bg.r, eff_bg.g, eff_bg.b, 255 },
                     .fg = .{ eff_fg.r, eff_fg.g, eff_fg.b, 255 },
-                    .glyph = glyph,
+                    .uvx = uvx,
+                    .uvy = uvy,
+                    .flags = flags,
                 };
             }
         }
