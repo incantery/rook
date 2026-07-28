@@ -348,10 +348,21 @@ while every hook, MCP tool, and ask silently dies.
        they are not equally reversible — the last one takes live shells
        down with it. STATE IS NEVER TOUCHED: `~/.config/rook/`,
        `~/.local/state/rook/`, `rook.db`. No LaunchAgents exist.
-- [ ] 4. Merge to main (fast-forward; main has not moved)
-- [ ] 5. `make release` — bundle the zig `rook` + `rook-host`, stage
-       `rookctl`, drop the `wails3 task package` call. `make install`
-       already has the bundle shape; release adds signing + the zip.
+- [x] 4. Merge to main (fast-forward; main had not moved). NOT PUSHED —
+       `make release` pushes main with the tag, so the next release
+       carries it.
+- [x] 5. `make release` assembles the bundle itself instead of calling
+       `wails3 task package`. The ZIP'S SHAPE is unchanged on purpose —
+       `rook.app` + a top-level `rookctl` — because `install.sh` and
+       `internal/selfupdate` both read it, and keeping that contract is
+       what let the app underneath change without touching the upgrade
+       path. `release-stage` is everything up to the zip with nothing
+       irreversible in it, so packaging is testable.
+       Caught by testing it: `make install` had symlinked
+       `~/.local/bin/rookctl` into the bundle, and `selfupdate.Apply`
+       resolves symlinks before overwriting — `rookctl update` would
+       have rewritten a sealed binary and invalidated the signature.
+       A copy now, both places.
 - [ ] 6. Run the migration's `binaries` + `daemons` phases and delete
        `/Applications/rookz.app`
 - [ ] 7. Restructure: promote `native/` to first class
