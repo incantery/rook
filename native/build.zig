@@ -23,6 +23,13 @@ pub fn build(b: *std.Build) void {
         exe_mod.addImport("objc", dep.module("objc"));
     }
     exe_mod.link_libc = true;
+
+    // Tree-sitter runtime + vendored grammars (parser-table C files).
+    exe_mod.addIncludePath(b.path("vendor/tree-sitter/include"));
+    exe_mod.addIncludePath(b.path("vendor/tree-sitter/src"));
+    exe_mod.addCSourceFile(.{ .file = b.path("vendor/tree-sitter/src/lib.c"), .flags = &.{"-std=c11"} });
+    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/zig/parser.c"), .flags = &.{"-std=c11"} });
+    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/go/parser.c"), .flags = &.{"-std=c11"} });
     exe_mod.linkFramework("AppKit", .{});
     exe_mod.linkFramework("Metal", .{});
     exe_mod.linkFramework("QuartzCore", .{});

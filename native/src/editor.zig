@@ -21,7 +21,25 @@ const bufferpkg = @import("buffer.zig");
 pub const tab_width = 4;
 const max_line = 4096;
 
-pub const Style = enum(u8) { text, dim, sel, cursor, mode, status, err };
+pub const Style = enum(u8) {
+    text,
+    dim,
+    sel,
+    cursor,
+    mode,
+    status,
+    err,
+    // Syntax buckets (tree-sitter captures; see syntax.zig).
+    syn_comment,
+    syn_string,
+    syn_number,
+    syn_keyword,
+    syn_type,
+    syn_func,
+};
+
+/// One highlight span in absolute byte offsets; later spans override.
+pub const HlSpan = struct { start: u32, end: u32, st: Style };
 
 pub const RCell = struct {
     cp: u21 = ' ',
@@ -77,6 +95,19 @@ pub const Editor = struct {
     closed: bool = false,
     render_dirty: bool = true,
 
+    // Highlighter seam — function pointers so the editor never links
+    // the tree-sitter C (headless tests stay headless). syntax.zig
+    // attaches; null = plain text.
+    hl_ctx: ?*anyopaque = null,
+    hl_reparse: ?*const fn (*anyopaque, []const u8) void = null,
+    hl_spans: ?*const fn (*anyopaque, u32, u32, *std.ArrayListUnmanaged(HlSpan), Allocator) void = null,
+    hl_set_path: ?*const fn (*anyopaque, ?[]const u8) void = null,
+    hl_destroy: ?*const fn (*anyopaque) void = null,
+    hl_version: u64 = std.math.maxInt(u64),
+    hl_spans_buf: std.ArrayListUnmanaged(HlSpan) = .empty,
+    hl_styles: std.ArrayListUnmanaged(Style) = .empty,
+    hl_vstart: usize = 0,
+
     pub fn create(gpa: Allocator, io: std.Io, path: ?[]const u8) !*Editor {
         const self = try gpa.create(Editor);
         errdefer gpa.destroy(self);
@@ -93,6 +124,9 @@ pub const Editor = struct {
 
     pub fn destroy(self: *Editor) void {
         const gpa = self.gpa;
+        if (self.hl_destroy) |f| f(self.hl_ctx.?);
+        self.hl_spans_buf.deinit(gpa);
+        self.hl_styles.deinit(gpa);
         self.buf.deinit(gpa);
         self.cmd.deinit(gpa);
         self.last_search.deinit(gpa);
@@ -416,6 +450,8 @@ pub const Editor = struct {
         self.goal = 0;
         self.mode = .normal;
         self.render_dirty = true;
+        if (self.hl_set_path) |f| f(self.hl_ctx.?, self.buf.path);
+        self.hl_version = std.math.maxInt(u64);
     }
 
     // ------------------------------------------------------------ normal/visual
@@ -1074,6 +1110,7 @@ pub const Editor = struct {
         const text_cols = cols - @min(gw, cols - 1);
         const text_rows = rows - 1;
         self.ensureVisible(text_cols, text_rows);
+        self.refreshHighlights(text_rows);
 
         const cur_rc = renderCol(self.lineText(self.cline), self.ccol);
 
@@ -1103,18 +1140,19 @@ pub const Editor = struct {
             var rc: usize = 0;
             var i: usize = 0;
             while (i < s.len) {
-                const sel = self.selContains(line, i, abs_start);
+                const base = self.hlStyleAt(abs_start + i);
+                const st: Style = if (self.selContains(line, i, abs_start)) .sel else base;
                 if (s[i] == '\t') {
                     const next = rc / tab_width * tab_width + tab_width;
                     while (rc < next) : (rc += 1) {
-                        putText(out, gw, text_cols, self.left, rc, ' ', sel);
+                        putText(out, gw, text_cols, self.left, rc, ' ', st);
                     }
                     i += 1;
                     continue;
                 }
                 const n = cpLenAt(s, i);
                 const cp = std.unicode.utf8Decode(s[i..@min(i + n, s.len)]) catch 0xFFFD;
-                putText(out, gw, text_cols, self.left, rc, cp, sel);
+                putText(out, gw, text_cols, self.left, rc, cp, st);
                 rc += 1;
                 i += n;
             }
@@ -1129,7 +1167,7 @@ pub const Editor = struct {
                         const mrc = renderCol(s, bi);
                         if (mrc >= self.left and mrc - self.left < text_cols) {
                             const cell = &out[gw + (mrc - self.left)];
-                            if (cell.st == .text) cell.st = .sel;
+                            if (cell.st != .cursor and cell.st != .sel) cell.st = .sel;
                         }
                     }
                 }
@@ -1137,7 +1175,7 @@ pub const Editor = struct {
 
             // Visual-line selection tints the whole used row even past EOL.
             if (self.mode == .visual_line and self.selContains(line, 0, abs_start) and rc == 0) {
-                putText(out, gw, text_cols, self.left, 0, ' ', true);
+                putText(out, gw, text_cols, self.left, 0, ' ', .sel);
             }
 
             // Cursor (block) — in command mode it sits on the status row.
@@ -1152,9 +1190,54 @@ pub const Editor = struct {
         return g;
     }
 
-    fn putText(out: []RCell, gw: usize, text_cols: usize, left: usize, rc: usize, cp: u21, sel: bool) void {
+    fn putText(out: []RCell, gw: usize, text_cols: usize, left: usize, rc: usize, cp: u21, st: Style) void {
         if (rc < left or rc - left >= text_cols) return;
-        out[gw + (rc - left)] = .{ .cp = cp, .st = if (sel) .sel else .text };
+        out[gw + (rc - left)] = .{ .cp = cp, .st = st };
+    }
+
+    /// Reparse on buffer-version change, then bake the VISIBLE byte
+    /// range's capture spans into a per-byte style table (later spans
+    /// override — nvim's convention).
+    fn refreshHighlights(self: *Editor, text_rows: usize) void {
+        const reparse = self.hl_reparse orelse return;
+        const gpa = self.gpa;
+        const rope = &self.buf.rope;
+
+        if (self.buf.version != self.hl_version) {
+            // Full reparse, size-capped; ts_tree_edit is the upgrade
+            // path if this ever shows in frame_fill.
+            if (rope.byteLen() <= 4 << 20) {
+                if (rope.dupeRange(gpa, 0, rope.byteLen()) catch null) |flat| {
+                    defer gpa.free(flat);
+                    reparse(self.hl_ctx.?, flat);
+                    self.hl_version = self.buf.version;
+                }
+            } else return;
+        }
+
+        const lc = self.lineCountB();
+        const vstart = rope.lineStart(@min(self.top, lc - 1));
+        const last_line = @min(self.top + text_rows, lc) - 1;
+        const vend = rope.lineEnd(last_line);
+        self.hl_vstart = vstart;
+
+        self.hl_styles.resize(gpa, vend - vstart) catch return;
+        @memset(self.hl_styles.items, .text);
+        self.hl_spans_buf.clearRetainingCapacity();
+        if (self.hl_spans) |f| f(self.hl_ctx.?, @intCast(vstart), @intCast(vend), &self.hl_spans_buf, gpa);
+        for (self.hl_spans_buf.items) |sp| {
+            const a = @max(@as(usize, sp.start), vstart) - vstart;
+            const b = @min(@as(usize, sp.end), vend) - vstart;
+            if (a >= b) continue;
+            @memset(self.hl_styles.items[a..b], sp.st);
+        }
+    }
+
+    fn hlStyleAt(self: *const Editor, abs: usize) Style {
+        if (self.hl_reparse == null) return .text;
+        const rel = abs -% self.hl_vstart;
+        if (rel >= self.hl_styles.items.len) return .text;
+        return self.hl_styles.items[rel];
     }
 
     fn fillStatusRow(self: *Editor, out: []RCell) void {

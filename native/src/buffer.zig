@@ -12,6 +12,10 @@ pub const Buffer = struct {
     path: ?[]u8 = null,
     modified: bool = false,
 
+    /// Bumped by every content mutation (edits, undo, redo) — the
+    /// highlighter's reparse trigger.
+    version: u64 = 0,
+
     undo_stack: std.ArrayListUnmanaged(Edit) = .empty,
     redo_stack: std.ArrayListUnmanaged(Edit) = .empty,
     /// Edits sharing a group id undo as one `u`. Bump via newUndoGroup
@@ -87,6 +91,7 @@ pub const Buffer = struct {
         try self.rope.delete(gpa, start, end);
         try self.rope.insert(gpa, start, text);
         self.modified = true;
+        self.version +%= 1;
         if (clear_redo) {
             for (self.redo_stack.items) |e| gpa.free(e.deleted);
             self.redo_stack.clearRetainingCapacity();
@@ -129,6 +134,7 @@ pub const Buffer = struct {
             target = e.off;
             gpa.free(e.deleted);
             self.modified = true;
+            self.version +%= 1;
         }
         return target;
     }

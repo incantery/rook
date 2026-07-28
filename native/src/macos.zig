@@ -698,6 +698,7 @@ pub const App = struct {
             return true;
         }
         const ed = editorpkg.Editor.create(self.gpa, self.io, path) catch return false;
+        @import("syntax.zig").attach(ed, self.gpa);
         const pane = self.gpa.create(panespkg.Pane) catch {
             ed.destroy();
             return false;
@@ -1578,6 +1579,12 @@ pub const App = struct {
                 .mode => th.bar_bg,
                 .status => th.bar_value,
                 .err => th.ed_err,
+                .syn_comment => th.syn_comment,
+                .syn_string => th.syn_string,
+                .syn_number => th.syn_number,
+                .syn_keyword => th.syn_keyword,
+                .syn_type => th.syn_type,
+                .syn_func => th.syn_func,
             };
             switch (rc.st) {
                 .sel => bg = th.ed_sel_bg,

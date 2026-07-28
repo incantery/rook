@@ -38,15 +38,24 @@ over a rope buffer (`src/rope.zig` → `src/buffer.zig` →
 `src/editor.zig`): normal/insert/visual/visual-line/command modes,
 h j k l w b e 0 ^ $ gg G arrows ⌃D/⌃U, operators d y c (dd yy cc D C
 Y), x r J p P, counts, grouped undo (u / ⌃R), `:w :q :wq :e :<n>`.
+`/` searches (literal, wrapping, n/N, hlsearch until `:noh`).
+TREE-SITTER highlighting is in (slice two): the runtime and zig/go
+grammars are vendored C (vendor/), highlight queries embedded; a
+full reparse runs per buffer change (size-capped) and capture spans
+are extracted for the visible range only, mapped to the theme's
+syntax colors. Other languages = drop a grammar's parser.c + its
+highlights.scm into vendor/ and add two lines to syntax.zig.
 Open one with `rookz edit <file>` from any shell inside the app (the
 CLI finds this instance via ROOKZ_SOCK) or ctl `edit <path>`: a
 focused editor retargets, otherwise a split opens. `:q` closes the
-pane like a shell exit. The editor is a pure model — keys in, a
-styled character grid out — so `zig test src/editor.zig` drives the
-whole modal machine headless; macos.zig only maps styles to colors
-and glyphs. Editor debts: no search yet, one register, no autoindent,
-no syntax (tree-sitter is the next slice), wide glyphs count one
-column, 4KB line clamp on motions/render.
+pane like a shell exit (⌘W asks the same question). The editor is a
+pure model — keys in, a styled character grid out — so `zig test
+src/editor.zig` drives the whole modal machine headless with ZERO C
+linkage: the highlighter attaches through function-pointer hooks
+(syntax.zig), never an import. Editor debts: one register, no
+autoindent, undo doesn't track the save point (a fully-undone buffer
+still reads modified), wide glyphs count one column, 4KB line clamp
+on motions/render.
 
 A status bar sits under the panes — tenant one of `src/ui.zig`, the
 seed of rook's own UI layer (immediate-mode quads + text runs from the

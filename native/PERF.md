@@ -104,6 +104,14 @@ and default-bg alpha branch in fillPane are noise. Transparency is
 config-gated because a non-opaque layer forfeits direct scan-out —
 the ~5-7ms fullscreen present-lag win stays default.
 
+Eighth re-run — tree-sitter + the second sweep (2026-07-28 late: ⌘W,
+editor /-search, split-ratio drag, SGR mouse reporting, config live
+reload, tree-sitter zig/go): cat **0.888s**, RSS 87MB (the vendored
+runtime + two grammar tables cost ~nothing resident), idle 0 frames.
+Highlight work is fill-time only on dirty editor frames: full reparse
+per buffer version (size-capped 4MB), captures extracted for the
+visible byte range only.
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,

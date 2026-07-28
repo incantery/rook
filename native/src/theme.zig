@@ -33,6 +33,14 @@ pub const Theme = struct {
     ed_dim: [4]u8,
     ed_sel_bg: [4]u8,
     ed_err: [4]u8,
+
+    // Editor syntax (tree-sitter capture buckets).
+    syn_comment: [4]u8,
+    syn_string: [4]u8,
+    syn_number: [4]u8,
+    syn_keyword: [4]u8,
+    syn_type: [4]u8,
+    syn_func: [4]u8,
 };
 
 /// The colors rookz shipped with — kept exactly, as the fallback.
@@ -56,6 +64,12 @@ pub const default: Theme = .{
     .ed_dim = .{ 96, 99, 116, 255 },
     .ed_sel_bg = .{ 58, 62, 88, 255 },
     .ed_err = .{ 247, 118, 142, 255 },
+    .syn_comment = .{ 96, 99, 116, 255 },
+    .syn_string = .{ 158, 206, 106, 255 },
+    .syn_number = .{ 255, 158, 100, 255 },
+    .syn_keyword = .{ 187, 154, 247, 255 },
+    .syn_type = .{ 115, 218, 202, 255 },
+    .syn_func = .{ 122, 162, 247, 255 },
 };
 
 /// Nocturne — rook's own (the Claude Design boards, 2026-07-22).
@@ -100,6 +114,13 @@ pub const nocturne: Theme = .{
     .ed_dim = .{ 0x56, 0x5a, 0x70, 255 }, // lo
     .ed_sel_bg = .{ 0x39, 0x37, 0x57, 255 },
     .ed_err = .{ 0xd9, 0x8a, 0x8a, 255 },
+    // nocturne.ts syntax block: comments deliberately readable.
+    .syn_comment = .{ 0x8d, 0x92, 0xad, 255 },
+    .syn_string = .{ 0x9e, 0xc4, 0x9a, 255 },
+    .syn_number = .{ 0xd4, 0xbd, 0x85, 255 },
+    .syn_keyword = .{ 0xb8, 0xab, 0xee, 255 },
+    .syn_type = .{ 0xd4, 0xbd, 0x85, 255 },
+    .syn_func = .{ 0xa3, 0xc0, 0xe8, 255 },
 };
 
 const builtins = [_]*const Theme{ &default, &nocturne };
