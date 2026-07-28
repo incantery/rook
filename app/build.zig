@@ -125,4 +125,17 @@ pub fn build(b: *std.Build) void {
     e2e_run.addArtifactArg(exe);
     if (b.args) |args| e2e_run.addArgs(args);
     e2e_step.dependOn(&e2e_run.step);
+
+    // Compile the harness without running it — the CI half of e2e.
+    //
+    // `zig build e2e` RUNS the suite, which CI cannot: no window server,
+    // no Metal device, no shells. But nothing else in the default build
+    // graph reaches e2e/, so without this step the harness compiles only
+    // when someone runs it, and Zig's std churn rots it silently in
+    // between (writing it cost three removals in one file:
+    // std.Thread.sleep, std.time.milliTimestamp, std.fs.cwd). This turns
+    // that into a red build instead of a compile error discovered at the
+    // moment you actually needed the suite.
+    const e2e_check = b.step("e2e-check", "Compile the e2e harness without running it");
+    e2e_check.dependOn(&e2e_exe.step);
 }

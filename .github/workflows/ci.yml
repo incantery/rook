@@ -44,6 +44,14 @@ jobs:
       - name: Test
         run: zig build test
 
+      # The e2e suite cannot RUN here — it needs a window server, a Metal
+      # device, and real shells. It can still be COMPILED, and it has to
+      # be: nothing else in the build graph reaches app/e2e/, so this is
+      # the only thing standing between the harness and silent bit-rot as
+      # Zig's std moves under it.
+      - name: Build e2e harness
+        run: zig build e2e-check
+
   go:
     runs-on: ubuntu-latest
     timeout-minutes: 10
