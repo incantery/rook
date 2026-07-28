@@ -79,6 +79,16 @@ work. Quiet-key p50 wobbles run-to-run (16.6/16.9/21.4 across today)
 while p95 holds ~26.5; likely the 80ms key cadence beating against
 the 8.33ms vsync phase — WATCH, don't average away.
 
+Fifth re-run — inverse video + cursor-dirty (2026-07-28, the whitespace
+bug): cat **0.887s** (new best), fill p50 38µs (was 37 — the per-cell
+inverse branch is noise). The fix set: fillPane applies the inverse
+flag (Style.bg/fg deliberately don't — claude code's inverse-space
+cursor rendered invisible), DECTCEM hide is respected, and cursor-only
+moves (backspace's \b, arrows) now dirty the focused pane by comparing
+against the last-drawn cursor — the emulator's dirty tracking is
+row-content only, so a frame-skipping renderer must diff the cursor
+itself. Idle stays zero frames (a parked cursor compares equal).
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,

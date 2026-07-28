@@ -168,10 +168,16 @@ close-pane chord (exit the shell), no zoom, typing into a pane while
 its resize is still settling can lose a line to reflow (transient,
 ctl-only in practice).
 
-Three lessons that will recur: box/block glyphs are SPRITES, never font
+Lessons that will recur: box/block glyphs are SPRITES, never font
 glyphs (edge-to-edge or you get seams); the session must answer
 terminal queries (Effects callbacks) or query-and-wait programs like
-nvim stall on their response timeouts; and never encode a frame
+nvim stall on their response timeouts; never encode a frame
 synchronously from a caller's thread — nextDrawable contention wedged
 the ctl thread once, so mutations set scene_dirty and let the display
-link draw.
+link draw; Style.bg/fg do NOT apply the inverse flag — the fg/bg swap
+is the renderer's job (claude code's input cursor is an inverse-video
+space, which rendered invisible until fillPane learned this); and the
+emulator's dirty tracking is row-CONTENT only — cursor-only moves
+(backspace's \b, arrows, DECTCEM hide/show) dirty nothing, so a
+frame-skipping renderer must diff the cursor against what it last drew
+or the on-screen cursor goes stale.

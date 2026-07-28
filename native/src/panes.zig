@@ -27,6 +27,11 @@ pub const Pane = struct {
     drawn_cols: u32 = 0,
     drawn_rows: u32 = 0,
     dirty: bool = false,
+    /// The cursor state (position + visibility) baked into the last
+    /// fill. Cursor-only moves (backspace's \b, arrows) dirty no row
+    /// anywhere in the emulator — this is the only record that the
+    /// on-screen cursor is now stale.
+    drawn_cursor: u32 = 0xffff_ffff,
 };
 
 pub const Node = union(enum) {

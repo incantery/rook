@@ -624,6 +624,12 @@ pub const App = struct {
             p.session.unlockForSnapshot();
             p.dirty = p.rs.dirty != .@"false";
             p.rs.dirty = .@"false";
+            // Cursor-only changes (backspace's \b, arrows, DECTCEM
+            // hide/show) dirty no row — compare against what the last
+            // fill drew, or the on-screen cursor goes stale. The cursor
+            // move IS the key's visible echo, so it legitimately sets
+            // focused_dirty and consumes the key→photon mark.
+            if (p == atab.focused and cursorKey(p) != p.drawn_cursor) p.dirty = true;
             if (p.dirty) {
                 any_dirty = true;
                 if (p == atab.focused) focused_dirty = true;
@@ -659,6 +665,7 @@ pub const App = struct {
                 if (rows == 0) continue;
             }
             self.fillPane(p, cells[off .. off + cols * rows], cols, rows);
+            p.drawn_cursor = cursorKey(p);
             p.buf_off = off;
             p.drawn_cols = @intCast(cols);
             p.drawn_rows = @intCast(rows);
@@ -669,7 +676,13 @@ pub const App = struct {
         stats.global.frame_fill.recordSeconds(t_fill - t_update);
 
         const drawable = self.layer.msgSend(objc.Object, "nextDrawable", .{});
-        if (drawable.value == null) return;
+        if (drawable.value == null) {
+            // The emulator's dirty state was already consumed above —
+            // losing this frame would freeze the change until the NEXT
+            // one arrives. Re-arm and retry on a later tick.
+            self.scene_dirty = true;
+            return;
+        }
         // Backpressure (waiting for a free drawable) is pacing, not
         // work — its own ring, so the fps capability math stays honest.
         const t_acquired = CACurrentMediaTime();
@@ -903,13 +916,23 @@ pub const App = struct {
     /// Fill one pane's slot of the cell buffer from its render state.
     /// The cursor renders only in the focused pane — the second half of
     /// the focus telegraph.
+    /// The cursor state a fill bakes into the grid, as one comparable
+    /// word: position when visible, a sentinel when hidden or offscreen.
+    fn cursorKey(p: *panespkg.Pane) u32 {
+        if (!p.rs.cursor.visible) return 0xffff_ffff;
+        const cur = p.rs.cursor.viewport orelse return 0xffff_ffff;
+        return (@as(u32, cur.y) << 16) | cur.x;
+    }
+
     fn fillPane(self: *App, p: *panespkg.Pane, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
         const colors = &p.rs.colors;
         const default_bg = colors.background;
         const default_fg = colors.foreground;
         const row_cells = p.rs.row_data.items(.cells);
         const cellw_px: u16 = @intCast(self.renderer.cellw_px);
-        const show_cursor = p == self.activeTab().focused;
+        // DECTCEM hide (TUIs that paint their own cursor, e.g. claude
+        // code's inverse-space block) must actually hide ours.
+        const show_cursor = p == self.activeTab().focused and p.rs.cursor.visible;
         for (0..rows) |y| {
             const raws = row_cells[y].items(.raw);
             const styles = row_cells[y].items(.style);
@@ -961,14 +984,19 @@ pub const App = struct {
                     .spacer_head => prev_wide = null,
                 }
 
-                var inv = false;
+                // Style.bg/fg deliberately don't apply the inverse flag
+                // — that swap is the renderer's job (upstream ghostty
+                // does the same in its cell fill). The cursor is one
+                // more inversion on top, so cursor-over-inverse reads
+                // normal.
+                var inv = styled and st.flags.inverse;
                 if (show_cursor) {
                     if (p.rs.cursor.viewport) |cur| {
-                        if (cur.x == x and cur.y == y) inv = true;
+                        if (cur.x == x and cur.y == y) inv = !inv;
                     }
                 }
                 const eff_bg = if (inv) fg else bg;
-                const eff_fg = if (inv) bg else fg;
+                const eff_fg = if (styled and st.flags.invisible) eff_bg else if (inv) bg else fg;
 
                 cells[y * cols + x] = .{
                     .bg = .{ eff_bg.r, eff_bg.g, eff_bg.b, 255 },
