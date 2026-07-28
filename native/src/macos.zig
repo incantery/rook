@@ -439,11 +439,17 @@ pub const App = struct {
                 },
                 .term => |*tm| {
                     const alt = tm.session.term.screens.active_key == .alternate;
-                    if (!alt) break;
-                    const seq: []const u8 = if (lines > 0) "\x1b[A" else "\x1b[B";
-                    if (lines < 0) lines = -lines;
-                    var n: i64 = 0;
-                    while (n < lines and n < 20) : (n += 1) tm.session.write(seq);
+                    if (alt) {
+                        // Alt-screen apps take arrows (vim/less).
+                        const seq: []const u8 = if (lines > 0) "\x1b[A" else "\x1b[B";
+                        if (lines < 0) lines = -lines;
+                        var n: i64 = 0;
+                        while (n < lines and n < 20) : (n += 1) tm.session.write(seq);
+                    } else {
+                        // Primary screen: scroll the viewport into
+                        // history; typing snaps back.
+                        tm.session.scrollViewport(@intCast(-lines));
+                    }
                 },
             }
             break;
@@ -605,10 +611,67 @@ pub const App = struct {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         self.markInput(ts);
-        switch (self.activeTab().focused.content) {
-            .term => |*t| t.session.write(bytes),
+        self.paneInput(self.activeTab().focused, bytes);
+    }
+
+    /// Route input into a pane: editors take the modal machine, a
+    /// copy-mode terminal scrolls, a live terminal writes to the pty
+    /// (and typing snaps a scrolled viewport back — every terminal's
+    /// convention). ONE path for NSEvents and ctl. Caller holds
+    /// draw_lock.
+    pub fn paneInput(self: *App, p: *panespkg.Pane, bytes: []const u8) void {
+        switch (p.content) {
+            .term => |*t| {
+                if (t.copy_mode) {
+                    self.copyModeKey(t, bytes);
+                    return;
+                }
+                t.session.write(bytes);
+                t.session.scrollTo(.active);
+            },
             .edit => |ed| ed.key(bytes),
         }
+    }
+
+    /// Enter tmux-style copy mode on the focused terminal pane.
+    pub fn enterCopyMode(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        if (self.activeTab().focused.term()) |tm| {
+            tm.copy_mode = true;
+            tm.copy_g = false;
+            self.scene_dirty = true;
+        }
+    }
+
+    /// Copy-mode keys: vim motions scroll the viewport; q/ESC/i/Enter
+    /// snap back to the live screen and exit. Caller holds draw_lock.
+    fn copyModeKey(self: *App, tm: *panespkg.Term, bytes: []const u8) void {
+        const rows: isize = @intCast(@max(2, self.activeTab().focused.rows));
+        for (bytes) |ch| {
+            if (tm.copy_g and ch == 'g') {
+                tm.copy_g = false;
+                tm.session.scrollTo(.top);
+                continue;
+            }
+            tm.copy_g = false;
+            switch (ch) {
+                'g' => tm.copy_g = true,
+                'j' => tm.session.scrollViewport(1),
+                'k' => tm.session.scrollViewport(-1),
+                'd', 0x04 => tm.session.scrollViewport(@divTrunc(rows, 2)),
+                'u', 0x15 => tm.session.scrollViewport(-@divTrunc(rows, 2)),
+                'f', 0x06 => tm.session.scrollViewport(rows - 1),
+                'b', 0x02 => tm.session.scrollViewport(-(rows - 1)),
+                'G' => tm.session.scrollTo(.active),
+                'q', 0x1b, 'i', '\r' => {
+                    tm.copy_mode = false;
+                    tm.session.scrollTo(.active);
+                },
+                else => {},
+            }
+        }
+        self.scene_dirty = true;
     }
 
     /// Is the focused pane an editor? (Locked peek for the key path.)
@@ -636,6 +699,7 @@ pub const App = struct {
             .tab_next => self.cycleTab(1),
             .tab_prev => self.cycleTab(-1),
             .tab_select => _ = self.selectTab(@as(usize, b.arg) - 1),
+            .copy_mode => self.enterCopyMode(),
         }
     }
 
@@ -1065,6 +1129,11 @@ pub const App = struct {
             if (self.keybinds.leader) |ld| {
                 var lbuf: [3]u8 = .{ ' ', ld, ' ' };
                 x += ui.text(x, ty, &lbuf, bar_bg, accent_color) + self.renderer.cell_w / 2;
+            }
+        }
+        if (self.activeTab().focused.term()) |tm| {
+            if (tm.copy_mode) {
+                x += ui.text(x, ty, " SCROLL ", bar_bg, accent_color) + self.renderer.cell_w / 2;
             }
         }
         _ = ui.text(x, ty, self.hud_left[0..self.hud_left_len], bar_fg, bar_bg);

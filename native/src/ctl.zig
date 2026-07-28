@@ -121,10 +121,7 @@ fn writeTarget(app: *macos.App, pane_id: ?u32, bytes: []const u8) bool {
     defer app.draw_lock.unlock();
     const p = findPane(app, pane_id) orelse return false;
     if (p == app.tabs.items[app.active_tab].focused) app.markInput(CACurrentMediaTime());
-    switch (p.content) {
-        .term => |*tm| tm.session.write(bytes),
-        .edit => |ed| ed.key(bytes),
-    }
+    app.paneInput(p, bytes);
     return true;
 }
 

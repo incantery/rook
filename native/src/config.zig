@@ -93,6 +93,9 @@ pub const Action = enum {
     /// Jump to tab `arg` (1-based). Digits 1–9 are bound by default,
     /// tmux-style; config can rebind them.
     tab_select,
+    /// tmux copy mode: keys scroll the focused terminal's viewport.
+    /// <leader>[ by default.
+    copy_mode,
 };
 
 pub const ActionSpec = struct { action: Action, arg: u8 = 0 };
@@ -116,6 +119,8 @@ fn actionFromName(name: []const u8) ?ActionSpec {
         .{ .n = "session.new", .a = .tab_new }, // the wails keymap's name for it
         .{ .n = "tab.next", .a = .tab_next },
         .{ .n = "tab.prev", .a = .tab_prev },
+        .{ .n = "copy-mode", .a = .copy_mode }, // tmux's name
+        .{ .n = "pane.scrollback", .a = .copy_mode },
     };
     for (map) |m| {
         if (std.mem.eql(u8, name, m.n)) return .{ .action = m.a };
@@ -202,8 +207,10 @@ fn topLevelEq(line: []const u8) ?usize {
 
 pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     var kb: Keybinds = .{};
-    // tmux's defaults: <leader>1–9 jump to tabs. Config lines rebind.
+    // tmux's defaults: <leader>1–9 jump to tabs, <leader>[ enters copy
+    // mode. Config lines rebind.
     for (1..10) |d| kb.bind(@intCast('0' + d), .{ .action = .tab_select, .arg = @intCast(d) });
+    kb.bind('[', .{ .action = .copy_mode });
 
     var pathbuf: [1024]u8 = undefined;
     const path = blk: {

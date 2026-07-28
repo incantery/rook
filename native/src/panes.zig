@@ -19,6 +19,10 @@ pub const Rect = struct {
 pub const Term = struct {
     session: *sessionpkg.Session,
     rs: vt.RenderState = .empty,
+    /// tmux-style copy mode (<leader>[): keys scroll the viewport
+    /// instead of reaching the pty.
+    copy_mode: bool = false,
+    copy_g: bool = false,
 };
 
 /// What lives inside a pane. The tree, layout, focus, chords, and tabs

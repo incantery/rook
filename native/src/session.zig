@@ -72,6 +72,24 @@ pub const Session = struct {
 
     /// Take the session lock for a render snapshot, with priority over
     /// the reader's parse loop.
+    /// Scroll the viewport into history (negative) or toward the
+    /// active area (positive). No-op on screens without scrollback
+    /// (the alt screen). Any thread.
+    pub fn scrollViewport(self: *Session, delta: isize) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.term.screens.active.scroll(.{ .delta_row = delta });
+    }
+
+    pub fn scrollTo(self: *Session, where: enum { top, active }) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        switch (where) {
+            .top => self.term.screens.active.scroll(.top),
+            .active => self.term.screens.active.scroll(.active),
+        }
+    }
+
     pub fn lockForSnapshot(self: *Session) void {
         self.snapshot_wanted.store(true, .release);
         self.mutex.lock();
