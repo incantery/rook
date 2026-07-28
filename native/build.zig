@@ -52,4 +52,15 @@ pub fn build(b: *std.Build) void {
     const exe_unit_tests = b.addTest(.{ .root_module = exe_mod });
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     test_step.dependOn(&run_exe_unit_tests.step);
+
+    // The editor suite (editor+buffer+rope, headless, no C deps) roots
+    // at editor.zig — the exe module's test collection never reaches
+    // those test decls, so it gets its own test root. This hole once
+    // let a broken build read as green.
+    const editor_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/editor.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(editor_tests).step);
 }

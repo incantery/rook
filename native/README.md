@@ -45,17 +45,26 @@ full reparse runs per buffer change (size-capped) and capture spans
 are extracted for the visible range only, mapped to the theme's
 syntax colors. Other languages = drop a grammar's parser.c + its
 highlights.scm into vendor/ and add two lines to syntax.zig.
-Open one with `rookz edit <file>` from any shell inside the app (the
-CLI finds this instance via ROOKZ_SOCK) or ctl `edit <path>`: a
-focused editor retargets, otherwise a split opens. `:q` closes the
-pane like a shell exit (⌘W asks the same question). The editor is a
-pure model — keys in, a styled character grid out — so `zig test
-src/editor.zig` drives the whole modal machine headless with ZERO C
-linkage: the highlighter attaches through function-pointer hooks
-(syntax.zig), never an import. Editor debts: one register, no
-autoindent, undo doesn't track the save point (a fully-undone buffer
-still reads modified), wide glyphs count one column, 4KB line clamp
-on motions/render.
+Open one with `rookz edit <file>` — or just `re <file>` — from any
+shell inside the app (the CLI finds this instance via ROOKZ_SOCK), or
+ctl `edit <path>`. The editor TAKES OVER the pane like vim would: the
+shell parks underneath and keeps running, `:q`/⌘W drops you back to
+it, prompt and scrollback intact (a focused editor retargets in
+place instead). Opening a DIRECTORY gives a netrw-style listing
+buffer — j/k, Enter descends/opens, `-` climbs to the parent from
+any buffer with the cursor landing on where you came from; dirs sort
+first, `../` is always line one, and it lives inside the pane, so
+every pane can hold its own tree. The app leader works in the editor
+too (double-tap types the literal key, same as a terminal). The
+editor is a pure model — keys in, a styled character grid out — so
+`zig test src/editor.zig` drives the whole modal machine headless
+with ZERO C linkage: the highlighter attaches through
+function-pointer hooks (syntax.zig), never an import (the directory
+reader is plain libc readdir, which macOS links regardless). Editor
+debts: one register, no autoindent, undo doesn't track the save
+point (a fully-undone buffer still reads modified), wide glyphs
+count one column, 4KB line clamp on motions/render, relative :e
+paths resolve against the app cwd rather than the buffer's dir.
 
 A status bar sits under the panes — tenant one of `src/ui.zig`, the
 seed of rook's own UI layer (immediate-mode quads + text runs from the
@@ -147,6 +156,9 @@ theme = "nocturne"       # builtin themes: default, nocturne
 background-opacity = 0.9 # <1 = translucent window; OPTS OUT of
                          # direct scan-out (~+5ms present lag) —
                          # perf tradeoff on purpose, default 1.0
+window-padding = 8       # points of breathing room between chrome
+                         # and panes (default 0: content runs to the
+                         # window edge); the gap shows the theme bg
 background-blur = "blur" # what's BEHIND a translucent window:
                          # none (raw desktop), blur (frosted,
                          # NSVisualEffectView — the recommended one),

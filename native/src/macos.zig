@@ -169,6 +169,10 @@ pub const App = struct {
     /// extends under the (transparent) titlebar, so all chrome shifts
     /// down by this much; the strip itself stays a pure drag region.
     top_inset: f32 = 0,
+    /// window-padding, points and px: breathing room around the pane
+    /// area (bars stay full-width; the gap shows the theme bg).
+    pad_pts: f32 = 0,
+    pad: f32 = 0,
     /// Layout/focus changed: the next frame redraws even if no pane's
     /// grid is dirty.
     scene_dirty: bool = true,
@@ -376,8 +380,9 @@ pub const App = struct {
         // Standard macOS titlebar is 28pt; with fullSizeContentView we
         // draw under it and shift chrome down instead.
         const top_inset: f32 = if (opaque_bg) 0 else @floatCast(28 * scale);
-        const cols: u16 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_w)), renderer.cell_w));
-        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2 - top_inset, renderer.cell_h)));
+        const pad: f32 = @floatCast(cfg.window_padding * scale);
+        const cols: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_w)) - pad * 2, renderer.cell_w)));
+        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2 - top_inset - pad * 2, renderer.cell_h)));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
         const session = try sessionpkg.Session.start(gpa, init.io, shell, null, termColors(), @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
@@ -407,12 +412,14 @@ pub const App = struct {
             .bar_h = bar_h,
             .tab_h = bar_h,
             .top_inset = top_inset,
+            .pad_pts = @floatCast(cfg.window_padding),
+            .pad = pad,
             .bg_opacity = cfg.background_opacity,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
         };
         try self.tabs.append(gpa, tab_one);
         self.focused_session.store(session, .release);
-        panespkg.layout(tab_one.root, .{ .x = 0, .y = self.contentY(), .w = self.px_w, .h = self.contentH() }, self.sep);
+        panespkg.layout(tab_one.root, self.paneArea(), self.sep);
         return self;
     }
 
@@ -511,6 +518,7 @@ pub const App = struct {
         self.bar_h = @ceil(self.renderer.cell_h + @as(f32, @floatCast(8 * scale)));
         self.tab_h = self.bar_h;
         if (self.top_inset > 0) self.top_inset = @floatCast(28 * scale);
+        self.pad = @floatCast(self.pad_pts * scale);
         self.relayoutLocked();
         self.scene_dirty = true;
     }
@@ -524,6 +532,16 @@ pub const App = struct {
     /// Where panes start: below the titlebar strip and tab bar.
     fn contentY(self: *App) f32 {
         return self.top_inset + self.tab_h;
+    }
+
+    /// The rect panes tile: the content area inset by window-padding.
+    fn paneArea(self: *App) panespkg.Rect {
+        return .{
+            .x = self.pad,
+            .y = self.contentY() + self.pad,
+            .w = @max(1, self.px_w - self.pad * 2),
+            .h = @max(1, self.contentH() - self.pad * 2),
+        };
     }
 
     fn activeTab(self: *App) *panespkg.Tab {
@@ -767,32 +785,27 @@ pub const App = struct {
     }
 
     /// Open `path` in an editor: retarget a focused editor pane in
-    /// place (the rook-buffers model), else split one off to the right.
+    /// place (the rook-buffers model), else TAKE OVER the focused
+    /// terminal pane — the shell parks in `pane.under` and keeps
+    /// running; editor :q restores it, like vim in a terminal.
     pub fn openEditor(self: *App, path: []const u8) bool {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         const t = self.activeTab();
-        if (t.focused.editor()) |ed| {
+        const p = t.focused;
+        if (p.editor()) |ed| {
             ed.open(path, false) catch return false;
             self.scene_dirty = true;
             return true;
         }
         const ed = editorpkg.Editor.create(self.gpa, self.io, path) catch return false;
         @import("syntax.zig").attach(ed, self.gpa);
-        const pane = self.gpa.create(panespkg.Pane) catch {
-            ed.destroy();
-            return false;
-        };
-        pane.* = .{ .id = self.next_pane_id, .content = .{ .edit = ed } };
-        self.next_pane_id += 1;
-        if (!panespkg.splitAt(self.gpa, &t.root, t.focused, pane, true)) {
-            ed.destroy();
-            self.gpa.destroy(pane);
-            return false;
-        }
-        t.panes.append(self.gpa, pane) catch {};
-        self.setFocusLocked(pane);
-        self.relayoutLocked();
+        var tm = p.content.term;
+        tm.copy_mode = false;
+        p.under = tm;
+        p.content = .{ .edit = ed };
+        p.drawn_cursor = 0xffff_ffff;
+        self.focused_session.store(self.focusedTermSession(), .release);
         self.refreshHudLocked(CACurrentMediaTime());
         self.scene_dirty = true;
         return true;
@@ -802,7 +815,7 @@ pub const App = struct {
     /// Background tabs relayout on activation. Caller holds draw_lock.
     fn relayoutLocked(self: *App) void {
         const t = self.activeTab();
-        panespkg.layout(t.root, .{ .x = 0, .y = self.contentY(), .w = self.px_w, .h = self.contentH() }, self.sep);
+        panespkg.layout(t.root, self.paneArea(), self.sep);
         for (t.panes.items) |p| {
             const cols: u16 = @intFromFloat(@max(2, @divFloor(p.rect.w, self.renderer.cell_w)));
             const rows: u16 = @intFromFloat(@max(2, @divFloor(p.rect.h, self.renderer.cell_h)));
@@ -813,6 +826,9 @@ pub const App = struct {
                 .term => |*tm| tm.session.resize(cols, rows, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px)),
                 .edit => |ed| ed.render_dirty = true,
             }
+            // A parked shell must track pane dims too, or a resize
+            // during takeover restores a mis-sized grid.
+            if (p.under) |*ut| ut.session.resize(cols, rows, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
         }
     }
 
@@ -972,13 +988,6 @@ pub const App = struct {
         self.scene_dirty = true;
     }
 
-    /// Is the focused pane an editor? (Locked peek for the key path.)
-    pub fn focusedIsEditor(self: *App) bool {
-        self.draw_lock.lock();
-        defer self.draw_lock.unlock();
-        return self.activeTab().focused.editor() != null;
-    }
-
     fn barDirty(self: *App) void {
         self.draw_lock.lock();
         self.scene_dirty = true;
@@ -1007,9 +1016,9 @@ pub const App = struct {
     /// one, or was swallowed as an unknown chord).
     pub fn handleCharKey(self: *App, ch: u8, ts: f64) bool {
         const ld = self.keybinds.leader orelse return false;
-        // An editor owns its keys — the app leader would swallow
-        // literal backticks mid-edit. (Cmd chords still work above.)
-        if (self.focusedIsEditor()) return false;
+        // The leader works in editors too (pane nav must not dead-end
+        // there) — a literal leader char costs a double-tap, same as
+        // the terminal. Seth's call in TODO.md.
         if (self.leader_pending.swap(false, .acq_rel)) {
             self.barDirty();
             if (ch == ld) {
@@ -1078,7 +1087,20 @@ pub const App = struct {
                 const p = t.panes.items[i];
                 const done = switch (p.content) {
                     .term => |*tm| tm.session.exited.load(.acquire),
-                    .edit => |ed| ed.closed,
+                    .edit => |ed| blk: {
+                        if (!ed.closed) break :blk false;
+                        const ut = p.under orelse break :blk true;
+                        // Takeover editor closing: restore the parked
+                        // shell instead of collapsing the pane. (If the
+                        // shell died while parked, the term arm catches
+                        // it next frame.)
+                        ed.destroy();
+                        p.under = null;
+                        p.content = .{ .term = ut };
+                        p.drawn_cursor = 0xffff_ffff;
+                        changed = true;
+                        break :blk false;
+                    },
                 };
                 if (!done) {
                     i += 1;

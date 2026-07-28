@@ -94,6 +94,10 @@ pub const Editor = struct {
 
     closed: bool = false,
     render_dirty: bool = true,
+    /// Buffer is a directory LISTING (netrw/oil heritage): Enter opens
+    /// the entry under the cursor, `-` climbs to the parent. No side
+    /// panel — every pane can hold its own tree.
+    is_dir: bool = false,
 
     // Highlighter seam — function pointers so the editor never links
     // the tree-sitter C (headless tests stay headless). syntax.zig
@@ -111,15 +115,139 @@ pub const Editor = struct {
     pub fn create(gpa: Allocator, io: std.Io, path: ?[]const u8) !*Editor {
         const self = try gpa.create(Editor);
         errdefer gpa.destroy(self);
+        var is_dir = false;
         self.* = .{
             .gpa = gpa,
             .io = io,
             .buf = if (path) |p|
-                try bufferpkg.Buffer.initFromFile(gpa, io, p)
+                try loadPath(gpa, io, p, &is_dir)
             else
                 try bufferpkg.Buffer.initEmpty(gpa),
         };
+        self.is_dir = is_dir;
         return self;
+    }
+
+    // ------------------------------------------------------- directory buffers
+
+    // macOS dirent (arm64/APFS layout); opendir follows symlinks, which
+    // is exactly the "is this a directory" probe we want.
+    const Dirent = extern struct {
+        d_ino: u64,
+        d_seekoff: u64,
+        d_reclen: u16,
+        d_namlen: u16,
+        d_type: u8,
+        d_name: [1024]u8,
+    };
+    extern "c" fn opendir(path: [*:0]const u8) ?*anyopaque;
+    extern "c" fn readdir(d: *anyopaque) ?*Dirent;
+    extern "c" fn closedir(d: *anyopaque) c_int;
+
+    fn trimSlash(p: []const u8) []const u8 {
+        if (p.len > 1 and p[p.len - 1] == '/') return p[0 .. p.len - 1];
+        return p;
+    }
+
+    /// Render `path` as listing text ("../" first, dirs before files,
+    /// dirs slash-suffixed), or null if it isn't an openable directory.
+    fn dirListing(gpa: Allocator, path: []const u8) !?[]u8 {
+        var zbuf: [1024]u8 = undefined;
+        if (path.len == 0 or path.len >= zbuf.len) return null;
+        @memcpy(zbuf[0..path.len], path);
+        zbuf[path.len] = 0;
+        const d = opendir(zbuf[0..path.len :0]) orelse return null;
+        defer _ = closedir(d);
+
+        const Ent = struct { name: []u8, dir: bool };
+        var ents: std.ArrayListUnmanaged(Ent) = .empty;
+        defer {
+            for (ents.items) |e| gpa.free(e.name);
+            ents.deinit(gpa);
+        }
+        while (readdir(d)) |de| {
+            const name = de.d_name[0..de.d_namlen];
+            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            try ents.append(gpa, .{ .name = try gpa.dupe(u8, name), .dir = de.d_type == 4 });
+        }
+        const S = struct {
+            fn lt(_: void, a: Ent, b: Ent) bool {
+                if (a.dir != b.dir) return a.dir; // dirs first
+                return std.mem.lessThan(u8, a.name, b.name);
+            }
+        };
+        std.mem.sort(Ent, ents.items, {}, S.lt);
+
+        var text: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer text.deinit(gpa);
+        try text.appendSlice(gpa, "../");
+        for (ents.items) |e| {
+            try text.append(gpa, '\n');
+            try text.appendSlice(gpa, e.name);
+            if (e.dir) try text.append(gpa, '/');
+        }
+        return try text.toOwnedSlice(gpa);
+    }
+
+    /// A path becomes a buffer: directory → listing, else file contents.
+    fn loadPath(gpa: Allocator, io: std.Io, path: []const u8, is_dir: *bool) !bufferpkg.Buffer {
+        if (try dirListing(gpa, path)) |text| {
+            defer gpa.free(text);
+            var b: bufferpkg.Buffer = .{ .rope = try .init(gpa, text) };
+            errdefer b.rope.deinit(gpa);
+            b.path = try gpa.dupe(u8, trimSlash(path));
+            is_dir.* = true;
+            return b;
+        }
+        is_dir.* = false;
+        return bufferpkg.Buffer.initFromFile(gpa, io, path);
+    }
+
+    /// Enter on a listing line: descend into the entry (".." climbs).
+    fn openDirEntry(self: *Editor) void {
+        const base = self.buf.path orelse return;
+        const line = std.mem.trimEnd(u8, self.lineText(self.cline), "/");
+        if (line.len == 0) return;
+        if (std.mem.eql(u8, line, "..")) return self.openParentDir();
+        const joined = std.fmt.bufPrint(&self.scratch2, "{s}/{s}", .{ trimSlash(base), line }) catch return;
+        self.open(joined, false) catch |err| {
+            self.setStatus("open failed: {s}", .{@errorName(err)}, true);
+        };
+    }
+
+    /// `-` from anywhere: the containing directory's listing, cursor on
+    /// the entry we came from (vim-vinegar muscle memory).
+    fn openParentDir(self: *Editor) void {
+        const cur = self.buf.path orelse {
+            self.setStatus("no file", .{}, true);
+            return;
+        };
+        if (self.buf.modified) {
+            self.setStatus("unsaved changes (:w first, or :e! to discard)", .{}, true);
+            return;
+        }
+        const from_dir = self.is_dir;
+        const parent = if (from_dir)
+            std.fs.path.dirname(trimSlash(cur)) orelse "/"
+        else
+            std.fs.path.dirname(cur) orelse "/";
+        var childbuf: [512]u8 = undefined;
+        const cbase = std.fs.path.basename(trimSlash(cur));
+        const cn = @min(cbase.len, childbuf.len);
+        @memcpy(childbuf[0..cn], cbase[0..cn]);
+        self.open(parent, false) catch |err| {
+            self.setStatus("open failed: {s}", .{@errorName(err)}, true);
+            return;
+        };
+        if (!self.is_dir) return;
+        var i: usize = 0;
+        const n = self.lineCountB();
+        while (i < n) : (i += 1) {
+            if (std.mem.eql(u8, std.mem.trimEnd(u8, self.lineText(i), "/"), childbuf[0..cn])) {
+                self.cline = i;
+                break;
+            }
+        }
     }
 
     pub fn destroy(self: *Editor) void {
@@ -400,6 +528,10 @@ pub const Editor = struct {
 
         const is = std.mem.eql;
         if (is(u8, verb, "w") or is(u8, verb, "wq") or is(u8, verb, "x")) {
+            if (self.is_dir) {
+                self.setStatus("a directory listing isn't writable", .{}, true);
+                return;
+            }
             if (arg.len > 0) {
                 const p = gpa.dupe(u8, arg) catch return;
                 if (self.buf.path) |old| gpa.free(old);
@@ -439,10 +571,11 @@ pub const Editor = struct {
             self.setStatus("unsaved changes (:w first, or :e! to discard)", .{}, true);
             return;
         }
-        var nb = try bufferpkg.Buffer.initFromFile(self.gpa, self.io, path);
+        var is_dir = false;
+        const nb = try loadPath(self.gpa, self.io, path, &is_dir);
         self.buf.deinit(self.gpa);
         self.buf = nb;
-        nb.path = null; // moved
+        self.is_dir = is_dir;
         self.cline = 0;
         self.ccol = 0;
         self.top = 0;
@@ -511,6 +644,11 @@ pub const Editor = struct {
 
         switch (ch) {
             'g' => self.pend_g = true,
+
+            // Directory buffers: Enter descends, `-` climbs (from file
+            // buffers too — vim-vinegar).
+            '\r' => if (self.is_dir) self.openDirEntry(),
+            '-' => self.openParentDir(),
 
             // Motions.
             'h', 'l', 'w', 'b', 'e', '0', '^', '$' => self.motionCharwise(ch),
@@ -1624,4 +1762,57 @@ test "search jump wrap and n/N" {
         if (c.st == .sel) hl2 += 1;
     }
     try testing.expectEqual(@as(usize, 0), hl2);
+}
+
+test "directory buffer: listing, enter opens, dash climbs" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pathbuf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&pathbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.createDir(io, "sub", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "beta.txt", .data = "hello dir\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "alpha.txt", .data = "first\n" });
+
+    var e = try Editor.create(gpa, io, root);
+    defer e.destroy();
+    try testing.expect(e.is_dir);
+
+    // "../", dirs first, then files alphabetically.
+    const text = try bufText(gpa, e);
+    defer gpa.free(text);
+    try testing.expectEqualStrings("../\nsub/\nalpha.txt\nbeta.txt", text);
+
+    // :w refuses on a listing.
+    keys(e, ":w");
+    e.key("\r");
+    try testing.expect(e.status_err);
+
+    // Enter on beta.txt (line 3) opens the file.
+    keys(e, "3j");
+    e.key("\r");
+    try testing.expect(!e.is_dir);
+    const ft = try bufText(gpa, e);
+    defer gpa.free(ft);
+    try testing.expectEqualStrings("hello dir\n", ft);
+
+    // `-` from the file: back to the listing, cursor ON beta.txt.
+    keys(e, "-");
+    try testing.expect(e.is_dir);
+    try testing.expectEqual(@as(usize, 3), e.cline);
+
+    // Enter descends into sub/ (empty: just "../").
+    keys(e, "gg");
+    keys(e, "j");
+    e.key("\r");
+    try testing.expect(e.is_dir);
+    const st = try bufText(gpa, e);
+    defer gpa.free(st);
+    try testing.expectEqualStrings("../", st);
+
+    // ".." climbs back up, cursor on sub/.
+    e.key("\r");
+    try testing.expect(e.is_dir);
+    try testing.expectEqual(@as(usize, 1), e.cline);
 }

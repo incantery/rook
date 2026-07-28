@@ -41,6 +41,9 @@ pub const Config = struct {
     /// fullscreen) — measured tradeoff, opt-in on purpose.
     background_opacity: f64 = 1.0,
     background_blur: Blur = .none,
+    /// Points of breathing room between the chrome and the pane area
+    /// (content otherwise runs to the very window edge). 0–32.
+    window_padding: f64 = 0,
 };
 
 /// One number over both config files — the live-reload poll compares
@@ -127,6 +130,12 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
             if (stripped.len > 0) {
                 cfg.theme = gpa.dupe(u8, stripped) catch cfg.theme;
             }
+        } else if (std.mem.eql(u8, key, "window_padding")) {
+            cfg.window_padding = std.fmt.parseFloat(f64, val) catch 0;
+            if (cfg.window_padding < 0 or cfg.window_padding > 32) {
+                std.debug.print("rookz config: window-padding {d} out of [0, 32], using 0\n", .{cfg.window_padding});
+                cfg.window_padding = 0;
+            }
         } else if (std.mem.eql(u8, key, "background_blur")) {
             const stripped = std.mem.trim(u8, val, "\"");
             cfg.background_blur = blurFromName(stripped) orelse blk: {
@@ -134,7 +143,7 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
                 break :blk .none;
             };
         } else {
-            std.debug.print("rookz config: unknown key '{s}' (known: font-size, font-family, theme, background-opacity, background-blur)\n", .{key_raw});
+            std.debug.print("rookz config: unknown key '{s}' (known: font-size, font-family, theme, background-opacity, background-blur, window-padding)\n", .{key_raw});
         }
     }
 

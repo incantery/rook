@@ -14,6 +14,10 @@ extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 
 pub fn main(init: std.process.Init) !void {
     const argv = init.minimal.args.vector;
+    // Invoked as `re` (the ~/.local/bin symlink): straight to edit —
+    // `re foo.zig` is the daily-driver spelling.
+    if (argv.len > 0 and std.mem.eql(u8, std.fs.path.basename(std.mem.span(argv[0])), "re"))
+        return edit(argv[1..]);
     // No subcommand = the app (a Dock launch has no argv to give, or
     // hands us flags like -psn_… / --no-activate directly).
     const cmd: []const u8 = if (argv.len > 1 and argv[1][0] != '-') std.mem.span(argv[1]) else "win";

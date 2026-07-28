@@ -24,6 +24,7 @@ extern "c" fn setsid() pid_t;
 extern "c" fn dup2(old: fd_t, new: fd_t) c_int;
 extern "c" fn close(fd: fd_t) c_int;
 extern "c" fn execvp(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn getdtablesize() c_int;
 extern "c" fn waitpid(pid: pid_t, status: ?*c_int, options: c_int) pid_t;
 extern "c" fn _exit(code: c_int) noreturn;
 extern "c" fn read(fd: fd_t, buf: [*]u8, n: usize) isize;
@@ -113,7 +114,14 @@ pub const Pty = struct {
             if (dup2(self.slave, 0) < 0) _exit(127);
             if (dup2(self.slave, 1) < 0) _exit(127);
             if (dup2(self.slave, 2) < 0) _exit(127);
-            if (self.slave > 2) _ = close(self.slave);
+            // Everything above stdio dies here: inherited fds leak into
+            // the shell otherwise — a ctl CONNECTION held by a child
+            // kept nc from ever seeing EOF (a spawn racing an open ctl
+            // conn: leader-c from `press`), and pty masters/sockets
+            // shouldn't outlive the app in children either.
+            var cfd: c_int = 3;
+            const maxfd = getdtablesize();
+            while (cfd < maxfd) : (cfd += 1) _ = close(cfd);
             if (cwd) |d| _ = chdir(d);
 
             _ = execvp(argv[0], &argv_buf);

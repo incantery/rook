@@ -77,7 +77,10 @@ install:
 	@# in lockstep with the installed app.
 	mkdir -p $(HOME)/.local/bin
 	ln -sf $(ROOKZ_APP)/Contents/MacOS/rookz $(HOME)/.local/bin/rookz
-	@echo "installed $(ROOKZ_APP) + ~/.local/bin/rookz — Spotlight 'rookz' or: open -a rookz"
+	@# `re` = rookz edit (argv[0] dispatch, TODO.md ask) — this CLAIMS the
+	@# name from the old hand-made re→rookctl symlink.
+	ln -sf $(ROOKZ_APP)/Contents/MacOS/rookz $(HOME)/.local/bin/re
+	@echo "installed $(ROOKZ_APP) + ~/.local/bin/{rookz,re} — Spotlight 'rookz' or: open -a rookz"
 
 dev-web:
 	XDG_STATE_HOME=$(HOME)/.local/state/rook-dev \
