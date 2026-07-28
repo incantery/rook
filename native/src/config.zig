@@ -180,7 +180,8 @@ pub const Action = enum {
     /// tmux copy mode: keys scroll the focused terminal's viewport.
     /// <leader>[ by default.
     copy_mode,
-    /// The workspace palette (reads rook.db). <leader>w by default.
+    /// The workspace palette (reads rook.db). <leader>s by default
+    /// (tmux's choose-session).
     workspace_switch,
 };
 
@@ -299,7 +300,10 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     // mode. Config lines rebind.
     for (1..10) |d| kb.bind(@intCast('0' + d), .{ .action = .tab_select, .arg = @intCast(d) });
     kb.bind('[', .{ .action = .copy_mode });
-    kb.bind('w', .{ .action = .workspace_switch });
+    // tmux: prefix-s = choose-session. Spaces are sessions, so the
+    // workspace palette lives on s ('w' stays free for a future
+    // choose-window/tab picker, also tmux's).
+    kb.bind('s', .{ .action = .workspace_switch });
 
     var pathbuf: [1024]u8 = undefined;
     const path = blk: {

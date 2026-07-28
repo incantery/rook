@@ -74,7 +74,9 @@ cwd names space one; a space collapses when its last tab closes (the
 last space closing exits the app). The status bar shows where you
 are (`rookz · zig · …`).
 
-`<leader>w` (action `workspace.switch`) opens the WORKSPACE PALETTE —
+`<leader>s` (action `workspace.switch` — tmux's prefix-s
+choose-session; `w` stays reserved for a choose-window picker) opens
+the WORKSPACE PALETTE —
 the first modal chrome tenant, and the seed of every future picker
 (file finder, themes, commands): type-to-filter fuzzy list, arrows or
 ⌃N/⌃P, Enter, ESC. The list is rook's own registry — rookz reads
