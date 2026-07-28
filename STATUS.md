@@ -169,10 +169,12 @@ when `frontend/` itself changes.
 Retired-stack targets keep a `-web` suffix: `build-web`, `dev-web`,
 `package-web`, `install-web`, `e2e-web`.
 
-There is no `make e2e` any more, and that is a gap rather than a rename.
-It was how an agent could *see* rook and verify its own UI work instead
-of asking; it drove the webview through Playwright, and the Zig app has
-no equivalent. It belongs with the agent layer in the list above.
+`make e2e` drives the real app end to end — each scenario spawns a
+sandboxed rook and asserts against both truths, `dump` for what the
+emulator holds and a decoded `shot` for what the renderer actually drew.
+It is how an agent verifies its own work instead of asking. Local only:
+it needs a window server, a Metal device, and real shells. See
+[`app/e2e/`](app/e2e/) and the notes in `app/README.md`.
 
 ## Branches
 

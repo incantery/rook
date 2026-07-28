@@ -346,6 +346,56 @@ different truths: dump is what the emulator holds, shot is what the
 renderer did with it. The atlas-flip bug (day two) was invisible to dump
 and obvious in shot; keep both in every verification.
 
+## e2e (`make e2e`)
+
+The socket above is per-command. `app/e2e/` is the suite around it — the
+replacement for the Playwright harness the cutover deleted, and the
+answer to "verify it yourself before asking Seth".
+
+```
+make e2e                 # all scenarios (~2s)
+make e2e ARGS=splits     # one, substring match on the name
+make e2e-clean           # remove sandboxes a failing run kept
+```
+
+Every scenario spawns its **own** instance — own ctl socket, own config,
+own `XDG_*`, own `HOME`, `/bin/sh`, and no rook-host. Scenarios cannot
+see each other's tabs, panes, or shells. That is not fastidiousness: the
+webview suite leaked a workspace out of one failing spec and the live
+session it left behind broke unrelated renderer specs, which read as
+renderer regressions for a while.
+
+Three things the harness does that are worth keeping if it gets rewritten:
+
+- **`start()` proves a shell is executing before any scenario types.**
+  It waits for a prompt, then round-trips an `echo <marker>`. Waiting for
+  the prompt alone is not enough — the pty accepts bytes the shell has
+  not read yet, and that race is what made the old suite flake on a cold
+  sandbox.
+- **The sandbox owns `HOME`, and that is what sets `PS1`.** rook starts
+  LOGIN shells, so `/etc/profile` runs and overwrites an inherited `PS1`
+  before the first prompt is drawn. `~/.profile` is sourced after it, so
+  the sandbox's own `.profile` is the only hook that wins. (Found by the
+  first scenario failing with the developer's real hostname in the
+  prompt.)
+- **Screen matching joins the rows.** A pane wraps at its width, so
+  `total` can land as `t` + `otal` and a naive grep reports a stall that
+  is not happening — see the 15-minute lesson above.
+
+A failing run keeps its sandbox and prints the path: the app's own
+stdout/stderr is in `app.log` there, which is the difference between "a
+config typo on line 3" and "every assertion timed out for no reason".
+A passing run deletes them.
+
+`shot` is decoded, not just written — `harness.zig`'s `Shot` reads the
+PNG back through ImageIO, so pixel assertions are real. `distinctColors`
+is the cheap one: a frame that drew nothing is one colour.
+
+Deliberately **not** in `zig build test` and not in CI. It needs a window
+server, a Metal device, and real shells; CI's value is being fast and
+never flaky, and this is neither. The pure models — rope, editor, paste,
+config — have headless suites that do run there.
+
 ## Config
 
 `~/.config/rook/config.toml` (respects `XDG_CONFIG_HOME`). A TOML

@@ -98,4 +98,31 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     }) });
     test_step.dependOn(&b.addRunArtifact(config_tests).step);
+
+    // e2e: spawns the real app and drives its ctl socket.
+    //
+    // NOT part of `test`, and not in CI — it needs a window server, a
+    // Metal device, and real shells, so it is the local pixel-and-pty
+    // gate the headless suites structurally cannot be. Keeping it off
+    // `test` is deliberate: CI's value is that it is fast and never
+    // flaky, and this is neither.
+    const e2e_step = b.step("e2e", "Drive the real app end to end (local only)");
+    const e2e_mod = b.createModule(.{
+        .root_source_file = b.path("e2e/main.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    e2e_mod.link_libc = true;
+    // Reading a `shot` back as pixels — the half of visibility a text
+    // dump cannot give. Same frameworks png.zig writes through.
+    e2e_mod.linkFramework("CoreGraphics", .{});
+    e2e_mod.linkFramework("ImageIO", .{});
+    e2e_mod.linkFramework("CoreFoundation", .{});
+    const e2e_exe = b.addExecutable(.{ .name = "e2e", .root_module = e2e_mod });
+    const e2e_run = b.addRunArtifact(e2e_exe);
+    // The app under test, by path — so `zig build e2e` builds it first
+    // and the harness can never drive a stale binary.
+    e2e_run.addArtifactArg(exe);
+    if (b.args) |args| e2e_run.addArgs(args);
+    e2e_step.dependOn(&e2e_run.step);
 }

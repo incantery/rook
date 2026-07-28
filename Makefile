@@ -25,7 +25,7 @@ APP := /Applications/rook.app
 BUILD := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit).$(shell date +%Y%m%d%H%M%S)
 BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 
-.PHONY: build build-web dev prod dev-web package-web install install-web clean agent release release-stage e2e-web e2e-clean-web
+.PHONY: build build-web dev prod dev-web package-web install install-web clean agent release release-stage e2e e2e-clean e2e-web e2e-clean-web
 
 # Compile only, and deliberately so: there is no run target that skips
 # DEV_ENV, because an instance on the default socket unlinks-then-binds
@@ -166,6 +166,25 @@ install-web: package-web
 # would shadow this loop.
 agent:
 	go build -ldflags "$(BUILD_FLAG)" -o $(shell go env GOPATH)/bin/rook-agent ./cmd/rook-agent
+
+# The real app, driven end to end: each scenario spawns a SANDBOXED rook
+# (own ctl socket, own config, own state dir, /bin/sh, no rook-host) and
+# asserts against both truths — `dump` for what the emulator holds and a
+# decoded `shot` for what the renderer actually drew.
+#
+#   make e2e                 — all scenarios
+#   make e2e ARGS=splits     — one (substring match on the name)
+#
+# Local only, never CI: it needs a window server, a Metal device, and
+# real shells. See app/e2e/ and app/README.md.
+e2e:
+	cd app && zig build e2e -- $(ARGS)
+
+# Sandboxes are /tmp/rook-e2e-<pid>-<n>; a scenario leaves its dir behind
+# on failure so the app log and any shot are still there to read.
+e2e-clean:
+	-pkill -f 'rook-e2e' 2>/dev/null || true
+	rm -rf /tmp/rook-e2e-*
 
 # Browser-driven tests against the RETIRED app: Wails server mode runs it as
 # an HTTP server, so Playwright gets the actual Go services and a real host

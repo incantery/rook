@@ -439,9 +439,36 @@ while every hook, MCP tool, and ask silently dies.
        Renaming the package in `build.zig.zon` (`.native` → `.rook`)
        invalidates the fingerprint, since it is derived from the name —
        Zig refuses the build and prints the replacement value.
-       NOT done here, and it is the real loss: **`make e2e` was the
-       agent's eyes** and it drove the webview. It is `e2e-web` now, and
-       the Zig app has nothing equivalent. That belongs with §9.
+       The one loss was **`make e2e`, the agent's eyes** — it drove the
+       webview through Playwright, so it became `e2e-web` with nothing
+       equivalent for the Zig app. Closed immediately after; see below.
+- [x] 7b. e2e for the Zig app (`app/e2e/`, `make e2e`). Six scenarios —
+       boot, echo, splits, tabs, editor, pixels — each in its OWN
+       sandboxed instance (own socket, config, XDG, HOME, /bin/sh, no
+       rook-host), ~2s for the suite. `shot` is DECODED through ImageIO
+       rather than just written, so pixel assertions are real: a frame
+       that drew nothing is one colour, which is the cheap signature the
+       atlas-flip bug would have tripped.
+       THREE THINGS IT LEARNED, all of them the hard way and all of them
+       load-bearing: (1) `start()` round-trips an `echo <marker>` before
+       any scenario types, because waiting for a prompt to be DRAWN is
+       not the same as a shell READING — the pty buffers, and that race
+       is what made the old suite flake on a cold sandbox; (2) the
+       sandbox owns `HOME`, because rook starts LOGIN shells and
+       /etc/profile overwrites an inherited `PS1` before the first prompt
+       — `~/.profile` is the only hook that wins; (3) screen matching
+       JOINS the rows, because a pane wraps at its width.
+       Two of the first six failures were the TEST being wrong about the
+       app, which is the harness paying for itself on day one: `edit`
+       TAKES OVER its pane (the shell parks underneath) rather than
+       splitting, and `panes` prints two different `*` markers — active
+       tab at column 0, focused-within-tab before the id — so matching
+       the wrong one made tab switching look like a no-op.
+       NOT in `zig build test` and NOT in CI, deliberately: it needs a
+       window server, a Metal device, and real shells. Zig 0.16 gotcha,
+       hit three times in one file: `std.Thread.sleep`,
+       `std.time.milliTimestamp` and `std.fs.cwd` are all gone — the
+       harness talks to libc directly for the same reason the app does.
 - [ ] 8. Command registry + ⌘K palette (every later panel registers)
 - [ ] 9. Asks → attention inbox → agent deck (product identity, in
        that order)
