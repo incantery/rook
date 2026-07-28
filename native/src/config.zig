@@ -69,3 +69,175 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
     }
     return cfg;
 }
+
+// ---- keybinds.toml ----
+//
+// Leader chords, tmux-shaped: `leader = "x"` in [app], then
+// `"<leader>v" = "pane.split-right"` lines. Double-tap the leader to
+// type it literally; an unknown chord key is swallowed. Canonical
+// action names are the wails keymap's (pane.split-right, pane.
+// split-down, pane.focus-*, tab.new/next/prev); a few aliases from
+// Seth's first file are accepted. [editor] is parsed past, not into —
+// there is no editor yet.
+
+pub const Action = enum {
+    split_right,
+    split_down,
+    focus_left,
+    focus_right,
+    focus_up,
+    focus_down,
+    tab_new,
+    tab_next,
+    tab_prev,
+};
+
+fn actionFromName(name: []const u8) ?Action {
+    const map = [_]struct { n: []const u8, a: Action }{
+        .{ .n = "pane.split-right", .a = .split_right },
+        .{ .n = "app.split.vertical", .a = .split_right }, // vim :vsplit sense
+        .{ .n = "pane.split-down", .a = .split_down },
+        .{ .n = "app.split.horizontal", .a = .split_down },
+        .{ .n = "pane.focus-left", .a = .focus_left },
+        .{ .n = "pane.focus-right", .a = .focus_right },
+        .{ .n = "pane.focus-up", .a = .focus_up },
+        .{ .n = "pane.focus-down", .a = .focus_down },
+        .{ .n = "tab.new", .a = .tab_new },
+        .{ .n = "tab.next", .a = .tab_next },
+        .{ .n = "tab.prev", .a = .tab_prev },
+    };
+    for (map) |m| {
+        if (std.mem.eql(u8, name, m.n)) return m.a;
+    }
+    return null;
+}
+
+pub const Keybinds = struct {
+    leader: ?u8 = null,
+    entries: [32]struct { ch: u8, action: Action } = undefined,
+    n: usize = 0,
+
+    pub fn lookup(self: *const Keybinds, ch: u8) ?Action {
+        for (self.entries[0..self.n]) |e| {
+            if (e.ch == ch) return e.action;
+        }
+        return null;
+    }
+};
+
+/// Unquote a TOML basic string if quoted, resolving \" and \\.
+/// Returns a slice into `buf`.
+fn unquote(s: []const u8, buf: []u8) []const u8 {
+    if (s.len < 2 or s[0] != '"' or s[s.len - 1] != '"') return s;
+    const inner = s[1 .. s.len - 1];
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < inner.len and n < buf.len) : (i += 1) {
+        if (inner[i] == '\\' and i + 1 < inner.len) {
+            i += 1;
+            buf[n] = switch (inner[i]) {
+                'n' => '\n',
+                't' => '\t',
+                else => inner[i], // \" \\ and anything else: literal
+            };
+        } else buf[n] = inner[i];
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+/// A chord key: one char, or a named key (TAB, SPACE, ESC).
+fn chordChar(s: []const u8) ?u8 {
+    if (s.len == 1) return s[0];
+    if (std.mem.eql(u8, s, "TAB")) return '\t';
+    if (std.mem.eql(u8, s, "SPACE")) return ' ';
+    if (std.mem.eql(u8, s, "ESC")) return 0x1b;
+    return null;
+}
+
+/// Find the first top-level '=' (outside quotes) — keys like
+/// "<leader>\"" contain quote-escaped content.
+fn topLevelEq(line: []const u8) ?usize {
+    var in_quote = false;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (in_quote and c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (c == '"') in_quote = !in_quote;
+        if (!in_quote and c == '=') return i;
+    }
+    return null;
+}
+
+pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
+    var kb: Keybinds = .{};
+
+    var pathbuf: [1024]u8 = undefined;
+    const path = blk: {
+        if (getenv("XDG_CONFIG_HOME")) |x| {
+            break :blk std.fmt.bufPrint(&pathbuf, "{s}/rookz/keybinds.toml", .{std.mem.span(x)}) catch return kb;
+        }
+        const home = getenv("HOME") orelse return kb;
+        break :blk std.fmt.bufPrint(&pathbuf, "{s}/.config/rookz/keybinds.toml", .{std.mem.span(home)}) catch return kb;
+    };
+
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch return kb;
+    defer gpa.free(data);
+
+    var section: enum { none, app, other } = .none;
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (line[0] == '[') {
+            if (std.mem.eql(u8, line, "[app]")) {
+                section = .app;
+            } else {
+                section = .other;
+                if (std.mem.eql(u8, line, "[editor]"))
+                    std.debug.print("rookz keybinds: [editor] noted — no editor yet, skipped\n", .{});
+            }
+            continue;
+        }
+        if (section != .app) continue;
+
+        const eq = topLevelEq(line) orelse continue;
+        var keybuf: [64]u8 = undefined;
+        var valbuf: [64]u8 = undefined;
+        const key = unquote(std.mem.trim(u8, line[0..eq], " \t"), &keybuf);
+        var val = std.mem.trim(u8, line[eq + 1 ..], " \t");
+        if (val.len > 0 and val[0] != '"') {
+            if (std.mem.indexOfScalar(u8, val, '#')) |hash| val = std.mem.trim(u8, val[0..hash], " \t");
+        }
+        const value = unquote(val, &valbuf);
+
+        if (std.mem.eql(u8, key, "leader")) {
+            kb.leader = chordChar(value) orelse blk: {
+                std.debug.print("rookz keybinds: leader must be one key, got '{s}'\n", .{value});
+                break :blk null;
+            };
+        } else if (std.mem.startsWith(u8, key, "<leader>")) {
+            const ch = chordChar(key["<leader>".len..]) orelse {
+                std.debug.print("rookz keybinds: unsupported chord key '{s}'\n", .{key});
+                continue;
+            };
+            const action = actionFromName(value) orelse {
+                std.debug.print("rookz keybinds: unknown action '{s}' for '{s}'\n", .{ value, key });
+                continue;
+            };
+            if (kb.n < kb.entries.len) {
+                kb.entries[kb.n] = .{ .ch = ch, .action = action };
+                kb.n += 1;
+            }
+        } else {
+            std.debug.print("rookz keybinds: only <leader> chords supported yet, ignoring '{s}'\n", .{key});
+        }
+    }
+
+    if (kb.n > 0 and kb.leader == null)
+        std.debug.print("rookz keybinds: chords defined but no leader set — they are unreachable\n", .{});
+    return kb;
+}

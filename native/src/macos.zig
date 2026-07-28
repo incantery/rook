@@ -75,6 +75,11 @@ pub const App = struct {
     queue: objc.Object,
     renderer: renderpkg.Renderer,
     shell: [*:0]const u8,
+    keybinds: @import("config.zig").Keybinds,
+
+    /// Leader chord armed: the next key resolves a binding (or the
+    /// leader again types it literally). Shown in the bar while armed.
+    leader_pending: std.atomic.Value(bool) = .init(false),
 
     // The scene: tabs of split trees. Mutated only under draw_lock.
     tabs: std.ArrayListUnmanaged(*panespkg.Tab) = .empty,
@@ -159,6 +164,7 @@ pub const App = struct {
     pub fn create(init: std.process.Init) !*App {
         const gpa = init.gpa;
         const cfg = @import("config.zig").load(init.io, gpa);
+        const keybinds = @import("config.zig").loadKeybinds(init.io, gpa);
 
         const NSApplication = objc.getClass("NSApplication").?;
         const app = NSApplication.msgSend(objc.Object, "sharedApplication", .{});
@@ -237,6 +243,7 @@ pub const App = struct {
             .queue = queue,
             .renderer = renderer,
             .shell = shell,
+            .keybinds = keybinds,
             .px_w = @floatCast(px_w),
             .px_h = @floatCast(px_h),
             .sep = @floatCast(@max(1.0, @round(scale))),
@@ -437,6 +444,61 @@ pub const App = struct {
         self.relayoutLocked();
         self.refreshHudLocked(CACurrentMediaTime());
         self.scene_dirty = true;
+    }
+
+    /// Write input to the focused pane under the scene lock.
+    pub fn writeFocused(self: *App, bytes: []const u8, ts: f64) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        self.markInput(ts);
+        self.activeTab().focused.session.write(bytes);
+    }
+
+    fn barDirty(self: *App) void {
+        self.draw_lock.lock();
+        self.scene_dirty = true;
+        self.draw_lock.unlock();
+    }
+
+    fn dispatch(self: *App, action: @import("config.zig").Action) void {
+        switch (action) {
+            .split_right => self.splitFocused(true),
+            .split_down => self.splitFocused(false),
+            .focus_left => _ = self.focusMove(.left),
+            .focus_right => _ = self.focusMove(.right),
+            .focus_up => _ = self.focusMove(.up),
+            .focus_down => _ = self.focusMove(.down),
+            .tab_new => self.newTab(),
+            .tab_next => self.cycleTab(1),
+            .tab_prev => self.cycleTab(-1),
+        }
+    }
+
+    /// The leader state machine — ONE path for real keystrokes (the
+    /// event monitor) and ctl `press`, so chords are testable blind.
+    /// Returns true if the key was consumed (armed a chord, resolved
+    /// one, or was swallowed as an unknown chord).
+    pub fn handleCharKey(self: *App, ch: u8, ts: f64) bool {
+        const ld = self.keybinds.leader orelse return false;
+        if (self.leader_pending.swap(false, .acq_rel)) {
+            self.barDirty();
+            if (ch == ld) {
+                // Double-tap: the leader typed literally.
+                self.writeFocused(&[1]u8{ch}, ts);
+                return true;
+            }
+            if (self.keybinds.lookup(ch)) |action| {
+                self.dispatch(action);
+                return true;
+            }
+            return true; // unknown chord: swallowed, tmux-style
+        }
+        if (ch == ld) {
+            self.leader_pending.store(true, .release);
+            self.barDirty();
+            return true;
+        }
+        return false;
     }
 
     fn setFocusLocked(self: *App, pane: *panespkg.Pane) void {
@@ -764,6 +826,14 @@ pub const App = struct {
         const ty = by + (self.bar_h - self.renderer.cell_h) / 2;
         const pad = self.renderer.cell_w;
         var x: f32 = pad;
+        // Armed leader: an accent cell showing the leader key, tmux's
+        // prefix indicator.
+        if (self.leader_pending.load(.acquire)) {
+            if (self.keybinds.leader) |ld| {
+                var lbuf: [3]u8 = .{ ' ', ld, ' ' };
+                x += ui.text(x, ty, &lbuf, bar_bg, accent_color) + self.renderer.cell_w / 2;
+            }
+        }
         // Tab strip (drawn live from scene state, not the cached HUD
         // text — a tab switch redraws via scene_dirty immediately).
         if (self.tabs.items.len > 1) {
@@ -972,14 +1042,17 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
         break :blk std.mem.span(s);
     };
     if (bytes.len > 0) {
+        const ts = event.msgSend(f64, "timestamp", .{});
+        // Leader chords see plain single-byte keys only — modified or
+        // multi-byte input can never arm or resolve a chord.
+        if (bytes.len == 1 and flags & (flag_ctrl | (1 << 19)) == 0) {
+            if (app.handleCharKey(bytes[0], ts)) return null;
+        }
         // The kernel's receipt time, same clock as presentedTime: this
         // makes key_present a true key-to-photon number. Writes go to
         // the focused pane, under the scene lock so reap can't free the
         // session mid-write.
-        app.draw_lock.lock();
-        app.markInput(event.msgSend(f64, "timestamp", .{}));
-        app.activeTab().focused.session.write(bytes);
-        app.draw_lock.unlock();
+        app.writeFocused(bytes, ts);
     }
     return null;
 }

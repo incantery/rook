@@ -239,6 +239,28 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else if (std.fmt.parseInt(u32, rest, 10) catch null) |id| {
             reply(fd, if (app.focusById(id)) "ok\n" else "err no pane\n");
         } else reply(fd, "err focus <id|left|right|up|down>\n");
+    } else if (std.mem.eql(u8, verb, "press") and rest.len > 0) {
+        // Drive the REAL key path (leader state machine included) with
+        // one character — chords are testable blind. `press SPACE`,
+        // `press TAB`, `press ESC` for named keys.
+        const ch: ?u8 = if (rest.len == 1)
+            rest[0]
+        else if (std.mem.eql(u8, rest, "TAB"))
+            '\t'
+        else if (std.mem.eql(u8, rest, "SPACE"))
+            ' '
+        else if (std.mem.eql(u8, rest, "ESC"))
+            0x1b
+        else
+            null;
+        if (ch) |c| {
+            if (app.handleCharKey(c, CACurrentMediaTime())) {
+                reply(fd, "consumed\n");
+            } else {
+                app.writeFocused(&[1]u8{c}, CACurrentMediaTime());
+                reply(fd, "typed\n");
+            }
+        } else reply(fd, "err press <char|TAB|SPACE|ESC>\n");
     } else if (std.mem.eql(u8, verb, "type") and rest.len > 0) {
         reply(fd, if (writeTarget(app, pane_id, rest)) "ok\n" else "err no pane\n");
     } else if (std.mem.eql(u8, verb, "enter") and rest.len == 0) {

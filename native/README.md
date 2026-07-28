@@ -51,6 +51,8 @@ printf 'type ls -la\n'       | nc -U /tmp/rookz.sock   # keystrokes → pty
 printf 'enter\n'             | nc -U /tmp/rookz.sock
 printf 'ctrlc\n'             | nc -U /tmp/rookz.sock
 printf 'key 1b5b41\n'        | nc -U /tmp/rookz.sock   # raw hex bytes → pty
+printf 'press `\n'           | nc -U /tmp/rookz.sock   # REAL key path (leader
+                                                       #   machine included)
 printf 'panes\n'             | nc -U /tmp/rookz.sock   # all tabs' panes, * = active/focused
 printf 'tabs\n'              | nc -U /tmp/rookz.sock   # list tabs
 printf 'tab new\n'           | nc -U /tmp/rookz.sock   # also: tab <n>, tab next, tab prev
@@ -88,6 +90,30 @@ file = defaults. Unknown keys warn on stderr.
 font-size = 13
 font-family = "FiraCode Nerd Font Mono"
 ```
+
+## Keybinds
+
+`~/.config/rookz/keybinds.toml` — leader chords, tmux-shaped. The
+leader arms a pending chord (an accent cell appears in the bar);
+double-tap types the leader literally; an unknown chord key is
+swallowed. Modified or multi-byte keys never arm or resolve chords.
+Loaded at launch (no live reload yet).
+
+```toml
+[app]
+leader = "`"
+"<leader>v" = "pane.split-right"
+'"<leader>\""' = "pane.split-down"     # tmux's %/" senses
+"<leader>t" = "tab.new"
+```
+
+Canonical action names (the wails keymap's): `pane.split-right`,
+`pane.split-down`, `pane.focus-left/right/up/down`, `tab.new`,
+`tab.next`, `tab.prev`. Aliases accepted: `app.split.vertical` (=
+split-right, the vim `:vsplit` sense) and `app.split.horizontal` (=
+split-down). Named chord keys: `TAB`, `SPACE`, `ESC`. `[editor]` is
+parsed past and noted — no editor yet. Hardcoded ⌘/⌃ chords remain
+alongside; config overriding them comes later.
 
 ## Layout
 
