@@ -1437,6 +1437,32 @@ pub const App = struct {
     fn copyModeKey(self: *App, tm: *panespkg.Term, bytes: []const u8) void {
         const rows: isize = @intCast(@max(2, self.activeTab().focused.rows));
         for (bytes) |ch| {
+            // The `/` prompt owns every key while it is open, motions
+            // included — you are typing a needle, not scrolling.
+            if (tm.search_input) {
+                switch (ch) {
+                    '\r', '\n' => {
+                        tm.search_input = false;
+                        self.runSearchLocked(tm);
+                    },
+                    0x1b => { // ESC abandons the prompt, not the mode
+                        tm.search_input = false;
+                        tm.search_len = 0;
+                    },
+                    0x7f, 0x08 => {
+                        // Backspacing past the first character closes the
+                        // prompt, the way vim's / does.
+                        if (tm.search_len == 0) {
+                            tm.search_input = false;
+                        } else tm.search_len -= 1;
+                    },
+                    else => if (ch >= 0x20 and ch < 0x7f and tm.search_len < tm.search_buf.len) {
+                        tm.search_buf[tm.search_len] = ch;
+                        tm.search_len += 1;
+                    },
+                }
+                continue;
+            }
             if (tm.copy_g and ch == 'g') {
                 tm.copy_g = false;
                 tm.session.scrollTo(.top);
@@ -1452,14 +1478,61 @@ pub const App = struct {
                 'f', 0x06 => tm.session.scrollViewport(rows - 1),
                 'b', 0x02 => tm.session.scrollViewport(-(rows - 1)),
                 'G' => tm.session.scrollTo(.active),
+                '/' => {
+                    tm.search_input = true;
+                    tm.search_len = 0;
+                },
+                // Vim's directions: n keeps going the way / went (back
+                // through history), N turns around.
+                'n' => self.stepSearchLocked(tm, true),
+                'N' => self.stepSearchLocked(tm, false),
                 'q', 0x1b, 'i', '\r' => {
                     tm.copy_mode = false;
                     tm.session.scrollTo(.active);
+                    self.endSearchLocked(tm);
                 },
                 else => {},
             }
         }
         self.scene_dirty = true;
+    }
+
+    /// Run the typed needle and jump to the first hit. Caller holds
+    /// draw_lock.
+    fn runSearchLocked(self: *App, tm: *panespkg.Term) void {
+        tm.search_i = 0;
+        tm.search_n = tm.session.searchBegin(tm.search_buf[0..tm.search_len]);
+        if (tm.search_n == 0) return;
+        // The library orders matches newest-first, so the first `next`
+        // lands on the hit CLOSEST TO THE BOTTOM — nearest to where you
+        // were looking, which is what searching backwards should mean.
+        self.stepSearchLocked(tm, true);
+    }
+
+    /// Move to the next/previous match. Caller holds draw_lock.
+    fn stepSearchLocked(self: *App, tm: *panespkg.Term, next: bool) void {
+        if (tm.search_n == 0) return;
+        const rows: u16 = @intCast(@min(self.activeTab().focused.rows, std.math.maxInt(u16)));
+        if (!tm.session.searchSelect(next, rows)) {
+            // The only way this fails after a successful begin is the
+            // screen changing under us (alt screen); the session has
+            // already dropped the search, so drop our readout too.
+            tm.search_n = 0;
+            tm.search_i = 0;
+            return;
+        }
+        const w = tm.session.searchWhere();
+        tm.search_i = w.idx;
+        tm.search_n = w.n;
+    }
+
+    fn endSearchLocked(_: *App, tm: *panespkg.Term) void {
+        tm.session.searchEnd();
+        tm.session.clearSelection();
+        tm.search_input = false;
+        tm.search_len = 0;
+        tm.search_i = 0;
+        tm.search_n = 0;
     }
 
     fn barDirty(self: *App) void {
@@ -2394,6 +2467,19 @@ pub const App = struct {
         if (self.activeTab().focused.term()) |tm| {
             if (tm.copy_mode) {
                 x += ui.text(x, ty, " SCROLL ", th.bar_bg, th.accent) + self.renderer.cell_w / 2;
+            }
+            // The needle, while typing it and after. `n` is unusable if
+            // you can't see what you're stepping through; `0/0` is how
+            // a search that found nothing says so.
+            if (tm.search_input or tm.search_n > 0) {
+                var sb: [96]u8 = undefined;
+                const label = if (tm.search_input)
+                    std.fmt.bufPrint(&sb, " /{s}_ ", .{tm.search_buf[0..tm.search_len]}) catch ""
+                else
+                    std.fmt.bufPrint(&sb, " /{s} {d}/{d} ", .{ tm.search_buf[0..tm.search_len], tm.search_i, tm.search_n }) catch "";
+                x += ui.text(x, ty, label, th.bar_bg, th.bar_value) + self.renderer.cell_w / 2;
+            } else if (tm.search_len > 0 and tm.copy_mode) {
+                x += ui.text(x, ty, " /no match ", th.bar_bg, th.accent) + self.renderer.cell_w / 2;
             }
         }
         _ = ui.text(x, ty, self.hud_left[0..self.hud_left_len], th.bar_fg, self.glassBg(th.bar_bg));

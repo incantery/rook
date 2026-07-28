@@ -421,6 +421,22 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             if (app.notify_warned) "no" else "yes",
         }) catch return;
         reply(fd, s2);
+    } else if (std.mem.eql(u8, verb, "search")) {
+        // State only — the search is DRIVEN through `press`, so the
+        // real copy-mode key path is what gets tested, not a shortcut
+        // into the session that no keystroke can reach.
+        app.draw_lock.lock();
+        defer app.draw_lock.unlock();
+        var buf: [256]u8 = undefined;
+        const tm = app.activeTab().focused.term() orelse return reply(fd, "err not a terminal\n");
+        const s2 = std.fmt.bufPrint(&buf, "copy={s} prompt={s} needle=\"{s}\" match={d}/{d}\n", .{
+            @as([]const u8, if (tm.copy_mode) "yes" else "no"),
+            @as([]const u8, if (tm.search_input) "open" else "closed"),
+            tm.search_buf[0..tm.search_len],
+            tm.search_i,
+            tm.search_n,
+        }) catch return;
+        reply(fd, s2);
     } else if (std.mem.eql(u8, verb, "zoom")) {
         reply(fd, if (app.toggleZoom()) "ok\n" else "err nothing to zoom (single pane)\n");
     } else if (std.mem.eql(u8, verb, "clipboard")) {
@@ -529,6 +545,10 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             ' '
         else if (std.mem.eql(u8, rest, "ESC"))
             0x1b
+        else if (std.mem.eql(u8, rest, "RET"))
+            '\r'
+        else if (std.mem.eql(u8, rest, "BS"))
+            0x7f
         else
             null;
         if (ch) |c| {

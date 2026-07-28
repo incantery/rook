@@ -23,6 +23,17 @@ pub const Term = struct {
     /// instead of reaching the pty.
     copy_mode: bool = false,
     copy_g: bool = false,
+    /// The `/` prompt is open and eating keys. The needle buffer doubles
+    /// as what the status bar draws, both while typing and after — a
+    /// search you can't see the terms of is one you can't trust `n`.
+    search_input: bool = false,
+    search_buf: [64]u8 = undefined,
+    search_len: usize = 0,
+    /// Selected match (1-based) of total, for the bar's `3/17`. Zero
+    /// total means no live search; the results themselves live on the
+    /// Session, next to the screen they describe.
+    search_i: usize = 0,
+    search_n: usize = 0,
 };
 
 /// What lives inside a pane. The tree, layout, focus, chords, and tabs

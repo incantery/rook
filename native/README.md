@@ -26,6 +26,28 @@ yank instead); the wheel scrolls editors, primary-screen viewports
 enters tmux-style copy mode: j/k/u/d/⌃B/⌃F/gg/G scroll, q/ESC exits,
 an accent SCROLL chip shows in the bar.
 
+**`/` searches the scrollback** from copy mode; `n` and `N` step
+through the hits, and the bar shows the needle and `3/17` — `n` is
+unusable if you can't see what you're stepping through, and `no match`
+is how a search that found nothing says so. ESC abandons the prompt
+without leaving copy mode, and backspacing past the first character
+closes it, the way vim's `/` does. ghostty-vt does the actual searching
+(`vt.search.Screen`); rook adds a lifetime, a viewport move and the
+readout. The hit becomes the terminal's real SELECTION, so it
+highlights and ⌘C copies it without a new render path. It lands half a
+screen down, computed as an absolute row — the library clamps that at
+both ends, whereas scroll-to-pin-then-up would push a hit that was
+already near the bottom clean off the viewport. If a program swaps to
+the alt screen while a search is live the search is dropped, because
+results from the primary screen shown over the alternate are nonsense;
+a resize is survivable and the library re-searches itself. This uses
+the BLOCKING `searchAll` — the library also offers tick/feed so a
+background thread can chew through a huge buffer incrementally, which
+is what to reach for when scrollback grows past one page (it hasn't:
+`Session.start` never sets `max_scrollback`, so it inherits the
+embedded-library default of 10,000 *bytes*, about 930 rows in
+practice).
+
 **⌘V** pastes, by xterm's rules (`src/paste.zig`, pure data in/data out,
 its own test root): bytes that could signal the foreground process —
 ESC, ⌃C, ⌃Z, NUL, the tty's own control set — become spaces whether or
@@ -445,7 +467,12 @@ the terminal core, `zig_objc` is ghostty's own pin.
 
 ## Known debts
 
-No scrollback view, no selection, cursor is a color swap, input is
+Scrollback keeps only ~930 rows — `Session.start` never passes
+`max_scrollback`, so it takes ghostty-vt's embedded default of 10,000
+bytes where ghostty the app sets 10MB; a one-line fix, but it moves
+per-pane memory so the number wants choosing on purpose. Copy mode has
+no vim motions or visual-mode yank yet (`/` search and scrolling only).
+Cursor is a color swap, input is
 cooked NSEvent characters (upgrade path: `vt.input.encodeKey`), no
 window-close → quit delegate, grapheme-cluster emoji (flags, ZWJ,
 skin tones) render blank — only a cell's first codepoint rasterizes;

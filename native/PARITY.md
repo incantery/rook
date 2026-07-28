@@ -115,8 +115,25 @@ a daily driver.
       never be invisible), but a direction with nothing that way puts
       the zoom back rather than spending it on a no-op. Chip wears
       tmux's `Z`; ctl `zoom` toggles, `panes` marks it.
-- [ ] **Scrollback search** (`/` in copy mode). Copy mode scrolls but
-      can't find.
+- [x] **Scrollback search** (`/` in copy mode, `n`/`N` to step) — the
+      library does the searching (`vt.search.Screen`); rook adds a
+      lifetime, a viewport move and the bar readout. The hit becomes the
+      real terminal SELECTION, so it highlights and ⌘C copies it with no
+      new render path. Placed half a screen down via an absolute row
+      (which clamps at both ends) rather than scroll-to-pin-then-up,
+      which would push a bottom-of-buffer hit clean off the viewport.
+      Drops itself if a program swaps to the alt screen under it —
+      results from the primary shown over the alternate are nonsense.
+      Uses the BLOCKING `searchAll`; the library also has tick/feed for
+      a background thread, which is what to reach for if scrollback ever
+      grows (see below). ctl `search` reports state; `press RET`/`BS`
+      drive the prompt through the real key path.
+- [ ] **Scrollback is one page** (~930 rows at 92 cols, measured).
+      `Session.start` never passes `max_scrollback`, so it inherits
+      ghostty-vt's EMBEDDED-LIBRARY default of 10,000 *bytes* — ghostty
+      the app sets 10MB. Search is what made this visible. A one-line
+      change, but it moves per-pane memory, so it wants a number chosen
+      on purpose.
 - [ ] Copy mode: full vim motions + visual mode + yank (already on TODO.md).
 - [ ] Tab/space **rename** (`,` in tmux) — spaces name themselves from
       cwd today, with no way to override.

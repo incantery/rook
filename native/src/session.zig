@@ -104,6 +104,17 @@ pub const Session = struct {
     clip_buf: []u8 = &.{},
     clip_len: usize = 0,
 
+    /// Scrollback search over the active screen. It lives here rather
+    /// than on the pane because every operation on it reads screen
+    /// state under this mutex — and because a closing pane then frees
+    /// it along with everything else it owns.
+    search: ?vt.search.Screen = null,
+    /// The screen the search was built against. `screens.active` moves
+    /// when a program enters the alt screen, and results from the
+    /// primary shown over the alternate would be nonsense — so we
+    /// notice the swap and drop the search rather than lie.
+    search_of: ?*vt.Screen = null,
+
     /// Whether OSC 52 writes are honoured (config `clipboard-write`).
     /// Read on the reader thread; the app rewrites it on live reload,
     /// and a torn read of a two-valued enum can only pick one of the
@@ -183,6 +194,81 @@ pub const Session = struct {
         s.select(.init(pa, pb, false)) catch {};
     }
 
+    // ---- scrollback search ----
+    //
+    // ghostty-vt does the searching; all rook adds is a lifetime and a
+    // viewport move. `searchAll` is the BLOCKING spelling — the library
+    // also offers tick/feed so a background thread can search a huge
+    // scrollback incrementally, which is what ghostty itself does. We
+    // take the blocking one because it runs on the ctl/main thread with
+    // the mutex held, and a stall there is a frozen window: worth
+    // revisiting the moment someone feels it on a big buffer.
+
+    /// Start a search for `needle`, returning the number of matches.
+    /// Replaces any search in flight. Any thread.
+    pub fn searchBegin(self: *Session, needle: []const u8) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.searchEndLocked();
+        if (needle.len == 0) return 0;
+        const s = self.term.screens.active;
+        self.search = vt.search.Screen.init(self.gpa, s, needle) catch return 0;
+        self.search_of = s;
+        self.search.?.searchAll() catch {};
+        const n = self.search.?.matchesLen();
+        if (n == 0) self.searchEndLocked();
+        return n;
+    }
+
+    /// Move to the next (older) or previous (newer) match: select it and
+    /// bring it into view. `rows` is the pane height, used to place the
+    /// hit rather than glue it to the top edge. Any thread.
+    pub fn searchSelect(self: *Session, next: bool, rows: u16) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const s = self.term.screens.active;
+        // Alt screen swap under us: the results describe a screen you
+        // are no longer looking at.
+        if (self.search_of != s) {
+            self.searchEndLocked();
+            return false;
+        }
+        const sr = if (self.search) |*p| p else return false;
+        if (!(sr.select(if (next) .next else .prev) catch return false)) return false;
+        const hl = sr.selectedMatch() orelse return false;
+        const u = hl.untracked();
+        s.select(.init(u.start, u.end, false)) catch {};
+        // Place the hit HALF A SCREEN DOWN rather than at the top edge.
+        // Done as an absolute row (which the library clamps at both
+        // ends) and not as scroll-to-pin-then-up: a match already near
+        // the bottom would scroll clean off the viewport that way.
+        if (s.pages.pointFromPin(.screen, u.start)) |pt| {
+            s.scroll(.{ .row = pt.screen.y -| @as(u32, @max(1, rows / 2)) });
+        } else s.scroll(.{ .pin = u.start });
+        return true;
+    }
+
+    /// Which match is selected (1-based) and how many there are.
+    pub fn searchWhere(self: *Session) struct { idx: usize, n: usize } {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const sr = if (self.search) |*p| p else return .{ .idx = 0, .n = 0 };
+        const sel = sr.selected orelse return .{ .idx = 0, .n = sr.matchesLen() };
+        return .{ .idx = sel.idx + 1, .n = sr.matchesLen() };
+    }
+
+    pub fn searchEnd(self: *Session) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.searchEndLocked();
+    }
+
+    fn searchEndLocked(self: *Session) void {
+        if (self.search) |*sr| sr.deinit();
+        self.search = null;
+        self.search_of = null;
+    }
+
     pub fn clearSelection(self: *Session) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -244,6 +330,8 @@ pub const Session = struct {
         _ = ptypkg.Pty.wait(self.pid);
         self.pty.deinit();
         if (self.clip_buf.len > 0) self.gpa.free(self.clip_buf);
+        // Before the terminal: the search untracks pins IN the screen.
+        self.searchEndLocked();
         self.term.deinit(self.gpa);
         self.gpa.destroy(self);
     }
