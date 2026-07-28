@@ -352,6 +352,29 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         }
         app.postKey(code, mods, chars[0..n]);
         reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "version")) {
+        // Build identity + what happened to rook-host. `owned` is the
+        // load-bearing bit: it decides whether quitting takes the daemon
+        // down, so a blind test needs to see it (hostc.zig).
+        app.host_lock.lock();
+        defer app.host_lock.unlock();
+        var buf: [768]u8 = undefined;
+        const s = std.fmt.bufPrint(
+            &buf,
+            "rookz {s} build={s}\nhost={s} port={d} pid={d} build={s} release={s} owned={s}\nhost-binary={s}\n",
+            .{
+                @import("build_options").version,
+                @import("build_options").id,
+                if (app.host_up) "up" else "down",
+                app.host.info.port,
+                app.host.info.pid,
+                app.host.info.build(),
+                app.host.info.release(),
+                if (app.host.owned) "yes" else "no",
+                app.host.binary(),
+            },
+        ) catch return;
+        reply(fd, s);
     } else if (std.mem.eql(u8, verb, "ime")) {
         // Is the input-method plumbing actually live? inputContext is
         // AppKit's verdict on our NSTextInputClient conformance — nil
@@ -516,6 +539,9 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         stats.global.reset();
         reply(fd, "ok\n");
     } else if (std.mem.eql(u8, line, "quit")) {
+        // _exit skips AppKit, so the will-terminate observer never runs —
+        // do its one job here, or every scripted quit leaks a daemon.
+        app.shutdownHost();
         reply(fd, "ok\n");
         _exit(0);
     } else {

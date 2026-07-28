@@ -24,6 +24,16 @@ pub fn build(b: *std.Build) void {
     }
     exe_mod.link_libc = true;
 
+    // Build identity. The Makefile stamps ONE id per `make` run into every
+    // binary it produces (see internal/version) and passes the same string
+    // here, so app and daemon built together report the same build — the
+    // compatibility key rookctl warns on and rook-host replaces across.
+    // Unstamped local builds are "dev", exactly like the Go side.
+    const build_opts = b.addOptions();
+    build_opts.addOption([]const u8, "id", b.option([]const u8, "build", "build identity (matches the Go BUILD id)") orelse "dev");
+    build_opts.addOption([]const u8, "version", b.option([]const u8, "version", "release version (e.g. v0.38.0)") orelse "dev");
+    exe_mod.addOptions("build_options", build_opts);
+
     // Tree-sitter runtime + vendored grammars (parser-table C files).
     exe_mod.addIncludePath(b.path("vendor/tree-sitter/include"));
     exe_mod.addIncludePath(b.path("vendor/tree-sitter/src"));

@@ -167,6 +167,41 @@ and a cwd of `/`.
 Flags: `win --no-activate` opens the window without stealing focus —
 use this for every tooling/probe launch.
 
+## rook-host: the daemon is ours now
+
+`internal/host` is rook's server half — threads, review, asks,
+attention, transcripts, decisions, worktrees — and `rookctl` and the MCP
+server reach it over localhost HTTP with a bearer token from
+`~/.local/state/rook/host.json`. `src/hostc.zig` is rookz walking
+through that same door: `readInfo` → `get`/`post` → JSON, hand-rolled
+HTTP/1.1 over one connection per request (one origin, one hop, no TLS,
+no redirects — std.http would be the bigger thing). `usage.zig` is its
+first tenant.
+
+The lifecycle is INVERTED from the wails app. That one deliberately
+rides a healthy daemon and never kills it, so shells survive an app
+restart; rookz owns its ptys in-process, so that trade buys nothing
+here. Instead: rookz spawns the daemon at launch (off-thread — a cold
+start costs a health poll of up to 5s and the first frame owes it
+nothing) and SIGTERMs it on quit. Nothing runs while rook is closed.
+
+We always spawn and let rook-host decide, rather than reimplementing
+`shouldRide` in Zig: the daemon is idempotent, and replaces a stale
+build or exits with "already running" on its own. `owned` is then just
+`host.json`'s pid == the pid we forked — and we shut down only what we
+own, so a rookz launched beside the wails app during the cutover can
+never take that app's daemon with it. Check either with `version`:
+
+```
+rookz dev build=dev
+host=up port=56744 pid=56341 build=a46c116.20260726142750 owned=yes
+```
+
+Fail-open like everything else: no host.json, no binary, a dead daemon
+→ `host=down`, one line on stderr, and a terminal that works fine
+without it. A rookz that is SIGKILLed leaves its daemon behind, which
+the next build change reaps — the same gap the wails app has.
+
 ## Dev control socket (the playwright substitute)
 
 Debug builds listen on `/tmp/rookz.sock` (`ROOKZ_SOCK` overrides).
@@ -196,6 +231,8 @@ printf 'paste a\\nb\n'         | nc -U /tmp/rookz.sock   #   or a literal payloa
 printf 'nskey 14 80000\n'     | nc -U /tmp/rookz.sock   # a REAL NSEvent: keycode,
                                                        #   modmask hex, characters
 printf 'ime\n'                | nc -U /tmp/rookz.sock   # input-context state + preedit
+printf 'version\n'            | nc -U /tmp/rookz.sock   # build id + rook-host state
+                                                       #   (owned=yes → quitting kills it)
 printf 'dump@2\n'            | nc -U /tmp/rookz.sock   # any pane-taking verb
 printf 'type@2 ls\n'         | nc -U /tmp/rookz.sock   #   targets by @id
 printf 'shot /tmp/s.png\n'   | nc -U /tmp/rookz.sock   # pixel truth
