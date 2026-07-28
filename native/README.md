@@ -389,11 +389,28 @@ leader = "`"
 "<leader>t" = "tab.new"
 ```
 
-`<leader>1`–`<leader>9` jump to tabs by default (tmux's digits);
-config lines rebind them like any chord.
+`<leader>1`–`<leader>9` jump to tabs by default (tmux's digits),
+`<leader>[` copy mode, `<leader>s` the workspace palette, `<leader>z`
+zoom; config lines rebind them like any chord.
+
+**Zoom** (`<leader>z`, `pane.zoom`, ctl `zoom`) gives the focused pane
+the whole tab. The split tree is untouched — zoom is a single `?*Pane`
+on the Tab, so unzooming is exact by construction rather than by
+restoring remembered ratios. Hidden panes get a ZERO rect, which the
+draw, the hit test and the resize already read as "nothing here", and
+relayout skips them so they keep their grid: no reflow on the way in or
+out. Focusing another pane unzooms, because focus must never land
+somewhere invisible — but a direction with no pane that way puts the
+zoom back rather than spending it on a keystroke that did nothing else.
+Splitting unzooms (the new pane has to be visible), and a zoomed pane
+whose shell exits clears the zoom with it. The tab chip wears tmux's
+`Z`; without it a zoomed tab is indistinguishable from a tab that only
+ever had one pane, and the way out is a keystroke you'd have no reason
+to reach for.
 
 Canonical action names (the wails keymap's): `pane.split-right`,
-`pane.split-down`, `pane.focus-left/right/up/down`, `tab.new` (alias
+`pane.split-down`, `pane.focus-left/right/up/down`, `pane.zoom`,
+`tab.new` (alias
 `session.new`), `tab.next`, `tab.prev`, `tab.select-1`…`tab.select-9`. Aliases accepted: `app.split.vertical` (=
 split-right, the vim `:vsplit` sense) and `app.split.horizontal` (=
 split-down). Named chord keys: `TAB`, `SPACE`, `ESC`. `[editor]` is
@@ -440,7 +457,7 @@ covers light/heavy/rounded lines + blocks but not doubles/diagonals
 (font fallback).
 
 Pane debts: split ratio is fixed at 0.5 (no drag/resize), no ⌘W
-close-pane chord (exit the shell), no zoom, typing into a pane while
+close-pane chord (exit the shell), typing into a pane while
 its resize is still settling can lose a line to reflow (transient,
 ctl-only in practice).
 

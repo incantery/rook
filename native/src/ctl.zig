@@ -215,7 +215,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         for (app.spaces.items, 0..) |s, si| {
             for (s.tabs.items, 0..) |t, ti| {
                 for (t.panes.items) |p| {
-                    w.print("{s}{s} t{d} {s}{d} rect {d}x{d}+{d}+{d} grid {d}x{d}\n", .{
+                    w.print("{s}{s} t{d} {s}{d} rect {d}x{d}+{d}+{d} grid {d}x{d}{s}\n", .{
                         @as([]const u8, if (si == app.active_space and ti == s.active_tab) "*" else " "),
                         s.label(),
                         ti + 1,
@@ -227,6 +227,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                         @as(u32, @intFromFloat(p.rect.y)),
                         p.cols,
                         p.rows,
+                        @as([]const u8, if (t.zoomed == p) " zoomed" else ""),
                     }) catch break;
                 }
             }
@@ -420,6 +421,8 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             if (app.notify_warned) "no" else "yes",
         }) catch return;
         reply(fd, s2);
+    } else if (std.mem.eql(u8, verb, "zoom")) {
+        reply(fd, if (app.toggleZoom()) "ok\n" else "err nothing to zoom (single pane)\n");
     } else if (std.mem.eql(u8, verb, "clipboard")) {
         // The REAL pasteboard, read back — so an OSC 52 test proves the
         // bytes reached the system, not just that rook noticed them.

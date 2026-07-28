@@ -105,7 +105,16 @@ a daily driver.
       how `zig build run` runs.
 - [ ] **OSC 8 hyperlinks** + URL/path detection with ⌘-click to open
       (file:line → open in the editor pane; that's the payoff).
-- [ ] **Pane zoom** (`<leader>z`) — tmux muscle memory, missing entirely.
+- [x] **Pane zoom** (`<leader>z`, tmux's key) — the focused pane takes
+      the whole tab. The TREE IS UNTOUCHED; zoom is one `?*Pane` on the
+      Tab, so unzooming is exact by construction rather than by
+      remembering ratios. Hidden panes get a ZERO rect, which the draw,
+      the hit test and the resize already read as "nothing here" — and
+      because relayout skips them they keep their grid, so a zoom costs
+      no reflow either way. Focusing another pane unzooms (focus must
+      never be invisible), but a direction with nothing that way puts
+      the zoom back rather than spending it on a no-op. Chip wears
+      tmux's `Z`; ctl `zoom` toggles, `panes` marks it.
 - [ ] **Scrollback search** (`/` in copy mode). Copy mode scrolls but
       can't find.
 - [ ] Copy mode: full vim motions + visual mode + yank (already on TODO.md).

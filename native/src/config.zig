@@ -269,6 +269,8 @@ pub const Action = enum {
     /// The workspace palette (reads rook.db). <leader>s by default
     /// (tmux's choose-session).
     workspace_switch,
+    /// tmux zoom: the focused pane takes the whole tab. <leader>z.
+    pane_zoom,
 };
 
 pub const ActionSpec = struct { action: Action, arg: u8 = 0 };
@@ -296,6 +298,8 @@ fn actionFromName(name: []const u8) ?ActionSpec {
         .{ .n = "pane.scrollback", .a = .copy_mode },
         .{ .n = "workspace.switch", .a = .workspace_switch },
         .{ .n = "workspace.picker", .a = .workspace_switch },
+        .{ .n = "pane.zoom", .a = .pane_zoom }, // the registry's name
+        .{ .n = "resize-pane -Z", .a = .pane_zoom }, // tmux's
     };
     for (map) |m| {
         if (std.mem.eql(u8, name, m.n)) return .{ .action = m.a };
@@ -390,6 +394,8 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     // workspace palette lives on s ('w' stays free for a future
     // choose-window/tab picker, also tmux's).
     kb.bind('s', .{ .action = .workspace_switch });
+    // tmux: prefix-z = resize-pane -Z. Same key, same muscle memory.
+    kb.bind('z', .{ .action = .pane_zoom });
 
     var pathbuf: [1024]u8 = undefined;
     const path = cfgPath(&pathbuf) orelse return kb;

@@ -91,6 +91,12 @@ pub const Tab = struct {
     /// the point is to say WHERE attention is owed, which a dock bounce
     /// alone can't.
     bell: bool = false,
+    /// tmux zoom: this pane temporarily owns the whole tab area. The
+    /// TREE IS UNTOUCHED — zoom is a display state, not a layout, so
+    /// unzooming is exact by construction rather than by remembering
+    /// ratios. Cleared whenever the thing it points at could go stale
+    /// (the pane closes, focus moves, a split arrives).
+    zoomed: ?*Pane = null,
 };
 
 /// A workspace SESSION — tmux's session, rook's workspace: its own
@@ -142,6 +148,19 @@ pub fn layout(node: Node, rect: Rect, sep: f32) void {
             }
         },
     }
+}
+
+/// Lay out a tab, honouring zoom.
+///
+/// A zoomed tab gives the zoomed pane the whole area and every other
+/// pane a ZERO rect. Zero is load-bearing: it is what the draw, the
+/// hit test and the resize all already read as "nothing here" — a
+/// hidden pane can't be clicked, can't be drawn, and (because relayout
+/// skips it) keeps the grid size it had, so unzooming costs no reflow.
+pub fn layoutTab(t: *Tab, rect: Rect, sep: f32) void {
+    const z = t.zoomed orelse return layout(t.root, rect, sep);
+    for (t.panes.items) |p| p.rect = .{};
+    z.rect = rect;
 }
 
 /// Replace target's leaf with a split of (target, new_pane). Returns

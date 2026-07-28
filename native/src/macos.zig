@@ -894,8 +894,10 @@ pub const App = struct {
             return;
         }
         const t = self.activeTab();
-        // Separators are resize handles first (±4px grab slop).
-        if (panespkg.hitSeparator(t.root, x, y, 4)) |sp| {
+        // Separators are resize handles first (±4px grab slop) — but a
+        // zoomed tab shows none, and dragging an invisible one would
+        // resize a split you can't see.
+        if (if (t.zoomed == null) panespkg.hitSeparator(t.root, x, y, 4) else null) |sp| {
             self.drag_split = sp;
             self.drag_split_rect = panespkg.splitRect(sp);
             return;
@@ -1264,8 +1266,12 @@ pub const App = struct {
     /// Background tabs relayout on activation. Caller holds draw_lock.
     fn relayoutLocked(self: *App) void {
         const t = self.activeTab();
-        panespkg.layout(t.root, self.paneArea(), self.sep);
+        panespkg.layoutTab(t, self.paneArea(), self.sep);
         for (t.panes.items) |p| {
+            // Zero rect = zoomed out of sight. Leave its grid alone;
+            // resizing hidden panes to a 2x2 minimum would reflow their
+            // scrollback on every zoom and again on every unzoom.
+            if (p.rect.w == 0 or p.rect.h == 0) continue;
             const cols: u16 = @intFromFloat(@max(2, @divFloor(p.rect.w, self.renderer.cell_w)));
             const rows: u16 = @intFromFloat(@max(2, @divFloor(p.rect.h, self.renderer.cell_h)));
             if (cols == p.cols and rows == p.rows) continue;
@@ -1621,6 +1627,7 @@ pub const App = struct {
             .tab_select => _ = self.selectTab(@as(usize, b.arg) - 1),
             .copy_mode => self.enterCopyMode(),
             .workspace_switch => self.openPalette(),
+            .pane_zoom => _ = self.toggleZoom(),
         }
     }
 
@@ -1658,9 +1665,36 @@ pub const App = struct {
     }
 
     fn setFocusLocked(self: *App, pane: *panespkg.Pane) void {
-        self.activeTab().focused = pane;
-        self.focused_session.store(if (pane.term()) |t| t.session else null, .release);
+        const t = self.activeTab();
+        // Focusing a DIFFERENT pane unzooms, tmux-style. Focus must
+        // never land somewhere invisible; clicking the zoomed pane
+        // itself is not a move and keeps the zoom.
+        if (t.focused != pane and t.zoomed != null) {
+            t.zoomed = null;
+            self.relayoutLocked();
+        }
+        t.focused = pane;
+        self.focused_session.store(if (pane.term()) |t2| t2.session else null, .release);
         self.scene_dirty = true;
+    }
+
+    /// `<leader>z`: the focused pane takes the whole tab, or gives it
+    /// back. A no-op in a single-pane tab — there is nothing to hide,
+    /// and a zoom you can't see is a zoom you can't get out of. Any
+    /// thread.
+    pub fn toggleZoom(self: *App) bool {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const t = self.activeTab();
+        if (t.zoomed != null) {
+            t.zoomed = null;
+        } else {
+            if (t.panes.items.len < 2) return false;
+            t.zoomed = t.focused;
+        }
+        self.relayoutLocked();
+        self.scene_dirty = true;
+        return true;
     }
 
     /// Move focus in a direction within the active tab. Any thread.
@@ -1669,7 +1703,24 @@ pub const App = struct {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         const t = self.activeTab();
-        const target = panespkg.navigate(t.panes.items, t.focused, dir) orelse return false;
+        // navigate() reads RECTS, and a zoomed tab's hidden panes have
+        // none — so unzoom first or every direction reads as "nothing
+        // there" and ctrl+hjkl silently dies. If nothing does lie that
+        // way, put the zoom back: unzooming for a keystroke that
+        // otherwise did nothing is its own small betrayal, and zoom is
+        // one pointer, so restoring it is exact.
+        const was_zoomed = t.zoomed;
+        if (was_zoomed != null) {
+            t.zoomed = null;
+            self.relayoutLocked();
+        }
+        const target = panespkg.navigate(t.panes.items, t.focused, dir) orelse {
+            if (was_zoomed) |z| {
+                t.zoomed = z;
+                self.relayoutLocked();
+            }
+            return false;
+        };
         self.setFocusLocked(target);
         return true;
     }
@@ -1731,6 +1782,9 @@ pub const App = struct {
                 }
                 changed = true;
                 if (self.drag_pane == p) self.drag_pane = null;
+                // The zoomed pane is about to be freed; a stale pointer
+                // here would lay out a dead pane over the whole tab.
+                if (t.zoomed == p) t.zoomed = null;
                 self.drag_split = null; // tree is about to mutate
                 _ = panespkg.removeAt(self.gpa, &t.root, p);
                 _ = t.panes.swapRemove(i);
@@ -1807,6 +1861,13 @@ pub const App = struct {
         var any_dirty = self.scene_dirty;
         var focused_dirty = false;
         for (atab.panes.items) |p| {
+            // Hidden by zoom: same deal as a background tab — the
+            // emulator keeps advancing, the render work is zero.
+            if (p.rect.w == 0) {
+                p.dirty = false;
+                p.drawn_cols = 0;
+                continue;
+            }
             switch (p.content) {
                 .term => |*tm| {
                     tm.session.lockForSnapshot();
@@ -1857,6 +1918,7 @@ pub const App = struct {
         for (atab.panes.items) |p| {
             p.drawn_cols = 0;
             p.drawn_rows = 0;
+            if (p.rect.w == 0) continue;
             const cols: usize = switch (p.content) {
                 .term => |*tm| tm.rs.cols,
                 .edit => p.cols,
@@ -1938,7 +2000,9 @@ pub const App = struct {
             if (p.drawn_cols == 0) continue;
             self.renderer.drawGrid(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.buf_off, p.drawn_cols, p.drawn_rows);
         }
-        if (atab.panes.items.len > 1) {
+        // Zoomed: one pane fills the area, so there are no boundaries to
+        // draw and no focus edge to telegraph (focus is unambiguous).
+        if (atab.panes.items.len > 1 and atab.zoomed == null) {
             var sep_buf: [64]panespkg.Rect = undefined;
             var nsep: usize = 0;
             panespkg.collectSeparators(atab.root, &sep_buf, &nsep);
@@ -2394,11 +2458,16 @@ pub const App = struct {
             // A belled tab wears a dot before its number. The bell says
             // "something wants you"; the dot says WHICH tab, which is
             // the half a dock bounce can't deliver.
+            // And a zoomed tab wears tmux's Z. Without it, a zoomed tab
+            // is indistinguishable from a tab that only ever had one
+            // pane — and the way out is a keystroke you'd have no
+            // reason to reach for.
             var chip: [44]u8 = undefined;
+            const z: []const u8 = if (t.zoomed != null) " Z" else "";
             const label = if (t.bell)
-                std.fmt.bufPrint(&chip, " • {d} {s} ", .{ i + 1, title }) catch continue
+                std.fmt.bufPrint(&chip, " • {d} {s}{s} ", .{ i + 1, title, z }) catch continue
             else
-                std.fmt.bufPrint(&chip, " {d} {s} ", .{ i + 1, title }) catch continue;
+                std.fmt.bufPrint(&chip, " {d} {s}{s} ", .{ i + 1, title, z }) catch continue;
 
             const fg = if (is_active) th.bar_value else if (t.bell) th.accent else th.bar_fg;
             const bg = self.glassBg(if (is_active) th.chip_active_bg else th.bar_bg);
