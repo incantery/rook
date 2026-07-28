@@ -150,16 +150,42 @@ func Apply(r *Release) error {
 			if err := replaceBinary(newCtl, self); err != nil {
 				return fmt.Errorf("app updated, but replacing rookctl at %s failed: %v", self, err)
 			}
-			// the `re` shim rides along: a symlink next to rookctl whose
-			// name is the verb. Best-effort — a failure here can't be
-			// worth failing an otherwise-complete update over.
-			re := filepath.Join(filepath.Dir(self), "re")
-			if _, err := os.Lstat(re); os.IsNotExist(err) {
-				os.Symlink(self, re)
-			}
+			linkCLI(filepath.Dir(self))
 		}
 	}
 	return nil
+}
+
+// linkCLI points `rook` and `re` at the app binary, in the same dir the
+// running rookctl lives in.
+//
+// This is the UPGRADE path, and it is not the same as a fresh install:
+// install.sh writes these links itself, but someone who has been running
+// rook since before the app was rewritten reaches the new version through
+// `rookctl update` alone. Without this they would get the new app with no
+// `rook` on PATH at all, and `re` still meaning "rookctl edit" — pointing
+// at an editor that no longer exists.
+//
+// Both are FORCED, not created-if-missing: `re` already exists on every
+// such machine, aimed at the old meaning, and leaving it alone is the bug
+// rather than the safe choice. Best-effort throughout — a symlink failure
+// cannot be worth failing an otherwise-complete update over.
+func linkCLI(bindir string) {
+	appBin := filepath.Join(appPath, "Contents", "MacOS", "rook")
+	if !fileExists(appBin) {
+		return
+	}
+	for _, name := range []string{"rook", "re"} {
+		p := filepath.Join(bindir, name)
+		// Only ever replace a symlink or a missing entry. A real file
+		// there is someone else's `re`, and clobbering it is not ours
+		// to do.
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		os.Remove(p)
+		os.Symlink(appBin, p)
+	}
 }
 
 func download(url, dst string) error {
