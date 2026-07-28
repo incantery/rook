@@ -4,7 +4,14 @@
 #                   (its own XDG_STATE_HOME + XDG_CONFIG_HOME + XDG_DATA_HOME
 #                   → own host daemon, sessions, config, and database; never
 #                   touches the daily driver — see dev for why it matters)
-#   make start    — quick foreground run of a production build
+#   make prod     — the same sandbox at ReleaseFast; the binary the
+#                   scoreboard measures (app/PERF.md)
+#   make build    — compile the app without running it: the "does it still
+#                   build" check, and what CI runs
+#
+# The retired webview app keeps the -web suffix — build-web, dev-web,
+# package-web, install-web, e2e-web. Nothing in the shipped app depends
+# on it; it is the way back, not a live surface.
 # Promote: make install, then quit+relaunch the installed app. Every
 # install gets a fresh BUILD id stamped into ALL binaries, and the app
 # replaces a daemon whose build differs — so relaunch is guaranteed to
@@ -18,13 +25,19 @@ APP := /Applications/rook.app
 BUILD := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit).$(shell date +%Y%m%d%H%M%S)
 BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 
-.PHONY: build start dev prod dev-web package install install-web clean agent release release-stage e2e e2e-clean
+.PHONY: build build-web dev prod dev-web package-web install install-web clean agent release release-stage e2e-web e2e-clean-web
 
+# Compile only, and deliberately so: there is no run target that skips
+# DEV_ENV, because an instance on the default socket unlinks-then-binds
+# and would steal /tmp/rook.sock out from under the installed app (see
+# dev). Want to run it? make dev, make prod, or make install.
 build:
-	wails3 task build
+	cd app && zig build
 
-start: build
-	./bin/rook
+# The retired webview app. The only target left that needs the wails3
+# CLI — `make install` has not since the cutover.
+build-web:
+	wails3 task build
 
 # Isolated sandbox. The dev instance gets its own state (host daemon +
 # sessions), config, and data (database + worktrees) dirs, so it never rides
@@ -40,13 +53,13 @@ start: build
 # worktree.go checkouts) — else dev shares the daily driver's rook.db, so
 # its workspaces, verdict ledger, threads, and cost totals would pollute the
 # real ones, and worktrees would land in the shared tree.
-# dev builds and runs the Zig app in native/ — which IS rook now. The
+# dev builds and runs the Zig app in app/ — which IS rook now. The
 # webview dev instance survives as dev-web for side-by-side comparisons
 # (the latency A/B needs both).
 #
 # dev  = Debug: fast compiles, slow binary (ghostty-vt parses ~100x
 #        slower — fine for typing, do NOT judge firehose/cat here).
-# prod = ReleaseFast: the binary the scoreboard measures (native/PERF.md,
+# prod = ReleaseFast: the binary the scoreboard measures (app/PERF.md,
 #        same mode bench.sh builds). Zig caches per optimize mode, so
 #        alternating dev/prod doesn't rebuild ghostty-vt each time.
 # Both use their own ctl socket: the server unlinks-then-binds, so a
@@ -56,10 +69,10 @@ start: build
 # installed app's.
 DEV_ENV = ROOK_SOCK=/tmp/rook-dev.sock XDG_STATE_HOME=$(HOME)/.local/state/rook-dev
 dev:
-	cd native && zig build && $(DEV_ENV) ./zig-out/bin/rook win
+	cd app && zig build && $(DEV_ENV) ./zig-out/bin/rook win
 
 prod:
-	cd native && zig build -Doptimize=ReleaseFast && $(DEV_ENV) ./zig-out/bin/rook win
+	cd app && zig build -Doptimize=ReleaseFast && $(DEV_ENV) ./zig-out/bin/rook win
 
 # The daily driver: the ZIG app as /Applications/rook.app. ReleaseFast,
 # minimal hand-rolled bundle, ad-hoc signed, ctl socket on the default
@@ -88,15 +101,15 @@ REL_VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'
 VERSION_STAMP := $(shell test -z "$$(git status --porcelain)" && git describe --tags --exact-match 2>/dev/null || echo dev)
 STAMP_FLAGS = $(BUILD_FLAG) -X github.com/incantery/rook/internal/version.Version=$(VERSION_STAMP)
 install:
-	cd native && zig build -Doptimize=ReleaseFast -Dbuild=$(BUILD) -Dversion=$(REL_VERSION)
-	go build -ldflags "$(STAMP_FLAGS)" -o native/zig-out/bin/rook-host ./cmd/rook-host
-	go build -ldflags "$(STAMP_FLAGS)" -o native/zig-out/bin/rookctl ./cmd/rookctl
+	cd app && zig build -Doptimize=ReleaseFast -Dbuild=$(BUILD) -Dversion=$(REL_VERSION)
+	go build -ldflags "$(STAMP_FLAGS)" -o app/zig-out/bin/rook-host ./cmd/rook-host
+	go build -ldflags "$(STAMP_FLAGS)" -o app/zig-out/bin/rookctl ./cmd/rookctl
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS
-	sed 's/__VERSION__/$(REL_VERSION)/g' native/bundle/Info.plist > $(APP)/Contents/Info.plist
-	cp native/zig-out/bin/rook $(APP)/Contents/MacOS/rook
-	cp native/zig-out/bin/rook-host $(APP)/Contents/MacOS/rook-host
-	cp native/zig-out/bin/rookctl $(APP)/Contents/MacOS/rookctl
+	sed 's/__VERSION__/$(REL_VERSION)/g' app/bundle/Info.plist > $(APP)/Contents/Info.plist
+	cp app/zig-out/bin/rook $(APP)/Contents/MacOS/rook
+	cp app/zig-out/bin/rook-host $(APP)/Contents/MacOS/rook-host
+	cp app/zig-out/bin/rookctl $(APP)/Contents/MacOS/rookctl
 	codesign -s - --force $(APP)
 	$(LSREGISTER) -f $(APP)
 	mdimport $(APP)
@@ -115,7 +128,7 @@ install:
 	@# rookctl and writes over what it resolves to, so a link into the
 	@# bundle would make `rookctl update` rewrite a sealed binary and
 	@# invalidate the app's signature.
-	install -m 0755 native/zig-out/bin/rookctl $(HOME)/.local/bin/rookctl
+	install -m 0755 app/zig-out/bin/rookctl $(HOME)/.local/bin/rookctl
 	@echo "installed $(APP) (v$(REL_VERSION), build $(BUILD)) + ~/.local/bin/{rook,re,rookctl}"
 	@echo "quit + relaunch rook to pick it up"
 
@@ -125,7 +138,7 @@ dev-web:
 	XDG_DATA_HOME=$(HOME)/.local/share/rook-dev \
 	wails3 dev
 
-package:
+package-web:
 	@# The bundle task only adds files into an existing .app — a stale
 	@# bundle keeps files the build no longer produces (e.g. Assets.car).
 	rm -rf bin/rook.app
@@ -133,7 +146,7 @@ package:
 
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
-install-web: package
+install-web: package-web
 	rm -rf $(APP)
 	cp -R bin/rook.app $(APP)
 	@# A bare cp skips the registration Finder/installers do — without this,
@@ -154,18 +167,22 @@ install-web: package
 agent:
 	go build -ldflags "$(BUILD_FLAG)" -o $(shell go env GOPATH)/bin/rook-agent ./cmd/rook-agent
 
-# Browser-driven tests against the REAL app: Wails server mode runs rook as an
-# HTTP server, so Playwright gets the actual Go services and a real host
+# Browser-driven tests against the RETIRED app: Wails server mode runs it as
+# an HTTP server, so Playwright gets the actual Go services and a real host
 # daemon — sandboxed in bin/e2e, never your daily driver. See docs/e2e.md.
-#   make e2e                     — all specs
-#   make e2e ARGS="--headed"     — watch it happen
-#   make e2e ARGS=theme          — one file
-e2e:
+#   make e2e-web                     — all specs
+#   make e2e-web ARGS="--headed"     — watch it happen
+#   make e2e-web ARGS=theme          — one file
+#
+# There is no `make e2e` any more, and that is a real gap rather than a
+# rename: this was how an agent could SEE rook and verify its own UI work
+# instead of asking. The Zig app has no equivalent loop yet — app/PARITY.md.
+e2e-web:
 	cd frontend && pnpm exec playwright test $(ARGS)
 
 # The sandbox daemon is setsid'd to outlive the app (same as the real one), so
 # it survives the run by design. This is how you stop it.
-e2e-clean:
+e2e-clean-web:
 	-pkill -f 'bin/e2e/rook-host'
 	rm -rf bin/e2e
 
@@ -183,8 +200,8 @@ ghostty-lib:
 	cp -R $(GHOSTTY_SRC)/zig-out/include bin/ghostty-vt/
 	cp $(GHOSTTY_SRC)/zig-out/lib/libghostty-vt.a bin/ghostty-vt/lib/
 
-clean: e2e-clean
-	rm -rf bin frontend/dist
+clean: e2e-clean-web
+	rm -rf bin frontend/dist app/zig-out app/.zig-cache
 
 # Publish a release: make release VERSION=v0.1.0
 # Builds arm64 on this machine (no CI), zips rook.app + rookctl, tags the
@@ -222,21 +239,21 @@ release-stage:
 	rm -rf bin/rook.app $(DIST)
 	@# The app. -Dversion drops the leading v: CFBundleShortVersionString
 	@# has to be a dotted number, and XTVERSION reports it too.
-	cd native && zig build -Doptimize=ReleaseFast -Dbuild=$(BUILD) -Dversion=$(VERSION:v%=%)
-	$(GO_RELEASE) -o native/zig-out/bin/rook-host ./cmd/rook-host
-	$(GO_RELEASE) -o native/zig-out/bin/rookctl ./cmd/rookctl
+	cd app && zig build -Doptimize=ReleaseFast -Dbuild=$(BUILD) -Dversion=$(VERSION:v%=%)
+	$(GO_RELEASE) -o app/zig-out/bin/rook-host ./cmd/rook-host
+	$(GO_RELEASE) -o app/zig-out/bin/rookctl ./cmd/rookctl
 	mkdir -p $(STAGED_APP)/Contents/MacOS
-	sed 's/__VERSION__/$(VERSION:v%=%)/g' native/bundle/Info.plist > $(STAGED_APP)/Contents/Info.plist
-	cp native/zig-out/bin/rook $(STAGED_APP)/Contents/MacOS/rook
-	cp native/zig-out/bin/rook-host $(STAGED_APP)/Contents/MacOS/rook-host
-	cp native/zig-out/bin/rookctl $(STAGED_APP)/Contents/MacOS/rookctl
+	sed 's/__VERSION__/$(VERSION:v%=%)/g' app/bundle/Info.plist > $(STAGED_APP)/Contents/Info.plist
+	cp app/zig-out/bin/rook $(STAGED_APP)/Contents/MacOS/rook
+	cp app/zig-out/bin/rook-host $(STAGED_APP)/Contents/MacOS/rook-host
+	cp app/zig-out/bin/rookctl $(STAGED_APP)/Contents/MacOS/rookctl
 	@# Sign the BUNDLE last — the seal covers the nested binaries, so
 	@# anything that rewrites one afterwards invalidates it.
 	codesign -s - --force $(STAGED_APP)
 	@# rookctl at the top level is what install.sh copies to the user's
 	@# PATH and what selfupdate swaps the running one with. Same build,
 	@# a second copy on purpose: the bundle's is sealed.
-	cp native/zig-out/bin/rookctl $(STAGE)/rookctl
+	cp app/zig-out/bin/rookctl $(STAGE)/rookctl
 	@# No `re` symlink here any more — `re` is `rook edit` now, and
 	@# install.sh points it at the app binary inside the bundle.
 	@# ditto -c -k, not zip: preserves xattrs and the ad-hoc signature exactly

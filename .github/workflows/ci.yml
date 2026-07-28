@@ -10,6 +10,40 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The app. This job is the point of CI: before the cutover nothing here
+  # built Zig, so the shipping app could break while a type error in the
+  # retired Svelte tree blocked the merge. macOS because the app is AppKit
+  # and Metal all the way down (app/src/macos.zig) — there is no
+  # cross-compile of this to check on Linux.
+  zig:
+    runs-on: macos-15
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      # Reads the version from app/build.zig.zon's minimum_zig_version, and
+      # caches the global zig cache — which is where the fetched ghostty-vt
+      # and zig-objc tarballs land, so this is also the dependency cache.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # Debug, not ReleaseFast: this gate answers "does it still build and
+      # do the tests pass", and Debug compiles several times faster. The
+      # ReleaseFast binary is what app/bench.sh measures, and perf numbers
+      # are not a CI concern — see app/PERF.md for why they are measured by
+      # hand on a known machine.
+      - name: Build
+        run: zig build
+
+      # build.zig wires four test roots, not one: test decls in files the
+      # exe module never imports are invisible to a single addTest, and
+      # that hole silently swallowed the editor's tests once already.
+      - name: Test
+        run: zig build test
+
   go:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -32,35 +66,6 @@ jobs:
       - name: Test
         run: go test ./internal/... ./cmd/rook-host/... ./cmd/rook-agent/... ./cmd/rookctl/...
 
-  frontend:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@v7
-      # Reads the pnpm version from frontend/package.json's packageManager field
-      - uses: pnpm/action-setup@v6
-        with:
-          package_json_file: frontend/package.json
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
-
-      - name: Lint
-        run: pnpm run lint
-
-      - name: Format check
-        run: pnpm run format:check
-
-      - name: Type check
-        run: pnpm run check
-
-      - name: Build
-        run: pnpm run build
+# The retired webview app is gated by .github/workflows/web.yml, which only
+# fires when frontend/ actually changes. It used to run here on every PR —
+# minutes of install-and-build to protect a fallback that nothing ships.

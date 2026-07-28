@@ -18,13 +18,13 @@ frontend, xterm.js in a WKWebView. That version is gone —
 `/Applications/rook.app` is the Zig app, and it replaced the old one
 outright rather than shipping beside it. The reasoning, the migration,
 and the things that broke on the way are in
-[`native/PARITY.md`](native/PARITY.md).
+[`app/PARITY.md`](app/PARITY.md).
 
 The one-line case for the rewrite: the webview compositor was the floor
 under input latency, and no amount of work above it moved that floor.
 Owning the `CAMetalLayer` removed it. See
 [`docs/render-latency.md`](docs/render-latency.md) for the diagnosis
-that preceded the decision, and [`native/PERF.md`](native/PERF.md) for
+that preceded the decision, and [`app/PERF.md`](app/PERF.md) for
 what it bought.
 
 ## Install
@@ -76,7 +76,7 @@ is to get out of neovim's way.
 Agent surface: `rookctl` and the MCP server work unchanged, because
 they always spoke to the daemon rather than to the UI.
 
-Perf, all measured and reproducible with `native/bench.sh`:
+Perf, all measured and reproducible with `app/bench.sh`:
 
 | metric | value |
 |---|---|
@@ -88,7 +88,7 @@ Perf, all measured and reproducible with `native/bench.sh`:
 ## What does not work yet
 
 Ordered by how much of rook's identity each one holds — the full list
-with reasoning is [`native/PARITY.md`](native/PARITY.md).
+with reasoning is [`app/PARITY.md`](app/PARITY.md).
 
 1. **The agent layer**, which is the actual product: asks → attention
    inbox → agent deck. 14 open items, the largest single gap. The
@@ -124,30 +124,55 @@ Stated out loud because they are choices, not oversights:
 
 | file | what it holds |
 |---|---|
-| [`native/README.md`](native/README.md) | how the app works — architecture, every subsystem, the lessons that will recur |
-| [`native/PARITY.md`](native/PARITY.md) | the debt checklist and the order to pay it in |
-| [`native/PERF.md`](native/PERF.md) | the scoreboard, and the rules for adding to it |
+| [`app/README.md`](app/README.md) | how the app works — architecture, every subsystem, the lessons that will recur |
+| [`app/PARITY.md`](app/PARITY.md) | the debt checklist and the order to pay it in |
+| [`app/PERF.md`](app/PERF.md) | the scoreboard, and the rules for adding to it |
 | [`docs/render-latency.md`](docs/render-latency.md) | the latency diagnosis that motivated the rewrite |
 | [`docs/agent.md`](docs/agent.md) | the agent/host surface |
-| [`NEXT.md`](NEXT.md) | longer-horizon architecture notes |
+| [`NEXT.md`](NEXT.md) | the review-workspace thesis — product direction |
+| [`app/NEXT.md`](app/NEXT.md) | Zig architecture notes — hypotheses, explicitly not decisions |
 | [`README.md`](README.md) | project intro — **partly pre-cutover, read with that in mind** |
 
 ## Repo layout
 
 ```
-native/      the Zig app: renderer, terminal, editor, chrome   ← the app
-cmd/         rook-host, rookctl                                 ← the daemon + CLI
-internal/    the host: threads, review, asks, transcripts, …    ← the product
+app/            the Zig app: renderer, terminal, editor, chrome  ← the app
+cmd/            rook-host, rookctl                               ← the daemon + CLI
+internal/       the host: threads, review, asks, transcripts, …  ← the product
 claude-plugin/  hooks + MCP wiring for Claude Code
-scripts/     rook-migrate.sh and friends
-docs/        design notes and diagnoses
-frontend/    the retired Svelte/xterm app — still builds via `make install-web`
-spike/       old experiments
+scripts/        rook-migrate.sh and friends
+docs/           design notes and diagnoses
+frontend/       the retired Svelte/xterm app — `make install-web`
+spike/          old experiments
 ```
+
+It was `native/` until 2026-07-28. The name was a contrast with the
+webview, and once the webview was gone it described nothing — everything
+is native now. Renaming it was the visible half of promoting the app to
+first-class; the half that mattered was CI, which had never built a line
+of Zig while gating every PR on the retired frontend.
 
 `frontend/` is kept as the way back, not as a live surface. `make
 install-web` still packages it. Nothing in the shipped app depends on
-it.
+it, and it no longer gates CI — `.github/workflows/web.yml` runs only
+when `frontend/` itself changes.
+
+## Building it
+
+| | |
+|---|---|
+| `make build` | compile the app; what CI runs. Runs nothing — every run target has to sandbox its socket |
+| `make dev` | Debug build in an isolated sandbox (own daemon, config, database) |
+| `make prod` | the same sandbox at ReleaseFast — the binary `app/bench.sh` measures |
+| `make install` | the daily driver into `/Applications` |
+
+Retired-stack targets keep a `-web` suffix: `build-web`, `dev-web`,
+`package-web`, `install-web`, `e2e-web`.
+
+There is no `make e2e` any more, and that is a gap rather than a rename.
+It was how an agent could *see* rook and verify its own UI work instead
+of asking; it drove the webview through Playwright, and the Zig app has
+no equivalent. It belongs with the agent layer in the list above.
 
 ## Branches
 

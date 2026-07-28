@@ -420,7 +420,28 @@ while every hook, MCP tool, and ask silently dies.
        A copy now, both places.
 - [ ] 6. Run the migration's `binaries` + `daemons` phases and delete
        `/Applications/rookz.app`
-- [ ] 7. Restructure: promote `native/` to first class
+- [x] 7. Restructure: promote `native/` to first class. `native/` →
+       `app/` — the name was a contrast with the webview and described
+       nothing once the webview was gone. But the rename was the small
+       half. **CI had never built a line of Zig**, while running four
+       gates (lint, format, typecheck, build) on the retired frontend on
+       every PR: the shipping app could break green, and a Svelte type
+       error could block a merge. There is a macOS `zig build` + `zig
+       build test` job now, and the frontend moved to its own
+       path-filtered workflow. The Makefile's first two verbs had the
+       same inversion — `build` and `start` drove `wails3`, which
+       `make install` stopped needing at the cutover, so both were
+       broken on a fresh clone. `build` compiles the app now; the
+       retired stack keeps the `-web` suffix that `dev-web` and
+       `install-web` already established. `build` deliberately does not
+       run anything: every run target has to pass DEV_ENV or it steals
+       `/tmp/rook.sock` from the installed app.
+       Renaming the package in `build.zig.zon` (`.native` → `.rook`)
+       invalidates the fingerprint, since it is derived from the name —
+       Zig refuses the build and prints the replacement value.
+       NOT done here, and it is the real loss: **`make e2e` was the
+       agent's eyes** and it drove the webview. It is `e2e-web` now, and
+       the Zig app has nothing equivalent. That belongs with §9.
 - [ ] 8. Command registry + ⌘K palette (every later panel registers)
 - [ ] 9. Asks → attention inbox → agent deck (product identity, in
        that order)

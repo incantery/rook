@@ -1,4 +1,15 @@
-# PERF — the scoreboard
+# PERF — the scoreboard (pre-cutover; superseded)
+
+> **This is the webview app's scoreboard, and it stops at 2026-07-27.**
+> The live one is [`app/PERF.md`](../app/PERF.md). Every number below was
+> measured against Go + Svelte + xterm.js in a WKWebView — the app rook
+> stopped being on 2026-07-28 — so they are not comparable to anything
+> measured since, and no number here should be quoted as rook's.
+>
+> Kept because the *rules* at the top of this file outlived the app they
+> were written for, and because the numbers are the evidence for why the
+> rewrite happened at all. The diagnosis that follows from them is
+> [`render-latency.md`](render-latency.md).
 
 What gets written down gets defended. Rook's target audience switches from
 Ghostty/Alacritty/Kitty; the bar is "nothing about rook feels like web tech"
