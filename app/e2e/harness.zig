@@ -148,9 +148,15 @@ pub const Instance = struct {
         var cfgfile_buf: [192]u8 = undefined;
         const cfgfile = try std.fmt.bufPrint(&cfgfile_buf, "{s}/config.toml", .{rookcfg});
         var cfg_buf: [1024]u8 = undefined;
+        // A leader is set here because there is NO default one
+        // (`Keybinds.leader` is `?u8 = null` — the user picks it), and
+        // without it `handleCharKey` returns immediately, so every
+        // leader chord is silently inert. A scenario testing `<leader>a`
+        // would fail against a perfectly working app.
         const cfg = try std.fmt.bufPrint(&cfg_buf,
             \\font-family = "Menlo"
             \\font-size = 14
+            \\leader = "`"
             \\{s}
             \\
         , .{opts.config_extra});

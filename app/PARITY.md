@@ -200,8 +200,21 @@ a daily driver.
 - [ ] **Settings UI** (⌘,): appearance, keybinds, and the token panes
       (Jira/OpenAI/cloud/relay → keychain). Today: hand-edit TOML.
 - [ ] Choose-window picker on `<leader>w` (reserved, unimplemented)
-- [ ] Side panes (left/right slottable tenants) — the container every
-      §2 panel lands in. `SidePane.svelte` + `winchrome` on main.
+- [x] Side panes (left/right slottable tenants) — the container every
+      §2 panel lands in. Built WITH a tenant on purpose (the attention
+      inbox, below): "primitives pulled by tenants, never speculative"
+      is the rule the UI layer grew under, and a container validated
+      against nothing is a guess about what §2 will need.
+      What makes it a container rather than a slab painted over the
+      panes: opening it RETILES — the terminal beside it gets a new
+      column count and a pty resize, which is what the e2e asserts,
+      because a decorative overlay would pass every other check.
+      Width in COLUMNS not pixels (snapped to whole cells, capped at
+      half the window). Window chrome, not a tab's: same panel from
+      every tab, never in `panes`. Tenants are placement-agnostic —
+      `drawAttention` takes a rect, so `panel.flip` belongs to the
+      container. Tenant is an enum + switch like `pal_mode`, NOT a
+      vtable: an interface designed against one tenant is a guess.
 - [ ] Status bar: workspace/branch/review-gate state, not just perf HUD
 
 ## 2. The agent layer — this is the actual product
@@ -212,8 +225,20 @@ Ranked by how much of rook's identity dies without it.
 - [ ] **Asks / RUI** (`/asks/`, doorbell, answers drain, MCP `ask` tool).
       Claude asking a question and getting an answer is the flagship
       loop. Needs a form renderer (radio/multi/text) in a pane.
-- [ ] **Attention inbox** (`/attention`, `<leader>a`) — the "what needs
-      me" queue that makes the app worth leaving open.
+- [~] **Attention inbox** (`/attention`, `<leader>a`) — the "what needs
+      me" queue that makes the app worth leaving open. LISTS today, as
+      the side pane's first tenant (`src/attention.zig`, shaped after
+      usage.zig, fail-open the same way). Does NOT act: jumping to the
+      session and answering the ask need `/agents/{id}` verbs and a form
+      renderer — they belong with the asks item above.
+      Two things it is careful about, both worth preserving in whatever
+      replaces it: "nothing waiting" and "host unreachable" RENDER
+      DIFFERENTLY (an empty list because the daemon is down would read
+      as good news, the worst possible lie for this panel); and idle
+      frames stay 0 — it polls 2s but only while OPEN, and only dirties
+      the scene on a digest change. Measured after: 6s open, n=0 on
+      every frame ring. Overflow is never silent (`+N more` covers both
+      the height cap and the 16-item fetch cap).
 - [ ] **Agent deck / session view** (`/sessions`, `/agents`, `<leader>v`):
       transcript jsonl → rendered timeline, flat vim-navigable deck.
       Biggest single UI build on the list; `internal/transcript` +

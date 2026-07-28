@@ -43,6 +43,11 @@ pub const Action = enum {
     /// The command palette — this table, over the same widget.
     palette_commands,
     app_fullscreen,
+    /// Toggle the side pane holding the attention inbox.
+    panel_attention,
+    /// Move the side pane to the other edge — panels are placement-
+    /// agnostic, so this is a property of the container, not the tenant.
+    panel_flip,
 };
 
 pub const Spec = struct { action: Action, arg: u8 = 0 };
@@ -82,6 +87,8 @@ pub const commands = [_]Command{
     .{ .id = "workspace.switch", .title = "Switch Workspace", .category = "Workspace", .action = .workspace_switch, .keys = "<leader>s" },
     .{ .id = "palette.commands", .title = "Command Palette", .category = "App", .action = .palette_commands, .keys = "⌘K" },
     .{ .id = "app.fullscreen", .title = "Toggle Fullscreen", .category = "App", .action = .app_fullscreen },
+    .{ .id = "attention.inbox", .title = "Attention Inbox", .category = "Panel", .action = .panel_attention, .keys = "<leader>a" },
+    .{ .id = "panel.flip", .title = "Move Side Pane to Other Edge", .category = "Panel", .action = .panel_flip },
 };
 
 /// Alternate spellings that resolve to a command. Kept apart from the

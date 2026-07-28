@@ -222,6 +222,55 @@ at the 2Hz HUD tick. ctl: `workspaces`, `palette-open`, `palette`
 (state dump — the modal is blind-drivable through the normal
 type/press verbs); `tabs`/`panes` list all spaces.
 
+## Side panes, and the attention inbox
+
+A slottable left/right container — **the container every §2 panel lands
+in** — with the attention inbox as its first tenant. `<leader>a` or
+`attention.inbox`; `panel.flip` moves it to the other edge.
+
+It was built WITH a tenant on purpose. "Primitives pulled by tenants,
+never speculative" is the rule the whole UI layer grew under, and a
+container validated against nothing is a guess about what §2's panels
+will need.
+
+What makes it a real container rather than a slab painted over the
+panes: opening it **retiles**, so the terminal beside it gets a new
+column count and a pty resize. The e2e asserts exactly that — `grid CxR`
+from `panes` must narrow — because a decorative overlay would pass every
+other check.
+
+- **Width is in COLUMNS, not pixels** (`side_cols`), snapped to whole
+  cells, so the pane beside it still lands on the character grid at any
+  font size. Capped at half the window: a side pane that can squeeze the
+  panes to nothing can lose you a shell.
+- **It is window chrome, not a tab's.** Full content height, same inbox
+  from every tab, and it never appears in `panes`.
+- **Tenants are placement-agnostic** — `drawAttention` takes a rect and
+  never learns which edge it came from, so `panel.flip` is a property of
+  the container.
+- **The tenant is an enum + a switch**, exactly like `pal_mode`, not a
+  vtable. A tenant interface designed against one tenant is a guess; the
+  switch is where the inbox/deck/threads/review join it.
+
+The inbox itself (`src/attention.zig`) is a projection of the host's
+`GET /attention`, shaped after `usage.zig` and fail-open the same way.
+Two things it is careful about:
+
+- **"Nothing waiting" and "host unreachable" render differently.** An
+  empty list because the daemon is down would read as good news, which
+  is the worst possible lie for this particular panel.
+- **Idle frames stay 0.** It polls every 2s, but ONLY while open, and a
+  fetch dirties the scene only when a digest changes. A poll that
+  repainted unconditionally would cost 30 frames a minute forever —
+  measured after the fact: 6s open, `n=0` on every frame ring.
+
+Overflow is never silent: rows dropped for want of height and rows
+dropped by the 16-item fetch cap both surface as `+N more`.
+
+Not done: **acting** on a row. Jumping to the session and answering the
+ask need `/agents/{id}` verbs and a form renderer — §2's asks item. The
+inbox lists today.
+
 ## The command registry (`src/registry.zig`)
 
 Every action rook can take is a named command, in one table. **⌘K**
@@ -359,6 +408,9 @@ printf 'panes\n'             | nc -U /tmp/rook.sock   # all tabs' panes, * = act
 printf 'tabs\n'              | nc -U /tmp/rook.sock   # list tabs
 printf 'commands\n'          | nc -U /tmp/rook.sock   # the registry: id, title,
                                                        #   key hint, :ExName
+printf 'sidepane\n'          | nc -U /tmp/rook.sock   # container state + the
+                                                       #   tenant's rows (chrome
+                                                       #   is invisible to dump)
 printf 'run pane.split-right\n' | nc -U /tmp/rook.sock # by name; aliases resolve
 printf 'tab new\n'           | nc -U /tmp/rook.sock   # also: tab <n>, tab next, tab prev
 printf 'split right\n'       | nc -U /tmp/rook.sock   # split focused (or: down)

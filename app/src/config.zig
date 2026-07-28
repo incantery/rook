@@ -404,6 +404,8 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     kb.bind('s', .{ .action = .workspace_switch });
     // tmux: prefix-z = resize-pane -Z. Same key, same muscle memory.
     kb.bind('z', .{ .action = .pane_zoom });
+    // The attention inbox — the wails app's <leader>a, kept.
+    kb.bind('a', .{ .action = .panel_attention });
 
     var pathbuf: [1024]u8 = undefined;
     const path = cfgPath(&pathbuf) orelse return kb;

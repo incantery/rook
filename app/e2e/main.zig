@@ -28,6 +28,7 @@ const scenarios = [_]Scenario{
     .{ .name = "pixels", .what = "the renderer actually drew (shot, decoded)", .run = pixels },
     .{ .name = "commands", .what = "registry lists, runs by name, and drives the ⌘K palette", .run = commands },
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
+    .{ .name = "sidepane", .what = "side pane retiles the grid, flips edges, and holds the inbox", .run = sidepane },
 };
 
 // ---------------------------------------------------------------- boot
@@ -316,6 +317,64 @@ fn excmd(gpa: std.mem.Allocator, bin: []const u8) !void {
         h.sleepMs(100);
     }
     try h.expectEq(":PaneSplitRight split the pane", 2, try app.paneCount());
+}
+
+// ------------------------------------------------------------ sidepane
+
+/// Columns of the focused pane, from `panes` ("… grid 80x24").
+fn paneCols(app: *h.Instance) !usize {
+    const r = try app.ctl("panes");
+    const g = std.mem.indexOf(u8, r, " grid ") orelse return error.AssertFailed;
+    const rest = r[g + 6 ..];
+    const x = std.mem.indexOfScalar(u8, rest, 'x') orelse return error.AssertFailed;
+    return std.fmt.parseInt(usize, rest[0..x], 10) catch error.AssertFailed;
+}
+
+fn sidepane(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    try h.expectContains(try app.ctl("sidepane"), "closed", "starts closed");
+    const wide = try paneCols(app);
+
+    // The assertion that separates a real container from a slab painted
+    // OVER the panes: opening it must narrow the terminal's grid, which
+    // means a pty resize reached the shell.
+    _ = try app.ctl("run attention.inbox");
+    const st = try app.ctl("sidepane");
+    try h.expectContains(st, "open side:right panel:attention", "opened on the right");
+    const narrow = try paneCols(app);
+    try h.expect(narrow < wide, "pane should narrow: {d} cols before, {d} after", .{ wide, narrow });
+
+    // The sandbox has no rook-host (XDG_STATE_HOME is unwritable on
+    // purpose), so the honest render is "unreachable" — NOT an empty
+    // list, which would read as "nothing needs you" and be a lie.
+    try h.expectContains(try app.ctl("sidepane"), "host unreachable", "fails open, and says which");
+
+    // Placement-agnostic: same tenant, other edge, same width.
+    _ = try app.ctl("run panel.flip");
+    try h.expectContains(try app.ctl("sidepane"), "open side:left", "flipped to the left");
+    try h.expectEq("flip keeps the width", narrow, try paneCols(app));
+
+    // It is chrome, not a pane: it must not appear in `panes`.
+    try h.expectEq("side pane is not a pane", 1, try app.paneCount());
+
+    // Toggling the SAME panel closes and gives the columns back.
+    _ = try app.ctl("run attention.inbox");
+    try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
+    try h.expectEq("columns restored", wide, try paneCols(app));
+
+    // And the real chord, through AppKit's leader machine.
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press a");
+    var waited: u32 = 0;
+    while (waited < 3000) : (waited += 100) {
+        if (std.mem.indexOf(u8, try app.ctl("sidepane"), "open") != null) break;
+        h.sleepMs(100);
+    }
+    try h.expectContains(try app.ctl("sidepane"), "open", "<leader>a toggles it");
 }
 
 // ---------------------------------------------------------------- runner

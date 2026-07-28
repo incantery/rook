@@ -336,6 +336,39 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else {
             reply(fd, "err unknown command (see `commands`)\n");
         }
+    } else if (std.mem.eql(u8, verb, "sidepane") and rest.len == 0) {
+        // Container state + the tenant's rows, so the whole panel is
+        // verifiable without a screenshot.
+        var buf: [4096]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        app.draw_lock.lock();
+        if (!app.side_open) {
+            _ = w.write("closed\n") catch 0;
+        } else {
+            w.print("open side:{s} panel:{s}\n", .{
+                @tagName(app.side),
+                @tagName(app.side_panel),
+            }) catch {};
+            switch (app.side_panel) {
+                .attention => {
+                    if (!app.attention.live) {
+                        _ = w.write("host unreachable\n") catch 0;
+                    } else if (app.attention.n == 0) {
+                        _ = w.write("nothing waiting\n") catch 0;
+                    } else for (app.attention.slice()) |*it| {
+                        w.print("{s}\t{s}{s}\n", .{
+                            it.workspace(),
+                            it.text(),
+                            @as([]const u8, if (it.interactive) "\t(picker)" else ""),
+                        }) catch break;
+                    }
+                    if (app.attention.more > 0)
+                        w.print("+{d} more\n", .{app.attention.more}) catch {};
+                },
+            }
+        }
+        app.draw_lock.unlock();
+        reply(fd, buf[0..w.end]);
     } else if (std.mem.eql(u8, verb, "usage") and rest.len == 0) {
         // The cluster as drawn (host-cached; empty = host unreachable).
         var buf: [128]u8 = undefined;

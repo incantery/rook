@@ -294,6 +294,17 @@ const CompletedBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 /// draw path are shared; only the row text and what Enter does differ.
 pub const PalMode = enum { workspaces, commands };
 
+/// Which side pane a panel is slotted into. Panels are placement-
+/// agnostic: the tenant draws into a rect and does not know which edge
+/// it came from.
+pub const Side = enum { left, right };
+
+/// The side pane's tenants. One today; the switch in drawSidePane is
+/// where §2's inbox/deck/threads/review join it, the same way pal_mode
+/// grew a second list. Deliberately an enum rather than a vtable — a
+/// tenant interface designed against ONE tenant is a guess.
+pub const Panel = enum { attention };
+
 pub const App = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -348,6 +359,23 @@ pub const App = struct {
     pal_items: []workspacespkg.Entry = &.{},
     pal_filtered: [64]usize = undefined,
     pal_nfiltered: usize = 0,
+    // ---- side pane: the container every §2 panel lands in ----
+    /// Closed by default. An empty container costs nothing but a branch,
+    /// and the inbox is only worth screen space once something is in it.
+    side_open: bool = false,
+    side: Side = .right,
+    side_panel: Panel = .attention,
+    /// Columns, not pixels: the pane beside it is a character grid, and
+    /// a width in px makes the split land mid-cell at some font sizes.
+    side_cols: f32 = 34,
+    /// The inbox, refreshed by attentionThread ONLY while open — a
+    /// closed panel must cost nothing, including no host traffic.
+    attention: @import("attention.zig").Snapshot = .{},
+    attention_digest: u64 = 0,
+    /// Set when the panel opens so the poller fetches immediately
+    /// instead of after its next sleep.
+    attention_wake: std.atomic.Value(bool) = .init(false),
+
     /// A command the palette picked, waiting for draw_lock to be RELEASED.
     /// The palette's key path runs under the lock and every dispatch
     /// target takes it again (newTab, selectTab, splitFocused, …), so
@@ -726,6 +754,12 @@ pub const App = struct {
             std.debug.print("rook usage: thread failed: {}\n", .{err});
         }
 
+        // The attention inbox. Spawned always, but it only FETCHES while
+        // its panel is open — a closed panel owes the host nothing.
+        if (std.Thread.spawn(.{}, attentionThread, .{self})) |t| t.detach() else |err| {
+            std.debug.print("rook attention: thread failed: {}\n", .{err});
+        }
+
         // Keys → pty (Cmd+Q quits). AppKit copies the handler block, so the
         // stack context is fine here.
         var block_ctx = MonitorBlock.init(.{ .app = self }, &monitorCallback);
@@ -881,12 +915,36 @@ pub const App = struct {
         return self.top_inset + self.tab_h;
     }
 
-    /// The rect panes tile: the content area inset by window-padding.
-    fn paneArea(self: *App) panespkg.Rect {
+    /// Width the side pane takes, or 0 when closed. Snapped to whole
+    /// cells so the terminal beside it still lands on the grid.
+    fn sideWidth(self: *App) f32 {
+        if (!self.side_open) return 0;
+        // Never more than half the window: a side pane that can squeeze
+        // the panes to nothing is a side pane that can lose your shell.
+        return @min(@round(self.side_cols * self.renderer.cell_w), self.px_w / 2);
+    }
+
+    /// The side pane's own rect. Full content height — it is WINDOW
+    /// chrome, not a tab's, so it does not move when you switch tabs
+    /// and every tab sees the same inbox.
+    fn sideArea(self: *App) panespkg.Rect {
+        const w = self.sideWidth();
         return .{
-            .x = self.pad,
+            .x = if (self.side == .left) 0 else self.px_w - w,
+            .y = self.contentY(),
+            .w = w,
+            .h = @max(1, self.contentH()),
+        };
+    }
+
+    /// The rect panes tile: the content area inset by window-padding,
+    /// minus whatever the side pane took.
+    fn paneArea(self: *App) panespkg.Rect {
+        const side = self.sideWidth();
+        return .{
+            .x = self.pad + if (self.side == .left) side else 0,
             .y = self.contentY() + self.pad,
-            .w = @max(1, self.px_w - self.pad * 2),
+            .w = @max(1, self.px_w - self.pad * 2 - side),
             .h = @max(1, self.contentH() - self.pad * 2),
         };
     }
@@ -1790,7 +1848,41 @@ pub const App = struct {
             .workspace_switch => self.openPalette(),
             .palette_commands => self.openCommandPalette(),
             .app_fullscreen => self.requestFullscreen(),
+            .panel_attention => self.toggleSidePane(.attention),
+            .panel_flip => self.flipSidePane(),
         }
+    }
+
+    /// Toggle the side pane. Opening with a DIFFERENT panel than the one
+    /// showing switches tenants instead of closing — the VS Code rule,
+    /// and the one that makes a second tenant behave sensibly the day it
+    /// arrives.
+    pub fn toggleSidePane(self: *App, panel: Panel) void {
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            if (self.side_open and self.side_panel == panel) {
+                self.side_open = false;
+            } else {
+                self.side_panel = panel;
+                self.side_open = true;
+            }
+            // The panes beside it must retile: their COLUMN COUNT
+            // changes, which means a pty resize, not just a redraw.
+            self.relayoutLocked();
+            self.scene_dirty = true;
+        }
+        // Wake the poller so an opened panel fills in now rather than at
+        // the next tick. Cheap: it only ever skips ahead one sleep.
+        self.attention_wake.store(true, .release);
+    }
+
+    fn flipSidePane(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        self.side = if (self.side == .left) .right else .left;
+        self.relayoutLocked();
+        self.scene_dirty = true;
     }
 
     /// Let an editor's `:` reach the command registry (`:PaneSplitRight`).
@@ -2218,6 +2310,9 @@ pub const App = struct {
         };
         self.drawBar(&ui);
         self.drawTabBar(&ui);
+        // Before the palette: the modal draws LAST and over everything,
+        // side pane included.
+        if (self.side_open) self.drawSidePane(&ui);
         if (self.ime_marked_len > 0) self.drawPreedit(&ui);
         if (self.pal_open) self.drawPalette(&ui);
 
@@ -2689,6 +2784,83 @@ pub const App = struct {
     /// purpose (a modal must read instantly, glass or not). Input row
     /// on top, filtered rows under it, selected row lifted + accent
     /// edge — the chip vocabulary at palette scale.
+    /// The side pane: a titled slab with one tenant drawn into it.
+    /// Chrome, so it draws from the same pipelines and atlases as the
+    /// grid — a widget is never its own draw path.
+    fn drawSidePane(self: *App, ui: *@import("ui.zig").Ui) void {
+        const r = self.sideArea();
+        if (r.w <= 0) return;
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        const row_h = self.bar_h;
+
+        ui.rect(r.x, r.y, r.w, r.h, self.glassBg(th.bar_bg));
+        // A one-cell rule on the edge that faces the panes, so the
+        // boundary reads even when the tenant is empty.
+        const edge_x = if (self.side == .left) r.x + r.w - self.sep else r.x;
+        ui.rect(edge_x, r.y, self.sep, r.h, th.sep);
+
+        var y = r.y;
+        const tx = r.x + cw;
+        _ = ui.text(tx, y + (row_h - ch) / 2, switch (self.side_panel) {
+            .attention => "ATTENTION",
+        }, th.bar_value, self.glassBg(th.bar_bg));
+        y += row_h;
+
+        switch (self.side_panel) {
+            .attention => self.drawAttention(ui, r, y),
+        }
+    }
+
+    fn drawAttention(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        const row_h = self.bar_h;
+        const bg = self.glassBg(th.bar_bg);
+        const tx = r.x + cw;
+        var y = top;
+
+        // "Nothing needs you" and "we can't reach the host" are
+        // different facts and must not render the same.
+        if (!self.attention.live) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "host unreachable", th.bar_fg, bg);
+            return;
+        }
+        if (self.attention.n == 0) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "nothing waiting", th.bar_fg, bg);
+            return;
+        }
+
+        // Room for the rows, less one line kept back for the overflow
+        // note when there is one.
+        const avail = r.y + r.h - top - (if (self.attention.more > 0) row_h else 0);
+        const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h * 2)));
+        const shown = @min(self.attention.slice().len, fits);
+
+        for (self.attention.slice()[0..shown]) |*it| {
+            // Two lines per item: workspace, then what it wants. An ask
+            // is a sentence — one line would truncate all of them.
+            ui.rect(r.x, y + self.sep, self.sep * 2, row_h * 2 - self.sep * 2, th.accent);
+            _ = ui.text(tx, y + (row_h - ch) / 2, it.workspace(), th.bar_value, bg);
+            if (it.interactive)
+                _ = ui.textRight(r.x + r.w - cw, y + (row_h - ch) / 2, "picker", th.bar_fg, bg);
+            y += row_h;
+            const room: usize = @intFromFloat(@max(0, @divFloor(r.w - cw * 3, cw)));
+            const t = it.text();
+            _ = ui.text(tx, y + (row_h - ch) / 2, t[0..@min(t.len, room)], th.bar_fg, bg);
+            y += row_h;
+        }
+
+        // NEVER a silent cap: rows dropped for want of space and rows
+        // dropped by the fetch cap both say so.
+        const hidden = self.attention.slice().len - shown + self.attention.more;
+        if (hidden > 0) {
+            var buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "+{d} more", .{hidden}) catch "+more";
+            _ = ui.text(tx, y + (row_h - ch) / 2, s, th.bar_fg, bg);
+        }
+    }
+
     fn drawPalette(self: *App, ui: *@import("ui.zig").Ui) void {
         const cw = self.renderer.cell_w;
         const row_h = self.bar_h;
@@ -3233,6 +3405,44 @@ fn terminateCallback(context: *const ResizeBlock.Context, notification: objc.c.i
 fn authCallback(_: *const AuthBlock.Context, granted: bool, err: objc.c.id) callconv(.c) void {
     _ = err;
     if (!granted) std.debug.print("rook: notification permission denied (System Settings > Notifications > rook)\n", .{});
+}
+
+/// Background poll of the attention inbox, 2s, and ONLY while the panel
+/// is open — a closed panel costs no host traffic, no wakeups, and no
+/// frames. Two properties this must not break:
+///
+///  - idle frames stay 0. A poll that repainted unconditionally would
+///    cost 30 frames/minute forever, so a fetch only dirties the scene
+///    when the DIGEST changes.
+///  - the fetch is blocking (3s socket timeouts) and happens off the
+///    render path; only the assignment takes draw_lock.
+fn attentionThread(app: *App) void {
+    const att = @import("attention.zig");
+    while (true) {
+        const open = blk: {
+            app.draw_lock.lock();
+            defer app.draw_lock.unlock();
+            break :blk app.side_open and app.side_panel == .attention;
+        };
+        if (open) {
+            const snap = att.fetch(app.gpa, app.io);
+            const d = snap.digest();
+            app.draw_lock.lock();
+            if (d != app.attention_digest) {
+                app.attention = snap;
+                app.attention_digest = d;
+                app.scene_dirty = true;
+            }
+            app.draw_lock.unlock();
+        }
+        // 100ms slices so an open-toggle is picked up promptly without
+        // a condvar; the loop is a null check when the panel is closed.
+        var slept: u32 = 0;
+        while (slept < 2000) : (slept += 100) {
+            if (app.attention_wake.swap(false, .acq_rel)) break;
+            _ = usleep(100 * 1000);
+        }
+    }
 }
 
 fn usageThread(app: *App) void {
