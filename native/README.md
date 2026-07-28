@@ -72,6 +72,18 @@ reader thread inside the parse, so it only raises a flag — everything
 the bell MEANS is AppKit's, drained on the main thread off the 2Hz HUD
 tick. ctl `tabs` prints `bell` beside a tab that is holding one.
 
+**OSC 9 / OSC 777** become real desktop notifications, so an agent that
+finishes in a space you left can say so through Notification Centre
+rather than only through a chip dot. This needed a fork of ghostty-vt:
+the library decodes both sequences and then dropped the result, having
+no effect callback to hand it to — `incantery/ghostty`, branch
+`rook/vt-desktop-notification`, adds one mirroring `bell`. Permission is
+requested lazily, on the first notification rather than at launch, so a
+probe instance never triggers the prompt. Unbundled runs skip it with a
+warning: `currentNotificationCenter` raises when the process has no
+bundle identifier, which is exactly how `zig build run` runs. ctl
+`notify` reports the last one posted.
+
 The cursor
 and the accent-colored separator edges mark the focused pane. Only the
 active tab renders: background tabs' emulators keep advancing but cost

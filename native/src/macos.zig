@@ -283,6 +283,8 @@ fn nsStringLen(bytes: []const u8) objc.Object {
 }
 
 const MonitorBlock = objc.Block(struct { app: *App }, .{objc.c.id}, objc.c.id);
+/// UNUserNotificationCenter's authorization completion handler.
+const AuthBlock = objc.Block(struct {}, .{ bool, objc.c.id }, void);
 const ResizeBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 const PresentedBlock = objc.Block(struct { app: *App, dirty: u8, commit_t: f64 }, .{objc.c.id}, void);
 const CompletedBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
@@ -436,6 +438,14 @@ pub const App = struct {
     /// What BEL does (config `bell`). Live-reloadable, unlike the
     /// renderer-shaped settings around it.
     cfg_bell: @import("config.zig").Bell = .visual,
+    /// Notification bookkeeping: authorization is asked once lazily, the
+    /// unbundled warning is printed once, and the last one posted is kept
+    /// for ctl `notify` (a banner is the one thing a blind test can't see).
+    notify_asked: bool = false,
+    notify_warned: bool = false,
+    notify_seq: u32 = 0,
+    notify_last: [384]u8 = undefined,
+    notify_last_len: usize = 0,
 
     /// Active mouse-drag selection: the pane and its anchor cell
     /// (viewport coords at mousedown). Under draw_lock; cleared by
@@ -2059,9 +2069,91 @@ pub const App = struct {
         if (!frontmost) _ = self.app.msgSend(c_long, "requestUserAttention:", .{@as(c_long, 10)});
     }
 
+    /// Post an OSC 9 / OSC 777 notification through UNUserNotificationCenter.
+    ///
+    /// GUARDED ON THE BUNDLE. currentNotificationCenter raises an
+    /// NSException when the process has no bundle identifier, which is
+    /// exactly how a `zig build run` binary runs — so an unbundled dev
+    /// instance would die on the first notification instead of skipping
+    /// it. The installed app has an identifier and takes this path.
+    fn postNotification(self: *App, title: []const u8, body: []const u8) void {
+        const bundle = objc.getClass("NSBundle").?.msgSend(objc.Object, "mainBundle", .{});
+        if (bundle.value == null) return;
+        if (bundle.msgSend(objc.Object, "bundleIdentifier", .{}).value == null) {
+            if (!self.notify_warned) {
+                self.notify_warned = true;
+                std.debug.print("rook: notifications need the app bundle (run /Applications/rook.app)\n", .{});
+            }
+            return;
+        }
+        const Center = objc.getClass("UNUserNotificationCenter") orelse return;
+        const center = Center.msgSend(objc.Object, "currentNotificationCenter", .{});
+        if (center.value == null) return;
+
+        // Ask once, lazily. At startup this would pop a permission
+        // dialog on every probe launch; here it costs one prompt the
+        // first time something actually wants to notify.
+        if (!self.notify_asked) {
+            self.notify_asked = true;
+            var auth = AuthBlock.init(.{}, &authCallback);
+            // alert | sound = 1 | 2
+            center.msgSend(void, "requestAuthorizationWithOptions:completionHandler:", .{ @as(u64, 3), &auth });
+        }
+
+        const Content = objc.getClass("UNMutableNotificationContent") orelse return;
+        const content = Content.msgSend(objc.Object, "alloc", .{}).msgSend(objc.Object, "init", .{});
+        defer content.msgSend(void, "release", .{});
+        // OSC 9 has no title of its own; the app's name is the honest one.
+        content.msgSend(void, "setTitle:", .{if (title.len > 0) nsStringLen(title).value else nsString("rook").value});
+        content.msgSend(void, "setBody:", .{nsStringLen(body).value});
+
+        const Request = objc.getClass("UNNotificationRequest") orelse return;
+        var idbuf: [64]u8 = undefined;
+        self.notify_seq +%= 1;
+        const ident = std.fmt.bufPrint(&idbuf, "rook.osc.{d}", .{self.notify_seq}) catch return;
+        const req = Request.msgSend(objc.Object, "requestWithIdentifier:content:trigger:", .{
+            nsStringLen(ident).value,
+            content.value,
+            @as(objc.c.id, null),
+        });
+        center.msgSend(void, "addNotificationRequest:withCompletionHandler:", .{ req.value, @as(objc.c.id, null) });
+    }
+
+    /// Drain notification requests raised by reader threads. Separate
+    /// from the bell drain only because it needs each session's mutex:
+    /// the title/body live in the Session and the reader can overwrite
+    /// them mid-parse.
+    fn drainNotificationsLocked(self: *App) void {
+        for (self.spaces.items) |space| {
+            for (space.tabs.items) |tab| {
+                for (tab.panes.items) |p| {
+                    const tm = p.term() orelse continue;
+                    var title_buf: [96]u8 = undefined;
+                    var body_buf: [256]u8 = undefined;
+                    var tl: usize = 0;
+                    var bl: usize = 0;
+                    tm.session.mutex.lock();
+                    if (tm.session.notify_pending) {
+                        tm.session.notify_pending = false;
+                        tl = tm.session.notify_title_len;
+                        bl = tm.session.notify_body_len;
+                        @memcpy(title_buf[0..tl], tm.session.notify_title[0..tl]);
+                        @memcpy(body_buf[0..bl], tm.session.notify_body[0..bl]);
+                    }
+                    tm.session.mutex.unlock();
+                    if (tl == 0 and bl == 0) continue;
+                    self.notify_last_len = @min(tl + bl + 3, self.notify_last.len);
+                    _ = std.fmt.bufPrint(&self.notify_last, "{s} | {s}", .{ title_buf[0..tl], body_buf[0..bl] }) catch {};
+                    self.postNotification(title_buf[0..tl], body_buf[0..bl]);
+                }
+            }
+        }
+    }
+
     fn refreshHudLocked(self: *App, now: f64) void {
         self.hud_calls +%= 1;
         self.drainBellsLocked();
+        self.drainNotificationsLocked();
         if (self.hud_calls % 2 == 0) self.pollConfigLocked();
         const bytes = stats.global.bytes_in.load(.monotonic);
         if (self.hud_last_t > 0 and now > self.hud_last_t) {
@@ -2754,6 +2846,13 @@ fn hostThread(app: *App) void {
 fn terminateCallback(context: *const ResizeBlock.Context, notification: objc.c.id) callconv(.c) void {
     _ = notification;
     context.app.shutdownHost();
+}
+
+/// Authorization result. Nothing to do but say so once: a denied
+/// notification is the user's decision, and retrying would be nagging.
+fn authCallback(_: *const AuthBlock.Context, granted: bool, err: objc.c.id) callconv(.c) void {
+    _ = err;
+    if (!granted) std.debug.print("rook: notification permission denied (System Settings > Notifications > rook)\n", .{});
 }
 
 fn usageThread(app: *App) void {

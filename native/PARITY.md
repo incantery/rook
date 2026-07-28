@@ -83,8 +83,16 @@ a daily driver.
       the tab is the acknowledgement. `bell = none|visual|audible|all`.
       The cheapest agent-attention signal there is, and until §2's inbox
       lands it is the ONLY way rook can say an agent wants you.
-- [ ] **Notifications**: OSC 9 / OSC 777 → `NSUserNotification`. Claude
-      finishing in a background space should say so.
+- [x] **Notifications**: OSC 9 / OSC 777 → UNUserNotificationCenter.
+      Needed a FORK of ghostty-vt: `osc.zig` decodes both into
+      `show_desktop_notification`, but `stream_terminal.zig` dropped it
+      in the "no terminal-modifying effect" bucket, so no embedder could
+      reach it. incantery/ghostty `rook/vt-desktop-notification` adds a
+      `desktop_notification` effect mirroring `bell` (upstream-shaped,
+      with tests; the C ABI is deliberately left unwired — new enum tags
+      there are the library's call). Guarded on the bundle identifier:
+      `currentNotificationCenter` RAISES without one, which is exactly
+      how `zig build run` runs.
 - [ ] **OSC 8 hyperlinks** + URL/path detection with ⌘-click to open
       (file:line → open in the editor pane; that's the payoff).
 - [ ] **Pane zoom** (`<leader>z`) — tmux muscle memory, missing entirely.

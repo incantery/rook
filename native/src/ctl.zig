@@ -408,6 +408,18 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             },
         ) catch return;
         reply(fd, s);
+    } else if (std.mem.eql(u8, verb, "notify")) {
+        // The banner itself is the OS's; this is the last thing we
+        // handed it, which is the part a blind test can check.
+        app.draw_lock.lock();
+        defer app.draw_lock.unlock();
+        var buf: [512]u8 = undefined;
+        const s2 = std.fmt.bufPrint(&buf, "last=\"{s}\" asked={s} bundled={s}\n", .{
+            app.notify_last[0..app.notify_last_len],
+            if (app.notify_asked) "yes" else "no",
+            if (app.notify_warned) "no" else "yes",
+        }) catch return;
+        reply(fd, s2);
     } else if (std.mem.eql(u8, verb, "ime")) {
         // Is the input-method plumbing actually live? inputContext is
         // AppKit's verdict on our NSTextInputClient conformance — nil

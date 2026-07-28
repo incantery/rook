@@ -64,6 +64,16 @@ pub const Session = struct {
     /// exited). The app collapses the pane on its next frame.
     exited: std.atomic.Value(bool) = .init(false),
 
+    /// A desktop notification was requested (OSC 9 / OSC 777). Title
+    /// and body are copied here because the effect's slices are borrowed
+    /// for the call only. Guarded by `mutex`, like the terminal itself —
+    /// the reader writes them mid-parse and the app reads them later.
+    notify_pending: bool = false,
+    notify_title: [96]u8 = undefined,
+    notify_title_len: usize = 0,
+    notify_body: [256]u8 = undefined,
+    notify_body_len: usize = 0,
+
     /// BEL arrived. Set on the reader thread (inside the parse, with the
     /// mutex held), drained by the app on the main thread — the bell has
     /// to reach AppKit, and the reader is the wrong thread to touch it
@@ -211,6 +221,7 @@ pub const Session = struct {
             .xtversion = &effectXtversion,
             .color_scheme = &effectColorScheme,
             .bell = &effectBell,
+            .desktop_notification = &effectNotify,
             .clipboard_write = null,
             .title_changed = null,
             .pwd_changed = null,
@@ -246,6 +257,18 @@ pub const Session = struct {
     /// belongs on the main thread.
     fn effectBell(h: *Handler) void {
         fromHandler(h).bell.store(true, .release);
+    }
+
+    /// OSC 9 / OSC 777. Same thread and same rule as the bell: copy what
+    /// we need (the slices die with the call) and let the main thread
+    /// decide what a notification means.
+    fn effectNotify(h: *Handler, title: []const u8, body: []const u8) void {
+        const self = fromHandler(h);
+        self.notify_title_len = @min(title.len, self.notify_title.len);
+        @memcpy(self.notify_title[0..self.notify_title_len], title[0..self.notify_title_len]);
+        self.notify_body_len = @min(body.len, self.notify_body.len);
+        @memcpy(self.notify_body[0..self.notify_body_len], body[0..self.notify_body_len]);
+        self.notify_pending = true;
     }
 
     fn effectWritePty(h: *Handler, data: [:0]const u8) void {

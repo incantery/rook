@@ -47,6 +47,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkFramework("CoreGraphics", .{});
     exe_mod.linkFramework("CoreText", .{});
     exe_mod.linkFramework("ImageIO", .{});
+    // OSC 9 / OSC 777 desktop notifications (UNUserNotificationCenter).
+    exe_mod.linkFramework("UserNotifications", .{});
     // The workspace registry: rook's own sqlite db, read via the
     // system libsqlite3 (macOS ships it; no vendored dependency).
     exe_mod.linkSystemLibrary("sqlite3", .{});
