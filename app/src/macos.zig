@@ -387,6 +387,12 @@ pub const App = struct {
     /// Set when an answer is queued, so the poster posts it now.
     ask_wake: std.atomic.Value(bool) = .init(false),
     deck_wake: std.atomic.Value(bool) = .init(false),
+    /// An agent id whose transcript has been requested. The fetch is
+    /// blocking HTTP over a document-sized body, so the key path only
+    /// ever queues — transcriptThread does the work and opens the pane.
+    tx_req: [64]u8 = @splat(0),
+    tx_req_len: usize = 0,
+    tx_wake: std.atomic.Value(bool) = .init(false),
 
     /// The side pane takes the key path. Needed the moment a tenant is
     /// INTERACTIVE — the inbox is read-only, the ask form is not. Modal
@@ -588,11 +594,26 @@ pub const App = struct {
         @memcpy(self.shot_path[0..path.len], path);
         self.shot_len = path.len;
         self.shot_state.store(2, .release); // armed
+        // FORCE a frame. The shot is serviced by the display link while
+        // drawing, and this app draws NOTHING when idle — that is a
+        // measured property, not an accident. Without this, a shot of a
+        // quiet screen simply never happens: it times out, and because
+        // the state stays armed, every later shot answers "err busy"
+        // forever. Cost is one frame per shot, which is what a shot is.
+        self.draw_lock.lock();
+        self.scene_dirty = true;
+        self.draw_lock.unlock();
         return true;
     }
 
     pub fn shotPending(self: *App) bool {
         return self.shot_state.load(.acquire) != 0;
+    }
+
+    /// Disarm a shot that never got serviced, so one timeout does not
+    /// wedge the surface for the rest of the process's life.
+    pub fn cancelShot(self: *App) void {
+        self.shot_state.store(0, .release);
     }
 
     pub fn create(init: std.process.Init) !*App {
@@ -802,6 +823,11 @@ pub const App = struct {
         // its panel is open — a closed panel owes the host nothing.
         if (std.Thread.spawn(.{}, attentionThread, .{self})) |t| t.detach() else |err| {
             std.debug.print("rook attention: thread failed: {}\n", .{err});
+        }
+
+        // Transcript fetches, on demand.
+        if (std.Thread.spawn(.{}, transcriptThread, .{self})) |t| t.detach() else |err| {
+            std.debug.print("rook transcript: thread failed: {}\n", .{err});
         }
 
         // The agent deck, gated on its panel like the inbox.
@@ -2266,11 +2292,18 @@ pub const App = struct {
                 'g' => self.deck_sel = 0,
                 'G' => self.deck_sel = n -| 1,
                 '\r', '\n' => {
+                    // Enter OPENS the agent — its transcript. That is what
+                    // "open this row" means in a deck, and it is the
+                    // question the deck could not answer before: what did
+                    // it actually say.
+                    if (self.deck_sel < n)
+                        self.requestTranscriptLocked(self.deck.slice()[self.deck_sel].id.get());
+                    self.scene_dirty = true;
+                    return;
+                },
+                0x07 => { // ⌃G — go to its pane, same meaning as in the ask form
                     if (self.deck_sel < n) {
                         const a = self.deck.slice()[self.deck_sel];
-                        // Same "go there" as the ask form's ⌃G: panes are
-                        // not host sessions, so a shared cwd is the only
-                        // correspondence there is.
                         if (self.jumpToCwdLocked(a.cwd.get())) self.side_focus = false;
                     }
                     self.scene_dirty = true;
@@ -2280,6 +2313,49 @@ pub const App = struct {
             }
             i += 1;
         }
+        self.scene_dirty = true;
+    }
+
+    /// Ask for an agent's transcript. Returns immediately — the fetch is
+    /// a document-sized blocking HTTP read and must not sit on the key
+    /// path. Caller holds draw_lock.
+    pub fn requestTranscriptLocked(self: *App, id: []const u8) void {
+        const n = @min(id.len, self.tx_req.len);
+        if (n == 0) return;
+        @memcpy(self.tx_req[0..n], id[0..n]);
+        self.tx_req_len = n;
+        self.tx_wake.store(true, .release);
+    }
+
+    /// Put rendered text into an editor pane, under a display name.
+    ///
+    /// Takeover, exactly like `edit`: the shell parks underneath and
+    /// `:q` gives it back. A transcript is something you read beside
+    /// your work and then dismiss, which is the same shape.
+    pub fn openTextPane(self: *App, name: []const u8, text: []const u8) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const t = self.activeTab();
+        const p = t.focused;
+        if (p.editor()) |ed| {
+            ed.openText(name, text) catch return;
+            self.scene_dirty = true;
+            return;
+        }
+        const ed = editorpkg.Editor.create(self.gpa, self.io, null) catch return;
+        @import("syntax.zig").attach(ed, self.gpa);
+        self.attachCommands(ed);
+        ed.openText(name, text) catch {
+            ed.destroy();
+            return;
+        };
+        var tm = p.content.term;
+        tm.copy_mode = false;
+        p.under = tm;
+        p.content = .{ .edit = ed };
+        p.drawn_cursor = 0xffff_ffff;
+        self.focused_session.store(self.focusedTermSession(), .release);
+        self.refreshHudLocked(CACurrentMediaTime());
         self.scene_dirty = true;
     }
 
@@ -3327,7 +3403,7 @@ pub const App = struct {
             y += row_h;
         }
         if (self.side_focus)
-            _ = ui.text(tx, y + (row_h - ch) / 2, "j/k moves · enter goes there", th.bar_fg, bg);
+            _ = ui.text(tx, y + (row_h - ch) / 2, "j/k · enter opens · ^G goes there", th.bar_fg, bg);
     }
 
     fn drawAsk(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
@@ -4155,6 +4231,47 @@ fn asksThread(app: *App) void {
         while (slept < 1000) : (slept += 100) {
             if (app.ask_wake.swap(false, .acq_rel)) break;
             _ = usleep(100 * 1000);
+        }
+    }
+}
+
+/// Fetch a requested transcript and open it as a buffer.
+///
+/// Its own thread because the body is document-sized (the host's own
+/// note: 200 records of a real transcript is ~485KB) and the fetch is
+/// blocking. Rendering allocates, unlike every other panel — a timeline
+/// IS a document — and the editor takes ownership of the text.
+fn transcriptThread(app: *App) void {
+    const tx = @import("transcript.zig");
+    while (true) {
+        var id: [64]u8 = undefined;
+        var n: usize = 0;
+        app.draw_lock.lock();
+        if (app.tx_req_len > 0) {
+            n = app.tx_req_len;
+            @memcpy(id[0..n], app.tx_req[0..n]);
+            app.tx_req_len = 0;
+        }
+        app.draw_lock.unlock();
+
+        if (n > 0) {
+            if (tx.fetchRendered(app.gpa, app.io, id[0..n])) |text| {
+                defer app.gpa.free(text);
+                var name: [80]u8 = undefined;
+                // Short id: a uuid is 36 characters of nothing a human
+                // reads, and the pane's name is chrome.
+                const short = id[0..@min(n, 8)];
+                const label = std.fmt.bufPrint(&name, "agent:{s}", .{short}) catch "agent";
+                app.openTextPane(label, text);
+            } else {
+                std.debug.print("rook: transcript fetch failed for {s}\n", .{id[0..n]});
+            }
+        }
+
+        var slept: u32 = 0;
+        while (slept < 1000) : (slept += 50) {
+            if (app.tx_wake.swap(false, .acq_rel)) break;
+            _ = usleep(50 * 1000);
         }
     }
 }

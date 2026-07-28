@@ -357,6 +357,13 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             app.presentAsk(a);
             reply(fd, "ok\n");
         } else reply(fd, "err bad questions JSON\n");
+    } else if (std.mem.eql(u8, verb, "transcript") and rest.len > 0) {
+        // Open an agent's transcript as a buffer. Async by design: the
+        // fetch is a document-sized blocking read, so this only queues.
+        app.draw_lock.lock();
+        app.requestTranscriptLocked(rest);
+        app.draw_lock.unlock();
+        reply(fd, "ok\n");
     } else if (std.mem.eql(u8, verb, "ask-answer") and rest.len == 0) {
         // What the form last decided, verbatim. This is the body that
         // unblocks the asker, so it is the thing worth asserting on.
@@ -741,7 +748,13 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             while (app.shotPending() and waited < 2_000_000) : (waited += 10_000) {
                 _ = usleep(10_000);
             }
-            reply(fd, if (app.shotPending()) "err timeout\n" else "ok\n");
+            if (app.shotPending()) {
+                // Disarm: a shot left armed makes every later one answer
+                // "err busy", so one timeout would wedge the surface for
+                // the life of the process.
+                app.cancelShot();
+                reply(fd, "err timeout\n");
+            } else reply(fd, "ok\n");
         } else reply(fd, "err busy\n");
     } else if (std.mem.startsWith(u8, line, "winsize ")) {
         var it = std.mem.tokenizeScalar(u8, line[8..], ' ');

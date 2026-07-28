@@ -271,6 +271,48 @@ Not done: **acting** on a row. Jumping to the session and answering the
 ask need `/agents/{id}` verbs and a form renderer — §2's asks item. The
 inbox lists today.
 
+## The session view (`src/transcript.zig`)
+
+Enter on a deck row opens that agent's transcript **as a buffer**. That
+is the whole design: rook's editor is already a renderer with scrolling,
+search, motions and yank, so a timeline becomes a document rather than a
+bespoke viewer. `Editor.openText` is the seam, and `synthetic` marks a
+buffer with no file behind it so `:w` refuses. The same simplification
+threads will want.
+
+`GET /agents/{id}/transcript` serves whole records; rook takes the last
+200 and says so when older ones exist. Records render as
+`── assistant · model ──` headings, `⚒ Tool <what it names>` for calls,
+`→` / `✗` for results, and `· thinking` for blocks Claude Code writes
+with an encrypted signature and no text.
+
+Three judgement calls that make it readable:
+
+- **A tool result is not attributed to the user.** Claude Code sends
+  results back as `user` records; heading them "user" makes a build log
+  read as something the human said, which is the one thing this view
+  must not get wrong.
+- **Tool inputs show what they NAME**, not their whole payload — the
+  input is often a file's entire new contents, which would bury the
+  conversation in the thing it was about.
+- **Results are clipped to six lines** with a `…`. The transcript is for
+  seeing *what came back*, not reading it in full.
+
+**Found while building this, and it would have bitten every later
+panel**: `hostc` did not decode `Transfer-Encoding: chunked`. Go switches
+to chunked once a response outgrows its write buffer, so `/usage`,
+`/attention` and `/agents` all worked and the first big response did not
+— and the symptom was a JSON parse error, which reads as "the host sent
+garbage" rather than "we failed to decode it". `hostc.dechunk` has its
+own test root now.
+
+**Also found**: `shot` never dirtied the scene, and this app draws
+nothing when idle. A screenshot of a quiet screen therefore never
+happened — it timed out, and because the request stayed armed, every
+later shot answered `err busy` for the life of the process. Both halves
+are fixed; it made the agent-visibility story unreliable in exactly the
+situation you would use it.
+
 ## The agent deck (`src/agents.zig`)
 
 Every claude session rook can see, at once. `<leader>v` or `agent.view`.

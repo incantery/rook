@@ -217,10 +217,95 @@ pub fn request(
 
     // Shift the body to the front so the caller owns one clean slice.
     const body_start = head_end + 4;
-    const body_len = len - body_start;
+    var body_len = len - body_start;
+    const chunked = headerHasChunked(buf[0..head_end]);
     std.mem.copyForwards(u8, buf[0..body_len], buf[body_start..len]);
+    if (chunked) {
+        body_len = dechunk(buf[0..body_len]) orelse {
+            gpa.free(buf);
+            return null;
+        };
+    }
     const out = gpa.realloc(buf, body_len) catch buf[0..body_len];
     return .{ .status = status, .body = out };
+}
+
+/// Does the header block declare chunked transfer encoding?
+///
+/// Go's net/http switches to it once a response outgrows its write
+/// buffer, so this stayed invisible until the first BIG one: /usage,
+/// /attention and /agents all fit in a Content-Length response, and the
+/// transcript endpoint does not. Without de-chunking, the caller gets a
+/// body with `1000\r\n` framing sprinkled through it and reports a JSON
+/// parse error — which reads as "the host sent garbage", not "we did".
+fn headerHasChunked(head: []const u8) bool {
+    var it = std.mem.splitSequence(u8, head, "\r\n");
+    while (it.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " "), "transfer-encoding")) continue;
+        var vbuf: [64]u8 = undefined;
+        const v = std.mem.trim(u8, line[colon + 1 ..], " ");
+        if (v.len > vbuf.len) return false;
+        const lower = std.ascii.lowerString(vbuf[0..v.len], v);
+        if (std.mem.indexOf(u8, lower, "chunked") != null) return true;
+    }
+    return false;
+}
+
+/// Decode chunked transfer encoding IN PLACE. Returns the decoded
+/// length, or null if the framing is malformed.
+///
+/// Safe in place because the output is always shorter than the input:
+/// every chunk carries at least a size line and a trailing CRLF.
+pub fn dechunk(buf: []u8) ?usize {
+    var read_i: usize = 0;
+    var write_i: usize = 0;
+    while (true) {
+        const nl = std.mem.indexOfPos(u8, buf, read_i, "\r\n") orelse return null;
+        // The size line may carry `;ext=...` after the hex — ignore it.
+        var size_str = buf[read_i..nl];
+        if (std.mem.indexOfScalar(u8, size_str, ';')) |semi| size_str = size_str[0..semi];
+        const size = std.fmt.parseInt(usize, std.mem.trim(u8, size_str, " "), 16) catch return null;
+        read_i = nl + 2;
+        if (size == 0) return write_i; // last chunk; trailers ignored
+        if (read_i + size > buf.len) return null;
+        std.mem.copyForwards(u8, buf[write_i..][0..size], buf[read_i..][0..size]);
+        write_i += size;
+        read_i += size;
+        // Each chunk's data is followed by CRLF.
+        if (read_i + 2 > buf.len) return null;
+        read_i += 2;
+    }
+}
+
+// ----------------------------------------------------------------- tests
+
+test "dechunk reassembles a chunked body" {
+    var buf = "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n".*;
+    const n = dechunk(&buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("hello world", buf[0..n]);
+}
+
+test "dechunk handles a chunk extension and mixed-case hex" {
+    var buf = "A;foo=bar\r\n0123456789\r\n0\r\n\r\n".*;
+    const n = dechunk(&buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("0123456789", buf[0..n]);
+}
+
+test "dechunk declines malformed framing rather than returning garbage" {
+    var no_size = "nothex\r\ndata\r\n".*;
+    try std.testing.expect(dechunk(&no_size) == null);
+    // A size larger than what actually arrived — a truncated response.
+    var short = "FF\r\nonly-a-few\r\n".*;
+    try std.testing.expect(dechunk(&short) == null);
+}
+
+test "headerHasChunked is case-insensitive and does not false-positive" {
+    try std.testing.expect(headerHasChunked("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked"));
+    try std.testing.expect(headerHasChunked("HTTP/1.1 200 OK\r\ntransfer-encoding: Chunked"));
+    try std.testing.expect(!headerHasChunked("HTTP/1.1 200 OK\r\nContent-Length: 12"));
+    // A header merely MENTIONING the word must not trigger it.
+    try std.testing.expect(!headerHasChunked("HTTP/1.1 200 OK\r\nX-Note: chunked is off"));
 }
 
 pub fn get(gpa: std.mem.Allocator, info: *const Info, path: []const u8, max_body: usize) ?Response {

@@ -290,10 +290,30 @@ Ranked by how much of rook's identity dies without it.
       path segment: the first version read this repo's `rook/app` as
       "app", which is true and useless. Wire mapping pinned by a test
       against a real captured /agents response.
-- [ ] **Session view**: transcript jsonl → rendered timeline. The other
-      half, and the bigger one — `internal/transcript` + `transcriptapi`
-      do the parsing, `/agents/{id}/transcript` serves whole records with
-      an `after=` cursor. The deck is where it would open from.
+- [x] **Session view**: Enter on a deck row opens that agent's
+      transcript AS A BUFFER (`src/transcript.zig`). The editor is
+      already a renderer with scrolling, search, motions and yank, so a
+      timeline is a document rather than a bespoke viewer —
+      `Editor.openText` is the seam and `synthetic` makes `:w` refuse.
+      The simplification threads will want too.
+      Renders `── assistant · model ──`, `⚒ Tool <what it names>`, `→`/`✗`
+      results clipped to six lines, `· thinking` for the encrypted
+      blocks. JUDGEMENT THAT MATTERS: a tool result is NOT attributed to
+      the user — Claude Code sends results back as `user` records, and
+      heading them "user" makes a build log read as something the human
+      said, which is the one thing this view must not get wrong.
+      TWO BUGS IT SURFACED, both in shared tooling: (1) **hostc did not
+      decode `Transfer-Encoding: chunked`** — Go switches to it once a
+      response outgrows its write buffer, so every earlier panel worked
+      and the first big one did not, presenting as a JSON parse error
+      that read as the host's fault; `hostc.dechunk` has its own test
+      root now, and this would have bitten threads and review too.
+      (2) **`shot` never dirtied the scene** and the app draws nothing
+      when idle, so a screenshot of a quiet screen timed out AND left
+      the request armed, wedging every later shot with `err busy`.
+- [ ] Paging further back (`before=` cursor) and live tail (`after=`).
+      The window is the last 200 records and says so; both cursors are
+      already on the wire.
 - [ ] **Threads** (`/threads/`, `<leader>t`): host-projected editable
       docs. In rook these are *buffers* — the editor already is the
       renderer, which is a genuine simplification over Monaco.

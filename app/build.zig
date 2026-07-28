@@ -131,6 +131,29 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(agents_tests).step);
 
+    // The session view's record→document rendering. Its own root because
+    // the shape is the host's to change and a silent mismatch would show
+    // up as an empty or misleading transcript, not a crash.
+    const transcript_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/transcript.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(transcript_tests).step);
+
+    // hostc's HTTP framing. Its own root because of the chunked-encoding
+    // bug this exists to prevent: Go switches to chunked once a response
+    // outgrows its write buffer, so EVERY panel worked until the first
+    // big one, and the symptom was a JSON parse error that read as "the
+    // host sent garbage" rather than "we failed to decode it".
+    const hostc_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/hostc.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    hostc_tests.root_module.link_libc = true;
+    test_step.dependOn(&b.addRunArtifact(hostc_tests).step);
+
     // e2e: spawns the real app and drives its ctl socket.
     //
     // NOT part of `test`, and not in CI — it needs a window server, a

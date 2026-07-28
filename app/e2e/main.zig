@@ -92,9 +92,14 @@ fn splits(gpa: std.mem.Allocator, bin: []const u8) !void {
     try app.waitTextCount("split-lives", 2, 10_000);
 
     _ = try app.ctl("close");
-    // The shell has to die and be reaped before the tree collapses.
+    // The shell has to die and be reaped before the tree collapses, and
+    // the reap joins the reader thread on a display-link tick. 5s was
+    // enough in isolation but failed once on a machine busy with several
+    // other rook instances — the budget is arbitrary, the assertion is
+    // "eventually one pane", so give it room rather than encode a
+    // timing assumption about how loaded the host is.
     var waited: u32 = 0;
-    while (waited < 5000 and try app.paneCount() != 1) : (waited += 100) {
+    while (waited < 15000 and try app.paneCount() != 1) : (waited += 100) {
         h.sleepMs(100);
     }
     try h.expectEq("panes after close", 1, try app.paneCount());
@@ -549,6 +554,13 @@ fn deck(gpa: std.mem.Allocator, bin: []const u8) !void {
     // must not reach the shell.
     _ = try app.ctl("type jjjj");
     try h.expectContains(try app.ctl("dump"), "e2e$", "deck keys did NOT reach the shell");
+
+    // ⌃G means "go to its pane" in the deck exactly as it does in the ask
+    // form; Enter means "open it" (its transcript). With no host there is
+    // nothing to open, so this only asserts neither key wedges the form.
+    _ = try app.ctl("key 07");
+    _ = try app.ctl("key 0d");
+    try h.expectContains(try app.ctl("sidepane"), "panel:deck", "deck survives enter/^G with no host");
 
     // ESC yields the keys back without closing the panel — you want to
     // keep looking at the list while you work.

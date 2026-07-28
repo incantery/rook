@@ -99,6 +99,13 @@ pub const Editor = struct {
     /// panel — every pane can hold its own tree.
     is_dir: bool = false,
 
+    /// A buffer with no file behind it — a rendered transcript today,
+    /// host-projected docs later. `:w` refuses on it for the same reason
+    /// it refuses on a directory listing: there is nowhere to write.
+    /// The editor is otherwise itself, which is the point of projecting
+    /// into a buffer rather than building a viewer.
+    synthetic: bool = false,
+
     // Highlighter seam — function pointers so the editor never links
     // the tree-sitter C (headless tests stay headless). syntax.zig
     // attaches; null = plain text.
@@ -544,6 +551,10 @@ pub const Editor = struct {
                 self.setStatus("a directory listing isn't writable", .{}, true);
                 return;
             }
+            if (self.synthetic) {
+                self.setStatus("{s} has no file behind it", .{self.displayName()}, true);
+                return;
+            }
             if (arg.len > 0) {
                 const p = gpa.dupe(u8, arg) catch return;
                 if (self.buf.path) |old| gpa.free(old);
@@ -594,6 +605,32 @@ pub const Editor = struct {
         if (run(ctx, verb)) return true;
         self.setStatus("not a command: {s}", .{verb}, true);
         return true; // handled: the message is ours, not the fallthrough's
+    }
+
+    /// Show text that has no file behind it, under a display name.
+    ///
+    /// The whole session-view design in one call: a transcript is a
+    /// DOCUMENT, and the editor is already a renderer with scrolling,
+    /// search, motions and yank. Building a bespoke viewer would have
+    /// meant reimplementing all of that worse.
+    pub fn openText(self: *Editor, name: []const u8, text: []const u8) !void {
+        var b: bufferpkg.Buffer = .{ .rope = try .init(self.gpa, text) };
+        errdefer b.rope.deinit(self.gpa);
+        b.path = try self.gpa.dupe(u8, name);
+        self.buf.deinit(self.gpa);
+        self.buf = b;
+        self.is_dir = false;
+        self.synthetic = true;
+        self.cline = 0;
+        self.ccol = 0;
+        self.top = 0;
+        self.left = 0;
+        // A synthetic name is not a path, so the highlighter must not try
+        // to pick a grammar from its extension.
+        if (self.hl_set_path) |set| {
+            if (self.hl_ctx) |ctx| set(ctx, null);
+        }
+        self.hl_version = std.math.maxInt(u64);
     }
 
     /// Retarget this pane at another file (:e / ctl edit — the
