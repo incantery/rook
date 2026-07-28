@@ -314,9 +314,33 @@ Ranked by how much of rook's identity dies without it.
 - [ ] Paging further back (`before=` cursor) and live tail (`after=`).
       The window is the last 200 records and says so; both cursors are
       already on the wire.
-- [ ] **Threads** (`/threads/`, `<leader>t`): host-projected editable
-      docs. In rook these are *buffers* — the editor already is the
-      renderer, which is a genuine simplification over Monaco.
+- [x] **Threads** (`/threads/`, `<leader>t`) — host-projected editable
+      docs, and in rook they ARE buffers: `<leader>t` lists, Enter opens
+      `thread:{id}`, `:w` saves the draft, `:ThreadNote`/`:ThreadAsk`/
+      `:ThreadResolve` go through the ex-command bridge (which is what
+      it was built for). `Editor.app_save` is the seam — same
+      function-pointer shape as the highlighter and the command bridge,
+      so editor.zig still knows about buffers and not about hosts. The
+      buffer NAME carries identity, so a save belongs to a PANE rather
+      than to some "current thread" two panes would fight over.
+      THE CONTRACT, both halves load-bearing: the prefix is `content`
+      MINUS `draft`, computed exactly — never by scanning for the
+      scissors, since a comment body could contain a scissors-shaped
+      line; and a 409 is NOT an error but a concurrent agent reply, so
+      rook splices its tail onto the grown history and re-saves (append-
+      only, so it always merges).
+      FOUND ON REAL DATA: anchors are MULTI-LINE (a newline in a
+      single-row list breaks the row — `setOneLine` collapses runs), and
+      `deliverError` deserves its own mark because it means submitted-
+      but-nobody-was-told, the one failure the old model showed as a
+      normal wait.
+      ALSO FIXED: the untargeted-input priority lived in TWO places (the
+      NSEvent path and ctl) and drifted — the threads panel reached one
+      and not the other, so Enter went to the shell. There is one
+      `routeChromeKeyLocked` now.
+- [ ] Thread CREATION from a buffer (`gt` — go-to-or-create on the line
+      under the cursor). Reading and replying work; starting one still
+      needs the anchor plumbing.
 - [ ] **Review / RookTask** (`/tasks/`, `/edits/`, `<leader>g`): the
       changes list, the gate, approve/reject/comment, review rings.
       Needs a diff surface (see §3).

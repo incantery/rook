@@ -410,6 +410,8 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     kb.bind('q', .{ .action = .panel_ask });
     // The agent deck — the wails app's <leader>v, kept.
     kb.bind('v', .{ .action = .panel_deck });
+    // Threads, likewise.
+    kb.bind('t', .{ .action = .panel_threads });
 
     var pathbuf: [1024]u8 = undefined;
     const path = cfgPath(&pathbuf) orelse return kb;

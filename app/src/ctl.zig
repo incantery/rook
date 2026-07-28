@@ -152,22 +152,11 @@ fn writeTarget(app: *macos.App, pane_id: ?u32, bytes: []const u8) bool {
     const ok = blk: {
         app.draw_lock.lock();
         defer app.draw_lock.unlock();
-        // Untargeted input follows the real key path's priority: palette,
-        // then a focused side pane, then the pane.
-        if (app.pal_open and pane_id == null) {
+        // Untargeted input goes through the SAME routing rule the real
+        // key path uses — see routeChromeKeyLocked.
+        if (pane_id == null) {
             app.markInput(CACurrentMediaTime());
-            app.palKeyLocked(bytes);
-            break :blk true;
-        }
-        if (app.side_focus and app.side_panel == .ask and pane_id == null) {
-            app.markInput(CACurrentMediaTime());
-            app.askKeyLocked(bytes);
-            break :blk true;
-        }
-        if (app.side_focus and app.side_panel == .deck and pane_id == null) {
-            app.markInput(CACurrentMediaTime());
-            app.deckKeyLocked(bytes);
-            break :blk true;
+            if (app.routeChromeKeyLocked(bytes)) break :blk true;
         }
         const p = findPane(app, pane_id) orelse break :blk false;
         if (p == app.activeTab().focused) app.markInput(CACurrentMediaTime());
@@ -406,6 +395,23 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     }
                     if (app.attention.more > 0)
                         w.print("+{d} more\n", .{app.attention.more}) catch {};
+                },
+                .threads => {
+                    if (!app.thr.live) {
+                        _ = w.write("host unreachable\n") catch 0;
+                    } else if (app.thr.n == 0) {
+                        _ = w.write("no open threads\n") catch 0;
+                    } else for (app.thr.slice(), 0..) |*t, i| {
+                        w.print("{s}{d}\t{s}:{d}\t{s}{s}\n", .{
+                            @as([]const u8, if (i == app.thr_sel) "*" else " "),
+                            t.id,
+                            t.path.get(),
+                            t.line,
+                            t.anchor.get(),
+                            @as([]const u8, if (t.undelivered) "\t(undelivered)" else if (t.has_draft) "\t(draft)" else ""),
+                        }) catch break;
+                    }
+                    if (app.thr.more > 0) w.print("+{d} more\n", .{app.thr.more}) catch {};
                 },
                 .deck => {
                     if (!app.deck.live) {

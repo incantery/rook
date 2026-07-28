@@ -154,6 +154,18 @@ pub fn build(b: *std.Build) void {
     hostc_tests.root_module.link_libc = true;
     test_step.dependOn(&b.addRunArtifact(hostc_tests).step);
 
+    // The thread-document contract: the prefix arithmetic and the
+    // concurrent-reply splice. Its own root because getting the prefix
+    // wrong loses a draft — the host 409s and the client has to merge,
+    // and a merge that splices at the wrong place eats what you typed.
+    const threads_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/threads.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    threads_tests.root_module.link_libc = true;
+    test_step.dependOn(&b.addRunArtifact(threads_tests).step);
+
     // e2e: spawns the real app and drives its ctl socket.
     //
     // NOT part of `test`, and not in CI — it needs a window server, a

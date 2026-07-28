@@ -271,6 +271,42 @@ Not done: **acting** on a row. Jumping to the session and answering the
 ask need `/agents/{id}` verbs and a form renderer — §2's asks item. The
 inbox lists today.
 
+## Threads (`src/threads.zig`)
+
+File-anchored conversations, projected as **editable buffers**.
+`<leader>t` lists the active space's workspace threads; Enter opens one
+as `thread:{id}`. `:w` saves your draft, and `:ThreadNote` /
+`:ThreadAsk` / `:ThreadResolve` reach the host through the ex-command
+bridge — which is what that bridge was built for.
+
+The host keeps truth structured and hands out a document: rendered
+history, a scissors line, your draft below. Two parts of that contract
+are load-bearing for any client:
+
+- **The prefix is `content` minus `draft`, computed exactly** — never by
+  scanning for the scissors line, because a comment body could legally
+  contain a scissors-shaped line. The host returns `draft` alongside the
+  doc precisely so the arithmetic is possible.
+- **A 409 is not an error, it is a concurrent agent reply.** The host
+  answers with the fresh doc; rook splices its tail onto the grown
+  history and re-saves. History is append-only, so this always merges.
+
+`Editor.app_save` is the seam — the same function-pointer shape as the
+highlighter and the ex-command bridge, so `editor.zig` still knows about
+buffers and not about what is on the other end of one. The buffer NAME
+carries identity (`thread:42`), so which thread a save belongs to is a
+property of the pane rather than an "open thread" on the App that a
+second pane would fight over.
+
+Two things real data taught, neither visible in a sandbox:
+
+- **Anchors are multi-line.** An anchor is a span of source, and pasting
+  a newline into a single-row list breaks the row. `setOneLine` collapses
+  whitespace runs.
+- **An undelivered thread gets its own mark.** `deliverError` means the
+  thread is open and submitted but *nobody was told* — the one failure
+  the old model rendered as a normal wait.
+
 ## The session view (`src/transcript.zig`)
 
 Enter on a deck row opens that agent's transcript **as a buffer**. That

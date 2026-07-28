@@ -47,6 +47,14 @@ pub const Action = enum {
     panel_attention,
     /// The agent deck — every claude session, at once.
     panel_deck,
+    /// The workspace's threads.
+    panel_threads,
+    /// Thread verbs, on whichever thread the focused pane holds. Reached
+    /// as :ThreadNote / :ThreadAsk / :ThreadResolve through the
+    /// ex-command bridge, which is exactly what that bridge is for.
+    thread_note,
+    thread_ask,
+    thread_resolve,
     /// Bring a pending question back. Without this, switching panels
     /// while an ask is open strands it: the form still holds the ask, so
     /// the poller will not offer another, and nothing shows it.
@@ -95,6 +103,10 @@ pub const commands = [_]Command{
     .{ .id = "app.fullscreen", .title = "Toggle Fullscreen", .category = "App", .action = .app_fullscreen },
     .{ .id = "attention.inbox", .title = "Attention Inbox", .category = "Panel", .action = .panel_attention, .keys = "<leader>a" },
     .{ .id = "agent.view", .title = "Agent Deck", .category = "Panel", .action = .panel_deck, .keys = "<leader>v" },
+    .{ .id = "threads.toggle", .title = "Threads", .category = "Panel", .action = .panel_threads, .keys = "<leader>t" },
+    .{ .id = "thread.note", .title = "Land Draft as a Note", .category = "Thread", .action = .thread_note },
+    .{ .id = "thread.ask", .title = "Send Draft to the Agent", .category = "Thread", .action = .thread_ask },
+    .{ .id = "thread.resolve", .title = "Resolve Thread", .category = "Thread", .action = .thread_resolve },
     .{ .id = "ask.show", .title = "Show Pending Question", .category = "Panel", .action = .panel_ask, .keys = "<leader>q" },
     .{ .id = "panel.flip", .title = "Move Side Pane to Other Edge", .category = "Panel", .action = .panel_flip },
 };

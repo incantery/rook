@@ -131,6 +131,16 @@ pub const Editor = struct {
     cmd_ctx: ?*anyopaque = null,
     app_command: ?*const fn (*anyopaque, []const u8) bool = null,
 
+    /// A buffer whose `:w` goes somewhere other than a file — a thread
+    /// projected from the host. Same seam shape as the two above, and
+    /// the same reason: the editor stays a pure model that knows about
+    /// buffers, not about what is on the other end of one.
+    ///
+    /// Returns true if it handled the save. It runs synchronously on the
+    /// key path, so the app side must not block on the network — it
+    /// queues and reports through setStatus later.
+    app_save: ?*const fn (*anyopaque, name: []const u8, content: []const u8) bool = null,
+
     pub fn create(gpa: Allocator, io: std.Io, path: ?[]const u8) !*Editor {
         const self = try gpa.create(Editor);
         errdefer gpa.destroy(self);
@@ -290,7 +300,7 @@ pub const Editor = struct {
 
     // ------------------------------------------------------------ text access
 
-    fn lineCountB(self: *const Editor) usize {
+    pub fn lineCountB(self: *const Editor) usize {
         return self.buf.rope.lineCount();
     }
 
@@ -363,7 +373,7 @@ pub const Editor = struct {
         if (self.ccol > maxc) self.ccol = maxc;
     }
 
-    fn setStatus(self: *Editor, comptime fmt: []const u8, args: anytype, is_err: bool) void {
+    pub fn setStatus(self: *Editor, comptime fmt: []const u8, args: anytype, is_err: bool) void {
         const s = std.fmt.bufPrint(&self.status_buf, fmt, args) catch return;
         self.status_len = s.len;
         self.status_err = is_err;
@@ -552,6 +562,22 @@ pub const Editor = struct {
                 return;
             }
             if (self.synthetic) {
+                // A projected buffer may still be SAVEABLE — it just does
+                // not save to a file. Offer it to the app before refusing.
+                if (self.app_save) |save| {
+                    if (self.cmd_ctx) |ctx| {
+                        const text = self.buf.rope.dupeRange(gpa, 0, self.buf.rope.byteLen()) catch {
+                            self.setStatus("out of memory", .{}, true);
+                            return;
+                        };
+                        defer gpa.free(text);
+                        if (save(ctx, self.buf.path orelse "", text)) {
+                            self.buf.modified = false;
+                            if (!is(u8, verb, "w")) self.closed = true;
+                            return;
+                        }
+                    }
+                }
                 self.setStatus("{s} has no file behind it", .{self.displayName()}, true);
                 return;
             }

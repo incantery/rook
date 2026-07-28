@@ -31,6 +31,7 @@ const scenarios = [_]Scenario{
     .{ .name = "sidepane", .what = "side pane retiles the grid, flips edges, and holds the inbox", .run = sidepane },
     .{ .name = "asks", .what = "a question renders, takes keys, and produces the answer JSON", .run = asks },
     .{ .name = "deck", .what = "the agent deck opens focused and yields the keys back", .run = deck },
+    .{ .name = "threads", .what = "the threads panel, and :Thread* refuses a non-thread buffer", .run = threads },
 };
 
 // ---------------------------------------------------------------- boot
@@ -578,6 +579,47 @@ fn deck(gpa: std.mem.Allocator, bin: []const u8) !void {
     // The deck is a registry command like any other, so the palette
     // lists it — that is the whole point of the spine.
     try h.expectContains(try app.ctl("commands"), "agent.view", "registered as a command");
+}
+
+// ------------------------------------------------------------- threads
+
+fn threads(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    const wide = try paneCols(app);
+
+    _ = try app.ctl("run threads.toggle");
+    const st = try app.ctl("sidepane");
+    try h.expectContains(st, "panel:threads", "threads takes the side pane");
+    try h.expectContains(st, "host unreachable", "fails open, and says which");
+    try h.expect(try paneCols(app) < wide, "threads retiles like any tenant", .{});
+
+    // Opens focused, like the deck: it is a list you pick from.
+    _ = try app.ctl("type jjkk");
+    try h.expectContains(try app.ctl("dump"), "e2e$", "panel keys did NOT reach the shell");
+    _ = try app.ctl("key 1b");
+    _ = try app.ctl("run threads.toggle");
+    try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
+
+    // The thread verbs reach the registry AND the ex-command bridge.
+    const cmds = try app.ctl("commands");
+    try h.expectContains(cmds, "thread.note", "thread verbs are commands");
+    try h.expectContains(cmds, ":ThreadNote", "…and have derived ex-names");
+
+    // :ThreadNote on a buffer that is NOT a thread must SAY so. A silent
+    // no-op here is indistinguishable from a bug, and this is the only
+    // half of the thread verbs testable without a host.
+    var path_buf: [192]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/plain.txt", .{app.dirPath()});
+    try h.writeFile(path, "not a thread\n");
+    _ = try app.ctlFmt("edit {s}", .{path});
+    try app.waitText("not a thread", 5_000);
+    _ = try app.ctl("type :ThreadNote");
+    _ = try app.ctl("enter");
+    try app.waitText("not a thread buffer", 5_000);
 }
 
 // ---------------------------------------------------------------- runner
