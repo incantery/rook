@@ -13,7 +13,9 @@ and it already does.
 asks, attention, transcripts, decisions, worktrees, workflows, cloud
 relay, plugins, LSP. `rookctl` and the MCP server talk to it over
 localhost HTTP + bearer token, and that is how Claude touches rook.
-Porting it to Zig buys nothing and costs the product.
+Porting it *now* buys nothing and costs the product. Porting most of it
+eventually is the plan — see §6, which is the destination this checklist
+is walking toward.
 
 So the replacement is not a port. It is: **rookz grows a host client and
 renders host state in its own chrome** — `usage.zig` is the seed of
@@ -194,6 +196,87 @@ must clear is "I don't reach for a terminal nvim inside rookz", not
   long-term shape.
 - **No web/remote projection.** The webview version could in principle
   be reached from anywhere; a Metal app cannot.
+
+## 6. Medium term: the Go recedes
+
+The destination is a rookide with little or no Go in it. Anything that
+stays Go lives in **its own repo behind an artifact** — a binary rook
+spawns and speaks a protocol to. That is a design goal, not a cleanup
+chore, and it is worth stating now so the checklist above is understood
+as a step toward it rather than an endorsement of two languages forever.
+
+**Why port at all.** Not tidiness — identity. Rook wants a UI whose
+elements have stable semantic ids that rookctl and agents can address,
+where the review gate, the thread doc, and the verdict ledger *are* the
+things on screen. Across a process boundary the UI always renders a
+copy: state is serialized, the copy drifts, and "what does the pane
+show" and "what does the host believe" become two questions. In-process,
+a thread is a buffer, a review anchor is a mark in that buffer, and the
+ledger is the same object the renderer draws.
+
+**Most of the dependency tree dies at cutover anyway.** `wails/v3`,
+`creack/pty`, `charmbracelet/{ultraviolet,ansi,vt}`, `go-runewidth`,
+`mattn/go-sqlite3`, `pelletier/go-toml` are all webview-era scaffolding:
+rookz owns ptys, ghostty-vt owns emulation and width tables,
+`workspaces.zig` already speaks to system libsqlite3, `config.zig`
+already parses TOML. What genuinely needs Go is narrow — `connectrpc` +
+`protobuf` + TLS + websockets, i.e. cloud, relay, edge signing,
+trackers, self-update. Everything else in the host is filesystem,
+subprocess, and JSON. Even git is shelled out (`git -C dir status
+--porcelain=v2`), so review/gutter/worktree port as spawn-and-parse.
+
+**The Go that survives is not a wart.** NEXT.md already wants
+capabilities delivered as external protocol services (LSP, DAP, MCP,
+agent protocols, purpose-built processes over a typed rook protocol). A
+`rook-cloud` binary in its own repo, spawned lazily when a remote ask
+needs to leave the machine, is exactly that shape — the residual Go
+becomes the first tenant of rook's own extension boundary, and the best
+available pressure on it.
+
+**What Go is buying today, that Zig has to earn.** Three things, ranked
+honestly. (1) Mature TLS and third-party API plumbing — real, but
+confined to the edge, so the separate-repo rule already solves it.
+(2) A GC over a long-lived, heavily-mutated object graph (threads,
+anchors, review state) under concurrent access from watchers and
+handlers, for days at a time. That is a different discipline from a
+renderer where a frame's allocations die at the frame boundary; the
+lifetime design is the real cost of the port, not the typing.
+(3) Encoded behavior in tests — `threads_test.go` is 29KB,
+`transcriptwatch_test.go` 17KB, `review_test.go` 14KB. Porting discards
+years of edge cases and re-earns them in production, on the daily
+driver. That argues against a big-bang rewrite, not against porting.
+
+**The sequencing rule: port by coupling to the UI, and only after rookz
+already renders the thing.** `workspaces.zig` is the proof — ~130 lines
+of sqlite replaced a whole Go API surface because the palette needed
+exactly one query and no more. Ported first, it would have reproduced
+the Go shape. Build the client, ship the panel, learn what the UI
+actually needs, then collapse the service at the size the UI proved.
+
+Rough classification:
+
+- **Port first** (want to be in-process): threads → buffers,
+  review/reanchor/tasks → marks in those buffers, attention, decisions,
+  gutter, grep, worktree, LSP
+- **Port eventually** (local, low UI coupling): transcripts, usage
+  prober, monitor, overview, workload
+- **Stays Go, own repo** (network edge): cloud/relay/edge/edgesign,
+  GitHub + Jira trackers, self-update
+
+Two constraints on timing. Zig 0.16 is pre-1.0 and std churns —
+`trimRight`→`trimEnd` and the `Io.Dir` reshuffle already landed on a
+small surface, and 20k lines of service code makes every release a
+migration; that argues for porting late, nearer 1.0. And the HTTP wire
+survives regardless, because rookctl and MCP reach rook over it: it is
+the agent surface, a product feature, not an implementation detail.
+
+Which is what makes this a non-decision today. Build `hostc.zig`
+against the wire, ship the panels, and the server's language stays
+invisible behind it. The port then becomes a series of quiet,
+individually reversible moves: reimplement one endpoint in Zig, flip
+the client to the in-process call, delete the Go. No flag day, and each
+move is justified by a UI that already exists and is already verifiable
+through the ctl socket.
 
 ## Suggested order
 
