@@ -46,6 +46,8 @@ extern "c" fn CVDisplayLinkGetActualOutputVideoRefreshPeriod(link: CVDisplayLink
 
 const NSEventMaskKeyDown: u64 = 1 << 10;
 const NSEventMaskLeftMouseDown: u64 = 1 << 1;
+const NSEventMaskLeftMouseUp: u64 = 1 << 2;
+const NSEventMaskLeftMouseDragged: u64 = 1 << 6;
 const NSEventMaskScrollWheel: u64 = 1 << 22;
 const flag_shift: u64 = 1 << 17;
 const flag_ctrl: u64 = 1 << 18;
@@ -69,6 +71,7 @@ const ed_dim: [4]u8 = .{ 96, 99, 116, 255 };
 const ed_sel_bg: [4]u8 = .{ 58, 62, 88, 255 };
 const ed_err: [4]u8 = .{ 247, 118, 142, 255 };
 const ed_bg_rgb: @import("ghostty-vt").color.RGB = .{ .r = 18, .g = 19, .b = 26 };
+const term_sel_bg: [3]u8 = .{ 58, 62, 88 };
 
 fn nsString(s: [*:0]const u8) objc.Object {
     const NSString = objc.getClass("NSString").?;
@@ -165,6 +168,12 @@ pub const App = struct {
 
     /// Wheel accumulator (points); one scroll step per cell height.
     wheel_accum: f64 = 0,
+
+    /// Active mouse-drag selection: the pane and its anchor cell
+    /// (viewport coords at mousedown). Under draw_lock; cleared by
+    /// reap if the pane dies mid-drag.
+    drag_pane: ?*panespkg.Pane = null,
+    drag_anchor: [2]u16 = .{ 0, 0 },
 
     // ctl `shot` handoff: the socket thread stores a path and flips the
     // flag; the render thread services it after the next commit.
@@ -311,7 +320,8 @@ pub const App = struct {
         // Mouse: click-to-focus (panes + tab chips), wheel scroll.
         var mouse_ctx = MonitorBlock.init(.{ .app = self }, &mouseCallback);
         _ = NSEvent.msgSend(objc.Object, "addLocalMonitorForEventsMatchingMask:handler:", .{
-            NSEventMaskLeftMouseDown | NSEventMaskScrollWheel,
+            NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp |
+                NSEventMaskLeftMouseDragged | NSEventMaskScrollWheel,
             &mouse_ctx,
         });
 
@@ -415,9 +425,72 @@ pub const App = struct {
             const r = p.rect;
             if (x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h) {
                 self.setFocusLocked(p);
+                if (p.term()) |tm| {
+                    // A fresh click clears the old selection and
+                    // anchors a possible drag.
+                    tm.session.clearSelection();
+                    self.drag_pane = p;
+                    self.drag_anchor = self.cellAt(p, x, y);
+                }
                 break;
             }
         }
+    }
+
+    fn cellAt(self: *App, p: *panespkg.Pane, x: f32, y: f32) [2]u16 {
+        const cx: f32 = @max(0, (x - p.rect.x) / self.renderer.cell_w);
+        const cy: f32 = @max(0, (y - p.rect.y) / self.renderer.cell_h);
+        return .{
+            @intCast(@min(@as(u32, @intFromFloat(cx)), p.cols - 1)),
+            @intCast(@min(@as(u32, @intFromFloat(cy)), p.rows - 1)),
+        };
+    }
+
+    /// Mouse drag: extend the selection from the anchor to the cell
+    /// under the pointer.
+    pub fn dragTo(self: *App, x: f32, y: f32) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const p = self.drag_pane orelse return;
+        const tm = p.term() orelse return;
+        const cur = self.cellAt(p, x, y);
+        tm.session.setSelection(self.drag_anchor[0], self.drag_anchor[1], cur[0], cur[1]);
+    }
+
+    pub fn dragEnd(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        self.drag_pane = null;
+    }
+
+    /// ⌘C: focused terminal's selection (or editor's register) → the
+    /// system pasteboard. Returns the copied text (caller frees) so
+    /// ctl \`copy\` can verify without reading the pasteboard.
+    pub fn copyFocused(self: *App) ?[]const u8 {
+        self.draw_lock.lock();
+        const text: ?[]const u8 = switch (self.activeTab().focused.content) {
+            .term => |*tm| if (tm.session.selectionText(self.gpa)) |t| t[0..t.len] else null,
+            .edit => |ed| blk: {
+                // Visual selection yanks first; otherwise the last yank.
+                if (ed.mode == .visual or ed.mode == .visual_line) ed.key("y");
+                if (ed.reg.items.len == 0) break :blk null;
+                break :blk self.gpa.dupe(u8, ed.reg.items) catch null;
+            },
+        };
+        self.draw_lock.unlock();
+        const t = text orelse return null;
+
+        const pb = objc.getClass("NSPasteboard").?.msgSend(objc.Object, "generalPasteboard", .{});
+        _ = pb.msgSend(i64, "clearContents", .{});
+        // NSString from bytes (not NUL-terminated).
+        const nss = objc.getClass("NSString").?.msgSend(objc.Object, "alloc", .{})
+            .msgSend(objc.Object, "initWithBytes:length:encoding:", .{
+            @as(*const anyopaque, t.ptr),
+            @as(u64, t.len),
+            @as(u64, 4), // NSUTF8StringEncoding
+        });
+        _ = pb.msgSend(bool, "setString:forType:", .{ nss.value, nsString("public.utf8-plain-text").value });
+        return t;
     }
 
     /// Wheel steps (+ = scroll up) routed to the pane under the point:
@@ -787,6 +860,7 @@ pub const App = struct {
                     continue;
                 }
                 changed = true;
+                if (self.drag_pane == p) self.drag_pane = null;
                 _ = panespkg.removeAt(self.gpa, &t.root, p);
                 _ = t.panes.swapRemove(i);
                 const was_focused = t.focused == p;
@@ -1203,6 +1277,7 @@ pub const App = struct {
         const default_bg = colors.background;
         const default_fg = colors.foreground;
         const row_cells = tm.rs.row_data.items(.cells);
+        const row_sels = tm.rs.row_data.items(.selection);
         const cellw_px: u16 = @intCast(self.renderer.cellw_px);
         // DECTCEM hide (TUIs that paint their own cursor, e.g. claude
         // code's inverse-space block) must actually hide ours.
@@ -1216,7 +1291,10 @@ pub const App = struct {
                 const styled = raw.style_id != 0;
                 const st: vt.Style = if (styled) styles[x] else .{};
 
-                const bg = st.bg(raw, &colors.palette) orelse default_bg;
+                var bg = st.bg(raw, &colors.palette) orelse default_bg;
+                if (row_sels[y]) |sr| {
+                    if (x >= sr[0] and x <= sr[1]) bg = .{ .r = term_sel_bg[0], .g = term_sel_bg[1], .b = term_sel_bg[2] };
+                }
                 var fg = st.fg(.{ .default = default_fg, .palette = &colors.palette });
                 // Faint (SGR 2) is the renderer's job like inverse:
                 // blend fg halfway toward bg (claude code's subdued
@@ -1379,6 +1457,10 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                     // The rook chords: ⌘D splits right, ⌘⇧D splits down,
                     // ⌘T new tab (session.new in the wails keymap),
                     // ⌘1–9 select tab, ⌘⇧[ / ⌘⇧] cycle.
+                    'c' => {
+                        if (app.copyFocused()) |t| app.gpa.free(t);
+                        return null;
+                    },
                     'd' => {
                         app.splitFocused(flags & flag_shift == 0);
                         return null;
@@ -1492,6 +1574,14 @@ fn mouseCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) call
 
     if (etype == 1) { // NSEventTypeLeftMouseDown
         app.clickAt(x, y);
+        return null;
+    }
+    if (etype == 6) { // NSEventTypeLeftMouseDragged
+        app.dragTo(x, y);
+        return null;
+    }
+    if (etype == 2) { // NSEventTypeLeftMouseUp
+        app.dragEnd();
         return null;
     }
 

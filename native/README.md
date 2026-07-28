@@ -13,9 +13,12 @@ buffer offset; chrome is more quads). Chords match the wails app:
 yields to alternate-screen apps (vim keeps its own splits) by reading
 alt-screen truth straight from the emulator, no heuristic — plus
 **⌘T** new tab, **⌘1–9** select, **⌘⇧[** / **⌘⇧]** cycle. The mouse
-works: clicks focus panes and select tab chips; the wheel scrolls
-editors and alt-screen apps (arrow keys — primary-screen scrollback
-is its own slice). The cursor
+works: clicks focus panes and select tab chips; drag selects text
+(⌘C copies — a focused editor copies its visual selection or last
+yank instead); the wheel scrolls editors, primary-screen viewports
+(typing snaps back), and alt-screen apps (arrow keys). <leader>[
+enters tmux-style copy mode: j/k/u/d/⌃B/⌃F/gg/G scroll, q/ESC exits,
+an accent SCROLL chip shows in the bar. The cursor
 and the accent-colored separator edges mark the focused pane. Only the
 active tab renders: background tabs' emulators keep advancing but cost
 zero frames (measured: `yes` in a hidden tab, 480 ticks, 1 draw). A
@@ -95,6 +98,8 @@ printf 'edit /abs/file\n'     | nc -U /tmp/rookz.sock   # editor pane (focused e
 printf 'focus left\n'        | nc -U /tmp/rookz.sock   # move focus (or an id — switches tab)
 printf 'click 300 800\n'      | nc -U /tmp/rookz.sock   # px coords: chips select, panes focus
 printf 'wheel 300 800 -5\n'   | nc -U /tmp/rookz.sock   # scroll steps (+ = up) at a point
+printf 'drag 99 206 319 206\n' | nc -U /tmp/rookz.sock   # select: down, drag, up
+printf 'copy\n'               | nc -U /tmp/rookz.sock   # \u2318C's path; replies the text
 printf 'dump@2\n'            | nc -U /tmp/rookz.sock   # any pane-taking verb
 printf 'type@2 ls\n'         | nc -U /tmp/rookz.sock   #   targets by @id
 printf 'shot /tmp/s.png\n'   | nc -U /tmp/rookz.sock   # pixel truth

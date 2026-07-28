@@ -234,6 +234,27 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         }
         app.clickAt(x, y);
         reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "drag")) {
+        // Full gesture: down at (x1,y1), drag to (x2,y2), up.
+        var it = std.mem.tokenizeScalar(u8, rest, ' ');
+        const x1 = std.fmt.parseFloat(f32, it.next() orelse "") catch -1;
+        const y1 = std.fmt.parseFloat(f32, it.next() orelse "") catch -1;
+        const x2 = std.fmt.parseFloat(f32, it.next() orelse "") catch -1;
+        const y2 = std.fmt.parseFloat(f32, it.next() orelse "") catch -1;
+        if (x1 < 0 or y1 < 0 or x2 < 0 or y2 < 0) {
+            reply(fd, "err drag <x1> <y1> <x2> <y2>\n");
+            return;
+        }
+        app.clickAt(x1, y1);
+        app.dragTo(x2, y2);
+        app.dragEnd();
+        reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "copy") and rest.len == 0) {
+        if (app.copyFocused()) |t| {
+            defer app.gpa.free(t);
+            reply(fd, t);
+            reply(fd, "\n");
+        } else reply(fd, "err nothing selected\n");
     } else if (std.mem.eql(u8, verb, "wheel")) {
         var it = std.mem.tokenizeScalar(u8, rest, ' ');
         const x = std.fmt.parseFloat(f32, it.next() orelse "") catch -1;

@@ -90,6 +90,32 @@ pub const Session = struct {
         }
     }
 
+    /// Replace the selection with viewport-coord cells a→b (inclusive
+    /// cells; either order). Any thread.
+    pub fn setSelection(self: *Session, ax: u16, ay: u16, bx: u16, by: u16) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const s = self.term.screens.active;
+        const pa = s.pages.pin(.{ .viewport = .{ .x = ax, .y = ay } }) orelse return;
+        const pb = s.pages.pin(.{ .viewport = .{ .x = bx, .y = by } }) orelse return;
+        s.select(.init(pa, pb, false)) catch {};
+    }
+
+    pub fn clearSelection(self: *Session) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.term.screens.active.clearSelection();
+    }
+
+    /// The selected text (unwrapped), or null. Caller frees.
+    pub fn selectionText(self: *Session, alloc: std.mem.Allocator) ?[:0]const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const s = self.term.screens.active;
+        const sel = s.selection orelse return null;
+        return s.selectionString(alloc, .{ .sel = sel }) catch null;
+    }
+
     pub fn lockForSnapshot(self: *Session) void {
         self.snapshot_wanted.store(true, .release);
         self.mutex.lock();
