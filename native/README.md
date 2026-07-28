@@ -107,9 +107,12 @@ leader = "`"
 "<leader>t" = "tab.new"
 ```
 
+`<leader>1`–`<leader>9` jump to tabs by default (tmux's digits);
+config lines rebind them like any chord.
+
 Canonical action names (the wails keymap's): `pane.split-right`,
-`pane.split-down`, `pane.focus-left/right/up/down`, `tab.new`,
-`tab.next`, `tab.prev`. Aliases accepted: `app.split.vertical` (=
+`pane.split-down`, `pane.focus-left/right/up/down`, `tab.new` (alias
+`session.new`), `tab.next`, `tab.prev`, `tab.select-1`…`tab.select-9`. Aliases accepted: `app.split.vertical` (=
 split-right, the vim `:vsplit` sense) and `app.split.horizontal` (=
 split-down). Named chord keys: `TAB`, `SPACE`, `ESC`. `[editor]` is
 parsed past and noted — no editor yet. Hardcoded ⌘/⌃ chords remain

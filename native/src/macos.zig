@@ -460,8 +460,8 @@ pub const App = struct {
         self.draw_lock.unlock();
     }
 
-    fn dispatch(self: *App, action: @import("config.zig").Action) void {
-        switch (action) {
+    fn dispatch(self: *App, b: @import("config.zig").Bind) void {
+        switch (b.action) {
             .split_right => self.splitFocused(true),
             .split_down => self.splitFocused(false),
             .focus_left => _ = self.focusMove(.left),
@@ -471,6 +471,7 @@ pub const App = struct {
             .tab_new => self.newTab(),
             .tab_next => self.cycleTab(1),
             .tab_prev => self.cycleTab(-1),
+            .tab_select => _ = self.selectTab(@as(usize, b.arg) - 1),
         }
     }
 
@@ -487,8 +488,8 @@ pub const App = struct {
                 self.writeFocused(&[1]u8{ch}, ts);
                 return true;
             }
-            if (self.keybinds.lookup(ch)) |action| {
-                self.dispatch(action);
+            if (self.keybinds.lookup(ch)) |b| {
+                self.dispatch(b);
                 return true;
             }
             return true; // unknown chord: swallowed, tmux-style

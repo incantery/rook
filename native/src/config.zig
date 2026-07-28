@@ -90,9 +90,19 @@ pub const Action = enum {
     tab_new,
     tab_next,
     tab_prev,
+    /// Jump to tab `arg` (1-based). Digits 1–9 are bound by default,
+    /// tmux-style; config can rebind them.
+    tab_select,
 };
 
-fn actionFromName(name: []const u8) ?Action {
+pub const ActionSpec = struct { action: Action, arg: u8 = 0 };
+
+fn actionFromName(name: []const u8) ?ActionSpec {
+    if (std.mem.startsWith(u8, name, "tab.select-")) {
+        const n = std.fmt.parseInt(u8, name["tab.select-".len..], 10) catch return null;
+        if (n < 1 or n > 9) return null;
+        return .{ .action = .tab_select, .arg = n };
+    }
     const map = [_]struct { n: []const u8, a: Action }{
         .{ .n = "pane.split-right", .a = .split_right },
         .{ .n = "app.split.vertical", .a = .split_right }, // vim :vsplit sense
@@ -108,21 +118,38 @@ fn actionFromName(name: []const u8) ?Action {
         .{ .n = "tab.prev", .a = .tab_prev },
     };
     for (map) |m| {
-        if (std.mem.eql(u8, name, m.n)) return m.a;
+        if (std.mem.eql(u8, name, m.n)) return .{ .action = m.a };
     }
     return null;
 }
 
+pub const Bind = struct { ch: u8, action: Action, arg: u8 = 0 };
+
 pub const Keybinds = struct {
     leader: ?u8 = null,
-    entries: [32]struct { ch: u8, action: Action } = undefined,
+    entries: [32]Bind = undefined,
     n: usize = 0,
 
-    pub fn lookup(self: *const Keybinds, ch: u8) ?Action {
+    pub fn lookup(self: *const Keybinds, ch: u8) ?Bind {
         for (self.entries[0..self.n]) |e| {
-            if (e.ch == ch) return e.action;
+            if (e.ch == ch) return e;
         }
         return null;
+    }
+
+    /// Bind or rebind: a chord char holds one action (config lines
+    /// replace defaults).
+    fn bind(self: *Keybinds, ch: u8, spec: ActionSpec) void {
+        for (self.entries[0..self.n]) |*e| {
+            if (e.ch == ch) {
+                e.* = .{ .ch = ch, .action = spec.action, .arg = spec.arg };
+                return;
+            }
+        }
+        if (self.n < self.entries.len) {
+            self.entries[self.n] = .{ .ch = ch, .action = spec.action, .arg = spec.arg };
+            self.n += 1;
+        }
     }
 };
 
@@ -175,6 +202,8 @@ fn topLevelEq(line: []const u8) ?usize {
 
 pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     var kb: Keybinds = .{};
+    // tmux's defaults: <leader>1–9 jump to tabs. Config lines rebind.
+    for (1..10) |d| kb.bind(@intCast('0' + d), .{ .action = .tab_select, .arg = @intCast(d) });
 
     var pathbuf: [1024]u8 = undefined;
     const path = blk: {
@@ -225,14 +254,11 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
                 std.debug.print("rookz keybinds: unsupported chord key '{s}'\n", .{key});
                 continue;
             };
-            const action = actionFromName(value) orelse {
+            const spec = actionFromName(value) orelse {
                 std.debug.print("rookz keybinds: unknown action '{s}' for '{s}'\n", .{ value, key });
                 continue;
             };
-            if (kb.n < kb.entries.len) {
-                kb.entries[kb.n] = .{ .ch = ch, .action = action };
-                kb.n += 1;
-            }
+            kb.bind(ch, spec);
         } else {
             std.debug.print("rookz keybinds: only <leader> chords supported yet, ignoring '{s}'\n", .{key});
         }
