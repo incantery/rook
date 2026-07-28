@@ -250,6 +250,7 @@ pub const Renderer = struct {
     }
 
     fn rasterize(self: *Renderer, cp: u21, wide: bool) ?GlyphLoc {
+        _ = @import("stats.zig").global.glyphs_rasterized.fetchAdd(1, .monotonic);
         const slot_width = self.cellw_px * @as(usize, if (wide) 2 else 1);
         @memset(self.scratch_data[0 .. self.scratch_w * self.cellh_px], 0);
 

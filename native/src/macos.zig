@@ -8,6 +8,9 @@ const objc = @import("objc");
 const vt = @import("ghostty-vt");
 const sessionpkg = @import("session.zig");
 const renderpkg = @import("render.zig");
+const stats = @import("stats.zig");
+
+extern "c" fn CACurrentMediaTime() f64;
 
 const NSPoint = extern struct { x: f64, y: f64 };
 const NSSize = extern struct { width: f64, height: f64 };
@@ -41,6 +44,8 @@ fn nsString(s: [*:0]const u8) objc.Object {
 
 const MonitorBlock = objc.Block(struct { app: *App }, .{objc.c.id}, objc.c.id);
 const ResizeBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
+const PresentedBlock = objc.Block(struct { app: *App, dirty: u8 }, .{objc.c.id}, void);
+const CompletedBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -59,11 +64,32 @@ pub const App = struct {
     pending_w: f64 = 0,
     pending_h: f64 = 0,
 
+    /// Pending keystroke timestamp (CACurrentMediaTime clock; NSEvent
+    /// timestamps share it). Consumed by the presented handler of the
+    /// first DIRTY frame after the mark — measuring the echo, not the
+    /// next repaint.
+    input_mark: std.atomic.Value(f64) = .init(0),
+    last_presented: std.atomic.Value(f64) = .init(0),
+
+    /// drawFrame may be entered from the display link OR an input kick
+    /// (reader thread, echo just parsed) — one at a time.
+    draw_lock: sessionpkg.Lock = .{},
+
     // ctl `shot` handoff: the socket thread stores a path and flips the
     // flag; the render thread services it after the next commit.
     shot_state: std.atomic.Value(u8) = .init(0),
     shot_path: [1024]u8 = undefined,
     shot_len: usize = 0,
+
+    pub fn markInput(self: *App, t: f64) void {
+        self.input_mark.store(t, .release);
+    }
+
+    fn drawNow(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        self.drawFrame();
+    }
 
     pub fn requestShot(self: *App, path: []const u8) bool {
         if (path.len == 0 or path.len > self.shot_path.len) return false;
@@ -96,6 +122,8 @@ pub const App = struct {
         layer.msgSend(void, "setDevice:", .{device.value});
         // MTLPixelFormatBGRA8Unorm = 80
         layer.msgSend(void, "setPixelFormat:", .{@as(u64, 80)});
+        // Double- not triple-buffer: one whole frame less key-to-photon.
+        layer.msgSend(void, "setMaximumDrawableCount:", .{@as(u64, 2)});
         // false so the ctl `shot` command can read our own drawable back —
         // dev-tool visibility outranks the marginal framebufferOnly win.
         layer.msgSend(void, "setFramebufferOnly:", .{false});
@@ -135,6 +163,8 @@ pub const App = struct {
         const session = try sessionpkg.Session.start(gpa, init.io, shell, @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
 
         const self = try gpa.create(App);
+        session.kick = &inputKick;
+        session.kick_ctx = self;
         self.* = .{
             .gpa = gpa,
             .app = app,
@@ -230,14 +260,30 @@ pub const App = struct {
         defer pool.deinit();
 
         _ = self.frame_count.fetchAdd(1, .monotonic);
+        const t_start = CACurrentMediaTime();
 
-        // Snapshot terminal state under the session lock.
-        self.session.mutex.lock();
+        // Snapshot terminal state under the session lock, with priority
+        // over the reader's parse loop.
+        self.session.lockForSnapshot();
         self.rs.update(self.gpa, &self.session.term) catch {
-            self.session.mutex.unlock();
+            self.session.unlockForSnapshot();
             return;
         };
-        self.session.mutex.unlock();
+        self.session.unlockForSnapshot();
+        const t_update = CACurrentMediaTime();
+
+        // A clean grid means nothing to draw: skip the whole frame. This
+        // is both the honest idle number (zero work) and the honest
+        // latency number — the key mark is consumed only by a frame that
+        // actually carried the echo.
+        const dirty = self.rs.dirty != .@"false";
+        self.rs.dirty = .@"false";
+        const shot_wanted = self.shot_state.load(.acquire) == 2;
+        if (!dirty and !shot_wanted) {
+            _ = stats.global.frames_skipped.fetchAdd(1, .monotonic);
+            return;
+        }
+        stats.global.frame_update.recordSeconds(t_update - t_start);
 
         // The snapshot is the authority on grid dims; during a resize it
         // may briefly disagree with the drawable, which is fine.
@@ -321,6 +367,9 @@ pub const App = struct {
             }
         }
 
+        const t_fill = CACurrentMediaTime();
+        stats.global.frame_fill.recordSeconds(t_fill - t_update);
+
         const drawable = self.layer.msgSend(objc.Object, "nextDrawable", .{});
         if (drawable.value == null) return;
 
@@ -344,8 +393,24 @@ pub const App = struct {
         const enc = cmd.msgSend(objc.Object, "renderCommandEncoderWithDescriptor:", .{desc.value});
         self.renderer.draw(enc, @floatCast(size.width), @floatCast(size.height), @intCast(cols), @intCast(rows));
         enc.msgSend(void, "endEncoding", .{});
+
+        // GPU time when the buffer completes; photon time when the
+        // drawable actually presents. Both handlers are copied by Metal.
+        var completed_ctx = CompletedBlock.init(.{ .app = self }, &completedCallback);
+        cmd.msgSend(void, "addCompletedHandler:", .{&completed_ctx});
+        var presented_ctx = PresentedBlock.init(.{ .app = self, .dirty = @intFromBool(dirty) }, &presentedCallback);
+        drawable.msgSend(void, "addPresentedHandler:", .{&presented_ctx});
+
         cmd.msgSend(void, "presentDrawable:", .{drawable.value});
         cmd.msgSend(void, "commit", .{});
+
+        const t_commit = CACurrentMediaTime();
+        stats.global.frame_encode.recordSeconds(t_commit - t_fill);
+        _ = stats.global.frames_drawn.fetchAdd(1, .monotonic);
+        if (dirty) {
+            const mark = self.input_mark.load(.acquire);
+            if (mark > 0 and t_commit > mark) stats.global.key_commit.recordSeconds(t_commit - mark);
+        }
 
         // Service a pending ctl `shot`: wait for this frame's GPU work,
         // read our own drawable back, write PNG. Render-thread only.
@@ -406,6 +471,7 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
         else => null,
     };
     if (arrow) |seq| {
+        app.markInput(event.msgSend(f64, "timestamp", .{}));
         app.session.write(seq);
         return null;
     }
@@ -414,7 +480,12 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
     if (chars.value != null) {
         if (chars.msgSend(?[*:0]const u8, "UTF8String", .{})) |s| {
             const bytes = std.mem.span(s);
-            if (bytes.len > 0) app.session.write(bytes);
+            if (bytes.len > 0) {
+                // The kernel's receipt time, same clock as presentedTime:
+                // this makes key_present a true key-to-photon number.
+                app.markInput(event.msgSend(f64, "timestamp", .{}));
+                app.session.write(bytes);
+            }
         }
     }
     return null;
@@ -425,6 +496,29 @@ fn resizeCallback(context: *const ResizeBlock.Context, notification: objc.c.id) 
     context.app.viewResized();
 }
 
+fn completedCallback(context: *const CompletedBlock.Context, cmd_id: objc.c.id) callconv(.c) void {
+    _ = context;
+    const cmd = objc.Object.fromId(cmd_id);
+    const gpu_start = cmd.msgSend(f64, "GPUStartTime", .{});
+    const gpu_end = cmd.msgSend(f64, "GPUEndTime", .{});
+    if (gpu_end > gpu_start) stats.global.frame_gpu.recordSeconds(gpu_end - gpu_start);
+}
+
+fn presentedCallback(context: *const PresentedBlock.Context, drawable_id: objc.c.id) callconv(.c) void {
+    const app = context.app;
+    const t = objc.Object.fromId(drawable_id).msgSend(f64, "presentedTime", .{});
+    if (t <= 0) return;
+
+    const last = app.last_presented.swap(t, .acq_rel);
+    if (last > 0 and t > last) stats.global.present_interval.recordSeconds(t - last);
+
+    // Key → photon: only a dirty frame may consume the pending mark.
+    if (context.dirty != 0) {
+        const mark = app.input_mark.swap(0, .acq_rel);
+        if (mark > 0 and t > mark) stats.global.key_present.recordSeconds(t - mark);
+    }
+}
+
 fn displayLinkCallback(link: CVDisplayLinkRef, now: ?*const anyopaque, output: ?*const anyopaque, flags_in: u64, flags_out: ?*u64, ctx: ?*anyopaque) callconv(.c) i32 {
     _ = link;
     _ = now;
@@ -432,6 +526,14 @@ fn displayLinkCallback(link: CVDisplayLinkRef, now: ?*const anyopaque, output: ?
     _ = flags_in;
     _ = flags_out;
     const self: *App = @ptrCast(@alignCast(ctx.?));
-    self.drawFrame();
+    self.drawNow();
     return 0;
+}
+
+/// Reader thread, after a parsed chunk: render immediately if a
+/// keystroke is waiting on its echo. Output without pending input stays
+/// on the display-link cadence.
+fn inputKick(ctx: *anyopaque) void {
+    const self: *App = @ptrCast(@alignCast(ctx));
+    if (self.input_mark.load(.acquire) > 0) self.drawNow();
 }

@@ -16,6 +16,7 @@ const Effects = Handler.Effects;
 
 extern "c" fn os_unfair_lock_lock(l: *u32) void;
 extern "c" fn os_unfair_lock_unlock(l: *u32) void;
+extern "c" fn usleep(us: u32) c_int;
 
 /// Tiny mutex over macOS os_unfair_lock: zero-init, callable from any
 /// thread (display link, reader), no Io handle required.
@@ -46,11 +47,36 @@ pub const Session = struct {
     mutex: Lock = .{},
     thread: ?std.Thread = null,
 
+    /// os_unfair_lock has no fairness: under a firehose the reader
+    /// re-acquires back-to-back and starves the render thread for
+    /// hundreds of ms (measured). The renderer raises this flag before
+    /// locking; the reader yields between chunks while it's up.
+    snapshot_wanted: std.atomic.Value(bool) = .init(false),
+
+    /// Input kick: called after each parsed chunk (outside the lock) so
+    /// the app can render an echo immediately instead of waiting for the
+    /// next display-link tick. The callee gates on pending input to keep
+    /// firehose output coalesced (the wake-per-KB lesson).
+    kick: ?*const fn (*anyopaque) void = null,
+    kick_ctx: *anyopaque = undefined,
+
     // Geometry for XTWINOPS size reports; updated by resize().
     cols: u16,
     rows: u16,
     cell_w_px: u32,
     cell_h_px: u32,
+
+    /// Take the session lock for a render snapshot, with priority over
+    /// the reader's parse loop.
+    pub fn lockForSnapshot(self: *Session) void {
+        self.snapshot_wanted.store(true, .release);
+        self.mutex.lock();
+    }
+
+    pub fn unlockForSnapshot(self: *Session) void {
+        self.mutex.unlock();
+        self.snapshot_wanted.store(false, .release);
+    }
 
     pub fn start(gpa: std.mem.Allocator, io: anytype, shell: [*:0]const u8, cols: u16, rows: u16, cell_w_px: u32, cell_h_px: u32) !*Session {
         const self = try gpa.create(Session);
@@ -97,9 +123,13 @@ pub const Session = struct {
         while (true) {
             const n = self.pty.readMaster(&buf);
             if (n == 0) break;
+            _ = @import("stats.zig").global.bytes_in.fetchAdd(n, .monotonic);
+            // Yield to a waiting renderer before re-acquiring.
+            while (self.snapshot_wanted.load(.acquire)) _ = usleep(50);
             self.mutex.lock();
             stream.nextSlice(buf[0..n]);
             self.mutex.unlock();
+            if (self.kick) |k| k(self.kick_ctx);
         }
     }
 

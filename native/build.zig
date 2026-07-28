@@ -13,7 +13,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    if (b.lazyDependency("ghostty", .{})) |dep| {
+    // target+optimize MUST flow to the dependency or ghostty-vt builds at
+    // its own default (Debug) even in a ReleaseFast bench build — which
+    // showed up as a 100x parse throughput hole in the first benchmark.
+    if (b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize })) |dep| {
         exe_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     }
     if (b.lazyDependency("zig_objc", .{ .target = target, .optimize = optimize })) |dep| {

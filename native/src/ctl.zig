@@ -13,6 +13,9 @@
 
 const std = @import("std");
 const macos = @import("macos.zig");
+const stats = @import("stats.zig");
+
+extern "c" fn CACurrentMediaTime() f64;
 
 const sockaddr_un = extern struct {
     sun_len: u8 = 0,
@@ -108,12 +111,15 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         reply(fd, str);
         reply(fd, "\n");
     } else if (std.mem.startsWith(u8, line, "type ")) {
+        app.markInput(CACurrentMediaTime());
         app.session.write(line[5..]);
         reply(fd, "ok\n");
     } else if (std.mem.eql(u8, line, "enter")) {
+        app.markInput(CACurrentMediaTime());
         app.session.write("\r");
         reply(fd, "ok\n");
     } else if (std.mem.eql(u8, line, "ctrlc")) {
+        app.markInput(CACurrentMediaTime());
         app.session.write("\x03");
         reply(fd, "ok\n");
     } else if (std.mem.startsWith(u8, line, "key ")) {
@@ -128,6 +134,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             reply(fd, "err hex\n");
             return;
         };
+        app.markInput(CACurrentMediaTime());
         app.session.write(out);
         reply(fd, "ok\n");
     } else if (std.mem.startsWith(u8, line, "shot ")) {
@@ -148,6 +155,14 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             return;
         }
         app.requestWinSize(w, h);
+        reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, line, "stats")) {
+        var buf: [4096]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        stats.writeReport(&w) catch {};
+        reply(fd, buf[0..w.end]);
+    } else if (std.mem.eql(u8, line, "stats reset")) {
+        stats.global.reset();
         reply(fd, "ok\n");
     } else if (std.mem.eql(u8, line, "quit")) {
         reply(fd, "ok\n");

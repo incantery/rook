@@ -1,5 +1,7 @@
 # rookz — native rook in Zig on libghostty-vt
 
+Numbers live in [PERF.md](PERF.md); `./bench.sh` reproduces them.
+
 Experimental (branch `rook/zig`). Standalone Zig desktop terminal:
 pty → ghostty-vt → RenderState → instanced Metal grid in an owned
 CAMetalLayer. No webview, no Swift.
@@ -26,6 +28,9 @@ printf 'enter\n'             | nc -U /tmp/rookz.sock
 printf 'ctrlc\n'             | nc -U /tmp/rookz.sock
 printf 'key 1b5b41\n'        | nc -U /tmp/rookz.sock   # raw hex bytes → pty
 printf 'shot /tmp/s.png\n'   | nc -U /tmp/rookz.sock   # pixel truth
+printf 'winsize 900 600\n'   | nc -U /tmp/rookz.sock   # resize (points)
+printf 'stats\n'             | nc -U /tmp/rookz.sock   # live perf numbers
+printf 'stats reset\n'       | nc -U /tmp/rookz.sock
 printf 'quit\n'              | nc -U /tmp/rookz.sock
 ```
 
