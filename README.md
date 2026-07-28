@@ -1,7 +1,14 @@
 # rook
 
-An AI-native IDE for the agent age — a Wails desktop app that replaces a
+An AI-native IDE for the agent age — a native macOS app that replaces a
 ghostty+tmux daily driver with something an agent can drive as fluently as you can.
+
+> **Current state: [STATUS.md](STATUS.md).** rook was a Wails app (Go +
+> Svelte + xterm.js in a WKWebView) until 2026-07-28; it is now a Zig
+> app rendering through its own Metal pipeline. The architecture
+> decisions below were written for that earlier design and are kept as
+> the reasoning that led here — read them as history, not as a
+> description of what ships today.
 
 The name works twice: rooks are the clever corvids — tool-users and the classic
 witch's familiar, which is exactly the built-in-agent story — and the chess rook
@@ -29,7 +36,8 @@ just look). Use the script or `rookctl`, not a browser download — curl skips
 the quarantine attribute, so the ad-hoc-signed app launches without
 Gatekeeper ceremony.
 
-From source: `make install` (needs Go, node, and the wails3 CLI).
+From source: `make install` (needs Go and Zig 0.16 — no longer node or
+the wails3 CLI).
 Maintainers cut releases with `make release VERSION=vX.Y.Z`.
 
 ## Configure
