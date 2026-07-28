@@ -122,6 +122,10 @@ pub const App = struct {
     /// Top tab bar height in px — tabs are first-class chrome (wails
     /// rook's named tabs), not a corner of the status bar.
     tab_h: f32,
+    /// Glass mode only: the titlebar strip's height in px. The layer
+    /// extends under the (transparent) titlebar, so all chrome shifts
+    /// down by this much; the strip itself stays a pure drag region.
+    top_inset: f32 = 0,
     /// Layout/focus changed: the next frame redraws even if no pane's
     /// grid is dirty.
     scene_dirty: bool = true,
@@ -272,7 +276,10 @@ pub const App = struct {
 
         const rect = NSRect{ .origin = .{ .x = 0, .y = 0 }, .size = .{ .width = win_w, .height = win_h } };
         // titled | closable | miniaturizable | resizable = 15
-        const style: u64 = 15;
+        var style: u64 = 15;
+        // Glass mode: the layer must extend under the titlebar or the
+        // titlebar stays an opaque AppKit slab above the tint.
+        if (!opaque_bg) style |= 1 << 15; // fullSizeContentView
         const window = objc.getClass("NSWindow").?
             .msgSend(objc.Object, "alloc", .{})
             .msgSend(objc.Object, "initWithContentRect:styleMask:backing:defer:", .{ rect, style, @as(u64, 2), false });
@@ -283,6 +290,10 @@ pub const App = struct {
             window.msgSend(void, "setOpaque:", .{false});
             const clear = objc.getClass("NSColor").?.msgSend(objc.Object, "clearColor", .{});
             window.msgSend(void, "setBackgroundColor:", .{clear.value});
+            // The strip is ours now: no material, no title text —
+            // traffic lights float over our tinted drag strip.
+            window.msgSend(void, "setTitlebarAppearsTransparent:", .{true});
+            window.msgSend(void, "setTitleVisibility:", .{@as(i64, 1)}); // hidden
             std.debug.print("rookz: background-opacity {d:.2} — compositor path (direct scan-out off)\n", .{cfg.background_opacity});
         }
 
@@ -305,8 +316,11 @@ pub const App = struct {
         // fallback; the CoreText cascade catches everything else.
         const renderer = try renderpkg.Renderer.init(gpa, device, cfg.font_family, cfg.font_size * scale, 64 * 1024);
         const bar_h: f32 = @ceil(renderer.cell_h + @as(f32, @floatCast(8 * scale)));
+        // Standard macOS titlebar is 28pt; with fullSizeContentView we
+        // draw under it and shift chrome down instead.
+        const top_inset: f32 = if (opaque_bg) 0 else @floatCast(28 * scale);
         const cols: u16 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_w)), renderer.cell_w));
-        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2, renderer.cell_h)));
+        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2 - top_inset, renderer.cell_h)));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
         const session = try sessionpkg.Session.start(gpa, init.io, shell, null, termColors(), @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
@@ -335,12 +349,13 @@ pub const App = struct {
             .sep = @floatCast(@max(1.0, @round(scale))),
             .bar_h = bar_h,
             .tab_h = bar_h,
+            .top_inset = top_inset,
             .bg_opacity = cfg.background_opacity,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
         };
         try self.tabs.append(gpa, tab_one);
         self.focused_session.store(session, .release);
-        panespkg.layout(tab_one.root, .{ .x = 0, .y = self.tab_h, .w = self.px_w, .h = self.contentH() }, self.sep);
+        panespkg.layout(tab_one.root, .{ .x = 0, .y = self.contentY(), .w = self.px_w, .h = self.contentH() }, self.sep);
         return self;
     }
 
@@ -438,13 +453,20 @@ pub const App = struct {
         self.sep = @floatCast(@max(1.0, @round(scale)));
         self.bar_h = @ceil(self.renderer.cell_h + @as(f32, @floatCast(8 * scale)));
         self.tab_h = self.bar_h;
+        if (self.top_inset > 0) self.top_inset = @floatCast(28 * scale);
         self.relayoutLocked();
         self.scene_dirty = true;
     }
 
-    /// Pane-area height: the window minus the tab bar and status bar.
+    /// Pane-area height: the window minus the tab bar and status bar
+    /// (and, in glass mode, the titlebar strip we draw under).
     fn contentH(self: *App) f32 {
-        return @max(1, self.px_h - self.bar_h - self.tab_h);
+        return @max(1, self.px_h - self.bar_h - self.tab_h - self.top_inset);
+    }
+
+    /// Where panes start: below the titlebar strip and tab bar.
+    fn contentY(self: *App) f32 {
+        return self.top_inset + self.tab_h;
     }
 
     fn activeTab(self: *App) *panespkg.Tab {
@@ -456,7 +478,8 @@ pub const App = struct {
     pub fn clickAt(self: *App, x: f32, y: f32, local: bool) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
-        if (y < self.tab_h) {
+        if (y < self.top_inset) return; // titlebar drag strip — AppKit's
+        if (y < self.contentY()) {
             for (self.chip_x[0..self.chip_n], 0..) |cx, i| {
                 if (x >= cx[0] and x <= cx[1]) {
                     self.activateTabLocked(i);
@@ -722,7 +745,7 @@ pub const App = struct {
     /// Background tabs relayout on activation. Caller holds draw_lock.
     fn relayoutLocked(self: *App) void {
         const t = self.activeTab();
-        panespkg.layout(t.root, .{ .x = 0, .y = self.tab_h, .w = self.px_w, .h = self.contentH() }, self.sep);
+        panespkg.layout(t.root, .{ .x = 0, .y = self.contentY(), .w = self.px_w, .h = self.contentH() }, self.sep);
         for (t.panes.items) |p| {
             const cols: u16 = @intFromFloat(@max(2, @divFloor(p.rect.w, self.renderer.cell_w)));
             const rows: u16 = @intFromFloat(@max(2, @divFloor(p.rect.h, self.renderer.cell_h)));
@@ -1209,8 +1232,8 @@ pub const App = struct {
             const s = self.sep;
             if (fr.x > 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x - s, fr.y, s, fr.h, th.accent);
             if (fr.x + fr.w < self.px_w - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x + fr.w, fr.y, s, fr.h, th.accent);
-            if (fr.y > self.tab_h + 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y - s, fr.w, s, th.accent);
-            if (fr.y + fr.h < self.tab_h + self.contentH() - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y + fr.h, fr.w, s, th.accent);
+            if (fr.y > self.contentY() + 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y - s, fr.w, s, th.accent);
+            if (fr.y + fr.h < self.contentY() + self.contentH() - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y + fr.h, fr.w, s, th.accent);
         }
         var ui = @import("ui.zig").Ui{
             .r = &self.renderer,
@@ -1373,10 +1396,16 @@ pub const App = struct {
         self.scene_dirty = true;
     }
 
+    /// Chrome background at the window's alpha — the bars are glass
+    /// exactly like default-bg cells (accent highlights stay solid).
+    fn glassBg(self: *App, c: [4]u8) [4]u8 {
+        return .{ c[0], c[1], c[2], self.bg_alpha };
+    }
+
     /// The status bar: tenant one of the ui layer.
     fn drawBar(self: *App, ui: *@import("ui.zig").Ui) void {
         const by = self.px_h - self.bar_h;
-        ui.rect(0, by, self.px_w, self.bar_h, th.bar_bg);
+        ui.rect(0, by, self.px_w, self.bar_h, self.glassBg(th.bar_bg));
         const ty = by + (self.bar_h - self.renderer.cell_h) / 2;
         const pad = self.renderer.cell_w;
         var x: f32 = pad;
@@ -1393,8 +1422,8 @@ pub const App = struct {
                 x += ui.text(x, ty, " SCROLL ", th.bar_bg, th.accent) + self.renderer.cell_w / 2;
             }
         }
-        _ = ui.text(x, ty, self.hud_left[0..self.hud_left_len], th.bar_fg, th.bar_bg);
-        _ = ui.textRight(self.px_w - pad, ty, self.hud_right[0..self.hud_right_len], th.bar_value, th.bar_bg);
+        _ = ui.text(x, ty, self.hud_left[0..self.hud_left_len], th.bar_fg, self.glassBg(th.bar_bg));
+        _ = ui.textRight(self.px_w - pad, ty, self.hud_right[0..self.hud_right_len], th.bar_value, self.glassBg(th.bar_bg));
     }
 
     /// The top tab bar — tabs as first-class chrome (the wails app's
@@ -1402,8 +1431,10 @@ pub const App = struct {
     /// 0/2, read from the emulator under its lock); the active chip
     /// gets a lifted background and an accent underline.
     fn drawTabBar(self: *App, ui: *@import("ui.zig").Ui) void {
-        ui.rect(0, 0, self.px_w, self.tab_h, th.bar_bg);
-        const ty = (self.tab_h - self.renderer.cell_h) / 2;
+        // One slab from the window top: in glass mode it also tints the
+        // titlebar strip the traffic lights float over.
+        ui.rect(0, 0, self.px_w, self.contentY(), self.glassBg(th.bar_bg));
+        const ty = self.top_inset + (self.tab_h - self.renderer.cell_h) / 2;
         var x: f32 = self.renderer.cell_w / 2;
         for (self.tabs.items, 0..) |t, i| {
             const is_active = i == self.active_tab;
@@ -1432,9 +1463,9 @@ pub const App = struct {
             const label = std.fmt.bufPrint(&chip, " {d} {s} ", .{ i + 1, title }) catch continue;
 
             const fg = if (is_active) th.bar_value else th.bar_fg;
-            const bg = if (is_active) th.chip_active_bg else th.bar_bg;
+            const bg = self.glassBg(if (is_active) th.chip_active_bg else th.bar_bg);
             const w = ui.text(x, ty, label, fg, bg);
-            if (is_active) ui.rect(x, self.tab_h - self.sep * 2, w, self.sep * 2, th.accent);
+            if (is_active) ui.rect(x, self.contentY() - self.sep * 2, w, self.sep * 2, th.accent);
             if (i < self.chip_x.len) {
                 self.chip_x[i] = .{ x, x + w };
                 self.chip_n = i + 1;
@@ -1570,7 +1601,7 @@ pub const App = struct {
         for (g, 0..) |rc, i| {
             const status_row = rows >= 1 and i >= (rows - 1) * cols;
             var bg: [4]u8 = if (status_row) th.chip_active_bg else th.ed_bg;
-            if (!status_row) bg[3] = self.bg_alpha;
+            bg[3] = self.bg_alpha;
             var fg: [4]u8 = switch (rc.st) {
                 .text => if (status_row) th.bar_value else th.ed_fg,
                 .dim => if (status_row) th.bar_fg else th.ed_dim,

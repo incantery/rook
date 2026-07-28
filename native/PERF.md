@@ -112,6 +112,21 @@ Highlight work is fill-time only on dirty editor frames: full reparse
 per buffer version (size-capped 4MB), captures extracted for the
 visible byte range only.
 
+Ninth re-run — glass chrome (2026-07-28 morning: transparent titlebar
+via fullSizeContentView, chrome bars at window alpha): cat
+**0.922/0.923s** across two runs at 67×39 — the first DAYTIME entry
+(Seth's live session + apps alongside; quiet-key p50 22ms vs ~17
+overnight says machine load, not render path — the opaque path
+compiles to identical work: alpha 255, inset 0). Fill p50 40µs, idle
+0 frames, RSS 87MB. Two bench honesty fixes landed: bench.sh now PINS
+its config (the live config's background-opacity would have silently
+benched the compositor path — it only ever ran opaque because the
+quoted key didn't parse until today), font pinned to Hack 18pt, which
+is what the band was actually measured with (PERF header said
+FiraCode 13 — that was day one, before the config file existed). And
+the WM tile drifts with desktop state (67×42 overnight → 67×39
+today) — state the grid per run, don't chase it.
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,

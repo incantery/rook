@@ -15,7 +15,15 @@ if [ ! -f "$CORPUS" ]; then
   base64 < /dev/urandom | head -c 150000000 > "$CORPUS"
 fi
 
-ROOKZ_SOCK=$SOCK ./zig-out/bin/rookz win --no-activate >/dev/null 2>&1 &
+# The scoreboard runs a PINNED config — the user's live config (theme,
+# background-opacity) must not skew like-for-like runs. Font is pinned
+# to what the 0.88–0.91s cat band was measured with (Hack 18pt → the
+# 67×42 WM-tile grid); everything else is defaults, opacity included.
+BENCHCFG=/tmp/rookz-bench-config
+mkdir -p $BENCHCFG/rookz
+printf 'font-family = "Hack Nerd Font Mono"\nfont-size = 18\n' > $BENCHCFG/rookz/config.toml
+
+XDG_CONFIG_HOME=$BENCHCFG ROOKZ_SOCK=$SOCK ./zig-out/bin/rookz win --no-activate >/dev/null 2>&1 &
 APP=$!
 trap 'kill $APP 2>/dev/null' EXIT
 sleep 2

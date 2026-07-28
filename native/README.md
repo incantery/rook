@@ -136,8 +136,9 @@ and obvious in shot; keep both in every verification.
 
 `~/.config/rookz/config.toml` (respects `XDG_CONFIG_HOME`). A TOML
 subset: flat `key = value`, `#` comments, quoted strings; `[sections]`
-skipped. Dashes and underscores in keys are interchangeable. Missing
-file = defaults. Unknown keys warn on stderr.
+skipped. Keys may be quoted (`"background-opacity"` works); dashes and
+underscores are interchangeable. Missing file = defaults. Unknown keys
+warn on stderr.
 
 ```toml
 font-size = 13
@@ -147,6 +148,13 @@ background-opacity = 0.9 # <1 = translucent window; OPTS OUT of
                          # direct scan-out (~+5ms present lag) —
                          # perf tradeoff on purpose, default 1.0
 ```
+
+Opacity < 1 is whole-window glass: the layer extends under a
+transparent titlebar (fullSizeContentView — traffic lights float over
+a tinted strip that stays a pure drag region, chrome shifts down
+28pt), and the tab/status bars and editor status row carry the same
+alpha as default-bg cells. Explicit-bg cells, selection, and accent
+highlights stay solid. Opaque config keeps the stock titlebar.
 
 Themes color everything at once — emulator defaults + ANSI 16,
 chrome, editor, selection (src/theme.zig, one flat struct). Nocturne
