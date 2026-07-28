@@ -65,7 +65,10 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
         if (line.len == 0 or line[0] == '#' or line[0] == '[') continue;
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
 
-        const key_raw = std.mem.trim(u8, line[0..eq], " \t");
+        var key_raw = std.mem.trim(u8, line[0..eq], " \t");
+        // TOML allows quoted keys ("background-opacity" = 0.9) — same key.
+        if (key_raw.len >= 2 and key_raw[0] == '"' and key_raw[key_raw.len - 1] == '"')
+            key_raw = key_raw[1 .. key_raw.len - 1];
         var keybuf: [64]u8 = undefined;
         if (key_raw.len > keybuf.len) continue;
         for (key_raw, 0..) |c, i| keybuf[i] = if (c == '-') '_' else c;
