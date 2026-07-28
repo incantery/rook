@@ -16,6 +16,14 @@ pub fn build(b: *std.Build) void {
     if (b.lazyDependency("ghostty", .{})) |dep| {
         exe_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     }
+    if (b.lazyDependency("zig_objc", .{ .target = target, .optimize = optimize })) |dep| {
+        exe_mod.addImport("objc", dep.module("objc"));
+    }
+    exe_mod.link_libc = true;
+    exe_mod.linkFramework("AppKit", .{});
+    exe_mod.linkFramework("Metal", .{});
+    exe_mod.linkFramework("QuartzCore", .{});
+    exe_mod.linkFramework("CoreVideo", .{});
 
     const exe = b.addExecutable(.{
         .name = "rookz",

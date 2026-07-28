@@ -14,8 +14,13 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, cmd, "demo")) return demo(init);
     if (std.mem.eql(u8, cmd, "exec")) return exec(init, argv[2..]);
+    if (std.mem.eql(u8, cmd, "win")) {
+        var app = try @import("macos.zig").App.init();
+        app.run();
+        return;
+    }
 
-    std.debug.print("usage: rookz [demo|exec <cmd...>]\n", .{});
+    std.debug.print("usage: rookz [demo|exec <cmd...>|win]\n", .{});
     return error.UnknownCommand;
 }
 
