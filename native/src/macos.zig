@@ -16,6 +16,7 @@ const sessionpkg = @import("session.zig");
 const renderpkg = @import("render.zig");
 const panespkg = @import("panes.zig");
 const editorpkg = @import("editor.zig");
+const workspacespkg = @import("workspaces.zig");
 const themepkg = @import("theme.zig");
 const stats = @import("stats.zig");
 
@@ -173,6 +174,17 @@ pub const App = struct {
     /// area (bars stay full-width; the gap shows the theme bg).
     pad_pts: f32 = 0,
     pad: f32 = 0,
+
+    // The palette — first modal chrome tenant (workspace switcher).
+    // Open, it intercepts the whole key path; items come fresh from
+    // rook.db each open. All state mutates under draw_lock.
+    pal_open: bool = false,
+    pal_input: [96]u8 = undefined,
+    pal_input_len: usize = 0,
+    pal_sel: usize = 0,
+    pal_items: []workspacespkg.Entry = &.{},
+    pal_filtered: [64]usize = undefined,
+    pal_nfiltered: usize = 0,
     /// Layout/focus changed: the next frame redraws even if no pane's
     /// grid is dirty.
     scene_dirty: bool = true,
@@ -419,6 +431,9 @@ pub const App = struct {
         };
         try self.tabs.append(gpa, tab_one);
         self.focused_session.store(session, .release);
+        // Workspace registry up front — tab chips wear their workspace
+        // name from the first frame, palette or not.
+        self.pal_items = workspacespkg.load(gpa);
         panespkg.layout(tab_one.root, self.paneArea(), self.sep);
         return self;
     }
@@ -756,7 +771,13 @@ pub const App = struct {
     /// open where you are, the tmux/wails behavior (TODO.md item one).
     /// Buffer-owned by App; valid until the next call.
     fn focusedCwd(self: *App) ?[*:0]const u8 {
-        const tm = self.activeTab().focused.term() orelse return null;
+        return self.paneCwd(self.activeTab().focused);
+    }
+
+    /// A pane's shell cwd via the kernel (proc_pidinfo) — a takeover
+    /// editor's parked shell counts (the pane is still "at" that dir).
+    fn paneCwd(self: *App, p: *panespkg.Pane) ?[*:0]const u8 {
+        const tm = p.term() orelse (if (p.under) |*ut| ut else return null);
         // struct proc_vnodepathinfo { vnode_info_path pvi_cdir; ... };
         // vip_path (MAXPATHLEN) sits after the 152-byte vnode_info.
         const n = proc_pidinfo(tm.session.pid, PROC_PIDVNODEPATHINFO, 0, &self.cwd_info, self.cwd_info.len);
@@ -769,8 +790,8 @@ pub const App = struct {
     /// Spawn a shell session wrapped in a fresh pane. Caller inserts it
     /// into a tree and a tab (holding draw_lock — focusedCwd reads the
     /// focused pane).
-    fn makePane(self: *App) !*panespkg.Pane {
-        const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, self.focusedCwd(), termColors(), 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
+    fn makePane(self: *App, cwd: ?[*:0]const u8) !*panespkg.Pane {
+        const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, cwd, termColors(), 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px));
         session.kick = &inputKick;
         session.kick_ctx = self;
         const pane = try self.gpa.create(panespkg.Pane);
@@ -837,7 +858,7 @@ pub const App = struct {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         const t = self.activeTab();
-        const pane = self.makePane() catch |err| {
+        const pane = self.makePane(self.focusedCwd()) catch |err| {
             std.debug.print("rookz: split failed: {}\n", .{err});
             return;
         };
@@ -859,7 +880,11 @@ pub const App = struct {
     pub fn newTab(self: *App) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
-        const pane = self.makePane() catch |err| {
+        self.newTabLocked(self.focusedCwd());
+    }
+
+    fn newTabLocked(self: *App, cwd: ?[*:0]const u8) void {
+        const pane = self.makePane(cwd) catch |err| {
             std.debug.print("rookz: new tab failed: {}\n", .{err});
             return;
         };
@@ -906,6 +931,10 @@ pub const App = struct {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         self.markInput(ts);
+        if (self.pal_open) {
+            self.palKeyLocked(bytes);
+            return;
+        }
         self.paneInput(self.activeTab().focused, bytes);
     }
 
@@ -994,6 +1023,141 @@ pub const App = struct {
         self.draw_lock.unlock();
     }
 
+    // ------------------------------------------------------------ palette
+    // The workspace switcher, and the seed of every future picker
+    // (file finder, themes, commands): type-to-filter over a list, a
+    // modal that owns the key path while open.
+
+    /// Open the palette with a fresh read of rook.db. Any thread.
+    pub fn openPalette(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        workspacespkg.free(self.gpa, self.pal_items);
+        self.pal_items = workspacespkg.load(self.gpa);
+        self.pal_input_len = 0;
+        self.pal_sel = 0;
+        self.pal_open = true;
+        self.palRefilterLocked();
+        self.scene_dirty = true;
+    }
+
+    /// Close hides; pal_items PERSISTS — the chip annotation resolves
+    /// tabs against it between opens (openPalette refreshes it).
+    fn closePaletteLocked(self: *App) void {
+        self.pal_open = false;
+        self.pal_nfiltered = 0;
+        self.scene_dirty = true;
+    }
+
+    /// The workspace whose root holds this pane's shell cwd.
+    fn workspaceFor(self: *App, p: *panespkg.Pane) ?[]const u8 {
+        const cwd = self.paneCwd(p) orelse return null;
+        const c = std.mem.span(cwd);
+        for (self.pal_items) |e| {
+            if (std.mem.startsWith(u8, c, e.root) and (c.len == e.root.len or c[e.root.len] == '/'))
+                return e.name;
+        }
+        return null;
+    }
+
+    /// Case-insensitive subsequence match — the telescope basic. Items
+    /// keep db order (already ranked by last_used).
+    fn fuzzyMatch(hay: []const u8, needle: []const u8) bool {
+        var hi: usize = 0;
+        for (needle) |nc| {
+            const n = std.ascii.toLower(nc);
+            while (hi < hay.len and std.ascii.toLower(hay[hi]) != n) hi += 1;
+            if (hi == hay.len) return false;
+            hi += 1;
+        }
+        return true;
+    }
+
+    fn palRefilterLocked(self: *App) void {
+        const needle = self.pal_input[0..self.pal_input_len];
+        self.pal_nfiltered = 0;
+        for (self.pal_items, 0..) |e, i| {
+            if (self.pal_nfiltered >= self.pal_filtered.len) break;
+            if (fuzzyMatch(e.name, needle) or fuzzyMatch(e.root, needle)) {
+                self.pal_filtered[self.pal_nfiltered] = i;
+                self.pal_nfiltered += 1;
+            }
+        }
+        if (self.pal_sel >= self.pal_nfiltered) self.pal_sel = self.pal_nfiltered -| 1;
+    }
+
+    /// Palette input — same stream contract as the editor: NSEvents
+    /// deliver chars and whole CSI arrows, ctl delivers strings.
+    /// Pub for ctl's writeTarget (blind-drivable modal).
+    pub fn palKeyLocked(self: *App, bytes: []const u8) void {
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const b = bytes[i];
+            if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
+                switch (bytes[i + 2]) {
+                    'A' => self.pal_sel -|= 1,
+                    'B' => self.pal_sel = @min(self.pal_sel + 1, self.pal_nfiltered -| 1),
+                    else => {},
+                }
+                i += 3;
+                continue;
+            }
+            switch (b) {
+                0x1b => {
+                    self.closePaletteLocked();
+                    return;
+                },
+                '\r', '\n' => {
+                    self.palActivateLocked();
+                    return;
+                },
+                0x10, 0x0b => self.pal_sel -|= 1, // ⌃P / ⌃K
+                0x0e => self.pal_sel = @min(self.pal_sel + 1, self.pal_nfiltered -| 1), // ⌃N
+                0x7f, 0x08 => {
+                    self.pal_input_len -|= 1;
+                    self.palRefilterLocked();
+                },
+                else => if (b >= 0x20 and b < 0x7f and self.pal_input_len < self.pal_input.len) {
+                    self.pal_input[self.pal_input_len] = b;
+                    self.pal_input_len += 1;
+                    self.palRefilterLocked();
+                },
+            }
+            i += 1;
+        }
+        self.scene_dirty = true;
+    }
+
+    /// Enter: focus a tab already living under that workspace root,
+    /// else open a new tab shelled into it. Switch, don't duplicate —
+    /// and cd stays sacred: the workspace annotates, it never fences.
+    fn palActivateLocked(self: *App) void {
+        if (self.pal_sel >= self.pal_nfiltered) {
+            self.closePaletteLocked();
+            return;
+        }
+        const e = self.pal_items[self.pal_filtered[self.pal_sel]];
+        var rootbuf: [1024:0]u8 = undefined;
+        if (e.root.len >= rootbuf.len) {
+            self.closePaletteLocked();
+            return;
+        }
+        @memcpy(rootbuf[0..e.root.len], e.root);
+        rootbuf[e.root.len] = 0;
+        const root: []const u8 = rootbuf[0..e.root.len];
+        self.closePaletteLocked();
+
+        for (self.tabs.items, 0..) |t, ti| {
+            const cwd = self.paneCwd(t.focused) orelse continue;
+            const c = std.mem.span(cwd);
+            if (std.mem.startsWith(u8, c, root) and (c.len == root.len or c[root.len] == '/')) {
+                self.activateTabLocked(ti);
+                return;
+            }
+        }
+        self.newTabLocked(rootbuf[0..e.root.len :0]);
+    }
+
     fn dispatch(self: *App, b: @import("config.zig").Bind) void {
         switch (b.action) {
             .split_right => self.splitFocused(true),
@@ -1007,6 +1171,7 @@ pub const App = struct {
             .tab_prev => self.cycleTab(-1),
             .tab_select => _ = self.selectTab(@as(usize, b.arg) - 1),
             .copy_mode => self.enterCopyMode(),
+            .workspace_switch => self.openPalette(),
         }
     }
 
@@ -1016,6 +1181,9 @@ pub const App = struct {
     /// one, or was swallowed as an unknown chord).
     pub fn handleCharKey(self: *App, ch: u8, ts: f64) bool {
         const ld = self.keybinds.leader orelse return false;
+        // The palette owns the whole key path while open (typing a
+        // leader char into a filter must not arm a chord).
+        if (self.pal_open) return false;
         // The leader works in editors too (pane nav must not dead-end
         // there) — a literal leader char costs a double-tap, same as
         // the terminal. Seth's call in TODO.md.
@@ -1324,6 +1492,7 @@ pub const App = struct {
         };
         self.drawBar(&ui);
         self.drawTabBar(&ui);
+        if (self.pal_open) self.drawPalette(&ui);
 
         enc.msgSend(void, "endEncoding", .{});
 
@@ -1447,9 +1616,18 @@ pub const App = struct {
             stats.maxRssMb(),
         }) catch return;
 
-        var tabs_buf: [160]u8 = undefined;
+        var tabs_buf: [256]u8 = undefined;
         var tw: std.Io.Writer = .fixed(&tabs_buf);
         for (self.tabs.items) |tb| {
+            // Refresh the chip's workspace annotation (cwd moves; the
+            // digest below makes a change redraw the bar).
+            tb.ws_len = 0;
+            if (self.workspaceFor(tb.focused)) |wname| {
+                const n = @min(wname.len, tb.ws.len);
+                @memcpy(tb.ws[0..n], wname[0..n]);
+                tb.ws_len = n;
+            }
+            tw.print("{s}|", .{tb.ws[0..tb.ws_len]}) catch {};
             switch (tb.focused.content) {
                 .term => |*tm| {
                     tm.session.mutex.lock();
@@ -1538,8 +1716,11 @@ pub const App = struct {
                     if (n > 0) title = title_buf[0..n];
                 },
             }
-            var chip: [40]u8 = undefined;
-            const label = std.fmt.bufPrint(&chip, " {d} {s} ", .{ i + 1, title }) catch continue;
+            var chip: [64]u8 = undefined;
+            const label = if (t.ws_len > 0)
+                std.fmt.bufPrint(&chip, " {d} {s} · {s} ", .{ i + 1, t.ws[0..t.ws_len], title }) catch continue
+            else
+                std.fmt.bufPrint(&chip, " {d} {s} ", .{ i + 1, title }) catch continue;
 
             const fg = if (is_active) th.bar_value else th.bar_fg;
             const bg = self.glassBg(if (is_active) th.chip_active_bg else th.bar_bg);
@@ -1551,6 +1732,52 @@ pub const App = struct {
             }
             x += w + self.renderer.cell_w / 2;
             if (x > self.px_w) break;
+        }
+    }
+
+    /// The palette panel: floats over the panes, SOLID colors on
+    /// purpose (a modal must read instantly, glass or not). Input row
+    /// on top, filtered rows under it, selected row lifted + accent
+    /// edge — the chip vocabulary at palette scale.
+    fn drawPalette(self: *App, ui: *@import("ui.zig").Ui) void {
+        const cw = self.renderer.cell_w;
+        const row_h = self.bar_h;
+        const shown = @min(self.pal_nfiltered, 12);
+        const w = @min(self.px_w - 4 * cw, 72 * cw);
+        const h = row_h * @as(f32, @floatFromInt(shown + 1)) + self.sep * 2;
+        const x = (self.px_w - w) / 2;
+        const y = self.contentY() + self.renderer.cell_h;
+
+        ui.rect(x - self.sep, y - self.sep, w + self.sep * 2, h + self.sep * 2, th.accent);
+        ui.rect(x, y, w, h, th.bar_bg);
+
+        // Input row.
+        var tx = x + cw;
+        const ty = y + (row_h - self.renderer.cell_h) / 2;
+        tx += ui.text(tx, ty, "workspace ", th.bar_fg, th.bar_bg);
+        tx += ui.text(tx, ty, self.pal_input[0..self.pal_input_len], th.bar_value, th.bar_bg);
+        ui.rect(tx, ty, cw / 4, self.renderer.cell_h, th.accent); // caret
+
+        var ry = y + row_h + self.sep * 2;
+        if (self.pal_nfiltered == 0) {
+            _ = ui.text(x + cw, ry + (row_h - self.renderer.cell_h) / 2, "no matches", th.bar_fg, th.bar_bg);
+            return;
+        }
+        for (self.pal_filtered[0..shown], 0..) |item_i, vi| {
+            const e = self.pal_items[item_i];
+            const selected = vi == self.pal_sel;
+            const bg = if (selected) th.chip_active_bg else th.bar_bg;
+            if (selected) {
+                ui.rect(x, ry, w, row_h, th.chip_active_bg);
+                ui.rect(x, ry, self.sep * 2, row_h, th.accent);
+            }
+            const rty = ry + (row_h - self.renderer.cell_h) / 2;
+            _ = ui.text(x + cw, rty, e.name, if (selected) th.bar_value else th.bar_fg, bg);
+            // Root path, right-aligned and quiet; drop it when narrow.
+            const room = w - 2 * cw - @as(f32, @floatFromInt(e.name.len + 2)) * cw;
+            if (@as(f32, @floatFromInt(e.root.len)) * cw < room)
+                _ = ui.textRight(x + w - cw, rty, e.root, th.bar_fg, bg);
+            ry += row_h;
         }
     }
 

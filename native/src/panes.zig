@@ -86,6 +86,11 @@ pub const Tab = struct {
     root: Node,
     panes: std.ArrayListUnmanaged(*Pane) = .empty,
     focused: *Pane,
+    /// Workspace ANNOTATION (never a container — cd is sacred): the
+    /// registry name whose root holds the focused shell's cwd, resolved
+    /// at the 2Hz HUD tick, worn by the tab chip.
+    ws: [24]u8 = undefined,
+    ws_len: usize = 0,
 };
 
 pub const Split = struct {

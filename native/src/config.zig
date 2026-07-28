@@ -180,6 +180,8 @@ pub const Action = enum {
     /// tmux copy mode: keys scroll the focused terminal's viewport.
     /// <leader>[ by default.
     copy_mode,
+    /// The workspace palette (reads rook.db). <leader>w by default.
+    workspace_switch,
 };
 
 pub const ActionSpec = struct { action: Action, arg: u8 = 0 };
@@ -205,6 +207,8 @@ fn actionFromName(name: []const u8) ?ActionSpec {
         .{ .n = "tab.prev", .a = .tab_prev },
         .{ .n = "copy-mode", .a = .copy_mode }, // tmux's name
         .{ .n = "pane.scrollback", .a = .copy_mode },
+        .{ .n = "workspace.switch", .a = .workspace_switch },
+        .{ .n = "workspace.picker", .a = .workspace_switch },
     };
     for (map) |m| {
         if (std.mem.eql(u8, name, m.n)) return .{ .action = m.a };
@@ -295,6 +299,7 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     // mode. Config lines rebind.
     for (1..10) |d| kb.bind(@intCast('0' + d), .{ .action = .tab_select, .arg = @intCast(d) });
     kb.bind('[', .{ .action = .copy_mode });
+    kb.bind('w', .{ .action = .workspace_switch });
 
     var pathbuf: [1024]u8 = undefined;
     const path = blk: {

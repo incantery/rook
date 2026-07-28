@@ -37,6 +37,9 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkFramework("CoreGraphics", .{});
     exe_mod.linkFramework("CoreText", .{});
     exe_mod.linkFramework("ImageIO", .{});
+    // The workspace registry: rook's own sqlite db, read via the
+    // system libsqlite3 (macOS ships it; no vendored dependency).
+    exe_mod.linkSystemLibrary("sqlite3", .{});
 
     const exe = b.addExecutable(.{
         .name = "rookz",

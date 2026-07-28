@@ -148,6 +148,13 @@ unmasked it: `press`-driven leader-c spawns a tab mid-connection,
 the child held the ctl conn, and nc never saw EOF — looked exactly
 like a deadlock; the app was fine all along.
 
+Eleventh re-run — workspace palette + chip annotations (2026-07-28):
+cat **0.908s** at 67×39, in band; fill p50 39µs, idle 0 frames, RSS
+86MB. The palette draws only while open (one bool branch per frame
+closed), the sqlite read happens on open, and the per-tab
+cwd→workspace resolve rides the existing 2Hz HUD tick (a proc_pidinfo
+per tab, cached on the Tab) — none of it shows.
+
 Context (different machines/corpora — directional only): webview rook
 cat = 0.91s (M3 Max, its own scoreboard); Mitchell's 2026-07-06 M4 Max
 table: Ghostty nightly 0.575s, Alacritty 1.2s, Ghostty 1.3.2 1.5s,

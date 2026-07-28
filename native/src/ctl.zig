@@ -119,6 +119,12 @@ fn findPane(app: *macos.App, pane_id: ?u32) ?*panespkg.Pane {
 fn writeTarget(app: *macos.App, pane_id: ?u32, bytes: []const u8) bool {
     app.draw_lock.lock();
     defer app.draw_lock.unlock();
+    // An open palette owns untargeted input, same as the real key path.
+    if (app.pal_open and pane_id == null) {
+        app.markInput(CACurrentMediaTime());
+        app.palKeyLocked(bytes);
+        return true;
+    }
     const p = findPane(app, pane_id) orelse return false;
     if (p == app.tabs.items[app.active_tab].focused) app.markInput(CACurrentMediaTime());
     app.paneInput(p, bytes);
@@ -206,6 +212,38 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         }
         app.draw_lock.unlock();
         reply(fd, buf[0..w.end]);
+    } else if (std.mem.eql(u8, verb, "workspaces") and rest.len == 0) {
+        // Fresh read of rook.db — proves the sqlite path blind.
+        const list = @import("workspaces.zig").load(app.gpa);
+        defer @import("workspaces.zig").free(app.gpa, list);
+        var buf: [4096]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        for (list) |e| w.print("{s}\t{s}\n", .{ e.name, e.root }) catch break;
+        if (list.len == 0) _ = w.write("none\n") catch 0;
+        reply(fd, buf[0..w.end]);
+    } else if (std.mem.eql(u8, verb, "palette") and rest.len == 0) {
+        // Palette state: closed, or the filter + rows (* = selected).
+        var buf: [4096]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        app.draw_lock.lock();
+        if (!app.pal_open) {
+            _ = w.write("closed\n") catch 0;
+        } else {
+            w.print("filter:{s}\n", .{app.pal_input[0..app.pal_input_len]}) catch {};
+            for (app.pal_filtered[0..app.pal_nfiltered], 0..) |ii, vi| {
+                const e = app.pal_items[ii];
+                w.print("{s}{s}\t{s}\n", .{
+                    @as([]const u8, if (vi == app.pal_sel) "*" else " "),
+                    e.name,
+                    e.root,
+                }) catch break;
+            }
+        }
+        app.draw_lock.unlock();
+        reply(fd, buf[0..w.end]);
+    } else if (std.mem.eql(u8, verb, "palette-open") and rest.len == 0) {
+        app.openPalette();
+        reply(fd, "ok\n");
     } else if (std.mem.eql(u8, verb, "tab")) {
         if (std.mem.eql(u8, rest, "new")) {
             app.newTab();
