@@ -1011,15 +1011,22 @@ pub const App = struct {
     /// ⌘C: focused terminal's selection (or editor's register) → the
     /// system pasteboard. Returns the copied text (caller frees) so
     /// ctl \`copy\` can verify without reading the pasteboard.
-    pub fn copyFocused(self: *App) ?[]const u8 {
+    /// The SENTINEL is part of the type on purpose. selectionString
+    /// allocates len+1 bytes; slicing the sentinel off to get a plain
+    /// []const u8 hands the caller a length that doesn't match the
+    /// allocation, and freeing it is an invalid free — which only
+    /// aborts when len and len+1 land in different size classes, so it
+    /// hid for as long as the copied strings happened to be lucky.
+    /// Allocator.free adds the sentinel back when the type carries it.
+    pub fn copyFocused(self: *App) ?[:0]const u8 {
         self.draw_lock.lock();
-        const text: ?[]const u8 = switch (self.activeTab().focused.content) {
-            .term => |*tm| if (tm.session.selectionText(self.gpa)) |t| t[0..t.len] else null,
+        const text: ?[:0]const u8 = switch (self.activeTab().focused.content) {
+            .term => |*tm| tm.session.selectionText(self.gpa),
             .edit => |ed| blk: {
                 // Visual selection yanks first; otherwise the last yank.
                 if (ed.mode == .visual or ed.mode == .visual_line) ed.key("y");
                 if (ed.reg.items.len == 0) break :blk null;
-                break :blk self.gpa.dupe(u8, ed.reg.items) catch null;
+                break :blk self.gpa.dupeZ(u8, ed.reg.items) catch null;
             },
         };
         self.draw_lock.unlock();
