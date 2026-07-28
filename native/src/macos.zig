@@ -140,6 +140,11 @@ pub const App = struct {
     hud_last_t: f64 = 0,
     hud_last_bytes: u64 = 0,
     hud_mbs: f64 = 0,
+    /// Config live-reload: wyhash of both config files, polled at
+    /// ~1Hz off the HUD tick. Theme + keybinds apply live;
+    /// font/opacity need a relaunch (renderer + window are built).
+    config_digest: u64 = 0,
+    hud_calls: u64 = 0,
 
     // fps truth: the display link's refresh period is the ceiling the
     // HUD shows optimistically; it dips only when measured FRAME COST
@@ -1258,7 +1263,44 @@ pub const App = struct {
 
     /// Recompute the status-bar text; flip scene_dirty only when it
     /// changed. Caller holds draw_lock.
+    /// Reload keybinds + theme when a config file changes (1Hz poll
+    /// off the HUD tick). Caller holds draw_lock.
+    fn pollConfigLocked(self: *App) void {
+        const cfgpkg = @import("config.zig");
+        const d = cfgpkg.digest(self.io, self.gpa);
+        defer self.config_digest = d;
+        if (self.config_digest == 0 or d == self.config_digest) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const cfg = cfgpkg.load(self.io, arena.allocator());
+        self.keybinds = cfgpkg.loadKeybinds(self.io, arena.allocator());
+        self.leader_pending.store(false, .release);
+
+        if (themepkg.byName(cfg.theme)) |t| {
+            th = t.*;
+        } else std.debug.print("rookz config: unknown theme '{s}'\n", .{cfg.theme});
+
+        // Retint every live emulator; the palette dirty flag forces a
+        // full RenderState rebuild next snapshot.
+        const tc = termColors();
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |p| {
+                if (p.term()) |tm| {
+                    tm.session.mutex.lock();
+                    tm.session.term.colors = tc;
+                    tm.session.term.flags.dirty.palette = true;
+                    tm.session.mutex.unlock();
+                } else if (p.editor()) |ed| ed.render_dirty = true;
+            }
+        }
+        self.scene_dirty = true;
+        std.debug.print("rookz: config reloaded (theme {s}; font/opacity need relaunch)\n", .{th.name});
+    }
+
     fn refreshHudLocked(self: *App, now: f64) void {
+        self.hud_calls +%= 1;
+        if (self.hud_calls % 2 == 0) self.pollConfigLocked();
         const bytes = stats.global.bytes_in.load(.monotonic);
         if (self.hud_last_t > 0 and now > self.hud_last_t) {
             self.hud_mbs = @as(f64, @floatFromInt(bytes -| self.hud_last_bytes)) / (now - self.hud_last_t) / 1e6;

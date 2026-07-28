@@ -19,6 +19,31 @@ pub const Config = struct {
     background_opacity: f64 = 1.0,
 };
 
+/// One number over both config files — the live-reload poll compares
+/// this at 1Hz (files are tiny; reading beats fs-event plumbing).
+pub fn digest(io: std.Io, gpa: std.mem.Allocator) u64 {
+    var h = std.hash.Wyhash.init(0x400c);
+    var pathbuf: [1024]u8 = undefined;
+    inline for (.{ "config.toml", "keybinds.toml" }) |name| {
+        if (cfgPath(&pathbuf, name)) |path| {
+            if (std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch null) |data| {
+                h.update(data);
+                gpa.free(data);
+            }
+        }
+        h.update(&.{0});
+    }
+    return h.final();
+}
+
+fn cfgPath(buf: []u8, comptime name: []const u8) ?[]const u8 {
+    if (getenv("XDG_CONFIG_HOME")) |x| {
+        return std.fmt.bufPrint(buf, "{s}/rookz/" ++ name, .{std.mem.span(x)}) catch null;
+    }
+    const home = getenv("HOME") orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/.config/rookz/" ++ name, .{std.mem.span(home)}) catch null;
+}
+
 pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
     var cfg: Config = .{};
 
