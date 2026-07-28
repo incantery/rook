@@ -932,6 +932,24 @@ pub const Editor = struct {
         self.cursorToOffset(at + self.reg.items.len - 1);
     }
 
+    /// Wheel scroll: move the viewport, dragging the cursor along only
+    /// when it would leave the view (vim's scroll feel). Positive =
+    /// down (later lines).
+    pub fn scroll(self: *Editor, dy: i64) void {
+        const lc = self.lineCountB();
+        var t: i64 = @intCast(self.top);
+        t += dy;
+        if (t < 0) t = 0;
+        if (t > @as(i64, @intCast(lc - 1))) t = @intCast(lc - 1);
+        self.top = @intCast(t);
+        const text_rows = @max(1, self.last_rows -| 1);
+        if (self.cline < self.top) self.cline = self.top;
+        if (self.cline >= self.top + text_rows) self.cline = self.top + text_rows - 1;
+        if (self.cline >= lc) self.cline = lc - 1;
+        self.clampNormal();
+        self.render_dirty = true;
+    }
+
     // ------------------------------------------------------------ selection
 
     /// Is (line, bcol) inside the visual selection?

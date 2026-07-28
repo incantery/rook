@@ -12,7 +12,10 @@ buffer offset; chrome is more quads). Chords match the wails app:
 **⌘D** split right, **⌘⇧D** split down, **⌃HJKL** focus nav — which
 yields to alternate-screen apps (vim keeps its own splits) by reading
 alt-screen truth straight from the emulator, no heuristic — plus
-**⌘T** new tab, **⌘1–9** select, **⌘⇧[** / **⌘⇧]** cycle. The cursor
+**⌘T** new tab, **⌘1–9** select, **⌘⇧[** / **⌘⇧]** cycle. The mouse
+works: clicks focus panes and select tab chips; the wheel scrolls
+editors and alt-screen apps (arrow keys — primary-screen scrollback
+is its own slice). The cursor
 and the accent-colored separator edges mark the focused pane. Only the
 active tab renders: background tabs' emulators keep advancing but cost
 zero frames (measured: `yes` in a hidden tab, 480 ticks, 1 draw). A
@@ -90,6 +93,8 @@ printf 'split right\n'       | nc -U /tmp/rookz.sock   # split focused (or: down
 printf 'edit /abs/file\n'     | nc -U /tmp/rookz.sock   # editor pane (focused editor
                                                        #   retargets; else split right)
 printf 'focus left\n'        | nc -U /tmp/rookz.sock   # move focus (or an id — switches tab)
+printf 'click 300 800\n'      | nc -U /tmp/rookz.sock   # px coords: chips select, panes focus
+printf 'wheel 300 800 -5\n'   | nc -U /tmp/rookz.sock   # scroll steps (+ = up) at a point
 printf 'dump@2\n'            | nc -U /tmp/rookz.sock   # any pane-taking verb
 printf 'type@2 ls\n'         | nc -U /tmp/rookz.sock   #   targets by @id
 printf 'shot /tmp/s.png\n'   | nc -U /tmp/rookz.sock   # pixel truth

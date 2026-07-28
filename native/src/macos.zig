@@ -45,6 +45,8 @@ extern "c" fn CVDisplayLinkStart(link: CVDisplayLinkRef) i32;
 extern "c" fn CVDisplayLinkGetActualOutputVideoRefreshPeriod(link: CVDisplayLinkRef) f64;
 
 const NSEventMaskKeyDown: u64 = 1 << 10;
+const NSEventMaskLeftMouseDown: u64 = 1 << 1;
+const NSEventMaskScrollWheel: u64 = 1 << 22;
 const flag_shift: u64 = 1 << 17;
 const flag_ctrl: u64 = 1 << 18;
 const flag_cmd: u64 = 1 << 20;
@@ -155,6 +157,14 @@ pub const App = struct {
     /// proc_pidinfo(PROC_PIDVNODEPATHINFO) scratch: 2 × (152-byte
     /// vnode_info + 1024-byte path). Written under draw_lock.
     cwd_info: [2352]u8 = undefined,
+
+    /// Tab-chip x extents (px) recorded by drawTabBar for click hit
+    /// tests. Written/read under draw_lock.
+    chip_x: [16][2]f32 = undefined,
+    chip_n: usize = 0,
+
+    /// Wheel accumulator (points); one scroll step per cell height.
+    wheel_accum: f64 = 0,
 
     // ctl `shot` handoff: the socket thread stores a path and flips the
     // flag; the render thread services it after the next commit.
@@ -298,6 +308,13 @@ pub const App = struct {
             &block_ctx,
         });
 
+        // Mouse: click-to-focus (panes + tab chips), wheel scroll.
+        var mouse_ctx = MonitorBlock.init(.{ .app = self }, &mouseCallback);
+        _ = NSEvent.msgSend(objc.Object, "addLocalMonitorForEventsMatchingMask:handler:", .{
+            NSEventMaskLeftMouseDown | NSEventMaskScrollWheel,
+            &mouse_ctx,
+        });
+
         // Resize: view frame changes retarget the drawable, the layout,
         // every pane's emulator (reflow) and pty. Runs on the main thread.
         var resize_ctx = ResizeBlock.init(.{ .app = self }, &resizeCallback);
@@ -377,6 +394,60 @@ pub const App = struct {
 
     fn activeTab(self: *App) *panespkg.Tab {
         return self.tabs.items[self.active_tab];
+    }
+
+    /// A click in scene px coords: tab chips select, panes focus.
+    /// Shared by the NSEvent monitor and ctl \`click\` (blind-testable).
+    pub fn clickAt(self: *App, x: f32, y: f32) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        if (y < self.tab_h) {
+            for (self.chip_x[0..self.chip_n], 0..) |cx, i| {
+                if (x >= cx[0] and x <= cx[1]) {
+                    self.activateTabLocked(i);
+                    break;
+                }
+            }
+            return;
+        }
+        const t = self.activeTab();
+        for (t.panes.items) |p| {
+            const r = p.rect;
+            if (x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h) {
+                self.setFocusLocked(p);
+                break;
+            }
+        }
+    }
+
+    /// Wheel steps (+ = scroll up) routed to the pane under the point:
+    /// editors move their viewport, alt-screen terminals get arrows,
+    /// primary-screen terminal scrollback lands with the scrollback
+    /// slice.
+    pub fn wheelAt(self: *App, x: f32, y: f32, lines_in: i64) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        var lines = lines_in;
+        const t = self.activeTab();
+        for (t.panes.items) |p| {
+            const r = p.rect;
+            if (!(x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h)) continue;
+            switch (p.content) {
+                .edit => |ed| {
+                    ed.scroll(-lines);
+                    self.scene_dirty = true;
+                },
+                .term => |*tm| {
+                    const alt = tm.session.term.screens.active_key == .alternate;
+                    if (!alt) break;
+                    const seq: []const u8 = if (lines > 0) "\x1b[A" else "\x1b[B";
+                    if (lines < 0) lines = -lines;
+                    var n: i64 = 0;
+                    while (n < lines and n < 20) : (n += 1) tm.session.write(seq);
+                },
+            }
+            break;
+        }
     }
 
     /// The focused pane's shell cwd via libproc — new tabs and splits
@@ -1038,6 +1109,10 @@ pub const App = struct {
             const bg = if (is_active) chip_active_bg else bar_bg;
             const w = ui.text(x, ty, label, fg, bg);
             if (is_active) ui.rect(x, self.tab_h - self.sep * 2, w, self.sep * 2, accent_color);
+            if (i < self.chip_x.len) {
+                self.chip_x[i] = .{ x, x + w };
+                self.chip_n = i + 1;
+            }
             x += w + self.renderer.cell_w / 2;
             if (x > self.px_w) break;
         }
@@ -1326,6 +1401,40 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
         // session mid-write.
         app.writeFocused(bytes, ts);
     }
+    return null;
+}
+
+/// Mouse: clicks focus what they land on (pane or tab chip); the
+/// wheel scrolls the pane under the cursor — alt-screen terminals get
+/// arrow keys (vim/less), editors scroll their viewport, primary-
+/// screen terminal scrollback arrives with the scrollback slice.
+fn mouseCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) callconv(.c) objc.c.id {
+    const app: *App = context.app;
+    const event = objc.Object.fromId(event_id);
+    const etype = event.msgSend(u64, "type", .{});
+
+    // Window coords are points, origin bottom-left; the scene is px,
+    // origin top-left of the layer (= contentView).
+    const loc = event.msgSend(NSPoint, "locationInWindow", .{});
+    const scale = app.layer.msgSend(f64, "contentsScale", .{});
+    const x: f32 = @floatCast(loc.x * scale);
+    const y: f32 = app.px_h - @as(f32, @floatCast(loc.y * scale));
+    if (y < 0 or y > app.px_h or x < 0 or x > app.px_w) return event_id; // titlebar etc.
+
+    if (etype == 1) { // NSEventTypeLeftMouseDown
+        app.clickAt(x, y);
+        return null;
+    }
+
+    // Scroll wheel: accumulate points; one step per cell height.
+    const dy = event.msgSend(f64, "scrollingDeltaY", .{});
+    app.draw_lock.lock();
+    app.wheel_accum += dy;
+    const step: f64 = @floatCast(@max(1.0, app.renderer.cell_h / @as(f32, @floatCast(scale))));
+    const lines: i64 = @intFromFloat(app.wheel_accum / step);
+    app.wheel_accum -= @as(f64, @floatFromInt(lines)) * step;
+    app.draw_lock.unlock();
+    if (lines != 0) app.wheelAt(x, y, lines);
     return null;
 }
 

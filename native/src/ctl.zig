@@ -227,6 +227,27 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         // place, else one splits off to the right. Paths resolve
         // against the APP's cwd — send absolute paths (rookz edit does).
         reply(fd, if (app.openEditor(rest)) "ok\n" else "err open\n");
+    } else if (std.mem.eql(u8, verb, "click")) {
+        var it = std.mem.tokenizeScalar(u8, rest, ' ');
+        const x = std.fmt.parseFloat(f32, it.next() orelse "") catch -1;
+        const y = std.fmt.parseFloat(f32, it.next() orelse "") catch -1;
+        if (x < 0 or y < 0) {
+            reply(fd, "err click <x_px> <y_px>\n");
+            return;
+        }
+        app.clickAt(x, y);
+        reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "wheel")) {
+        var it = std.mem.tokenizeScalar(u8, rest, ' ');
+        const x = std.fmt.parseFloat(f32, it.next() orelse "") catch -1;
+        const y = std.fmt.parseFloat(f32, it.next() orelse "") catch -1;
+        const lines = std.fmt.parseInt(i64, it.next() orelse "", 10) catch 0;
+        if (x < 0 or y < 0 or lines == 0) {
+            reply(fd, "err wheel <x_px> <y_px> <±lines>\n");
+            return;
+        }
+        app.wheelAt(x, y, lines);
+        reply(fd, "ok\n");
     } else if (std.mem.eql(u8, verb, "split")) {
         if (std.mem.eql(u8, rest, "right")) {
             app.splitFocused(true);
