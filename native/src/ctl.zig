@@ -239,12 +239,15 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         app.draw_lock.lock();
         for (app.spaces.items, 0..) |s, si| {
             for (s.tabs.items, 0..) |t, ti| {
-                w.print("{s}[{s}] {d} ({d} pane{s})\n", .{
+                w.print("{s}[{s}] {d} ({d} pane{s}){s}\n", .{
                     @as([]const u8, if (si == app.active_space and ti == s.active_tab) "*" else " "),
                     s.label(),
                     ti + 1,
                     t.panes.items.len,
                     @as([]const u8, if (t.panes.items.len == 1) "" else "s"),
+                    // The chip's bell dot, in text — `shot` can see the
+                    // dot, but a blind test shouldn't have to.
+                    @as([]const u8, if (t.bell) " bell" else ""),
                 }) catch break;
             }
         }

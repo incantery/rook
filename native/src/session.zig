@@ -64,6 +64,13 @@ pub const Session = struct {
     /// exited). The app collapses the pane on its next frame.
     exited: std.atomic.Value(bool) = .init(false),
 
+    /// BEL arrived. Set on the reader thread (inside the parse, with the
+    /// mutex held), drained by the app on the main thread — the bell has
+    /// to reach AppKit, and the reader is the wrong thread to touch it
+    /// from. A flag rather than a count: ten bells in a burst are one
+    /// "something wants you", and that is the whole signal.
+    bell: std.atomic.Value(bool) = .init(false),
+
     // Geometry for XTWINOPS size reports; updated by resize().
     cols: u16,
     rows: u16,
@@ -203,7 +210,7 @@ pub const Session = struct {
             .enquiry = &effectEnquiry,
             .xtversion = &effectXtversion,
             .color_scheme = &effectColorScheme,
-            .bell = null,
+            .bell = &effectBell,
             .clipboard_write = null,
             .title_changed = null,
             .pwd_changed = null,
@@ -231,6 +238,14 @@ pub const Session = struct {
 
     fn fromHandler(h: *Handler) *Session {
         return @fieldParentPtr("term", h.terminal);
+    }
+
+    /// BEL. Fires on the reader thread with the mutex held, so it does
+    /// exactly one thing: raise a flag. Everything the bell actually
+    /// MEANS — a dock bounce, a chip dot, a beep — is AppKit's, and
+    /// belongs on the main thread.
+    fn effectBell(h: *Handler) void {
+        fromHandler(h).bell.store(true, .release);
     }
 
     fn effectWritePty(h: *Handler, data: [:0]const u8) void {

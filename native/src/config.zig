@@ -44,6 +44,21 @@ pub fn blurFromName(name: []const u8) ?Blur {
     return null;
 }
 
+/// What BEL does. `visual` is the default because the signal that
+/// matters is "which pane wants me", and that is the chip dot plus a
+/// dock bounce — an agent finishing work in a background space should
+/// be findable, not audible. `audible` adds NSBeep for people who want
+/// the terminal to sound like a terminal.
+pub const Bell = enum { none, visual, audible, all };
+
+pub fn bellFromName(name: []const u8) ?Bell {
+    if (std.mem.eql(u8, name, "none")) return .none;
+    if (std.mem.eql(u8, name, "visual")) return .visual;
+    if (std.mem.eql(u8, name, "audible")) return .audible;
+    if (std.mem.eql(u8, name, "all") or std.mem.eql(u8, name, "both")) return .all;
+    return null;
+}
+
 pub const Config = struct {
     font_size: f64 = 13,
     font_family: [:0]const u8 = "FiraCode Nerd Font Mono",
@@ -57,6 +72,7 @@ pub const Config = struct {
     /// Points of breathing room between the chrome and the pane area
     /// (content otherwise runs to the very window edge). 0–32.
     window_padding: f64 = 0,
+    bell: Bell = .visual,
 };
 
 /// One number over the config file — the live-reload poll compares this
@@ -172,6 +188,12 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
                 std.debug.print("rook config: window-padding {d} out of [0, 32], using 0\n", .{cfg.window_padding});
                 cfg.window_padding = 0;
             }
+        } else if (std.mem.eql(u8, key, "bell")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            cfg.bell = bellFromName(stripped) orelse blk: {
+                std.debug.print("rook config: unknown bell '{s}' (none, visual, audible, all)\n", .{stripped});
+                break :blk .visual;
+            };
         } else if (std.mem.eql(u8, key, "background_blur")) {
             const stripped = std.mem.trim(u8, val, "\"");
             cfg.background_blur = blurFromName(stripped) orelse blk: {

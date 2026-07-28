@@ -78,8 +78,11 @@ a daily driver.
       the path is testable; ctl `ime` reports the state.
 - [ ] **OSC 52** (clipboard write): `session.zig` sets `.clipboard_write = null`.
       Copying from a remote tmux/vim over ssh silently fails.
-- [ ] **Bell** (`.bell = null`): no audible/visual bell, and no dock badge.
-      This is also the cheapest agent-attention signal there is.
+- [x] **Bell** — accent dot on the tab chip that rang + a single dock
+      bounce, both suppressed while you're watching that tab; visiting
+      the tab is the acknowledgement. `bell = none|visual|audible|all`.
+      The cheapest agent-attention signal there is, and until §2's inbox
+      lands it is the ONLY way rook can say an agent wants you.
 - [ ] **Notifications**: OSC 9 / OSC 777 → `NSUserNotification`. Claude
       finishing in a background space should say so.
 - [ ] **OSC 8 hyperlinks** + URL/path detection with ⌘-click to open

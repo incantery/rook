@@ -58,6 +58,20 @@ what a key means, which is why Return/Tab/ESC/arrows are untouched by
 any of this. Modified keys never reach the IME at all — ⌃C is the
 terminal's.
 
+**BEL is an attention signal**, which is most of why it exists here: an
+agent finishing in a space you left is the case rook cares about, and
+until the attention inbox lands this is the only way the app can say so.
+The tab that rang wears an accent dot on its chip, and the Dock bounces
+once (`requestUserAttention:`, informational — the critical variant
+bounces until you focus the app, which is bad manners for a shell that
+finished a build). Both are suppressed when you are already watching:
+frontmost, on that tab. Visiting the tab IS the acknowledgement, so
+there is no dismiss. `bell` in config takes `none`, `visual` (default),
+`audible` (adds NSBeep), or `all`. The emulator callback runs on the
+reader thread inside the parse, so it only raises a flag — everything
+the bell MEANS is AppKit's, drained on the main thread off the 2Hz HUD
+tick. ctl `tabs` prints `bell` beside a tab that is holding one.
+
 The cursor
 and the accent-colored separator edges mark the focused pane. Only the
 active tab renders: background tabs' emulators keep advancing but cost

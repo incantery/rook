@@ -23,6 +23,8 @@ const themepkg = @import("theme.zig");
 const stats = @import("stats.zig");
 
 extern "c" fn CACurrentMediaTime() f64;
+/// AppKit's system alert sound — the audible half of the bell.
+extern "c" fn NSBeep() void;
 
 const NSPoint = extern struct { x: f64, y: f64 };
 const NSSize = extern struct { width: f64, height: f64 };
@@ -431,6 +433,9 @@ pub const App = struct {
     /// color carry this alpha; explicit cell colors stay solid.
     bg_alpha: u8 = 255,
     bg_opacity: f64 = 1.0,
+    /// What BEL does (config `bell`). Live-reloadable, unlike the
+    /// renderer-shaped settings around it.
+    cfg_bell: @import("config.zig").Bell = .visual,
 
     /// Active mouse-drag selection: the pane and its anchor cell
     /// (viewport coords at mousedown). Under draw_lock; cleared by
@@ -609,6 +614,7 @@ pub const App = struct {
             .pad_pts = @floatCast(cfg.window_padding),
             .pad = pad,
             .bg_opacity = cfg.background_opacity,
+            .cfg_bell = cfg.bell,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
             .ime_view = view,
         };
@@ -1315,6 +1321,8 @@ pub const App = struct {
 
     fn activateTabLocked(self: *App, i: usize) void {
         self.activeSpace().active_tab = i;
+        // Looking at it IS the acknowledgement. No separate dismiss.
+        self.activeSpace().tabs.items[i].bell = false;
         self.focused_session.store(self.focusedTermSession(), .release);
         // The window may have resized while this tab was hidden.
         self.relayoutLocked();
@@ -1988,6 +1996,7 @@ pub const App = struct {
         const cfg = cfgpkg.load(self.io, arena.allocator());
         self.keybinds = cfgpkg.loadKeybinds(self.io, arena.allocator());
         self.leader_pending.store(false, .release);
+        self.cfg_bell = cfg.bell;
 
         if (themepkg.byName(cfg.theme)) |t| {
             th = t.*;
@@ -2010,8 +2019,49 @@ pub const App = struct {
         std.debug.print("rook: config reloaded (theme {s}; font/opacity need relaunch)\n", .{th.name});
     }
 
+    /// Drain BEL flags raised by reader threads and turn them into the
+    /// things a bell actually means. Main thread, under draw_lock, off
+    /// the 2Hz HUD tick — half a second late is imperceptible for an
+    /// attention signal, and it keeps AppKit off the parse path.
+    ///
+    /// A bell in the tab you are already looking at, in an app that is
+    /// frontmost, has nothing to tell you: you are watching it happen.
+    /// So the chip dot is only set for tabs you are NOT on, and the dock
+    /// is only disturbed when rook isn't the active app — which is
+    /// exactly the case the signal exists for, an agent finishing in a
+    /// space you left.
+    fn drainBellsLocked(self: *App) void {
+        if (self.cfg_bell == .none) return;
+        const frontmost = self.app.msgSend(bool, "isActive", .{});
+        var rang = false;
+        for (self.spaces.items, 0..) |space, si| {
+            for (space.tabs.items, 0..) |tab, ti| {
+                var tab_rang = false;
+                for (tab.panes.items) |p| {
+                    if (p.term()) |tm| {
+                        if (tm.session.bell.swap(false, .acquire)) tab_rang = true;
+                    }
+                }
+                if (!tab_rang) continue;
+                rang = true;
+                const watching = frontmost and si == self.active_space and ti == space.active_tab;
+                if (!watching and !tab.bell) {
+                    tab.bell = true;
+                    self.scene_dirty = true;
+                }
+            }
+        }
+        if (!rang) return;
+        if (self.cfg_bell == .audible or self.cfg_bell == .all) NSBeep();
+        // NSInformationalRequest bounces once and stops; the critical
+        // variant bounces until you focus the app, which is the wrong
+        // manners for a shell that finished a build.
+        if (!frontmost) _ = self.app.msgSend(c_long, "requestUserAttention:", .{@as(c_long, 10)});
+    }
+
     fn refreshHudLocked(self: *App, now: f64) void {
         self.hud_calls +%= 1;
+        self.drainBellsLocked();
         if (self.hud_calls % 2 == 0) self.pollConfigLocked();
         const bytes = stats.global.bytes_in.load(.monotonic);
         if (self.hud_last_t > 0 and now > self.hud_last_t) {
@@ -2169,10 +2219,16 @@ pub const App = struct {
                     if (n > 0) title = title_buf[0..n];
                 },
             }
-            var chip: [40]u8 = undefined;
-            const label = std.fmt.bufPrint(&chip, " {d} {s} ", .{ i + 1, title }) catch continue;
+            // A belled tab wears a dot before its number. The bell says
+            // "something wants you"; the dot says WHICH tab, which is
+            // the half a dock bounce can't deliver.
+            var chip: [44]u8 = undefined;
+            const label = if (t.bell)
+                std.fmt.bufPrint(&chip, " • {d} {s} ", .{ i + 1, title }) catch continue
+            else
+                std.fmt.bufPrint(&chip, " {d} {s} ", .{ i + 1, title }) catch continue;
 
-            const fg = if (is_active) th.bar_value else th.bar_fg;
+            const fg = if (is_active) th.bar_value else if (t.bell) th.accent else th.bar_fg;
             const bg = self.glassBg(if (is_active) th.chip_active_bg else th.bar_bg);
             const w = ui.text(x, ty, label, fg, bg);
             if (is_active) ui.rect(x, self.contentY() - self.sep * 2, w, self.sep * 2, th.accent);

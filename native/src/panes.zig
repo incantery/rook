@@ -86,6 +86,11 @@ pub const Tab = struct {
     root: Node,
     panes: std.ArrayListUnmanaged(*Pane) = .empty,
     focused: *Pane,
+    /// A pane in this tab rang the bell while you weren't looking at it.
+    /// Drawn as a dot on the chip and cleared when the tab is selected —
+    /// the point is to say WHERE attention is owed, which a dock bounce
+    /// alone can't.
+    bell: bool = false,
 };
 
 /// A workspace SESSION — tmux's session, rook's workspace: its own
