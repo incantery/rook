@@ -54,6 +54,12 @@ pub const Editor = struct {
     vanchor_col: usize = 0,
 
     cmd: std.ArrayListUnmanaged(u8) = .empty,
+    /// What the command line is collecting: an ex command (:) or a
+    /// search pattern (/).
+    cmd_kind: enum { ex, search } = .ex,
+    /// The live pattern; non-empty = visible matches highlight
+    /// (:noh clears).
+    last_search: std.ArrayListUnmanaged(u8) = .empty,
     reg: std.ArrayListUnmanaged(u8) = .empty,
     reg_linewise: bool = false,
 
@@ -89,6 +95,7 @@ pub const Editor = struct {
         const gpa = self.gpa;
         self.buf.deinit(gpa);
         self.cmd.deinit(gpa);
+        self.last_search.deinit(gpa);
         self.reg.deinit(gpa);
         self.grid.deinit(gpa);
         gpa.destroy(self);
@@ -321,7 +328,14 @@ pub const Editor = struct {
         }
         if (b0 == '\r' or b0 == '\n') {
             self.mode = .normal;
-            self.execCommand();
+            switch (self.cmd_kind) {
+                .ex => self.execCommand(),
+                .search => {
+                    self.last_search.clearRetainingCapacity();
+                    self.last_search.appendSlice(self.gpa, self.cmd.items) catch {};
+                    self.searchNext(true);
+                },
+            }
             self.cmd.clearRetainingCapacity();
             return;
         }
@@ -369,6 +383,8 @@ pub const Editor = struct {
             } else self.closed = true;
         } else if (is(u8, verb, "q!")) {
             self.closed = true;
+        } else if (is(u8, verb, "noh") or is(u8, verb, "nohlsearch")) {
+            self.last_search.clearRetainingCapacity();
         } else if (is(u8, verb, "e") or is(u8, verb, "e!")) {
             if (arg.len == 0) {
                 self.setStatus("e needs a path", .{}, true);
@@ -620,8 +636,16 @@ pub const Editor = struct {
 
             ':' => {
                 self.mode = .command;
+                self.cmd_kind = .ex;
                 self.cmd.clearRetainingCapacity();
             },
+            '/' => {
+                self.mode = .command;
+                self.cmd_kind = .search;
+                self.cmd.clearRetainingCapacity();
+            },
+            'n' => self.searchNext(true),
+            'N' => self.searchNext(false),
 
             else => {
                 self.op = 0;
@@ -932,6 +956,50 @@ pub const Editor = struct {
         self.cursorToOffset(at + self.reg.items.len - 1);
     }
 
+    /// Jump to the next/previous match of last_search, wrapping.
+    fn searchNext(self: *Editor, fwd: bool) void {
+        const pat = self.last_search.items;
+        if (pat.len == 0) {
+            self.setStatus("no previous search", .{}, true);
+            return;
+        }
+        if (self.findMatch(fwd)) |pos| {
+            self.cline = pos.line;
+            self.ccol = pos.col;
+            self.goal = renderCol(self.lineText(pos.line), pos.col);
+        } else {
+            self.setStatus("pattern not found: {s}", .{pat[0..@min(pat.len, 60)]}, true);
+        }
+    }
+
+    fn findMatch(self: *Editor, fwd: bool) ?Pos {
+        const pat = self.last_search.items;
+        const lc = self.lineCountB();
+        if (fwd) {
+            // Current line after the cursor, then wrap through all lines.
+            var l = self.cline;
+            var from = @min(self.ccol + 1, self.lineLenB(l));
+            for (0..lc + 1) |_| {
+                const s = self.lineText(l);
+                if (std.mem.indexOfPos(u8, s, @min(from, s.len), pat)) |i| return .{ .line = l, .col = i };
+                l = (l + 1) % lc;
+                from = 0;
+            }
+            return null;
+        }
+        // Backward: before the cursor on this line, then wrap backward.
+        var l = self.cline;
+        var limit: ?usize = self.ccol;
+        for (0..lc + 1) |_| {
+            const s = self.lineText(l);
+            const hay = if (limit) |lim| s[0..@min(lim, s.len)] else s;
+            if (std.mem.lastIndexOf(u8, hay, pat)) |i| return .{ .line = l, .col = i };
+            l = if (l == 0) lc - 1 else l - 1;
+            limit = null;
+        }
+        return null;
+    }
+
     /// The :q refusal, callable from the app's ⌘W path.
     pub fn setStatusUnsaved(self: *Editor) void {
         self.setStatus("unsaved changes (:w first, or :q! to discard)", .{}, true);
@@ -1050,6 +1118,23 @@ pub const Editor = struct {
                 rc += 1;
                 i += n;
             }
+            // Search matches tint like a selection (vim hlsearch-ish;
+            // :noh clears). Cursor/selection styles win.
+            if (self.last_search.items.len > 0) {
+                const pat = self.last_search.items;
+                var from: usize = 0;
+                while (std.mem.indexOfPos(u8, s, from, pat)) |mi| : (from = mi + pat.len) {
+                    var bi = mi;
+                    while (bi < mi + pat.len and bi < s.len) : (bi += cpLenAt(s, bi)) {
+                        const mrc = renderCol(s, bi);
+                        if (mrc >= self.left and mrc - self.left < text_cols) {
+                            const cell = &out[gw + (mrc - self.left)];
+                            if (cell.st == .text) cell.st = .sel;
+                        }
+                    }
+                }
+            }
+
             // Visual-line selection tints the whole used row even past EOL.
             if (self.mode == .visual_line and self.selContains(line, 0, abs_start) and rc == 0) {
                 putText(out, gw, text_cols, self.left, 0, ' ', true);
@@ -1077,7 +1162,7 @@ pub const Editor = struct {
 
         var x: usize = 0;
         if (self.mode == .command) {
-            putStr(out, &x, ":", .status);
+            putStr(out, &x, if (self.cmd_kind == .search) "/" else ":", .status);
             for (self.cmd.items) |c| {
                 if (x >= out.len) break;
                 out[x] = .{ .cp = c, .st = .status };
@@ -1415,4 +1500,45 @@ test "scroll keeps cursor visible" {
     keys(e, "gg");
     _ = e.fillGrid(20, 10);
     try testing.expectEqual(@as(usize, 0), e.top);
+}
+
+test "search jump wrap and n/N" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialpha beta\ngamma\nbeta again");
+    e.key("\x1b");
+    keys(e, "gg0");
+    keys(e, "/beta");
+    e.key("\r");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+    try testing.expectEqual(@as(usize, 6), e.ccol);
+    keys(e, "n");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    try testing.expectEqual(@as(usize, 0), e.ccol);
+    keys(e, "n"); // wraps back to line 0
+    try testing.expectEqual(@as(usize, 0), e.cline);
+    keys(e, "N"); // backward → line 2 again
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    keys(e, "/nosuch");
+    e.key("\r");
+    try testing.expect(e.status_err);
+
+    // Highlight shows in the grid; :noh clears it.
+    keys(e, "/beta");
+    e.key("\r");
+    const g = e.fillGrid(30, 6);
+    var hl: usize = 0;
+    for (g) |c| {
+        if (c.st == .sel) hl += 1;
+    }
+    try testing.expect(hl >= 7); // two visible "beta"s (cursor eats one cell)
+    keys(e, ":noh");
+    e.key("\r");
+    const g2 = e.fillGrid(30, 6);
+    var hl2: usize = 0;
+    for (g2) |c| {
+        if (c.st == .sel) hl2 += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), hl2);
 }
