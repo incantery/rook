@@ -51,9 +51,16 @@ the terminal core, `zig_objc` is ghostty's own pin.
 
 ## Known debts
 
-No resize handling, no scrollback view, no selection, cursor is a color
-swap, input is cooked NSEvent characters (upgrade path:
-`vt.input.encodeKey`), no window-close → quit delegate, no color emoji
-(alpha-only rasterization; needs an RGBA atlas pass), atlas-full policy
-is clear-and-rebuild, glyphs render single-style (no bold/italic faces
-yet — the style flags are in `vt.Style.flags` when we want them).
+No scrollback view, no selection, cursor is a color swap, input is
+cooked NSEvent characters (upgrade path: `vt.input.encodeKey`), no
+window-close → quit delegate, no color emoji (alpha-only rasterization;
+needs an RGBA atlas pass), atlas-full policy is clear-and-rebuild,
+glyphs render single-style (no bold/italic faces yet — the style flags
+are in `vt.Style.flags` when we want them), box-drawing sprite set
+covers light/heavy/rounded lines + blocks but not doubles/diagonals
+(font fallback), clipboard effects (OSC 52) unwired.
+
+Two lessons that will recur: box/block glyphs are SPRITES, never font
+glyphs (edge-to-edge or you get seams), and the session must answer
+terminal queries (Effects callbacks) or query-and-wait programs like
+nvim stall on their response timeouts.

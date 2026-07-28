@@ -216,6 +216,18 @@ pub const Renderer = struct {
     }
 
     fn rasterize(self: *Renderer, cp: u21, wide: bool) ?GlyphLoc {
+        const slot_width = self.cellw_px * @as(usize, if (wide) 2 else 1);
+        @memset(self.scratch_data[0 .. self.scratch_w * self.cellh_px], 0);
+
+        // Box-drawing and block-element glyphs are drawn procedurally,
+        // edge to edge — a font glyph centered in a ceil'd cell leaves
+        // hairline seams between stacked cells (the nvim-logo bug).
+        if (self.drawSprite(cp)) return self.uploadSlot(slot_width);
+
+        return self.rasterizeFont(cp, slot_width);
+    }
+
+    fn rasterizeFont(self: *Renderer, cp: u21, slot_width: usize) ?GlyphLoc {
         // UTF-16 for CoreText.
         var u16buf: [2]u16 = undefined;
         var u16len: usize = 1;
@@ -242,22 +254,20 @@ pub const Renderer = struct {
             if (!CTFontGetGlyphsForCharacters(font, &u16buf, &glyph_ids, @intCast(u16len))) return null;
         }
 
-        const slot_w = self.cellw_px * @as(usize, if (wide) 2 else 1);
-
         // Center the glyph's advance inside its slot.
         const adv = CTFontGetAdvancesForGlyphs(font, 0, &glyph_ids, null, 1);
-        var x: f64 = (@as(f64, @floatFromInt(slot_w)) - adv) / 2.0;
+        var x: f64 = (@as(f64, @floatFromInt(slot_width)) - adv) / 2.0;
         if (x < 0) x = 0;
 
-        CGContextClearRect(self.scratch, .{
-            .origin = .{ .x = 0, .y = 0 },
-            .size = .{ .width = @floatFromInt(self.scratch_w), .height = @floatFromInt(self.cellh_px) },
-        });
         const pos = [1]CGPoint{.{ .x = x, .y = self.descent }};
         CTFontDrawGlyphs(font, &glyph_ids, &pos, 1, self.scratch);
 
-        // Shelf-allocate an atlas slot.
-        if (self.shelf_x + slot_w > atlas_px) {
+        return self.uploadSlot(slot_width);
+    }
+
+    /// Shelf-allocate an atlas slot and upload the scratch bitmap into it.
+    fn uploadSlot(self: *Renderer, slot_width: usize) ?GlyphLoc {
+        if (self.shelf_x + slot_width > atlas_px) {
             self.shelf_x = 0;
             self.shelf_y += self.cellh_px;
         }
@@ -269,16 +279,115 @@ pub const Renderer = struct {
             self.shelf_y = 0;
         }
         const loc: GlyphLoc = .{ .uvx = @intCast(self.shelf_x), .uvy = @intCast(self.shelf_y) };
-        self.shelf_x += slot_w;
+        self.shelf_x += slot_width;
 
         self.atlas.msgSend(void, "replaceRegion:mipmapLevel:withBytes:bytesPerRow:", .{
-            MTLRegion{ .x = loc.uvx, .y = loc.uvy, .z = 0, .w = slot_w, .h = self.cellh_px, .d = 1 },
+            MTLRegion{ .x = loc.uvx, .y = loc.uvy, .z = 0, .w = slot_width, .h = self.cellh_px, .d = 1 },
             @as(u64, 0),
             @as(*const anyopaque, self.scratch_data),
             @as(u64, self.scratch_w),
         });
 
         return loc;
+    }
+
+    // --- Procedural sprites: exact-pixel, seam-free ---
+
+    fn fillRect(self: *Renderer, x: usize, y: usize, w: usize, h: usize, val: u8) void {
+        const x1 = @min(x + w, self.scratch_w);
+        const y1 = @min(y + h, self.cellh_px);
+        var yy = y;
+        while (yy < y1) : (yy += 1) {
+            @memset(self.scratch_data[yy * self.scratch_w + x .. yy * self.scratch_w + x1], val);
+        }
+    }
+
+    /// Draw cp into the scratch bitmap if it's a supported box-drawing or
+    /// block-element character. Returns false to fall back to the font.
+    fn drawSprite(self: *Renderer, cp: u21) bool {
+        const w = self.cellw_px;
+        const h = self.cellh_px;
+
+        // Block elements: pure rectangle fills.
+        switch (cp) {
+            0x2580 => self.fillRect(0, 0, w, h / 2, 0xFF), // ▀
+            0x2581...0x2588 => { // ▁..█ lower eighths
+                const k: usize = cp - 0x2580;
+                const hh = h * k / 8;
+                self.fillRect(0, h - hh, w, hh, 0xFF);
+            },
+            0x2589...0x258F => { // ▉..▏ left eighths, 7/8 down to 1/8
+                const k: usize = 8 - (cp - 0x2588);
+                self.fillRect(0, 0, w * k / 8, h, 0xFF);
+            },
+            0x2590 => self.fillRect(w / 2, 0, w - w / 2, h, 0xFF), // ▐
+            0x2591 => self.fillRect(0, 0, w, h, 0x40), // ░
+            0x2592 => self.fillRect(0, 0, w, h, 0x80), // ▒
+            0x2593 => self.fillRect(0, 0, w, h, 0xC0), // ▓
+            0x2594 => self.fillRect(0, 0, w, h / 8, 0xFF), // ▔
+            0x2595 => self.fillRect(w - w / 8, 0, w / 8, h, 0xFF), // ▕
+            0x2596...0x259F => { // quadrants
+                const quads: u4 = switch (cp) {
+                    0x2596 => 0b0010, // ▖ ll
+                    0x2597 => 0b0001, // ▗ lr
+                    0x2598 => 0b1000, // ▘ ul
+                    0x2599 => 0b1011, // ▙
+                    0x259A => 0b1001, // ▚
+                    0x259B => 0b1110, // ▛
+                    0x259C => 0b1101, // ▜
+                    0x259D => 0b0100, // ▝ ur
+                    0x259E => 0b0110, // ▞
+                    0x259F => 0b0111, // ▟
+                    else => unreachable,
+                };
+                const hw = w / 2;
+                const hh = h / 2;
+                if (quads & 0b1000 != 0) self.fillRect(0, 0, hw, hh, 0xFF);
+                if (quads & 0b0100 != 0) self.fillRect(hw, 0, w - hw, hh, 0xFF);
+                if (quads & 0b0010 != 0) self.fillRect(0, hh, hw, h - hh, 0xFF);
+                if (quads & 0b0001 != 0) self.fillRect(hw, hh, w - hw, h - hh, 0xFF);
+            },
+            else => return self.drawBoxLines(cp),
+        }
+        return true;
+    }
+
+    fn drawBoxLines(self: *Renderer, cp: u21) bool {
+        // Light (and heavy, drawn identically) line segments as a
+        // {up,down,left,right} bitset. Rounded corners map to sharp.
+        const U: u4 = 0b1000;
+        const D: u4 = 0b0100;
+        const L: u4 = 0b0010;
+        const R: u4 = 0b0001;
+        const seg: u4 = switch (cp) {
+            0x2500, 0x2501 => L | R, // ─ ━
+            0x2502, 0x2503 => U | D, // │ ┃
+            0x250C, 0x250F, 0x256D => R | D, // ┌ ┏ ╭
+            0x2510, 0x2513, 0x256E => L | D, // ┐ ┓ ╮
+            0x2514, 0x2517, 0x2570 => R | U, // └ ┗ ╰
+            0x2518, 0x251B, 0x256F => L | U, // ┘ ┛ ╯
+            0x251C, 0x2523 => U | D | R, // ├ ┣
+            0x2524, 0x252B => U | D | L, // ┤ ┫
+            0x252C, 0x2533 => L | R | D, // ┬ ┳
+            0x2534, 0x253B => L | R | U, // ┴ ┻
+            0x253C, 0x254B => U | D | L | R, // ┼ ╋
+            0x2574 => L, // ╴
+            0x2575 => U, // ╵
+            0x2576 => R, // ╶
+            0x2577 => D, // ╷
+            else => return false,
+        };
+
+        const w = self.cellw_px;
+        const h = self.cellh_px;
+        const t = @max(2, h / 14);
+        const cx = (w - t) / 2;
+        const cy = (h - t) / 2;
+        if (seg & L != 0) self.fillRect(0, cy, cx + t, t, 0xFF);
+        if (seg & R != 0) self.fillRect(cx, cy, w - cx, t, 0xFF);
+        if (seg & U != 0) self.fillRect(cx, 0, t, cy + t, 0xFF);
+        if (seg & D != 0) self.fillRect(cx, cy, t, h - cy, 0xFF);
+        return true;
     }
 
     /// The CPU-visible cell array to fill before draw().

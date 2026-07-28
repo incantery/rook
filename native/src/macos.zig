@@ -132,7 +132,7 @@ pub const App = struct {
         const rows: u32 = @intFromFloat(@divFloor(@as(f32, @floatCast(px_h)), renderer.cell_h));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
-        const session = try sessionpkg.Session.start(gpa, init.io, shell, @intCast(cols), @intCast(rows));
+        const session = try sessionpkg.Session.start(gpa, init.io, shell, @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px));
 
         const self = try gpa.create(App);
         self.* = .{
