@@ -4431,7 +4431,13 @@ pub const App = struct {
     /// colors and atlas glyphs. Last row is the editor's status line.
     fn fillEditorPane(self: *App, ed: *editorpkg.Editor, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
         const g = ed.fillGrid(cols, rows);
+        const cellw_px: u16 = @intCast(self.renderer.cellw_px);
+        var prev_wide: ?renderpkg.GlyphLoc = null;
         for (g, 0..) |rc, i| {
+            // The grid is walked flat, so the carry has to be dropped at
+            // every row start — a tail in column zero (its left half
+            // scrolled off) must not pick up the previous row's glyph.
+            if (cols != 0 and i % cols == 0) prev_wide = null;
             const status_row = rows >= 1 and i >= (rows - 1) * cols;
             var bg: [4]u8 = if (status_row) th.chip_active_bg else th.ed_bg;
             bg[3] = self.bg_alpha;
@@ -4463,11 +4469,32 @@ pub const App = struct {
             var uvx: u16 = 0;
             var uvy: u16 = 0;
             var flags: u16 = 0;
-            if (rc.cp > 32) if (self.renderer.glyph(rc.cp, false)) |loc| {
-                uvx = loc.uvx;
-                uvy = loc.uvy;
-                flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
-            };
+            if (rc.tail) {
+                // The right half of a wide glyph: same atlas slot as the
+                // cell before it, sampled one cell further across. Same
+                // arrangement the terminal path uses for a spacer_tail.
+                if (prev_wide) |loc| {
+                    uvx = loc.uvx + cellw_px;
+                    uvy = loc.uvy;
+                    flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
+                }
+                prev_wide = null;
+            } else if (rc.cp > 32 and editorpkg.wideCp(rc.cp)) {
+                prev_wide = null;
+                if (self.renderer.glyph(rc.cp, true)) |loc| {
+                    uvx = loc.uvx;
+                    uvy = loc.uvy;
+                    flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
+                    prev_wide = loc;
+                }
+            } else {
+                prev_wide = null;
+                if (rc.cp > 32) if (self.renderer.glyph(rc.cp, false)) |loc| {
+                    uvx = loc.uvx;
+                    uvy = loc.uvy;
+                    flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
+                };
+            }
             cells[i] = .{
                 .bg = bg,
                 .fg = fg,

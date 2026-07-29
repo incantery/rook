@@ -27,6 +27,7 @@ const scenarios = [_]Scenario{
     .{ .name = "editor", .what = "edit a file, change it, :w reaches disk", .run = editor },
     .{ .name = "indent", .what = "o inherits the indent, >> shifts, and neither leaves whitespace", .run = indent },
     .{ .name = "vim", .what = "regex :s, a macro, a block edit and `.` all reach disk", .run = vim },
+    .{ .name = "wide", .what = "CJK text lays out two cells wide and motions still land", .run = wideText },
     .{ .name = "clobber", .what = ":w refuses a file an agent changed underneath it", .run = clobber },
     .{ .name = "reload", .what = "an open buffer follows the file, or says it can't", .run = reload },
     .{ .name = "pixels", .what = "the renderer actually drew (shot, decoded)", .run = pixels },
@@ -319,6 +320,52 @@ fn vim(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(got, "ree:gamma", "`.` should have deleted two characters");
     try h.expectContains(got, "aaa!", "the macro did not record");
     try h.expectContains(got, "bbb!", "the macro did not replay");
+}
+
+// ----------------------------------------------------------------- wide
+
+/// A CJK line takes two cells per character on screen while motions
+/// still move one CHARACTER at a time. Both halves are checked: the
+/// dump for the layout, and disk for where the edit actually landed.
+fn wideText(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    var path_buf: [192]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/wide.txt", .{app.dirPath()});
+    try h.writeFile(path,
+        \\日本語です
+        \\abcdefgh
+        \\
+    );
+
+    _ = try app.ctlFmt("edit {s}", .{path});
+    try app.waitText("日本語", 5_000);
+
+    // Two `l` from column zero is two CHARACTERS, so `x` takes the
+    // third one. If motion were counting cells it would take the
+    // second.
+    _ = try app.ctl("type gg0llx");
+
+    // And a `j` from there lands under the character's FIRST cell:
+    // 語 started at render column 4, so this deletes the `e`.
+    _ = try app.ctl("type jx");
+
+    _ = try app.ctl("type :w");
+    _ = try app.ctl("enter");
+
+    var content: [512]u8 = undefined;
+    var waited: u32 = 0;
+    while (waited < 5000) : (waited += 100) {
+        const got = h.readFile(path, &content) catch "";
+        if (std.mem.indexOf(u8, got, "日本です") != null) break;
+        h.sleepMs(100);
+    }
+    const got = try h.readFile(path, &content);
+    try h.expectContains(got, "日本です", "l moved by cells rather than by characters");
+    try h.expectContains(got, "abcdfgh", "j landed on the wrong column under a wide line");
 }
 
 // -------------------------------------------------------------- clobber

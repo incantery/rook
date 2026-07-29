@@ -90,6 +90,19 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(regex_tests).step);
 
+    // The editor's width table is generated from ghostty's, so that the
+    // editor stays free of the C++ deps ghostty-vt brings. This root has
+    // the dependency and exists to catch the two drifting apart.
+    const width_mod = b.createModule(.{
+        .root_source_file = b.path("src/width_check.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize })) |dep| {
+        width_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    }
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = width_mod })).step);
+
     // The case table is generated data, so its tests are the only thing
     // standing between a bad generator run and silently wrong `gU`.
     const unicase_tests = b.addTest(.{ .root_module = b.createModule(.{

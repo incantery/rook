@@ -647,7 +647,25 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       so a chunk is rewritten into a second buffer and the range end is
       carried by the difference; the old in-place byte walk relied on
       one-byte-for-one-byte and could not survive that.
-- [ ] Editor debts already logged: wide glyphs = 1 column
+- [x] **Wide glyphs take two columns.** CJK and emoji lay out two
+      cells wide, and the width table is GENERATED from ghostty's — the
+      one the terminal panes already lay out with — so a pane and an
+      editor showing the same Japanese line cannot disagree about where
+      it ends. The editor stays free of the C++ deps ghostty-vt brings
+      (simdutf, highway) that its headless test root is deliberately
+      without; `width_check.zig` is a test root that HAS the dependency
+      and re-derives the answer for all 1.1M codepoints on every run, so
+      a ghostty upgrade that moves a boundary fails there instead of
+      surfacing as a cursor one cell off. The second cell carries the
+      STYLE but no codepoint of its own, which is what keeps a selection
+      or a search match from coming out striped, and what keeps a text
+      dump reading `日本語` rather than `日 本 語 `.
+- [ ] **Combining marks still take a cell of their own.** Ghostty's
+      zero-width rule is deliberately NOT adopted: this renderer maps
+      one cell to one atlas glyph and cannot compose a mark onto the
+      glyph before it, so width 0 would render them as nothing at all —
+      worse than the current misplacement. Grapheme clusters are the
+      real fix, and they are a bigger change: motion, not just layout.
 - [x] **Notice a disk change while the buffer is OPEN**, not only at
       `:w`. One stat per editor pane on the existing 1Hz tick, split by
       who has something to lose: an UNMODIFIED buffer reloads (keeping

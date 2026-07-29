@@ -32,14 +32,18 @@
 //!   `&` and `\1`-`\9` in a replacement.
 //! Case is per codepoint over the scripts vim covers (unicase.zig),
 //!   and the mapping is 1:1 — so `gU` on `ß` gives `ẞ`, not `SS`.
-//! Debts: wide glyphs count as one column; lines beyond max_line
-//!   get motion/render math clamped.
+//! Wide glyphs (CJK, emoji) take TWO columns, from the same table the
+//!   terminal panes lay out with (width.zig).
+//! Debts: combining marks still take a cell of their own, because one
+//!   cell draws one glyph — grapheme clusters are the real fix; lines
+//!   beyond max_line get motion/render math clamped.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const bufferpkg = @import("buffer.zig");
 const regex = @import("regex.zig");
 const unicase = @import("unicase.zig");
+const wide = @import("width.zig");
 
 pub const tab_width = 4;
 const max_line = 64 * 1024;
@@ -69,7 +73,18 @@ pub const HlSpan = struct { start: u32, end: u32, st: Style };
 pub const RCell = struct {
     cp: u21 = ' ',
     st: Style = .text,
+    /// The right half of a double-width glyph. Its codepoint lives in
+    /// the cell to the LEFT and this one draws the other half, the same
+    /// arrangement the terminal grid uses for a wide cell's spacer.
+    tail: bool = false,
 };
+
+/// Whether a codepoint takes two cells. The renderer needs this to
+/// rasterize a wide glyph into a double-width atlas slot, and it should
+/// be asking the same table the layout above used.
+pub fn wideCp(cp: u21) bool {
+    return wide.isWide(cp);
+}
 
 pub const Mode = enum { normal, insert, visual, visual_line, visual_block, command };
 
@@ -598,21 +613,33 @@ pub const Editor = struct {
         return prevCpStart(s, s.len);
     }
 
+    /// Render columns for a byte column. A tab runs to the next stop and
+    /// a CJK or emoji codepoint takes TWO columns, which is why this is
+    /// not just a codepoint count.
     fn renderCol(s: []const u8, bcol: usize) usize {
         var rc: usize = 0;
         var i: usize = 0;
         while (i < bcol and i < s.len) {
-            if (s[i] == '\t') rc = rc / tab_width * tab_width + tab_width else rc += 1;
+            if (s[i] == '\t')
+                rc = rc / tab_width * tab_width + tab_width
+            else
+                rc += wide.cellWidth(decodeAt(s, i));
             i += cpLenAt(s, i);
         }
         return rc;
     }
 
+    /// The inverse. When `target` lands on the SECOND column of a wide
+    /// glyph it gives that glyph's first byte — a cursor cannot sit
+    /// inside a character.
     fn bcolForRenderCol(s: []const u8, target: usize) usize {
         var rc: usize = 0;
         var i: usize = 0;
         while (i < s.len) {
-            const next_rc = if (s[i] == '\t') rc / tab_width * tab_width + tab_width else rc + 1;
+            const next_rc = if (s[i] == '\t')
+                rc / tab_width * tab_width + tab_width
+            else
+                rc + wide.cellWidth(decodeAt(s, i));
             if (next_rc > target) return i;
             rc = next_rc;
             i += cpLenAt(s, i);
@@ -4647,8 +4674,16 @@ pub const Editor = struct {
                     (if (abs_start + i == po and !in_sel) .mode else st)
                 else
                     st;
-                putText(out, gw, text_cols, self.left, rc, decodeAt(s, i), pst);
-                rc += 1;
+                const cp = decodeAt(s, i);
+                const w = wide.cellWidth(cp);
+                putText(out, gw, text_cols, self.left, rc, cp, pst);
+                if (w == 2) {
+                    // The second half carries no codepoint of its own;
+                    // it has to carry the STYLE, or a selection over a
+                    // CJK line would be striped.
+                    putTail(out, gw, text_cols, self.left, rc + 1, pst);
+                }
+                rc += w;
                 i += n;
             }
             // Search matches tint like a selection (vim hlsearch-ish;
@@ -4662,8 +4697,14 @@ pub const Editor = struct {
                     var bi = m.start;
                     while (bi < m.end and bi < s.len) : (bi += cpLenAt(s, bi)) {
                         const mrc = renderCol(s, bi);
-                        if (mrc >= self.left and mrc - self.left < text_cols) {
-                            const cell = &out[gw + (mrc - self.left)];
+                        // Tint every column the character covers, not
+                        // just its first, or a match on CJK text comes
+                        // out striped.
+                        const mw = wide.cellWidth(decodeAt(s, bi));
+                        for (0..mw) |k| {
+                            const c = mrc + k;
+                            if (c < self.left or c - self.left >= text_cols) continue;
+                            const cell = &out[gw + (c - self.left)];
                             if (cell.st != .cursor and cell.st != .sel) cell.st = .sel;
                         }
                     }
@@ -4677,8 +4718,17 @@ pub const Editor = struct {
 
             // Cursor (block) — in command mode it sits on the status row.
             if (line == self.cline and self.mode != .command) {
-                if (cur_rc >= self.left and cur_rc - self.left < text_cols) {
-                    out[gw + (cur_rc - self.left)].st = .cursor;
+                // A block cursor on a wide glyph covers the whole
+                // glyph, the way it does in a terminal.
+                const cw: usize = if (self.ccol < s.len)
+                    wide.cellWidth(decodeAt(s, self.ccol))
+                else
+                    1;
+                for (0..cw) |k| {
+                    const c = cur_rc + k;
+                    if (c >= self.left and c - self.left < text_cols) {
+                        out[gw + (c - self.left)].st = .cursor;
+                    }
                 }
             }
         }
@@ -4690,6 +4740,14 @@ pub const Editor = struct {
     fn putText(out: []RCell, gw: usize, text_cols: usize, left: usize, rc: usize, cp: u21, st: Style) void {
         if (rc < left or rc - left >= text_cols) return;
         out[gw + (rc - left)] = .{ .cp = cp, .st = st };
+    }
+
+    /// The right half of a wide glyph. It is written even when the LEFT
+    /// half was scrolled off, so a line that starts mid-character still
+    /// paints something rather than leaving a hole.
+    fn putTail(out: []RCell, gw: usize, text_cols: usize, left: usize, rc: usize, st: Style) void {
+        if (rc < left or rc - left >= text_cols) return;
+        out[gw + (rc - left)] = .{ .cp = ' ', .st = st, .tail = true };
     }
 
     /// Reparse on buffer-version change, then bake the VISIBLE byte
@@ -4827,6 +4885,10 @@ pub const Editor = struct {
             const cells = g[row * cols ..][0..cols];
             while (line_end > 0 and cells[line_end - 1].cp == ' ') line_end -= 1;
             for (cells[0..line_end]) |c| {
+                // The second cell of a wide glyph holds no character of
+                // its own — emitting its blank would dump 日本語 as
+                // "日 本 語 " and make every text assertion lie.
+                if (c.tail) continue;
                 const n = std.unicode.utf8Encode(c.cp, &enc) catch continue;
                 try outl.appendSlice(gpa, enc[0..n]);
             }
@@ -8292,4 +8354,143 @@ test "tilde lands on the next character even when the width changed" {
             return err;
         };
     }
+}
+
+test "a wide glyph takes two render columns" {
+    // Widths cross-checked with vim's strdisplaywidth(): "日本語" is 6
+    // columns, "aあb" is 4, and an emoji is 2.
+    try testing.expectEqual(@as(usize, 6), Editor.renderCol("日本語", 9));
+    try testing.expectEqual(@as(usize, 4), Editor.renderCol("aあb", 5));
+    try testing.expectEqual(@as(usize, 2), Editor.renderCol("🙂", 4));
+    try testing.expectEqual(@as(usize, 3), Editor.renderCol("abc", 3));
+    // Each character's own starting column.
+    try testing.expectEqual(@as(usize, 0), Editor.renderCol("日本語", 0));
+    try testing.expectEqual(@as(usize, 2), Editor.renderCol("日本語", 3));
+    try testing.expectEqual(@as(usize, 4), Editor.renderCol("日本語", 6));
+}
+
+test "a column inside a wide glyph resolves to the glyph, not past it" {
+    // vim does the same: k onto a wide line from either of the two
+    // columns lands on the same character.
+    try testing.expectEqual(@as(usize, 3), Editor.bcolForRenderCol("日本語", 2));
+    try testing.expectEqual(@as(usize, 3), Editor.bcolForRenderCol("日本語", 3));
+    try testing.expectEqual(@as(usize, 6), Editor.bcolForRenderCol("日本語", 4));
+    try testing.expectEqual(@as(usize, 6), Editor.bcolForRenderCol("日本語", 5));
+    try testing.expectEqual(@as(usize, 0), Editor.bcolForRenderCol("日本語", 0));
+}
+
+test "the goal column crosses a wide line the way vim's does" {
+    // Measured in vim with virtcol(): from 日 j lands on a, from 本 on
+    // c, from 語 on e, from x on g.
+    const Case = struct { rights: usize, want_col: usize };
+    for ([_]Case{
+        .{ .rights = 0, .want_col = 0 }, // 日 -> a
+        .{ .rights = 1, .want_col = 2 }, // 本 -> c
+        .{ .rights = 2, .want_col = 4 }, // 語 -> e
+        .{ .rights = 3, .want_col = 6 }, // x  -> g
+    }) |c| {
+        const gpa = testing.allocator;
+        var e = try mkEditor(gpa);
+        defer e.destroy();
+        keys(e, "i");
+        utf8Keys(e, "日本語x\nabcdefgh");
+        e.key("\x1b");
+        keys(e, "gg0");
+        for (0..c.rights) |_| keys(e, "l");
+        keys(e, "j");
+        try testing.expectEqual(@as(usize, 1), e.cline);
+        try testing.expectEqual(c.want_col, e.ccol);
+    }
+}
+
+test "coming back up onto a wide glyph lands on its first byte" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i");
+    utf8Keys(e, "日本語x\nabcdefgh");
+    e.key("\x1b");
+    // Column 5 on line 2 is the SECOND cell of 語 on line 1.
+    keys(e, "gg0jlllll");
+    try testing.expectEqual(@as(usize, 5), e.ccol);
+    keys(e, "k");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+    try testing.expectEqual(@as(usize, 6), e.ccol); // 語 starts at byte 6
+}
+
+test "the grid gives a wide glyph two cells and the cursor covers both" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i");
+    utf8Keys(e, "日本x");
+    e.key("\x1b");
+    keys(e, "gg0");
+
+    const g = e.fillGrid(32, 3);
+    const gw: usize = 2; // "1 "
+    try testing.expectEqual(@as(u21, '日'), g[gw].cp);
+    try testing.expect(!g[gw].tail);
+    // The second cell carries no codepoint of its own.
+    try testing.expect(g[gw + 1].tail);
+    try testing.expectEqual(@as(u21, '本'), g[gw + 2].cp);
+    try testing.expect(g[gw + 3].tail);
+    try testing.expectEqual(@as(u21, 'x'), g[gw + 4].cp);
+    try testing.expect(!g[gw + 4].tail);
+
+    // A block cursor on a wide glyph covers the whole glyph.
+    try testing.expectEqual(Style.cursor, g[gw].st);
+    try testing.expectEqual(Style.cursor, g[gw + 1].st);
+    try testing.expect(g[gw + 2].st != .cursor);
+}
+
+test "a selection over wide text is not striped" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i");
+    utf8Keys(e, "日本語");
+    e.key("\x1b");
+    keys(e, "gg0vl"); // visual over the first two characters
+    const g = e.fillGrid(32, 3);
+    const gw: usize = 2;
+    for (0..4) |k| {
+        const st = g[gw + k].st;
+        try testing.expect(st == .sel or st == .cursor);
+    }
+}
+
+test "a search match on wide text tints both of its columns" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i");
+    utf8Keys(e, "あa\nあa");
+    e.key("\x1b");
+    keys(e, "gg0");
+    // Searching moves to the match on line 2, so line 1's match is
+    // highlighted WITHOUT the cursor style covering for it.
+    keys(e, "/");
+    utf8Keys(e, "あ");
+    e.key("\r");
+    try testing.expectEqual(@as(usize, 1), e.cline);
+
+    const g = e.fillGrid(32, 4);
+    const gw: usize = 2;
+    try testing.expectEqual(Style.sel, g[gw].st);
+    try testing.expectEqual(Style.sel, g[gw + 1].st);
+    try testing.expect(g[gw + 2].st != .sel);
+}
+
+test "a text dump of wide glyphs is the text, not the cells" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i");
+    utf8Keys(e, "日本語です");
+    e.key("\x1b");
+    const dump = try e.dumpText(gpa, 40, 3);
+    defer gpa.free(dump);
+    var it = std.mem.splitScalar(u8, dump, '\n');
+    try testing.expectEqualStrings("1 日本語です", it.next().?);
 }
