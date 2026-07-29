@@ -390,6 +390,32 @@ pub const Instance = struct {
     }
 
     /// Number of panes across every tab (`panes` prints one per line).
+    /// Poll a ctl command until its output contains `needle`.
+    ///
+    /// The panels are filled by background threads that only run while
+    /// the panel is open, so asserting straight after a toggle reads the
+    /// PRE-POLL state — which for every panel is "host unreachable", a
+    /// failure that looks like a bug in the thing under test rather than
+    /// a race in the test. waitText cannot serve here: a side panel is
+    /// window chrome, and `screen` dumps the focused pane's grid.
+    pub fn waitCtl(self: *Instance, cmd: []const u8, needle: []const u8, timeout_ms: u32) ![]const u8 {
+        var waited: u32 = 0;
+        while (true) {
+            const out = try self.ctl(cmd);
+            if (std.mem.indexOf(u8, out, needle) != null) return out;
+            if (waited >= timeout_ms) {
+                std.debug.print("      waited {d}ms for \"{s}\" in `{s}`, saw:\n", .{ timeout_ms, needle, cmd });
+                var it = std.mem.splitScalar(u8, out, '\n');
+                while (it.next()) |line| {
+                    if (line.len > 0) std.debug.print("      | {s}\n", .{line});
+                }
+                return error.Timeout;
+            }
+            sleepMs(100);
+            waited += 100;
+        }
+    }
+
     pub fn paneCount(self: *Instance) !usize {
         const r = try self.ctl("panes");
         return countLines(r);
@@ -535,6 +561,62 @@ pub fn writeFile(path: []const u8, data: []const u8) !void {
 
 /// std.Thread.sleep does not exist in Zig 0.16; scenarios that poll for
 /// state the ctl socket cannot block on use this.
+/// Run a command to completion in `cwd`, discarding its output, and
+/// return its exit status. For SETTING UP a scenario — seeding a
+/// registry, making a repo — never for the thing under test.
+///
+/// Fork+execv rather than std.process, matching the rest of this file:
+/// the harness already owns this idiom for spawning the app, and 0.16
+/// routes std.process.spawn through an Io that scenarios do not carry.
+pub fn runCmd(cwd: []const u8, argv: []const [*:0]const u8) !u8 {
+    if (argv.len == 0 or argv.len > 15) return error.BadArgv;
+    var cwd_z: [512]u8 = undefined;
+    if (cwd.len + 1 > cwd_z.len) return error.PathTooLong;
+    @memcpy(cwd_z[0..cwd.len], cwd);
+    cwd_z[cwd.len] = 0;
+
+    const pid = fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        _ = chdir(@ptrCast(&cwd_z));
+        const devnull = open("/dev/null", 2); // O_RDWR
+        if (devnull >= 0) {
+            _ = dup2(devnull, 0);
+            _ = dup2(devnull, 1);
+            _ = dup2(devnull, 2);
+        }
+        var vec: [16:null]?[*:0]const u8 = @splat(null);
+        for (argv, 0..) |a, i| vec[i] = a;
+        _ = execv(argv[0], &vec);
+        _exit(127);
+    }
+    var status: c_int = 0;
+    _ = waitpid(pid, &status, 0);
+    // WEXITSTATUS
+    return @intCast((status >> 8) & 0xff);
+}
+
+/// mkdir -p, one component at a time. The sandbox's data dir exists but
+/// `<data>/rook` does not until something creates it, and that is where
+/// regdb looks for rook.db.
+pub fn mkdirP(path: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    if (path.len + 1 > buf.len) return error.PathTooLong;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    var i: usize = 1;
+    while (i <= path.len) : (i += 1) {
+        if (i == path.len or buf[i] == '/') {
+            const save = buf[i];
+            buf[i] = 0;
+            _ = mkdir(@ptrCast(&buf), 0o755);
+            buf[i] = save;
+        }
+    }
+}
+
+extern "c" fn chdir(path: [*:0]const u8) c_int;
+
 pub fn sleepMs(ms: u32) void {
     _ = usleep(ms * 1000);
 }
@@ -733,6 +815,16 @@ pub fn expectEq(comptime label: []const u8, want: usize, got: usize) !void {
     if (want == got) return;
     std.debug.print("      assertion failed: {s} — want {d}, got {d}\n", .{ label, want, got });
     return error.AssertFailed;
+}
+
+/// The negative form. Worth having as a helper rather than an inverted
+/// `expect`, because the failure message needs to quote what it FOUND —
+/// "still says host unreachable" is diagnosable, "expected false" is not.
+pub fn expectNotContains(haystack: []const u8, needle: []const u8, comptime label: []const u8) !void {
+    if (std.mem.indexOf(u8, haystack, needle) != null) {
+        std.debug.print("    ✗ {s}: found \"{s}\" and should not have\n", .{ label, needle });
+        return error.UnexpectedContent;
+    }
 }
 
 pub fn expectContains(haystack: []const u8, needle: []const u8, comptime label: []const u8) !void {
