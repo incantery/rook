@@ -15,15 +15,17 @@
 //! Operators: d y c gu gU g~ and > <, with their doubled line forms,
 //!   D C Y S, and the text objects iw aw iW aW, i" i' i` and the four
 //!   bracket pairs.
-//! Edits: x X r R s J gJ ~ p P u ctrl-r, counts, `.`, autoindent.
+//! Edits: x X r R s J gJ ~ p P u ctrl-r ctrl-a ctrl-x, counts, `.`,
+//!   autoindent.
 //! Visual: > < u U ~ J; ctrl-v blocks with d x y c I A r $, and a
 //!   blockwise p that puts the rectangle back.
 //! State: "a and "0-"9 registers, ma marks, gv, q@ macros.
 //! Insert: ctrl-w ctrl-u ctrl-t ctrl-d ctrl-r ctrl-o, and ctrl-n /
 //!   ctrl-p keyword completion from the buffer.
-//! Ex: :w :q :q! :wq :x :e :<n>, ZZ ZQ, :[range]s/pat/rep/[gi], and
-//!   :[range]g/pat/{d | s/// | normal keys} with :g! and :v — over
-//!   % . $ N,M 'a '<,'> addresses.
+//! Ex: :w :q :q! :wq :x :e :<n>, ZZ ZQ, :[range]{d|y|m|t|normal},
+//!   :[range]s/pat/rep/[gi], and :[range]g/pat/{d | s/// | normal keys}
+//!   with :g! and :v — over % . $ N,M 'a '<,'> addresses. A typed
+//!   `:e` path is relative to the BUFFER's directory.
 //! Patterns are vim-magic REGEXES (regex.zig), for `/` `?` `n` `*` and
 //!   `:s`, with `&` and `\1`-`\9` in a replacement.
 //! Debts: case operators are ASCII-only; wide glyphs count
@@ -429,6 +431,32 @@ pub const Editor = struct {
                 break;
             }
         }
+    }
+
+    /// A relative path, joined onto the current buffer's directory.
+    /// Absolute paths and `~` are returned untouched, and so is
+    /// anything that will not fit — the caller's own error is a better
+    /// one than a silently truncated path.
+    /// A path typed at `:e`, joined onto the directory of the buffer
+    /// you are LOOKING at rather than whatever directory the app was
+    /// launched from — `:e ../other.zig` has to mean what it says when
+    /// you are three panes deep in someone else's tree.
+    ///
+    /// Only `:e` uses this. The paths the directory listing builds and
+    /// the ones the app hands in are already resolved against the app
+    /// cwd, and resolving them twice is how you get
+    /// `a/b/a/b/file.txt`.
+    ///
+    /// Writes into the CALLER's buffer: the path being resolved often
+    /// lives in `scratch2`, and formatting a buffer into itself is an
+    /// alias panic rather than a wrong answer.
+    fn resolveTyped(self: *Editor, path: []const u8, out: *[max_path]u8) []const u8 {
+        if (path.len == 0 or path[0] == '/' or path[0] == '~') return path;
+        const cur = self.buf.path orelse return path;
+        // On a listing, the buffer's own path IS the directory.
+        const dir = if (self.is_dir) trimSlash(cur) else std.fs.path.dirname(cur) orelse return path;
+        if (dir.len == 0) return path;
+        return std.fmt.bufPrint(out, "{s}/{s}", .{ dir, path }) catch path;
     }
 
     pub fn destroy(self: *Editor) void {
@@ -1695,6 +1723,59 @@ pub const Editor = struct {
         self.setStatus("{d} line{s}", .{ hit.items.len, if (hit.items.len == 1) "" else "s" }, false);
     }
 
+    /// A destination for `:m` / `:t`. `0` is not line one — it is
+    /// BEFORE line one, which is the only way to move something to the
+    /// very top, so it comes back as -1.
+    fn parseDest(self: *Editor, s: []const u8) ?isize {
+        const t = std.mem.trim(u8, s, " ");
+        if (t.len == 0) return null;
+        if (t.len == 1 and t[0] == '0') return -1;
+        var i: usize = 0;
+        const l = self.parseLineAddr(t, &i) orelse return null;
+        if (i != t.len) return null;
+        return @intCast(l);
+    }
+
+    /// `:[range]m{dest}` and `:[range]t{dest}` (`:co` too).
+    ///
+    /// Runs on the yank/paste path rather than on raw offsets, so the
+    /// end-of-file newline rules live in ONE place that already has
+    /// tests. The unnamed register is saved and put back: moving lines
+    /// must not cost you the thing you were about to paste.
+    fn exMoveCopy(self: *Editor, span: LineSpan, dest: isize, copy: bool) void {
+        const gpa = self.gpa;
+        const last = self.lineCountB() - 1;
+        const a = @min(span.a, last);
+        const b = @min(span.b, last);
+        if (!copy and dest >= @as(isize, @intCast(a)) - 1 and dest <= @as(isize, @intCast(b))) {
+            self.setStatus("cannot move lines into themselves", .{}, true);
+            return;
+        }
+
+        var saved: std.ArrayListUnmanaged(u8) = .empty;
+        defer saved.deinit(gpa);
+        saved.appendSlice(gpa, self.reg.items) catch return;
+        const saved_kind = self.reg_kind;
+        defer {
+            self.reg.clearRetainingCapacity();
+            self.reg.appendSlice(gpa, saved.items) catch {};
+            self.reg_kind = saved_kind;
+        }
+
+        self.buf.newUndoGroup();
+        self.buf.group_pinned = true;
+        defer self.buf.group_pinned = false;
+
+        self.op = if (copy) 'y' else 'd';
+        self.opLines(a, b);
+
+        var d = dest;
+        if (!copy and d > @as(isize, @intCast(b))) d -= @intCast(b - a + 1);
+        self.cline = if (d < 0) 0 else @min(@as(usize, @intCast(d)), self.lineCountB() - 1);
+        self.ccol = 0;
+        self.paste(d >= 0);
+    }
+
     fn execCommand(self: *Editor) void {
         const gpa = self.gpa;
         // Left only: `:g/t/normal I> ` means that trailing space, and
@@ -1740,6 +1821,51 @@ pub const Editor = struct {
             if (gspec) |gs| {
                 const whole: LineSpan = .{ .a = 0, .b = self.lineCountB() - 1 };
                 self.exGlobal(if (used > 0) span else whole, gs, invert);
+                return;
+            }
+        }
+        // Line commands that take the range: d y m t co, and `normal`.
+        if (ranged.len > 0) {
+            const one = ranged.len == 1 or ranged[1] == ' ';
+            if (ranged[0] == 'd' and one) {
+                self.op = 'd';
+                self.opLines(span.a, span.b);
+                return;
+            }
+            if (ranged[0] == 'y' and one) {
+                self.op = 'y';
+                self.opLines(span.a, span.b);
+                return;
+            }
+            const mv: ?struct { rest: []const u8, copy: bool } =
+                if (ranged[0] == 'm') .{ .rest = ranged[1..], .copy = false } else if (ranged[0] == 't')
+                .{ .rest = ranged[1..], .copy = true }
+            else if (std.mem.startsWith(u8, ranged, "co"))
+                .{ .rest = ranged[2..], .copy = true }
+            else
+                null;
+            if (mv) |m| {
+                const dest = self.parseDest(m.rest) orelse {
+                    self.setStatus("{c} needs a destination line", .{ranged[0]}, true);
+                    return;
+                };
+                self.exMoveCopy(span, dest, m.copy);
+                return;
+            }
+            if (std.mem.startsWith(u8, ranged, "normal ")) {
+                // With a range, once per line; without one, once here.
+                const body = ranged["normal ".len..];
+                self.buf.newUndoGroup();
+                self.buf.group_pinned = true;
+                defer self.buf.group_pinned = false;
+                var l = span.a;
+                while (l <= span.b and l < self.lineCountB()) : (l += 1) {
+                    self.cline = l;
+                    self.ccol = 0;
+                    self.key(body);
+                    self.key("\x1b");
+                }
+                self.clampNormal();
                 return;
             }
         }
@@ -1817,7 +1943,8 @@ pub const Editor = struct {
                 self.setStatus("e needs a path", .{}, true);
                 return;
             }
-            self.open(arg, is(u8, verb, "e!")) catch |err| {
+            var rbuf: [max_path]u8 = undefined;
+            self.open(self.resolveTyped(arg, &rbuf), is(u8, verb, "e!")) catch |err| {
                 self.setStatus("open failed: {s}", .{@errorName(err)}, true);
             };
         } else if (self.appCommand(verb)) {
@@ -2366,6 +2493,8 @@ pub const Editor = struct {
                 self.op = 0;
                 self.count = 0;
             },
+            0x01 => self.addToNumber(1), // ctrl-a
+            0x18 => self.addToNumber(-1), // ctrl-x
             'r' => self.pend_r = true,
             'R' => {
                 self.count = 0;
@@ -2572,6 +2701,34 @@ pub const Editor = struct {
         const n = cpLenAt(s, self.ccol);
         self.buf.deleteRange(self.gpa, start + self.ccol, start + self.ccol + n) catch return;
         self.buf.insert(self.gpa, start + self.ccol, cp) catch return;
+    }
+
+    /// ctrl-a / ctrl-x — the number at or after the cursor on this
+    /// line, plus or minus the count. Decimal with an optional sign;
+    /// vim also does hex and octal, and this says so rather than
+    /// guessing at `0x1f`.
+    fn addToNumber(self: *Editor, sign: i64) void {
+        const gpa = self.gpa;
+        const cnt: i64 = @intCast(self.takeCount());
+        const s = self.lineText(self.cline);
+        var i = self.ccol;
+        while (i < s.len and !std.ascii.isDigit(s[i])) i += 1;
+        if (i >= s.len) return;
+        var a = i;
+        while (a > 0 and std.ascii.isDigit(s[a - 1])) a -= 1;
+        if (a > 0 and s[a - 1] == '-') a -= 1;
+        var b = a;
+        if (s[b] == '-') b += 1;
+        while (b < s.len and std.ascii.isDigit(s[b])) b += 1;
+        const val = std.fmt.parseInt(i64, s[a..b], 10) catch return;
+        var nbuf: [24]u8 = undefined;
+        const out = std.fmt.bufPrint(&nbuf, "{d}", .{val +| sign * cnt}) catch return;
+        self.buf.newUndoGroup();
+        const base = self.buf.rope.lineStart(self.cline);
+        self.buf.deleteRange(gpa, base + a, base + b) catch return;
+        self.buf.insert(gpa, base + a, out) catch return;
+        // On the last digit, which is where vim leaves it.
+        self.ccol = a + out.len - 1;
     }
 
     fn cursorToOffset(self: *Editor, off: usize) void {
@@ -7437,4 +7594,154 @@ test "a multi-byte key with nothing pending is still ignored" {
     const s = try bufText(gpa, e);
     defer gpa.free(s);
     try testing.expectEqualStrings("abc", s);
+}
+
+// ------------------------------------------- numbers, line commands, :e paths
+
+test "ctrl-a adds to the number at or after the cursor" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ix = 41 y");
+    e.key("\x1b");
+    keys(e, "0");
+    e.key("\x01");
+    try testing.expectEqual(@as(usize, 5), e.ccol); // the last digit
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("x = 42 y", s);
+}
+
+test "a count multiplies the increment" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iv 7");
+    e.key("\x1b");
+    keys(e, "05");
+    e.key("\x01");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("v 12", s);
+}
+
+test "ctrl-x goes below zero and takes the sign with it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "in = 3");
+    e.key("\x1b");
+    keys(e, "$5");
+    e.key("\x18");
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        try testing.expectEqualStrings("n = -2", s);
+    }
+    keys(e, "0");
+    e.key("\x01"); // and back up over the minus
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("n = -1", s);
+}
+
+test "a line range deletes and yanks" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\nc\nd");
+    e.key("\x1b");
+    ex(e, "2,3d");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a\nd", s);
+}
+
+test "m moves a line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\nc");
+    e.key("\x1b");
+    ex(e, "1m$");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("b\nc\na", s);
+}
+
+test "m0 moves a line to the very top" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\nc");
+    e.key("\x1b");
+    ex(e, "3m0");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("c\na\nb", s);
+}
+
+test "t copies a line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb");
+    e.key("\x1b");
+    ex(e, "1t$");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a\nb\na", s);
+}
+
+test "moving lines leaves the unnamed register alone" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ikeep\na\nb");
+    e.key("\x1b");
+    keys(e, "ggyy"); // unnamed = "keep\n"
+    ex(e, "2m$");
+    keys(e, "ggp");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("keep\nkeep\nb\na", s);
+}
+
+test "moving lines into themselves is refused" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\nc");
+    e.key("\x1b");
+    ex(e, "1,2m1");
+    const dump = try e.dumpText(gpa, 60, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "into themselves") != null);
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a\nb\nc", s);
+}
+
+test "normal with a range runs once per line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    ex(e, "1,2normal A!");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one!\ntwo!\nthree", s);
+}
+
+test "a move destination below the range shifts up by what was taken" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\nc\nd");
+    e.key("\x1b");
+    ex(e, "1m3"); // after "c", which is one line higher once "a" is gone
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("b\nc\na\nd", s);
 }

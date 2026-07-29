@@ -594,9 +594,18 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       collapses to where that text was, which is the more useful answer
       than throwing it away. This is the seam the git gutter and
       thread reanchoring want next.
-- [ ] Editor debts already logged: numbered registers, `f`/`t` target
-      ASCII only, wide glyphs = 1 column, relative `:e` resolves
-      against app cwd
+- [x] **The rest of the ex line, and ctrl-a/ctrl-x.** `:[range]d`,
+      `y`, `m`, `t`/`co`, and `normal` (once per line when it has a
+      range). `:m` and `:t` run on the yank/paste path rather than on
+      raw offsets, so the end-of-file newline rules stay in the one
+      place that already has tests, and the unnamed register is put
+      back afterwards — moving lines must not cost you the thing you
+      were about to paste. A typed `:e` path now resolves against the
+      BUFFER's directory rather than the app cwd, while the paths the
+      listing and the app hand in stay untouched: resolving those
+      twice is how you get `a/b/a/b/file.txt`.
+- [ ] Editor debts already logged: wide glyphs = 1 column; ctrl-a
+      reads decimal only, not vim's hex and octal
 - [x] **Notice a disk change while the buffer is OPEN**, not only at
       `:w`. One stat per editor pane on the existing 1Hz tick, split by
       who has something to lose: an UNMODIFIED buffer reloads (keeping
