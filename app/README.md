@@ -152,11 +152,19 @@ titles don't dirty the grid, so the digest is what redraws chips.
 Panes hold CONTENT — a terminal or an EDITOR (the rook-buffers model:
 a file is a document, panes retarget in place). The editor is vim-core
 over a rope buffer (`src/rope.zig` → `src/buffer.zig` →
-`src/editor.zig`): normal/insert/visual/visual-line/command modes,
-h j k l w b e 0 ^ $ gg G arrows ⌃D/⌃U, operators d y c (dd yy cc D C
-Y), x r J p P, counts, grouped undo (u / ⌃R), `:w :q :wq :e :<n>`
-(`!` on any write forces it).
-`/` searches (literal, wrapping, n/N, hlsearch until `:noh`).
+`src/editor.zig`). The full key list lives in editor.zig's header
+comment, which is the one that gets updated; the shape of it is:
+normal, insert, visual, visual-line, visual-block and command modes;
+the motions (including `%`, `{`/`}`, `H`/`M`/`L`, `ge`, `f`/`t` and
+the `z` scrolls); operators `d y c gu gU g~ > <` with counts, doubled
+line forms, and text objects; `.` repeat, `"a` and `"0`-`"9`
+registers, `ma` marks, `q`/`@` macros, ⌃N completion; grouped undo
+with counts; and an ex line with ranges — `:s`, `:g`, `:m`, `:t`,
+`:normal`, `:d`, `:y` and the file commands.
+
+Search and `:s` take vim-magic REGEXES (`src/regex.zig`), searching as
+you type, with `&` and `\1`-`\9` in a replacement.
+
 TREE-SITTER highlighting is in (slice two): the runtime and zig/go
 grammars are vendored C (vendor/), highlight queries embedded; a
 full reparse runs per buffer change (size-capped) and capture spans
@@ -180,8 +188,8 @@ with ZERO C linkage: the highlighter attaches through
 function-pointer hooks (syntax.zig), never an import (the directory
 reader is plain libc readdir, which macOS links regardless). Editor
 debts: case operators are ASCII-only; wide glyphs count one column;
-relative :e paths resolve against the app cwd rather than the buffer's
-dir.
+`ctrl-a` reads decimal, not vim's hex and octal; a line past the 64KB
+clamp gets its motion and render math clamped with it.
 
 Marks are ANCHORED: they hold a byte offset, and `Buffer.on_edit`
 reports every edit — offset, bytes removed, bytes added — so a mark
@@ -1213,6 +1221,14 @@ grepping for a test name alone reports "no failure" for a mutation
 that never got compiled. That produced a false all-clear twice in one
 session, and the second time the redundant branch it was hiding turned
 out to have a real bug next door;
+a vacuity check can ITSELF be vacuous, and the tell is a mutation that
+compiles and changes nothing — swapping which character's LENGTH is
+measured is invisible in ASCII, a paste at column zero never needs the
+padding branch, a move to the end of a three-line file lands where the
+clamp would have put it anyway, and matches on lines 1 and 3 of a
+five-line buffer are the same match forwards and backwards. When a
+revert produces no failure, the first suspect is the test, not the
+guarantee;
 NEVER call into a framework that synchronises
 with the display-link thread while holding draw_lock — the query waits
 for that thread, and that thread is in `drawNow` waiting for the lock,
