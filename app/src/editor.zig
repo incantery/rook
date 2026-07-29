@@ -9,7 +9,7 @@
 //!
 //! Vim scope v1: normal/insert/visual/visual-line/command modes;
 //! h j k l w b e 0 ^ $ gg G arrows ctrl-d/u; operators d y c (+ dd yy
-//! cc D C Y), x r J p P u ctrl-r, counts; f F t T ; , >> << (and
+//! cc D C Y), x r J p P u ctrl-r, counts, `.`; f F t T ; , >> << (and
 //! > < in visual), text objects (iw aw iW aW, i" i' i` and the four
 //! bracket pairs), autoindent; :w :q :q! :wq :x :e :<n>.
 //! Debts: no marks/registers beyond the unnamed one, f/t target ASCII
@@ -95,6 +95,14 @@ pub const Editor = struct {
     /// someone to review.
     ai_line: ?usize = null,
     ai_len: usize = 0,
+
+    /// `.` — the keys of the last change (`dot`), the keys of the one
+    /// being typed now (`rec`), and the buffer version when it started.
+    dot: std.ArrayListUnmanaged(u8) = .empty,
+    rec: std.ArrayListUnmanaged(u8) = .empty,
+    rec_on: bool = false,
+    rec_ver: u64 = 0,
+    dot_replay: bool = false,
 
     cmd: std.ArrayListUnmanaged(u8) = .empty,
     /// What the command line is collecting: an ex command (:) or a
@@ -318,6 +326,8 @@ pub const Editor = struct {
         self.hl_styles.deinit(gpa);
         self.buf.deinit(gpa);
         self.cmd.deinit(gpa);
+        self.dot.deinit(gpa);
+        self.rec.deinit(gpa);
         self.last_search.deinit(gpa);
         self.reg.deinit(gpa);
         self.grid.deinit(gpa);
@@ -554,54 +564,132 @@ pub const Editor = struct {
 
         var i: usize = 0;
         while (i < bytes.len) {
-            // Whole CSI arrow sequences (from the event monitor).
-            if (bytes[i] == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
-                const m: ?u8 = switch (bytes[i + 2]) {
-                    'A' => 'k',
-                    'B' => 'j',
-                    'C' => 'l',
-                    'D' => 'h',
-                    else => null,
-                };
-                if (m) |mm| {
-                    switch (self.mode) {
-                        .command => {},
-                        .insert => self.insertArrow(mm),
-                        else => self.normalKey(mm),
-                    }
-                    i += 3;
-                    continue;
-                }
-            }
+            const pre_mode = self.mode;
+            const pre_ver = self.buf.version;
+            const n = self.dispatch(bytes[i..]);
+            self.recordStep(bytes[i..][0..n], pre_mode, pre_ver);
+            i += n;
+        }
+    }
 
-            switch (self.mode) {
-                .command, .insert => {
-                    // Consume a printable run at once (multi-byte UTF-8
-                    // included); control bytes go one at a time.
-                    var end = i;
-                    while (end < bytes.len and (bytes[end] == '\t' or bytes[end] >= 0x20)) end += 1;
-                    const run = bytes[i..end];
-                    if (run.len > 0) {
-                        if (self.mode == .insert) self.insertKey(run) else self.commandKey(run);
-                        i = end;
-                    } else {
-                        if (self.mode == .insert) self.insertKey(bytes[i .. i + 1]) else self.commandKey(bytes[i .. i + 1]);
-                        i += 1;
-                    }
-                },
-                else => {
-                    // Normal/visual commands are single ASCII keys;
-                    // skip over any multi-byte codepoint whole. A
-                    // pending `f` dies with it rather than staying
-                    // armed to swallow whatever you press next —
-                    // f/t target ASCII today, and a key that vanishes
-                    // is better than a key that lands somewhere else.
-                    const n = cpLenAt(bytes, i);
-                    if (n == 1) self.normalKey(bytes[i]) else self.pend_find = 0;
-                    i += n;
-                },
+    /// One key's worth of input; returns the bytes it consumed.
+    fn dispatch(self: *Editor, bytes: []const u8) usize {
+        // Whole CSI arrow sequences (from the event monitor).
+        if (bytes[0] == 0x1b and bytes.len > 2 and bytes[1] == '[') {
+            const m: ?u8 = switch (bytes[2]) {
+                'A' => 'k',
+                'B' => 'j',
+                'C' => 'l',
+                'D' => 'h',
+                else => null,
+            };
+            if (m) |mm| {
+                switch (self.mode) {
+                    .command => {},
+                    .insert => self.insertArrow(mm),
+                    else => self.normalKey(mm),
+                }
+                return 3;
             }
         }
+
+        switch (self.mode) {
+            .command, .insert => {
+                // Consume a printable run at once (multi-byte UTF-8
+                // included); control bytes go one at a time.
+                var end: usize = 0;
+                while (end < bytes.len and (bytes[end] == '\t' or bytes[end] >= 0x20)) end += 1;
+                if (end == 0) end = 1;
+                const run = bytes[0..end];
+                if (self.mode == .insert) self.insertKey(run) else self.commandKey(run);
+                return end;
+            },
+            else => {
+                // Normal/visual commands are single ASCII keys;
+                // skip over any multi-byte codepoint whole. A
+                // pending `f` dies with it rather than staying
+                // armed to swallow whatever you press next —
+                // f/t target ASCII today, and a key that vanishes
+                // is better than a key that lands somewhere else.
+                const n = cpLenAt(bytes, 0);
+                if (n == 1) self.normalKey(bytes[0]) else self.pend_find = 0;
+                return n;
+            },
+        }
+    }
+
+    /// True when nothing is half-typed — the moment a command is over.
+    fn quiescent(self: *const Editor) bool {
+        return self.mode == .normal and self.op == 0 and self.count == 0 and
+            !self.pend_g and !self.pend_r and self.pend_shift == 0 and
+            self.pend_obj == 0 and self.pend_find == 0;
+    }
+
+    /// Remember the keys of the last change, so `.` can type them again.
+    ///
+    /// Recorded by RESULT, not by key table: keys accumulate while a
+    /// command is in flight and are kept only if the buffer actually
+    /// moved. `w` and `yy` leave no dot; `x`, `cwfoo<esc>` and `vjd`
+    /// leave one — and no list of "which keys are changes" has to be
+    /// maintained here, which is the list that always goes stale.
+    fn recordStep(self: *Editor, k: []const u8, pre_mode: Mode, pre_ver: u64) void {
+        if (self.dot_replay or k.len == 0) return;
+        if (!self.rec_on) {
+            // A command starts in normal or visual mode. `u`, ctrl-r
+            // and `.` move the buffer without being changes of their
+            // own — repeating an undo is not what anybody means.
+            if (pre_mode == .insert or pre_mode == .command) return;
+            if (k.len == 1 and (k[0] == 'u' or k[0] == 0x12 or k[0] == '.')) return;
+            self.rec_on = true;
+            self.rec_ver = pre_ver;
+            self.rec.clearRetainingCapacity();
+        }
+        // A recording longer than this is a paste or a wedged state,
+        // not a keystroke someone will want back.
+        if (self.rec.items.len + k.len > 64 * 1024) {
+            self.rec_on = false;
+            return;
+        }
+        self.rec.appendSlice(self.gpa, k) catch {
+            self.rec_on = false;
+            return;
+        };
+        if (!self.quiescent()) return;
+        self.rec_on = false;
+        if (self.buf.version == self.rec_ver) return;
+        self.dot.clearRetainingCapacity();
+        self.dot.appendSlice(self.gpa, self.rec.items) catch {};
+    }
+
+    /// Type the last change again. A count on `.` REPLACES the recorded
+    /// one (`3dd` then `5.` deletes five lines, not three) — vim's rule,
+    /// and the only reason the leading digits are split off here.
+    fn dotRepeat(self: *Editor) void {
+        const cnt = self.count;
+        self.count = 0;
+        if (self.dot_replay or self.dot.items.len == 0) return;
+
+        var rest: []const u8 = self.dot.items;
+        if (cnt > 0) while (rest.len > 0 and rest[0] >= '1' and rest[0] <= '9') {
+            var j: usize = 1;
+            while (j < rest.len and rest[j] >= '0' and rest[j] <= '9') j += 1;
+            rest = rest[j..];
+        };
+
+        var head: [24]u8 = undefined;
+        var play: std.ArrayListUnmanaged(u8) = .empty;
+        defer play.deinit(self.gpa);
+        if (cnt > 0) {
+            const d = std.fmt.bufPrint(&head, "{d}", .{cnt}) catch "";
+            play.appendSlice(self.gpa, d) catch return;
+        }
+        play.appendSlice(self.gpa, rest) catch return;
+
+        // Replayed off a copy: `key` re-enters this file and must not
+        // be walking a slice of a list something else could grow.
+        self.dot_replay = true;
+        defer self.dot_replay = false;
+        self.key(play.items);
     }
 
     fn insertArrow(self: *Editor, m: u8) void {
@@ -1293,6 +1381,8 @@ pub const Editor = struct {
             },
             'n' => self.searchNext(true),
             'N' => self.searchNext(false),
+
+            '.' => self.dotRepeat(),
 
             else => {
                 self.op = 0;
@@ -3204,4 +3294,133 @@ test "visual mode selects a text object" {
     const s = try bufText(gpa, e);
     defer gpa.free(s);
     try testing.expectEqualStrings("one  three", s);
+}
+
+// ------------------------------------------------------------------ dot repeat
+
+test "dot repeats a charwise change" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "0x..");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("def", s);
+}
+
+test "dot repeats a change that ended in insert mode" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione two three");
+    e.key("\x1b");
+    keys(e, "0cwX");
+    e.key("\x1b");
+    keys(e, "w.");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("X X three", s);
+}
+
+test "dot repeats a linewise change" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree\nfour");
+    e.key("\x1b");
+    keys(e, "ggdd.");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("three\nfour", s);
+}
+
+test "dot repeats an open-line insert" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione");
+    e.key("\x1b");
+    keys(e, "otwo");
+    e.key("\x1b");
+    keys(e, ".");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\ntwo\ntwo", s);
+}
+
+test "dot repeats a visual delete" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdefgh");
+    e.key("\x1b");
+    keys(e, "0vld.");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("efgh", s);
+}
+
+test "motions and yanks do not become the dot" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc def");
+    e.key("\x1b");
+    keys(e, "0x"); // dot = x
+    keys(e, "wyy"); // a motion and a yank in between
+    keys(e, "0.");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("c def", s);
+}
+
+test "undo does not become the dot" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcd");
+    e.key("\x1b");
+    keys(e, "0xu.");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("bcd", s);
+}
+
+test "a count on dot replaces the recorded one" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdefghij");
+    e.key("\x1b");
+    keys(e, "03x"); // abc gone
+    keys(e, "2."); // de gone, not another three
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("fghij", s);
+}
+
+test "dot repeats a shift" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo");
+    e.key("\x1b");
+    keys(e, "gg>>.");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("        one\ntwo", s);
+}
+
+test "dot repeats an operator over a text object" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione two three");
+    e.key("\x1b");
+    keys(e, "0daw.");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("three", s);
 }

@@ -454,9 +454,17 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       backward search from past the cursor counts it as a nesting
       level, which is a bug the vacuity check on a redundant branch
       turned up.
-- [ ] Editor debts already logged: registers, marks, `.` repeat,
-      `f`/`t` target ASCII only, wide glyphs = 1 column, relative `:e`
-      resolves against app cwd
+- [x] **`.` repeats the last change** — recorded by RESULT, not by key
+      table: keys accumulate while a command is in flight and are kept
+      only if the buffer version actually moved. So `w` and `yy` leave
+      no dot, `cwfoo<esc>` and `vjd` do, and nothing here has to
+      maintain a list of which keys count as changes — the list that
+      always goes stale. `u`/ctrl-r/`.` are the three explicit
+      exceptions: they move the buffer without being changes of their
+      own. A count on `.` REPLACES the recorded one (`3dd` then `5.`).
+- [ ] Editor debts already logged: registers, marks, `f`/`t` target
+      ASCII only, wide glyphs = 1 column, relative `:e` resolves
+      against app cwd
 - [x] **Notice a disk change while the buffer is OPEN**, not only at
       `:w`. One stat per editor pane on the existing 1Hz tick, split by
       who has something to lose: an UNMODIFIED buffer reloads (keeping

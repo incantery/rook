@@ -315,6 +315,29 @@ distrust when you come back to it. It dirties the scene only when
 something actually changed, so zero-idle-frames holds: measured at 0
 frames drawn across 6 idle seconds with an editor pane open.
 
+### `.` records the result, not the keys
+
+`.` repeats the last change, and the thing worth writing down is how it
+decides what a change WAS. Every key that arrives in normal or visual
+mode starts (or extends) a recording; when nothing is half-typed
+anymore — no pending operator, count, register, object or find — the
+recording ends, and it is kept only if the buffer's version moved
+while it ran.
+
+That is the whole rule, and it is a rule about results rather than
+about keys. `w` and `yy` leave the dot alone because they change
+nothing. `cwfoo<esc>` and `vjd` become the dot because they do, with
+the insert-mode keystrokes and the ESC recorded along the way — the
+replay just types them again. Nothing in this file maintains a list of
+which commands count as changes, which is precisely the list that goes
+stale the next time an operator is added.
+
+Three keys are excluded by name, because they move the buffer without
+being changes of their own: `u`, ctrl-r and `.` itself. And a count
+given to `.` REPLACES the recorded one — `3dd` then `5.` deletes five
+lines — which is the only reason the replay bothers splitting the
+leading digits off the recording.
+
 ### Indentation the file decides
 
 `o`, `O`, `cc` and Enter inherit the leading whitespace of the line
