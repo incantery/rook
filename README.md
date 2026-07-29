@@ -37,7 +37,7 @@ the quarantine attribute, so the ad-hoc-signed app launches without
 Gatekeeper ceremony.
 
 From source: `make install` (needs Go and Zig 0.16 — no longer node or
-the wails3 CLI).
+the wails3 CLI; full Xcode is optional, for the icon compiler).
 Maintainers cut releases with `make release VERSION=vX.Y.Z`.
 
 ## Configure

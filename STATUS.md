@@ -39,7 +39,9 @@ browser download — curl skips the quarantine attribute that would
 otherwise make Gatekeeper block an ad-hoc-signed app.
 
 From source: `make install`. Needs Go and Zig 0.16. It no longer needs
-node or the wails3 CLI.
+node or the wails3 CLI. Full Xcode is optional — it supplies `actool`,
+which compiles the app icon; without it the build falls back to a
+flattened icon and says so.
 
 ## Shape
 

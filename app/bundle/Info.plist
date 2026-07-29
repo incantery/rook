@@ -10,6 +10,14 @@
 	<string>com.incantery.rook</string>
 	<key>CFBundleExecutable</key>
 	<string>rook</string>
+	<!-- Both, on purpose: CFBundleIconName resolves in Assets.car and is
+	     what macOS 26 wants; CFBundleIconFile names the .icns every
+	     earlier macOS reads, and LSMinimumSystemVersion is 13.0.
+	     scripts/build-icon.sh puts both in Resources. -->
+	<key>CFBundleIconName</key>
+	<string>appicon</string>
+	<key>CFBundleIconFile</key>
+	<string>appicon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>

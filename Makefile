@@ -104,6 +104,9 @@ install:
 	cp app/zig-out/bin/rook $(APP)/Contents/MacOS/rook
 	cp app/zig-out/bin/rook-host $(APP)/Contents/MacOS/rook-host
 	cp app/zig-out/bin/rookctl $(APP)/Contents/MacOS/rookctl
+	@# Before codesign: the seal covers Resources. Degrades to a
+	@# fallback icon without Xcode rather than failing the build.
+	scripts/build-icon.sh $(APP)/Contents
 	codesign -s - --force $(APP)
 	$(LSREGISTER) -f $(APP)
 	mdimport $(APP)
@@ -213,8 +216,11 @@ release-stage:
 	cp app/zig-out/bin/rook $(STAGED_APP)/Contents/MacOS/rook
 	cp app/zig-out/bin/rook-host $(STAGED_APP)/Contents/MacOS/rook-host
 	cp app/zig-out/bin/rookctl $(STAGED_APP)/Contents/MacOS/rookctl
-	@# Sign the BUNDLE last — the seal covers the nested binaries, so
-	@# anything that rewrites one afterwards invalidates it.
+	@# --strict: a release must carry the real icon, so a missing actool
+	@# fails here rather than quietly shipping the fallback.
+	scripts/build-icon.sh $(STAGED_APP)/Contents --strict
+	@# Sign the BUNDLE last — the seal covers the nested binaries and
+	@# Resources, so anything that rewrites one afterwards invalidates it.
 	codesign -s - --force $(STAGED_APP)
 	@# rookctl at the top level is what install.sh copies to the user's
 	@# PATH and what selfupdate swaps the running one with. Same build,
