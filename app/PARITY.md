@@ -555,6 +555,15 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       runs on a step budget that fails closed. Removing the budget
       makes the pathological test run past 90 seconds, which is how
       that one was checked.
+- [x] **Searching as you type**, `:g`, `ZZ`/`ZQ`, counts on `u` and
+      ctrl-r. The preview always measures from where the prompt OPENED,
+      not from the last preview — otherwise deleting a character leaves
+      you somewhere the shorter pattern never matched — and ESC puts
+      back both the cursor and the pattern that was current before.
+      `:g` collects matching lines FIRST and runs them bottom-up, which
+      is what makes `:g/x/d` work at all. An ex command is ONE undo:
+      `Buffer.newUndoGroup` can be pinned, because the primitives that
+      open groups are exactly the ones a global reaches for.
 - [ ] Regex gaps: no `\{-}` (non-greedy), no `\zs`/`\ze`, no `\%(`
       non-capturing groups, no back-references INSIDE a pattern, and
       `\c`/`\C` are not honoured mid-pattern (`:s///i` is).

@@ -10,7 +10,8 @@
 //! Vim scope v1. Modes: normal, insert, visual, visual-line,
 //! visual-block, command.
 //! Motions: h j k l w b e ge 0 ^ $ gg G % { } H M L, arrows,
-//!   ctrl-d/u, zt zz zb, / ? n N * #, f F t T ; ,.
+//!   ctrl-d/u, zt zz zb, / ? n N * # (searching as you type),
+//!   f F t T ; ,.
 //! Operators: d y c gu gU g~ and > <, with their doubled line forms,
 //!   D C Y S, and the text objects iw aw iW aW, i" i' i` and the four
 //!   bracket pairs.
@@ -19,14 +20,15 @@
 //!   blockwise p that puts the rectangle back.
 //! State: "a and "0-"9 registers, ma marks, gv, q@ macros.
 //! Insert: ctrl-w ctrl-u ctrl-t ctrl-d ctrl-r ctrl-o.
-//! Ex: :w :q :q! :wq :x :e :<n>, :[range]s/pat/rep/[gi] over
+//! Ex: :w :q :q! :wq :x :e :<n>, ZZ ZQ, :[range]s/pat/rep/[gi], and
+//!   :[range]g/pat/{d | s/// | normal keys} with :g! and :v — over
 //!   % . $ N,M 'a '<,'> addresses.
 //! Patterns are vim-magic REGEXES (regex.zig), for `/` `?` `n` `*` and
 //!   `:s`, with `&` and `\1`-`\9` in a replacement.
 //! Debts: marks do not shift when text above them is edited; case
-//! operators are
-//! ASCII-only; f/t target ASCII only; wide glyphs count as one column;
-//! lines beyond max_line get motion/render math clamped.
+//!   operators are ASCII-only; f/t target ASCII only; wide glyphs count
+//!   as one column; lines beyond max_line get motion/render math
+//!   clamped.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -132,6 +134,12 @@ pub const Editor = struct {
     /// someone to review.
     ai_line: ?usize = null,
     ai_len: usize = 0,
+
+    /// `/` preview: where the cursor was when the prompt opened, and
+    /// the pattern that was current before it — both put back on ESC,
+    /// so an abandoned search leaves nothing behind.
+    inc_save: ?Pos = null,
+    inc_prev: std.ArrayListUnmanaged(u8) = .empty,
 
     /// `R` — insert mode that overwrites. The history is what each
     /// keystroke displaced, so backspace can put it back the way vim
@@ -415,6 +423,7 @@ pub const Editor = struct {
         self.rep_text.deinit(gpa);
         self.rec.deinit(gpa);
         self.last_search.deinit(gpa);
+        self.inc_prev.deinit(gpa);
         if (self.last_re) |*r| r.deinit(gpa);
         self.reg.deinit(gpa);
         for (&self.regs) |*r| r.text.deinit(gpa);
@@ -1146,6 +1155,7 @@ pub const Editor = struct {
         const b0 = bytes[0];
         if (b0 == 0x1b) {
             self.cmd.clearRetainingCapacity();
+            self.abandonSearch();
             self.mode = .normal;
             return;
         }
@@ -1154,6 +1164,11 @@ pub const Editor = struct {
             switch (self.cmd_kind) {
                 .ex => self.execCommand(),
                 .search => {
+                    // Back to where the prompt opened, so the jump is
+                    // measured from there and not from wherever the
+                    // preview wandered to.
+                    if (self.inc_save) |p| self.cursorTo(p);
+                    self.inc_save = null;
                     if (self.setSearch(self.cmd.items, false)) {
                         self.search_fwd = self.search_typed_fwd;
                         self.searchNext(self.search_fwd);
@@ -1166,10 +1181,59 @@ pub const Editor = struct {
         if (b0 == 0x7f or b0 == 0x08) {
             if (self.cmd.items.len > 0) {
                 _ = self.cmd.pop();
-            } else self.mode = .normal;
+                self.incPreview();
+            } else {
+                self.abandonSearch();
+                self.mode = .normal;
+            }
             return;
         }
-        if (b0 >= 0x20) self.cmd.appendSlice(self.gpa, bytes) catch {};
+        if (b0 >= 0x20) {
+            self.cmd.appendSlice(self.gpa, bytes) catch {};
+            self.incPreview();
+        }
+    }
+
+    fn cursorTo(self: *Editor, p: Pos) void {
+        self.cline = @min(p.line, self.lineCountB() - 1);
+        self.ccol = @min(p.col, self.lineCap(self.cline));
+        self.goal = renderCol(self.lineText(self.cline), self.ccol);
+    }
+
+    /// Search as you type: jump and highlight on every keystroke,
+    /// always measuring from where the prompt opened rather than from
+    /// the last preview — otherwise deleting a character would leave
+    /// you somewhere the shorter pattern never matched.
+    fn incPreview(self: *Editor) void {
+        if (self.cmd_kind != .search) return;
+        const save = self.inc_save orelse return;
+        self.cursorTo(save);
+        if (self.cmd.items.len == 0) {
+            self.clearSearch();
+            return;
+        }
+        // A half-typed `\(` is not an error yet, it is a pattern you
+        // are still in the middle of; leave the last good preview up.
+        const re = regex.Regex.compile(self.gpa, self.cmd.items, false) catch return;
+        if (self.last_re) |*old| old.deinit(self.gpa);
+        self.last_re = re;
+        self.last_search.clearRetainingCapacity();
+        self.last_search.appendSlice(self.gpa, self.cmd.items) catch {};
+        if (self.findMatch(self.search_typed_fwd)) |pos| {
+            self.cline = pos.line;
+            self.ccol = pos.col;
+            self.goal = renderCol(self.lineText(pos.line), pos.col);
+        }
+    }
+
+    /// ESC out of a `/`: put back the cursor AND the pattern that was
+    /// current before the prompt opened.
+    fn abandonSearch(self: *Editor) void {
+        const save = self.inc_save orelse return;
+        self.inc_save = null;
+        self.cursorTo(save);
+        self.clearSearch();
+        if (self.inc_prev.items.len > 0) _ = self.setSearch(self.inc_prev.items, false);
     }
 
     const LineSpan = struct { a: usize, b: usize };
@@ -1344,6 +1408,9 @@ pub const Editor = struct {
         const re = &self.last_re.?;
 
         self.buf.newUndoGroup();
+        const was_pinned = self.buf.group_pinned;
+        self.buf.group_pinned = true;
+        defer self.buf.group_pinned = was_pinned;
         var hits: usize = 0;
         var lines: usize = 0;
         var last_hit: usize = self.cline;
@@ -1378,9 +1445,85 @@ pub const Editor = struct {
         }, false);
     }
 
+    /// `:[range]g/pat/cmd` and its inverse `:g!` / `:v`.
+    ///
+    /// Matching lines are collected FIRST and run bottom-up, which is
+    /// what makes `:g/x/d` work at all: a command that deletes the line
+    /// it is standing on would renumber every line the scan had not
+    /// reached yet.
+    fn exGlobal(self: *Editor, span: LineSpan, spec: []const u8, invert: bool) void {
+        const gpa = self.gpa;
+        if (spec.len == 0 or std.ascii.isAlphanumeric(spec[0])) {
+            self.setStatus("usage: :[range]g/pattern/command", .{}, true);
+            return;
+        }
+        const sep = spec[0];
+        const body = spec[1..];
+        const pat_end = fieldEnd(body, sep);
+        var pbuf: [512]u8 = undefined;
+        const pat = unescapeField(body[0..pat_end], sep, &pbuf);
+        if (pat.len == 0) {
+            self.setStatus("nothing to match", .{}, true);
+            return;
+        }
+        const cmd = if (pat_end < body.len)
+            std.mem.trimStart(u8, body[pat_end + 1 ..], " ")
+        else
+            "";
+        if (cmd.len == 0) {
+            self.setStatus("usage: :[range]g/pattern/command", .{}, true);
+            return;
+        }
+        if (!self.setSearch(pat, false)) return;
+        const re = &self.last_re.?;
+
+        var hit: std.ArrayListUnmanaged(usize) = .empty;
+        defer hit.deinit(gpa);
+        var line = span.a;
+        while (line <= span.b and line < self.lineCountB()) : (line += 1) {
+            const s = self.lineText(line);
+            if ((re.search(s, 0) != null) != invert) hit.append(gpa, line) catch break;
+        }
+        if (hit.items.len == 0) {
+            self.setStatus("pattern not found: {s}", .{pat[0..@min(pat.len, 48)]}, true);
+            return;
+        }
+
+        self.buf.newUndoGroup();
+        self.buf.group_pinned = true;
+        defer self.buf.group_pinned = false;
+        var i = hit.items.len;
+        while (i > 0) {
+            i -= 1;
+            const l = hit.items[i];
+            if (l >= self.lineCountB()) continue;
+            self.cline = l;
+            self.ccol = 0;
+            if (cmd[0] == 'd' and (cmd.len == 1 or cmd[1] == ' ')) {
+                const saved = self.op;
+                self.op = 'd';
+                self.opLines(l, l);
+                self.op = saved;
+            } else if (cmd[0] == 's') {
+                self.exSubstitute(.{ .a = l, .b = l }, cmd[1..]);
+            } else if (std.mem.startsWith(u8, cmd, "normal ")) {
+                self.key(cmd["normal ".len..]);
+                // Whatever it left half-typed dies with the line.
+                self.key("\x1b");
+            } else {
+                self.setStatus("g takes d, s/// or normal", .{}, true);
+                return;
+            }
+        }
+        self.clampNormal();
+        self.setStatus("{d} line{s}", .{ hit.items.len, if (hit.items.len == 1) "" else "s" }, false);
+    }
+
     fn execCommand(self: *Editor) void {
         const gpa = self.gpa;
-        const line = std.mem.trim(u8, self.cmd.items, " ");
+        // Left only: `:g/t/normal I> ` means that trailing space, and
+        // trimming it would silently change what the command does.
+        const line = std.mem.trimStart(u8, self.cmd.items, " ");
         if (line.len == 0) return;
 
         // :<n> — goto line.
@@ -1394,14 +1537,37 @@ pub const Editor = struct {
         // `:s` and a bare address.
         var span: LineSpan = .{ .a = self.cline, .b = self.cline };
         const used = self.parseRange(line, &span);
-        const ranged = std.mem.trim(u8, line[used..], " ");
+        const ranged = std.mem.trimStart(u8, line[used..], " ");
         if (ranged.len > 0 and ranged[0] == 's' and
             (ranged.len == 1 or !std.ascii.isAlphanumeric(ranged[1])))
         {
             self.exSubstitute(span, ranged[1..]);
             return;
         }
-        if (used > 0 and ranged.len == 0) {
+        {
+            // `:g/pat/cmd`, `:g!/pat/cmd`, `:v/pat/cmd`. The default
+            // range is the WHOLE file, not the current line — a global
+            // that only looked at one line would be a substitute.
+            var gspec: ?[]const u8 = null;
+            var invert = false;
+            if (ranged.len > 1 and ranged[0] == 'v') {
+                gspec = ranged[1..];
+                invert = true;
+            } else if (ranged.len > 1 and ranged[0] == 'g') {
+                if (ranged[1] == '!') {
+                    invert = true;
+                    if (ranged.len > 2) gspec = ranged[2..];
+                } else if (!std.ascii.isAlphanumeric(ranged[1])) {
+                    gspec = ranged[1..];
+                }
+            }
+            if (gspec) |gs| {
+                const whole: LineSpan = .{ .a = 0, .b = self.lineCountB() - 1 };
+                self.exGlobal(if (used > 0) span else whole, gs, invert);
+                return;
+            }
+        }
+        if (used > 0 and std.mem.trim(u8, ranged, " ").len == 0) {
             self.cline = @min(span.b, self.lineCountB() - 1);
             self.ccol = firstNonblank(self.lineText(self.cline));
             return;
@@ -1772,6 +1938,13 @@ pub const Editor = struct {
             self.count = 0;
             switch (ch) {
                 'z', 't', 'b' => self.scrollHere(ch),
+                'Z' => {
+                    self.cmd.clearRetainingCapacity();
+                    self.cmd.appendSlice(gpa, "x") catch return;
+                    self.execCommand();
+                    self.cmd.clearRetainingCapacity();
+                },
+                'Q' => self.closed = true,
                 else => {},
             }
             return;
@@ -2128,10 +2301,24 @@ pub const Editor = struct {
                     self.caseLines();
                     return;
                 }
-                if (self.buf.undo(gpa) catch null) |off| self.cursorToOffset(off) else self.setStatus("already at oldest change", .{}, false);
+                var moved = false;
+                for (0..self.takeCount()) |_| {
+                    if (self.buf.undo(gpa) catch null) |off| {
+                        self.cursorToOffset(off);
+                        moved = true;
+                    } else break;
+                }
+                if (!moved) self.setStatus("already at oldest change", .{}, false);
             },
             0x12 => { // ctrl-r
-                if (self.buf.redo(gpa) catch null) |off| self.cursorToOffset(off) else self.setStatus("already at newest change", .{}, false);
+                var moved = false;
+                for (0..self.takeCount()) |_| {
+                    if (self.buf.redo(gpa) catch null) |off| {
+                        self.cursorToOffset(off);
+                        moved = true;
+                    } else break;
+                }
+                if (!moved) self.setStatus("already at newest change", .{}, false);
             },
 
             // Visual.
@@ -2179,11 +2366,17 @@ pub const Editor = struct {
                 self.cmd_kind = .search;
                 self.search_typed_fwd = ch == '/';
                 self.cmd.clearRetainingCapacity();
+                self.inc_save = .{ .line = self.cline, .col = self.ccol };
+                self.inc_prev.clearRetainingCapacity();
+                self.inc_prev.appendSlice(gpa, self.last_search.items) catch {};
             },
             'n' => self.searchNext(self.search_fwd),
             'N' => self.searchNext(!self.search_fwd),
 
             '.' => self.dotRepeat(),
+
+            // `ZZ` writes and closes, `ZQ` throws the buffer away.
+            'Z' => self.pend_z = true,
 
             // Macros.
             'q' => {
@@ -6478,4 +6671,172 @@ test "a block highlight does not paint a whole tab stop" {
     try testing.expectEqual(Style.sel, cells[1 * 40 + gw + 0].st);
     try testing.expect(cells[1 * 40 + gw + 1].st != .sel);
     try testing.expect(cells[1 * 40 + gw + 3].st != .sel);
+}
+test "search matches are tinted" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo bar\nbaz foo");
+    e.key("\x1b");
+    keys(e, "gg0/bar");
+    e.key("\r");
+    keys(e, "G$"); // cursor away from the match
+    const cells = e.fillGrid(40, 5);
+    const gw = Editor.digits(e.lineCountB()) + 1;
+    // "bar" is at columns 4..6 of row 0.
+    try testing.expectEqual(Style.sel, cells[0 * 40 + gw + 4].st);
+    try testing.expectEqual(Style.sel, cells[0 * 40 + gw + 6].st);
+    try testing.expect(cells[0 * 40 + gw + 3].st != .sel);
+}
+
+// ------------------------------------------------- incsearch, :g, ZZ, counts
+
+test "search previews as you type" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree\nfoo bar");
+    e.key("\x1b");
+    keys(e, "gg0");
+    keys(e, "/th"); // no Enter yet
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    keys(e, "ree"); // still matching
+    try testing.expectEqual(@as(usize, 2), e.cline);
+}
+
+test "a preview measures from where the prompt opened" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo\nbar\nfoo");
+    e.key("\x1b");
+    keys(e, "gg0/foo"); // wraps to line 2
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    e.key("\x7f"); // back to /fo — still line 2, not line 0
+    try testing.expectEqual(@as(usize, 2), e.cline);
+}
+
+test "escaping a search puts the cursor and the old pattern back" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo\nbar\nbaz");
+    e.key("\x1b");
+    keys(e, "gg0/bar");
+    e.key("\r");
+    try testing.expectEqual(@as(usize, 1), e.cline);
+    keys(e, "gg0/baz"); // preview jumps to line 2...
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    e.key("\x1b"); // ...and ESC takes it all back
+    try testing.expectEqual(@as(usize, 0), e.cline);
+    try testing.expectEqualStrings("bar", e.last_search.items);
+}
+
+test "g deletes every matching line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ikeep\nDROP a\nkeep2\nDROP b");
+    e.key("\x1b");
+    ex(e, "g/DROP/d");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("keep\nkeep2", s);
+}
+
+test "v deletes every line that does not match" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ikeep\nDROP a\nkeep2");
+    e.key("\x1b");
+    ex(e, "v/keep/d");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("keep\nkeep2", s);
+}
+
+test "g bang is the same as v" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ikeep\nDROP a\nkeep2");
+    e.key("\x1b");
+    ex(e, "g!/keep/d");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("keep\nkeep2", s);
+}
+
+test "g runs a substitute on each match" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia x\nb y\na z");
+    e.key("\x1b");
+    ex(e, "g/^a/s/ /-/");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a-x\nb y\na-z", s);
+}
+
+test "g runs normal-mode keys on each match" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    ex(e, "g/t/normal I> ");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\n> two\n> three", s);
+}
+
+test "g defaults to the whole file, and takes a range" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ix\nx\nx\nx");
+    e.key("\x1b");
+    keys(e, "G"); // on the last line, which a per-line default would use
+    ex(e, "2,3g/x/d");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("x\nx", s);
+}
+
+test "the whole global is one undo" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\na\nb");
+    e.key("\x1b");
+    ex(e, "g/a/d");
+    keys(e, "u");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a\nb\na\nb", s);
+}
+
+test "a count on u undoes that many changes" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "0xxx"); // three separate changes
+    keys(e, "2u");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("bcdef", s);
+}
+
+test "ZQ closes without writing" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    keys(e, "ZQ");
+    try testing.expect(e.closed);
 }

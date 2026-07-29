@@ -50,6 +50,11 @@ pub const Buffer = struct {
     /// highlighter's reparse trigger. Monotonic, so it says "something
     /// happened", never "we are back where we were".
     version: u64 = 0,
+    /// While pinned, newUndoGroup does nothing. An ex command that
+    /// edits many lines is ONE change to undo however many primitives
+    /// it reaches for, and the primitives are the ones that open
+    /// groups.
+    group_pinned: bool = false,
 
     /// Edits are numbered, and the number rides along through undo and
     /// redo. The number on top of the undo stack therefore identifies
@@ -218,6 +223,7 @@ pub const Buffer = struct {
     }
 
     pub fn newUndoGroup(self: *Buffer) void {
+        if (self.group_pinned) return;
         self.group +%= 1;
     }
 
