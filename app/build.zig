@@ -90,6 +90,15 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(regex_tests).step);
 
+    // The case table is generated data, so its tests are the only thing
+    // standing between a bad generator run and silently wrong `gU`.
+    const unicase_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/unicase.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(unicase_tests).step);
+
     // Same reason, same shape: paste encoding is pure data rules, and
     // they're security rules, so they get a root that definitely runs.
     const paste_tests = b.addTest(.{ .root_module = b.createModule(.{

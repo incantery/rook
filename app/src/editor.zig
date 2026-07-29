@@ -30,14 +30,16 @@
 //! Patterns are vim-magic REGEXES (regex.zig), for `/` `?` `n` `*` and
 //!   `:s` — groups, \%( ), \zs \ze, \{-}, classes and anchors — with
 //!   `&` and `\1`-`\9` in a replacement.
-//! Debts: case operators are ASCII-only; wide glyphs count
-//!   as one column; lines beyond max_line get motion/render math
-//!   clamped.
+//! Case is per codepoint over the scripts vim covers (unicase.zig),
+//!   and the mapping is 1:1 — so `gU` on `ß` gives `ẞ`, not `SS`.
+//! Debts: wide glyphs count as one column; lines beyond max_line
+//!   get motion/render math clamped.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const bufferpkg = @import("buffer.zig");
 const regex = @import("regex.zig");
+const unicase = @import("unicase.zig");
 
 pub const tab_width = 4;
 const max_line = 64 * 1024;
@@ -2480,13 +2482,24 @@ pub const Editor = struct {
                 const s = self.lineText(self.cline);
                 if (self.ccol >= s.len) return;
                 var end = self.ccol;
+                var moved: usize = 0;
                 for (0..cnt) |_| {
                     if (end >= s.len) break;
                     end += cpLenAt(s, end);
+                    moved += 1;
                 }
                 const base = self.buf.rope.lineStart(self.cline);
                 self.caseRange(base + self.ccol, base + end, '~');
-                self.ccol = end;
+                // `end` was measured on the OLD line, and the case
+                // mapping can change how many bytes those codepoints
+                // take. Step over what is there now instead.
+                const t = self.lineText(self.cline);
+                var c = self.ccol;
+                for (0..moved) |_| {
+                    if (c >= t.len) break;
+                    c += cpLenAt(t, c);
+                }
+                self.ccol = c;
                 self.clampNormal();
             },
             'U' => {
@@ -3807,37 +3820,84 @@ pub const Editor = struct {
         return op == 'u' or op == 'U' or op == '~';
     }
 
+    fn mapCase(cp: u21, how: u8) u21 {
+        return switch (how) {
+            'u' => unicase.toLower(cp),
+            'U' => unicase.toUpper(cp),
+            else => unicase.toggle(cp),
+        };
+    }
+
     /// `gu` / `gU` / `g~` over a byte range, in 4KB chunks because the
     /// range can be a whole paragraph and copyRange walks from the root
     /// every time.
     ///
-    /// ASCII case only. Every substitution is one byte for one byte, so
-    /// the offsets stay put while the walk runs — a Unicode-aware
-    /// version changes lengths and would need the whole range rebuilt.
+    /// Case is per CODEPOINT and the mapping is 1:1 (see unicase.zig),
+    /// but the byte length still moves under it — `İ` is two bytes and
+    /// lowercases to a one-byte `i`, `ß` is two and uppercases to a
+    /// three-byte `ẞ`. So a chunk is rewritten into a separate output
+    /// buffer and the range's end is carried along by the difference,
+    /// rather than the old trick of editing bytes in place.
+    ///
+    /// A chunk never cuts a codepoint in half: the tail of an
+    /// incomplete sequence is left for the next pass.
     fn caseRange(self: *Editor, start: usize, end: usize, how: u8) void {
         const gpa = self.gpa;
         if (start >= end) return;
         self.buf.newUndoGroup();
-        var chunk: [4096]u8 = undefined;
+        var in_buf: [4096]u8 = undefined;
+        // A codepoint grows by at most one byte under case mapping, and
+        // the shortest that can grow is two, so half again is plenty.
+        var out_buf: [4096 * 2]u8 = undefined;
         var off = start;
-        while (off < end) {
-            const n = @min(chunk.len, end - off);
-            self.buf.rope.copyRange(off, off + n, chunk[0..n]);
-            var changed = false;
-            for (chunk[0..n]) |*c| {
-                const was = c.*;
-                c.* = switch (how) {
-                    'u' => std.ascii.toLower(was),
-                    'U' => std.ascii.toUpper(was),
-                    else => if (std.ascii.isUpper(was)) std.ascii.toLower(was) else std.ascii.toUpper(was),
-                };
-                if (c.* != was) changed = true;
+        var stop = end;
+        while (off < stop) {
+            var n = @min(in_buf.len, stop - off);
+            self.buf.rope.copyRange(off, off + n, in_buf[0..n]);
+            if (off + n < stop) {
+                // Back up to the last codepoint that fits whole.
+                var k = n;
+                while (k > 0 and in_buf[k - 1] & 0xC0 == 0x80) k -= 1;
+                if (k > 0) {
+                    k -= 1;
+                    if (k + cpLenAt(in_buf[0..n], k) > n) n = k;
+                }
+                if (n == 0) break; // a single codepoint longer than the chunk
             }
+
+            var m: usize = 0;
+            var i: usize = 0;
+            var changed = false;
+            while (i < n) {
+                const len = cpLenAt(in_buf[0..n], i);
+                const cp: u21 = std.unicode.utf8Decode(in_buf[i..][0..len]) catch {
+                    // Invalid bytes pass through untouched; a case
+                    // operator is not the place to repair a file.
+                    @memcpy(out_buf[m..][0..len], in_buf[i..][0..len]);
+                    m += len;
+                    i += len;
+                    continue;
+                };
+                const to = mapCase(cp, how);
+                if (to == cp) {
+                    @memcpy(out_buf[m..][0..len], in_buf[i..][0..len]);
+                    m += len;
+                } else {
+                    changed = true;
+                    m += std.unicode.utf8Encode(to, out_buf[m..]) catch blk: {
+                        @memcpy(out_buf[m..][0..len], in_buf[i..][0..len]);
+                        break :blk len;
+                    };
+                }
+                i += len;
+            }
+
             if (changed) {
                 self.buf.deleteRange(gpa, off, off + n) catch return;
-                self.buf.insert(gpa, off, chunk[0..n]) catch return;
-            }
-            off += n;
+                self.buf.insert(gpa, off, out_buf[0..m]) catch return;
+                stop = stop + m - n;
+                off += m;
+            } else off += n;
         }
     }
 
@@ -8133,4 +8193,103 @@ test "backslash c in a search overrides the case the caller asked for" {
     e.key("\r");
     try testing.expectEqual(@as(usize, 1), e.cline);
     try testing.expectEqual(@as(usize, 0), e.ccol);
+}
+
+/// Type text the way a keyboard delivers it — one whole codepoint per
+/// key event. `keys` sends single bytes, which is fine for ASCII and
+/// wrong for everything else.
+fn utf8Keys(e: *Editor, s: []const u8) void {
+    var i: usize = 0;
+    while (i < s.len) {
+        const n = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+        const end = @min(i + n, s.len);
+        e.key(s[i..end]);
+        i = end;
+    }
+}
+
+test "case operators work past ASCII" {
+    // Expectations read out of real vim.
+    const Case = struct { in: []const u8, keys: []const u8, want: []const u8 };
+    const cases = [_]Case{
+        .{ .in = "café", .keys = "gUU", .want = "CAFÉ" },
+        .{ .in = "CAFÉ", .keys = "guu", .want = "café" },
+        .{ .in = "naïve", .keys = "gUU", .want = "NAÏVE" },
+        .{ .in = "Café", .keys = "g~~", .want = "cAFÉ" },
+        .{ .in = "привет мир", .keys = "gUU", .want = "ПРИВЕТ МИР" },
+        .{ .in = "ПРИВЕТ", .keys = "guu", .want = "привет" },
+        // Greek's final sigma uppercases to the same sigma as the
+        // medial one, and does not come back.
+        .{ .in = "ΣΤΙΓΜΑΣ", .keys = "guu", .want = "στιγμασ" },
+        .{ .in = "café au lait", .keys = "gUiw", .want = "CAFÉ au lait" },
+    };
+    for (cases) |c| {
+        const gpa = testing.allocator;
+        var e = try mkEditor(gpa);
+        defer e.destroy();
+        keys(e, "i");
+        utf8Keys(e, c.in);
+        e.key("\x1b");
+        keys(e, "0");
+        keys(e, c.keys);
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        testing.expectEqualStrings(c.want, s) catch |err| {
+            std.debug.print("in={s} keys={s}\n", .{ c.in, c.keys });
+            return err;
+        };
+    }
+}
+
+test "a case operator may change how many BYTES the text takes" {
+    // The reason caseRange rewrites into a second buffer instead of
+    // editing bytes in place: ss is two bytes and uppercases to a
+    // three-byte capital, and a dotted capital I is two bytes and
+    // lowercases to a one-byte i.
+    const Case = struct { in: []const u8, keys: []const u8, want: []const u8 };
+    const cases = [_]Case{
+        .{ .in = "straße", .keys = "gUU", .want = "STRAẞE" },
+        .{ .in = "STRAẞE", .keys = "guu", .want = "straße" },
+        .{ .in = "İstanbul", .keys = "guu", .want = "istanbul" },
+        .{ .in = "éÉß", .keys = "3~", .want = "Ééẞ" },
+    };
+    for (cases) |c| {
+        const gpa = testing.allocator;
+        var e = try mkEditor(gpa);
+        defer e.destroy();
+        keys(e, "i");
+        utf8Keys(e, c.in);
+        e.key("\x1b");
+        keys(e, "0");
+        keys(e, c.keys);
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        testing.expectEqualStrings(c.want, s) catch |err| {
+            std.debug.print("in={s} keys={s}\n", .{ c.in, c.keys });
+            return err;
+        };
+    }
+}
+
+test "tilde lands on the next character even when the width changed" {
+    const Case = struct { in: []const u8, want_col: usize };
+    // Cursor measured against vim by inserting a marker after the ~.
+    const cases = [_]Case{
+        .{ .in = "İx", .want_col = 1 }, // 2 bytes became 1
+        .{ .in = "ßx", .want_col = 3 }, // 2 bytes became 3
+        .{ .in = "éx", .want_col = 2 }, // unchanged
+    };
+    for (cases) |c| {
+        const gpa = testing.allocator;
+        var e = try mkEditor(gpa);
+        defer e.destroy();
+        keys(e, "i");
+        utf8Keys(e, c.in);
+        e.key("\x1b");
+        keys(e, "0~");
+        testing.expectEqual(c.want_col, e.ccol) catch |err| {
+            std.debug.print("in={s}\n", .{c.in});
+            return err;
+        };
+    }
 }
