@@ -415,9 +415,15 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       that reflex is the one who will `:w!` past the clobber guard.
 - [ ] Editor debts already logged: autoindent, registers, wide glyphs =
       1 column, 4KB line clamp, relative `:e` resolves against app cwd
-- [ ] Notice a disk change while the buffer is OPEN, not only at `:w`.
-      `Buffer.disk` is the state a watcher would compare against; today
-      you find out when you try to save.
+- [x] **Notice a disk change while the buffer is OPEN**, not only at
+      `:w`. One stat per editor pane on the existing 1Hz tick, split by
+      who has something to lose: an UNMODIFIED buffer reloads (keeping
+      your cursor and scroll — landing on line one every time an agent
+      touches the file would make the pane useless for watching), a
+      MODIFIED one only says so with `[!]` beside your `[+]`. Every
+      pane in every space, because a background tab holding a stale
+      buffer is the one you would not think to distrust. Measured: 6
+      idle seconds with an editor open still draws 0 frames.
 
 ## 4. Platform and distribution
 

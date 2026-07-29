@@ -183,6 +183,18 @@ debts: one register, no autoindent, wide glyphs count one column,
 4KB line clamp on motions/render, relative :e paths resolve against
 the app cwd rather than the buffer's dir.
 
+Text is decoded ONE CELL PER CODEPOINT through a single helper
+(`decodeAt`), and undecodable bytes become U+FFFD one at a time. Two
+bugs lived in not doing that: the status row laid one cell per BYTE
+with the byte stored as a codepoint, so `résumé.txt` rendered as
+mojibake in the name of the file you were editing; and the obvious
+`utf8Decode(s[i..i+1]) catch 0xFFFD` is DEAD CODE, because `utf8Decode`
+hands a one-byte slice straight back without validating it — 0xFF came
+out as `ÿ`. `cpLenAt` is the single source of how far to advance
+(returning 1 for an invalid start byte *and* for a sequence that runs
+off the end of the line), so motions, render columns and the grid fill
+cannot disagree about where a character ends.
+
 ### `:w` cannot lose your file
 
 Saving is the one thing in rook that can destroy work nobody can get
@@ -219,6 +231,36 @@ point: a write landing between the two calls is recorded as either
 newer than the bytes we hold (`save` then overwrites it silently) or
 older (`save` refuses over content that was in fact current). Only the
 second failure is survivable, and it costs one `:w!`.
+
+The dirty marker is a SAVE POINT, not a flag. A stored bool can only
+ever be set, so `u` all the way back to what was on disk still showed
+`[+]` and still refused `:q` — which teaches the `:q!` reflex, and the
+person with that reflex is the one who will `:w!` past the guard
+above. Edits carry a sequence number that rides through undo and redo,
+so the number on top of the undo stack identifies the buffer's content
+STATE rather than how much has happened to it. `version` stays
+monotonic and separate: the highlighter wants "something happened",
+never "we are back where we were".
+
+### Following a file that changes under you
+
+`:w` catching a conflict is the last line, not the only one. One stat
+per editor pane on the existing 1Hz tick asks whether the file moved,
+and the two cases split by who has something to lose:
+
+- **Unmodified buffers reload**, keeping cursor and scroll. You have no
+  edits, the file is the truth, and landing back on line one every time
+  an agent touches the file would make the pane useless for the thing
+  it is most useful for — watching.
+- **Modified buffers only say so**: `[!]` beside your `[+]`. Merging is
+  yours. The only outcome worse than showing something stale is
+  reloading over an edit.
+
+Every pane in every space, not just the visible one — a background tab
+holding a stale buffer is exactly the one you would not think to
+distrust when you come back to it. It dirties the scene only when
+something actually changed, so zero-idle-frames holds: measured at 0
+frames drawn across 6 idle seconds with an editor pane open.
 
 WORKSPACES ARE SESSIONS (tmux's model): the hierarchy is space → tabs
 → panes. Each workspace owns a full tab set; switching swaps the

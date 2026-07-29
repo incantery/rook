@@ -103,6 +103,19 @@ pub const Buffer = struct {
         return top.seq;
     }
 
+    /// Has the file moved since we loaded or last wrote it?
+    ///
+    /// One stat, cheap enough to ask on a timer. False whenever we hold
+    /// no claim (a scratch or projected buffer, or a path that did not
+    /// exist when it was opened) — the same fail-open rule `save` uses,
+    /// so the two can never disagree about whose file this is.
+    pub fn changedOnDisk(self: *const Buffer, io: std.Io) bool {
+        const known = self.disk orelse return false;
+        const p = self.path orelse return false;
+        const st = std.Io.Dir.cwd().statFile(io, p, .{}) catch return true;
+        return !known.matches(st);
+    }
+
     pub fn initEmpty(gpa: Allocator) Allocator.Error!Buffer {
         return .{ .rope = try .init(gpa, "") };
     }

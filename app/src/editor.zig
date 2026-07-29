@@ -106,6 +106,13 @@ pub const Editor = struct {
     /// into a buffer rather than building a viewer.
     synthetic: bool = false,
 
+    /// The file moved on disk and we could NOT take it, because the
+    /// buffer has edits. Refreshed by the app's poll, so it clears
+    /// itself once the two agree again (a `:w`, or the other writer
+    /// putting it back). Purely a signal — nothing in the editor acts
+    /// on it, because merging is the human's.
+    disk_changed: bool = false,
+
     // Highlighter seam — function pointers so the editor never links
     // the tree-sitter C (headless tests stay headless). syntax.zig
     // attaches; null = plain text.
@@ -321,9 +328,31 @@ pub const Editor = struct {
         return self.buf.rope.lineStart(self.cline) + self.ccol;
     }
 
+    /// Bytes the codepoint at `i` occupies; 1 for anything undecodable.
+    ///
+    /// The single source of truth for how the editor ADVANCES through a
+    /// line, so motions, render columns and the grid fill all step the
+    /// same way. A sequence that runs off the end of the line counts as
+    /// one byte too — otherwise the advance overshoots and the column
+    /// arithmetic disagrees with what was drawn.
     fn cpLenAt(s: []const u8, i: usize) usize {
         if (i >= s.len) return 1;
-        return std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+        const n = std.unicode.utf8ByteSequenceLength(s[i]) catch return 1;
+        return if (i + n <= s.len) n else 1;
+    }
+
+    /// The codepoint at `i`, or U+FFFD.
+    ///
+    /// NOT `utf8Decode(s[i..i+1]) catch 0xFFFD`: given a ONE-BYTE slice
+    /// `utf8Decode` returns that byte unchanged without validating it,
+    /// so the catch never fires and 0xFF renders as `ÿ`. Every
+    /// undecodable byte becomes one replacement character, which keeps
+    /// a binary file rendering as garbage of the RIGHT WIDTH rather
+    /// than resynchronising somewhere the cursor math cannot follow.
+    fn decodeAt(s: []const u8, i: usize) u21 {
+        const n = cpLenAt(s, i);
+        if (n == 1 and s[i] >= 0x80) return 0xFFFD;
+        return std.unicode.utf8Decode(s[i .. i + n]) catch 0xFFFD;
     }
 
     fn prevCpStart(s: []const u8, i: usize) usize {
@@ -671,6 +700,43 @@ pub const Editor = struct {
             if (self.hl_ctx) |ctx| set(ctx, null);
         }
         self.hl_version = std.math.maxInt(u64);
+    }
+
+    /// Re-read the file under this buffer, keeping where you were.
+    ///
+    /// The difference from `:e` is the cursor: `:e` is you asking for a
+    /// file and starting at the top, this is the file changing under
+    /// you while you read it. Landing back on line one every time an
+    /// agent touches the file you are watching would make the pane
+    /// useless for watching.
+    ///
+    /// Refuses on a modified buffer — merging is the human's, and the
+    /// only thing worse than not reloading is reloading over an edit.
+    pub fn reload(self: *Editor) !void {
+        if (self.buf.isModified() or self.synthetic) return;
+        const path = self.buf.path orelse return;
+        const owned = try self.gpa.dupe(u8, path);
+        defer self.gpa.free(owned);
+
+        var is_dir = false;
+        const nb = try loadPath(self.gpa, self.io, owned, &is_dir);
+        const cline = self.cline;
+        const ccol = self.ccol;
+        const top = self.top;
+        self.buf.deinit(self.gpa);
+        self.buf = nb;
+        self.is_dir = is_dir;
+        // Clamp back onto whatever the file is NOW — it may be shorter
+        // than the one we were looking at, and every motion below reads
+        // these as valid.
+        const last = self.lineCountB() -| 1;
+        self.cline = @min(cline, last);
+        self.top = @min(top, last);
+        self.ccol = ccol;
+        self.clampNormal();
+        self.render_dirty = true;
+        self.hl_version = std.math.maxInt(u64);
+        self.setStatus("reloaded — changed on disk", .{}, false);
     }
 
     /// Retarget this pane at another file (:e / ctl edit — the
@@ -1434,8 +1500,7 @@ pub const Editor = struct {
                     continue;
                 }
                 const n = cpLenAt(s, i);
-                const cp = std.unicode.utf8Decode(s[i..@min(i + n, s.len)]) catch 0xFFFD;
-                putText(out, gw, text_cols, self.left, rc, cp, st);
+                putText(out, gw, text_cols, self.left, rc, decodeAt(s, i), st);
                 rc += 1;
                 i += n;
             }
@@ -1552,6 +1617,10 @@ pub const Editor = struct {
         } else {
             putStr(out, &x, self.displayName(), .text);
             if (self.buf.isModified()) putStr(out, &x, " [+]", .dim);
+            // Both marks, both meaningful: [+] is your edit, [!] is
+            // somebody else's, and seeing them together is exactly the
+            // moment to decide which one survives.
+            if (self.disk_changed) putStr(out, &x, " [!] changed on disk", .err);
         }
 
         // Right side: line:col.
@@ -1566,10 +1635,23 @@ pub const Editor = struct {
         }
     }
 
+    /// Lay a string into the status row, ONE CELL PER CODEPOINT.
+    ///
+    /// It used to be one cell per BYTE, with the byte stored as if it
+    /// were a codepoint — so every non-ASCII character in the status
+    /// row came out as two or three wrong glyphs. Found by an em-dash
+    /// in a status message rendering as `â`, but the case that
+    /// matters is a filename: open `résumé.txt` and the name of the
+    /// file you are editing is mojibake.
+    ///
+    /// Invalid bytes become U+FFFD rather than being skipped, so a
+    /// filename that is not valid UTF-8 still occupies the width it
+    /// takes and the rest of the row does not slide left.
     fn putStr(out: []RCell, x: *usize, s: []const u8, st: Style) void {
-        for (s) |c| {
+        var i: usize = 0;
+        while (i < s.len) : (i += cpLenAt(s, i)) {
             if (x.* >= out.len) return;
-            out[x.*] = .{ .cp = c, .st = st };
+            out[x.*] = .{ .cp = decodeAt(s, i), .st = st };
             x.* += 1;
         }
     }
@@ -1960,4 +2042,56 @@ test "directory buffer: listing, enter opens, dash climbs" {
     e.key("\r");
     try testing.expect(e.is_dir);
     try testing.expectEqual(@as(usize, 1), e.cline);
+}
+
+test "the status row is codepoints, not bytes" {
+    // It used to lay one cell per BYTE with the byte stored as a
+    // codepoint, so any non-ASCII in the status row — a filename most
+    // of all — rendered as two or three wrong glyphs.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    e.setStatus("café — dash", .{}, false);
+    const dump = try e.dumpText(gpa, 40, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "café — dash") != null);
+}
+
+test "an invalid byte in the status row keeps its width" {
+    // U+FFFD rather than a skip: dropping it would slide the rest of
+    // the row left and quietly misreport the columns.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    e.setStatus("a{s}b", .{"\xff"}, false);
+    const dump = try e.dumpText(gpa, 40, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "a\u{FFFD}b") != null);
+}
+
+test "a binary file renders as replacement chars, one per bad byte" {
+    // Not `ÿ`: `utf8Decode` hands a one-byte slice straight back
+    // without validating it, so the obvious `catch 0xFFFD` is dead
+    // code. One cell per undecodable byte also keeps the width right,
+    // which is what stops the cursor column from drifting off what was
+    // actually drawn.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    try e.buf.insert(gpa, 0, "a\xff\xfeb\n");
+    const dump = try e.dumpText(gpa, 40, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "a\u{FFFD}\u{FFFD}b") != null);
+}
+
+test "a truncated sequence at end of line does not overshoot" {
+    // A 3-byte lead with only one byte left must advance by ONE, or the
+    // render loop steps past the line while renderCol steps inside it.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    try e.buf.insert(gpa, 0, "ok\xe2\n");
+    const dump = try e.dumpText(gpa, 40, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "ok\u{FFFD}") != null);
 }

@@ -26,6 +26,7 @@ const scenarios = [_]Scenario{
     .{ .name = "tabs", .what = "new tab, cycle, pane counts stay separate", .run = tabs },
     .{ .name = "editor", .what = "edit a file, change it, :w reaches disk", .run = editor },
     .{ .name = "clobber", .what = ":w refuses a file an agent changed underneath it", .run = clobber },
+    .{ .name = "reload", .what = "an open buffer follows the file, or says it can't", .run = reload },
     .{ .name = "pixels", .what = "the renderer actually drew (shot, decoded)", .run = pixels },
     .{ .name = "commands", .what = "registry lists, runs by name, and drives the ⌘K palette", .run = commands },
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
@@ -263,6 +264,47 @@ fn clobber(gpa: std.mem.Allocator, bin: []const u8) !void {
     }
     const settled = try h.readFile(path, &content);
     try h.expectContains(settled, "again", "a plain :w works once the conflict is resolved");
+}
+
+// -------------------------------------------------------------- reload
+
+/// The other half of the clobber guard: noticing while the buffer is
+/// still OPEN. An editor pane left on a file an agent is working
+/// through should show what the agent wrote — and must not, if you have
+/// edits of your own in it.
+fn reload(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    var path_buf: [192]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/watched.txt", .{app.dirPath()});
+    try h.writeFile(path, "first version\n");
+
+    _ = try app.ctlFmt("edit {s}", .{path});
+    try app.waitText("first version", 5_000);
+
+    // Somebody else rewrites it. We have no edits, so the pane follows.
+    try h.writeFile(path, "second version\n");
+    try app.waitText("second version", 8_000);
+
+    // Now put an edit in the buffer, and change the file again. The
+    // pane must NOT take it — reloading over an edit is the one outcome
+    // worse than showing something stale.
+    _ = try app.ctl("type omy own line");
+    _ = try app.ctl("key 1b"); // esc
+    try h.writeFile(path, "third version\n");
+    try app.waitText("[!]", 8_000);
+
+    var screen: [64 * 1024]u8 = undefined;
+    const s = try app.screen(&screen);
+    try h.expectContains(s, "my own line", "the edit survives a change on disk");
+    try h.expect(
+        std.mem.indexOf(u8, s, "third version") == null,
+        "a modified buffer must not take the new file, screen is: \"{s}\"",
+        .{s},
+    );
 }
 
 // -------------------------------------------------------------- pixels

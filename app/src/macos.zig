@@ -3250,6 +3250,63 @@ pub const App = struct {
     /// changed. Caller holds draw_lock.
     /// Reload keybinds + theme when a config file changes (1Hz poll
     /// off the HUD tick). Caller holds draw_lock.
+    /// Notice a file that changed under an OPEN buffer.
+    ///
+    /// The whole premise of rook is that agents rewrite your files while
+    /// you look at them, and until this existed you found out at `:w` —
+    /// after typing into a stale copy. So the two cases split by who has
+    /// something to lose:
+    ///
+    /// UNMODIFIED buffers RELOAD. You have no edits, the file is the
+    /// truth, and a pane you left open on a file an agent is working
+    /// through should show what the agent wrote. This is the case that
+    /// makes an editor pane useful as a WATCHER.
+    ///
+    /// MODIFIED buffers only say so — `[!]` beside your `[+]`. Merging
+    /// is yours; the only thing worse than not reloading is reloading
+    /// over an edit.
+    ///
+    /// Every pane in every space, not just the visible one: a background
+    /// tab holding a stale buffer is exactly the one you would not think
+    /// to distrust when you come back to it. One stat per editor pane at
+    /// 1Hz, and it dirties the scene only when something actually
+    /// changed, so the zero-idle-frames property holds.
+    /// Caller holds draw_lock.
+    fn pollBuffersLocked(self: *App) void {
+        for (self.spaces.items) |space| {
+            for (space.tabs.items) |t| {
+                for (t.panes.items) |p| {
+                    const ed = switch (p.content) {
+                        .edit => |e| e,
+                        .term => continue,
+                    };
+                    if (ed.synthetic or ed.is_dir) continue;
+                    if (!ed.buf.changedOnDisk(self.io)) {
+                        if (ed.disk_changed) {
+                            ed.disk_changed = false;
+                            ed.render_dirty = true;
+                            self.scene_dirty = true;
+                        }
+                        continue;
+                    }
+                    if (ed.buf.isModified()) {
+                        if (!ed.disk_changed) {
+                            ed.disk_changed = true;
+                            ed.render_dirty = true;
+                            self.scene_dirty = true;
+                        }
+                        continue;
+                    }
+                    // A reload that fails leaves the buffer exactly as it
+                    // was, which is the right outcome for a transient
+                    // read error — we try again next tick.
+                    ed.reload() catch continue;
+                    self.scene_dirty = true;
+                }
+            }
+        }
+    }
+
     fn pollConfigLocked(self: *App) void {
         const cfgpkg = @import("config.zig");
         const d = cfgpkg.digest(self.io, self.gpa);
@@ -3475,6 +3532,7 @@ pub const App = struct {
         self.drainBellsLocked();
         self.drainNotificationsLocked();
         if (self.hud_calls % 2 == 0) self.pollConfigLocked();
+        if (self.hud_calls % 2 == 1) self.pollBuffersLocked();
         const bytes = stats.global.bytes_in.load(.monotonic);
         if (self.hud_last_t > 0 and now > self.hud_last_t) {
             self.hud_mbs = @as(f64, @floatFromInt(bytes -| self.hud_last_bytes)) / (now - self.hud_last_t) / 1e6;
