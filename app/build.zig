@@ -68,15 +68,25 @@ pub fn build(b: *std.Build) void {
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     test_step.dependOn(&run_exe_unit_tests.step);
 
-    // The editor suite (editor+buffer+rope, headless, no C deps) roots
-    // at editor.zig — the exe module's test collection never reaches
-    // those test decls, so it gets its own test root. This hole once
-    // let a broken build read as green.
-    const editor_tests = b.addTest(.{ .root_module = b.createModule(.{
+    // The editor suite (editor+buffer+rope) roots at editor.zig — the
+    // exe module's test collection never reaches those test decls, so it
+    // gets its own test root. This hole once let a broken build read as
+    // green.
+    //
+    // It takes ghostty-vt for its UNICODE tables, and nothing else: the
+    // editor and the terminal panes have to agree about how wide a
+    // Japanese line is and where a grapheme cluster ends, and the only
+    // way two tables cannot disagree is to be one table. Measured at
+    // ~150ms on this root once the module is cached.
+    const editor_mod = b.createModule(.{
         .root_source_file = b.path("src/editor.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
+        .target = target,
+        .optimize = optimize,
+    });
+    if (b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize })) |dep| {
+        editor_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    }
+    const editor_tests = b.addTest(.{ .root_module = editor_mod });
     test_step.dependOn(&b.addRunArtifact(editor_tests).step);
 
     // The regex engine. It rides in under editor.zig's root already,
@@ -89,19 +99,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     }) });
     test_step.dependOn(&b.addRunArtifact(regex_tests).step);
-
-    // The editor's width table is generated from ghostty's, so that the
-    // editor stays free of the C++ deps ghostty-vt brings. This root has
-    // the dependency and exists to catch the two drifting apart.
-    const width_mod = b.createModule(.{
-        .root_source_file = b.path("src/width_check.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    if (b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize })) |dep| {
-        width_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
-    }
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = width_mod })).step);
 
     // The case table is generated data, so its tests are the only thing
     // standing between a bad generator run and silently wrong `gU`.

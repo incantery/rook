@@ -32,19 +32,20 @@
 //!   `&` and `\1`-`\9` in a replacement.
 //! Case is per codepoint over the scripts vim covers (unicase.zig),
 //!   and the mapping is 1:1 — so `gU` on `ß` gives `ẞ`, not `SS`.
-//! Wide glyphs (CJK, emoji) take TWO columns, from the same table the
-//!   terminal panes lay out with (width.zig).
+//! The unit of movement is a GRAPHEME CLUSTER, not a codepoint: a
+//!   combining mark, a skin tone, a flag's other half and every link of
+//!   a ZWJ chain belong to the character before them. Wide clusters
+//!   (CJK, emoji) take two columns. Segmentation and width both come
+//!   from ghostty, which is what the terminal panes lay out with.
 //! Long lines are editable: the line buffer grows to meet the line, and
 //!   the render path copies only the window it can draw.
-//! Debts: combining marks still take a cell of their own, because one
-//!   cell draws one glyph — grapheme clusters are the real fix.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const bufferpkg = @import("buffer.zig");
 const regex = @import("regex.zig");
 const unicase = @import("unicase.zig");
-const wide = @import("width.zig");
+const vt = @import("ghostty-vt");
 
 pub const tab_width = 4;
 /// The ceiling on a single line. Not a buffer size any more — the line
@@ -83,13 +84,19 @@ pub const RCell = struct {
     /// the cell to the LEFT and this one draws the other half, the same
     /// arrangement the terminal grid uses for a wide cell's spacer.
     tail: bool = false,
+    /// Non-zero when this cell holds a grapheme cluster of more than one
+    /// codepoint: `(offset << 8) | len` into the frame's cluster bytes,
+    /// read back with `Editor.clusterText`. `cp` still holds the base,
+    /// so anything that only wants A character — a text dump, a width —
+    /// can ignore this entirely.
+    cluster: u32 = 0,
 };
 
 /// Whether a codepoint takes two cells. The renderer needs this to
 /// rasterize a wide glyph into a double-width atlas slot, and it should
 /// be asking the same table the layout above used.
 pub fn wideCp(cp: u21) bool {
-    return wide.isWide(cp);
+    return vt.unicode.codepointWidth(cp) == 2;
 }
 
 pub const Mode = enum { normal, insert, visual, visual_line, visual_block, command };
@@ -273,6 +280,9 @@ pub const Editor = struct {
     /// path's whole claim is that it copies a WINDOW and not the line,
     /// and that claim is a number rather than a stopwatch.
     line_bytes_copied: usize = 0,
+    /// Per-frame arena for the bytes of multi-codepoint clusters that
+    /// cells point into. Cleared at the top of every `fillGrid`.
+    cluster_bytes: std.ArrayListUnmanaged(u8) = .empty,
     scratch2: [max_path]u8 = undefined,
 
     closed: bool = false,
@@ -500,6 +510,7 @@ pub const Editor = struct {
     pub fn destroy(self: *Editor) void {
         const gpa = self.gpa;
         gpa.free(self.line_buf);
+        self.cluster_bytes.deinit(gpa);
         if (self.hl_destroy) |f| f(self.hl_ctx.?);
         self.hl_spans_buf.deinit(gpa);
         self.hl_styles.deinit(gpa);
@@ -659,25 +670,94 @@ pub const Editor = struct {
         return j;
     }
 
-    /// Byte col of the LAST codepoint (normal mode's right edge); 0 for
+    /// Byte col of the LAST character (normal mode's right edge); 0 for
     /// an empty line.
     fn lastCpCol(s: []const u8) usize {
         if (s.len == 0) return 0;
-        return prevCpStart(s, s.len);
+        return prevClusterStart(s, s.len);
+    }
+
+    /// The most codepoints one cluster may swallow. A ZWJ chain can be
+    /// arbitrarily long and at some point it stops being a character;
+    /// the terminal caps for the same reason.
+    const max_cluster_cps = 16;
+
+    /// One grapheme cluster: the bytes it occupies and the cells it
+    /// takes. THIS is how the editor advances through a line — a
+    /// combining mark, a skin tone, a flag's second half and every link
+    /// of a ZWJ chain belong to the character before them, so `x`
+    /// removes a whole character and `l` never stops inside one.
+    ///
+    /// Segmentation and width both come from ghostty, which is what the
+    /// terminal panes already lay out with. Neovim does the same
+    /// (UAX #29) — plain vim does NOT, and stops at combining marks, so
+    /// it is not the oracle for this one.
+    const Cluster = struct { len: usize, width: u2 };
+
+    fn clusterAt(s: []const u8, i: usize) Cluster {
+        if (i >= s.len) return .{ .len = 1, .width = 1 };
+        // Control bytes are their own cell and never join anything.
+        // Ghostty's segmenter is explicitly not defined over them, and
+        // a binary file should render as garbage of the right WIDTH
+        // rather than take the editor somewhere undefined.
+        if (s[i] < 0x20 or s[i] == 0x7f) return .{ .len = 1, .width = 1 };
+
+        var cps: [max_cluster_cps]u21 = undefined;
+        var lens: [max_cluster_cps]usize = undefined;
+        var n: usize = 0;
+        var j = i;
+        while (n < cps.len and j < s.len) {
+            if (s[j] < 0x20 or s[j] == 0x7f) break;
+            const cl = cpLenAt(s, j);
+            cps[n] = decodeAt(s, j);
+            lens[n] = cl;
+            n += 1;
+            j += cl;
+        }
+        if (n == 0) return .{ .len = 1, .width = 1 };
+        const g = vt.unicode.graphemeWidth(u21, cps[0..n]);
+        var bytes: usize = 0;
+        for (lens[0..@min(g.len, n)]) |l| bytes += l;
+        return .{ .len = @max(bytes, 1), .width = @max(g.width, 1) };
+    }
+
+    fn clusterLenAt(s: []const u8, i: usize) usize {
+        return clusterAt(s, i).len;
+    }
+
+    /// Start of the cluster before byte `i`.
+    ///
+    /// Walks FORWARD from the start of the line rather than backward,
+    /// because a cluster boundary is not something you can see from its
+    /// right-hand end: whether a codepoint joins what precedes it
+    /// depends on what precedes it.
+    fn prevClusterStart(s: []const u8, i: usize) usize {
+        const target = @min(i, s.len);
+        if (target == 0) return 0;
+        var at: usize = 0;
+        var prev: usize = 0;
+        while (at < target) {
+            prev = at;
+            at += clusterLenAt(s, at);
+        }
+        return prev;
     }
 
     /// Render columns for a byte column. A tab runs to the next stop and
-    /// a CJK or emoji codepoint takes TWO columns, which is why this is
-    /// not just a codepoint count.
+    /// a CJK or emoji CLUSTER takes two, which is why this is neither a
+    /// byte count nor a codepoint count.
     fn renderCol(s: []const u8, bcol: usize) usize {
         var rc: usize = 0;
         var i: usize = 0;
         while (i < bcol and i < s.len) {
-            if (s[i] == '\t')
-                rc = rc / tab_width * tab_width + tab_width
-            else
-                rc += wide.cellWidth(decodeAt(s, i));
-            i += cpLenAt(s, i);
+            if (s[i] == '\t') {
+                rc = rc / tab_width * tab_width + tab_width;
+                i += 1;
+            } else {
+                const c = clusterAt(s, i);
+                rc += c.width;
+                i += c.len;
+            }
         }
         return rc;
     }
@@ -689,13 +769,14 @@ pub const Editor = struct {
         var rc: usize = 0;
         var i: usize = 0;
         while (i < s.len) {
+            const step: usize = if (s[i] == '\t') 1 else clusterAt(s, i).len;
             const next_rc = if (s[i] == '\t')
                 rc / tab_width * tab_width + tab_width
             else
-                rc + wide.cellWidth(decodeAt(s, i));
+                rc + clusterAt(s, i).width;
             if (next_rc > target) return i;
             rc = next_rc;
-            i += cpLenAt(s, i);
+            i += step;
         }
         return i;
     }
@@ -1031,10 +1112,10 @@ pub const Editor = struct {
         const s = self.lineText(self.cline);
         switch (m) {
             'h' => {
-                if (self.ccol > 0) self.ccol = prevCpStart(s, self.ccol);
+                if (self.ccol > 0) self.ccol = prevClusterStart(s, self.ccol);
             },
             'l' => {
-                if (self.ccol < s.len) self.ccol += cpLenAt(s, self.ccol);
+                if (self.ccol < s.len) self.ccol += clusterLenAt(s, self.ccol);
             },
             'j' => {
                 if (self.cline + 1 < self.lineCountB()) {
@@ -1124,7 +1205,7 @@ pub const Editor = struct {
             self.mode = .normal;
             if (self.ccol > 0) {
                 const s = self.lineText(self.cline);
-                self.ccol = prevCpStart(s, self.ccol);
+                self.ccol = prevClusterStart(s, self.ccol);
             }
             self.goal = renderCol(self.lineText(self.cline), self.ccol);
             return;
@@ -1155,7 +1236,7 @@ pub const Editor = struct {
                 const ev = self.rep_ev.pop() orelse {
                     if (self.ccol > 0) {
                         const s = self.lineText(self.cline);
-                        self.ccol = prevCpStart(s, self.ccol);
+                        self.ccol = prevClusterStart(s, self.ccol);
                     }
                     return;
                 };
@@ -1171,7 +1252,7 @@ pub const Editor = struct {
             }
             if (self.ccol > 0) {
                 const s = self.lineText(self.cline);
-                const p = prevCpStart(s, self.ccol);
+                const p = prevClusterStart(s, self.ccol);
                 const start = self.buf.rope.lineStart(self.cline);
                 self.buf.deleteRange(gpa, start + p, start + self.ccol) catch return;
                 self.ccol = p;
@@ -1408,7 +1489,7 @@ pub const Editor = struct {
         while (i < bytes.len) {
             const n = cpLenAt(bytes, i);
             const s = self.lineText(self.cline);
-            const over = if (self.ccol < s.len) cpLenAt(s, self.ccol) else 0;
+            const over = if (self.ccol < s.len) clusterLenAt(s, self.ccol) else 0;
             const at = self.absOff();
             if (over > 0) {
                 self.rep_text.appendSlice(gpa, s[self.ccol..][0..over]) catch return;
@@ -2498,7 +2579,7 @@ pub const Editor = struct {
                 var end = self.ccol;
                 for (0..cnt) |_| {
                     if (end >= s.len) break;
-                    end += cpLenAt(s, end);
+                    end += clusterLenAt(s, end);
                 }
                 if (end == self.ccol) return;
                 self.buf.newUndoGroup();
@@ -2518,7 +2599,7 @@ pub const Editor = struct {
                 var start = self.ccol;
                 for (0..cnt) |_| {
                     if (start == 0) break;
-                    start = prevCpStart(s, start);
+                    start = prevClusterStart(s, start);
                 }
                 self.buf.newUndoGroup();
                 self.yankStore(s[start..self.ccol], .char, true);
@@ -2568,7 +2649,7 @@ pub const Editor = struct {
                 var moved: usize = 0;
                 for (0..cnt) |_| {
                     if (end >= s.len) break;
-                    end += cpLenAt(s, end);
+                    end += clusterLenAt(s, end);
                     moved += 1;
                 }
                 const base = self.buf.rope.lineStart(self.cline);
@@ -2580,7 +2661,7 @@ pub const Editor = struct {
                 var c = self.ccol;
                 for (0..moved) |_| {
                     if (c >= t.len) break;
-                    c += cpLenAt(t, c);
+                    c += clusterLenAt(t, c);
                 }
                 self.ccol = c;
                 self.clampNormal();
@@ -2651,7 +2732,7 @@ pub const Editor = struct {
                     return;
                 }
                 const s = self.lineText(self.cline);
-                if (s.len > 0 and self.ccol < s.len) self.ccol += cpLenAt(s, self.ccol);
+                if (s.len > 0 and self.ccol < s.len) self.ccol += clusterLenAt(s, self.ccol);
                 self.enterInsert();
             },
             'A' => {
@@ -2804,7 +2885,7 @@ pub const Editor = struct {
         if (s.len == 0 or self.ccol >= s.len) return;
         self.buf.newUndoGroup();
         const start = self.buf.rope.lineStart(self.cline);
-        const n = cpLenAt(s, self.ccol);
+        const n = clusterLenAt(s, self.ccol);
         self.buf.deleteRange(self.gpa, start + self.ccol, start + self.ccol + n) catch return;
         self.buf.insert(self.gpa, start + self.ccol, cp) catch return;
     }
@@ -3040,10 +3121,10 @@ pub const Editor = struct {
         for (0..cnt) |_| {
             const s = self.lineText(line);
             switch (m) {
-                'h' => col = prevCpStart(s, col),
+                'h' => col = prevClusterStart(s, col),
                 'l' => {
                     if (col < s.len) {
-                        const n = col + cpLenAt(s, col);
+                        const n = col + clusterLenAt(s, col);
                         // Normal-mode l stops at the last cp; operators
                         // reach one past (dl deletes the char).
                         if (self.op != 0 or n < s.len) col = n;
@@ -3094,7 +3175,7 @@ pub const Editor = struct {
                 const far_line = if (b0 > a0) line else self.cline;
                 const far_col = if (b0 > a0) col else self.ccol;
                 const s = self.lineText(far_line);
-                if (far_col < s.len) hi += cpLenAt(s, far_col);
+                if (far_col < s.len) hi += clusterLenAt(s, far_col);
             }
             self.opRange(@min(a0, b0), hi);
             return;
@@ -3121,18 +3202,18 @@ pub const Editor = struct {
         if (fwd) {
             var j = from;
             if (j >= s.len) return null;
-            j += cpLenAt(s, j);
-            while (j < s.len) : (j += cpLenAt(s, j)) {
+            j += clusterLenAt(s, j);
+            while (j < s.len) : (j += clusterLenAt(s, j)) {
                 if (cpAt(s, j, target)) return j;
             }
             return null;
         }
         if (from == 0) return null;
-        var j = prevCpStart(s, from);
+        var j = prevClusterStart(s, from);
         while (true) {
             if (cpAt(s, j, target)) return j;
             if (j == 0) return null;
-            j = prevCpStart(s, j);
+            j = prevClusterStart(s, j);
         }
     }
 
@@ -3165,13 +3246,13 @@ pub const Editor = struct {
                     self.op = 0;
                     return;
                 }
-                col += cpLenAt(s, col);
+                col += clusterLenAt(s, col);
             } else {
                 if (col == 0) {
                     self.op = 0;
                     return;
                 }
-                col = prevCpStart(s, col);
+                col = prevClusterStart(s, col);
             }
         }
         for (0..cnt) |_| {
@@ -3183,13 +3264,13 @@ pub const Editor = struct {
                 return;
             };
         }
-        if (till) col = if (fwd) prevCpStart(s, col) else col + cpLenAt(s, col);
+        if (till) col = if (fwd) prevClusterStart(s, col) else col + clusterLenAt(s, col);
 
         if (self.op != 0) {
             // f/t are inclusive of the landing character, F/T are not —
             // `df,` eats the comma, `dF,` stops at it.
             var end_col = col;
-            if (fwd and end_col < s.len) end_col += cpLenAt(s, end_col);
+            if (fwd and end_col < s.len) end_col += clusterLenAt(s, end_col);
             const base = self.buf.rope.lineStart(self.cline);
             const a = base + self.ccol;
             const b = base + end_col;
@@ -3595,7 +3676,7 @@ pub const Editor = struct {
         var s = self.lineText(line);
         if (to_end) {
             // e: step one cp, skip blanks/newlines, run to end of class run.
-            if (col < s.len) col += cpLenAt(s, col);
+            if (col < s.len) col += clusterLenAt(s, col);
             while (true) {
                 if (col >= s.len) {
                     if (line + 1 >= self.lineCountB()) return .{ .line = line, .col = lastCpCol(s) };
@@ -3605,14 +3686,14 @@ pub const Editor = struct {
                     continue;
                 }
                 if (charClass(s[col]) == 0) {
-                    col += cpLenAt(s, col);
+                    col += clusterLenAt(s, col);
                     continue;
                 }
                 break;
             }
             const cls = charClass(s[col]);
             while (true) {
-                const n = col + cpLenAt(s, col);
+                const n = col + clusterLenAt(s, col);
                 if (n >= s.len or charClass(s[n]) != cls) return .{ .line = line, .col = col };
                 col = n;
             }
@@ -3620,7 +3701,7 @@ pub const Editor = struct {
         // w: skip current class run, then blanks (crossing lines).
         if (col < s.len) {
             const cls = charClass(s[col]);
-            while (col < s.len and charClass(s[col]) == cls) col += cpLenAt(s, col);
+            while (col < s.len and charClass(s[col]) == cls) col += clusterLenAt(s, col);
         }
         while (true) {
             if (col >= s.len) {
@@ -3632,7 +3713,7 @@ pub const Editor = struct {
                 continue;
             }
             if (charClass(s[col]) == 0) {
-                col += cpLenAt(s, col);
+                col += clusterLenAt(s, col);
                 continue;
             }
             return .{ .line = line, .col = col };
@@ -3654,12 +3735,12 @@ pub const Editor = struct {
                 if (s.len == 0) return .{ .line = line, .col = 0 };
                 continue;
             }
-            col = prevCpStart(s, col);
+            col = prevClusterStart(s, col);
             if (charClass(s[col]) != 0) break;
         }
         const cls = charClass(s[col]);
         while (col > 0) {
-            const p = prevCpStart(s, col);
+            const p = prevClusterStart(s, col);
             if (charClass(s[p]) != cls) break;
             col = p;
         }
@@ -3680,9 +3761,9 @@ pub const Editor = struct {
                 line -= 1;
                 s = self.lineText(line);
                 if (s.len == 0) return .{ .line = line, .col = 0 };
-                col = prevCpStart(s, s.len);
+                col = prevClusterStart(s, s.len);
             } else {
-                col = prevCpStart(s, col);
+                col = prevClusterStart(s, col);
             }
             const c = charClass(s[col]);
             if (in_run != 0 and c == in_run) continue;
@@ -4170,7 +4251,7 @@ pub const Editor = struct {
         const a = @min(bcolForRenderCol(s, r.lo), s.len);
         if (r.eol) return .{ .a = a, .b = s.len };
         var b = bcolForRenderCol(s, r.hi);
-        if (b < s.len) b += cpLenAt(s, b);
+        if (b < s.len) b += clusterLenAt(s, b);
         return .{ .a = a, .b = @min(@max(b, a), s.len) };
     }
 
@@ -4248,7 +4329,7 @@ pub const Editor = struct {
             const s = self.lineText(i);
             var n: usize = 0;
             var k = sp.a;
-            while (k < sp.b) : (k += cpLenAt(s, k)) n += 1;
+            while (k < sp.b) : (k += clusterLenAt(s, k)) n += 1;
             const base = self.buf.rope.lineStart(i);
             self.buf.deleteRange(gpa, base + sp.a, base + sp.b) catch continue;
             var fill: [max_indent]u8 = undefined;
@@ -4334,7 +4415,7 @@ pub const Editor = struct {
         const bl = self.buf.rope.lineOfOffset(b);
         const s = self.lineText(bl);
         const bc = b - self.buf.rope.lineStart(bl);
-        if (bc < s.len) b += cpLenAt(s, bc);
+        if (bc < s.len) b += clusterLenAt(s, bc);
         self.op = op;
         self.opRange(a, b);
     }
@@ -4422,7 +4503,7 @@ pub const Editor = struct {
         }
         const s = self.lineText(self.cline);
         var at = self.absOff();
-        if (after and s.len > 0 and self.ccol < s.len) at += cpLenAt(s, self.ccol);
+        if (after and s.len > 0 and self.ccol < s.len) at += clusterLenAt(s, self.ccol);
         for (0..cnt) |_| self.buf.insert(gpa, at, body) catch return;
         self.cursorToOffset(at + body.len * cnt - 1);
     }
@@ -4648,6 +4729,7 @@ pub const Editor = struct {
         const gpa = self.gpa;
         self.last_cols = cols;
         self.last_rows = rows;
+        self.cluster_bytes.clearRetainingCapacity();
         self.grid.resize(gpa, cols * rows) catch return self.grid.items;
         const g = self.grid.items;
         @memset(g, .{});
@@ -4738,22 +4820,28 @@ pub const Editor = struct {
                     i += 1;
                     continue;
                 }
-                const n = cpLenAt(s, i);
+                const cl = clusterAt(s, i);
                 const pst: Style = if (pair) |po|
                     (if (abs_start + i == po and !in_sel) .mode else st)
                 else
                     st;
                 const cp = decodeAt(s, i);
-                const w = wide.cellWidth(cp);
                 putText(out, gw, text_cols, self.left, rc, cp, pst);
-                if (w == 2) {
+                if (cl.len > cpLenAt(s, i)) {
+                    // More than one codepoint: the renderer has to shape
+                    // the whole thing, so stash the bytes and point the
+                    // cell at them. `cp` stays the base, so anything
+                    // that only wants A character still works.
+                    self.attachCluster(out, gw, text_cols, self.left, rc, s[i..][0..cl.len]);
+                }
+                if (cl.width == 2) {
                     // The second half carries no codepoint of its own;
                     // it has to carry the STYLE, or a selection over a
                     // CJK line would be striped.
                     putTail(out, gw, text_cols, self.left, rc + 1, pst);
                 }
-                rc += w;
-                i += n;
+                rc += cl.width;
+                i += cl.len;
             }
             // Search matches tint like a selection (vim hlsearch-ish;
             // :noh clears). Cursor/selection styles win.
@@ -4764,12 +4852,12 @@ pub const Editor = struct {
                     // forever otherwise.
                     from = if (m.end > m.start) m.end else m.start + 1;
                     var bi = m.start;
-                    while (bi < m.end and bi < s.len) : (bi += cpLenAt(s, bi)) {
+                    while (bi < m.end and bi < s.len) : (bi += clusterLenAt(s, bi)) {
                         const mrc = renderCol(s, bi);
                         // Tint every column the character covers, not
                         // just its first, or a match on CJK text comes
                         // out striped.
-                        const mw = wide.cellWidth(decodeAt(s, bi));
+                        const mw = clusterAt(s, bi).width;
                         for (0..mw) |k| {
                             const c = mrc + k;
                             if (c < self.left or c - self.left >= text_cols) continue;
@@ -4790,7 +4878,7 @@ pub const Editor = struct {
                 // A block cursor on a wide glyph covers the whole
                 // glyph, the way it does in a terminal.
                 const cw: usize = if (self.ccol < s.len)
-                    wide.cellWidth(decodeAt(s, self.ccol))
+                    clusterAt(s, self.ccol).width
                 else
                     1;
                 for (0..cw) |k| {
@@ -4804,6 +4892,36 @@ pub const Editor = struct {
 
         self.fillStatusRow(g[(rows - 1) * cols ..][0..cols]);
         return g;
+    }
+
+    /// Point a cell at the bytes of its cluster. Bytes live in a
+    /// per-frame arena rather than in the cell, because a cell is
+    /// copied cols*rows times a frame and a cluster is rare.
+    fn attachCluster(
+        self: *Editor,
+        out: []RCell,
+        gw: usize,
+        text_cols: usize,
+        left: usize,
+        rc: usize,
+        bytes: []const u8,
+    ) void {
+        if (rc < left or rc - left >= text_cols) return;
+        if (bytes.len > 255) return; // the length field, and no real cluster
+        const off = self.cluster_bytes.items.len;
+        if (off > (1 << 24)) return; // the offset field; a frame gone mad
+        self.cluster_bytes.appendSlice(self.gpa, bytes) catch return;
+        out[gw + (rc - left)].cluster = @intCast((off << 8) | bytes.len);
+    }
+
+    /// The bytes of a cell's grapheme cluster, or empty when it is a
+    /// plain single-codepoint cell. Valid until the next `fillGrid`.
+    pub fn clusterText(self: *const Editor, c: RCell) []const u8 {
+        if (c.cluster == 0) return &.{};
+        const off = c.cluster >> 8;
+        const len = c.cluster & 0xff;
+        if (off + len > self.cluster_bytes.items.len) return &.{};
+        return self.cluster_bytes.items[off..][0..len];
     }
 
     fn putText(out: []RCell, gw: usize, text_cols: usize, left: usize, rc: usize, cp: u21, st: Style) void {
@@ -8639,7 +8757,7 @@ test "four bytes per column is enough for the widest narrow codepoint" {
     keys(e, "i");
     for (0..40) |_| e.key("\u{10400}");
     e.key("\x1b");
-    try testing.expectEqual(@as(u2, 1), wide.cellWidth(0x10400));
+    try testing.expectEqual(@as(u2, 1), Editor.clusterAt("\u{10400}", 0).width);
     const dump = try e.dumpText(gpa, 24, 3);
     defer gpa.free(dump);
     // The gutter takes two columns, so 22 characters should render.
@@ -8679,4 +8797,87 @@ test "a frame on a huge line copies a window, not the line" {
     e.line_bytes_copied = 0;
     _ = e.fillGrid(120, 40);
     try testing.expect(e.line_bytes_copied >= n);
+}
+
+
+/// The corpus for the grapheme tests: one entry per way Unicode glues
+/// codepoints into a single character. Every expectation was read out
+/// of NEOVIM, which does UAX #29 — plain vim stops at combining marks
+/// and is not the oracle here.
+const grapheme_cases = [_]struct { name: []const u8, in: []const u8, rest: []const u8 }{
+    .{ .name = "e + combining acute", .in = "e\u{301}Z", .rest = "Z" },
+    .{ .name = "e + two marks", .in = "e\u{301}\u{300}Z", .rest = "Z" },
+    .{ .name = "a + VS16", .in = "a\u{FE0F}Z", .rest = "Z" },
+    .{ .name = "smiley + VS16", .in = "\u{263A}\u{FE0F}Z", .rest = "Z" },
+    .{ .name = "thumbs up + skin tone", .in = "\u{1F44D}\u{1F3FB}Z", .rest = "Z" },
+    .{ .name = "regional indicator flag", .in = "\u{1F1EF}\u{1F1F5}Z", .rest = "Z" },
+    .{ .name = "ZWJ family", .in = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F466}Z", .rest = "Z" },
+    .{ .name = "hangul L+V", .in = "\u{1100}\u{1161}Z", .rest = "Z" },
+    .{ .name = "devanagari conjunct", .in = "\u{915}\u{94D}\u{937}Z", .rest = "Z" },
+    .{ .name = "plain emoji", .in = "\u{1F600}Z", .rest = "Z" },
+    .{ .name = "CJK", .in = "\u{65E5}Z", .rest = "Z" },
+    .{ .name = "plain ascii", .in = "abZ", .rest = "bZ" },
+};
+
+fn mkWith(gpa: Allocator, text: []const u8) !*Editor {
+    const e = try mkEditor(gpa);
+    keys(e, "i");
+    utf8Keys(e, text);
+    e.key("\x1b");
+    keys(e, "gg0");
+    return e;
+}
+
+test "x removes a whole grapheme cluster" {
+    for (grapheme_cases) |c| {
+        const gpa = testing.allocator;
+        const e = try mkWith(gpa, c.in);
+        defer e.destroy();
+        keys(e, "x");
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        testing.expectEqualStrings(c.rest, s) catch |err| {
+            std.debug.print("case: {s}\n", .{c.name});
+            return err;
+        };
+    }
+}
+
+test "l steps over a whole grapheme cluster" {
+    for (grapheme_cases) |c| {
+        const gpa = testing.allocator;
+        const e = try mkWith(gpa, c.in);
+        defer e.destroy();
+        keys(e, "l");
+        // The cursor lands on the byte where the SECOND cluster starts,
+        // which is the input minus its tail.
+        const want = c.in.len - c.rest.len;
+        testing.expectEqual(want, e.ccol) catch |err| {
+            std.debug.print("case: {s}\n", .{c.name});
+            return err;
+        };
+    }
+}
+
+test "h comes back to the start of the cluster it stepped over" {
+    for (grapheme_cases) |c| {
+        const gpa = testing.allocator;
+        const e = try mkWith(gpa, c.in);
+        defer e.destroy();
+        keys(e, "lh");
+        testing.expectEqual(@as(usize, 0), e.ccol) catch |err| {
+            std.debug.print("case: {s}\n", .{c.name});
+            return err;
+        };
+    }
+}
+
+test "a combining mark does not take a column of its own" {
+    // The reason clusters had to happen before the width work was
+    // finished: `e` plus an accent is ONE character, one cell.
+    try testing.expectEqual(@as(usize, 1), Editor.renderCol("e\u{301}Z", 3));
+    try testing.expectEqual(@as(usize, 1), Editor.renderCol("e\u{301}\u{300}Z", 5));
+    // And the wide ones still take two.
+    try testing.expectEqual(@as(usize, 2), Editor.renderCol("\u{1F44D}\u{1F3FB}Z", 8));
+    try testing.expectEqual(@as(usize, 2), Editor.renderCol("\u{1F1EF}\u{1F1F5}Z", 8));
 }

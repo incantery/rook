@@ -677,12 +677,25 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       cost 6.3MB of copying per frame — more than the line itself. They
       all take a bound now. Measured over 100 frames on a 2MB line:
       629,193,600 bytes copied before, 48,100 after.
-- [ ] **Combining marks still take a cell of their own.** Ghostty's
-      zero-width rule is deliberately NOT adopted: this renderer maps
-      one cell to one atlas glyph and cannot compose a mark onto the
-      glyph before it, so width 0 would render them as nothing at all —
-      worse than the current misplacement. Grapheme clusters are the
-      real fix, and they are a bigger change: motion, not just layout.
+- [x] **The unit of movement is a grapheme cluster.** A combining
+      mark, a skin tone, a flag's other half and every link of a ZWJ
+      chain belong to the character before them, so `x` removes a whole
+      character and `l` never stops inside one. This also dissolves the
+      zero-width problem rather than solving it: the editor never asks
+      for a lone combining mark's width any more, because the mark is
+      part of a cluster and the CLUSTER has a width.
+      Segmentation comes from ghostty, and getting it meant REVERSING
+      the previous entry's decision — the editor now imports ghostty-vt
+      instead of carrying a generated copy of its width table. Two
+      reasons: `graphemeBreak` is not exported, so a generated table
+      would have meant reimplementing UAX #29 against data the library
+      does not hand out; and the C++ dependency that justified
+      generating measured ~150ms on the editor's test root once cached.
+      `width.zig` and `width_check.zig` are gone; the behaviour they
+      guaranteed and every test of it stayed.
+      NEOVIM is the oracle here, not vim: vim stops at combining marks
+      and splits flags, ZWJ sequences and skin tones, which is a
+      twenty-year-old approximation rather than a decision.
 - [x] **Notice a disk change while the buffer is OPEN**, not only at
       `:w`. One stat per editor pane on the existing 1Hz tick, split by
       who has something to lose: an UNMODIFIED buffer reloads (keeping
