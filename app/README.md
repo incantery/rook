@@ -1257,6 +1257,12 @@ question about it;
 when copying another program's behaviour, ask the FEATURE and not the
 function that sounds like it — vim's `toupper()` and its `gU` operator
 use different tables and disagree about `ß`;
+when a pixel assertion will not separate two builds, suspect the
+MEASUREMENT before the feature — four attempts at one failed in four
+different ways (a peak row that is equally inky either way, a band
+diluted by surrounding text, and a signal that was measuring the typed
+command because `waitText` matched the sentinel inside the command it
+had just typed, so the screenshot preceded any output);
 a RENDER bug can hide behind a green model: shaping a grapheme cluster
 left the graphics context's text matrix behind it, so every plain glyph
 rasterized afterwards drew outside its slot and neighbouring characters
