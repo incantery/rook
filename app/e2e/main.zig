@@ -26,6 +26,7 @@ const scenarios = [_]Scenario{
     .{ .name = "tabs", .what = "new tab, cycle, pane counts stay separate", .run = tabs },
     .{ .name = "editor", .what = "edit a file, change it, :w reaches disk", .run = editor },
     .{ .name = "indent", .what = "o inherits the indent, >> shifts, and neither leaves whitespace", .run = indent },
+    .{ .name = "vim", .what = "regex :s, a macro, a block edit and `.` all reach disk", .run = vim },
     .{ .name = "clobber", .what = ":w refuses a file an agent changed underneath it", .run = clobber },
     .{ .name = "reload", .what = "an open buffer follows the file, or says it can't", .run = reload },
     .{ .name = "pixels", .what = "the renderer actually drew (shot, decoded)", .run = pixels },
@@ -254,6 +255,70 @@ fn indent(gpa: std.mem.Allocator, bin: []const u8) !void {
         "an abandoned `o` left trailing whitespace in the file: \"{s}\"",
         .{got},
     );
+}
+
+// ------------------------------------------------------------------ vim
+
+/// The editing surface, driven the way someone actually drives it —
+/// a capture-swapping substitute, a recorded macro, a rectangular
+/// edit, and `.` — with the answer read off DISK rather than off the
+/// screen, so nothing here can pass on a render that lied.
+fn vim(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    var path_buf: [192]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/vim.txt", .{app.dirPath()});
+    try h.writeFile(path,
+        \\alpha=one
+        \\beta=two
+        \\gamma=three
+        \\aaa
+        \\bbb
+        \\
+    );
+
+    _ = try app.ctlFmt("edit {s}", .{path});
+    try app.waitText("gamma", 5_000);
+
+    // A regex substitute with two captures, swapped.
+    _ = try app.ctl("type gg");
+    _ = try app.ctl("type :1,3s/\\(\\w\\+\\)=\\(\\w\\+\\)/\\2:\\1/");
+    _ = try app.ctl("enter");
+
+    // A macro that appends a marker, recorded on one line and replayed
+    // on the next.
+    _ = try app.ctl("type 4GqmA!");
+    _ = try app.ctl("key 1b");
+    _ = try app.ctl("type jq@m");
+
+    // A rectangular insert down the first column of the first two lines.
+    _ = try app.ctl("type gg0");
+    _ = try app.ctl("key 16"); // ctrl-v
+    _ = try app.ctl("type jI> ");
+    _ = try app.ctl("key 1b");
+
+    // And `.` repeating the last change — the `x` below, twice.
+    _ = try app.ctl("type 3G0x.");
+
+    _ = try app.ctl("type :w");
+    _ = try app.ctl("enter");
+
+    var content: [512]u8 = undefined;
+    var waited: u32 = 0;
+    while (waited < 5000) : (waited += 100) {
+        const got = h.readFile(path, &content) catch "";
+        if (std.mem.indexOf(u8, got, "one:alpha") != null) break;
+        h.sleepMs(100);
+    }
+    const got = try h.readFile(path, &content);
+    try h.expectContains(got, "> one:alpha", "the substitute or the block insert did not land");
+    try h.expectContains(got, "> two:beta", "the block insert reached only one row");
+    try h.expectContains(got, "ree:gamma", "`.` should have deleted two characters");
+    try h.expectContains(got, "aaa!", "the macro did not record");
+    try h.expectContains(got, "bbb!", "the macro did not replay");
 }
 
 // -------------------------------------------------------------- clobber
