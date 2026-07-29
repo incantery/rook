@@ -103,7 +103,7 @@ pub const Substrate = struct {
     pub fn threadList(self: Substrate, workspace: []const u8) threaddoc.Snapshot {
         if (workspace.len == 0) return .{};
         if (self.arm == .local) {
-            if (threaddoc.readList(self.gpa, workspace)) |snap| return snap;
+            if (threaddoc.readList(self.gpa, self.io, workspace)) |snap| return snap;
         }
         return threaddoc.listHost(self.gpa, self.io, workspace);
     }

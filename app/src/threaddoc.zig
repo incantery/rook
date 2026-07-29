@@ -23,6 +23,10 @@
 const std = @import("std");
 const hostc = @import("hostc.zig");
 const threads = @import("threads.zig");
+const reanchor = @import("reanchor.zig");
+const blobs = @import("blobs.zig");
+const workspaces = @import("workspaces.zig");
+const git = @import("git.zig");
 
 pub const max_threads = 32;
 
@@ -137,14 +141,19 @@ pub const Snapshot = struct {
 /// that distinction to know whether the remote arm would say anything
 /// different.
 ///
-/// Deliberately NOT re-anchored, which is what the host's list does too
-/// — its ThreadInfo carries a currentStart and this client has never
-/// parsed it, so a row has always pointed at the stored line. Porting
-/// that faithfully keeps this change reviewable as a move rather than a
-/// move plus a behaviour change; re-anchoring the sidebar is now a
-/// three-line follow-up (threads.Thread.anchor is right there) and
-/// deserves its own commit.
-pub fn readList(gpa: std.mem.Allocator, workspace: []const u8) ?Snapshot {
+/// Rows are RE-ANCHORED: a row opens where its code is NOW, not where
+/// the conversation started. That is the point of storing an anchor
+/// rather than a line number, and a sidebar that sends you to a line the
+/// code has left is worse than one that admits it does not know.
+///
+/// Only MODIFIED-side anchors, which is the same rule the review panel
+/// follows — re-anchor where the base is unambiguously the working tree.
+/// An original-side anchor's snapshot came from a diff base and must be
+/// compared against that base; resolving WHICH base (HEAD, or a
+/// worktree's merge-base) is reviewBaseFor's job and still lives in the
+/// Go host. Those rows keep their stored line, which is what every row
+/// did before this change, so nothing regresses.
+pub fn readList(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) ?Snapshot {
     var store = threads.Store.open();
     defer store.close();
     if (store.db == null) return null;
@@ -154,6 +163,17 @@ pub fn readList(gpa: std.mem.Allocator, workspace: []const u8) ?Snapshot {
     // fetching bodies to discard them is a query per row.
     var rows = store.list(gpa, workspace, .{ .comments = false });
     defer rows.deinit();
+
+    var memo = reanchor.Memo.init(gpa);
+    defer memo.deinit();
+    var blob_store = blobs.Store.open();
+    defer blob_store.close();
+    // Resolved on first use: a workspace whose threads are all resolved,
+    // or all original-side, should not fork git for a repo top it will
+    // never consult.
+    var top: ?[]u8 = null;
+    var top_tried = false;
+    defer if (top) |t| gpa.free(t);
 
     for (rows.items) |t| {
         // Resolved threads are history; the list is what still wants you.
@@ -168,6 +188,29 @@ pub fn readList(gpa: std.mem.Allocator, workspace: []const u8) ?Snapshot {
         out.anchor.setOneLine(t.anchor_text);
         out.has_draft = t.draft.len > 0;
         out.undelivered = t.deliver_error.len > 0;
+
+        var a = t.anchor();
+        if (a.side == .modified and a.blob_sha.len > 0) {
+            if (!top_tried) {
+                top_tried = true;
+                if (workspaces.rootOf(gpa, workspace)) |root_dir| {
+                    defer gpa.free(root_dir);
+                    top = git.repoTop(gpa, io, root_dir);
+                }
+            }
+            if (top) |repo_top| {
+                reanchor.resolve(gpa, io, .{
+                    .top = repo_top,
+                    .blobs = &blob_store,
+                    .memo = &memo,
+                }, &a);
+                // An outdated anchor keeps its STORED range, so this is
+                // the right line either way: where the row should send
+                // you, with anchor_text as what it renders.
+                if (a.current_start > 0) out.line = @intCast(a.current_start);
+            }
+        }
+
         snap.items[snap.n] = out;
         snap.n += 1;
     }
@@ -431,6 +474,11 @@ fn expectSameSnapshot(want: Snapshot, got: Snapshot) !void {
 }
 
 test "the registry path agrees with the host path, row for row" {
+    // No workspaces row and no anchor_blobs, so nothing here re-anchors
+    // and both paths report stored lines. That is deliberate: this test
+    // pins the FIELD MAPPING and the resolved-skip. Re-anchoring is a
+    // behaviour the host does not share, so it gets its own test below
+    // rather than being smuggled into a parity assertion.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -456,7 +504,7 @@ test "the registry path agrees with the host path, row for row" {
         \\ {"id":4,"path":"d.zig","startLine":1,"state":"resolved","anchorText":"gone","draft":"","deliverError":""}]
     ;
 
-    const local = readList(T.allocator, "src") orelse return error.RegistryUnreachable;
+    const local = readList(T.allocator, T.io, "src") orelse return error.RegistryUnreachable;
     const host = parseList(T.allocator, wire);
 
     try expectSameSnapshot(host, local);
@@ -486,12 +534,114 @@ test "the registry path caps at max_threads and counts the rest" {
     try w.writeAll(";\x00");
     try testdb.run(db, @ptrCast(sql[0 .. w.end - 1 :0].ptr));
 
-    const snap = readList(T.allocator, "src") orelse return error.RegistryUnreachable;
+    const snap = readList(T.allocator, T.io, "src") orelse return error.RegistryUnreachable;
     try T.expectEqual(@as(usize, max_threads), snap.n);
     try T.expectEqual(@as(usize, 3), snap.more);
 }
 
 test "an unreadable registry is null, so list can fall back" {
     _ = setenv("XDG_DATA_HOME", "/nonexistent/rook-test", 1);
-    try T.expectEqual(@as(?Snapshot, null), readList(T.allocator, "src"));
+    try T.expectEqual(@as(?Snapshot, null), readList(T.allocator, T.io, "src"));
+}
+
+const anchorpkg = @import("anchor.zig");
+
+test "a sidebar row opens where its code is now" {
+    // The behaviour this change exists for: the conversation was started
+    // against line 3, two lines have since been inserted above it, and
+    // the row must send you to 5. Real registry, real repo, real diff.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db = try fixtureDb(&tmp, &buf);
+
+    var dirbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dirbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var repobuf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = try std.fmt.bufPrint(&repobuf, "{s}/repo", .{dir});
+    try tmp.dir.createDirPath(T.io, "repo");
+    // Without `git init`, rev-parse walks up out of .zig-cache and
+    // reports rook's own top; every anchor then resolves against the
+    // wrong tree, reads as outdated, and this passes while proving
+    // nothing.
+    if (git.run(T.allocator, T.io, repo, &.{ "init", "-q" }, 1 << 16)) |r| r.deinit(T.allocator);
+
+    const original = "l1\nl2\nl3\nl4\nl5\n";
+    const sha = anchorpkg.blobSha(original);
+
+    // HEAD gets THREE lines prepended, the working tree TWO. The two
+    // sides therefore map the same stored range to DIFFERENT lines — 6
+    // against the base, 5 against the tree — which is what makes the
+    // original-side assertion below able to fail. With an empty repo it
+    // could not: `git show HEAD:f.zig` errors, the anchor reads as
+    // outdated, and the row keeps line 3 whether the side rule exists or
+    // not. Found by removing the rule and watching the test still pass.
+    try tmp.dir.writeFile(T.io, .{ .sub_path = "repo/f.zig", .data = "x\ny\nz\n" ++ original });
+    inline for (.{
+        &[_][]const u8{ "add", "f.zig" },
+        &[_][]const u8{ "-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base" },
+    }) |argv| {
+        if (git.run(T.allocator, T.io, repo, argv, 1 << 16)) |r| {
+            defer r.deinit(T.allocator);
+            if (r.code != 0) return error.SkipZigTest; // no usable git
+        } else return error.SkipZigTest;
+    }
+    try tmp.dir.writeFile(T.io, .{ .sub_path = "repo/f.zig", .data = "a\nb\n" ++ original });
+
+    try testdb.run(db, testdb.schema);
+    var sql: [2048]u8 = undefined;
+    try testdb.run(db, try std.fmt.bufPrintZ(&sql,
+        \\INSERT INTO workspaces (name, root, created_at, last_used) VALUES ('src','{s}','t','t');
+        \\INSERT INTO anchor_blobs (sha, content) VALUES ('{s}','{s}');
+        \\INSERT INTO threads (id, workspace, path, start_line, end_line, side, blob_sha, anchor_text, state, created_at, updated_at)
+        \\ VALUES (1,'src','f.zig',3,4,'modified','{s}','l3','open','t','t');
+        \\INSERT INTO threads (id, workspace, path, start_line, end_line, side, blob_sha, anchor_text, state, created_at, updated_at)
+        \\ VALUES (2,'src','f.zig',3,4,'original','{s}','l3','open','t','t');
+    , .{ repo, &sha, original, &sha, &sha }));
+
+    const snap = readList(T.allocator, T.io, "src") orelse return error.RegistryUnreachable;
+    try T.expectEqual(@as(usize, 2), snap.n);
+
+    // Modified side: re-anchored onto today's tree.
+    try T.expectEqual(@as(i32, 5), snap.slice()[0].line);
+
+    // Original side: NOT re-anchored, because WHICH base to compare
+    // against is reviewBaseFor's answer and that is still in Go. Keeps
+    // its stored line — 3, not the 6 that re-anchoring against HEAD
+    // would give, so this fails if the side rule is dropped.
+    try T.expectEqual(@as(i32, 3), snap.slice()[1].line);
+}
+
+test "an outdated anchor still points at its stored line" {
+    // The anchored lines themselves changed, so there is no honest
+    // mapping. The row must not guess — it keeps the stored range and
+    // renders anchor_text, which is exactly why anchor_text is stored.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db = try fixtureDb(&tmp, &buf);
+
+    var dirbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dirbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var repobuf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = try std.fmt.bufPrint(&repobuf, "{s}/repo", .{dir});
+    try tmp.dir.createDirPath(T.io, "repo");
+    if (git.run(T.allocator, T.io, repo, &.{ "init", "-q" }, 1 << 16)) |r| r.deinit(T.allocator);
+
+    const original = "l1\nl2\nl3\nl4\nl5\n";
+    const sha = anchorpkg.blobSha(original);
+    try tmp.dir.writeFile(T.io, .{ .sub_path = "repo/f.zig", .data = "l1\nl2\nCHANGED\nl4\nl5\n" });
+
+    try testdb.run(db, testdb.schema);
+    var sql: [2048]u8 = undefined;
+    try testdb.run(db, try std.fmt.bufPrintZ(&sql,
+        \\INSERT INTO workspaces (name, root, created_at, last_used) VALUES ('src','{s}','t','t');
+        \\INSERT INTO anchor_blobs (sha, content) VALUES ('{s}','{s}');
+        \\INSERT INTO threads (id, workspace, path, start_line, end_line, side, blob_sha, anchor_text, state, created_at, updated_at)
+        \\ VALUES (1,'src','f.zig',3,3,'modified','{s}','l3','open','t','t');
+    , .{ repo, &sha, original, &sha }));
+
+    const snap = readList(T.allocator, T.io, "src") orelse return error.RegistryUnreachable;
+    try T.expectEqual(@as(i32, 3), snap.slice()[0].line);
+    try T.expectEqualStrings("l3", snap.slice()[0].anchor.get());
 }
