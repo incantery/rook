@@ -527,6 +527,14 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       the only thing between a macro that plays itself and the stack —
       removing it crashes the test binary, which is how that one was
       checked.
+- [x] **`?`, `gv`, and the numbered registers.** `n` walks the SEARCH
+      DIRECTION and `N` walks the other one, which is what makes `N`
+      after a `?` go forward; `*`/`#` set it too. `"0` holds the last
+      yank and nothing else — a delete must not push the thing you
+      were about to paste out of it, which is the whole point of the
+      split — and deletes of a line or more shift down the `"1`-`"9`
+      ring. `gv` restores the last selection with its MODE, so a
+      linewise one comes back linewise.
 - [ ] `:s` patterns are LITERAL, not regexes — the same engine `/`
       uses. Saying so beats half a regex that surprises you on a `.`.
       A real one is its own slice, and `\r` in a replacement (vim's

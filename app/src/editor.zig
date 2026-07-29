@@ -9,11 +9,11 @@
 //!
 //! Vim scope v1: normal/insert/visual/visual-line/command modes;
 //! h j k l w b e ge 0 ^ $ gg G % { } H M L arrows ctrl-d/u, zt zz zb,
-//! / n N * #; operators d y c gu gU g~ (+ their doubled forms and
+//! / ? n N * #; operators d y c gu gU g~ (+ their doubled forms and
 //! D C Y S); x X r R s J gJ ~ p P u ctrl-r, counts, `.`;
 //! f F t T ; , >> << (and > < u U ~ J in visual), text objects
 //! (iw aw iW aW, i" i' i` and the four bracket pairs), autoindent,
-//! "a registers, ma marks, q@ macros; in insert, ctrl-w ctrl-u ctrl-t ctrl-d
+//! "a and "0-"9 registers, ma marks, gv, q@ macros; in insert, ctrl-w ctrl-u ctrl-t ctrl-d
 //! ctrl-r ctrl-o; :w :q :q! :wq :x :e :<n>, :[range]s/pat/rep/[gi]
 //! with % . $ N,M 'a '<,'> addresses.
 //! Debts: marks do not shift when text above them is edited, case
@@ -145,6 +145,11 @@ pub const Editor = struct {
     /// What the command line is collecting: an ex command (:) or a
     /// search pattern (/).
     cmd_kind: enum { ex, search } = .ex,
+    /// Which way the pending `/` or `?` runs, and which way `n` walks.
+    /// `N` is the other one — not "backwards", which is what makes `N`
+    /// after a `?` go forward.
+    search_typed_fwd: bool = true,
+    search_fwd: bool = true,
     /// The live pattern; non-empty = visible matches highlight
     /// (:noh clears).
     last_search: std.ArrayListUnmanaged(u8) = .empty,
@@ -152,7 +157,8 @@ pub const Editor = struct {
     reg_linewise: bool = false,
     /// `"a` — the 26 named registers, plus the letter a `"` is waiting
     /// for and the one the command after it should use (0 = unnamed).
-    regs: [26]Named = @splat(.{}),
+    /// 26 named plus the ten numbered: index 26+n is `"n`.
+    regs: [36]Named = @splat(.{}),
     pend_reg: bool = false,
     sel_reg: u8 = 0,
 
@@ -1115,7 +1121,8 @@ pub const Editor = struct {
                 .search => {
                     self.last_search.clearRetainingCapacity();
                     self.last_search.appendSlice(self.gpa, self.cmd.items) catch {};
-                    self.searchNext(true);
+                    self.search_fwd = self.search_typed_fwd;
+                    self.searchNext(self.search_fwd);
                 },
             }
             self.cmd.clearRetainingCapacity();
@@ -1726,6 +1733,7 @@ pub const Editor = struct {
                     self.motionLinewise(if (n == 0) 0 else @min(n - 1, self.lineCountB() - 1));
                 },
                 'e' => self.motionCharwise(k_ge),
+                'v' => self.reselect(),
                 'u', 'U', '~' => {
                     if (self.mode == .visual or self.mode == .visual_line) {
                         self.visualOp(ch);
@@ -1878,7 +1886,7 @@ pub const Editor = struct {
                 }
                 if (end == self.ccol) return;
                 self.buf.newUndoGroup();
-                self.yankStore(s[self.ccol..end], false);
+                self.yankStore(s[self.ccol..end], false, true);
                 const start = self.buf.rope.lineStart(self.cline);
                 self.buf.deleteRange(gpa, start + self.ccol, start + end) catch return;
                 self.clampNormal();
@@ -1897,7 +1905,7 @@ pub const Editor = struct {
                     start = prevCpStart(s, start);
                 }
                 self.buf.newUndoGroup();
-                self.yankStore(s[start..self.ccol], false);
+                self.yankStore(s[start..self.ccol], false, true);
                 const base = self.buf.rope.lineStart(self.cline);
                 self.buf.deleteRange(gpa, base + start, base + self.ccol) catch return;
                 self.ccol = start;
@@ -2077,13 +2085,14 @@ pub const Editor = struct {
                 // because that is what you were about to type.
                 if (from_visual) self.cmd.appendSlice(gpa, "'<,'>") catch {};
             },
-            '/' => {
+            '/', '?' => {
                 self.mode = .command;
                 self.cmd_kind = .search;
+                self.search_typed_fwd = ch == '/';
                 self.cmd.clearRetainingCapacity();
             },
-            'n' => self.searchNext(true),
-            'N' => self.searchNext(false),
+            'n' => self.searchNext(self.search_fwd),
+            'N' => self.searchNext(!self.search_fwd),
 
             '.' => self.dotRepeat(),
 
@@ -2513,6 +2522,19 @@ pub const Editor = struct {
         self.mode = .normal;
     }
 
+    /// `gv` — put the last selection back, clamped to a buffer that
+    /// may have shrunk under it.
+    fn reselect(self: *Editor) void {
+        const v = self.vlast orelse return;
+        const last = self.lineCountB() - 1;
+        self.mode = v.mode;
+        self.vanchor_line = @min(v.a.line, last);
+        self.vanchor_col = @min(v.a.col, self.lineCap(self.vanchor_line));
+        self.cline = @min(v.b.line, last);
+        self.ccol = @min(v.b.col, self.lineCap(self.cline));
+        self.goal = renderCol(self.lineText(self.cline), self.ccol);
+    }
+
     fn markPos(self: *const Editor, letter: u8) ?Pos {
         if (letter == '`' or letter == '\'') return self.jump;
         if (letter < 'a' or letter > 'z') return null;
@@ -2766,6 +2788,7 @@ pub const Editor = struct {
         while (b < s.len and charClass(s[b]) == 1) b += 1;
         self.last_search.clearRetainingCapacity();
         self.last_search.appendSlice(self.gpa, s[a..b]) catch return;
+        self.search_fwd = fwd;
         // Start from the word's first byte so a forward search leaves
         // this occurrence and a backward one does not find it again.
         self.ccol = a;
@@ -2792,13 +2815,17 @@ pub const Editor = struct {
 
     /// Whatever the pending `"x` names, else the unnamed register.
     /// Consumes the selection: a register lasts exactly one command.
+    fn regIndex(name: u8) ?usize {
+        const lo = std.ascii.toLower(name);
+        if (lo >= 'a' and lo <= 'z') return lo - 'a';
+        if (name >= '0' and name <= '9') return 26 + (name - '0');
+        return null;
+    }
+
     fn takeReg(self: *Editor) ?*Named {
         const r = self.sel_reg;
         self.sel_reg = 0;
-        if (r == 0) return null;
-        const lower = std.ascii.toLower(r);
-        if (lower < 'a' or lower > 'z') return null;
-        return &self.regs[lower - 'a'];
+        return &self.regs[regIndex(r) orelse return null];
     }
 
     /// Store a yank or a delete. The unnamed register always gets it —
@@ -2807,7 +2834,7 @@ pub const Editor = struct {
     /// uppercase. `"_` is the black hole: it takes the text and leaves
     /// the unnamed register ALONE, which is the whole reason to have it
     /// (`"_dd` deletes without losing what you were about to paste).
-    fn yankStore(self: *Editor, text: []const u8, linewise: bool) void {
+    fn yankStore(self: *Editor, text: []const u8, linewise: bool, deleted: bool) void {
         const gpa = self.gpa;
         const upper = std.ascii.isUpper(self.sel_reg);
         const blackhole = self.sel_reg == '_';
@@ -2827,6 +2854,28 @@ pub const Editor = struct {
         self.reg.appendSlice(gpa, text) catch {};
         self.reg_linewise = linewise;
         endLine(gpa, &self.reg, linewise);
+
+        // The numbered registers, vim's arrangement. `"0` holds the
+        // last YANK and nothing else — a delete must not push the
+        // thing you were about to paste out of it, which is the entire
+        // point of the split. Deletes of a line or more shift down the
+        // `"1`-`"9` ring instead.
+        if (!deleted) {
+            const z = &self.regs[26];
+            z.text.clearRetainingCapacity();
+            z.text.appendSlice(gpa, text) catch {};
+            z.linewise = linewise;
+            endLine(gpa, &z.text, linewise);
+            return;
+        }
+        if (!linewise and std.mem.indexOfScalar(u8, text, '\n') == null) return;
+        var i: usize = 9;
+        while (i > 1) : (i -= 1) std.mem.swap(Named, &self.regs[26 + i], &self.regs[26 + i - 1]);
+        const one = &self.regs[27];
+        one.text.clearRetainingCapacity();
+        one.text.appendSlice(gpa, text) catch {};
+        one.linewise = linewise;
+        endLine(gpa, &one.text, linewise);
     }
 
     /// A linewise register holds WHOLE lines, even when the last one of
@@ -2890,7 +2939,7 @@ pub const Editor = struct {
         }
         const text = self.buf.rope.dupeRange(gpa, start, end) catch return;
         defer gpa.free(text);
-        self.yankStore(text, false);
+        self.yankStore(text, false, op != 'y');
         if (op == 'y') {
             self.cursorToOffset(start);
             return;
@@ -2921,7 +2970,7 @@ pub const Editor = struct {
 
         const text = rope.dupeRange(gpa, start, end) catch return;
         defer gpa.free(text);
-        self.yankStore(text, true);
+        self.yankStore(text, true, op != 'y');
         if (op == 'y') {
             self.cline = a;
             self.clampNormal();
@@ -3133,7 +3182,7 @@ pub const Editor = struct {
         switch (self.mode) {
             .insert, .command => self.key(text),
             else => {
-                self.yankStore(text, text[text.len - 1] == '\n');
+                self.yankStore(text, text[text.len - 1] == '\n', false);
                 self.paste(true);
             },
         }
@@ -5568,4 +5617,106 @@ test "the status row says which register is recording" {
     const dump = try e.dumpText(gpa, 60, 6);
     defer gpa.free(dump);
     try testing.expect(std.mem.indexOf(u8, dump, "recording @a") != null);
+}
+
+// -------------------------------------- numbered registers, ? search, gv
+
+test "the zero register holds the last yank, not the last delete" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ikeep\ngone\nhere");
+    e.key("\x1b");
+    keys(e, "ggyy"); // "0 = keep
+    keys(e, "jdd"); // unnamed = gone, "0 must not move
+    keys(e, "G\"0p");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("keep\nhere\nkeep", s);
+}
+
+test "deletes shift down the numbered ring" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\nc\nz");
+    e.key("\x1b");
+    keys(e, "ggdddd"); // "1 = b, "2 = a
+    keys(e, "G\"1p\"2p");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("c\nz\nb\na", s);
+}
+
+test "a small charwise delete stays out of the ring" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo");
+    e.key("\x1b");
+    keys(e, "ggdd"); // "1 = one
+    keys(e, "x"); // a one-character delete: not ring-worthy
+    keys(e, "G$\"1p");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("wo\none", s);
+}
+
+test "question mark searches backward and n keeps going that way" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    // Two matches close together and one far off, so a forward `n`
+    // and a backward one cannot land on the same line by luck.
+    keys(e, "ix\nfoo\nfoo\ny\nfoo\nz");
+    e.key("\x1b");
+    keys(e, "G?foo");
+    e.key("\r");
+    try testing.expectEqual(@as(usize, 4), e.cline);
+    keys(e, "n");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    keys(e, "N"); // N is the OTHER way, not "backwards"
+    try testing.expectEqual(@as(usize, 4), e.cline);
+}
+
+test "hash sets the search direction too" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo\nx\nfoo\ny\nfoo");
+    e.key("\x1b");
+    keys(e, "G0#");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    keys(e, "n");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+}
+
+test "gv puts the last selection back" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "0vll"); // a b c selected
+    e.key("\x1b");
+    keys(e, "$"); // wander off
+    keys(e, "gvd");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("def", s);
+}
+
+test "gv restores a linewise selection as linewise" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree\nfour");
+    e.key("\x1b");
+    keys(e, "ggVj");
+    e.key("\x1b");
+    keys(e, "G");
+    keys(e, "gvd");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("three\nfour", s);
 }
