@@ -660,6 +660,23 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       STYLE but no codepoint of its own, which is what keeps a selection
       or a search match from coming out striped, and what keeps a text
       dump reading `日本語` rather than `日 本 語 `.
+- [x] **Long lines stay editable, and cheap to draw.** The 64KB clamp
+      is gone: the shared line buffer is heap-backed and GROWS to meet
+      the line, so a 200KB minified line takes `A` and `$` like any
+      other. The ceiling that remains (4MB) is a cursor-column limit
+      rather than a buffer size, and it still refuses in the one way
+      that matters — loudly, rather than by pinning the cursor and
+      dropping every further keystroke into the middle of a line you
+      cannot see. `lineCap` and `lineText` now come from ONE function,
+      because a column derived from a length larger than the slice
+      handed back is the exact shape of the abort that got the clamp
+      built in the first place.
+      Growing the buffer alone would have been a performance
+      regression, and a big one: FOUR callers pulled the whole line in
+      once per frame each to ask one question about it, so a 2MB line
+      cost 6.3MB of copying per frame — more than the line itself. They
+      all take a bound now. Measured over 100 frames on a 2MB line:
+      629,193,600 bytes copied before, 48,100 after.
 - [ ] **Combining marks still take a cell of their own.** Ghostty's
       zero-width rule is deliberately NOT adopted: this renderer maps
       one cell to one atlas glyph and cannot compose a mark onto the

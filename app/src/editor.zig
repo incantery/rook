@@ -34,9 +34,10 @@
 //!   and the mapping is 1:1 — so `gU` on `ß` gives `ẞ`, not `SS`.
 //! Wide glyphs (CJK, emoji) take TWO columns, from the same table the
 //!   terminal panes lay out with (width.zig).
+//! Long lines are editable: the line buffer grows to meet the line, and
+//!   the render path copies only the window it can draw.
 //! Debts: combining marks still take a cell of their own, because one
-//!   cell draws one glyph — grapheme clusters are the real fix; lines
-//!   beyond max_line get motion/render math clamped.
+//!   cell draws one glyph — grapheme clusters are the real fix.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -46,7 +47,12 @@ const unicase = @import("unicase.zig");
 const wide = @import("width.zig");
 
 pub const tab_width = 4;
-const max_line = 64 * 1024;
+/// The ceiling on a single line. Not a buffer size any more — the line
+/// buffer grows to meet the line — but a ceiling is still wanted: past
+/// this the cursor could not represent a column, and a file that is one
+/// enormous line is a file you want to survive opening, not to load a
+/// column index for.
+const max_line = 4 * 1024 * 1024;
 /// Path joining only — it must NOT ride max_line up.
 const max_path = 4096;
 
@@ -259,7 +265,14 @@ pub const Editor = struct {
     status_len: usize = 0,
     status_err: bool = false,
 
-    scratch: [max_line]u8 = undefined,
+    /// The shared line buffer. Heap-backed and grown on demand rather
+    /// than a fixed array, so a minified line stays editable without
+    /// every editor paying for the worst case up front.
+    line_buf: []u8 = &.{},
+    /// Bytes copied out of the rope into `line_buf`, ever. The render
+    /// path's whole claim is that it copies a WINDOW and not the line,
+    /// and that claim is a number rather than a stopwatch.
+    line_bytes_copied: usize = 0,
     scratch2: [max_path]u8 = undefined,
 
     closed: bool = false,
@@ -486,6 +499,7 @@ pub const Editor = struct {
 
     pub fn destroy(self: *Editor) void {
         const gpa = self.gpa;
+        gpa.free(self.line_buf);
         if (self.hl_destroy) |f| f(self.hl_ctx.?);
         self.hl_spans_buf.deinit(gpa);
         self.hl_styles.deinit(gpa);
@@ -537,26 +551,65 @@ pub const Editor = struct {
     ///
     /// One definition, and every column that comes from a length goes
     /// through it.
-    fn lineCap(self: *const Editor, line: usize) usize {
-        return @min(self.lineLenB(line), max_line);
+    fn lineCap(self: *Editor, line: usize) usize {
+        return self.ensureLineBuf(self.lineLenB(line));
+    }
+
+    /// Grow the shared line buffer to hold `want` bytes and report what
+    /// it can actually hold — which is the number `lineCap` hands out
+    /// and the number `lineText` will return.
+    ///
+    /// The two MUST agree. A column that came from a length larger than
+    /// the slice `lineText` returns is the exact shape of the abort
+    /// described above, so there is one function that decides both, and
+    /// a failed allocation reports the smaller answer rather than the
+    /// one it wanted.
+    fn ensureLineBuf(self: *Editor, want: usize) usize {
+        const need = @min(want, max_line);
+        if (self.line_buf.len >= need) return need;
+        const grown = self.gpa.realloc(self.line_buf, need) catch return self.line_buf.len;
+        self.line_buf = grown;
+        return need;
     }
 
     /// Is this line longer than the editor will let you work with?
-    fn lineClamped(self: *const Editor, line: usize) bool {
-        return self.lineLenB(line) > max_line;
+    fn lineClamped(self: *Editor, line: usize) bool {
+        const len = self.lineLenB(line);
+        return len > self.ensureLineBuf(len);
     }
 
-    /// Copy a line into scratch (clamped to max_line — the long-line debt).
+    /// Copy a line into the shared buffer.
     ///
     /// The returned slice is only valid until the NEXT call: it is one
     /// shared buffer. Every caller consumes it before asking for
     /// another line, and that is a contract, not an accident.
     fn lineText(self: *Editor, line: usize) []const u8 {
+        return self.lineTextUpTo(line, max_line);
+    }
+
+    /// The same, but stopping after `limit` bytes. The render path uses
+    /// this: it can only DRAW the columns in the window, so copying a
+    /// two-megabyte minified line in full, once per visible row, once
+    /// per frame, buys nothing. Motions still take the whole line —
+    /// `$` has to know where the line really ends.
+    fn lineTextUpTo(self: *Editor, line: usize, limit: usize) []const u8 {
         const start = self.buf.rope.lineStart(line);
         const end = self.buf.rope.lineEnd(line);
-        const n = @min(end - start, max_line);
-        self.buf.rope.copyRange(start, start + n, self.scratch[0..n]);
-        return self.scratch[0..n];
+        const n = @min(self.ensureLineBuf(end - start), limit);
+        self.buf.rope.copyRange(start, start + n, self.line_buf[0..n]);
+        self.line_bytes_copied +|= n;
+        return self.line_buf[0..n];
+    }
+
+    /// Render column of a position, copying only as far as it needs to.
+    ///
+    /// `renderCol` never walks past the column it is asked about, so
+    /// pulling the whole line in to answer is waste that scales with
+    /// the line: four callers were doing it once per frame each, which
+    /// on a two-megabyte line came to more bytes copied per frame than
+    /// the line itself.
+    fn renderColAt(self: *Editor, line: usize, col: usize) usize {
+        return renderCol(self.lineTextUpTo(line, col), col);
     }
 
     fn absOff(self: *const Editor) usize {
@@ -1136,6 +1189,9 @@ pub const Editor = struct {
             // max_line, so carrying on would drop every further
             // keystroke into the same spot in the MIDDLE of a line you
             // cannot see — silent corruption dressed as a stuck cursor.
+            // The CEILING, not this line's length — at the end of an
+            // ordinary line ccol equals the length, and testing against
+            // that would refuse every append.
             if (self.ccol >= max_line) {
                 self.setStatus("line too long to edit past {d} bytes", .{max_line}, true);
                 return;
@@ -4376,7 +4432,7 @@ pub const Editor = struct {
     /// outside the editor (the IME's candidate window is the first).
     pub fn cursorCell(self: *Editor) struct { col: u16, row: u16 } {
         const gw = digits(self.lineCountB()) + 1;
-        const rc = renderCol(self.lineText(self.cline), self.ccol);
+        const rc = self.renderColAt(self.cline, self.ccol);
         return .{ .col = @intCast(gw + rc), .row = @intCast(self.cline -| self.top) };
     }
 
@@ -4524,7 +4580,10 @@ pub const Editor = struct {
     /// The partner of the bracket under the cursor, if the cursor is
     /// on one. Null the rest of the time, which is most of it.
     fn cursorPairOffset(self: *Editor) ?usize {
-        const s = self.lineText(self.cline);
+        // Only the character UNDER the cursor decides whether there is
+        // a pair to look for, and on most keystrokes there is not — so
+        // do not drag a whole minified line in to find that out.
+        const s = self.lineTextUpTo(self.cline, self.ccol +| 1);
         if (self.ccol >= s.len) return null;
         var ob: u8 = 0;
         var cb: u8 = 0;
@@ -4570,7 +4629,7 @@ pub const Editor = struct {
     fn ensureVisible(self: *Editor, text_cols: usize, text_rows: usize) void {
         if (self.cline < self.top) self.top = self.cline;
         if (self.cline >= self.top + text_rows) self.top = self.cline - text_rows + 1;
-        const rc = renderCol(self.lineText(self.cline), self.ccol);
+        const rc = self.renderColAt(self.cline, self.ccol);
         if (rc < self.left) self.left = rc;
         if (text_cols > 0 and rc >= self.left + text_cols) self.left = rc - text_cols + 1;
     }
@@ -4600,11 +4659,15 @@ pub const Editor = struct {
         self.ensureVisible(text_cols, text_rows);
         self.refreshHighlights(text_rows);
 
-        const cur_rc = renderCol(self.lineText(self.cline), self.ccol);
+        // renderCol only ever walks as far as the column it is asked
+        // about, so the copy stops there too. On a two-megabyte line
+        // with the cursor at column zero — which is where you are the
+        // moment you open a minified file — this copies nothing.
+        const cur_rc = self.renderColAt(self.cline, self.ccol);
         // The rectangle, resolved once: selContains cannot ask for a
         // line's text while fillGrid is holding the shared buffer.
         const blk: ?DrawBlock = if (self.mode == .visual_block) b: {
-            const ac = renderCol(self.lineText(self.vanchor_line), self.vanchor_col);
+            const ac = self.renderColAt(self.vanchor_line, self.vanchor_col);
             break :b .{
                 .a = @min(self.vanchor_line, self.cline),
                 .b = @max(self.vanchor_line, self.cline),
@@ -4641,7 +4704,13 @@ pub const Editor = struct {
                 }
             }
 
-            const s = self.lineText(line);
+            // Only the bytes that could reach the right edge of the
+            // window. Every codepoint is at least one column and at
+            // most four bytes, and a tab is one byte for several
+            // columns, so four bytes per column is a safe bound — and
+            // it turns a two-megabyte minified line from a per-row,
+            // per-frame copy into a few hundred bytes.
+            const s = self.lineTextUpTo(line, (self.left + text_cols) *| 4 +| 8);
             const abs_start = self.buf.rope.lineStart(line);
             var rc: usize = 0;
             var i: usize = 0;
@@ -4844,7 +4913,7 @@ pub const Editor = struct {
         var rbuf: [32]u8 = undefined;
         const rs = std.fmt.bufPrint(&rbuf, "{d}:{d} ", .{
             self.cline + 1,
-            renderCol(self.lineText(self.cline), self.ccol) + 1,
+            self.renderColAt(self.cline, self.ccol) + 1,
         }) catch return;
         if (rs.len < out.len) {
             var rx = out.len - rs.len;
@@ -8493,4 +8562,121 @@ test "a text dump of wide glyphs is the text, not the cells" {
     defer gpa.free(dump);
     var it = std.mem.splitScalar(u8, dump, '\n');
     try testing.expectEqualStrings("1 日本語です", it.next().?);
+}
+
+test "a line past the OLD 64KB clamp is fully editable" {
+    // The line buffer grows to meet the line now, so the ceiling is the
+    // only thing left that refuses, and 200KB is nowhere near it.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    const n = 200 * 1024;
+    try longLine(gpa, e, n);
+    try testing.expect(!e.lineClamped(0));
+    try testing.expectEqual(n, e.lineCap(0));
+
+    keys(e, "A");
+    try testing.expectEqual(n, e.ccol);
+    keys(e, "z");
+    e.key("\x1b");
+    // The character landed at the true end, not at byte 65536.
+    try testing.expectEqual(n + 1, e.buf.rope.byteLen());
+    const tail = try e.buf.rope.dupeRange(gpa, n - 1, n + 1);
+    defer gpa.free(tail);
+    try testing.expectEqualStrings("xz", tail);
+}
+
+test "$ on a long line reaches its real end" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    const n = 300 * 1024;
+    try longLine(gpa, e, n);
+    keys(e, "gg0$");
+    try testing.expectEqual(n - 1, e.ccol);
+}
+
+test "the ceiling still refuses, and still says so" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    try longLine(gpa, e, max_line + 900);
+    try testing.expect(e.lineClamped(0));
+    const before = e.buf.rope.byteLen();
+    keys(e, "A");
+    keys(e, "nope");
+    try testing.expectEqual(before, e.buf.rope.byteLen());
+    try testing.expect(std.mem.indexOf(u8, e.status_buf[0..e.status_len], "too long") != null);
+}
+
+test "the render window reaches the cursor on a very long line" {
+    // The bound is four bytes per column. This checks it is actually
+    // enough to reach what the window shows, a long way from column
+    // zero — if it were short, the row would come out blank.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    try longLine(gpa, e, 100 * 1024);
+    try e.buf.insert(gpa, 100 * 1024, "MARKER");
+    e.cline = 0;
+    // On the marker's LAST character, so the window ends just past it
+    // — the cursor is held at the right edge, so anything after it
+    // would be off screen no matter how wide the pane.
+    e.ccol = 100 * 1024 + 5;
+    const dump = try e.dumpText(gpa, 60, 4);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "MARKER") != null);
+    // And the window really is a window: column zero is long gone.
+    try testing.expect(e.left > 100 * 1024 - 60);
+}
+
+test "four bytes per column is enough for the widest narrow codepoint" {
+    // A four-byte codepoint that is only ONE column wide is the worst
+    // case for the render bound: exactly four bytes per column.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i");
+    for (0..40) |_| e.key("\u{10400}");
+    e.key("\x1b");
+    try testing.expectEqual(@as(u2, 1), wide.cellWidth(0x10400));
+    const dump = try e.dumpText(gpa, 24, 3);
+    defer gpa.free(dump);
+    // The gutter takes two columns, so 22 characters should render.
+    var it = std.mem.splitScalar(u8, dump, '\n');
+    const row = it.next().?;
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < row.len) : (i += Editor.cpLenAt(row, i)) count += 1;
+    try testing.expectEqual(@as(usize, 24), count); // "1 " + 22 glyphs
+}
+
+test "a frame on a huge line copies a window, not the line" {
+    // The render path's claim is a BOUND, so it is asserted as a
+    // number of bytes rather than as a stopwatch — a wall-clock
+    // threshold would be flaky on a loaded CI box and would not say
+    // what actually went wrong.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    const n = 2 * 1024 * 1024;
+    try longLine(gpa, e, n);
+
+    e.line_bytes_copied = 0;
+    for (0..100) |_| _ = e.fillGrid(120, 40);
+    const at_start = e.line_bytes_copied;
+
+    // Without the bound this is 100 frames x 2MB, and it measured
+    // 629,193,600 bytes — MORE than the line per frame, because four
+    // separate callers each pulled the whole line in to ask one
+    // question about it. With the bound it measures 48,100.
+    try testing.expect(at_start < 100 * 4 * 1024);
+
+    // At the far end of the line the cursor's own render column does
+    // have to be walked, so this one is allowed to be big — the point
+    // is that it is the exception and not every frame.
+    keys(e, "$");
+    e.line_bytes_copied = 0;
+    _ = e.fillGrid(120, 40);
+    try testing.expect(e.line_bytes_copied >= n);
 }
