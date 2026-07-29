@@ -250,6 +250,22 @@ pub fn build(b: *std.Build) void {
     blobs_tests.root_module.linkSystemLibrary("sqlite3", .{});
     test_step.dependOn(&b.addRunArtifact(blobs_tests).step);
 
+    // Re-anchoring assembled — the arithmetic against real git and a
+    // real sqlite fixture. Its own root because the parts worth testing
+    // here are exactly the ones a fake would paper over: what git calls
+    // a hunk, and whether a missing row reads as pruned. It reaches
+    // anchor/git/blobs through their imports, so those suites run here
+    // too; they keep their own roots so a failure still names the layer
+    // it came from.
+    const reanchor_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/reanchor.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    reanchor_tests.root_module.link_libc = true;
+    reanchor_tests.root_module.linkSystemLibrary("sqlite3", .{});
+    test_step.dependOn(&b.addRunArtifact(reanchor_tests).step);
+
     // The UI layer's text fitting. Its own root for the reason logged
     // above editor_tests — the exe module's test collection does not
     // reach these decls, and a suite that is never run is worse than no
