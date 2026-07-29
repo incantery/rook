@@ -9,14 +9,15 @@
 //!
 //! Vim scope v1: normal/insert/visual/visual-line/command modes;
 //! h j k l w b e ge 0 ^ $ gg G % { } H M L arrows ctrl-d/u, zt zz zb,
-//! / n N * #; operators d y c (+ dd yy cc D C Y),
-//! x r J p P u ctrl-r, counts, `.`; f F t T ; , >> << (and
-//! > < in visual), text objects (iw aw iW aW, i" i' i` and the four
-//! bracket pairs), autoindent, "a registers and ma marks;
-//! :w :q :q! :wq :x :e :<n>.
-//! Debts: marks do not shift when text above them is edited, no
-//! numbered registers, f/t target ASCII only, wide glyphs count as one
-//! column, lines beyond max_line get motion/render math clamped.
+//! / n N * #; operators d y c gu gU g~ (+ their doubled forms and
+//! D C Y S); x X r R s J gJ ~ p P u ctrl-r, counts, `.`;
+//! f F t T ; , >> << (and > < u U ~ J in visual), text objects
+//! (iw aw iW aW, i" i' i` and the four bracket pairs), autoindent,
+//! "a registers and ma marks; :w :q :q! :wq :x :e :<n>.
+//! Debts: marks do not shift when text above them is edited, case
+//! operators are ASCII-only, no numbered registers, f/t target ASCII
+//! only, wide glyphs count as one column, lines beyond max_line get
+//! motion/render math clamped.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -53,6 +54,9 @@ pub const RCell = struct {
 };
 
 pub const Mode = enum { normal, insert, visual, visual_line, command };
+
+/// One `R` keystroke: bytes put in, bytes displaced.
+const RepEvent = struct { ins: u8, over: u8 };
 
 pub const Editor = struct {
     gpa: Allocator,
@@ -98,6 +102,16 @@ pub const Editor = struct {
     /// someone to review.
     ai_line: ?usize = null,
     ai_len: usize = 0,
+
+    /// `R` — insert mode that overwrites. The history is what each
+    /// keystroke displaced, so backspace can put it back the way vim
+    /// does; `ins` is what went in, `over` how much came out (0 = the
+    /// key landed past the end of the line and there is nothing owed).
+    /// Any cursor move drops it, because the offsets it holds are
+    /// only meaningful for an unbroken run.
+    replacing: bool = false,
+    rep_ev: std.ArrayListUnmanaged(RepEvent) = .empty,
+    rep_text: std.ArrayListUnmanaged(u8) = .empty,
 
     /// `.` — the keys of the last change (`dot`), the keys of the one
     /// being typed now (`rec`), and the buffer version when it started.
@@ -341,6 +355,8 @@ pub const Editor = struct {
         self.buf.deinit(gpa);
         self.cmd.deinit(gpa);
         self.dot.deinit(gpa);
+        self.rep_ev.deinit(gpa);
+        self.rep_text.deinit(gpa);
         self.rec.deinit(gpa);
         self.last_search.deinit(gpa);
         self.reg.deinit(gpa);
@@ -716,6 +732,7 @@ pub const Editor = struct {
 
     fn insertArrow(self: *Editor, m: u8) void {
         if ((m == 'j' or m == 'k') and self.ai_line != null) self.dropPendingIndent();
+        self.dropReplaceHistory();
         const s = self.lineText(self.cline);
         switch (m) {
             'h' => {
@@ -749,6 +766,7 @@ pub const Editor = struct {
         const b0 = bytes[0];
         if (b0 == 0x1b) { // ESC → normal, cursor left one cp
             self.dropPendingIndent();
+            self.endReplace();
             self.mode = .normal;
             if (self.ccol > 0) {
                 const s = self.lineText(self.cline);
@@ -765,6 +783,7 @@ pub const Editor = struct {
             var ibuf: [max_indent]u8 = undefined;
             const ind = self.indentOf(self.cline, &ibuf);
             self.dropPendingIndent();
+            self.dropReplaceHistory();
             self.buf.insert(gpa, self.absOff(), "\n") catch return;
             self.cline += 1;
             self.ccol = 0;
@@ -775,6 +794,27 @@ pub const Editor = struct {
             // Backspacing INTO an auto-indent is a deliberate edit of
             // it; the editor stops claiming those bytes.
             self.ai_line = null;
+            if (self.replacing) {
+                // Replace mode owes the line its old characters back —
+                // and once that debt is paid, backspace only MOVES.
+                // It never deletes text this R never touched.
+                const ev = self.rep_ev.pop() orelse {
+                    if (self.ccol > 0) {
+                        const s = self.lineText(self.cline);
+                        self.ccol = prevCpStart(s, self.ccol);
+                    }
+                    return;
+                };
+                const start = self.absOff() - ev.ins;
+                self.buf.deleteRange(gpa, start, start + ev.ins) catch return;
+                if (ev.over > 0) {
+                    const keep = self.rep_text.items.len - ev.over;
+                    self.buf.insert(gpa, start, self.rep_text.items[keep..]) catch return;
+                    self.rep_text.shrinkRetainingCapacity(keep);
+                }
+                self.ccol = start - self.buf.rope.lineStart(self.cline);
+                return;
+            }
             if (self.ccol > 0) {
                 const s = self.lineText(self.cline);
                 const p = prevCpStart(s, self.ccol);
@@ -803,10 +843,51 @@ pub const Editor = struct {
                 self.setStatus("line too long to edit past {d} bytes", .{max_line}, true);
                 return;
             }
+            if (self.replacing) {
+                self.replaceRun(bytes);
+                return;
+            }
             self.buf.insert(gpa, self.absOff(), bytes) catch return;
             self.ccol += bytes.len;
             self.ai_line = null; // typed on it — it is yours now
         }
+    }
+
+    /// One codepoint in, one codepoint out — and what came out is kept
+    /// so backspace can put it back. Past the end of the line there is
+    /// nothing to displace and `R` is just insert, which is also what
+    /// vim does.
+    fn replaceRun(self: *Editor, bytes: []const u8) void {
+        const gpa = self.gpa;
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const n = cpLenAt(bytes, i);
+            const s = self.lineText(self.cline);
+            const over = if (self.ccol < s.len) cpLenAt(s, self.ccol) else 0;
+            const at = self.absOff();
+            if (over > 0) {
+                self.rep_text.appendSlice(gpa, s[self.ccol..][0..over]) catch return;
+                self.buf.deleteRange(gpa, at, at + over) catch return;
+            }
+            self.buf.insert(gpa, at, bytes[i..][0..n]) catch return;
+            self.rep_ev.append(gpa, .{ .ins = @intCast(n), .over = @intCast(over) }) catch {};
+            self.ccol += n;
+            i += n;
+        }
+        self.ai_line = null;
+    }
+
+    /// Any cursor move invalidates the history: backspace walks
+    /// backward from where the run left off, and nothing it holds is
+    /// true after a jump.
+    fn dropReplaceHistory(self: *Editor) void {
+        self.rep_ev.clearRetainingCapacity();
+        self.rep_text.clearRetainingCapacity();
+    }
+
+    fn endReplace(self: *Editor) void {
+        self.replacing = false;
+        self.dropReplaceHistory();
     }
 
     /// Put a fresh line's inherited indent in, and arm the take-back.
@@ -1225,6 +1306,18 @@ pub const Editor = struct {
                     self.motionLinewise(if (n == 0) 0 else @min(n - 1, self.lineCountB() - 1));
                 },
                 'e' => self.motionCharwise(k_ge),
+                'u', 'U', '~' => {
+                    if (self.mode == .visual or self.mode == .visual_line) {
+                        self.visualOp(ch);
+                        return;
+                    }
+                    if (isCaseOp(self.op)) { // gugu
+                        self.caseLines();
+                        return;
+                    }
+                    self.op = ch;
+                },
+                'J' => self.joinLines(self.takeCount(), false),
                 else => {
                     self.op = 0;
                     self.count = 0;
@@ -1370,17 +1463,103 @@ pub const Editor = struct {
                 self.buf.deleteRange(gpa, start + self.ccol, start + end) catch return;
                 self.clampNormal();
             },
-            'r' => self.pend_r = true,
-            'J' => {
-                if (self.cline + 1 >= self.lineCountB()) return;
+            'X' => {
+                if (self.mode == .visual or self.mode == .visual_line) {
+                    self.visualOp('d');
+                    return;
+                }
+                const cnt = self.takeCount();
+                if (self.ccol == 0) return;
+                const s = self.lineText(self.cline);
+                var start = self.ccol;
+                for (0..cnt) |_| {
+                    if (start == 0) break;
+                    start = prevCpStart(s, start);
+                }
                 self.buf.newUndoGroup();
-                const eol = self.buf.rope.lineEnd(self.cline);
-                const next = self.lineText(self.cline + 1);
-                const nb = firstNonblank(next);
-                self.buf.deleteRange(gpa, eol, eol + 1 + nb) catch return;
-                self.buf.insert(gpa, eol, " ") catch return;
-                self.ccol = eol - self.buf.rope.lineStart(self.cline);
+                self.yankStore(s[start..self.ccol], false);
+                const base = self.buf.rope.lineStart(self.cline);
+                self.buf.deleteRange(gpa, base + start, base + self.ccol) catch return;
+                self.ccol = start;
                 self.clampNormal();
+            },
+            's' => {
+                if (self.mode == .visual or self.mode == .visual_line) {
+                    self.visualOp('c');
+                    return;
+                }
+                // `s` is `cl` — except on an empty line, where `cl` has
+                // nothing to delete and would leave you in normal mode.
+                if (self.lineLenB(self.cline) == 0) {
+                    self.count = 0;
+                    self.enterInsert();
+                    return;
+                }
+                self.op = 'c';
+                self.motionCharwise('l');
+            },
+            'S' => {
+                if (self.mode == .visual or self.mode == .visual_line) {
+                    self.visualOp('c');
+                    return;
+                }
+                const cnt = self.takeCount();
+                const a = self.cline;
+                self.op = 'c';
+                self.opLines(a, @min(a + cnt - 1, self.lineCountB() - 1));
+            },
+            '~' => {
+                if (self.mode == .visual or self.mode == .visual_line) {
+                    self.visualOp('~');
+                    return;
+                }
+                if (isCaseOp(self.op)) {
+                    self.caseLines();
+                    return;
+                }
+                const cnt = self.takeCount();
+                const s = self.lineText(self.cline);
+                if (self.ccol >= s.len) return;
+                var end = self.ccol;
+                for (0..cnt) |_| {
+                    if (end >= s.len) break;
+                    end += cpLenAt(s, end);
+                }
+                const base = self.buf.rope.lineStart(self.cline);
+                self.caseRange(base + self.ccol, base + end, '~');
+                self.ccol = end;
+                self.clampNormal();
+            },
+            'U' => {
+                if (self.mode == .visual or self.mode == .visual_line) {
+                    self.visualOp('U');
+                    return;
+                }
+                if (isCaseOp(self.op)) {
+                    self.caseLines();
+                    return;
+                }
+                self.op = 0;
+                self.count = 0;
+            },
+            'r' => self.pend_r = true,
+            'R' => {
+                self.count = 0;
+                self.endReplace();
+                self.enterInsert();
+                self.replacing = true;
+            },
+            'J' => {
+                if (self.mode == .visual or self.mode == .visual_line) {
+                    const a = @min(self.vanchor_line, self.cline);
+                    const b = @max(self.vanchor_line, self.cline);
+                    self.mode = .normal;
+                    self.count = 0;
+                    self.cline = a;
+                    self.joinLines(b - a + 1, true);
+                    return;
+                }
+                self.joinLines(self.takeCount(), true);
             },
 
             // Insert transitions — unless something is waiting for a
@@ -1431,8 +1610,17 @@ pub const Editor = struct {
             'p' => self.paste(true),
             'P' => self.paste(false),
 
-            // Undo.
+            // Undo — unless a case operator is waiting, where `u` is
+            // its own doubled key (`guu`).
             'u' => {
+                if (self.mode == .visual or self.mode == .visual_line) {
+                    self.visualOp('u');
+                    return;
+                }
+                if (isCaseOp(self.op)) {
+                    self.caseLines();
+                    return;
+                }
                 if (self.buf.undo(gpa) catch null) |off| self.cursorToOffset(off) else self.setStatus("already at oldest change", .{}, false);
             },
             0x12 => { // ctrl-r
@@ -2204,12 +2392,57 @@ pub const Editor = struct {
         if (list.items[list.items.len - 1] != '\n') list.append(gpa, '\n') catch {};
     }
 
+    fn isCaseOp(op: u8) bool {
+        return op == 'u' or op == 'U' or op == '~';
+    }
+
+    /// `gu` / `gU` / `g~` over a byte range, in 4KB chunks because the
+    /// range can be a whole paragraph and copyRange walks from the root
+    /// every time.
+    ///
+    /// ASCII case only. Every substitution is one byte for one byte, so
+    /// the offsets stay put while the walk runs — a Unicode-aware
+    /// version changes lengths and would need the whole range rebuilt.
+    fn caseRange(self: *Editor, start: usize, end: usize, how: u8) void {
+        const gpa = self.gpa;
+        if (start >= end) return;
+        self.buf.newUndoGroup();
+        var chunk: [4096]u8 = undefined;
+        var off = start;
+        while (off < end) {
+            const n = @min(chunk.len, end - off);
+            self.buf.rope.copyRange(off, off + n, chunk[0..n]);
+            var changed = false;
+            for (chunk[0..n]) |*c| {
+                const was = c.*;
+                c.* = switch (how) {
+                    'u' => std.ascii.toLower(was),
+                    'U' => std.ascii.toUpper(was),
+                    else => if (std.ascii.isUpper(was)) std.ascii.toLower(was) else std.ascii.toUpper(was),
+                };
+                if (c.* != was) changed = true;
+            }
+            if (changed) {
+                self.buf.deleteRange(gpa, off, off + n) catch return;
+                self.buf.insert(gpa, off, chunk[0..n]) catch return;
+            }
+            off += n;
+        }
+    }
+
     /// Charwise operator over [start, end) byte offsets.
     fn opRange(self: *Editor, start: usize, end: usize) void {
         const gpa = self.gpa;
         const op = self.op;
         self.op = 0;
         if (start == end) return;
+        if (isCaseOp(op)) {
+            // Case operators leave the registers alone: nothing was
+            // taken out of the buffer to put anywhere.
+            self.caseRange(start, end, op);
+            self.cursorToOffset(start);
+            return;
+        }
         const text = self.buf.rope.dupeRange(gpa, start, end) catch return;
         defer gpa.free(text);
         self.yankStore(text, false);
@@ -2233,6 +2466,13 @@ pub const Editor = struct {
         const rope = &self.buf.rope;
         var start = rope.lineStart(a);
         const end = if (b + 1 < self.lineCountB()) rope.lineStart(b + 1) else rope.byteLen();
+
+        if (isCaseOp(op)) {
+            self.caseRange(start, end, op);
+            self.cline = a;
+            self.ccol = firstNonblank(self.lineText(a));
+            return;
+        }
 
         const text = rope.dupeRange(gpa, start, end) catch return;
         defer gpa.free(text);
@@ -2305,6 +2545,37 @@ pub const Editor = struct {
         self.cline = @min(a, self.lineCountB() - 1);
         self.ccol = firstNonblank(self.lineText(self.cline));
         self.goal = renderCol(self.lineText(self.cline), self.ccol);
+    }
+
+    /// `J` and `gJ`. A count joins that many LINES, so `3J` is two
+    /// joins — vim's arithmetic, and `1J` still joins one pair.
+    /// `gJ` is the same minus the space and minus the next line's
+    /// indent being eaten, which is the whole reason it exists.
+    fn joinLines(self: *Editor, cnt: usize, space: bool) void {
+        const gpa = self.gpa;
+        var grouped = false;
+        for (0..@max(1, cnt -| 1)) |_| {
+            if (self.cline + 1 >= self.lineCountB()) break;
+            if (!grouped) {
+                self.buf.newUndoGroup();
+                grouped = true;
+            }
+            const eol = self.buf.rope.lineEnd(self.cline);
+            const nb = if (space) firstNonblank(self.lineText(self.cline + 1)) else 0;
+            self.buf.deleteRange(gpa, eol, eol + 1 + nb) catch return;
+            if (space) self.buf.insert(gpa, eol, " ") catch return;
+            self.ccol = eol - self.buf.rope.lineStart(self.cline);
+        }
+        self.clampNormal();
+    }
+
+    /// The doubled key of a pending case operator — `guu`, `gUU`,
+    /// `g~~`, and the `gugu` spelling too. Vim takes any of `u`, `U`
+    /// and `~` here, so this does not care which arrived.
+    fn caseLines(self: *Editor) void {
+        const cnt = self.takeCount();
+        const a = self.cline;
+        self.opLines(a, @min(a + cnt - 1, self.lineCountB() - 1));
     }
 
     fn opToEol(self: *Editor, op: u8) void {
@@ -2688,7 +2959,7 @@ pub const Editor = struct {
 
         const mode_str: []const u8 = switch (self.mode) {
             .normal => " NORMAL ",
-            .insert => " INSERT ",
+            .insert => if (self.replacing) " REPLACE " else " INSERT ",
             .visual => " VISUAL ",
             .visual_line => " V-LINE ",
             .command => unreachable,
@@ -4079,4 +4350,272 @@ test "zt zz zb move the window, not the cursor" {
     keys(e, "zz");
     try testing.expectEqual(@as(usize, 7), e.top);
     try testing.expectEqual(@as(usize, 9), e.cline);
+}
+
+// ---------------------------------------------------------------- edit round
+
+test "s substitutes count characters" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "03sXY");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("XYdef", s);
+}
+
+test "s on an empty line still enters insert" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\n\ntwo");
+    e.key("\x1b");
+    keys(e, "ggjsX");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\nX\ntwo", s);
+}
+
+test "S changes count lines" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    keys(e, "gg2SX");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("X\nthree", s);
+}
+
+test "X deletes before the cursor" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "0lll2X");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("adef", s);
+}
+
+test "X at column zero does nothing" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc\ndef");
+    e.key("\x1b");
+    keys(e, "j0X");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abc\ndef", s);
+}
+
+test "tilde toggles count characters and advances" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "03~");
+    try testing.expectEqual(@as(usize, 3), e.ccol);
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("ABCdef", s);
+}
+
+test "tilde clamps at the end of the line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    keys(e, "0~~~");
+    try testing.expectEqual(@as(usize, 2), e.ccol);
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("ABC", s);
+}
+
+test "gU over a motion, and gUU over the line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo bar\nbaz qux");
+    e.key("\x1b");
+    keys(e, "gg0gUw");
+    keys(e, "jgUU");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("FOO bar\nBAZ QUX", s);
+}
+
+test "gu and the gugu spelling both take the line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iFOO BAR");
+    e.key("\x1b");
+    keys(e, "gggugu");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("foo bar", s);
+}
+
+test "g tilde over a text object flips the case in place" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iFoo bar");
+    e.key("\x1b");
+    keys(e, "0g~w");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("fOO bar", s);
+}
+
+test "a case operator leaves the register alone" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    keys(e, "ggyy"); // unnamed = "one\n"
+    keys(e, "jgUU"); // TWO, and the register must not have moved
+    keys(e, "p");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\nTWO\none\nthree", s);
+}
+
+test "visual u lowercases the selection" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iFOO BAR BAZ");
+    e.key("\x1b");
+    keys(e, "0vwwu");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("foo bar bAZ", s);
+}
+
+test "visual line U uppercases whole lines" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo\nbar");
+    e.key("\x1b");
+    keys(e, "ggVjU");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("FOO\nBAR", s);
+}
+
+test "a count on J joins that many lines" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\nc\nd");
+    e.key("\x1b");
+    keys(e, "gg3J");
+    try testing.expectEqual(@as(usize, 3), e.ccol);
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a b c\nd", s);
+}
+
+test "gJ joins without a space and keeps the indent" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo\n");
+    keys(e, "   bar");
+    e.key("\x1b");
+    keys(e, "gggJ");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("foo   bar", s);
+}
+
+test "R overwrites, and backspace puts back what it took" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "0RXY");
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        try testing.expectEqualStrings("XYcdef", s);
+    }
+    e.key("\x7f");
+    e.key("\x7f");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abcdef", s);
+}
+
+test "R past the end of the line is just insert" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iab");
+    e.key("\x1b");
+    keys(e, "0RXYZ");
+    e.key("\x7f");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("XY", s);
+}
+
+test "backspacing past the start of an R just moves" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "$RX");
+    e.key("\x7f"); // pays back the 'f'
+    e.key("\x7f"); // owes nothing now, so it only moves
+    try testing.expectEqual(@as(usize, 4), e.ccol);
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abcdef", s);
+}
+
+test "the status row says REPLACE" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    keys(e, "0R");
+    const dump = try e.dumpText(gpa, 40, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "REPLACE") != null);
+}
+
+test "dot repeats an R" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "0RXY");
+    e.key("\x1b");
+    keys(e, "ll.");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("XYcXYf", s); // same as vim
 }

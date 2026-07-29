@@ -346,6 +346,23 @@ gap BETWEEN the two words instead of the span covering them. The bump
 belongs to whichever end is far from the cursor, which is a sentence
 worth keeping the next time a backward motion lands.
 
+### Case operators cost three letters
+
+`gu`, `gU` and `g~` are not a new mechanism. The pending-operator field
+already meant "some operator is waiting for a range", so it grew three
+more letters and the two places that consume a range — the charwise
+one and the linewise one — learned to transform instead of delete. That
+buys `gUiw`, `gu}`, `` g~`a ``, `gUf,` and every other combination
+without any of them being written down anywhere.
+
+They leave the registers alone, which falls out of the same place:
+nothing came out of the buffer, so there is nothing to put anywhere.
+
+ASCII case only, and that is load-bearing rather than lazy — every
+substitution is one byte for one byte, which is what lets the walk run
+in 4KB chunks and edit in place. A Unicode-aware version changes
+lengths and has to rebuild the range.
+
 ### `.` records the result, not the keys
 
 `.` repeats the last change, and the thing worth writing down is how it

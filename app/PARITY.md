@@ -486,6 +486,20 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       so `dge` deleted the span between the two words instead of the
       span covering them. The bump belongs to whichever end is FAR
       from the cursor.
+- [x] **The small edits** — `s` `S` `X` `~` `gJ`, a count on `J`, and
+      the case operators `gu` `gU` `g~` with their doubled line forms
+      and their visual `u`/`U`/`~`. The case operators ride the
+      EXISTING operator plumbing (`op` grew three more letters), so
+      they compose with every motion, text object, find and mark for
+      free, and they leave the registers alone — nothing came out of
+      the buffer to put anywhere. ASCII case only: every substitution
+      is one byte for one byte, which is what lets the walk run in
+      4KB chunks without rebuilding offsets.
+- [x] **`R`** — replace mode, with backspace putting back what it took.
+      The history is what each keystroke displaced; once that debt is
+      paid, backspace only MOVES, and never deletes text this `R` never
+      touched. Any cursor move drops the history, because the offsets
+      in it only mean anything for an unbroken run.
 - [ ] Marks do not shift when text ABOVE them is edited — they hold a
       line and column, not an anchored offset. Fixing it means routing
       every buffer edit through one seam that adjusts them, which is
