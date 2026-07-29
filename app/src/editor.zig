@@ -2713,32 +2713,206 @@ pub const Editor = struct {
         self.buf.insert(self.gpa, start + self.ccol, cp) catch return;
     }
 
-    /// ctrl-a / ctrl-x — the number at or after the cursor on this
-    /// line, plus or minus the count. Decimal with an optional sign;
-    /// vim also does hex and octal, and this says so rather than
-    /// guessing at `0x1f`.
+    const NumBase = enum { dec, hex, oct, bin };
+
+    fn isBinDigit(c: u8) bool {
+        return c == '0' or c == '1';
+    }
+    fn isOctDigit(c: u8) bool {
+        return c >= '0' and c <= '7';
+    }
+
+    /// Where the number under or after the cursor starts, if there is
+    /// one. The order matters and is vim's: a cursor sitting anywhere
+    /// INSIDE `0x1f` — including on the `f` — belongs to that number, so
+    /// hex digits are walked backwards first and the `0x` looked for
+    /// behind them. Only when that fails does it fall back to "the next
+    /// decimal digit at or after the cursor", which is what makes
+    /// `deadbeef` stay a word and `0x1f` a number.
+    fn numberStart(s: []const u8, cur: usize) ?usize {
+        if (cur < s.len) {
+            var c = cur;
+            while (c > 0 and std.ascii.isHex(s[c])) c -= 1;
+            if (c > 0 and (s[c] == 'x' or s[c] == 'X') and s[c - 1] == '0' and
+                c + 1 < s.len and std.ascii.isHex(s[c + 1])) return c - 1;
+            c = cur;
+            while (c > 0 and isBinDigit(s[c])) c -= 1;
+            if (c > 0 and (s[c] == 'b' or s[c] == 'B') and s[c - 1] == '0' and
+                c + 1 < s.len and isBinDigit(s[c + 1])) return c - 1;
+        }
+        var i = cur;
+        while (i < s.len and !std.ascii.isDigit(s[i])) i += 1;
+        if (i >= s.len) return null;
+        while (i > 0 and std.ascii.isDigit(s[i - 1])) i -= 1;
+        return i;
+    }
+
+    const Num = struct {
+        a: usize, // first byte, prefix included
+        b: usize, // one past the last digit
+        base: NumBase,
+        val: u64, // magnitude; `neg` carries the sign for decimal
+        neg: bool,
+        digits: usize, // digit count, so leading zeros survive
+        upper: bool, // hex letters: the LAST one seen decides
+        prefix_up: bool, // the `x`/`b` itself keeps its own case
+    };
+
+    /// Read the number starting at `a`. The prefix decides the base, so
+    /// this is also what makes a bare `0x` (no hex digit) fall back to
+    /// the decimal `0`.
+    fn readNumber(s: []const u8, a: usize) ?Num {
+        var n = Num{
+            .a = a,
+            .b = a,
+            .base = .dec,
+            .val = 0,
+            .neg = false,
+            .digits = 0,
+            .upper = false,
+            .prefix_up = false,
+        };
+        var i = a;
+        if (i >= s.len or !std.ascii.isDigit(s[i])) return null;
+        if (s[i] == '0' and i + 1 < s.len and (s[i + 1] == 'x' or s[i + 1] == 'X') and
+            i + 2 < s.len and std.ascii.isHex(s[i + 2]))
+        {
+            n.base = .hex;
+            n.prefix_up = s[i + 1] == 'X';
+            i += 2;
+        } else if (s[i] == '0' and i + 1 < s.len and (s[i + 1] == 'b' or s[i + 1] == 'B') and
+            i + 2 < s.len and isBinDigit(s[i + 2]))
+        {
+            n.base = .bin;
+            n.prefix_up = s[i + 1] == 'B';
+            i += 2;
+        } else if (s[i] == '0' and i + 1 < s.len and isOctDigit(s[i + 1])) {
+            // Octal only if EVERY digit is one; `0089` is decimal 89,
+            // which is why a zero-padded line number still counts up
+            // the way you meant.
+            var j = i;
+            while (j < s.len and std.ascii.isDigit(s[j])) j += 1;
+            if (std.mem.indexOfAnyPos(u8, s[i..j], 0, "89") == null) {
+                n.base = .oct;
+                // The leading zero is octal's PREFIX, not one of the
+                // digits whose width is preserved: `0777` grows to
+                // `01000` rather than staying four wide.
+                i += 1;
+            }
+        }
+        // A leading `-` belongs to a DECIMAL number only. vim reads it,
+        // then throws it away again the moment a base prefix turns up,
+        // so `-0x10` counts UP to `-0x11`.
+        if (n.base == .dec and a > 0 and s[a - 1] == '-') {
+            n.neg = true;
+            n.a = a - 1;
+        }
+        const dstart = i;
+        while (i < s.len) : (i += 1) {
+            const c = s[i];
+            const d: u8 = switch (n.base) {
+                .dec => if (std.ascii.isDigit(c)) c - '0' else break,
+                .oct => if (isOctDigit(c)) c - '0' else break,
+                .bin => if (isBinDigit(c)) c - '0' else break,
+                .hex => if (std.ascii.isDigit(c))
+                    c - '0'
+                else if (std.ascii.isHex(c)) blk: {
+                    n.upper = std.ascii.isUpper(c);
+                    break :blk (std.ascii.toLower(c) - 'a') + 10;
+                } else break,
+            };
+            const radix: u64 = switch (n.base) {
+                .dec => 10,
+                .oct => 8,
+                .bin => 2,
+                .hex => 16,
+            };
+            n.val = n.val *% radix +% d;
+        }
+        if (i == dstart) return null;
+        n.digits = i - dstart;
+        n.b = i;
+        return n;
+    }
+
+    /// ctrl-a / ctrl-x — the number at or after the cursor on this line,
+    /// plus or minus the count.
+    ///
+    /// Bases follow vim's default `nrformats=bin,octal,hex`, which means
+    /// a leading zero is OCTAL: `007` counts up to `010`. That surprises
+    /// people, and neovim dropped it for exactly that reason, but an
+    /// editor advertising vim keys that quietly disagrees with vim about
+    /// what a number is would be worse. `0089` stays decimal, so the
+    /// common zero-padded case still behaves.
+    ///
+    /// Everything about the original spelling is kept: the `x`/`b` keeps
+    /// its case, hex letters take the case of the LAST letter in the
+    /// number (`0xaB` -> `0xAC`, `0xAb` -> `0xac`), and leading zeros
+    /// hold their width. Non-decimal bases are unsigned and wrap at 64
+    /// bits, so `0x0` goes down to `0xffffffffffffffff`.
     fn addToNumber(self: *Editor, sign: i64) void {
         const gpa = self.gpa;
-        const cnt: i64 = @intCast(self.takeCount());
+        const cnt: u64 = self.takeCount();
         const s = self.lineText(self.cline);
-        var i = self.ccol;
-        while (i < s.len and !std.ascii.isDigit(s[i])) i += 1;
-        if (i >= s.len) return;
-        var a = i;
-        while (a > 0 and std.ascii.isDigit(s[a - 1])) a -= 1;
-        if (a > 0 and s[a - 1] == '-') a -= 1;
-        var b = a;
-        if (s[b] == '-') b += 1;
-        while (b < s.len and std.ascii.isDigit(s[b])) b += 1;
-        const val = std.fmt.parseInt(i64, s[a..b], 10) catch return;
-        var nbuf: [24]u8 = undefined;
-        const out = std.fmt.bufPrint(&nbuf, "{d}", .{val +| sign * cnt}) catch return;
+        const a = numberStart(s, self.ccol) orelse return;
+        const n = readNumber(s, a) orelse return;
+
+        const delta = cnt *% @as(u64, @intCast(@abs(sign)));
+        var out_buf: [80]u8 = undefined;
+        var out: []const u8 = undefined;
+        if (n.base == .dec) {
+            var v: i64 = @bitCast(n.val);
+            if (n.neg) v = -%v;
+            v = if (sign > 0) v +| @as(i64, @bitCast(delta)) else v -| @as(i64, @bitCast(delta));
+            out = std.fmt.bufPrint(&out_buf, "{d}", .{v}) catch return;
+        } else {
+            const v = if (sign > 0) n.val +% delta else n.val -% delta;
+            var dbuf: [64]u8 = undefined;
+            const body = switch (n.base) {
+                .hex => if (n.upper)
+                    std.fmt.bufPrint(&dbuf, "{X}", .{v}) catch return
+                else
+                    std.fmt.bufPrint(&dbuf, "{x}", .{v}) catch return,
+                .oct => std.fmt.bufPrint(&dbuf, "{o}", .{v}) catch return,
+                .bin => std.fmt.bufPrint(&dbuf, "{b}", .{v}) catch return,
+                .dec => unreachable,
+            };
+            var k: usize = 0;
+            switch (n.base) {
+                .hex, .bin => {
+                    out_buf[k] = '0';
+                    const letter: u8 = if (n.base == .hex)
+                        (if (n.prefix_up) 'X' else 'x')
+                    else
+                        (if (n.prefix_up) 'B' else 'b');
+                    out_buf[k + 1] = letter;
+                    k += 2;
+                },
+                .oct => {
+                    out_buf[k] = '0';
+                    k += 1;
+                },
+                .dec => unreachable,
+            }
+            // A number can be spelled with any number of leading zeros,
+            // so the padding is bounded by the buffer rather than by
+            // trust: `0b` and two hundred zeros must not scribble.
+            var pad = n.digits;
+            while (pad > body.len and k + body.len < out_buf.len) : (pad -= 1) {
+                out_buf[k] = '0';
+                k += 1;
+            }
+            @memcpy(out_buf[k..][0..body.len], body);
+            k += body.len;
+            out = out_buf[0..k];
+        }
+
         self.buf.newUndoGroup();
         const base = self.buf.rope.lineStart(self.cline);
-        self.buf.deleteRange(gpa, base + a, base + b) catch return;
-        self.buf.insert(gpa, base + a, out) catch return;
-        // On the last digit, which is where vim leaves it.
-        self.ccol = a + out.len - 1;
+        self.buf.deleteRange(gpa, base + n.a, base + n.b) catch return;
+        self.buf.insert(gpa, base + n.a, out) catch return;
+        // On the last character, which is where vim leaves it.
+        self.ccol = n.a + out.len - 1;
     }
 
     fn cursorToOffset(self: *Editor, off: usize) void {
@@ -7659,6 +7833,79 @@ test "ctrl-a adds to the number at or after the cursor" {
     const s = try bufText(gpa, e);
     defer gpa.free(s);
     try testing.expectEqualStrings("x = 42 y", s);
+}
+
+test "ctrl-a and ctrl-x across bases, every case checked against real vim" {
+    // Generated by driving /usr/bin/vim with the same keys and reading
+    // the buffer back. Not one of these expectations was written from
+    // memory; several of them (the last hex letter deciding case, octal
+    // padding that grows, `-0x10` counting UP) contradict what I would
+    // have guessed.
+    const Case = struct { in: []const u8, cur: usize, up: bool, want: []const u8 };
+    const cases = [_]Case{
+    .{ .in = "007", .cur = 0, .up = true, .want = "010" },
+    .{ .in = "0x1f", .cur = 0, .up = true, .want = "0x20" },
+    .{ .in = "0xff", .cur = 0, .up = true, .want = "0x100" },
+    .{ .in = "0X1F", .cur = 0, .up = true, .want = "0X20" },
+    .{ .in = "0b101", .cur = 0, .up = true, .want = "0b110" },
+    .{ .in = "08", .cur = 0, .up = true, .want = "9" },
+    .{ .in = "-5", .cur = 0, .up = true, .want = "-4" },
+    .{ .in = "99", .cur = 0, .up = true, .want = "100" },
+    .{ .in = "0x1a", .cur = 0, .up = true, .want = "0x1b" },
+    .{ .in = "0x1A", .cur = 0, .up = true, .want = "0x1B" },
+    .{ .in = "0xaB", .cur = 0, .up = true, .want = "0xAC" },
+    .{ .in = "0xAb", .cur = 0, .up = true, .want = "0xac" },
+    .{ .in = "0x005", .cur = 0, .up = true, .want = "0x006" },
+    .{ .in = "0x00f", .cur = 0, .up = true, .want = "0x010" },
+    .{ .in = "0x0ff", .cur = 0, .up = true, .want = "0x100" },
+    .{ .in = "0008", .cur = 0, .up = true, .want = "9" },
+    .{ .in = "00019", .cur = 0, .up = true, .want = "20" },
+    .{ .in = "0b0001", .cur = 0, .up = true, .want = "0b0010" },
+    .{ .in = "0000", .cur = 0, .up = true, .want = "0001" },
+    .{ .in = "089", .cur = 0, .up = true, .want = "90" },
+    .{ .in = "0777", .cur = 0, .up = true, .want = "01000" },
+    .{ .in = "-0x10", .cur = 0, .up = true, .want = "-0x11" },
+    .{ .in = "a-5", .cur = 0, .up = true, .want = "a-4" },
+    .{ .in = "1.5", .cur = 0, .up = true, .want = "2.5" },
+    .{ .in = "0x", .cur = 0, .up = true, .want = "1x" },
+    .{ .in = "abc", .cur = 0, .up = true, .want = "abc" },
+    .{ .in = "ab 0x1f", .cur = 0, .up = true, .want = "ab 0x20" },
+    .{ .in = "ab 12", .cur = 0, .up = true, .want = "ab 13" },
+    .{ .in = "0x10", .cur = 3, .up = false, .want = "0x0f" },
+    .{ .in = "010", .cur = 0, .up = false, .want = "007" },
+    .{ .in = "0b100", .cur = 0, .up = false, .want = "0b011" },
+    .{ .in = "0x0", .cur = 0, .up = false, .want = "0xffffffffffffffff" },
+    .{ .in = "0b0", .cur = 0, .up = false, .want = "0b1111111111111111111111111111111111111111111111111111111111111111" },
+    .{ .in = "0", .cur = 0, .up = false, .want = "-1" },
+    .{ .in = "5", .cur = 0, .up = false, .want = "4" },
+    .{ .in = "0x1f", .cur = 2, .up = true, .want = "0x20" },
+    .{ .in = "0xff", .cur = 3, .up = true, .want = "0x100" },
+    .{ .in = "0xabc", .cur = 3, .up = true, .want = "0xabd" },
+    .{ .in = "12 34", .cur = 3, .up = true, .want = "12 35" },
+    .{ .in = "0x1f 0x2f", .cur = 5, .up = true, .want = "0x1f 0x30" },
+    .{ .in = "x0ff", .cur = 2, .up = true, .want = "x0ff" },
+    .{ .in = "deadbeef", .cur = 0, .up = true, .want = "deadbeef" },
+    .{ .in = "9x", .cur = 0, .up = true, .want = "10x" },
+    .{ .in = "0xg", .cur = 0, .up = true, .want = "1xg" },
+    .{ .in = "0b12", .cur = 0, .up = true, .want = "0b102" },
+    };
+    for (cases) |c| {
+        const gpa = testing.allocator;
+        var e = try mkEditor(gpa);
+        defer e.destroy();
+        keys(e, "i");
+        keys(e, c.in);
+        e.key("\x1b");
+        keys(e, "0");
+        for (0..c.cur) |_| keys(e, "l");
+        e.key(if (c.up) "\x01" else "\x18");
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        testing.expectEqualStrings(c.want, s) catch |err| {
+            std.debug.print("case: {s} cur={d} up={}\n", .{ c.in, c.cur, c.up });
+            return err;
+        };
+    }
 }
 
 test "a count multiplies the increment" {
