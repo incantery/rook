@@ -3594,6 +3594,22 @@ pub const Editor = struct {
     // ------------------------------------------------------------ selection
 
     /// Is (line, bcol) inside the visual selection?
+    /// The block as fillGrid needs it: line range plus a RENDER column
+    /// range, so a tab in one row cannot pull the highlight out of
+    /// line with the row above.
+    const DrawBlock = struct {
+        a: usize,
+        b: usize,
+        lo: usize,
+        hi: usize,
+        eol: bool,
+
+        fn has(self: DrawBlock, line: usize, rc: usize) bool {
+            return line >= self.a and line <= self.b and
+                rc >= self.lo and (self.eol or rc <= self.hi);
+        }
+    };
+
     fn selContains(self: *const Editor, line: usize, bcol: usize, abs_line_start: usize) bool {
         if (!self.inVisual()) return false;
         const al = @min(self.vanchor_line, self.cline);
@@ -3651,16 +3667,16 @@ pub const Editor = struct {
         const cur_rc = renderCol(self.lineText(self.cline), self.ccol);
         // The rectangle, resolved once: selContains cannot ask for a
         // line's text while fillGrid is holding the shared buffer.
-        const blk: ?struct { a: usize, b: usize, lo: usize, hi: usize } =
-            if (self.mode == .visual_block) b: {
-                const ac = renderCol(self.lineText(self.vanchor_line), self.vanchor_col);
-                break :b .{
-                    .a = @min(self.vanchor_line, self.cline),
-                    .b = @max(self.vanchor_line, self.cline),
-                    .lo = @min(ac, cur_rc),
-                    .hi = @max(ac, cur_rc),
-                };
-            } else null;
+        const blk: ?DrawBlock = if (self.mode == .visual_block) b: {
+            const ac = renderCol(self.lineText(self.vanchor_line), self.vanchor_col);
+            break :b .{
+                .a = @min(self.vanchor_line, self.cline),
+                .b = @max(self.vanchor_line, self.cline),
+                .lo = @min(ac, cur_rc),
+                .hi = @max(ac, cur_rc),
+                .eol = self.block_eol,
+            };
+        } else null;
 
         for (0..text_rows) |row| {
             const line = self.top + row;
@@ -3690,14 +3706,23 @@ pub const Editor = struct {
             while (i < s.len) {
                 const base = self.hlStyleAt(abs_start + i);
                 const in_sel = if (blk) |bb|
-                    line >= bb.a and line <= bb.b and rc >= bb.lo and (self.block_eol or rc <= bb.hi)
+                    bb.has(line, rc)
                 else
                     self.selContains(line, i, abs_start);
                 const st: Style = if (in_sel) .sel else base;
                 if (s[i] == '\t') {
+                    // A tab spans several columns, and a BLOCK is a
+                    // range of columns — so its style is decided per
+                    // column here rather than once per byte. Anything
+                    // else paints a whole tab stop for a one-column
+                    // selection.
                     const next = rc / tab_width * tab_width + tab_width;
                     while (rc < next) : (rc += 1) {
-                        putText(out, gw, text_cols, self.left, rc, ' ', st);
+                        const tst: Style = if (blk) |bb|
+                            (if (bb.has(line, rc)) .sel else base)
+                        else
+                            st;
+                        putText(out, gw, text_cols, self.left, rc, ' ', tst);
                     }
                     i += 1;
                     continue;
@@ -6431,4 +6456,26 @@ test "a zero-width search pattern does not wedge the renderer" {
     const dump = try e.dumpText(gpa, 40, 6);
     defer gpa.free(dump);
     try testing.expect(std.mem.indexOf(u8, dump, "abc") != null);
+}
+
+test "a block highlight does not paint a whole tab stop" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iab\n");
+    e.key("\t");
+    keys(e, "cd");
+    e.key("\x1b");
+    // Anchored on the tab line and reaching UP, so the cursor sits on
+    // row 0 and does not paint over the cell being checked.
+    keys(e, "G0");
+    e.key("\x16"); // ctrl-v: one column wide
+    keys(e, "k");
+    const cells = e.fillGrid(40, 5);
+    const gw = Editor.digits(e.lineCountB()) + 1;
+    // Row 1 is the tab line: column 0 is in the block, 1..3 are the
+    // rest of the tab and must not be.
+    try testing.expectEqual(Style.sel, cells[1 * 40 + gw + 0].st);
+    try testing.expect(cells[1 * 40 + gw + 1].st != .sel);
+    try testing.expect(cells[1 * 40 + gw + 3].st != .sel);
 }
