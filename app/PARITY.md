@@ -395,9 +395,22 @@ must clear is "I don't reach for a terminal nvim inside rook", not
 - [ ] More grammars: ts/tsx/md/toml/json/rust/python (drop parser.c +
       highlights.scm in vendor/, two lines in syntax.zig)
 - [ ] Markdown rendering in a pane (top item on wails' own backlog)
+- [x] **`:w` cannot lose your file.** Atomic replace, permissions
+      carried across the new inode, symlinks written through rather
+      than replaced — and a refusal to overwrite a file that changed
+      underneath the buffer, which in an agent workspace is the normal
+      case rather than a corner one. `!` on any write forces it; the
+      message names `:e!` too, because whether you want yours or
+      theirs is not something the editor can know. Each guarantee has
+      a unit test that fails when the guarantee is reverted (checked,
+      all three), plus an e2e that drives the refusal through the real
+      key path — a guard nobody can reach is theatre.
 - [ ] Editor debts already logged: save-point tracking, autoindent,
       registers, wide glyphs = 1 column, 4KB line clamp, relative `:e`
       resolves against app cwd
+- [ ] Notice a disk change while the buffer is OPEN, not only at `:w`.
+      `Buffer.disk` is the state a watcher would compare against; today
+      you find out when you try to save.
 
 ## 4. Platform and distribution
 

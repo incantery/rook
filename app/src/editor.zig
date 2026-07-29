@@ -556,7 +556,12 @@ pub const Editor = struct {
         const arg = std.mem.trim(u8, if (sp) |i| line[i + 1 ..] else "", " ");
 
         const is = std.mem.eql;
-        if (is(u8, verb, "w") or is(u8, verb, "wq") or is(u8, verb, "x")) {
+        // `!` on a write means "I know, do it anyway" — the answer to
+        // the clobber guard below. Stripped here so one branch handles
+        // both forms of each verb.
+        const bang = verb.len > 1 and verb[verb.len - 1] == '!';
+        const wverb = if (bang) verb[0 .. verb.len - 1] else verb;
+        if (is(u8, wverb, "w") or is(u8, wverb, "wq") or is(u8, wverb, "x")) {
             if (self.is_dir) {
                 self.setStatus("a directory listing isn't writable", .{}, true);
                 return;
@@ -573,7 +578,7 @@ pub const Editor = struct {
                         defer gpa.free(text);
                         if (save(ctx, self.buf.path orelse "", text)) {
                             self.buf.modified = false;
-                            if (!is(u8, verb, "w")) self.closed = true;
+                            if (!is(u8, wverb, "w")) self.closed = true;
                             return;
                         }
                     }
@@ -585,13 +590,22 @@ pub const Editor = struct {
                 const p = gpa.dupe(u8, arg) catch return;
                 if (self.buf.path) |old| gpa.free(old);
                 self.buf.path = p;
+                // `:w other` is a new target, so we hold no claim on it —
+                // and a claim inherited from the OLD file would refuse
+                // the write for a reason that makes no sense.
+                self.buf.disk = null;
             }
-            self.buf.save(gpa, self.io) catch |err| {
-                self.setStatus("write failed: {s}", .{@errorName(err)}, true);
+            self.buf.save(gpa, self.io, bang) catch |err| {
+                if (err == error.ChangedOnDisk) {
+                    // Naming both ways out matters: one of them keeps
+                    // your edit and one of them keeps theirs, and which
+                    // you want is not something the editor can know.
+                    self.setStatus("changed on disk since you opened it (:w! overwrites, :e! reloads)", .{}, true);
+                } else self.setStatus("write failed: {s}", .{@errorName(err)}, true);
                 return;
             };
             self.setStatus("wrote {s}", .{self.displayName()}, false);
-            if (!is(u8, verb, "w")) self.closed = true;
+            if (!is(u8, wverb, "w")) self.closed = true;
         } else if (is(u8, verb, "q")) {
             if (self.buf.modified) {
                 self.setStatus("unsaved changes (:q! to discard)", .{}, true);

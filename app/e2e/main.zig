@@ -25,6 +25,7 @@ const scenarios = [_]Scenario{
     .{ .name = "splits", .what = "split right, focus moves, close returns", .run = splits },
     .{ .name = "tabs", .what = "new tab, cycle, pane counts stay separate", .run = tabs },
     .{ .name = "editor", .what = "edit a file, change it, :w reaches disk", .run = editor },
+    .{ .name = "clobber", .what = ":w refuses a file an agent changed underneath it", .run = clobber },
     .{ .name = "pixels", .what = "the renderer actually drew (shot, decoded)", .run = pixels },
     .{ .name = "commands", .what = "registry lists, runs by name, and drives the ⌘K palette", .run = commands },
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
@@ -174,6 +175,69 @@ fn editor(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("enter");
     try app.waitText("e2e$", 5_000);
     try h.expectEq("still one pane after :q", 1, try app.paneCount());
+}
+
+// -------------------------------------------------------------- clobber
+
+/// The case rook exists inside: you open a file, an agent rewrites it,
+/// you save. Covered in `zig test src/buffer.zig` at the unit level;
+/// this drives it through the REAL key path, because the guard is only
+/// worth anything if `:w` actually reaches it and the refusal actually
+/// reaches your eyes.
+fn clobber(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    var path_buf: [192]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/shared.txt", .{app.dirPath()});
+    try h.writeFile(path, "mine\n");
+
+    _ = try app.ctlFmt("edit {s}", .{path});
+    try app.waitText("mine", 5_000);
+    _ = try app.ctl("type ohello");
+    _ = try app.ctl("key 1b"); // esc
+
+    // Somebody else's write, while we hold the buffer.
+    try h.writeFile(path, "theirs, and longer\n");
+
+    _ = try app.ctl("type :w");
+    _ = try app.ctl("enter");
+    try app.waitText("changed on disk", 5_000);
+
+    // Refusing has to mean refusing. If the message showed but the write
+    // went through anyway, the guard is theatre.
+    var content: [256]u8 = undefined;
+    const kept = try h.readFile(path, &content);
+    try h.expectContains(kept, "theirs", "their bytes survive a refused :w");
+
+    // `:w!` is the way through.
+    _ = try app.ctl("type :w!");
+    _ = try app.ctl("enter");
+    var waited: u32 = 0;
+    while (waited < 5000) : (waited += 100) {
+        const got = h.readFile(path, &content) catch "";
+        if (std.mem.indexOf(u8, got, "hello") != null) break;
+        h.sleepMs(100);
+    }
+    const forced = try h.readFile(path, &content);
+    try h.expectContains(forced, "hello", ":w! overwrites");
+
+    // And the claim is re-established, so the NEXT save is not refused
+    // for a conflict that was already resolved.
+    _ = try app.ctl("type oagain");
+    _ = try app.ctl("key 1b");
+    _ = try app.ctl("type :w");
+    _ = try app.ctl("enter");
+    waited = 0;
+    while (waited < 5000) : (waited += 100) {
+        const got = h.readFile(path, &content) catch "";
+        if (std.mem.indexOf(u8, got, "again") != null) break;
+        h.sleepMs(100);
+    }
+    const settled = try h.readFile(path, &content);
+    try h.expectContains(settled, "again", "a plain :w works once the conflict is resolved");
 }
 
 // -------------------------------------------------------------- pixels

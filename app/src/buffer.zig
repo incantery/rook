@@ -6,11 +6,46 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ropepkg = @import("rope.zig");
 
+/// What we last saw on disk, at load or at save.
+///
+/// Enough to notice somebody else's write. In an agent workspace that
+/// is not a corner case — the whole premise of rook is that things are
+/// editing your files while you look at them.
+pub const DiskState = struct {
+    mtime_ns: i128,
+    size: u64,
+    inode: u64,
+
+    fn of(st: std.Io.File.Stat) DiskState {
+        return .{
+            .mtime_ns = @intCast(st.mtime.nanoseconds),
+            .size = st.size,
+            .inode = @intCast(st.inode),
+        };
+    }
+
+    /// All three, not just mtime: a filesystem with coarse timestamps
+    /// can rewrite a file inside one tick, and a replace-by-rename
+    /// (which is what rook's own save does) keeps neither size nor
+    /// inode stable.
+    fn matches(self: DiskState, st: std.Io.File.Stat) bool {
+        const other = DiskState.of(st);
+        return self.mtime_ns == other.mtime_ns and
+            self.size == other.size and
+            self.inode == other.inode;
+    }
+};
+
 pub const Buffer = struct {
     rope: ropepkg.Rope,
     /// Absolute path, owned; null = scratch.
     path: ?[]u8 = null,
     modified: bool = false,
+    /// The file as we last saw it, or null when we have no claim on it
+    /// (a scratch buffer, or a path that did not exist when we opened
+    /// it). Null means `save` will not refuse — fail open, like the
+    /// rest of rook's host-facing code.
+    disk: ?DiskState = null,
 
     /// Bumped by every content mutation (edits, undo, redo) — the
     /// highlighter's reparse trigger.
@@ -37,6 +72,13 @@ pub const Buffer = struct {
     }
 
     pub fn initFromFile(gpa: Allocator, io: std.Io, abs_path: []const u8) !Buffer {
+        // Stat BEFORE the read, and the order is the whole point. A
+        // write landing between the two calls is either recorded as
+        // newer than the bytes we hold (stat last — `save` then
+        // overwrites it without a word) or older (stat first — `save`
+        // refuses over content that was in fact current). Only the
+        // second failure is survivable; it costs a `:w!`.
+        const before: ?DiskState = if (std.Io.Dir.cwd().statFile(io, abs_path, .{})) |st| .of(st) else |_| null;
         const data: []u8 = std.Io.Dir.cwd().readFileAlloc(io, abs_path, gpa, .limited(1 << 30)) catch |err| switch (err) {
             error.FileNotFound => try gpa.alloc(u8, 0), // new file: empty buffer, path set
             else => return err,
@@ -45,6 +87,7 @@ pub const Buffer = struct {
         var b: Buffer = .{ .rope = try .init(gpa, data) };
         errdefer b.rope.deinit(gpa);
         b.path = try gpa.dupe(u8, abs_path);
+        b.disk = before;
         return b;
     }
 
@@ -57,12 +100,72 @@ pub const Buffer = struct {
         self.redo_stack.deinit(gpa);
     }
 
-    pub fn save(self: *Buffer, gpa: Allocator, io: std.Io) !void {
+    pub const SaveError = error{
+        NoPath,
+        /// The file moved under us since we opened or last wrote it.
+        /// `force` is the caller's `:w!`.
+        ChangedOnDisk,
+    } || Allocator.Error || std.Io.Dir.CreateFileAtomicError ||
+        std.Io.File.Atomic.ReplaceError || std.Io.Writer.Error;
+
+    /// Write the buffer to its path.
+    ///
+    /// Three properties, each of which was absent and each of which can
+    /// cost somebody a file:
+    ///
+    /// ATOMIC. The old implementation was `writeFile`, which truncates
+    /// in place. A crash, a full disk or a cancelled write halfway
+    /// through leaves HALF a file where the source used to be, and the
+    /// original is gone. This creates a sibling temp file and renames
+    /// over the target, so the path is either the old bytes or the new
+    /// ones and never a prefix of either.
+    ///
+    /// PERMISSIONS SURVIVE. Rename-over installs a NEW inode, so the
+    /// mode has to be carried across by hand — otherwise `:w` on a
+    /// shell script hands it back non-executable. (Truncate-in-place
+    /// got this for free, which is why it was never noticed.)
+    ///
+    /// SYMLINKS ARE WRITTEN THROUGH, not replaced. Renaming over a link
+    /// silently turns it into a regular file, which is how a dotfile
+    /// linked into a repo stops tracking the repo.
+    pub fn save(self: *Buffer, gpa: Allocator, io: std.Io, force: bool) SaveError!void {
         const p = self.path orelse return error.NoPath;
+        const cwd = std.Io.Dir.cwd();
+
+        // Resolve first: everything below acts on the real file, not on
+        // the name that points at it.
+        var real_buf: [1024]u8 = undefined;
+        const target: []const u8 = if (cwd.realPathFile(io, p, &real_buf)) |n| real_buf[0..n] else |_| p;
+
+        const now: ?std.Io.File.Stat = cwd.statFile(io, target, .{}) catch null;
+        if (!force) {
+            if (self.disk) |known| {
+                // Gone counts as changed: the file we claimed no longer
+                // exists, so writing would resurrect it with our copy of
+                // content somebody deliberately removed.
+                const same = if (now) |st| known.matches(st) else false;
+                if (!same) return error.ChangedOnDisk;
+            }
+        }
+
         const flat = try self.rope.dupeRange(gpa, 0, self.rope.byteLen());
         defer gpa.free(flat);
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = flat });
+
+        var af = try cwd.createFileAtomic(io, target, .{
+            .permissions = if (now) |st| st.permissions else .default_file,
+            .replace = true,
+        });
+        // deinit removes the temp file if we never got to `replace`, so
+        // a failure leaves the target untouched rather than littering.
+        defer af.deinit(io);
+        var wbuf: [64 * 1024]u8 = undefined;
+        var w = af.file.writer(io, &wbuf);
+        try w.interface.writeAll(flat);
+        try w.interface.flush();
+        try af.replace(io);
+
         self.modified = false;
+        self.disk = if (cwd.statFile(io, target, .{})) |st| .of(st) else |_| null;
     }
 
     pub fn newUndoGroup(self: *Buffer) void {
@@ -199,7 +302,7 @@ test "buffer save/load round trip" {
     var b = try Buffer.initFromFile(gpa, io, file_path); // missing → empty
     try testing.expectEqual(@as(usize, 0), b.rope.byteLen());
     try b.insert(gpa, 0, "one\ntwo\n");
-    try b.save(gpa, io);
+    try b.save(gpa, io, false);
     try testing.expect(!b.modified);
     b.deinit(gpa);
 
@@ -208,4 +311,132 @@ test "buffer save/load round trip" {
     const s = try contents(gpa, &b2);
     defer gpa.free(s);
     try testing.expectEqualStrings("one\ntwo\n", s);
+}
+
+/// Every save test needs the same three lines.
+fn tmpPath(buf: []u8, sub: []const u8, name: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, ".zig-cache/tmp/{s}/{s}", .{ sub, name });
+}
+
+test "save preserves the file's permissions" {
+    // Rename-over installs a NEW inode, so the mode does not come along
+    // by itself. `:w` on a shell script must not hand it back
+    // non-executable.
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const cwd = std.Io.Dir.cwd();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pathbuf: [128]u8 = undefined;
+    const p = try tmpPath(&pathbuf, &tmp.sub_path, "script.sh");
+
+    try cwd.writeFile(io, .{ .sub_path = p, .data = "#!/bin/sh\n" });
+    try cwd.setFilePermissions(io, p, .fromMode(0o755), .{});
+
+    var b = try Buffer.initFromFile(gpa, io, p);
+    defer b.deinit(gpa);
+    try b.insert(gpa, b.rope.byteLen(), "echo hi\n");
+    try b.save(gpa, io, false);
+
+    const st = try cwd.statFile(io, p, .{});
+    try testing.expectEqual(@as(u32, 0o755), @as(u32, @intCast(st.permissions.toMode() & 0o777)));
+}
+
+test "save writes THROUGH a symlink instead of replacing it" {
+    // A dotfile linked into a repo stops tracking the repo the moment a
+    // save turns the link into a regular file.
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const cwd = std.Io.Dir.cwd();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var real_buf: [128]u8 = undefined;
+    var link_buf: [128]u8 = undefined;
+    const real = try tmpPath(&real_buf, &tmp.sub_path, "real.txt");
+    const link = try tmpPath(&link_buf, &tmp.sub_path, "link.txt");
+
+    try cwd.writeFile(io, .{ .sub_path = real, .data = "before\n" });
+    try tmp.dir.symLink(io, "real.txt", "link.txt", .{});
+
+    var b = try Buffer.initFromFile(gpa, io, link);
+    defer b.deinit(gpa);
+    try b.deleteRange(gpa, 0, b.rope.byteLen());
+    try b.insert(gpa, 0, "after\n");
+    try b.save(gpa, io, false);
+
+    // The link is still a link...
+    const lst = try cwd.statFile(io, link, .{ .follow_symlinks = false });
+    try testing.expectEqual(std.Io.File.Kind.sym_link, lst.kind);
+    // ...and the write landed on its target.
+    var read_buf: [64]u8 = undefined;
+    const got = try cwd.readFile(io, real, &read_buf);
+    try testing.expectEqualStrings("after\n", got);
+}
+
+test "save refuses to clobber a file that changed underneath it" {
+    // The agent-workspace case: something else edited the file while it
+    // was open. Saving over it without a word is the one outcome that
+    // destroys work nobody can get back.
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const cwd = std.Io.Dir.cwd();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pathbuf: [128]u8 = undefined;
+    const p = try tmpPath(&pathbuf, &tmp.sub_path, "shared.txt");
+
+    try cwd.writeFile(io, .{ .sub_path = p, .data = "mine\n" });
+    var b = try Buffer.initFromFile(gpa, io, p);
+    defer b.deinit(gpa);
+    try b.insert(gpa, 0, "edited ");
+
+    try cwd.writeFile(io, .{ .sub_path = p, .data = "theirs, and longer\n" });
+    try testing.expectError(error.ChangedOnDisk, b.save(gpa, io, false));
+
+    // Refusing means refusing: their bytes are untouched.
+    var read_buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("theirs, and longer\n", try cwd.readFile(io, p, &read_buf));
+
+    // `:w!` is the way through, and it re-establishes the claim so the
+    // NEXT save is not refused for a conflict already resolved.
+    try b.save(gpa, io, true);
+    try testing.expectEqualStrings("edited mine\n", try cwd.readFile(io, p, &read_buf));
+    try b.insert(gpa, 0, "again ");
+    try b.save(gpa, io, false);
+}
+
+test "a file deleted underneath us counts as changed" {
+    // Writing would resurrect content somebody deliberately removed.
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const cwd = std.Io.Dir.cwd();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pathbuf: [128]u8 = undefined;
+    const p = try tmpPath(&pathbuf, &tmp.sub_path, "doomed.txt");
+
+    try cwd.writeFile(io, .{ .sub_path = p, .data = "here\n" });
+    var b = try Buffer.initFromFile(gpa, io, p);
+    defer b.deinit(gpa);
+    try b.insert(gpa, 0, "x");
+    try cwd.deleteFile(io, p);
+    try testing.expectError(error.ChangedOnDisk, b.save(gpa, io, false));
+    try b.save(gpa, io, true);
+}
+
+test "a file that did not exist when we opened it is not claimed" {
+    // No claim, no refusal: `:e newfile` then `:w` must just work.
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pathbuf: [128]u8 = undefined;
+    const p = try tmpPath(&pathbuf, &tmp.sub_path, "brand-new.txt");
+
+    var b = try Buffer.initFromFile(gpa, io, p);
+    defer b.deinit(gpa);
+    try testing.expectEqual(@as(?DiskState, null), b.disk);
+    try b.insert(gpa, 0, "hello\n");
+    try b.save(gpa, io, false);
+    try testing.expect(b.disk != null);
 }

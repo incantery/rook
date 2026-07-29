@@ -154,7 +154,8 @@ a file is a document, panes retarget in place). The editor is vim-core
 over a rope buffer (`src/rope.zig` → `src/buffer.zig` →
 `src/editor.zig`): normal/insert/visual/visual-line/command modes,
 h j k l w b e 0 ^ $ gg G arrows ⌃D/⌃U, operators d y c (dd yy cc D C
-Y), x r J p P, counts, grouped undo (u / ⌃R), `:w :q :wq :e :<n>`.
+Y), x r J p P, counts, grouped undo (u / ⌃R), `:w :q :wq :e :<n>`
+(`!` on any write forces it).
 `/` searches (literal, wrapping, n/N, hlsearch until `:noh`).
 TREE-SITTER highlighting is in (slice two): the runtime and zig/go
 grammars are vendored C (vendor/), highlight queries embedded; a
@@ -182,6 +183,43 @@ debts: one register, no autoindent, undo doesn't track the save
 point (a fully-undone buffer still reads modified), wide glyphs
 count one column, 4KB line clamp on motions/render, relative :e
 paths resolve against the app cwd rather than the buffer's dir.
+
+### `:w` cannot lose your file
+
+Saving is the one thing in rook that can destroy work nobody can get
+back, so `Buffer.save` holds three properties, each of which was
+absent and each of which is unit-tested by reverting it:
+
+- **Atomic.** It was `writeFile`, which truncates in place — a crash,
+  a full disk or a cancelled write halfway through leaves HALF a file
+  where the source used to be, original gone. It now writes a sibling
+  temp file and renames over the target, so the path holds the old
+  bytes or the new ones and never a prefix of either.
+- **Permissions survive.** Rename-over installs a NEW inode, so the
+  mode has to be carried across by hand; truncate-in-place got this
+  for free, which is exactly why nobody would notice until `:w` handed
+  a shell script back non-executable.
+- **Symlinks are written through, not replaced.** Renaming over a link
+  turns it into a regular file — how a dotfile linked into a repo
+  quietly stops tracking the repo.
+
+And the guard that matters most here specifically: **`:w` refuses to
+overwrite a file that changed underneath it.** rook's premise is that
+agents are editing your files while you look at them, so "somebody
+else wrote this since you opened it" is the normal case, not a corner
+one. The buffer records (mtime, size, inode) at load and after each
+save; a mismatch refuses the write and names both ways out — `:w!`
+keeps yours, `:e!` takes theirs — because which one you want is not
+something the editor can know. Deletion counts as a change: writing
+would resurrect content somebody removed on purpose. No claim (a
+scratch buffer, or a path that did not exist when you opened it) means
+no refusal.
+
+The stat happens BEFORE the read at load, and the order is the whole
+point: a write landing between the two calls is recorded as either
+newer than the bytes we hold (`save` then overwrites it silently) or
+older (`save` refuses over content that was in fact current). Only the
+second failure is survivable, and it costs one `:w!`.
 
 WORKSPACES ARE SESSIONS (tmux's model): the hierarchy is space → tabs
 → panes. Each workspace owns a full tab set; switching swaps the
