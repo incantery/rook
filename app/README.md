@@ -346,6 +346,23 @@ gap BETWEEN the two words instead of the span covering them. The bump
 belongs to whichever end is far from the cursor, which is a sentence
 worth keeping the next time a backward motion lands.
 
+### The block is render columns, and `A` pads where `I` skips
+
+`ctrl-v` measures its rectangle in RENDER columns rather than bytes, so
+a tab in the middle of one line does not knock the block out of
+alignment with the line above it. Each row resolves its own byte span
+from its own text, which also means the order rows get edited in does
+not matter — the usual worry with a multi-line edit, and worth saying
+out loud because it is not obvious from the loop.
+
+The one asymmetry worth knowing: block `A` PADS a line too short to
+reach the column, and block `I` SKIPS it. Both are vim's, and the
+reason holds up — appending to a short line is a request to reach that
+far, while inserting into one is a request to insert at a position that
+is not there. A blockwise paste pads for the same reason, and grows the
+buffer rather than dropping rows off the bottom: losing half a paste
+silently is worse than gaining a line.
+
 ### Case operators cost three letters
 
 `gu`, `gU` and `g~` are not a new mechanism. The pending-operator field

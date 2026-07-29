@@ -535,6 +535,15 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       split — and deletes of a line or more shift down the `"1`-`"9`
       ring. `gv` restores the last selection with its MODE, so a
       linewise one comes back linewise.
+- [x] **Visual block** — `ctrl-v` with `d` `x` `y` `c` `I` `A` `r` `$`
+      and the case operators, plus a `p` that puts a rectangle back as
+      a rectangle. The block is measured in RENDER columns, so a tab
+      does not knock it out of alignment. `A` pads a line too short to
+      reach the column and `I` skips it — appending to a short line is
+      a request to reach that far, inserting into one is not, and both
+      are vim's. A paste taller than what is left grows the buffer
+      rather than dropping its last rows: losing half a paste silently
+      is worse than gaining a line.
 - [ ] `:s` patterns are LITERAL, not regexes — the same engine `/`
       uses. Saying so beats half a regex that surprises you on a `.`.
       A real one is its own slice, and `\r` in a replacement (vim's

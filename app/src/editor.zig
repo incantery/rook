@@ -7,19 +7,24 @@
 //! dumps the same grid as text, and `zig test src/editor.zig` drives
 //! the whole machine headless. All calls happen under App.draw_lock.
 //!
-//! Vim scope v1: normal/insert/visual/visual-line/command modes;
-//! h j k l w b e ge 0 ^ $ gg G % { } H M L arrows ctrl-d/u, zt zz zb,
-//! / ? n N * #; operators d y c gu gU g~ (+ their doubled forms and
-//! D C Y S); x X r R s J gJ ~ p P u ctrl-r, counts, `.`;
-//! f F t T ; , >> << (and > < u U ~ J in visual), text objects
-//! (iw aw iW aW, i" i' i` and the four bracket pairs), autoindent,
-//! "a and "0-"9 registers, ma marks, gv, q@ macros; in insert, ctrl-w ctrl-u ctrl-t ctrl-d
-//! ctrl-r ctrl-o; :w :q :q! :wq :x :e :<n>, :[range]s/pat/rep/[gi]
-//! with % . $ N,M 'a '<,'> addresses.
-//! Debts: marks do not shift when text above them is edited, case
-//! operators are ASCII-only, no numbered registers, f/t target ASCII
-//! only, wide glyphs count as one column, lines beyond max_line get
-//! motion/render math clamped.
+//! Vim scope v1. Modes: normal, insert, visual, visual-line,
+//! visual-block, command.
+//! Motions: h j k l w b e ge 0 ^ $ gg G % { } H M L, arrows,
+//!   ctrl-d/u, zt zz zb, / ? n N * #, f F t T ; ,.
+//! Operators: d y c gu gU g~ and > <, with their doubled line forms,
+//!   D C Y S, and the text objects iw aw iW aW, i" i' i` and the four
+//!   bracket pairs.
+//! Edits: x X r R s J gJ ~ p P u ctrl-r, counts, `.`, autoindent.
+//! Visual: > < u U ~ J; ctrl-v blocks with d x y c I A r $, and a
+//!   blockwise p that puts the rectangle back.
+//! State: "a and "0-"9 registers, ma marks, gv, q@ macros.
+//! Insert: ctrl-w ctrl-u ctrl-t ctrl-d ctrl-r ctrl-o.
+//! Ex: :w :q :q! :wq :x :e :<n>, :[range]s/pat/rep/[gi] over
+//!   % . $ N,M 'a '<,'> addresses.
+//! Debts: `:s` and `/` patterns are literal, not regexes; marks do not
+//! shift when text above them is edited; case operators are
+//! ASCII-only; f/t target ASCII only; wide glyphs count as one column;
+//! lines beyond max_line get motion/render math clamped.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -55,7 +60,12 @@ pub const RCell = struct {
     st: Style = .text,
 };
 
-pub const Mode = enum { normal, insert, visual, visual_line, command };
+pub const Mode = enum { normal, insert, visual, visual_line, visual_block, command };
+
+/// What shape a register holds. `block` is a rectangle, stored one row
+/// per line — it is the shape, not the text, that makes `p` put it back
+/// as a rectangle.
+pub const RegKind = enum { char, line, block };
 
 /// One `R` keystroke: bytes put in, bytes displaced.
 const RepEvent = struct { ins: u8, over: u8 };
@@ -86,6 +96,18 @@ pub const Editor = struct {
     /// The selection the last visual mode left behind — what `'<` and
     /// `'>` name in an ex range, and what `gv` puts back.
     vlast: ?struct { mode: Mode, a: Pos, b: Pos } = null,
+    /// `$` in block mode: the right edge is each line's own end.
+    block_eol: bool = false,
+    /// A block insert in flight — where it started and where the text
+    /// has to land on every other row when ESC arrives.
+    bins: ?struct {
+        a: usize,
+        b: usize,
+        rcol: usize,
+        eol: bool,
+        pad: bool,
+        start: usize,
+    } = null,
     /// `>` or `<` waiting for its second key. Not routed through `op`,
     /// because `op` means "delete a range" everywhere it is read.
     pend_shift: u8 = 0,
@@ -154,7 +176,7 @@ pub const Editor = struct {
     /// (:noh clears).
     last_search: std.ArrayListUnmanaged(u8) = .empty,
     reg: std.ArrayListUnmanaged(u8) = .empty,
-    reg_linewise: bool = false,
+    reg_kind: RegKind = .char,
     /// `"a` — the 26 named registers, plus the letter a `"` is waiting
     /// for and the one the command after it should use (0 = unnamed).
     /// 26 named plus the ten numbered: index 26+n is `"n`.
@@ -704,6 +726,10 @@ pub const Editor = struct {
         }
     }
 
+    fn inVisual(self: *const Editor) bool {
+        return self.mode == .visual or self.mode == .visual_line or self.mode == .visual_block;
+    }
+
     /// True when nothing is half-typed — the moment a command is over.
     fn quiescent(self: *const Editor) bool {
         return self.mode == .normal and self.op == 0 and self.count == 0 and
@@ -768,7 +794,7 @@ pub const Editor = struct {
         const n = &self.regs[lo - 'a'];
         if (!std.ascii.isUpper(name)) n.text.clearRetainingCapacity();
         n.text.appendSlice(self.gpa, self.macro_buf.items) catch {};
-        n.linewise = false;
+        n.kind = .char;
         self.macro_buf.clearRetainingCapacity();
     }
 
@@ -915,6 +941,7 @@ pub const Editor = struct {
         }
         if (b0 == 0x1b) { // ESC → normal, cursor left one cp
             self.dropPendingIndent();
+            self.flushBlockInsert();
             self.endReplace();
             self.mode = .normal;
             if (self.ccol > 0) {
@@ -1587,6 +1614,10 @@ pub const Editor = struct {
 
         if (self.pend_r) {
             self.pend_r = false;
+            if (self.mode == .visual_block) {
+                if (ch >= 0x20) self.blockReplace(ch) else self.leaveVisual();
+                return;
+            }
             if (ch >= 0x20) {
                 const s = self.lineText(self.cline);
                 if (s.len > 0 and self.ccol < s.len) {
@@ -1735,7 +1766,7 @@ pub const Editor = struct {
                 'e' => self.motionCharwise(k_ge),
                 'v' => self.reselect(),
                 'u', 'U', '~' => {
-                    if (self.mode == .visual or self.mode == .visual_line) {
+                    if (self.inVisual()) {
                         self.visualOp(ch);
                         return;
                     }
@@ -1763,7 +1794,10 @@ pub const Editor = struct {
             '-' => self.openParentDir(),
 
             // Motions.
-            'h', 'l', 'w', 'b', 'e', '0', '^', '$' => self.motionCharwise(ch),
+            'h', 'l', 'w', 'b', 'e', '0', '^', '$' => {
+                if (self.mode == .visual_block) self.block_eol = ch == '$';
+                self.motionCharwise(ch);
+            },
             '%' => self.motionMatch(),
             '{' => self.motionPara(false),
             '}' => self.motionPara(true),
@@ -1838,7 +1872,7 @@ pub const Editor = struct {
 
             // Operators.
             'd', 'y', 'c' => {
-                if (self.mode == .visual or self.mode == .visual_line) {
+                if (self.inVisual()) {
                     self.visualOp(ch);
                     return;
                 }
@@ -1851,7 +1885,7 @@ pub const Editor = struct {
                 self.op = ch;
             },
             '>', '<' => {
-                if (self.mode == .visual or self.mode == .visual_line) {
+                if (self.inVisual()) {
                     const a = @min(self.vanchor_line, self.cline);
                     const b = @max(self.vanchor_line, self.cline);
                     self.leaveVisual();
@@ -1872,7 +1906,7 @@ pub const Editor = struct {
             },
 
             'x' => {
-                if (self.mode == .visual or self.mode == .visual_line) {
+                if (self.inVisual()) {
                     self.visualOp('d');
                     return;
                 }
@@ -1886,13 +1920,13 @@ pub const Editor = struct {
                 }
                 if (end == self.ccol) return;
                 self.buf.newUndoGroup();
-                self.yankStore(s[self.ccol..end], false, true);
+                self.yankStore(s[self.ccol..end], .char, true);
                 const start = self.buf.rope.lineStart(self.cline);
                 self.buf.deleteRange(gpa, start + self.ccol, start + end) catch return;
                 self.clampNormal();
             },
             'X' => {
-                if (self.mode == .visual or self.mode == .visual_line) {
+                if (self.inVisual()) {
                     self.visualOp('d');
                     return;
                 }
@@ -1905,14 +1939,14 @@ pub const Editor = struct {
                     start = prevCpStart(s, start);
                 }
                 self.buf.newUndoGroup();
-                self.yankStore(s[start..self.ccol], false, true);
+                self.yankStore(s[start..self.ccol], .char, true);
                 const base = self.buf.rope.lineStart(self.cline);
                 self.buf.deleteRange(gpa, base + start, base + self.ccol) catch return;
                 self.ccol = start;
                 self.clampNormal();
             },
             's' => {
-                if (self.mode == .visual or self.mode == .visual_line) {
+                if (self.inVisual()) {
                     self.visualOp('c');
                     return;
                 }
@@ -1927,7 +1961,7 @@ pub const Editor = struct {
                 self.motionCharwise('l');
             },
             'S' => {
-                if (self.mode == .visual or self.mode == .visual_line) {
+                if (self.inVisual()) {
                     self.visualOp('c');
                     return;
                 }
@@ -1937,7 +1971,7 @@ pub const Editor = struct {
                 self.opLines(a, @min(a + cnt - 1, self.lineCountB() - 1));
             },
             '~' => {
-                if (self.mode == .visual or self.mode == .visual_line) {
+                if (self.inVisual()) {
                     self.visualOp('~');
                     return;
                 }
@@ -1959,7 +1993,7 @@ pub const Editor = struct {
                 self.clampNormal();
             },
             'U' => {
-                if (self.mode == .visual or self.mode == .visual_line) {
+                if (self.inVisual()) {
                     self.visualOp('U');
                     return;
                 }
@@ -1978,7 +2012,7 @@ pub const Editor = struct {
                 self.replacing = true;
             },
             'J' => {
-                if (self.mode == .visual or self.mode == .visual_line) {
+                if (self.inVisual()) {
                     const a = @min(self.vanchor_line, self.cline);
                     const b = @max(self.vanchor_line, self.cline);
                     self.leaveVisual();
@@ -1993,18 +2027,29 @@ pub const Editor = struct {
             // Insert transitions — unless something is waiting for a
             // range, in which case i/a name a text object.
             'i' => {
-                if (self.op != 0 or self.mode == .visual or self.mode == .visual_line) {
+                if (self.op != 0 or self.inVisual()) {
                     self.pend_obj = 'i';
                     return;
                 }
                 self.enterInsert();
             },
             'I' => {
+                if (self.mode == .visual_block) {
+                    const r = self.blockRect();
+                    self.leaveVisual();
+                    self.block_eol = false;
+                    self.cline = r.a;
+                    self.ccol = self.blockSpan(r.a, r).a;
+                    self.enterInsert();
+                    self.armBlockInsert(r, .left);
+                    return;
+                }
+                if (self.inVisual()) self.leaveVisual();
                 self.ccol = firstNonblank(self.lineText(self.cline));
                 self.enterInsert();
             },
             'a' => {
-                if (self.op != 0 or self.mode == .visual or self.mode == .visual_line) {
+                if (self.op != 0 or self.inVisual()) {
                     self.pend_obj = 'a';
                     return;
                 }
@@ -2013,6 +2058,18 @@ pub const Editor = struct {
                 self.enterInsert();
             },
             'A' => {
+                if (self.mode == .visual_block) {
+                    const r = self.blockRect();
+                    self.leaveVisual();
+                    self.block_eol = false;
+                    self.cline = r.a;
+                    const sp = self.blockSpan(r.a, r);
+                    self.ccol = if (r.eol) self.lineCap(r.a) else @min(sp.b, self.lineCap(r.a));
+                    self.enterInsert();
+                    self.armBlockInsert(r, .right);
+                    return;
+                }
+                if (self.inVisual()) self.leaveVisual();
                 self.ccol = self.lineCap(self.cline);
                 self.enterInsert();
             },
@@ -2041,7 +2098,7 @@ pub const Editor = struct {
             // Undo — unless a case operator is waiting, where `u` is
             // its own doubled key (`guu`).
             'u' => {
-                if (self.mode == .visual or self.mode == .visual_line) {
+                if (self.inVisual()) {
                     self.visualOp('u');
                     return;
                 }
@@ -2065,6 +2122,16 @@ pub const Editor = struct {
                     self.vanchor_col = self.ccol;
                 }
             },
+            0x16 => { // ctrl-v
+                self.block_eol = false;
+                if (self.mode == .visual_block) {
+                    self.leaveVisual();
+                } else {
+                    self.mode = .visual_block;
+                    self.vanchor_line = self.cline;
+                    self.vanchor_col = self.ccol;
+                }
+            },
             'V' => {
                 if (self.mode == .visual_line) {
                     self.leaveVisual();
@@ -2076,7 +2143,7 @@ pub const Editor = struct {
             },
 
             ':' => {
-                const from_visual = self.mode == .visual or self.mode == .visual_line;
+                const from_visual = self.inVisual();
                 self.leaveVisual();
                 self.mode = .command;
                 self.cmd_kind = .ex;
@@ -2512,7 +2579,7 @@ pub const Editor = struct {
     /// ends a visual goes through here so `'<`/`'>` and `gv` cannot
     /// drift out of date with one of the exits.
     fn leaveVisual(self: *Editor) void {
-        if (self.mode == .visual or self.mode == .visual_line) {
+        if (self.inVisual()) {
             self.vlast = .{
                 .mode = self.mode,
                 .a = .{ .line = self.vanchor_line, .col = self.vanchor_col },
@@ -2810,7 +2877,7 @@ pub const Editor = struct {
 
     const Named = struct {
         text: std.ArrayListUnmanaged(u8) = .empty,
-        linewise: bool = false,
+        kind: RegKind = .char,
     };
 
     /// Whatever the pending `"x` names, else the unnamed register.
@@ -2834,26 +2901,26 @@ pub const Editor = struct {
     /// uppercase. `"_` is the black hole: it takes the text and leaves
     /// the unnamed register ALONE, which is the whole reason to have it
     /// (`"_dd` deletes without losing what you were about to paste).
-    fn yankStore(self: *Editor, text: []const u8, linewise: bool, deleted: bool) void {
+    fn yankStore(self: *Editor, text: []const u8, kind: RegKind, deleted: bool) void {
         const gpa = self.gpa;
         const upper = std.ascii.isUpper(self.sel_reg);
         const blackhole = self.sel_reg == '_';
         if (self.takeReg()) |n| {
             if (!upper) {
                 n.text.clearRetainingCapacity();
-                n.linewise = linewise;
-            } else if (n.linewise and n.text.items.len > 0 and n.text.items[n.text.items.len - 1] != '\n') {
+                n.kind = kind;
+            } else if (n.kind == .line and n.text.items.len > 0 and n.text.items[n.text.items.len - 1] != '\n') {
                 n.text.append(gpa, '\n') catch {};
             }
             n.text.appendSlice(gpa, text) catch {};
-            if (upper and linewise) n.linewise = true;
-            endLine(gpa, &n.text, n.linewise);
+            if (upper and kind == .line) n.kind = .line;
+            endLine(gpa, &n.text, n.kind == .line);
         }
         if (blackhole) return;
         self.reg.clearRetainingCapacity();
         self.reg.appendSlice(gpa, text) catch {};
-        self.reg_linewise = linewise;
-        endLine(gpa, &self.reg, linewise);
+        self.reg_kind = kind;
+        endLine(gpa, &self.reg, kind == .line);
 
         // The numbered registers, vim's arrangement. `"0` holds the
         // last YANK and nothing else — a delete must not push the
@@ -2864,18 +2931,18 @@ pub const Editor = struct {
             const z = &self.regs[26];
             z.text.clearRetainingCapacity();
             z.text.appendSlice(gpa, text) catch {};
-            z.linewise = linewise;
-            endLine(gpa, &z.text, linewise);
+            z.kind = kind;
+            endLine(gpa, &z.text, kind == .line);
             return;
         }
-        if (!linewise and std.mem.indexOfScalar(u8, text, '\n') == null) return;
+        if (kind != .line and std.mem.indexOfScalar(u8, text, '\n') == null) return;
         var i: usize = 9;
         while (i > 1) : (i -= 1) std.mem.swap(Named, &self.regs[26 + i], &self.regs[26 + i - 1]);
         const one = &self.regs[27];
         one.text.clearRetainingCapacity();
         one.text.appendSlice(gpa, text) catch {};
-        one.linewise = linewise;
-        endLine(gpa, &one.text, linewise);
+        one.kind = kind;
+        endLine(gpa, &one.text, kind == .line);
     }
 
     /// A linewise register holds WHOLE lines, even when the last one of
@@ -2939,7 +3006,7 @@ pub const Editor = struct {
         }
         const text = self.buf.rope.dupeRange(gpa, start, end) catch return;
         defer gpa.free(text);
-        self.yankStore(text, false, op != 'y');
+        self.yankStore(text, .char, op != 'y');
         if (op == 'y') {
             self.cursorToOffset(start);
             return;
@@ -2970,7 +3037,7 @@ pub const Editor = struct {
 
         const text = rope.dupeRange(gpa, start, end) catch return;
         defer gpa.free(text);
-        self.yankStore(text, true, op != 'y');
+        self.yankStore(text, .line, op != 'y');
         if (op == 'y') {
             self.cline = a;
             self.clampNormal();
@@ -3084,7 +3151,182 @@ pub const Editor = struct {
         if (op != 'c') self.clampNormal();
     }
 
+    // ---------------------------------------------------------- visual block
+
+    /// The rectangle, in RENDER columns — the columns you can see, so a
+    /// tab does not knock the block out of alignment.
+    const Block = struct { a: usize, b: usize, lo: usize, hi: usize, eol: bool };
+
+    fn blockRect(self: *Editor) Block {
+        const ac = renderCol(self.lineText(self.vanchor_line), self.vanchor_col);
+        const cc = renderCol(self.lineText(self.cline), self.ccol);
+        return .{
+            .a = @min(self.vanchor_line, self.cline),
+            .b = @max(self.vanchor_line, self.cline),
+            .lo = @min(ac, cc),
+            .hi = @max(ac, cc),
+            .eol = self.block_eol,
+        };
+    }
+
+    /// Where render columns [lo, hi] land on one line, in bytes. A line
+    /// too short to reach `lo` comes back empty, which is how vim skips
+    /// it rather than inventing text to operate on.
+    fn blockSpan(self: *Editor, line: usize, r: Block) Range {
+        const s = self.lineText(line);
+        const a = @min(bcolForRenderCol(s, r.lo), s.len);
+        if (r.eol) return .{ .a = a, .b = s.len };
+        var b = bcolForRenderCol(s, r.hi);
+        if (b < s.len) b += cpLenAt(s, b);
+        return .{ .a = a, .b = @min(@max(b, a), s.len) };
+    }
+
+    /// `d` / `x` / `y` / `c` over the rectangle.
+    ///
+    /// Each row's span is resolved fresh from that line's own text, so
+    /// the order rows are edited in does not matter — which is worth
+    /// saying, because the obvious worry with a multi-line edit is that
+    /// the offsets go stale behind you.
+    fn blockOp(self: *Editor, op: u8) void {
+        const gpa = self.gpa;
+        const r = self.blockRect();
+        self.leaveVisual();
+        self.block_eol = false;
+
+        var text: std.ArrayListUnmanaged(u8) = .empty;
+        defer text.deinit(gpa);
+        var line = r.a;
+        while (line <= r.b and line < self.lineCountB()) : (line += 1) {
+            const sp = self.blockSpan(line, r);
+            const s = self.lineText(line);
+            if (line > r.a) text.append(gpa, '\n') catch {};
+            text.appendSlice(gpa, s[sp.a..sp.b]) catch {};
+        }
+        if (isCaseOp(op)) {
+            self.buf.newUndoGroup();
+            var l = r.a;
+            while (l <= r.b and l < self.lineCountB()) : (l += 1) {
+                const sp = self.blockSpan(l, r);
+                const base = self.buf.rope.lineStart(l);
+                self.caseRange(base + sp.a, base + sp.b, op);
+            }
+            self.cline = r.a;
+            self.ccol = @min(self.blockSpan(r.a, r).a, self.lineCap(r.a));
+            self.clampNormal();
+            return;
+        }
+        self.yankStore(text.items, .block, op != 'y');
+        if (op == 'y') {
+            self.cline = r.a;
+            self.ccol = self.blockSpan(r.a, r).a;
+            self.clampNormal();
+            return;
+        }
+
+        self.buf.newUndoGroup();
+        var i = r.a;
+        while (i <= r.b and i < self.lineCountB()) : (i += 1) {
+            const sp = self.blockSpan(i, r);
+            if (sp.b == sp.a) continue;
+            const base = self.buf.rope.lineStart(i);
+            self.buf.deleteRange(gpa, base + sp.a, base + sp.b) catch {};
+        }
+        self.cline = r.a;
+        self.ccol = @min(self.blockSpan(r.a, r).a, self.lineCap(r.a));
+        if (op == 'c') {
+            self.armBlockInsert(r, .left);
+            self.mode = .insert;
+            return;
+        }
+        self.clampNormal();
+    }
+
+    /// `r` in block mode: every cell becomes the same character.
+    fn blockReplace(self: *Editor, ch: u8) void {
+        const gpa = self.gpa;
+        const r = self.blockRect();
+        self.leaveVisual();
+        self.block_eol = false;
+        self.buf.newUndoGroup();
+        var i = r.a;
+        while (i <= r.b and i < self.lineCountB()) : (i += 1) {
+            const sp = self.blockSpan(i, r);
+            if (sp.b == sp.a) continue;
+            const s = self.lineText(i);
+            var n: usize = 0;
+            var k = sp.a;
+            while (k < sp.b) : (k += cpLenAt(s, k)) n += 1;
+            const base = self.buf.rope.lineStart(i);
+            self.buf.deleteRange(gpa, base + sp.a, base + sp.b) catch continue;
+            var fill: [max_indent]u8 = undefined;
+            const m = @min(n, fill.len);
+            @memset(fill[0..m], ch);
+            self.buf.insert(gpa, base + sp.a, fill[0..m]) catch continue;
+        }
+        self.cline = r.a;
+        self.ccol = @min(self.blockSpan(r.a, r).a, self.lineCap(r.a));
+        self.clampNormal();
+    }
+
+    const BlockEdge = enum { left, right };
+
+    /// `I`, `A` and the insert half of `c`: type on the first row, and
+    /// on ESC the same text lands on every other row of the block.
+    fn armBlockInsert(self: *Editor, r: Block, edge: BlockEdge) void {
+        self.bins = .{
+            .a = r.a,
+            .b = r.b,
+            .rcol = if (edge == .left) r.lo else r.hi + 1,
+            .eol = r.eol,
+            .pad = edge == .right,
+            .start = self.ccol,
+        };
+    }
+
+    /// Replicate what was typed on the first row onto the rest.
+    ///
+    /// `I` SKIPS a line too short to reach the column — there is no
+    /// position there to insert at. `A` pads it with spaces instead,
+    /// because appending to a short line is a request to reach that
+    /// far. Both are vim's, and the difference is the whole reason
+    /// `pad` is a field.
+    fn flushBlockInsert(self: *Editor) void {
+        const gpa = self.gpa;
+        const bi = self.bins orelse return;
+        self.bins = null;
+        if (self.cline != bi.a or self.ccol <= bi.start) return;
+        const typed = self.gpa.dupe(u8, self.lineText(bi.a)[bi.start..self.ccol]) catch return;
+        defer gpa.free(typed);
+        if (typed.len == 0) return;
+
+        var line = bi.a + 1;
+        while (line <= bi.b and line < self.lineCountB()) : (line += 1) {
+            const s = self.lineText(line);
+            const width = renderCol(s, s.len);
+            var at: usize = undefined;
+            if (bi.eol) {
+                at = s.len;
+            } else if (width < bi.rcol) {
+                if (!bi.pad) continue;
+                const base = self.buf.rope.lineStart(line);
+                var sp: [max_indent]u8 = undefined;
+                const n = @min(bi.rcol - width, sp.len);
+                @memset(sp[0..n], ' ');
+                self.buf.insert(gpa, base + s.len, sp[0..n]) catch continue;
+                at = s.len + n;
+            } else {
+                at = bcolForRenderCol(s, bi.rcol);
+            }
+            const base = self.buf.rope.lineStart(line);
+            self.buf.insert(gpa, base + at, typed) catch continue;
+        }
+    }
+
     fn visualOp(self: *Editor, op: u8) void {
+        if (self.mode == .visual_block) {
+            self.blockOp(op);
+            return;
+        }
         const linewise = self.mode == .visual_line;
         self.leaveVisual();
         if (linewise) {
@@ -3104,6 +3346,42 @@ pub const Editor = struct {
         self.opRange(a, b);
     }
 
+    /// A rectangle goes back as a rectangle: one row per line, starting
+    /// at the cursor's render column and going DOWN, padding any line
+    /// that does not reach that far and adding lines at the end when
+    /// the rectangle is taller than what is left. Losing half a paste
+    /// silently is worse than gaining a line.
+    fn pasteBlock(self: *Editor, body: []const u8, after: bool, cnt: usize) void {
+        const gpa = self.gpa;
+        const s0 = self.lineText(self.cline);
+        var rcol = renderCol(s0, self.ccol);
+        if (after and self.ccol < s0.len) rcol += 1;
+
+        var line = self.cline;
+        var it = std.mem.splitScalar(u8, body, '\n');
+        while (it.next()) |row| : (line += 1) {
+            if (line >= self.lineCountB()) {
+                self.buf.insert(gpa, self.buf.rope.byteLen(), "\n") catch break;
+            }
+            const s = self.lineText(line);
+            const width = renderCol(s, s.len);
+            const base = self.buf.rope.lineStart(line);
+            var at: usize = undefined;
+            if (width < rcol) {
+                var sp: [max_indent]u8 = undefined;
+                const n = @min(rcol - width, sp.len);
+                @memset(sp[0..n], ' ');
+                self.buf.insert(gpa, base + s.len, sp[0..n]) catch continue;
+                at = s.len + n;
+            } else {
+                at = bcolForRenderCol(s, rcol);
+            }
+            for (0..cnt) |_| self.buf.insert(gpa, base + at, row) catch break;
+        }
+        self.ccol = @min(bcolForRenderCol(self.lineText(self.cline), rcol), self.lineCap(self.cline));
+        self.clampNormal();
+    }
+
     fn paste(self: *Editor, after: bool) void {
         const gpa = self.gpa;
         if (self.sel_reg == '_') { // the black hole holds nothing
@@ -3115,15 +3393,19 @@ pub const Editor = struct {
         // pasting a NAMED register into the buffer must not be walking
         // a list that anything downstream could reallocate.
         var body: []const u8 = self.reg.items;
-        var linewise = self.reg_linewise;
+        var kind = self.reg_kind;
         if (self.takeReg()) |n| {
             body = n.text.items;
-            linewise = n.linewise;
+            kind = n.kind;
         }
         if (body.len == 0) return;
         const cnt = self.takeCount();
         self.buf.newUndoGroup();
-        if (linewise) {
+        if (kind == .block) {
+            self.pasteBlock(body, after, cnt);
+            return;
+        }
+        if (kind == .line) {
             const rope = &self.buf.rope;
             for (0..cnt) |i| {
                 if (after) {
@@ -3182,7 +3464,7 @@ pub const Editor = struct {
         switch (self.mode) {
             .insert, .command => self.key(text),
             else => {
-                self.yankStore(text, text[text.len - 1] == '\n', false);
+                self.yankStore(text, if (text[text.len - 1] == '\n') .line else .char, false);
                 self.paste(true);
             },
         }
@@ -3260,11 +3542,15 @@ pub const Editor = struct {
 
     /// Is (line, bcol) inside the visual selection?
     fn selContains(self: *const Editor, line: usize, bcol: usize, abs_line_start: usize) bool {
-        if (self.mode != .visual and self.mode != .visual_line) return false;
+        if (!self.inVisual()) return false;
         const al = @min(self.vanchor_line, self.cline);
         const bl = @max(self.vanchor_line, self.cline);
         if (line < al or line > bl) return false;
         if (self.mode == .visual_line) return true;
+        // The block is drawn by fillGrid from render columns it works
+        // out once, because lineText hands back a slice of ONE shared
+        // buffer and the caller is already holding it.
+        if (self.mode == .visual_block) return false;
         // Charwise: compare absolute offsets, inclusive of the far end.
         const anchor_abs = self.buf.rope.lineStart(self.vanchor_line) + self.vanchor_col;
         const cur_abs = self.buf.rope.lineStart(self.cline) + self.ccol;
@@ -3310,6 +3596,18 @@ pub const Editor = struct {
         self.refreshHighlights(text_rows);
 
         const cur_rc = renderCol(self.lineText(self.cline), self.ccol);
+        // The rectangle, resolved once: selContains cannot ask for a
+        // line's text while fillGrid is holding the shared buffer.
+        const blk: ?struct { a: usize, b: usize, lo: usize, hi: usize } =
+            if (self.mode == .visual_block) b: {
+                const ac = renderCol(self.lineText(self.vanchor_line), self.vanchor_col);
+                break :b .{
+                    .a = @min(self.vanchor_line, self.cline),
+                    .b = @max(self.vanchor_line, self.cline),
+                    .lo = @min(ac, cur_rc),
+                    .hi = @max(ac, cur_rc),
+                };
+            } else null;
 
         for (0..text_rows) |row| {
             const line = self.top + row;
@@ -3338,7 +3636,11 @@ pub const Editor = struct {
             var i: usize = 0;
             while (i < s.len) {
                 const base = self.hlStyleAt(abs_start + i);
-                const st: Style = if (self.selContains(line, i, abs_start)) .sel else base;
+                const in_sel = if (blk) |bb|
+                    line >= bb.a and line <= bb.b and rc >= bb.lo and (self.block_eol or rc <= bb.hi)
+                else
+                    self.selContains(line, i, abs_start);
+                const st: Style = if (in_sel) .sel else base;
                 if (s[i] == '\t') {
                     const next = rc / tab_width * tab_width + tab_width;
                     while (rc < next) : (rc += 1) {
@@ -3456,6 +3758,7 @@ pub const Editor = struct {
             .insert => if (self.replacing) " REPLACE " else " INSERT ",
             .visual => " VISUAL ",
             .visual_line => " V-LINE ",
+            .visual_block => " V-BLOCK ",
             .command => unreachable,
         };
         putStr(out, &x, mode_str, .mode);
@@ -3643,14 +3946,14 @@ test "yank paste linewise and charwise" {
     keys(e, "ialpha\nbeta\ngamma");
     e.key("\x1b");
     keys(e, "ggyy"); // yank "alpha\n"
-    try testing.expect(e.reg_linewise);
+    try testing.expectEqual(RegKind.line, e.reg_kind);
     keys(e, "Gp"); // paste after last line
     var s = try bufText(gpa, e);
     try testing.expectEqualStrings("alpha\nbeta\ngamma\nalpha", s);
     gpa.free(s);
 
     keys(e, "gg0vey"); // charwise yank "alpha"
-    try testing.expect(!e.reg_linewise);
+    try testing.expectEqual(RegKind.char, e.reg_kind);
     keys(e, "$p");
     s = try bufText(gpa, e);
     try testing.expectEqualStrings("alphaalpha\nbeta\ngamma\nalpha", s);
@@ -5719,4 +6022,196 @@ test "gv restores a linewise selection as linewise" {
     const s = try bufText(gpa, e);
     defer gpa.free(s);
     try testing.expectEqualStrings("three\nfour", s);
+}
+
+// ---------------------------------------------------------- visual block
+
+test "ctrl-v d deletes the rectangle" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef\nabcdef\nabcdef");
+    e.key("\x1b");
+    keys(e, "gg0l");
+    e.key("\x16");
+    keys(e, "jjld");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("adef\nadef\nadef", s);
+}
+
+test "ctrl-v I inserts at the left edge of every row" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc\nabc\nabc");
+    e.key("\x1b");
+    keys(e, "gg0l");
+    e.key("\x16");
+    keys(e, "jjIXY");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("aXYbc\naXYbc\naXYbc", s);
+}
+
+test "ctrl-v A appends past the right edge of every row" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc\nabc\nabc");
+    e.key("\x1b");
+    keys(e, "gg0l");
+    e.key("\x16");
+    keys(e, "jjAXY");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abXYc\nabXYc\nabXYc", s);
+}
+
+test "block A pads a short line, block I skips it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef\nab\nabcdef");
+    e.key("\x1b");
+    keys(e, "gg0lll");
+    e.key("\x16");
+    keys(e, "jjAX");
+    e.key("\x1b");
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        try testing.expectEqualStrings("abcdXef\nab  X\nabcdXef", s);
+    }
+
+    var e2 = try mkEditor(gpa);
+    defer e2.destroy();
+    keys(e2, "iabcdef\nab\nabcdef");
+    e2.key("\x1b");
+    keys(e2, "gg0lll");
+    e2.key("\x16");
+    keys(e2, "jjIX");
+    e2.key("\x1b");
+    const s = try bufText(gpa, e2);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abcXdef\nab\nabcXdef", s);
+}
+
+test "dollar in block mode reaches each line's own end" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nabcd\nab");
+    e.key("\x1b");
+    keys(e, "gg0");
+    e.key("\x16");
+    keys(e, "jj$AX");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("aX\nabcdX\nabX", s);
+}
+
+test "r over a block replaces every cell" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef\nabcdef");
+    e.key("\x1b");
+    keys(e, "gg0l");
+    e.key("\x16");
+    keys(e, "jlrZ");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("aZZdef\naZZdef", s);
+}
+
+test "a block yank pastes back as a block" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc\ndef\nghi");
+    e.key("\x1b");
+    keys(e, "gg0");
+    e.key("\x16");
+    keys(e, "jly");
+    keys(e, "$p");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abcab\ndefde\nghi", s);
+}
+
+test "a block paste pads a line that is too short" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iXY\nXY\nlonger line here\nq");
+    e.key("\x1b");
+    keys(e, "gg0");
+    e.key("\x16");
+    keys(e, "jly"); // block "XY\nXY"
+    keys(e, "G0P"); // onto the one-character last line
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    // The rectangle is taller than what is left, so it grows the
+    // buffer rather than dropping its last row. Same as vim.
+    try testing.expectEqualStrings("XY\nXY\nlonger line here\nXYq\nXY", s);
+}
+
+test "gU over a block only touches the rectangle" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef\nabcdef");
+    e.key("\x1b");
+    keys(e, "gg0l");
+    e.key("\x16");
+    keys(e, "jlU");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("aBCdef\naBCdef", s);
+}
+
+test "the status row says V-BLOCK" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    e.key("\x16");
+    const dump = try e.dumpText(gpa, 40, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "V-BLOCK") != null);
+}
+
+test "ctrl-v c retypes the rectangle on every row" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef\nabcdef\nabcdef");
+    e.key("\x1b");
+    keys(e, "gg0l");
+    e.key("\x16");
+    keys(e, "jjlcZZ");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("aZZdef\naZZdef\naZZdef", s);
+}
+
+test "a block paste pads a line too short to reach the column" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iXY\nXY\nabcdefgh\nz");
+    e.key("\x1b");
+    keys(e, "gg0");
+    e.key("\x16");
+    keys(e, "jly");
+    keys(e, "3G0llllp");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("XY\nXY\nabcdeXYfgh\nz    XY", s);
 }
