@@ -10,7 +10,7 @@
 //! Vim scope v1. Modes: normal, insert, visual, visual-line,
 //! visual-block, command.
 //! Motions: h j k l w b e ge 0 ^ $ gg G % { } H M L, arrows,
-//!   ctrl-d/u, zt zz zb, / ? n N * # (searching as you type),
+//!   ctrl-d/u, zt zz zb, / ? n N * # (searching as you type), gd,
 //!   f F t T ; ,.
 //! Operators: d y c gu gU g~ and > <, with their doubled line forms,
 //!   D C Y S, and the text objects iw aw iW aW, i" i' i` and the four
@@ -19,7 +19,8 @@
 //! Visual: > < u U ~ J; ctrl-v blocks with d x y c I A r $, and a
 //!   blockwise p that puts the rectangle back.
 //! State: "a and "0-"9 registers, ma marks, gv, q@ macros.
-//! Insert: ctrl-w ctrl-u ctrl-t ctrl-d ctrl-r ctrl-o.
+//! Insert: ctrl-w ctrl-u ctrl-t ctrl-d ctrl-r ctrl-o, and ctrl-n /
+//!   ctrl-p keyword completion from the buffer.
 //! Ex: :w :q :q! :wq :x :e :<n>, ZZ ZQ, :[range]s/pat/rep/[gi], and
 //!   :[range]g/pat/{d | s/// | normal keys} with :g! and :v — over
 //!   % . $ N,M 'a '<,'> addresses.
@@ -134,6 +135,17 @@ pub const Editor = struct {
     /// someone to review.
     ai_line: ?usize = null,
     ai_len: usize = 0,
+
+    /// Insert-mode keyword completion in flight. The candidates are
+    /// concatenated into `cpl_blob` with their starts in `cpl_at`
+    /// (plus a trailing sentinel), already in the order the ring
+    /// should visit them; `cpl_base` is the buffer offset the word
+    /// starts at, which is what a chosen candidate replaces from.
+    cpl_blob: std.ArrayListUnmanaged(u8) = .empty,
+    cpl_at: std.ArrayListUnmanaged(u32) = .empty,
+    cpl_base: usize = 0,
+    cpl_idx: usize = 0,
+    cpl_live: bool = false,
 
     /// `/` preview: where the cursor was when the prompt opened, and
     /// the pattern that was current before it — both put back on ESC,
@@ -424,6 +436,8 @@ pub const Editor = struct {
         self.rec.deinit(gpa);
         self.last_search.deinit(gpa);
         self.inc_prev.deinit(gpa);
+        self.cpl_blob.deinit(gpa);
+        self.cpl_at.deinit(gpa);
         if (self.last_re) |*r| r.deinit(gpa);
         self.reg.deinit(gpa);
         for (&self.regs) |*r| r.text.deinit(gpa);
@@ -905,6 +919,9 @@ pub const Editor = struct {
     fn insertKey(self: *Editor, bytes: []const u8) void {
         const gpa = self.gpa;
         const b0 = bytes[0];
+        // Any key that is not another ctrl-n/ctrl-p ends the ring —
+        // the candidates were built against text that has now moved.
+        if (b0 != 0x0e and b0 != 0x10) self.cpl_live = false;
 
         // ctrl-r took the next key as a register name.
         if (self.pend_ins_reg) {
@@ -947,6 +964,10 @@ pub const Editor = struct {
             },
             0x12 => { // ctrl-r — paste a register inline
                 self.pend_ins_reg = true;
+                return;
+            },
+            0x0e, 0x10 => { // ctrl-n / ctrl-p — keyword completion
+                self.complete(b0 == 0x0e);
                 return;
             },
             0x0f => { // ctrl-o — one normal command, then back
@@ -1040,6 +1061,139 @@ pub const Editor = struct {
             self.ccol += bytes.len;
             self.ai_line = null; // typed on it — it is yours now
         }
+    }
+
+    // ------------------------------------------------- keyword completion
+
+    const max_cpl = 200;
+    const max_cpl_bytes = 16 * 1024;
+
+    /// Every word in the buffer that starts with `prefix` and is longer
+    /// than it, in the order the ring should visit them: forward from
+    /// the cursor and wrapping for ctrl-n, backward for ctrl-p. Vim's
+    /// order, and it is the whole reason the nearest match is usually
+    /// the one you wanted.
+    ///
+    /// The typed prefix goes on the END, so cycling past the last
+    /// candidate gives you back what you actually typed instead of
+    /// stranding you on a word you rejected.
+    fn buildCompletions(self: *Editor, prefix: []const u8, at: usize, fwd: bool) void {
+        const gpa = self.gpa;
+        self.cpl_blob.clearRetainingCapacity();
+        self.cpl_at.clearRetainingCapacity();
+
+        const Cand = struct { off: u32, start: u32, len: u32 };
+        var cands: std.ArrayListUnmanaged(Cand) = .empty;
+        defer cands.deinit(gpa);
+        var blob: std.ArrayListUnmanaged(u8) = .empty;
+        defer blob.deinit(gpa);
+
+        const scan = @min(self.lineCountB(), 20_000);
+        outer: for (0..scan) |l| {
+            const s = self.lineText(l);
+            const base = self.buf.rope.lineStart(l);
+            var i: usize = 0;
+            while (i < s.len) {
+                if (charClass(s[i]) != 1) {
+                    i += 1;
+                    continue;
+                }
+                var j = i;
+                while (j < s.len and charClass(s[j]) == 1) j += 1;
+                const w = s[i..j];
+                if (w.len > prefix.len and std.mem.startsWith(u8, w, prefix)) {
+                    if (cands.items.len >= max_cpl or blob.items.len + w.len > max_cpl_bytes) break :outer;
+                    const start: u32 = @intCast(blob.items.len);
+                    blob.appendSlice(gpa, w) catch break :outer;
+                    cands.append(gpa, .{
+                        .off = @intCast(base + i),
+                        .start = start,
+                        .len = @intCast(w.len),
+                    }) catch break :outer;
+                }
+                i = j;
+            }
+        }
+
+        // Order the ring, then drop repeats — keeping the FIRST, which
+        // after ordering is the nearest one.
+        var order: std.ArrayListUnmanaged(usize) = .empty;
+        defer order.deinit(gpa);
+        const n = cands.items.len;
+        for (0..2) |pass| {
+            var k: usize = 0;
+            while (k < n) : (k += 1) {
+                const idx = if (fwd) k else n - 1 - k;
+                const c = cands.items[idx];
+                const near = if (fwd) c.off > at else c.off < at;
+                if ((pass == 0) == near) order.append(gpa, idx) catch {};
+            }
+        }
+        for (order.items) |idx| {
+            const c = cands.items[idx];
+            const w = blob.items[c.start..][0..c.len];
+            var dup = false;
+            var q: usize = 0;
+            while (q < self.cpl_at.items.len) : (q += 1) {
+                const a = self.cpl_at.items[q];
+                // The last entry has no start after it yet — the blob's
+                // own length is its end.
+                const b = if (q + 1 < self.cpl_at.items.len)
+                    self.cpl_at.items[q + 1]
+                else
+                    @as(u32, @intCast(self.cpl_blob.items.len));
+                if (std.mem.eql(u8, self.cpl_blob.items[a..b], w)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) continue;
+            self.cpl_at.append(gpa, @intCast(self.cpl_blob.items.len)) catch return;
+            self.cpl_blob.appendSlice(gpa, w) catch return;
+        }
+        // The typed text, as the last stop in the ring.
+        self.cpl_at.append(gpa, @intCast(self.cpl_blob.items.len)) catch return;
+        self.cpl_blob.appendSlice(gpa, prefix) catch return;
+        self.cpl_at.append(gpa, @intCast(self.cpl_blob.items.len)) catch return;
+    }
+
+    fn cplCount(self: *const Editor) usize {
+        return self.cpl_at.items.len -| 1;
+    }
+
+    fn cplWord(self: *const Editor, i: usize) []const u8 {
+        return self.cpl_blob.items[self.cpl_at.items[i]..self.cpl_at.items[i + 1]];
+    }
+
+    /// ctrl-n / ctrl-p in insert mode.
+    fn complete(self: *Editor, fwd: bool) void {
+        const gpa = self.gpa;
+        if (!self.cpl_live) {
+            const s = self.lineText(self.cline);
+            var a = self.ccol;
+            while (a > 0 and charClass(s[a - 1]) == 1) a -= 1;
+            if (a == self.ccol) return; // nothing to complete from
+            var pbuf: [max_indent]u8 = undefined;
+            const plen = @min(self.ccol - a, pbuf.len);
+            @memcpy(pbuf[0..plen], s[a..][0..plen]);
+            self.cpl_base = self.buf.rope.lineStart(self.cline) + a;
+            self.buildCompletions(pbuf[0..plen], self.cpl_base, fwd);
+            if (self.cplCount() <= 1) { // only the typed text came back
+                self.setStatus("no completions", .{}, false);
+                return;
+            }
+            self.cpl_live = true;
+            self.cpl_idx = if (fwd) 0 else 0;
+        } else {
+            const n = self.cplCount();
+            self.cpl_idx = if (fwd) (self.cpl_idx + 1) % n else (self.cpl_idx + n - 1) % n;
+        }
+        const word = self.cplWord(self.cpl_idx);
+        const end = self.absOff();
+        if (end > self.cpl_base) self.buf.deleteRange(gpa, self.cpl_base, end) catch return;
+        self.buf.insert(gpa, self.cpl_base, word) catch return;
+        self.ccol = self.cpl_base + word.len - self.buf.rope.lineStart(self.cline);
+        self.ai_line = null;
     }
 
     /// Backspace (and ctrl-w) in column zero: take the newline above.
@@ -1960,6 +2114,7 @@ pub const Editor = struct {
                 },
                 'e' => self.motionCharwise(k_ge),
                 'v' => self.reselect(),
+                'd' => self.gotoDefinition(),
                 'u', 'U', '~' => {
                     if (self.inVisual()) {
                         self.visualOp(ch);
@@ -2802,6 +2957,38 @@ pub const Editor = struct {
             };
         }
         self.mode = .normal;
+    }
+
+    /// `gd` — the first occurrence of the word under the cursor, from
+    /// the top of the file. Vim calls it "local declaration" and this
+    /// is the honest version of that: no scopes, no index, just the
+    /// first time the name appears, which in most files IS where it is
+    /// declared.
+    fn gotoDefinition(self: *Editor) void {
+        self.count = 0;
+        self.op = 0;
+        const s = self.lineText(self.cline);
+        var a = self.ccol;
+        while (a < s.len and charClass(s[a]) != 1) a += 1;
+        if (a >= s.len) {
+            self.setStatus("no word under the cursor", .{}, true);
+            return;
+        }
+        while (a > 0 and charClass(s[a - 1]) == 1) a -= 1;
+        var b = a;
+        while (b < s.len and charClass(s[b]) == 1) b += 1;
+        var pbuf: [max_indent]u8 = undefined;
+        const pat = std.fmt.bufPrint(&pbuf, "\\<{s}\\>", .{s[a..b]}) catch return;
+        if (!self.setSearch(pat, false)) return;
+        self.search_fwd = true;
+        self.setJump();
+        self.cline = 0;
+        self.ccol = 0;
+        if (self.findMatch(true)) |pos| {
+            self.cline = pos.line;
+            self.ccol = pos.col;
+            self.goal = renderCol(self.lineText(pos.line), pos.col);
+        }
     }
 
     /// `gv` — put the last selection back, clamped to a buffer that
@@ -3803,6 +3990,31 @@ pub const Editor = struct {
         }
     };
 
+    /// The partner of the bracket under the cursor, if the cursor is
+    /// on one. Null the rest of the time, which is most of it.
+    fn cursorPairOffset(self: *Editor) ?usize {
+        const s = self.lineText(self.cline);
+        if (self.ccol >= s.len) return null;
+        var ob: u8 = 0;
+        var cb: u8 = 0;
+        switch (s[self.ccol]) {
+            '(', ')' => {
+                ob = '(';
+                cb = ')';
+            },
+            '[', ']' => {
+                ob = '[';
+                cb = ']';
+            },
+            '{', '}' => {
+                ob = '{';
+                cb = '}';
+            },
+            else => return null,
+        }
+        return self.matchBracket(self.absOff(), ob, cb, s[self.ccol] == ob);
+    }
+
     fn selContains(self: *const Editor, line: usize, bcol: usize, abs_line_start: usize) bool {
         if (!self.inVisual()) return false;
         const al = @min(self.vanchor_line, self.cline);
@@ -3871,6 +4083,12 @@ pub const Editor = struct {
             };
         } else null;
 
+        // The bracket under the cursor and its partner, so a long body
+        // tells you where it ends without moving the cursor to find
+        // out. Resolved once, before the row loop takes the shared
+        // line buffer.
+        const pair: ?usize = if (self.mode != .command) self.cursorPairOffset() else null;
+
         for (0..text_rows) |row| {
             const line = self.top + row;
             const out = g[row * cols ..][0..cols];
@@ -3921,7 +4139,11 @@ pub const Editor = struct {
                     continue;
                 }
                 const n = cpLenAt(s, i);
-                putText(out, gw, text_cols, self.left, rc, decodeAt(s, i), st);
+                const pst: Style = if (pair) |po|
+                    (if (abs_start + i == po and !in_sel) .mode else st)
+                else
+                    st;
+                putText(out, gw, text_cols, self.left, rc, decodeAt(s, i), pst);
                 rc += 1;
                 i += n;
             }
@@ -6839,4 +7061,154 @@ test "ZQ closes without writing" {
     e.key("\x1b");
     keys(e, "ZQ");
     try testing.expect(e.closed);
+}
+
+// --------------------------------------------- completion, gd, bracket pair
+
+test "ctrl-n completes from a word above" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialphabet\nbeta\nal");
+    e.key("\x1b");
+    keys(e, "GA");
+    e.key("\x0e");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("alphabet\nbeta\nalphabet", s);
+}
+
+test "ctrl-n twice takes the next candidate" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialpha\nalpine\nal");
+    e.key("\x1b");
+    keys(e, "GA");
+    e.key("\x0e");
+    e.key("\x0e");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("alpha\nalpine\nalpine", s);
+}
+
+test "ctrl-p starts from the nearest one above" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    // One candidate on each side, so which direction is searched first
+    // is the only thing that decides the answer.
+    keys(e, "ialpha\nal\nalpine");
+    e.key("\x1b");
+    keys(e, "ggjA");
+    e.key("\x10");
+    e.key("\x1b");
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        try testing.expectEqualStrings("alpha\nalpha\nalpine", s);
+    }
+
+    var e2 = try mkEditor(gpa);
+    defer e2.destroy();
+    keys(e2, "ialpha\nal\nalpine");
+    e2.key("\x1b");
+    keys(e2, "ggjA");
+    e2.key("\x0e"); // ctrl-n looks DOWN first
+    e2.key("\x1b");
+    const s = try bufText(gpa, e2);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("alpha\nalpine\nalpine", s);
+}
+
+test "cycling past the last candidate returns what you typed" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialpha\nalpine\nal");
+    e.key("\x1b");
+    keys(e, "GA");
+    e.key("\x0e");
+    e.key("\x0e");
+    e.key("\x0e"); // past both, back to "al"
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("alpha\nalpine\nal", s);
+}
+
+test "no candidate leaves the word alone" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialpha\nzz");
+    e.key("\x1b");
+    keys(e, "GA");
+    e.key("\x0e");
+    {
+        const dump = try e.dumpText(gpa, 40, 6);
+        defer gpa.free(dump);
+        try testing.expect(std.mem.indexOf(u8, dump, "no completions") != null);
+    }
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("alpha\nzz", s);
+}
+
+test "the same word twice is offered once" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iwidget\nwidget\nwidgetry\nwid");
+    e.key("\x1b");
+    keys(e, "GA");
+    e.key("\x0e");
+    e.key("\x0e"); // second distinct candidate, not the duplicate
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("widget\nwidget\nwidgetry\nwidgetry", s);
+}
+
+test "typing after a completion ends the ring" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialpha\nal");
+    e.key("\x1b");
+    keys(e, "GA");
+    e.key("\x0e"); // alpha
+    keys(e, "s"); // alphas — and the ring is over
+    e.key("\x0e"); // nothing starts with "alphas"
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("alpha\nalphas", s);
+}
+
+test "gd goes to the first mention of the word" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ivar total = 0\nx = 1\ntotal = total + x");
+    e.key("\x1b");
+    keys(e, "G0gd");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+    try testing.expectEqual(@as(usize, 4), e.ccol);
+}
+
+test "the matching bracket is marked" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iif (a) {\nbody\n}");
+    e.key("\x1b");
+    keys(e, "gg0f{");
+    const cells = e.fillGrid(40, 5);
+    const gw = Editor.digits(e.lineCountB()) + 1;
+    // Row 2 is `}` — the partner of the `{` under the cursor.
+    try testing.expectEqual(Style.mode, cells[2 * 40 + gw].st);
 }

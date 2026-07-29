@@ -564,6 +564,16 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       is what makes `:g/x/d` work at all. An ex command is ONE undo:
       `Buffer.newUndoGroup` can be pinned, because the primitives that
       open groups are exactly the ones a global reaches for.
+- [x] **Keyword completion** (ctrl-n / ctrl-p), `gd`, and a matching
+      bracket mark. Completion offers every word in the buffer sharing
+      the prefix, ordered by DIRECTION from the cursor — down first for
+      ctrl-n, up first for ctrl-p — deduped, with the text you actually
+      typed as the last stop in the ring so cycling past the end does
+      not strand you on a word you rejected. Any other key ends the
+      ring, because the candidates were built against text that has
+      since moved. `gd` is the honest version of "local declaration":
+      the first mention of the word from the top of the file, which in
+      most files is where it is declared.
 - [ ] Regex gaps: no `\{-}` (non-greedy), no `\zs`/`\ze`, no `\%(`
       non-capturing groups, no back-references INSIDE a pattern, and
       `\c`/`\C` are not honoured mid-pattern (`:s///i` is).
