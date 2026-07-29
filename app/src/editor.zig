@@ -13,7 +13,7 @@
 //! D C Y S); x X r R s J gJ ~ p P u ctrl-r, counts, `.`;
 //! f F t T ; , >> << (and > < u U ~ J in visual), text objects
 //! (iw aw iW aW, i" i' i` and the four bracket pairs), autoindent,
-//! "a registers and ma marks; in insert, ctrl-w ctrl-u ctrl-t ctrl-d
+//! "a registers, ma marks, q@ macros; in insert, ctrl-w ctrl-u ctrl-t ctrl-d
 //! ctrl-r ctrl-o; :w :q :q! :wq :x :e :<n>, :[range]s/pat/rep/[gi]
 //! with % . $ N,M 'a '<,'> addresses.
 //! Debts: marks do not shift when text above them is edited, case
@@ -123,6 +123,15 @@ pub const Editor = struct {
     ins_oneshot: u8 = 0,
     rep_ev: std.ArrayListUnmanaged(RepEvent) = .empty,
     rep_text: std.ArrayListUnmanaged(u8) = .empty,
+
+    /// `q` — the register being recorded into (0 = not recording), the
+    /// keys so far, the last register `@` played, and how deep a macro
+    /// is currently calling other macros.
+    macro_reg: u8 = 0,
+    macro_buf: std.ArrayListUnmanaged(u8) = .empty,
+    macro_last: u8 = 0,
+    macro_depth: u8 = 0,
+    pend_macro: u8 = 0,
 
     /// `.` — the keys of the last change (`dot`), the keys of the one
     /// being typed now (`rec`), and the buffer version when it started.
@@ -366,6 +375,7 @@ pub const Editor = struct {
         self.buf.deinit(gpa);
         self.cmd.deinit(gpa);
         self.dot.deinit(gpa);
+        self.macro_buf.deinit(gpa);
         self.rep_ev.deinit(gpa);
         self.rep_text.deinit(gpa);
         self.rec.deinit(gpa);
@@ -613,7 +623,15 @@ pub const Editor = struct {
             const pre_mode = self.mode;
             const pre_ver = self.buf.version;
             const pre_reg = self.sel_reg;
+            // Recording is suppressed inside a replay: a macro that
+            // runs another one records the `@b`, not what b expands to.
+            const taping = self.macro_reg != 0 and self.macro_depth == 0;
             const n = self.dispatch(bytes[i..]);
+            // Still recording AFTER the step, so the `q` that stops it
+            // is not the last thing the macro does.
+            if (taping and self.macro_reg != 0 and self.macro_buf.items.len < 64 * 1024) {
+                self.macro_buf.appendSlice(self.gpa, bytes[i..][0..n]) catch {};
+            }
             // A `"a` selection survives exactly ONE command. It was set
             // by the step before this one, so if this step finished
             // without taking it, it is gone — otherwise `"a` followed
@@ -685,7 +703,7 @@ pub const Editor = struct {
         return self.mode == .normal and self.op == 0 and self.count == 0 and
             !self.pend_g and !self.pend_z and !self.pend_r and self.pend_shift == 0 and
             self.pend_obj == 0 and self.pend_find == 0 and !self.pend_reg and
-            self.pend_mark == 0;
+            self.pend_mark == 0 and self.pend_macro == 0;
     }
 
     /// Remember the keys of the last change, so `.` can type them again.
@@ -722,6 +740,55 @@ pub const Editor = struct {
         if (self.buf.version == self.rec_ver) return;
         self.dot.clearRetainingCapacity();
         self.dot.appendSlice(self.gpa, self.rec.items) catch {};
+    }
+
+    // -------------------------------------------------------------- macros
+
+    /// Macros live in the SAME registers as yanks, which is vim's
+    /// arrangement and a good one: `"ap` prints the macro you just
+    /// recorded, and `"ay$` on a line of keystrokes loads one.
+    fn startMacro(self: *Editor, name: u8) void {
+        const lo = std.ascii.toLower(name);
+        if (lo < 'a' or lo > 'z') return;
+        self.macro_reg = name;
+        self.macro_buf.clearRetainingCapacity();
+    }
+
+    fn stopMacro(self: *Editor) void {
+        const name = self.macro_reg;
+        self.macro_reg = 0;
+        const lo = std.ascii.toLower(name);
+        if (lo < 'a' or lo > 'z') return;
+        const n = &self.regs[lo - 'a'];
+        if (!std.ascii.isUpper(name)) n.text.clearRetainingCapacity();
+        n.text.appendSlice(self.gpa, self.macro_buf.items) catch {};
+        n.linewise = false;
+        self.macro_buf.clearRetainingCapacity();
+    }
+
+    /// `@a`, `@@`, and `10@a`. The depth cap is the only thing standing
+    /// between a macro that plays itself and the stack.
+    fn playMacro(self: *Editor, name0: u8) void {
+        const cnt = self.takeCount();
+        const name = if (name0 == '@') self.macro_last else name0;
+        const lo = std.ascii.toLower(name);
+        if (lo < 'a' or lo > 'z') {
+            self.setStatus("no macro to repeat", .{}, true);
+            return;
+        }
+        self.macro_last = lo;
+        if (self.macro_depth >= 16) {
+            self.setStatus("macro nested too deep", .{}, true);
+            return;
+        }
+        // Played off a copy: the macro is free to yank into its own
+        // register while it runs.
+        const body = self.gpa.dupe(u8, self.regs[lo - 'a'].text.items) catch return;
+        defer self.gpa.free(body);
+        if (body.len == 0) return;
+        self.macro_depth += 1;
+        defer self.macro_depth -= 1;
+        for (0..cnt) |_| self.key(body);
     }
 
     /// Type the last change again. A count on `.` REPLACES the recorded
@@ -1557,6 +1624,18 @@ pub const Editor = struct {
             return;
         }
 
+        if (self.pend_macro != 0) {
+            const kind = self.pend_macro;
+            self.pend_macro = 0;
+            if (ch == 0x1b or ch < 0x20) {
+                self.op = 0;
+                self.count = 0;
+                return;
+            }
+            if (kind == 'q') self.startMacro(ch) else self.playMacro(ch);
+            return;
+        }
+
         if (self.pend_mark != 0) {
             const kind = self.pend_mark;
             self.pend_mark = 0;
@@ -1598,6 +1677,7 @@ pub const Editor = struct {
             self.pend_obj = 0;
             self.pend_reg = false;
             self.pend_mark = 0;
+            self.pend_macro = 0;
             self.sel_reg = 0;
             self.leaveVisual();
             return;
@@ -2006,6 +2086,12 @@ pub const Editor = struct {
             'N' => self.searchNext(false),
 
             '.' => self.dotRepeat(),
+
+            // Macros.
+            'q' => {
+                if (self.macro_reg != 0) self.stopMacro() else self.pend_macro = 'q';
+            },
+            '@' => self.pend_macro = '@',
 
             // Registers and marks.
             '"' => self.pend_reg = true,
@@ -3325,6 +3411,11 @@ pub const Editor = struct {
         };
         putStr(out, &x, mode_str, .mode);
         x += 1;
+        if (self.macro_reg != 0) {
+            putStr(out, &x, "recording @", .err);
+            putStr(out, &x, &[1]u8{self.macro_reg}, .err);
+            x += 1;
+        }
         if (self.status_len > 0) {
             putStr(out, &x, self.status_buf[0..self.status_len], if (self.status_err) .err else .text);
         } else {
@@ -5356,4 +5447,125 @@ test "a bare range is a goto" {
     keys(e, "gg");
     ex(e, "$");
     try testing.expectEqual(@as(usize, 3), e.cline);
+}
+
+// ---------------------------------------------------------------- macros
+
+test "q records and @ replays" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\nc\nd");
+    e.key("\x1b");
+    keys(e, "ggqaI> ");
+    e.key("\x1b");
+    keys(e, "jq");
+    keys(e, "@a");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("> a\n> b\nc\nd", s);
+}
+
+test "the q that stops a recording is not in it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia");
+    e.key("\x1b");
+    keys(e, "qaI> ");
+    e.key("\x1b");
+    keys(e, "q");
+    try testing.expectEqualStrings("I> \x1b", e.regs['a' - 'a'].text.items);
+}
+
+test "a count on @ repeats the macro" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i1\n2\n3\n4\n5");
+    e.key("\x1b");
+    keys(e, "ggqzI-");
+    e.key("\x1b");
+    keys(e, "jq");
+    keys(e, "3@z");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("-1\n-2\n-3\n-4\n5", s);
+}
+
+test "at-at repeats the last macro" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\nc");
+    e.key("\x1b");
+    keys(e, "ggqaI> ");
+    e.key("\x1b");
+    keys(e, "jq");
+    keys(e, "@a@@");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("> a\n> b\n> c", s);
+}
+
+test "a macro lives in the register, so it can be pasted" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iZZ");
+    e.key("\x1b");
+    keys(e, "qbx");
+    keys(e, "q");
+    keys(e, "\"bp");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("Zx", s);
+}
+
+test "an uppercase register appends to the macro" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    keys(e, "qcxq");
+    keys(e, "qCxq");
+    try testing.expectEqualStrings("xx", e.regs['c' - 'a'].text.items);
+}
+
+test "a macro that plays itself stops at the depth cap" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    keys(e, "qa@aq"); // register a = "@a"
+    try testing.expectEqualStrings("@a", e.regs['a' - 'a'].text.items);
+    keys(e, "@a");
+    const dump = try e.dumpText(gpa, 60, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "nested too deep") != null);
+}
+
+test "a macro records the call to another macro, not its expansion" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "qbxxq"); // b = "xx"
+    keys(e, "qa@bq"); // a should hold "@b", two bytes
+    try testing.expectEqualStrings("@b", e.regs['a' - 'a'].text.items);
+}
+
+test "the status row says which register is recording" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    keys(e, "qa");
+    const dump = try e.dumpText(gpa, 60, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "recording @a") != null);
 }

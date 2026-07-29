@@ -518,6 +518,15 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       Every visual exit now runs through one `leaveVisual`, which is
       what keeps `'<`/`'>` from drifting out of date with whichever
       key ended the selection.
+- [x] **Macros** — `q{a-z}` records, `q` stops, `@a` plays, `@@`
+      repeats, `10@a` counts. They live in the SAME registers as
+      yanks, which is vim's arrangement and a good one: `"ap` prints
+      the macro you just recorded and `"ay$` loads one from a line of
+      text. Recording is suppressed inside a replay, so a macro
+      records the `@b` rather than what b expands to. The depth cap is
+      the only thing between a macro that plays itself and the stack —
+      removing it crashes the test binary, which is how that one was
+      checked.
 - [ ] `:s` patterns are LITERAL, not regexes — the same engine `/`
       uses. Saying so beats half a regex that surprises you on a `.`.
       A real one is its own slice, and `\r` in a replacement (vim's
