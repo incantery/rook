@@ -334,6 +334,11 @@ pub const App = struct {
     next_tab_id: u32 = 2,
     px_w: f32,
     px_h: f32,
+    /// The spatial system: gutter, pane padding, row height, gap.
+    /// Recomputed on every resize (the backing scale can change when a
+    /// window moves between displays).
+    m: @import("ui.zig").Metrics,
+    /// One device pixel: the split gap, and every hairline rule.
     sep: f32 = 2,
     /// Status bar height in px; panes tile the content area above it.
     bar_h: f32,
@@ -746,13 +751,17 @@ pub const App = struct {
         // Nerd Font base (default) so prompt icons resolve without
         // fallback; the CoreText cascade catches everything else.
         const renderer = try renderpkg.Renderer.init(gpa, device, cfg.font_family, cfg.font_size * scale, 64 * 1024);
-        const bar_h: f32 = @ceil(renderer.cell_h + @as(f32, @floatCast(8 * scale)));
+        const m = @import("ui.zig").Metrics.compute(@floatCast(scale), renderer.cell_h);
+        const bar_h: f32 = m.row;
         // Standard macOS titlebar is 28pt; with fullSizeContentView we
         // draw under it and shift chrome down instead.
         const top_inset: f32 = if (opaque_bg) 0 else @floatCast(28 * scale);
         const pad: f32 = @floatCast(cfg.window_padding * scale);
-        const cols: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_w)) - pad * 2, renderer.cell_w)));
-        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2 - top_inset - pad * 2, renderer.cell_h)));
+        // Two insets, not one: window padding is outside the pane box,
+        // pane padding is inside it, and the first shell sees both.
+        const inset = pad * 2 + m.pane_pad * 2;
+        const cols: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_w)) - inset, renderer.cell_w)));
+        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2 - top_inset - inset, renderer.cell_h)));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
         const session = try sessionpkg.Session.start(gpa, init.io, shell, null, termColors(), @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px), cfg.scrollback);
@@ -781,6 +790,7 @@ pub const App = struct {
             .keybinds = keybinds,
             .px_w = @floatCast(px_w),
             .px_h = @floatCast(px_h),
+            .m = m,
             .sep = @floatCast(@max(1.0, @round(scale))),
             .bar_h = bar_h,
             .tab_h = bar_h,
@@ -1025,7 +1035,8 @@ pub const App = struct {
         self.px_w = @floatCast(px_w);
         self.px_h = @floatCast(px_h);
         self.sep = @floatCast(@max(1.0, @round(scale)));
-        self.bar_h = @ceil(self.renderer.cell_h + @as(f32, @floatCast(8 * scale)));
+        self.m = @import("ui.zig").Metrics.compute(@floatCast(scale), self.renderer.cell_h);
+        self.bar_h = self.m.row;
         self.tab_h = self.bar_h;
         if (self.top_inset > 0) self.top_inset = @floatCast(28 * scale);
         self.pad = @floatCast(self.pad_pts * scale);
@@ -1076,6 +1087,18 @@ pub const App = struct {
             .w = @max(1, self.px_w - self.pad * 2 - side),
             .h = @max(1, self.contentH() - self.pad * 2),
         };
+    }
+
+    /// Where a pane's FIRST CELL sits inside its box.
+    ///
+    /// The box is the slot the tree handed out — it fills, tiles and
+    /// hit-tests against that. The grid is inset from it, so text never
+    /// touches a split separator or the focus ring. One function because
+    /// four call sites map between pixels and cells (draw, click,
+    /// cursor, resize) and three of them agreeing is a bug you find with
+    /// the mouse.
+    fn gridOrigin(self: *App, p: *panespkg.Pane) struct { x: f32, y: f32 } {
+        return .{ .x = p.rect.x + self.m.pane_pad, .y = p.rect.y + self.m.pane_pad };
     }
 
     pub fn activeSpace(self: *App) *panespkg.Space {
@@ -1163,8 +1186,9 @@ pub const App = struct {
     }
 
     fn cellAt(self: *App, p: *panespkg.Pane, x: f32, y: f32) [2]u16 {
-        const cx: f32 = @max(0, (x - p.rect.x) / self.renderer.cell_w);
-        const cy: f32 = @max(0, (y - p.rect.y) / self.renderer.cell_h);
+        const o = self.gridOrigin(p);
+        const cx: f32 = @max(0, (x - o.x) / self.renderer.cell_w);
+        const cy: f32 = @max(0, (y - o.y) / self.renderer.cell_h);
         return .{
             @intCast(@min(@as(u32, @intFromFloat(cx)), p.cols - 1)),
             @intCast(@min(@as(u32, @intFromFloat(cy)), p.rows - 1)),
@@ -1336,7 +1360,8 @@ pub const App = struct {
                 row = @floatFromInt(c.row);
             },
         }
-        return .{ .x = p.rect.x + col * cw, .y = p.rect.y + row * ch };
+        const o = self.gridOrigin(p);
+        return .{ .x = o.x + col * cw, .y = o.y + row * ch };
     }
 
     /// Same point, in SCREEN coordinates and points — what AppKit wants
@@ -1507,8 +1532,9 @@ pub const App = struct {
             // resizing hidden panes to a 2x2 minimum would reflow their
             // scrollback on every zoom and again on every unzoom.
             if (p.rect.w == 0 or p.rect.h == 0) continue;
-            const cols: u16 = @intFromFloat(@max(2, @divFloor(p.rect.w, self.renderer.cell_w)));
-            const rows: u16 = @intFromFloat(@max(2, @divFloor(p.rect.h, self.renderer.cell_h)));
+            const inset = self.m.pane_pad * 2;
+            const cols: u16 = @intFromFloat(@max(2, @divFloor(p.rect.w - inset, self.renderer.cell_w)));
+            const rows: u16 = @intFromFloat(@max(2, @divFloor(p.rect.h - inset, self.renderer.cell_h)));
             if (cols == p.cols and rows == p.rows) continue;
             p.cols = cols;
             p.rows = rows;
@@ -3135,7 +3161,8 @@ pub const App = struct {
         }
         for (atab.panes.items) |p| {
             if (p.drawn_cols == 0) continue;
-            self.renderer.drawGrid(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.buf_off, p.drawn_cols, p.drawn_rows);
+            const o = self.gridOrigin(p);
+            self.renderer.drawGrid(enc, vp_w, vp_h, o.x, o.y, p.buf_off, p.drawn_cols, p.drawn_rows);
         }
         // Zoomed: one pane fills the area, so there are no boundaries to
         // draw and no focus edge to telegraph (focus is unambiguous).
@@ -3148,12 +3175,20 @@ pub const App = struct {
             }
             // The focused pane claims its share of adjacent separators
             // in the accent color — cheap, unambiguous focus telegraph.
+            //
+            // Against the PANE AREA, not the window: the outer bound is
+            // the tiled region, which window-padding and an open side
+            // pane both move. Comparing to the window drew accent on
+            // edges with no neighbour behind them, so the telegraph read
+            // as a box around the pane instead of a claim on the
+            // separators it actually touches.
             const fr = atab.focused.rect;
+            const area = self.paneArea();
             const s = self.sep;
-            if (fr.x > 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x - s, fr.y, s, fr.h, th.accent);
-            if (fr.x + fr.w < self.px_w - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x + fr.w, fr.y, s, fr.h, th.accent);
-            if (fr.y > self.contentY() + 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y - s, fr.w, s, th.accent);
-            if (fr.y + fr.h < self.contentY() + self.contentH() - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y + fr.h, fr.w, s, th.accent);
+            if (fr.x > area.x + 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x - s, fr.y, s, fr.h, th.accent);
+            if (fr.x + fr.w < area.x + area.w - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x + fr.w, fr.y, s, fr.h, th.accent);
+            if (fr.y > area.y + 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y - s, fr.w, s, th.accent);
+            if (fr.y + fr.h < area.y + area.h - 0.5) self.renderer.drawRect(enc, vp_w, vp_h, fr.x, fr.y + fr.h, fr.w, s, th.accent);
         }
         var ui = @import("ui.zig").Ui{
             .r = &self.renderer,
@@ -3520,8 +3555,13 @@ pub const App = struct {
     fn drawBar(self: *App, ui: *@import("ui.zig").Ui) void {
         const by = self.px_h - self.bar_h;
         ui.rect(0, by, self.px_w, self.bar_h, self.glassBg(th.bar_bg));
+        // The rule is what makes it a BAR. bar_bg sits one step below
+        // the terminal background — a two-value difference that reads as
+        // nothing at all, so without this the status line looked like
+        // text that had scrolled to the bottom of the shell.
+        ui.rect(0, by, self.px_w, self.sep, th.sep);
         const ty = by + (self.bar_h - self.renderer.cell_h) / 2;
-        const pad = self.renderer.cell_w;
+        const pad = self.m.gutter;
         var x: f32 = pad;
         // Armed leader: an accent cell showing the leader key, tmux's
         // prefix indicator.
@@ -3561,6 +3601,9 @@ pub const App = struct {
         // One slab from the window top: in glass mode it also tints the
         // titlebar strip the traffic lights float over.
         ui.rect(0, 0, self.px_w, self.contentY(), self.glassBg(th.bar_bg));
+        // Same rule as the status bar's, on the other edge — the chrome
+        // and the panes are one flat field of colour without them.
+        ui.rect(0, self.contentY() - self.sep, self.px_w, self.sep, th.sep);
         const ty = self.top_inset + (self.tab_h - self.renderer.cell_h) / 2;
 
         // The TITLE ZONE: workspace name centered, usage cluster right.
@@ -3581,9 +3624,13 @@ pub const App = struct {
                 th.accent
             else
                 th.bar_fg;
-            _ = ui.textRight(self.px_w - cw, zone_ty, self.usage.slice(), ufg, self.glassBg(th.bar_bg));
+            _ = ui.textRight(self.px_w - self.m.gutter, zone_ty, self.usage.slice(), ufg, self.glassBg(th.bar_bg));
         }
-        var x: f32 = self.renderer.cell_w / 2;
+        // Chip TEXT lands on the same gutter the status bar's text does —
+        // the two bars are the window's edges and must line up. The
+        // label carries a leading pad space, so the box starts a cell
+        // before it.
+        var x: f32 = @max(0, self.m.gutter - cw);
         const space = self.activeSpace();
         for (space.tabs.items, 0..) |t, i| {
             const is_active = i == space.active_tab;
@@ -3645,18 +3692,17 @@ pub const App = struct {
     fn drawSidePane(self: *App, ui: *@import("ui.zig").Ui) void {
         const r = self.sideArea();
         if (r.w <= 0) return;
-        const cw = self.renderer.cell_w;
         const ch = self.renderer.cell_h;
         const row_h = self.bar_h;
 
         ui.rect(r.x, r.y, r.w, r.h, self.glassBg(th.bar_bg));
-        // A one-cell rule on the edge that faces the panes, so the
-        // boundary reads even when the tenant is empty.
+        // A hairline on the edge that faces the panes, so the boundary
+        // reads even when the tenant is empty.
         const edge_x = if (self.side == .left) r.x + r.w - self.sep else r.x;
         ui.rect(edge_x, r.y, self.sep, r.h, th.sep);
 
         var y = r.y;
-        const tx = r.x + cw;
+        const tx = r.x + self.m.gutter;
         _ = ui.text(tx, y + (row_h - ch) / 2, switch (self.side_panel) {
             .attention => "ATTENTION",
             .ask => "QUESTION",
@@ -3669,6 +3715,12 @@ pub const App = struct {
         if (self.side_focus)
             ui.rect(r.x, r.y, r.w, self.sep, th.accent);
         y += row_h;
+        // The header names the tenant; the rule says where it stops. The
+        // same divider the palette puts under its input, for the same
+        // reason — a title that runs straight into its rows is just the
+        // first row.
+        ui.rect(r.x, y, r.w, self.sep, th.sep);
+        y += self.sep + self.m.gap;
 
         switch (self.side_panel) {
             .attention => self.drawAttention(ui, r, y),
@@ -3684,7 +3736,7 @@ pub const App = struct {
         const ch = self.renderer.cell_h;
         const row_h = self.bar_h;
         const bg = self.glassBg(th.bar_bg);
-        const tx = r.x + cw;
+        const tx = r.x + self.m.gutter;
         var y = top;
 
         if (!self.rev.live) {
@@ -3696,7 +3748,7 @@ pub const App = struct {
             return;
         }
 
-        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - cw * 3, cw)));
+        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - self.m.gutter * 2, cw)));
         // THE GATE, first and unmissable: it is the answer to the only
         // question this panel exists for — can I ship this yet.
         var gbuf: [96]u8 = undefined;
@@ -3731,7 +3783,7 @@ pub const App = struct {
             const s2 = std.fmt.bufPrint(&loc, "{s}:{d}", .{ file, f.line }) catch file;
             _ = ui.text(mx, y + (row_h - ch) / 2, s2[0..@min(s2.len, cols -| 2)], if (selected) th.bar_value else th.bar_fg, rbg);
             if (f.risk >= 7)
-                _ = ui.textRight(r.x + r.w - cw, y + (row_h - ch) / 2, "risk", th.ed_err, rbg);
+                _ = ui.textRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2, "risk", th.ed_err, rbg);
             y += row_h;
             const wtxt = f.what.get();
             _ = ui.text(tx + cw * 2, y + (row_h - ch) / 2, wtxt[0..@min(wtxt.len, cols -| 2)], th.bar_fg, rbg);
@@ -3753,7 +3805,7 @@ pub const App = struct {
         const ch = self.renderer.cell_h;
         const row_h = self.bar_h;
         const bg = self.glassBg(th.bar_bg);
-        const tx = r.x + cw;
+        const tx = r.x + self.m.gutter;
         var y = top;
 
         if (!self.thr.live) {
@@ -3764,7 +3816,7 @@ pub const App = struct {
             _ = ui.text(tx, y + (row_h - ch) / 2, "no open threads", th.bar_fg, bg);
             return;
         }
-        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - cw * 3, cw)));
+        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - self.m.gutter * 2, cw)));
         const avail = r.y + r.h - top - row_h;
         const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h * 2)));
         const shown = @min(self.thr.slice().len, fits);
@@ -3805,7 +3857,7 @@ pub const App = struct {
         const ch = self.renderer.cell_h;
         const row_h = self.bar_h;
         const bg = self.glassBg(th.bar_bg);
-        const tx = r.x + cw;
+        const tx = r.x + self.m.gutter;
         var y = top;
 
         if (!self.deck.live) {
@@ -3817,7 +3869,7 @@ pub const App = struct {
             return;
         }
 
-        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - cw * 3, cw)));
+        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - self.m.gutter * 2, cw)));
         const avail = r.y + r.h - top - row_h; // keep a line for the hint
         const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h * 2)));
         const shown = @min(self.deck.slice().len, fits);
@@ -3846,7 +3898,7 @@ pub const App = struct {
             const name = self.cwdLabel(a.cwd.get(), &lblbuf);
             _ = ui.text(mx, y + (row_h - ch) / 2, name[0..@min(name.len, cols -| 2)], if (selected) th.bar_value else th.bar_fg, rbg);
             if (a.interactive)
-                _ = ui.textRight(r.x + r.w - cw, y + (row_h - ch) / 2, "picker", th.bar_fg, rbg);
+                _ = ui.textRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2, "picker", th.bar_fg, rbg);
             y += row_h;
             const what = a.what.get();
             _ = ui.text(tx + cw * 2, y + (row_h - ch) / 2, what[0..@min(what.len, cols -| 2)], th.bar_fg, rbg);
@@ -3869,14 +3921,14 @@ pub const App = struct {
         const ch = self.renderer.cell_h;
         const row_h = self.bar_h;
         const bg = self.glassBg(th.bar_bg);
-        const tx = r.x + cw;
+        const tx = r.x + self.m.gutter;
         var y = top;
         const a = self.ask orelse {
             _ = ui.text(tx, y + (row_h - ch) / 2, "no question", th.bar_fg, bg);
             return;
         };
         const q = a.questions[self.ask_qi];
-        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - cw * 3, cw)));
+        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - self.m.gutter * 2, cw)));
 
         // WHO is asking. Without it a question is a demand from nowhere,
         // and with several agents running it is unanswerable — you cannot
@@ -3893,7 +3945,7 @@ pub const App = struct {
         if (a.n > 1) {
             var buf: [16]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{d}/{d}", .{ self.ask_qi + 1, a.n }) catch "";
-            _ = ui.textRight(r.x + r.w - cw, y + (row_h - ch) / 2 - row_h, s, th.bar_fg, bg);
+            _ = ui.textRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2 - row_h, s, th.bar_fg, bg);
         }
 
         // The question, wrapped by hand — ui.text does not wrap and an
@@ -4030,7 +4082,7 @@ pub const App = struct {
         const ch = self.renderer.cell_h;
         const row_h = self.bar_h;
         const bg = self.glassBg(th.bar_bg);
-        const tx = r.x + cw;
+        const tx = r.x + self.m.gutter;
         var y = top;
 
         // "Nothing needs you" and "we can't reach the host" are
@@ -4056,9 +4108,9 @@ pub const App = struct {
             ui.rect(r.x, y + self.sep, self.sep * 2, row_h * 2 - self.sep * 2, th.accent);
             _ = ui.text(tx, y + (row_h - ch) / 2, it.workspace(), th.bar_value, bg);
             if (it.interactive)
-                _ = ui.textRight(r.x + r.w - cw, y + (row_h - ch) / 2, "picker", th.bar_fg, bg);
+                _ = ui.textRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2, "picker", th.bar_fg, bg);
             y += row_h;
-            const room: usize = @intFromFloat(@max(0, @divFloor(r.w - cw * 3, cw)));
+            const room: usize = @intFromFloat(@max(0, @divFloor(r.w - self.m.gutter * 2, cw)));
             const t = it.text();
             _ = ui.text(tx, y + (row_h - ch) / 2, t[0..@min(t.len, room)], th.bar_fg, bg);
             y += row_h;
@@ -4077,20 +4129,28 @@ pub const App = struct {
     fn drawPalette(self: *App, ui: *@import("ui.zig").Ui) void {
         const cw = self.renderer.cell_w;
         const row_h = self.bar_h;
+        const gut = self.m.gutter;
         const shown = @min(self.pal_nfiltered, 12);
         const w = @min(self.px_w - 4 * cw, 72 * cw);
-        const h = row_h * @as(f32, @floatFromInt(shown + 1)) + self.sep * 2;
+        // A row per result, the input row, the rule under it, and a pad
+        // band top and bottom — a list whose last row is flush with the
+        // card's edge reads as a list that got cut off.
+        const h = row_h * @as(f32, @floatFromInt(shown + 1)) + self.sep + self.m.gap * 2;
         const x = (self.px_w - w) / 2;
         const y = self.contentY() + self.renderer.cell_h;
 
-        ui.rect(x - self.sep, y - self.sep, w + self.sep * 2, h + self.sep * 2, th.accent);
+        // A quiet border, not an accent one. The accent is the SELECTED
+        // row's mark; spending it on the container too meant the eye had
+        // two equally loud things to find in a list you open to pick one
+        // thing from.
+        ui.rect(x - self.sep, y - self.sep, w + self.sep * 2, h + self.sep * 2, th.sep);
         ui.rect(x, y, w, h, th.bar_bg);
 
         // Input row. The prompt names the mode — with two pickers on two
         // different keys, "which list am I in" has to be answerable
         // without reading the rows.
-        var tx = x + cw;
-        const ty = y + (row_h - self.renderer.cell_h) / 2;
+        var tx = x + gut;
+        const ty = y + self.m.gap + (row_h - self.renderer.cell_h) / 2;
         tx += ui.text(tx, ty, switch (self.pal_mode) {
             .workspaces => "workspace ",
             .commands => "command ",
@@ -4098,9 +4158,12 @@ pub const App = struct {
         tx += ui.text(tx, ty, self.pal_input[0..self.pal_input_len], th.bar_value, th.bar_bg);
         ui.rect(tx, ty, cw / 4, self.renderer.cell_h, th.accent); // caret
 
-        var ry = y + row_h + self.sep * 2;
+        // What you typed and what matched are two different things, and
+        // the rule is what says so.
+        ui.rect(x, y + self.m.gap + row_h, w, self.sep, th.sep);
+        var ry = y + self.m.gap + row_h + self.sep;
         if (self.pal_nfiltered == 0) {
-            _ = ui.text(x + cw, ry + (row_h - self.renderer.cell_h) / 2, "no matches", th.bar_fg, th.bar_bg);
+            _ = ui.text(x + gut, ry + (row_h - self.renderer.cell_h) / 2, "no matches", th.bar_fg, th.bar_bg);
             return;
         }
         for (self.pal_filtered[0..shown], 0..) |item_i, vi| {
@@ -4134,10 +4197,10 @@ pub const App = struct {
                     break :blk .{ l, if (c.keys.len > 0) c.keys else c.id };
                 },
             };
-            _ = ui.text(x + cw, rty, label, if (selected) th.bar_value else th.bar_fg, bg);
-            const room = w - 2 * cw - @as(f32, @floatFromInt(label.len + 2)) * cw;
+            _ = ui.text(x + gut, rty, label, if (selected) th.bar_value else th.bar_fg, bg);
+            const room = w - 2 * gut - @as(f32, @floatFromInt(label.len + 2)) * cw;
             if (@as(f32, @floatFromInt(detail.len)) * cw < room)
-                _ = ui.textRight(x + w - cw, rty, detail, th.bar_fg, bg);
+                _ = ui.textRight(x + w - gut, rty, detail, th.bar_fg, bg);
             ry += row_h;
         }
     }

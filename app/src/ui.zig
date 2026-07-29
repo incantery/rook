@@ -13,6 +13,44 @@ const std = @import("std");
 const objc = @import("objc");
 const renderpkg = @import("render.zig");
 
+/// The spatial system, in device pixels.
+///
+/// Every distance the chrome spaces itself by is derived here, once,
+/// from the backing scale and the cell box. It is a struct rather than
+/// literals at the call sites for two reasons found by looking at the
+/// app: the bars inset themselves by one CELL, so the gutter grew and
+/// shrank with the font size while nothing else did; and the numbers
+/// were computed in two places (window creation and every resize) that
+/// had to agree by hand.
+///
+/// Points, not cells, for anything that reads as an EDGE — an edge is a
+/// property of the window, not of the text inside it.
+pub const Metrics = struct {
+    /// Chrome's inner left/right inset: where a bar's text starts.
+    gutter: f32,
+    /// Inside a pane, between its box and its first cell. Without it,
+    /// text touches the split separator and the focus ring — the tell
+    /// that made splits read as unfinished.
+    pane_pad: f32,
+    /// One chrome row: a bar, a panel line, a palette row.
+    row: f32,
+    /// Between clusters inside a panel — bigger than a gutter, smaller
+    /// than a row.
+    gap: f32,
+
+    /// A hairline is ONE device pixel at every scale. `App.sep` is the
+    /// same number (it is also the split gap); this is only its name
+    /// when it is being used as a rule.
+    pub fn compute(scale: f32, cell_h: f32) Metrics {
+        return .{
+            .gutter = @round(10 * scale),
+            .pane_pad = @round(6 * scale),
+            .row = @ceil(cell_h + @round(10 * scale)),
+            .gap = @round(6 * scale),
+        };
+    }
+};
+
 pub const Ui = struct {
     r: *renderpkg.Renderer,
     enc: objc.Object,
