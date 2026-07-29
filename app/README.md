@@ -180,8 +180,27 @@ with ZERO C linkage: the highlighter attaches through
 function-pointer hooks (syntax.zig), never an import (the directory
 reader is plain libc readdir, which macOS links regardless). Editor
 debts: one register, no autoindent, wide glyphs count one column,
-4KB line clamp on motions/render, relative :e paths resolve against
-the app cwd rather than the buffer's dir.
+relative :e paths resolve against the app cwd rather than the
+buffer's dir.
+
+Long lines have a CLAMP (64KB), and getting it wrong used to abort the
+app. `ccol` is a byte offset into the real line while `lineText` hands
+back a truncated COPY of it, and every helper indexes the copy with
+the offset — so a column past the clamp read off the end of a slice.
+Two doors reached it in one keystroke: `A` on a long line, and a
+backspace joining onto a long line ABOVE the cursor, both of which
+assigned the real length. `lineCap` is the single definition of how
+far the editor will go and every column derived from a length passes
+through it; `prevCpStart` is total in its index as well, so a future
+caller that gets it wrong draws a wrong cursor instead of killing the
+process with your buffer in it. Typing at the clamp is REFUSED rather
+than inserted with the cursor pinned — carrying on would drop every
+further keystroke at the same offset in the middle of a line you
+cannot see. A clamped line says `[long line]` in the status row,
+because rendering it exactly like a line that had ended was the real
+defect. 64KB was chosen by measurement, not feel: a file of 40 × 60KB
+lines fills at p50 **50µs**, cheaper than a normal source file (1.1ms,
+where the cost is tree-sitter, not the copy).
 
 Text is decoded ONE CELL PER CODEPOINT through a single helper
 (`decodeAt`), and undecodable bytes become U+FFFD one at a time. Two

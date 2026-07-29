@@ -413,8 +413,20 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       has happened to it. This matters more than it looks: a dirty
       marker that lies teaches the `:q!` reflex, and the person with
       that reflex is the one who will `:w!` past the clobber guard.
+- [x] **Long lines cannot abort the app.** `ccol` is an offset into the
+      real line, `lineText` returns a truncated copy, and every helper
+      indexed the copy with the offset — `A` on a long line or a
+      backspace joining onto one crashed in a single keystroke.
+      `lineCap` is now the one definition of the editor's reach, typing
+      at the clamp is refused rather than dropped mid-line, and the
+      status row says `[long line]`. Clamp raised 4KB → 64KB on a
+      measurement (40 × 60KB lines fill in 50µs).
+- [ ] Unbounded line length: the clamp is a real wall, just a distant
+      one. The fix is a horizontal WINDOW — render and do column math
+      over `[left, left+cols)` instead of copying whole lines — which is
+      its own slice.
 - [ ] Editor debts already logged: autoindent, registers, wide glyphs =
-      1 column, 4KB line clamp, relative `:e` resolves against app cwd
+      1 column, relative `:e` resolves against app cwd
 - [x] **Notice a disk change while the buffer is OPEN**, not only at
       `:w`. One stat per editor pane on the existing 1Hz tick, split by
       who has something to lose: an UNMODIFIED buffer reloads (keeping

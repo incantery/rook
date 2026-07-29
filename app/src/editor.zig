@@ -19,7 +19,9 @@ const Allocator = std.mem.Allocator;
 const bufferpkg = @import("buffer.zig");
 
 pub const tab_width = 4;
-const max_line = 4096;
+const max_line = 64 * 1024;
+/// Path joining only — it must NOT ride max_line up.
+const max_path = 4096;
 
 pub const Style = enum(u8) {
     text,
@@ -90,7 +92,7 @@ pub const Editor = struct {
     status_err: bool = false,
 
     scratch: [max_line]u8 = undefined,
-    scratch2: [max_line]u8 = undefined,
+    scratch2: [max_path]u8 = undefined,
 
     closed: bool = false,
     render_dirty: bool = true,
@@ -315,7 +317,34 @@ pub const Editor = struct {
         return self.buf.rope.lineEnd(line) - self.buf.rope.lineStart(line);
     }
 
+    /// How far into `line` the editor will go: its real length, or the
+    /// clamp, whichever is smaller.
+    ///
+    /// THE bug this file had. `ccol` is a byte offset into the real
+    /// line, `lineText` hands back a TRUNCATED COPY of it, and every
+    /// helper indexes the copy with the offset — so the moment a column
+    /// went past the clamp, `prevCpStart` read off the end of the slice
+    /// and the app aborted with your buffer in it. Two entry points
+    /// reached it with one keystroke: `A` on a long line, and a
+    /// backspace joining onto a long previous line, both of which
+    /// assigned the REAL length.
+    ///
+    /// One definition, and every column that comes from a length goes
+    /// through it.
+    fn lineCap(self: *const Editor, line: usize) usize {
+        return @min(self.lineLenB(line), max_line);
+    }
+
+    /// Is this line longer than the editor will let you work with?
+    fn lineClamped(self: *const Editor, line: usize) bool {
+        return self.lineLenB(line) > max_line;
+    }
+
     /// Copy a line into scratch (clamped to max_line — the long-line debt).
+    ///
+    /// The returned slice is only valid until the NEXT call: it is one
+    /// shared buffer. Every caller consumes it before asking for
+    /// another line, and that is a contract, not an accident.
     fn lineText(self: *Editor, line: usize) []const u8 {
         const start = self.buf.rope.lineStart(line);
         const end = self.buf.rope.lineEnd(line);
@@ -355,9 +384,18 @@ pub const Editor = struct {
         return std.unicode.utf8Decode(s[i .. i + n]) catch 0xFFFD;
     }
 
+    /// Start of the codepoint before byte `i`.
+    ///
+    /// TOTAL in `i` on purpose. This is the function that panicked: it
+    /// was handed a column past the end of the slice and indexed
+    /// straight into it. Clamping here does not excuse a caller from
+    /// keeping the column inside the line — `lineCap` is for that — it
+    /// means a caller that gets it wrong renders a wrong cursor instead
+    /// of killing the app with your buffer in it.
     fn prevCpStart(s: []const u8, i: usize) usize {
-        if (i == 0) return 0;
-        var j = i - 1;
+        var j = @min(i, s.len);
+        if (j == 0) return 0;
+        j -= 1;
         while (j > 0 and (s[j] & 0xc0) == 0x80) j -= 1;
         return j;
     }
@@ -521,7 +559,7 @@ pub const Editor = struct {
                 self.buf.deleteRange(gpa, start + p, start + self.ccol) catch return;
                 self.ccol = p;
             } else if (self.cline > 0) {
-                const prev_len = self.lineLenB(self.cline - 1);
+                const prev_len = self.lineCap(self.cline - 1);
                 const nl = self.buf.rope.lineStart(self.cline) - 1;
                 self.buf.deleteRange(gpa, nl, nl + 1) catch return;
                 self.cline -= 1;
@@ -532,6 +570,16 @@ pub const Editor = struct {
         if (b0 == '\t' or b0 >= 0x20) {
             // Printable run (possibly multi-byte UTF-8); drop other
             // control bytes.
+            //
+            // REFUSED at the clamp, rather than inserted with the
+            // cursor pinned. The cursor cannot represent a column past
+            // max_line, so carrying on would drop every further
+            // keystroke into the same spot in the MIDDLE of a line you
+            // cannot see — silent corruption dressed as a stuck cursor.
+            if (self.ccol >= max_line) {
+                self.setStatus("line too long to edit past {d} bytes", .{max_line}, true);
+                return;
+            }
             self.buf.insert(gpa, self.absOff(), bytes) catch return;
             self.ccol += bytes.len;
         }
@@ -936,7 +984,7 @@ pub const Editor = struct {
                 self.enterInsert();
             },
             'A' => {
-                self.ccol = self.lineLenB(self.cline);
+                self.ccol = self.lineCap(self.cline);
                 self.enterInsert();
             },
             'o' => {
@@ -1617,6 +1665,10 @@ pub const Editor = struct {
         } else {
             putStr(out, &x, self.displayName(), .text);
             if (self.buf.isModified()) putStr(out, &x, " [+]", .dim);
+            // A line the editor cannot reach the end of used to render
+            // exactly like a line that had ended. Silence was the real
+            // defect here — worse than the wall itself.
+            if (self.lineClamped(self.cline)) putStr(out, &x, " [long line]", .err);
             // Both marks, both meaningful: [+] is your edit, [!] is
             // somebody else's, and seeing them together is exactly the
             // moment to decide which one survives.
@@ -2094,4 +2146,76 @@ test "a truncated sequence at end of line does not overshoot" {
     const dump = try e.dumpText(gpa, 40, 6);
     defer gpa.free(dump);
     try testing.expect(std.mem.indexOf(u8, dump, "ok\u{FFFD}") != null);
+}
+
+/// A line longer than the clamp, for the crash tests below.
+fn longLine(gpa: Allocator, e: *Editor, n: usize) !void {
+    const long = try gpa.alloc(u8, n);
+    defer gpa.free(long);
+    @memset(long, 'x');
+    try e.buf.insert(gpa, 0, long);
+}
+
+test "A on a line past the clamp does not abort the app" {
+    // `A` assigned the REAL line length to a column that indexes a
+    // TRUNCATED copy, so the next keystroke read off the end of the
+    // slice and killed the process with the buffer in it. One `A`, one
+    // character, one ESC was the whole recipe.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    try longLine(gpa, e, max_line + 900);
+    keys(e, "A");
+    try testing.expect(e.ccol <= max_line);
+    keys(e, "z");
+    keys(e, "\x1b");
+    try testing.expect(e.ccol <= max_line);
+}
+
+test "backspace joining onto a long line does not abort the app" {
+    // The same defect through the other door, and this one needs no
+    // long line on screen at all — just a long line ABOVE the cursor.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    try longLine(gpa, e, max_line + 900);
+    try e.buf.insert(gpa, max_line + 900, "\nsecond\n");
+    e.cline = 1;
+    e.ccol = 0;
+    keys(e, "i");
+    keys(e, "\x7f");
+    try testing.expect(e.ccol <= max_line);
+    keys(e, "\x1b");
+    try testing.expect(e.ccol <= max_line);
+}
+
+test "typing at the clamp is refused, not dropped mid-line" {
+    // Inserting with the cursor pinned would put every further
+    // keystroke at the same offset in the MIDDLE of a line you cannot
+    // see — silent corruption wearing a stuck cursor as a disguise.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    try longLine(gpa, e, max_line + 900);
+    const before = e.buf.rope.byteLen();
+    keys(e, "A");
+    keys(e, "nope");
+    try testing.expectEqual(before, e.buf.rope.byteLen());
+    const status = e.status_buf[0..e.status_len];
+    try testing.expect(std.mem.indexOf(u8, status, "too long") != null);
+}
+
+test "a clamped line says so, in the row and in the status" {
+    // Silence is the actual defect: a truncated line rendered exactly
+    // like a line that had ended.
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    try longLine(gpa, e, max_line + 900);
+    try e.buf.insert(gpa, max_line + 900, "\nshort\n");
+    try testing.expect(e.lineClamped(0));
+    try testing.expect(!e.lineClamped(1));
+    const dump = try e.dumpText(gpa, 40, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "long line") != null);
 }
