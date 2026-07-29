@@ -308,6 +308,56 @@ test "headerHasChunked is case-insensitive and does not false-positive" {
     try std.testing.expect(!headerHasChunked("HTTP/1.1 200 OK\r\nX-Note: chunked is off"));
 }
 
+/// Percent-encode one query-string VALUE into `buf`, returning the
+/// slice. Null when it would not fit.
+///
+/// Needed the moment a value is not a rook identifier: file paths carry
+/// spaces, `#`, `&`, `+` and non-ASCII, and pasting one raw into a query
+/// does not fail loudly — `&` splits the value into a second parameter
+/// and `#` truncates it, so the host answers about a DIFFERENT file with
+/// a perfectly good 200. The unreserved set is RFC 3986's; everything
+/// else, `/` included, is escaped, because these are values and never
+/// path structure.
+pub fn queryEncode(buf: []u8, value: []const u8) ?[]const u8 {
+    const hex = "0123456789ABCDEF";
+    var w: usize = 0;
+    for (value) |c| {
+        const unreserved = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~';
+        if (unreserved) {
+            if (w + 1 > buf.len) return null;
+            buf[w] = c;
+            w += 1;
+            continue;
+        }
+        if (w + 3 > buf.len) return null;
+        buf[w] = '%';
+        buf[w + 1] = hex[c >> 4];
+        buf[w + 2] = hex[c & 0xf];
+        w += 3;
+    }
+    return buf[0..w];
+}
+
+test "queryEncode escapes what would otherwise change the request" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("a.txt", queryEncode(&buf, "a.txt").?);
+    try std.testing.expectEqualStrings("a%2Fb.txt", queryEncode(&buf, "a/b.txt").?);
+    // The three that silently retarget a request rather than erroring.
+    try std.testing.expectEqualStrings("a%20b", queryEncode(&buf, "a b").?);
+    try std.testing.expectEqualStrings("a%26base%3Dbranch", queryEncode(&buf, "a&base=branch").?);
+    try std.testing.expectEqualStrings("a%23frag", queryEncode(&buf, "a#frag").?);
+    // `+` must not survive: a decoder that reads it as a space would
+    // rename the file being asked about.
+    try std.testing.expectEqualStrings("a%2Bb", queryEncode(&buf, "a+b").?);
+    // Non-ASCII goes out byte by byte, which is what the UTF-8 path on
+    // disk already is.
+    try std.testing.expectEqualStrings("caf%C3%A9", queryEncode(&buf, "café").?);
+    // Refusal, not truncation: a clipped path names a different file.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), queryEncode(&tiny, "a b c"));
+}
+
 pub fn get(gpa: std.mem.Allocator, info: *const Info, path: []const u8, max_body: usize) ?Response {
     return request(gpa, info, "GET", path, null, max_body);
 }

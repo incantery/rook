@@ -36,6 +36,7 @@
 
 const std = @import("std");
 const git = @import("git.zig");
+const hostc = @import("hostc.zig");
 
 /// Per-side content cap. The Go host's reviewMaxSide, kept because it is
 /// a wire contract with clients that already exist, not because a Zig
@@ -119,7 +120,7 @@ pub const Status = enum {
     /// may name a status we have never heard of, and a file we can still
     /// diff is a better answer than a dropped row.
     pub fn parse(s: []const u8) Status {
-        inline for (.{ Status.added, .deleted, .renamed, .untracked }) |st| {
+        inline for ([_]Status{ .added, .deleted, .renamed, .untracked }) |st| {
             if (std.mem.eql(u8, s, st.word())) return st;
         }
         return .modified;
@@ -437,6 +438,147 @@ pub fn sides(gpa: std.mem.Allocator, io: std.Io, top: []const u8, rel: []const u
     if (s.binary) {
         s.original = "";
         s.modified = "";
+    }
+    return s;
+}
+
+// ------------------------------------------------------------ remote arm
+//
+// The same two answers from a host, in whatever language it is written.
+// Not a legacy path: it is the only one that works from a machine that is
+// not holding the repo, and the JSON below is the shape a non-git source
+// will answer in too.
+//
+// Both build the SAME Changes/Sides an in-process read builds, strings
+// duped into the same arena, so nothing above this line can tell which
+// arm answered.
+
+const WireFile = struct {
+    path: []const u8 = "",
+    status: []const u8 = "",
+    oldPath: []const u8 = "",
+};
+
+const WireChanges = struct {
+    base: []const u8 = "head",
+    baseRef: []const u8 = "HEAD",
+    baseName: []const u8 = "HEAD",
+    fallback: []const u8 = "",
+    files: []const WireFile = &.{},
+    truncated: bool = false,
+};
+
+const WireSides = struct {
+    path: []const u8 = "",
+    base: []const u8 = "head",
+    baseRef: []const u8 = "HEAD",
+    baseName: []const u8 = "HEAD",
+    fallback: []const u8 = "",
+    original: []const u8 = "",
+    modified: []const u8 = "",
+    binary: bool = false,
+    truncated: bool = false,
+};
+
+/// Read a mode word back off the wire. Anything unrecognised is head,
+/// for the reason Status.parse gives: a host may name a source this build
+/// has never heard of, and the resolved ref it sent is still what it
+/// diffed against.
+fn modeOf(s: []const u8) Mode {
+    return if (std.mem.eql(u8, s, Mode.branch.word())) .branch else .head;
+}
+
+/// Build the query suffix for a `?base=` param, empty when there is none
+/// — letting the HOST apply its own default, which is the only way a
+/// client that does not know whether this workspace is a worktree can get
+/// the right answer.
+fn baseQuery(buf: []u8, param: []const u8) ?[]const u8 {
+    if (param.len == 0) return "";
+    var enc: [128]u8 = undefined;
+    const v = hostc.queryEncode(&enc, param) orelse return null;
+    return std.fmt.bufPrint(buf, "?base={s}", .{v}) catch null;
+}
+
+pub fn changesHost(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8, param: []const u8) Changes {
+    var c: Changes = .{ .arena = .init(gpa) };
+    const arena = c.arena.allocator();
+
+    const info = hostc.readInfo(gpa, io) orelse return c;
+    var ws_enc: [512]u8 = undefined;
+    const ws = hostc.queryEncode(&ws_enc, workspace) orelse return c;
+    var qbuf: [192]u8 = undefined;
+    const q = baseQuery(&qbuf, param) orelse return c;
+    var path_buf: [1024]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/workspaces/{s}/changes{s}", .{ ws, q }) catch return c;
+
+    var resp = hostc.get(gpa, &info, path, 8 << 20) orelse return c;
+    defer resp.deinit(gpa);
+    if (resp.status != 200) return c;
+
+    const parsed = std.json.parseFromSlice(WireChanges, gpa, resp.body, .{ .ignore_unknown_fields = true }) catch return c;
+    defer parsed.deinit();
+    const w = parsed.value;
+    c.base = .{
+        .mode = modeOf(w.base),
+        .ref = arena.dupe(u8, w.baseRef) catch "HEAD",
+        .name = arena.dupe(u8, w.baseName) catch "HEAD",
+        .fallback = arena.dupe(u8, w.fallback) catch "",
+    };
+    c.truncated = w.truncated;
+
+    var list: std.ArrayListUnmanaged(File) = .empty;
+    for (w.files) |f| {
+        if (f.path.len == 0) continue;
+        list.append(arena, .{
+            .path = arena.dupe(u8, f.path) catch continue,
+            .status = Status.parse(f.status),
+            .old_path = arena.dupe(u8, f.oldPath) catch "",
+        }) catch break;
+    }
+    c.files = list.toOwnedSlice(arena) catch &.{};
+    return c;
+}
+
+pub fn sidesHost(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8, rel: []const u8, param: []const u8) Sides {
+    var s: Sides = .{ .arena = .init(gpa) };
+    const arena = s.arena.allocator();
+    s.path = arena.dupe(u8, rel) catch "";
+
+    const info = hostc.readInfo(gpa, io) orelse return s;
+    var ws_enc: [512]u8 = undefined;
+    const ws = hostc.queryEncode(&ws_enc, workspace) orelse return s;
+    var rel_enc: [3 * std.fs.max_path_bytes]u8 = undefined;
+    const rel_q = hostc.queryEncode(&rel_enc, rel) orelse return s;
+    var qbuf: [192]u8 = undefined;
+    const q = baseQuery(&qbuf, param) orelse return s;
+    var path_buf: [4 * std.fs.max_path_bytes]u8 = undefined;
+    // ?path= first, so baseQuery's leading '?' becomes an '&' here — the
+    // one place the two query builders have to agree.
+    const path = std.fmt.bufPrint(&path_buf, "/workspaces/{s}/diff?path={s}{s}{s}", .{
+        ws,
+        rel_q,
+        if (q.len > 0) "&" else "",
+        if (q.len > 0) q[1..] else "",
+    }) catch return s;
+
+    var resp = hostc.get(gpa, &info, path, 2 * (max_side + 1024)) orelse return s;
+    defer resp.deinit(gpa);
+    if (resp.status != 200) return s;
+
+    const parsed = std.json.parseFromSlice(WireSides, gpa, resp.body, .{ .ignore_unknown_fields = true }) catch return s;
+    defer parsed.deinit();
+    const w = parsed.value;
+    s.base = .{
+        .mode = modeOf(w.base),
+        .ref = arena.dupe(u8, w.baseRef) catch "HEAD",
+        .name = arena.dupe(u8, w.baseName) catch "HEAD",
+        .fallback = arena.dupe(u8, w.fallback) catch "",
+    };
+    s.binary = w.binary;
+    s.truncated = w.truncated;
+    if (!s.binary) {
+        s.original = arena.dupe(u8, w.original) catch "";
+        s.modified = arena.dupe(u8, w.modified) catch "";
     }
     return s;
 }

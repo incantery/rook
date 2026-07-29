@@ -54,6 +54,28 @@ pub fn rootOf(gpa: std.mem.Allocator, name: []const u8) ?[]u8 {
     return gpa.dupe(u8, root) catch null;
 }
 
+/// The workspace this one is a worktree OF, or null for a top-level
+/// workspace. Caller owns the result.
+///
+/// Its own query for the same reason rootOf has one. An empty
+/// `worktree_of` reads as null rather than as an empty string, because
+/// every caller's question is "is this a worktree" and a "" that has to
+/// be length-checked downstream is how that turns into a lookup for the
+/// workspace named "".
+pub fn parentOf(gpa: std.mem.Allocator, name: []const u8) ?[]u8 {
+    const db = regdb.open() orelse return null;
+    defer regdb.close(db);
+    var stmt: ?*anyopaque = null;
+    if (regdb.sqlite3_prepare_v2(db, "SELECT worktree_of FROM workspaces WHERE name = ?", -1, &stmt, null) != regdb.OK)
+        return null;
+    defer _ = regdb.sqlite3_finalize(stmt);
+    _ = regdb.sqlite3_bind_text(stmt, 1, name.ptr, @intCast(name.len), regdb.STATIC);
+    if (regdb.sqlite3_step(stmt) != regdb.ROW) return null;
+    const parent = regdb.text(stmt, 0);
+    if (parent.len == 0) return null;
+    return gpa.dupe(u8, parent) catch null;
+}
+
 /// Load workspaces GROUPED: top-level entries by last_used, each
 /// followed by its worktree children (their own last_used order). A
 /// missing db or any sqlite error is an EMPTY list, never a failure —

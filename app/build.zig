@@ -323,7 +323,9 @@ pub fn build(b: *std.Build) void {
     // Diff sources: where "what changed" comes from. Its own root, and
     // it needs neither sqlite nor a registry — a diff source is git and
     // bytes, which is exactly why it is separable from the substrate at
-    // all. What it guards is a pair of INDEX-WALKING parsers over flat
+    // all, and why substrate.zig rather than this module is what turns a
+    // workspace NAME into a repo. What it guards is a pair of
+    // INDEX-WALKING parsers over flat
     // NUL-separated field arrays, where a rename record consumes a
     // variable number of fields: mis-advance by one and a status field is
     // read as a path, so the pane offers a diff of a file called "M" and
