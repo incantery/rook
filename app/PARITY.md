@@ -544,10 +544,20 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       are vim's. A paste taller than what is left grows the buffer
       rather than dropping its last rows: losing half a paste silently
       is worse than gaining a line.
-- [ ] `:s` patterns are LITERAL, not regexes — the same engine `/`
-      uses. Saying so beats half a regex that surprises you on a `.`.
-      A real one is its own slice, and `\r` in a replacement (vim's
-      line-splitter) waits for it.
+- [x] **A regex engine** (`regex.zig`), vim-magic syntax, behind `/`
+      `?` `n` `N` `*` `#`, the search highlight, and `:s` — with `&`
+      and `\1`-`\9` in a replacement and `\r` splitting a line.
+      BACKTRACKING rather than a Thompson simulation, because captures
+      are the point: `\1` is most of why a regex beats a substring
+      search. What that costs is held off two ways — a repeat of a
+      single-width atom is ONE instruction with an internal greedy
+      loop, so `.*` over a long line uses no stack, and every match
+      runs on a step budget that fails closed. Removing the budget
+      makes the pathological test run past 90 seconds, which is how
+      that one was checked.
+- [ ] Regex gaps: no `\{-}` (non-greedy), no `\zs`/`\ze`, no `\%(`
+      non-capturing groups, no back-references INSIDE a pattern, and
+      `\c`/`\C` are not honoured mid-pattern (`:s///i` is).
 - [ ] Marks do not shift when text ABOVE them is edited — they hold a
       line and column, not an anchored offset. Fixing it means routing
       every buffer edit through one seam that adjusts them, which is

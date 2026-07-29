@@ -79,6 +79,17 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(editor_tests).step);
 
+    // The regex engine. It rides in under editor.zig's root already,
+    // but it gets its own too: it is pure data rules with a step budget
+    // holding back the pathological cases, and a root of its own is
+    // what makes `zig build test` name it when one of those slips.
+    const regex_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/regex.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(regex_tests).step);
+
     // Same reason, same shape: paste encoding is pure data rules, and
     // they're security rules, so they get a root that definitely runs.
     const paste_tests = b.addTest(.{ .root_module = b.createModule(.{

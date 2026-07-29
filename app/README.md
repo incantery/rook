@@ -327,6 +327,31 @@ distrust when you come back to it. It dirties the scene only when
 something actually changed, so zero-idle-frames holds: measured at 0
 frames drawn across 6 idle seconds with an editor pane open.
 
+### The regex engine backtracks on purpose
+
+`regex.zig` is a small vim-magic engine behind `/`, `?`, `n`, `*`, the
+search highlight and `:s`. It backtracks rather than simulating a
+Thompson NFA, which is the slower choice and the right one here:
+captures are most of the point. `s/foo(\(.*\))/bar(\1)/` is the thing
+people actually want out of a substitute, and a Thompson simulation
+gives you a yes/no.
+
+What backtracking costs is held off in two places. A repeat of a
+SINGLE-WIDTH atom — `.*`, `[a-z]\+`, `x\{2,5}` — compiles to one
+instruction with an internal greedy loop, so scanning a long line
+costs no stack at all; only group repeats and alternation recurse, and
+those are short in real patterns. And every match attempt runs on a
+step budget that fails closed. `\(a\+\)\+b` against thirty a's with no
+`b` has 2^29 ways to split them; with the budget it returns nothing in
+microseconds, and without it the test does not finish in ninety
+seconds. That is what the vacuity check for it measures.
+
+Two zero-width traps are worth naming, because both of them hang rather
+than misbehave. `:s/x*//g` matches empty, writes nothing, and would sit
+at the same offset forever; so would the search highlight on `/x*`,
+inside the render loop. Both advance by one when the match is empty,
+and both have a test that hangs if you take the guard out.
+
 ### Real vim as the oracle
 
 Vim ships with macOS, so the expectations in these tests are taken from

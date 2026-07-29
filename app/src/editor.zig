@@ -21,14 +21,17 @@
 //! Insert: ctrl-w ctrl-u ctrl-t ctrl-d ctrl-r ctrl-o.
 //! Ex: :w :q :q! :wq :x :e :<n>, :[range]s/pat/rep/[gi] over
 //!   % . $ N,M 'a '<,'> addresses.
-//! Debts: `:s` and `/` patterns are literal, not regexes; marks do not
-//! shift when text above them is edited; case operators are
+//! Patterns are vim-magic REGEXES (regex.zig), for `/` `?` `n` `*` and
+//!   `:s`, with `&` and `\1`-`\9` in a replacement.
+//! Debts: marks do not shift when text above them is edited; case
+//! operators are
 //! ASCII-only; f/t target ASCII only; wide glyphs count as one column;
 //! lines beyond max_line get motion/render math clamped.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const bufferpkg = @import("buffer.zig");
+const regex = @import("regex.zig");
 
 pub const tab_width = 4;
 const max_line = 64 * 1024;
@@ -175,6 +178,10 @@ pub const Editor = struct {
     /// The live pattern; non-empty = visible matches highlight
     /// (:noh clears).
     last_search: std.ArrayListUnmanaged(u8) = .empty,
+    /// The compiled form of `last_search`. Kept beside the text rather
+    /// than recompiled per line, because a search walks every line in
+    /// the buffer and the highlight walks every visible one per frame.
+    last_re: ?regex.Regex = null,
     reg: std.ArrayListUnmanaged(u8) = .empty,
     reg_kind: RegKind = .char,
     /// `"a` — the 26 named registers, plus the letter a `"` is waiting
@@ -408,6 +415,7 @@ pub const Editor = struct {
         self.rep_text.deinit(gpa);
         self.rec.deinit(gpa);
         self.last_search.deinit(gpa);
+        if (self.last_re) |*r| r.deinit(gpa);
         self.reg.deinit(gpa);
         for (&self.regs) |*r| r.text.deinit(gpa);
         self.grid.deinit(gpa);
@@ -1146,10 +1154,10 @@ pub const Editor = struct {
             switch (self.cmd_kind) {
                 .ex => self.execCommand(),
                 .search => {
-                    self.last_search.clearRetainingCapacity();
-                    self.last_search.appendSlice(self.gpa, self.cmd.items) catch {};
-                    self.search_fwd = self.search_typed_fwd;
-                    self.searchNext(self.search_fwd);
+                    if (self.setSearch(self.cmd.items, false)) {
+                        self.search_fwd = self.search_typed_fwd;
+                        self.searchNext(self.search_fwd);
+                    }
                 },
             }
             self.cmd.clearRetainingCapacity();
@@ -1266,8 +1274,10 @@ pub const Editor = struct {
         return s.len;
     }
 
-    fn subLine(self: *Editor, line: usize, pat: []const u8, rep: []const u8, all: bool, icase: bool) usize {
+    fn subLine(self: *Editor, line: usize, re: *const regex.Regex, rep: []const u8, all: bool) usize {
         const gpa = self.gpa;
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        defer out.deinit(gpa);
         var done: usize = 0;
         var from: usize = 0;
         while (true) {
@@ -1275,26 +1285,29 @@ pub const Editor = struct {
             // moved everything after it, and lineText hands back a copy
             // that goes stale the moment the rope changes.
             const s = self.lineText(line);
-            const idx = indexOfCase(s, from, pat, icase) orelse break;
+            if (from > s.len) break;
+            const m = re.search(s, from) orelse break;
+            out.clearRetainingCapacity();
+            regex.expand(&out, gpa, rep, s, m) catch break;
             const start = self.buf.rope.lineStart(line);
-            self.buf.deleteRange(gpa, start + idx, start + idx + pat.len) catch break;
-            if (rep.len > 0) self.buf.insert(gpa, start + idx, rep) catch break;
+            if (m.end > m.start) self.buf.deleteRange(gpa, start + m.start, start + m.end) catch break;
+            if (out.items.len > 0) self.buf.insert(gpa, start + m.start, out.items) catch break;
             done += 1;
             if (!all) break;
-            // Past the text just written, so `:s/a/aa/g` terminates.
-            from = idx + rep.len;
+            // Past the text just written, so `:s/a/aa/g` terminates —
+            // and one further on a zero-width match, which would
+            // otherwise sit in the same spot forever.
+            from = m.start + out.items.len;
+            if (m.end == m.start) from += 1;
         }
         return done;
     }
 
     /// `:[range]s/pat/rep/[flags]`.
     ///
-    /// The pattern is LITERAL, not a regex — the same engine `/` uses,
-    /// and saying so is better than half a regex that surprises you on
-    /// a `.`. Any character can be the separator, `\` escapes it, and
-    /// the flags are `g` (every match on the line) and `i` (ignore
-    /// case). No `c`: a confirm prompt needs a modal the editor does
-    /// not have yet.
+    /// Any character can be the separator and `\` escapes it. The flags
+    /// are `g` (every match on the line) and `i` (ignore case). No `c`:
+    /// a confirm prompt needs a modal the editor does not have yet.
     fn exSubstitute(self: *Editor, span: LineSpan, spec: []const u8) void {
         if (spec.len == 0 or std.ascii.isAlphanumeric(spec[0])) {
             self.setStatus("usage: :[range]s/pattern/replacement/[gi]", .{}, true);
@@ -1326,20 +1339,29 @@ pub const Editor = struct {
         // The pattern becomes the search pattern, so `n` walks the rest
         // of them and the matches stay highlighted — vim's behaviour,
         // and the reason a substitute is a good way to FIND things.
-        self.last_search.clearRetainingCapacity();
-        self.last_search.appendSlice(self.gpa, pat) catch {};
+        // It also does the compiling, so a bad pattern stops here.
+        if (!self.setSearch(pat, icase)) return;
+        const re = &self.last_re.?;
 
         self.buf.newUndoGroup();
         var hits: usize = 0;
         var lines: usize = 0;
         var last_hit: usize = self.cline;
         var line = span.a;
-        while (line <= span.b and line < self.lineCountB()) : (line += 1) {
-            const n = self.subLine(line, pat, rep, all, icase);
-            if (n == 0) continue;
-            hits += n;
-            lines += 1;
-            last_hit = line;
+        var last = span.b;
+        while (line <= last and line < self.lineCountB()) {
+            const before = self.lineCountB();
+            const n = self.subLine(line, re, rep, all);
+            // A `\r` in the replacement splits the line, so the range
+            // the loop is walking gets longer under it.
+            const added = self.lineCountB() -| before;
+            last += added;
+            if (n > 0) {
+                hits += n;
+                lines += 1;
+                last_hit = line + added;
+            }
+            line += 1 + added;
         }
         if (hits == 0) {
             self.setStatus("pattern not found: {s}", .{pat[0..@min(pat.len, 48)]}, true);
@@ -1447,7 +1469,7 @@ pub const Editor = struct {
         } else if (is(u8, verb, "q!")) {
             self.closed = true;
         } else if (is(u8, verb, "noh") or is(u8, verb, "nohlsearch")) {
-            self.last_search.clearRetainingCapacity();
+            self.clearSearch();
         } else if (is(u8, verb, "e") or is(u8, verb, "e!")) {
             if (arg.len == 0) {
                 self.setStatus("e needs a path", .{}, true);
@@ -2853,8 +2875,12 @@ pub const Editor = struct {
         while (a > 0 and charClass(s[a - 1]) == 1) a -= 1;
         var b = a;
         while (b < s.len and charClass(s[b]) == 1) b += 1;
-        self.last_search.clearRetainingCapacity();
-        self.last_search.appendSlice(self.gpa, s[a..b]) catch return;
+        // Anchored, which is what `*` has always meant: `*` on `foo`
+        // must not stop on `foobar`. The word is alphanumeric plus `_`
+        // by construction, so nothing in it needs escaping.
+        var pbuf: [max_indent]u8 = undefined;
+        const pat = std.fmt.bufPrint(&pbuf, "\\<{s}\\>", .{s[a..b]}) catch return;
+        if (!self.setSearch(pat, false)) return;
         self.search_fwd = fwd;
         // Start from the word's first byte so a forward search leaves
         // this occurrence and a backward one does not find it again.
@@ -3470,6 +3496,33 @@ pub const Editor = struct {
         }
     }
 
+    /// Compile a pattern and make it the current search. Returns false
+    /// (with the reason on the status line) when it does not compile,
+    /// so a typo leaves the previous highlight alone instead of
+    /// silently matching nothing.
+    fn setSearch(self: *Editor, pat: []const u8, icase: bool) bool {
+        if (pat.len == 0) return false;
+        var re = regex.Regex.compile(self.gpa, pat, icase) catch {
+            self.setStatus("bad pattern: {s}", .{pat[0..@min(pat.len, 48)]}, true);
+            return false;
+        };
+        if (self.last_re) |*old| old.deinit(self.gpa);
+        self.last_re = re;
+        self.last_search.clearRetainingCapacity();
+        self.last_search.appendSlice(self.gpa, pat) catch {
+            re.deinit(self.gpa);
+            self.last_re = null;
+            return false;
+        };
+        return true;
+    }
+
+    fn clearSearch(self: *Editor) void {
+        if (self.last_re) |*r| r.deinit(self.gpa);
+        self.last_re = null;
+        self.last_search.clearRetainingCapacity();
+    }
+
     /// Jump to the next/previous match of last_search, wrapping.
     fn searchNext(self: *Editor, fwd: bool) void {
         const pat = self.last_search.items;
@@ -3488,7 +3541,7 @@ pub const Editor = struct {
     }
 
     fn findMatch(self: *Editor, fwd: bool) ?Pos {
-        const pat = self.last_search.items;
+        const re = if (self.last_re) |*r| r else return null;
         const lc = self.lineCountB();
         if (fwd) {
             // Current line after the cursor, then wrap through all lines.
@@ -3496,7 +3549,7 @@ pub const Editor = struct {
             var from = @min(self.ccol + 1, self.lineLenB(l));
             for (0..lc + 1) |_| {
                 const s = self.lineText(l);
-                if (std.mem.indexOfPos(u8, s, @min(from, s.len), pat)) |i| return .{ .line = l, .col = i };
+                if (re.search(s, @min(from, s.len))) |m| return .{ .line = l, .col = m.start };
                 l = (l + 1) % lc;
                 from = 0;
             }
@@ -3507,8 +3560,8 @@ pub const Editor = struct {
         var limit: ?usize = self.ccol;
         for (0..lc + 1) |_| {
             const s = self.lineText(l);
-            const hay = if (limit) |lim| s[0..@min(lim, s.len)] else s;
-            if (std.mem.lastIndexOf(u8, hay, pat)) |i| return .{ .line = l, .col = i };
+            const before = if (limit) |lim| @min(lim, s.len + 1) else s.len + 1;
+            if (re.searchBack(s, before)) |m| return .{ .line = l, .col = m.start };
             l = if (l == 0) lc - 1 else l - 1;
             limit = null;
         }
@@ -3656,12 +3709,14 @@ pub const Editor = struct {
             }
             // Search matches tint like a selection (vim hlsearch-ish;
             // :noh clears). Cursor/selection styles win.
-            if (self.last_search.items.len > 0) {
-                const pat = self.last_search.items;
+            if (self.last_re) |*re| {
                 var from: usize = 0;
-                while (std.mem.indexOfPos(u8, s, from, pat)) |mi| : (from = mi + pat.len) {
-                    var bi = mi;
-                    while (bi < mi + pat.len and bi < s.len) : (bi += cpLenAt(s, bi)) {
+                while (re.search(s, from)) |m| {
+                    // A zero-width match (`^`, `\<`) would sit here
+                    // forever otherwise.
+                    from = if (m.end > m.start) m.end else m.start + 1;
+                    var bi = m.start;
+                    while (bi < m.end and bi < s.len) : (bi += cpLenAt(s, bi)) {
                         const mrc = renderCol(s, bi);
                         if (mrc >= self.left and mrc - self.left < text_cols) {
                             const cell = &out[gw + (mrc - self.left)];
@@ -5089,7 +5144,8 @@ test "star from mid-word takes the whole word" {
     keys(e, "gg0ll*"); // sitting on the second l of hello
     try testing.expectEqual(@as(usize, 1), e.cline);
     try testing.expectEqual(@as(usize, 4), e.ccol);
-    try testing.expectEqualStrings("hello", e.last_search.items);
+    // `*` anchors the word, which is what keeps it off `hellos`.
+    try testing.expectEqualStrings("\\<hello\\>", e.last_search.items);
 }
 
 test "ge walks back to the end of the previous word" {
@@ -6214,4 +6270,165 @@ test "a block paste pads a line too short to reach the column" {
     const s = try bufText(gpa, e);
     defer gpa.free(s);
     try testing.expectEqualStrings("XY\nXY\nabcdeXYfgh\nz    XY", s);
+}
+
+// -------------------------------------------------------------- regex search
+
+test "search anchors to the start of a line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ix func a\nfunc b");
+    e.key("\x1b");
+    keys(e, "gg0/^func");
+    e.key("\r");
+    try testing.expectEqual(@as(usize, 1), e.cline);
+    try testing.expectEqual(@as(usize, 0), e.ccol);
+}
+
+test "search takes a character class" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc\nxx 4711 z");
+    e.key("\x1b");
+    keys(e, "gg0/\\d\\+");
+    e.key("\r");
+    try testing.expectEqual(@as(usize, 1), e.cline);
+    try testing.expectEqual(@as(usize, 3), e.ccol);
+}
+
+test "star will not stop on a longer word" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo\nfoobar\nfoo");
+    e.key("\x1b");
+    keys(e, "gg0*");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+}
+
+test "substitute swaps captured groups" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ikey=value\na=b");
+    e.key("\x1b");
+    ex(e, "%s/\\(\\w\\+\\)=\\(\\w\\+\\)/\\2=\\1/");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("value=key\nb=a", s);
+}
+
+test "ampersand in a replacement is the whole match" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo bar");
+    e.key("\x1b");
+    ex(e, "s/foo/&&/");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("foofoo bar", s);
+}
+
+test "a zero-width match prefixes every line without looping" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\nc");
+    e.key("\x1b");
+    ex(e, "%s/^/> /");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("> a\n> b\n> c", s);
+}
+
+test "backslash r in a replacement splits the line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione,two");
+    e.key("\x1b");
+    ex(e, "s/,/\\r/");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\ntwo", s);
+}
+
+test "a split line does not make the range walk off the end" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia,b\nc,d\nkeep,me");
+    e.key("\x1b");
+    ex(e, "1,2s/,/\\r/");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a\nb\nc\nd\nkeep,me", s);
+}
+
+test "a bad pattern leaves the previous search alone" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo\nbar\nfoo");
+    e.key("\x1b");
+    keys(e, "gg0/foo");
+    e.key("\r");
+    keys(e, "/\\(oops");
+    e.key("\r");
+    const dump = try e.dumpText(gpa, 60, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "bad pattern") != null);
+    try testing.expectEqualStrings("foo", e.last_search.items);
+}
+
+test "substitute over a bracket class" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia1b2c3");
+    e.key("\x1b");
+    ex(e, "s/[0-9]/./g");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a.b.c.", s);
+}
+
+test "a dollar anchor only matches at the end" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ixx yy\nzz xx");
+    e.key("\x1b");
+    ex(e, "%s/xx$/QQ/");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("xx yy\nzz QQ", s);
+}
+
+test "an empty match with an empty replacement still terminates" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    ex(e, "s/x*//g"); // matches empty everywhere and writes nothing
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abc", s);
+}
+
+test "a zero-width search pattern does not wedge the renderer" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc\ndef");
+    e.key("\x1b");
+    keys(e, "/x*");
+    e.key("\r");
+    const dump = try e.dumpText(gpa, 40, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "abc") != null);
 }
