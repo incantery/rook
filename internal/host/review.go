@@ -314,14 +314,16 @@ func statusWord(x, y byte) string {
 	}
 }
 
-// headChanges parses `git status --porcelain -z`: one record per path
+// The three parsers below are the parse rules ONLY, split out from the
+// git calls that feed them, because the same rules now live twice — here
+// and in app/src/diffsource.zig — and both are tested against the shared
+// table in app/src/testdata/diff_changes.txt. Pure functions over bytes
+// are what let one fixture file reach both languages.
+
+// parsePorcelain reads `git status --porcelain -z`: one record per path
 // (staged and unstaged states share the XY pair), renames followed by the
 // origin path as its own NUL record.
-func headChanges(top string) ([]changedFile, error) {
-	out, err := gitOut(top, reviewTimeout, "status", "--porcelain", "-z")
-	if err != nil {
-		return nil, err
-	}
+func parsePorcelain(out []byte) []changedFile {
 	files := []changedFile{}
 	fields := strings.Split(string(out), "\x00")
 	for i := 0; i < len(fields); i++ {
@@ -338,27 +340,37 @@ func headChanges(top string) ([]changedFile, error) {
 		}
 		files = append(files, cf)
 	}
-	return files, nil
+	return files
 }
 
-// branchChanges is the branch-vs-merge-base list: committed + uncommitted
-// work relative to the base, plus untracked files (part of "the task's
-// whole work" even before an add).
-func branchChanges(top, ref string) ([]changedFile, error) {
-	out, err := gitOut(top, reviewTimeout, "diff", "--name-status", "-z", ref)
-	if err != nil {
-		return nil, err
-	}
+// parseNameStatus reads `git diff --name-status -z REF`, where the status
+// is its own field: a plain record is two fields and a rename or copy is
+// three.
+func parseNameStatus(out []byte) []changedFile {
 	files := []changedFile{}
 	fields := strings.Split(string(out), "\x00")
+	add := func(path, status, oldPath string) {
+		// An empty path is not a file. It can only come from a truncated
+		// tail no healthy git emits, and keeping it — which this loop
+		// used to do — puts a blank row in the pane offering a diff that
+		// cannot be opened, since confinePath refuses "" before it
+		// becomes a read. Dropping it loses nothing: the record named
+		// nothing. app/src/diffsource.zig does the same, which is why the
+		// shared fixture can assert it.
+		if path == "" {
+			return
+		}
+		files = append(files, changedFile{Path: path, Status: status, OldPath: oldPath})
+	}
 	for i := 0; i < len(fields); {
 		st := fields[i]
 		if st == "" {
 			break
 		}
-		// rename/copy records carry two paths: old, then new
+		// rename/copy records carry two paths: old, then new. The letter
+		// is a PREFIX — R and C carry a similarity score.
 		if (st[0] == 'R' || st[0] == 'C') && i+2 < len(fields) {
-			files = append(files, changedFile{Path: fields[i+2], Status: "renamed", OldPath: fields[i+1]})
+			add(fields[i+2], "renamed", fields[i+1])
 			i += 3
 			continue
 		}
@@ -372,19 +384,46 @@ func branchChanges(top, ref string) ([]changedFile, error) {
 		case 'D':
 			status = "deleted"
 		}
-		files = append(files, changedFile{Path: fields[i+1], Status: status})
+		add(fields[i+1], status, "")
 		i += 2
 	}
-	out, err = gitOut(top, reviewTimeout, "ls-files", "--others", "--exclude-standard", "-z")
-	if err != nil {
-		return nil, err
-	}
-	for _, f := range strings.Split(string(out), "\x00") {
+	return files
+}
+
+// parseOthers reads `git ls-files --others --exclude-standard -z`.
+func parseOthers(out []byte) []changedFile {
+	files := []changedFile{}
+	for f := range strings.SplitSeq(string(out), "\x00") {
 		if f != "" {
 			files = append(files, changedFile{Path: f, Status: "untracked"})
 		}
 	}
-	return files, nil
+	return files
+}
+
+// headChanges is the uncommitted-work list.
+func headChanges(top string) ([]changedFile, error) {
+	out, err := gitOut(top, reviewTimeout, "status", "--porcelain", "-z")
+	if err != nil {
+		return nil, err
+	}
+	return parsePorcelain(out), nil
+}
+
+// branchChanges is the branch-vs-merge-base list: committed + uncommitted
+// work relative to the base, plus untracked files (part of "the task's
+// whole work" even before an add).
+func branchChanges(top, ref string) ([]changedFile, error) {
+	out, err := gitOut(top, reviewTimeout, "diff", "--name-status", "-z", ref)
+	if err != nil {
+		return nil, err
+	}
+	files := parseNameStatus(out)
+	out, err = gitOut(top, reviewTimeout, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, err
+	}
+	return append(files, parseOthers(out)...), nil
 }
 
 // capSide enforces the per-side content rules: a NUL in the sniff window

@@ -5,9 +5,102 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// changesFixtures is the table this implementation and
+// app/src/diffsource.zig BOTH answer to. It lives outside this package
+// because it belongs to neither side — see the file's own header for the
+// format and for why these particular loops earned it.
+const changesFixtures = "../../app/src/testdata/diff_changes.txt"
+
+// unescapeFixture expands the table's two escapes. EMPTY is the explicit
+// spelling of an empty string, so a blank field is a typo rather than an
+// assertion.
+func unescapeFixture(s string) string {
+	if s == "EMPTY" {
+		return ""
+	}
+	s = strings.ReplaceAll(s, `\0`, "\x00")
+	return strings.ReplaceAll(s, `\s`, " ")
+}
+
+// renderChanged prints a parse result in the table's `want` spelling, so a
+// failure shows both sides in the same language.
+func renderChanged(files []changedFile) string {
+	if len(files) == 0 {
+		return "EMPTY"
+	}
+	esc := func(s string) string { return strings.ReplaceAll(s, " ", `\s`) }
+	var b strings.Builder
+	for i, f := range files {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(f.Status + ":" + esc(f.Path))
+		if f.OldPath != "" {
+			b.WriteString("<-" + esc(f.OldPath))
+		}
+	}
+	return b.String()
+}
+
+func TestChangedFileParsers(t *testing.T) {
+	raw, err := os.ReadFile(changesFixtures)
+	if err != nil {
+		t.Fatalf("shared fixtures: %v", err)
+	}
+	declared, seen := -1, 0
+	for ln := range strings.SplitSeq(string(raw), "\n") {
+		line := strings.TrimSpace(ln)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			if rest, ok := strings.CutPrefix(line, "# cases:"); ok {
+				if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil {
+					declared = n
+				}
+			}
+			continue
+		}
+		parts := strings.Split(line, "|")
+		if len(parts) < 4 {
+			t.Fatalf("malformed row: %q", line)
+		}
+		name := strings.TrimSpace(parts[0])
+		parser := strings.TrimSpace(parts[1])
+		input := []byte(unescapeFixture(strings.TrimSpace(parts[2])))
+		want := strings.TrimSpace(parts[3])
+
+		var got []changedFile
+		switch parser {
+		case "porcelain":
+			got = parsePorcelain(input)
+		case "namestatus":
+			got = parseNameStatus(input)
+		case "others":
+			got = parseOthers(input)
+		default:
+			t.Fatalf("case %q: unknown parser %q", name, parser)
+		}
+		if g := renderChanged(got); g != want {
+			t.Errorf("case %q: want %s, got %s", name, want, g)
+		}
+		seen++
+	}
+	// The guard that keeps this from passing vacuously: a fixture file
+	// that failed to load, or rows a format change made unparseable,
+	// would otherwise be a green run over zero cases.
+	if declared <= 0 {
+		t.Fatalf("fixtures declare no case count")
+	}
+	if seen != declared {
+		t.Fatalf("read %d cases, file declares %d", seen, declared)
+	}
+}
 
 func TestConfinePath(t *testing.T) {
 	top := t.TempDir()

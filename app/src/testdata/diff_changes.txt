@@ -1,0 +1,132 @@
+# Shared changed-file fixtures: git's three NUL-separated listings turned
+# into the review pane's (status, path, old_path) triples.
+#
+# The SAME rules live twice right now — internal/host/review.go and
+# app/src/diffsource.zig — and this file is what stops them drifting.
+# Both test suites read it and must agree on every row.
+#
+# These parsers are worth pinning this hard for two reasons. They are
+# INDEX-WALKING loops over a flat field array, where rename records
+# consume a variable number of fields — the classic place to lose a file
+# or spin. And the status vocabulary is not the same in both formats,
+# which is the sort of asymmetry a second implementation quietly
+# "corrects" (see the C rows below).
+#
+# When the port completes and one implementation is deleted, this file
+# stays: it is the spec for the parse, not scaffolding for the migration.
+#
+# Format, '|'-separated, fields trimmed:
+#
+#   name | parser | input | want
+#
+# parser: which listing the input came from.
+#   porcelain  — `git status --porcelain -z`      (head mode)
+#   namestatus — `git diff --name-status -z REF`  (branch mode)
+#   others     — `git ls-files --others --exclude-standard -z`
+#
+# input: the listing's raw bytes, with two escapes so the fields can be
+#   trimmed and read by eye — `\0` is NUL and `\s` is a space. Both
+#   matter: NUL is the separator, and a leading space is a MEANINGFUL
+#   porcelain status ("\sM" is modified-unstaged, "M\s" is staged).
+#
+# want: comma-separated `status:path` in order, or `status:path<-oldpath`
+#   for a record that carries a rename/copy origin. The literal EMPTY
+#   means "no files" — spelled out, so a blank field is a typo rather
+#   than an assertion.
+#
+# Both parsers assert they read exactly this many cases, so a row one
+# side skips is a failure rather than a silent gap.
+# cases: 32
+
+# ---------------------------------------------------------------- porcelain
+#
+# One record per path: the XY pair carries the staged state in X and the
+# worktree state in Y, and a single path is listed once however many of
+# the two moved. The pair is folded to ONE word, and the worktree side
+# wins a mixed verdict — what is on disk now is what you are about to
+# review.
+
+porcelain modify unstaged             | porcelain | \sM\sf.txt\0                | modified:f.txt
+porcelain modify staged               | porcelain | M\s\sf.txt\0                | modified:f.txt
+porcelain modify both sides           | porcelain | MM\sf.txt\0                 | modified:f.txt
+porcelain add staged                  | porcelain | A\s\snew.txt\0              | added:new.txt
+porcelain add intent-to-add           | porcelain | \sA\sf.txt\0                | added:f.txt
+porcelain delete unstaged             | porcelain | \sD\sgone.txt\0             | deleted:gone.txt
+porcelain delete staged               | porcelain | D\s\sgone.txt\0             | deleted:gone.txt
+porcelain typechange                  | porcelain | \sT\sf.txt\0                | modified:f.txt
+porcelain unmerged                    | porcelain | UU\sf.txt\0                 | modified:f.txt
+porcelain untracked                   | porcelain | ??\su.txt\0                 | untracked:u.txt
+
+# Added, then deleted from disk before anyone looked: the worktree side
+# wins, so this reads deleted. Ordering inside the fold is the whole
+# content of this row — a fold that tested A before D would say added,
+# and the pane would offer to diff a file that is not there.
+porcelain worktree side wins          | porcelain | AD\sboth.txt\0              | deleted:both.txt
+
+# Renames and copies put the ORIGIN in its own following field, so the
+# walk consumes two fields for one file.
+porcelain rename                      | porcelain | R\s\snew.txt\0old.txt\0     | renamed:new.txt<-old.txt
+porcelain rename then edited          | porcelain | RM\snew.txt\0old.txt\0      | renamed:new.txt<-old.txt
+
+# A COPY carries an origin exactly like a rename, and is still reported
+# `modified` — because the fold only spells R as renamed. Deliberate: a
+# copy did not move the original, so the pane has a new file whose
+# interesting diff is against the file it was copied from. Note this is
+# the OPPOSITE of what name-status does with C, two sections down.
+porcelain copy keeps its origin       | porcelain | C\s\scopy.txt\0src.txt\0    | modified:copy.txt<-src.txt
+
+# Paths are NOT quoted or escaped in -z mode, so a space in a name is
+# just a byte in the path — the record ends at the NUL and nowhere else.
+porcelain path containing a space     | porcelain | \sM\sdir/a\sb.txt\0         | modified:dir/a\sb.txt
+porcelain two files                   | porcelain | \sM\sa.txt\0\sM\sb.txt\0    | modified:a.txt,modified:b.txt
+
+# A record too short to hold "XY path" is skipped rather than sliced —
+# and the walk carries on to the next one instead of giving up on the
+# rest of the listing.
+porcelain runt record is skipped      | porcelain | \sM\0\sM\sb.txt\0           | modified:b.txt
+porcelain clean tree                  | porcelain | EMPTY                       | EMPTY
+
+# --------------------------------------------------------------- namestatus
+#
+# `git diff --name-status -z` puts the status in its OWN field, so a
+# plain record is two fields and a rename/copy is three. Same file list,
+# an entirely different field rhythm from porcelain.
+
+namestatus modify                     | namestatus | M\0f.txt\0                 | modified:f.txt
+namestatus add                        | namestatus | A\0new.txt\0               | added:new.txt
+namestatus delete                     | namestatus | D\0gone.txt\0              | deleted:gone.txt
+namestatus typechange                 | namestatus | T\0f.txt\0                 | modified:f.txt
+
+# The status field carries a similarity score, so the letter is a PREFIX
+# and never the whole field.
+namestatus rename with score          | namestatus | R100\0old.txt\0new.txt\0   | renamed:new.txt<-old.txt
+
+# ...and here C reads `renamed`, where porcelain reads `modified`. Both
+# sides must reproduce the inconsistency until someone decides which is
+# right; a port that unified them would change what the pane says about
+# copies without anyone choosing that.
+namestatus copy reads renamed         | namestatus | C085\0src.txt\0copy.txt\0  | renamed:copy.txt<-src.txt
+
+namestatus two records                | namestatus | M\0a.txt\0A\0b.txt\0       | modified:a.txt,added:b.txt
+
+# The rhythm change mid-listing is the thing: three fields, then two.
+# An advance that assumed one width would read the next status as a path.
+namestatus rename then modify         | namestatus | R100\0o.txt\0n.txt\0M\0f.txt\0 | renamed:n.txt<-o.txt,modified:f.txt
+
+namestatus no changes                 | namestatus | EMPTY                      | EMPTY
+
+# Truncated tails. Neither can come from a healthy git, and neither may
+# loop or read past the end. A status with no path yields NOTHING — an
+# empty path is not a file, and a blank row in the pane that reports a
+# diff nobody can open is worse than a dropped record.
+namestatus status with no path        | namestatus | M\0                        | EMPTY
+namestatus rename missing its target  | namestatus | R100\0o.txt                | modified:o.txt
+
+# ------------------------------------------------------------------- others
+#
+# Untracked files, folded into branch mode: work that is part of the task
+# even though nobody has run `git add` yet.
+
+others two files                      | others | a.txt\0b.txt\0                 | untracked:a.txt,untracked:b.txt
+others nothing untracked              | others | EMPTY                          | EMPTY
+others empty fields are not paths     | others | a.txt\0\0b.txt\0               | untracked:a.txt,untracked:b.txt

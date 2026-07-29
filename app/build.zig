@@ -320,6 +320,22 @@ pub fn build(b: *std.Build) void {
     reanchor_tests.root_module.linkSystemLibrary("sqlite3", .{});
     test_step.dependOn(&b.addRunArtifact(reanchor_tests).step);
 
+    // Diff sources: where "what changed" comes from. Its own root, and
+    // it needs neither sqlite nor a registry — a diff source is git and
+    // bytes, which is exactly why it is separable from the substrate at
+    // all. What it guards is a pair of INDEX-WALKING parsers over flat
+    // NUL-separated field arrays, where a rename record consumes a
+    // variable number of fields: mis-advance by one and a status field is
+    // read as a path, so the pane offers a diff of a file called "M" and
+    // silently loses the real one. The shared fixture table it runs off
+    // is answered by internal/host/review.go too.
+    const diffsource_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/diffsource.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(diffsource_tests).step);
+
     // The UI layer's text fitting. Its own root for the reason logged
     // above editor_tests — the exe module's test collection does not
     // reach these decls, and a suite that is never run is worse than no
