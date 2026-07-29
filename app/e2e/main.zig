@@ -41,6 +41,7 @@ const scenarios = [_]Scenario{
     .{ .name = "threads", .what = "the threads panel, and :Thread* refuses a non-thread buffer", .run = threads },
     .{ .name = "review", .what = "the review panel opens focused and keeps its verdict keys", .run = review },
     .{ .name = "threadrows", .what = "the sidebar lists real threads and re-anchors their lines", .run = threadRows },
+    .{ .name = "reviewrows", .what = "the review panel shows findings, the gate, and re-anchored lines", .run = reviewRows },
 };
 
 // ---------------------------------------------------------------- boot
@@ -1031,6 +1032,111 @@ fn threads(gpa: std.mem.Allocator, bin: []const u8) !void {
     try app.waitText("not a thread buffer", 5_000);
 }
 
+// ------------------------------------------------- seeding a registry
+//
+// Both panel scenarios need the same thing: a git repo whose file has
+// MOVED since the anchors were taken, and a registry the app will
+// actually find. Shared because the schema DDL is the part that must not
+// drift between them — two copies would be two chances to test against a
+// shape rook does not have.
+
+/// git's own hash of the snapshot below:
+///   printf 'l1\nl2\nl3\nl4\nl5\n' | git hash-object --stdin
+///
+/// Hardcoded rather than computed, so these stay BLACK-BOX checks of the
+/// shipped binary: if the app's blobSha ever disagreed with git, the
+/// snapshot would not be found, rows would go outdated, and the line
+/// assertions are what would catch it.
+const snapshot_sha = "b8cb000a15a7fc5e44750b59e867c859c6050a92";
+
+const Registry = struct {
+    db_buf: [256]u8 = undefined,
+    db_len: usize = 0,
+    repo_buf: [256]u8 = undefined,
+    repo_len: usize = 0,
+
+    fn db(self: *const Registry) [:0]const u8 {
+        return self.db_buf[0..self.db_len :0];
+    }
+    pub fn repo(self: *const Registry) []const u8 {
+        return self.repo_buf[0..self.repo_len];
+    }
+
+    /// Run more SQL against the seeded db. "SNAPSHOT" in `sql` is
+    /// replaced by the snapshot's sha, which keeps the fixtures readable
+    /// — a 40-char hex string repeated inline hides which rows share an
+    /// anchor.
+    pub fn exec(self: *const Registry, app: *h.Instance, comptime sql: []const u8) !void {
+        var buf: [4096]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        var rest: []const u8 = sql;
+        while (std.mem.indexOf(u8, rest, "SNAPSHOT")) |i| {
+            try w.writeAll(rest[0..i]);
+            try w.writeAll(snapshot_sha);
+            rest = rest["SNAPSHOT".len + i ..];
+        }
+        try w.writeAll(rest);
+        try w.writeByte(0);
+        const sqlz: [*:0]const u8 = @ptrCast(buf[0 .. w.end - 1 :0].ptr);
+        if (try h.runCmd(app.dirPath(), &.{ "/usr/bin/sqlite3", self.db().ptr, sqlz }) != 0)
+            return error.SeedFailed;
+    }
+};
+
+/// A repo whose f.zig has drifted from the snapshot by TWO separate
+/// insertions — two lines at the top and two more between l2 and l3 —
+/// plus an empty registry at XDG_DATA_HOME/rook/rook.db holding a
+/// workspace named for the space the sandbox boots into.
+///
+/// Two insertions rather than one on purpose: an anchor on line 1 sits
+/// below only the first and rides to 3, while one on line 3 sits below
+/// both and rides to 7. Different DELTAS are what separate real
+/// re-anchoring from a constant offset applied to every row — with a
+/// single insertion both anchors move by 2 and the assertion proves
+/// nothing about the mapping.
+fn seedRegistry(app: *h.Instance) !Registry {
+    var reg: Registry = .{};
+
+    const repo = try std.fmt.bufPrint(&reg.repo_buf, "{s}/repo", .{app.dirPath()});
+    reg.repo_len = repo.len;
+    try h.mkdirP(repo);
+    if (try h.runCmd(repo, &.{ "/usr/bin/git", "init", "-q" }) != 0) return error.NoGit;
+    var f_buf: [256]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/f.zig", .{repo}), "a\nb\nl1\nl2\nX\nY\nl3\nl4\nl5\n");
+
+    var rookdir_buf: [256]u8 = undefined;
+    const rookdir = try std.fmt.bufPrint(&rookdir_buf, "{s}/data/rook", .{app.dirPath()});
+    try h.mkdirP(rookdir);
+    // bufPrintZ, not bufPrint: this crosses into execv as a C string, and
+    // an unterminated slice pointer is a path sqlite cannot open — which
+    // surfaces only as a nonzero exit with the output discarded.
+    const db = try std.fmt.bufPrintZ(&reg.db_buf, "{s}/rook.db", .{rookdir});
+    reg.db_len = db.len;
+
+    // The subset of rook's schema the read side touches, verbatim from
+    // internal/host/registry.go — including the three thread columns it
+    // adds by ALTER TABLE, because a migrated db is the only shape that
+    // exists in the wild.
+    var sql_buf: [4096]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(&sql_buf,
+        \\CREATE TABLE workspaces (name TEXT PRIMARY KEY, root TEXT NOT NULL DEFAULT '', scratch INTEGER NOT NULL DEFAULT 0, worktree_of TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_used TEXT NOT NULL);
+        \\CREATE TABLE anchor_blobs (sha TEXT PRIMARY KEY, content BLOB NOT NULL);
+        \\CREATE TABLE threads (id INTEGER PRIMARY KEY, workspace TEXT NOT NULL, path TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, side TEXT NOT NULL DEFAULT 'modified', blob_sha TEXT NOT NULL, commit_sha TEXT NOT NULL DEFAULT '', anchor_text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', resolved_by TEXT NOT NULL DEFAULT '', agent_reopens INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, submitted_at TEXT, rook_task_id INTEGER NOT NULL DEFAULT 0, deliver_error TEXT NOT NULL DEFAULT '', draft TEXT NOT NULL DEFAULT '');
+        \\CREATE TABLE thread_comments (id INTEGER PRIMARY KEY, thread_id INTEGER NOT NULL, author TEXT NOT NULL, agent_session TEXT NOT NULL DEFAULT '', body TEXT NOT NULL, created_at TEXT NOT NULL);
+        \\CREATE TABLE rook_tasks (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL DEFAULT 0, workspace TEXT NOT NULL, work_type TEXT NOT NULL, state TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', anchor_kind TEXT NOT NULL DEFAULT 'none', path TEXT NOT NULL DEFAULT '', start_line INTEGER NOT NULL DEFAULT 0, end_line INTEGER NOT NULL DEFAULT 0, side TEXT NOT NULL DEFAULT 'modified', blob_sha TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '', anchor_text TEXT NOT NULL DEFAULT '', anchor_ref TEXT NOT NULL DEFAULT '', origin TEXT NOT NULL DEFAULT 'rook', source_ref TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        \\INSERT INTO workspaces VALUES ('scratch','{s}',0,'','t','t');
+        \\INSERT INTO anchor_blobs VALUES ('{s}','l1
+        \\l2
+        \\l3
+        \\l4
+        \\l5
+        \\');
+    , .{ repo, snapshot_sha });
+    if (try h.runCmd(app.dirPath(), &.{ "/usr/bin/sqlite3", db.ptr, sql.ptr }) != 0)
+        return error.SeedFailed;
+    return reg;
+}
+
 /// The sidebar with actual threads in it, read from a registry rather
 /// than asked of a host — and re-anchored, which is the behaviour no
 /// unit test can show you on screen.
@@ -1044,59 +1150,18 @@ fn threadRows(gpa: std.mem.Allocator, bin: []const u8) !void {
         app.deinit();
     }
 
-    // A repo whose file has moved since the thread was written: the
-    // snapshot is l1..l5, the tree has two lines prepended, so a thread
-    // anchored at line 3 belongs at line 5 now.
-    var repo_buf: [256]u8 = undefined;
-    const repo = try std.fmt.bufPrint(&repo_buf, "{s}/repo", .{app.dirPath()});
-    try h.mkdirP(repo);
-    if (try h.runCmd(repo, &.{ "/usr/bin/git", "init", "-q" }) != 0) return error.NoGit;
-    var f_buf: [256]u8 = undefined;
-    try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/f.zig", .{repo}), "a\nb\nl1\nl2\nl3\nl4\nl5\n");
-
-    // The registry the app will find: XDG_DATA_HOME/rook/rook.db, with a
-    // workspace named for the space the sandbox boots into ("scratch").
-    var rookdir_buf: [256]u8 = undefined;
-    const rookdir = try std.fmt.bufPrint(&rookdir_buf, "{s}/data/rook", .{app.dirPath()});
-    try h.mkdirP(rookdir);
-    // bufPrintZ, not bufPrint: this crosses into execv as a C string,
-    // and an unterminated slice pointer is a path sqlite cannot open —
-    // which surfaces only as a nonzero exit with the output discarded.
-    var db_buf: [256]u8 = undefined;
-    const db = try std.fmt.bufPrintZ(&db_buf, "{s}/rook.db", .{rookdir});
-
-    // git's own hash of the snapshot:
-    //   printf 'l1\nl2\nl3\nl4\nl5\n' | git hash-object --stdin
-    // Hardcoded rather than computed, so this stays a BLACK-BOX check of
-    // the shipped binary: if the app's blobSha ever disagreed with git,
-    // the snapshot would not be found, the row would go outdated, and
-    // the line assertion below is what would catch it.
-    const sha = "b8cb000a15a7fc5e44750b59e867c859c6050a92";
-    var sql_buf: [2048]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(&sql_buf,
-        \\CREATE TABLE workspaces (name TEXT PRIMARY KEY, root TEXT NOT NULL DEFAULT '', scratch INTEGER NOT NULL DEFAULT 0, worktree_of TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_used TEXT NOT NULL);
-        \\CREATE TABLE anchor_blobs (sha TEXT PRIMARY KEY, content BLOB NOT NULL);
-        \\CREATE TABLE threads (id INTEGER PRIMARY KEY, workspace TEXT NOT NULL, path TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, side TEXT NOT NULL DEFAULT 'modified', blob_sha TEXT NOT NULL, commit_sha TEXT NOT NULL DEFAULT '', anchor_text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', resolved_by TEXT NOT NULL DEFAULT '', agent_reopens INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, submitted_at TEXT, rook_task_id INTEGER NOT NULL DEFAULT 0, deliver_error TEXT NOT NULL DEFAULT '', draft TEXT NOT NULL DEFAULT '');
-        \\CREATE TABLE thread_comments (id INTEGER PRIMARY KEY, thread_id INTEGER NOT NULL, author TEXT NOT NULL, agent_session TEXT NOT NULL DEFAULT '', body TEXT NOT NULL, created_at TEXT NOT NULL);
-        \\INSERT INTO workspaces VALUES ('scratch','{s}',0,'','t','t');
-        \\INSERT INTO anchor_blobs VALUES ('{s}','l1
-        \\l2
-        \\l3
-        \\l4
-        \\l5
-        \\');
+    var reg = try seedRegistry(app);
+    try reg.exec(app,
         \\INSERT INTO threads (id,workspace,path,start_line,end_line,blob_sha,anchor_text,state,created_at,updated_at,draft,deliver_error)
-        \\ VALUES (1,'scratch','f.zig',3,4,'{s}','l3','open','t','t','',''),
+        \\ VALUES (1,'scratch','f.zig',3,4,'SNAPSHOT','l3','open','t','t','',''),
         \\        (2,'scratch','other.zig',9,9,'nosnapshot','x','pending','t','t','tail',''),
         \\        (3,'scratch','gone.zig',1,1,'nosnapshot','y','resolved','t','t','','');
-    , .{ repo, sha, sha });
-    if (try h.runCmd(app.dirPath(), &.{ "/usr/bin/sqlite3", db.ptr, sql.ptr }) != 0)
-        return error.SeedFailed;
+    );
 
     _ = try app.ctl("run threads.toggle");
     try h.expectContains(try app.ctl("sidepane"), "panel:threads", "threads takes the side pane");
 
-    // THE assertion, and it doubles as the wait: the row shows line 5,
+    // THE assertion, and it doubles as the wait: the row shows line 7,
     // not the 3 the thread was written against. That is the re-anchor
     // happening inside the shipped binary, against a real working tree,
     // with no host anywhere.
@@ -1105,7 +1170,7 @@ fn threadRows(gpa: std.mem.Allocator, bin: []const u8) !void {
     // chrome, and `screen` dumps the focused pane's grid — asserting
     // there passes only by accident and fails with a shell prompt as
     // evidence.
-    const rows = try app.waitCtl("sidepane", "f.zig:5", 10_000);
+    const rows = try app.waitCtl("sidepane", "f.zig:7", 10_000);
 
     // The local arm answered, so the panel is not reporting a host it
     // never needed.
@@ -1131,7 +1196,111 @@ fn threadRows(gpa: std.mem.Allocator, bin: []const u8) !void {
     defer shut.deinit();
 
     _ = try app.ctl("run threads.toggle");
-    _ = try app.waitCtl("sidepane", "f.zig:5", 10_000);
+    _ = try app.waitCtl("sidepane", "f.zig:7", 10_000);
+    var p2: [256]u8 = undefined;
+    var open = try app.shot(try std.fmt.bufPrint(&p2, "{s}/open.png", .{app.dirPath()}));
+    defer open.deinit();
+
+    try h.expect(
+        shut.width == open.width and shut.height == open.height,
+        "shots disagree on size: {d}x{d} vs {d}x{d}",
+        .{ shut.width, shut.height, open.width, open.height },
+    );
+    var changed: usize = 0;
+    var y: usize = 0;
+    while (y < open.height) : (y += 4) {
+        var x = open.width - open.width / 5;
+        while (x < open.width) : (x += 4) {
+            if (shut.pixel(x, y) != open.pixel(x, y)) changed += 1;
+        }
+    }
+    try h.expect(changed > 50, "the panel strip barely changed ({d} px) — the rows were right but nothing drew", .{changed});
+}
+
+/// The review panel with an actual review in it, computed here rather
+/// than handed over by a host: the gate, the attention order, and the
+/// re-anchored lines.
+///
+/// The `review` scenario above covers the empty/host-unreachable side and
+/// the verdict keys. This one seeds the sandbox's own registry so the
+/// LOCAL arm engages and the gate is computed in this process.
+fn reviewRows(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var reg = try seedRegistry(app);
+    // A review parent and three findings. Two share the snapshot and sit
+    // below different amounts of drift, so they re-anchor by different
+    // DELTAS — line 3 rides to 7 (below both insertions) and line 1 to 3
+    // (below only the first). Equal deltas would not distinguish real
+    // mapping from a constant offset. The third has no snapshot at all
+    // and must not move.
+    //
+    // States are chosen so the gate has something to say: rejected and
+    // proposed block, approved does not, so 2 of 3 block and the gate is
+    // shut. Risks 9 and 2 fix the attention order between the blockers.
+    try reg.exec(app,
+        \\INSERT INTO rook_tasks (id,parent_id,workspace,work_type,state,title,anchor_kind,detail,created_at,updated_at)
+        \\ VALUES (1,0,'scratch','review','reviewing','review','ref','{"label":"unstaged","verb":"commit"}','t','t');
+        \\INSERT INTO rook_tasks (id,parent_id,workspace,work_type,state,title,anchor_kind,path,start_line,end_line,blob_sha,detail,created_at,updated_at)
+        \\ VALUES (2,1,'scratch','review','rejected','f.zig:3','code','f.zig',3,4,'SNAPSHOT','{"summary":"off by one","category":"logic","score":{"risk":9}}','t','t'),
+        \\        (3,1,'scratch','review','proposed','other.zig:9','code','other.zig',9,9,'','{"summary":"unclear name","category":"style","score":{"risk":2}}','t','t'),
+        \\        (4,1,'scratch','review','approved','f.zig:1','code','f.zig',1,1,'SNAPSHOT','{"summary":"reads fine","category":"style","score":{"risk":1}}','t','t');
+    );
+
+    _ = try app.ctl("run review.changes");
+    try h.expectContains(try app.ctl("sidepane"), "panel:review", "review takes the side pane");
+
+    // Doubles as the wait: the finding was written against line 3 and the
+    // row has to say 7. Read through ctl, because a side panel is window
+    // chrome and `screen` dumps the focused pane's grid.
+    const out = try app.waitCtl("sidepane", "f.zig:7", 10_000);
+
+    // The local arm answered, so the panel is not reporting a host it
+    // never needed.
+    try h.expectNotContains(out, "host unreachable", "the local arm answered");
+
+    // The GATE, computed in this process from the children's states —
+    // not a number the host handed over. 2 of 3 block, so it is shut.
+    try h.expectContains(out, "gate commit blocked blocking=2 total=3", "the gate is computed locally");
+    try h.expectContains(out, "unstaged", "the review's label, from its detail bag");
+
+    // The second re-anchored row moves by a DIFFERENT delta: 1 -> 3,
+    // where the first went 3 -> 7. That difference is the thing that
+    // separates a real mapping from a constant offset applied to
+    // everything, and it is why the fixture has two insertions.
+    try h.expectContains(out, "f.zig:3", "the second anchor re-anchored by its own delta");
+    // No snapshot, so no movement — a finding that cannot be mapped keeps
+    // where it was written rather than guessing.
+    try h.expectContains(out, "other.zig:9", "no snapshot, no movement");
+
+    // Summaries, not titles: the title is just path:line, which the row
+    // already shows.
+    try h.expectContains(out, "off by one", "the summary is what you triage on");
+
+    // Attention order: blocking first, riskiest first. The rejected
+    // risk-9 finding leads, the approved one is last.
+    const rejected_at = std.mem.indexOf(u8, out, "rejected").?;
+    const proposed_at = std.mem.indexOf(u8, out, "proposed").?;
+    const approved_at = std.mem.indexOf(u8, out, "approved").?;
+    try h.expect(rejected_at < proposed_at, "riskier blocker should sort first", .{});
+    try h.expect(proposed_at < approved_at, "blockers should sort before cleared findings", .{});
+
+    // ...and it actually DREW. Two shots, panel shut then open, and the
+    // right-hand strip has to differ. Self-calibrating — no constant for
+    // the panel's width — and the only assertion here that a
+    // data-correct panel rendering nothing would fail.
+    _ = try app.ctl("run review.changes");
+    try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
+    var p1: [256]u8 = undefined;
+    var shut = try app.shot(try std.fmt.bufPrint(&p1, "{s}/shut.png", .{app.dirPath()}));
+    defer shut.deinit();
+
+    _ = try app.ctl("run review.changes");
+    _ = try app.waitCtl("sidepane", "f.zig:7", 10_000);
     var p2: [256]u8 = undefined;
     var open = try app.shot(try std.fmt.bufPrint(&p2, "{s}/open.png", .{app.dirPath()}));
     defer open.deinit();
