@@ -82,6 +82,14 @@ pub const schema =
     \\  deliver_error TEXT NOT NULL DEFAULT '',
     \\  draft         TEXT NOT NULL DEFAULT ''
     \\);
+    \\CREATE TABLE IF NOT EXISTS workspaces (
+    \\  name       TEXT PRIMARY KEY,
+    \\  root       TEXT NOT NULL DEFAULT '',
+    \\  scratch    INTEGER NOT NULL DEFAULT 0,
+    \\  worktree_of TEXT NOT NULL DEFAULT '',
+    \\  created_at TEXT NOT NULL,
+    \\  last_used  TEXT NOT NULL
+    \\);
     \\CREATE TABLE IF NOT EXISTS thread_comments (
     \\  id            INTEGER PRIMARY KEY,
     \\  thread_id     INTEGER NOT NULL,

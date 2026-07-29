@@ -186,6 +186,23 @@ pub fn runTimeout(
     };
 }
 
+/// The repository's top-level directory for `dir`, or null when `dir` is
+/// not in a repo.
+///
+/// Anchor paths are stored top-relative because that is how git reports
+/// them, and a workspace root can sit BELOW the top — so joining an
+/// anchor path onto the workspace root instead of onto the top silently
+/// resolves the wrong file in exactly the repos where it matters.
+/// Caller owns the result.
+pub fn repoTop(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ?[]u8 {
+    const r = run(gpa, io, dir, &.{ "rev-parse", "--show-toplevel" }, 64 * 1024) orelse return null;
+    defer r.deinit(gpa);
+    if (r.code != 0) return null;
+    const top = std.mem.trim(u8, r.stdout, " \t\r\n");
+    if (top.len == 0) return null;
+    return gpa.dupe(u8, top) catch null;
+}
+
 /// Join a repo-relative path onto `top`, refusing anything that escapes.
 ///
 /// Ported from the Go host's confinePath. The guard matters because these

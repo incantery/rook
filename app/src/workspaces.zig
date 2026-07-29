@@ -33,6 +33,27 @@ pub fn free(gpa: std.mem.Allocator, list: []Entry) void {
     gpa.free(list);
 }
 
+/// The root directory of one workspace by name, or null if the registry
+/// has never heard of it. Caller owns the result.
+///
+/// Its own query rather than a scan of load(): callers that want one
+/// root (re-anchoring, which needs somewhere to run git) should not pay
+/// for the grouping pass, and load()'s result is ordered for a palette
+/// rather than keyed for lookup.
+pub fn rootOf(gpa: std.mem.Allocator, name: []const u8) ?[]u8 {
+    const db = regdb.open() orelse return null;
+    defer regdb.close(db);
+    var stmt: ?*anyopaque = null;
+    if (regdb.sqlite3_prepare_v2(db, "SELECT root FROM workspaces WHERE name = ?", -1, &stmt, null) != regdb.OK)
+        return null;
+    defer _ = regdb.sqlite3_finalize(stmt);
+    _ = regdb.sqlite3_bind_text(stmt, 1, name.ptr, @intCast(name.len), regdb.STATIC);
+    if (regdb.sqlite3_step(stmt) != regdb.ROW) return null;
+    const root = regdb.text(stmt, 0);
+    if (root.len == 0) return null;
+    return gpa.dupe(u8, root) catch null;
+}
+
 /// Load workspaces GROUPED: top-level entries by last_used, each
 /// followed by its worktree children (their own last_used order). A
 /// missing db or any sqlite error is an EMPTY list, never a failure —

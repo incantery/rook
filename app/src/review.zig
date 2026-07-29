@@ -15,6 +15,11 @@
 
 const std = @import("std");
 const hostc = @import("hostc.zig");
+const tasks = @import("tasks.zig");
+const blobs = @import("blobs.zig");
+const reanchor = @import("reanchor.zig");
+const workspaces = @import("workspaces.zig");
+const git = @import("git.zig");
 
 pub const max_findings = 64;
 
@@ -160,8 +165,127 @@ pub const Snapshot = struct {
     }
 };
 
+/// The review panel's data.
+///
+/// Reads rook's registry DIRECTLY and re-anchors in this process. The
+/// host is no longer asked, and the reason is not that HTTP was slow: a
+/// review panel re-anchors against the WORKING TREE, which changes while
+/// you read it, so the answer has to be recomputed against the tree as
+/// it is now rather than as it was when a JSON response was built.
+///
+/// Falls back to the host only when the registry cannot be opened at
+/// all — a machine where the db is somewhere this build does not expect.
+/// That is a different answer from "no reviews", and blanking the panel
+/// on it would be a regression, so the old path stays as the floor.
 pub fn fetch(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) Snapshot {
     if (workspace.len == 0) return .{};
+    if (read(gpa, io, workspace)) |snap| return snap;
+    return fetchHost(gpa, io, workspace);
+}
+
+/// Local path. Null means the registry itself was unreachable — NOT that
+/// there is nothing to review, which is a live snapshot with `any` false.
+pub fn read(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) ?Snapshot {
+    var store = tasks.Store.open();
+    defer store.close();
+    if (store.db == null) return null;
+
+    var snap: Snapshot = .{ .live = true };
+    var roots = store.roots(gpa, workspace, "review");
+    defer roots.deinit();
+    if (roots.items.len == 0) return snap; // live, and nothing to review
+    const root = roots.items[0]; // newest — roots() orders DESC
+
+    var root_detail = Detail.parse(gpa, root.detail);
+    defer root_detail.deinit();
+    snap.any = true;
+    snap.id = root.id;
+    snap.label.setOneLine(if (root_detail.v.label.len > 0) root_detail.v.label else root.title);
+    snap.verb.setOneLine(root_detail.v.verb);
+
+    var kids = store.childrenOf(gpa, root.id);
+    defer kids.deinit();
+    const gate = tasks.gateFromChildren(kids.items, root_detail.v.verb);
+    snap.ready = gate.ready;
+    snap.blocking = gate.blocking;
+    snap.total = gate.total;
+
+    // Re-anchoring context. Anchor paths are top-relative, so this needs
+    // the repo TOP and not the workspace root, which can sit below it.
+    // Everything here is optional: without it the findings still render,
+    // at the line they were written against.
+    var memo = reanchor.Memo.init(gpa);
+    defer memo.deinit();
+    var blob_store = blobs.Store.open();
+    defer blob_store.close();
+    const top: ?[]u8 = blk: {
+        const root_dir = workspaces.rootOf(gpa, workspace) orelse break :blk null;
+        defer gpa.free(root_dir);
+        break :blk git.repoTop(gpa, io, root_dir);
+    };
+    defer if (top) |t| gpa.free(t);
+
+    for (kids.items) |c| {
+        if (snap.n >= max_findings) {
+            snap.more += 1;
+            continue;
+        }
+        var f: Finding = .{ .id = c.id };
+        f.path.setOneLine(c.path);
+        f.line = c.start_line;
+        // Review leaves are always modified-side (reviewtasks.go stores
+        // them that way), so re-anchoring here needs no diff base — the
+        // one dependency deliberately left behind in Go does not bind.
+        if (top != null and std.mem.eql(u8, c.anchor_kind, "code") and c.blob_sha.len > 0) {
+            var a: reanchor.Anchor = .{
+                .path = c.path,
+                .start_line = c.start_line,
+                .end_line = c.end_line,
+                .blob_sha = c.blob_sha,
+            };
+            reanchor.resolve(gpa, io, .{
+                .top = top.?,
+                .blobs = &blob_store,
+                .memo = &memo,
+            }, &a);
+            // Open where the code IS. An outdated anchor keeps its
+            // stored range, which is already what current_start holds.
+            if (a.current_start > 0) f.line = a.current_start;
+        }
+        f.state = State.parse(c.state);
+        var d = Detail.parse(gpa, c.detail);
+        defer d.deinit();
+        f.what.setOneLine(if (d.v.summary.len > 0) d.v.summary else c.title);
+        f.category.setOneLine(d.v.category);
+        f.risk = d.v.score.risk;
+        snap.items[snap.n] = f;
+        snap.n += 1;
+    }
+    sortByAttention(snap.items[0..snap.n]);
+    return snap;
+}
+
+/// A task's work_type-owned JSON bag. Malformed detail yields the zero
+/// value rather than dropping the finding — a bad bag costs you a
+/// summary, not the row telling you something is wrong.
+const Detail = struct {
+    v: WireDetail = .{},
+    parsed: ?std.json.Parsed(WireDetail) = null,
+
+    fn parse(gpa: std.mem.Allocator, raw: []const u8) Detail {
+        const p = std.json.parseFromSlice(WireDetail, gpa, raw, .{ .ignore_unknown_fields = true }) catch
+            return .{};
+        return .{ .v = p.value, .parsed = p };
+    }
+
+    fn deinit(self: *Detail) void {
+        if (self.parsed) |p| p.deinit();
+    }
+};
+
+/// The pre-registry path: ask the host and parse its JSON. Kept as the
+/// fallback above, and it is what a remote client would need.
+pub fn fetchHost(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) Snapshot {
     const info = hostc.readInfo(gpa, io) orelse return .{};
     var path_buf: [160]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/workspaces/{s}/tasks?workType=review", .{workspace}) catch return .{};
@@ -325,4 +449,128 @@ test "the summary is preferred over the title, which is only path:line" {
         return;
     }
     return error.TestUnexpectedResult;
+}
+
+// --------------------------------------------------- the registry path
+//
+// These drive `read` end to end: a real registry on disk, a real repo,
+// a real git diff. XDG_DATA_HOME is pointed at a fixture so regdb's own
+// path resolution is under test too — the alternative, injecting a
+// store, would test everything except whether we look in the right
+// place, which is the one thing that silently returns "no reviews".
+
+const testdb = @import("testdb.zig");
+const anchorpkg = @import("anchor.zig");
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+const Env = struct {
+    tmp: std.testing.TmpDir,
+    /// <tmp>/repo — the workspace root, and a git repo.
+    repo: []const u8,
+    dbpath: [:0]const u8,
+    repobuf: [std.fs.max_path_bytes]u8 = undefined,
+    dbbuf: [std.fs.max_path_bytes]u8 = undefined,
+
+    fn deinit(self: *Env) void {
+        self.tmp.cleanup();
+    }
+};
+
+fn env() !*Env {
+    const e = try T.allocator.create(Env);
+    e.* = .{ .tmp = std.testing.tmpDir(.{}), .repo = undefined, .dbpath = undefined };
+    var base: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&base, ".zig-cache/tmp/{s}", .{e.tmp.sub_path});
+    e.repo = try std.fmt.bufPrint(&e.repobuf, "{s}/repo", .{dir});
+    e.dbpath = try std.fmt.bufPrintZ(&e.dbbuf, "{s}/rook/rook.db", .{dir});
+
+    try e.tmp.dir.createDirPath(T.io, "repo");
+    try e.tmp.dir.createDirPath(T.io, "rook");
+
+    // The repo has to be a REAL one. Without `git init`, rev-parse
+    // --show-toplevel walks up out of .zig-cache and reports rook's own
+    // top — every anchor then resolves against the wrong tree and reads
+    // as outdated, which is a green-looking test that proves nothing.
+    if (git.run(T.allocator, T.io, e.repo, &.{ "init", "-q" }, 1 << 16)) |r| r.deinit(T.allocator);
+
+    // regdb resolves XDG_DATA_HOME/rook/rook.db, so pointing it here is
+    // what makes every Store.open() below find the fixture.
+    var xdg: [std.fs.max_path_bytes]u8 = undefined;
+    const xdgz = try std.fmt.bufPrintZ(&xdg, "{s}", .{dir});
+    _ = setenv("XDG_DATA_HOME", xdgz, 1);
+    return e;
+}
+
+fn destroyEnv(e: *Env) void {
+    e.deinit();
+    T.allocator.destroy(e);
+}
+
+test "read builds the panel from the registry and re-anchors against the tree" {
+    const e = try env();
+    defer destroyEnv(e);
+
+    // The file as it was when the finding was written, snapshotted...
+    const original = "l1\nl2\nl3\nl4\nl5\n";
+    const sha = anchorpkg.blobSha(original);
+    try e.tmp.dir.writeFile(T.io, .{ .sub_path = "repo/f.zig", .data = "a\nb\n" ++ original });
+
+    try testdb.run(e.dbpath, testdb.schema);
+    var sql: [2048]u8 = undefined;
+    const stmts = try std.fmt.bufPrintZ(&sql,
+        \\INSERT INTO workspaces (name, root, created_at, last_used) VALUES ('src', '{s}', 't', 't');
+        \\INSERT INTO anchor_blobs (sha, content) VALUES ('{s}', '{s}');
+        \\INSERT INTO rook_tasks (id, parent_id, workspace, work_type, state, title, anchor_kind, detail, created_at, updated_at)
+        \\ VALUES (1, 0, 'src', 'review', 'reviewing', 'r', 'ref', '{{"label":"unstaged","verb":"commit"}}', 't', 't');
+        \\INSERT INTO rook_tasks (id, parent_id, workspace, work_type, state, title, anchor_kind, path, start_line, end_line, blob_sha, detail, created_at, updated_at)
+        \\ VALUES (2, 1, 'src', 'review', 'proposed', 'f.zig:3', 'code', 'f.zig', 3, 4, '{s}', '{{"summary":"check this","category":"logic","score":{{"risk":7}}}}', 't', 't');
+        \\INSERT INTO rook_tasks (id, parent_id, workspace, work_type, state, title, anchor_kind, detail, created_at, updated_at)
+        \\ VALUES (3, 1, 'src', 'review', 'approved', 'ok', 'none', '', 't', 't');
+    , .{ e.repo, &sha, original, &sha });
+    try testdb.run(e.dbpath, stmts);
+
+    const snap = read(T.allocator, T.io, "src") orelse return error.RegistryUnreachable;
+
+    try T.expect(snap.live);
+    try T.expect(snap.any);
+    try T.expectEqual(@as(i64, 1), snap.id);
+    try T.expectEqualStrings("unstaged", snap.label.get());
+    try T.expectEqualStrings("commit", snap.verb.get());
+
+    // Gate, computed here rather than handed over by the host.
+    try T.expectEqual(@as(i64, 2), snap.total);
+    try T.expectEqual(@as(i64, 1), snap.blocking);
+    try T.expect(!snap.ready);
+
+    try T.expectEqual(@as(usize, 2), snap.slice().len);
+    const f = snap.slice()[0]; // blocking sorts first
+    try T.expectEqualStrings("f.zig", f.path.get());
+    try T.expectEqualStrings("check this", f.what.get());
+    try T.expectEqualStrings("logic", f.category.get());
+    try T.expectEqual(@as(i64, 7), f.risk);
+
+    // THE assertion for this whole slice: the finding was written
+    // against line 3, two lines have since been inserted above it, and
+    // nothing asked the host. 5 means the local re-anchor ran.
+    try T.expectEqual(@as(i64, 5), f.line);
+}
+
+test "a workspace with no review is live and empty, not unreachable" {
+    const e = try env();
+    defer destroyEnv(e);
+    try testdb.run(e.dbpath, testdb.schema);
+
+    const snap = read(T.allocator, T.io, "src") orelse return error.RegistryUnreachable;
+    try T.expect(snap.live);
+    try T.expect(!snap.any);
+    try T.expectEqual(@as(usize, 0), snap.slice().len);
+}
+
+test "an unreadable registry is null, so fetch can fall back" {
+    // The distinction the fallback rests on: null means "could not ask",
+    // which is not the same answer as "nothing to review" and must not
+    // blank the panel.
+    _ = setenv("XDG_DATA_HOME", "/nonexistent/rook-test", 1);
+    try T.expectEqual(@as(?Snapshot, null), read(T.allocator, T.io, "src"));
 }

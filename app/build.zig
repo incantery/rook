@@ -196,15 +196,20 @@ pub fn build(b: *std.Build) void {
     threaddoc_tests.root_module.link_libc = true;
     test_step.dependOn(&b.addRunArtifact(threaddoc_tests).step);
 
-    // The review gate's rules. Its own root because a client that
+    // The review panel: gate rules, and since the registry cutover, the
+    // whole local read path. Its own root because a client that
     // disagreed with the host about what BLOCKS would render a gate the
-    // host will not honour — the worst kind of wrong for this panel.
+    // host will not honour — the worst kind of wrong for this panel —
+    // and because these tests now drive a real registry, a real repo and
+    // a real git diff end to end, which is the only way to catch the
+    // panel silently falling back to stored line numbers.
     const review_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/review.zig"),
         .target = b.graph.host,
         .optimize = .Debug,
     }) });
     review_tests.root_module.link_libc = true;
+    review_tests.root_module.linkSystemLibrary("sqlite3", .{});
     test_step.dependOn(&b.addRunArtifact(review_tests).step);
 
     // Re-anchoring arithmetic — the first piece of the Go host's review

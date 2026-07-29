@@ -99,15 +99,24 @@ pub const Store = struct {
         return self.query(gpa, "SELECT " ++ cols ++ " FROM rook_tasks WHERE parent_id = ? ORDER BY id", parent_id);
     }
 
-    /// Root tasks for a workspace (parent_id 0), newest first.
-    pub fn roots(self: Store, gpa: std.mem.Allocator, workspace: []const u8) List {
+    /// Root tasks for a workspace (parent_id 0), NEWEST FIRST.
+    ///
+    /// `work_type` empty means no filter. The order is the panel's: when
+    /// several reviews exist, the one you are working through is the
+    /// latest, and showing all of them at once buries it.
+    pub fn roots(self: Store, gpa: std.mem.Allocator, workspace: []const u8, work_type: []const u8) List {
         var out: List = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
         const db = self.db orelse return out;
+        const sql = if (work_type.len > 0)
+            "SELECT " ++ cols ++ " FROM rook_tasks WHERE parent_id = 0 AND workspace = ? AND work_type = ? ORDER BY id DESC"
+        else
+            "SELECT " ++ cols ++ " FROM rook_tasks WHERE parent_id = 0 AND workspace = ? ORDER BY id DESC";
         var stmt: ?*anyopaque = null;
-        if (regdb.sqlite3_prepare_v2(db, "SELECT " ++ cols ++ " FROM rook_tasks WHERE parent_id = 0 AND workspace = ? ORDER BY id DESC", -1, &stmt, null) != regdb.OK)
-            return out;
+        if (regdb.sqlite3_prepare_v2(db, sql, -1, &stmt, null) != regdb.OK) return out;
         defer _ = regdb.sqlite3_finalize(stmt);
         _ = regdb.sqlite3_bind_text(stmt, 1, workspace.ptr, @intCast(workspace.len), regdb.STATIC);
+        if (work_type.len > 0)
+            _ = regdb.sqlite3_bind_text(stmt, 2, work_type.ptr, @intCast(work_type.len), regdb.STATIC);
         collect(&out, stmt);
         return out;
     }
@@ -290,14 +299,23 @@ test "roots are per workspace" {
 
     var store = Store.openPath(p);
     defer store.close();
-    var r = store.roots(testing.allocator, "src");
+    var r = store.roots(testing.allocator, "src", "");
     defer r.deinit();
     try testing.expectEqual(@as(usize, 1), r.items.len);
     try testing.expectEqual(@as(i64, 1), r.items[0].id);
 
-    var none = store.roots(testing.allocator, "nosuch");
+    var none = store.roots(testing.allocator, "nosuch", "");
     defer none.deinit();
     try testing.expectEqual(@as(usize, 0), none.items.len);
+
+    // work_type narrows, and a type nothing uses is empty rather than
+    // unfiltered — the failure mode of an ignored filter.
+    var reviews = store.roots(testing.allocator, "src", "review");
+    defer reviews.deinit();
+    try testing.expectEqual(@as(usize, 1), reviews.items.len);
+    var onboarding = store.roots(testing.allocator, "src", "onboarding");
+    defer onboarding.deinit();
+    try testing.expectEqual(@as(usize, 0), onboarding.items.len);
 }
 
 test "a missing db is an empty list, never a crash" {
