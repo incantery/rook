@@ -10,7 +10,8 @@
 //! Vim scope v1: normal/insert/visual/visual-line/command modes;
 //! h j k l w b e 0 ^ $ gg G arrows ctrl-d/u; operators d y c (+ dd yy
 //! cc D C Y), x r J p P u ctrl-r, counts; f F t T ; , >> << (and
-//! > < in visual), autoindent; :w :q :q! :wq :x :e :<n>.
+//! > < in visual), text objects (iw aw iW aW, i" i' i` and the four
+//! bracket pairs), autoindent; :w :q :q! :wq :x :e :<n>.
 //! Debts: no marks/registers beyond the unnamed one, f/t target ASCII
 //! only, wide glyphs count as one column, lines beyond max_line get
 //! motion/render math clamped.
@@ -76,6 +77,11 @@ pub const Editor = struct {
     /// `>` or `<` waiting for its second key. Not routed through `op`,
     /// because `op` means "delete a range" everywhere it is read.
     pend_shift: u8 = 0,
+    /// `i` or `a` waiting for the object to name (`ciw`, `da(`). Only
+    /// armed when there is something for an object to apply TO — after
+    /// an operator, or in visual mode — because `i` on its own is how
+    /// you get into insert mode.
+    pend_obj: u8 = 0,
     /// `f`/`F`/`t`/`T` waiting for the character to find, and what `;`
     /// and `,` should repeat.
     pend_find: u8 = 0,
@@ -1006,12 +1012,27 @@ pub const Editor = struct {
             return;
         }
 
+        // `iw` / `a(` — the key after i/a names the object, literally,
+        // so this also sits above the count branch.
+        if (self.pend_obj != 0) {
+            const around = self.pend_obj == 'a';
+            self.pend_obj = 0;
+            if (ch == 0x1b or ch < 0x20) {
+                self.op = 0;
+                self.count = 0;
+                return;
+            }
+            self.applyTextObject(around, ch);
+            return;
+        }
+
         if (ch == 0x1b) { // ESC: clear pending, leave visual
             self.count = 0;
             self.op = 0;
             self.pend_g = false;
             self.pend_shift = 0;
             self.pend_find = 0;
+            self.pend_obj = 0;
             self.mode = .normal;
             return;
         }
@@ -1184,13 +1205,24 @@ pub const Editor = struct {
                 self.clampNormal();
             },
 
-            // Insert transitions.
-            'i' => self.enterInsert(),
+            // Insert transitions — unless something is waiting for a
+            // range, in which case i/a name a text object.
+            'i' => {
+                if (self.op != 0 or self.mode == .visual or self.mode == .visual_line) {
+                    self.pend_obj = 'i';
+                    return;
+                }
+                self.enterInsert();
+            },
             'I' => {
                 self.ccol = firstNonblank(self.lineText(self.cline));
                 self.enterInsert();
             },
             'a' => {
+                if (self.op != 0 or self.mode == .visual or self.mode == .visual_line) {
+                    self.pend_obj = 'a';
+                    return;
+                }
                 const s = self.lineText(self.cline);
                 if (s.len > 0 and self.ccol < s.len) self.ccol += cpLenAt(s, self.ccol);
                 self.enterInsert();
@@ -1422,6 +1454,202 @@ pub const Editor = struct {
         }
         self.ccol = col;
         if (self.mode == .normal) self.clampNormal();
+        self.goal = renderCol(self.lineText(self.cline), self.ccol);
+    }
+
+    // -------------------------------------------------------- text objects
+
+    /// A bracket further away than this is not the one you meant.
+    const obj_scan_max = 1 << 20;
+
+    const Range = struct { a: usize, b: usize };
+
+    /// Scan the ROPE for a matching bracket, counting nesting.
+    ///
+    /// Chunked rather than byte-at-a-time: the rope has no cheap
+    /// iterator and `copyRange` walks from the root, so a per-byte loop
+    /// would turn `di{` on a long function into a tree traversal per
+    /// character.
+    ///
+    /// Brackets inside strings and comments COUNT, same as vim's own
+    /// `%`. Doing better needs the syntax tree, and the syntax tree is
+    /// an optional hook here.
+    fn matchBracket(self: *Editor, from: usize, ob: u8, cb: u8, fwd: bool) ?usize {
+        const rope = &self.buf.rope;
+        var depth: usize = 1;
+        var chunk: [4096]u8 = undefined;
+        if (fwd) {
+            var off = from + 1;
+            const stop = @min(rope.byteLen(), from + obj_scan_max);
+            while (off < stop) {
+                const n = @min(chunk.len, stop - off);
+                rope.copyRange(off, off + n, chunk[0..n]);
+                for (chunk[0..n], 0..) |c, i| {
+                    if (c == ob) {
+                        depth += 1;
+                    } else if (c == cb) {
+                        depth -= 1;
+                        if (depth == 0) return off + i;
+                    }
+                }
+                off += n;
+            }
+            return null;
+        }
+        var end = from;
+        const floor = from -| obj_scan_max;
+        while (end > floor) {
+            const n = @min(chunk.len, end - floor);
+            rope.copyRange(end - n, end, chunk[0..n]);
+            var i = n;
+            while (i > 0) {
+                i -= 1;
+                const c = chunk[i];
+                if (c == cb) {
+                    depth += 1;
+                } else if (c == ob) {
+                    depth -= 1;
+                    if (depth == 0) return end - n + i;
+                }
+            }
+            end -= n;
+        }
+        return null;
+    }
+
+    /// `i(` / `a{` / `i[` / `a<` — the pair enclosing the cursor.
+    ///
+    /// Sitting ON a bracket counts as being inside its pair, which is
+    /// what makes `ci(` work with the cursor parked on the paren you
+    /// were just looking at.
+    fn objBracket(self: *Editor, around: bool, ob: u8, cb: u8) ?Range {
+        const rope = &self.buf.rope;
+        const cur = self.absOff();
+        var here: u8 = 0;
+        if (cur < rope.byteLen()) {
+            var one: [1]u8 = undefined;
+            rope.copyRange(cur, cur + 1, &one);
+            here = one[0];
+        }
+        // Sitting ON a bracket is being inside its pair — either one.
+        // The closing case needs saying out loud: searching backward
+        // from past the cursor would count that `)` as a nesting level
+        // and hand back the pair OUTSIDE it, which deletes strictly
+        // more than you asked for.
+        var a: usize = undefined;
+        var b: usize = undefined;
+        if (here == ob) {
+            a = cur;
+            b = self.matchBracket(a, ob, cb, true) orelse return null;
+        } else if (here == cb) {
+            b = cur;
+            a = self.matchBracket(b, ob, cb, false) orelse return null;
+        } else {
+            a = self.matchBracket(cur + 1, ob, cb, false) orelse return null;
+            b = self.matchBracket(a, ob, cb, true) orelse return null;
+        }
+        return if (around) .{ .a = a, .b = b + 1 } else .{ .a = a + 1, .b = b };
+    }
+
+    /// `i"` / `a'` — line-local, because a quote that spanned lines
+    /// would usually mean an UNBALANCED quote somewhere above, and
+    /// `ci"` would then eat half the file.
+    ///
+    /// Pairs are counted from the start of the line, so the cursor
+    /// sitting on the opening quote, inside, or on the closing quote
+    /// all resolve to the same string.
+    fn objQuote(self: *Editor, around: bool, q: u8) ?Range {
+        const s = self.lineText(self.cline);
+        const base = self.buf.rope.lineStart(self.cline);
+        var ob_at: ?usize = null;
+        var i: usize = 0;
+        while (i < s.len) : (i += 1) {
+            if (s[i] == '\\') {
+                i += 1;
+                continue;
+            }
+            if (s[i] != q) continue;
+            if (ob_at) |o| {
+                if (self.ccol <= i) {
+                    if (!around) return .{ .a = base + o + 1, .b = base + i };
+                    // `a"` takes the trailing whitespace, vim's rule —
+                    // otherwise `da"` leaves a stray space behind.
+                    var e = i + 1;
+                    while (e < s.len and (s[e] == ' ' or s[e] == '\t')) e += 1;
+                    return .{ .a = base + o, .b = base + e };
+                }
+                ob_at = null;
+            } else ob_at = i;
+        }
+        return null;
+    }
+
+    /// `iw` / `aw` — the run of one character class around the cursor.
+    /// `aw` extends over the whitespace after it, or before it when the
+    /// word ends the line.
+    fn objWord(self: *Editor, around: bool, big: bool) ?Range {
+        const s = self.lineText(self.cline);
+        if (s.len == 0) return null;
+        const base = self.buf.rope.lineStart(self.cline);
+        const cur = @min(self.ccol, s.len - 1);
+        const cls = if (big) @as(u8, if (charClass(s[cur]) == 0) 0 else 1) else charClass(s[cur]);
+        const sameClass = struct {
+            fn f(c: u8, want: u8, b: bool) bool {
+                const k = charClass(c);
+                return if (b) (if (want == 0) k == 0 else k != 0) else k == want;
+            }
+        }.f;
+
+        var a = cur;
+        while (a > 0 and sameClass(s[a - 1], cls, big)) a -= 1;
+        var b = cur + 1;
+        while (b < s.len and sameClass(s[b], cls, big)) b += 1;
+        if (!around) return .{ .a = base + a, .b = base + b };
+
+        var e = b;
+        while (e < s.len and charClass(s[e]) == 0) e += 1;
+        if (e == b) while (a > 0 and charClass(s[a - 1]) == 0) {
+            a -= 1;
+        };
+        return .{ .a = base + a, .b = base + e };
+    }
+
+    /// Resolve `iw`, `a(`, `i"` … to an absolute byte range.
+    fn textObject(self: *Editor, around: bool, kind: u8) ?Range {
+        return switch (kind) {
+            'w' => self.objWord(around, false),
+            'W' => self.objWord(around, true),
+            '"', '\'', '`' => self.objQuote(around, kind),
+            '(', ')', 'b' => self.objBracket(around, '(', ')'),
+            '{', '}', 'B' => self.objBracket(around, '{', '}'),
+            '[', ']' => self.objBracket(around, '[', ']'),
+            '<', '>' => self.objBracket(around, '<', '>'),
+            else => null,
+        };
+    }
+
+    /// `diw` / `ci(` / `va"` — apply the pending operator to an object,
+    /// or select it in visual mode.
+    fn applyTextObject(self: *Editor, around: bool, kind: u8) void {
+        self.count = 0;
+        const r = self.textObject(around, kind) orelse {
+            // No such object here: cancel, the way a failed find does.
+            // An operator that falls back to "some other range" is how
+            // you lose a paragraph to a typo.
+            self.op = 0;
+            return;
+        };
+        if (self.op != 0) {
+            self.opRange(r.a, r.b);
+            return;
+        }
+        // Visual: put the anchor and cursor on the object's ends.
+        self.mode = .visual;
+        self.vanchor_line = self.buf.rope.lineOfOffset(r.a);
+        self.vanchor_col = r.a - self.buf.rope.lineStart(self.vanchor_line);
+        const last = if (r.b > r.a) r.b - 1 else r.a;
+        self.cline = self.buf.rope.lineOfOffset(last);
+        self.ccol = last - self.buf.rope.lineStart(self.cline);
         self.goal = renderCol(self.lineText(self.cline), self.ccol);
     }
 
@@ -2833,4 +3061,147 @@ test "f on a non-ASCII target does not stay armed" {
     try testing.expectEqual(@as(u8, 0), e.pend_find);
     keys(e, "l"); // must be a motion, not a find target
     try testing.expectEqual(@as(usize, 1), e.ccol);
+}
+
+test "ciw diw and aw" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione two three");
+    e.key("\x1b");
+
+    keys(e, "0wciwTWO");
+    e.key("\x1b");
+    var s = try bufText(gpa, e);
+    try testing.expectEqualStrings("one TWO three", s);
+    gpa.free(s);
+
+    // `aw` takes the whitespace after the word.
+    keys(e, "0daw");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("TWO three", s);
+    gpa.free(s);
+
+    // The last word on a line has no trailing space, so `aw` takes the
+    // leading one instead — otherwise `daw` leaves a dangling space.
+    keys(e, "$daw");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("TWO", s);
+    gpa.free(s);
+
+    // `iw` on whitespace is the whitespace run, not the next word.
+    keys(e, "cca   b");
+    e.key("\x1b");
+    keys(e, "0lldiw");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("ab", s);
+    gpa.free(s);
+}
+
+test "bracket objects nest and cross lines" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifn(a, g(b), c)");
+    e.key("\x1b");
+
+    // Inside the INNER call: the nearest enclosing pair wins.
+    keys(e, "0fbdi(");
+    var s = try bufText(gpa, e);
+    try testing.expectEqualStrings("fn(a, g(), c)", s);
+    gpa.free(s);
+
+    // Parked ON the open paren counts as inside it.
+    keys(e, "0f(di(");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("fn()", s);
+    gpa.free(s);
+
+    // `a{` over a body that spans lines.
+    keys(e, "ccif x {");
+    e.key("\r");
+    keys(e, "body");
+    e.key("\r");
+    keys(e, "}");
+    e.key("\x1b");
+    keys(e, "ggjda{"); // inside the braces, as vim requires
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("if x ", s);
+    gpa.free(s);
+}
+
+test "sitting on a closing bracket means that pair, not the one outside" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifn(a, g(b), c)");
+    e.key("\x1b");
+    // The inner `)`. Searching backward from PAST the cursor would
+    // count it as a nesting level and hand back the outer pair, which
+    // deletes strictly more than was asked for.
+    keys(e, "0f)di(");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("fn(a, g(), c)", s);
+}
+
+test "quote objects are line-local and take the whole string" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ilet a = \"hello\" + x");
+    e.key("\x1b");
+
+    keys(e, "0ci\"bye");
+    e.key("\x1b");
+    var s = try bufText(gpa, e);
+    try testing.expectEqualStrings("let a = \"bye\" + x", s);
+    gpa.free(s);
+
+    // `a"` eats the trailing space, so `da"` leaves no orphan.
+    keys(e, "0da\"");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("let a = + x", s);
+    gpa.free(s);
+}
+
+test "a text object that is not there cancels the operator" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ino brackets here");
+    e.key("\x1b");
+    keys(e, "0di(");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("no brackets here", s);
+    try testing.expectEqual(@as(u8, 0), e.op);
+    try testing.expectEqual(Mode.normal, e.mode);
+}
+
+test "i and a still enter insert with nothing pending" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iab");
+    e.key("\x1b");
+    keys(e, "0iX");
+    e.key("\x1b");
+    keys(e, "$aY");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("XabY", s);
+}
+
+test "visual mode selects a text object" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione two three");
+    e.key("\x1b");
+    keys(e, "0wviwd");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one  three", s);
 }

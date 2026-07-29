@@ -444,9 +444,19 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       `F`/`T` are not; the key after `f` is literal (`f2` finds a `2`);
       `;` after `t` advances, since the cursor is already parked one
       short and a `;` that does nothing is worse than useless.
-- [ ] Editor debts already logged: registers, marks, `f`/`t` target
-      ASCII only, wide glyphs = 1 column, relative `:e` resolves
-      against app cwd
+- [x] **Text objects** — `iw`/`aw`/`iW`/`aW`, `i"` `i'` `` i` ``, and
+      the four bracket pairs with `b`/`B`, each with an `a` form, in
+      operators and in visual mode. `i`/`a` become object prefixes only
+      when something is waiting for a range, so they still enter insert
+      otherwise. Words and quotes are line-local, brackets are not
+      (`di{` over a body is the point). Sitting on a CLOSING bracket
+      resolves to that pair rather than the one outside it — a
+      backward search from past the cursor counts it as a nesting
+      level, which is a bug the vacuity check on a redundant branch
+      turned up.
+- [ ] Editor debts already logged: registers, marks, `.` repeat,
+      `f`/`t` target ASCII only, wide glyphs = 1 column, relative `:e`
+      resolves against app cwd
 - [x] **Notice a disk change while the buffer is OPEN**, not only at
       `:w`. One stat per editor pane on the existing 1Hz tick, split by
       who has something to lose: an UNMODIFIED buffer reloads (keeping

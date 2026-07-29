@@ -195,6 +195,28 @@ of counting, and `;` after `t` ADVANCES — the cursor is already parked
 one short of the target, so a plain re-search would find the same one
 and a `;` that does nothing is worse than useless.
 
+TEXT OBJECTS are the other half of what an operator is for: `iw`/`aw`
+(and `iW`/`aW`), `i"`/`i'`/`` i` ``, and the four bracket pairs —
+`i(` `i{` `i[` `i<` plus `b`/`B` — each with an `a` form. `i` and `a`
+only become object prefixes when something is waiting for a range (an
+operator is pending, or you are in visual mode); otherwise they are
+still how you get into insert mode.
+
+Words and quotes are line-local; brackets are not, because `di{` over
+a function body is the point of having them. Sitting ON either bracket
+counts as being inside that pair — the closing case is worth saying
+out loud, since searching backward from past the cursor counts that
+`)` as a nesting level and hands back the pair OUTSIDE it, deleting
+strictly more than you asked for. Brackets inside strings and comments
+count, same as vim's own `%`; doing better needs the syntax tree, and
+the syntax tree is an optional hook here. Quotes are line-local for a
+reason too: an unbalanced quote somewhere above would otherwise make
+`ci"` eat half the file.
+
+The rope has no cheap iterator and `copyRange` walks from the root, so
+bracket matching scans in 4KB chunks — a per-byte loop would be a tree
+traversal per character.
+
 Long lines have a CLAMP (64KB), and getting it wrong used to abort the
 app. `ccol` is a byte offset into the real line while `lineText` hands
 back a truncated COPY of it, and every helper indexes the copy with
