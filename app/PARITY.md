@@ -510,6 +510,18 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       re-enter later. ctrl-t on a still-empty line indents it, where
       `>>` deliberately would not — diff hygiene is about lines you are
       not typing on.
+- [x] **`:[range]s/pat/rep/[gi]`** with `%`, `.`, `$`, `N`, `N,M`,
+      `'a` and the `'<,'>` a visual selection leaves behind — `:` out
+      of a visual prefills that range, because it is what you were
+      about to type. One undo group for the whole command; the pattern
+      becomes the search pattern so `n` walks the rest of them.
+      Every visual exit now runs through one `leaveVisual`, which is
+      what keeps `'<`/`'>` from drifting out of date with whichever
+      key ended the selection.
+- [ ] `:s` patterns are LITERAL, not regexes — the same engine `/`
+      uses. Saying so beats half a regex that surprises you on a `.`.
+      A real one is its own slice, and `\r` in a replacement (vim's
+      line-splitter) waits for it.
 - [ ] Marks do not shift when text ABOVE them is edited — they hold a
       line and column, not an anchored offset. Fixing it means routing
       every buffer edit through one seam that adjusts them, which is

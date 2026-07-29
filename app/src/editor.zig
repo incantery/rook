@@ -14,7 +14,8 @@
 //! f F t T ; , >> << (and > < u U ~ J in visual), text objects
 //! (iw aw iW aW, i" i' i` and the four bracket pairs), autoindent,
 //! "a registers and ma marks; in insert, ctrl-w ctrl-u ctrl-t ctrl-d
-//! ctrl-r ctrl-o; :w :q :q! :wq :x :e :<n>.
+//! ctrl-r ctrl-o; :w :q :q! :wq :x :e :<n>, :[range]s/pat/rep/[gi]
+//! with % . $ N,M 'a '<,'> addresses.
 //! Debts: marks do not shift when text above them is edited, case
 //! operators are ASCII-only, no numbered registers, f/t target ASCII
 //! only, wide glyphs count as one column, lines beyond max_line get
@@ -82,6 +83,9 @@ pub const Editor = struct {
 
     vanchor_line: usize = 0,
     vanchor_col: usize = 0,
+    /// The selection the last visual mode left behind — what `'<` and
+    /// `'>` name in an ex range, and what `gv` puts back.
+    vlast: ?struct { mode: Mode, a: Pos, b: Pos } = null,
     /// `>` or `<` waiting for its second key. Not routed through `op`,
     /// because `op` means "delete a range" everywhere it is read.
     pend_shift: u8 = 0,
@@ -1059,6 +1063,198 @@ pub const Editor = struct {
         if (b0 >= 0x20) self.cmd.appendSlice(self.gpa, bytes) catch {};
     }
 
+    const LineSpan = struct { a: usize, b: usize };
+
+    /// One ex address: `.`, `$`, a number, or a mark — including the
+    /// `'<` / `'>` a visual selection leaves behind.
+    fn parseLineAddr(self: *Editor, s: []const u8, i: *usize) ?usize {
+        const last = self.lineCountB() - 1;
+        if (i.* >= s.len) return null;
+        switch (s[i.*]) {
+            '.' => {
+                i.* += 1;
+                return self.cline;
+            },
+            '$' => {
+                i.* += 1;
+                return last;
+            },
+            '\'' => {
+                if (i.* + 1 >= s.len) return null;
+                const name = s[i.* + 1];
+                i.* += 2;
+                const v = self.vlast orelse {
+                    const p = self.markPos(name) orelse return null;
+                    return @min(p.line, last);
+                };
+                if (name == '<') return @min(@min(v.a.line, v.b.line), last);
+                if (name == '>') return @min(@max(v.a.line, v.b.line), last);
+                const p = self.markPos(name) orelse return null;
+                return @min(p.line, last);
+            },
+            '0'...'9' => {
+                var n: usize = 0;
+                while (i.* < s.len and s[i.*] >= '0' and s[i.*] <= '9') : (i.* += 1) {
+                    n = n *| 10 +| (s[i.*] - '0');
+                }
+                return @min(n -| 1, last);
+            },
+            else => return null,
+        }
+    }
+
+    /// A leading ex range. Returns the bytes consumed — zero means the
+    /// command had none and the caller's default stands.
+    fn parseRange(self: *Editor, s: []const u8, span: *LineSpan) usize {
+        if (s.len > 0 and s[0] == '%') {
+            span.* = .{ .a = 0, .b = self.lineCountB() - 1 };
+            return 1;
+        }
+        var i: usize = 0;
+        const first = self.parseLineAddr(s, &i) orelse return 0;
+        var a = first;
+        var b = first;
+        if (i < s.len and s[i] == ',') {
+            const save = i;
+            i += 1;
+            if (self.parseLineAddr(s, &i)) |second| {
+                b = second;
+            } else {
+                i = save;
+            }
+        }
+        if (a > b) std.mem.swap(usize, &a, &b);
+        span.* = .{ .a = a, .b = b };
+        return i;
+    }
+
+    fn indexOfCase(hay: []const u8, from: usize, needle: []const u8, icase: bool) ?usize {
+        if (needle.len == 0 or from > hay.len or hay.len < needle.len) return null;
+        if (!icase) return std.mem.indexOfPos(u8, hay, from, needle);
+        var i = from;
+        while (i + needle.len <= hay.len) : (i += 1) {
+            if (std.ascii.eqlIgnoreCase(hay[i..][0..needle.len], needle)) return i;
+        }
+        return null;
+    }
+
+    /// Copy one `/`-delimited field out, dropping the backslash from an
+    /// escaped separator. Everything else is literal — see exSubstitute.
+    fn unescapeField(src: []const u8, sep: u8, out: []u8) []const u8 {
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < src.len and n < out.len) : (i += 1) {
+            if (src[i] == '\\' and i + 1 < src.len and src[i + 1] == sep) i += 1;
+            out[n] = src[i];
+            n += 1;
+        }
+        return out[0..n];
+    }
+
+    /// The end of the current field: the next separator that is not
+    /// backslash-escaped.
+    fn fieldEnd(s: []const u8, sep: u8) usize {
+        var i: usize = 0;
+        while (i < s.len) : (i += 1) {
+            if (s[i] == '\\') {
+                i += 1;
+                continue;
+            }
+            if (s[i] == sep) return i;
+        }
+        return s.len;
+    }
+
+    fn subLine(self: *Editor, line: usize, pat: []const u8, rep: []const u8, all: bool, icase: bool) usize {
+        const gpa = self.gpa;
+        var done: usize = 0;
+        var from: usize = 0;
+        while (true) {
+            // Re-read the line every pass: the previous replacement
+            // moved everything after it, and lineText hands back a copy
+            // that goes stale the moment the rope changes.
+            const s = self.lineText(line);
+            const idx = indexOfCase(s, from, pat, icase) orelse break;
+            const start = self.buf.rope.lineStart(line);
+            self.buf.deleteRange(gpa, start + idx, start + idx + pat.len) catch break;
+            if (rep.len > 0) self.buf.insert(gpa, start + idx, rep) catch break;
+            done += 1;
+            if (!all) break;
+            // Past the text just written, so `:s/a/aa/g` terminates.
+            from = idx + rep.len;
+        }
+        return done;
+    }
+
+    /// `:[range]s/pat/rep/[flags]`.
+    ///
+    /// The pattern is LITERAL, not a regex — the same engine `/` uses,
+    /// and saying so is better than half a regex that surprises you on
+    /// a `.`. Any character can be the separator, `\` escapes it, and
+    /// the flags are `g` (every match on the line) and `i` (ignore
+    /// case). No `c`: a confirm prompt needs a modal the editor does
+    /// not have yet.
+    fn exSubstitute(self: *Editor, span: LineSpan, spec: []const u8) void {
+        if (spec.len == 0 or std.ascii.isAlphanumeric(spec[0])) {
+            self.setStatus("usage: :[range]s/pattern/replacement/[gi]", .{}, true);
+            return;
+        }
+        const sep = spec[0];
+        const body = spec[1..];
+
+        const pat_end = fieldEnd(body, sep);
+        var pbuf: [512]u8 = undefined;
+        const pat = unescapeField(body[0..pat_end], sep, &pbuf);
+        if (pat.len == 0) {
+            self.setStatus("nothing to substitute", .{}, true);
+            return;
+        }
+
+        var rbuf: [512]u8 = undefined;
+        var rep: []const u8 = "";
+        var flags: []const u8 = "";
+        if (pat_end < body.len) {
+            const after = body[pat_end + 1 ..];
+            const rep_end = fieldEnd(after, sep);
+            rep = unescapeField(after[0..rep_end], sep, &rbuf);
+            if (rep_end < after.len) flags = after[rep_end + 1 ..];
+        }
+        const all = std.mem.indexOfScalar(u8, flags, 'g') != null;
+        const icase = std.mem.indexOfScalar(u8, flags, 'i') != null;
+
+        // The pattern becomes the search pattern, so `n` walks the rest
+        // of them and the matches stay highlighted — vim's behaviour,
+        // and the reason a substitute is a good way to FIND things.
+        self.last_search.clearRetainingCapacity();
+        self.last_search.appendSlice(self.gpa, pat) catch {};
+
+        self.buf.newUndoGroup();
+        var hits: usize = 0;
+        var lines: usize = 0;
+        var last_hit: usize = self.cline;
+        var line = span.a;
+        while (line <= span.b and line < self.lineCountB()) : (line += 1) {
+            const n = self.subLine(line, pat, rep, all, icase);
+            if (n == 0) continue;
+            hits += n;
+            lines += 1;
+            last_hit = line;
+        }
+        if (hits == 0) {
+            self.setStatus("pattern not found: {s}", .{pat[0..@min(pat.len, 48)]}, true);
+            return;
+        }
+        self.cline = @min(last_hit, self.lineCountB() - 1);
+        self.ccol = firstNonblank(self.lineText(self.cline));
+        self.goal = renderCol(self.lineText(self.cline), self.ccol);
+        self.setStatus("{d} substitution{s} on {d} line{s}", .{
+            hits,
+            if (hits == 1) "" else "s",
+            lines,
+            if (lines == 1) "" else "s",
+        }, false);
+    }
+
     fn execCommand(self: *Editor) void {
         const gpa = self.gpa;
         const line = std.mem.trim(u8, self.cmd.items, " ");
@@ -1067,6 +1263,23 @@ pub const Editor = struct {
         // :<n> — goto line.
         if (std.fmt.parseInt(usize, line, 10) catch null) |n| {
             self.cline = @min(n -| 1, self.lineCountB() - 1);
+            self.ccol = firstNonblank(self.lineText(self.cline));
+            return;
+        }
+
+        // A leading range belongs to whoever takes one. Today that is
+        // `:s` and a bare address.
+        var span: LineSpan = .{ .a = self.cline, .b = self.cline };
+        const used = self.parseRange(line, &span);
+        const ranged = std.mem.trim(u8, line[used..], " ");
+        if (ranged.len > 0 and ranged[0] == 's' and
+            (ranged.len == 1 or !std.ascii.isAlphanumeric(ranged[1])))
+        {
+            self.exSubstitute(span, ranged[1..]);
+            return;
+        }
+        if (used > 0 and ranged.len == 0) {
+            self.cline = @min(span.b, self.lineCountB() - 1);
             self.ccol = firstNonblank(self.lineText(self.cline));
             return;
         }
@@ -1386,7 +1599,7 @@ pub const Editor = struct {
             self.pend_reg = false;
             self.pend_mark = 0;
             self.sel_reg = 0;
-            self.mode = .normal;
+            self.leaveVisual();
             return;
         }
 
@@ -1553,7 +1766,7 @@ pub const Editor = struct {
                 if (self.mode == .visual or self.mode == .visual_line) {
                     const a = @min(self.vanchor_line, self.cline);
                     const b = @max(self.vanchor_line, self.cline);
-                    self.mode = .normal;
+                    self.leaveVisual();
                     self.count = 0;
                     self.shiftLines(a, b, ch == '>');
                     return;
@@ -1680,7 +1893,7 @@ pub const Editor = struct {
                 if (self.mode == .visual or self.mode == .visual_line) {
                     const a = @min(self.vanchor_line, self.cline);
                     const b = @max(self.vanchor_line, self.cline);
-                    self.mode = .normal;
+                    self.leaveVisual();
                     self.count = 0;
                     self.cline = a;
                     self.joinLines(b - a + 1, true);
@@ -1757,7 +1970,7 @@ pub const Editor = struct {
             // Visual.
             'v' => {
                 if (self.mode == .visual) {
-                    self.mode = .normal;
+                    self.leaveVisual();
                 } else {
                     self.mode = .visual;
                     self.vanchor_line = self.cline;
@@ -1766,7 +1979,7 @@ pub const Editor = struct {
             },
             'V' => {
                 if (self.mode == .visual_line) {
-                    self.mode = .normal;
+                    self.leaveVisual();
                 } else {
                     self.mode = .visual_line;
                     self.vanchor_line = self.cline;
@@ -1775,9 +1988,14 @@ pub const Editor = struct {
             },
 
             ':' => {
+                const from_visual = self.mode == .visual or self.mode == .visual_line;
+                self.leaveVisual();
                 self.mode = .command;
                 self.cmd_kind = .ex;
                 self.cmd.clearRetainingCapacity();
+                // `:` out of a visual prefills the range vim prefills,
+                // because that is what you were about to type.
+                if (from_visual) self.cmd.appendSlice(gpa, "'<,'>") catch {};
             },
             '/' => {
                 self.mode = .command;
@@ -2193,6 +2411,20 @@ pub const Editor = struct {
     /// eyes set this: `G`, `gg`, `n`, and a mark jump.
     fn setJump(self: *Editor) void {
         self.jump = .{ .line = self.cline, .col = self.ccol };
+    }
+
+    /// Leave visual mode, remembering the selection. Everything that
+    /// ends a visual goes through here so `'<`/`'>` and `gv` cannot
+    /// drift out of date with one of the exits.
+    fn leaveVisual(self: *Editor) void {
+        if (self.mode == .visual or self.mode == .visual_line) {
+            self.vlast = .{
+                .mode = self.mode,
+                .a = .{ .line = self.vanchor_line, .col = self.vanchor_col },
+                .b = .{ .line = self.cline, .col = self.ccol },
+            };
+        }
+        self.mode = .normal;
     }
 
     fn markPos(self: *const Editor, letter: u8) ?Pos {
@@ -2719,7 +2951,7 @@ pub const Editor = struct {
 
     fn visualOp(self: *Editor, op: u8) void {
         const linewise = self.mode == .visual_line;
-        self.mode = .normal;
+        self.leaveVisual();
         if (linewise) {
             self.op = op;
             self.opLines(@min(self.vanchor_line, self.cline), @max(self.vanchor_line, self.cline));
@@ -4928,4 +5160,200 @@ test "ctrl-t indents a line that is still empty" {
     const s = try bufText(gpa, e);
     defer gpa.free(s);
     try testing.expectEqualStrings("one\n    two", s);
+}
+
+// ------------------------------------------------------------- :s substitute
+
+fn ex(e: *Editor, cmd: []const u8) void {
+    e.key(":");
+    e.key(cmd);
+    e.key("\r");
+}
+
+test "percent s replaces on every line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo\nboo");
+    e.key("\x1b");
+    ex(e, "%s/o/0/g");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("f00\nb00", s);
+}
+
+test "s without g takes only the first match on the line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo\nboo");
+    e.key("\x1b");
+    keys(e, "G");
+    ex(e, "s/o/0/");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("foo\nb0o", s);
+}
+
+test "s defaults to the current line only" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    keys(e, "gg");
+    ex(e, "s/o/0/");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("0ne\ntwo\nthree", s);
+}
+
+test "a numeric range bounds the substitute" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\na\na\na");
+    e.key("\x1b");
+    ex(e, "2,3s/a/X/");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a\nX\nX\na", s);
+}
+
+test "dollar and dot are addresses" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\na\na\na");
+    e.key("\x1b");
+    keys(e, "ggj"); // line 1
+    ex(e, ".,$s/a/X/");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a\nX\nX\nX", s);
+}
+
+test "the i flag ignores case" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iFoo\nFOO");
+    e.key("\x1b");
+    ex(e, "%s/foo/x/gi");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("x\nx", s);
+}
+
+test "any character can be the separator" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia/b");
+    e.key("\x1b");
+    ex(e, "s#/#-#");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a-b", s);
+}
+
+test "an escaped separator is literal" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione/two");
+    e.key("\x1b");
+    ex(e, "s/\\//-/");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one-two", s);
+}
+
+test "a replacement containing the pattern still terminates" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iaaa");
+    e.key("\x1b");
+    ex(e, "s/a/aa/g");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("aaaaaa", s);
+}
+
+test "an empty replacement deletes" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione two one");
+    e.key("\x1b");
+    ex(e, "s/one//g");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings(" two ", s);
+}
+
+test "a missing pattern says so and changes nothing" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    ex(e, "%s/zz/x/");
+    const dump = try e.dumpText(gpa, 60, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "pattern not found") != null);
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abc", s);
+}
+
+test "the whole substitute is one undo" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\na\na");
+    e.key("\x1b");
+    ex(e, "%s/a/X/");
+    keys(e, "u");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a\na\na", s);
+}
+
+test "a substitute sets the search pattern" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo\nbar\nfoo");
+    e.key("\x1b");
+    keys(e, "gg");
+    ex(e, "s/foo/foo/");
+    keys(e, "n");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+}
+
+test "colon from a visual selection prefills its range" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\na\na\na");
+    e.key("\x1b");
+    keys(e, "ggjVj:"); // lines 1..2 selected
+    keys(e, "s/a/X/");
+    e.key("\r");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("a\nX\nX\na", s);
+}
+
+test "a bare range is a goto" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree\nfour");
+    e.key("\x1b");
+    keys(e, "gg");
+    ex(e, "$");
+    try testing.expectEqual(@as(usize, 3), e.cline);
 }
