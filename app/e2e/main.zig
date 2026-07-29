@@ -169,8 +169,33 @@ fn editor(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(got, "bravo", "the other lines survive");
     try h.expectContains(got, "charlie", "the other lines survive");
 
+    // The dirty marker is a SAVE POINT, not a "something happened" flag.
+    // Type, see [+]; undo back to what is on disk, and it must go —
+    // otherwise `:q` refuses a buffer that matches the file, and you
+    // learn the `:q!` reflex on a buffer you had no reason to force.
+    _ = try app.ctl("type ostray");
+    _ = try app.ctl("key 1b"); // esc
+    try app.waitText("[+]", 5_000);
+    _ = try app.ctl("type u");
+    var undone: u32 = 0;
+    while (undone < 5000) : (undone += 100) {
+        var screen: [64 * 1024]u8 = undefined;
+        const s = try app.screen(&screen);
+        if (std.mem.indexOf(u8, s, "[+]") == null) break;
+        h.sleepMs(100);
+    }
+    var screen: [64 * 1024]u8 = undefined;
+    const after_undo = try app.screen(&screen);
+    try h.expect(
+        std.mem.indexOf(u8, after_undo, "[+]") == null,
+        "undo back to the save point should clear [+], screen still shows it",
+        .{},
+    );
+
     // :q drops back to the parked shell — the other half of takeover, and
-    // the half that actually loses work if it breaks.
+    // the half that actually loses work if it breaks. It only gets there
+    // because the undo above genuinely cleared the dirty state; a stored
+    // flag would refuse here.
     _ = try app.ctl("type :q");
     _ = try app.ctl("enter");
     try app.waitText("e2e$", 5_000);

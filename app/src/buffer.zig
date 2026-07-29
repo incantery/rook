@@ -40,7 +40,6 @@ pub const Buffer = struct {
     rope: ropepkg.Rope,
     /// Absolute path, owned; null = scratch.
     path: ?[]u8 = null,
-    modified: bool = false,
     /// The file as we last saw it, or null when we have no claim on it
     /// (a scratch buffer, or a path that did not exist when we opened
     /// it). Null means `save` will not refuse — fail open, like the
@@ -48,8 +47,19 @@ pub const Buffer = struct {
     disk: ?DiskState = null,
 
     /// Bumped by every content mutation (edits, undo, redo) — the
-    /// highlighter's reparse trigger.
+    /// highlighter's reparse trigger. Monotonic, so it says "something
+    /// happened", never "we are back where we were".
     version: u64 = 0,
+
+    /// Edits are numbered, and the number rides along through undo and
+    /// redo. The number on top of the undo stack therefore identifies
+    /// the buffer's CONTENT STATE rather than how much has happened to
+    /// it — which is what lets `u` all the way back to the last write
+    /// report the file as unmodified again.
+    seq_next: u64 = 1,
+    /// The state last written. 0 is the empty stack: how a buffer
+    /// starts, and where a full undo of everything lands.
+    saved_seq: u64 = 0,
 
     undo_stack: std.ArrayListUnmanaged(Edit) = .empty,
     redo_stack: std.ArrayListUnmanaged(Edit) = .empty,
@@ -65,7 +75,33 @@ pub const Buffer = struct {
         inserted_len: usize,
         deleted: []u8, // owned
         group: u32,
+        /// Identity of the state this edit PRODUCED. Preserved when the
+        /// edit moves between the two stacks, so a state you return to
+        /// is recognisably the same state.
+        seq: u64,
     };
+
+    /// Is the buffer different from what was last written?
+    ///
+    /// Derived, not stored. A stored flag can only ever be set — no
+    /// amount of undo un-sets it — so a buffer undone all the way back
+    /// to the last save still claimed to be dirty, `:q` still refused,
+    /// and you learned to reach for `:q!` reflexively. A reflex is a
+    /// bad thing to teach someone whose next guard is `:w!`.
+    pub fn isModified(self: *const Buffer) bool {
+        return self.stateSeq() != self.saved_seq;
+    }
+
+    /// Declare the current state written. For `save`, and for the
+    /// projected buffers that save through the app instead of to a file.
+    pub fn markSaved(self: *Buffer) void {
+        self.saved_seq = self.stateSeq();
+    }
+
+    fn stateSeq(self: *const Buffer) u64 {
+        const top = self.undo_stack.getLastOrNull() orelse return 0;
+        return top.seq;
+    }
 
     pub fn initEmpty(gpa: Allocator) Allocator.Error!Buffer {
         return .{ .rope = try .init(gpa, "") };
@@ -164,7 +200,7 @@ pub const Buffer = struct {
         try w.interface.flush();
         try af.replace(io);
 
-        self.modified = false;
+        self.markSaved();
         self.disk = if (cwd.statFile(io, target, .{})) |st| .of(st) else |_| null;
     }
 
@@ -190,10 +226,11 @@ pub const Buffer = struct {
             .inserted_len = text.len,
             .deleted = deleted,
             .group = self.group,
+            .seq = self.seq_next,
         });
+        self.seq_next += 1;
         try self.rope.delete(gpa, start, end);
         try self.rope.insert(gpa, start, text);
-        self.modified = true;
         self.version +%= 1;
         if (clear_redo) {
             for (self.redo_stack.items) |e| gpa.free(e.deleted);
@@ -231,12 +268,14 @@ pub const Buffer = struct {
                 .inserted_len = e.deleted.len,
                 .deleted = inv_deleted,
                 .group = g,
+                // Carried, not re-issued: an edit that comes back to
+                // the undo stack restores the state it first produced.
+                .seq = e.seq,
             });
             try self.rope.delete(gpa, e.off, e.off + e.inserted_len);
             try self.rope.insert(gpa, e.off, e.deleted);
             target = e.off;
             gpa.free(e.deleted);
-            self.modified = true;
             self.version +%= 1;
         }
         return target;
@@ -303,7 +342,7 @@ test "buffer save/load round trip" {
     try testing.expectEqual(@as(usize, 0), b.rope.byteLen());
     try b.insert(gpa, 0, "one\ntwo\n");
     try b.save(gpa, io, false);
-    try testing.expect(!b.modified);
+    try testing.expect(!b.isModified());
     b.deinit(gpa);
 
     var b2 = try Buffer.initFromFile(gpa, io, file_path);
@@ -311,6 +350,90 @@ test "buffer save/load round trip" {
     const s = try contents(gpa, &b2);
     defer gpa.free(s);
     try testing.expectEqualStrings("one\ntwo\n", s);
+}
+
+test "undoing back to the save point clears modified" {
+    // The bug this replaces: `modified` was a flag, and a flag can only
+    // ever be set. `u` all the way back to what you saved still refused
+    // `:q`, which teaches the `:q!` reflex — a bad habit to build in
+    // someone whose next guard is `:w!`.
+    const gpa = testing.allocator;
+    var b = try Buffer.initEmpty(gpa);
+    defer b.deinit(gpa);
+
+    try testing.expect(!b.isModified()); // fresh
+    b.newUndoGroup();
+    try b.insert(gpa, 0, "hello");
+    try testing.expect(b.isModified());
+
+    b.markSaved();
+    try testing.expect(!b.isModified());
+
+    b.newUndoGroup();
+    try b.insert(gpa, 5, " world");
+    try testing.expect(b.isModified());
+
+    _ = try b.undo(gpa);
+    try testing.expect(!b.isModified()); // back AT the save point
+
+    _ = try b.redo(gpa);
+    try testing.expect(b.isModified()); // and away from it again
+}
+
+test "undoing PAST the save point is still modified" {
+    // Symmetry the flag could never express: the file on disk holds
+    // "hello", and an empty buffer differs from it just as much as a
+    // longer one does.
+    const gpa = testing.allocator;
+    var b = try Buffer.initEmpty(gpa);
+    defer b.deinit(gpa);
+
+    b.newUndoGroup();
+    try b.insert(gpa, 0, "hello");
+    b.markSaved();
+
+    _ = try b.undo(gpa);
+    try testing.expect(b.isModified());
+}
+
+test "a new edit after undo cannot reach the save point again" {
+    // Redo is discarded, so the saved state is unreachable and the
+    // buffer must keep saying so rather than matching by accident.
+    const gpa = testing.allocator;
+    var b = try Buffer.initEmpty(gpa);
+    defer b.deinit(gpa);
+
+    b.newUndoGroup();
+    try b.insert(gpa, 0, "one");
+    b.newUndoGroup();
+    try b.insert(gpa, 3, "two");
+    b.markSaved(); // saved "onetwo"
+
+    _ = try b.undo(gpa); // back to "one"
+    b.newUndoGroup();
+    try b.insert(gpa, 3, "three"); // clears redo; "onetwo" is gone
+    try testing.expect(b.isModified());
+    _ = try b.undo(gpa);
+    try testing.expect(b.isModified());
+}
+
+test "a whole insert-mode group is one step away from saved" {
+    // Everything typed between two newUndoGroup calls shares a group,
+    // so one `u` returns to the save point — not one `u` per keystroke.
+    const gpa = testing.allocator;
+    var b = try Buffer.initEmpty(gpa);
+    defer b.deinit(gpa);
+
+    b.newUndoGroup();
+    try b.insert(gpa, 0, "saved\n");
+    b.markSaved();
+
+    b.newUndoGroup(); // enterInsert
+    for ("typing") |c| try b.insert(gpa, b.rope.byteLen(), &[_]u8{c});
+    try testing.expect(b.isModified());
+
+    _ = try b.undo(gpa);
+    try testing.expect(!b.isModified());
 }
 
 /// Every save test needs the same three lines.

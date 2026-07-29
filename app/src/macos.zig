@@ -1701,7 +1701,7 @@ pub const App = struct {
         switch (self.activeTab().focused.content) {
             .term => |*tm| _ = kill(tm.session.pid, 1), // SIGHUP
             .edit => |ed| {
-                if (ed.buf.modified) {
+                if (ed.buf.isModified()) {
                     ed.setStatusUnsaved();
                 } else ed.closed = true;
                 ed.render_dirty = true;

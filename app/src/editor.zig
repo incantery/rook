@@ -251,7 +251,7 @@ pub const Editor = struct {
             self.setStatus("no file", .{}, true);
             return;
         };
-        if (self.buf.modified) {
+        if (self.buf.isModified()) {
             self.setStatus("unsaved changes (:w first, or :e! to discard)", .{}, true);
             return;
         }
@@ -577,7 +577,7 @@ pub const Editor = struct {
                         };
                         defer gpa.free(text);
                         if (save(ctx, self.buf.path orelse "", text)) {
-                            self.buf.modified = false;
+                            self.buf.markSaved();
                             if (!is(u8, wverb, "w")) self.closed = true;
                             return;
                         }
@@ -607,7 +607,7 @@ pub const Editor = struct {
             self.setStatus("wrote {s}", .{self.displayName()}, false);
             if (!is(u8, wverb, "w")) self.closed = true;
         } else if (is(u8, verb, "q")) {
-            if (self.buf.modified) {
+            if (self.buf.isModified()) {
                 self.setStatus("unsaved changes (:q! to discard)", .{}, true);
             } else self.closed = true;
         } else if (is(u8, verb, "q!")) {
@@ -676,7 +676,7 @@ pub const Editor = struct {
     /// Retarget this pane at another file (:e / ctl edit — the
     /// rook-buffers model: panes retarget in place).
     pub fn open(self: *Editor, path: []const u8, force: bool) !void {
-        if (self.buf.modified and !force) {
+        if (self.buf.isModified() and !force) {
             self.setStatus("unsaved changes (:w first, or :e! to discard)", .{}, true);
             return;
         }
@@ -1551,7 +1551,7 @@ pub const Editor = struct {
             putStr(out, &x, self.status_buf[0..self.status_len], if (self.status_err) .err else .text);
         } else {
             putStr(out, &x, self.displayName(), .text);
-            if (self.buf.modified) putStr(out, &x, " [+]", .dim);
+            if (self.buf.isModified()) putStr(out, &x, " [+]", .dim);
         }
 
         // Right side: line:col.

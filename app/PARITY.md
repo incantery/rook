@@ -405,9 +405,16 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       a unit test that fails when the guarantee is reverted (checked,
       all three), plus an e2e that drives the refusal through the real
       key path — a guard nobody can reach is theatre.
-- [ ] Editor debts already logged: save-point tracking, autoindent,
-      registers, wide glyphs = 1 column, 4KB line clamp, relative `:e`
-      resolves against app cwd
+- [x] **Save-point tracking.** `modified` was a stored flag, and a flag
+      can only ever be set: `u` all the way back to what you saved still
+      refused `:q`. It is derived now — edits are numbered, the number
+      rides through undo and redo, and the number on top of the undo
+      stack identifies the buffer's CONTENT STATE rather than how much
+      has happened to it. This matters more than it looks: a dirty
+      marker that lies teaches the `:q!` reflex, and the person with
+      that reflex is the one who will `:w!` past the clobber guard.
+- [ ] Editor debts already logged: autoindent, registers, wide glyphs =
+      1 column, 4KB line clamp, relative `:e` resolves against app cwd
 - [ ] Notice a disk change while the buffer is OPEN, not only at `:w`.
       `Buffer.disk` is the state a watcher would compare against; today
       you find out when you try to save.

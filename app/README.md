@@ -179,10 +179,9 @@ editor is a pure model — keys in, a styled character grid out — so
 with ZERO C linkage: the highlighter attaches through
 function-pointer hooks (syntax.zig), never an import (the directory
 reader is plain libc readdir, which macOS links regardless). Editor
-debts: one register, no autoindent, undo doesn't track the save
-point (a fully-undone buffer still reads modified), wide glyphs
-count one column, 4KB line clamp on motions/render, relative :e
-paths resolve against the app cwd rather than the buffer's dir.
+debts: one register, no autoindent, wide glyphs count one column,
+4KB line clamp on motions/render, relative :e paths resolve against
+the app cwd rather than the buffer's dir.
 
 ### `:w` cannot lose your file
 
