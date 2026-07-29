@@ -194,6 +194,10 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     }) });
     threaddoc_tests.root_module.link_libc = true;
+    // sqlite since the list moved onto the registry. Its parity test is
+    // the one that matters here: the local path and the host path must
+    // agree row for row, or the cutover leaves two panels that disagree.
+    threaddoc_tests.root_module.linkSystemLibrary("sqlite3", .{});
     test_step.dependOn(&b.addRunArtifact(threaddoc_tests).step);
 
     // The review panel: gate rules, and since the registry cutover, the

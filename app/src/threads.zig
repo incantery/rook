@@ -107,6 +107,11 @@ pub const List = struct {
 pub const Filter = struct {
     state: []const u8 = "",
     path: []const u8 = "",
+    /// Fetch each thread's comments. On by default because a thread
+    /// without its conversation is half a thread — but the LIST panel
+    /// only needs to know whether a draft exists, and paying a query per
+    /// row for bodies it discards is the N+1 this flag exists to decline.
+    comments: bool = true,
 };
 
 pub const Store = struct {
@@ -133,11 +138,11 @@ pub const Store = struct {
             return out;
         defer _ = regdb.sqlite3_finalize(stmt);
         _ = regdb.sqlite3_bind_int64(stmt, 1, id);
-        self.collect(&out, stmt);
+        self.collect(&out, stmt, true);
         return out;
     }
 
-    /// A workspace's threads in id order, comments included.
+    /// A workspace's threads in id order, comments included by default.
     pub fn list(self: Store, gpa: std.mem.Allocator, workspace: []const u8, filter: Filter) List {
         var out: List = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
         const db = self.db orelse return out;
@@ -167,11 +172,11 @@ pub const Store = struct {
             idx += 1;
             _ = regdb.sqlite3_bind_text(stmt, idx, filter.path.ptr, @intCast(filter.path.len), regdb.STATIC);
         }
-        self.collect(&out, stmt);
+        self.collect(&out, stmt, filter.comments);
         return out;
     }
 
-    fn collect(self: Store, out: *List, stmt: ?*anyopaque) void {
+    fn collect(self: Store, out: *List, stmt: ?*anyopaque, comments: bool) void {
         const a = out.arena.allocator();
         var rows: std.ArrayListUnmanaged(Thread) = .empty;
         while (regdb.sqlite3_step(stmt) == regdb.ROW) {
@@ -203,7 +208,9 @@ pub const Store = struct {
             rows.append(a, t) catch break;
         }
         out.items = rows.items;
-        for (out.items) |*t| t.comments = self.commentsFor(a, t.id);
+        if (comments) {
+            for (out.items) |*t| t.comments = self.commentsFor(a, t.id);
+        }
     }
 
     /// Comments for one thread, id order. An unreadable comment list is

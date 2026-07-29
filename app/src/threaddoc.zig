@@ -16,10 +16,13 @@
 //!      and splice your tail back on. History is append-only, so this
 //!      always merges.
 //!
-//! Everything is plain HTTP — no session socket, checked before building.
+//! Reads come from the registry in this process; the document and every
+//! write still go over plain HTTP, for the reason spelled out above
+//! fetchDoc — the doc is half of the save contract, not a view of rows.
 
 const std = @import("std");
 const hostc = @import("hostc.zig");
+const threads = @import("threads.zig");
 
 pub const max_threads = 32;
 
@@ -128,8 +131,58 @@ pub const Snapshot = struct {
     }
 };
 
+/// The thread sidebar's list. Reads the registry directly, falling back
+/// to the host only when it cannot be opened — same rule as the review
+/// panel, and for the same reason: "could not ask" is a different answer
+/// from "no threads" and must not blank the panel.
 pub fn list(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) Snapshot {
     if (workspace.len == 0) return .{};
+    if (readList(gpa, workspace)) |snap| return snap;
+    return listHost(gpa, io, workspace);
+}
+
+/// Local path. Null means the registry was unreachable, not empty.
+///
+/// Deliberately NOT re-anchored, which is what the host's list does too
+/// — its ThreadInfo carries a currentStart and this client has never
+/// parsed it, so a row has always pointed at the stored line. Porting
+/// that faithfully keeps this change reviewable as a move rather than a
+/// move plus a behaviour change; re-anchoring the sidebar is now a
+/// three-line follow-up (threads.Thread.anchor is right there) and
+/// deserves its own commit.
+pub fn readList(gpa: std.mem.Allocator, workspace: []const u8) ?Snapshot {
+    var store = threads.Store.open();
+    defer store.close();
+    if (store.db == null) return null;
+
+    var snap: Snapshot = .{ .live = true };
+    // Comments off: this panel only asks whether a draft exists, and
+    // fetching bodies to discard them is a query per row.
+    var rows = store.list(gpa, workspace, .{ .comments = false });
+    defer rows.deinit();
+
+    for (rows.items) |t| {
+        // Resolved threads are history; the list is what still wants you.
+        if (std.mem.eql(u8, t.state, "resolved")) continue;
+        if (snap.n >= max_threads) {
+            snap.more += 1;
+            continue;
+        }
+        var out: Thread = .{ .id = t.id, .line = @intCast(t.start_line) };
+        out.path.set(t.path);
+        out.state = State.parse(t.state);
+        out.anchor.setOneLine(t.anchor_text);
+        out.has_draft = t.draft.len > 0;
+        out.undelivered = t.deliver_error.len > 0;
+        snap.items[snap.n] = out;
+        snap.n += 1;
+    }
+    return snap;
+}
+
+/// The pre-registry path. Still the fallback, and what a remote client
+/// would need.
+pub fn listHost(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) Snapshot {
     const info = hostc.readInfo(gpa, io) orelse return .{};
     var path_buf: [160]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/workspaces/{s}/threads", .{workspace}) catch return .{};
@@ -181,6 +234,18 @@ pub const Doc = struct {
 };
 
 /// Fetch a thread as a document. Caller owns `Doc.content`.
+///
+/// Stays on HTTP, deliberately, even though the rows behind it are now
+/// readable locally. The document is not a view of the rows — it is one
+/// half of the SAVE contract: a save posts the whole document back and
+/// the host diffs it against its own fresh render, answering 409 with
+/// that render when they disagree. Rendering locally would mean the
+/// prefix we compute comes from OUR renderer while the check comes from
+/// the host's, so any byte of difference — comment ordering, a separator,
+/// a timestamp format — becomes a 409 the user cannot clear by retrying.
+///
+/// It can only move when the writer moves with it, which is the same
+/// rule holding every other write in Go.
 pub fn fetchDoc(gpa: std.mem.Allocator, io: std.Io, id: i64) ?Doc {
     const info = hostc.readInfo(gpa, io) orelse return null;
     var path_buf: [64]u8 = undefined;
@@ -332,4 +397,107 @@ test "an empty list is live, unlike an unreachable host" {
     try T.expect(parseList(T.allocator, "[]").live);
     const unreachable_snap: Snapshot = .{};
     try T.expect(!unreachable_snap.live);
+}
+
+// ------------------------------------------------- the registry path
+//
+// The assertion that matters for a MOVE: the local path and the host
+// path must produce the same Snapshot from the same data. Testing them
+// separately would let them drift into two panels that disagree, which
+// is the specific failure a cutover invites.
+
+const testdb = @import("testdb.zig");
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+/// Point regdb at a fixture and return the db path.
+fn fixtureDb(tmp: *std.testing.TmpDir, buf: []u8) ![:0]const u8 {
+    var dirbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrintZ(&dirbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.createDirPath(T.io, "rook");
+    _ = setenv("XDG_DATA_HOME", dir, 1);
+    return std.fmt.bufPrintZ(buf, "{s}/rook/rook.db", .{dir});
+}
+
+fn expectSameSnapshot(want: Snapshot, got: Snapshot) !void {
+    try T.expectEqual(want.live, got.live);
+    try T.expectEqual(want.n, got.n);
+    try T.expectEqual(want.more, got.more);
+    for (want.slice(), got.slice()) |w, g| {
+        try T.expectEqual(w.id, g.id);
+        try T.expectEqualStrings(w.path.get(), g.path.get());
+        try T.expectEqual(w.line, g.line);
+        try T.expectEqual(w.state, g.state);
+        try T.expectEqualStrings(w.anchor.get(), g.anchor.get());
+        try T.expectEqual(w.has_draft, g.has_draft);
+        try T.expectEqual(w.undelivered, g.undelivered);
+    }
+    // Belt and braces: the digest is what the render path polls on.
+    try T.expectEqual(want.digest(), got.digest());
+}
+
+test "the registry path agrees with the host path, row for row" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db = try fixtureDb(&tmp, &buf);
+    try testdb.run(db, testdb.schema);
+    try testdb.run(db,
+        \\INSERT INTO threads (id, workspace, path, start_line, end_line, side, blob_sha,
+        \\  commit_sha, anchor_text, state, deliver_error, draft, rook_task_id, resolved_by,
+        \\  agent_reopens, created_at, updated_at, submitted_at)
+        \\VALUES
+        \\ (1,'src','a.zig',10,12,'modified','s1','','if (x)  {
+        \\  return; }','open','','',0,'',0,'t','t',NULL),
+        \\ (2,'src','b.zig',3,3,'modified','s2','','two','pending','','tail here',0,'',0,'t','t',NULL),
+        \\ (3,'src','c.zig',7,7,'modified','s3','','three','open','nudge failed','',0,'',0,'t','t',NULL),
+        \\ (4,'src','d.zig',1,1,'modified','s4','','gone','resolved','','',0,'user',0,'t','t',NULL);
+    );
+
+    // The same four threads as the host would serialise them.
+    const wire =
+        \\[{"id":1,"path":"a.zig","startLine":10,"state":"open","anchorText":"if (x)  {\n  return; }","draft":"","deliverError":""},
+        \\ {"id":2,"path":"b.zig","startLine":3,"state":"pending","anchorText":"two","draft":"tail here","deliverError":""},
+        \\ {"id":3,"path":"c.zig","startLine":7,"state":"open","anchorText":"three","draft":"","deliverError":"nudge failed"},
+        \\ {"id":4,"path":"d.zig","startLine":1,"state":"resolved","anchorText":"gone","draft":"","deliverError":""}]
+    ;
+
+    const local = readList(T.allocator, "src") orelse return error.RegistryUnreachable;
+    const host = parseList(T.allocator, wire);
+
+    try expectSameSnapshot(host, local);
+    // ...and the shared expectations, so a bug common to both still fails.
+    try T.expectEqual(@as(usize, 3), local.n); // resolved dropped
+    try T.expect(local.slice()[1].has_draft);
+    try T.expect(local.slice()[2].undelivered);
+    // The multi-line anchor collapsed to one row on both paths.
+    try T.expectEqualStrings("if (x) { return; }", local.slice()[0].anchor.get());
+}
+
+test "the registry path caps at max_threads and counts the rest" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db = try fixtureDb(&tmp, &buf);
+    try testdb.run(db, testdb.schema);
+
+    // max_threads + 3 open threads, so `more` has to be 3.
+    var sql: [8192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&sql);
+    try w.writeAll("INSERT INTO threads (workspace, path, start_line, end_line, blob_sha, anchor_text, state, created_at, updated_at) VALUES ");
+    for (0..max_threads + 3) |i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("('src','f{d}.zig',1,1,'s','a','open','t','t')", .{i});
+    }
+    try w.writeAll(";\x00");
+    try testdb.run(db, @ptrCast(sql[0 .. w.end - 1 :0].ptr));
+
+    const snap = readList(T.allocator, "src") orelse return error.RegistryUnreachable;
+    try T.expectEqual(@as(usize, max_threads), snap.n);
+    try T.expectEqual(@as(usize, 3), snap.more);
+}
+
+test "an unreadable registry is null, so list can fall back" {
+    _ = setenv("XDG_DATA_HOME", "/nonexistent/rook-test", 1);
+    try T.expectEqual(@as(?Snapshot, null), readList(T.allocator, "src"));
 }
