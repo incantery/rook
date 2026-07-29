@@ -179,9 +179,21 @@ editor is a pure model — keys in, a styled character grid out — so
 with ZERO C linkage: the highlighter attaches through
 function-pointer hooks (syntax.zig), never an import (the directory
 reader is plain libc readdir, which macOS links regardless). Editor
-debts: one register, no marks, `f`/`t` target ASCII only, wide glyphs
-count one column, relative :e paths resolve against the app cwd rather
-than the buffer's dir.
+debts: marks hold a line and column rather than an anchored offset, so
+editing text ABOVE one leaves it pointing at the wrong place; no
+numbered registers; `f`/`t` target ASCII only; wide glyphs count one
+column; relative :e paths resolve against the app cwd rather than the
+buffer's dir.
+
+Registers are `"a`–`"z`, uppercase appending rather than replacing, and
+`"_` is the black hole — it takes the text and leaves the unnamed
+register ALONE, which is the entire point of it (`"_dd` deletes a line
+without losing what you were about to paste). The unnamed register
+always gets a copy of every yank and delete, because that is what makes
+`p` after any `d` work. A `"a` selection survives exactly one command:
+arm it, press a motion that doesn't want it, and it is spent — the
+alternative is a stray `"a` leaving the next `x` quietly writing into
+register a.
 
 `f` `F` `t` `T` `;` `,` are line-local on purpose — these are the
 motions you use to get somewhere you can SEE, and one that silently

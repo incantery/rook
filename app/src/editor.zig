@@ -11,10 +11,11 @@
 //! h j k l w b e 0 ^ $ gg G arrows ctrl-d/u; operators d y c (+ dd yy
 //! cc D C Y), x r J p P u ctrl-r, counts, `.`; f F t T ; , >> << (and
 //! > < in visual), text objects (iw aw iW aW, i" i' i` and the four
-//! bracket pairs), autoindent; :w :q :q! :wq :x :e :<n>.
-//! Debts: no marks/registers beyond the unnamed one, f/t target ASCII
-//! only, wide glyphs count as one column, lines beyond max_line get
-//! motion/render math clamped.
+//! bracket pairs), autoindent, "a registers and ma marks;
+//! :w :q :q! :wq :x :e :<n>.
+//! Debts: marks do not shift when text above them is edited, no
+//! numbered registers, f/t target ASCII only, wide glyphs count as one
+//! column, lines beyond max_line get motion/render math clamped.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -113,6 +114,17 @@ pub const Editor = struct {
     last_search: std.ArrayListUnmanaged(u8) = .empty,
     reg: std.ArrayListUnmanaged(u8) = .empty,
     reg_linewise: bool = false,
+    /// `"a` — the 26 named registers, plus the letter a `"` is waiting
+    /// for and the one the command after it should use (0 = unnamed).
+    regs: [26]Named = @splat(.{}),
+    pend_reg: bool = false,
+    sel_reg: u8 = 0,
+
+    /// `m` / `` ` `` / `'` waiting for their letter, the 26 marks, and
+    /// where the last jump started (`` `` `` and `''`).
+    pend_mark: u8 = 0,
+    marks: [26]?Pos = @splat(null),
+    jump: ?Pos = null,
 
     grid: std.ArrayListUnmanaged(RCell) = .empty,
     last_cols: usize = 80,
@@ -330,6 +342,7 @@ pub const Editor = struct {
         self.rec.deinit(gpa);
         self.last_search.deinit(gpa);
         self.reg.deinit(gpa);
+        for (&self.regs) |*r| r.text.deinit(gpa);
         self.grid.deinit(gpa);
         gpa.destroy(self);
     }
@@ -566,7 +579,13 @@ pub const Editor = struct {
         while (i < bytes.len) {
             const pre_mode = self.mode;
             const pre_ver = self.buf.version;
+            const pre_reg = self.sel_reg;
             const n = self.dispatch(bytes[i..]);
+            // A `"a` selection survives exactly ONE command. It was set
+            // by the step before this one, so if this step finished
+            // without taking it, it is gone — otherwise `"a` followed
+            // by a stray `j` would leave the next `x` writing into a.
+            if (self.sel_reg != 0 and self.sel_reg == pre_reg and self.quiescent()) self.sel_reg = 0;
             self.recordStep(bytes[i..][0..n], pre_mode, pre_ver);
             i += n;
         }
@@ -622,7 +641,8 @@ pub const Editor = struct {
     fn quiescent(self: *const Editor) bool {
         return self.mode == .normal and self.op == 0 and self.count == 0 and
             !self.pend_g and !self.pend_r and self.pend_shift == 0 and
-            self.pend_obj == 0 and self.pend_find == 0;
+            self.pend_obj == 0 and self.pend_find == 0 and !self.pend_reg and
+            self.pend_mark == 0;
     }
 
     /// Remember the keys of the last change, so `.` can type them again.
@@ -1100,6 +1120,37 @@ pub const Editor = struct {
             return;
         }
 
+        // `"a` and `ma` / `` `a `` / `'a` — the key after each of these
+        // is a NAME, taken literally, so they sit above the count
+        // branch with the rest of the pending states.
+        if (self.pend_reg) {
+            self.pend_reg = false;
+            if (ch == 0x1b or ch < 0x20) {
+                self.op = 0;
+                self.count = 0;
+                return;
+            }
+            self.sel_reg = ch;
+            return;
+        }
+
+        if (self.pend_mark != 0) {
+            const kind = self.pend_mark;
+            self.pend_mark = 0;
+            if (ch == 0x1b or ch < 0x20) {
+                self.op = 0;
+                self.count = 0;
+                return;
+            }
+            if (kind == 'm') {
+                if (ch >= 'a' and ch <= 'z') self.marks[ch - 'a'] = .{ .line = self.cline, .col = self.ccol };
+                self.count = 0;
+                return;
+            }
+            self.gotoMark(ch, kind == '`');
+            return;
+        }
+
         // `iw` / `a(` — the key after i/a names the object, literally,
         // so this also sits above the count branch.
         if (self.pend_obj != 0) {
@@ -1121,6 +1172,9 @@ pub const Editor = struct {
             self.pend_shift = 0;
             self.pend_find = 0;
             self.pend_obj = 0;
+            self.pend_reg = false;
+            self.pend_mark = 0;
+            self.sel_reg = 0;
             self.mode = .normal;
             return;
         }
@@ -1383,6 +1437,10 @@ pub const Editor = struct {
             'N' => self.searchNext(false),
 
             '.' => self.dotRepeat(),
+
+            // Registers and marks.
+            '"' => self.pend_reg = true,
+            'm', '`', '\'' => self.pend_mark = ch,
 
             else => {
                 self.op = 0;
@@ -1748,12 +1806,61 @@ pub const Editor = struct {
             self.opLines(@min(self.cline, target), @max(self.cline, target));
             return;
         }
+        self.setJump();
         self.cline = target;
         self.ccol = firstNonblank(self.lineText(target));
         self.goal = renderCol(self.lineText(target), self.ccol);
     }
 
     const Pos = struct { line: usize, col: usize };
+
+    // ------------------------------------------------------------------ marks
+
+    /// Remember where a jump started, so `` `` `` can undo it. Only the
+    /// motions that move you somewhere you did not aim at with your
+    /// eyes set this: `G`, `gg`, `n`, and a mark jump.
+    fn setJump(self: *Editor) void {
+        self.jump = .{ .line = self.cline, .col = self.ccol };
+    }
+
+    fn markPos(self: *const Editor, letter: u8) ?Pos {
+        if (letter == '`' or letter == '\'') return self.jump;
+        if (letter < 'a' or letter > 'z') return null;
+        return self.marks[letter - 'a'];
+    }
+
+    /// `` `a `` (exact) and `'a` (first non-blank of the line), as
+    /// motions — so `d'a` is linewise over the range and ``d`a`` is
+    /// charwise to the byte, which is the whole reason marks pay for
+    /// themselves. An unset mark CANCELS a pending operator rather than
+    /// running it against a position nobody chose.
+    fn gotoMark(self: *Editor, letter: u8, exact: bool) void {
+        self.count = 0;
+        const target = self.markPos(letter) orelse {
+            self.op = 0;
+            self.setStatus("mark not set: {c}", .{letter}, true);
+            return;
+        };
+        const line = @min(target.line, self.lineCountB() - 1);
+        if (self.op != 0) {
+            if (!exact) {
+                self.opLines(@min(line, self.cline), @max(line, self.cline));
+                return;
+            }
+            const dst = self.buf.rope.lineStart(line) + @min(target.col, self.lineCap(line));
+            const cur = self.absOff();
+            self.opRange(@min(cur, dst), @max(cur, dst));
+            return;
+        }
+        self.setJump();
+        self.cline = line;
+        self.ccol = if (exact)
+            @min(target.col, self.lineCap(line))
+        else
+            firstNonblank(self.lineText(line));
+        self.clampNormal();
+        self.goal = renderCol(self.lineText(self.cline), self.ccol);
+    }
 
     fn charClass(c: u8) u8 {
         if (c == ' ' or c == '\t') return 0;
@@ -1840,10 +1947,56 @@ pub const Editor = struct {
 
     // ------------------------------------------------------------ operators
 
+    const Named = struct {
+        text: std.ArrayListUnmanaged(u8) = .empty,
+        linewise: bool = false,
+    };
+
+    /// Whatever the pending `"x` names, else the unnamed register.
+    /// Consumes the selection: a register lasts exactly one command.
+    fn takeReg(self: *Editor) ?*Named {
+        const r = self.sel_reg;
+        self.sel_reg = 0;
+        if (r == 0) return null;
+        const lower = std.ascii.toLower(r);
+        if (lower < 'a' or lower > 'z') return null;
+        return &self.regs[lower - 'a'];
+    }
+
+    /// Store a yank or a delete. The unnamed register always gets it —
+    /// that is what makes `p` after any `d` work — and a named one gets
+    /// a copy, appending instead of replacing when the letter is
+    /// uppercase. `"_` is the black hole: it takes the text and leaves
+    /// the unnamed register ALONE, which is the whole reason to have it
+    /// (`"_dd` deletes without losing what you were about to paste).
     fn yankStore(self: *Editor, text: []const u8, linewise: bool) void {
+        const gpa = self.gpa;
+        const upper = std.ascii.isUpper(self.sel_reg);
+        const blackhole = self.sel_reg == '_';
+        if (self.takeReg()) |n| {
+            if (!upper) {
+                n.text.clearRetainingCapacity();
+                n.linewise = linewise;
+            } else if (n.linewise and n.text.items.len > 0 and n.text.items[n.text.items.len - 1] != '\n') {
+                n.text.append(gpa, '\n') catch {};
+            }
+            n.text.appendSlice(gpa, text) catch {};
+            if (upper and linewise) n.linewise = true;
+            endLine(gpa, &n.text, n.linewise);
+        }
+        if (blackhole) return;
         self.reg.clearRetainingCapacity();
-        self.reg.appendSlice(self.gpa, text) catch {};
+        self.reg.appendSlice(gpa, text) catch {};
         self.reg_linewise = linewise;
+        endLine(gpa, &self.reg, linewise);
+    }
+
+    /// A linewise register holds WHOLE lines, even when the last one of
+    /// the file came without a newline — otherwise `p` on it splices
+    /// the text onto whatever line the cursor is on.
+    fn endLine(gpa: Allocator, list: *std.ArrayListUnmanaged(u8), linewise: bool) void {
+        if (!linewise or list.items.len == 0) return;
+        if (list.items[list.items.len - 1] != '\n') list.append(gpa, '\n') catch {};
     }
 
     /// Charwise operator over [start, end) byte offsets.
@@ -1879,9 +2032,6 @@ pub const Editor = struct {
         const text = rope.dupeRange(gpa, start, end) catch return;
         defer gpa.free(text);
         self.yankStore(text, true);
-        if (self.reg.items.len > 0 and self.reg.items[self.reg.items.len - 1] != '\n') {
-            self.reg.append(gpa, '\n') catch {};
-        }
         if (op == 'y') {
             self.cline = a;
             self.clampNormal();
@@ -1986,25 +2136,41 @@ pub const Editor = struct {
 
     fn paste(self: *Editor, after: bool) void {
         const gpa = self.gpa;
-        if (self.reg.items.len == 0) return;
+        if (self.sel_reg == '_') { // the black hole holds nothing
+            self.sel_reg = 0;
+            self.count = 0;
+            return;
+        }
+        // The register is read into locals before the first insert:
+        // pasting a NAMED register into the buffer must not be walking
+        // a list that anything downstream could reallocate.
+        var body: []const u8 = self.reg.items;
+        var linewise = self.reg_linewise;
+        if (self.takeReg()) |n| {
+            body = n.text.items;
+            linewise = n.linewise;
+        }
+        if (body.len == 0) return;
+        const cnt = self.takeCount();
         self.buf.newUndoGroup();
-        if (self.reg_linewise) {
+        if (linewise) {
             const rope = &self.buf.rope;
-            if (after) {
-                if (self.cline + 1 < self.lineCountB()) {
-                    self.buf.insert(gpa, rope.lineStart(self.cline + 1), self.reg.items) catch return;
+            for (0..cnt) |i| {
+                if (after) {
+                    if (self.cline + 1 < self.lineCountB()) {
+                        self.buf.insert(gpa, rope.lineStart(self.cline + 1), body) catch return;
+                    } else {
+                        // Paste after the last line: newline first, and
+                        // the register's own trailing newline is dropped.
+                        var end = rope.byteLen();
+                        self.buf.insert(gpa, end, "\n") catch return;
+                        end += 1;
+                        self.buf.insert(gpa, end, body[0 .. body.len - 1]) catch return;
+                    }
+                    if (i == 0) self.cline += 1;
                 } else {
-                    // Paste after the last line: newline first, and the
-                    // register's own trailing newline is dropped.
-                    const text = self.reg.items[0 .. self.reg.items.len - 1];
-                    var end = rope.byteLen();
-                    self.buf.insert(gpa, end, "\n") catch return;
-                    end += 1;
-                    self.buf.insert(gpa, end, text) catch return;
+                    self.buf.insert(gpa, rope.lineStart(self.cline), body) catch return;
                 }
-                self.cline += 1;
-            } else {
-                self.buf.insert(gpa, rope.lineStart(self.cline), self.reg.items) catch return;
             }
             self.ccol = firstNonblank(self.lineText(self.cline));
             return;
@@ -2012,8 +2178,8 @@ pub const Editor = struct {
         const s = self.lineText(self.cline);
         var at = self.absOff();
         if (after and s.len > 0 and self.ccol < s.len) at += cpLenAt(s, self.ccol);
-        self.buf.insert(gpa, at, self.reg.items) catch return;
-        self.cursorToOffset(at + self.reg.items.len - 1);
+        for (0..cnt) |_| self.buf.insert(gpa, at, body) catch return;
+        self.cursorToOffset(at + body.len * cnt - 1);
     }
 
     /// Where the cursor sits in the pane's OWN cell grid, gutter
@@ -2060,6 +2226,7 @@ pub const Editor = struct {
             return;
         }
         if (self.findMatch(fwd)) |pos| {
+            self.setJump();
             self.cline = pos.line;
             self.ccol = pos.col;
             self.goal = renderCol(self.lineText(pos.line), pos.col);
@@ -3423,4 +3590,146 @@ test "dot repeats an operator over a text object" {
     const s = try bufText(gpa, e);
     defer gpa.free(s);
     try testing.expectEqualStrings("three", s);
+}
+
+// ------------------------------------------------------------ registers, marks
+
+test "a named register keeps its text across an unrelated delete" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    keys(e, "gg\"ayy"); // a = "one\n"
+    keys(e, "jdd"); // unnamed = "two\n", a untouched
+    keys(e, "\"ap");
+    keys(e, "p");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\nthree\none\ntwo", s);
+}
+
+test "an uppercase register appends" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    keys(e, "gg\"ayy");
+    keys(e, "j\"Ayy");
+    keys(e, "G\"ap");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\ntwo\nthree\none\ntwo", s);
+}
+
+test "the black hole register deletes without clobbering the unnamed one" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    keys(e, "ggyy"); // unnamed = "one\n"
+    keys(e, "j\"_dd"); // "two" gone, unnamed still "one\n"
+    keys(e, "p");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\nthree\none", s);
+}
+
+test "a register selection survives exactly one command" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo");
+    e.key("\x1b");
+    keys(e, "gg\"a"); // armed...
+    keys(e, "j"); // ...and spent on a motion that does not want it
+    keys(e, "yy"); // so this goes to the unnamed register only
+    keys(e, "\"ap"); // register a is empty: nothing to paste
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\ntwo", s);
+}
+
+test "a count on p pastes that many copies" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo");
+    e.key("\x1b");
+    keys(e, "ggyy3p");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\none\none\none\ntwo", s);
+}
+
+test "a mark remembers the exact column; the quote form takes first non-blank" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i    hello\nworld");
+    e.key("\x1b");
+    keys(e, "ggfoma");
+    try testing.expectEqual(@as(usize, 8), e.ccol);
+    keys(e, "G");
+    keys(e, "`a");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+    try testing.expectEqual(@as(usize, 8), e.ccol);
+    keys(e, "G'a");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+    try testing.expectEqual(@as(usize, 4), e.ccol);
+}
+
+test "backtick mark is a charwise motion for an operator" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "0ma$d`a");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("f", s);
+}
+
+test "quote mark is a linewise motion for an operator" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree\nfour");
+    e.key("\x1b");
+    keys(e, "ggjmaGd'a");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one", s);
+}
+
+test "an unset mark cancels the operator instead of guessing" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "$d`z");
+    // The point is not just that nothing was deleted — it is that the
+    // `d` did not stay armed to eat whatever you press next.
+    keys(e, "0l");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abcdef", s);
+}
+
+test "backtick backtick returns from a jump, and back again" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree\nfour");
+    e.key("\x1b");
+    keys(e, "ggG");
+    try testing.expectEqual(@as(usize, 3), e.cline);
+    keys(e, "``");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+    keys(e, "``");
+    try testing.expectEqual(@as(usize, 3), e.cline);
 }

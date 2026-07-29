@@ -462,7 +462,22 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       always goes stale. `u`/ctrl-r/`.` are the three explicit
       exceptions: they move the buffer without being changes of their
       own. A count on `.` REPLACES the recorded one (`3dd` then `5.`).
-- [ ] Editor debts already logged: registers, marks, `f`/`t` target
+- [x] **Registers and marks.** `"a`–`"z` (uppercase APPENDS, `"_` is
+      the black hole: it takes the text and leaves the unnamed register
+      alone, so `"_dd` deletes without losing what you were about to
+      paste). The unnamed register always gets a copy too — that is
+      what makes `p` after any `d` work. A `"a` selection survives
+      exactly ONE command, so a stray motion after it does not leave
+      the next `x` writing into a. `ma` / `` `a `` / `'a`, both jump
+      forms usable as motions (``d`a`` charwise, `d'a` linewise), an
+      unset mark cancels the operator rather than running it against a
+      position nobody chose, and `` `` ``/`''` return from the last
+      jump. `p`/`P` take a count.
+- [ ] Marks do not shift when text ABOVE them is edited — they hold a
+      line and column, not an anchored offset. Fixing it means routing
+      every buffer edit through one seam that adjusts them, which is
+      the same seam a git gutter and reanchoring want.
+- [ ] Editor debts already logged: numbered registers, `f`/`t` target
       ASCII only, wide glyphs = 1 column, relative `:e` resolves
       against app cwd
 - [x] **Notice a disk change while the buffer is OPEN**, not only at
