@@ -1,8 +1,11 @@
 package host
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -37,33 +40,65 @@ index ce01362..0f2416e 100644
 	}
 }
 
+// maprangeFixtures is the table this implementation and app/src/anchor.zig
+// BOTH answer to. It lives outside this package because it belongs to
+// neither side — see the file's own header for the format and for why
+// mirrored hand-written tests were not enough.
+const maprangeFixtures = "../../app/src/testdata/anchor_maprange.txt"
+
 func TestMapRange(t *testing.T) {
-	cases := []struct {
-		name       string
-		hunks      []hunk
-		start, end int
-		wantStart  int
-		wantEnd    int
-		outdated   bool
-	}{
-		{"no hunks", nil, 5, 7, 5, 7, false},
-		{"insertion above shifts down", []hunk{{2, 0, 3, 2}}, 5, 7, 7, 9, false},
-		{"deletion above shifts up", []hunk{{1, 3, 1, 0}}, 10, 12, 7, 9, false},
-		{"replacement above shifts by delta", []hunk{{1, 2, 1, 5}}, 10, 12, 13, 15, false},
-		{"change below is invisible", []hunk{{20, 2, 20, 4}}, 5, 7, 5, 7, false},
-		{"edit inside range outdates", []hunk{{6, 1, 6, 1}}, 5, 7, 5, 7, true},
-		{"edit overlapping start outdates", []hunk{{3, 4, 3, 1}}, 5, 7, 5, 7, true},
-		{"insertion strictly inside outdates", []hunk{{5, 0, 6, 2}}, 5, 7, 5, 7, true},
-		{"insertion at range start shifts", []hunk{{4, 0, 5, 2}}, 5, 7, 7, 9, false},
-		{"insertion at range end is below", []hunk{{7, 0, 8, 2}}, 5, 7, 5, 7, false},
-		{"whole range deleted outdates", []hunk{{4, 6, 4, 0}}, 5, 7, 5, 7, true},
+	raw, err := os.ReadFile(maprangeFixtures)
+	if err != nil {
+		t.Fatalf("shared fixtures: %v", err)
 	}
-	for _, c := range cases {
-		s, e, out := mapRange(c.hunks, c.start, c.end)
-		if s != c.wantStart || e != c.wantEnd || out != c.outdated {
-			t.Errorf("%s: got %d-%d outdated=%v, want %d-%d outdated=%v",
-				c.name, s, e, out, c.wantStart, c.wantEnd, c.outdated)
+	declared, seen := -1, 0
+	for ln := range strings.SplitSeq(string(raw), "\n") {
+		line := strings.TrimSpace(ln)
+		if line == "" {
+			continue
 		}
+		if strings.HasPrefix(line, "#") {
+			if i := strings.Index(line, "cases:"); i >= 0 {
+				if declared, err = strconv.Atoi(strings.TrimSpace(line[i+len("cases:"):])); err != nil {
+					t.Fatalf("case count: %v", err)
+				}
+			}
+			continue
+		}
+		f := strings.Split(line, "|")
+		if len(f) != 4 {
+			t.Fatalf("malformed row: %q", line)
+		}
+		name := strings.TrimSpace(f[0])
+		var hunks []hunk
+		for _, g := range strings.Fields(f[1]) {
+			var h hunk
+			if _, err := fmt.Sscanf(g, "%d,%d,%d,%d", &h.oldStart, &h.oldCount, &h.newStart, &h.newCount); err != nil {
+				t.Fatalf("%s: hunk %q: %v", name, g, err)
+			}
+			hunks = append(hunks, h)
+		}
+		var start, end, wantStart, wantEnd int
+		var outdated bool
+		if _, err := fmt.Sscanf(strings.TrimSpace(f[2]), "%d %d", &start, &end); err != nil {
+			t.Fatalf("%s: range: %v", name, err)
+		}
+		if _, err := fmt.Sscanf(strings.TrimSpace(f[3]), "%d %d %t", &wantStart, &wantEnd, &outdated); err != nil {
+			t.Fatalf("%s: want: %v", name, err)
+		}
+		seen++
+		if s, e, out := mapRange(hunks, start, end); s != wantStart || e != wantEnd || out != outdated {
+			t.Errorf("%s: got %d-%d outdated=%v, want %d-%d outdated=%v",
+				name, s, e, out, wantStart, wantEnd, outdated)
+		}
+	}
+	// Vacuity guard: without it, a parser bug that skipped every row
+	// reads as a passing test. Both sides check the file's own count.
+	if declared < 0 {
+		t.Fatal("fixtures declare no case count")
+	}
+	if seen != declared {
+		t.Fatalf("read %d cases, file declares %d", seen, declared)
 	}
 }
 

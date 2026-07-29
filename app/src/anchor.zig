@@ -213,34 +213,89 @@ test "parse unified=0 headers" {
     try std.testing.expectEqual(@as(?Hunk, null), it.next());
 }
 
-test "map a stored range through hunks" {
-    const Case = struct {
-        name: []const u8,
-        hs: []const Hunk,
-        start: u32,
-        end: u32,
-        want: Mapped,
-    };
-    const cases = [_]Case{
-        .{ .name = "no hunks", .hs = &.{}, .start = 5, .end = 7, .want = .{ .start = 5, .end = 7, .outdated = false } },
-        .{ .name = "insertion above shifts down", .hs = &.{.{ .old_start = 2, .old_count = 0, .new_start = 3, .new_count = 2 }}, .start = 5, .end = 7, .want = .{ .start = 7, .end = 9, .outdated = false } },
-        .{ .name = "deletion above shifts up", .hs = &.{.{ .old_start = 1, .old_count = 3, .new_start = 1, .new_count = 0 }}, .start = 10, .end = 12, .want = .{ .start = 7, .end = 9, .outdated = false } },
-        .{ .name = "replacement above shifts by delta", .hs = &.{.{ .old_start = 1, .old_count = 2, .new_start = 1, .new_count = 5 }}, .start = 10, .end = 12, .want = .{ .start = 13, .end = 15, .outdated = false } },
-        .{ .name = "change below is invisible", .hs = &.{.{ .old_start = 20, .old_count = 2, .new_start = 20, .new_count = 4 }}, .start = 5, .end = 7, .want = .{ .start = 5, .end = 7, .outdated = false } },
-        .{ .name = "edit inside range outdates", .hs = &.{.{ .old_start = 6, .old_count = 1, .new_start = 6, .new_count = 1 }}, .start = 5, .end = 7, .want = .{ .start = 5, .end = 7, .outdated = true } },
-        .{ .name = "edit overlapping start outdates", .hs = &.{.{ .old_start = 3, .old_count = 4, .new_start = 3, .new_count = 1 }}, .start = 5, .end = 7, .want = .{ .start = 5, .end = 7, .outdated = true } },
-        .{ .name = "insertion strictly inside outdates", .hs = &.{.{ .old_start = 5, .old_count = 0, .new_start = 6, .new_count = 2 }}, .start = 5, .end = 7, .want = .{ .start = 5, .end = 7, .outdated = true } },
-        .{ .name = "insertion at range start shifts", .hs = &.{.{ .old_start = 4, .old_count = 0, .new_start = 5, .new_count = 2 }}, .start = 5, .end = 7, .want = .{ .start = 7, .end = 9, .outdated = false } },
-        .{ .name = "insertion at range end is below", .hs = &.{.{ .old_start = 7, .old_count = 0, .new_start = 8, .new_count = 2 }}, .start = 5, .end = 7, .want = .{ .start = 5, .end = 7, .outdated = false } },
-        .{ .name = "whole range deleted outdates", .hs = &.{.{ .old_start = 4, .old_count = 6, .new_start = 4, .new_count = 0 }}, .start = 5, .end = 7, .want = .{ .start = 5, .end = 7, .outdated = true } },
-    };
-    for (cases) |c| {
-        const got = mapRange(c.hs, c.start, c.end);
-        std.testing.expectEqual(c.want, got) catch |err| {
-            std.debug.print("case: {s}\n", .{c.name});
+/// The shared table, compiled in. @embedFile rather than a runtime read
+/// on purpose: a fixture that has moved or been deleted is then a build
+/// failure, where an open-and-skip would leave the suite green with
+/// nothing behind it. A parity check that can silently test nothing is
+/// worse than no parity check.
+const maprange_fixtures = @embedFile("testdata/anchor_maprange.txt");
+
+test "map a stored range through hunks (shared fixtures)" {
+    var declared: ?usize = null;
+    var seen: usize = 0;
+
+    var lines = std.mem.splitScalar(u8, maprange_fixtures, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        if (line[0] == '#') {
+            if (std.mem.indexOf(u8, line, "cases:")) |i|
+                declared = try std.fmt.parseInt(usize, std.mem.trim(u8, line[i + "cases:".len ..], " \t"), 10);
+            continue;
+        }
+
+        var fields = std.mem.splitScalar(u8, line, '|');
+        const name = trimmed(fields.next() orelse return error.MalformedRow);
+        const hunks_s = trimmed(fields.next() orelse return error.MalformedRow);
+        const range_s = trimmed(fields.next() orelse return error.MalformedRow);
+        const want_s = trimmed(fields.next() orelse return error.MalformedRow);
+        if (fields.next() != null) return error.MalformedRow;
+
+        var hs: [8]Hunk = undefined;
+        var n: usize = 0;
+        var groups = std.mem.tokenizeAny(u8, hunks_s, " \t");
+        while (groups.next()) |g| : (n += 1) {
+            var p = std.mem.splitScalar(u8, g, ',');
+            hs[n] = .{
+                .old_start = try nextInt(&p),
+                .old_count = try nextInt(&p),
+                .new_start = try nextInt(&p),
+                .new_count = try nextInt(&p),
+            };
+            if (p.next() != null) return error.MalformedHunk;
+        }
+
+        var r = std.mem.tokenizeAny(u8, range_s, " \t");
+        const start = try tokInt(&r);
+        const end = try tokInt(&r);
+        if (r.next() != null) return error.MalformedRow;
+
+        var w = std.mem.tokenizeAny(u8, want_s, " \t");
+        const want: Mapped = .{
+            .start = try tokInt(&w),
+            .end = try tokInt(&w),
+            .outdated = blk: {
+                const t = w.next() orelse return error.MalformedRow;
+                if (std.mem.eql(u8, t, "true")) break :blk true;
+                if (std.mem.eql(u8, t, "false")) break :blk false;
+                return error.MalformedRow;
+            },
+        };
+        if (w.next() != null) return error.MalformedRow;
+
+        seen += 1;
+        std.testing.expectEqual(want, mapRange(hs[0..n], start, end)) catch |err| {
+            std.debug.print("fixture case: {s}\n", .{name});
             return err;
         };
     }
+
+    // The vacuity guard. Without it a parser bug that skipped every row
+    // reads as a passing suite.
+    try std.testing.expect(declared != null);
+    try std.testing.expectEqual(declared.?, seen);
+}
+
+fn trimmed(s: []const u8) []const u8 {
+    return std.mem.trim(u8, s, " \t");
+}
+
+fn nextInt(it: *std.mem.SplitIterator(u8, .scalar)) !u32 {
+    return std.fmt.parseInt(u32, it.next() orelse return error.MalformedHunk, 10);
+}
+
+fn tokInt(it: *std.mem.TokenIterator(u8, .any)) !u32 {
+    return std.fmt.parseInt(u32, it.next() orelse return error.MalformedRow, 10);
 }
 
 test "parse and map compose over a real diff" {
