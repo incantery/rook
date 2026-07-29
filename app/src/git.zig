@@ -14,14 +14,69 @@
 //! streams and draining one invites: a chatty stderr fills its pipe and
 //! the child blocks forever.
 //!
-//! KNOWN GAP vs the Go side: no timeout. Go wraps these in a
-//! context with reviewTimeout; 0.16 has no cancelable wait, and a
-//! watchdog thread racing kill() against wait() is worse than the hang
-//! it prevents. A wedged git wedges the calling thread. Left explicit
-//! rather than papered over, and it wants fixing before this runs on a
-//! UI thread.
+//! Timeouts are enforced by a watchdog thread, matching the Go side's
+//! context deadline. The race that makes watchdogs dangerous — killing a
+//! pid the main thread has already reaped, which after pid reuse means
+//! killing a stranger — is closed by ORDERING rather than by locking:
+//!
+//!   main:     read stdout to EOF → signal done → JOIN watchdog → wait()
+//!   watchdog: poll `done`; on expiry SIGKILL the pid, then exit
+//!
+//! The only reap is main's wait(), and it happens strictly after the
+//! join, so no kill can ever follow it. The watchdog signals rather than
+//! calling Child.kill(), which would reap from a second thread and
+//! mutate the Child out from under its owner.
+//!
+//! What the deadline does NOT cover: the signal goes to git alone, not
+//! to a process group, so a grandchild that inherited the stdout pipe
+//! (a pager, a credential helper) keeps it open and the read stays
+//! blocked. Fixing that means putting the child in its own process group
+//! at spawn, which SpawnOptions does not expose — and the alternative,
+//! signalling OUR group, would take the app down with it. None of the
+//! commands here run helpers, so this is a bound on the guarantee rather
+//! than a live bug.
 
 const std = @import("std");
+
+/// What the Go host uses for the same calls (reviewTimeout). Generous:
+/// this bounds a wedged git, it does not police a slow one.
+pub const default_timeout_ms: u64 = 10_000;
+
+/// How often the watchdog checks whether it is still needed. Short
+/// enough that the thread is gone almost immediately after a normal
+/// call — which is every call — and long enough that it costs nothing.
+const watchdog_tick_ms: u64 = 25;
+
+const Watchdog = struct {
+    pid: std.posix.pid_t,
+    io: std.Io,
+    timeout_ms: u64,
+    done: std.atomic.Value(bool) = .init(false),
+    /// Set when the watchdog actually fired, so the caller can tell a
+    /// killed git from one that merely failed.
+    fired: std.atomic.Value(bool) = .init(false),
+
+    fn watch(self: *Watchdog) void {
+        var waited: u64 = 0;
+        while (waited < self.timeout_ms) {
+            if (self.done.load(.acquire)) return;
+            const tick: std.Io.Clock.Duration = .{
+                .raw = std.Io.Duration.fromMilliseconds(watchdog_tick_ms),
+                // `awake` excludes suspend, so closing the lid for an
+                // hour does not spend the deadline and shoot a healthy
+                // git the moment the machine wakes.
+                .clock = .awake,
+            };
+            tick.sleep(self.io) catch return;
+            waited += watchdog_tick_ms;
+        }
+        if (self.done.load(.acquire)) return;
+        self.fired.store(true, .release);
+        // SIGKILL, not TERM: this fires only after the deadline, and a
+        // git that ignored TERM would leave us waiting all over again.
+        std.posix.kill(self.pid, .KILL) catch {};
+    }
+};
 
 pub const Result = struct {
     /// Child stdout. Caller owns it.
@@ -29,20 +84,36 @@ pub const Result = struct {
     /// Exit status. A signalled or unknown termination reports 255,
     /// which no git command uses as a success code.
     code: u8,
+    /// True when the watchdog killed it. Distinct from a nonzero code,
+    /// because "git took too long" and "git said no" are different
+    /// answers — the first says nothing about the repository.
+    timed_out: bool = false,
 
     pub fn deinit(self: Result, gpa: std.mem.Allocator) void {
         gpa.free(self.stdout);
     }
 };
 
-/// Run git in `dir`. Null when git could not be started at all — a
-/// machine with no git, which is a different thing from git failing.
+/// Run git in `dir` with the default deadline.
 pub fn run(
     gpa: std.mem.Allocator,
     io: std.Io,
     dir: []const u8,
     args: []const []const u8,
     limit: usize,
+) ?Result {
+    return runTimeout(gpa, io, dir, args, limit, default_timeout_ms);
+}
+
+/// Run git in `dir`. Null when git could not be started at all — a
+/// machine with no git, which is a different thing from git failing.
+pub fn runTimeout(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    dir: []const u8,
+    args: []const []const u8,
+    limit: usize,
+    timeout_ms: u64,
 ) ?Result {
     var argv = std.ArrayListUnmanaged([]const u8).initCapacity(gpa, args.len + 3) catch return null;
     defer argv.deinit(gpa);
@@ -70,13 +141,37 @@ pub fn run(
         break :blk std.process.spawn(io, opts) catch return null;
     };
 
+    // The watchdog only makes sense once we have a pid to signal; a
+    // spawn with no id is already over.
+    var dog: Watchdog = .{ .pid = child.id orelse 0, .io = io, .timeout_ms = timeout_ms };
+    const thread: ?std.Thread = if (dog.pid > 0)
+        std.Thread.spawn(.{}, Watchdog.watch, .{&dog}) catch null
+    else
+        null;
+
+    // Retiring is spelled out on every path rather than deferred, and
+    // that is deliberate: a defer would ALSO run on the paths that
+    // already joined, and joining a thread twice is undefined. It has to
+    // happen before wait() on both, because wait() is the reap and no
+    // kill may follow it.
+    const retire = struct {
+        fn call(d: *Watchdog, t: ?std.Thread) void {
+            if (t) |th| {
+                d.done.store(true, .release);
+                th.join();
+            }
+        }
+    }.call;
+
     var buf: [16 * 1024]u8 = undefined;
     var reader = child.stdout.?.readerStreaming(io, &buf);
     const out = reader.interface.allocRemaining(gpa, .limited(limit)) catch {
+        retire(&dog, thread);
         _ = child.wait(io) catch {};
         return null;
     };
 
+    retire(&dog, thread);
     const term = child.wait(io) catch {
         gpa.free(out);
         return null;
@@ -87,6 +182,7 @@ pub fn run(
             .exited => |c| c,
             else => 255,
         },
+        .timed_out = dog.fired.load(.acquire),
     };
 }
 
@@ -148,6 +244,45 @@ test "run reports git's exit code, and 1 is not a failure" {
     defer same.deinit(testing.allocator);
     try testing.expectEqual(@as(u8, 0), same.code);
     try testing.expectEqualStrings("", same.stdout);
+}
+
+test "the watchdog kills a child that outlives its deadline" {
+    // Driven against /bin/sleep rather than through run(), because no
+    // git invocation reliably hangs with stdin on /dev/null — and a
+    // test that only asserts "if it timed out, then…" asserts nothing.
+    // This exercises the mechanism that matters: the kill fires, and the
+    // join-before-reap ordering holds.
+    var child = std.process.spawn(testing.io, .{
+        .argv = &.{ "/bin/sleep", "30" },
+        .stdout = .pipe,
+        .stderr = .ignore,
+        .stdin = .ignore,
+    }) catch return error.SkipZigTest;
+
+    var dog: Watchdog = .{ .pid = child.id.?, .io = testing.io, .timeout_ms = 200 };
+    const thread = try std.Thread.spawn(.{}, Watchdog.watch, .{&dog});
+
+    // The read returns because the kill closes the pipe — which is what
+    // unwedges a hung call in production too.
+    var buf: [256]u8 = undefined;
+    var reader = child.stdout.?.readerStreaming(testing.io, &buf);
+    const out = try reader.interface.allocRemaining(testing.allocator, .limited(4096));
+    defer testing.allocator.free(out);
+
+    dog.done.store(true, .release);
+    thread.join();
+    const term = try child.wait(testing.io);
+
+    try testing.expect(dog.fired.load(.acquire));
+    // Signalled, not exited — sleep(1) would have exited 0 after 30s.
+    try testing.expect(term != .exited);
+}
+
+test "a normal call retires the watchdog without firing it" {
+    const r = runTimeout(testing.allocator, testing.io, ".", &.{"--version"}, 4096, 10_000) orelse return error.SkipZigTest;
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(u8, 0), r.code);
+    try testing.expect(!r.timed_out);
 }
 
 test "run captures stdout" {
