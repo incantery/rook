@@ -9,10 +9,11 @@
 //!
 //! Vim scope v1: normal/insert/visual/visual-line/command modes;
 //! h j k l w b e 0 ^ $ gg G arrows ctrl-d/u; operators d y c (+ dd yy
-//! cc D C Y), x r J p P u ctrl-r, counts; :w :q :q! :wq :x :e :<n>.
-//! Debts: no search, no marks/registers beyond the unnamed one, no
-//! autoindent, wide glyphs count as one column, lines beyond 4KB get
-//! motion/render math clamped.
+//! cc D C Y), x r J p P u ctrl-r, counts; >> << (and > < in visual),
+//! autoindent; :w :q :q! :wq :x :e :<n>.
+//! Debts: no marks/registers beyond the unnamed one, no f/t/;/,, wide
+//! glyphs count as one column, lines beyond max_line get motion/render
+//! math clamped.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -72,6 +73,17 @@ pub const Editor = struct {
 
     vanchor_line: usize = 0,
     vanchor_col: usize = 0,
+    /// `>` or `<` waiting for its second key. Not routed through `op`,
+    /// because `op` means "delete a range" everywhere it is read.
+    pend_shift: u8 = 0,
+
+    /// An indent this editor inserted that you have not committed to by
+    /// typing after it. Stripped when you leave the line — vim's rule,
+    /// and it is about diffs: pressing `o`, changing your mind and
+    /// pressing ESC must not leave a line of trailing whitespace for
+    /// someone to review.
+    ai_line: ?usize = null,
+    ai_len: usize = 0,
 
     cmd: std.ArrayListUnmanaged(u8) = .empty,
     /// What the command line is collecting: an ex command (:) or a
@@ -429,9 +441,82 @@ pub const Editor = struct {
         return i;
     }
 
+    /// Column of the first non-blank, or 0 if the line has none — the
+    /// `^` motion, where landing on column 0 of a blank line is right.
     fn firstNonblank(s: []const u8) usize {
         for (s, 0..) |c, i| if (c != ' ' and c != '\t') return i;
         return 0;
+    }
+
+    /// Bytes of leading whitespace. Differs from `firstNonblank` on a
+    /// line that is ALL whitespace: that line's indent is the whole
+    /// line, and a new line below it should inherit it.
+    fn indentLen(s: []const u8) usize {
+        for (s, 0..) |c, i| if (c != ' ' and c != '\t') return i;
+        return s.len;
+    }
+
+    /// Display width of leading whitespace, tabs snapping to the stop.
+    fn indentWidth(s: []const u8) usize {
+        var w: usize = 0;
+        for (s[0..indentLen(s)]) |c| {
+            if (c == '\t') w = w / tab_width * tab_width + tab_width else w += 1;
+        }
+        return w;
+    }
+
+    /// Deeper than this is not an indent, it is content.
+    const max_indent = 256;
+
+    /// Leading whitespace of `line`, copied OUT of the shared scratch —
+    /// every caller inserts it somewhere, and the insert may want
+    /// `lineText` again.
+    fn indentOf(self: *Editor, line: usize, out: *[max_indent]u8) []const u8 {
+        const s = self.lineText(line);
+        const n = @min(indentLen(s), max_indent);
+        @memcpy(out[0..n], s[0..n]);
+        return out[0..n];
+    }
+
+    /// Tabs or spaces? The FILE decides.
+    ///
+    /// rook's own tree has Zig (spaces) and Go (tabs) side by side, so
+    /// a setting would be wrong in one of them no matter which way it
+    /// pointed. Whatever the buffer already indents with is the answer,
+    /// and a buffer with no indented lines yet gets spaces.
+    ///
+    /// The budget is INDENTED lines seen, not lines read: a Go file can
+    /// open with a licence header and an import block, and a flat count
+    /// of the first N lines would find no tabs in any of it.
+    fn indentUnit(self: *const Editor) []const u8 {
+        var tabs: usize = 0;
+        var spaces: usize = 0;
+        const scan = @min(self.lineCountB(), 2000);
+        for (0..scan) |l| {
+            if (tabs + spaces >= 200) break;
+            const start = self.buf.rope.lineStart(l);
+            if (self.buf.rope.lineEnd(l) == start) continue;
+            var one: [1]u8 = undefined;
+            self.buf.rope.copyRange(start, start + 1, &one);
+            if (one[0] == '\t') tabs += 1 else if (one[0] == ' ') spaces += 1;
+        }
+        return if (tabs > spaces) "\t" else " " ** tab_width;
+    }
+
+    /// Whitespace spelling `width` columns in `unit`'s currency.
+    fn makeIndent(width: usize, unit: []const u8, out: *[max_indent]u8) []const u8 {
+        var n: usize = 0;
+        if (unit.len == 1 and unit[0] == '\t') {
+            while (n < width / tab_width and n < max_indent) : (n += 1) out[n] = '\t';
+            var rem = width % tab_width;
+            while (rem > 0 and n < max_indent) : (rem -= 1) {
+                out[n] = ' ';
+                n += 1;
+            }
+        } else {
+            while (n < width and n < max_indent) : (n += 1) out[n] = ' ';
+        }
+        return out[0..n];
     }
 
     fn clampNormal(self: *Editor) void {
@@ -505,6 +590,7 @@ pub const Editor = struct {
     }
 
     fn insertArrow(self: *Editor, m: u8) void {
+        if ((m == 'j' or m == 'k') and self.ai_line != null) self.dropPendingIndent();
         const s = self.lineText(self.cline);
         switch (m) {
             'h' => {
@@ -537,6 +623,7 @@ pub const Editor = struct {
         const gpa = self.gpa;
         const b0 = bytes[0];
         if (b0 == 0x1b) { // ESC → normal, cursor left one cp
+            self.dropPendingIndent();
             self.mode = .normal;
             if (self.ccol > 0) {
                 const s = self.lineText(self.cline);
@@ -546,12 +633,23 @@ pub const Editor = struct {
             return;
         }
         if (b0 == '\r' or b0 == '\n') {
+            // The indent is read BEFORE the split and before the strip:
+            // holding Enter on a fresh `o` should keep giving you the
+            // indent while leaving no whitespace behind on the lines
+            // you skipped past.
+            var ibuf: [max_indent]u8 = undefined;
+            const ind = self.indentOf(self.cline, &ibuf);
+            self.dropPendingIndent();
             self.buf.insert(gpa, self.absOff(), "\n") catch return;
             self.cline += 1;
             self.ccol = 0;
+            self.insertIndent(ind);
             return;
         }
         if (b0 == 0x7f or b0 == 0x08) { // backspace
+            // Backspacing INTO an auto-indent is a deliberate edit of
+            // it; the editor stops claiming those bytes.
+            self.ai_line = null;
             if (self.ccol > 0) {
                 const s = self.lineText(self.cline);
                 const p = prevCpStart(s, self.ccol);
@@ -582,7 +680,19 @@ pub const Editor = struct {
             }
             self.buf.insert(gpa, self.absOff(), bytes) catch return;
             self.ccol += bytes.len;
+            self.ai_line = null; // typed on it — it is yours now
         }
+    }
+
+    /// Put a fresh line's inherited indent in, and arm the take-back.
+    fn insertIndent(self: *Editor, ind: []const u8) void {
+        if (ind.len == 0) {
+            self.armPendingIndent(self.cline, 0);
+            return;
+        }
+        self.buf.insert(self.gpa, self.absOff(), ind) catch return;
+        self.ccol = ind.len;
+        self.armPendingIndent(self.cline, ind.len);
     }
 
     // ------------------------------------------------------------ command mode
@@ -736,6 +846,7 @@ pub const Editor = struct {
         b.path = try self.gpa.dupe(u8, name);
         self.buf.deinit(self.gpa);
         self.buf = b;
+        self.ai_line = null; // line numbers belonged to the old buffer
         self.is_dir = false;
         self.synthetic = true;
         self.cline = 0;
@@ -773,6 +884,7 @@ pub const Editor = struct {
         const top = self.top;
         self.buf.deinit(self.gpa);
         self.buf = nb;
+        self.ai_line = null; // line numbers belonged to the old buffer
         self.is_dir = is_dir;
         // Clamp back onto whatever the file is NOW — it may be shorter
         // than the one we were looking at, and every motion below reads
@@ -798,6 +910,7 @@ pub const Editor = struct {
         const nb = try loadPath(self.gpa, self.io, path, &is_dir);
         self.buf.deinit(self.gpa);
         self.buf = nb;
+        self.ai_line = null; // line numbers belonged to the old buffer
         self.is_dir = is_dir;
         self.cline = 0;
         self.ccol = 0;
@@ -823,6 +936,32 @@ pub const Editor = struct {
         self.mode = .insert;
     }
 
+    /// Take back an auto-indent nobody typed on.
+    ///
+    /// Deliberately timid: it fires only when the line is still EXACTLY
+    /// the whitespace this editor put there. Anything else — a typed
+    /// character, a backspace, a paste — means the human owns those
+    /// bytes now, and code that deletes text on a guess is code that
+    /// eats someone's line.
+    fn dropPendingIndent(self: *Editor) void {
+        const line = self.ai_line orelse return;
+        const n = self.ai_len;
+        self.ai_line = null;
+        self.ai_len = 0;
+        if (n == 0 or line >= self.lineCountB()) return;
+        const s = self.lineText(line);
+        if (s.len != n or indentLen(s) != s.len) return;
+        const start = self.buf.rope.lineStart(line);
+        self.buf.deleteRange(self.gpa, start, start + n) catch return;
+        if (self.cline == line) self.ccol = 0;
+    }
+
+    /// Arm the strip, and remember how much we owe back.
+    fn armPendingIndent(self: *Editor, line: usize, n: usize) void {
+        self.ai_line = if (n == 0) null else line;
+        self.ai_len = n;
+    }
+
     fn normalKey(self: *Editor, ch: u8) void {
         const gpa = self.gpa;
 
@@ -845,6 +984,7 @@ pub const Editor = struct {
             self.count = 0;
             self.op = 0;
             self.pend_g = false;
+            self.pend_shift = 0;
             self.mode = .normal;
             return;
         }
@@ -852,6 +992,24 @@ pub const Editor = struct {
         // Counts (0 alone is a motion).
         if (ch >= '1' and ch <= '9' or (ch == '0' and self.count > 0)) {
             self.count = self.count *| 10 +| (ch - '0');
+            return;
+        }
+
+        // `>>` / `>j` / `>k` — after the count branch, so `>3j` counts
+        // the same as `3>>`.
+        if (self.pend_shift != 0) {
+            const dir = self.pend_shift;
+            self.pend_shift = 0;
+            const cnt = self.takeCount();
+            const a = self.cline;
+            const right = dir == '>';
+            if (ch == dir) {
+                self.shiftLines(a, @min(a + cnt - 1, self.lineCountB() - 1), right);
+            } else if (ch == 'j') {
+                self.shiftLines(a, @min(a + cnt, self.lineCountB() - 1), right);
+            } else if (ch == 'k') {
+                self.shiftLines(a -| cnt, a, right);
+            }
             return;
         }
 
@@ -929,6 +1087,17 @@ pub const Editor = struct {
                 }
                 self.op = ch;
             },
+            '>', '<' => {
+                if (self.mode == .visual or self.mode == .visual_line) {
+                    const a = @min(self.vanchor_line, self.cline);
+                    const b = @max(self.vanchor_line, self.cline);
+                    self.mode = .normal;
+                    self.count = 0;
+                    self.shiftLines(a, b, ch == '>');
+                    return;
+                }
+                self.pend_shift = ch;
+            },
             'D' => self.opToEol('d'),
             'C' => self.opToEol('c'),
             'Y' => {
@@ -988,15 +1157,21 @@ pub const Editor = struct {
                 self.enterInsert();
             },
             'o' => {
+                var ibuf: [max_indent]u8 = undefined;
+                const ind = self.indentOf(self.cline, &ibuf);
                 self.enterInsert();
                 self.buf.insert(gpa, self.buf.rope.lineEnd(self.cline), "\n") catch return;
                 self.cline += 1;
                 self.ccol = 0;
+                self.insertIndent(ind);
             },
             'O' => {
+                var ibuf: [max_indent]u8 = undefined;
+                const ind = self.indentOf(self.cline, &ibuf);
                 self.enterInsert();
                 self.buf.insert(gpa, self.buf.rope.lineStart(self.cline), "\n") catch return;
                 self.ccol = 0;
+                self.insertIndent(ind);
             },
 
             // Paste.
@@ -1272,7 +1447,11 @@ pub const Editor = struct {
 
         self.buf.newUndoGroup();
         if (op == 'c') {
-            // cc: clear the lines but keep one empty line to type into.
+            // cc: clear the lines but keep one empty line to type into,
+            // at the indent you were already at — retyping a line is
+            // not a request to move it to column zero.
+            var ibuf: [max_indent]u8 = undefined;
+            const ind = self.indentOf(a, &ibuf);
             if (end > start and self.buf.rope.byteLen() >= end and end >= 1) {
                 const keep_nl = b + 1 < self.lineCountB();
                 self.buf.deleteRange(gpa, start, if (keep_nl) end - 1 else end) catch return;
@@ -1280,6 +1459,7 @@ pub const Editor = struct {
             self.cline = a;
             self.ccol = 0;
             self.mode = .insert;
+            self.insertIndent(ind);
             return;
         }
         // dd at EOF also eats the newline BEFORE the range.
@@ -1287,6 +1467,46 @@ pub const Editor = struct {
         self.buf.deleteRange(gpa, start, end) catch return;
         self.cline = @min(a, self.lineCountB() - 1);
         self.ccol = firstNonblank(self.lineText(self.cline));
+    }
+
+    /// Shift lines [a, b] by one indent step.
+    ///
+    /// Works in COLUMNS, not bytes: the existing indent is measured with
+    /// tabs snapping to their stop, a step is added or removed, and the
+    /// result is respelled in whatever the file indents with. That is
+    /// what makes `<<` do the right thing on a line someone indented
+    /// with a mix of both.
+    ///
+    /// Blank lines are left alone. Vim's behaviour, and the reason is
+    /// the same one as the auto-indent take-back: nobody wants a diff
+    /// where the change is whitespace on an empty line.
+    fn shiftLines(self: *Editor, a: usize, b: usize, right: bool) void {
+        const gpa = self.gpa;
+        const unit = self.indentUnit();
+        var grouped = false;
+        var line = a;
+        while (line <= b and line < self.lineCountB()) : (line += 1) {
+            const s = self.lineText(line);
+            const cur_bytes = indentLen(s);
+            if (cur_bytes == s.len) continue; // blank
+            const w = indentWidth(s);
+            const target = if (right) w + tab_width else w -| tab_width;
+            var ibuf: [max_indent]u8 = undefined;
+            const ind = makeIndent(target, unit, &ibuf);
+            if (ind.len == cur_bytes and std.mem.eql(u8, ind, s[0..cur_bytes])) continue;
+
+            // One group for the whole range: `3>>` is one edit to undo.
+            if (!grouped) {
+                self.buf.newUndoGroup();
+                grouped = true;
+            }
+            const start = self.buf.rope.lineStart(line);
+            self.buf.deleteRange(gpa, start, start + cur_bytes) catch return;
+            if (ind.len > 0) self.buf.insert(gpa, start, ind) catch return;
+        }
+        self.cline = @min(a, self.lineCountB() - 1);
+        self.ccol = firstNonblank(self.lineText(self.cline));
+        self.goal = renderCol(self.lineText(self.cline), self.ccol);
     }
 
     fn opToEol(self: *Editor, op: u8) void {
@@ -2218,4 +2438,172 @@ test "a clamped line says so, in the row and in the status" {
     const dump = try e.dumpText(gpa, 40, 6);
     defer gpa.free(dump);
     try testing.expect(std.mem.indexOf(u8, dump, "long line") != null);
+}
+
+test "o O and Enter inherit the indent" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+
+    keys(e, "i    alpha");
+    e.key("\r");
+    keys(e, "beta");
+    e.key("\x1b");
+    keys(e, "ogamma");
+    e.key("\x1b");
+    keys(e, "ggOzero");
+    e.key("\x1b");
+
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings(
+        "    zero\n    alpha\n    beta\n    gamma",
+        s,
+    );
+}
+
+test "an indent nobody typed on is taken back" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+
+    keys(e, "i\tdeep");
+    e.key("\x1b");
+
+    // `o` then ESC: the line is empty, not a tab of trailing space.
+    keys(e, "o");
+    try testing.expectEqual(@as(usize, 1), e.ccol); // indent is there while typing
+    e.key("\x1b");
+    var s = try bufText(gpa, e);
+    try testing.expectEqualStrings("\tdeep\n", s);
+    gpa.free(s);
+
+    // Enter on a fresh `o` leaves the skipped line bare but keeps
+    // handing the indent forward.
+    keys(e, "kA");
+    e.key("\r");
+    e.key("\r");
+    keys(e, "x");
+    e.key("\x1b");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("\tdeep\n\n\tx\n", s);
+    gpa.free(s);
+}
+
+test "typing on an inherited indent keeps it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i  a");
+    e.key("\x1b");
+    keys(e, "ob");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("  a\n  b", s);
+}
+
+test "shift right and left respell the indent in the file's currency" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+
+    // A space-indented buffer: the unit is spaces.
+    keys(e, "i    one");
+    e.key("\r");
+    keys(e, "two");
+    e.key("\x1b");
+    keys(e, "gg>>");
+    var s = try bufText(gpa, e);
+    try testing.expectEqualStrings("        one\n    two", s);
+    gpa.free(s);
+
+    keys(e, "<<<<");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("one\n    two", s);
+    gpa.free(s);
+
+    // `<<` at column zero is a floor, not an underflow.
+    keys(e, "<<");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("one\n    two", s);
+    gpa.free(s);
+}
+
+test "a tab-indented buffer shifts with tabs" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i\tfunc()");
+    e.key("\r");
+    keys(e, "body"); // the tab comes from the line above
+    e.key("\x1b");
+    keys(e, "gg>>");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("\t\tfunc()\n\tbody", s);
+}
+
+test "a shift over a range is one undo, and skips blank lines" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia");
+    e.key("\r");
+    e.key("\r");
+    keys(e, "c");
+    e.key("\x1b");
+    keys(e, "gg3>>");
+    var s = try bufText(gpa, e);
+    try testing.expectEqualStrings("    a\n\n    c", s); // blank line untouched
+    gpa.free(s);
+
+    keys(e, "u");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("a\n\nc", s);
+    gpa.free(s);
+}
+
+test "visual line shift covers the selection" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione");
+    e.key("\r");
+    keys(e, "two");
+    e.key("\r");
+    keys(e, "three");
+    e.key("\x1b");
+    keys(e, "ggVj>");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("    one\n    two\nthree", s);
+    try testing.expectEqual(Mode.normal, e.mode);
+}
+
+test "cc retypes the line without moving it to column zero" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i        deep");
+    e.key("\x1b");
+    keys(e, "ccnew");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("        new", s);
+}
+
+test "a header of unindented lines does not hide the file's tabs" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i");
+    for (0..250) |_| { // longer than any flat first-N-lines window
+        keys(e, "package");
+        e.key("\r");
+    }
+    keys(e, "\tbody");
+    e.key("\x1b");
+    try testing.expectEqualStrings("\t", e.indentUnit());
 }

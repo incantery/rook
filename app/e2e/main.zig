@@ -25,6 +25,7 @@ const scenarios = [_]Scenario{
     .{ .name = "splits", .what = "split right, focus moves, close returns", .run = splits },
     .{ .name = "tabs", .what = "new tab, cycle, pane counts stay separate", .run = tabs },
     .{ .name = "editor", .what = "edit a file, change it, :w reaches disk", .run = editor },
+    .{ .name = "indent", .what = "o inherits the indent, >> shifts, and neither leaves whitespace", .run = indent },
     .{ .name = "clobber", .what = ":w refuses a file an agent changed underneath it", .run = clobber },
     .{ .name = "reload", .what = "an open buffer follows the file, or says it can't", .run = reload },
     .{ .name = "pixels", .what = "the renderer actually drew (shot, decoded)", .run = pixels },
@@ -201,6 +202,58 @@ fn editor(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("enter");
     try app.waitText("e2e$", 5_000);
     try h.expectEq("still one pane after :q", 1, try app.paneCount());
+}
+
+// --------------------------------------------------------------- indent
+
+/// Indentation through the REAL key path, asserted on DISK.
+///
+/// The unit tests cover the rules; what this catches is the layer
+/// between: `>` arriving as a key at all, and — the one that would
+/// otherwise ship unnoticed — an abandoned `o` leaving a line of
+/// trailing whitespace in the file. That is invisible on screen and
+/// obvious in a diff, which is the worst combination.
+fn indent(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    var path_buf: [192]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/indent.txt", .{app.dirPath()});
+    try h.writeFile(path, "    alpha\n    bravo\n");
+
+    _ = try app.ctlFmt("edit {s}", .{path});
+    try app.waitText("bravo", 5_000);
+
+    // `o` on an indented line, then a word: the word keeps the indent.
+    // `Gk`, not `G` — the file's trailing newline makes the last line
+    // empty, and an empty line has no indent to hand down.
+    _ = try app.ctl("type Gkoecho");
+    _ = try app.ctl("key 1b");
+    // `o` then straight back out: nothing left behind.
+    _ = try app.ctl("type o");
+    _ = try app.ctl("key 1b");
+    // >> on the first line.
+    _ = try app.ctl("type gg>>");
+    _ = try app.ctl("type :w");
+    _ = try app.ctl("enter");
+
+    var content: [512]u8 = undefined;
+    var waited: u32 = 0;
+    while (waited < 5000) : (waited += 100) {
+        const got = h.readFile(path, &content) catch "";
+        if (std.mem.indexOf(u8, got, "echo") != null) break;
+        h.sleepMs(100);
+    }
+    const got = try h.readFile(path, &content);
+    try h.expectContains(got, "        alpha", ">> should have doubled the first line's indent");
+    try h.expectContains(got, "    echo", "o should have inherited the indent");
+    try h.expect(
+        std.mem.indexOf(u8, got, "    \n") == null,
+        "an abandoned `o` left trailing whitespace in the file: \"{s}\"",
+        .{got},
+    );
 }
 
 // -------------------------------------------------------------- clobber

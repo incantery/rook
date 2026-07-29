@@ -179,9 +179,9 @@ editor is a pure model — keys in, a styled character grid out — so
 with ZERO C linkage: the highlighter attaches through
 function-pointer hooks (syntax.zig), never an import (the directory
 reader is plain libc readdir, which macOS links regardless). Editor
-debts: one register, no autoindent, wide glyphs count one column,
-relative :e paths resolve against the app cwd rather than the
-buffer's dir.
+debts: one register, no `f`/`t`/`;`/`,`, no marks, wide glyphs count
+one column, relative :e paths resolve against the app cwd rather than
+the buffer's dir.
 
 Long lines have a CLAMP (64KB), and getting it wrong used to abort the
 app. `ccol` is a byte offset into the real line while `lineText` hands
@@ -280,6 +280,41 @@ holding a stale buffer is exactly the one you would not think to
 distrust when you come back to it. It dirties the scene only when
 something actually changed, so zero-idle-frames holds: measured at 0
 frames drawn across 6 idle seconds with an editor pane open.
+
+### Indentation the file decides
+
+`o`, `O`, `cc` and Enter inherit the leading whitespace of the line
+they came from, VERBATIM — bytes copied, not a width recomputed — so a
+buffer keeps indenting the way it already indents without a setting
+saying which way that is.
+
+`>>` and `<<` (counts, `>j`/`>k`, and `>`/`<` over a visual selection)
+work in COLUMNS rather than bytes: the existing indent is measured with
+tabs snapping to their stop, one `tab_width` step is added or removed,
+and the result is respelled in whatever the buffer indents with. That
+last part is why `<<` does something sensible on a line someone
+indented with a mix of both. The currency is detected from the buffer —
+first indent byte per line, counted until 200 indented lines have been
+seen, so a Go file that opens with a licence header and an import block
+is still a tab file. rook's own tree has Zig and Go side by side, so a
+setting would be wrong in one of them no matter which way it pointed.
+
+Two things are deliberately timid, and both are about diffs:
+
+- **Blank lines don't shift.** Nobody wants a review comment about
+  whitespace on an empty line.
+- **An indent you never typed on is taken back.** Press `o`, change
+  your mind, press ESC, and the line is empty rather than a line of
+  trailing spaces. It fires only when the line is still EXACTLY the
+  whitespace the editor put there — one typed character, one
+  backspace, one paste, and those bytes are yours. Code that deletes
+  text on a guess is code that eats someone's line. Holding Enter
+  keeps handing the indent forward while leaving nothing behind on the
+  lines you skipped, which is vim's behaviour and the reason for it.
+
+The e2e (`indent`) asserts on DISK, because trailing whitespace is
+invisible on screen and obvious in a diff — the worst combination for
+something to ship unnoticed.
 
 WORKSPACES ARE SESSIONS (tmux's model): the hierarchy is space → tabs
 → panes. Each workspace owns a full tab set; switching swaps the

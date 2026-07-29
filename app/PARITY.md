@@ -425,8 +425,20 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       one. The fix is a horizontal WINDOW — render and do column math
       over `[left, left+cols)` instead of copying whole lines — which is
       its own slice.
-- [ ] Editor debts already logged: autoindent, registers, wide glyphs =
-      1 column, relative `:e` resolves against app cwd
+- [x] **Indentation the file decides.** `o` / `O` / `cc` / Enter
+      inherit the line's leading whitespace verbatim; `>>` and `<<`
+      (counts, `>j`/`>k`, `>`/`<` in visual) work in COLUMNS and
+      respell the result in whatever the buffer already indents with,
+      detected by counting first indent bytes until 200 indented lines
+      have been seen — a flat first-N-lines scan reads a Go file's
+      licence header and import block and concludes "spaces". No
+      setting, because rook's own tree is Zig and Go side by side.
+      Blank lines don't shift, and an indent you never typed on is
+      taken back on ESC — both are about not putting whitespace noise
+      in someone's diff. The take-back fires only when the line is
+      still exactly the bytes the editor inserted.
+- [ ] Editor debts already logged: registers, `f`/`t`/`;`/`,`, marks,
+      wide glyphs = 1 column, relative `:e` resolves against app cwd
 - [x] **Notice a disk change while the buffer is OPEN**, not only at
       `:w`. One stat per editor pane on the existing 1Hz tick, split by
       who has something to lose: an UNMODIFIED buffer reloads (keeping
