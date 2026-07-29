@@ -221,6 +221,22 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(anchor_tests).step);
 
+    // The anchor blob store's read path. Its own root, and it links
+    // sqlite because the bug it guards is a libsqlite3 API trap rather
+    // than a rook one: sqlite3_column_blob returns NULL for a
+    // zero-length blob, so reading presence off the pointer reports
+    // every empty-file snapshot as pruned — and a pruned snapshot means
+    // "outdated", which is unfixable by the user and looks like rook
+    // losing their comment's place.
+    const blobs_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/blobs.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    blobs_tests.root_module.link_libc = true;
+    blobs_tests.root_module.linkSystemLibrary("sqlite3", .{});
+    test_step.dependOn(&b.addRunArtifact(blobs_tests).step);
+
     // The UI layer's text fitting. Its own root for the reason logged
     // above editor_tests — the exe module's test collection does not
     // reach these decls, and a suite that is never run is worse than no

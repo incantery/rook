@@ -6,20 +6,14 @@
 //! same-user read-only opens are safe alongside the host's writes.
 
 const std = @import("std");
+const regdb = @import("regdb.zig");
 
-extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+const sqlite3_prepare_v2 = regdb.sqlite3_prepare_v2;
+const sqlite3_step = regdb.sqlite3_step;
+const sqlite3_finalize = regdb.sqlite3_finalize;
+const sqlite3_column_text = regdb.sqlite3_column_text;
 
-// libsqlite3 (system): the six calls a read-only query needs.
-extern "c" fn sqlite3_open_v2(path: [*:0]const u8, db: *?*anyopaque, flags: c_int, vfs: ?[*:0]const u8) c_int;
-extern "c" fn sqlite3_close(db: ?*anyopaque) c_int;
-extern "c" fn sqlite3_prepare_v2(db: ?*anyopaque, sql: [*:0]const u8, n: c_int, stmt: *?*anyopaque, tail: ?*?[*:0]const u8) c_int;
-extern "c" fn sqlite3_step(stmt: ?*anyopaque) c_int;
-extern "c" fn sqlite3_finalize(stmt: ?*anyopaque) c_int;
-extern "c" fn sqlite3_column_text(stmt: ?*anyopaque, col: c_int) ?[*:0]const u8;
-extern "c" fn sqlite3_busy_timeout(db: ?*anyopaque, ms: c_int) c_int;
-
-const SQLITE_OPEN_READONLY: c_int = 1;
-const SQLITE_ROW: c_int = 100;
+const SQLITE_ROW = regdb.ROW;
 
 pub const Entry = struct {
     name: []u8,
@@ -39,14 +33,6 @@ pub fn free(gpa: std.mem.Allocator, list: []Entry) void {
     gpa.free(list);
 }
 
-fn dbPath(buf: []u8) ?[:0]const u8 {
-    if (getenv("XDG_DATA_HOME")) |x| {
-        return std.fmt.bufPrintZ(buf, "{s}/rook/rook.db", .{std.mem.span(x)}) catch null;
-    }
-    const home = getenv("HOME") orelse return null;
-    return std.fmt.bufPrintZ(buf, "{s}/.local/share/rook/rook.db", .{std.mem.span(home)}) catch null;
-}
-
 /// Load workspaces GROUPED: top-level entries by last_used, each
 /// followed by its worktree children (their own last_used order). A
 /// missing db or any sqlite error is an EMPTY list, never a failure —
@@ -55,16 +41,8 @@ fn dbPath(buf: []u8) ?[:0]const u8 {
 pub fn load(gpa: std.mem.Allocator) []Entry {
     var flat: std.ArrayListUnmanaged(Entry) = .empty;
     defer flat.deinit(gpa);
-    var pathbuf: [1024]u8 = undefined;
-    const path = dbPath(&pathbuf) orelse return &.{};
-
-    var db: ?*anyopaque = null;
-    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, null) != 0) {
-        _ = sqlite3_close(db); // sqlite allocates a handle even on error
-        return &.{};
-    }
-    defer _ = sqlite3_close(db);
-    _ = sqlite3_busy_timeout(db, 200);
+    const db = regdb.open() orelse return &.{};
+    defer regdb.close(db);
 
     var stmt: ?*anyopaque = null;
     if (sqlite3_prepare_v2(db, "SELECT name, root, worktree_of FROM workspaces WHERE root != '' ORDER BY last_used DESC", -1, &stmt, null) != 0)
