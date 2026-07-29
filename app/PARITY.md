@@ -711,6 +711,16 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       cluster landed outside its slot. Separators and the `d` of `end`
       simply stopped being drawn, while every text assertion stayed
       green, because the MODEL was right and only the raster was wrong.
+- [x] **Terminal panes shape clusters too**, on the same path. Agent
+      output is where emoji and accented text actually turn up, and a
+      terminal cell holds a cluster the way an editor cell does — the
+      library keeps the trailing codepoints beside the cell rather than
+      in it. Before: `e` plus an accent drew as a bare `e`.
+      NOT fixed by this, and a different problem: flags, ZWJ sequences
+      and skin tones are still split across cells in a terminal,
+      because the emulator only CLUSTERS those under mode 2027 and does
+      not enable it by default. That is a decision about column
+      accounting for TUIs, not about rasterizing, so it is left alone.
 - [ ] The status row still lays out per codepoint (`putStr`), so a
       filename with a combining mark spreads over an extra cell there.
       Cosmetic, and the only place left that has not moved to clusters.

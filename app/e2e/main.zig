@@ -29,6 +29,7 @@ const scenarios = [_]Scenario{
     .{ .name = "vim", .what = "regex :s, a macro, a block edit and `.` all reach disk", .run = vim },
     .{ .name = "wide", .what = "CJK text lays out two cells wide and motions still land", .run = wideText },
     .{ .name = "grapheme", .what = "a cluster is one character to move over and to delete", .run = graphemes },
+    .{ .name = "termglyph", .what = "a terminal pane shapes clusters too, not just the editor", .run = termGlyph },
     .{ .name = "clobber", .what = ":w refuses a file an agent changed underneath it", .run = clobber },
     .{ .name = "reload", .what = "an open buffer follows the file, or says it can't", .run = reload },
     .{ .name = "pixels", .what = "the renderer actually drew (shot, decoded)", .run = pixels },
@@ -424,6 +425,58 @@ fn graphemes(gpa: std.mem.Allocator, bin: []const u8) !void {
     }
     const got = try h.readFile(path, &content);
     try h.expectContains(got, "||||end", "an x left part of a cluster behind");
+}
+
+// ----------------------------------------------------------- termglyph
+
+/// The SHELL side. Agent output is where emoji actually turn up, and a
+/// terminal cell holds a cluster the same way an editor cell does — so
+/// it has to shape it the same way. Asserted on pixels, because `dump`
+/// sees the text either way and cannot tell a flag from a boxed letter.
+fn termGlyph(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    // Literal UTF-8 in the source: POSIX printf has no \\U escape, and
+    // the sandbox shell is /bin/sh.
+    // Combining LOW LINE under a run of letters: thirty of them make a
+    // continuous rule across the row, so "the marks drew" and "they did
+    // not" differ by a whole line of pixels rather than by a few dots.
+    // Regional indicators and ZWJ are deliberately not tested here —
+    // the terminal does not cluster those without mode 2027, which is a
+    // decision about column accounting and not about rasterizing.
+    // The content goes in a FILE and the command is `cat`. Typing it
+    // instead put thirty-times-six characters on the command line,
+    // which wrapped across the rows being measured — and `waitText`
+    // matched the sentinel inside the command it had just typed, so the
+    // shot was taken before any output existed at all.
+    var path_buf: [192]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/marks.txt", .{app.dirPath()});
+    const row = "x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}\n";
+    try h.writeFile(path, row ++ row ++ row ++ row ++ row ++ row ++ "ZZTOP\n");
+
+    _ = try app.ctlFmt("type cat {s}", .{path});
+    _ = try app.ctl("enter");
+    try app.waitText("ZZTOP", 10_000);
+
+    var shot_buf: [192]u8 = undefined;
+    const shot_path = try std.fmt.bufPrint(&shot_buf, "/tmp/term.png", .{});
+    _ = &shot_buf;
+    var shot = try app.shot(shot_path);
+    defer shot.deinit();
+
+    // Ink density over the output area, as a fraction of ten thousand so
+    // the number does not move with the display scale. Measured 60 with
+    // the marks drawn and 44 with only their bases.
+    // Six underlined rows, so the marks are a QUARTER of the ink in the
+    // band rather than a rounding error on one line of it.
+    const top = shot.height / 24;
+    const bot = shot.height / 3;
+    const drawn = shot.ink(top, bot);
+    const density = drawn * 10_000 / @max(shot.width * (bot - top), 1);
+    try h.expect(density > 500, "output too thin ({d}/10000) — the terminal drew each cluster's base and dropped its marks", .{density});
 }
 
 // -------------------------------------------------------------- clobber

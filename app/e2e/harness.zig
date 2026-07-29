@@ -674,6 +674,24 @@ pub const Shot = struct {
         return n;
     }
 
+    /// The inkiest single pixel row in a band, as a count. Bands full of
+    /// blank rows dilute a density until a real difference reads as
+    /// noise; one row through the middle of the text does not.
+    pub fn peakRowInk(self: *const Shot, y0: usize, y1: usize) usize {
+        const bg = self.pixel(self.width - 2, y0);
+        var best: usize = 0;
+        var y = y0;
+        while (y < @min(y1, self.height)) : (y += 1) {
+            var n: usize = 0;
+            var x: usize = 0;
+            while (x < self.width) : (x += 1) {
+                if (self.pixel(x, y) != bg) n += 1;
+            }
+            if (n > best) best = n;
+        }
+        return best;
+    }
+
     /// Distinct colours, capped. A window that drew nothing is one
     /// colour; a window with a prompt and chrome is many. This is the
     /// cheapest assertion that separates "rendered" from "cleared".

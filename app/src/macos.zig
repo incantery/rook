@@ -4332,6 +4332,10 @@ pub const App = struct {
         for (0..rows) |y| {
             const raws = row_cells[y].items(.raw);
             const styles = row_cells[y].items(.style);
+            // The codepoints AFTER the base, for cells holding a
+            // grapheme cluster. The library keeps them beside the cell
+            // rather than in it.
+            const graphemes = row_cells[y].items(.grapheme);
             var prev_wide: ?renderpkg.GlyphLoc = null;
             for (0..cols) |x| {
                 const raw = &raws[x];
@@ -4366,26 +4370,48 @@ pub const App = struct {
                     else => 0,
                 };
 
+                // A cell can hold several codepoints that are one
+                // character — a flag, a skin tone, a ZWJ sequence — and
+                // rasterizing only the base draws a boxed letter where
+                // the flag should be. Encode the whole cluster and let
+                // CoreText shape it, the same path the editor uses.
+                var cbuf: [64]u8 = undefined;
+                var clen: usize = 0;
+                if (raw.content_tag == .codepoint_grapheme and graphemes[x].len > 0 and cp > 32) {
+                    clen = std.unicode.utf8Encode(cp, &cbuf) catch 0;
+                    for (graphemes[x]) |extra| {
+                        if (clen + 4 > cbuf.len) break;
+                        clen += std.unicode.utf8Encode(extra, cbuf[clen..]) catch break;
+                    }
+                }
+                const cluster: ?[]const u8 = if (clen > 0) cbuf[0..clen] else null;
+
                 var uvx: u16 = 0;
                 var uvy: u16 = 0;
                 var flags: u16 = 0;
                 switch (raw.wide) {
                     .narrow => {
-                        if (cp > 32) if (self.renderer.glyph(cp, false)) |loc| {
+                        const loc_opt = if (cluster) |b|
+                            self.renderer.glyphCluster(b, false)
+                        else if (cp > 32) self.renderer.glyph(cp, false) else null;
+                        if (loc_opt) |loc| {
                             uvx = loc.uvx;
                             uvy = loc.uvy;
                             flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
-                        };
+                        }
                         prev_wide = null;
                     },
                     .wide => {
                         prev_wide = null;
-                        if (cp > 32) if (self.renderer.glyph(cp, true)) |loc| {
+                        const loc_opt = if (cluster) |b|
+                            self.renderer.glyphCluster(b, true)
+                        else if (cp > 32) self.renderer.glyph(cp, true) else null;
+                        if (loc_opt) |loc| {
                             uvx = loc.uvx;
                             uvy = loc.uvy;
                             flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
                             prev_wide = loc;
-                        };
+                        }
                     },
                     // The wide glyph's right half lives one cell over in
                     // the atlas slot.

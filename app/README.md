@@ -1213,10 +1213,10 @@ Copy mode has no vim motions or visual-mode yank yet (`/` search and
 scrolling only).
 Cursor is a color swap, input is
 cooked NSEvent characters (upgrade path: `vt.input.encodeKey`), no
-window-close → quit delegate, TERMINAL panes still render a
-grapheme-cluster emoji from its first codepoint only (the editor shapes
-clusters with CTLine now; the terminal's cluster sits in RenderState
-Cell.grapheme and wants the same treatment) — atlas-full policy is
+window-close → quit delegate, a terminal splits flags/ZWJ/skin-tone
+sequences across cells because the emulator only clusters those under
+mode 2027 and does not enable it (combining marks DO cluster, and both
+surfaces shape them with CTLine) — atlas-full policy is
 clear-and-rebuild,
 glyphs render single-style (no bold/italic faces yet — the style flags
 are in `vt.Style.flags` when we want them), box-drawing sprite set
