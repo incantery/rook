@@ -1085,7 +1085,15 @@ close-pane chord (exit the shell), typing into a pane while
 its resize is still settling can lose a line to reflow (transient,
 ctl-only in practice).
 
-Lessons that will recur: NEVER call into a framework that synchronises
+Lessons that will recur: a VACUITY CHECK must confirm the build
+SUCCEEDED and the right test FAILED — `zig build test` prints a
+"failed command" line on a clean run (a test writes to stderr) and
+prints a per-root error count when a root does not compile, so
+grepping for a test name alone reports "no failure" for a mutation
+that never got compiled. That produced a false all-clear twice in one
+session, and the second time the redundant branch it was hiding turned
+out to have a real bug next door;
+NEVER call into a framework that synchronises
 with the display-link thread while holding draw_lock — the query waits
 for that thread, and that thread is in `drawNow` waiting for the lock,
 which wedges every thread in the app behind it (a `sample` of a hung
