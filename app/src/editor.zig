@@ -5076,6 +5076,15 @@ pub const Editor = struct {
                 // its own — emitting its blank would dump 日本語 as
                 // "日 本 語 " and make every text assertion lie.
                 if (c.tail) continue;
+                // A cluster dumps as the whole character, not as the
+                // base codepoint it happens to start with — otherwise a
+                // flag reads as one regional indicator and an accent
+                // disappears from every assertion that goes through here.
+                const cl = self.clusterText(c);
+                if (cl.len > 0) {
+                    try outl.appendSlice(gpa, cl);
+                    continue;
+                }
                 const n = std.unicode.utf8Encode(c.cp, &enc) catch continue;
                 try outl.appendSlice(gpa, enc[0..n]);
             }
@@ -8880,4 +8889,14 @@ test "a combining mark does not take a column of its own" {
     // And the wide ones still take two.
     try testing.expectEqual(@as(usize, 2), Editor.renderCol("\u{1F44D}\u{1F3FB}Z", 8));
     try testing.expectEqual(@as(usize, 2), Editor.renderCol("\u{1F1EF}\u{1F1F5}Z", 8));
+}
+
+test "clusters do not disturb the cells around them" {
+    const gpa = testing.allocator;
+    const e = try mkWith(gpa, "e\u{301}|\u{1F1EF}\u{1F1F5}|end");
+    defer e.destroy();
+    const dump = try e.dumpText(gpa, 40, 3);
+    defer gpa.free(dump);
+    var it = std.mem.splitScalar(u8, dump, '\n');
+    try testing.expectEqualStrings("1 e\u{301}|\u{1F1EF}\u{1F1F5}|end", it.next().?);
 }

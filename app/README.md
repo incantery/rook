@@ -1213,10 +1213,11 @@ Copy mode has no vim motions or visual-mode yank yet (`/` search and
 scrolling only).
 Cursor is a color swap, input is
 cooked NSEvent characters (upgrade path: `vt.input.encodeKey`), no
-window-close → quit delegate, grapheme-cluster emoji (flags, ZWJ,
-skin tones) render blank — only a cell's first codepoint rasterizes;
-the cluster sits in RenderState Cell.grapheme awaiting CTLine-style
-shaping — atlas-full policy is clear-and-rebuild,
+window-close → quit delegate, TERMINAL panes still render a
+grapheme-cluster emoji from its first codepoint only (the editor shapes
+clusters with CTLine now; the terminal's cluster sits in RenderState
+Cell.grapheme and wants the same treatment) — atlas-full policy is
+clear-and-rebuild,
 glyphs render single-style (no bold/italic faces yet — the style flags
 are in `vt.Style.flags` when we want them), box-drawing sprite set
 covers light/heavy/rounded lines + blocks but not doubles/diagonals
@@ -1256,6 +1257,11 @@ question about it;
 when copying another program's behaviour, ask the FEATURE and not the
 function that sounds like it — vim's `toupper()` and its `gU` operator
 use different tables and disagree about `ß`;
+a RENDER bug can hide behind a green model: shaping a grapheme cluster
+left the graphics context's text matrix behind it, so every plain glyph
+rasterized afterwards drew outside its slot and neighbouring characters
+silently stopped appearing — the cell grid was correct the whole time,
+which is why the e2e for it asserts on pixel density and not on text;
 NEVER call into a framework that synchronises
 with the display-link thread while holding draw_lock — the query waits
 for that thread, and that thread is in `drawNow` waiting for the lock,

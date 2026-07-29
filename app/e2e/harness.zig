@@ -658,6 +658,22 @@ pub const Shot = struct {
         return (@as(u32, self.px[off]) << 16) | (@as(u32, self.px[off + 1]) << 8) | @as(u32, self.px[off + 2]);
     }
 
+    /// Pixels in a band that differ from the background, sampled at
+    /// full resolution. "Did this actually draw" for a REGION, where
+    /// `distinctColors` only answers it for the whole window.
+    pub fn ink(self: *const Shot, y0: usize, y1: usize) usize {
+        const bg = self.pixel(self.width - 2, y0);
+        var n: usize = 0;
+        var y = y0;
+        while (y < @min(y1, self.height)) : (y += 1) {
+            var x: usize = 0;
+            while (x < self.width) : (x += 1) {
+                if (self.pixel(x, y) != bg) n += 1;
+            }
+        }
+        return n;
+    }
+
     /// Distinct colours, capped. A window that drew nothing is one
     /// colour; a window with a prompt and chrome is many. This is the
     /// cheapest assertion that separates "rendered" from "cleared".

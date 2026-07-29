@@ -34,6 +34,24 @@ extern "c" fn CTFontDrawGlyphs(font: CTFontRef, glyphs: [*]const u16, positions:
 extern "c" fn CGBitmapContextCreate(data: ?*anyopaque, w: usize, h: usize, bits_per_comp: usize, bytes_per_row: usize, space: ?*anyopaque, info: u32) CGContextRef;
 extern "c" fn CGBitmapContextGetData(ctx: CGContextRef) ?[*]u8;
 extern "c" fn CGContextClearRect(ctx: CGContextRef, rect: extern struct { origin: CGPoint, size: CGSize }) void;
+// Line shaping, for grapheme clusters. Mapping characters to glyphs one
+// at a time cannot ligate a ZWJ sequence or position a combining mark
+// over its base — that is what a CTLine is for.
+const CFDictionaryRef = ?*anyopaque;
+const CFAttributedStringRef = ?*anyopaque;
+const CTLineRef = ?*anyopaque;
+extern "c" fn CFDictionaryCreate(alloc: ?*anyopaque, keys: [*]const ?*const anyopaque, values: [*]const ?*const anyopaque, n: isize, key_cb: ?*const anyopaque, val_cb: ?*const anyopaque) CFDictionaryRef;
+extern "c" fn CFAttributedStringCreate(alloc: ?*anyopaque, str: CFStringRef, attrs: CFDictionaryRef) CFAttributedStringRef;
+extern "c" fn CTLineCreateWithAttributedString(str: CFAttributedStringRef) CTLineRef;
+extern "c" fn CTLineDraw(line: CTLineRef, ctx: CGContextRef) void;
+extern "c" fn CTLineGetTypographicBounds(line: CTLineRef, ascent: ?*f64, descent: ?*f64, leading: ?*f64) f64;
+extern "c" fn CGContextSetTextPosition(ctx: CGContextRef, x: f64, y: f64) void;
+const CGAffineTransform = extern struct { a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64 };
+extern "c" fn CGContextSetTextMatrix(ctx: CGContextRef, m: CGAffineTransform) void;
+const identity_matrix: CGAffineTransform = .{ .a = 1, .b = 0, .c = 0, .d = 1, .tx = 0, .ty = 0 };
+extern const kCTFontAttributeName: CFStringRef;
+extern const kCFTypeDictionaryKeyCallBacks: anyopaque;
+extern const kCFTypeDictionaryValueCallBacks: anyopaque;
 
 const utf8_encoding: u32 = 0x08000100;
 const alpha_only: u32 = 7; // kCGImageAlphaOnly
@@ -235,6 +253,8 @@ pub const Renderer = struct {
     scratch_data: [*]u8,
     scratch_w: usize,
     glyphs: std.AutoHashMapUnmanaged(u21, ?GlyphLoc) = .empty,
+    /// Shaped grapheme clusters, keyed by a hash of their bytes.
+    clusters: std.AutoHashMapUnmanaged(u64, ?GlyphLoc) = .empty,
     shelf_x: usize = 0,
     shelf_y: usize = 0,
 
@@ -352,6 +372,91 @@ pub const Renderer = struct {
         return loc;
     }
 
+    /// Find-or-rasterize a GRAPHEME CLUSTER — several codepoints that
+    /// are one character. Keyed by a hash of the bytes: a cluster has no
+    /// small integer identity the way a codepoint does, and holding the
+    /// bytes would mean owning and freeing them across an atlas reset.
+    pub fn glyphCluster(self: *Renderer, bytes: []const u8, wide: bool) ?GlyphLoc {
+        const key = std.hash.Wyhash.hash(0, bytes);
+        const gop = self.clusters.getOrPut(self.gpa, key) catch return null;
+        if (gop.found_existing) return gop.value_ptr.*;
+        const loc = self.rasterizeCluster(bytes, self.cellw_px * @as(usize, if (wide) 2 else 1));
+        gop.value_ptr.* = loc;
+        return loc;
+    }
+
+    /// Shape a whole cluster with CoreText and draw the result.
+    ///
+    /// A CTLine is the point: mapping characters to glyphs one at a time
+    /// puts a combining mark next to its base instead of over it, and
+    /// leaves a ZWJ sequence as the separate people it was built from.
+    /// CoreText also does the font cascade itself, so an emoji inside a
+    /// line of text finds the emoji font without being asked.
+    fn rasterizeCluster(self: *Renderer, bytes: []const u8, slot_width: usize) ?GlyphLoc {
+        _ = @import("stats.zig").global.glyphs_rasterized.fetchAdd(1, .monotonic);
+
+        const str = CFStringCreateWithBytes(null, bytes.ptr, @intCast(bytes.len), utf8_encoding, false) orelse return null;
+        defer CFRelease(str);
+
+        // Which atlas this lands in is decided by the font the cluster's
+        // BASE resolves to, reusing the single-codepoint cascade — an
+        // emoji base means a colour font, a letter means a text one, and
+        // a cluster does not mix the two in practice.
+        const base_cp = std.unicode.utf8Decode(bytes[0..(std.unicode.utf8ByteSequenceLength(bytes[0]) catch return null)]) catch return null;
+        var color = false;
+        {
+            var probe: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(base_cp, &probe) catch return null;
+            const bstr = CFStringCreateWithBytes(null, &probe, @intCast(n), utf8_encoding, false) orelse return null;
+            defer CFRelease(bstr);
+            const cascade = CTFontCreateForString(self.font, bstr, .{ .location = 0, .length = if (base_cp >= 0x10000) 2 else 1 });
+            defer if (cascade != null) CFRelease(cascade);
+            const f = if (cascade != null) cascade else self.font;
+            color = CTFontGetSymbolicTraits(f) & color_glyphs_trait != 0;
+        }
+
+        // Colour emoji are scaled to the cell the same way the
+        // single-codepoint path does; Apple Color Emoji's em square
+        // overflows text metrics.
+        const draw_font = if (color) blk: {
+            const target: f64 = @floatFromInt(self.cellh_px * 3 / 4);
+            break :blk CTFontCreateCopyWithAttributes(self.font, target, null, null) orelse return null;
+        } else self.font;
+        defer if (color) CFRelease(draw_font);
+
+        const keys = [_]?*const anyopaque{@ptrCast(kCTFontAttributeName)};
+        const values = [_]?*const anyopaque{@ptrCast(draw_font)};
+        const attrs = CFDictionaryCreate(null, &keys, &values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks) orelse return null;
+        defer CFRelease(attrs);
+        const astr = CFAttributedStringCreate(null, str, attrs) orelse return null;
+        defer CFRelease(astr);
+        const line = CTLineCreateWithAttributedString(astr) orelse return null;
+        defer CFRelease(line);
+
+        const adv = CTLineGetTypographicBounds(line, null, null, null);
+        var x: f64 = (@as(f64, @floatFromInt(slot_width)) - adv) / 2.0;
+        if (x < 0) x = 0;
+
+        // CTLineDraw advances the context's text position and leaves
+        // the text MATRIX behind it, and CTFontDrawGlyphs positions
+        // relative to that matrix — so a cluster drawn once put every
+        // plain glyph rasterized afterwards outside its slot, which
+        // showed up as the neighbouring characters silently vanishing.
+        // Both draw paths now set it, so neither can inherit it.
+        if (color) {
+            @memset(self.color_scratch_data[0 .. self.scratch_w * 4 * self.cellh_px], 0);
+            CGContextSetTextMatrix(self.color_scratch, identity_matrix);
+            CGContextSetTextPosition(self.color_scratch, x, CTFontGetDescent(draw_font));
+            CTLineDraw(line, self.color_scratch);
+            return self.uploadColorSlot(slot_width);
+        }
+        @memset(self.scratch_data[0 .. self.scratch_w * self.cellh_px], 0);
+        CGContextSetTextMatrix(self.scratch, identity_matrix);
+        CGContextSetTextPosition(self.scratch, x, self.descent);
+        CTLineDraw(line, self.scratch);
+        return self.uploadSlot(slot_width);
+    }
+
     fn rasterize(self: *Renderer, cp: u21, wide: bool) ?GlyphLoc {
         _ = @import("stats.zig").global.glyphs_rasterized.fetchAdd(1, .monotonic);
         const slot_width = self.cellw_px * @as(usize, if (wide) 2 else 1);
@@ -406,6 +511,7 @@ pub const Renderer = struct {
 
             @memset(self.color_scratch_data[0 .. self.scratch_w * 4 * self.cellh_px], 0);
             const pos = [1]CGPoint{.{ .x = x, .y = CTFontGetDescent(sized) }};
+            CGContextSetTextMatrix(self.color_scratch, identity_matrix);
             CTFontDrawGlyphs(sized, &glyph_ids, &pos, 1, self.color_scratch);
             return self.uploadColorSlot(slot_width);
         }
@@ -416,6 +522,7 @@ pub const Renderer = struct {
         if (x < 0) x = 0;
 
         const pos = [1]CGPoint{.{ .x = x, .y = self.descent }};
+        CGContextSetTextMatrix(self.scratch, identity_matrix);
         CTFontDrawGlyphs(font, &glyph_ids, &pos, 1, self.scratch);
 
         return self.uploadSlot(slot_width);
@@ -428,6 +535,9 @@ pub const Renderer = struct {
         }
         if (self.color_shelf_y + self.cellh_px > atlas_px) {
             self.glyphs.clearRetainingCapacity();
+            // Cluster locations point into the same atlas, so they go
+            // with it — a survivor would sample whatever reuses its slot.
+            self.clusters.clearRetainingCapacity();
             self.color_shelf_x = 0;
             self.color_shelf_y = 0;
         }
@@ -454,6 +564,7 @@ pub const Renderer = struct {
             // Atlas full: drop the whole cache and start over. Rare enough
             // that one flashed frame is acceptable for now.
             self.glyphs.clearRetainingCapacity();
+            self.clusters.clearRetainingCapacity();
             self.shelf_x = 0;
             self.shelf_y = 0;
         }

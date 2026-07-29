@@ -696,6 +696,24 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       NEOVIM is the oracle here, not vim: vim stops at combining marks
       and splits flags, ZWJ sequences and skin tones, which is a
       twenty-year-old approximation rather than a decision.
+- [x] **A cluster RENDERS as the character it is.** The old note that
+      "grapheme-cluster emoji render blank — only a cell's first
+      codepoint rasterizes" is closed: a cell that holds more than one
+      codepoint is shaped by CoreText as a line, so a mark sits over its
+      base, a flag is a flag, a skin tone applies, and a ZWJ family
+      ligates into one glyph. Cells point at their cluster's bytes in a
+      per-frame arena rather than carrying them, because a cell is
+      copied cols*rows times a frame and a cluster is rare.
+      The bug this shipped with, and the reason the e2e now asserts on
+      PIXELS: drawing a shaped cluster leaves the graphics context's
+      text matrix behind it, and `CTFontDrawGlyphs` positions relative
+      to that matrix — so every plain glyph rasterized after the first
+      cluster landed outside its slot. Separators and the `d` of `end`
+      simply stopped being drawn, while every text assertion stayed
+      green, because the MODEL was right and only the raster was wrong.
+- [ ] The status row still lays out per codepoint (`putStr`), so a
+      filename with a combining mark spreads over an extra cell there.
+      Cosmetic, and the only place left that has not moved to clusters.
 - [x] **Notice a disk change while the buffer is OPEN**, not only at
       `:w`. One stat per editor pane on the existing 1Hz tick, split by
       who has something to lose: an UNMODIFIED buffer reloads (keeping

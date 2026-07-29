@@ -4479,6 +4479,23 @@ pub const App = struct {
                     flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
                 }
                 prev_wide = null;
+            } else if (rc.cluster != 0) {
+                // Several codepoints that are one character: CoreText
+                // shapes the whole thing, so a mark sits over its base
+                // and a ZWJ sequence ligates into the one glyph it is
+                // supposed to be.
+                prev_wide = null;
+                // The CLUSTER's width, not the base codepoint's — `a`
+                // followed by VS16 is wide and a bare `a` is not. The
+                // editor already decided, and said so by putting a tail
+                // in the next cell.
+                const w = (i + 1) % cols != 0 and i + 1 < g.len and g[i + 1].tail;
+                if (self.renderer.glyphCluster(ed.clusterText(rc), w)) |loc| {
+                    uvx = loc.uvx;
+                    uvy = loc.uvy;
+                    flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
+                    if (w) prev_wide = loc;
+                }
             } else if (rc.cp > 32 and editorpkg.wideCp(rc.cp)) {
                 prev_wide = null;
                 if (self.renderer.glyph(rc.cp, true)) |loc| {

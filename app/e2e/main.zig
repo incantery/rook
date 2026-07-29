@@ -28,6 +28,7 @@ const scenarios = [_]Scenario{
     .{ .name = "indent", .what = "o inherits the indent, >> shifts, and neither leaves whitespace", .run = indent },
     .{ .name = "vim", .what = "regex :s, a macro, a block edit and `.` all reach disk", .run = vim },
     .{ .name = "wide", .what = "CJK text lays out two cells wide and motions still land", .run = wideText },
+    .{ .name = "grapheme", .what = "a cluster is one character to move over and to delete", .run = graphemes },
     .{ .name = "clobber", .what = ":w refuses a file an agent changed underneath it", .run = clobber },
     .{ .name = "reload", .what = "an open buffer follows the file, or says it can't", .run = reload },
     .{ .name = "pixels", .what = "the renderer actually drew (shot, decoded)", .run = pixels },
@@ -366,6 +367,63 @@ fn wideText(gpa: std.mem.Allocator, bin: []const u8) !void {
     const got = try h.readFile(path, &content);
     try h.expectContains(got, "日本です", "l moved by cells rather than by characters");
     try h.expectContains(got, "abcdfgh", "j landed on the wrong column under a wide line");
+}
+
+// ------------------------------------------------------------ graphemes
+
+/// A grapheme cluster is ONE character: `x` takes all of it and `l`
+/// steps over all of it, whether it is a letter with an accent, a flag,
+/// a skin tone or a ZWJ chain. Read off disk, so a render that lied
+/// could not carry it.
+fn graphemes(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    var path_buf: [192]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/graphemes.txt", .{app.dirPath()});
+    try h.writeFile(path, "e\u{301}|\u{1F1EF}\u{1F1F5}|\u{1F44D}\u{1F3FB}|\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F466}|end\n");
+
+    _ = try app.ctlFmt("edit {s}", .{path});
+    try app.waitText("end", 5_000);
+
+    // Pixels, not just cells. A cluster that shapes wrong is invisible
+    // to `dump` — and so is the failure this caught: drawing a shaped
+    // cluster left the graphics context's text matrix behind it, which
+    // put every PLAIN glyph rasterized afterwards outside its slot. The
+    // separators and the `d` of `end` simply stopped being drawn while
+    // every text assertion stayed green.
+    var shot_buf: [192]u8 = undefined;
+    const shot_path = try std.fmt.bufPrint(&shot_buf, "{s}/shot.png", .{app.dirPath()});
+    var shot = try app.shot(shot_path);
+    defer shot.deinit();
+    const row_top = shot.height / 24;
+    const row_bot = shot.height / 8;
+    // A DENSITY rather than a pixel count, so the number does not move
+    // with the display scale. Measured 130 with the clusters shaping
+    // correctly and 100 with the text-matrix bug in place, which is what
+    // sets the threshold between them.
+    const drawn = shot.ink(row_top, row_bot);
+    const area = shot.width * (row_bot - row_top);
+    const density = drawn * 10_000 / @max(area, 1);
+    try h.expect(density > 115, "text row is too empty ({d}/10000) — glyphs after a shaped cluster stopped drawing", .{density});
+
+    // One `x` per cluster: four characters, four keystrokes, and the
+    // separators are all that should be left in front of `end`.
+    _ = try app.ctl("type gg0xlxlxlx");
+    _ = try app.ctl("type :w");
+    _ = try app.ctl("enter");
+
+    var content: [512]u8 = undefined;
+    var waited: u32 = 0;
+    while (waited < 5000) : (waited += 100) {
+        const got = h.readFile(path, &content) catch "";
+        if (std.mem.indexOf(u8, got, "|||") != null) break;
+        h.sleepMs(100);
+    }
+    const got = try h.readFile(path, &content);
+    try h.expectContains(got, "||||end", "an x left part of a cluster behind");
 }
 
 // -------------------------------------------------------------- clobber
