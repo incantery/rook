@@ -179,9 +179,21 @@ editor is a pure model — keys in, a styled character grid out — so
 with ZERO C linkage: the highlighter attaches through
 function-pointer hooks (syntax.zig), never an import (the directory
 reader is plain libc readdir, which macOS links regardless). Editor
-debts: one register, no `f`/`t`/`;`/`,`, no marks, wide glyphs count
-one column, relative :e paths resolve against the app cwd rather than
-the buffer's dir.
+debts: one register, no marks, `f`/`t` target ASCII only, wide glyphs
+count one column, relative :e paths resolve against the app cwd rather
+than the buffer's dir.
+
+`f` `F` `t` `T` `;` `,` are line-local on purpose — these are the
+motions you use to get somewhere you can SEE, and one that silently
+walked to the next line would make `dt)` a much worse mistake than it
+looks. A find that misses CANCELS a pending operator, so `dfQ` on a
+line with no Q does nothing rather than deleting to somewhere
+arbitrary. `f`/`t` are inclusive of the landing character for an
+operator and `F`/`T` are not (`df,` eats the comma, `dF,` stops at
+it), the key after `f` is taken literally so `f2` finds a `2` instead
+of counting, and `;` after `t` ADVANCES — the cursor is already parked
+one short of the target, so a plain re-search would find the same one
+and a `;` that does nothing is worse than useless.
 
 Long lines have a CLAMP (64KB), and getting it wrong used to abort the
 app. `ccol` is a byte offset into the real line while `lineText` hands

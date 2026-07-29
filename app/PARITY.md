@@ -437,8 +437,16 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       taken back on ESC — both are about not putting whitespace noise
       in someone's diff. The take-back fires only when the line is
       still exactly the bytes the editor inserted.
-- [ ] Editor debts already logged: registers, `f`/`t`/`;`/`,`, marks,
-      wide glyphs = 1 column, relative `:e` resolves against app cwd
+- [x] **`f` `F` `t` `T` `;` `,`** — line-local, because a find that
+      walked to the next line makes `dt)` a much worse mistake than it
+      looks. A miss cancels a pending operator rather than deleting to
+      somewhere arbitrary; `f`/`t` are inclusive for an operator and
+      `F`/`T` are not; the key after `f` is literal (`f2` finds a `2`);
+      `;` after `t` advances, since the cursor is already parked one
+      short and a `;` that does nothing is worse than useless.
+- [ ] Editor debts already logged: registers, marks, `f`/`t` target
+      ASCII only, wide glyphs = 1 column, relative `:e` resolves
+      against app cwd
 - [x] **Notice a disk change while the buffer is OPEN**, not only at
       `:w`. One stat per editor pane on the existing 1Hz tick, split by
       who has something to lose: an UNMODIFIED buffer reloads (keeping

@@ -9,11 +9,11 @@
 //!
 //! Vim scope v1: normal/insert/visual/visual-line/command modes;
 //! h j k l w b e 0 ^ $ gg G arrows ctrl-d/u; operators d y c (+ dd yy
-//! cc D C Y), x r J p P u ctrl-r, counts; >> << (and > < in visual),
-//! autoindent; :w :q :q! :wq :x :e :<n>.
-//! Debts: no marks/registers beyond the unnamed one, no f/t/;/,, wide
-//! glyphs count as one column, lines beyond max_line get motion/render
-//! math clamped.
+//! cc D C Y), x r J p P u ctrl-r, counts; f F t T ; , >> << (and
+//! > < in visual), autoindent; :w :q :q! :wq :x :e :<n>.
+//! Debts: no marks/registers beyond the unnamed one, f/t target ASCII
+//! only, wide glyphs count as one column, lines beyond max_line get
+//! motion/render math clamped.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -76,6 +76,11 @@ pub const Editor = struct {
     /// `>` or `<` waiting for its second key. Not routed through `op`,
     /// because `op` means "delete a range" everywhere it is read.
     pend_shift: u8 = 0,
+    /// `f`/`F`/`t`/`T` waiting for the character to find, and what `;`
+    /// and `,` should repeat.
+    pend_find: u8 = 0,
+    find_cmd: u8 = 0,
+    find_char: u8 = 0,
 
     /// An indent this editor inserted that you have not committed to by
     /// typing after it. Stripped when you leave the line — vim's rule,
@@ -580,9 +585,13 @@ pub const Editor = struct {
                 },
                 else => {
                     // Normal/visual commands are single ASCII keys;
-                    // skip over any multi-byte codepoint whole.
+                    // skip over any multi-byte codepoint whole. A
+                    // pending `f` dies with it rather than staying
+                    // armed to swallow whatever you press next —
+                    // f/t target ASCII today, and a key that vanishes
+                    // is better than a key that lands somewhere else.
                     const n = cpLenAt(bytes, i);
-                    if (n == 1) self.normalKey(bytes[i]);
+                    if (n == 1) self.normalKey(bytes[i]) else self.pend_find = 0;
                     i += n;
                 },
             }
@@ -980,11 +989,29 @@ pub const Editor = struct {
             return;
         }
 
+        // A pending f/F/t/T takes the NEXT key literally — a digit is a
+        // character to find, not a count — so this sits above the count
+        // branch. ESC is the one escape hatch.
+        if (self.pend_find != 0) {
+            const cmd = self.pend_find;
+            self.pend_find = 0;
+            if (ch == 0x1b or ch < 0x20) {
+                self.op = 0;
+                self.count = 0;
+                return;
+            }
+            self.find_cmd = cmd;
+            self.find_char = ch;
+            self.motionFind(cmd, ch, false);
+            return;
+        }
+
         if (ch == 0x1b) { // ESC: clear pending, leave visual
             self.count = 0;
             self.op = 0;
             self.pend_g = false;
             self.pend_shift = 0;
+            self.pend_find = 0;
             self.mode = .normal;
             return;
         }
@@ -1033,6 +1060,22 @@ pub const Editor = struct {
 
             // Motions.
             'h', 'l', 'w', 'b', 'e', '0', '^', '$' => self.motionCharwise(ch),
+            'f', 'F', 't', 'T' => self.pend_find = ch,
+            ';', ',' => {
+                if (self.find_cmd == 0) {
+                    self.op = 0;
+                    self.count = 0;
+                    return;
+                }
+                const cmd = if (ch == ';') self.find_cmd else switch (self.find_cmd) {
+                    'f' => @as(u8, 'F'),
+                    'F' => 'f',
+                    't' => 'T',
+                    'T' => 't',
+                    else => self.find_cmd,
+                };
+                self.motionFind(cmd, self.find_char, true);
+            },
             'j', 'k' => {
                 const cnt = self.takeCount();
                 if (self.op != 0) {
@@ -1295,6 +1338,88 @@ pub const Editor = struct {
         }
 
         self.cline = line;
+        self.ccol = col;
+        if (self.mode == .normal) self.clampNormal();
+        self.goal = renderCol(self.lineText(self.cline), self.ccol);
+    }
+
+    /// One `f`/`F`/`t`/`T` step: the column of the next (or previous)
+    /// `target` on this line, or null.
+    ///
+    /// Line-local, like vim — these are the motions you use to get
+    /// somewhere you can SEE, and one that silently walked to the next
+    /// line would make `dt)` a much worse mistake than it looks.
+    fn findStep(s: []const u8, fwd: bool, target: u8, from: usize) ?usize {
+        if (fwd) {
+            var j = from;
+            if (j >= s.len) return null;
+            j += cpLenAt(s, j);
+            while (j < s.len) : (j += cpLenAt(s, j)) {
+                if (s[j] == target) return j;
+            }
+            return null;
+        }
+        if (from == 0) return null;
+        var j = prevCpStart(s, from);
+        while (true) {
+            if (s[j] == target) return j;
+            if (j == 0) return null;
+            j = prevCpStart(s, j);
+        }
+    }
+
+    /// `f`/`F`/`t`/`T`, `;`/`,` — move, or feed a pending operator.
+    ///
+    /// `repeat` is `;`/`,` and matters only for `t`: the cursor is
+    /// already parked one short of the target, so a plain search would
+    /// find the same one and go nowhere. Vim advances past it, and a
+    /// `;` that does nothing is worse than useless — you press it
+    /// again.
+    fn motionFind(self: *Editor, cmd: u8, target: u8, repeat: bool) void {
+        const cnt = self.takeCount();
+        const fwd = cmd == 'f' or cmd == 't';
+        const till = cmd == 't' or cmd == 'T';
+        const s = self.lineText(self.cline);
+
+        var col = self.ccol;
+        if (repeat and till) {
+            // Step off the character we are parked against.
+            if (fwd) {
+                if (col >= s.len) {
+                    self.op = 0;
+                    return;
+                }
+                col += cpLenAt(s, col);
+            } else {
+                if (col == 0) {
+                    self.op = 0;
+                    return;
+                }
+                col = prevCpStart(s, col);
+            }
+        }
+        for (0..cnt) |_| {
+            col = findStep(s, fwd, target, col) orelse {
+                // Not found: the cursor stays and the operator is
+                // cancelled, so `dt;` on a line with no `;` is a no-op
+                // rather than a deletion to somewhere arbitrary.
+                self.op = 0;
+                return;
+            };
+        }
+        if (till) col = if (fwd) prevCpStart(s, col) else col + cpLenAt(s, col);
+
+        if (self.op != 0) {
+            // f/t are inclusive of the landing character, F/T are not —
+            // `df,` eats the comma, `dF,` stops at it.
+            var end_col = col;
+            if (fwd and end_col < s.len) end_col += cpLenAt(s, end_col);
+            const base = self.buf.rope.lineStart(self.cline);
+            const a = base + self.ccol;
+            const b = base + end_col;
+            self.opRange(@min(a, b), @max(a, b));
+            return;
+        }
         self.ccol = col;
         if (self.mode == .normal) self.clampNormal();
         self.goal = renderCol(self.lineText(self.cline), self.ccol);
@@ -2606,4 +2731,106 @@ test "a header of unindented lines does not hide the file's tabs" {
     keys(e, "\tbody");
     e.key("\x1b");
     try testing.expectEqualStrings("\t", e.indentUnit());
+}
+
+test "f F t T move within the line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione,two,three");
+    e.key("\x1b");
+    keys(e, "0");
+
+    keys(e, "f,");
+    try testing.expectEqual(@as(usize, 3), e.ccol);
+    keys(e, "f,");
+    try testing.expectEqual(@as(usize, 7), e.ccol);
+    keys(e, "F,");
+    try testing.expectEqual(@as(usize, 3), e.ccol);
+    keys(e, "t,");
+    try testing.expectEqual(@as(usize, 6), e.ccol); // one short of the second
+    keys(e, "0T,");
+    try testing.expectEqual(@as(usize, 0), e.ccol); // nothing before it: no move
+    keys(e, "$T,");
+    try testing.expectEqual(@as(usize, 8), e.ccol); // one past the second
+
+    // A character that is not on the line moves nothing.
+    keys(e, "0fz");
+    try testing.expectEqual(@as(usize, 0), e.ccol);
+}
+
+test "counts, ; and , repeat a find" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia.b.c.d");
+    e.key("\x1b");
+    keys(e, "0");
+
+    keys(e, "2f.");
+    try testing.expectEqual(@as(usize, 3), e.ccol);
+    keys(e, ";");
+    try testing.expectEqual(@as(usize, 5), e.ccol);
+    keys(e, ",");
+    try testing.expectEqual(@as(usize, 3), e.ccol);
+
+    // `;` after `t` must ADVANCE — the cursor is already parked one
+    // short, so a plain re-search would find the same target.
+    keys(e, "0t.");
+    try testing.expectEqual(@as(usize, 0), e.ccol);
+    keys(e, ";");
+    try testing.expectEqual(@as(usize, 2), e.ccol);
+    keys(e, ";");
+    try testing.expectEqual(@as(usize, 4), e.ccol);
+}
+
+test "operators take f and t, inclusive one way only" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+
+    keys(e, "ifoo(bar)baz");
+    e.key("\x1b");
+    keys(e, "0f(l"); // inside the parens
+    keys(e, "dt)");
+    var s = try bufText(gpa, e);
+    try testing.expectEqualStrings("foo()baz", s);
+    gpa.free(s);
+
+    keys(e, "0df(");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings(")baz", s); // f is inclusive
+    gpa.free(s);
+
+    // A find that fails cancels the operator instead of deleting to
+    // somewhere arbitrary.
+    keys(e, "0dfQ");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings(")baz", s);
+    gpa.free(s);
+    try testing.expectEqual(@as(u8, 0), e.op);
+}
+
+test "a digit after f is a character to find, not a count" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iab2cd");
+    e.key("\x1b");
+    keys(e, "0f2");
+    try testing.expectEqual(@as(usize, 2), e.ccol);
+    try testing.expectEqual(@as(u32, 0), e.count);
+}
+
+test "f on a non-ASCII target does not stay armed" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcd");
+    e.key("\x1b");
+    keys(e, "0f");
+    e.key("é"); // not reachable today
+    try testing.expectEqual(@as(u8, 0), e.pend_find);
+    keys(e, "l"); // must be a motion, not a find target
+    try testing.expectEqual(@as(usize, 1), e.ccol);
 }
