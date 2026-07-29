@@ -531,7 +531,23 @@ pub const App = struct {
     // exceeds the vsync budget (capability, not demand — dirty-skip
     // gaps must never read as lag).
     link: CVDisplayLinkRef = null,
-    display_period_us: f64 = 0,
+    /// Display refresh period in µs; 0 until the link has ticked once.
+    ///
+    /// Written from the DISPLAY-LINK thread and read under draw_lock,
+    /// so it is atomic — but the reason it is atomic is the smaller
+    /// half. CoreVideo must never be QUERIED while draw_lock is held:
+    /// the call blocks inside CoreVideo waiting on the link's own IO
+    /// thread, and that thread is in `drawNow` waiting for draw_lock.
+    /// That inversion wedges the whole app, and it is not theoretical —
+    /// a `sample` of a hung instance showed exactly it, every thread
+    /// queued on the lock behind a reader thread parked inside
+    /// `CVDisplayLinkGetActualOutputVideoRefreshPeriod`.
+    ///
+    /// It bites only in the window before the first tick caches a
+    /// value, which is why it reads as a rare startup hang rather than
+    /// a bug. The link answers the question on its own thread now, and
+    /// nothing under the lock does anything but read this.
+    display_period_us: std.atomic.Value(u64) = .init(0),
 
     /// Focused pane's session, readable without draw_lock (the input
     /// kick compares pointers only — never dereferences).
@@ -3239,11 +3255,8 @@ pub const App = struct {
     /// The display's refresh period in µs (the fps ceiling). Queried
     /// lazily — the link reports 0 before its first tick.
     fn displayPeriodUs(self: *App) f64 {
-        if (self.display_period_us <= 0 and self.link != null) {
-            const p = CVDisplayLinkGetActualOutputVideoRefreshPeriod(self.link);
-            if (p > 0) self.display_period_us = p * 1e6;
-        }
-        return if (self.display_period_us > 0) self.display_period_us else 8333;
+        const p = self.display_period_us.load(.monotonic);
+        return if (p > 0) @floatFromInt(p) else 8333;
     }
 
     /// Recompute the status-bar text; flip scene_dirty only when it
@@ -4725,12 +4738,19 @@ fn presentedCallback(context: *const PresentedBlock.Context, drawable_id: objc.c
 }
 
 fn displayLinkCallback(link: CVDisplayLinkRef, now: ?*const anyopaque, output: ?*const anyopaque, flags_in: u64, flags_out: ?*u64, ctx: ?*anyopaque) callconv(.c) i32 {
-    _ = link;
     _ = now;
     _ = output;
     _ = flags_in;
     _ = flags_out;
     const self: *App = @ptrCast(@alignCast(ctx.?));
+    // Ask CoreVideo here, on ITS OWN thread and BEFORE taking the lock.
+    // Asking from under draw_lock is the inversion documented on the
+    // field: the query waits for this thread, and this thread is about
+    // to wait for the lock the caller is holding.
+    if (self.display_period_us.load(.monotonic) == 0) {
+        const p = CVDisplayLinkGetActualOutputVideoRefreshPeriod(link);
+        if (p > 0) self.display_period_us.store(@intFromFloat(@round(p * 1e6)), .monotonic);
+    }
     self.drawNow();
     return 0;
 }

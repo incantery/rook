@@ -1016,7 +1016,13 @@ close-pane chord (exit the shell), typing into a pane while
 its resize is still settling can lose a line to reflow (transient,
 ctl-only in practice).
 
-Lessons that will recur: box/block glyphs are SPRITES, never font
+Lessons that will recur: NEVER call into a framework that synchronises
+with the display-link thread while holding draw_lock — the query waits
+for that thread, and that thread is in `drawNow` waiting for the lock,
+which wedges every thread in the app behind it (a `sample` of a hung
+instance is what showed this; the link answers on its own thread now
+and nothing under the lock does more than read an atomic);
+box/block glyphs are SPRITES, never font
 glyphs (edge-to-edge or you get seams); the session must answer
 terminal queries (Effects callbacks) or query-and-wait programs like
 nvim stall on their response timeouts; never encode a frame
