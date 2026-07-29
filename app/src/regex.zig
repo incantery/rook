@@ -149,8 +149,12 @@ pub const Regex = struct {
             m.groups[g] = .{ .a = a, .b = b };
         }
         const whole = m.groups[0] orelse return null;
-        m.start = whole.a;
-        m.end = whole.b;
+        // `\zs` and `\ze` move the reported match without moving what
+        // was consumed, which is the whole point of them.
+        m.start = vm.caps[20] orelse whole.a;
+        m.end = vm.caps[21] orelse whole.b;
+        if (m.end < m.start) m.end = m.start;
+        m.groups[0] = .{ .a = m.start, .b = m.end };
         return m;
     }
 };
@@ -160,7 +164,10 @@ pub const Regex = struct {
 const Vm = struct {
     re: *const Regex,
     s: []const u8,
-    caps: [20]?usize = @splat(null),
+    /// Twenty for the ten groups, plus two for `\zs` and `\ze` — they
+    /// need slots of their own, because the whole-match saves run
+    /// after the body and would overwrite anything the body set.
+    caps: [22]?usize = @splat(null),
     steps: u32,
 
     fn eq(self: *const Vm, a: u8, b: u8) bool {
@@ -506,6 +513,26 @@ const Parser = struct {
                     self.body_base = start;
                     return null;
                 },
+                '%' => {
+                    // `\%(` — a group that does not capture.
+                    if (self.i + 2 >= self.src.len or self.src[self.i + 2] != '(') return error.BadPattern;
+                    self.i += 3;
+                    const start: u32 = @intCast(self.prog.items.len);
+                    self.body_base = start;
+                    try self.alts(depth + 1);
+                    if (!self.esc(')')) return error.BadPattern;
+                    self.i += 2;
+                    self.body_base = start;
+                    return null;
+                },
+                'z' => {
+                    if (self.i + 2 >= self.src.len) return error.BadPattern;
+                    const which = self.src[self.i + 2];
+                    if (which != 's' and which != 'e') return error.BadPattern;
+                    self.i += 3;
+                    _ = try self.emit(.{ .save = if (which == 's') 20 else 21 });
+                    return null;
+                },
                 '<' => {
                     self.i += 2;
                     _ = try self.emit(.word_start);
@@ -828,4 +855,31 @@ test "a non-greedy group prefers to stop" {
     defer re.deinit(gpa);
     const m = re.search("aaa", 0).?;
     try testing.expectEqual(@as(usize, 1), m.end);
+}
+
+test "non-capturing groups do not take a number" {
+    const gpa = testing.allocator;
+    var re = try Regex.compile(gpa, "\\%(foo\\|bar\\)=\\(\\w\\+\\)", false);
+    defer re.deinit(gpa);
+    const s = "bar=baz";
+    const m = re.search(s, 0).?;
+    try testing.expectEqualStrings("bar=baz", s[m.start..m.end]);
+    try testing.expectEqualStrings("baz", s[m.groups[1].?.a..m.groups[1].?.b]);
+    try testing.expect(m.groups[2] == null);
+}
+
+test "zs and ze move the reported match" {
+    const gpa = testing.allocator;
+    var re = try Regex.compile(gpa, "foo\\zsbar", false);
+    defer re.deinit(gpa);
+    const s = "xfoobary";
+    const m = re.search(s, 0).?;
+    try testing.expectEqualStrings("bar", s[m.start..m.end]);
+
+    var re2 = try Regex.compile(gpa, "foo\\zebar", false);
+    defer re2.deinit(gpa);
+    const m2 = re2.search(s, 0).?;
+    try testing.expectEqualStrings("foo", s[m2.start..m2.end]);
+    // ...but the match still had to be followed by "bar".
+    try testing.expect(re2.search("xfoobaz", 0) == null);
 }

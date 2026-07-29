@@ -19,7 +19,8 @@
 //!   autoindent.
 //! Visual: > < u U ~ J; ctrl-v blocks with d x y c I A r $, and a
 //!   blockwise p that puts the rectangle back.
-//! State: "a and "0-"9 registers, ma marks, gv, q@ macros.
+//! State: "a and "0-"9 registers, ma marks, gv, q@ macros, and a
+//!   jumplist on ctrl-o / ctrl-i.
 //! Insert: ctrl-w ctrl-u ctrl-t ctrl-d ctrl-r ctrl-o, and ctrl-n /
 //!   ctrl-p keyword completion from the buffer.
 //! Ex: :w :q :q! :wq :x :e :<n>, ZZ ZQ, :[range]{d|y|m|t|normal},
@@ -27,7 +28,8 @@
 //!   with :g! and :v — over % . $ N,M 'a '<,'> addresses. A typed
 //!   `:e` path is relative to the BUFFER's directory.
 //! Patterns are vim-magic REGEXES (regex.zig), for `/` `?` `n` `*` and
-//!   `:s`, with `&` and `\1`-`\9` in a replacement.
+//!   `:s` — groups, \%( ), \zs \ze, \{-}, classes and anchors — with
+//!   `&` and `\1`-`\9` in a replacement.
 //! Debts: case operators are ASCII-only; wide glyphs count
 //!   as one column; lines beyond max_line get motion/render math
 //!   clamped.
@@ -225,6 +227,12 @@ pub const Editor = struct {
     /// at the wrong text and does not say so.
     marks: [26]?usize = @splat(null),
     jump: ?usize = null,
+    /// The jumplist, for ctrl-o and ctrl-i. Anchored offsets like the
+    /// marks, and shifted by the same seam — a jumplist that survives
+    /// an edit only by luck is one you learn not to trust.
+    jumps: [jump_max]usize = @splat(0),
+    jump_len: usize = 0,
+    jump_pos: usize = 0,
 
     grid: std.ArrayListUnmanaged(RCell) = .empty,
     last_cols: usize = 80,
@@ -2493,6 +2501,8 @@ pub const Editor = struct {
                 self.op = 0;
                 self.count = 0;
             },
+            0x0f => self.jumpBack(), // ctrl-o
+            '\t' => self.jumpForward(), // ctrl-i
             0x01 => self.addToNumber(1), // ctrl-a
             0x18 => self.addToNumber(-1), // ctrl-x
             'r' => self.pend_r = true,
@@ -3135,8 +3145,46 @@ pub const Editor = struct {
     /// Remember where a jump started, so `` `` `` can undo it. Only the
     /// motions that move you somewhere you did not aim at with your
     /// eyes set this: `G`, `gg`, `n`, and a mark jump.
+    const jump_max = 64;
+
     fn setJump(self: *Editor) void {
-        self.jump = self.absOff();
+        const here = self.absOff();
+        self.jump = here;
+        // A new jump makes the forward history stale — the same rule a
+        // browser's back button follows.
+        self.jump_len = self.jump_pos;
+        if (self.jump_len == jump_max) {
+            std.mem.copyForwards(usize, self.jumps[0 .. jump_max - 1], self.jumps[1..jump_max]);
+            self.jump_len -= 1;
+        }
+        self.jumps[self.jump_len] = here;
+        self.jump_len += 1;
+        self.jump_pos = self.jump_len;
+    }
+
+    /// ctrl-o. Standing at the newest entry, the CURRENT position is
+    /// parked first, so ctrl-i has somewhere to come back to.
+    fn jumpBack(self: *Editor) void {
+        const cnt = self.takeCount();
+        for (0..cnt) |_| {
+            if (self.jump_pos == 0) break;
+            if (self.jump_pos == self.jump_len and self.jump_len < jump_max) {
+                self.jumps[self.jump_len] = self.absOff();
+                self.jump_len += 1;
+            }
+            self.jump_pos -= 1;
+            self.cursorToOffset(self.jumps[self.jump_pos]);
+        }
+    }
+
+    /// ctrl-i (which is TAB).
+    fn jumpForward(self: *Editor) void {
+        const cnt = self.takeCount();
+        for (0..cnt) |_| {
+            if (self.jump_pos + 1 >= self.jump_len) break;
+            self.jump_pos += 1;
+            self.cursorToOffset(self.jumps[self.jump_pos]);
+        }
     }
 
     /// Move one anchored position past an edit. A position INSIDE the
@@ -3158,6 +3206,7 @@ pub const Editor = struct {
             if (m.*) |*off| shiftAnchor(off, start, removed, added);
         }
         if (self.jump) |*off| shiftAnchor(off, start, removed, added);
+        for (self.jumps[0..self.jump_len]) |*off| shiftAnchor(off, start, removed, added);
     }
 
     /// Leave visual mode, remembering the selection. Everything that
@@ -7744,4 +7793,71 @@ test "a move destination below the range shifts up by what was taken" {
     const s = try bufText(gpa, e);
     defer gpa.free(s);
     try testing.expectEqualStrings("b\nc\na\nd", s);
+}
+
+// ---------------------------------------------------------------- jumplist
+
+test "ctrl-o walks back through the jumps, ctrl-i forward" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "il1\nl2\nl3\nl4\nl5\nl6\nl7\nl8");
+    e.key("\x1b");
+    keys(e, "gg"); // from the last line
+    keys(e, "3G"); // from line 0
+    keys(e, "6G"); // from line 2
+    e.key("\x0f");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    e.key("\x0f");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+    e.key("\t");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    // And forward once more, onto the position ctrl-o parked when it
+    // first stepped off the end.
+    e.key("\t");
+    try testing.expectEqual(@as(usize, 5), e.cline);
+}
+
+test "a new jump drops the forward history" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "il1\nl2\nl3\nl4\nl5\nl6\nl7\nl8");
+    e.key("\x1b");
+    keys(e, "gg3G6G");
+    e.key("\x0f"); // back to line 2
+    keys(e, "8G"); // a new jump from here
+    e.key("\t"); // there is nothing forward any more
+    try testing.expectEqual(@as(usize, 7), e.cline);
+    e.key("\x0f"); // but back still works
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    // ...and keeps working past the entries the new jump discarded.
+    e.key("\x0f");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+}
+
+test "ctrl-o at the oldest entry stays put" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "il1\nl2\nl3");
+    e.key("\x1b");
+    keys(e, "gg");
+    e.key("\x0f");
+    e.key("\x0f");
+    e.key("\x0f");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+}
+
+test "the jumplist is anchored to the text" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "il1\nl2\nl3\nl4");
+    e.key("\x1b");
+    keys(e, "gg"); // jump entry on the last line
+    keys(e, "Onew"); // a line above everything shifts it down
+    e.key("\x1b");
+    e.key("\x0f");
+    try testing.expectEqual(@as(usize, 4), e.cline);
 }

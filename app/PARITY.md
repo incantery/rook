@@ -581,9 +581,16 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       first two. Non-greedy is one bit: for a single-width repeat it
       counts up from the minimum instead of down from the maximum, and
       for a group it swaps which way out the split tries first.
-- [ ] Regex gaps: no `\zs`/`\ze`, no `\%(` non-capturing groups, no
-      back-references INSIDE a pattern, and `\c`/`\C` are not honoured
-      mid-pattern (`:s///i` is).
+- [x] **A jumplist** on ctrl-o / ctrl-i, and `\%(` / `\zs` / `\ze` in
+      the regex. The jumplist holds anchored offsets and rides the same
+      `Buffer.on_edit` seam as the marks — one that survived edits only
+      by luck is one you learn not to trust. A new jump discards the
+      forward history, and stepping off the newest entry parks where
+      you were, so ctrl-i can come back to it. `\zs`/`\ze` get capture
+      slots of their OWN: the whole-match saves run after the body and
+      would overwrite anything the body set.
+- [ ] Regex gaps: no back-references INSIDE a pattern, and `\c`/`\C`
+      are not honoured mid-pattern (`:s///i` is).
 - [x] **Marks are ANCHORED.** They hold a byte offset, and
       `Buffer.on_edit` tells the editor about every edit — offset,
       bytes removed, bytes added — so a mark moves with the text
