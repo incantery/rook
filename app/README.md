@@ -386,6 +386,18 @@ gap BETWEEN the two words instead of the span covering them. The bump
 belongs to whichever end is far from the cursor, which is a sentence
 worth keeping the next time a backward motion lands.
 
+The method scaled further than one-off expectations. Where a behaviour
+is a TABLE rather than a rule, the table itself is generated from vim
+and pasted in as data: 45 `ctrl-a` cases, and the whole Unicode case
+map, read out of vim by driving 13k codepoints through `gUU` and `guu`.
+
+Which is where the sharpest lesson came from. Vim has more than one
+answer, and the convenient source is not always the one you are
+imitating: `toupper("ß")` is `ß`, but `gU` on `ß` is `ẞ`. They use
+different tables. A case map built from the builtin would have been
+wrong at the first character anyone would test. Ask the FEATURE you are
+copying, not the function that sounds like it.
+
 ### The block is render columns, and `A` pads where `I` skips
 
 `ctrl-v` measures its rectangle in RENDER columns rather than bytes, so
@@ -415,10 +427,12 @@ without any of them being written down anywhere.
 They leave the registers alone, which falls out of the same place:
 nothing came out of the buffer, so there is nothing to put anywhere.
 
-ASCII case only, and that is load-bearing rather than lazy — every
-substitution is one byte for one byte, which is what lets the walk run
-in 4KB chunks and edit in place. A Unicode-aware version changes
-lengths and has to rebuild the range.
+Case is per CODEPOINT now (`unicase.zig`), and the byte length moves
+under it: `İ` is two bytes and lowercases to a one-byte `i`, `ß` is two
+and uppercases to a three-byte `ẞ`. So the walk rewrites a chunk into a
+second buffer and carries the range's end along by the difference,
+rather than the old in-place trick that relied on one byte for one byte.
+Chunk boundaries never cut a codepoint in half.
 
 ### `.` records the result, not the keys
 
@@ -1228,7 +1242,20 @@ padding branch, a move to the end of a three-line file lands where the
 clamp would have put it anyway, and matches on lines 1 and 3 of a
 five-line buffer are the same match forwards and backwards. When a
 revert produces no failure, the first suspect is the test, not the
-guarantee;
+guarantee — and a mutation that breaks the BUILD (an unused variable,
+an unreachable branch) is not a check either, it is a retry;
+a mutation is also the only thing that catches a test you never wrote:
+a bound that survived being cut to a quarter turned out to have no test
+behind it at all, and the search-highlight one had covered exactly the
+case the cursor was already painting over;
+a PERFORMANCE guarantee should be asserted as a COUNT and not a
+stopwatch — a wall-clock threshold is flaky on a loaded box and says
+nothing about what went wrong, whereas counting bytes copied per frame
+named all four callers that were pulling a whole line in to ask one
+question about it;
+when copying another program's behaviour, ask the FEATURE and not the
+function that sounds like it — vim's `toupper()` and its `gU` operator
+use different tables and disagree about `ß`;
 NEVER call into a framework that synchronises
 with the display-link thread while holding draw_lock — the query waits
 for that thread, and that thread is in `drawNow` waiting for the lock,
