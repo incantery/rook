@@ -51,8 +51,9 @@ const Inst = union(enum) {
     char: u8,
     any,
     class: u16,
-    /// `x*`, `x\+`, `x\{2,5}` where x is single-width.
-    rep: struct { what: Simple, min: u32, max: u32 },
+    /// `x*`, `x\+`, `x\{2,5}` where x is single-width. Non-greedy
+    /// (`\{-}`) tries the SHORTEST count first instead of the longest.
+    rep: struct { what: Simple, min: u32, max: u32, greedy: bool = true },
     split: struct { x: u32, y: u32 },
     jmp: u32,
     save: u8,
@@ -245,19 +246,25 @@ const Vm = struct {
                     pc = b.y;
                 },
                 .rep => |r| {
-                    // Greedy, and iterative: `.*` on a long line costs
+                    // Iterative either way: `.*` on a long line costs
                     // one frame, not one per character.
-                    var n: u32 = 0;
-                    while (n < r.max and self.simpleAt(r.what, sp + n)) : (n += 1) {
-                        if (r.what == .any and self.s[sp + n] == '\n') break;
+                    var max: u32 = 0;
+                    while (max < r.max and self.simpleAt(r.what, sp + max)) : (max += 1) {
+                        if (r.what == .any and self.s[sp + max] == '\n') break;
                     }
+                    if (max < r.min) return false;
+                    var n: u32 = if (r.greedy) max else r.min;
                     while (true) {
-                        if (n < r.min) return false;
                         self.steps += 1;
                         if (self.steps > step_budget) return false;
                         if (self.run(pc + 1, sp + n, depth + 1)) return true;
-                        if (n == 0) return false;
-                        n -= 1;
+                        if (r.greedy) {
+                            if (n == r.min) return false;
+                            n -= 1;
+                        } else {
+                            if (n == max) return false;
+                            n += 1;
+                        }
                     }
                 },
             }
@@ -331,6 +338,7 @@ const Parser = struct {
         const simple = try self.atom(depth);
         var min: u32 = 1;
         var max: u32 = 1;
+        var greedy = true;
         if (self.at() == '*') {
             self.i += 1;
             min = 0;
@@ -345,25 +353,25 @@ const Parser = struct {
             max = 1;
         } else if (self.esc('{')) {
             self.i += 2;
-            try self.counted(&min, &max);
+            try self.counted(&min, &max, &greedy);
         } else return;
 
         if (simple) |what| {
             // One instruction with an internal loop. This is the case
             // that keeps `.*` off the stack.
             self.prog.shrinkRetainingCapacity(start);
-            _ = try self.emit(.{ .rep = .{ .what = what, .min = min, .max = max } });
+            _ = try self.emit(.{ .rep = .{ .what = what, .min = min, .max = max, .greedy = greedy } });
             return;
         }
         // A group repeat has to backtrack properly, so it keeps the
         // split/jmp shape. Bounded counts are unrolled by copying.
-        try self.wrapRepeat(start, min, max);
+        try self.wrapRepeat(start, min, max, greedy);
     }
 
     /// Wrap the instructions from `start` onward in a repeat. The body
     /// is COPIED for a bounded count, which is why the count is capped:
     /// `\{1,1000}` on a group would be a thousand copies of it.
-    fn wrapRepeat(self: *Parser, start: u32, min: u32, max: u32) Error!void {
+    fn wrapRepeat(self: *Parser, start: u32, min: u32, max: u32, greedy: bool) Error!void {
         const body = try self.gpa.dupe(Inst, self.prog.items[start..]);
         defer self.gpa.free(body);
         self.prog.shrinkRetainingCapacity(start);
@@ -379,7 +387,12 @@ const Parser = struct {
             try self.appendBody(body);
             _ = try self.emit(.{ .jmp = l });
             const end: u32 = @intCast(self.prog.items.len);
-            self.prog.items[l] = .{ .split = .{ .x = l + 1, .y = end } };
+            // The split decides the order the two ways out are tried,
+            // and that is the ONLY difference greedy makes.
+            self.prog.items[l] = if (greedy)
+                .{ .split = .{ .x = l + 1, .y = end } }
+            else
+                .{ .split = .{ .x = end, .y = l + 1 } };
             return;
         }
         // The optional tail: one guarded copy per remaining repetition.
@@ -390,7 +403,10 @@ const Parser = struct {
             try self.appendBody(body);
         }
         const end: u32 = @intCast(self.prog.items.len);
-        for (opts.items) |o| self.prog.items[o] = .{ .split = .{ .x = o + 1, .y = end } };
+        for (opts.items) |o| self.prog.items[o] = if (greedy)
+            .{ .split = .{ .x = o + 1, .y = end } }
+        else
+            .{ .split = .{ .x = end, .y = o + 1 } };
     }
 
     /// Copy a body, relocating its internal jump targets to the new
@@ -413,7 +429,12 @@ const Parser = struct {
         }
     }
 
-    fn counted(self: *Parser, min: *u32, max: *u32) Error!void {
+    /// `\{n,m}`, and vim's `\{-...}` for the non-greedy forms.
+    fn counted(self: *Parser, min: *u32, max: *u32, greedy: *bool) Error!void {
+        if (self.at() == '-') {
+            greedy.* = false;
+            self.i += 1;
+        }
         var lo: u32 = 0;
         var saw_lo = false;
         while (self.at()) |c| : (self.i += 1) {
@@ -422,7 +443,9 @@ const Parser = struct {
             saw_lo = true;
         }
         var hi: u32 = lo;
+        var saw_comma = false;
         if (self.at() == ',') {
+            saw_comma = true;
             self.i += 1;
             var h: u32 = 0;
             var saw_hi = false;
@@ -436,6 +459,9 @@ const Parser = struct {
         // Vim closes this with `}` or `\}`; take either.
         if (self.esc('}')) self.i += 2 else if (self.at() == '}') self.i += 1 else return error.BadPattern;
         if (!saw_lo) lo = 0;
+        // Bare `\{}` and `\{-}` mean "any number" — vim's, and the
+        // reason `\{-}` is the non-greedy `*` rather than a no-op.
+        if (!saw_lo and !saw_comma) hi = std.math.maxInt(u32);
         if (hi < lo) return error.BadPattern;
         min.* = lo;
         max.* = hi;
@@ -784,4 +810,22 @@ test "replacement escapes" {
     defer out.deinit(gpa);
     try expand(&out, gpa, "a\\&b\\\\c\\rd", "x", m);
     try testing.expectEqualStrings("a&b\\c\nd", out.items);
+}
+
+test "non-greedy repeats take the shortest match" {
+    try expectFind("<.\\{-}>", "<a> and <b>", "<a>");
+    try expectFind("<.*>", "<a> and <b>", "<a> and <b>");
+    try expectFind("a\\{-1,}b", "aaab", "aaab");
+    try expectFind("\\(ab\\)\\{-}c", "ababc", "ababc");
+    // The unbounded group form: greedy would take both pairs.
+    try expectFind("x\\(ab\\)\\{-}", "xababy", "x");
+    try expectFind("x\\(ab\\)*", "xababy", "xabab");
+}
+
+test "a non-greedy group prefers to stop" {
+    const gpa = testing.allocator;
+    var re = try Regex.compile(gpa, "\\(a\\)\\{-1,3}", false);
+    defer re.deinit(gpa);
+    const m = re.search("aaa", 0).?;
+    try testing.expectEqual(@as(usize, 1), m.end);
 }

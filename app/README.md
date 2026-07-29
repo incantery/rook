@@ -179,9 +179,9 @@ editor is a pure model — keys in, a styled character grid out — so
 with ZERO C linkage: the highlighter attaches through
 function-pointer hooks (syntax.zig), never an import (the directory
 reader is plain libc readdir, which macOS links regardless). Editor
-debts: case operators are ASCII-only; `f`/`t` target ASCII only; wide
-glyphs count one column; relative :e paths resolve against the app cwd
-rather than the buffer's dir.
+debts: case operators are ASCII-only; wide glyphs count one column;
+relative :e paths resolve against the app cwd rather than the buffer's
+dir.
 
 Marks are ANCHORED: they hold a byte offset, and `Buffer.on_edit`
 reports every edit — offset, bytes removed, bytes added — so a mark

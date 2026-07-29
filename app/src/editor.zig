@@ -26,7 +26,7 @@
 //!   % . $ N,M 'a '<,'> addresses.
 //! Patterns are vim-magic REGEXES (regex.zig), for `/` `?` `n` `*` and
 //!   `:s`, with `&` and `\1`-`\9` in a replacement.
-//! Debts: case operators are ASCII-only; f/t target ASCII only; wide glyphs count
+//! Debts: case operators are ASCII-only; wide glyphs count
 //!   as one column; lines beyond max_line get motion/render math
 //!   clamped.
 
@@ -125,7 +125,11 @@ pub const Editor = struct {
     /// and `,` should repeat.
     pend_find: u8 = 0,
     find_cmd: u8 = 0,
-    find_char: u8 = 0,
+    /// The target as BYTES, not one byte: `f—` and `fé` have to work
+    /// in a file full of prose, and this editor's own docs are full of
+    /// em-dashes.
+    find_char: [4]u8 = undefined,
+    find_len: u8 = 0,
 
     /// An indent this editor inserted that you have not committed to by
     /// typing after it. Stripped when you leave the line — vim's rule,
@@ -756,7 +760,20 @@ pub const Editor = struct {
                 // f/t target ASCII today, and a key that vanishes
                 // is better than a key that lands somewhere else.
                 const n = cpLenAt(bytes, 0);
-                if (n == 1) self.normalKey(bytes[0]) else self.pend_find = 0;
+                if (n == 1) {
+                    self.normalKey(bytes[0]);
+                } else if (self.pend_find != 0) {
+                    // `f—`: the target is a codepoint, not a byte.
+                    const cmd = self.pend_find;
+                    self.pend_find = 0;
+                    self.setFindTarget(cmd, bytes[0..n]);
+                    self.motionFind(cmd, false);
+                } else if (self.pend_r) {
+                    self.pend_r = false;
+                    self.replaceCp(bytes[0..n]);
+                } else {
+                    self.pend_find = 0;
+                }
                 return n;
             },
         }
@@ -1965,16 +1982,7 @@ pub const Editor = struct {
                 if (ch >= 0x20) self.blockReplace(ch) else self.leaveVisual();
                 return;
             }
-            if (ch >= 0x20) {
-                const s = self.lineText(self.cline);
-                if (s.len > 0 and self.ccol < s.len) {
-                    self.buf.newUndoGroup();
-                    const start = self.buf.rope.lineStart(self.cline);
-                    const n = cpLenAt(s, self.ccol);
-                    self.buf.deleteRange(gpa, start + self.ccol, start + self.ccol + n) catch return;
-                    self.buf.insert(gpa, start + self.ccol, &[1]u8{ch}) catch return;
-                }
-            }
+            if (ch >= 0x20) self.replaceCp(&[1]u8{ch});
             return;
         }
 
@@ -1989,9 +1997,8 @@ pub const Editor = struct {
                 self.count = 0;
                 return;
             }
-            self.find_cmd = cmd;
-            self.find_char = ch;
-            self.motionFind(cmd, ch, false);
+            self.setFindTarget(cmd, &[1]u8{ch});
+            self.motionFind(cmd, false);
             return;
         }
 
@@ -2183,7 +2190,7 @@ pub const Editor = struct {
                     'T' => 't',
                     else => self.find_cmd,
                 };
-                self.motionFind(cmd, self.find_char, true);
+                self.motionFind(cmd, true);
             },
             'j', 'k' => {
                 const cnt = self.takeCount();
@@ -2555,6 +2562,18 @@ pub const Editor = struct {
         }
     }
 
+    /// `r` — the character under the cursor becomes `cp`, whole
+    /// codepoint for whole codepoint.
+    fn replaceCp(self: *Editor, cp: []const u8) void {
+        const s = self.lineText(self.cline);
+        if (s.len == 0 or self.ccol >= s.len) return;
+        self.buf.newUndoGroup();
+        const start = self.buf.rope.lineStart(self.cline);
+        const n = cpLenAt(s, self.ccol);
+        self.buf.deleteRange(self.gpa, start + self.ccol, start + self.ccol + n) catch return;
+        self.buf.insert(self.gpa, start + self.ccol, cp) catch return;
+    }
+
     fn cursorToOffset(self: *Editor, off: usize) void {
         const o = @min(off, self.buf.rope.byteLen());
         self.cline = self.buf.rope.lineOfOffset(o);
@@ -2656,20 +2675,25 @@ pub const Editor = struct {
     /// Line-local, like vim — these are the motions you use to get
     /// somewhere you can SEE, and one that silently walked to the next
     /// line would make `dt)` a much worse mistake than it looks.
-    fn findStep(s: []const u8, fwd: bool, target: u8, from: usize) ?usize {
+    fn cpAt(s: []const u8, j: usize, target: []const u8) bool {
+        return j + target.len <= s.len and std.mem.eql(u8, s[j..][0..target.len], target);
+    }
+
+    fn findStep(s: []const u8, fwd: bool, target: []const u8, from: usize) ?usize {
+        if (target.len == 0) return null;
         if (fwd) {
             var j = from;
             if (j >= s.len) return null;
             j += cpLenAt(s, j);
             while (j < s.len) : (j += cpLenAt(s, j)) {
-                if (s[j] == target) return j;
+                if (cpAt(s, j, target)) return j;
             }
             return null;
         }
         if (from == 0) return null;
         var j = prevCpStart(s, from);
         while (true) {
-            if (s[j] == target) return j;
+            if (cpAt(s, j, target)) return j;
             if (j == 0) return null;
             j = prevCpStart(s, j);
         }
@@ -2682,7 +2706,15 @@ pub const Editor = struct {
     /// find the same one and go nowhere. Vim advances past it, and a
     /// `;` that does nothing is worse than useless — you press it
     /// again.
-    fn motionFind(self: *Editor, cmd: u8, target: u8, repeat: bool) void {
+    /// Arm `f`/`F`/`t`/`T` with a target of one whole codepoint.
+    fn setFindTarget(self: *Editor, cmd: u8, cp: []const u8) void {
+        self.find_cmd = cmd;
+        self.find_len = @intCast(@min(cp.len, self.find_char.len));
+        @memcpy(self.find_char[0..self.find_len], cp[0..self.find_len]);
+    }
+
+    fn motionFind(self: *Editor, cmd: u8, repeat: bool) void {
+        const target = self.find_char[0..self.find_len];
         const cnt = self.takeCount();
         const fwd = cmd == 'f' or cmd == 't';
         const till = cmd == 't' or cmd == 'T';
@@ -7350,4 +7382,59 @@ test "an undo puts a mark back where it was" {
     const s = try bufText(gpa, e);
     defer gpa.free(s);
     try testing.expectEqualStrings("one\ntwo\nXthree", s);
+}
+
+// ------------------------------------------------------- multi-byte targets
+
+test "f finds a multi-byte character" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    // The curly quotes share their first two bytes with the em-dash,
+    // so a find that compares one byte lands on the wrong character.
+    keys(e, "i“a” — two — three");
+    e.key("\x1b");
+    keys(e, "0f");
+    e.key("—"); // one call: a codepoint arrives whole from the key path
+    try testing.expectEqual(@as(usize, 8), e.ccol);
+    keys(e, ";"); // the repeat carries the whole codepoint too
+    try testing.expectEqual(@as(usize, 16), e.ccol);
+}
+
+test "dt with a multi-byte target cuts up to it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione — two");
+    e.key("\x1b");
+    keys(e, "0dt");
+    e.key("—");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("— two", s);
+}
+
+test "r replaces with a multi-byte character" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    keys(e, "0lr");
+    e.key("é");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("aéc", s);
+}
+
+test "a multi-byte key with nothing pending is still ignored" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    e.key("é"); // not a command
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abc", s);
 }

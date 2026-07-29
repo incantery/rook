@@ -574,9 +574,16 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       since moved. `gd` is the honest version of "local declaration":
       the first mention of the word from the top of the file, which in
       most files is where it is declared.
-- [ ] Regex gaps: no `\{-}` (non-greedy), no `\zs`/`\ze`, no `\%(`
-      non-capturing groups, no back-references INSIDE a pattern, and
-      `\c`/`\C` are not honoured mid-pattern (`:s///i` is).
+- [x] **`f` `t` `r` take whole codepoints**, and the regex takes
+      `\{-}`. `f—` has to work in a file full of prose, and this
+      project's own docs are full of em-dashes; comparing one byte
+      lands on the wrong character, since `—` and `”` share their
+      first two. Non-greedy is one bit: for a single-width repeat it
+      counts up from the minimum instead of down from the maximum, and
+      for a group it swaps which way out the split tries first.
+- [ ] Regex gaps: no `\zs`/`\ze`, no `\%(` non-capturing groups, no
+      back-references INSIDE a pattern, and `\c`/`\C` are not honoured
+      mid-pattern (`:s///i` is).
 - [x] **Marks are ANCHORED.** They hold a byte offset, and
       `Buffer.on_edit` tells the editor about every edit — offset,
       bytes removed, bytes added — so a mark moves with the text
