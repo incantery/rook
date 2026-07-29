@@ -414,6 +414,9 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     kb.bind('t', .{ .action = .panel_threads });
     // Review — the wails app's <leader>g (the Gate).
     kb.bind('g', .{ .action = .panel_review });
+    // ...and the Diff the gate is about. Next to it on purpose: the list
+    // of findings and the change they are about are one motion apart.
+    kb.bind('d', .{ .action = .diff_open });
 
     var pathbuf: [1024]u8 = undefined;
     const path = cfgPath(&pathbuf) orelse return kb;

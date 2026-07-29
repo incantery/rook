@@ -437,6 +437,20 @@ pub const App = struct {
     rev_open_path: [128]u8 = @splat(0),
     rev_open_path_len: usize = 0,
     rev_open_line: i64 = 0,
+    /// A diff view queued to build. Off the key path for the same reason
+    /// everything else here is, only more so: one diff is a `git diff`
+    /// per changed file, so building it on the UI thread would stall the
+    /// frame for as long as the repo is large.
+    ///
+    /// When `diff_path_len` is non-zero it is ONE file's diff; otherwise
+    /// the whole changes list.
+    diff_req: bool = false,
+    diff_path: [256]u8 = @splat(0),
+    diff_path_len: usize = 0,
+    /// The modified-side line to land on, or 0 for the top. A finding
+    /// names a line, and a diff that opened at row one would make you
+    /// hunt for it — the same rule openEditorAtLine follows.
+    diff_line: i64 = 0,
 
     /// The side pane takes the key path. Needed the moment a tenant is
     /// INTERACTIVE — the inbox is read-only, the ask form is not. Modal
@@ -2067,6 +2081,7 @@ pub const App = struct {
             .thread_resolve => self.threadVerb("resolve"),
             .panel_ask => self.showPendingAsk(),
             .panel_flip => self.flipSidePane(),
+            .diff_open => self.requestDiff("", 0),
         }
     }
 
@@ -2577,6 +2592,59 @@ pub const App = struct {
         self.scene_dirty = true;
     }
 
+    /// Queue a diff view. Empty `path` means every changed file.
+    ///
+    /// Queued rather than built, because building forks git once per file
+    /// and this is called from the key path — including from the review
+    /// panel, where the alternative is the whole window freezing on the
+    /// keystroke that was supposed to show you the code.
+    pub fn requestDiff(self: *App, path: []const u8, line: i64) void {
+        self.draw_lock.lock();
+        self.diff_path_len = @min(path.len, self.diff_path.len);
+        @memcpy(self.diff_path[0..self.diff_path_len], path[0..self.diff_path_len]);
+        self.diff_line = line;
+        self.diff_req = true;
+        self.draw_lock.unlock();
+        self.rev_wake.store(true, .release);
+    }
+
+    /// Put a built diff document into a pane, decorated and locked.
+    ///
+    /// The three arrays travel together and are indexed by the same line,
+    /// which is the invariant diffdoc.zig exists to hold — so they are
+    /// handed over in one call rather than assembled here.
+    pub fn showDiff(self: *App, name: []const u8, doc: *const @import("diffdoc.zig").Doc, row: usize) void {
+        self.openTextPane(name, doc.text);
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const ed = self.activeTab().focused.editor() orelse return;
+
+        var styles = self.gpa.alloc(editorpkg.Style, doc.rows.len) catch return;
+        defer self.gpa.free(styles);
+        var nums = self.gpa.alloc(u32, doc.rows.len) catch return;
+        defer self.gpa.free(nums);
+        for (doc.rows, 0..) |r, i| {
+            styles[i] = switch (r.kind) {
+                .add => .diff_add,
+                .del => .diff_del,
+                .hunk => .diff_hunk,
+                .meta => .diff_meta,
+                .context => .text,
+            };
+            // ONE number, and which side it is depends on the row: a
+            // deletion belongs to the original, everything else to the
+            // modified side. The +/- prefix already says which file the
+            // number is in, so a second column would be spending four
+            // columns of a terminal to repeat it.
+            nums[i] = if (r.kind == .del) r.old_line else r.new_line;
+        }
+        ed.setDecor(styles, nums) catch return;
+        ed.cline = @min(row, doc.rows.len -| 1);
+        ed.ccol = 0;
+        ed.top = row -| 3; // a little context above where you landed
+        self.scene_dirty = true;
+    }
+
     /// Bring a pending question back to the front.
     ///
     /// Needed because the form HOLDS the ask while it is open, so the
@@ -2741,6 +2809,29 @@ pub const App = struct {
                 'a' => self.queueVerdictLocked("approved"),
                 'r' => self.queueVerdictLocked("rejected"),
                 'd' => self.queueVerdictLocked("deferred"),
+                // The CHANGE this finding is about, rather than the file
+                // it lives in. Additive: Enter still opens the file at
+                // the line, because that is the motion already in
+                // people's hands and a verdict often needs the
+                // surrounding code rather than the patch.
+                //
+                // Set inline instead of through requestDiff: the caller
+                // holds draw_lock, and taking it again would deadlock on
+                // the keystroke.
+                'D' => {
+                    if (self.rev_sel < n) {
+                        const f = self.rev.slice()[self.rev_sel];
+                        const p = f.path.get();
+                        self.diff_path_len = @min(p.len, self.diff_path.len);
+                        @memcpy(self.diff_path[0..self.diff_path_len], p[0..self.diff_path_len]);
+                        self.diff_line = f.line;
+                        self.diff_req = true;
+                        self.rev_wake.store(true, .release);
+                        self.side_focus = false;
+                    }
+                    self.scene_dirty = true;
+                    return;
+                },
                 '\r', '\n' => {
                     if (self.rev_sel < n) {
                         const f = self.rev.slice()[self.rev_sel];
@@ -3890,7 +3981,7 @@ pub const App = struct {
             y += row_h;
         }
         if (self.side_focus)
-            _ = ui.text(tx, y + (row_h - ch) / 2, "a/r/d verdict · enter opens", th.bar_fg, bg);
+            _ = ui.text(tx, y + (row_h - ch) / 2, "a/r/d verdict · enter file · D diff", th.bar_fg, bg);
     }
 
     fn drawThreads(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
@@ -4481,6 +4572,10 @@ pub const App = struct {
                 .syn_keyword => th.syn_keyword,
                 .syn_type => th.syn_type,
                 .syn_func => th.syn_func,
+                .diff_add => th.diff_add,
+                .diff_del => th.diff_del,
+                .diff_hunk => th.diff_hunk,
+                .diff_meta => th.diff_meta,
             };
             switch (rc.st) {
                 .sel => bg = th.ed_sel_bg,
@@ -4966,6 +5061,10 @@ fn reviewThread(app: *App) void {
         var open_line: i64 = 0;
         var ws_buf: [64]u8 = undefined;
         var ws_len: usize = 0;
+        var want_diff = false;
+        var diff_path: [256]u8 = undefined;
+        var diff_len: usize = 0;
+        var diff_line: i64 = 0;
         const open_panel = blk: {
             app.draw_lock.lock();
             defer app.draw_lock.unlock();
@@ -4981,6 +5080,13 @@ fn reviewThread(app: *App) void {
                 @memcpy(open_path[0..open_len], app.rev_open_path[0..open_len]);
                 open_line = app.rev_open_line;
                 app.rev_open_path_len = 0;
+            }
+            want_diff = app.diff_req;
+            if (want_diff) {
+                diff_len = app.diff_path_len;
+                @memcpy(diff_path[0..diff_len], app.diff_path[0..diff_len]);
+                diff_line = app.diff_line;
+                app.diff_req = false;
             }
             const label = app.activeSpace().label();
             ws_len = @min(label.len, ws_buf.len);
@@ -5006,6 +5112,8 @@ fn reviewThread(app: *App) void {
             _ = app.openEditorAtLine(resolved, open_line);
         }
 
+        if (want_diff) buildDiff(app, ws_buf[0..ws_len], diff_path[0..diff_len], diff_line);
+
         if (open_panel or forced) {
             const snap = sub.Substrate.select(app.gpa, app.io).reviewSnapshot(ws_buf[0..ws_len]);
             const d = snap.digest();
@@ -5025,6 +5133,54 @@ fn reviewThread(app: *App) void {
             _ = usleep(50 * 1000);
         }
     }
+}
+
+/// Build a diff view and hand it to a pane.
+///
+/// Runs on the review thread, off the key path — one diff is a `git diff`
+/// per changed file, and a big repo would otherwise stall the frame for
+/// the duration.
+///
+/// `path` empty means every changed file in one document. The empty
+/// answer is still a document ("no changes"), because a keystroke that
+/// appears to do nothing is indistinguishable from a broken one.
+fn buildDiff(app: *App, workspace: []const u8, path: []const u8, line: i64) void {
+    const ds = @import("diffsource.zig");
+    const dd = @import("diffdoc.zig");
+    const sub = @import("substrate.zig");
+    if (workspace.len == 0) return;
+    const s = sub.Substrate.select(app.gpa, app.io);
+
+    // Base "": let the source decide — a worktree diffs its whole task,
+    // everything else its uncommitted work. Overriding here would make
+    // the view disagree with the review panel above it.
+    if (path.len > 0) {
+        var sides = s.diffSides(workspace, path, "");
+        defer sides.deinit();
+        var doc = dd.one(app.gpa, app.io, path, &sides, .{});
+        defer doc.deinit();
+        const row = if (line > 0) doc.rowForLine(0, @intCast(line)) else 0;
+        var name: [288]u8 = undefined;
+        const label = std.fmt.bufPrint(&name, "diff:{s}", .{path}) catch "diff";
+        app.showDiff(label, &doc, row);
+        return;
+    }
+
+    var changes = s.changes(workspace, "");
+    defer changes.deinit();
+
+    // The fetch closure, so diffdoc never needs to know what a substrate
+    // is — it takes two texts per file and nothing else.
+    const Fetch = struct {
+        sb: sub.Substrate,
+        ws: []const u8,
+        fn get(self: @This(), p: []const u8) ds.Sides {
+            return self.sb.diffSides(self.ws, p, "");
+        }
+    };
+    var doc = dd.all(app.gpa, app.io, &changes, Fetch{ .sb = s, .ws = workspace }, Fetch.get, .{});
+    defer doc.deinit();
+    app.showDiff("diff:changes", &doc, 0);
 }
 
 /// Threads: list, open, save, and the verbs.

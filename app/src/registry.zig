@@ -64,6 +64,10 @@ pub const Action = enum {
     /// Move the side pane to the other edge — panels are placement-
     /// agnostic, so this is a property of the container, not the tenant.
     panel_flip,
+    /// The workspace's changes as a unified diff, in a pane. A view, not
+    /// a panel: it is a DOCUMENT — scrolled, searched and navigated with
+    /// the editor's own keys — and the side panes are for lists.
+    diff_open,
 };
 
 pub const Spec = struct { action: Action, arg: u8 = 0 };
@@ -112,6 +116,7 @@ pub const commands = [_]Command{
     .{ .id = "thread.resolve", .title = "Resolve Thread", .category = "Thread", .action = .thread_resolve },
     .{ .id = "ask.show", .title = "Show Pending Question", .category = "Panel", .action = .panel_ask, .keys = "<leader>q" },
     .{ .id = "panel.flip", .title = "Move Side Pane to Other Edge", .category = "Panel", .action = .panel_flip },
+    .{ .id = "diff.open", .title = "Diff: Working Changes", .category = "Review", .action = .diff_open, .keys = "<leader>d" },
 };
 
 /// Alternate spellings that resolve to a command. Kept apart from the

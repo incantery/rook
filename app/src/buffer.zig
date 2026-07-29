@@ -80,6 +80,26 @@ pub const Buffer = struct {
     /// normal-mode edit); everything typed inside shares the group.
     group: u32 = 0,
 
+    /// This buffer's content is a VIEW of something else, so editing it
+    /// could only ever produce a lie. A diff document is the first case:
+    /// its text is computed from two sides, its gutter numbers belong to
+    /// a file the buffer does not contain, and half its rows are lines
+    /// that were deleted.
+    ///
+    /// Enforced here rather than at the keymap, and that is the point.
+    /// The editor mutates through forty-nine call sites and every one of
+    /// them lands on applyEdit; a guard on the keys would have to
+    /// enumerate every command that edits, and the one it missed would
+    /// corrupt the document silently.
+    readonly: bool = false,
+
+    /// Set when an edit was declined, cleared by whoever reports it. The
+    /// buffer cannot show a message and the editor cannot see every
+    /// refusal, so the flag is the seam between them — otherwise a
+    /// read-only buffer swallows keystrokes and looks broken rather than
+    /// protected.
+    refused: bool = false,
+
     /// One reversible edit: bytes `deleted` were replaced by
     /// `inserted_len` bytes at `off`.
     const Edit = struct {
@@ -245,6 +265,10 @@ pub const Buffer = struct {
     }
 
     fn applyEdit(self: *Buffer, gpa: Allocator, start: usize, end: usize, text: []const u8, clear_redo: bool) Allocator.Error!void {
+        if (self.readonly) {
+            self.refused = true;
+            return;
+        }
         const deleted = try self.rope.dupeRange(gpa, start, end);
         errdefer gpa.free(deleted);
         try self.undo_stack.append(gpa, .{

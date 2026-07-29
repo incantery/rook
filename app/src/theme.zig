@@ -41,6 +41,17 @@ pub const Theme = struct {
     syn_keyword: [4]u8,
     syn_type: [4]u8,
     syn_func: [4]u8,
+
+    // Diff rows. Foreground only, deliberately: a full-row background
+    // wash fights the selection and the cursor line for the same cells,
+    // and in a terminal-native pane those two have to stay legible —
+    // you select inside a diff to copy a line out of it.
+    diff_add: [4]u8,
+    diff_del: [4]u8,
+    diff_hunk: [4]u8,
+    /// The header rook writes above each file, and notes like "binary
+    /// file". Reads as chrome rather than as content.
+    diff_meta: [4]u8,
 };
 
 /// The colors rook shipped with — kept exactly, as the fallback.
@@ -70,6 +81,12 @@ pub const default: Theme = .{
     .syn_keyword = .{ 187, 154, 247, 255 },
     .syn_type = .{ 115, 218, 202, 255 },
     .syn_func = .{ 122, 162, 247, 255 },
+    // Reusing the string/error hues rather than inventing two greens:
+    // added/removed is the same "good/bad" axis the theme already names.
+    .diff_add = .{ 158, 206, 106, 255 },
+    .diff_del = .{ 247, 118, 142, 255 },
+    .diff_hunk = .{ 122, 162, 247, 255 },
+    .diff_meta = .{ 96, 99, 116, 255 },
 };
 
 /// Nocturne — rook's own (the Claude Design boards, 2026-07-22).
@@ -121,6 +138,11 @@ pub const nocturne: Theme = .{
     .syn_keyword = .{ 0xb8, 0xab, 0xee, 255 },
     .syn_type = .{ 0xd4, 0xbd, 0x85, 255 },
     .syn_func = .{ 0xa3, 0xc0, 0xe8, 255 },
+    // Muted to match nocturne's rule that nothing shouts.
+    .diff_add = .{ 0x9e, 0xc4, 0x9a, 255 },
+    .diff_del = .{ 0xd9, 0x8a, 0x8a, 255 },
+    .diff_hunk = .{ 0xa3, 0xc0, 0xe8, 255 },
+    .diff_meta = .{ 0x8d, 0x92, 0xad, 255 },
 };
 
 const builtins = [_]*const Theme{ &default, &nocturne };

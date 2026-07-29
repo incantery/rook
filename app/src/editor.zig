@@ -72,6 +72,13 @@ pub const Style = enum(u8) {
     syn_keyword,
     syn_type,
     syn_func,
+    // Diff buckets. Structural rather than syntactic: they come from a
+    // document's own shape (diffdoc.zig's row map), not from a grammar,
+    // which is why they arrive through setDecor instead of hl_spans.
+    diff_add,
+    diff_del,
+    diff_hunk,
+    diff_meta,
 };
 
 /// One highlight span in absolute byte offsets; later spans override.
@@ -318,6 +325,26 @@ pub const Editor = struct {
     hl_spans_buf: std.ArrayListUnmanaged(HlSpan) = .empty,
     hl_styles: std.ArrayListUnmanaged(Style) = .empty,
     hl_vstart: usize = 0,
+
+    /// Per-LINE decoration for a document whose colouring and numbering
+    /// come from its own structure rather than from a grammar and its own
+    /// row count. Empty means an ordinary buffer, which is the only case
+    /// the rest of the editor knows about.
+    ///
+    /// Two arrays rather than one struct because they answer to different
+    /// owners: the styles are what a line IS, the gutter numbers are what
+    /// a line REFERS TO, and a diff has both while a plain file has
+    /// neither.
+    ///
+    /// A style here wins over the highlighter for the whole line. That is
+    /// correct for every case this exists for — a `+` row in a patch is
+    /// an addition first and Zig second — and it means the two systems
+    /// never have to be merged.
+    line_style: std.ArrayListUnmanaged(Style) = .empty,
+    /// What the gutter prints instead of the buffer row number. Zero
+    /// prints nothing, which is what a hunk header or a rook-written
+    /// header line deserves: it is not a line of any file.
+    line_gutter: std.ArrayListUnmanaged(u32) = .empty,
 
     // App-command seam, same shape and same reason as the highlighter's:
     // a `:` verb this editor does not own is offered to the app's command
@@ -884,6 +911,9 @@ pub const Editor = struct {
         if (bytes.len == 0) return;
         self.render_dirty = true;
         self.status_len = 0;
+        // Any refusal from a previous batch has been reported; a stale
+        // flag would blame this keystroke for the last one's edit.
+        self.buf.refused = false;
 
         var i: usize = 0;
         while (i < bytes.len) {
@@ -916,6 +946,17 @@ pub const Editor = struct {
             }
             self.recordStep(bytes[i..][0..n], pre_mode, pre_ver);
             i += n;
+        }
+        // A declined edit says so once, whatever tried it. Without this a
+        // read-only document swallows keystrokes and reads as broken
+        // rather than as protected — and the person who cannot tell the
+        // difference reaches for `:w!` on the next buffer.
+        if (self.buf.refused) {
+            self.buf.refused = false;
+            self.setStatus("this buffer is a view — nothing to edit", .{}, true);
+            // Insert mode with nothing to insert into is a trap: every
+            // key would be eaten silently and ESC would look like the fix.
+            if (self.mode == .insert) self.mode = .normal;
         }
     }
 
@@ -2152,6 +2193,57 @@ pub const Editor = struct {
     /// DOCUMENT, and the editor is already a renderer with scrolling,
     /// search, motions and yank. Building a bespoke viewer would have
     /// meant reimplementing all of that worse.
+    /// Attach a document's per-line decoration, and lock the buffer.
+    ///
+    /// Both arrays are indexed by buffer line and must be as long as the
+    /// buffer, which is the caller's invariant to hold — a short array
+    /// leaves the tail undecorated rather than misdecorated, because a
+    /// gutter number borrowed from the wrong line is a number a reviewer
+    /// would act on.
+    ///
+    /// Read-only is not a separate decision. Everything that arrives this
+    /// way is a view: its text was computed, its numbers name a file it
+    /// does not hold, and an edit could only make it disagree with the
+    /// thing it is showing.
+    pub fn setDecor(self: *Editor, styles: []const Style, gutter: []const u32) !void {
+        self.line_style.clearRetainingCapacity();
+        self.line_gutter.clearRetainingCapacity();
+        try self.line_style.appendSlice(self.gpa, styles);
+        try self.line_gutter.appendSlice(self.gpa, gutter);
+        self.buf.readonly = true;
+        self.render_dirty = true;
+    }
+
+    /// Drop any decoration and unlock the buffer. Every path that swaps
+    /// the document calls this: decoration belongs to the text it was
+    /// computed from, and carrying it onto a different buffer would paint
+    /// a real file with a patch's colours and number it with a patch's
+    /// lines.
+    fn clearDecor(self: *Editor) void {
+        self.line_style.clearRetainingCapacity();
+        self.line_gutter.clearRetainingCapacity();
+        self.buf.readonly = false;
+        self.buf.refused = false;
+    }
+
+    /// The gutter number for a line: the decorated one when there is one,
+    /// else the buffer row. Zero means print nothing.
+    fn gutterNumFor(self: *const Editor, line: usize) u32 {
+        if (self.line_gutter.items.len == 0) return @intCast(line + 1);
+        if (line >= self.line_gutter.items.len) return 0;
+        return self.line_gutter.items[line];
+    }
+
+    /// How wide the gutter has to be. For a decorated buffer that is the
+    /// widest NUMBER it will print, which is not the line count: a diff
+    /// of 40 rows can name line 2000 of a file.
+    fn gutterWidth(self: *const Editor) usize {
+        if (self.line_gutter.items.len == 0) return digits(self.lineCountB()) + 1;
+        var max: u32 = 1;
+        for (self.line_gutter.items) |n| max = @max(max, n);
+        return digits(max) + 1;
+    }
+
     pub fn openText(self: *Editor, name: []const u8, text: []const u8) !void {
         var b: bufferpkg.Buffer = .{ .rope = try .init(self.gpa, text) };
         errdefer b.rope.deinit(self.gpa);
@@ -2159,6 +2251,7 @@ pub const Editor = struct {
         self.buf.deinit(self.gpa);
         self.buf = b;
         self.ai_line = null; // line numbers belonged to the old buffer
+        self.clearDecor();
         self.is_dir = false;
         self.synthetic = true;
         self.cline = 0;
@@ -2197,6 +2290,7 @@ pub const Editor = struct {
         self.buf.deinit(self.gpa);
         self.buf = nb;
         self.ai_line = null; // line numbers belonged to the old buffer
+        self.clearDecor();
         self.is_dir = is_dir;
         // Clamp back onto whatever the file is NOW — it may be shorter
         // than the one we were looking at, and every motion below reads
@@ -2223,6 +2317,7 @@ pub const Editor = struct {
         self.buf.deinit(self.gpa);
         self.buf = nb;
         self.ai_line = null; // line numbers belonged to the old buffer
+        self.clearDecor();
         self.is_dir = is_dir;
         self.cline = 0;
         self.ccol = 0;
@@ -4512,7 +4607,7 @@ pub const Editor = struct {
     /// included — for anything that has to point at the cursor from
     /// outside the editor (the IME's candidate window is the first).
     pub fn cursorCell(self: *Editor) struct { col: u16, row: u16 } {
-        const gw = digits(self.lineCountB()) + 1;
+        const gw = self.gutterWidth();
         const rc = self.renderColAt(self.cline, self.ccol);
         return .{ .col = @intCast(gw + rc), .row = @intCast(self.cline -| self.top) };
     }
@@ -4735,7 +4830,7 @@ pub const Editor = struct {
         @memset(g, .{});
         if (rows < 2 or cols < 4) return g;
 
-        const gw = digits(self.lineCountB()) + 1;
+        const gw = self.gutterWidth();
         const text_cols = cols - @min(gw, cols - 1);
         const text_rows = rows - 1;
         self.ensureVisible(text_cols, text_rows);
@@ -4774,9 +4869,12 @@ pub const Editor = struct {
             }
 
             // Gutter: right-aligned number, dim except the cursor line.
-            {
+            // A decorated document numbers by what the line REFERS TO, and
+            // zero prints nothing — that row is not a line of any file.
+            const gnum = self.gutterNumFor(line);
+            if (gnum > 0) {
                 var nbuf: [20]u8 = undefined;
-                const ns = std.fmt.bufPrint(&nbuf, "{d}", .{line + 1}) catch "";
+                const ns = std.fmt.bufPrint(&nbuf, "{d}", .{gnum}) catch "";
                 const pad = gw - 1 -| ns.len;
                 for (ns, 0..) |c, i| {
                     if (pad + i < gw) out[pad + i] = .{
@@ -4797,7 +4895,13 @@ pub const Editor = struct {
             var rc: usize = 0;
             var i: usize = 0;
             while (i < s.len) {
-                const base = self.hlStyleAt(abs_start + i);
+                // A decorated line's style is the whole line's, and it
+                // beats the highlighter: a `+` row is an addition first
+                // and Zig second.
+                const base = if (line < self.line_style.items.len)
+                    self.line_style.items[line]
+                else
+                    self.hlStyleAt(abs_start + i);
                 const in_sel = if (blk) |bb|
                     bb.has(line, rc)
                 else
@@ -5016,6 +5120,7 @@ pub const Editor = struct {
             putStr(out, &x, self.status_buf[0..self.status_len], if (self.status_err) .err else .text);
         } else {
             putStr(out, &x, self.displayName(), .text);
+            if (self.buf.readonly) putStr(out, &x, " [view]", .dim);
             if (self.buf.isModified()) putStr(out, &x, " [+]", .dim);
             // A line the editor cannot reach the end of used to render
             // exactly like a line that had ended. Silence was the real

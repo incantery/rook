@@ -193,47 +193,18 @@ fn currentContent(gpa: std.mem.Allocator, io: std.Io, ctx: Context, a: *const An
     }
 }
 
-/// `git diff --no-index --unified=0` between two contents, via scratch
-/// files. Caller owns the result.
-///
-/// Exit 1 means "the files differ" and is the expected outcome — we only
-/// get here because the hashes already disagree. Exit 0 is legal too
-/// (git can consider them equal where a byte compare did not, e.g. via
-/// an autocrlf setting) and yields no hunks, which maps to no movement.
+/// The hunk headers between two contents. Zero context, because only the
+/// arithmetic is wanted here and context lines would just be parsed and
+/// dropped. Caller owns the result.
 fn diffHunks(gpa: std.mem.Allocator, io: std.Io, old: []const u8, cur: []const u8) ?[]Hunk {
-    var rnd: [8]u8 = undefined;
-    io.random(&rnd); // 0.16 routes randomness through Io, not std.crypto
-    var namebuf: [64]u8 = undefined;
-    const name = std.fmt.bufPrint(&namebuf, "rook-reanchor-{x}", .{std.mem.readInt(u64, &rnd, .little)}) catch return null;
-
-    var rootbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = tmpRoot(&rootbuf, name) orelse return null;
-
-    const cwd = std.Io.Dir.cwd();
-    var dir = cwd.createDirPathOpen(io, root, .{}) catch return null;
-    defer {
-        dir.close(io);
-        cwd.deleteTree(io, root) catch {};
-    }
-    dir.writeFile(io, .{ .sub_path = "a", .data = old }) catch return null;
-    dir.writeFile(io, .{ .sub_path = "b", .data = cur }) catch return null;
-
-    const r = git.run(gpa, io, root, &.{ "diff", "--no-index", "--unified=0", "a", "b" }, max_file) orelse return null;
+    const r = git.diffTexts(gpa, io, old, cur, 0, max_file) orelse return null;
     defer r.deinit(gpa);
-    if (r.code != 0 and r.code != 1) return null; // git itself failed
 
     var list: std.ArrayListUnmanaged(Hunk) = .empty;
     defer list.deinit(gpa);
     var it = anchor.hunks(r.stdout);
     while (it.next()) |h| list.append(gpa, h) catch return null;
     return list.toOwnedSlice(gpa) catch null;
-}
-
-extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
-
-fn tmpRoot(buf: []u8, name: []const u8) ?[]const u8 {
-    const base = if (getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "/tmp";
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ base, name }) catch null;
 }
 
 // ---------------------------------------------------------------------

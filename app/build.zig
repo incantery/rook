@@ -338,6 +338,19 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(diffsource_tests).step);
 
+    // A diff as a readable document. Its own root because the invariant
+    // it holds is one a compiler cannot: ONE row of the map per line of
+    // the text. A patch line the walk forgets to map slides the gutter by
+    // one from that point down, and the numbers keep looking plausible
+    // all the way — a reviewer would trust a wrong line, which is worse
+    // than showing no numbers at all.
+    const diffdoc_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/diffdoc.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(diffdoc_tests).step);
+
     // The UI layer's text fitting. Its own root for the reason logged
     // above editor_tests — the exe module's test collection does not
     // reach these decls, and a suite that is never run is worse than no

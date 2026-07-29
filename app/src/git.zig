@@ -186,6 +186,61 @@ pub fn runTimeout(
     };
 }
 
+/// `git diff --no-index` between two in-memory texts, via scratch files.
+/// Returns the raw patch. Caller owns the Result.
+///
+/// Two texts rather than a path and a ref, and that is the point: it
+/// diffs whatever a caller HAS, so the same code answers for a working
+/// tree, for a commit, and for two sides a remote host sent over. A
+/// source that is not git at all still gets a git-quality patch out of
+/// it.
+///
+/// Exit 1 means "the files differ" and is the expected outcome. Exit 0 is
+/// legal too — git can consider texts equal where a byte compare did not,
+/// via an autocrlf setting — and yields an empty patch, which reads as no
+/// changes.
+pub fn diffTexts(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    old: []const u8,
+    cur: []const u8,
+    context_lines: u32,
+    limit: usize,
+) ?Result {
+    var rnd: [8]u8 = undefined;
+    io.random(&rnd); // 0.16 routes randomness through Io, not std.crypto
+    var namebuf: [64]u8 = undefined;
+    const name = std.fmt.bufPrint(&namebuf, "rook-diff-{x}", .{std.mem.readInt(u64, &rnd, .little)}) catch return null;
+
+    var rootbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = tmpRoot(&rootbuf, name) orelse return null;
+
+    const cwd = std.Io.Dir.cwd();
+    var dir = cwd.createDirPathOpen(io, root, .{}) catch return null;
+    defer {
+        dir.close(io);
+        cwd.deleteTree(io, root) catch {};
+    }
+    dir.writeFile(io, .{ .sub_path = "a", .data = old }) catch return null;
+    dir.writeFile(io, .{ .sub_path = "b", .data = cur }) catch return null;
+
+    var ubuf: [32]u8 = undefined;
+    const uflag = std.fmt.bufPrint(&ubuf, "--unified={d}", .{context_lines}) catch return null;
+    const r = run(gpa, io, root, &.{ "diff", "--no-index", uflag, "a", "b" }, limit) orelse return null;
+    if (r.code != 0 and r.code != 1) {
+        r.deinit(gpa);
+        return null; // git itself failed
+    }
+    return r;
+}
+
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
+fn tmpRoot(buf: []u8, name: []const u8) ?[]const u8 {
+    const base = if (getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "/tmp";
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ base, name }) catch null;
+}
+
 /// The repository's top-level directory for `dir`, or null when `dir` is
 /// not in a repo.
 ///

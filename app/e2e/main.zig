@@ -42,6 +42,7 @@ const scenarios = [_]Scenario{
     .{ .name = "review", .what = "the review panel opens focused and keeps its verdict keys", .run = review },
     .{ .name = "threadrows", .what = "the sidebar lists real threads and re-anchors their lines", .run = threadRows },
     .{ .name = "reviewrows", .what = "the review panel shows findings, the gate, and re-anchored lines", .run = reviewRows },
+    .{ .name = "diffview", .what = "the diff view renders hunks, colours them, numbers by FILE line, and refuses edits", .run = diffView },
 };
 
 // ---------------------------------------------------------------- boot
@@ -1416,4 +1417,110 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("\n", .{});
     if (failed > 0) return error.E2eFailed;
+}
+
+
+/// The diff view: a real patch, in a pane, with the gutter numbering by
+/// FILE line rather than by buffer row.
+///
+/// That last part is the reason this scenario exists at all. Every unit
+/// test here can check the row map; only the app can show that the map
+/// reached the gutter, and a gutter that silently counted rows would look
+/// entirely plausible while sending a reviewer to the wrong line.
+fn diffView(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var reg = try seedRegistry(app);
+
+    // Commit a five-line base, then put the seeded nine-line version
+    // back, so f.zig is MODIFIED with two separate insertions rather than
+    // untracked. Two insertions at different depths is what makes the
+    // gutter numbers diverge from the row numbers by different amounts —
+    // a single insertion would move everything below it by one constant
+    // and a row-counting gutter could still look right.
+    var f_buf: [256]u8 = undefined;
+    const f_path = try std.fmt.bufPrint(&f_buf, "{s}/f.zig", .{reg.repo()});
+    try h.writeFile(f_path, "l1\nl2\nl3\nl4\nl5\n");
+    if (try h.runCmd(reg.repo(), &.{ "/usr/bin/git", "add", "f.zig" }) != 0) return error.GitFailed;
+    if (try h.runCmd(reg.repo(), &.{
+        "/usr/bin/git", "-c", "user.email=t@example.com", "-c", "user.name=t",
+        "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base",
+    }) != 0) return error.GitFailed;
+    // l4 becomes L4 as well, so the patch has a real deletion in it. Only
+    // a del row can show that the gutter picks the ORIGINAL side's number
+    // for one — every other row reads from the modified side, so a gutter
+    // that always did would pass without it.
+    try h.writeFile(f_path, "a\nb\nl1\nl2\nX\nY\nl3\nL4\nl5\n");
+
+    _ = try app.ctl("run diff.open");
+
+    // The pane, not a side panel: a diff is a document, so it goes where
+    // documents go and `screen` is the right surface to read it from.
+    try app.waitText("@@", 10_000);
+    var buf: [16 * 1024]u8 = undefined;
+    const out = try app.screen(&buf);
+
+    // The header rook wrote, naming the real path and base. git's own
+    // --no-index headers name scratch files and must not have survived.
+    try h.expectContains(out, "f.zig", "the header names the file");
+    try h.expectContains(out, "modified · base HEAD", "the status and the base it diffed against");
+    try h.expectNotContains(out, "a/a", "git's scratch-file headers are dropped");
+    try h.expectNotContains(out, "diff --git", "git's scratch-file headers are dropped");
+
+    // THE ASSERTION THIS SCENARIO EXISTS FOR. `l1` is the sixth row of
+    // the buffer and the third line of the file, and the gutter says 3.
+    // A gutter counting buffer rows would render "6  l1" here — equally
+    // plausible on screen, and it would send every reviewer following a
+    // finding to the wrong line.
+    try h.expectContains(out, "3  l1", "the gutter numbers by FILE line, not buffer row");
+    try h.expectNotContains(out, "6  l1", "the gutter is not counting buffer rows");
+
+    // Additions carry the modified side's numbers: a and b are the file's
+    // lines 1 and 2 even though they are rows 4 and 5.
+    try h.expectContains(out, "1 +a", "an addition is numbered on the modified side");
+    try h.expectContains(out, "5 +X", "the second insertion, deeper in the file");
+
+    // ...and the deletion carries the ORIGINAL side's: old line 4, next
+    // to the addition that replaced it at new line 8.
+    try h.expectContains(out, "4 -l4", "a deletion is numbered on the original side");
+    try h.expectContains(out, "8 +L4", "and its replacement on the modified side");
+
+    // Structural rows are lines of no file, so they get no number.
+    try h.expectContains(out, "  @@ -1,5 +1,9 @@", "a hunk header has a blank gutter");
+
+    // The rows are COLOURED, checked against the theme's own values.
+    //
+    // Taken here, before anything can put an error on screen, and that
+    // ordering is load-bearing: the default theme spells diff_del and
+    // ed_err with the same hue, so a shot taken after the refusal message
+    // below would find that red whatever the diff rows were painted.
+    // Counting a colour is geometry-free — no cell metrics, no pane
+    // origin — which is what keeps it robust to a window resize.
+    {
+        var shot_path: [256]u8 = undefined;
+        const sp = try std.fmt.bufPrint(&shot_path, "{s}/diff.png", .{app.dirPath()});
+        var shot = try app.shot(sp);
+        defer shot.deinit();
+        // Thresholds far under what was measured (766 / 2250 / 5293) and
+        // far over antialiasing noise, which is nil here: nothing else in
+        // this frame is near any of the three.
+        try h.expect(shot.countColorNear(0x9ECE6A, 12) > 100, "additions are painted diff_add", .{});
+        try h.expect(shot.countColorNear(0xF7768E, 12) > 100, "deletions are painted diff_del", .{});
+        try h.expect(shot.countColorNear(0x7AA2F7, 12) > 100, "hunk headers are painted diff_hunk", .{});
+    }
+
+    // Read-only, and it SAYS so. `x` would delete the character under the
+    // cursor in any other buffer; here it must change nothing and explain
+    // why, because a pane that silently eats keystrokes reads as broken
+    // rather than as protected.
+    _ = try app.ctl("type x");
+    const after = try app.screen(&buf);
+    try h.expectContains(after, "this buffer is a view", "a refused edit says so");
+    try h.expectContains(after, "3  l1", "and the document is untouched");
+    try h.expectContains(after, "1 +a", "and the document is untouched");
+
 }

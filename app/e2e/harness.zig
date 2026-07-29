@@ -774,6 +774,61 @@ pub const Shot = struct {
         return best;
     }
 
+    /// How many pixels sit within `tol` per channel of `rgb`.
+    ///
+    /// Geometry-free on purpose: asserting a COLOUR is present somewhere
+    /// needs no cell metrics, no pane origin and no font size, all of
+    /// which change with the window and none of which the thing under
+    /// test is about. A tolerance because a glyph edge is blended — the
+    /// core of a stroke lands on the exact colour, its rim does not.
+    pub fn countColorNear(self: *const Shot, rgb: u32, tol: u8) usize {
+        const want_r: i32 = @intCast((rgb >> 16) & 0xff);
+        const want_g: i32 = @intCast((rgb >> 8) & 0xff);
+        const want_b: i32 = @intCast(rgb & 0xff);
+        const t: i32 = tol;
+        var n: usize = 0;
+        var y: usize = 0;
+        while (y < self.height) : (y += 1) {
+            var x: usize = 0;
+            while (x < self.width) : (x += 1) {
+                const p = self.pixel(x, y);
+                const r: i32 = @intCast((p >> 16) & 0xff);
+                const g: i32 = @intCast((p >> 8) & 0xff);
+                const b: i32 = @intCast(p & 0xff);
+                if (@abs(r - want_r) <= t and @abs(g - want_g) <= t and @abs(b - want_b) <= t) n += 1;
+            }
+        }
+        return n;
+    }
+
+    /// The `cap` most common colours, brightest-first ties broken
+    /// arbitrarily. For working out what a frame actually contains when
+    /// an exact-colour assertion is being written.
+    pub fn topColors(self: *const Shot, out: []u32, counts: []usize) usize {
+        var n: usize = 0;
+        var y: usize = 0;
+        while (y < self.height) : (y += 4) {
+            var x: usize = 0;
+            while (x < self.width) : (x += 2) {
+                const p = self.pixel(x, y);
+                var found = false;
+                for (out[0..n], 0..) |c, i| {
+                    if (c == p) {
+                        counts[i] += 1;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found and n < out.len) {
+                    out[n] = p;
+                    counts[n] = 1;
+                    n += 1;
+                }
+            }
+        }
+        return n;
+    }
+
     /// Distinct colours, capped. A window that drew nothing is one
     /// colour; a window with a prompt and chrome is many. This is the
     /// cheapest assertion that separates "rendered" from "cleared".
