@@ -259,6 +259,21 @@ pub fn build(b: *std.Build) void {
     blobs_tests.root_module.linkSystemLibrary("sqlite3", .{});
     test_step.dependOn(&b.addRunArtifact(blobs_tests).step);
 
+    // The substrate contract: which arm answers, and the promise that
+    // they stay separate. Its own root because the failure it guards is
+    // invisible — a remote arm that quietly read the local registry
+    // would pass every other test in the tree while making the interface
+    // a lie, and a caller on another machine would be the one to find
+    // out. Its tests assert both directions of the choice.
+    const substrate_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/substrate.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    substrate_tests.root_module.link_libc = true;
+    substrate_tests.root_module.linkSystemLibrary("sqlite3", .{});
+    test_step.dependOn(&b.addRunArtifact(substrate_tests).step);
+
     // Thread rows and their comments. Its own root for the same reason
     // tasks has one — the scan is POSITIONAL against the Go host's
     // threadCols — plus one this table owns: submitted_at is the only

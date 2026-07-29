@@ -131,17 +131,11 @@ pub const Snapshot = struct {
     }
 };
 
-/// The thread sidebar's list. Reads the registry directly, falling back
-/// to the host only when it cannot be opened — same rule as the review
-/// panel, and for the same reason: "could not ask" is a different answer
-/// from "no threads" and must not blank the panel.
-pub fn list(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) Snapshot {
-    if (workspace.len == 0) return .{};
-    if (readList(gpa, workspace)) |snap| return snap;
-    return listHost(gpa, io, workspace);
-}
-
-/// Local path. Null means the registry was unreachable, not empty.
+/// The LOCAL arm of the sidebar list (substrate.zig picks the arm).
+///
+/// Null means the registry was unreachable, not empty — the caller needs
+/// that distinction to know whether the remote arm would say anything
+/// different.
 ///
 /// Deliberately NOT re-anchored, which is what the host's list does too
 /// — its ThreadInfo carries a currentStart and this client has never
@@ -180,8 +174,8 @@ pub fn readList(gpa: std.mem.Allocator, workspace: []const u8) ?Snapshot {
     return snap;
 }
 
-/// The pre-registry path. Still the fallback, and what a remote client
-/// would need.
+/// The REMOTE arm. Not a legacy path — the only one that works from
+/// another machine, and indifferent to the host's language.
 pub fn listHost(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) Snapshot {
     const info = hostc.readInfo(gpa, io) orelse return .{};
     var path_buf: [160]u8 = undefined;

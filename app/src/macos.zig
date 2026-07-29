@@ -4956,7 +4956,7 @@ fn asksThread(app: *App) void {
 
 /// Review: poll the workspace's review, apply verdicts, open findings.
 fn reviewThread(app: *App) void {
-    const rev = @import("review.zig");
+    const sub = @import("substrate.zig");
     while (true) {
         var set_id: i64 = 0;
         var set_name: [12]u8 = undefined;
@@ -4991,7 +4991,7 @@ fn reviewThread(app: *App) void {
         // A verdict outranks polling: it is what the human just did.
         var forced = false;
         if (set_id != 0) {
-            _ = rev.setState(app.gpa, app.io, set_id, set_name[0..set_len]);
+            _ = sub.Substrate.select(app.gpa, app.io).setReviewState(set_id, set_name[0..set_len]);
             forced = true; // re-fetch so the gate reflects it immediately
         }
 
@@ -5007,7 +5007,7 @@ fn reviewThread(app: *App) void {
         }
 
         if (open_panel or forced) {
-            const snap = rev.fetch(app.gpa, app.io, ws_buf[0..ws_len]);
+            const snap = sub.Substrate.select(app.gpa, app.io).reviewSnapshot(ws_buf[0..ws_len]);
             const d = snap.digest();
             app.draw_lock.lock();
             if (d != app.rev_digest) {
@@ -5034,6 +5034,7 @@ fn reviewThread(app: *App) void {
 /// would splice the wrong tail.
 fn threadsThread(app: *App) void {
     const thr = @import("threaddoc.zig");
+    const sub = @import("substrate.zig");
     while (true) {
         // --- save first: what the human already typed outranks polling
         var save_id: i64 = 0;
@@ -5072,7 +5073,7 @@ fn threadsThread(app: *App) void {
 
         if (save_id != 0 and save_body.len > 0) {
             defer app.gpa.free(save_body);
-            switch (thr.saveDoc(app.gpa, app.io, save_id, save_body)) {
+            switch (sub.Substrate.select(app.gpa, app.io).saveThreadDoc(save_id, save_body)) {
                 .ok => app.setThreadStatus(save_id, "saved"),
                 .failed => app.setThreadStatus(save_id, "save failed"),
                 .stale => |fresh| {
@@ -5090,7 +5091,7 @@ fn threadsThread(app: *App) void {
                     app.draw_lock.unlock();
                     if (thr.splice(app.gpa, &f, tail)) |merged| {
                         defer app.gpa.free(merged);
-                        _ = thr.saveDoc(app.gpa, app.io, save_id, merged);
+                        _ = sub.Substrate.select(app.gpa, app.io).saveThreadDoc(save_id, merged);
                         app.replaceThreadDoc(save_id, merged, f.prefix(), "merged a reply");
                     }
                 },
@@ -5098,11 +5099,11 @@ fn threadsThread(app: *App) void {
         }
 
         if (verb_id != 0) {
-            const ok = thr.verb(app.gpa, app.io, verb_id, verb_name[0..verb_len]);
+            const ok = sub.Substrate.select(app.gpa, app.io).threadVerb(verb_id, verb_name[0..verb_len]);
             app.setThreadStatus(verb_id, if (ok) "done" else "refused");
             // The doc changed underneath us (a note becomes a comment).
             if (ok) {
-                if (thr.fetchDoc(app.gpa, app.io, verb_id)) |d| {
+                if (sub.Substrate.select(app.gpa, app.io).threadDoc(verb_id)) |d| {
                     var doc = d;
                     defer doc.deinit(app.gpa);
                     app.replaceThreadDoc(verb_id, doc.content, doc.prefix(), null);
@@ -5111,7 +5112,7 @@ fn threadsThread(app: *App) void {
         }
 
         if (open_id != 0) {
-            if (thr.fetchDoc(app.gpa, app.io, open_id)) |d| {
+            if (sub.Substrate.select(app.gpa, app.io).threadDoc(open_id)) |d| {
                 var doc = d;
                 defer doc.deinit(app.gpa);
                 var name: [32]u8 = undefined;
@@ -5122,7 +5123,7 @@ fn threadsThread(app: *App) void {
         }
 
         if (want_list) {
-            const snap = thr.list(app.gpa, app.io, ws_buf[0..ws_len]);
+            const snap = sub.Substrate.select(app.gpa, app.io).threadList(ws_buf[0..ws_len]);
             const d = snap.digest();
             app.draw_lock.lock();
             if (d != app.thr_digest) {

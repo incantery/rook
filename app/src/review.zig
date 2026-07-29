@@ -165,26 +165,18 @@ pub const Snapshot = struct {
     }
 };
 
-/// The review panel's data.
+/// The LOCAL arm of the review read (substrate.zig picks the arm).
 ///
-/// Reads rook's registry DIRECTLY and re-anchors in this process. The
-/// host is no longer asked, and the reason is not that HTTP was slow: a
-/// review panel re-anchors against the WORKING TREE, which changes while
-/// you read it, so the answer has to be recomputed against the tree as
-/// it is now rather than as it was when a JSON response was built.
+/// Reads rook's registry directly and re-anchors in this process. The
+/// reason is not that HTTP was slow: a review panel re-anchors against
+/// the WORKING TREE, which changes while you read it, so the answer has
+/// to be recomputed against the tree as it is now rather than as it was
+/// when a JSON response was built.
 ///
-/// Falls back to the host only when the registry cannot be opened at
-/// all — a machine where the db is somewhere this build does not expect.
-/// That is a different answer from "no reviews", and blanking the panel
-/// on it would be a regression, so the old path stays as the floor.
-pub fn fetch(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) Snapshot {
-    if (workspace.len == 0) return .{};
-    if (read(gpa, io, workspace)) |snap| return snap;
-    return fetchHost(gpa, io, workspace);
-}
-
-/// Local path. Null means the registry itself was unreachable — NOT that
-/// there is nothing to review, which is a live snapshot with `any` false.
+/// Null means the registry itself was unreachable — NOT that there is
+/// nothing to review, which is a live snapshot with `any` false. The
+/// caller needs that distinction to know whether falling back to the
+/// remote arm would tell it anything new.
 pub fn read(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) ?Snapshot {
     var store = tasks.Store.open();
     defer store.close();
@@ -283,8 +275,9 @@ const Detail = struct {
     }
 };
 
-/// The pre-registry path: ask the host and parse its JSON. Kept as the
-/// fallback above, and it is what a remote client would need.
+/// The REMOTE arm: ask a host and parse its JSON. Not a legacy path —
+/// it is the only one that works from another machine, and it is
+/// indifferent to what the host is written in.
 pub fn fetchHost(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) Snapshot {
     const info = hostc.readInfo(gpa, io) orelse return .{};
     var path_buf: [160]u8 = undefined;
