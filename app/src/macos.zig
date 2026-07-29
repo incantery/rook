@@ -21,6 +21,7 @@ const registrypkg = @import("registry.zig");
 const pastepkg = @import("paste.zig");
 const hostc = @import("hostc.zig");
 const themepkg = @import("theme.zig");
+const uipkg = @import("ui.zig");
 const stats = @import("stats.zig");
 
 extern "c" fn CACurrentMediaTime() f64;
@@ -3670,9 +3671,21 @@ pub const App = struct {
                 std.fmt.bufPrint(&chip, " {d} {s}{s} ", .{ i + 1, title, z }) catch continue;
 
             const fg = if (is_active) th.bar_value else if (t.bell) th.accent else th.bar_fg;
-            const bg = self.glassBg(if (is_active) th.chip_active_bg else th.bar_bg);
-            const w = ui.text(x, ty, label, fg, bg);
-            if (is_active) ui.rect(x, self.contentY() - self.sep * 2, w, self.sep * 2, th.accent);
+            // A chip is a SHAPE, not a run of coloured cells. Painting
+            // the pill first and drawing the glyphs over it is what lets
+            // it have corners at all — text() would lay a square
+            // background back over them.
+            const w = @as(f32, @floatFromInt(std.unicode.utf8CountCodepoints(label) catch label.len)) * cw;
+            const chip_y = ty - (self.tab_h - self.renderer.cell_h) / 2 + self.m.gap / 2;
+            const chip_h = self.tab_h - self.m.gap;
+            if (is_active)
+                ui.roundRect(x, chip_y, w, chip_h, self.glassBg(th.chip_active_bg), .{ .radius = self.m.radius });
+            _ = ui.textOver(x, ty, label, fg);
+            // The underline says which tab owns the content below, which
+            // the lifted fill alone does not. Inset by the radius so it
+            // starts where the chip's edge is actually straight.
+            if (is_active)
+                ui.rect(x + self.m.radius, self.contentY() - self.sep * 2, w - self.m.radius * 2, self.sep * 2, th.accent);
             if (i < self.chip_x.len) {
                 self.chip_x[i] = .{ x, x + w };
                 self.chip_n = i + 1;
@@ -3731,6 +3744,15 @@ pub const App = struct {
         }
     }
 
+    /// The selected row in a side panel: a rounded highlight inset from
+    /// the panel's edges, so it reads as a row IN the panel rather than
+    /// a band across it. One helper because four tenants draw the same
+    /// row, and a selection that looked different in each would be four
+    /// vocabularies for one idea.
+    fn drawRowSelection(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, y: f32, h: f32) void {
+        ui.roundRect(r.x + self.m.gap, y, r.w - self.m.gap * 2, h, th.chip_active_bg, .{ .radius = self.m.radius });
+    }
+
     fn drawReview(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
         const cw = self.renderer.cell_w;
         const ch = self.renderer.cell_h;
@@ -3738,6 +3760,7 @@ pub const App = struct {
         const bg = self.glassBg(th.bar_bg);
         const tx = r.x + self.m.gutter;
         var y = top;
+        var clipbuf: [256]u8 = undefined;
 
         if (!self.rev.live) {
             _ = ui.text(tx, y + (row_h - ch) / 2, "host unreachable", th.bar_fg, bg);
@@ -3756,10 +3779,10 @@ pub const App = struct {
             std.fmt.bufPrint(&gbuf, "{s} READY · {d} reviewed", .{ self.rev.verb.get(), self.rev.total }) catch ""
         else
             std.fmt.bufPrint(&gbuf, "{s} blocked · {d} of {d} left", .{ self.rev.verb.get(), self.rev.blocking, self.rev.total }) catch "";
-        _ = ui.text(tx, y + (row_h - ch) / 2, g[0..@min(g.len, cols)], if (self.rev.ready) th.accent else th.ed_err, bg);
+        _ = ui.text(tx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, g, cols), if (self.rev.ready) th.accent else th.ed_err, bg);
         y += row_h;
         const lbl = self.rev.label.get();
-        _ = ui.text(tx, y + (row_h - ch) / 2, lbl[0..@min(lbl.len, cols)], th.bar_fg, bg);
+        _ = ui.text(tx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, lbl, cols), th.bar_fg, bg);
         y += row_h;
 
         const avail = r.y + r.h - y - row_h;
@@ -3768,25 +3791,24 @@ pub const App = struct {
 
         for (self.rev.slice()[0..shown], 0..) |*f, i| {
             const selected = i == self.rev_sel;
-            const rbg = if (selected) th.chip_active_bg else bg;
-            if (selected) ui.rect(r.x, y, r.w, row_h * 2, th.chip_active_bg);
+            if (selected) self.drawRowSelection(ui, r, y, row_h * 2);
             const mfg = switch (f.state) {
                 .approved, .deferred => th.bar_fg,
                 .rejected => th.ed_err,
                 else => th.accent,
             };
             var mx = tx;
-            mx += ui.text(mx, y + (row_h - ch) / 2, f.state.mark(), mfg, rbg);
+            mx += ui.textOver(mx, y + (row_h - ch) / 2, f.state.mark(), mfg);
             var loc: [140]u8 = undefined;
             const base = f.path.get();
             const file = if (std.mem.lastIndexOfScalar(u8, base, '/')) |sl| base[sl + 1 ..] else base;
             const s2 = std.fmt.bufPrint(&loc, "{s}:{d}", .{ file, f.line }) catch file;
-            _ = ui.text(mx, y + (row_h - ch) / 2, s2[0..@min(s2.len, cols -| 2)], if (selected) th.bar_value else th.bar_fg, rbg);
+            _ = ui.textOver(mx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, s2, cols -| 2), if (selected) th.bar_value else th.bar_fg);
             if (f.risk >= 7)
-                _ = ui.textRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2, "risk", th.ed_err, rbg);
+                _ = ui.textOverRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2, "risk", th.ed_err);
             y += row_h;
             const wtxt = f.what.get();
-            _ = ui.text(tx + cw * 2, y + (row_h - ch) / 2, wtxt[0..@min(wtxt.len, cols -| 2)], th.bar_fg, rbg);
+            _ = ui.textOver(tx + cw * 2, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, wtxt, cols -| 2), th.bar_fg);
             y += row_h;
         }
         const hidden = self.rev.slice().len - shown + self.rev.more;
@@ -3807,6 +3829,7 @@ pub const App = struct {
         const bg = self.glassBg(th.bar_bg);
         const tx = r.x + self.m.gutter;
         var y = top;
+        var clipbuf: [256]u8 = undefined;
 
         if (!self.thr.live) {
             _ = ui.text(tx, y + (row_h - ch) / 2, "host unreachable", th.bar_fg, bg);
@@ -3823,22 +3846,21 @@ pub const App = struct {
 
         for (self.thr.slice()[0..shown], 0..) |*t, i| {
             const selected = i == self.thr_sel;
-            const rbg = if (selected) th.chip_active_bg else bg;
-            if (selected) ui.rect(r.x, y, r.w, row_h * 2, th.chip_active_bg);
+            if (selected) self.drawRowSelection(ui, r, y, row_h * 2);
             // An UNDELIVERED thread is the one failure the old model
             // rendered as a normal wait: submitted, and nobody was told.
             const mark: []const u8 = if (t.undelivered) "! " else if (t.has_draft) "✎ " else "· ";
             const mfg = if (t.undelivered) th.ed_err else if (t.has_draft) th.accent else th.bar_fg;
             var mx = tx;
-            mx += ui.text(mx, y + (row_h - ch) / 2, mark, mfg, rbg);
+            mx += ui.textOver(mx, y + (row_h - ch) / 2, mark, mfg);
             var loc: [140]u8 = undefined;
             const base = t.path.get();
             const file = if (std.mem.lastIndexOfScalar(u8, base, '/')) |sl| base[sl + 1 ..] else base;
             const s2 = std.fmt.bufPrint(&loc, "{s}:{d}", .{ file, t.line }) catch file;
-            _ = ui.text(mx, y + (row_h - ch) / 2, s2[0..@min(s2.len, cols -| 2)], if (selected) th.bar_value else th.bar_fg, rbg);
+            _ = ui.textOver(mx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, s2, cols -| 2), if (selected) th.bar_value else th.bar_fg);
             y += row_h;
             const a = t.anchor.get();
-            _ = ui.text(tx + cw * 2, y + (row_h - ch) / 2, a[0..@min(a.len, cols -| 2)], th.bar_fg, rbg);
+            _ = ui.textOver(tx + cw * 2, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, a, cols -| 2), th.bar_fg);
             y += row_h;
         }
         const hidden = self.thr.slice().len - shown + self.thr.more;
@@ -3859,6 +3881,7 @@ pub const App = struct {
         const bg = self.glassBg(th.bar_bg);
         const tx = r.x + self.m.gutter;
         var y = top;
+        var clipbuf: [256]u8 = undefined;
 
         if (!self.deck.live) {
             _ = ui.text(tx, y + (row_h - ch) / 2, "host unreachable", th.bar_fg, bg);
@@ -3876,8 +3899,7 @@ pub const App = struct {
 
         for (self.deck.slice()[0..shown], 0..) |*a, i| {
             const selected = i == self.deck_sel;
-            const rbg = if (selected) th.chip_active_bg else bg;
-            if (selected) ui.rect(r.x, y, r.w, row_h * 2, th.chip_active_bg);
+            if (selected) self.drawRowSelection(ui, r, y, row_h * 2);
             // The state dot carries the whole triage: what needs you is
             // the accent, what is moving is normal, what is idle recedes.
             const dot: []const u8 = switch (a.state) {
@@ -3891,17 +3913,17 @@ pub const App = struct {
                 .quiet => th.bar_fg,
             };
             var mx = tx;
-            mx += ui.text(mx, y + (row_h - ch) / 2, dot, dotfg, rbg);
+            mx += ui.textOver(mx, y + (row_h - ch) / 2, dot, dotfg);
             // Workspace-relative, not the last path segment: an agent in
             // rook/app must not read as "app", which every repo has.
             var lblbuf: [96]u8 = undefined;
             const name = self.cwdLabel(a.cwd.get(), &lblbuf);
-            _ = ui.text(mx, y + (row_h - ch) / 2, name[0..@min(name.len, cols -| 2)], if (selected) th.bar_value else th.bar_fg, rbg);
+            _ = ui.textOver(mx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, name, cols -| 2), if (selected) th.bar_value else th.bar_fg);
             if (a.interactive)
-                _ = ui.textRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2, "picker", th.bar_fg, rbg);
+                _ = ui.textOverRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2, "picker", th.bar_fg);
             y += row_h;
             const what = a.what.get();
-            _ = ui.text(tx + cw * 2, y + (row_h - ch) / 2, what[0..@min(what.len, cols -| 2)], th.bar_fg, rbg);
+            _ = ui.textOver(tx + cw * 2, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, what, cols -| 2), th.bar_fg);
             y += row_h;
         }
 
@@ -3923,6 +3945,7 @@ pub const App = struct {
         const bg = self.glassBg(th.bar_bg);
         const tx = r.x + self.m.gutter;
         var y = top;
+        var clipbuf: [256]u8 = undefined;
         const a = self.ask orelse {
             _ = ui.text(tx, y + (row_h - ch) / 2, "no question", th.bar_fg, bg);
             return;
@@ -3936,7 +3959,7 @@ pub const App = struct {
         if (a.cwd.len > 0) {
             var srcbuf: [96]u8 = undefined;
             const src = self.askSourceLabel(&srcbuf);
-            _ = ui.text(tx, y + (row_h - ch) / 2, src[0..@min(src.len, cols)], th.accent, bg);
+            _ = ui.text(tx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, src, cols), th.accent, bg);
             y += row_h;
         }
 
@@ -3955,8 +3978,7 @@ pub const App = struct {
 
         for (q.options[0..q.n], 0..) |o, i| {
             const selected = i == self.ask_sel;
-            const rbg = if (selected) th.chip_active_bg else bg;
-            if (selected) ui.rect(r.x, y, r.w, row_h, th.chip_active_bg);
+            if (selected) self.drawRowSelection(ui, r, y, row_h);
             // ● / ○ for single, [x] / [ ] for multi — the mark says which
             // KIND of question this is without a word of explanation.
             const mark: []const u8 = if (q.multi)
@@ -3964,9 +3986,9 @@ pub const App = struct {
             else
                 (if (selected) "(*) " else "( ) ");
             var mx = tx;
-            mx += ui.text(mx, y + (row_h - ch) / 2, mark, if (selected) th.accent else th.bar_fg, rbg);
+            mx += ui.textOver(mx, y + (row_h - ch) / 2, mark, if (selected) th.accent else th.bar_fg);
             const lbl = o.label.get();
-            _ = ui.text(mx, y + (row_h - ch) / 2, lbl[0..@min(lbl.len, cols -| 4)], if (selected) th.bar_value else th.bar_fg, rbg);
+            _ = ui.textOver(mx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, lbl, cols -| 4), if (selected) th.bar_value else th.bar_fg);
             y += row_h;
             // The description only for the row under the cursor: all of
             // them at once is a wall, none of them loses the tradeoff.
@@ -3978,15 +4000,14 @@ pub const App = struct {
         // pick from options that miss the point.
         const other = self.askOtherRow();
         const osel = self.ask_sel == other;
-        if (osel) ui.rect(r.x, y, r.w, row_h, th.chip_active_bg);
-        const obg = if (osel) th.chip_active_bg else bg;
+        if (osel) self.drawRowSelection(ui, r, y, row_h);
         var ox = tx;
-        ox += ui.text(ox, y + (row_h - ch) / 2, if (q.free_text) "> " else "(+) ", if (osel) th.accent else th.bar_fg, obg);
+        ox += ui.textOver(ox, y + (row_h - ch) / 2, if (q.free_text) "> " else "(+) ", if (osel) th.accent else th.bar_fg);
         if (self.ask_text_len > 0) {
             const t = self.ask_text[0..self.ask_text_len];
-            _ = ui.text(ox, y + (row_h - ch) / 2, t[t.len -| (cols -| 4) ..], th.bar_value, obg);
+            _ = ui.textOver(ox, y + (row_h - ch) / 2, t[t.len -| (cols -| 4) ..], th.bar_value);
         } else {
-            _ = ui.text(ox, y + (row_h - ch) / 2, if (q.free_text) "type an answer" else "Other…", th.bar_fg, obg);
+            _ = ui.textOver(ox, y + (row_h - ch) / 2, if (q.free_text) "type an answer" else "Other…", th.bar_fg);
         }
         if (osel) {
             const used: f32 = @floatFromInt(@min(self.ask_text_len, cols -| 4) + 4);
@@ -3999,7 +4020,7 @@ pub const App = struct {
             @as([]const u8, if (q.multi) "space ticks · " else ""),
             @as([]const u8, if (a.cwd.len > 0) " · ^G goes there" else ""),
         }) catch "enter sends · esc dismisses";
-        _ = ui.text(tx, y + (row_h - ch) / 2, h[0..@min(h.len, cols)], th.bar_fg, bg);
+        _ = ui.text(tx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, h, cols), th.bar_fg, bg);
     }
 
     /// How to name where an ask came from. A workspace name if the cwd is
@@ -4084,6 +4105,7 @@ pub const App = struct {
         const bg = self.glassBg(th.bar_bg);
         const tx = r.x + self.m.gutter;
         var y = top;
+        var clipbuf: [256]u8 = undefined;
 
         // "Nothing needs you" and "we can't reach the host" are
         // different facts and must not render the same.
@@ -4111,8 +4133,7 @@ pub const App = struct {
                 _ = ui.textRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2, "picker", th.bar_fg, bg);
             y += row_h;
             const room: usize = @intFromFloat(@max(0, @divFloor(r.w - self.m.gutter * 2, cw)));
-            const t = it.text();
-            _ = ui.text(tx, y + (row_h - ch) / 2, t[0..@min(t.len, room)], th.bar_fg, bg);
+            _ = ui.text(tx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, it.text(), room), th.bar_fg, bg);
             y += row_h;
         }
 
@@ -4139,23 +4160,32 @@ pub const App = struct {
         const x = (self.px_w - w) / 2;
         const y = self.contentY() + self.renderer.cell_h;
 
+        // Elevation, then the card. A modal that shares an edge with the
+        // work behind it reads as part of it; the shadow is the only
+        // thing that says "this is over your terminal, and temporary".
+        ui.shadow(x, y + self.m.gap, w, h, self.m.radius_card, self.m.elevation, .{ 0, 0, 0, 150 });
         // A quiet border, not an accent one. The accent is the SELECTED
         // row's mark; spending it on the container too meant the eye had
         // two equally loud things to find in a list you open to pick one
         // thing from.
-        ui.rect(x - self.sep, y - self.sep, w + self.sep * 2, h + self.sep * 2, th.sep);
-        ui.rect(x, y, w, h, th.bar_bg);
+        ui.roundRect(x, y, w, h, th.bar_bg, .{
+            .radius = self.m.radius_card,
+            .border = self.sep,
+            .border_color = th.sep,
+        });
 
         // Input row. The prompt names the mode — with two pickers on two
         // different keys, "which list am I in" has to be answerable
         // without reading the rows.
+        // Every run inside the card is drawn OVER it — a per-glyph
+        // background would square off the corners it sits inside.
         var tx = x + gut;
         const ty = y + self.m.gap + (row_h - self.renderer.cell_h) / 2;
-        tx += ui.text(tx, ty, switch (self.pal_mode) {
+        tx += ui.textOver(tx, ty, switch (self.pal_mode) {
             .workspaces => "workspace ",
             .commands => "command ",
-        }, th.bar_fg, th.bar_bg);
-        tx += ui.text(tx, ty, self.pal_input[0..self.pal_input_len], th.bar_value, th.bar_bg);
+        }, th.bar_fg);
+        tx += ui.textOver(tx, ty, self.pal_input[0..self.pal_input_len], th.bar_value);
         ui.rect(tx, ty, cw / 4, self.renderer.cell_h, th.accent); // caret
 
         // What you typed and what matched are two different things, and
@@ -4163,15 +4193,17 @@ pub const App = struct {
         ui.rect(x, y + self.m.gap + row_h, w, self.sep, th.sep);
         var ry = y + self.m.gap + row_h + self.sep;
         if (self.pal_nfiltered == 0) {
-            _ = ui.text(x + gut, ry + (row_h - self.renderer.cell_h) / 2, "no matches", th.bar_fg, th.bar_bg);
+            _ = ui.textOver(x + gut, ry + (row_h - self.renderer.cell_h) / 2, "no matches", th.bar_fg);
             return;
         }
         for (self.pal_filtered[0..shown], 0..) |item_i, vi| {
             const selected = vi == self.pal_sel;
-            const bg = if (selected) th.chip_active_bg else th.bar_bg;
             if (selected) {
-                ui.rect(x, ry, w, row_h, th.chip_active_bg);
-                ui.rect(x, ry, self.sep * 2, row_h, th.accent);
+                // Inset from the card's edge, so the highlight reads as
+                // a row IN the card rather than a band across it.
+                const sx = x + self.m.gap;
+                ui.roundRect(sx, ry, w - self.m.gap * 2, row_h, th.chip_active_bg, .{ .radius = self.m.radius });
+                ui.rect(sx, ry + self.m.radius, self.sep * 2, row_h - self.m.radius * 2, th.accent);
             }
             const rty = ry + (row_h - self.renderer.cell_h) / 2;
             var lbl: [96]u8 = undefined;
@@ -4197,10 +4229,10 @@ pub const App = struct {
                     break :blk .{ l, if (c.keys.len > 0) c.keys else c.id };
                 },
             };
-            _ = ui.text(x + gut, rty, label, if (selected) th.bar_value else th.bar_fg, bg);
+            _ = ui.textOver(x + gut, rty, label, if (selected) th.bar_value else th.bar_fg);
             const room = w - 2 * gut - @as(f32, @floatFromInt(label.len + 2)) * cw;
             if (@as(f32, @floatFromInt(detail.len)) * cw < room)
-                _ = ui.textRight(x + w - gut, rty, detail, th.bar_fg, bg);
+                _ = ui.textOverRight(x + w - gut, rty, detail, th.bar_fg);
             ry += row_h;
         }
     }

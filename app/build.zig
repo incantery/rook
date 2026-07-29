@@ -177,6 +177,28 @@ pub fn build(b: *std.Build) void {
     review_tests.root_module.link_libc = true;
     test_step.dependOn(&b.addRunArtifact(review_tests).step);
 
+    // The UI layer's text fitting. Its own root for the reason logged
+    // above editor_tests — the exe module's test collection does not
+    // reach these decls, and a suite that is never run is worse than no
+    // suite. It needs objc and the renderer's frameworks because ui.zig
+    // sits on render.zig; the tests themselves touch neither.
+    const ui_mod = b.createModule(.{
+        .root_source_file = b.path("src/ui.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    if (b.lazyDependency("zig_objc", .{ .target = b.graph.host, .optimize = .Debug })) |dep| {
+        ui_mod.addImport("objc", dep.module("objc"));
+    }
+    ui_mod.link_libc = true;
+    ui_mod.linkFramework("AppKit", .{});
+    ui_mod.linkFramework("Metal", .{});
+    ui_mod.linkFramework("QuartzCore", .{});
+    ui_mod.linkFramework("CoreGraphics", .{});
+    ui_mod.linkFramework("CoreText", .{});
+    const ui_tests = b.addTest(.{ .root_module = ui_mod });
+    test_step.dependOn(&b.addRunArtifact(ui_tests).step);
+
     // e2e: spawns the real app and drives its ctl socket.
     //
     // NOT part of `test`, and not in CI — it needs a window server, a

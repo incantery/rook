@@ -563,6 +563,44 @@ CAPABILITY: the display's rate, dipping only when measured frame cost
 can't fit the vsync budget — demand pacing (dirty-skip drawing less
 because less happened) never reads as lag.
 
+### The chrome's spatial system
+
+`ui.Metrics` holds every distance the chrome spaces itself by — gutter,
+pane padding, row height, gap, radius, elevation — derived once per
+resize from the backing scale and the cell box. Points, not cells, for
+anything that reads as an EDGE: an edge belongs to the window, not to
+the text inside it. Before it existed the bars inset themselves by one
+CELL, so the gutter moved with the font size while nothing else did,
+and the numbers were computed in two places that had to agree by hand.
+
+Panes inset their GRID from their BOX (`gridOrigin`): the box still
+fills, tiles and hit-tests, only the cells move. It is one function
+because four sites map pixels to cells — draw, click, cursor, resize —
+and three of them agreeing is a bug you find with the mouse.
+
+`drawRoundRect` is one signed-distance field doing three jobs: inside
+it is a fill, a band at the edge is a border, a falloff outside it is a
+shadow. Chips, selected rows and the palette card are all quads on the
+same encoder as the grid — a widget is still never its own draw path.
+
+Two gotchas that cost real time here:
+
+- **Metal aligns `float4` to 16 bytes; Zig aligns `[4]f32` to 4.** A
+  mixed uniform struct develops padding holes on one side only, and the
+  first version of the rounded-rect pipeline drew *nothing* because
+  `rect` landed 8 bytes early. `RRUniforms` is all-`float4` with a
+  `comptime` offset assertion.
+- **The bg pipeline does not blend.** `ui.text` lays a background cell
+  under every glyph, edge to edge, so drawing it on a pill crops the
+  corners off — and at alpha 0 it punches a hole. Anything sitting on a
+  painted shape uses `ui.textOver`, which runs the glyph pass alone.
+
+`ui.clip` fits a string to N cells with an ellipsis. Text that simply
+stops reads as a rendering fault; "…" reads as "there is more", which
+in a 34-column side pane is the truth most of the time. It counts
+codepoints, so a cut cannot leave half of one for `initUnchecked` to
+iterate.
+
 ```
 zig build                    # needs zig 0.16
 ./zig-out/bin/rook win      # the app (make dev from repo root does both)
@@ -847,8 +885,9 @@ chords remain alongside; config overriding them comes later.
 - `src/buffer.zig` — document: rope + path + grouped undo
 - `src/editor.zig` — the vim-core modal machine; pure model, tested
   headless
-- `src/ui.zig` — the UI layer seed: rects + text runs (mono v1; CTLine
-  shaping is the upgrade path when tabs/finder need proportional)
+- `src/ui.zig` — the UI layer seed: the metrics, rects, rounded rects,
+  shadows and text runs (mono v1; CTLine shaping is the upgrade path
+  when tabs/finder need proportional)
 - `src/macos.zig` — AppKit window, CAMetalLayer, CVDisplayLink loop, keys,
   the scene (draw_lock serializes; lock order draw_lock → session mutex)
 - `src/render.zig` — CoreText ASCII atlas + two instanced Metal passes

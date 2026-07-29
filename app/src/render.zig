@@ -111,17 +111,113 @@ const shader_src =
     \\  float4 emoji = colors.sample(s, in.uv); // premultiplied
     \\  return mix(mono, emoji, in.sel);
     \\}
+    \\
+    \\// --- Rounded rectangles, borders and shadows ---
+    \\// One signed-distance field does all three: inside it is a fill,
+    \\// a band at the edge is a border, and a falloff OUTSIDE it is a
+    \\// shadow. Output is premultiplied, like fg_fs.
+    \\// EVERY member is a float4 on purpose. Metal aligns float4 to 16
+    \\// bytes and Zig aligns [4]f32 to 4, so a mixed struct develops
+    \\// padding holes on one side only — the first version of this drew
+    \\// nothing at all, because `rect` landed 8 bytes early.
+    \\struct RRUni {
+    \\  float4 vp;      // xy = viewport
+    \\  float4 rect;    // xywh in px
+    \\  float4 params;  // x = radius, y = border, z = soften
+    \\  float4 fill;
+    \\  float4 edge;
+    \\};
+    \\struct RROut { float4 pos [[position]]; float2 px; };
+    \\
+    \\vertex RROut rr_vs(uint vid [[vertex_id]], constant RRUni& u [[buffer(0)]]) {
+    \\  // A shadow paints outside its rect, so the quad grows to hold it.
+    \\  float grow = u.params.z * 3.0;
+    \\  float2 o = u.rect.xy - grow;
+    \\  float2 s = u.rect.zw + grow * 2.0;
+    \\  float2 corner = float2(vid & 1, vid >> 1);
+    \\  float2 px = o + corner * s;
+    \\  RROut r;
+    \\  r.pos = float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0.0, 1.0);
+    \\  r.px = px;
+    \\  return r;
+    \\}
+    \\
+    \\
+    \\static float sd_round_box(float2 p, float2 b, float r) {
+    \\  float2 q = abs(p) - b + r;
+    \\  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+    \\}
+    \\
+    \\fragment float4 rr_fs(RROut in [[stage_in]], constant RRUni& u [[buffer(0)]]) {
+    \\  float radius = u.params.x, border = u.params.y, soften = u.params.z;
+    \\  float2 c = u.rect.xy + u.rect.zw * 0.5;
+    \\  float2 b = u.rect.zw * 0.5;
+    \\  float r = min(radius, min(b.x, b.y));
+    \\  float d = sd_round_box(in.px - c, b, r);
+    \\  if (soften > 0.0) {
+    \\    float a = u.fill.a * (1.0 - smoothstep(0.0, soften, d));
+    \\    return float4(u.fill.rgb * a, a);
+    \\  }
+    \\  float inside = 1.0 - smoothstep(-0.7, 0.7, d);
+    \\  float4 col = u.fill;
+    \\  if (border > 0.0) {
+    \\    float core = 1.0 - smoothstep(-0.7, 0.7, d + border);
+    \\    col = mix(u.edge, u.fill, core);
+    \\  }
+    \\  float a = col.a * inside;
+    \\  return float4(col.rgb * a, a);
+    \\}
 ;
 
 const atlas_px: usize = 2048;
 
 pub const GlyphLoc = struct { uvx: u16, uvy: u16, color: bool = false };
 
+/// Must match the MSL RRUni layout — all float4, see the note there.
+/// Five 16-byte rows with no holes on either side.
+const RRUniforms = extern struct {
+    vp: [4]f32,
+    rect: [4]f32,
+    /// radius, border, soften, unused.
+    params: [4]f32,
+    fill: [4]f32,
+    edge: [4]f32 = .{ 0, 0, 0, 0 },
+};
+
+comptime {
+    std.debug.assert(@sizeOf(RRUniforms) == 80);
+    std.debug.assert(@offsetOf(RRUniforms, "rect") == 16);
+    std.debug.assert(@offsetOf(RRUniforms, "fill") == 48);
+}
+
+/// How a rounded rect is painted. Defaults give a plain filled rect
+/// with square corners — the same thing `drawRect` draws, so a caller
+/// only pays for what it asks for.
+pub const RectStyle = struct {
+    radius: f32 = 0,
+    /// Border thickness in px, drawn INSIDE the shape. 0 = none.
+    border: f32 = 0,
+    border_color: [4]u8 = .{ 0, 0, 0, 0 },
+    /// Blur radius in px. Non-zero makes this a SHADOW: the shape is
+    /// not filled, it falls off outward over this distance.
+    soften: f32 = 0,
+};
+
+fn norm(c: [4]u8) [4]f32 {
+    return .{
+        @as(f32, @floatFromInt(c[0])) / 255.0,
+        @as(f32, @floatFromInt(c[1])) / 255.0,
+        @as(f32, @floatFromInt(c[2])) / 255.0,
+        @as(f32, @floatFromInt(c[3])) / 255.0,
+    };
+}
+
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
     device: objc.Object,
     bg_pso: objc.Object,
     fg_pso: objc.Object,
+    rr_pso: objc.Object,
     atlas: objc.Object,
     cells_buf: objc.Object,
     cells_cap: usize,
@@ -212,6 +308,9 @@ pub const Renderer = struct {
 
         const bg_pso = try makePipeline(device, lib, "bg_vs", "bg_fs", false);
         const fg_pso = try makePipeline(device, lib, "fg_vs", "fg_fs", true);
+        // Blended: a rounded corner IS an alpha ramp, and a shadow is
+        // nothing but one.
+        const rr_pso = try makePipeline(device, lib, "rr_vs", "rr_fs", true);
 
         // --- Cell buffer (shared storage) ---
         const cells_buf = device.msgSend(objc.Object, "newBufferWithLength:options:", .{
@@ -224,6 +323,7 @@ pub const Renderer = struct {
             .device = device,
             .bg_pso = bg_pso,
             .fg_pso = fg_pso,
+            .rr_pso = rr_pso,
             .atlas = atlas,
             .cells_buf = cells_buf,
             .cells_cap = max_cells,
@@ -503,6 +603,29 @@ pub const Renderer = struct {
         encoder.msgSend(void, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{ @as(u64, 4), @as(u64, 0), @as(u64, 4), n });
     }
 
+    /// The glyph half of `drawGrid`, without the background pass. The bg
+    /// pipeline does NOT blend — it writes cell backgrounds straight
+    /// through, alpha included — so running it over an already-painted
+    /// shape squares that shape off (and, at alpha 0, punches a hole in
+    /// it). Chrome that sits on a pill or a card draws with this.
+    pub fn drawGlyphs(self: *Renderer, encoder: objc.Object, vp_w: f32, vp_h: f32, origin_x: f32, origin_y: f32, cell_off: usize, cols: u32, rows: u32) void {
+        const uni = Uniforms{
+            .vp = .{ vp_w, vp_h },
+            .cell = .{ self.cell_w, self.cell_h },
+            .cols = cols,
+            .atlas = .{ @floatFromInt(atlas_px), @floatFromInt(atlas_px) },
+            .origin = .{ origin_x, origin_y },
+        };
+        const n: u64 = @as(u64, cols) * rows;
+        const byte_off: u64 = cell_off * @sizeOf(CellData);
+        encoder.msgSend(void, "setRenderPipelineState:", .{self.fg_pso.value});
+        encoder.msgSend(void, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &uni), @as(u64, @sizeOf(Uniforms)), @as(u64, 0) });
+        encoder.msgSend(void, "setVertexBuffer:offset:atIndex:", .{ self.cells_buf.value, byte_off, @as(u64, 1) });
+        encoder.msgSend(void, "setFragmentTexture:atIndex:", .{ self.atlas.value, @as(u64, 0) });
+        encoder.msgSend(void, "setFragmentTexture:atIndex:", .{ self.color_atlas.value, @as(u64, 1) });
+        encoder.msgSend(void, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{ @as(u64, 4), @as(u64, 0), @as(u64, 4), n });
+    }
+
     /// Solid rect (separators, focus edges, pane backgrounds): the bg
     /// pipeline with cell = the rect and one instance passed inline.
     pub fn drawRect(self: *Renderer, encoder: objc.Object, vp_w: f32, vp_h: f32, x: f32, y: f32, w: f32, h: f32, rgba: [4]u8) void {
@@ -518,6 +641,24 @@ pub const Renderer = struct {
         encoder.msgSend(void, "setRenderPipelineState:", .{self.bg_pso.value});
         encoder.msgSend(void, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &uni), @as(u64, @sizeOf(Uniforms)), @as(u64, 0) });
         encoder.msgSend(void, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &cell), @as(u64, @sizeOf(CellData)), @as(u64, 1) });
+        encoder.msgSend(void, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{ @as(u64, 4), @as(u64, 0), @as(u64, 4), @as(u64, 1) });
+    }
+
+    /// A rounded rect, a border, or a shadow — one signed-distance
+    /// field, so the chrome's cards and chips are still just quads on
+    /// the same encoder as the grid.
+    pub fn drawRoundRect(self: *Renderer, encoder: objc.Object, vp_w: f32, vp_h: f32, x: f32, y: f32, w: f32, h: f32, rgba: [4]u8, style: RectStyle) void {
+        if (w < 0.5 or h < 0.5) return;
+        const uni = RRUniforms{
+            .vp = .{ vp_w, vp_h, 0, 0 },
+            .rect = .{ x, y, w, h },
+            .params = .{ style.radius, style.border, style.soften, 0 },
+            .fill = norm(rgba),
+            .edge = norm(style.border_color),
+        };
+        encoder.msgSend(void, "setRenderPipelineState:", .{self.rr_pso.value});
+        encoder.msgSend(void, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &uni), @as(u64, @sizeOf(RRUniforms)), @as(u64, 0) });
+        encoder.msgSend(void, "setFragmentBytes:length:atIndex:", .{ @as(*const anyopaque, &uni), @as(u64, @sizeOf(RRUniforms)), @as(u64, 0) });
         encoder.msgSend(void, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{ @as(u64, 4), @as(u64, 0), @as(u64, 4), @as(u64, 1) });
     }
 };
