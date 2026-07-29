@@ -383,8 +383,18 @@ The zig editor exists to be a *good enough* in-app buffer. The bar it
 must clear is "I don't reach for a terminal nvim inside rook", not
 "it replaces Monaco feature for feature".
 
-- [ ] **Diff / review viewer** — required by §2's review panel, so it's
-      the one editor item on the critical path
+- [x] **Diff / review viewer** — `<leader>d` / `:DiffOpen`, and `D` on a
+      review finding opens that file's diff at that finding's line.
+      Unified rather than side-by-side: side-by-side needs ~160 columns
+      before it truncates code, and rook's differentiator is the review
+      rather than the diff chrome. diffdoc.zig's row map carries both
+      sides' numbers anyway, so a side-by-side mode later needs the map
+      and nothing else. Two properties it exists to hold: the gutter
+      numbers by FILE line (deletions from the original side, everything
+      else from the modified one) because every other surface in rook
+      names a file line, and the buffer is read-only at
+      `Buffer.applyEdit` rather than at the keymap — forty-nine mutation
+      sites all land there, and a keymap guard would miss one silently.
 - [ ] **Finder** (⌃P) — pluggable sources + preview. The workspace
       palette is already the primitive; this is a second source.
 - [ ] **Grep** (⌃G, host `/grep`) + **quickfix** pane (TODO.md has the
