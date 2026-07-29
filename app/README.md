@@ -179,11 +179,18 @@ editor is a pure model — keys in, a styled character grid out — so
 with ZERO C linkage: the highlighter attaches through
 function-pointer hooks (syntax.zig), never an import (the directory
 reader is plain libc readdir, which macOS links regardless). Editor
-debts: marks hold a line and column rather than an anchored offset, so
-editing text ABOVE one leaves it pointing at the wrong place; no
-numbered registers; `f`/`t` target ASCII only; wide glyphs count one
-column; relative :e paths resolve against the app cwd rather than the
-buffer's dir.
+debts: case operators are ASCII-only; `f`/`t` target ASCII only; wide
+glyphs count one column; relative :e paths resolve against the app cwd
+rather than the buffer's dir.
+
+Marks are ANCHORED: they hold a byte offset, and `Buffer.on_edit`
+reports every edit — offset, bytes removed, bytes added — so a mark
+moves with its text rather than pointing at whatever ends up on line
+12. That is one seam on purpose. A position updated by only SOME edits
+is worse than one never updated at all, because it is right often
+enough to be trusted. Undo and redo fire it too, and a mark inside
+deleted text collapses to where that text was rather than being thrown
+away. It is also the seam a git gutter and thread reanchoring want.
 
 Registers are `"a`–`"z`, uppercase appending rather than replacing, and
 `"_` is the black hole — it takes the text and leaves the unnamed

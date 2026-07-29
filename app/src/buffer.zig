@@ -55,6 +55,13 @@ pub const Buffer = struct {
     /// it reaches for, and the primitives are the ones that open
     /// groups.
     group_pinned: bool = false,
+    /// Told about every edit — offset, bytes removed, bytes added — so
+    /// anything holding a POSITION in this buffer can move it. One
+    /// seam on purpose: a position that only some edits update is
+    /// worse than one that never updates, because it is right often
+    /// enough to be trusted.
+    on_edit_ctx: ?*anyopaque = null,
+    on_edit: ?*const fn (*anyopaque, start: usize, removed: usize, added: usize) void = null,
 
     /// Edits are numbered, and the number rides along through undo and
     /// redo. The number on top of the undo stack therefore identifies
@@ -251,6 +258,7 @@ pub const Buffer = struct {
         try self.rope.delete(gpa, start, end);
         try self.rope.insert(gpa, start, text);
         self.version +%= 1;
+        if (self.on_edit) |f| f(self.on_edit_ctx.?, start, end - start, text.len);
         if (clear_redo) {
             for (self.redo_stack.items) |e| gpa.free(e.deleted);
             self.redo_stack.clearRetainingCapacity();
@@ -293,6 +301,7 @@ pub const Buffer = struct {
             });
             try self.rope.delete(gpa, e.off, e.off + e.inserted_len);
             try self.rope.insert(gpa, e.off, e.deleted);
+            if (self.on_edit) |f| f(self.on_edit_ctx.?, e.off, e.inserted_len, e.deleted.len);
             target = e.off;
             gpa.free(e.deleted);
             self.version +%= 1;

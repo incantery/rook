@@ -577,10 +577,16 @@ must clear is "I don't reach for a terminal nvim inside rook", not
 - [ ] Regex gaps: no `\{-}` (non-greedy), no `\zs`/`\ze`, no `\%(`
       non-capturing groups, no back-references INSIDE a pattern, and
       `\c`/`\C` are not honoured mid-pattern (`:s///i` is).
-- [ ] Marks do not shift when text ABOVE them is edited — they hold a
-      line and column, not an anchored offset. Fixing it means routing
-      every buffer edit through one seam that adjusts them, which is
-      the same seam a git gutter and reanchoring want.
+- [x] **Marks are ANCHORED.** They hold a byte offset, and
+      `Buffer.on_edit` tells the editor about every edit — offset,
+      bytes removed, bytes added — so a mark moves with the text
+      instead of pointing at whatever ends up on line 12. One seam on
+      purpose: a position that only SOME edits update is worse than one
+      that never updates, because it is right often enough to be
+      trusted. Undo and redo fire it too. A mark inside deleted text
+      collapses to where that text was, which is the more useful answer
+      than throwing it away. This is the seam the git gutter and
+      thread reanchoring want next.
 - [ ] Editor debts already logged: numbered registers, `f`/`t` target
       ASCII only, wide glyphs = 1 column, relative `:e` resolves
       against app cwd

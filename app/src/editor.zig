@@ -26,8 +26,7 @@
 //!   % . $ N,M 'a '<,'> addresses.
 //! Patterns are vim-magic REGEXES (regex.zig), for `/` `?` `n` `*` and
 //!   `:s`, with `&` and `\1`-`\9` in a replacement.
-//! Debts: marks do not shift when text above them is edited; case
-//!   operators are ASCII-only; f/t target ASCII only; wide glyphs count
+//! Debts: case operators are ASCII-only; f/t target ASCII only; wide glyphs count
 //!   as one column; lines beyond max_line get motion/render math
 //!   clamped.
 
@@ -214,8 +213,12 @@ pub const Editor = struct {
     /// `m` / `` ` `` / `'` waiting for their letter, the 26 marks, and
     /// where the last jump started (`` `` `` and `''`).
     pend_mark: u8 = 0,
-    marks: [26]?Pos = @splat(null),
-    jump: ?Pos = null,
+    /// Marks and the jump position are BYTE OFFSETS, not line/column,
+    /// and every buffer edit moves them (see onBufferEdit). A mark
+    /// that stays on line 12 while you add a line above it is pointing
+    /// at the wrong text and does not say so.
+    marks: [26]?usize = @splat(null),
+    jump: ?usize = null,
 
     grid: std.ArrayListUnmanaged(RCell) = .empty,
     last_cols: usize = 80,
@@ -297,6 +300,8 @@ pub const Editor = struct {
                 try bufferpkg.Buffer.initEmpty(gpa),
         };
         self.is_dir = is_dir;
+        self.buf.on_edit_ctx = self;
+        self.buf.on_edit = onBufferEdit;
         return self;
     }
 
@@ -2025,7 +2030,7 @@ pub const Editor = struct {
                 return;
             }
             if (kind == 'm') {
-                if (ch >= 'a' and ch <= 'z') self.marks[ch - 'a'] = .{ .line = self.cline, .col = self.ccol };
+                if (ch >= 'a' and ch <= 'z') self.marks[ch - 'a'] = self.absOff();
                 self.count = 0;
                 return;
             }
@@ -2942,7 +2947,28 @@ pub const Editor = struct {
     /// motions that move you somewhere you did not aim at with your
     /// eyes set this: `G`, `gg`, `n`, and a mark jump.
     fn setJump(self: *Editor) void {
-        self.jump = .{ .line = self.cline, .col = self.ccol };
+        self.jump = self.absOff();
+    }
+
+    /// Move one anchored position past an edit. A position INSIDE the
+    /// removed span collapses to its start: vim throws such a mark
+    /// away, and pointing at where the text was is the more useful
+    /// answer than pointing at nothing.
+    fn shiftAnchor(off: *usize, start: usize, removed: usize, added: usize) void {
+        if (off.* <= start) return;
+        if (off.* >= start + removed) {
+            off.* = off.* - removed + added;
+        } else {
+            off.* = start;
+        }
+    }
+
+    fn onBufferEdit(ctx: *anyopaque, start: usize, removed: usize, added: usize) void {
+        const self: *Editor = @ptrCast(@alignCast(ctx));
+        for (&self.marks) |*m| {
+            if (m.*) |*off| shiftAnchor(off, start, removed, added);
+        }
+        if (self.jump) |*off| shiftAnchor(off, start, removed, added);
     }
 
     /// Leave visual mode, remembering the selection. Everything that
@@ -3004,10 +3030,16 @@ pub const Editor = struct {
         self.goal = renderCol(self.lineText(self.cline), self.ccol);
     }
 
-    fn markPos(self: *const Editor, letter: u8) ?Pos {
+    fn markOffset(self: *const Editor, letter: u8) ?usize {
         if (letter == '`' or letter == '\'') return self.jump;
         if (letter < 'a' or letter > 'z') return null;
         return self.marks[letter - 'a'];
+    }
+
+    fn markPos(self: *const Editor, letter: u8) ?Pos {
+        const off = @min(self.markOffset(letter) orelse return null, self.buf.rope.byteLen());
+        const line = self.buf.rope.lineOfOffset(off);
+        return .{ .line = line, .col = off - self.buf.rope.lineStart(line) };
     }
 
     /// `` `a `` (exact) and `'a` (first non-blank of the line), as
@@ -7211,4 +7243,111 @@ test "the matching bracket is marked" {
     const gw = Editor.digits(e.lineCountB()) + 1;
     // Row 2 is `}` — the partner of the `{` under the cursor.
     try testing.expectEqual(Style.mode, cells[2 * 40 + gw].st);
+}
+
+// ------------------------------------------------------------ anchored marks
+
+test "a mark survives a line inserted above it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    keys(e, "Gma");
+    keys(e, "ggonew");
+    e.key("\x1b");
+    keys(e, "`aiX");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\nnew\ntwo\nXthree", s);
+}
+
+test "a mark survives a line deleted above it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree\nfour");
+    e.key("\x1b");
+    keys(e, "Gma");
+    keys(e, "ggdd");
+    keys(e, "`aiX");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("two\nthree\nXfour", s);
+}
+
+test "a mark inside deleted text collapses to where it was" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    keys(e, "ggjma"); // on "two"
+    keys(e, "ggdd"); // delete "one" — the mark's line moves up
+    keys(e, "`aiX");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("Xtwo\nthree", s);
+}
+
+test "a mark moves with an edit on its own line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabcdef");
+    e.key("\x1b");
+    keys(e, "0lllma"); // on 'd'
+    keys(e, "0iZZ"); // two characters in front of it
+    e.key("\x1b");
+    keys(e, "`arQ"); // whatever the mark points at becomes Q
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("ZZabcQef", s);
+}
+
+test "the jump position is anchored too" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree\nfour");
+    e.key("\x1b");
+    keys(e, "gg"); // jumped away from the last line, which is remembered
+    keys(e, "Onew"); // a line above everything; `O` does not touch the jump
+    e.key("\x1b");
+    keys(e, "``"); // back to the line it came from, one lower than it was
+    try testing.expectEqual(@as(usize, 4), e.cline);
+}
+
+test "a mark strictly inside a deleted range collapses to its start" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    keys(e, "ggjlma"); // inside "two", not at its first byte
+    keys(e, "ggVjd"); // both lines around it go
+    keys(e, "`aiX");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("Xthree", s);
+}
+
+test "an undo puts a mark back where it was" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree");
+    e.key("\x1b");
+    keys(e, "Gma"); // on "three"
+    keys(e, "ggdd"); // "one" goes; the mark shifts up
+    keys(e, "u"); // and back down again
+    keys(e, "`aiX");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\ntwo\nXthree", s);
 }
