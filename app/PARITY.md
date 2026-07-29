@@ -500,6 +500,16 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       paid, backspace only MOVES, and never deletes text this `R` never
       touched. Any cursor move drops the history, because the offsets
       in it only mean anything for an unbroken run.
+- [x] **Insert mode's own keys** — ctrl-w, ctrl-u, ctrl-t/ctrl-d,
+      ctrl-r, ctrl-o. `<C-o>` is one normal command then back, and it
+      exempts the cursor from the normal-mode clamp for its duration —
+      that one line is the whole reason `<C-o>$` appends instead of
+      overwriting the last character. It waits for QUIESCENCE rather
+      than for one key, so `<C-o>daw` works; and if the command opened
+      its own insert (`<C-o>cw`) it stands down instead of trying to
+      re-enter later. ctrl-t on a still-empty line indents it, where
+      `>>` deliberately would not — diff hygiene is about lines you are
+      not typing on.
 - [ ] Marks do not shift when text ABOVE them is edited — they hold a
       line and column, not an anchored offset. Fixing it means routing
       every buffer edit through one seam that adjusts them, which is

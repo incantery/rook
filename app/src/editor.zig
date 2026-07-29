@@ -13,7 +13,8 @@
 //! D C Y S); x X r R s J gJ ~ p P u ctrl-r, counts, `.`;
 //! f F t T ; , >> << (and > < u U ~ J in visual), text objects
 //! (iw aw iW aW, i" i' i` and the four bracket pairs), autoindent,
-//! "a registers and ma marks; :w :q :q! :wq :x :e :<n>.
+//! "a registers and ma marks; in insert, ctrl-w ctrl-u ctrl-t ctrl-d
+//! ctrl-r ctrl-o; :w :q :q! :wq :x :e :<n>.
 //! Debts: marks do not shift when text above them is edited, case
 //! operators are ASCII-only, no numbered registers, f/t target ASCII
 //! only, wide glyphs count as one column, lines beyond max_line get
@@ -110,6 +111,12 @@ pub const Editor = struct {
     /// Any cursor move drops it, because the offsets it holds are
     /// only meaningful for an unbroken run.
     replacing: bool = false,
+    /// ctrl-r in insert mode is waiting for a register name.
+    pend_ins_reg: bool = false,
+    /// ctrl-o: one normal-mode command, then back to insert. Counts
+    /// down because the step that ARMS it is already in normal mode
+    /// and quiescent, and would otherwise return immediately.
+    ins_oneshot: u8 = 0,
     rep_ev: std.ArrayListUnmanaged(RepEvent) = .empty,
     rep_text: std.ArrayListUnmanaged(u8) = .empty,
 
@@ -572,6 +579,10 @@ pub const Editor = struct {
     }
 
     fn clampNormal(self: *Editor) void {
+        // Mid ctrl-o the cursor still belongs to insert mode, which is
+        // allowed to sit one past the last character. That is the only
+        // reason `<C-o>$` appends instead of overwriting.
+        if (self.ins_oneshot > 0) return;
         const s = self.lineText(self.cline);
         const maxc = lastCpCol(s);
         if (self.ccol > maxc) self.ccol = maxc;
@@ -604,6 +615,16 @@ pub const Editor = struct {
             // without taking it, it is gone — otherwise `"a` followed
             // by a stray `j` would leave the next `x` writing into a.
             if (self.sel_reg != 0 and self.sel_reg == pre_reg and self.quiescent()) self.sel_reg = 0;
+            if (self.ins_oneshot > 0) {
+                if (self.ins_oneshot == 2) {
+                    self.ins_oneshot = 1;
+                } else if (self.mode == .insert) {
+                    self.ins_oneshot = 0; // the command opened its own insert
+                } else if (self.mode == .normal and self.quiescent()) {
+                    self.ins_oneshot = 0;
+                    self.mode = .insert;
+                }
+            }
             self.recordStep(bytes[i..][0..n], pre_mode, pre_ver);
             i += n;
         }
@@ -764,6 +785,57 @@ pub const Editor = struct {
     fn insertKey(self: *Editor, bytes: []const u8) void {
         const gpa = self.gpa;
         const b0 = bytes[0];
+
+        // ctrl-r took the next key as a register name.
+        if (self.pend_ins_reg) {
+            self.pend_ins_reg = false;
+            if (b0 >= 0x20) self.insertRegister(b0);
+            if (bytes.len > 1) self.insertKey(bytes[1..]);
+            return;
+        }
+        switch (b0) {
+            0x17 => { // ctrl-w — the word behind the cursor
+                self.ai_line = null;
+                self.dropReplaceHistory();
+                if (self.ccol == 0) {
+                    self.joinBack();
+                    return;
+                }
+                const p = self.scanWordBack(self.cline, self.ccol);
+                const from = if (p.line == self.cline) p.col else 0;
+                const start = self.buf.rope.lineStart(self.cline);
+                self.buf.deleteRange(gpa, start + from, start + self.ccol) catch return;
+                self.ccol = from;
+                return;
+            },
+            0x15 => { // ctrl-u — everything before the cursor on this line
+                self.ai_line = null;
+                self.dropReplaceHistory();
+                if (self.ccol == 0) return;
+                const start = self.buf.rope.lineStart(self.cline);
+                self.buf.deleteRange(gpa, start, start + self.ccol) catch return;
+                self.ccol = 0;
+                return;
+            },
+            0x14 => { // ctrl-t / ctrl-d — indent this line while typing
+                self.insertShift(true);
+                return;
+            },
+            0x04 => {
+                self.insertShift(false);
+                return;
+            },
+            0x12 => { // ctrl-r — paste a register inline
+                self.pend_ins_reg = true;
+                return;
+            },
+            0x0f => { // ctrl-o — one normal command, then back
+                self.ins_oneshot = 2;
+                self.mode = .normal;
+                return;
+            },
+            else => {},
+        }
         if (b0 == 0x1b) { // ESC → normal, cursor left one cp
             self.dropPendingIndent();
             self.endReplace();
@@ -821,12 +893,8 @@ pub const Editor = struct {
                 const start = self.buf.rope.lineStart(self.cline);
                 self.buf.deleteRange(gpa, start + p, start + self.ccol) catch return;
                 self.ccol = p;
-            } else if (self.cline > 0) {
-                const prev_len = self.lineCap(self.cline - 1);
-                const nl = self.buf.rope.lineStart(self.cline) - 1;
-                self.buf.deleteRange(gpa, nl, nl + 1) catch return;
-                self.cline -= 1;
-                self.ccol = prev_len;
+            } else {
+                self.joinBack();
             }
             return;
         }
@@ -851,6 +919,65 @@ pub const Editor = struct {
             self.ccol += bytes.len;
             self.ai_line = null; // typed on it — it is yours now
         }
+    }
+
+    /// Backspace (and ctrl-w) in column zero: take the newline above.
+    fn joinBack(self: *Editor) void {
+        if (self.cline == 0) return;
+        const prev_len = self.lineCap(self.cline - 1);
+        const nl = self.buf.rope.lineStart(self.cline) - 1;
+        self.buf.deleteRange(self.gpa, nl, nl + 1) catch return;
+        self.cline -= 1;
+        self.ccol = prev_len;
+    }
+
+    /// ctrl-r in insert mode. The register can hold newlines, so the
+    /// cursor is put back by OFFSET rather than by counting columns.
+    fn insertRegister(self: *Editor, name: u8) void {
+        var body: []const u8 = self.reg.items;
+        if (name != '"') {
+            const lo = std.ascii.toLower(name);
+            if (lo < 'a' or lo > 'z') return;
+            body = self.regs[lo - 'a'].text.items;
+        }
+        if (body.len == 0) return;
+        const at = self.absOff();
+        self.buf.insert(self.gpa, at, body) catch return;
+        const end = at + body.len;
+        self.cline = self.buf.rope.lineOfOffset(end);
+        self.ccol = end - self.buf.rope.lineStart(self.cline);
+        self.ai_line = null;
+        self.dropReplaceHistory();
+    }
+
+    /// ctrl-t / ctrl-d — shift this line without moving the cursor off
+    /// the text it was sitting on. `shiftLines` parks at the first
+    /// non-blank, which is right in normal mode and wrong while you
+    /// are typing.
+    fn insertShift(self: *Editor, right: bool) void {
+        const gpa = self.gpa;
+        self.dropReplaceHistory();
+        const s = self.lineText(self.cline);
+        const before = indentLen(s);
+        const tail = self.ccol -| before;
+        if (before == s.len) {
+            // shiftLines leaves whitespace-only lines alone, for the
+            // sake of diffs. On the line you are TYPING on, indenting
+            // it is the entire point.
+            const target = if (right) indentWidth(s) + tab_width else indentWidth(s) -| tab_width;
+            var ibuf: [max_indent]u8 = undefined;
+            const ind = makeIndent(target, self.indentUnit(), &ibuf);
+            const start = self.buf.rope.lineStart(self.cline);
+            self.buf.newUndoGroup();
+            if (s.len > 0) self.buf.deleteRange(gpa, start, start + s.len) catch return;
+            if (ind.len > 0) self.buf.insert(gpa, start, ind) catch return;
+            self.ccol = ind.len;
+            self.ai_line = null;
+            return;
+        }
+        self.shiftLines(self.cline, self.cline, right);
+        self.ccol = @min(indentLen(self.lineText(self.cline)) + tail, self.lineCap(self.cline));
+        self.ai_line = null;
     }
 
     /// One codepoint in, one codepoint out — and what came out is kept
@@ -4618,4 +4745,187 @@ test "dot repeats an R" {
     const s = try bufText(gpa, e);
     defer gpa.free(s);
     try testing.expectEqualStrings("XYcXYf", s); // same as vim
+}
+
+// -------------------------------------------------------- insert-mode round
+
+test "ctrl-w deletes the word behind the cursor" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo bar baz");
+    e.key("\x17");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("foo bar ", s);
+}
+
+test "ctrl-w from mid-line takes only what is behind" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo bar baz");
+    e.key("\x1b");
+    keys(e, "$i");
+    e.key("\x17");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("foo bar z", s);
+}
+
+test "ctrl-w in column zero takes the newline" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo\nbar");
+    e.key("\x1b");
+    keys(e, "j0i");
+    e.key("\x17");
+    keys(e, "Z");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("fooZbar", s);
+}
+
+test "ctrl-u clears the line before the cursor" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i    hello world");
+    e.key("\x15");
+    keys(e, "Z");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("Z", s);
+}
+
+test "ctrl-u in column zero does nothing" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i    hello");
+    e.key("\x1b");
+    keys(e, "0i");
+    e.key("\x15");
+    keys(e, "Z");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("Z    hello", s);
+}
+
+test "ctrl-o runs one normal command and comes back" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    keys(e, "0i");
+    e.key("\x0f");
+    keys(e, "lX");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("aXbc", s);
+}
+
+test "ctrl-o dollar appends rather than overwriting" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc def");
+    e.key("\x1b");
+    keys(e, "0i");
+    e.key("\x0f");
+    keys(e, "$X");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abc defX", s);
+}
+
+test "ctrl-o holds through a multi-key command" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione two three");
+    e.key("\x1b");
+    keys(e, "0i");
+    e.key("\x0f");
+    keys(e, "dawZ"); // daw is three keys; the Z lands back in insert
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("Ztwo three", s);
+}
+
+test "ctrl-r inserts a register inline" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione two");
+    e.key("\x1b");
+    keys(e, "0\"aye"); // register a = "one"
+    keys(e, "$a-");
+    e.key("\x12");
+    keys(e, "a");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one two-one", s);
+}
+
+test "ctrl-r with the unnamed register" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iabc");
+    e.key("\x1b");
+    keys(e, "0yl$a");
+    e.key("\x12");
+    keys(e, "\"");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("abca", s);
+}
+
+test "ctrl-t and ctrl-d indent the line under the cursor" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ihello");
+    e.key("\x14");
+    keys(e, "!");
+    e.key("\x1b");
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        try testing.expectEqualStrings("    hello!", s);
+    }
+    keys(e, "A");
+    e.key("\x04");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("hello!", s);
+}
+
+test "ctrl-t indents a line that is still empty" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione");
+    e.key("\x1b");
+    keys(e, "o");
+    e.key("\x14");
+    keys(e, "two");
+    e.key("\x1b");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("one\n    two", s);
 }
