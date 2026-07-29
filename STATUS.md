@@ -142,7 +142,6 @@ internal/       the host: threads, review, asks, transcripts, …  ← the produ
 claude-plugin/  hooks + MCP wiring for Claude Code
 scripts/        rook-migrate.sh and friends
 docs/           design notes and diagnoses
-frontend/       the retired Svelte/xterm app — `make install-web`
 spike/          old experiments
 ```
 
@@ -152,10 +151,11 @@ is native now. Renaming it was the visible half of promoting the app to
 first-class; the half that mattered was CI, which had never built a line
 of Zig while gating every PR on the retired frontend.
 
-`frontend/` is kept as the way back, not as a live surface. `make
-install-web` still packages it. Nothing in the shipped app depends on
-it, and it no longer gates CI — `.github/workflows/web.yml` runs only
-when `frontend/` itself changes.
+The webview stack itself — `frontend/` (Svelte + xterm.js), `cmd/rook`
+(the Wails main), `build/` (the wails3 scaffold) and the three Go
+packages only it used — was deleted on 2026-07-29. It had been kept as
+"the way back" for a day; the way back is `git show v0.39.0:frontend`,
+which costs nothing to keep and nothing to carry.
 
 ## Building it
 
@@ -165,9 +165,7 @@ when `frontend/` itself changes.
 | `make dev` | Debug build in an isolated sandbox (own daemon, config, database) |
 | `make prod` | the same sandbox at ReleaseFast — the binary `app/bench.sh` measures |
 | `make install` | the daily driver into `/Applications` |
-
-Retired-stack targets keep a `-web` suffix: `build-web`, `dev-web`,
-`package-web`, `install-web`, `e2e-web`.
+| `make e2e` | the app driven end to end — `dump` plus decoded screenshots |
 
 `make e2e` drives the real app end to end — each scenario spawns a
 sandboxed rook and asserts against both truths, `dump` for what the

@@ -158,7 +158,7 @@
 # keybind = <trigger>=<command>, one line per binding, repeatable. A bare key
 # ("m") fires after the backtick prefix; a modifier chord ("cmd+shift+k")
 # fires directly. An empty command ("keybind = m=") unbinds a default. The
-# frontend owns validation and fails open, so unknown commands, unparseable
+# app owns validation and fails open, so unknown commands, unparseable
 # chords, and reserved triggers (digits, the backtick escape) are ignored.
 # keybind = m=workspace.manager
 # keybind = cmd+shift+k=palette.toggle

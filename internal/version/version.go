@@ -11,7 +11,7 @@ package version
 
 var (
 	Version = "dev"
-	// Build stays "dev" only in unstamped builds (wails3 dev, go run) —
+	// Build stays "dev" only in unstamped builds (make dev, go run) —
 	// those never replace a running daemon, they ride it.
 	Build = "dev"
 )

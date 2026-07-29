@@ -1,9 +1,0 @@
-{
-    "$schema": "./node_modules/oxfmt/configuration_schema.json",
-    "printWidth": 100,
-    "tabWidth": 4,
-    "bracketSpacing": false,
-    "sortPackageJson": false,
-    "svelte": {},
-    "ignorePatterns": ["dist", "bindings", "package-lock.json"]
-}

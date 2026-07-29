@@ -31,15 +31,16 @@ type State struct {
 	// It exists for the one case Build cannot cover: unstamped builds all
 	// report Build "dev", so "dev" == "dev" and a client rides whatever
 	// daemon is already up — forever, including one running code from hours
-	// ago. `wails3 build DEV=true` rebuilds rook-host on every *.go save
-	// (build/config.yml), so the binary on disk is always fresh while the
-	// process is not, and host changes silently never load.
+	// ago. A dev loop rebuilds rook-host on every edit, so the binary on
+	// disk is always fresh while the process is not, and host changes
+	// silently never load. That is exactly how "dev" == "dev" rode a
+	// stale daemon for days.
 	//
 	// Content, not mtime: `go build` rewrites its output even when the
 	// result is byte-identical, so a timestamp would call every no-op
 	// restart a change and kill the sessions that riding exists to keep.
 	// The hash rides when the code really is the same and replaces when it
-	// is not. See internal/hostclient.
+	// is not. The app applies the same rule — app/src/hostc.zig.
 	//
 	// Empty means a daemon older than this field, which for an unstamped
 	// client is itself proof of staleness.

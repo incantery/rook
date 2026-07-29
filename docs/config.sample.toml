@@ -85,7 +85,7 @@
 #   "cmd+shift+k"   a modifier chord, fires directly
 #   "K" / "gd"      a bare key or sequence, fires directly without the
 #                   leader (dispatch is editor-scope only for now)
-# An empty command ("") unbinds a default. The frontend owns validation and
+# An empty command ("") unbinds a default. The app owns validation and
 # fails open: unknown commands, unparseable triggers, and reserved ones
 # (digits, the backtick escape) are ignored.
 

@@ -1,22 +1,8 @@
-.task
 bin
-frontend/dist
-frontend/node_modules
-build/linux/appimage/build
-build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
-# Mobile generated (per-machine; overlays hold absolute paths)
-build/ios/xcode/overlay.json
-build/ios/xcode/gen/
-build/android/overlay.json
-build/android/gen/
 # macOS Finder droppings
 .DS_Store
 # local one-off builds
 /rookctl
-frontend/rook
-# playwright output (the e2e sandbox itself lives in bin/, already ignored)
-frontend/test-results
-frontend/playwright-report
 # Claude Code's worktree isolation drops checkouts of this repo in here. They
 # are live git worktrees, so `git add -A` tries to commit an embedded repo and
 # `make release` refuses the dirty tree — which is how one blocked a release.

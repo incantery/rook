@@ -169,11 +169,12 @@ func (e *packed) sgr(params ansi.Params) {
 		case n == 38 || n == 48:
 			mode, _, _ := params.Param(i+1, 0)
 			var pk uint32 = 0x80000000
-			if mode == 5 {
+			switch mode {
+			case 5:
 				v, _, _ := params.Param(i+2, 0)
 				pk |= uint32(v)
 				i += 2
-			} else if mode == 2 {
+			case 2:
 				r, _, _ := params.Param(i+2, 0)
 				g, _, _ := params.Param(i+3, 0)
 				bl, _, _ := params.Param(i+4, 0)

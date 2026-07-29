@@ -20,9 +20,9 @@ import (
 
 func main() {
 	if st, err := host.ReadState(); err == nil && st.Healthy() {
-		// Same compatibility rule as internal/hostclient: build identity,
-		// and an unstamped build (go run, wails3 dev) never replaces a
-		// stamped daemon — it rides it.
+		// Same compatibility rule the app applies (app/src/hostc.zig):
+		// build identity, and an unstamped build (go run, make dev)
+		// never replaces a stamped daemon — it rides it.
 		if st.Build == version.Build || version.Build == "dev" {
 			fmt.Printf("rook-host already running (pid %d, port %d, build %s)\n", st.PID, st.Port, st.Build)
 			return

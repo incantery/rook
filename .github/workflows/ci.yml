@@ -61,19 +61,16 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Scope: ./... would hit the build/ios scaffold (doesn't compile) and
-      # cmd/rook, the wails GUI binary, which can't even typecheck on Linux
-      # without the GTK4/webkitgtk dev headers (a 1-2 min install). cmd/rook
-      # is a thin wiring main exercised by every local `make dev` build on
-      # macOS; everything it wires lives in internal/, which is covered.
+      # ./... covers every Go package now. It used to be an allow-list,
+      # because the webview app dragged in two packages that could not
+      # build on a Linux runner — cmd/rook (GTK4/webkitgtk headers) and
+      # the build/ios scaffold (a main that only exists under the `ios`
+      # tag). Both are gone, and an allow-list silently misses new
+      # packages, so this is a list no more.
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.7.2
-          args: ./internal/... ./cmd/rook-host/... ./cmd/rook-agent/... ./cmd/rookctl/...
+          args: ./...
 
       - name: Test
-        run: go test ./internal/... ./cmd/rook-host/... ./cmd/rook-agent/... ./cmd/rookctl/...
-
-# The retired webview app is gated by .github/workflows/web.yml, which only
-# fires when frontend/ actually changes. It used to run here on every PR —
-# minutes of install-and-build to protect a fallback that nothing ships.
+        run: go test ./...

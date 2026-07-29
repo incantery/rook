@@ -25,7 +25,7 @@ APP := /Applications/rook.app
 BUILD := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit).$(shell date +%Y%m%d%H%M%S)
 BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 
-.PHONY: build build-web dev prod dev-web package-web install install-web clean agent release release-stage e2e e2e-clean e2e-web e2e-clean-web
+.PHONY: build dev prod install clean agent release release-stage e2e e2e-clean
 
 # Compile only, and deliberately so: there is no run target that skips
 # DEV_ENV, because an instance on the default socket unlinks-then-binds
@@ -33,11 +33,6 @@ BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 # dev). Want to run it? make dev, make prod, or make install.
 build:
 	cd app && zig build
-
-# The retired webview app. The only target left that needs the wails3
-# CLI — `make install` has not since the cutover.
-build-web:
-	wails3 task build
 
 # Isolated sandbox. The dev instance gets its own state (host daemon +
 # sessions), config, and data (database + worktrees) dirs, so it never rides
@@ -53,9 +48,7 @@ build-web:
 # worktree.go checkouts) — else dev shares the daily driver's rook.db, so
 # its workspaces, verdict ledger, threads, and cost totals would pollute the
 # real ones, and worktrees would land in the shared tree.
-# dev builds and runs the Zig app in app/ — which IS rook now. The
-# webview dev instance survives as dev-web for side-by-side comparisons
-# (the latency A/B needs both).
+# dev builds and runs the Zig app in app/ — which IS rook.
 #
 # dev  = Debug: fast compiles, slow binary (ghostty-vt parses ~100x
 #        slower — fine for typing, do NOT judge firehose/cat here).
@@ -78,9 +71,7 @@ prod:
 # minimal hand-rolled bundle, ad-hoc signed, ctl socket on the default
 # /tmp/rook.sock (the agent-visibility surface rides along on purpose).
 #
-# It REPLACES the wails app at the same path, by design — `make
-# install-web` puts that one back, and is the escape hatch if this one
-# misbehaves. The two Go binaries ship INSIDE the bundle because that is
+# The two Go binaries ship INSIDE the bundle because that is
 # how they are found: the app resolves rook-host and rookctl beside its
 # own executable first (hostc.siblingBinary), so a bundle without them
 # is an app that cannot start a daemon or answer a CLI verb.
@@ -100,6 +91,9 @@ prod:
 REL_VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0)
 VERSION_STAMP := $(shell test -z "$$(git status --porcelain)" && git describe --tags --exact-match 2>/dev/null || echo dev)
 STAMP_FLAGS = $(BUILD_FLAG) -X github.com/incantery/rook/internal/version.Version=$(VERSION_STAMP)
+# A bare cp skips the registration Finder/installers do — without this,
+# Spotlight won't offer the app.
+LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 install:
 	cd app && zig build -Doptimize=ReleaseFast -Dbuild=$(BUILD) -Dversion=$(REL_VERSION)
 	go build -ldflags "$(STAMP_FLAGS)" -o app/zig-out/bin/rook-host ./cmd/rook-host
@@ -132,34 +126,6 @@ install:
 	@echo "installed $(APP) (v$(REL_VERSION), build $(BUILD)) + ~/.local/bin/{rook,re,rookctl}"
 	@echo "quit + relaunch rook to pick it up"
 
-dev-web:
-	XDG_STATE_HOME=$(HOME)/.local/state/rook-dev \
-	XDG_CONFIG_HOME=$(HOME)/.config/rook-dev \
-	XDG_DATA_HOME=$(HOME)/.local/share/rook-dev \
-	wails3 dev
-
-package-web:
-	@# The bundle task only adds files into an existing .app — a stale
-	@# bundle keeps files the build no longer produces (e.g. Assets.car).
-	rm -rf bin/rook.app
-	wails3 task package BUILD=$(BUILD)
-
-LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-
-install-web: package-web
-	rm -rf $(APP)
-	cp -R bin/rook.app $(APP)
-	@# A bare cp skips the registration Finder/installers do — without this,
-	@# Spotlight won't offer the app.
-	$(LSREGISTER) -f $(APP)
-	mdimport $(APP)
-	@# The CLI (tmux's scripting surface): rookctl ls / agents, plus the
-	@# claim hooks claude runs. Lives on PATH, not in the bundle.
-	go build -ldflags "$(BUILD_FLAG)" -o $(shell go env GOPATH)/bin/rookctl ./cmd/rookctl
-	go build -ldflags "$(BUILD_FLAG)" -o $(shell go env GOPATH)/bin/rook-agent ./cmd/rook-agent
-	@echo "installed $(APP) + rookctl + rook-agent (build $(BUILD))"
-	@echo "quit + relaunch rook to pick it up — the relaunch replaces the daemon (shells die with it)"
-
 # The drafter's dev loop: rebuild, and the running host's supervisor
 # notices the new mtime and respawns rook-agent — no daemon replacement,
 # no shell deaths. Deliberately NOT bundled into the .app: next-to-binary
@@ -186,25 +152,6 @@ e2e-clean:
 	-pkill -f 'rook-e2e' 2>/dev/null || true
 	rm -rf /tmp/rook-e2e-*
 
-# Browser-driven tests against the RETIRED app: Wails server mode runs it as
-# an HTTP server, so Playwright gets the actual Go services and a real host
-# daemon — sandboxed in bin/e2e, never your daily driver. See docs/e2e.md.
-#   make e2e-web                     — all specs
-#   make e2e-web ARGS="--headed"     — watch it happen
-#   make e2e-web ARGS=theme          — one file
-#
-# There is no `make e2e` any more, and that is a real gap rather than a
-# rename: this was how an agent could SEE rook and verify its own UI work
-# instead of asking. The Zig app has no equivalent loop yet — app/PARITY.md.
-e2e-web:
-	cd frontend && pnpm exec playwright test $(ARGS)
-
-# The sandbox daemon is setsid'd to outlive the app (same as the real one), so
-# it survives the run by design. This is how you stop it.
-e2e-clean-web:
-	-pkill -f 'bin/e2e/rook-host'
-	rm -rf bin/e2e
-
 # libghostty-vt for the `ghostty` build tag (benchmarks + differential
 # fuzzing — see internal/host/ghostty_term.go). Requires zig (brew install
 # zig). The normal build never needs this.
@@ -219,8 +166,8 @@ ghostty-lib:
 	cp -R $(GHOSTTY_SRC)/zig-out/include bin/ghostty-vt/
 	cp $(GHOSTTY_SRC)/zig-out/lib/libghostty-vt.a bin/ghostty-vt/lib/
 
-clean: e2e-clean-web
-	rm -rf bin frontend/dist app/zig-out app/.zig-cache
+clean:
+	rm -rf bin app/zig-out app/.zig-cache
 
 # Publish a release: make release VERSION=v0.1.0
 # Builds arm64 on this machine (no CI), zips rook.app + rookctl, tags the
@@ -229,11 +176,11 @@ clean: e2e-clean-web
 # and upgrade with `rookctl update`. rook-agent is not shipped yet — the
 # drafter stays a from-source feature until it settles.
 #
-# The bundle is the ZIG app: `rook` plus the two Go binaries it resolves
-# beside its own executable (hostc.siblingBinary), assembled here rather
-# than by wails3. The zip's SHAPE is unchanged — rook.app + a rookctl at
-# the top level — because install.sh and internal/selfupdate both read
-# it, and keeping their contract is what let the app underneath change
+# The bundle is assembled by hand, right here: `rook` plus the two Go
+# binaries it resolves beside its own executable (hostc.siblingBinary).
+# The zip's SHAPE — rook.app + a rookctl at the top level — is fixed by
+# install.sh and internal/selfupdate, which both read it; keeping that
+# contract is what let the app underneath change (webview → Zig)
 # without touching the upgrade path.
 DIST := bin/dist
 RELEASE_ZIP = rook-$(VERSION)-darwin-arm64.zip
