@@ -8,8 +8,9 @@
 //! the whole machine headless. All calls happen under App.draw_lock.
 //!
 //! Vim scope v1: normal/insert/visual/visual-line/command modes;
-//! h j k l w b e 0 ^ $ gg G arrows ctrl-d/u; operators d y c (+ dd yy
-//! cc D C Y), x r J p P u ctrl-r, counts, `.`; f F t T ; , >> << (and
+//! h j k l w b e ge 0 ^ $ gg G % { } H M L arrows ctrl-d/u, zt zz zb,
+//! / n N * #; operators d y c (+ dd yy cc D C Y),
+//! x r J p P u ctrl-r, counts, `.`; f F t T ; , >> << (and
 //! > < in visual), text objects (iw aw iW aW, i" i' i` and the four
 //! bracket pairs), autoindent, "a registers and ma marks;
 //! :w :q :q! :wq :x :e :<n>.
@@ -71,6 +72,7 @@ pub const Editor = struct {
     count: u32 = 0,
     op: u8 = 0, // pending operator: 'd','y','c' or 0
     pend_g: bool = false,
+    pend_z: bool = false,
     pend_r: bool = false,
 
     vanchor_line: usize = 0,
@@ -640,7 +642,7 @@ pub const Editor = struct {
     /// True when nothing is half-typed — the moment a command is over.
     fn quiescent(self: *const Editor) bool {
         return self.mode == .normal and self.op == 0 and self.count == 0 and
-            !self.pend_g and !self.pend_r and self.pend_shift == 0 and
+            !self.pend_g and !self.pend_z and !self.pend_r and self.pend_shift == 0 and
             self.pend_obj == 0 and self.pend_find == 0 and !self.pend_reg and
             self.pend_mark == 0;
     }
@@ -1169,6 +1171,7 @@ pub const Editor = struct {
             self.count = 0;
             self.op = 0;
             self.pend_g = false;
+            self.pend_z = false;
             self.pend_shift = 0;
             self.pend_find = 0;
             self.pend_obj = 0;
@@ -1203,12 +1206,29 @@ pub const Editor = struct {
             return;
         }
 
+        if (self.pend_z) {
+            self.pend_z = false;
+            self.count = 0;
+            switch (ch) {
+                'z', 't', 'b' => self.scrollHere(ch),
+                else => {},
+            }
+            return;
+        }
+
         if (self.pend_g) {
             self.pend_g = false;
-            if (ch == 'g') {
-                const n = self.count;
-                self.count = 0;
-                self.motionLinewise(if (n == 0) 0 else @min(n - 1, self.lineCountB() - 1));
+            switch (ch) {
+                'g' => {
+                    const n = self.count;
+                    self.count = 0;
+                    self.motionLinewise(if (n == 0) 0 else @min(n - 1, self.lineCountB() - 1));
+                },
+                'e' => self.motionCharwise(k_ge),
+                else => {
+                    self.op = 0;
+                    self.count = 0;
+                },
             }
             return;
         }
@@ -1223,6 +1243,22 @@ pub const Editor = struct {
 
             // Motions.
             'h', 'l', 'w', 'b', 'e', '0', '^', '$' => self.motionCharwise(ch),
+            '%' => self.motionMatch(),
+            '{' => self.motionPara(false),
+            '}' => self.motionPara(true),
+            '*' => self.searchWord(true),
+            '#' => self.searchWord(false),
+            'z' => self.pend_z = true,
+            'H', 'M', 'L' => {
+                const rows = @max(1, self.last_rows -| 1);
+                const bot = @min(self.top + rows - 1, self.lineCountB() - 1);
+                const cnt = self.takeCount();
+                self.motionLinewise(switch (ch) {
+                    'H' => @min(self.top + cnt - 1, bot),
+                    'L' => @max(self.top, bot -| (cnt - 1)),
+                    else => self.top + (bot - self.top) / 2,
+                });
+            },
             'f', 'F', 't', 'T' => self.pend_find = ch,
             ';', ',' => {
                 if (self.find_cmd == 0) {
@@ -1461,6 +1497,12 @@ pub const Editor = struct {
     /// Charwise motions: either move the cursor or feed a pending
     /// operator. `e` is inclusive; the rest exclusive. cw acts as ce
     /// (vim's special case).
+    /// `ge` is spelled with a `g`, so it arrives through the pend_g
+    /// branch rather than the motion table. The pseudo-key keeps it on
+    /// motionCharwise's operator path instead of growing a second copy
+    /// of that path.
+    const k_ge: u8 = 0x01;
+
     fn motionCharwise(self: *Editor, m0: u8) void {
         var m = m0;
         if (self.op == 'c' and m == 'w') m = 'e';
@@ -1503,17 +1545,32 @@ pub const Editor = struct {
                     line = r.line;
                     col = r.col;
                 },
+                k_ge => {
+                    const r = self.scanWordEndBack(line, col);
+                    line = r.line;
+                    col = r.col;
+                    inclusive = true;
+                },
                 else => {},
             }
         }
 
         if (self.op != 0) {
-            const s = self.lineText(line);
-            var end_col = col;
-            if (inclusive and end_col < s.len) end_col += cpLenAt(s, end_col);
-            const a = self.buf.rope.lineStart(self.cline) + self.ccol;
-            const b = self.buf.rope.lineStart(line) + end_col;
-            self.opRange(@min(a, b), @max(a, b));
+            const a0 = self.buf.rope.lineStart(self.cline) + self.ccol;
+            const b0 = self.buf.rope.lineStart(line) + col;
+            var hi = @max(a0, b0);
+            if (inclusive) {
+                // The bump belongs to whichever end is the FAR one:
+                // for `e` that is the target, for the backward `ge` it
+                // is where you started. Verified against vim — `dge`
+                // eats both the previous word's last character and the
+                // one under the cursor.
+                const far_line = if (b0 > a0) line else self.cline;
+                const far_col = if (b0 > a0) col else self.ccol;
+                const s = self.lineText(far_line);
+                if (far_col < s.len) hi += cpLenAt(s, far_col);
+            }
+            self.opRange(@min(a0, b0), hi);
             return;
         }
 
@@ -1943,6 +2000,154 @@ pub const Editor = struct {
             col = p;
         }
         return .{ .line = line, .col = col };
+    }
+
+    /// `ge` — back to the END of the previous word. The first loop is
+    /// what makes it `ge` and not `b`: from inside a word you have to
+    /// walk out of that word's own run before the previous one counts.
+    fn scanWordEndBack(self: *Editor, line0: usize, col0: usize) Pos {
+        var line = line0;
+        var col = col0;
+        var s = self.lineText(line);
+        var in_run = if (col < s.len) charClass(s[col]) else 0;
+        while (true) {
+            if (col == 0) {
+                if (line == 0) return .{ .line = 0, .col = 0 };
+                line -= 1;
+                s = self.lineText(line);
+                if (s.len == 0) return .{ .line = line, .col = 0 };
+                col = prevCpStart(s, s.len);
+            } else {
+                col = prevCpStart(s, col);
+            }
+            const c = charClass(s[col]);
+            if (in_run != 0 and c == in_run) continue;
+            in_run = 0;
+            if (c != 0) return .{ .line = line, .col = col };
+        }
+    }
+
+    /// `{` / `}` — the blank line before or after this paragraph. A
+    /// blank line is the entire definition of a paragraph here, which
+    /// is also vim's default.
+    fn paraTarget(self: *Editor, from: usize, fwd: bool) usize {
+        const last = self.lineCountB() - 1;
+        var l = from;
+        if (fwd) {
+            while (l < last and self.lineLenB(l) == 0) l += 1;
+            while (l < last and self.lineLenB(l) != 0) l += 1;
+            return l;
+        }
+        while (l > 0 and self.lineLenB(l) == 0) l -= 1;
+        while (l > 0 and self.lineLenB(l) != 0) l -= 1;
+        return l;
+    }
+
+    /// Exclusive and charwise, landing in column 0 — so `d}` from the
+    /// middle of a line takes the rest of the paragraph and stops at
+    /// the blank line rather than swallowing it.
+    fn motionPara(self: *Editor, fwd: bool) void {
+        const cnt = self.takeCount();
+        var line = self.cline;
+        for (0..cnt) |_| line = self.paraTarget(line, fwd);
+        if (self.op != 0) {
+            const a = self.absOff();
+            const b = self.buf.rope.lineStart(line);
+            self.opRange(@min(a, b), @max(a, b));
+            return;
+        }
+        self.setJump();
+        self.cline = line;
+        self.ccol = 0;
+        self.goal = 0;
+        self.clampNormal();
+    }
+
+    /// `%` — the first bracket at or after the cursor ON THIS LINE, and
+    /// its match. Inclusive for an operator, because `d%` meaning
+    /// "everything but the closing brace" would be useless.
+    fn motionMatch(self: *Editor) void {
+        self.count = 0;
+        const s = self.lineText(self.cline);
+        var col = self.ccol;
+        var ob: u8 = 0;
+        var cb: u8 = 0;
+        var fwd = false;
+        while (col < s.len) : (col += 1) {
+            switch (s[col]) {
+                '(', ')' => {
+                    ob = '(';
+                    cb = ')';
+                },
+                '[', ']' => {
+                    ob = '[';
+                    cb = ']';
+                },
+                '{', '}' => {
+                    ob = '{';
+                    cb = '}';
+                },
+                else => continue,
+            }
+            fwd = s[col] == ob;
+            break;
+        }
+        if (ob == 0) {
+            self.op = 0;
+            return;
+        }
+        const from = self.buf.rope.lineStart(self.cline) + col;
+        const dst = self.matchBracket(from, ob, cb, fwd) orelse {
+            self.op = 0;
+            return;
+        };
+        if (self.op != 0) {
+            // From the CURSOR to the match, not from the bracket:
+            // `d%` sitting before an open paren takes the text in
+            // between too. Verified against vim.
+            const cur = self.absOff();
+            self.opRange(@min(cur, dst), @max(cur, dst) + 1);
+            return;
+        }
+        self.setJump();
+        self.cursorToOffset(dst);
+        self.goal = renderCol(self.lineText(self.cline), self.ccol);
+    }
+
+    /// `*` / `#` — the word under the cursor becomes the search
+    /// pattern. Literal, like everything `/` does: `*` on `foo` also
+    /// finds `foobar`, because this engine has no word boundaries to
+    /// anchor with yet.
+    fn searchWord(self: *Editor, fwd: bool) void {
+        self.count = 0;
+        self.op = 0;
+        const s = self.lineText(self.cline);
+        var a = self.ccol;
+        while (a < s.len and charClass(s[a]) != 1) a += 1;
+        if (a >= s.len) {
+            self.setStatus("no word under the cursor", .{}, true);
+            return;
+        }
+        while (a > 0 and charClass(s[a - 1]) == 1) a -= 1;
+        var b = a;
+        while (b < s.len and charClass(s[b]) == 1) b += 1;
+        self.last_search.clearRetainingCapacity();
+        self.last_search.appendSlice(self.gpa, s[a..b]) catch return;
+        // Start from the word's first byte so a forward search leaves
+        // this occurrence and a backward one does not find it again.
+        self.ccol = a;
+        self.searchNext(fwd);
+    }
+
+    /// `zt` / `zz` / `zb` — put the cursor line at the top, middle or
+    /// bottom of the window without moving it in the buffer.
+    fn scrollHere(self: *Editor, where: u8) void {
+        const rows = @max(1, self.last_rows -| 1);
+        self.top = switch (where) {
+            't' => self.cline,
+            'b' => self.cline -| (rows - 1),
+            else => self.cline -| rows / 2,
+        };
     }
 
     // ------------------------------------------------------------ operators
@@ -3732,4 +3937,146 @@ test "backtick backtick returns from a jump, and back again" {
     try testing.expectEqual(@as(usize, 0), e.cline);
     keys(e, "``");
     try testing.expectEqual(@as(usize, 3), e.cline);
+}
+
+// -------------------------------------------------------------- motion round
+
+test "percent jumps to the match and back" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo(bar[baz])end");
+    e.key("\x1b");
+    keys(e, "0%");
+    try testing.expectEqual(@as(usize, 12), e.ccol);
+    keys(e, "%");
+    try testing.expectEqual(@as(usize, 3), e.ccol);
+}
+
+test "d percent takes everything from the cursor through the match" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo(bar[baz])end");
+    e.key("\x1b");
+    keys(e, "0d%");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("end", s);
+}
+
+test "paragraph motions land on the blank line" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\n\nc\nd\n\ne");
+    e.key("\x1b");
+    keys(e, "gg}");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    keys(e, "}");
+    try testing.expectEqual(@as(usize, 5), e.cline);
+    keys(e, "{");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    keys(e, "{");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+}
+
+test "d brace-close stops at the blank line without eating it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia\nb\n\nc\nd");
+    e.key("\x1b");
+    keys(e, "ggd}");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("\nc\nd", s);
+}
+
+test "star searches the word under the cursor" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo bar\nbaz foo");
+    e.key("\x1b");
+    keys(e, "gg0*");
+    try testing.expectEqual(@as(usize, 1), e.cline);
+    try testing.expectEqual(@as(usize, 4), e.ccol);
+    keys(e, "#");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+    try testing.expectEqual(@as(usize, 0), e.ccol);
+}
+
+test "star from mid-word takes the whole word" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ihello bar\nbaz hello");
+    e.key("\x1b");
+    keys(e, "gg0ll*"); // sitting on the second l of hello
+    try testing.expectEqual(@as(usize, 1), e.cline);
+    try testing.expectEqual(@as(usize, 4), e.ccol);
+    try testing.expectEqualStrings("hello", e.last_search.items);
+}
+
+test "ge walks back to the end of the previous word" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo bar baz");
+    e.key("\x1b");
+    keys(e, "$ge");
+    try testing.expectEqual(@as(usize, 6), e.ccol);
+    keys(e, "ge");
+    try testing.expectEqual(@as(usize, 2), e.ccol);
+}
+
+test "dge is inclusive at both ends" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifoo bar baz");
+    e.key("\x1b");
+    keys(e, "$dge");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("foo ba", s);
+}
+
+test "H M L move within the window" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12");
+    e.key("\x1b");
+    keys(e, "gg");
+    _ = e.fillGrid(20, 6); // 5 text rows: lines 0..4 visible
+    keys(e, "L");
+    try testing.expectEqual(@as(usize, 4), e.cline);
+    keys(e, "H");
+    try testing.expectEqual(@as(usize, 0), e.cline);
+    keys(e, "M");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    keys(e, "3H");
+    try testing.expectEqual(@as(usize, 2), e.cline);
+    keys(e, "2L");
+    try testing.expectEqual(@as(usize, 3), e.cline);
+}
+
+test "zt zz zb move the window, not the cursor" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "i1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20");
+    e.key("\x1b");
+    _ = e.fillGrid(20, 6); // 5 text rows
+    keys(e, "10G");
+    try testing.expectEqual(@as(usize, 9), e.cline);
+    keys(e, "zt");
+    try testing.expectEqual(@as(usize, 9), e.top);
+    keys(e, "zb");
+    try testing.expectEqual(@as(usize, 5), e.top);
+    keys(e, "zz");
+    try testing.expectEqual(@as(usize, 7), e.top);
+    try testing.expectEqual(@as(usize, 9), e.cline);
 }

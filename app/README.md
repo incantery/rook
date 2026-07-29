@@ -327,6 +327,25 @@ distrust when you come back to it. It dirties the scene only when
 something actually changed, so zero-idle-frames holds: measured at 0
 frames drawn across 6 idle seconds with an editor pane open.
 
+### Real vim as the oracle
+
+Vim ships with macOS, so the expectations in these tests are taken from
+it rather than from memory: write the buffer to a temp file, run
+`vim -Nu NONE -c 'normal <keys>' -c wq`, and read back what it did.
+Two bugs came out of doing that instead of guessing.
+
+`d%` measured from the BRACKET rather than the cursor, so `d%` sitting
+a few characters before an open paren left those characters behind —
+vim takes them.
+
+`ge` is the first inclusive motion in this editor that runs BACKWARD,
+and the operator path had been adding the inclusive byte to the target
+end before taking min/max. That is right for `e`, where the target is
+the far end, and wrong for `ge`, where the cursor is: `dge` deleted the
+gap BETWEEN the two words instead of the span covering them. The bump
+belongs to whichever end is far from the cursor, which is a sentence
+worth keeping the next time a backward motion lands.
+
 ### `.` records the result, not the keys
 
 `.` repeats the last change, and the thing worth writing down is how it

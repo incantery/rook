@@ -473,6 +473,19 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       unset mark cancels the operator rather than running it against a
       position nobody chose, and `` `` ``/`''` return from the last
       jump. `p`/`P` take a count.
+- [x] **The motions a day of editing keeps reaching for** — `%`,
+      `{`/`}`, `H`/`M`/`L`, `zt`/`zz`/`zb`, `*`/`#`, `ge`. `d%` runs
+      from the CURSOR through the match, not from the bracket. `*` is
+      a literal search like `/`, so it also finds `foobar` — this
+      engine has no word boundaries to anchor with yet. Expectations
+      were taken from real vim rather than from memory, which is how
+      the backward-inclusive bug below turned up.
+- [x] **Backward inclusive motions bumped the wrong end.** `ge` is the
+      first inclusive motion that runs BACKWARD, and the operator path
+      added the inclusive byte to the target before taking min/max —
+      so `dge` deleted the span between the two words instead of the
+      span covering them. The bump belongs to whichever end is FAR
+      from the cursor.
 - [ ] Marks do not shift when text ABOVE them is edited — they hold a
       line and column, not an anchored offset. Fixing it means routing
       every buffer edit through one seam that adjusts them, which is
