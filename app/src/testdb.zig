@@ -52,10 +52,43 @@ pub fn run(p: [*:0]const u8, sql: [*:0]const u8) !void {
 /// The subset of rook's schema the read-side ports touch. Kept verbatim
 /// from internal/host/registry.go — a fixture that drifts from the real
 /// schema tests nothing, and column ORDER is what the scans depend on.
+/// NOTE on threads: rook_task_id, deliver_error and draft are NOT in
+/// registry.go's CREATE TABLE — they arrive through ALTER TABLE
+/// migrations. They are folded in here because what the read side must
+/// match is the shape of a MIGRATED db, which is the only shape that
+/// exists in the wild.
 pub const schema =
     \\CREATE TABLE IF NOT EXISTS anchor_blobs (
     \\  sha     TEXT PRIMARY KEY,
     \\  content BLOB NOT NULL
+    \\);
+    \\CREATE TABLE IF NOT EXISTS threads (
+    \\  id            INTEGER PRIMARY KEY,
+    \\  workspace     TEXT NOT NULL,
+    \\  path          TEXT NOT NULL,
+    \\  start_line    INTEGER NOT NULL,
+    \\  end_line      INTEGER NOT NULL,
+    \\  side          TEXT NOT NULL DEFAULT 'modified',
+    \\  blob_sha      TEXT NOT NULL,
+    \\  commit_sha    TEXT NOT NULL DEFAULT '',
+    \\  anchor_text   TEXT NOT NULL,
+    \\  state         TEXT NOT NULL DEFAULT 'pending',
+    \\  resolved_by   TEXT NOT NULL DEFAULT '',
+    \\  agent_reopens INTEGER NOT NULL DEFAULT 0,
+    \\  created_at    TEXT NOT NULL,
+    \\  updated_at    TEXT NOT NULL,
+    \\  submitted_at  TEXT,
+    \\  rook_task_id  INTEGER NOT NULL DEFAULT 0,
+    \\  deliver_error TEXT NOT NULL DEFAULT '',
+    \\  draft         TEXT NOT NULL DEFAULT ''
+    \\);
+    \\CREATE TABLE IF NOT EXISTS thread_comments (
+    \\  id            INTEGER PRIMARY KEY,
+    \\  thread_id     INTEGER NOT NULL,
+    \\  author        TEXT NOT NULL,
+    \\  agent_session TEXT NOT NULL DEFAULT '',
+    \\  body          TEXT NOT NULL,
+    \\  created_at    TEXT NOT NULL
     \\);
     \\CREATE TABLE IF NOT EXISTS rook_tasks (
     \\  id           INTEGER PRIMARY KEY,

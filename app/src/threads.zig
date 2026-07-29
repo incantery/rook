@@ -1,335 +1,384 @@
-//! Threads — file-anchored conversations, projected as editable buffers.
+//! Threads — READ side, straight off the registry.
 //!
-//! The host keeps truth structured in its DB and hands out a DOCUMENT:
-//! rendered history, a scissors line, then your draft below it. Saving
-//! posts the whole document back and the host diffs it against a fresh
-//! render. That contract is `internal/host/threaddoc.go`, and two parts
-//! of it are load-bearing for any client:
+//! A thread is a file-anchored conversation: a stored anchor (path,
+//! range, blob_sha, side) plus its comments in id order. threaddoc.zig
+//! is the other half — how a thread is PROJECTED as an editable
+//! document; this is where the rows come from. The Go host splits the
+//! same way (threads.go / threaddoc.go) and the names now match on both
+//! sides, because during a port two files called the same thing in two
+//! languages is a standing invitation to read the wrong one.
 //!
-//!   1. The prefix is `content` MINUS `draft`, computed exactly — never
-//!      by scanning for the scissors line, because a comment body could
-//!      legally contain a scissors-shaped line. The host hands `draft`
-//!      back with the doc precisely so we can do this arithmetic.
+//! Comments come back with the thread rather than on demand. Threads are
+//! small, a pane renders all of them at once, and the alternative is an
+//! N+1 that shows up as scroll jank on exactly the review with the most
+//! conversation in it. The Go side made the same call.
 //!
-//!   2. A save that no longer matches answers 409 WITH the fresh doc.
-//!      That is not an error, it is a concurrent agent reply: re-render
-//!      and splice your tail back on. History is append-only, so this
-//!      always merges.
-//!
-//! Everything is plain HTTP — no session socket, checked before building.
+//! Read-only, like the rest of the substrate port. Anchors here carry no
+//! current range: mapping them onto today's file is reanchor.resolve's
+//! job, and doing it inside a query would bury a git fork in something
+//! that looks like a row fetch.
 
 const std = @import("std");
-const hostc = @import("hostc.zig");
+const regdb = @import("regdb.zig");
+const reanchor = @import("reanchor.zig");
 
-pub const max_threads = 32;
+/// Column list and ORDER, verbatim from the Go host's threadCols. The
+/// scan indexes positionally, so these must not drift.
+const cols =
+    "id, workspace, path, start_line, end_line, side, blob_sha, " ++
+    "commit_sha, anchor_text, state, deliver_error, draft, rook_task_id, resolved_by, " ++
+    "agent_reopens, created_at, updated_at, submitted_at";
 
-const WireThread = struct {
+pub const Comment = struct {
     id: i64 = 0,
-    path: []const u8 = "",
-    startLine: i32 = 0,
-    state: []const u8 = "",
-    anchorText: []const u8 = "",
-    draft: []const u8 = "",
-    deliverError: []const u8 = "",
-};
-
-const WireDoc = struct {
-    content: []const u8 = "",
-    draft: []const u8 = "",
-    resolved: bool = false,
-};
-
-fn Text(comptime n: usize) type {
-    return struct {
-        buf: [n]u8 = @splat(0),
-        len: u16 = 0,
-        const Self = @This();
-        pub fn set(self: *Self, s: []const u8) void {
-            const k = @min(n, s.len);
-            @memcpy(self.buf[0..k], s[0..k]);
-            self.len = @intCast(k);
-        }
-
-        /// Set as ONE line: an anchor is a span of source and often
-        /// several lines of it, which a single-row list cannot show —
-        /// real data has multi-line anchors, and pasting a newline into
-        /// a row breaks the row. Whitespace runs collapse to one space.
-        pub fn setOneLine(self: *Self, s: []const u8) void {
-            var w: usize = 0;
-            var last_space = true; // also trims the leading run
-            for (s) |c| {
-                if (w >= n) break;
-                const is_ws = c == '\n' or c == '\r' or c == '\t' or c == ' ';
-                if (is_ws) {
-                    if (last_space) continue;
-                    self.buf[w] = ' ';
-                    w += 1;
-                    last_space = true;
-                    continue;
-                }
-                self.buf[w] = c;
-                w += 1;
-                last_space = false;
-            }
-            while (w > 0 and self.buf[w - 1] == ' ') w -= 1;
-            self.len = @intCast(w);
-        }
-        pub fn get(self: *const Self) []const u8 {
-            return self.buf[0..self.len];
-        }
-    };
-}
-
-pub const State = enum {
-    pending,
-    open,
-    resolved,
-
-    pub fn parse(s: []const u8) State {
-        if (std.mem.eql(u8, s, "pending")) return .pending;
-        if (std.mem.eql(u8, s, "resolved")) return .resolved;
-        return .open;
-    }
+    /// user|agent. Declared by the writer, not authenticated — the Go
+    /// schema says so out loud and nothing downstream should treat it as
+    /// proof of anything.
+    author: []const u8 = "",
+    agent_session: []const u8 = "",
+    body: []const u8 = "",
+    created_at: []const u8 = "",
 };
 
 pub const Thread = struct {
     id: i64 = 0,
-    path: Text(120) = .{},
-    line: i32 = 0,
-    state: State = .open,
-    anchor: Text(80) = .{},
-    has_draft: bool = false,
-    /// The nudge never reached a responder. A thread in this state is
-    /// open and submitted but NOBODY WAS TOLD — the one failure the old
-    /// model rendered as a normal wait, so it gets its own mark.
-    undelivered: bool = false,
+    workspace: []const u8 = "",
+
+    // The stored anchor: immutable ground truth.
+    path: []const u8 = "",
+    start_line: u32 = 0,
+    end_line: u32 = 0,
+    side: []const u8 = "modified",
+    blob_sha: []const u8 = "",
+    commit_sha: []const u8 = "",
+    /// The anchored lines verbatim. What an outdated thread renders
+    /// from, which is why it is stored rather than re-read.
+    anchor_text: []const u8 = "",
+
+    state: []const u8 = "pending", // pending|open|resolved
+    /// Why a nudge never reached a responder; "" when it did. A thread
+    /// with this set is open and submitted and NOBODY WAS TOLD — the one
+    /// failure that otherwise renders as an ordinary wait.
+    deliver_error: []const u8 = "",
+    /// Text saved below the scissors line but not yet crystallised into
+    /// a comment. threaddoc.zig's tail.
+    draft: []const u8 = "",
+    /// The review this thread hangs off, 0 for none.
+    rook_task_id: i64 = 0,
+    resolved_by: []const u8 = "",
+    agent_reopens: i64 = 0,
+
+    created_at: []const u8 = "",
+    updated_at: []const u8 = "",
+    /// NULL in the schema, so genuinely absent rather than "". An
+    /// unsubmitted thread has never been sent to anyone.
+    submitted_at: ?[]const u8 = null,
+
+    comments: []const Comment = &.{},
+
+    /// The stored anchor, in the shape reanchor.resolve takes. Side is a
+    /// string in the schema and an enum there; anything that is not
+    /// "original" is modified, matching the Go side, where an empty side
+    /// column has always meant modified.
+    pub fn anchor(self: Thread) reanchor.Anchor {
+        return .{
+            .path = self.path,
+            .start_line = self.start_line,
+            .end_line = self.end_line,
+            .blob_sha = self.blob_sha,
+            .side = if (std.mem.eql(u8, self.side, "original")) .original else .modified,
+        };
+    }
 };
 
-pub const Snapshot = struct {
-    items: [max_threads]Thread = undefined,
-    n: usize = 0,
-    more: usize = 0,
-    live: bool = false,
+/// A query result and the memory behind it — every string points into
+/// the arena.
+pub const List = struct {
+    arena: std.heap.ArenaAllocator,
+    items: []Thread = &.{},
 
-    pub fn slice(self: *const Snapshot) []const Thread {
-        return self.items[0..self.n];
+    pub fn deinit(self: *List) void {
+        self.arena.deinit();
+    }
+};
+
+/// Filters for a listing. Empty means "no filter", exactly as the Go
+/// side's empty-string parameters do.
+pub const Filter = struct {
+    state: []const u8 = "",
+    path: []const u8 = "",
+};
+
+pub const Store = struct {
+    db: ?*anyopaque,
+
+    pub fn open() Store {
+        return .{ .db = regdb.open() };
     }
 
-    pub fn digest(self: *const Snapshot) u64 {
-        var h = std.hash.Wyhash.init(0);
-        h.update(if (self.live) "1" else "0");
-        for (self.slice()) |*t| {
-            std.hash.autoHash(&h, t.id);
-            std.hash.autoHash(&h, t.state);
-            std.hash.autoHash(&h, t.has_draft);
-            h.update(t.path.get());
+    pub fn openPath(p: [*:0]const u8) Store {
+        return .{ .db = regdb.openPath(p) };
+    }
+
+    pub fn close(self: *Store) void {
+        regdb.close(self.db);
+        self.db = null;
+    }
+
+    pub fn get(self: Store, gpa: std.mem.Allocator, id: i64) List {
+        var out: List = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
+        const db = self.db orelse return out;
+        var stmt: ?*anyopaque = null;
+        if (regdb.sqlite3_prepare_v2(db, "SELECT " ++ cols ++ " FROM threads WHERE id = ?", -1, &stmt, null) != regdb.OK)
+            return out;
+        defer _ = regdb.sqlite3_finalize(stmt);
+        _ = regdb.sqlite3_bind_int64(stmt, 1, id);
+        self.collect(&out, stmt);
+        return out;
+    }
+
+    /// A workspace's threads in id order, comments included.
+    pub fn list(self: Store, gpa: std.mem.Allocator, workspace: []const u8, filter: Filter) List {
+        var out: List = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
+        const db = self.db orelse return out;
+
+        // Built rather than concatenated at comptime because the filters
+        // are optional; bound as parameters, never interpolated, so a
+        // path with a quote in it is a path and not a syntax error.
+        var sql: [512]u8 = undefined;
+        var w = std.Io.Writer.fixed(&sql);
+        w.writeAll("SELECT " ++ cols ++ " FROM threads WHERE workspace = ?") catch return out;
+        if (filter.state.len > 0) w.writeAll(" AND state = ?") catch return out;
+        if (filter.path.len > 0) w.writeAll(" AND path = ?") catch return out;
+        w.writeAll(" ORDER BY id\x00") catch return out;
+        const sqlz: [*:0]const u8 = @ptrCast(sql[0 .. w.end - 1 :0].ptr);
+
+        var stmt: ?*anyopaque = null;
+        if (regdb.sqlite3_prepare_v2(db, sqlz, -1, &stmt, null) != regdb.OK) return out;
+        defer _ = regdb.sqlite3_finalize(stmt);
+
+        var idx: c_int = 1;
+        _ = regdb.sqlite3_bind_text(stmt, idx, workspace.ptr, @intCast(workspace.len), regdb.STATIC);
+        if (filter.state.len > 0) {
+            idx += 1;
+            _ = regdb.sqlite3_bind_text(stmt, idx, filter.state.ptr, @intCast(filter.state.len), regdb.STATIC);
         }
-        return h.final();
-    }
-};
-
-pub fn list(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8) Snapshot {
-    if (workspace.len == 0) return .{};
-    const info = hostc.readInfo(gpa, io) orelse return .{};
-    var path_buf: [160]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/workspaces/{s}/threads", .{workspace}) catch return .{};
-    var resp = hostc.get(gpa, &info, path, 512 * 1024) orelse return .{};
-    defer resp.deinit(gpa);
-    if (resp.status != 200) return .{};
-    return parseList(gpa, resp.body);
-}
-
-pub fn parseList(gpa: std.mem.Allocator, body: []const u8) Snapshot {
-    var snap: Snapshot = .{};
-    const parsed = std.json.parseFromSlice([]WireThread, gpa, body, .{ .ignore_unknown_fields = true }) catch return snap;
-    defer parsed.deinit();
-    snap.live = true;
-    for (parsed.value) |w| {
-        // Resolved threads are history; the list is what still wants you.
-        if (std.mem.eql(u8, w.state, "resolved")) continue;
-        if (snap.n >= max_threads) {
-            snap.more += 1;
-            continue;
+        if (filter.path.len > 0) {
+            idx += 1;
+            _ = regdb.sqlite3_bind_text(stmt, idx, filter.path.ptr, @intCast(filter.path.len), regdb.STATIC);
         }
-        var t: Thread = .{ .id = w.id, .line = w.startLine };
-        t.path.set(w.path);
-        t.state = State.parse(w.state);
-        t.anchor.setOneLine(w.anchorText);
-        t.has_draft = w.draft.len > 0;
-        t.undelivered = w.deliverError.len > 0;
-        snap.items[snap.n] = t;
-        snap.n += 1;
+        self.collect(&out, stmt);
+        return out;
     }
-    return snap;
-}
 
-pub const Doc = struct {
-    /// The whole document, as the editor should show it.
-    content: []u8,
-    /// How much of the tail is the draft. `content[0..content.len -
-    /// draft_len]` is the immutable prefix the host will check.
-    draft_len: usize,
-    resolved: bool,
-
-    pub fn prefix(self: *const Doc) []const u8 {
-        return self.content[0 .. self.content.len - @min(self.draft_len, self.content.len)];
+    fn collect(self: Store, out: *List, stmt: ?*anyopaque) void {
+        const a = out.arena.allocator();
+        var rows: std.ArrayListUnmanaged(Thread) = .empty;
+        while (regdb.sqlite3_step(stmt) == regdb.ROW) {
+            const t: Thread = .{
+                .id = regdb.sqlite3_column_int64(stmt, 0),
+                .workspace = a.dupe(u8, regdb.text(stmt, 1)) catch break,
+                .path = a.dupe(u8, regdb.text(stmt, 2)) catch break,
+                .start_line = clampLine(regdb.sqlite3_column_int64(stmt, 3)),
+                .end_line = clampLine(regdb.sqlite3_column_int64(stmt, 4)),
+                .side = a.dupe(u8, regdb.text(stmt, 5)) catch break,
+                .blob_sha = a.dupe(u8, regdb.text(stmt, 6)) catch break,
+                .commit_sha = a.dupe(u8, regdb.text(stmt, 7)) catch break,
+                .anchor_text = a.dupe(u8, regdb.text(stmt, 8)) catch break,
+                .state = a.dupe(u8, regdb.text(stmt, 9)) catch break,
+                .deliver_error = a.dupe(u8, regdb.text(stmt, 10)) catch break,
+                .draft = a.dupe(u8, regdb.text(stmt, 11)) catch break,
+                .rook_task_id = regdb.sqlite3_column_int64(stmt, 12),
+                .resolved_by = a.dupe(u8, regdb.text(stmt, 13)) catch break,
+                .agent_reopens = regdb.sqlite3_column_int64(stmt, 14),
+                .created_at = a.dupe(u8, regdb.text(stmt, 15)) catch break,
+                .updated_at = a.dupe(u8, regdb.text(stmt, 16)) catch break,
+                // NULL and "" are different answers here: never submitted
+                // versus submitted at an unknown time.
+                .submitted_at = if (regdb.sqlite3_column_text(stmt, 17)) |p|
+                    a.dupe(u8, std.mem.span(p)) catch break
+                else
+                    null,
+            };
+            rows.append(a, t) catch break;
+        }
+        out.items = rows.items;
+        for (out.items) |*t| t.comments = self.commentsFor(a, t.id);
     }
-    pub fn deinit(self: *Doc, gpa: std.mem.Allocator) void {
-        gpa.free(self.content);
-        self.* = undefined;
+
+    /// Comments for one thread, id order. An unreadable comment list is
+    /// an EMPTY one, never a missing thread — losing the anchor because
+    /// a comment would not scan is the wrong trade.
+    fn commentsFor(self: Store, a: std.mem.Allocator, thread_id: i64) []const Comment {
+        const db = self.db orelse return &.{};
+        var stmt: ?*anyopaque = null;
+        if (regdb.sqlite3_prepare_v2(db,
+            \\SELECT id, author, agent_session, body, created_at
+            \\FROM thread_comments WHERE thread_id = ? ORDER BY id
+        , -1, &stmt, null) != regdb.OK) return &.{};
+        defer _ = regdb.sqlite3_finalize(stmt);
+        _ = regdb.sqlite3_bind_int64(stmt, 1, thread_id);
+
+        var out: std.ArrayListUnmanaged(Comment) = .empty;
+        while (regdb.sqlite3_step(stmt) == regdb.ROW) {
+            out.append(a, .{
+                .id = regdb.sqlite3_column_int64(stmt, 0),
+                .author = a.dupe(u8, regdb.text(stmt, 1)) catch break,
+                .agent_session = a.dupe(u8, regdb.text(stmt, 2)) catch break,
+                .body = a.dupe(u8, regdb.text(stmt, 3)) catch break,
+                .created_at = a.dupe(u8, regdb.text(stmt, 4)) catch break,
+            }) catch break;
+        }
+        return out.items;
     }
 };
 
-/// Fetch a thread as a document. Caller owns `Doc.content`.
-pub fn fetchDoc(gpa: std.mem.Allocator, io: std.Io, id: i64) ?Doc {
-    const info = hostc.readInfo(gpa, io) orelse return null;
-    var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/threads/{d}/doc", .{id}) catch return null;
-    var resp = hostc.get(gpa, &info, path, 4 * 1024 * 1024) orelse return null;
-    defer resp.deinit(gpa);
-    if (resp.status != 200) return null;
-    return parseDoc(gpa, resp.body);
+fn clampLine(v: i64) u32 {
+    if (v <= 0 or v > std.math.maxInt(u32)) return 0;
+    return @intCast(v);
 }
 
-pub fn parseDoc(gpa: std.mem.Allocator, body: []const u8) ?Doc {
-    const parsed = std.json.parseFromSlice(WireDoc, gpa, body, .{ .ignore_unknown_fields = true }) catch return null;
-    defer parsed.deinit();
-    const content = gpa.dupe(u8, parsed.value.content) catch return null;
-    return .{ .content = content, .draft_len = parsed.value.draft.len, .resolved = parsed.value.resolved };
+// ---------------------------------------------------------------------
+
+const testing = std.testing;
+const testdb = @import("testdb.zig");
+
+fn seed(p: [*:0]const u8) !void {
+    try testdb.run(p, testdb.schema);
+    try testdb.run(p,
+        \\INSERT INTO threads (id, workspace, path, start_line, end_line, side, blob_sha,
+        \\  commit_sha, anchor_text, state, deliver_error, draft, rook_task_id, resolved_by,
+        \\  agent_reopens, created_at, updated_at, submitted_at)
+        \\VALUES
+        \\ (1,'src','a.zig',10,12,'modified','sha-a','c1','line ten','open','','',7,'',0,'t1','t2','t3'),
+        \\ (2,'src','a.zig',3,3,'original','sha-b','','line three','resolved','','draft text',0,'user',2,'t1','t2',NULL),
+        \\ (3,'src','b.zig',1,1,'','sha-c','','x','pending','nudge failed','',0,'',0,'t1','t2',NULL),
+        \\ (4,'other','z.zig',1,1,'modified','sha-d','','y','open','','',0,'',0,'t1','t2',NULL);
+        \\INSERT INTO thread_comments (id, thread_id, author, agent_session, body, created_at)
+        \\VALUES
+        \\ (1,1,'user','','first',  't1'),
+        \\ (2,1,'agent','sess-1','second','t2'),
+        \\ (3,2,'user','','only',   't1');
+    );
 }
 
-pub const SaveResult = union(enum) {
-    ok,
-    /// A concurrent reply landed. Carries the FRESH doc so the caller can
-    /// splice its tail back on — not an error, a merge.
-    stale: Doc,
-    failed,
-};
-
-/// Save a document. `POST /threads/{id}/doc {content}`.
-pub fn saveDoc(gpa: std.mem.Allocator, io: std.Io, id: i64, content: []const u8) SaveResult {
-    const info = hostc.readInfo(gpa, io) orelse return .failed;
-    var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/threads/{d}/doc", .{id}) catch return .failed;
-
-    // {"content": <json string>} — hand-built so the whole document does
-    // not need a second copy through a serializer.
-    var aw: std.Io.Writer.Allocating = .init(gpa);
-    defer aw.deinit();
-    _ = aw.writer.write("{\"content\":") catch return .failed;
-    @import("asks.zig").writeJsonString(&aw.writer, content);
-    _ = aw.writer.write("}") catch return .failed;
-
-    var resp = hostc.post(gpa, &info, path, aw.writer.buffered(), 4 * 1024 * 1024) orelse return .failed;
-    defer resp.deinit(gpa);
-    if (resp.status >= 200 and resp.status < 300) return .ok;
-    if (resp.status == 409) {
-        if (parseDoc(gpa, resp.body)) |fresh| return .{ .stale = fresh };
-    }
-    return .failed;
+fn openSeeded(tmp: *std.testing.TmpDir, buf: []u8) !Store {
+    const p = try testdb.path(tmp, buf);
+    try seed(p);
+    return Store.openPath(p);
 }
 
-/// POST a thread verb with no body: note | ask | resolve.
-pub fn verb(gpa: std.mem.Allocator, io: std.Io, id: i64, name: []const u8) bool {
-    const info = hostc.readInfo(gpa, io) orelse return false;
-    var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/threads/{d}/{s}", .{ id, name }) catch return false;
-    var resp = hostc.post(gpa, &info, path, "{}", 64 * 1024) orelse return false;
-    defer resp.deinit(gpa);
-    return resp.status >= 200 and resp.status < 300;
+test "threads come back in id order with their comments" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var store = try openSeeded(&tmp, &buf);
+    defer store.close();
+
+    var l = store.list(testing.allocator, "src", .{});
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 3), l.items.len);
+    try testing.expectEqual(@as(i64, 1), l.items[0].id);
+
+    // Positional scan: a column-order drift shows up here first.
+    try testing.expectEqualStrings("a.zig", l.items[0].path);
+    try testing.expectEqual(@as(u32, 10), l.items[0].start_line);
+    try testing.expectEqual(@as(u32, 12), l.items[0].end_line);
+    try testing.expectEqualStrings("sha-a", l.items[0].blob_sha);
+    try testing.expectEqualStrings("line ten", l.items[0].anchor_text);
+    try testing.expectEqual(@as(i64, 7), l.items[0].rook_task_id);
+
+    // Comments ride along, in id order.
+    try testing.expectEqual(@as(usize, 2), l.items[0].comments.len);
+    try testing.expectEqualStrings("first", l.items[0].comments[0].body);
+    try testing.expectEqualStrings("agent", l.items[0].comments[1].author);
+    try testing.expectEqualStrings("sess-1", l.items[0].comments[1].agent_session);
+    // A thread with no comments gets an empty slice, not a null one.
+    try testing.expectEqual(@as(usize, 0), l.items[2].comments.len);
 }
 
-/// Splice our tail onto a freshly rendered document.
-///
-/// The merge for a concurrent agent reply. History is append-only, so
-/// the fresh prefix simply grew — our draft is still ours and belongs
-/// below it. Caller owns the result.
-pub fn splice(gpa: std.mem.Allocator, fresh: *const Doc, our_tail: []const u8) ?[]u8 {
-    const p = fresh.prefix();
-    const out = gpa.alloc(u8, p.len + our_tail.len) catch return null;
-    @memcpy(out[0..p.len], p);
-    @memcpy(out[p.len..], our_tail);
-    return out;
+test "submitted_at distinguishes NULL from empty" {
+    // Never submitted and submitted-at-unknown-time are different
+    // answers, and the second is what "" would claim.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var store = try openSeeded(&tmp, &buf);
+    defer store.close();
+
+    var l = store.list(testing.allocator, "src", .{});
+    defer l.deinit();
+    try testing.expectEqualStrings("t3", l.items[0].submitted_at.?);
+    try testing.expectEqual(@as(?[]const u8, null), l.items[1].submitted_at);
 }
 
-/// The tail of `content` given the prefix length we were handed out.
-/// Returns null when the buffer no longer starts with that prefix —
-/// the user edited history, which the host would reject anyway.
-pub fn tailOf(content: []const u8, prefix_at_open: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, content, prefix_at_open)) return null;
-    return content[prefix_at_open.len..];
+test "filters narrow by state and path, and compose" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var store = try openSeeded(&tmp, &buf);
+    defer store.close();
+
+    var open_only = store.list(testing.allocator, "src", .{ .state = "open" });
+    defer open_only.deinit();
+    try testing.expectEqual(@as(usize, 1), open_only.items.len);
+    try testing.expectEqual(@as(i64, 1), open_only.items[0].id);
+
+    var by_path = store.list(testing.allocator, "src", .{ .path = "a.zig" });
+    defer by_path.deinit();
+    try testing.expectEqual(@as(usize, 2), by_path.items.len);
+
+    var both = store.list(testing.allocator, "src", .{ .state = "resolved", .path = "a.zig" });
+    defer both.deinit();
+    try testing.expectEqual(@as(usize, 1), both.items.len);
+    try testing.expectEqual(@as(i64, 2), both.items[0].id);
+
+    // A workspace filter that matches nothing is empty, not everything.
+    var none = store.list(testing.allocator, "nosuch", .{});
+    defer none.deinit();
+    try testing.expectEqual(@as(usize, 0), none.items.len);
 }
 
-// ----------------------------------------------------------------- tests
+test "filter values are bound, not interpolated" {
+    // The injection this shape prevents. A quote in a path must be a
+    // path; if these were concatenated it would be a syntax error at
+    // best and a different query at worst.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var store = try openSeeded(&tmp, &buf);
+    defer store.close();
 
-const T = std.testing;
-
-test "prefix is content minus draft, not a scissors scan" {
-    // The exact reason the host hands `draft` back: a comment body may
-    // legally contain a scissors-shaped line, so scanning for one would
-    // cut the document in the wrong place.
-    const body =
-        \\{"content":"history\n-- ✂ -- reply below --\nmy draft","draft":"my draft","resolved":false}
-    ;
-    var doc = parseDoc(T.allocator, body).?;
-    defer doc.deinit(T.allocator);
-    try T.expectEqualStrings("history\n-- ✂ -- reply below --\n", doc.prefix());
+    var l = store.list(testing.allocator, "src", .{ .path = "' OR 1=1 --" });
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 0), l.items.len);
 }
 
-test "a doc with no draft is all prefix" {
-    var doc = parseDoc(T.allocator, "{\"content\":\"just history\",\"draft\":\"\"}").?;
-    defer doc.deinit(T.allocator);
-    try T.expectEqualStrings("just history", doc.prefix());
+test "a thread hands reanchor the anchor it stored" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var store = try openSeeded(&tmp, &buf);
+    defer store.close();
+
+    var l = store.list(testing.allocator, "src", .{});
+    defer l.deinit();
+
+    const modified = l.items[0].anchor();
+    try testing.expectEqual(reanchor.Side.modified, modified.side);
+    try testing.expectEqualStrings("a.zig", modified.path);
+    try testing.expectEqual(@as(u32, 10), modified.start_line);
+
+    try testing.expectEqual(reanchor.Side.original, l.items[1].anchor().side);
+    // An EMPTY side column means modified — that is what the Go schema
+    // default has always meant, and rows predating the column have it.
+    try testing.expectEqual(reanchor.Side.modified, l.items[2].anchor().side);
 }
 
-test "splice puts our tail under a grown history" {
-    // The concurrent-reply merge: the agent replied while we were typing.
-    var fresh = parseDoc(T.allocator, "{\"content\":\"h1\\nh2\\n--cut--\\n\",\"draft\":\"\"}").?;
-    defer fresh.deinit(T.allocator);
-    const merged = splice(T.allocator, &fresh, "my unsent words").?;
-    defer T.allocator.free(merged);
-    try T.expectEqualStrings("h1\nh2\n--cut--\nmy unsent words", merged);
-}
-
-test "tailOf recovers what we wrote, and declines mangled history" {
-    try T.expectEqualStrings("tail", tailOf("PREFIX\ntail", "PREFIX\n").?);
-    try T.expectEqualStrings("", tailOf("PREFIX\n", "PREFIX\n").?);
-    // History edited above the line — the host would 409 this anyway.
-    try T.expect(tailOf("MANGLED\ntail", "PREFIX\n") == null);
-}
-
-test "the list drops resolved threads and marks the undelivered" {
-    const body =
-        \\[{"id":1,"path":"a.zig","startLine":10,"state":"open","anchorText":"fn a"},
-        \\ {"id":2,"path":"b.zig","state":"resolved"},
-        \\ {"id":3,"path":"c.zig","state":"open","draft":"wip","deliverError":"nobody home"}]
-    ;
-    const snap = parseList(T.allocator, body);
-    try T.expect(snap.live);
-    try T.expectEqual(@as(usize, 2), snap.n);
-    try T.expectEqual(@as(i64, 1), snap.slice()[0].id);
-    try T.expect(!snap.slice()[0].has_draft);
-    try T.expectEqual(@as(i64, 3), snap.slice()[1].id);
-    try T.expect(snap.slice()[1].has_draft);
-    try T.expect(snap.slice()[1].undelivered);
-}
-
-test "a multi-line anchor collapses to one row" {
-    // Real anchors are spans of source and are often several lines. A
-    // newline in a single-row list breaks the row (and the ctl output),
-    // which is exactly how this showed up against live data.
-    const body =
-        \\[{"id":1,"path":"a.go","state":"open","anchorText":"app := New({\n  Name: \"rook\",\n\t Desc: x})"}]
-    ;
-    const snap = parseList(T.allocator, body);
-    const a = snap.slice()[0].anchor.get();
-    try T.expect(std.mem.indexOfScalar(u8, a, '\n') == null);
-    try T.expect(std.mem.indexOfScalar(u8, a, '\t') == null);
-    try T.expectEqualStrings("app := New({ Name: \"rook\", Desc: x})", a);
-}
-
-test "an empty list is live, unlike an unreachable host" {
-    try T.expect(parseList(T.allocator, "[]").live);
-    const unreachable_snap: Snapshot = .{};
-    try T.expect(!unreachable_snap.live);
+test "a missing db is an empty list, never a crash" {
+    var store = Store.openPath("/nonexistent/rook/rook.db");
+    defer store.close();
+    var l = store.list(testing.allocator, "src", .{});
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 0), l.items.len);
 }

@@ -188,13 +188,13 @@ pub fn build(b: *std.Build) void {
     // concurrent-reply splice. Its own root because getting the prefix
     // wrong loses a draft — the host 409s and the client has to merge,
     // and a merge that splices at the wrong place eats what you typed.
-    const threads_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/threads.zig"),
+    const threaddoc_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/threaddoc.zig"),
         .target = b.graph.host,
         .optimize = .Debug,
     }) });
-    threads_tests.root_module.link_libc = true;
-    test_step.dependOn(&b.addRunArtifact(threads_tests).step);
+    threaddoc_tests.root_module.link_libc = true;
+    test_step.dependOn(&b.addRunArtifact(threaddoc_tests).step);
 
     // The review gate's rules. Its own root because a client that
     // disagreed with the host about what BLOCKS would render a gate the
@@ -249,6 +249,22 @@ pub fn build(b: *std.Build) void {
     blobs_tests.root_module.link_libc = true;
     blobs_tests.root_module.linkSystemLibrary("sqlite3", .{});
     test_step.dependOn(&b.addRunArtifact(blobs_tests).step);
+
+    // Thread rows and their comments. Its own root for the same reason
+    // tasks has one — the scan is POSITIONAL against the Go host's
+    // threadCols — plus one this table owns: submitted_at is the only
+    // NULLable column in the read path, and collapsing NULL to ""
+    // silently turns "never submitted" into "submitted at an unknown
+    // time", which is a thread nobody was ever told about reading as a
+    // normal wait.
+    const threads_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/threads.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    threads_tests.root_module.link_libc = true;
+    threads_tests.root_module.linkSystemLibrary("sqlite3", .{});
+    test_step.dependOn(&b.addRunArtifact(threads_tests).step);
 
     // RookTask reads and the review gate. Its own root because both
     // failure modes are quiet: the scan is POSITIONAL, so a column-order

@@ -402,7 +402,7 @@ pub const App = struct {
 
     // ---- threads ----
     /// The workspace thread list, polled while its panel is open.
-    thr: @import("threads.zig").Snapshot = .{},
+    thr: @import("threaddoc.zig").Snapshot = .{},
     thr_digest: u64 = 0,
     thr_sel: usize = 0,
     thr_wake: std.atomic.Value(bool) = .init(false),
@@ -5033,7 +5033,7 @@ fn reviewThread(app: *App) void {
 /// resource and must not interleave — a save racing its own re-open
 /// would splice the wrong tail.
 fn threadsThread(app: *App) void {
-    const thr = @import("threads.zig");
+    const thr = @import("threaddoc.zig");
     while (true) {
         // --- save first: what the human already typed outranks polling
         var save_id: i64 = 0;
