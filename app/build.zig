@@ -221,6 +221,19 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(anchor_tests).step);
 
+    // Running git, and the repo-path guard. Its own root because both
+    // halves fail silently when wrong: `git diff --no-index` exits 1 for
+    // "the files differ", so a runner that read nonzero as failure would
+    // report every changed file as having no hunks and every anchor
+    // would quietly stop moving — and confine() is a traversal guard, so
+    // its bugs are the kind you only notice from the outside.
+    const git_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/git.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(git_tests).step);
+
     // The anchor blob store's read path. Its own root, and it links
     // sqlite because the bug it guards is a libsqlite3 API trap rather
     // than a rook one: sqlite3_column_blob returns NULL for a
