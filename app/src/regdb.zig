@@ -29,7 +29,18 @@ pub extern "c" fn sqlite3_column_text(stmt: ?*anyopaque, col: c_int) ?[*:0]const
 pub extern "c" fn sqlite3_column_blob(stmt: ?*anyopaque, col: c_int) ?*const anyopaque;
 pub extern "c" fn sqlite3_column_bytes(stmt: ?*anyopaque, col: c_int) c_int;
 pub extern "c" fn sqlite3_bind_text(stmt: ?*anyopaque, idx: c_int, text: [*]const u8, n: c_int, destructor: ?*const anyopaque) c_int;
+pub extern "c" fn sqlite3_bind_int64(stmt: ?*anyopaque, idx: c_int, v: i64) c_int;
+pub extern "c" fn sqlite3_column_int64(stmt: ?*anyopaque, col: c_int) i64;
 pub extern "c" fn sqlite3_busy_timeout(db: ?*anyopaque, ms: c_int) c_int;
+
+/// Column text as a slice, empty when the column is NULL. Every TEXT
+/// column in rook's schema is NOT NULL, but a NULL still arrives from an
+/// outer join or an older db, and "" is what the Go side's string scan
+/// produces for those — so the two agree by construction.
+pub fn text(stmt: ?*anyopaque, col: c_int) []const u8 {
+    const p = sqlite3_column_text(stmt, col) orelse return "";
+    return std.mem.span(p);
+}
 
 pub const OPEN_READONLY: c_int = 1;
 pub const ROW: c_int = 100;

@@ -244,8 +244,7 @@ fn tmpRoot(buf: []u8, name: []const u8) ?[]const u8 {
 // ---------------------------------------------------------------------
 
 const testing = std.testing;
-
-extern "c" fn sqlite3_exec(db: ?*anyopaque, sql: [*:0]const u8, cb: ?*const anyopaque, arg: ?*anyopaque, err: ?*?[*:0]u8) c_int;
+const testdb = @import("testdb.zig");
 const regdb = @import("regdb.zig");
 
 const Fixture = struct {
@@ -263,26 +262,23 @@ const Fixture = struct {
         try self.tmp.dir.writeFile(testing.io, .{ .sub_path = name, .data = data });
     }
 
-    /// Put a snapshot in anchor_blobs and return its sha.
+    /// Put a snapshot in anchor_blobs and return its sha. Bound as a
+    /// blob rather than interpolated, so content with quotes or NULs is
+    /// stored the way a real capture would store it.
     fn snapshot(self: *Fixture, content: []const u8) ![40]u8 {
         const sha = anchor.blobSha(content);
-        var db: ?*anyopaque = null;
-        try testing.expectEqual(regdb.OK, regdb.sqlite3_open_v2(self.dbpath, &db, 2 | 4, null));
+        try testdb.run(self.dbpath, testdb.schema);
+        const db = try testdb.open(self.dbpath);
         defer _ = regdb.sqlite3_close(db);
-        try testing.expectEqual(regdb.OK, sqlite3_exec(db,
-            \\CREATE TABLE IF NOT EXISTS anchor_blobs (sha TEXT PRIMARY KEY, content BLOB NOT NULL);
-        , null, null, null));
         var stmt: ?*anyopaque = null;
         try testing.expectEqual(regdb.OK, regdb.sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO anchor_blobs (sha, content) VALUES (?, ?)", -1, &stmt, null));
         defer _ = regdb.sqlite3_finalize(stmt);
         _ = regdb.sqlite3_bind_text(stmt, 1, &sha, 40, regdb.STATIC);
-        _ = sqlite3_bind_blob(stmt, 2, content.ptr, @intCast(content.len), regdb.STATIC);
+        _ = testdb.sqlite3_bind_blob(stmt, 2, content.ptr, @intCast(content.len), regdb.STATIC);
         _ = regdb.sqlite3_step(stmt);
         return sha;
     }
 };
-
-extern "c" fn sqlite3_bind_blob(stmt: ?*anyopaque, idx: c_int, data: [*]const u8, n: c_int, destructor: ?*const anyopaque) c_int;
 
 fn fixture() !*Fixture {
     const f = try testing.allocator.create(Fixture);

@@ -85,31 +85,14 @@ pub fn one(gpa: std.mem.Allocator, sha: []const u8) ?[]u8 {
 // ---------------------------------------------------------------------
 
 const testing = std.testing;
-
-extern "c" fn sqlite3_exec(db: ?*anyopaque, sql: [*:0]const u8, cb: ?*const anyopaque, arg: ?*anyopaque, err: ?*?[*:0]u8) c_int;
-
-const OPEN_READWRITE: c_int = 2;
-const OPEN_CREATE: c_int = 4;
+const testdb = @import("testdb.zig");
 
 fn fixture(path: [*:0]const u8, sql: [*:0]const u8) !void {
-    var db: ?*anyopaque = null;
-    try testing.expectEqual(regdb.OK, regdb.sqlite3_open_v2(path, &db, OPEN_READWRITE | OPEN_CREATE, null));
-    defer _ = regdb.sqlite3_close(db);
-    try testing.expectEqual(regdb.OK, sqlite3_exec(db,
-        \\CREATE TABLE IF NOT EXISTS anchor_blobs (sha TEXT PRIMARY KEY, content BLOB NOT NULL);
-    , null, null, null));
-    try testing.expectEqual(regdb.OK, sqlite3_exec(db, sql, null, null, null));
+    try testdb.run(path, testdb.schema);
+    try testdb.run(path, sql);
 }
 
-/// sqlite opens by path, and TmpDir hands out an Io.Dir handle with no
-/// way to ask where it is (0.16 dropped realpath). So spell out the
-/// layout testing.tmpDir builds: .zig-cache/tmp/<sub_path>, relative to
-/// cwd, which is the build root under both `zig build test` and a bare
-/// `zig test`. If a future std moves it, these tests fail loudly on a
-/// missing db rather than reading the real registry.
-fn tmpDbPath(tmp: *std.testing.TmpDir, buf: []u8) ![:0]const u8 {
-    return try std.fmt.bufPrintZ(buf, ".zig-cache/tmp/{s}/rook.db", .{tmp.sub_path});
-}
+const tmpDbPath = testdb.path;
 
 test "a stored snapshot round-trips" {
     var tmp = testing.tmpDir(.{});

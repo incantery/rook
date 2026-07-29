@@ -250,6 +250,20 @@ pub fn build(b: *std.Build) void {
     blobs_tests.root_module.linkSystemLibrary("sqlite3", .{});
     test_step.dependOn(&b.addRunArtifact(blobs_tests).step);
 
+    // RookTask reads and the review gate. Its own root because both
+    // failure modes are quiet: the scan is POSITIONAL, so a column-order
+    // drift from the Go host's taskCols mislabels every row rather than
+    // erroring, and a gate that failed open on an unrecognised state
+    // would pass a review because of a typo.
+    const tasks_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/tasks.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    tasks_tests.root_module.link_libc = true;
+    tasks_tests.root_module.linkSystemLibrary("sqlite3", .{});
+    test_step.dependOn(&b.addRunArtifact(tasks_tests).step);
+
     // Re-anchoring assembled — the arithmetic against real git and a
     // real sqlite fixture. Its own root because the parts worth testing
     // here are exactly the ones a fake would paper over: what git calls
