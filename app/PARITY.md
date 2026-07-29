@@ -589,8 +589,19 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       you were, so ctrl-i can come back to it. `\zs`/`\ze` get capture
       slots of their OWN: the whole-match saves run after the body and
       would overwrite anything the body set.
-- [ ] Regex gaps: no back-references INSIDE a pattern, and `\c`/`\C`
-      are not honoured mid-pattern (`:s///i` is).
+- [x] **Back-references and the case flags close the regex gaps.**
+      `\1`-`\9` inside a pattern match what the group actually took, so
+      `s/\(\w\+\) \1/\1/g` de-duplicates a stutter; a reference is the
+      one atom whose width is unknown until match time, which is why it
+      cannot ride the iterative repeat. A forward reference is a typo
+      every time, so it fails to compile rather than matching empty.
+      `\c`/`\C` are NOT positional in vim — one anywhere decides the
+      whole pattern — so they are lifted out before parsing instead of
+      compiled. That is what keeps `\c^func` anchored: compiled as an
+      instruction, the `^` would no longer be at the start of the
+      pattern and would quietly become a literal caret. A `\c` inside
+      `[...]` stays a member of the class, which vim agrees with and is
+      the reason the lift has to track bracket expressions.
 - [x] **Marks are ANCHORED.** They hold a byte offset, and
       `Buffer.on_edit` tells the editor about every edit — offset,
       bytes removed, bytes added — so a mark moves with the text

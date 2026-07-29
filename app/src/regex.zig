@@ -6,10 +6,15 @@
 //! is worse than either extreme.
 //!
 //! Syntax (vim magic, the default): `.` `*` `^` `$` `[abc]` `[^a-z]`
-//! are special unescaped; `\(` `\)` `\|` `\+` `\?` `\=` `\{n,m}` `\<`
-//! `\>` and the class shorthands `\d \D \w \W \s \S \a \l \u` are
+//! are special unescaped; `\(` `\)` `\%(` `\|` `\+` `\?` `\=` `\{n,m}`
+//! `\<` `\>` `\zs` `\ze`, the back-references `\1`-`\9`, the case flags
+//! `\c` `\C` and the class shorthands `\d \D \w \W \s \S \a \l \u` are
 //! special escaped. Everything else after a `\` is that literal
 //! character.
+//!
+//! `\c` and `\C` are not positional — one anywhere in the pattern
+//! decides the case sensitivity of all of it — so they are lifted out
+//! before parsing rather than compiled. See `stripCase`.
 //!
 //! Compiled to instructions and run by BACKTRACKING, not by a Thompson
 //! simulation, because captures are the point — `\1` in a replacement
@@ -57,6 +62,10 @@ const Inst = union(enum) {
     split: struct { x: u32, y: u32 },
     jmp: u32,
     save: u8,
+    /// `\1`-`\9` INSIDE a pattern: match whatever that group captured.
+    /// Its width is not known until match time, which is exactly why it
+    /// cannot be a `Simple` and cannot ride the iterative repeat.
+    backref: u8,
     bol,
     eol,
     word_start,
@@ -89,9 +98,12 @@ pub const Regex = struct {
     }
 
     pub fn compile(gpa: Allocator, pattern: []const u8, icase: bool) Error!Regex {
+        var want_case = icase;
+        const src = try stripCase(gpa, pattern, &want_case);
+        defer gpa.free(src);
         var p: Parser = .{
             .gpa = gpa,
-            .src = pattern,
+            .src = src,
             .prog = .empty,
             .classes = .empty,
         };
@@ -101,15 +113,15 @@ pub const Regex = struct {
         }
         try p.prog.append(gpa, .{ .save = 0 });
         try p.alts(0);
-        if (p.i != pattern.len) return error.BadPattern; // a stray `\)`
+        if (p.i != src.len) return error.BadPattern; // a stray `\)`
         try p.prog.append(gpa, .{ .save = 1 });
         try p.prog.append(gpa, .match);
         return .{
             .prog = try p.prog.toOwnedSlice(gpa),
             .classes = try p.classes.toOwnedSlice(gpa),
-            .icase = icase,
-            .anchored = pattern.len > 0 and pattern[0] == '^' and
-                std.mem.indexOf(u8, pattern, "\\|") == null,
+            .icase = want_case,
+            .anchored = src.len > 0 and src[0] == '^' and
+                std.mem.indexOf(u8, src, "\\|") == null,
         };
     }
 
@@ -158,6 +170,69 @@ pub const Regex = struct {
         return m;
     }
 };
+
+/// Lift `\c` / `\C` out of the pattern, returning a copy without them.
+///
+/// They are not positional in vim: ONE anywhere decides the case
+/// sensitivity of the whole pattern, so `foo\c` and `\cfoo` are the same
+/// search. Removing them before parsing rather than compiling them to an
+/// instruction is what keeps `^` and `$` magic at the ends — `\c^func`
+/// would otherwise have pushed the `^` off the edge of the pattern and
+/// turned it into a literal caret.
+///
+/// Inside `[...]` a backslash is the bracket parser's business, so this
+/// tracks the class the same way `bracket` does: `]` closes it only when
+/// it is not the first item, and a leading `^` does not count as one.
+fn stripCase(gpa: Allocator, pattern: []const u8, icase: *bool) Error![]u8 {
+    var out = try gpa.alloc(u8, pattern.len);
+    errdefer gpa.free(out);
+    var n: usize = 0;
+    var i: usize = 0;
+    var in_class = false;
+    var first = false;
+    while (i < pattern.len) {
+        const c = pattern[i];
+        if (in_class) {
+            if (c == '\\' and i + 1 < pattern.len) {
+                out[n] = c;
+                out[n + 1] = pattern[i + 1];
+                n += 2;
+                i += 2;
+                first = false;
+                continue;
+            }
+            if (c == ']' and !first) in_class = false;
+            if (!(c == '^' and first)) first = false;
+        } else if (c == '\\' and i + 1 < pattern.len) {
+            switch (pattern[i + 1]) {
+                'c' => {
+                    icase.* = true;
+                    i += 2;
+                    continue;
+                },
+                'C' => {
+                    icase.* = false;
+                    i += 2;
+                    continue;
+                },
+                else => {
+                    out[n] = c;
+                    out[n + 1] = pattern[i + 1];
+                    n += 2;
+                    i += 2;
+                    continue;
+                },
+            }
+        } else if (c == '[') {
+            in_class = true;
+            first = true;
+        }
+        out[n] = c;
+        n += 1;
+        i += 1;
+    }
+    return try gpa.realloc(out, n);
+}
 
 // ------------------------------------------------------------------ matching
 
@@ -246,6 +321,21 @@ const Vm = struct {
                     if (self.run(pc + 1, sp, depth + 1)) return true;
                     self.caps[n] = was;
                     return false;
+                },
+                .backref => |g| {
+                    // A group that never participated matches nothing
+                    // and fails, rather than matching empty: `\(a\)\|\1`
+                    // should not let the second branch succeed for free.
+                    const a = self.caps[g * 2] orelse return false;
+                    const b = self.caps[g * 2 + 1] orelse return false;
+                    if (b < a) return false;
+                    const len = b - a;
+                    if (sp + len > self.s.len) return false;
+                    for (0..len) |k| {
+                        if (!self.eq(self.s[a + k], self.s[sp + k])) return false;
+                    }
+                    sp += len;
+                    pc += 1;
                 },
                 .jmp => |x| pc = x,
                 .split => |b| {
@@ -541,6 +631,15 @@ const Parser = struct {
                 '>' => {
                     self.i += 2;
                     _ = try self.emit(.word_end);
+                    return null;
+                },
+                '1'...'9' => {
+                    const g = n - '0';
+                    // Referring forward to a group that has not been
+                    // opened yet is a typo every time.
+                    if (g > self.ngroup) return error.BadPattern;
+                    self.i += 2;
+                    _ = try self.emit(.{ .backref = g });
                     return null;
                 },
                 'd', 'D', 'w', 'W', 's', 'S', 'a', 'l', 'u' => {
@@ -882,4 +981,74 @@ test "zs and ze move the reported match" {
     try testing.expectEqualStrings("foo", s[m2.start..m2.end]);
     // ...but the match still had to be followed by "bar".
     try testing.expect(re2.search("xfoobaz", 0) == null);
+}
+
+test "back-references inside the pattern" {
+    // Every expectation checked against /usr/bin/vim.
+    try expectFind("\\(\\w\\+\\) \\1", "foo foo bar", "foo foo");
+    try expectFind("\\(ab\\)\\1", "abab cd", "abab");
+    try expectFind("\\(.\\)\\1", "abbc", "bb");
+    try expectFind("\\(l\\)\\1", "hello", "ll");
+    try expectFind("\\(xyz\\)\\1", "xyzxyz", "xyzxyz");
+    // The reference has to match what the group ACTUALLY took, not the
+    // pattern that took it: \2\1 is "ba", and "abcabc" has no "ba".
+    try expectNone("\\(a\\)\\(b\\)\\2\\1", "abcabc");
+    try expectFind("\\(a\\)\\(b\\)\\2\\1", "xxabba", "abba");
+    // A group whose text moved: the reference follows the capture.
+    try expectFind("\\(.\\)x\\1", "zaxa", "axa");
+    try expectNone("\\(.\\)x\\1", "zaxb");
+}
+
+test "a back-reference is bounded by the group, not by the pattern" {
+    const gpa = testing.allocator;
+    var re = try Regex.compile(gpa, "\\(a*\\)b\\1", false);
+    defer re.deinit(gpa);
+    // Greedy \(a*\) grabs "aaa", then \1 needs "aaa" after the b and
+    // only "aa" is there, so it has to give one back.
+    const s = "aaabaa";
+    const m = re.search(s, 0).?;
+    try testing.expectEqualStrings("aabaa", s[m.start..m.end]);
+}
+
+test "a forward reference is a typo, not a pattern" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.BadPattern, Regex.compile(gpa, "\\1\\(a\\)", false));
+    try testing.expectError(error.BadPattern, Regex.compile(gpa, "\\2", false));
+}
+
+test "backslash c makes the whole pattern case-insensitive" {
+    // Not positional in vim: one anywhere applies to all of it.
+    try expectFind("\\cfoo", "xx FOO", "FOO");
+    try expectFind("foo\\c", "xx FOO", "FOO");
+    try expectFind("f\\coo", "xx FOO", "FOO");
+    try expectFind("\\cFOO", "xx foo", "foo");
+    try expectFind("\\ca[b]c", "aBc", "aBc");
+}
+
+test "backslash C forces case back on, over the caller's flag" {
+    const gpa = testing.allocator;
+    var re = try Regex.compile(gpa, "\\Cfoo", true);
+    defer re.deinit(gpa);
+    try testing.expect(re.search("xx FOO", 0) == null);
+    try testing.expectEqual(@as(usize, 3), re.search("xx foo", 0).?.start);
+}
+
+test "lifting the case flag out leaves the anchors at the ends" {
+    // The reason \c is stripped rather than compiled: `\c^func` has to
+    // keep the ^ magic, and `\cfunc$` the $.
+    try expectFind("\\c^func", "Func x", "Func");
+    try expectNone("\\c^func", "x Func");
+    try expectFind("\\cfunc$", "x Func", "Func");
+    try expectNone("\\cfunc$", "Func x");
+    try expectFind("\\c^func$", "FUNC", "FUNC");
+}
+
+test "a case flag inside a bracket is a member, not a flag" {
+    // Checked against vim: `[x\c]Q` puts a `c` in the class and leaves
+    // the Q case-SENSITIVE. This is the whole reason stripCase has to
+    // track bracket expressions instead of scanning for a two-byte
+    // sequence.
+    try expectNone("[x\\c]Q", "xq");
+    try expectFind("[x\\c]Q", "xQ", "xQ");
+    try expectFind("[x\\c]Q", "cQ", "cQ");
 }

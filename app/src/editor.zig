@@ -8108,3 +8108,29 @@ test "the jumplist is anchored to the text" {
     e.key("\x0f");
     try testing.expectEqual(@as(usize, 4), e.cline);
 }
+
+test "a substitute can refer back to its own capture" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ithe the cat sat sat");
+    e.key("\x1b");
+    ex(e, "s/\\(\\w\\+\\) \\1/\\1/g");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("the cat sat", s);
+}
+
+test "backslash c in a search overrides the case the caller asked for" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "iaaa\nFOO bar");
+    e.key("\x1b");
+    keys(e, "gg");
+    // `/` compiles case-SENSITIVE, so this only lands if the \c won.
+    keys(e, "/\\cfoo");
+    e.key("\r");
+    try testing.expectEqual(@as(usize, 1), e.cline);
+    try testing.expectEqual(@as(usize, 0), e.ccol);
+}
