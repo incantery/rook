@@ -207,6 +207,20 @@ pub fn build(b: *std.Build) void {
     review_tests.root_module.link_libc = true;
     test_step.dependOn(&b.addRunArtifact(review_tests).step);
 
+    // Re-anchoring arithmetic — the first piece of the Go host's review
+    // substrate to land here, and it gets its own root for a reason the
+    // others don't have: for now the SAME rules exist twice, in
+    // internal/host/reanchor.go and in src/anchor.zig, and the two must
+    // agree exactly. These tests are ports of reanchor_test.go's, input
+    // for input, so a divergence surfaces as one side going red rather
+    // than as a comment quietly rendering two lines off its code.
+    const anchor_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/anchor.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(anchor_tests).step);
+
     // The UI layer's text fitting. Its own root for the reason logged
     // above editor_tests — the exe module's test collection does not
     // reach these decls, and a suite that is never run is worse than no
