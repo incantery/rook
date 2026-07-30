@@ -348,6 +348,26 @@ a daily driver.
       READDIR order, so the same search listed differently on a
       different machine. filelist now sorts by path — which also
       makes ⌘P's tie-break stable.
+- [x] **`explorer-auto`** — the sidebar is already there when the
+      window opens, VS Code's own launch behaviour, and the last item
+      on the switcher list. Two rules make it orientation rather than
+      interruption: REPO-GATED (a Dock launch lands in $HOME, and a
+      sidebar listing a home directory is noise; being inside a
+      repository is the "you opened a project" signal — repoRootFs
+      returning null IS the gate, so the fallback-to-cwd its other
+      callers want is deliberately not applied), and FOCUS STAYS on
+      the shell (you launched a terminal; a tree that swallowed the
+      first thing you typed would be a worse start than no tree).
+      Runs before ctl binds, so an agent connecting the instant the
+      socket answers cannot race the pane it is about to assert on.
+      paneRootLocked grew a getcwd fallback while here: a pane whose
+      process has not started yet must not make the tree impossible.
+      e2e `explorerauto` needed the harness to choose a LAUNCH
+      DIRECTORY, which exposed two traps worth keeping: the child
+      chdirs before exec, so a relative artifact path silently execs
+      nothing ("the app never came up"), and a scenario that reuses
+      one path buffer for two directories scribbles over the launch
+      dir it is still using.
 - [ ] **Theme engine**: one semantic Palette, 8 builtins, runtime swap,
       **VS Code theme importer**. rook has 2 builtins and a config key
       (3 now, with vscode-dark).

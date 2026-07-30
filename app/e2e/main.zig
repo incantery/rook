@@ -57,6 +57,7 @@ const scenarios = [_]Scenario{
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
+    .{ .name = "explorerauto", .what = "explorer-auto: the sidebar opens at launch inside a repo, and never takes the keys", .run = explorerAuto },
     .{ .name = "findfiles", .what = "⌘⇧F: scan honours the ignore rules, results group by file, Enter jumps to the line", .run = findInFiles },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
@@ -2403,6 +2404,7 @@ const parity_env_json =
     \\{"id":"option:app:theme","kind":"option","scope":"app","key":"theme","value":"vscode-dark"},
     \\{"id":"option:app:editor-mode","kind":"option","scope":"app","key":"editor-mode","value":"insert"},
     \\{"id":"option:app:activity-bar","kind":"option","scope":"app","key":"activity-bar","value":true},
+    \\{"id":"option:app:explorer-auto","kind":"option","scope":"app","key":"explorer-auto","value":true},
     \\{"id":"option:app:font-family","kind":"option","scope":"app","key":"font-family","value":"Menlo"},
     \\{"id":"option:app:font-size","kind":"option","scope":"app","key":"font-size","value":14},
     \\{"id":"leader:app","kind":"leader","scope":"app","key":"`"}
@@ -2458,7 +2460,13 @@ fn presetParity(gpa: std.mem.Allocator, bin: []const u8) !void {
 /// LOOK half (Dark+ colors, the blue bar) is pixels; the persona
 /// screenshot pass covers it.
 fn vscodeFeel(gpa: std.mem.Allocator, bin: []const u8) !void {
-    const app = try h.Instance.start(gpa, bin, .{ .config_extra = "preset = \"vscode\"" });
+    // explorer-auto OFF: the preset turns it on, and the suite runs
+    // from inside rook's own repo, so the sidebar would already be up
+    // — this scenario is about the RAIL opening it. Auto-open has its
+    // own scenario, with launch directories it chooses.
+    const app = try h.Instance.start(gpa, bin, .{
+        .config_extra = "preset = \"vscode\"\nexplorer-auto = false",
+    });
     defer {
         app.stop();
         app.deinit();
@@ -2646,4 +2654,65 @@ fn findInFiles(gpa: std.mem.Allocator, bin: []const u8) !void {
     const again = try app.waitCtl("sidepane", "typing:yes", 5000);
     try h.expectContains(again, "panel:search", "the panel is still open");
     try h.expectContains(again, "results:2", "and still holds its results");
+}
+
+// -------------------------------------------------------- explorerauto
+
+/// `explorer-auto`: the sidebar is already there when the window
+/// opens — but only inside a repo, and never holding the keys.
+///
+/// Both halves matter. A Dock launch lands in $HOME, and a sidebar
+/// listing a home directory is noise; and a tree that took focus
+/// would swallow the first thing typed into a terminal you just
+/// opened.
+fn explorerAuto(gpa: std.mem.Allocator, bin: []const u8) !void {
+    // A repo to launch inside. Built before the instance, because the
+    // launch cwd is the thing under test.
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-xauto-{d}", .{h.runPid()});
+    // Each path gets its OWN buffer: both outlive the setup here and
+    // are handed to instances later, so reusing one scribbles over a
+    // launch directory that is still in use.
+    var repo_buf: [256]u8 = undefined;
+    const repo = try std.fmt.bufPrint(&repo_buf, "{s}/repo", .{scratch});
+    try h.mkdirP(repo);
+    var plain_buf: [256]u8 = undefined;
+    const plain = try std.fmt.bufPrint(&plain_buf, "{s}/plain", .{scratch});
+    try h.mkdirP(plain);
+    if (try h.runCmd(repo, &.{ "/usr/bin/git", "init", "-q" }) != 0) return error.NoGit;
+    var f_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/README.md", .{repo}), "hi\n");
+
+    {
+        const app = try h.Instance.start(gpa, bin, .{
+            .config_extra = "explorer-auto = true",
+            .cwd = repo,
+        });
+        defer {
+            app.stop();
+            app.deinit();
+        }
+        try h.expectEq("the sidebar came up with the window", 2, try app.paneCount());
+        try h.expectContains(try app.ctl("panes"), "edit:repo", "and it is the tree, rooted at the repo");
+        // FOCUS stayed on the shell: what start() typed to settle the
+        // instance reached a pty, which only happens if the tree did
+        // not take the keys.
+        _ = try app.ctl("type echo landed");
+        _ = try app.ctl("enter");
+        try app.waitText("landed", 5_000);
+    }
+
+    // Outside a repo: no sidebar. The gate is the whole difference
+    // between orientation and clutter.
+    {
+        const app = try h.Instance.start(gpa, bin, .{
+            .config_extra = "explorer-auto = true",
+            .cwd = plain,
+        });
+        defer {
+            app.stop();
+            app.deinit();
+        }
+        try h.expectEq("no repo, no sidebar", 1, try app.paneCount());
+    }
 }

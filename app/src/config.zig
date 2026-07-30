@@ -225,6 +225,7 @@ pub fn applyPreset(cfg: *Config, name: []const u8) bool {
         cfg.theme = "vscode-dark";
         cfg.editor_insert = true;
         cfg.activity_bar = true;
+        cfg.explorer_auto = true;
         return true;
     }
     // rook's own identity is the defaults — a no-op bundle, named so
@@ -306,6 +307,11 @@ pub const Config = struct {
     /// The left icon rail (VS Code's activity bar): explorer, palette,
     /// diff, agents, review — one click each, always visible.
     activity_bar: bool = false,
+    /// Open the file-tree sidebar at launch when the launch directory
+    /// is inside a repository. Repo-gated on purpose: a Dock launch
+    /// lands in $HOME, and a sidebar listing your home directory is
+    /// noise, not orientation.
+    explorer_auto: bool = false,
 };
 
 /// One number over the config file — the live-reload poll compares this
@@ -537,6 +543,13 @@ fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
             } else if (std.mem.eql(u8, stripped, "normal")) {
                 cfg.editor_insert = false;
             } else std.debug.print("rook config: unknown editor-mode '{s}' (normal, insert)\n", .{stripped});
+        } else if (std.mem.eql(u8, key, "explorer_auto")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            if (std.mem.eql(u8, stripped, "true")) {
+                cfg.explorer_auto = true;
+            } else if (std.mem.eql(u8, stripped, "false")) {
+                cfg.explorer_auto = false;
+            } else std.debug.print("rook config: bad explorer-auto '{s}' (true, false)\n", .{stripped});
         } else if (std.mem.eql(u8, key, "activity_bar")) {
             const stripped = std.mem.trim(u8, val, "\"");
             if (std.mem.eql(u8, stripped, "true")) {
@@ -670,6 +683,8 @@ fn applyEnvOption(cfg: *Config, gpa: std.mem.Allocator, key_raw: []const u8, val
         }
     } else if (std.mem.eql(u8, key, "activity_bar")) {
         cfg.activity_bar = jBool(value) orelse cfg.activity_bar;
+    } else if (std.mem.eql(u8, key, "explorer_auto")) {
+        cfg.explorer_auto = jBool(value) orelse cfg.explorer_auto;
     } else if (std.mem.eql(u8, key, "top_bar")) {
         cfg.top_bar = jSegList(value) orelse cfg.top_bar;
     } else if (std.mem.eql(u8, key, "status_left")) {
@@ -1086,6 +1101,7 @@ test "presets are the bundles the parity scenario pins" {
     try t.expect(std.mem.eql(u8, vs.theme, "vscode-dark"));
     try t.expect(vs.editor_insert);
     try t.expect(vs.activity_bar);
+    try t.expect(vs.explorer_auto);
 
     var tm: Config = .{};
     try t.expect(applyPreset(&tm, "tmux-neovim"));
@@ -1094,7 +1110,7 @@ test "presets are the bundles the parity scenario pins" {
     try t.expect(tm.buffer_line == .off);
     try t.expect(tm.status_left.eql(&segs(.{.tabs})));
     try t.expect(tm.status_right.eql(&segs(.{ .workspace, .branch, .cwd })));
-    try t.expect(!tm.editor_insert and !tm.activity_bar);
+    try t.expect(!tm.editor_insert and !tm.activity_bar and !tm.explorer_auto);
 
     // The no-op identity, and the refusal.
     var rk: Config = .{};

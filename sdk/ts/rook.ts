@@ -82,6 +82,7 @@ export class Env {
   tabStyle(style: string): this { return this.set("tab-style", style); }
   editorMode(mode: string): this { return this.set("editor-mode", mode); }
   activityBar(on: boolean): this { return this.set("activity-bar", on); }
+  explorerAuto(on: boolean): this { return this.set("explorer-auto", on); }
 
   // ---- presets: identities as bundles ----
   // Expanded at emit time so the graph shows every knob a preset set.
@@ -106,6 +107,7 @@ export class Env {
     this.theme("vscode-dark");
     this.editorMode("insert");
     this.activityBar(true);
+    this.explorerAuto(true);
     return this;
   }
 

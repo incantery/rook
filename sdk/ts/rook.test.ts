@@ -32,7 +32,8 @@ test("preset goldens match the Go SDK's", () => {
     `{"id":"option:app:buffer-line","kind":"option","scope":"app","key":"buffer-line","value":"always"},` +
     `{"id":"option:app:theme","kind":"option","scope":"app","key":"theme","value":"vscode-dark"},` +
     `{"id":"option:app:editor-mode","kind":"option","scope":"app","key":"editor-mode","value":"insert"},` +
-    `{"id":"option:app:activity-bar","kind":"option","scope":"app","key":"activity-bar","value":true}` +
+    `{"id":"option:app:activity-bar","kind":"option","scope":"app","key":"activity-bar","value":true},` +
+    `{"id":"option:app:explorer-auto","kind":"option","scope":"app","key":"explorer-auto","value":true}` +
     `]}\n`;
   assert.strictEqual(vscode, wantVSCode);
 });

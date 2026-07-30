@@ -135,8 +135,14 @@ func (e *Env) TabStyle(style string) *Env { return e.Set("tab-style", style) }
 func (e *Env) EditorMode(mode string) *Env { return e.Set("editor-mode", mode) }
 
 // ActivityBar toggles the left icon rail (VS Code's activity bar):
-// explorer, search, source control, agents, review — one click each.
+// explorer, find-in-files, source control, agents, review.
 func (e *Env) ActivityBar(on bool) *Env { return e.Set("activity-bar", on) }
+
+// ExplorerAuto opens the file-tree sidebar at launch when the launch
+// directory is inside a repository (a Dock launch lands in $HOME, and
+// a sidebar listing a home directory is noise). Focus stays on the
+// shell either way.
+func (e *Env) ExplorerAuto(on bool) *Env { return e.Set("explorer-auto", on) }
 
 func segList(segments []string) []string {
 	if segments == nil {
@@ -180,6 +186,7 @@ func (e *Env) PresetVSCode() *Env {
 	e.Theme("vscode-dark")
 	e.EditorMode("insert")
 	e.ActivityBar(true)
+	e.ExplorerAuto(true)
 	return e
 }
 

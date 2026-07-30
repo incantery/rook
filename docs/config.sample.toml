@@ -94,6 +94,12 @@
 # source control, agents, review — one click each, always visible.
 # activity-bar = false
 
+# Open the file-tree sidebar at launch, when the launch directory is
+# inside a repository (a Dock launch lands in $HOME, and a sidebar
+# listing a home directory is noise, not orientation). Focus stays on
+# the shell — you opened a terminal.
+# explorer-auto = false
+
 
 # ── Coder ────────────────────────────────────────────────────────────────
 

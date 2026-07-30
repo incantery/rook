@@ -797,6 +797,8 @@ pub const App = struct {
     cfg_ed_insert: bool = false,
     /// config activity-bar: the left icon rail.
     cfg_activity_bar: bool = false,
+    /// config explorer-auto: the tree sidebar opens at launch.
+    cfg_explorer_auto: bool = false,
     /// Icon rail hit zones (y extents), rebuilt each frame it draws.
     rail_y: [8][2]f32 = undefined,
     rail_n: usize = 0,
@@ -1042,6 +1044,7 @@ pub const App = struct {
             .cfg_bufline = cfg.buffer_line,
             .cfg_ed_insert = cfg.editor_insert,
             .cfg_activity_bar = cfg.activity_bar,
+            .cfg_explorer_auto = cfg.explorer_auto,
             .cursor_blink = cfg.cursor_blink,
             .cfg_scrollback = cfg.scrollback,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
@@ -1080,6 +1083,15 @@ pub const App = struct {
         self.window.msgSend(void, "makeKeyAndOrderFront:", .{@as(objc.c.id, null)});
         // --no-activate: probe/tooling launches must not steal focus.
         if (self.activate) self.app.msgSend(void, "activateIgnoringOtherApps:", .{true});
+
+        // The launch sidebar, before ctl binds: an e2e or an agent that
+        // connects the instant the socket answers must not race the
+        // pane it is about to assert on.
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            self.explorerAutoLocked();
+        }
 
         @import("ctl.zig").start(self) catch |err| {
             std.debug.print("rook ctl: failed to start: {}\n", .{err});
@@ -2583,6 +2595,33 @@ pub const App = struct {
         self.scene_dirty = true;
     }
 
+    /// config `explorer-auto`: the sidebar is already there when the
+    /// window opens, VS Code's own behaviour. Two rules make it feel
+    /// like orientation rather than an interruption:
+    ///
+    /// Repo-GATED — a Dock launch lands in $HOME, and a sidebar
+    /// listing a home directory is noise. Being inside a repository
+    /// is the "you opened a project" signal.
+    ///
+    /// Focus STAYS on the shell. You launched a terminal; the tree is
+    /// context, and a sidebar that swallowed the first thing you
+    /// typed would be a worse start than no sidebar at all.
+    fn explorerAutoLocked(self: *App) void {
+        if (!self.cfg_explorer_auto) return;
+        var buf: [1024]u8 = undefined;
+        const cwd = getcwd(&buf, buf.len) orelse return;
+        var rbuf: [1024]u8 = undefined;
+        // repoRootFs returns null OUTSIDE a repo — which is exactly
+        // the gate, so the fallback-to-cwd the other callers want is
+        // deliberately not applied here.
+        if (@import("git.zig").repoRootFs(self.io, self.gpa, std.mem.span(cwd), &rbuf) == null) return;
+        const keep = self.activeTab().focused;
+        const tree_pane = self.openTreePaneLocked() orelse return;
+        _ = tree_pane;
+        self.setFocusLocked(keep);
+        self.scene_dirty = true;
+    }
+
     /// Create the dedicated tree pane: a split at the TAB's left edge,
     /// full height, sidebar-wide (side_cols, the side panes' own
     /// number), rooted at the repo of wherever the focused pane is —
@@ -2594,6 +2633,7 @@ pub const App = struct {
     /// itself, so a non-repo still works). The tree and ⌘P share it so
     /// the two surfaces can never disagree about where you are.
     fn paneRootLocked(self: *App, p: *panespkg.Pane, buf: []u8) ?[]const u8 {
+        var own_buf: [1024]u8 = undefined;
         const start: []const u8 = blk: {
             if (p.editor()) |ed| {
                 if (!ed.synthetic) if (ed.buf.path) |bp| {
@@ -2601,8 +2641,13 @@ pub const App = struct {
                     break :blk std.fs.path.dirname(bp) orelse bp;
                 };
             }
-            const cwd = self.paneCwd(p) orelse return null;
-            break :blk std.mem.span(cwd);
+            if (self.paneCwd(p)) |cwd| break :blk std.mem.span(cwd);
+            // A pane whose process has not started yet (the first
+            // shell, one tick after launch) or has died must not make
+            // the tree impossible: the app's own cwd is where that
+            // shell was going to be anyway.
+            const own = getcwd(&own_buf, own_buf.len) orelse return null;
+            break :blk std.mem.span(own);
         };
         return @import("git.zig").repoRootFs(self.io, self.gpa, start, buf) orelse start;
     }

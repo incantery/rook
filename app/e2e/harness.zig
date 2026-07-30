@@ -38,6 +38,7 @@ extern "c" fn close(fd: c_int) c_int;
 extern "c" fn dup2(old: c_int, new: c_int) c_int;
 extern "c" fn getdtablesize() c_int;
 extern "c" fn getpid() c_int;
+extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]const u8;
 extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 extern "c" fn mkdir(path: [*:0]const u8, mode: u16) c_int;
@@ -91,6 +92,11 @@ pub const Opts = struct {
     env_json: []const u8 = "",
     /// How long start() waits for the socket, then for a live shell.
     boot_timeout_ms: u32 = 15_000,
+    /// Launch the app FROM this directory (default: the harness's own
+    /// cwd). The launch cwd is what the first shell inherits and what
+    /// `explorer-auto` gates on, so a scenario about either has to be
+    /// able to choose it.
+    cwd: ?[]const u8 = null,
 };
 
 var instance_seq: u32 = 0;
@@ -218,8 +224,18 @@ pub const Instance = struct {
     fn spawn(self: *Instance, rook_bin: []const u8, opts: Opts) !c_int {
         var bin_z: [512]u8 = undefined;
         if (rook_bin.len >= bin_z.len) return error.SpawnFailed;
-        @memcpy(bin_z[0..rook_bin.len], rook_bin);
-        bin_z[rook_bin.len] = 0;
+        // ABSOLUTE, resolved here in the parent: build.zig hands us the
+        // artifact by RELATIVE path, and a child that chdirs to a
+        // scenario's launch directory (opts.cwd) would exec nothing.
+        // The failure is silent and looks like "the app never came up".
+        var bin_len = rook_bin.len;
+        if (rook_bin.len > 0 and rook_bin[0] != '/') {
+            var cwd_buf: [512]u8 = undefined;
+            const here = getcwd(&cwd_buf, cwd_buf.len) orelse return error.SpawnFailed;
+            const joined = std.fmt.bufPrint(&bin_z, "{s}/{s}", .{ std.mem.span(here), rook_bin }) catch return error.SpawnFailed;
+            bin_len = joined.len;
+        } else @memcpy(bin_z[0..rook_bin.len], rook_bin);
+        bin_z[bin_len] = 0;
 
         var sock_z: [128]u8 = undefined;
         @memcpy(sock_z[0..self.sock_len], self.sockPath());
@@ -262,6 +278,14 @@ pub const Instance = struct {
             // kill the developer's live shells. An unwritable state dir
             // fails the spawn fast.
             _ = setenv("XDG_STATE_HOME", "/dev/null/no-host", 1);
+            if (opts.cwd) |c| {
+                var cbuf: [512]u8 = undefined;
+                if (c.len < cbuf.len) {
+                    @memcpy(cbuf[0..c.len], c);
+                    cbuf[c.len] = 0;
+                    _ = chdir(@ptrCast(&cbuf));
+                }
+            }
             _ = setenv("SHELL", opts.shell, 1);
             _ = setenv("TERM", "xterm-256color", 1);
             // Not PS1 — a login shell's /etc/profile overwrites it. The
@@ -645,6 +669,16 @@ const timeval = extern struct { sec: i64, usec: i32 };
 extern "c" fn gettimeofday(tv: *timeval, tz: ?*anyopaque) c_int;
 
 /// std.time.milliTimestamp is gone in 0.16 too.
+/// This run's pid — scenarios that build fixtures OUTSIDE a sandbox
+/// (a launch-cwd test cannot use the sandbox it has not created yet)
+/// use it to keep concurrent runs from colliding. NOT named `pid`:
+/// Instance has a `pid` field, and the two shadow each other at every
+/// call site inside the struct (the same trap the extern block's
+/// close/kill note describes).
+pub fn runPid() u32 {
+    return @intCast(getpid());
+}
+
 pub fn nowMs() i64 {
     var tv: timeval = undefined;
     _ = gettimeofday(&tv, null);
