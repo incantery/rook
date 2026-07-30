@@ -163,6 +163,22 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(search_tests).step);
 
+    // The LSP client. Its own root because the whole module is a
+    // contract with a process we did not write: every failure it guards
+    // is a stall or a silence rather than a crash — a server→client
+    // request we never answered (the session hangs), a LocationLink we
+    // failed to read (go-to-definition "does nothing"), a reply we
+    // dropped (a spinner nobody can clear). Sans-IO exists so those are
+    // testable without spawning gopls, and libc is here for the two
+    // tests that DO spawn, which prove the pipe and the teardown.
+    const lsp_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/lsp.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(lsp_tests).step);
+
     // The ask form's wire shape and JSON escaping. Its own root because a
     // malformed answer body is silently catastrophic: the host rejects
     // it, the answer is lost, and the asker stays blocked forever.
