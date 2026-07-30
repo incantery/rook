@@ -116,6 +116,15 @@ pub const RegKind = enum { char, line, block };
 /// One `R` keystroke: bytes put in, bytes displaced.
 const RepEvent = struct { ins: u8, over: u8 };
 
+/// One visible line of a directory tree: the full path behind the
+/// rendered row (owned by `tree_rows`), and what the row is. `climb`
+/// marks the "../" line, whose Enter re-roots at the parent.
+pub const TreeRow = struct {
+    path: []u8,
+    dir: bool = false,
+    climb: bool = false,
+};
+
 pub const Editor = struct {
     gpa: Allocator,
     io: std.Io,
@@ -294,10 +303,24 @@ pub const Editor = struct {
 
     closed: bool = false,
     render_dirty: bool = true,
-    /// Buffer is a directory LISTING (netrw/oil heritage): Enter opens
-    /// the entry under the cursor, `-` climbs to the parent. No side
-    /// panel — every pane can hold its own tree.
+    /// Buffer is a directory TREE (netrw's heir): Enter unfolds a
+    /// directory in place or opens a file, `-` climbs the root to the
+    /// parent. Still a BUFFER — every motion, `/` search and `n` work
+    /// on it — and still no side panel: every pane holds its own tree.
     is_dir: bool = false,
+
+    /// Which directories are unfolded, by absolute path (owned keys).
+    /// Lives on the EDITOR, not the buffer: retarget to a file and back
+    /// and your unfolds are still there.
+    tree_expanded: std.StringHashMapUnmanaged(void) = .empty,
+    /// One entry per visible tree line, in line order — the metadata a
+    /// rendered row can't carry (its full path, whether it's a dir).
+    /// Empty for ordinary buffers.
+    tree_rows: std.ArrayListUnmanaged(TreeRow) = .empty,
+    /// The alternate buffer: what tree.toggle replaced, so toggling
+    /// again puts you back where you were (vim's `#`, grown here).
+    alt_path: ?[]u8 = null,
+    alt_line: usize = 0,
 
     /// A buffer with no file behind it — a rendered transcript today,
     /// host-projected docs later. `:w` refuses on it for the same reason
@@ -377,18 +400,27 @@ pub const Editor = struct {
     pub fn create(gpa: Allocator, io: std.Io, path: ?[]const u8) !*Editor {
         const self = try gpa.create(Editor);
         errdefer gpa.destroy(self);
-        var is_dir = false;
         self.* = .{
             .gpa = gpa,
             .io = io,
-            .buf = if (path) |p|
-                try loadPath(gpa, io, p, &is_dir)
-            else
-                try bufferpkg.Buffer.initEmpty(gpa),
+            .buf = try bufferpkg.Buffer.initEmpty(gpa),
         };
-        self.is_dir = is_dir;
         self.buf.on_edit_ctx = self;
         self.buf.on_edit = onBufferEdit;
+        // Through open() rather than a second load path: a directory
+        // needs the tree state this editor now owns (expanded set, row
+        // metadata), and create-time is the one place a duplicate of
+        // that wiring would quietly drift. A fresh empty buffer is
+        // unmodified, so open() cannot refuse.
+        if (path) |p| {
+            self.open(p, false) catch |err| {
+                // Nothing else is allocated yet: open() fails before it
+                // touches the buffer, and the tree state only commits
+                // on success.
+                self.buf.deinit(gpa);
+                return err;
+            };
+        }
         return self;
     }
 
@@ -413,14 +445,22 @@ pub const Editor = struct {
         return p;
     }
 
-    /// Render `path` as listing text ("../" first, dirs before files,
-    /// dirs slash-suffixed), or null if it isn't an openable directory.
-    fn dirListing(gpa: Allocator, path: []const u8) !?[]u8 {
+    /// Append one directory level to the tree text and row list —
+    /// dirs first, alphabetical, ▾/▸ fold glyphs, two-space indent per
+    /// depth — recursing into the dirs the editor has unfolded.
+    fn treeLevel(
+        self: *Editor,
+        dir: []const u8,
+        depth: usize,
+        text: *std.ArrayListUnmanaged(u8),
+        rows: *std.ArrayListUnmanaged(TreeRow),
+    ) !void {
+        const gpa = self.gpa;
         var zbuf: [1024]u8 = undefined;
-        if (path.len == 0 or path.len >= zbuf.len) return null;
-        @memcpy(zbuf[0..path.len], path);
-        zbuf[path.len] = 0;
-        const d = opendir(zbuf[0..path.len :0]) orelse return null;
+        if (dir.len == 0 or dir.len >= zbuf.len) return;
+        @memcpy(zbuf[0..dir.len], dir);
+        zbuf[dir.len] = 0;
+        const d = opendir(zbuf[0..dir.len :0]) orelse return;
         defer _ = closedir(d);
 
         const Ent = struct { name: []u8, dir: bool };
@@ -442,20 +482,62 @@ pub const Editor = struct {
         };
         std.mem.sort(Ent, ents.items, {}, S.lt);
 
-        var text: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer text.deinit(gpa);
-        try text.appendSlice(gpa, "../");
         for (ents.items) |e| {
+            const full = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ trimSlash(dir), e.name });
+            errdefer gpa.free(full);
+            const unfolded = e.dir and self.tree_expanded.contains(full);
             try text.append(gpa, '\n');
+            for (0..depth) |_| try text.appendSlice(gpa, "  ");
+            // The glyph column exists for files too, so names align
+            // into one readable column regardless of kind.
+            try text.appendSlice(gpa, if (!e.dir) "  " else if (unfolded) "▾ " else "▸ ");
             try text.appendSlice(gpa, e.name);
             if (e.dir) try text.append(gpa, '/');
+            try rows.append(gpa, .{ .path = full, .dir = e.dir });
+            if (unfolded) try self.treeLevel(full, depth + 1, text, rows);
         }
+    }
+
+    /// Render `path` as tree text ("../" first, then the unfolded
+    /// tree), or null if it isn't an openable directory. Commits the
+    /// row metadata only on success — a failed load must not leave the
+    /// editor holding rows for a buffer it never got.
+    fn treeListing(self: *Editor, path: []const u8) !?[]u8 {
+        var zbuf: [1024]u8 = undefined;
+        if (path.len == 0 or path.len >= zbuf.len) return null;
+        @memcpy(zbuf[0..path.len], path);
+        zbuf[path.len] = 0;
+        const probe = opendir(zbuf[0..path.len :0]) orelse return null;
+        _ = closedir(probe);
+
+        const gpa = self.gpa;
+        var rows: std.ArrayListUnmanaged(TreeRow) = .empty;
+        errdefer {
+            for (rows.items) |r| gpa.free(r.path);
+            rows.deinit(gpa);
+        }
+        var text: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer text.deinit(gpa);
+
+        try text.appendSlice(gpa, "../");
+        try rows.append(gpa, .{ .path = try gpa.dupe(u8, trimSlash(path)), .climb = true });
+        try self.treeLevel(path, 0, &text, &rows);
+
+        self.clearTreeRows();
+        self.tree_rows = rows;
         return try text.toOwnedSlice(gpa);
     }
 
-    /// A path becomes a buffer: directory → listing, else file contents.
-    fn loadPath(gpa: Allocator, io: std.Io, path: []const u8, is_dir: *bool) !bufferpkg.Buffer {
-        if (try dirListing(gpa, path)) |text| {
+    fn clearTreeRows(self: *Editor) void {
+        for (self.tree_rows.items) |r| self.gpa.free(r.path);
+        self.tree_rows.deinit(self.gpa);
+        self.tree_rows = .empty;
+    }
+
+    /// A path becomes a buffer: directory → tree, else file contents.
+    fn loadPath(self: *Editor, path: []const u8, is_dir: *bool) !bufferpkg.Buffer {
+        const gpa = self.gpa;
+        if (try self.treeListing(path)) |text| {
             defer gpa.free(text);
             var b: bufferpkg.Buffer = .{ .rope = try .init(gpa, text) };
             errdefer b.rope.deinit(gpa);
@@ -464,23 +546,133 @@ pub const Editor = struct {
             return b;
         }
         is_dir.* = false;
-        return bufferpkg.Buffer.initFromFile(gpa, io, path);
+        self.clearTreeRows();
+        return bufferpkg.Buffer.initFromFile(gpa, self.io, path);
     }
 
-    /// Enter on a listing line: descend into the entry (".." climbs).
+    /// Enter on a tree line: unfold or fold a directory IN PLACE, open
+    /// a file, or climb ("../"). Folding is what makes it a tree —
+    /// netrw descended, and lost where you were.
     fn openDirEntry(self: *Editor) void {
-        const base = self.buf.path orelse return;
-        const line = std.mem.trimEnd(u8, self.lineText(self.cline), "/");
-        if (line.len == 0) return;
-        if (std.mem.eql(u8, line, "..")) return self.openParentDir();
-        const joined = std.fmt.bufPrint(&self.scratch2, "{s}/{s}", .{ trimSlash(base), line }) catch return;
-        self.open(joined, false) catch |err| {
+        if (self.cline >= self.tree_rows.items.len) return;
+        const row = self.tree_rows.items[self.cline];
+        if (row.climb) return self.openParentDir();
+        // Into scratch2 FIRST: the row owns this path, and both
+        // branches below rebuild the rows out from under it.
+        const p = std.fmt.bufPrint(&self.scratch2, "{s}", .{row.path}) catch return;
+        if (row.dir) {
+            self.treeToggleDir(p);
+            return;
+        }
+        self.open(p, false) catch |err| {
             self.setStatus("open failed: {s}", .{@errorName(err)}, true);
         };
     }
 
-    /// `-` from anywhere: the containing directory's listing, cursor on
-    /// the entry we came from (vim-vinegar muscle memory).
+    /// Fold or unfold one directory, keeping the cursor on it.
+    fn treeToggleDir(self: *Editor, path: []const u8) void {
+        const gpa = self.gpa;
+        if (self.tree_expanded.getKey(path)) |held| {
+            _ = self.tree_expanded.remove(path);
+            gpa.free(held);
+        } else {
+            const owned = gpa.dupe(u8, path) catch return;
+            self.tree_expanded.put(gpa, owned, {}) catch {
+                gpa.free(owned);
+                return;
+            };
+        }
+        self.treeRefresh(path);
+    }
+
+    /// Rebuild the tree buffer from disk and the expanded set, putting
+    /// the cursor on `cursor_path` if it is still visible. This is the
+    /// in-place counterpart of open(): same buffer identity, new fold
+    /// state — the cursor and viewport must not reset to the top.
+    fn treeRefresh(self: *Editor, cursor_path: ?[]const u8) void {
+        const gpa = self.gpa;
+        const root = gpa.dupe(u8, self.buf.path orelse return) catch return;
+        defer gpa.free(root);
+        var want: ?[]u8 = null;
+        defer if (want) |w| gpa.free(w);
+        if (cursor_path) |cp| want = gpa.dupe(u8, cp) catch null;
+
+        var is_dir = false;
+        const nb = self.loadPath(root, &is_dir) catch {
+            self.setStatus("tree refresh failed", .{}, true);
+            return;
+        };
+        if (!is_dir) {
+            // The directory vanished under us; fall back to a plain
+            // open of whatever it is now.
+            var tmp = nb;
+            tmp.deinit(gpa);
+            return;
+        }
+        const top = self.top;
+        self.buf.deinit(gpa);
+        self.buf = nb;
+        self.buf.on_edit_ctx = self;
+        self.buf.on_edit = onBufferEdit;
+        self.ai_line = null;
+        self.clearDecor();
+        self.is_dir = true;
+        self.ccol = 0;
+        const last = self.lineCountB() -| 1;
+        self.top = @min(top, last);
+        self.cline = @min(self.cline, last);
+        if (want) |w| {
+            for (self.tree_rows.items, 0..) |r, i| {
+                if (std.mem.eql(u8, r.path, w)) {
+                    self.cline = i;
+                    break;
+                }
+            }
+        }
+        self.render_dirty = true;
+        self.hl_version = std.math.maxInt(u64);
+    }
+
+    /// Unfold every ancestor of `target` under the tree's root and put
+    /// the cursor on it — `<leader>o`'s second half.
+    pub fn treeReveal(self: *Editor, target: []const u8) void {
+        const gpa = self.gpa;
+        const root = trimSlash(self.buf.path orelse return);
+        if (!self.is_dir) return;
+        if (target.len <= root.len or
+            !std.mem.startsWith(u8, target, root) or
+            target[root.len] != '/')
+        {
+            self.setStatus("not under this tree: {s}", .{target}, true);
+            return;
+        }
+        var dir = std.fs.path.dirname(target) orelse return;
+        while (dir.len > root.len) {
+            if (!self.tree_expanded.contains(dir)) {
+                const owned = gpa.dupe(u8, dir) catch return;
+                self.tree_expanded.put(gpa, owned, {}) catch {
+                    gpa.free(owned);
+                    return;
+                };
+            }
+            dir = std.fs.path.dirname(dir) orelse break;
+        }
+        self.treeRefresh(target);
+    }
+
+    /// Remember the buffer a tree replaced, for toggling back.
+    pub fn setAlt(self: *Editor, path: []const u8, line: usize) void {
+        const owned = self.gpa.dupe(u8, path) catch return;
+        if (self.alt_path) |old| self.gpa.free(old);
+        self.alt_path = owned;
+        self.alt_line = line;
+    }
+
+    /// `-` from anywhere: re-root the tree at the parent, cursor on
+    /// the entry we came from (vim-vinegar muscle memory). Climbing
+    /// from a tree keeps the old root UNFOLDED, so `-` reads as a
+    /// zoom-out — the thing you were looking at is still on screen,
+    /// one level deeper.
     fn openParentDir(self: *Editor) void {
         const cur = self.buf.path orelse {
             self.setStatus("no file", .{}, true);
@@ -491,23 +683,27 @@ pub const Editor = struct {
             return;
         }
         const from_dir = self.is_dir;
-        const parent = if (from_dir)
-            std.fs.path.dirname(trimSlash(cur)) orelse "/"
-        else
-            std.fs.path.dirname(cur) orelse "/";
-        var childbuf: [512]u8 = undefined;
-        const cbase = std.fs.path.basename(trimSlash(cur));
-        const cn = @min(cbase.len, childbuf.len);
-        @memcpy(childbuf[0..cn], cbase[0..cn]);
+        // A stable copy: `cur` lives in the buffer open() will replace.
+        var childbuf: [max_path]u8 = undefined;
+        const src = trimSlash(cur);
+        if (src.len > childbuf.len) return;
+        @memcpy(childbuf[0..src.len], src);
+        const child = childbuf[0..src.len];
+        const parent = std.fs.path.dirname(child) orelse "/";
+        if (from_dir) {
+            if (!self.tree_expanded.contains(child)) {
+                if (self.gpa.dupe(u8, child) catch null) |owned| {
+                    self.tree_expanded.put(self.gpa, owned, {}) catch self.gpa.free(owned);
+                }
+            }
+        }
         self.open(parent, false) catch |err| {
             self.setStatus("open failed: {s}", .{@errorName(err)}, true);
             return;
         };
         if (!self.is_dir) return;
-        var i: usize = 0;
-        const n = self.lineCountB();
-        while (i < n) : (i += 1) {
-            if (std.mem.eql(u8, std.mem.trimEnd(u8, self.lineText(i), "/"), childbuf[0..cn])) {
+        for (self.tree_rows.items, 0..) |r, i| {
+            if (std.mem.eql(u8, r.path, child)) {
                 self.cline = i;
                 break;
             }
@@ -543,6 +739,11 @@ pub const Editor = struct {
     pub fn destroy(self: *Editor) void {
         const gpa = self.gpa;
         gpa.free(self.line_buf);
+        self.clearTreeRows();
+        var it = self.tree_expanded.keyIterator();
+        while (it.next()) |k| gpa.free(k.*);
+        self.tree_expanded.deinit(gpa);
+        if (self.alt_path) |p| gpa.free(p);
         self.cluster_bytes.deinit(gpa);
         if (self.hl_destroy) |f| f(self.hl_ctx.?);
         self.hl_spans_buf.deinit(gpa);
@@ -2325,6 +2526,7 @@ pub const Editor = struct {
         self.ai_line = null; // line numbers belonged to the old buffer
         self.clearDecor();
         self.is_dir = false;
+        self.clearTreeRows();
         self.synthetic = true;
         self.cline = 0;
         self.ccol = 0;
@@ -2355,12 +2557,14 @@ pub const Editor = struct {
         defer self.gpa.free(owned);
 
         var is_dir = false;
-        const nb = try loadPath(self.gpa, self.io, owned, &is_dir);
+        const nb = try self.loadPath(owned, &is_dir);
         const cline = self.cline;
         const ccol = self.ccol;
         const top = self.top;
         self.buf.deinit(self.gpa);
         self.buf = nb;
+        self.buf.on_edit_ctx = self;
+        self.buf.on_edit = onBufferEdit;
         self.ai_line = null; // line numbers belonged to the old buffer
         self.clearDecor();
         self.is_dir = is_dir;
@@ -2385,9 +2589,11 @@ pub const Editor = struct {
             return;
         }
         var is_dir = false;
-        const nb = try loadPath(self.gpa, self.io, path, &is_dir);
+        const nb = try self.loadPath(path, &is_dir);
         self.buf.deinit(self.gpa);
         self.buf = nb;
+        self.buf.on_edit_ctx = self;
+        self.buf.on_edit = onBufferEdit;
         self.ai_line = null; // line numbers belonged to the old buffer
         self.clearDecor();
         self.is_dir = is_dir;
@@ -5717,7 +5923,7 @@ test "search jump wrap and n/N" {
     try testing.expectEqual(@as(usize, 0), hl2);
 }
 
-test "directory buffer: listing, enter opens, dash climbs" {
+test "tree buffer: enter folds in place and opens files, dash climbs" {
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
@@ -5725,6 +5931,7 @@ test "directory buffer: listing, enter opens, dash climbs" {
     var pathbuf: [256]u8 = undefined;
     const root = try std.fmt.bufPrint(&pathbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     try tmp.dir.createDir(io, "sub", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "sub/inner.txt", .data = "deep\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "beta.txt", .data = "hello dir\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "alpha.txt", .data = "first\n" });
 
@@ -5732,17 +5939,36 @@ test "directory buffer: listing, enter opens, dash climbs" {
     defer e.destroy();
     try testing.expect(e.is_dir);
 
-    // "../", dirs first, then files alphabetically.
+    // "../", dirs first (folded), files aligned into the glyph column.
     const text = try bufText(gpa, e);
     defer gpa.free(text);
-    try testing.expectEqualStrings("../\nsub/\nalpha.txt\nbeta.txt", text);
+    try testing.expectEqualStrings("../\n▸ sub/\n  alpha.txt\n  beta.txt", text);
 
-    // :w refuses on a listing.
+    // :w refuses on a tree.
     keys(e, ":w");
     e.key("\r");
     try testing.expect(e.status_err);
 
-    // Enter on beta.txt (line 3) opens the file.
+    // Enter on sub/ UNFOLDS in place: nothing re-roots, the cursor
+    // stays on the dir, its children appear indented under it. This is
+    // the tree/netrw difference — descending lost where you were.
+    keys(e, "gg");
+    keys(e, "j");
+    e.key("\r");
+    try testing.expect(e.is_dir);
+    try testing.expectEqual(@as(usize, 1), e.cline);
+    const unfolded = try bufText(gpa, e);
+    defer gpa.free(unfolded);
+    try testing.expectEqualStrings("../\n▾ sub/\n    inner.txt\n  alpha.txt\n  beta.txt", unfolded);
+
+    // Enter again folds it back.
+    e.key("\r");
+    const folded = try bufText(gpa, e);
+    defer gpa.free(folded);
+    try testing.expectEqualStrings("../\n▸ sub/\n  alpha.txt\n  beta.txt", folded);
+
+    // Enter on beta.txt opens the file.
+    keys(e, "gg");
     keys(e, "3j");
     e.key("\r");
     try testing.expect(!e.is_dir);
@@ -5750,24 +5976,50 @@ test "directory buffer: listing, enter opens, dash climbs" {
     defer gpa.free(ft);
     try testing.expectEqualStrings("hello dir\n", ft);
 
-    // `-` from the file: back to the listing, cursor ON beta.txt.
+    // `-` from the file: back to the tree, cursor ON beta.txt.
     keys(e, "-");
     try testing.expect(e.is_dir);
     try testing.expectEqual(@as(usize, 3), e.cline);
 
-    // Enter descends into sub/ (empty: just "../").
-    keys(e, "gg");
-    keys(e, "j");
-    e.key("\r");
+    // `-` from the tree: re-root at the PARENT, cursor on the old root
+    // — which stays unfolded, so climbing reads as a zoom-out.
+    keys(e, "-");
     try testing.expect(e.is_dir);
-    const st = try bufText(gpa, e);
-    defer gpa.free(st);
-    try testing.expectEqualStrings("../", st);
+    try testing.expect(e.cline < e.tree_rows.items.len);
+    try testing.expectEqualStrings(root, e.tree_rows.items[e.cline].path);
+    var subpath: [280]u8 = undefined;
+    const want_sub = try std.fmt.bufPrint(&subpath, "{s}/sub", .{root});
+    try testing.expectEqualStrings(want_sub, e.tree_rows.items[e.cline + 1].path);
+}
 
-    // ".." climbs back up, cursor on sub/.
-    e.key("\r");
-    try testing.expect(e.is_dir);
-    try testing.expectEqual(@as(usize, 1), e.cline);
+test "tree reveal unfolds every ancestor down to the target" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pathbuf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&pathbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.createDir(io, "a", .default_dir);
+    try tmp.dir.createDir(io, "a/b", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/b/deep.txt", .data = "x\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "top.txt", .data = "y\n" });
+
+    var e = try Editor.create(gpa, io, root);
+    defer e.destroy();
+    var tbuf: [320]u8 = undefined;
+    const target = try std.fmt.bufPrint(&tbuf, "{s}/a/b/deep.txt", .{root});
+    e.treeReveal(target);
+
+    try testing.expect(e.cline < e.tree_rows.items.len);
+    try testing.expectEqualStrings(target, e.tree_rows.items[e.cline].path);
+    const text = try bufText(gpa, e);
+    defer gpa.free(text);
+    try testing.expectEqualStrings("../\n▾ a/\n  ▾ b/\n      deep.txt\n  top.txt", text);
+
+    // A target outside the tree refuses rather than half-unfolding.
+    e.status_err = false;
+    e.treeReveal("/nowhere/else.txt");
+    try testing.expect(e.status_err);
 }
 
 test "the status row is codepoints, not bytes" {

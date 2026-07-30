@@ -426,6 +426,26 @@ The zig editor exists to be a *good enough* in-app buffer. The bar it
 must clear is "I don't reach for a terminal nvim inside rook", not
 "it replaces Monaco feature for feature".
 
+- [x] **File tree — netrw's heir, in the pane.** A directory buffer is
+      now a TREE: Enter unfolds/folds a directory IN PLACE (netrw
+      descended, and lost where you were), opens files, `-` re-roots at
+      the parent with the old root left unfolded so climbing reads as a
+      zoom-out. Still a BUFFER — every vim motion and `/` search work
+      on it — and still per-pane, never a global panel. The unfold set
+      lives on the EDITOR, so retargeting to a file and back keeps your
+      folds. `<leader>⇥` toggles it in the focused pane (a terminal
+      gets a takeover tree, shell parked under; a file buffer becomes
+      the tree's alternate and comes back on the next toggle);
+      `<leader>o` opens it revealed on the current file, ancestors
+      unfolded, cursor on it. Both on the APP leader on purpose — the
+      editor's own leader ([editor] scope) could never fire from a
+      terminal pane, which is where a takeover tree is most wanted.
+      Roots at the REPO of where you are (`git.repoRootFs`, filesystem
+      probe), falling back to the directory itself — anchor, not
+      fence. e2e `filetree`; unit tests own fold/reveal/climb.
+      Still owed from the mock: git-status letters on rows, file ops
+      (add/rename/delete), dotfile filtering.
+
 - [x] **Diff / review viewer** — `<leader>d` / `:DiffOpen`, and `D` on a
       review finding opens that file's diff at that finding's line.
       Unified rather than side-by-side: side-by-side needs ~160 columns

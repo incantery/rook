@@ -367,6 +367,34 @@ fn readSmall(io: std.Io, gpa: std.mem.Allocator, path: []const u8) ?[]u8 {
     return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096)) catch null;
 }
 
+/// The nearest ancestor of `path` that is a repository root — the
+/// directory whose `.git` is a directory (readable HEAD) or a
+/// worktree's pointer file. Same filesystem-only probe as headBranch,
+/// for the same reason: callers ask on the key path. Copied into
+/// `buf`; null when nothing above `path` is a repo.
+pub fn repoRootFs(io: std.Io, gpa: std.mem.Allocator, path: []const u8, buf: []u8) ?[]const u8 {
+    var dir = path;
+    while (dir.len > 0) {
+        var pbuf: [1024]u8 = undefined;
+        const headpath = std.fmt.bufPrint(&pbuf, "{s}/.git/HEAD", .{dir}) catch return null;
+        if (readSmall(io, gpa, headpath)) |c| {
+            gpa.free(c);
+            if (dir.len > buf.len) return null;
+            @memcpy(buf[0..dir.len], dir);
+            return buf[0..dir.len];
+        }
+        const gitfile = std.fmt.bufPrint(&pbuf, "{s}/.git", .{dir}) catch return null;
+        if (readSmall(io, gpa, gitfile)) |c| {
+            gpa.free(c);
+            if (dir.len > buf.len) return null;
+            @memcpy(buf[0..dir.len], dir);
+            return buf[0..dir.len];
+        }
+        dir = std.fs.path.dirname(dir) orelse return null;
+    }
+    return null;
+}
+
 // ---------------------------------------------------------------------
 
 const testing = std.testing;

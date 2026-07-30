@@ -36,6 +36,7 @@ const scenarios = [_]Scenario{
     .{ .name = "commands", .what = "registry lists, runs by name, and drives the ⌘K palette", .run = commands },
     .{ .name = "whichkey", .what = "an unanswered leader reveals the key menu; rows and bar hints click", .run = whichkey },
     .{ .name = "statusbar", .what = "the bar knows where you are: cwd + branch follow the pane, segments click", .run = statusbar },
+    .{ .name = "filetree", .what = "the tree takes over a pane, folds in place, reveals the current file, toggles back", .run = filetree },
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
     .{ .name = "sidepane", .what = "side pane retiles the grid, flips edges, and holds the inbox", .run = sidepane },
     .{ .name = "asks", .what = "a question renders, takes keys, and produces the answer JSON", .run = asks },
@@ -863,6 +864,100 @@ fn statusbar(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctlFmt("click {d} {d}", .{ ws[0], ws[1] });
     _ = try app.waitCtl("palette", "mode:workspaces", 3000);
     _ = try app.ctl("key 1b");
+}
+
+// ------------------------------------------------------------ filetree
+
+/// The file tree in the focused pane: `<leader>⇥` takes over a
+/// terminal with the tree of its repo (rooted at the .git top, not the
+/// cwd), Enter folds in place, `<leader>⇥` again hands the shell back;
+/// from a file, `<leader>o` opens the tree unfolded down to that file
+/// and `<leader>⇥` toggles back to it — the alternate-buffer loop.
+fn filetree(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // A little repo with depth, so root-at-repo and reveal-unfolding
+    // are both distinguishable from "just listed the cwd".
+    var proj_buf: [192]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{app.dirPath()});
+    var sub_buf: [200]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&sub_buf, "{s}/src", .{proj});
+    try h.mkdirP(sub);
+    var f_buf: [224]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/README.md", .{proj}), "hi\n");
+    const mainzig = try std.fmt.bufPrint(&f_buf, "{s}/main.zig", .{sub});
+    try h.writeFile(mainzig, "pub fn main() void {}\n");
+    if (try h.runCmd(proj, &.{ "/usr/bin/git", "init", "-q" }) != 0) return error.NoGit;
+
+    // Walk the shell into proj/SRC — the tree must root at PROJ (the
+    // repo), which is only provable from a subdirectory.
+    _ = try app.ctlFmt("type cd {s}", .{sub});
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("statusbar", "proj/src", 8000);
+
+    // <leader>⇥ from the terminal: a takeover tree.
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press TAB");
+    _ = try app.waitCtl("panes", "edit:proj", 5000);
+    var buf: [16 * 1024]u8 = undefined;
+    var scr = try app.screen(&buf);
+    try h.expectContains(scr, "▸ src/", "the repo's dirs list folded");
+    try h.expectContains(scr, "README.md", "the repo's files list");
+
+    // Enter on src/ unfolds IN PLACE. Navigated by `/` search — the
+    // tree is a BUFFER, so vim's own motions are the navigation — and
+    // search also dodges the row `.git/` occupies above it.
+    _ = try app.ctl("type /src");
+    _ = try app.ctl("enter");
+    _ = try app.ctl("press RET");
+    try app.waitText("▾ src/", 5000);
+    scr = try app.screen(&buf);
+    try h.expectContains(scr, "main.zig", "unfolding shows the child");
+    try h.expectContains(scr, "README.md", "the rest of the level is still there");
+
+    // <leader>⇥ again: the shell comes back (the tree had nothing else
+    // to show, so toggling off is the takeover ending).
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press TAB");
+    var waited: u32 = 0;
+    while (waited < 5000) : (waited += 100) {
+        if (std.mem.indexOf(u8, try app.ctl("panes"), "edit:") == null) break;
+        h.sleepMs(100);
+    }
+    try h.expectNotContains(try app.ctl("panes"), "edit:", "toggle hands the shell back");
+
+    // From a FILE: <leader>o opens the tree revealed on it.
+    _ = try app.ctlFmt("edit {s}", .{mainzig});
+    _ = try app.waitCtl("panes", "edit:main.zig", 5000);
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press o");
+    try app.waitText("▾ src/", 5000);
+    scr = try app.screen(&buf);
+    try h.expectContains(scr, "main.zig", "the target is on screen, ancestors unfolded");
+
+    // ...and <leader>⇥ toggles back to the file it covered.
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press TAB");
+    _ = try app.waitCtl("panes", "edit:main.zig", 5000);
+    try app.waitText("pub fn main", 5000);
+
+    // The teaching layer picked the new commands up for free.
+    _ = try app.ctl("press ESC"); // make sure nothing is armed
+    _ = try app.ctl("press `");
+    var wk_waited: u32 = 0;
+    while (wk_waited < 5000) : (wk_waited += 100) {
+        const s = try app.ctl("whichkey");
+        if (std.mem.indexOf(u8, s, "armed visible") != null) break;
+        h.sleepMs(100);
+    }
+    const wk = try app.ctl("whichkey");
+    try h.expectContains(wk, "TAB\tFile Tree", "the sheet teaches the toggle");
+    try h.expectContains(wk, "o\tFile Tree: Reveal File", "the sheet teaches reveal");
+    _ = try app.ctl("press ESC");
 }
 
 // --------------------------------------------------------------- excmd

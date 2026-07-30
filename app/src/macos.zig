@@ -2258,7 +2258,94 @@ pub const App = struct {
             .panel_ask => self.showPendingAsk(),
             .panel_flip => self.flipSidePane(),
             .diff_open => self.requestDiff("", 0),
+            .tree_toggle => self.treeCommand(false),
+            .tree_reveal => self.treeCommand(true),
         }
+    }
+
+    /// `<leader>⇥` / `<leader>o` — the file tree, IN the focused pane
+    /// (netrw's heir: no global panel, every pane holds its own).
+    ///
+    /// Toggle is symmetric: a file buffer remembers itself as the
+    /// tree's alternate and comes back on the next toggle; a terminal
+    /// gets a takeover tree (shell parked under, same as any takeover
+    /// editor) and closing the tree restores it. Reveal is toggle plus
+    /// a destination: the tree opens unfolded down to the current file
+    /// with the cursor on it.
+    ///
+    /// The tree roots at the REPO of where you are (filesystem .git
+    /// probe off the pane's cwd or the buffer's path), falling back to
+    /// the directory itself — the workspace is an anchor, not a fence.
+    fn treeCommand(self: *App, reveal: bool) void {
+        var root_buf: [1024]u8 = undefined;
+        var takeover_root: ?[]const u8 = null;
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            const p = self.activeTab().focused;
+            if (p.editor()) |ed| {
+                if (ed.is_dir) {
+                    if (reveal) {
+                        // Re-reveal the alternate — the file this tree
+                        // covered is the one "current file" means here.
+                        if (ed.alt_path) |alt| ed.treeReveal(alt);
+                        self.scene_dirty = true;
+                        return;
+                    }
+                    if (ed.alt_path) |alt| {
+                        var ab: [1024]u8 = undefined;
+                        if (alt.len > ab.len) return;
+                        @memcpy(ab[0..alt.len], alt);
+                        const line = ed.alt_line;
+                        ed.open(ab[0..alt.len], false) catch return;
+                        ed.cline = @min(line, ed.lineCountB() -| 1);
+                        self.scene_dirty = true;
+                        return;
+                    }
+                    if (p.under != null) {
+                        // Takeover tree with nothing else to show:
+                        // closing it hands the shell back (the reap).
+                        ed.closed = true;
+                        self.scene_dirty = true;
+                        return;
+                    }
+                    return; // a bare tree pane: nowhere to toggle to
+                }
+                // A file buffer → the tree, remembering where we were.
+                // Copies FIRST: open() replaces the buffer these slices
+                // live in. A modified buffer refuses inside open(),
+                // with its own status — same contract as :e.
+                var cur_buf: [1024]u8 = undefined;
+                var cur: ?[]const u8 = null;
+                if (!ed.synthetic) if (ed.buf.path) |bp| {
+                    if (bp.len <= cur_buf.len) {
+                        @memcpy(cur_buf[0..bp.len], bp);
+                        cur = cur_buf[0..bp.len];
+                    }
+                };
+                const cur_line = ed.cline;
+                const start = if (cur) |c| std.fs.path.dirname(c) orelse c else blk: {
+                    const cwd = self.paneCwd(p) orelse return;
+                    break :blk std.mem.span(cwd);
+                };
+                const root = @import("git.zig").repoRootFs(self.io, self.gpa, start, &root_buf) orelse start;
+                ed.open(root, false) catch return;
+                if (!ed.is_dir) return; // raced with the dir vanishing
+                if (cur) |c| {
+                    ed.setAlt(c, cur_line);
+                    if (reveal) ed.treeReveal(ed.alt_path orelse c);
+                }
+                self.scene_dirty = true;
+                return;
+            }
+            // A terminal → takeover tree rooted at its repo. openEditor
+            // takes draw_lock itself, so the call happens outside.
+            const cwd = self.paneCwd(p) orelse return;
+            const start = std.mem.span(cwd);
+            takeover_root = @import("git.zig").repoRootFs(self.io, self.gpa, start, &root_buf) orelse
+                std.fmt.bufPrint(&root_buf, "{s}", .{start}) catch return;
+        }
+        if (takeover_root) |r| _ = self.openEditor(r);
     }
 
     /// Toggle the side pane. Opening with a DIFFERENT panel than the one

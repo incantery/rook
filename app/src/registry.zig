@@ -68,6 +68,13 @@ pub const Action = enum {
     /// a panel: it is a DOCUMENT — scrolled, searched and navigated with
     /// the editor's own keys — and the side panes are for lists.
     diff_open,
+    /// The file tree, IN the focused pane (netrw's heir — no global
+    /// panel; every pane can hold its own). Toggle puts back whatever
+    /// the tree replaced: the file it covered, or the parked shell.
+    tree_toggle,
+    /// The tree opened ON the focused pane's current file: ancestors
+    /// unfolded, cursor on it.
+    tree_reveal,
 };
 
 pub const Spec = struct { action: Action, arg: u8 = 0 };
@@ -117,6 +124,8 @@ pub const commands = [_]Command{
     .{ .id = "ask.show", .title = "Show Pending Question", .category = "Panel", .action = .panel_ask, .keys = "<leader>q" },
     .{ .id = "panel.flip", .title = "Move Side Pane to Other Edge", .category = "Panel", .action = .panel_flip },
     .{ .id = "diff.open", .title = "Diff: Working Changes", .category = "Review", .action = .diff_open, .keys = "<leader>d" },
+    .{ .id = "tree.toggle", .title = "File Tree", .category = "Pane", .action = .tree_toggle, .keys = "<leader>⇥" },
+    .{ .id = "tree.reveal", .title = "File Tree: Reveal File", .category = "Pane", .action = .tree_reveal, .keys = "<leader>o" },
 };
 
 /// Alternate spellings that resolve to a command. Kept apart from the

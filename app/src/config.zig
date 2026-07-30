@@ -432,6 +432,14 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     // ...and the Diff the gate is about. Next to it on purpose: the list
     // of findings and the change they are about are one motion apart.
     kb.bind('d', .{ .action = .diff_open });
+    // The file tree, in the focused pane. THE APP'S leader, on purpose:
+    // the editor has its own leader (config [editor], a separate
+    // namespace) and could never fire this from a terminal pane, which
+    // is exactly where a takeover tree is most wanted.
+    kb.bind('\t', .{ .action = .tree_toggle });
+    // ...and opened on the current file (vim-vinegar's `-` energy, but
+    // the whole tree, unfolded down to where you are).
+    kb.bind('o', .{ .action = .tree_reveal });
 
     var pathbuf: [1024]u8 = undefined;
     const path = cfgPath(&pathbuf) orelse return kb;
