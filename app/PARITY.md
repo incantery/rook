@@ -454,6 +454,42 @@ a daily driver.
       without having to know a version number.
       Still open: incremental sync, completion, references, format on
       save.
+- [x] **A file is a document, not a copy per pane** — the buffers note
+      finally implemented rather than merely believed. Every pane used
+      to load its own rope, so one file in two panes was two undo
+      histories and two dirty flags: typing in one left the other
+      showing stale text, and `:w` from the second was REFUSED, because
+      the file really had changed underneath it. Two panes, one file,
+      one edit was reproducible in ten seconds before this.
+      Emacs is the model and its split is the one worth naming: the
+      buffer holds the text, the undo history and the modified flag;
+      the window holds the point and the scroll. src/docs.zig is the
+      buffer half — an open-document table keyed by path (case-
+      insensitively, like the filesystem), reference counted, and
+      deliberately NOT a cache: the last pane to close a file frees it,
+      so nothing can hand back text older than the disk.
+      `Editor.buf` became a POINTER, which is what made this tractable —
+      Zig auto-derefs, so two hundred `self.buf.…` sites never changed.
+      The registry reaches the editor through the same function-pointer
+      seam the highlighter and the language server use, so every
+      headless test still owns its own document and nothing in
+      editor.zig knows a registry exists.
+      Three things that had to move with it: the edit-notification seam
+      became a LIST (a document open twice has two sets of marks to
+      shift); reload REPLACES contents in place rather than swapping
+      the pointer, since other panes are holding it; and the
+      language-server sync mark moved onto the document, so two panes
+      send one didChange and which pane you typed in cannot decide
+      whether the server hears about it.
+      Known limit, deliberate: another view's cursor is CLAMPED on a
+      foreign edit, not carried. Emacs makes point a marker that tracks
+      the text; rook keeps the line where the line still exists and
+      never points past the end. Coarse and correct beats precise and
+      half-wired — making the cursor a real anchor is the follow-on,
+      and the machinery (Buffer's watcher seam) is already there.
+      This is the prerequisite for multiple windows, not a detour: every
+      window model is either correct or incoherent depending on whether
+      one file can be one document.
       e2e `lsp` drives a FAKE server (a shell script speaking real
       framing) so the suite needs no gopls installed. It found the bug
       pty.zig already had a comment about: a forked child inherits

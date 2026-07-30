@@ -774,6 +774,18 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             .{ b.config_us, b.keybinds_us, b.appkit_us, b.renderer_us, b.session_us, b.create_us, b.ctl_ready_us },
         ) catch return;
         reply(fd, s);
+    } else if (std.mem.eql(u8, verb, "docs") and rest.len == 0) {
+        // Which files are open and how many panes hold each. The whole
+        // window into an invariant that is otherwise invisible: two
+        // panes on one file should be ONE document, and the only way to
+        // see that from outside is to count the holders.
+        app.draw_lock.lock();
+        defer app.draw_lock.unlock();
+        var a: std.Io.Writer.Allocating = .init(app.gpa);
+        defer a.deinit();
+        a.writer.print("open:{d}\n", .{app.docs.count()}) catch return;
+        app.docs.describe(&a.writer);
+        reply(fd, a.written());
     } else if (std.mem.eql(u8, verb, "lsp") and rest.len == 0) {
         // Every running server and every diagnostic it has published.
         // The e2e suite's whole window into a subsystem whose real

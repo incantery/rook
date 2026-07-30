@@ -202,7 +202,18 @@ pub const TreeRow = struct {
 pub const Editor = struct {
     gpa: Allocator,
     io: std.Io,
-    buf: bufferpkg.Buffer,
+    /// The DOCUMENT this view is showing — shared, not owned.
+    ///
+    /// The rook-buffers model finally implemented rather than merely
+    /// believed: a file is a document and a pane is a window onto it, so
+    /// two panes showing one file are two views of ONE rope, one undo
+    /// history, one dirty flag. Before this it was two of each, and
+    /// typing in one pane left the other showing stale text that `:w`
+    /// would then refuse to overwrite.
+    ///
+    /// A pointer rather than a value, which is what makes the sharing
+    /// invisible to the two hundred `self.buf.…` sites below.
+    buf: *bufferpkg.Buffer,
 
     /// Viewport: first visible line, first visible render column.
     top: usize = 0,
@@ -456,16 +467,33 @@ pub const Editor = struct {
     // process manager to run its headless tests. macos.zig attaches;
     // null means no server, and every caller below degrades to what the
     // editor could already do on its own.
+    // Document registry seam — same function-pointer shape as the
+    // highlighter's and the server's, same reason. With no registry
+    // attached (every headless test) a view allocates and owns its own
+    // document exactly as it always did, so nothing below has to care
+    // which world it is in.
+    doc_ctx: ?*anyopaque = null,
+    /// A document for this path if one is already open somewhere, else
+    /// null and the caller loads it.
+    doc_find: ?*const fn (*anyopaque, path: []const u8) ?*bufferpkg.Buffer = null,
+    /// Take ownership of a freshly loaded document; the registry may
+    /// refuse (no room), in which case the view keeps owning it.
+    doc_publish: ?*const fn (*anyopaque, *bufferpkg.Buffer) bool = null,
+    /// Give up a reference. The registry frees at zero.
+    doc_release: ?*const fn (*anyopaque, *bufferpkg.Buffer) void = null,
+    /// True while this document is the registry's to free.
+    doc_shared: bool = false,
+    /// The document version this view last reconciled with. A version
+    /// it has not seen belongs to somebody ELSE's edit, and the cursor
+    /// may now be past the end of a line that shrank.
+    seen_version: u64 = std.math.maxInt(u64),
+
     lsp_ctx: ?*anyopaque = null,
     /// Ask about the identifier under the cursor. The answer is
     /// ASYNCHRONOUS — it arrives as a status line or a jump some frames
     /// later — so these return nothing.
     lsp_hover: ?*const fn (*anyopaque, *Editor) void = null,
     lsp_definition: ?*const fn (*anyopaque, *Editor) void = null,
-    /// The buffer version the server has been told about. The app
-    /// compares it on the frame loop, so an unedited buffer costs one
-    /// integer compare per frame and no traffic.
-    lsp_version: u64 = std.math.maxInt(u64),
     /// Debounce state: the version last OBSERVED changing, and when.
     /// Sync fires when typing stops, not on every keystroke — a
     /// full-text didChange per character is a lot of pipe for an
@@ -545,16 +573,49 @@ pub const Editor = struct {
     /// reading it.
     app_quit_all: ?*const fn (*anyopaque, write: bool, quit: bool, force: bool) void = null,
 
+    /// Stop watching the current document and give up our reference.
+    /// Frees it outright when nothing else holds it.
+    fn dropDoc(self: *Editor) void {
+        self.buf.unwatch(self);
+        if (self.doc_shared) {
+            if (self.doc_release) |f| f(self.doc_ctx.?, self.buf);
+        } else {
+            self.buf.deinit(self.gpa);
+            self.gpa.destroy(self.buf);
+        }
+        self.doc_shared = false;
+    }
+
+    /// Point this view at `doc` and start watching it.
+    fn adoptDoc(self: *Editor, doc: *bufferpkg.Buffer, shared: bool) void {
+        self.buf = doc;
+        self.doc_shared = shared;
+        self.buf.watch(self, onBufferEdit);
+        self.seen_version = self.buf.version;
+    }
+
+    /// Move a freshly loaded document onto the heap, offer it to the
+    /// registry, and adopt whichever copy is now authoritative.
+    fn ownNew(self: *Editor, loaded: bufferpkg.Buffer) !void {
+        const doc = try self.gpa.create(bufferpkg.Buffer);
+        doc.* = loaded;
+        var shared = false;
+        if (self.doc_publish) |f| shared = f(self.doc_ctx.?, doc);
+        self.adoptDoc(doc, shared);
+    }
+
     pub fn create(gpa: Allocator, io: std.Io, path: ?[]const u8) !*Editor {
         const self = try gpa.create(Editor);
         errdefer gpa.destroy(self);
+        const doc = try gpa.create(bufferpkg.Buffer);
+        errdefer gpa.destroy(doc);
+        doc.* = try bufferpkg.Buffer.initEmpty(gpa);
         self.* = .{
             .gpa = gpa,
             .io = io,
-            .buf = try bufferpkg.Buffer.initEmpty(gpa),
+            .buf = doc,
         };
-        self.buf.on_edit_ctx = self;
-        self.buf.on_edit = onBufferEdit;
+        self.buf.watch(self, onBufferEdit);
         // Through open() rather than a second load path: a directory
         // needs the tree state this editor now owns (expanded set, row
         // metadata), and create-time is the one place a duplicate of
@@ -565,7 +626,7 @@ pub const Editor = struct {
                 // Nothing else is allocated yet: open() fails before it
                 // touches the buffer, and the tree state only commits
                 // on success.
-                self.buf.deinit(gpa);
+                self.dropDoc();
                 return err;
             };
         }
@@ -918,10 +979,15 @@ pub const Editor = struct {
             return;
         }
         const top = self.top;
-        self.buf.deinit(gpa);
-        self.buf = nb;
-        self.buf.on_edit_ctx = self;
-        self.buf.on_edit = onBufferEdit;
+        // A tree is never shared: its rows are this view's expansion
+        // state, so two panes browsing one directory are two listings.
+        self.dropDoc();
+        try_own: {
+            self.ownNew(nb) catch {
+                self.setStatus("tree refresh failed", .{}, true);
+                break :try_own;
+            };
+        }
         self.ai_line = null;
         self.clearDecor();
         self.is_dir = true;
@@ -1064,7 +1130,7 @@ pub const Editor = struct {
         // ever took line decoration (a diff, a tree) leaked it here.
         self.line_style.deinit(gpa);
         self.line_gutter.deinit(gpa);
-        self.buf.deinit(gpa);
+        self.dropDoc();
         self.cmd.deinit(gpa);
         self.dot.deinit(gpa);
         self.macro_buf.deinit(gpa);
@@ -1434,6 +1500,30 @@ pub const Editor = struct {
         const s = self.lineText(self.cline);
         const maxc = lastCpCol(s);
         if (self.ccol > maxc) self.ccol = maxc;
+    }
+
+    /// Notice edits made through ANOTHER view of this document.
+    ///
+    /// The view that made an edit moved its own cursor as part of it;
+    /// every other view is still holding coordinates that may no longer
+    /// exist. Marks and jumps are shifted precisely, through the
+    /// watcher seam. The CURSOR is only clamped, which is coarser than
+    /// Emacs (whose point is a marker and tracks the text): it keeps
+    /// its line where the line still exists and never points past the
+    /// end. Coarse and correct beats precise and half-wired; making the
+    /// cursor a real anchor is the follow-on.
+    ///
+    /// Cheap on an idle frame — one integer compare per view.
+    pub fn reconcile(self: *Editor) void {
+        if (self.seen_version == self.buf.version) return;
+        self.seen_version = self.buf.version;
+        const last = self.lineCountB() -| 1;
+        if (self.cline > last) self.cline = last;
+        if (self.top > last) self.top = last;
+        self.ccol = @min(self.ccol, self.lineCap(self.cline));
+        if (self.mode == .normal) self.clampNormal();
+        self.goal = self.renderColAt(self.cline, self.ccol);
+        self.render_dirty = true;
     }
 
     pub fn setStatus(self: *Editor, comptime fmt: []const u8, args: anytype, is_err: bool) void {
@@ -3031,8 +3121,11 @@ pub const Editor = struct {
         var b: bufferpkg.Buffer = .{ .rope = try .init(self.gpa, text) };
         errdefer b.rope.deinit(self.gpa);
         b.path = try self.gpa.dupe(u8, name);
-        self.buf.deinit(self.gpa);
-        self.buf = b;
+        // Synthetic documents are never registered: their "path" is a
+        // display name, and two panes asking for the same name mean two
+        // different renderings of whatever produced them.
+        self.dropDoc();
+        try self.ownNew(b);
         self.ai_line = null; // line numbers belonged to the old buffer
         self.clearDecor();
         self.is_dir = false;
@@ -3072,10 +3165,12 @@ pub const Editor = struct {
         const cline = self.cline;
         const ccol = self.ccol;
         const top = self.top;
-        self.buf.deinit(self.gpa);
-        self.buf = nb;
-        self.buf.on_edit_ctx = self;
-        self.buf.on_edit = onBufferEdit;
+        // A reload REPLACES the document's contents in place rather
+        // than swapping in a new document: the old one may be on screen
+        // in another pane, and swapping would leave that pane holding a
+        // buffer nothing writes to any more. Every view sees the new
+        // text, which is what "the file changed on disk" means.
+        self.buf.replaceContents(self.gpa, nb);
         self.ai_line = null; // line numbers belonged to the old buffer
         self.clearDecor();
         self.is_dir = is_dir;
@@ -3109,10 +3204,24 @@ pub const Editor = struct {
         // was before it goes, and enroll the new one. Trees and
         // synthetic views never enroll — the list is documents.
         self.bufRemember();
-        self.buf.deinit(self.gpa);
-        self.buf = nb;
-        self.buf.on_edit_ctx = self;
-        self.buf.on_edit = onBufferEdit;
+        // THE sharing site. If this document is already open in another
+        // pane, the load we just did is thrown away and both panes end
+        // up on one rope — which is the whole point: one undo history,
+        // one dirty flag, one `:w`. Directories are excluded because a
+        // tree's rows carry this view's expansion state.
+        var shared: ?*bufferpkg.Buffer = null;
+        if (!is_dir) {
+            if (self.doc_find) |f| shared = f(self.doc_ctx.?, path);
+        }
+        if (shared) |doc| {
+            var tmp = nb;
+            tmp.deinit(self.gpa);
+            self.dropDoc();
+            self.adoptDoc(doc, true);
+        } else {
+            self.dropDoc();
+            try self.ownNew(nb);
+        }
         self.ai_line = null; // line numbers belonged to the old buffer
         self.clearDecor();
         self.is_dir = is_dir;

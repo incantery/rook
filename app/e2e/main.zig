@@ -62,6 +62,7 @@ const scenarios = [_]Scenario{
     .{ .name = "lsp", .what = "language server: diagnostics reach the gutter, ]d walks them, an edit re-diagnoses", .run = lspScenario },
     .{ .name = "lsppython", .what = "a second language is data: python roots at pyproject.toml and lands the same way", .run = lspPython },
     .{ .name = "lspts", .what = "ts and tsx share one server, root at the tsconfig, and split only on the grammar", .run = lspTs },
+    .{ .name = "docshare", .what = "one file in two panes is ONE document: edits, dirty flag and :w are shared", .run = docShare },
     .{ .name = "findfiles", .what = "⌘⇧F: scan honours the ignore rules, results group by file, Enter jumps to the line", .run = findInFiles },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
@@ -3112,5 +3113,86 @@ fn lspTs(gpa: std.mem.Allocator, bin: []const u8) !void {
             if (std.mem.startsWith(u8, line, "server ")) n += 1;
         }
         try h.expectEq("one server for the whole ts/tsx/js family", 1, n);
+    }
+}
+
+
+// ------------------------------------------------------------- docshare
+
+/// A file is a DOCUMENT and a pane is a window onto it.
+///
+/// rook said this long before it was true. Every pane used to load its
+/// own copy, so one file in two panes was two ropes, two undo histories
+/// and two dirty flags: typing in one left the other showing stale
+/// text, and `:w` from the second was refused because the file really
+/// had changed underneath it. Emacs's split — buffer holds the text,
+/// window holds the point — is what this pins.
+fn docShare(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-docs-{d}", .{h.runPid()});
+    try h.mkdirP(scratch);
+    var f_buf: [256]u8 = undefined;
+    const shared = try std.fmt.bufPrint(&f_buf, "{s}/shared.txt", .{scratch});
+    try h.writeFile(shared, "alpha\nbeta\ngamma\n");
+    var o_buf: [256]u8 = undefined;
+    const other = try std.fmt.bufPrint(&o_buf, "{s}/other.txt", .{scratch});
+    try h.writeFile(other, "one\ntwo\n");
+
+    const app = try h.Instance.start(gpa, bin, .{ .cwd = scratch });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var cmd_buf: [320]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{shared}));
+    _ = try app.ctl("split right");
+    var cmd2_buf: [320]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd2_buf, "edit {s}", .{shared}));
+
+    {
+        const out = try app.ctl("docs");
+        try h.expectContains(out, "open:1", "one file open, not two copies of it");
+        try h.expectContains(out, "views:2", "and two panes holding it");
+    }
+
+    // Type in pane 2; pane 1 is showing the same rope, so it sees it.
+    _ = try app.ctl("type@2 ggIZZZ");
+    _ = try app.ctl("key@2 1b");
+    {
+        const one = try app.ctl("dump@1");
+        try h.expectContains(one, "ZZZalpha", "the other pane sees the edit");
+    }
+    {
+        const out = try app.ctl("docs");
+        // ONE dirty flag. Two would mean two documents, and the second
+        // pane's `:w` would be refused as a clobber.
+        try h.expectContains(out, "modified:yes", "one dirty flag for the document");
+        try h.expectContains(out, "open:1", "still one document");
+    }
+
+    // …and one `:w`, from the pane that did NOT type.
+    _ = try app.ctl("focus 1");
+    _ = try app.ctl("type :w");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("docs", "modified:no", 5_000);
+    {
+        var disk_buf: [256]u8 = undefined;
+        const disk = try h.readFile(shared, &disk_buf);
+        try h.expectContains(disk, "ZZZalpha", "and the write carried the other pane's edit");
+    }
+
+    // A DIFFERENT file in the second pane is a different document —
+    // sharing is by path, not by "whatever is open".
+    var cmd3_buf: [320]u8 = undefined;
+    _ = try app.ctl("focus 2");
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd3_buf, "edit {s}", .{other}));
+    {
+        const out = try app.ctl("docs");
+        try h.expectContains(out, "open:2", "two files open");
+        try h.expectContains(out, "other.txt", "the second pane moved to its own document");
+        // The first pane let go of nothing — it is still on shared.txt,
+        // now alone.
+        try h.expectContains(out, "views:1", "each held by one pane");
     }
 }

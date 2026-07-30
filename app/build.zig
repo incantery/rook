@@ -181,6 +181,19 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(search_tests).step);
 
+    // The open-document table. Its own root because what it guards is
+    // an OWNERSHIP invariant, and both ways of getting it wrong are
+    // silent: one reference too many leaks a document for the life of
+    // the process, one too few frees a rope two panes are still
+    // drawing from.
+    const docs_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/docs.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(docs_tests).step);
+
     // The LSP client. Its own root because the whole module is a
     // contract with a process we did not write: every failure it guards
     // is a stall or a silence rather than a crash — a server→client

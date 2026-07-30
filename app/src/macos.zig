@@ -26,6 +26,8 @@ const filelistpkg = @import("filelist.zig");
 const searchpkg = @import("search.zig");
 const lsppkg = @import("lsp.zig");
 const lspmgrpkg = @import("lspmgr.zig");
+const docspkg = @import("docs.zig");
+const bufferpkg = @import("buffer.zig");
 const uipkg = @import("ui.zig");
 const stats = @import("stats.zig");
 
@@ -552,6 +554,11 @@ pub const App = struct {
     /// Columns, not pixels: the pane beside it is a character grid, and
     /// a width in px makes the split land mid-cell at some font sizes.
     side_cols: f32 = 34,
+
+    /// Every file open in any pane, and how many panes hold it. The
+    /// rook-buffers model made real: one file is one document, however
+    /// many windows are looking at it.
+    docs: docspkg.Registry = undefined,
 
     // ---- language servers ----
     /// Owns every running server, their roots, and the diagnostics they
@@ -1099,6 +1106,7 @@ pub const App = struct {
         // Nothing spawns here: the manager is a table until a file of a
         // known language opens. That is deliberate — a language server
         // costs ~1s and ~100MB, and launch owes it nothing.
+        self.docs = docspkg.Registry.init(gpa);
         self.lsp = lspmgrpkg.Manager.init(gpa, init.io);
         self.lsp.enabled = cfg.lsp;
         boot_times.create_us = usSince(boot_times.start);
@@ -1893,10 +1901,7 @@ pub const App = struct {
             self.scene_dirty = true;
             return true;
         }
-        const ed = editorpkg.Editor.create(self.gpa, self.io, path) catch return false;
-        @import("syntax.zig").attach(ed, self.gpa);
-        self.lspAttachLocked(ed);
-        self.attachCommands(ed);
+        const ed = self.newEditorLocked(path) orelse return false;
         var tm = p.content.term;
         tm.copy_mode = false;
         p.under = tm;
@@ -2696,13 +2701,13 @@ pub const App = struct {
         var root_buf: [1024]u8 = undefined;
         const root = self.paneRootLocked(p, &root_buf) orelse return null;
 
-        const ed = editorpkg.Editor.create(self.gpa, self.io, root) catch return null;
+        const ed = self.newEditorLocked(root) orelse return null;
         if (!ed.is_dir) {
             ed.destroy();
             return null;
         }
         ed.tree_pinned = true;
-        @import("syntax.zig").attach(ed, self.gpa);
+        self.attachDocsLocked(ed);
         self.lspAttachLocked(ed);
         self.attachCommands(ed);
         const pane = self.gpa.create(panespkg.Pane) catch {
@@ -3223,6 +3228,63 @@ pub const App = struct {
         }
     }
 
+    // ------------------------------------------------------ documents
+
+    /// Create an editor with the app's seams already installed.
+    ///
+    /// One helper rather than four call sites, and the ORDER is the
+    /// reason: the document registry has to be reachable before the
+    /// first open, or a pane's first file is the one that never gets
+    /// shared — which is exactly the file you were looking at.
+    fn newEditorLocked(self: *App, path: ?[]const u8) ?*editorpkg.Editor {
+        const ed = editorpkg.Editor.create(self.gpa, self.io, null) catch return null;
+        @import("syntax.zig").attach(ed, self.gpa);
+        self.attachDocsLocked(ed);
+        self.attachCommands(ed);
+        if (path) |p| {
+            ed.open(p, false) catch {
+                ed.destroy();
+                return null;
+            };
+        }
+        self.lspAttachLocked(ed);
+        return ed;
+    }
+
+    fn attachDocsLocked(self: *App, ed: *editorpkg.Editor) void {
+        ed.doc_ctx = self;
+        ed.doc_find = &docFindHook;
+        ed.doc_publish = &docPublishHook;
+        ed.doc_release = &docReleaseHook;
+    }
+
+    fn docFindHook(ctx: *anyopaque, path: []const u8) ?*bufferpkg.Buffer {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        return self.docs.acquire(path);
+    }
+
+    fn docPublishHook(ctx: *anyopaque, doc: *bufferpkg.Buffer) bool {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        return self.docs.publish(doc);
+    }
+
+    fn docReleaseHook(ctx: *anyopaque, doc: *bufferpkg.Buffer) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.docs.release(doc);
+    }
+
+    /// Let every view notice edits made through another one. Runs on
+    /// the frame loop beside the LSP tick, and costs one integer
+    /// compare per pane when nothing has changed.
+    fn reconcileViewsLocked(self: *App) void {
+        for (self.spaces.items) |space| for (space.tabs.items) |tab| {
+            for (tab.panes.items) |p| {
+                const ed = p.editor() orelse continue;
+                ed.reconcile();
+            }
+        };
+    }
+
     // ---------------------------------------------------- language servers
 
     /// Attach the seam and open the document. Called wherever an editor
@@ -3243,7 +3305,7 @@ pub const App = struct {
         const text = ed.buf.rope.dupeRange(self.gpa, 0, ed.buf.rope.byteLen()) catch return;
         defer self.gpa.free(text);
         srv.didOpen(path, text);
-        ed.lsp_version = ed.buf.version;
+        ed.buf.lsp_version = ed.buf.version;
         // A file opened a second time in a server that already knows it
         // still needs its diagnostics on screen — they were published
         // while no pane was showing them.
@@ -3255,13 +3317,16 @@ pub const App = struct {
     /// and nothing more.
     fn lspSyncLocked(self: *App, ed: *editorpkg.Editor) void {
         if (ed.lsp_ctx == null) return;
-        if (ed.buf.version == ed.lsp_version) return;
+        // Against the DOCUMENT's mark, not this view's: two panes on one
+        // file must send one didChange, and which pane you typed in must
+        // not decide whether the server hears about it.
+        if (ed.buf.version == ed.buf.lsp_version) return;
         const path = ed.buf.path orelse return;
         const srv = self.lsp.ensure(path) orelse return;
         const text = ed.buf.rope.dupeRange(self.gpa, 0, ed.buf.rope.byteLen()) catch return;
         defer self.gpa.free(text);
         srv.didChange(path, text);
-        ed.lsp_version = ed.buf.version;
+        ed.buf.lsp_version = ed.buf.version;
     }
 
     /// Diagnostics arrive in UTF-16 columns; the editor counts bytes.
@@ -3312,7 +3377,7 @@ pub const App = struct {
             for (tab.panes.items) |p| {
                 const ed = p.editor() orelse continue;
                 if (ed.lsp_ctx == null) continue;
-                if (ed.buf.version == ed.lsp_version) continue;
+                if (ed.buf.version == ed.buf.lsp_version) continue;
                 if (ed.buf.version != ed.lsp_seen_version) {
                     ed.lsp_seen_version = ed.buf.version;
                     ed.lsp_seen_at = now;
@@ -3614,10 +3679,7 @@ pub const App = struct {
             self.scene_dirty = true;
             return;
         }
-        const ed = editorpkg.Editor.create(self.gpa, self.io, null) catch return;
-        @import("syntax.zig").attach(ed, self.gpa);
-        self.lspAttachLocked(ed);
-        self.attachCommands(ed);
+        const ed = self.newEditorLocked(null) orelse return;
         ed.openText(name, text) catch {
             ed.destroy();
             return;
@@ -4019,12 +4081,10 @@ pub const App = struct {
         }
 
         // Split a fresh editor pane off the asker.
-        const ed = editorpkg.Editor.create(self.gpa, self.io, path) catch {
+        const ed = self.newEditorLocked(path) orelse {
             self.draw_lock.unlock();
             return;
         };
-        @import("syntax.zig").attach(ed, self.gpa);
-        self.lspAttachLocked(ed);
         self.attachCommands(ed);
         if (req.line > 0) ed.cline = @min(req.line, ed.lineCountB() -| 1);
         const pane = self.gpa.create(panespkg.Pane) catch {
@@ -4382,6 +4442,7 @@ pub const App = struct {
         self.reapExitedLocked();
         self.drainClipboardLocked();
         self.drainSearchLocked();
+        self.reconcileViewsLocked();
         self.drainLspLocked();
         self.lspTickLocked(CACurrentMediaTime());
 

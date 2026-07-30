@@ -36,6 +36,13 @@ pub const DiskState = struct {
     }
 };
 
+pub const EditFn = *const fn (ctx: *anyopaque, start: usize, removed: usize, added: usize) void;
+
+pub const Watcher = struct { ctx: *anyopaque, cb: EditFn };
+
+/// How many views may watch one document. See Buffer.watchers.
+pub const max_watchers = 16;
+
 pub const Buffer = struct {
     rope: ropepkg.Rope,
     /// Absolute path, owned; null = scratch.
@@ -56,12 +63,24 @@ pub const Buffer = struct {
     /// groups.
     group_pinned: bool = false,
     /// Told about every edit — offset, bytes removed, bytes added — so
-    /// anything holding a POSITION in this buffer can move it. One
-    /// seam on purpose: a position that only some edits update is
-    /// worse than one that never updates, because it is right often
-    /// enough to be trusted.
-    on_edit_ctx: ?*anyopaque = null,
-    on_edit: ?*const fn (*anyopaque, start: usize, removed: usize, added: usize) void = null,
+    /// anything holding a POSITION in this document can move it. One
+    /// seam on purpose: a position that only some edits update is worse
+    /// than one that never updates, because it is right often enough to
+    /// be trusted.
+    ///
+    /// A LIST, not one slot. A document open in two panes has two sets
+    /// of marks to move, and the single-listener seam this replaces was
+    /// written when a buffer could only ever have one view. Sixteen is
+    /// far past any sane number of panes onto one file; a seventeenth
+    /// view simply does not get its marks shifted, which is the least
+    /// harmful way to run out.
+    watchers: [max_watchers]?Watcher = @splat(null),
+
+    /// The version last pushed to a language server. It lives on the
+    /// DOCUMENT rather than on a view because the server has one copy:
+    /// two panes showing one file must not each sync it, and the one
+    /// that syncs must not depend on which pane you typed in.
+    lsp_version: u64 = std.math.maxInt(u64),
 
     /// Edits are numbered, and the number rides along through undo and
     /// redo. The number on top of the undo stack therefore identifies
@@ -146,6 +165,59 @@ pub const Buffer = struct {
         const p = self.path orelse return false;
         const st = std.Io.Dir.cwd().statFile(io, p, .{}) catch return true;
         return !known.matches(st);
+    }
+
+    /// Start telling `ctx` about edits. Idempotent: a view that
+    /// re-attaches to a document it already watches must not be told
+    /// twice, or every mark it holds moves double.
+    pub fn watch(self: *Buffer, ctx: *anyopaque, cb: EditFn) void {
+        for (&self.watchers) |*w| {
+            if (w.*) |have| {
+                if (have.ctx == ctx) return;
+            }
+        }
+        for (&self.watchers) |*w| {
+            if (w.* == null) {
+                w.* = .{ .ctx = ctx, .cb = cb };
+                return;
+            }
+        }
+    }
+
+    pub fn unwatch(self: *Buffer, ctx: *anyopaque) void {
+        for (&self.watchers) |*w| {
+            if (w.*) |have| {
+                if (have.ctx == ctx) w.* = null;
+            }
+        }
+    }
+
+    /// Every watcher, in slot order. Order is not a contract — a
+    /// watcher that cared which other watcher went first would be
+    /// depending on how panes happened to be opened.
+    fn notifyEdit(self: *Buffer, start: usize, removed: usize, added: usize) void {
+        for (self.watchers) |w| {
+            if (w) |have| have.cb(have.ctx, start, removed, added);
+        }
+    }
+
+    /// Become `fresh`, in place, keeping this document's identity.
+    ///
+    /// For reload: the document may be on screen in several panes, and
+    /// swapping the POINTER would leave the others holding a buffer
+    /// nothing writes to any more. Watchers, and the undo history, are
+    /// deliberately not carried over — the text they described is gone.
+    pub fn replaceContents(self: *Buffer, gpa: Allocator, fresh: Buffer) void {
+        const keep = self.watchers;
+        var old = self.*;
+        old.watchers = @splat(null);
+        self.* = fresh;
+        self.watchers = keep;
+        // A version that only ever grows: a view comparing versions to
+        // decide whether to re-clamp must not be fooled by a reload
+        // resetting the count.
+        self.version = old.version + 1;
+        old.deinit(gpa);
     }
 
     pub fn initEmpty(gpa: Allocator) Allocator.Error!Buffer {
@@ -282,7 +354,7 @@ pub const Buffer = struct {
         try self.rope.delete(gpa, start, end);
         try self.rope.insert(gpa, start, text);
         self.version +%= 1;
-        if (self.on_edit) |f| f(self.on_edit_ctx.?, start, end - start, text.len);
+        self.notifyEdit(start, end - start, text.len);
         if (clear_redo) {
             for (self.redo_stack.items) |e| gpa.free(e.deleted);
             self.redo_stack.clearRetainingCapacity();
@@ -325,7 +397,7 @@ pub const Buffer = struct {
             });
             try self.rope.delete(gpa, e.off, e.off + e.inserted_len);
             try self.rope.insert(gpa, e.off, e.deleted);
-            if (self.on_edit) |f| f(self.on_edit_ctx.?, e.off, e.inserted_len, e.deleted.len);
+            self.notifyEdit(e.off, e.inserted_len, e.deleted.len);
             target = e.off;
             gpa.free(e.deleted);
             self.version +%= 1;
