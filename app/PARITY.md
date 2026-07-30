@@ -245,8 +245,38 @@ a daily driver.
       instance against a graph instance on the live app's ctl output.
       Hot reload of the arrangement RETILES (pty resizes and all, the
       window-resize path). e2e `chrome` drives both personas blind.
+- [x] **The vscode persona's look and feel** (Seth: "doesn't look and
+      feel like vscode at all" — the gap, closed in layers). LOOK:
+      `vscode-dark` builtin theme, VS Code's own Dark+ values — and
+      the blue #007acc status bar forced FOUR OPTIONAL THEME SLOTS
+      (status_bg/fg/value/accent, null = the bar_* colors): bar_bg
+      also paints side panels and inactive bufline chips, so a theme
+      that turned it blue painted the whole app blue; and an
+      accent-colored glyph on an accent-colored bar is invisible, so
+      everything drawn ON the status bar asks statusBg()/statusFg()/
+      statusValue()/statusAccent(), never th.* directly. Activity-bar
+      icon rail (config `activity-bar`): window chrome at the far
+      left, outside even the side pane; one RailItem table so draw,
+      click, and ctl agree; explorer/search/scm/agents/review →
+      tree_toggle/palette_commands/diff_open/panel_deck/panel_review;
+      side-pane tenants light an accent edge when open. Bufline dirty
+      chips wear VS Code's ● where × sits. FEEL: `editor-mode =
+      insert` (writable file buffers open ready to type; trees and
+      readonly docs stay normal — insert in a buffer that refuses
+      edits is a lie; Esc still reaches vim); ⌘S speaks `:w` ITSELF
+      via a new Editor.exNow (one save path, clobber check included —
+      terminal panes pass ⌘S through untouched); click places the
+      cursor (bcolForRenderCol + lineCap — nvim's own mouse=a,
+      normal/insert modes only, all themes all personas). The preset
+      bundles all of it; goldens ×3 updated. e2e `vscodefeel` drives
+      the feel blind (INSERT on open, type + ⌘S via nskey reaches
+      disk, rail click opens the tree); the persona screenshot showed
+      VS Code's actual grammar emerge — active tab blending into the
+      editor, inactive chips on the lighter strip — from chip_active_bg
+      = ed_bg alone.
 - [ ] **Theme engine**: one semantic Palette, 8 builtins, runtime swap,
-      **VS Code theme importer**. rook has 2 builtins and a config key.
+      **VS Code theme importer**. rook has 2 builtins and a config key
+      (3 now, with vscode-dark).
 - [ ] **Settings UI** (⌘,): appearance, keybinds, and the token panes
       (Jira/OpenAI/cloud/relay → keychain). Today: hand-edit TOML.
 - [ ] Choose-window picker on `<leader>w` (reserved, unimplemented)

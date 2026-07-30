@@ -203,6 +203,12 @@ pub fn applyPreset(cfg: *Config, name: []const u8) bool {
         cfg.status_right = segs(.{ .cwd, .hints });
         cfg.tab_style = .current;
         cfg.buffer_line = true;
+        // The look-and-feel half of the persona: Dark+ colors with
+        // the blue status bar, the icon rail, files open ready to
+        // type, click places the cursor (that one is everyone's).
+        cfg.theme = "vscode-dark";
+        cfg.editor_insert = true;
+        cfg.activity_bar = true;
         return true;
     }
     // rook's own identity is the defaults — a no-op bundle, named so
@@ -277,6 +283,12 @@ pub const Config = struct {
     status_left: SegList = segs(.{ .workspace, .branch, .cwd }),
     status_right: SegList = segs(.{ .hints, .hud }),
     tab_style: TabStyle = .chips,
+    /// `editor-mode = "insert"`: writable file buffers open in insert
+    /// mode (the VS Code hand's contract; Esc still reaches normal).
+    editor_insert: bool = false,
+    /// The left icon rail (VS Code's activity bar): explorer, palette,
+    /// diff, agents, review — one click each, always visible.
+    activity_bar: bool = false,
 };
 
 /// One number over the config file — the live-reload poll compares this
@@ -502,6 +514,20 @@ fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
                 std.debug.print("rook config: unknown tab-style '{s}' (chips, index-name, current)\n", .{stripped});
                 break :blk cfg.tab_style;
             };
+        } else if (std.mem.eql(u8, key, "editor_mode")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            if (std.mem.eql(u8, stripped, "insert")) {
+                cfg.editor_insert = true;
+            } else if (std.mem.eql(u8, stripped, "normal")) {
+                cfg.editor_insert = false;
+            } else std.debug.print("rook config: unknown editor-mode '{s}' (normal, insert)\n", .{stripped});
+        } else if (std.mem.eql(u8, key, "activity_bar")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            if (std.mem.eql(u8, stripped, "true")) {
+                cfg.activity_bar = true;
+            } else if (std.mem.eql(u8, stripped, "false")) {
+                cfg.activity_bar = false;
+            } else std.debug.print("rook config: bad activity-bar '{s}' (true, false)\n", .{stripped});
         }
         // `preset` was handled by the pre-scan above.
         // No else: unknown top-level keys are the host's. See the header.
@@ -614,6 +640,14 @@ fn applyEnvOption(cfg: *Config, gpa: std.mem.Allocator, key_raw: []const u8, val
         cfg.buffer_line = jBool(value) orelse cfg.buffer_line;
     } else if (std.mem.eql(u8, key, "cursor_blink") or std.mem.eql(u8, key, "cursor_style_blink")) {
         cfg.cursor_blink = jBool(value) orelse cfg.cursor_blink;
+    } else if (std.mem.eql(u8, key, "editor_mode")) {
+        if (jStr(value)) |s| {
+            if (std.mem.eql(u8, s, "insert")) {
+                cfg.editor_insert = true;
+            } else if (std.mem.eql(u8, s, "normal")) cfg.editor_insert = false;
+        }
+    } else if (std.mem.eql(u8, key, "activity_bar")) {
+        cfg.activity_bar = jBool(value) orelse cfg.activity_bar;
     } else if (std.mem.eql(u8, key, "top_bar")) {
         cfg.top_bar = jSegList(value) orelse cfg.top_bar;
     } else if (std.mem.eql(u8, key, "status_left")) {
@@ -1027,6 +1061,9 @@ test "presets are the bundles the parity scenario pins" {
     try t.expect(vs.buffer_line);
     try t.expect(vs.status_left.eql(&segs(.{ .tabs, .branch })));
     try t.expect(vs.status_right.eql(&segs(.{ .cwd, .hints })));
+    try t.expect(std.mem.eql(u8, vs.theme, "vscode-dark"));
+    try t.expect(vs.editor_insert);
+    try t.expect(vs.activity_bar);
 
     var tm: Config = .{};
     try t.expect(applyPreset(&tm, "tmux-neovim"));
@@ -1035,6 +1072,7 @@ test "presets are the bundles the parity scenario pins" {
     try t.expect(!tm.buffer_line);
     try t.expect(tm.status_left.eql(&segs(.{.tabs})));
     try t.expect(tm.status_right.eql(&segs(.{ .workspace, .branch, .cwd })));
+    try t.expect(!tm.editor_insert and !tm.activity_bar);
 
     // The no-op identity, and the refusal.
     var rk: Config = .{};

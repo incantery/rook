@@ -83,6 +83,15 @@
 # active-tab chip; click cycles).
 # tab-style = "chips"
 
+# "insert" opens writable file buffers ready to type (the VS Code
+# hand's contract — Esc still reaches vim's normal mode). Trees,
+# diffs and other readonly docs stay normal either way.
+# editor-mode = "normal"
+
+# The left icon rail (VS Code's activity bar): explorer, search,
+# source control, agents, review — one click each, always visible.
+# activity-bar = false
+
 
 # ── Coder ────────────────────────────────────────────────────────────────
 

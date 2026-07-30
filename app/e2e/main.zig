@@ -56,6 +56,7 @@ const scenarios = [_]Scenario{
     .{ .name = "envgraph", .what = "environment.json wins: the graph's leader and chords drive, config.toml yields", .run = envgraph },
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
+    .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
 };
 
@@ -2294,7 +2295,7 @@ fn chrome(gpa: std.mem.Allocator, bin: []const u8) !void {
             app.deinit();
         }
         const sb = try app.ctl("statusbar");
-        try h.expectContains(sb, "topbar\nleft tabs\nright workspace branch cwd\ntabstyle index_name", "tmux arrangement");
+        try h.expectContains(sb, "topbar\nleft tabs\nright workspace branch cwd\nactivitybar off\ntabstyle index_name", "tmux arrangement");
         try h.expectContains(sb, "seg-tab1 ", "the tab list draws in the bar");
         _ = try app.ctl("run tab.new");
         _ = try app.waitCtl("statusbar", "seg-tab2", 5_000);
@@ -2310,7 +2311,7 @@ fn chrome(gpa: std.mem.Allocator, bin: []const u8) !void {
             app.deinit();
         }
         const sb = try app.ctl("statusbar");
-        try h.expectContains(sb, "topbar\nleft tabs branch\nright cwd hints\ntabstyle current", "vscode arrangement");
+        try h.expectContains(sb, "topbar\nleft tabs branch\nright cwd hints\nactivitybar on\ntabstyle current", "vscode arrangement");
         _ = try app.ctl("run tab.new");
         _ = try app.waitCtl("statusbar", "seg-tab1", 5_000);
         try h.expectEq("active tab after tab.new", 2, try activeTabNo(app));
@@ -2335,6 +2336,9 @@ const parity_env_json =
     \\{"id":"option:app:status-right","kind":"option","scope":"app","key":"status-right","value":["cwd","hints"]},
     \\{"id":"option:app:tab-style","kind":"option","scope":"app","key":"tab-style","value":"current"},
     \\{"id":"option:app:buffer-line","kind":"option","scope":"app","key":"buffer-line","value":true},
+    \\{"id":"option:app:theme","kind":"option","scope":"app","key":"theme","value":"vscode-dark"},
+    \\{"id":"option:app:editor-mode","kind":"option","scope":"app","key":"editor-mode","value":"insert"},
+    \\{"id":"option:app:activity-bar","kind":"option","scope":"app","key":"activity-bar","value":true},
     \\{"id":"option:app:font-family","kind":"option","scope":"app","key":"font-family","value":"Menlo"},
     \\{"id":"option:app:font-size","kind":"option","scope":"app","key":"font-size","value":14},
     \\{"id":"leader:app","kind":"leader","scope":"app","key":"`"}
@@ -2379,4 +2383,55 @@ fn presetParity(gpa: std.mem.Allocator, bin: []const u8) !void {
         std.debug.print("    preset drift!\n    toml:  {s}\n    graph: {s}\n", .{ toml_chrome, graph_chrome });
         return error.AssertFailed;
     }
+}
+
+// ---------------------------------------------------------- vscodefeel
+
+/// The FEEL half of the vscode persona, blind: a file opens ready to
+/// type (editor-mode = insert), what you type lands as text, ⌘S is
+/// `:w` (one save path — the clobber check included), and the
+/// activity-bar rail's explorer click opens the tree sidebar. The
+/// LOOK half (Dark+ colors, the blue bar) is pixels; the persona
+/// screenshot pass covers it.
+fn vscodeFeel(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{ .config_extra = "preset = \"vscode\"" });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    const sb = try app.ctl("statusbar");
+    try h.expectContains(sb, "activitybar on", "the rail is declared");
+    try h.expectContains(sb, "rail-explorer ", "the rail drew and reports click points");
+
+    // A file opens IN INSERT MODE, and typing is typing.
+    var path_buf: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/feel.txt", .{app.dirPath()});
+    try h.writeFile(path, "world\n");
+    _ = try app.ctlFmt("edit {s}", .{path});
+    try app.waitText("INSERT", 5_000);
+    _ = try app.ctl("type hello ");
+
+    // ⌘S (keycode 1, cmd mask) — the GUI save speaks :w itself.
+    _ = try app.ctl("nskey 1 100000 s");
+    var content: [128]u8 = undefined;
+    var waited: u32 = 0;
+    while (waited < 5_000) {
+        const got = h.readFile(path, &content) catch "";
+        if (std.mem.indexOf(u8, got, "hello world") != null) break;
+        h.sleepMs(50);
+        waited += 50;
+    }
+    try h.expectContains(try h.readFile(path, &content), "hello world", "cmd-s reached disk");
+
+    // The rail's explorer icon opens the tree sidebar beside the file.
+    try h.expectEq("panes before rail click", 1, try app.paneCount());
+    const p = wkPoint(try app.ctl("statusbar"), "rail-explorer") orelse return error.AssertFailed;
+    _ = try app.ctlFmt("click {d} {d}", .{ p[0], p[1] });
+    waited = 0;
+    while (waited < 3_000) {
+        if ((try app.paneCount()) == 2) break;
+        h.sleepMs(50);
+        waited += 50;
+    }
+    try h.expectEq("panes after rail click", 2, try app.paneCount());
 }

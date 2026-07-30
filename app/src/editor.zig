@@ -163,6 +163,10 @@ pub const Editor = struct {
     goal: usize = 0,
 
     mode: Mode = .normal,
+    /// Config `editor-mode = insert` (the VS Code persona): every
+    /// writable file buffer opens in insert mode. Esc still reaches
+    /// normal — vim stays underneath, this only moves the front door.
+    default_insert: bool = false,
     count: u32 = 0,
     op: u8 = 0, // pending operator: 'd','y','c' or 0
     pend_g: bool = false,
@@ -2886,9 +2890,34 @@ pub const Editor = struct {
         self.left = 0;
         self.goal = 0;
         self.mode = .normal;
+        // The VS Code hand's contract (config `editor-mode = insert`):
+        // a file opens ready to type. Trees and readonly docs stay
+        // normal — insert mode in a buffer that refuses edits is a lie.
+        if (self.default_insert and !is_dir and !self.buf.readonly) self.mode = .insert;
         self.render_dirty = true;
         if (self.hl_set_path) |f| f(self.hl_ctx.?, self.buf.path);
         self.hl_version = std.math.maxInt(u64);
+    }
+
+    /// Run one ex command as if typed at `:` — the app's ⌘S (and any
+    /// future GUI verb) speaks vim's own command surface rather than
+    /// growing a parallel save path that could drift from `:w`'s
+    /// clobber checks.
+    pub fn exNow(self: *Editor, line: []const u8) void {
+        self.cmd.clearRetainingCapacity();
+        self.cmd.appendSlice(self.gpa, line) catch return;
+        self.execCommand();
+        self.cmd.clearRetainingCapacity();
+        self.render_dirty = true;
+    }
+
+    /// Re-apply the open-time default mode. The app calls this after
+    /// configuring a freshly created editor: create() opened its file
+    /// before the app could set `default_insert` on it.
+    pub fn applyDefaultMode(self: *Editor) void {
+        if (self.default_insert and self.mode == .normal and
+            !self.buf.readonly and self.tree_rows.items.len == 0)
+            self.mode = .insert;
     }
 
     // ------------------------------------------------------------ normal/visual
@@ -5733,14 +5762,21 @@ pub const Editor = struct {
         var x: usize = 0;
         for (self.buffers.items, 0..) |e, i| {
             if (x >= out.len) break;
-            const on: Style = if (cur != null and cur.? == i) .buftab_on else .buftab_off;
+            const is_cur = cur != null and cur.? == i;
+            const on: Style = if (is_cur) .buftab_on else .buftab_off;
             const a = x;
             putStr(out, &x, " ", on);
             putStr(out, &x, std.fs.path.basename(e.path), on);
-            if (cur != null and cur.? == i and self.buf.isModified()) putStr(out, &x, " +", on);
             putStr(out, &x, " ", on);
             const close = x;
-            putStr(out, &x, "\u{d7}", on); // ×
+            // VS Code's grammar: a dirty tab wears ● where × sits —
+            // the dot IS the close button, and clicking it closes
+            // (with the same refuse-if-modified guard :bd has).
+            if (is_cur and self.buf.isModified()) {
+                putStr(out, &x, "\u{25cf}", on); // ●
+            } else {
+                putStr(out, &x, "\u{d7}", on); // ×
+            }
             putStr(out, &x, " ", on);
             self.bufline_hits.append(self.gpa, .{ .a = a, .b = @min(x, out.len), .close = close, .idx = i }) catch {};
             x += 1;
@@ -5751,18 +5787,36 @@ pub const Editor = struct {
     /// line. True when it acted (the app repaints); false lets the
     /// click keep meaning "focus the pane".
     pub fn mouseCell(self: *Editor, col: usize, row: usize) bool {
-        if (row != 0 or !self.buflineActive()) return false;
-        for (self.bufline_hits.items) |hit| {
-            if (col < hit.a or col >= hit.b) continue;
-            if (col == hit.close) {
-                self.bufClose(hit.idx);
-            } else {
-                self.bufSwitch(hit.idx);
+        const top_rows: usize = if (self.buflineActive()) 1 else 0;
+        if (top_rows == 1 and row == 0) {
+            for (self.bufline_hits.items) |hit| {
+                if (col < hit.a or col >= hit.b) continue;
+                if (col == hit.close) {
+                    self.bufClose(hit.idx);
+                } else {
+                    self.bufSwitch(hit.idx);
+                }
+                self.render_dirty = true;
+                return true;
             }
-            self.render_dirty = true;
-            return true;
+            return false;
         }
-        return false;
+        // A click in the text places the cursor — nvim's own mouse=a
+        // default, and half of what a GUI hand means by "click to
+        // edit". Normal and insert modes only: a click mid-visual or
+        // mid-command has two plausible meanings, and guessing wrong
+        // eats a selection. In a tree it moves the cursor and nothing
+        // else — opening on single click would make every misclick a
+        // navigation.
+        if (self.mode != .normal and self.mode != .insert) return false;
+        if (row < top_rows or self.lineCountB() == 0) return false;
+        const line = @min(self.top + (row - top_rows), self.lineCountB() - 1);
+        const gw = self.gutterWidth();
+        const rcol = self.left + (col -| gw);
+        self.cline = line;
+        self.ccol = @min(bcolForRenderCol(self.lineText(line), rcol), self.lineCap(line));
+        self.render_dirty = true;
+        return true;
     }
 
     /// Point a cell at the bytes of its cluster. Bytes live in a

@@ -27,6 +27,16 @@ pub const Theme = struct {
     bar_value: [4]u8,
     chip_active_bg: [4]u8,
 
+    /// The STATUS bar's own colors, when a theme wants it distinct
+    /// from the rest of the chrome — VS Code's blue bar is the reason
+    /// these exist. null = the bar_* colors above (every other theme).
+    /// status_accent replaces `accent` for glyphs drawn ON the status
+    /// bar: an accent-blue key glyph on an accent-blue bar is invisible.
+    status_bg: ?[4]u8 = null,
+    status_fg: ?[4]u8 = null,
+    status_value: ?[4]u8 = null,
+    status_accent: ?[4]u8 = null,
+
     // Editor pane.
     ed_bg: [4]u8,
     ed_fg: [4]u8,
@@ -145,7 +155,68 @@ pub const nocturne: Theme = .{
     .diff_meta = .{ 0x8d, 0x92, 0xad, 255 },
 };
 
-const builtins = [_]*const Theme{ &default, &nocturne };
+/// VS Code Dark+ — the editor-first persona's home colors. Values
+/// from VS Code's own dark defaults: editor #1e1e1e / #d4d4d4, the
+/// #007acc status bar (white text — its signature), tab strip
+/// #252526, Dark+ syntax buckets, and the stock integrated-terminal
+/// ANSI ramp. Chosen by `theme = "vscode-dark"`, and what the vscode
+/// PRESET sets — the persona should land looking like home.
+pub const vscode_dark: Theme = .{
+    .name = "vscode-dark",
+    .override_term = true,
+    .term_bg = .{ 0x1e, 0x1e, 0x1e },
+    .term_fg = .{ 0xcc, 0xcc, 0xcc },
+    .cursor = .{ 0xff, 0xff, 0xff },
+    .ansi = .{
+        .{ 0x00, 0x00, 0x00 }, // 0 black
+        .{ 0xcd, 0x31, 0x31 }, // 1 red
+        .{ 0x0d, 0xbc, 0x79 }, // 2 green
+        .{ 0xe5, 0xe5, 0x10 }, // 3 yellow
+        .{ 0x24, 0x72, 0xc8 }, // 4 blue
+        .{ 0xbc, 0x3f, 0xbc }, // 5 magenta
+        .{ 0x11, 0xa8, 0xcd }, // 6 cyan
+        .{ 0xe5, 0xe5, 0xe5 }, // 7 white
+        .{ 0x66, 0x66, 0x66 }, // 8 bright black
+        .{ 0xf1, 0x4c, 0x4c }, // 9 bright red
+        .{ 0x23, 0xd1, 0x8b }, // 10 bright green
+        .{ 0xf5, 0xf5, 0x43 }, // 11 bright yellow
+        .{ 0x3b, 0x8e, 0xea }, // 12 bright blue
+        .{ 0xd6, 0x70, 0xd6 }, // 13 bright magenta
+        .{ 0x29, 0xb8, 0xdb }, // 14 bright cyan
+        .{ 0xe5, 0xe5, 0xe5 }, // 15 bright white
+    },
+    .sel_bg = .{ 0x26, 0x4f, 0x78 },
+    .sep = .{ 0x33, 0x33, 0x33, 255 },
+    .accent = .{ 0x00, 0x7a, 0xcc, 255 },
+    .on_accent = .{ 0xff, 0xff, 0xff, 255 },
+    .bar_bg = .{ 0x25, 0x25, 0x26, 255 }, // tab strip / side panels
+    .bar_fg = .{ 0x96, 0x96, 0x96, 255 },
+    .bar_value = .{ 0xcc, 0xcc, 0xcc, 255 },
+    .chip_active_bg = .{ 0x1e, 0x1e, 0x1e, 255 }, // active tab = editor bg
+    // The blue bar. Everything on it is white or near-white.
+    .status_bg = .{ 0x00, 0x7a, 0xcc, 255 },
+    .status_fg = .{ 0xd6, 0xeb, 0xff, 255 },
+    .status_value = .{ 0xff, 0xff, 0xff, 255 },
+    .status_accent = .{ 0xff, 0xff, 0xff, 255 },
+    .ed_bg = .{ 0x1e, 0x1e, 0x1e, 255 },
+    .ed_fg = .{ 0xd4, 0xd4, 0xd4, 255 },
+    .ed_dim = .{ 0x6e, 0x76, 0x81, 255 },
+    .ed_sel_bg = .{ 0x26, 0x4f, 0x78, 255 },
+    .ed_err = .{ 0xf1, 0x4c, 0x4c, 255 },
+    .syn_comment = .{ 0x6a, 0x99, 0x55, 255 },
+    .syn_string = .{ 0xce, 0x91, 0x78, 255 },
+    .syn_number = .{ 0xb5, 0xce, 0xa8, 255 },
+    .syn_keyword = .{ 0x56, 0x9c, 0xd6, 255 },
+    .syn_type = .{ 0x4e, 0xc9, 0xb0, 255 },
+    .syn_func = .{ 0xdc, 0xdc, 0xaa, 255 },
+    // gitDecoration greens/reds, the ones VS Code's own gutter uses.
+    .diff_add = .{ 0x81, 0xb8, 0x8b, 255 },
+    .diff_del = .{ 0xf1, 0x4c, 0x4c, 255 },
+    .diff_hunk = .{ 0x56, 0x9c, 0xd6, 255 },
+    .diff_meta = .{ 0x85, 0x85, 0x85, 255 },
+};
+
+const builtins = [_]*const Theme{ &default, &nocturne, &vscode_dark };
 
 pub fn byName(name: []const u8) ?*const Theme {
     for (builtins) |t| {

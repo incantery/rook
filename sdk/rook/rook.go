@@ -129,6 +129,15 @@ func (e *Env) StatusRight(segments ...string) *Env {
 // "current" (one compact active-tab chip; click cycles).
 func (e *Env) TabStyle(style string) *Env { return e.Set("tab-style", style) }
 
+// EditorMode: "insert" opens writable file buffers ready to type (the
+// VS Code hand's contract; Esc still reaches vim's normal mode), or
+// the default "normal".
+func (e *Env) EditorMode(mode string) *Env { return e.Set("editor-mode", mode) }
+
+// ActivityBar toggles the left icon rail (VS Code's activity bar):
+// explorer, search, source control, agents, review — one click each.
+func (e *Env) ActivityBar(on bool) *Env { return e.Set("activity-bar", on) }
+
 func segList(segments []string) []string {
 	if segments == nil {
 		return []string{}
@@ -156,16 +165,21 @@ func (e *Env) PresetTmuxNeovim() *Env {
 	return e
 }
 
-// PresetVSCode arranges rook for a VS Code hand: editor surfaces
-// carry identity (per-pane buffer line on), sessions demoted to a
-// compact current-tab chip in the bottom bar, branch beside it —
-// VS Code's own bottom-left — and the teaching hints kept in reach.
+// PresetVSCode arranges rook for a VS Code hand — look and feel both:
+// editor surfaces carry identity (per-pane buffer line on), sessions
+// demoted to a compact current-tab chip in the bottom bar, branch
+// beside it — VS Code's own bottom-left — the teaching hints kept in
+// reach, Dark+ colors with the blue status bar, the activity-bar icon
+// rail, and files that open ready to type (Esc still reaches vim).
 func (e *Env) PresetVSCode() *Env {
 	e.TopBar()
 	e.StatusLeft("tabs", "branch")
 	e.StatusRight("cwd", "hints")
 	e.TabStyle("current")
 	e.BufferLine(true)
+	e.Theme("vscode-dark")
+	e.EditorMode("insert")
+	e.ActivityBar(true)
 	return e
 }
 

@@ -768,6 +768,13 @@ pub const App = struct {
     cfg_clip_allow: bool = true,
     /// config buffer-line: the per-pane document chips.
     cfg_bufline: bool = true,
+    /// config editor-mode = insert: files open ready to type.
+    cfg_ed_insert: bool = false,
+    /// config activity-bar: the left icon rail.
+    cfg_activity_bar: bool = false,
+    /// Icon rail hit zones (y extents), rebuilt each frame it draws.
+    rail_y: [8][2]f32 = undefined,
+    rail_n: usize = 0,
     /// Scrollback bytes for panes spawned later. NOT live-reloadable —
     /// a pane's limit is fixed when its PageList is built, so a reload
     /// would silently give new panes a different history depth from the
@@ -1008,6 +1015,8 @@ pub const App = struct {
             .cfg_bell = cfg.bell,
             .cfg_clip_allow = cfg.clipboard_write == .allow,
             .cfg_bufline = cfg.buffer_line,
+            .cfg_ed_insert = cfg.editor_insert,
+            .cfg_activity_bar = cfg.activity_bar,
             .cursor_blink = cfg.cursor_blink,
             .cfg_scrollback = cfg.scrollback,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
@@ -1274,13 +1283,21 @@ pub const App = struct {
         return @min(@round(self.side_cols * self.renderer.cell_w), self.px_w / 2);
     }
 
+    /// The icon rail's width (config `activity-bar`), or 0 when off.
+    /// VS Code's activity bar — window chrome at the far left edge,
+    /// outside even the side pane.
+    pub fn railWidth(self: *App) f32 {
+        if (!self.cfg_activity_bar) return 0;
+        return @round(3 * self.renderer.cell_w);
+    }
+
     /// The side pane's own rect. Full content height — it is WINDOW
     /// chrome, not a tab's, so it does not move when you switch tabs
     /// and every tab sees the same inbox.
     fn sideArea(self: *App) panespkg.Rect {
         const w = self.sideWidth();
         return .{
-            .x = if (self.side == .left) 0 else self.px_w - w,
+            .x = if (self.side == .left) self.railWidth() else self.px_w - w,
             .y = self.contentY(),
             .w = w,
             .h = @max(1, self.contentH()),
@@ -1288,13 +1305,14 @@ pub const App = struct {
     }
 
     /// The rect panes tile: the content area inset by window-padding,
-    /// minus whatever the side pane took.
+    /// minus whatever the side pane and the icon rail took.
     fn paneArea(self: *App) panespkg.Rect {
         const side = self.sideWidth();
+        const rail = self.railWidth();
         return .{
-            .x = self.pad + if (self.side == .left) side else 0,
+            .x = rail + self.pad + if (self.side == .left) side else 0,
             .y = self.contentY() + self.pad,
-            .w = @max(1, self.px_w - self.pad * 2 - side),
+            .w = @max(1, self.px_w - self.pad * 2 - side - rail),
             .h = @max(1, self.contentH() - self.pad * 2),
         };
     }
@@ -1397,6 +1415,17 @@ pub const App = struct {
                 self.leader_pending.store(true, .release);
             } else if (x >= self.hint_cmd_x[0] and x < self.hint_cmd_x[1]) {
                 self.pending_cmd = .{ .action = .palette_commands };
+            }
+            return;
+        }
+        // The icon rail: each box runs the command it shows. Queued
+        // like every chrome click — dispatch retakes draw_lock.
+        if (x < self.railWidth() and y >= self.contentY()) {
+            for (self.rail_y[0..self.rail_n], 0..) |zy, i| {
+                if (y >= zy[0] and y < zy[1]) {
+                    self.pending_cmd = .{ .action = rail_items[i].action };
+                    break;
+                }
             }
             return;
         }
@@ -3268,6 +3297,10 @@ pub const App = struct {
         ed.app_open = &editorOpenRequest;
         ed.leader = self.keybinds.ed_leader;
         ed.bufline_enabled = self.cfg_bufline;
+        ed.default_insert = self.cfg_ed_insert;
+        // create() opened the file before this ran; the default mode
+        // applies now that the editor knows what it is.
+        ed.applyDefaultMode();
     }
 
     /// The editor asked for a path OUTSIDE itself (tree beside-open,
@@ -3916,6 +3949,7 @@ pub const App = struct {
         };
         self.drawBar(&ui);
         self.drawTabBar(&ui);
+        self.drawActivityBar(&ui);
         // Before the palette: the modal draws LAST and over everything,
         // side pane included.
         if (self.side_open) self.drawSidePane(&ui);
@@ -4043,11 +4077,14 @@ pub const App = struct {
         const chrome_changed = !self.cfg_top_bar.eql(&cfg.top_bar) or
             !self.cfg_status_left.eql(&cfg.status_left) or
             !self.cfg_status_right.eql(&cfg.status_right) or
-            self.cfg_tab_style != cfg.tab_style;
+            self.cfg_tab_style != cfg.tab_style or
+            self.cfg_activity_bar != cfg.activity_bar;
         self.cfg_top_bar = cfg.top_bar;
         self.cfg_status_left = cfg.status_left;
         self.cfg_status_right = cfg.status_right;
         self.cfg_tab_style = cfg.tab_style;
+        self.cfg_activity_bar = cfg.activity_bar;
+        self.cfg_ed_insert = cfg.editor_insert;
         if (chrome_changed) {
             self.tab_h = if (self.cfg_top_bar.n == 0) 0 else self.bar_h;
             self.relayoutLocked();
@@ -4074,6 +4111,9 @@ pub const App = struct {
                 if (p.editor()) |ed| {
                     ed.leader = self.keybinds.ed_leader;
                     ed.bufline_enabled = self.cfg_bufline;
+                    // The default applies to the NEXT open; a live
+                    // editor's current mode is the user's, not ours.
+                    ed.default_insert = self.cfg_ed_insert;
                 }
             }
         };
@@ -4364,10 +4404,28 @@ pub const App = struct {
         return .{ c[0], c[1], c[2], self.bg_alpha };
     }
 
+    // The STATUS bar's colors. A theme may give the bottom bar its own
+    // identity (VS Code's blue) via th.status_*; everything drawn ON
+    // the bar asks these, never th.bar_*/th.accent directly — an
+    // accent-colored glyph on an accent-colored bar is invisible.
+    fn statusBg(self: *App) [4]u8 {
+        return self.glassBg(th.status_bg orelse th.bar_bg);
+    }
+    fn statusFg() [4]u8 {
+        return th.status_fg orelse th.bar_fg;
+    }
+    fn statusValue() [4]u8 {
+        return th.status_value orelse th.bar_value;
+    }
+    fn statusAccent() [4]u8 {
+        return th.status_accent orelse th.accent;
+    }
+
     /// The status bar: tenant one of the ui layer.
     fn drawBar(self: *App, ui: *@import("ui.zig").Ui) void {
         const by = self.px_h - self.bar_h;
-        ui.rect(0, by, self.px_w, self.bar_h, self.glassBg(th.bar_bg));
+        const chip_fg = th.status_bg orelse th.bar_bg;
+        ui.rect(0, by, self.px_w, self.bar_h, self.statusBg());
         // The rule is what makes it a BAR. bar_bg sits one step below
         // the terminal background — a two-value difference that reads as
         // nothing at all, so without this the status line looked like
@@ -4384,12 +4442,12 @@ pub const App = struct {
                 var gb: [4]u8 = undefined;
                 var lbuf: [8]u8 = undefined;
                 const s = std.fmt.bufPrint(&lbuf, " {s} ", .{keyGlyph(ld, &gb)}) catch " ";
-                x += ui.text(x, ty, s, th.bar_bg, th.accent) + self.renderer.cell_w / 2;
+                x += ui.text(x, ty, s, chip_fg, statusAccent()) + self.renderer.cell_w / 2;
             }
         }
         if (self.activeTab().focused.term()) |tm| {
             if (tm.copy_mode) {
-                x += ui.text(x, ty, " SCROLL ", th.bar_bg, th.accent) + self.renderer.cell_w / 2;
+                x += ui.text(x, ty, " SCROLL ", chip_fg, statusAccent()) + self.renderer.cell_w / 2;
             }
             // The needle, while typing it and after. `n` is unusable if
             // you can't see what you're stepping through; `0/0` is how
@@ -4400,9 +4458,9 @@ pub const App = struct {
                     std.fmt.bufPrint(&sb, " /{s}_ ", .{tm.search_buf[0..tm.search_len]}) catch ""
                 else
                     std.fmt.bufPrint(&sb, " /{s} {d}/{d} ", .{ tm.search_buf[0..tm.search_len], tm.search_i, tm.search_n }) catch "";
-                x += ui.text(x, ty, label, th.bar_bg, th.bar_value) + self.renderer.cell_w / 2;
+                x += ui.text(x, ty, label, chip_fg, statusValue()) + self.renderer.cell_w / 2;
             } else if (tm.search_len > 0 and tm.copy_mode) {
-                x += ui.text(x, ty, " /no match ", th.bar_bg, th.accent) + self.renderer.cell_w / 2;
+                x += ui.text(x, ty, " /no match ", chip_fg, statusAccent()) + self.renderer.cell_w / 2;
             }
         }
         // The SEGMENT ENGINE. What renders here is config's two lists
@@ -4417,7 +4475,7 @@ pub const App = struct {
         // cwd is FLEXIBLE: it reserves nothing, fills the gap between
         // the clusters, and can never push a fixed segment off.
         const cw = self.renderer.cell_w;
-        const bg = self.glassBg(th.bar_bg);
+        const bg = self.statusBg();
         const name = self.activeSpace().label();
         const br = self.bar_branch[0..self.bar_branch_len];
 
@@ -4482,9 +4540,9 @@ pub const App = struct {
             var clipbuf: [96]u8 = undefined;
             const s = @import("ui.zig").clip(&clipbuf, self.hud_left[0..self.hud_left_len], room);
             if (self.cfg_status_left.has(.cwd)) {
-                _ = ui.text(left_end, ty, s, th.bar_fg, bg);
+                _ = ui.text(left_end, ty, s, statusFg(), bg);
             } else if (self.cfg_status_right.has(.cwd)) {
-                _ = ui.textRight(gap_end, ty, s, th.bar_fg, bg);
+                _ = ui.textRight(gap_end, ty, s, statusFg(), bg);
             }
         }
     }
@@ -4517,19 +4575,19 @@ pub const App = struct {
     /// top strip uses — a segment is a segment wherever it lands.
     fn drawSegment(self: *App, ui: *@import("ui.zig").Ui, s: cfgpkg.Segment, x: *f32, ty: f32, name: []const u8, br: []const u8) void {
         const cw = self.renderer.cell_w;
-        const bg = self.glassBg(th.bar_bg);
+        const bg = self.statusBg();
         switch (s) {
             .workspace => {
                 const x0 = x.*;
-                x.* += ui.text(x.*, ty, "● ", th.accent, bg);
-                x.* += ui.text(x.*, ty, name, th.bar_value, bg);
+                x.* += ui.text(x.*, ty, "● ", statusAccent(), bg);
+                x.* += ui.text(x.*, ty, name, statusValue(), bg);
                 self.seg_ws_x = .{ x0, x.* };
                 x.* += 2 * cw;
             },
             .branch => {
                 const x0 = x.*;
-                x.* += ui.text(x.*, ty, "⎇ ", th.bar_fg, bg);
-                x.* += ui.text(x.*, ty, br, th.bar_value, bg);
+                x.* += ui.text(x.*, ty, "⎇ ", statusFg(), bg);
+                x.* += ui.text(x.*, ty, br, statusValue(), bg);
                 self.seg_branch_x = .{ x0, x.* };
                 x.* += 2 * cw;
             },
@@ -4543,22 +4601,22 @@ pub const App = struct {
                     var gb: [4]u8 = undefined;
                     const g = keyGlyph(ld, &gb);
                     const x0 = x.*;
-                    var tx = x.* + ui.text(x.*, ty, g, th.accent, bg);
-                    _ = ui.text(tx + cw, ty, "menu", th.bar_fg, bg);
+                    var tx = x.* + ui.text(x.*, ty, g, statusAccent(), bg);
+                    _ = ui.text(tx + cw, ty, "menu", statusFg(), bg);
                     tx += cw + 4 * cw;
                     self.hint_menu_x = .{ x0, tx };
                     x.* = tx + 3 * cw;
                 }
                 const x0 = x.*;
-                var tx = x.* + ui.text(x.*, ty, "⌘K", th.accent, bg);
-                _ = ui.text(tx + cw, ty, "commands", th.bar_fg, bg);
+                var tx = x.* + ui.text(x.*, ty, "⌘K", statusAccent(), bg);
+                _ = ui.text(tx + cw, ty, "commands", statusFg(), bg);
                 tx += cw + 8 * cw;
                 self.hint_cmd_x = .{ x0, tx };
                 x.* = tx + 2 * cw;
             },
             .hud => {
                 if (self.hud_right_len > 0) {
-                    x.* += ui.text(x.*, ty, self.hud_right[0..self.hud_right_len], th.bar_value, bg);
+                    x.* += ui.text(x.*, ty, self.hud_right[0..self.hud_right_len], statusValue(), bg);
                     x.* += 2 * cw;
                 }
             },
@@ -4567,9 +4625,9 @@ pub const App = struct {
                     const ufg = if (self.usage.worst >= 90)
                         th.ed_err
                     else if (self.usage.worst >= 70)
-                        th.accent
+                        statusAccent()
                     else
-                        th.bar_fg;
+                        statusFg();
                     x.* += ui.text(x.*, ty, self.usage.slice(), ufg, bg);
                     x.* += 2 * cw;
                 }
@@ -4586,7 +4644,7 @@ pub const App = struct {
     /// of the active tab (click cycles).
     fn barTabsSeg(self: *App, ui: ?*@import("ui.zig").Ui, x_start: f32, ty: f32) f32 {
         const cw = self.renderer.cell_w;
-        const bg = self.glassBg(th.bar_bg);
+        const bg = self.statusBg();
         const space = self.activeSpace();
         const by = self.px_h - self.bar_h;
         var x = x_start;
@@ -4599,7 +4657,7 @@ pub const App = struct {
             const label = std.fmt.bufPrint(&chip, "{d}/{d} {s}", .{ space.active_tab + 1, space.tabs.items.len, title }) catch return 0;
             const w = @as(f32, @floatFromInt(std.unicode.utf8CountCodepoints(label) catch label.len)) * cw;
             if (ui) |u| {
-                _ = u.text(x, ty, label, th.bar_value, bg);
+                _ = u.text(x, ty, label, statusValue(), bg);
                 if (self.bar_tab_x.len > 0) {
                     self.bar_tab_x[0] = .{ x, x + w };
                     self.bar_tab_n = 1;
@@ -4609,7 +4667,13 @@ pub const App = struct {
         }
 
         // index-name: every tab, active on a lifted pill, bells in
-        // accent — the chip vocabulary at one-row scale.
+        // accent — the chip vocabulary at one-row scale. On a
+        // status-tinted bar (VS Code's blue) the pill is a white wash:
+        // chip_active_bg belongs to the dark chrome, not to the tint.
+        const pill: [4]u8 = if (th.status_bg != null)
+            .{ 255, 255, 255, 48 }
+        else
+            self.glassBg(th.chip_active_bg);
         for (space.tabs.items, 0..) |t, i| {
             var tbuf: [24]u8 = undefined;
             const title = tabTitle(t, &tbuf);
@@ -4622,9 +4686,9 @@ pub const App = struct {
             const w = @as(f32, @floatFromInt(std.unicode.utf8CountCodepoints(label) catch label.len)) * cw;
             if (ui) |u| {
                 const is_active = i == space.active_tab;
-                const fg = if (is_active) th.bar_value else if (t.bell) th.accent else th.bar_fg;
+                const fg = if (is_active) statusValue() else if (t.bell) statusAccent() else statusFg();
                 if (is_active)
-                    u.roundRect(x, by + self.m.gap / 2, w, self.bar_h - self.m.gap, self.glassBg(th.chip_active_bg), .{ .radius = self.m.radius });
+                    u.roundRect(x, by + self.m.gap / 2, w, self.bar_h - self.m.gap, pill, .{ .radius = self.m.radius });
                 _ = u.textOver(x, ty, label, fg);
                 if (i < self.bar_tab_x.len) {
                     self.bar_tab_x[i] = .{ x, x + w };
@@ -4767,6 +4831,69 @@ pub const App = struct {
             },
         }
         return title;
+    }
+
+    /// The icon rail's items — glyph, name, and the command each click
+    /// runs. One table so draw, click, and ctl `statusbar` agree (the
+    /// registry pattern in miniature). rook's surfaces in VS Code's
+    /// order-of-thought: files, search, source control, then the two
+    /// panels that ARE rook — agents and review.
+    const RailItem = struct {
+        glyph: []const u8,
+        title: []const u8,
+        action: cfgpkg.Action,
+    };
+    pub const rail_items = [_]RailItem{
+        .{ .glyph = "\u{f07b}", .title = "explorer", .action = .tree_toggle },
+        .{ .glyph = "\u{f002}", .title = "search", .action = .palette_commands },
+        .{ .glyph = "\u{f126}", .title = "scm", .action = .diff_open },
+        .{ .glyph = "\u{f085}", .title = "agents", .action = .panel_deck },
+        .{ .glyph = "\u{f00c}", .title = "review", .action = .panel_review },
+    };
+
+    /// Is a rail item's surface currently up? Only the side-pane
+    /// tenants can answer honestly (the tree is per-pane, the palette
+    /// is modal) — the rest never light.
+    fn railActive(self: *App, action: cfgpkg.Action) bool {
+        return switch (action) {
+            .panel_deck => self.side_open and self.side_panel == .deck,
+            .panel_review => self.side_open and self.side_panel == .review,
+            else => false,
+        };
+    }
+
+    /// The icon rail (config `activity-bar`; the vscode preset turns
+    /// it on) — VS Code's activity bar carrying rook's surfaces, one
+    /// click each, always visible. Window chrome like the side pane:
+    /// same rail from every tab, drawn from the same pipelines.
+    fn drawActivityBar(self: *App, ui: *@import("ui.zig").Ui) void {
+        self.rail_n = 0;
+        const w = self.railWidth();
+        if (w <= 0) return;
+        const y0 = self.contentY();
+        const h = @max(1, self.contentH());
+        ui.rect(0, y0, w, h, self.glassBg(th.bar_bg));
+        // The hairline on the edge that faces the panes — the side
+        // pane's rule, for the side pane's reason.
+        ui.rect(w - self.sep, y0, self.sep, h, th.sep);
+        const ch = self.renderer.cell_h;
+        const cw = self.renderer.cell_w;
+        const box = @round(self.bar_h * 1.5);
+        var y = y0 + self.m.gap;
+        for (rail_items, 0..) |it, i| {
+            if (y + box > y0 + h) break;
+            const active = self.railActive(it.action);
+            const fg = if (active) th.bar_value else th.bar_fg;
+            _ = ui.text((w - cw) / 2, y + (box - ch) / 2, it.glyph, fg, self.glassBg(th.bar_bg));
+            // The open surface wears an accent edge, VS Code's own
+            // telegraph for "this icon is the panel you see".
+            if (active) ui.rect(0, y, self.sep * 2, box, th.accent);
+            if (i < self.rail_y.len) {
+                self.rail_y[i] = .{ y, y + box };
+                self.rail_n = i + 1;
+            }
+            y += box;
+        }
     }
 
     /// The top strip — tabs as first-class chrome (the wails app's
@@ -5753,6 +5880,19 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                     'k' => {
                         app.dispatch(.{ .action = .palette_commands });
                         return null;
+                    },
+                    // ⌘S: the GUI hand's save, speaking `:w` itself so
+                    // the clobber check stays one code path. Terminal
+                    // panes pass it through untouched (⌘S means
+                    // nothing to a shell, and swallowing it would be a
+                    // chord the pty never gets to see).
+                    's' => {
+                        app.draw_lock.lock();
+                        const ed = app.activeTab().focused.editor();
+                        if (ed) |e| e.exNow("w");
+                        if (ed != null) app.scene_dirty = true;
+                        app.draw_lock.unlock();
+                        if (ed != null) return null;
                     },
                     '1'...'9' => {
                         app.dispatch(.{ .action = .tab_select, .arg = s[0] - '0' });

@@ -353,12 +353,22 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         for (app.cfg_status_left.slice()) |s| w.print(" {s}", .{@tagName(s)}) catch {};
         w.print("\nright", .{}) catch {};
         for (app.cfg_status_right.slice()) |s| w.print(" {s}", .{@tagName(s)}) catch {};
+        w.print("\nactivitybar {s}", .{if (app.cfg_activity_bar) "on" else "off"}) catch {};
         w.print("\ntabstyle {s}\n", .{@tagName(app.cfg_tab_style)}) catch {};
         for (app.bar_tab_x[0..app.bar_tab_n], 0..) |zx, i| {
             w.print("seg-tab{d} {d},{d}\n", .{
                 i + 1,
                 @as(u32, @intFromFloat((zx[0] + zx[1]) / 2)),
                 seg_y,
+            }) catch {};
+        }
+        // The icon rail's click points, by name — the vscodefeel
+        // scenario drives the rail blind through these.
+        for (0..app.rail_n) |i| {
+            w.print("rail-{s} {d},{d}\n", .{
+                @import("macos.zig").App.rail_items[i].title,
+                @as(u32, @intFromFloat(app.railWidth() / 2)),
+                @as(u32, @intFromFloat((app.rail_y[i][0] + app.rail_y[i][1]) / 2)),
             }) catch {};
         }
         app.draw_lock.unlock();

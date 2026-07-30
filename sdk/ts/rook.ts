@@ -78,6 +78,8 @@ export class Env {
   statusLeft(...segments: string[]): this { return this.set("status-left", segments); }
   statusRight(...segments: string[]): this { return this.set("status-right", segments); }
   tabStyle(style: string): this { return this.set("tab-style", style); }
+  editorMode(mode: string): this { return this.set("editor-mode", mode); }
+  activityBar(on: boolean): this { return this.set("activity-bar", on); }
 
   // ---- presets: identities as bundles ----
   // Expanded at emit time so the graph shows every knob a preset set.
@@ -99,6 +101,9 @@ export class Env {
     this.statusRight("cwd", "hints");
     this.tabStyle("current");
     this.bufferLine(true);
+    this.theme("vscode-dark");
+    this.editorMode("insert");
+    this.activityBar(true);
     return this;
   }
 
