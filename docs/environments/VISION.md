@@ -90,7 +90,9 @@ fiction.
    a TOML renderer for the host's half of the file.
 4. `rook env apply` / `preview` verbs; last-applied graph; ownership
    design doc BEFORE any reconciler code.
-5. TypeScript and Python SDKs proper (parity probes exist under sdk/).
+5. ~~TypeScript SDK~~ (sdk/ts/rook.ts, 07-30 — Seth's vscode persona
+   runs on it; preset goldens in rook.test.ts). Python SDK when
+   demand arrives (the parity probe under sdk/rook/example stands in).
 6. First work mode: `rook review`, converging with the RookTask design.
 
 Deferred until dogfood demands: multi-language beyond the three,

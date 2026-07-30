@@ -1,69 +1,34 @@
-// Seth's config as a TypeScript environment — the parity probe.
+// Seth's config as a TypeScript environment — the parity probe, now a
+// consumer of the real TS SDK (sdk/ts/rook.ts). Output must stay
+// byte-identical to main.go's:
 //
-// Same environment as main.go, byte-identical output required
-// (docs/environments/IR.md, "Canonical bytes"). Runs under bun or
-// node (--experimental-strip-types). A real TS SDK arrives when
-// demand does; this measures emit time and keeps the canon honest.
+//   diff <(go run ./sdk/rook/example) <(node sdk/rook/example/main.ts)
 
-type Node = Record<string, unknown> & { id: string };
+import { env } from "../../ts/rook.ts";
 
-const nodes: Node[] = [];
+const e = env();
 
-function put(n: Node) {
-  const i = nodes.findIndex((e) => e.id === n.id);
-  if (i >= 0) nodes[i] = n;
-  else nodes.push(n);
-}
+e.fontFamily("Hack Nerd Font Mono");
+e.fontSize(18);
+e.backgroundOpacity(1);
+e.windowPadding(4);
+e.theme("Nocturne");
 
-function option(scope: string, key: string, value: unknown) {
-  put({ id: `option:${scope}:${key}`, kind: "option", scope, key, value });
-}
-const set = (key: string, value: unknown) => option("app", key, value);
-const host = (key: string, value: unknown) => option("host", key, value);
+e.leader("`");
+e.editorLeader(",");
 
-function table(name: string, entries: Record<string, unknown>) {
-  const sorted = Object.fromEntries(
-    Object.entries(entries).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-  );
-  put({ id: `table:host:${name}`, kind: "table", scope: "host", name, entries: sorted });
-}
+e.bind('<leader>"', "app.split.horizontal");
+e.bind("<leader>v", "app.split.vertical");
+e.bind("<leader>c", "tab.new");
+e.bind("<leader>m", "workspace.manager");
 
-const leader = (key: string) =>
-  put({ id: "leader:app", kind: "leader", scope: "app", key });
-const editorLeader = (key: string) =>
-  put({ id: "leader:editor", kind: "leader", scope: "editor", key });
+e.editorBind("normal", "<leader>TAB", "explorer.toggle");
+e.editorBind("normal", "<leader>o", "explorer.reveal");
 
-function bind(chord: string, command: string) {
-  put({ id: `keybind:app:${chord}`, kind: "keybind", scope: "app", chord, command });
-}
-function editorBind(mode: string, chord: string, command: string) {
-  const scope = `editor.${mode}`;
-  put({ id: `keybind:${scope}:${chord}`, kind: "keybind", scope, chord, command });
-}
+e.host("coder", "claude");
+e.host("workspace-allow", ["rook", "rook-cloud", "rook-site", "presentation"]);
+e.table("agent", { enabled: true, engine: "auto", model: "", "daily-cap-usd": 1 });
+e.table("lsp", { enable: ["go", "typescript", "svelte"] });
+e.table("cloud", { url: "https://api.rookide.com" });
 
-// ---- the environment (mirror of main.go) ----
-
-set("font-family", "Hack Nerd Font Mono");
-set("font-size", 18);
-set("background-opacity", 1);
-set("window-padding", 4);
-set("theme", "Nocturne");
-
-leader("`");
-editorLeader(",");
-
-bind('<leader>"', "app.split.horizontal");
-bind("<leader>v", "app.split.vertical");
-bind("<leader>c", "tab.new");
-bind("<leader>m", "workspace.manager");
-
-editorBind("normal", "<leader>TAB", "explorer.toggle");
-editorBind("normal", "<leader>o", "explorer.reveal");
-
-host("coder", "claude");
-host("workspace-allow", ["rook", "rook-cloud", "rook-site", "presentation"]);
-table("agent", { enabled: true, engine: "auto", model: "", "daily-cap-usd": 1 });
-table("lsp", { enable: ["go", "typescript", "svelte"] });
-table("cloud", { url: "https://api.rookide.com" });
-
-process.stdout.write(JSON.stringify({ rookEnvironment: 1, nodes }) + "\n");
+e.run();
