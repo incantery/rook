@@ -26,7 +26,7 @@ func TestPresetGoldens(t *testing.T) {
 		`{"id":"option:app:status-left","kind":"option","scope":"app","key":"status-left","value":["tabs","branch"]},` +
 		`{"id":"option:app:status-right","kind":"option","scope":"app","key":"status-right","value":["cwd","hints"]},` +
 		`{"id":"option:app:tab-style","kind":"option","scope":"app","key":"tab-style","value":"current"},` +
-		`{"id":"option:app:buffer-line","kind":"option","scope":"app","key":"buffer-line","value":true},` +
+		`{"id":"option:app:buffer-line","kind":"option","scope":"app","key":"buffer-line","value":"always"},` +
 		`{"id":"option:app:theme","kind":"option","scope":"app","key":"theme","value":"vscode-dark"},` +
 		`{"id":"option:app:editor-mode","kind":"option","scope":"app","key":"editor-mode","value":"insert"},` +
 		`{"id":"option:app:activity-bar","kind":"option","scope":"app","key":"activity-bar","value":true}` +

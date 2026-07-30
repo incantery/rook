@@ -69,6 +69,8 @@ export class Env {
   bell(mode: string): this { return this.set("bell", mode); }
   clipboardWrite(mode: string): this { return this.set("clipboard-write", mode); }
   bufferLine(on: boolean): this { return this.set("buffer-line", on); }
+  // The three-way form: "off", "multiple" (default), "always" (VS Code's).
+  bufferLineMode(mode: string): this { return this.set("buffer-line", mode); }
   cursorBlink(on: boolean): this { return this.set("cursor-blink", on); }
   scrollback(size: string): this { return this.set("scrollback", size); }
 
@@ -100,7 +102,7 @@ export class Env {
     this.statusLeft("tabs", "branch");
     this.statusRight("cwd", "hints");
     this.tabStyle("current");
-    this.bufferLine(true);
+    this.bufferLineMode("always");
     this.theme("vscode-dark");
     this.editorMode("insert");
     this.activityBar(true);

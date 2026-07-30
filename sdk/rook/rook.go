@@ -176,7 +176,7 @@ func (e *Env) PresetVSCode() *Env {
 	e.StatusLeft("tabs", "branch")
 	e.StatusRight("cwd", "hints")
 	e.TabStyle("current")
-	e.BufferLine(true)
+	e.BufferLineMode("always")
 	e.Theme("vscode-dark")
 	e.EditorMode("insert")
 	e.ActivityBar(true)
@@ -192,8 +192,13 @@ func (e *Env) WindowPadding(pts float64) *Env   { return e.Set("window-padding",
 func (e *Env) Bell(mode string) *Env            { return e.Set("bell", mode) }
 func (e *Env) ClipboardWrite(mode string) *Env  { return e.Set("clipboard-write", mode) }
 func (e *Env) BufferLine(on bool) *Env          { return e.Set("buffer-line", on) }
-func (e *Env) CursorBlink(on bool) *Env         { return e.Set("cursor-blink", on) }
-func (e *Env) Scrollback(size string) *Env      { return e.Set("scrollback", size) }
+
+// BufferLineMode is BufferLine's three-way form: "off", "multiple"
+// (the default — the strip appears with the second document) or
+// "always" (VS Code's: the tab is there from the first file).
+func (e *Env) BufferLineMode(mode string) *Env { return e.Set("buffer-line", mode) }
+func (e *Env) CursorBlink(on bool) *Env        { return e.Set("cursor-blink", on) }
+func (e *Env) Scrollback(size string) *Env     { return e.Set("scrollback", size) }
 
 // ---- emission ----
 

@@ -360,8 +360,11 @@ pub const Editor = struct {
     /// so the pane is the window and this is its buffer list). Drawn
     /// as the buffer line when there is more than one.
     buffers: std.ArrayListUnmanaged(BufEntry) = .empty,
-    /// config buffer-line: the app sets it; default on.
-    bufline_enabled: bool = true,
+    /// config buffer-line: `.multiple` shows the strip from the
+    /// second document (rook's rule — one chip is noise), `.always`
+    /// from the first (VS Code's — the tab IS how you know what you
+    /// have open), `.off` never. The app sets it.
+    bufline_mode: enum { off, multiple, always } = .multiple,
     /// Click ranges for the last-drawn buffer line, in grid columns.
     bufline_hits: std.ArrayListUnmanaged(BufHit) = .empty,
 
@@ -723,7 +726,14 @@ pub const Editor = struct {
     /// Is the buffer line on? Config on, more than one document, and
     /// the pane tall enough that a chrome row costs nothing vital.
     fn buflineActive(self: *const Editor) bool {
-        return self.bufline_enabled and self.buffers.items.len > 1 and self.last_rows >= 4;
+        if (self.last_rows < 4) return false;
+        return switch (self.bufline_mode) {
+            .off => false,
+            .multiple => self.buffers.items.len > 1,
+            // A tree has no document to name; the strip would be an
+            // empty band over the file list.
+            .always => self.buffers.items.len > 0 and !self.is_dir,
+        };
     }
 
     /// Colour the tree, line-level: directories in the tree_dir
@@ -2774,6 +2784,10 @@ pub const Editor = struct {
     /// The gutter number for a line: the decorated one when there is one,
     /// else the buffer row. Zero means print nothing.
     fn gutterNumFor(self: *const Editor, line: usize) u32 {
+        // 0 = "this row is not a line of any file", which is exactly
+        // what a tree row is. See gutterWidth for why trees have no
+        // numbers at all.
+        if (self.is_dir) return 0;
         if (self.line_gutter.items.len == 0) return @intCast(line + 1);
         if (line >= self.line_gutter.items.len) return 0;
         return self.line_gutter.items[line];
@@ -2783,6 +2797,13 @@ pub const Editor = struct {
     /// widest NUMBER it will print, which is not the line count: a diff
     /// of 40 rows can name line 2000 of a file.
     fn gutterWidth(self: *const Editor) usize {
+        // A tree has no line numbers — it is a list of files, not a
+        // document you address by line. NERDTree sets `nonumber` in
+        // its buffer and VS Code's explorer never had them; numbering
+        // the rows is the tell that this is a text buffer wearing a
+        // tree costume. (One leading space stays: the fold chevrons
+        // need somewhere to sit.)
+        if (self.is_dir) return 1;
         if (self.line_gutter.items.len == 0) return digits(self.lineCountB()) + 1;
         var max: u32 = 1;
         for (self.line_gutter.items) |n| max = @max(max, n);
@@ -5617,7 +5638,10 @@ pub const Editor = struct {
             const line = self.top + row;
             const out = g[(row + top_rows) * cols ..][0..cols];
             if (line >= self.lineCountB()) {
-                out[0] = .{ .cp = '~', .st = .dim };
+                // `~` marks the end of a DOCUMENT. Past the last file
+                // in a tree there is nothing to mark — NERDTree and
+                // VS Code's explorer both just end.
+                if (!self.is_dir) out[0] = .{ .cp = '~', .st = .dim };
                 continue;
             }
 
@@ -5805,9 +5829,7 @@ pub const Editor = struct {
         // default, and half of what a GUI hand means by "click to
         // edit". Normal and insert modes only: a click mid-visual or
         // mid-command has two plausible meanings, and guessing wrong
-        // eats a selection. In a tree it moves the cursor and nothing
-        // else — opening on single click would make every misclick a
-        // navigation.
+        // eats a selection.
         if (self.mode != .normal and self.mode != .insert) return false;
         if (row < top_rows or self.lineCountB() == 0) return false;
         const line = @min(self.top + (row - top_rows), self.lineCountB() - 1);
@@ -5816,6 +5838,12 @@ pub const Editor = struct {
         self.cline = line;
         self.ccol = @min(bcolForRenderCol(self.lineText(line), rcol), self.lineCap(line));
         self.render_dirty = true;
+        // In a TREE the click is the whole gesture: a folder folds, a
+        // file opens. Single click, both — VS Code's explorer and
+        // NERDTree's mouse mode 3, which is the contract a hand
+        // arriving with a mouse already has. (Enter still does the
+        // same thing; this adds a route, it doesn't replace one.)
+        if (self.is_dir and self.cline < self.tree_rows.items.len) self.openDirEntry();
         return true;
     }
 

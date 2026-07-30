@@ -986,6 +986,41 @@ fn parseRect(s: []const u8) ?struct { x: f32, y: f32, w: f32, h: f32, cols: usiz
     return null;
 }
 
+/// The rect + grid of the pane whose `panes` line names `needle`
+/// (parseRect only ever looks at the focused one). Cell height comes
+/// out of it, which is what turns "row 3 of the tree" into a click.
+fn paneRectNamed(app: *h.Instance, needle: []const u8) !struct { x: f32, y: f32, w: f32, h: f32, rows: usize } {
+    const r = try app.ctl("panes");
+    var lines = std.mem.splitScalar(u8, r, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, needle) == null) continue;
+        const ri = std.mem.indexOf(u8, line, "rect ") orelse continue;
+        const gi = std.mem.indexOf(u8, line, " grid ") orelse continue;
+        var it = std.mem.tokenizeAny(u8, line[ri + 5 .. gi], "x+");
+        const w = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+        const hh = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+        const x = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+        const y = std.fmt.parseFloat(f32, it.next() orelse continue) catch continue;
+        const grid = line[gi + 6 ..];
+        const xi = std.mem.indexOfScalar(u8, grid, 'x') orelse continue;
+        const ge = std.mem.indexOfAny(u8, grid, " \r") orelse grid.len;
+        const rows = std.fmt.parseInt(usize, grid[xi + 1 .. ge], 10) catch continue;
+        return .{ .x = x, .y = y, .w = w, .h = hh, .rows = rows };
+    }
+    return error.AssertFailed;
+}
+
+/// Click row `row` (0-based, as `dump` prints them) of a named pane.
+fn clickPaneRow(app: *h.Instance, needle: []const u8, row: usize) !void {
+    const r = try paneRectNamed(app, needle);
+    const ch = r.h / @as(f32, @floatFromInt(r.rows));
+    const y = r.y + ch * (@as(f32, @floatFromInt(row)) + 0.5);
+    _ = try app.ctlFmt("click {d} {d}", .{
+        @as(u32, @intFromFloat(r.x + r.w / 2)),
+        @as(u32, @intFromFloat(y)),
+    });
+}
+
 // ------------------------------------------------------------ filetree
 
 /// The file tree as NERDTree's dedicated sidebar: `<leader>⇥` opens a
@@ -1062,6 +1097,33 @@ fn filetree(gpa: std.mem.Allocator, bin: []const u8) !void {
     }
     try h.expectNotContains(try app.ctl("panes"), "edit:proj", "toggle removed the sidebar");
     try h.expectEq("exactly the tree pane went away", before_close - 1, try app.paneCount());
+
+    // THE MOUSE, which is how a VS Code hand arrives: single click
+    // folds a directory and single click opens a file (VS Code's
+    // explorer, NERDTree's mouse mode 3). Reopen the sidebar first.
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press TAB");
+    _ = try app.waitCtl("panes", "edit:proj", 5000);
+    // The tree has no line numbers and no `~` filler — it is a list of
+    // files, not a document (NERDTree sets nonumber; so do we).
+    const tree_scr = try app.screen(&buf);
+    try h.expectNotContains(tree_scr, "~", "no end-of-buffer markers in a tree");
+    // Row 0 is "../", row 1 the first entry. src/ is the only dir
+    // besides .git, and the listing is dirs-first: ../ .git/ src/.
+    try h.expectContains(tree_scr, "▸ src/", "src/ folded again after the reopen");
+    try clickPaneRow(app, "edit:proj", 2);
+    try app.waitText("▾ src/", 5000);
+    // And a click on a FILE opens it beside — the tree stays.
+    try clickPaneRow(app, "edit:proj", 4);
+    _ = try app.waitCtl("panes", "edit:README.md", 5000);
+    try h.expectContains(try app.ctl("panes"), "edit:proj", "the tree survived the file click");
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press TAB");
+    waited = 0;
+    while (waited < 5000) : (waited += 100) {
+        if (std.mem.indexOf(u8, try app.ctl("panes"), "edit:proj") == null) break;
+        h.sleepMs(100);
+    }
 
     // THE EDITOR LEADER: `,⇥` (maplocalleader — a separate scope from
     // the app's backtick) opens the sidebar from inside a buffer...
@@ -2335,7 +2397,7 @@ const parity_env_json =
     \\{"id":"option:app:status-left","kind":"option","scope":"app","key":"status-left","value":["tabs","branch"]},
     \\{"id":"option:app:status-right","kind":"option","scope":"app","key":"status-right","value":["cwd","hints"]},
     \\{"id":"option:app:tab-style","kind":"option","scope":"app","key":"tab-style","value":"current"},
-    \\{"id":"option:app:buffer-line","kind":"option","scope":"app","key":"buffer-line","value":true},
+    \\{"id":"option:app:buffer-line","kind":"option","scope":"app","key":"buffer-line","value":"always"},
     \\{"id":"option:app:theme","kind":"option","scope":"app","key":"theme","value":"vscode-dark"},
     \\{"id":"option:app:editor-mode","kind":"option","scope":"app","key":"editor-mode","value":"insert"},
     \\{"id":"option:app:activity-bar","kind":"option","scope":"app","key":"activity-bar","value":true},
@@ -2409,6 +2471,10 @@ fn vscodeFeel(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.writeFile(path, "world\n");
     _ = try app.ctlFmt("edit {s}", .{path});
     try app.waitText("INSERT", 5_000);
+    // The TAB STRIP is there from the FIRST file — VS Code's contract
+    // (`buffer-line = always`), not rook's own "one chip is noise".
+    var scr_buf: [16 * 1024]u8 = undefined;
+    try h.expectContains(try app.screen(&scr_buf), "feel.txt \u{d7}", "one open file still gets a tab");
     _ = try app.ctl("type hello ");
 
     // ⌘S (keycode 1, cmd mask) — the GUI save speaks :w itself.

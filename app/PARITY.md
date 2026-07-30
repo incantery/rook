@@ -274,6 +274,27 @@ a daily driver.
       VS Code's actual grammar emerge — active tab blending into the
       editor, inactive chips on the lighter strip — from chip_active_bg
       = ed_bg alone.
+      Round two, Seth's dogfood again ("file tabs missing; the tree
+      doesn't work great with mouse events, maybe doesn't work at
+      all"): `buffer-line` went TRI-STATE — `multiple` (rook's rule,
+      one chip is noise; still the default and what `true` means),
+      `always` (VS Code's: the tab is the editor's from file one),
+      `off` — and the vscode preset takes `always`. The TREE took the
+      MOUSE for real: a single click folds a directory and opens a
+      file (VS Code's explorer and NERDTree's mouse mode 3 agree, so
+      it is the contract a mouse-carrying hand already has; Enter
+      still does the same thing — this adds a route, it doesn't
+      replace one). A file click beside-opens and focus follows, so
+      tree → file → tab is one gesture each. Three tells that the
+      tree was a text buffer in costume went with it: line NUMBERS
+      (NERDTree sets nonumber; gutterNumFor returns 0, which the fill
+      path already meant as "not a line of any file"), the `~`
+      end-of-buffer run past the last entry, and the wide numeric
+      gutter. e2e: `filetree` clicks real rows through a new
+      paneRectNamed/clickPaneRow pair that does row math off the
+      PANE's own rect (no launch geometry in an assertion) and
+      asserts the numbers and tildes are gone; `vscodefeel` pins the
+      one-file tab.
 - [ ] **Theme engine**: one semantic Palette, 8 builtins, runtime swap,
       **VS Code theme importer**. rook has 2 builtins and a config key
       (3 now, with vscode-dark).

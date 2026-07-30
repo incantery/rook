@@ -767,7 +767,7 @@ pub const App = struct {
     /// a live reload inherits the current answer.
     cfg_clip_allow: bool = true,
     /// config buffer-line: the per-pane document chips.
-    cfg_bufline: bool = true,
+    cfg_bufline: cfgpkg.BufferLine = .multiple,
     /// config editor-mode = insert: files open ready to type.
     cfg_ed_insert: bool = false,
     /// config activity-bar: the left icon rail.
@@ -3296,7 +3296,11 @@ pub const App = struct {
         ed.app_quit_all = &editorQuitAll;
         ed.app_open = &editorOpenRequest;
         ed.leader = self.keybinds.ed_leader;
-        ed.bufline_enabled = self.cfg_bufline;
+        ed.bufline_mode = switch (self.cfg_bufline) {
+            .off => .off,
+            .multiple => .multiple,
+            .always => .always,
+        };
         ed.default_insert = self.cfg_ed_insert;
         // create() opened the file before this ran; the default mode
         // applies now that the editor knows what it is.
@@ -4110,7 +4114,11 @@ pub const App = struct {
                 } else if (p.editor()) |ed| ed.render_dirty = true;
                 if (p.editor()) |ed| {
                     ed.leader = self.keybinds.ed_leader;
-                    ed.bufline_enabled = self.cfg_bufline;
+                    ed.bufline_mode = switch (self.cfg_bufline) {
+                        .off => .off,
+                        .multiple => .multiple,
+                        .always => .always,
+                    };
                     // The default applies to the NEXT open; a live
                     // editor's current mode is the user's, not ours.
                     ed.default_insert = self.cfg_ed_insert;

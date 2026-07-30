@@ -176,6 +176,20 @@ pub fn segs(comptime list: anytype) SegList {
 /// the-bottom-bar minimalism; click cycles).
 pub const TabStyle = enum { chips, index_name, current };
 
+/// When the per-pane buffer line shows. `multiple` (the default, and
+/// what `true` means) holds rook's own rule — one chip is noise, so
+/// the strip appears with the second document. `always` is VS Code's
+/// contract: the tab is part of the editor from the first file, name
+/// and dirty dot and close button included.
+pub const BufferLine = enum { off, multiple, always };
+
+pub fn bufferLineFromName(name: []const u8) ?BufferLine {
+    if (std.mem.eql(u8, name, "off") or std.mem.eql(u8, name, "false")) return .off;
+    if (std.mem.eql(u8, name, "multiple") or std.mem.eql(u8, name, "true")) return .multiple;
+    if (std.mem.eql(u8, name, "always")) return .always;
+    return null;
+}
+
 pub fn tabStyleFromName(name: []const u8) ?TabStyle {
     if (std.mem.eql(u8, name, "chips")) return .chips;
     if (std.mem.eql(u8, name, "index-name") or std.mem.eql(u8, name, "index_name")) return .index_name;
@@ -194,7 +208,7 @@ pub fn applyPreset(cfg: *Config, name: []const u8) bool {
         cfg.status_left = segs(.{.tabs});
         cfg.status_right = segs(.{ .workspace, .branch, .cwd });
         cfg.tab_style = .index_name;
-        cfg.buffer_line = false;
+        cfg.buffer_line = .off;
         return true;
     }
     if (std.mem.eql(u8, name, "vscode")) {
@@ -202,7 +216,9 @@ pub fn applyPreset(cfg: *Config, name: []const u8) bool {
         cfg.status_left = segs(.{ .tabs, .branch });
         cfg.status_right = segs(.{ .cwd, .hints });
         cfg.tab_style = .current;
-        cfg.buffer_line = true;
+        // VS Code's tab strip is there from the first file, not the
+        // second — the tab IS how you know what you have open.
+        cfg.buffer_line = .always;
         // The look-and-feel half of the persona: Dark+ colors with
         // the blue status bar, the icon rail, files open ready to
         // type, click places the cursor (that one is everyone's).
@@ -256,9 +272,10 @@ pub const Config = struct {
     window_padding: f64 = 0,
     bell: Bell = .visual,
     clipboard_write: ClipboardWrite = .allow,
-    /// The per-pane buffer line (document chips over an editor). On
-    /// by default; `buffer-line = false` turns it off.
-    buffer_line: bool = true,
+    /// The per-pane buffer line (document chips over an editor).
+    /// `true`/`multiple` (default) shows it from the second document;
+    /// `always` from the first (VS Code); `false`/`off` never.
+    buffer_line: BufferLine = .multiple,
     /// Blink the focused pane's cursor (1.1s period, ~55% on — the
     /// mark every terminal shares). Ghostty's default too. The blink
     /// pauses while rook is in the background, so the zero-idle-frames
@@ -481,11 +498,10 @@ fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
             };
         } else if (std.mem.eql(u8, key, "buffer_line")) {
             const stripped = std.mem.trim(u8, val, "\"");
-            if (std.mem.eql(u8, stripped, "true")) {
-                cfg.buffer_line = true;
-            } else if (std.mem.eql(u8, stripped, "false")) {
-                cfg.buffer_line = false;
-            } else std.debug.print("rook config: bad buffer-line '{s}' (true, false)\n", .{stripped});
+            cfg.buffer_line = bufferLineFromName(stripped) orelse blk: {
+                std.debug.print("rook config: bad buffer-line '{s}' (true, false, always)\n", .{stripped});
+                break :blk cfg.buffer_line;
+            };
         } else if (std.mem.eql(u8, key, "cursor_blink") or
             std.mem.eql(u8, key, "cursor_style_blink"))
         {
@@ -637,7 +653,13 @@ fn applyEnvOption(cfg: *Config, gpa: std.mem.Allocator, key_raw: []const u8, val
             else => cfg.clipboard_write,
         };
     } else if (std.mem.eql(u8, key, "buffer_line")) {
-        cfg.buffer_line = jBool(value) orelse cfg.buffer_line;
+        // A graph carries the bool spellings too — an SDK's
+        // BufferLine(true) is the same knob as BufferLine("always").
+        cfg.buffer_line = switch (value) {
+            .bool => |b| if (b) .multiple else .off,
+            .string => |s| bufferLineFromName(s) orelse cfg.buffer_line,
+            else => cfg.buffer_line,
+        };
     } else if (std.mem.eql(u8, key, "cursor_blink") or std.mem.eql(u8, key, "cursor_style_blink")) {
         cfg.cursor_blink = jBool(value) orelse cfg.cursor_blink;
     } else if (std.mem.eql(u8, key, "editor_mode")) {
@@ -1058,7 +1080,7 @@ test "presets are the bundles the parity scenario pins" {
     try t.expect(applyPreset(&vs, "vscode"));
     try t.expect(vs.top_bar.n == 0);
     try t.expect(vs.tab_style == .current);
-    try t.expect(vs.buffer_line);
+    try t.expect(vs.buffer_line == .always);
     try t.expect(vs.status_left.eql(&segs(.{ .tabs, .branch })));
     try t.expect(vs.status_right.eql(&segs(.{ .cwd, .hints })));
     try t.expect(std.mem.eql(u8, vs.theme, "vscode-dark"));
@@ -1069,7 +1091,7 @@ test "presets are the bundles the parity scenario pins" {
     try t.expect(applyPreset(&tm, "tmux-neovim"));
     try t.expect(tm.top_bar.n == 0);
     try t.expect(tm.tab_style == .index_name);
-    try t.expect(!tm.buffer_line);
+    try t.expect(tm.buffer_line == .off);
     try t.expect(tm.status_left.eql(&segs(.{.tabs})));
     try t.expect(tm.status_right.eql(&segs(.{ .workspace, .branch, .cwd })));
     try t.expect(!tm.editor_insert and !tm.activity_bar);
