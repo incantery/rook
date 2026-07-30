@@ -152,6 +152,17 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(filelist_tests).step);
 
+    // Search's matching rules: smartcase, the binary probe, and the
+    // line-trim that has to keep the match visible. Pure data logic
+    // behind a panel, which is the shape that earns a headless root.
+    const search_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/search.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(search_tests).step);
+
     // The ask form's wire shape and JSON escaping. Its own root because a
     // malformed answer body is silently catastrophic: the host rejects
     // it, the answer is lost, and the asker stays blocked forever.

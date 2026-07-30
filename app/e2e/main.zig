@@ -57,6 +57,7 @@ const scenarios = [_]Scenario{
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
+    .{ .name = "findfiles", .what = "⌘⇧F: scan honours the ignore rules, results group by file, Enter jumps to the line", .run = findInFiles },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
 };
@@ -2574,4 +2575,75 @@ fn fileFinder(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("type >");
     _ = try app.waitCtl("palette", "mode:commands", 3000);
     _ = try app.ctl("key 1b");
+}
+
+// ------------------------------------------------------------ findfile
+
+/// Find in files (⌘⇧F): the query box, a scan that honours the file
+/// index's ignore rules, results grouped by file, and Enter jumping
+/// to the hit's LINE — the half a unit test cannot reach, because the
+/// engine's rules are pure but "did the jump land" is the app.
+fn findInFiles(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var proj_buf: [192]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{app.dirPath()});
+    var p_buf: [256]u8 = undefined;
+    try h.mkdirP(try std.fmt.bufPrint(&p_buf, "{s}/src", .{proj}));
+    try h.mkdirP(try std.fmt.bufPrint(&p_buf, "{s}/node_modules/dep", .{proj}));
+    if (try h.runCmd(proj, &.{ "/usr/bin/git", "init", "-q" }) != 0) return error.NoGit;
+    try h.writeFile(
+        try std.fmt.bufPrint(&p_buf, "{s}/src/a.zig", .{proj}),
+        "const x = 1;\n// needle here\nconst y = 2;\n",
+    );
+    try h.writeFile(
+        try std.fmt.bufPrint(&p_buf, "{s}/src/b.zig", .{proj}),
+        "fn f() void {}\n    needle indented\n",
+    );
+    try h.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/README.md", .{proj}), "nothing to see\n");
+    // Ignored, and full of what we are searching for: a search that
+    // reaches it would drown every real hit.
+    try h.writeFile(
+        try std.fmt.bufPrint(&p_buf, "{s}/node_modules/dep/x.zig", .{proj}),
+        "needle needle needle\n",
+    );
+
+    _ = try app.ctlFmt("type cd {s}/src", .{proj});
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("statusbar", "proj/src", 8000);
+
+    _ = try app.ctl("run panel.search");
+    _ = try app.waitCtl("sidepane", "panel:search", 5000);
+    _ = try app.ctl("type needle");
+    _ = try app.ctl("enter");
+    const res = try app.waitCtl("sidepane", "results:2", 8000);
+
+    try h.expectContains(res, "src/a.zig:2", "the hit carries its file and LINE");
+    try h.expectContains(res, "src/b.zig:2", "and so does the one in the other file");
+    try h.expectNotContains(res, "node_modules", "an ignored directory is not searched");
+    // Indentation is trimmed off the shown line — a deeply indented
+    // hit should show its code, not its whitespace.
+    try h.expectContains(res, "needle indented", "the shown line is trimmed");
+    // The box hands the keys to the list once there is a list.
+    try h.expectContains(res, "typing:no", "results take the keys");
+
+    // Hits arrive in PATH order (the index is sorted, so this holds
+    // on any machine): a.zig is first, so j lands on b.zig.
+    _ = try app.ctl("type j");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("panes", "edit:b.zig", 5000);
+    try h.expectEq("no pane was split", 1, try app.paneCount());
+    var buf: [16 * 1024]u8 = undefined;
+    try h.expectContains(try app.screen(&buf), "2:1", "the cursor landed on the hit's line");
+
+    // ⌘⇧F again FOCUSES the box — it must never toggle away results
+    // you are reading (the other tenants toggle; this one does not).
+    _ = try app.ctl("run panel.search");
+    const again = try app.waitCtl("sidepane", "typing:yes", 5000);
+    try h.expectContains(again, "panel:search", "the panel is still open");
+    try h.expectContains(again, "results:2", "and still holds its results");
 }

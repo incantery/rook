@@ -532,6 +532,28 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     if (app.attention.more > 0)
                         w.print("+{d} more\n", .{app.attention.more}) catch {};
                 },
+                .search => {
+                    // The query, what it scanned, and every hit — the
+                    // panel's whole state, so find-in-files is
+                    // drivable and assertable without pixels.
+                    w.print("query:{s} typing:{s}{s}\nresults:{d} files:{d} scanned:{d}{s}\n", .{
+                        app.sr_query[0..app.sr_query_len],
+                        @as([]const u8, if (app.sr_typing) "yes" else "no"),
+                        @as([]const u8, if (app.sr_running.load(.acquire)) " running" else ""),
+                        app.sr.hits.len,
+                        app.sr.files.len,
+                        app.sr.scanned,
+                        @as([]const u8, if (app.sr.truncated) " capped" else ""),
+                    }) catch {};
+                    for (app.sr.hits, 0..) |hit, i| {
+                        w.print("{s}{s}:{d}: {s}\n", .{
+                            @as([]const u8, if (i == app.sr_sel) "*" else " "),
+                            app.sr.files[hit.file],
+                            hit.line,
+                            hit.text,
+                        }) catch break;
+                    }
+                },
                 .review => {
                     if (!app.rev.live) {
                         _ = w.write("host unreachable\n") catch 0;

@@ -217,8 +217,14 @@ const Walker = struct {
     }
 };
 
-/// Walk `root`, newest-first by nothing at all — order is the walk's,
-/// and RANKING is the matcher's job (see macos.zig's fuzzyScore).
+/// Walk `root` and return its files SORTED BY PATH.
+///
+/// Sorted because readdir order is the filesystem's, which means it
+/// differs between machines and between runs on the same machine —
+/// and it reaches the user twice: as the tie-break in ⌘P's ranking,
+/// and as the order find-in-files lists its hits. Search results that
+/// come back in a different order on your colleague's laptop are
+/// results neither of you can talk about.
 pub fn load(gpa: std.mem.Allocator, root: []const u8) Index {
     var idx: Index = .{};
     if (root.len == 0) return idx;
@@ -228,6 +234,12 @@ pub fn load(gpa: std.mem.Allocator, root: []const u8) Index {
     const none: IgnoreSet = .{};
     w.walk(root, "", 0, &none);
 
+    const S = struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    };
+    std.mem.sort([]const u8, out.items, {}, S.lt);
     idx.paths = out.toOwnedSlice(gpa) catch &.{};
     idx.root = gpa.dupe(u8, root) catch "";
     idx.truncated = w.truncated;

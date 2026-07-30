@@ -323,6 +323,31 @@ a daily driver.
       shared with the tree so the two surfaces can never disagree
       about which repo you are in. e2e `filefinder` builds a repo with
       a NESTED .gitignore and pins all of it.
+- [x] **⌘⇧F, find in files** — the magnifier's real meaning, and the
+      last of the big VS Code reflexes. src/search.zig scans
+      filelist's index, so what ⌘P can open is exactly what ⌘⇧F can
+      search and the two can never disagree about node_modules.
+      LITERAL and smart-case (vim's rule: a lowercase query is loose,
+      any capital is exact) — rook has a regex engine and a toggle
+      belongs here eventually, but `main()` searched as a pattern
+      finds nothing, which reads as "search is broken". Binary files
+      skipped by grep's own NUL probe, 2MB/file and 2000-hit caps,
+      shown lines trimmed of indentation with the match column moved
+      to follow.
+      A side-pane TENANT (VS Code's shape), grouped by file: path
+      header, then its lines. Two states — the box, then the list —
+      because a search panel is two things; `/` or `i` returns to the
+      box, j/k/Enter walk and jump, and the panel STAYS OPEN on a jump
+      so hit two is not a re-search. It runs on a WORKER (a repo-wide
+      scan is milliseconds but not microseconds; the frame must never
+      wait on a filesystem), publishing through `sr_pending` which the
+      draw tick swaps in — and unlike every other tenant `panel.search`
+      does NOT toggle closed: ⌘⇧F with results up means "search
+      again", never "throw away what I am reading".
+      Found by the e2e, fixed in the product: results came back in
+      READDIR order, so the same search listed differently on a
+      different machine. filelist now sorts by path — which also
+      makes ⌘P's tie-break stable.
 - [ ] **Theme engine**: one semantic Palette, 8 builtins, runtime swap,
       **VS Code theme importer**. rook has 2 builtins and a config key
       (3 now, with vscode-dark).

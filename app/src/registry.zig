@@ -44,6 +44,8 @@ pub const Action = enum {
     palette_commands,
     /// The file finder: the repo's files, over the same widget.
     palette_files,
+    /// Find in files — the search panel, a side-pane tenant.
+    panel_search,
     app_fullscreen,
     /// Toggle the side pane holding the attention inbox.
     panel_attention,
@@ -116,6 +118,7 @@ pub const commands = [_]Command{
     .{ .id = "workspace.switch", .title = "Switch Workspace", .category = "Workspace", .action = .workspace_switch, .keys = "<leader>s" },
     .{ .id = "palette.commands", .title = "Command Palette", .category = "App", .action = .palette_commands, .keys = "⌘K" },
     .{ .id = "palette.files", .title = "Go to File", .category = "App", .action = .palette_files, .keys = "⌘P" },
+    .{ .id = "panel.search", .title = "Find in Files", .category = "App", .action = .panel_search, .keys = "⌘⇧F" },
     .{ .id = "app.fullscreen", .title = "Toggle Fullscreen", .category = "App", .action = .app_fullscreen },
     .{ .id = "attention.inbox", .title = "Attention Inbox", .category = "Panel", .action = .panel_attention, .keys = "<leader>a" },
     .{ .id = "agent.view", .title = "Agent Deck", .category = "Panel", .action = .panel_deck, .keys = "<leader>v" },

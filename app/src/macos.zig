@@ -23,6 +23,7 @@ const hostc = @import("hostc.zig");
 const themepkg = @import("theme.zig");
 const cfgpkg = @import("config.zig");
 const filelistpkg = @import("filelist.zig");
+const searchpkg = @import("search.zig");
 const uipkg = @import("ui.zig");
 const stats = @import("stats.zig");
 
@@ -334,7 +335,7 @@ pub const Side = enum { left, right };
 /// where §2's inbox/deck/threads/review join it, the same way pal_mode
 /// grew a second list. Deliberately an enum rather than a vtable — a
 /// tenant interface designed against ONE tenant is a guess.
-pub const Panel = enum { attention, ask, deck, threads, review };
+pub const Panel = enum { attention, ask, deck, threads, review, search };
 
 /// One clickable row of the which-key sheet. `click` is false for the
 /// collapsed "1…9" teaching row — a row that says "tabs 1–9" and then
@@ -526,6 +527,22 @@ pub const App = struct {
     side_open: bool = false,
     side: Side = .right,
     side_panel: Panel = .attention,
+    // ---- find in files (⌘⇧F) ----
+    /// The query box and the results it produced. Two states, because
+    /// a search panel is two things: a box you type in, then a list
+    /// you walk. `sr_typing` says which one has the keys.
+    sr_query: [128]u8 = undefined,
+    sr_query_len: usize = 0,
+    sr_typing: bool = true,
+    sr_sel: usize = 0,
+    sr_top: usize = 0,
+    sr: searchpkg.Results = .{},
+    /// Set while a scan is in flight, so the panel can say so rather
+    /// than looking like a search that found nothing.
+    sr_running: std.atomic.Value(bool) = .init(false),
+    /// Root + query handed to the worker; published back under the
+    /// draw_lock when it finishes.
+    sr_pending: ?searchpkg.Results = null,
     /// Columns, not pixels: the pane beside it is a character grid, and
     /// a width in px makes the split land mid-cell at some font sizes.
     side_cols: f32 = 34,
@@ -1984,6 +2001,7 @@ pub const App = struct {
             .deck => self.deckKeyLocked(bytes),
             .threads => self.threadsKeyLocked(bytes),
             .review => self.reviewKeyLocked(bytes),
+            .search => self.searchKeyLocked(bytes),
             // Read-only tenant: it never takes the keys.
             .attention => return false,
         }
@@ -2491,6 +2509,7 @@ pub const App = struct {
             .workspace_switch => self.openPalette(),
             .palette_commands => self.openCommandPalette(),
             .palette_files => self.openFilePalette(),
+            .panel_search => self.openSearchPanel(),
             .app_fullscreen => self.requestFullscreen(),
             .panel_attention => self.toggleSidePane(.attention),
             .panel_deck => self.toggleDeck(),
@@ -2956,6 +2975,170 @@ pub const App = struct {
 
     /// The deck's key path — vim keys over the list, Enter to go there.
     /// Caller holds draw_lock.
+    /// Open the search panel focused, with the box ready to type.
+    /// ⌘⇧F, the rail's magnifier, and `panel.search` all land here.
+    pub fn openSearchPanel(self: *App) void {
+        // NOT a toggle, unlike the other tenants: ⌘⇧F means "search",
+        // and pressing it with the panel already up means "search
+        // again" — never "close the results I am reading". Reaching
+        // for the key twice must not be how you lose them.
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            const was = self.side_open and self.side_panel == .search;
+            self.side_panel = .search;
+            self.side_open = true;
+            // The query and its results SURVIVE a reopen (VS Code's
+            // panel does too) — the box just takes the keys again.
+            self.sr_typing = true;
+            self.side_focus = true;
+            if (!was) self.relayoutLocked();
+            self.scene_dirty = true;
+        }
+        self.attention_wake.store(true, .release);
+    }
+
+    /// Run the query on a worker: a repo-wide scan is milliseconds but
+    /// not microseconds, and the frame must never wait on a
+    /// filesystem. The result is published through `sr_pending`, which
+    /// the draw tick swaps in under the lock.
+    fn startSearchLocked(self: *App) void {
+        if (self.sr_query_len == 0) return;
+        if (self.sr_running.load(.acquire)) return;
+        var rootbuf: [1024]u8 = undefined;
+        const root = self.paneRootLocked(self.activeTab().focused, &rootbuf) orelse return;
+        const Args = struct { app: *App, root: [1024]u8, root_len: usize, q: [128]u8, q_len: usize };
+        const a = self.gpa.create(Args) catch return;
+        a.* = .{ .app = self, .root = undefined, .root_len = root.len, .q = undefined, .q_len = self.sr_query_len };
+        @memcpy(a.root[0..root.len], root);
+        @memcpy(a.q[0..self.sr_query_len], self.sr_query[0..self.sr_query_len]);
+        self.sr_running.store(true, .release);
+        const T = struct {
+            fn go(args: *Args) void {
+                const app = args.app;
+                const res = searchpkg.run(app.gpa, args.root[0..args.root_len], args.q[0..args.q_len]);
+                app.draw_lock.lock();
+                // A second search may have been queued while this ran;
+                // the newest answer wins and the older one is dropped.
+                if (app.sr_pending) |*old| {
+                    var o = old.*;
+                    o.deinit(app.gpa);
+                }
+                app.sr_pending = res;
+                app.scene_dirty = true;
+                app.draw_lock.unlock();
+                app.sr_running.store(false, .release);
+                app.gpa.destroy(args);
+                // Wake the frame loop: the result arrived off-tick, and
+                // a dirty-skip renderer has no reason to draw without
+                // being told (the same nudge the attention poller uses).
+                app.attention_wake.store(true, .release);
+            }
+        };
+        if (std.Thread.spawn(.{}, T.go, .{a})) |t| {
+            t.detach();
+        } else |_| {
+            self.sr_running.store(false, .release);
+            self.gpa.destroy(a);
+        }
+    }
+
+    /// Swap in a finished search. Caller holds draw_lock (the draw
+    /// tick does).
+    fn drainSearchLocked(self: *App) void {
+        const done = self.sr_pending orelse return;
+        self.sr_pending = null;
+        self.sr.deinit(self.gpa);
+        self.sr = done;
+        self.sr_sel = 0;
+        self.sr_top = 0;
+        // The box hands the keys to the list the moment there is a
+        // list — you searched to read the answer, not to keep typing.
+        if (self.sr.hits.len > 0) self.sr_typing = false;
+        self.scene_dirty = true;
+    }
+
+    /// The search panel's keys. Two states: typing the query, then
+    /// walking the results (j/k/Enter, vim's and VS Code's list keys
+    /// both). `/` or `i` puts you back in the box.
+    pub fn searchKeyLocked(self: *App, bytes: []const u8) void {
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const b = bytes[i];
+            if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
+                switch (bytes[i + 2]) {
+                    'A' => {
+                        self.sr_typing = false;
+                        self.sr_sel -|= 1;
+                    },
+                    'B' => {
+                        self.sr_typing = false;
+                        self.sr_sel = @min(self.sr_sel + 1, self.sr.hits.len -| 1);
+                    },
+                    else => {},
+                }
+                i += 3;
+                self.scene_dirty = true;
+                continue;
+            }
+            if (self.sr_typing) {
+                switch (b) {
+                    0x1b => {
+                        self.side_focus = false;
+                        self.scene_dirty = true;
+                        return;
+                    },
+                    '\r', '\n' => self.startSearchLocked(),
+                    0x7f, 0x08 => self.sr_query_len -|= 1,
+                    else => if (b >= 0x20 and b < 0x7f and self.sr_query_len < self.sr_query.len) {
+                        self.sr_query[self.sr_query_len] = b;
+                        self.sr_query_len += 1;
+                    },
+                }
+                i += 1;
+                self.scene_dirty = true;
+                continue;
+            }
+            switch (b) {
+                0x1b => {
+                    self.side_focus = false;
+                    self.scene_dirty = true;
+                    return;
+                },
+                'k', 0x10 => self.sr_sel -|= 1,
+                'j', 0x0e => self.sr_sel = @min(self.sr_sel + 1, self.sr.hits.len -| 1),
+                'g' => self.sr_sel = 0,
+                'G' => self.sr_sel = self.sr.hits.len -| 1,
+                '/', 'i' => self.sr_typing = true,
+                '\r', '\n' => {
+                    // Jump to the hit. The panel STAYS — VS Code keeps
+                    // its results while you walk them, and a list that
+                    // closed on the first jump would make finding the
+                    // second hit a re-search.
+                    if (self.sr_sel < self.sr.hits.len) {
+                        const hit = self.sr.hits[self.sr_sel];
+                        const rel = self.sr.files[hit.file];
+                        var abs: [1024]u8 = undefined;
+                        const full = std.fmt.bufPrint(&abs, "{s}/{s}", .{ self.sr.root, rel }) catch return;
+                        if (full.len <= self.pending_open_path.len) {
+                            @memcpy(self.pending_open_path[0..full.len], full);
+                            self.pending_open = .{
+                                .len = full.len,
+                                .line = hit.line -| 1,
+                                .how = .here,
+                                .from = self.activeTab().focused.id,
+                            };
+                        }
+                        self.side_focus = false;
+                    }
+                },
+                else => {},
+            }
+            i += 1;
+            self.scene_dirty = true;
+        }
+    }
+
     pub fn deckKeyLocked(self: *App, bytes: []const u8) void {
         const n = self.deck.slice().len;
         var i: usize = 0;
@@ -3886,6 +4069,7 @@ pub const App = struct {
 
         self.reapExitedLocked();
         self.drainClipboardLocked();
+        self.drainSearchLocked();
 
         // HUD refresh at ~2Hz. Runs on skipped ticks too, so the bar
         // stays live during idle — but only a text CHANGE causes a draw.
@@ -5005,11 +5189,7 @@ pub const App = struct {
     };
     pub const rail_items = [_]RailItem{
         .{ .glyph = "\u{f07b}", .title = "explorer", .action = .tree_toggle },
-        // VS Code's magnifier is find-in-files, which rook does not
-        // have yet; of the two things it could mean today, "find a
-        // file" is the closer read of the glyph than "run a command"
-        // — and the command palette has ⌘K plus a bar hint already.
-        .{ .glyph = "\u{f002}", .title = "search", .action = .palette_files },
+        .{ .glyph = "\u{f002}", .title = "search", .action = .panel_search },
         .{ .glyph = "\u{f126}", .title = "scm", .action = .diff_open },
         .{ .glyph = "\u{f085}", .title = "agents", .action = .panel_deck },
         .{ .glyph = "\u{f00c}", .title = "review", .action = .panel_review },
@@ -5178,6 +5358,7 @@ pub const App = struct {
             .deck => "AGENTS",
             .threads => "THREADS",
             .review => "REVIEW",
+            .search => "SEARCH",
         }, th.bar_value, self.glassBg(th.bar_bg));
         // The focus telegraph: an interactive panel has to look like it
         // is the thing your keys are going to.
@@ -5197,6 +5378,7 @@ pub const App = struct {
             .deck => self.drawDeck(ui, r, y),
             .threads => self.drawThreads(ui, r, y),
             .review => self.drawReview(ui, r, y),
+            .search => self.drawSearch(ui, r, y),
         }
     }
 
@@ -5207,6 +5389,87 @@ pub const App = struct {
     /// vocabularies for one idea.
     fn drawRowSelection(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, y: f32, h: f32) void {
         ui.roundRect(r.x + self.m.gap, y, r.w - self.m.gap * 2, h, th.chip_active_bg, .{ .radius = self.m.radius });
+    }
+
+    /// Find in files: the query box, then the hits GROUPED BY FILE —
+    /// a path header, then its lines indented under it. A flat list of
+    /// 200 hits is a list you scroll; grouped, it is a list you read.
+    fn drawSearch(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        const row_h = self.bar_h;
+        const bg = self.glassBg(th.bar_bg);
+        const tx = r.x + self.m.gutter;
+        var y = top;
+        var clipbuf: [256]u8 = undefined;
+        const cols: usize = @intFromFloat(@max(4, (r.w - self.m.gutter * 2) / cw));
+
+        // The box. The caret only shows while the box has the keys —
+        // it is the panel's one telegraph for which half you are in.
+        var qbuf: [160]u8 = undefined;
+        const q = std.fmt.bufPrint(&qbuf, "/{s}", .{self.sr_query[0..self.sr_query_len]}) catch "/";
+        const qw = ui.text(tx, y + (row_h - ch) / 2, q, th.bar_value, bg);
+        if (self.sr_typing and self.side_focus)
+            ui.rect(tx + qw, y + (row_h - ch) / 2, cw / 4, ch, th.accent);
+        y += row_h;
+        ui.rect(r.x, y, r.w, self.sep, th.sep);
+        y += self.sep + self.m.gap;
+
+        if (self.sr_running.load(.acquire)) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "searching…", th.bar_fg, bg);
+            return;
+        }
+        if (self.sr.query.len == 0) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "type, then ⏎", th.bar_fg, bg);
+            return;
+        }
+        if (self.sr.hits.len == 0) {
+            var nb: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&nb, "no results in {d} files", .{self.sr.scanned}) catch "no results";
+            _ = ui.text(tx, y + (row_h - ch) / 2, msg, th.bar_fg, bg);
+            return;
+        }
+
+        // A count line, because "is this all of them" is the first
+        // question a result list raises.
+        var cbuf: [96]u8 = undefined;
+        const summary = std.fmt.bufPrint(&cbuf, "{d} in {d} files{s}", .{
+            self.sr.hits.len,
+            self.sr.files.len,
+            @as([]const u8, if (self.sr.truncated) " (capped)" else ""),
+        }) catch "";
+        _ = ui.text(tx, y + (row_h - ch) / 2, summary, th.bar_fg, bg);
+        y += row_h;
+
+        // Keep the selection on screen: rows are hits, and the file
+        // headers between them mean a fixed window would drift.
+        const avail: usize = @intFromFloat(@max(1, (r.y + r.h - y) / row_h));
+        const per_hit: usize = 1;
+        const window = avail -| 2;
+        if (self.sr_sel < self.sr_top) self.sr_top = self.sr_sel;
+        if (self.sr_sel >= self.sr_top + window / per_hit) self.sr_top = self.sr_sel - window / per_hit + 1;
+
+        var last_file: ?u32 = null;
+        var idx = self.sr_top;
+        while (idx < self.sr.hits.len) : (idx += 1) {
+            if (y + row_h > r.y + r.h) break;
+            const hit = self.sr.hits[idx];
+            if (last_file == null or last_file.? != hit.file) {
+                const path = self.sr.files[hit.file];
+                const s = @import("ui.zig").clip(&clipbuf, path, cols);
+                _ = ui.text(tx, y + (row_h - ch) / 2, s, th.bar_value, bg);
+                y += row_h;
+                last_file = hit.file;
+                if (y + row_h > r.y + r.h) break;
+            }
+            const selected = idx == self.sr_sel;
+            if (selected) self.drawRowSelection(ui, r, y, row_h);
+            var lb: [280]u8 = undefined;
+            const line = std.fmt.bufPrint(&lb, "{d}: {s}", .{ hit.line, hit.text }) catch hit.text;
+            const s = @import("ui.zig").clip(&clipbuf, line, cols -| 2);
+            _ = ui.textOver(tx + 2 * cw, y + (row_h - ch) / 2, s, if (selected) th.bar_value else th.bar_fg);
+            y += row_h;
+        }
     }
 
     fn drawReview(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
@@ -6060,6 +6323,10 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                     },
                     'p' => {
                         app.dispatch(.{ .action = .palette_files });
+                        return null;
+                    },
+                    'F' => {
+                        app.dispatch(.{ .action = .panel_search });
                         return null;
                     },
                     // ⌘S: the GUI hand's save, speaking `:w` itself so
