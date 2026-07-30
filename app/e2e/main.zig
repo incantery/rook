@@ -43,6 +43,7 @@ const scenarios = [_]Scenario{
     .{ .name = "threadrows", .what = "the sidebar lists real threads and re-anchors their lines", .run = threadRows },
     .{ .name = "reviewrows", .what = "the review panel shows findings, the gate, and re-anchored lines", .run = reviewRows },
     .{ .name = "diffview", .what = "the diff view renders hunks, colours them, numbers by FILE line, and refuses edits", .run = diffView },
+    .{ .name = "quitall", .what = ":qa reaches every editor pane and leaves the terminals alone", .run = quitAll },
 };
 
 // ---------------------------------------------------------------- boot
@@ -1523,4 +1524,99 @@ fn diffView(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(after, "3  l1", "and the document is untouched");
     try h.expectContains(after, "1 +a", "and the document is untouched");
 
+}
+
+
+/// The id of the pane holding `name`, from `panes` ("… 2 rect … edit:b.txt").
+fn editPaneId(app: *h.Instance, name: []const u8) !u32 {
+    const r = try app.ctl("panes");
+    var it = std.mem.splitScalar(u8, r, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, name) == null) continue;
+        // "*scratch t1 *2 rect …" — the id is the token after the tab.
+        var f = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = f.next(); // space/label
+        _ = f.next(); // t<N>
+        const id_tok = f.next() orelse continue;
+        const digits = std.mem.trimStart(u8, id_tok, "*");
+        return std.fmt.parseInt(u32, digits, 10) catch continue;
+    }
+    return error.AssertFailed;
+}
+
+/// `:qa` — every editor pane, and no terminal.
+///
+/// A unit test can only reach the verb table; "all" is by definition
+/// about panes one editor cannot see, so the reach is only observable
+/// here. The terminal half matters as much as the editor half: `:qa` in a
+/// tenant must not take down the shells and agents around it.
+fn quitAll(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var a_buf: [192]u8 = undefined;
+    var b_buf: [192]u8 = undefined;
+    const a = try std.fmt.bufPrint(&a_buf, "{s}/a.txt", .{app.dirPath()});
+    const b = try std.fmt.bufPrint(&b_buf, "{s}/b.txt", .{app.dirPath()});
+    try h.writeFile(a, "alpha\n");
+    try h.writeFile(b, "bravo\n");
+
+    // Three panes: two editors and a shell. `edit` takes over the focused
+    // pane, so each editor needs its own split first.
+    _ = try app.ctlFmt("edit {s}", .{a});
+    try app.waitText("alpha", 5_000);
+    _ = try app.ctl("run pane.split-right");
+    _ = try app.ctlFmt("edit {s}", .{b});
+    try app.waitText("bravo", 5_000);
+    _ = try app.ctl("run pane.split-down");
+    try h.expectEq("two editors and a shell", 3, try app.paneCount());
+    // The precondition, stated rather than assumed. The first version of
+    // this scenario checked for "a.txt" in `panes` — which never listed
+    // what a pane held, so the check passed with :qa never sent at all.
+    const before = try app.ctl("panes");
+    try h.expectContains(before, "edit:a.txt", "the first editor is open");
+    try h.expectContains(before, "edit:b.txt", "the second editor is open");
+    try h.expectContains(before, " term", "and a shell is open alongside them");
+
+    // :qa from ONE OF THE EDITORS, addressed by pane id.
+    //
+    // Not from the focused pane: `pane.split-down` moved focus to the new
+    // SHELL, so an untargeted `type` goes there and the shell answers
+    // "sh: :qa: command not found" while every assertion below still reads
+    // as a failure of :qa. The excmd scenario carries a comment about
+    // exactly this trap, and it caught this scenario too.
+    //
+    // The pane it is typed in is also one of the panes it closes, which is
+    // the reentrancy the app defers around — done inline, this is where it
+    // would free the buffer the ex parser is reading.
+    const ed_pane = try editPaneId(app, "b.txt");
+    _ = try app.ctlFmt("type@{d} :qa", .{ed_pane});
+    _ = try app.ctlFmt("enter@{d}", .{ed_pane});
+
+    // The editors go; `edit` parked each shell under its pane, so those
+    // come back rather than the panes collapsing. Either way the count
+    // must settle and the app must still be alive to answer.
+    var waited: u32 = 0;
+    while (waited < 5_000) : (waited += 100) {
+        const d = try app.ctl("panes");
+        if (std.mem.indexOf(u8, d, "edit:") == null) break;
+        h.sleepMs(100);
+    }
+    const dump = try app.ctl("panes");
+    try h.expectNotContains(dump, "edit:a.txt", ":qa closed the first editor");
+    try h.expectNotContains(dump, "edit:b.txt", ":qa closed the second editor");
+    try h.expectNotContains(dump, "edit:", "no editor pane survived :qa");
+
+    // THE OTHER HALF. The shells are untouched: the editor is a tenant of
+    // rook, and `:qa` quitting the whole multiplexer would take down every
+    // agent running in it.
+    try h.expectEq("the terminals survived", 3, try app.paneCount());
+    var buf: [8 * 1024]u8 = undefined;
+    _ = try app.ctl("type echo alive");
+    _ = try app.ctl("enter");
+    try app.waitText("alive", 5_000);
+    _ = try app.screen(&buf);
 }

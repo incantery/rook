@@ -490,6 +490,9 @@ pub const App = struct {
     /// running one inline is a self-deadlock. Drained by drainPendingCmd
     /// at each of the three places that let go of the lock.
     pending_cmd: ?registrypkg.Spec = null,
+    /// A queued `:qa`-family request. See editorQuitAll for why it cannot
+    /// run where it is asked for.
+    pending_quit_all: ?struct { write: bool, quit: bool, force: bool } = null,
 
     /// Subscription usage cluster (host-cached windows), refreshed by
     /// a background thread every 30s; shown right-aligned in the title
@@ -2878,6 +2881,54 @@ pub const App = struct {
         ed.cmd_ctx = self;
         ed.app_command = &editorExCommand;
         ed.app_save = &editorSave;
+        ed.app_quit_all = &editorQuitAll;
+    }
+
+    /// `:qa` / `:wa` / `:wqa`, queued.
+    ///
+    /// Queued and not done here for a reason the stack makes unavoidable:
+    /// this is called from inside the issuing editor's execCommand, and
+    /// that editor is one of the panes "all" covers. Closing it now would
+    /// free the buffer the ex parser is still reading.
+    fn editorQuitAll(ctx: *anyopaque, write: bool, quit: bool, force: bool) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.pending_quit_all = .{ .write = write, .quit = quit, .force = force };
+    }
+
+    /// Write and/or close every editor pane, in every tab.
+    ///
+    /// Every tab, because "all" means all — and the pane reaper already
+    /// walks all of them, restoring a parked shell where there is one and
+    /// collapsing the pane where there is not. Terminals are untouched:
+    /// the editor is a tenant of rook, not rook itself.
+    ///
+    /// Each buffer goes through the editor's OWN ex verb rather than a
+    /// second copy of the write path, so the clobber guard, projected
+    /// buffers and `!` behave here exactly as they do when you type them.
+    pub fn drainQuitAll(self: *App) void {
+        self.draw_lock.lock();
+        const req = self.pending_quit_all;
+        self.pending_quit_all = null;
+        self.draw_lock.unlock();
+        const r = req orelse return;
+
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        for (self.spaces.items) |space| {
+            for (space.tabs.items) |t| {
+                for (t.panes.items) |p| {
+                    const ed = p.editor() orelse continue;
+                    // Three verbs, not two. `:wa` writes and leaves the
+                    // pane open; only the quitting forms close it.
+                    ed.runEx(if (!r.quit)
+                        (if (r.force) "w!" else "w")
+                    else if (r.write)
+                        (if (r.force) "x!" else "x")
+                    else if (r.force) "q!" else "q");
+                }
+            }
+        }
+        self.scene_dirty = true;
     }
 
     /// The editor's ex-command bridge. QUEUES rather than dispatching:
@@ -2900,6 +2951,7 @@ pub const App = struct {
         self.pending_cmd = null;
         self.draw_lock.unlock();
         if (spec) |s| self.dispatch(s);
+        self.drainQuitAll();
     }
 
     /// The leader state machine — ONE path for real keystrokes (the

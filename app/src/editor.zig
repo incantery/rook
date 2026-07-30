@@ -367,6 +367,12 @@ pub const Editor = struct {
     /// key path, so the app side must not block on the network — it
     /// queues and reports through setStatus later.
     app_save: ?*const fn (*anyopaque, name: []const u8, content: []const u8) bool = null,
+    /// `:qa` / `:wa` / `:wqa` — the editor can close ITSELF, but "all"
+    /// spans panes it cannot see, so the app does that part. The app
+    /// DEFERS it: this fires from inside execCommand, and closing the pane
+    /// running an ex command would pull the buffer out from under the code
+    /// reading it.
+    app_quit_all: ?*const fn (*anyopaque, write: bool, quit: bool, force: bool) void = null,
 
     pub fn create(gpa: Allocator, io: std.Io, path: ?[]const u8) !*Editor {
         const self = try gpa.create(Editor);
@@ -815,6 +821,21 @@ pub const Editor = struct {
         return 0;
     }
 
+    /// The START of the last non-blank cluster — `g_`'s target.
+    ///
+    /// Walks back from the end, so trailing whitespace is skipped rather
+    /// than landed on. Returns 0 for a blank or empty line, which is
+    /// where vim leaves the cursor too.
+    fn lastNonblank(s: []const u8) usize {
+        var i = s.len;
+        while (i > 0) {
+            const p = prevClusterStart(s, i);
+            if (s[p] != ' ' and s[p] != '\t') return p;
+            i = p;
+        }
+        return 0;
+    }
+
     /// Bytes of leading whitespace. Differs from `firstNonblank` on a
     /// line that is ALL whitespace: that line's indent is the whole
     /// line, and a new line below it should inherit it.
@@ -1200,7 +1221,9 @@ pub const Editor = struct {
                     self.joinBack();
                     return;
                 }
-                const p = self.scanWordBack(self.cline, self.ccol);
+                // Insert-mode ctrl-w deletes a small word, not a WORD —
+                // vim's rule, and the one that makes it usable in code.
+                const p = self.scanWordBack(self.cline, self.ccol, false);
                 const from = if (p.line == self.cline) p.col else 0;
                 const start = self.buf.rope.lineStart(self.cline);
                 self.buf.deleteRange(gpa, start + from, start + self.ccol) catch return;
@@ -2145,6 +2168,34 @@ pub const Editor = struct {
             };
             self.setStatus("wrote {s}", .{self.displayName()}, false);
             if (!is(u8, wverb, "w")) self.closed = true;
+        } else if (isAll(wverb)) {
+            // vim's -all family. The editor is a TENANT here, not the
+            // application: `:qa` closes every editor pane and leaves the
+            // terminals alone — the reading `:qa` has in a vim running
+            // inside tmux, where it quits vim and not the multiplexer.
+            const quit = !is(u8, wverb, "wa") and !is(u8, wverb, "wall");
+            const write = wverb[0] == 'w' or wverb[0] == 'x';
+            if (self.app_quit_all) |f| {
+                if (self.cmd_ctx) |ctx| {
+                    // Both flags cross, because there are three verbs and
+                    // not two: `:wa` writes WITHOUT closing, and folding it
+                    // into "write" alone would quietly make it `:xa`.
+                    f(ctx, write, quit, bang);
+                    return;
+                }
+            }
+            // No app behind us — a headless editor in a test. Do our own
+            // half, so the verb is never silently ignored.
+            //
+            // The `!` has to be re-attached here. Forgetting it made
+            // `:qa!` run as `:q`, so it refused on a modified buffer —
+            // the second time in this change that a flag went missing
+            // crossing a boundary, which is what the tests are for.
+            self.runEx(if (!quit)
+                (if (bang) "w!" else "w")
+            else if (write)
+                (if (bang) "x!" else "x")
+            else if (bang) "q!" else "q");
         } else if (is(u8, verb, "q")) {
             if (self.buf.isModified()) {
                 self.setStatus("unsaved changes (:q! to discard)", .{}, true);
@@ -2178,6 +2229,27 @@ pub const Editor = struct {
     /// those are lowercase and a derived name never is. It also means a
     /// typo'd editor command still reports "not an editor command"
     /// instead of a confusing miss from the registry.
+    /// The `-all` spellings vim accepts, abbreviated and written out.
+    /// `xa` is `wqa`; leaving `qall`/`wall`/`wqall`/`xall` unrecognised is
+    /// the sort of gap you only find with your fingers.
+    fn isAll(wverb: []const u8) bool {
+        const names = [_][]const u8{ "qa", "qall", "wa", "wall", "wqa", "wqall", "xa", "xall" };
+        for (names) |n| if (std.mem.eql(u8, wverb, n)) return true;
+        return false;
+    }
+
+    /// Run one ex verb programmatically.
+    ///
+    /// `ZZ` already did this by hand (fill `cmd`, execute, clear); naming
+    /// it keeps the write rules — clobber guard, projected buffers, `!` —
+    /// in one place instead of copied per caller.
+    pub fn runEx(self: *Editor, verb: []const u8) void {
+        self.cmd.clearRetainingCapacity();
+        self.cmd.appendSlice(self.gpa, verb) catch return;
+        self.execCommand();
+        self.cmd.clearRetainingCapacity();
+    }
+
     fn appCommand(self: *Editor, verb: []const u8) bool {
         if (verb.len == 0 or verb[0] < 'A' or verb[0] > 'Z') return false;
         const run = self.app_command orelse return false;
@@ -2187,12 +2259,6 @@ pub const Editor = struct {
         return true; // handled: the message is ours, not the fallthrough's
     }
 
-    /// Show text that has no file behind it, under a display name.
-    ///
-    /// The whole session-view design in one call: a transcript is a
-    /// DOCUMENT, and the editor is already a renderer with scrolling,
-    /// search, motions and yank. Building a bespoke viewer would have
-    /// meant reimplementing all of that worse.
     /// Attach a document's per-line decoration, and lock the buffer.
     ///
     /// Both arrays are indexed by buffer line and must be as long as the
@@ -2244,6 +2310,12 @@ pub const Editor = struct {
         return digits(max) + 1;
     }
 
+    /// Show text that has no file behind it, under a display name.
+    ///
+    /// The whole session-view design in one call: a transcript is a
+    /// DOCUMENT, and the editor is already a renderer with scrolling,
+    /// search, motions and yank. Building a bespoke viewer would have
+    /// meant reimplementing all of that worse.
     pub fn openText(self: *Editor, name: []const u8, text: []const u8) !void {
         var b: bufferpkg.Buffer = .{ .rope = try .init(self.gpa, text) };
         errdefer b.rope.deinit(self.gpa);
@@ -2500,12 +2572,21 @@ pub const Editor = struct {
             self.count = 0;
             switch (ch) {
                 'z', 't', 'b' => self.scrollHere(ch),
-                'Z' => {
-                    self.cmd.clearRetainingCapacity();
-                    self.cmd.appendSlice(gpa, "x") catch return;
-                    self.execCommand();
-                    self.cmd.clearRetainingCapacity();
+                // z<CR>, z. and z- are zt/zz/zb that ALSO put the cursor
+                // on the line's first non-blank. That is the whole
+                // difference, and it is why they exist: you are about to
+                // read the line you just centred, not edit the column you
+                // happened to be in.
+                '\r', '.', '-' => {
+                    self.scrollHere(switch (ch) {
+                        '\r' => 't',
+                        '-' => 'b',
+                        else => 'z',
+                    });
+                    self.ccol = firstNonblank(self.lineText(self.cline));
+                    self.goal = renderCol(self.lineText(self.cline), self.ccol);
                 },
+                'Z' => self.runEx("x"),
                 'Q' => self.closed = true,
                 else => {},
             }
@@ -2521,6 +2602,8 @@ pub const Editor = struct {
                     self.motionLinewise(if (n == 0) 0 else @min(n - 1, self.lineCountB() - 1));
                 },
                 'e' => self.motionCharwise(k_ge),
+                'E' => self.motionCharwise(k_gE),
+                '_' => self.motionCharwise(k_glast),
                 'v' => self.reselect(),
                 'd' => self.gotoDefinition(),
                 'u', 'U', '~' => {
@@ -2548,14 +2631,33 @@ pub const Editor = struct {
 
             // Directory buffers: Enter descends, `-` climbs (from file
             // buffers too — vim-vinegar).
-            '\r' => if (self.is_dir) self.openDirEntry(),
+            // In a directory listing these two browse it, which is what
+            // they mean THERE. In a file they are vim's line motions, and
+            // a browser binding that swallowed them everywhere would cost
+            // two standard keys for a mode you are rarely in.
+            '\r' => if (self.is_dir)
+                self.openDirEntry()
+            else
+                self.motionLinewiseAt(self.cline + self.takeCount(), false),
+            // `-` stays the directory climb in EVERY buffer, which is
+            // vim-vinegar's binding and rook's own convention (there is a
+            // test for climbing out of an open file). vim's `-` — first
+            // non-blank of the previous line — loses the argument: it is a
+            // motion almost nobody reaches for when `k` is right there,
+            // and taking the key back would break a habit that works.
             '-' => self.openParentDir(),
 
             // Motions.
-            'h', 'l', 'w', 'b', 'e', '0', '^', '$' => {
+            'h', 'l', 'w', 'W', 'b', 'B', 'e', 'E', '0', '^', '$' => {
                 if (self.mode == .visual_block) self.block_eol = ch == '$';
                 self.motionCharwise(ch);
             },
+            '|' => self.motionCharwise(k_bar),
+            // Linewise, first non-blank, and NOT jumps: you are looking
+            // at the line you are moving to, so clobbering `` ` `` would
+            // throw away the place you actually wanted to come back to.
+            '+' => self.motionLinewiseAt(self.cline + self.takeCount(), false),
+            '_' => self.motionLinewiseAt(self.cline + self.takeCount() - 1, false),
             '%' => self.motionMatch(),
             '{' => self.motionPara(false),
             '}' => self.motionPara(true),
@@ -2613,6 +2715,10 @@ pub const Editor = struct {
                 self.count = 0;
                 self.motionLinewise(if (n == 0) self.lineCountB() - 1 else @min(n - 1, self.lineCountB() - 1));
             },
+            0x06 => self.scrollPage(true), // ctrl-f
+            0x02 => self.scrollPage(false), // ctrl-b
+            0x05 => self.scrollLine(true), // ctrl-e
+            0x19 => self.scrollLine(false), // ctrl-y
             0x04 => { // ctrl-d
                 const half = @max(1, (self.last_rows -| 1) / 2);
                 self.cline = @min(self.cline + half, self.lineCountB() - 1);
@@ -3204,16 +3310,25 @@ pub const Editor = struct {
     /// motionCharwise's operator path instead of growing a second copy
     /// of that path.
     const k_ge: u8 = 0x01;
+    /// `gE` — same trick as k_ge, for the WORD flavour.
+    const k_gE: u8 = 0x02;
+    /// `g_` — the last non-blank of the line. Inclusive, and charwise,
+    /// which is what separates `dg_` from `dd`.
+    const k_glast: u8 = 0x03;
+    /// `|` — to a screen column.
+    const k_bar: u8 = 0x04;
 
     fn motionCharwise(self: *Editor, m0: u8) void {
         var m = m0;
         if (self.op == 'c' and m == 'w') m = 'e';
+        if (self.op == 'c' and m == 'W') m = 'E';
         const cnt = self.takeCount();
         var line = self.cline;
         var col = self.ccol;
         var inclusive = false;
 
-        for (0..cnt) |_| {
+        const steps: usize = if (m == k_bar) 1 else cnt;
+        for (0..steps) |_| {
             const s = self.lineText(line);
             switch (m) {
                 'h' => col = prevClusterStart(s, col),
@@ -3231,27 +3346,43 @@ pub const Editor = struct {
                     col = s.len;
                     inclusive = false; // already one-past-last
                 },
-                'w' => {
-                    const r = self.scanWordFwd(line, col, false);
+                // The lower/upper pairs differ ONLY in the word
+                // vocabulary, which is the whole reason wclass takes a
+                // bool: `W` is `w` that does not stop at punctuation.
+                'w', 'W' => {
+                    const r = self.scanWordFwd(line, col, false, m == 'W');
                     line = r.line;
                     col = r.col;
                 },
-                'e' => {
-                    const r = self.scanWordFwd(line, col, true);
+                'e', 'E' => {
+                    const r = self.scanWordFwd(line, col, true, m == 'E');
                     line = r.line;
                     col = r.col;
                     inclusive = true;
                 },
-                'b' => {
-                    const r = self.scanWordBack(line, col);
+                'b', 'B' => {
+                    const r = self.scanWordBack(line, col, m == 'B');
                     line = r.line;
                     col = r.col;
                 },
-                k_ge => {
-                    const r = self.scanWordEndBack(line, col);
+                k_ge, k_gE => {
+                    const r = self.scanWordEndBack(line, col, m == k_gE);
                     line = r.line;
                     col = r.col;
                     inclusive = true;
+                },
+                k_glast => {
+                    // Last non-blank, counting from the END so a line of
+                    // trailing spaces lands on real text.
+                    col = lastNonblank(s);
+                    inclusive = true;
+                },
+                k_bar => {
+                    // vim counts SCREEN columns here, so a tab is its
+                    // full width and not one character. cnt is consumed
+                    // by the loop, so the target is computed from the
+                    // original count rather than stepped `cnt` times.
+                    col = bcolForRenderCol(s, cnt - 1);
                 },
                 else => {},
             }
@@ -3574,11 +3705,23 @@ pub const Editor = struct {
     }
 
     fn motionLinewise(self: *Editor, target: usize) void {
+        self.motionLinewiseAt(target, true);
+    }
+
+    /// Linewise motion, with control over whether it counts as a JUMP.
+    ///
+    /// `G`, `gg` and a mark jump do — they take you somewhere you were
+    /// not looking, so `` ` `` has to be able to bring you back. `+`,
+    /// `-`, `<CR>` and `_` do not: they move one line, and setting the
+    /// jump mark from them would overwrite the only record of where you
+    /// came from with a place you can see.
+    fn motionLinewiseAt(self: *Editor, target0: usize, is_jump: bool) void {
+        const target = @min(target0, self.lineCountB() -| 1);
         if (self.op != 0) {
             self.opLines(@min(self.cline, target), @max(self.cline, target));
             return;
         }
-        self.setJump();
+        if (is_jump) self.setJump();
         self.cline = target;
         self.ccol = firstNonblank(self.lineText(target));
         self.goal = renderCol(self.lineText(target), self.ccol);
@@ -3765,7 +3908,21 @@ pub const Editor = struct {
         return 2;
     }
 
-    fn scanWordFwd(self: *Editor, line0: usize, col0: usize, to_end: bool) Pos {
+    /// vim's TWO word vocabularies, as one function.
+    ///
+    /// A small word (`w`, `b`, `e`) separates keyword characters from
+    /// punctuation, which is what makes `w` stop at the `(` in `foo(bar)`.
+    /// A WORD (`W`, `B`, `E`) does not draw that line: everything
+    /// non-blank is one class, so `dW` eats `foo(bar)` whole.
+    ///
+    /// Collapsing 2 into 1 rather than adding a third class is what lets
+    /// every scanner below take a bool instead of growing a second copy.
+    fn wclass(c: u8, big: bool) u8 {
+        const k = charClass(c);
+        return if (big and k == 2) 1 else k;
+    }
+
+    fn scanWordFwd(self: *Editor, line0: usize, col0: usize, to_end: bool, big: bool) Pos {
         var line = line0;
         var col = col0;
         var s = self.lineText(line);
@@ -3780,23 +3937,23 @@ pub const Editor = struct {
                     s = self.lineText(line);
                     continue;
                 }
-                if (charClass(s[col]) == 0) {
+                if (wclass(s[col], big) == 0) {
                     col += clusterLenAt(s, col);
                     continue;
                 }
                 break;
             }
-            const cls = charClass(s[col]);
+            const cls = wclass(s[col], big);
             while (true) {
                 const n = col + clusterLenAt(s, col);
-                if (n >= s.len or charClass(s[n]) != cls) return .{ .line = line, .col = col };
+                if (n >= s.len or wclass(s[n], big) != cls) return .{ .line = line, .col = col };
                 col = n;
             }
         }
         // w: skip current class run, then blanks (crossing lines).
         if (col < s.len) {
-            const cls = charClass(s[col]);
-            while (col < s.len and charClass(s[col]) == cls) col += clusterLenAt(s, col);
+            const cls = wclass(s[col], big);
+            while (col < s.len and wclass(s[col], big) == cls) col += clusterLenAt(s, col);
         }
         while (true) {
             if (col >= s.len) {
@@ -3807,7 +3964,7 @@ pub const Editor = struct {
                 if (s.len == 0) return .{ .line = line, .col = 0 }; // vim stops on empty lines
                 continue;
             }
-            if (charClass(s[col]) == 0) {
+            if (wclass(s[col], big) == 0) {
                 col += clusterLenAt(s, col);
                 continue;
             }
@@ -3815,7 +3972,7 @@ pub const Editor = struct {
         }
     }
 
-    fn scanWordBack(self: *Editor, line0: usize, col0: usize) Pos {
+    fn scanWordBack(self: *Editor, line0: usize, col0: usize, big: bool) Pos {
         var line = line0;
         var col = col0;
         var s = self.lineText(line);
@@ -3831,12 +3988,12 @@ pub const Editor = struct {
                 continue;
             }
             col = prevClusterStart(s, col);
-            if (charClass(s[col]) != 0) break;
+            if (wclass(s[col], big) != 0) break;
         }
-        const cls = charClass(s[col]);
+        const cls = wclass(s[col], big);
         while (col > 0) {
             const p = prevClusterStart(s, col);
-            if (charClass(s[p]) != cls) break;
+            if (wclass(s[p], big) != cls) break;
             col = p;
         }
         return .{ .line = line, .col = col };
@@ -3845,11 +4002,11 @@ pub const Editor = struct {
     /// `ge` — back to the END of the previous word. The first loop is
     /// what makes it `ge` and not `b`: from inside a word you have to
     /// walk out of that word's own run before the previous one counts.
-    fn scanWordEndBack(self: *Editor, line0: usize, col0: usize) Pos {
+    fn scanWordEndBack(self: *Editor, line0: usize, col0: usize, big: bool) Pos {
         var line = line0;
         var col = col0;
         var s = self.lineText(line);
-        var in_run = if (col < s.len) charClass(s[col]) else 0;
+        var in_run = if (col < s.len) wclass(s[col], big) else 0;
         while (true) {
             if (col == 0) {
                 if (line == 0) return .{ .line = 0, .col = 0 };
@@ -3860,7 +4017,7 @@ pub const Editor = struct {
             } else {
                 col = prevClusterStart(s, col);
             }
-            const c = charClass(s[col]);
+            const c = wclass(s[col], big);
             if (in_run != 0 and c == in_run) continue;
             in_run = 0;
             if (c != 0) return .{ .line = line, .col = col };
@@ -3986,6 +4143,53 @@ pub const Editor = struct {
 
     /// `zt` / `zz` / `zb` — put the cursor line at the top, middle or
     /// bottom of the window without moving it in the buffer.
+    /// ctrl-f / ctrl-b — a whole screen, keeping two lines of overlap.
+    ///
+    /// The overlap is vim's, and it is the reason these are usable for
+    /// reading: a page that shared no line with the last one gives you
+    /// nothing to reattach your eye to. The cursor rides the viewport
+    /// rather than staying put, because a page scroll that left the cursor
+    /// behind would drag it back the moment you pressed `j`.
+    fn scrollPage(self: *Editor, down: bool) void {
+        const rows = @max(1, self.last_rows -| 1);
+        const step = @max(1, rows -| 2) * self.takeCount();
+        const last = self.lineCountB() -| 1;
+        if (down) {
+            self.top = @min(self.top + step, last);
+            self.cline = @max(self.cline + step, self.top);
+        } else {
+            self.top -|= step;
+            self.cline -|= step;
+        }
+        self.cline = @min(self.cline, last);
+        self.clampToViewport();
+        self.ccol = bcolForRenderCol(self.lineText(self.cline), self.goal);
+        self.clampNormal();
+    }
+
+    /// ctrl-e / ctrl-y — one line of the WINDOW, not of the cursor.
+    ///
+    /// The cursor only moves when the scroll would push it off screen,
+    /// which is what separates these from `j`/`k` and what they are for:
+    /// nudging context into view without losing your place.
+    fn scrollLine(self: *Editor, down: bool) void {
+        const cnt = self.takeCount();
+        const last = self.lineCountB() -| 1;
+        if (down) self.top = @min(self.top + cnt, last) else self.top -|= cnt;
+        self.clampToViewport();
+        self.ccol = bcolForRenderCol(self.lineText(self.cline), self.goal);
+        self.clampNormal();
+    }
+
+    /// Pull the cursor back inside the visible rows. Shared by the scroll
+    /// commands, which are the only ones that can move the viewport out
+    /// from under it.
+    fn clampToViewport(self: *Editor) void {
+        const rows = @max(1, self.last_rows -| 1);
+        const bot = @min(self.top + rows -| 1, self.lineCountB() -| 1);
+        self.cline = std.math.clamp(self.cline, self.top, bot);
+    }
+
     fn scrollHere(self: *Editor, where: u8) void {
         const rows = @max(1, self.last_rows -| 1);
         self.top = switch (where) {
@@ -6104,6 +6308,254 @@ test "visual mode selects a text object" {
 }
 
 // ------------------------------------------------------------------ dot repeat
+
+/// Load a buffer with `text` and leave the cursor at 0,0.
+fn edText(gpa: Allocator, text: []const u8) !*Editor {
+    const e = try mkEditor(gpa);
+    try e.openText("t", text);
+    e.buf.readonly = false; // openText is also the diff view's door
+    return e;
+}
+
+fn expectKeys(gpa: Allocator, text: []const u8, presses: []const u8, want: []const u8) !void {
+    var e = try edText(gpa, text);
+    defer e.destroy();
+    keys(e, presses);
+    const got = try bufText(gpa, e);
+    defer gpa.free(got);
+    try testing.expectEqualStrings(want, got);
+}
+
+// The WORD family and the column/line motions, every expectation taken
+// from real vim rather than from what the rule looks like it should do:
+//
+//   vim -Nu NONE -n -es -c 'normal dW' -c wq f
+//
+// The pairs differ only in whether punctuation breaks a word, so the
+// interesting inputs are the ones with punctuation glued to letters —
+// `foo(bar)` is one WORD and three small words.
+
+test "W E B and gE use the WORD vocabulary" {
+    const gpa = testing.allocator;
+    // dW eats the punctuation-glued run AND the space after it.
+    try expectKeys(gpa, "foo(bar) baz qux\n", "dW", "baz qux\n");
+    // dE is inclusive and stops at the run's last character, so the
+    // space survives — the difference from dW in one byte.
+    try expectKeys(gpa, "foo(bar) baz qux\n", "dE", " baz qux\n");
+    // cW acts as cE, exactly as cw acts as ce. Without that special case
+    // this would eat the space and join two words.
+    try expectKeys(gpa, "foo(bar) baz\n", "cWZZZ\x1b", "ZZZ baz\n");
+    // Backwards from the last character: B lands on the WORD's start.
+    try expectKeys(gpa, "foo(bar) baz\n", "$dB", "foo(bar) z\n");
+    // gE reaches the END of the previous WORD, which is the `)` — so the
+    // inclusive delete takes ") baz".
+    try expectKeys(gpa, "foo(bar) baz\n", "$dgE", "foo(bar\n");
+}
+
+test "small-word motions still stop at punctuation" {
+    const gpa = testing.allocator;
+    // The control for the test above: same input, lowercase keys, and the
+    // answers differ. If wclass ignored its flag both sets would pass.
+    try expectKeys(gpa, "foo(bar) baz qux\n", "dw", "(bar) baz qux\n");
+    try expectKeys(gpa, "foo(bar) baz qux\n", "de", "(bar) baz qux\n");
+    try expectKeys(gpa, "foo(bar) baz\n", "$db", "foo(bar) z\n");
+}
+
+test "g_ is the last non-blank, not the last column" {
+    const gpa = testing.allocator;
+    // Trailing whitespace is skipped, so dg_ leaves it behind. A `$`
+    // would have taken it.
+    try expectKeys(gpa, "ab cd   \n", "dg_", "   \n");
+}
+
+test "bar goes to a screen column and does not repeat" {
+    const gpa = testing.allocator;
+    // d3| deletes up to column 3, exclusive.
+    try expectKeys(gpa, "abcdefgh\n", "d3|", "cdefgh\n");
+    // The count is a TARGET, not a repeat count: three applications of a
+    // one-column step would land somewhere else entirely.
+    var e = try edText(gpa, "abcdefgh\n");
+    defer e.destroy();
+    keys(e, "5|");
+    try testing.expectEqual(@as(usize, 4), e.ccol);
+}
+
+test "plus underscore and enter move linewise to the first non-blank" {
+    const gpa = testing.allocator;
+    var e = try edText(gpa, "one\n    two\nthree\nfour\n");
+    defer e.destroy();
+
+    keys(e, "+");
+    try testing.expectEqual(@as(usize, 1), e.cline);
+    try testing.expectEqual(@as(usize, 4), e.ccol); // indent skipped
+
+    keys(e, "2+");
+    try testing.expectEqual(@as(usize, 3), e.cline);
+
+    // <CR> is `+`, in a file buffer. (In a directory listing it opens the
+    // entry instead, which the dir-browser test covers.)
+    keys(e, "gg");
+    e.key("\r");
+    try testing.expectEqual(@as(usize, 1), e.cline);
+
+    // `_` is count-1 lines down, so a bare `_` is "this line's first
+    // non-blank" — where `+` would already have moved on.
+    keys(e, "gg2_");
+    try testing.expectEqual(@as(usize, 1), e.cline);
+}
+
+test "a linewise motion past the end clamps instead of trapping" {
+    const gpa = testing.allocator;
+    var e = try edText(gpa, "one\ntwo\n");
+    defer e.destroy();
+    // 99+ on a two-line buffer. Unclamped this indexes past the rope and
+    // the editor is a crash away from any stray count.
+    keys(e, "99+");
+    const last = e.lineCountB() - 1;
+    try testing.expectEqual(last, e.cline);
+    // Consistent with G rather than with a number I picked: whether a
+    // trailing newline makes a last empty line is the rope's convention,
+    // and a clamp that disagreed with G would be its own bug.
+    keys(e, "gg");
+    keys(e, "G");
+    const g_lands = e.cline;
+    keys(e, "gg99+");
+    try testing.expectEqual(g_lands, e.cline);
+}
+
+test "the small-line motions are not jumps" {
+    const gpa = testing.allocator;
+    var e = try edText(gpa, "one\ntwo\nthree\nfour\nfive\n");
+    defer e.destroy();
+    // G is a jump, so it records where it left.
+    keys(e, "G");
+    // ...and `+`/`-`-class motions must not overwrite that record, or
+    // `` ` `` stops meaning "back where I was" after any line step.
+    keys(e, "gg");
+    const after_gg = e.jump;
+    keys(e, "+");
+    try testing.expectEqual(after_gg, e.jump);
+}
+
+test "the scroll commands move the window, and ctrl-e keeps your place" {
+    const gpa = testing.allocator;
+    var e = try edText(gpa, "l01\nl02\nl03\nl04\nl05\nl06\nl07\nl08\nl09\nl10\n" ++
+        "l11\nl12\nl13\nl14\nl15\nl16\nl17\nl18\nl19\nl20\n" ++
+        "l21\nl22\nl23\nl24\nl25\nl26\nl27\nl28\nl29\nl30\n");
+    defer e.destroy();
+    e.last_rows = 11; // 10 text rows plus the status row
+
+    // ctrl-f pages down keeping two lines of overlap: 10 text rows, so
+    // the top advances by 8. Without the overlap you land with nothing
+    // recognisable on screen.
+    e.key("\x06");
+    try testing.expectEqual(@as(usize, 8), e.top);
+    e.key("\x02"); // ctrl-b comes straight back
+    try testing.expectEqual(@as(usize, 0), e.top);
+
+    // ctrl-e scrolls the WINDOW by one and leaves the cursor where it is —
+    // that is the whole difference from `j`.
+    keys(e, "5G"); // well inside the window
+    const before = e.cline;
+    e.key("\x05");
+    try testing.expectEqual(@as(usize, 1), e.top);
+    try testing.expectEqual(before, e.cline);
+    e.key("\x19"); // ctrl-y back
+    try testing.expectEqual(@as(usize, 0), e.top);
+
+    // ...until the scroll would push the cursor off screen, at which
+    // point it has to come along.
+    keys(e, "gg");
+    e.key("\x05");
+    e.key("\x05");
+    try testing.expectEqual(@as(usize, 2), e.top);
+    try testing.expect(e.cline >= e.top);
+}
+
+test "a page scroll cannot walk off either end" {
+    const gpa = testing.allocator;
+    var e = try edText(gpa, "one\ntwo\nthree\n");
+    defer e.destroy();
+    e.last_rows = 11;
+    // Paging past the end on a buffer shorter than a page: an unclamped
+    // top indexes past the rope on the very next render.
+    keys(e, "\x06\x06\x06");
+    try testing.expect(e.top <= e.lineCountB() - 1);
+    try testing.expect(e.cline <= e.lineCountB() - 1);
+    keys(e, "\x02\x02\x02");
+    try testing.expectEqual(@as(usize, 0), e.top);
+}
+
+test "z<CR> z. and z- scroll like zt zz zb but move the cursor to text" {
+    const gpa = testing.allocator;
+    var e = try edText(gpa, "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n    indented\nl11\nl12\n");
+    defer e.destroy();
+    e.last_rows = 7; // 6 text rows
+
+    // On the indented line, cursor parked at the end of it.
+    keys(e, "10G$");
+    try testing.expect(e.ccol > 4);
+    // z<CR> is zt plus first-non-blank. Both halves asserted, because
+    // either one alone would make it a duplicate of a command that exists.
+    e.key("z");
+    e.key("\r");
+    try testing.expectEqual(@as(usize, 9), e.top); // zt: this line at the top
+    try testing.expectEqual(@as(usize, 4), e.ccol); // and off the indent
+
+    keys(e, "$");
+    keys(e, "z.");
+    try testing.expectEqual(@as(usize, 6), e.top); // zz: centred
+    try testing.expectEqual(@as(usize, 4), e.ccol);
+
+    keys(e, "$");
+    keys(e, "z-");
+    try testing.expectEqual(@as(usize, 4), e.top); // zb: at the bottom
+    try testing.expectEqual(@as(usize, 4), e.ccol);
+
+    // zt/zz/zb still leave the column alone — the pair is what makes the
+    // new three worth having.
+    keys(e, "$");
+    const col = e.ccol;
+    keys(e, "zt");
+    try testing.expectEqual(col, e.ccol);
+}
+
+test "the -all verbs are recognised, and wa does not close" {
+    const gpa = testing.allocator;
+    // No app behind this editor, so the -all verbs fall back to their
+    // single-buffer half. That is the path a headless test can see, and it
+    // pins the verb TABLE — the reach across panes is an e2e concern.
+    // Left SYNTHETIC on purpose. openText sets the buffer's path to the
+    // display name, so clearing the flag made the write verbs create a
+    // file called "t" in the repo — a test that edits the working tree it
+    // is run from. Synthetic, the writes are declined and the verb table
+    // is still exactly what is under test.
+    for ([_][]const u8{ "qa", "qall", "wa", "wall", "wqa", "wqall", "xa", "xall" }) |v| {
+        var e = try edText(gpa, "x\n");
+        defer e.destroy();
+        e.runEx(v);
+        // The point: never "not an editor command". Each one either acts
+        // or explains itself.
+        const msg = e.status_buf[0..e.status_len];
+        if (std.mem.indexOf(u8, msg, "not an editor command") != null) {
+            std.debug.print("verb :{s} unrecognised: {s}\n", .{ v, msg });
+            return error.UnknownVerb;
+        }
+    }
+
+    // `:qa` on a modified buffer refuses, exactly as `:q` does — verified
+    // against vim, which leaves the file untouched and complains.
+    var e = try edText(gpa, "x\n");
+    defer e.destroy();
+    keys(e, "ihello");
+    e.key("\x1b");
+    e.runEx("qa");
+    try testing.expect(!e.closed);
+    try testing.expect(e.status_err);
+    // ...and `:qa!` discards.
+    e.runEx("qa!");
+    try testing.expect(e.closed);
+}
 
 test "dot repeats a charwise change" {
     const gpa = testing.allocator;

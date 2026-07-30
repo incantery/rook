@@ -221,7 +221,17 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         for (app.spaces.items, 0..) |s, si| {
             for (s.tabs.items, 0..) |t, ti| {
                 for (t.panes.items) |p| {
-                    w.print("{s}{s} t{d} {s}{d} rect {d}x{d}+{d}+{d} grid {d}x{d}{s}\n", .{
+                    // What the pane HOLDS, appended last so the existing
+                    // "… grid 80x24" parsers are unaffected. Without it
+                    // `panes` cannot distinguish an editor from a shell,
+                    // which makes any assertion about editor panes — :qa's
+                    // reach, a takeover, a retarget — silently vacuous.
+                    var whatbuf: [128]u8 = undefined;
+                    const what: []const u8 = if (p.editor()) |ed|
+                        std.fmt.bufPrint(&whatbuf, " edit:{s}", .{ed.displayName()}) catch " edit"
+                    else
+                        " term";
+                    w.print("{s}{s} t{d} {s}{d} rect {d}x{d}+{d}+{d} grid {d}x{d}{s}{s}\n", .{
                         @as([]const u8, if (si == app.active_space and ti == s.active_tab) "*" else " "),
                         s.label(),
                         ti + 1,
@@ -234,6 +244,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                         p.cols,
                         p.rows,
                         @as([]const u8, if (t.zoomed == p) " zoomed" else ""),
+                        what,
                     }) catch break;
                 }
             }
