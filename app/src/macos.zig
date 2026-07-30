@@ -729,6 +729,8 @@ pub const App = struct {
     /// Held here as well as on each Session so a session spawned after
     /// a live reload inherits the current answer.
     cfg_clip_allow: bool = true,
+    /// config buffer-line: the per-pane document chips.
+    cfg_bufline: bool = true,
     /// Scrollback bytes for panes spawned later. NOT live-reloadable —
     /// a pane's limit is fixed when its PageList is built, so a reload
     /// would silently give new panes a different history depth from the
@@ -950,6 +952,7 @@ pub const App = struct {
             .bg_opacity = cfg.background_opacity,
             .cfg_bell = cfg.bell,
             .cfg_clip_allow = cfg.clipboard_write == .allow,
+            .cfg_bufline = cfg.buffer_line,
             .cursor_blink = cfg.cursor_blink,
             .cfg_scrollback = cfg.scrollback,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
@@ -1341,6 +1344,13 @@ pub const App = struct {
             const r = p.rect;
             if (x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h) {
                 self.setFocusLocked(p);
+                if (p.editor()) |ed| {
+                    // The buffer line's chips. mouseCell only claims
+                    // row zero while the line is up, so a click
+                    // anywhere else keeps meaning "focus the pane".
+                    const cell = self.cellAt(p, x, y);
+                    if (ed.mouseCell(cell[0], cell[1])) self.scene_dirty = true;
+                }
                 if (p.term()) |tm| {
                     const cell = self.cellAt(p, x, y);
                     const mm = tm.session.mouseMode();
@@ -3192,6 +3202,7 @@ pub const App = struct {
         ed.app_quit_all = &editorQuitAll;
         ed.app_open = &editorOpenRequest;
         ed.leader = self.keybinds.ed_leader;
+        ed.bufline_enabled = self.cfg_bufline;
     }
 
     /// The editor asked for a path OUTSIDE itself (tree beside-open,
@@ -3956,6 +3967,7 @@ pub const App = struct {
         self.leader_pending.store(false, .release);
         self.cfg_bell = cfg.bell;
         self.cfg_clip_allow = cfg.clipboard_write == .allow;
+        self.cfg_bufline = cfg.buffer_line;
         self.cursor_blink = cfg.cursor_blink;
 
         if (themepkg.byName(cfg.theme)) |t| {
@@ -3976,7 +3988,10 @@ pub const App = struct {
                     tm.session.clip_allow = self.cfg_clip_allow;
                     tm.session.mutex.unlock();
                 } else if (p.editor()) |ed| ed.render_dirty = true;
-                if (p.editor()) |ed| ed.leader = self.keybinds.ed_leader;
+                if (p.editor()) |ed| {
+                    ed.leader = self.keybinds.ed_leader;
+                    ed.bufline_enabled = self.cfg_bufline;
+                }
             }
         };
         self.scene_dirty = true;
@@ -5345,6 +5360,10 @@ pub const App = struct {
                 // Directories borrow the function colour: an accent
                 // that reads as structure in every builtin theme.
                 .tree_dir => th.syn_func,
+                // Chip text: ink on the mode's fill, set below.
+                .mode_insert, .mode_visual => th.bar_bg,
+                .buftab_on => th.bar_value,
+                .buftab_off => th.bar_fg,
             };
             switch (st) {
                 .sel => bg = th.ed_sel_bg,
@@ -5353,6 +5372,15 @@ pub const App = struct {
                     fg = if (status_row) th.chip_active_bg else th.ed_bg;
                 },
                 .mode => bg = th.accent,
+                // Airline's convention: the mode is tellable from the
+                // chip's colour alone — insert grows green, visual
+                // borrows the type colour.
+                .mode_insert => bg = th.diff_add,
+                .mode_visual => bg = th.syn_type,
+                // The buffer line: the app tab bar's chip vocabulary,
+                // one scale down.
+                .buftab_on => bg = th.chip_active_bg,
+                .buftab_off => bg = th.bar_bg,
                 else => {},
             }
 

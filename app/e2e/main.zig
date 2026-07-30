@@ -37,6 +37,7 @@ const scenarios = [_]Scenario{
     .{ .name = "whichkey", .what = "an unanswered leader reveals the key menu; rows and bar hints click", .run = whichkey },
     .{ .name = "statusbar", .what = "the bar knows where you are: cwd + branch follow the pane, segments click", .run = statusbar },
     .{ .name = "filetree", .what = "the tree takes over a pane, folds in place, reveals the current file, toggles back", .run = filetree },
+    .{ .name = "bufline", .what = "the buffer line: documents chip up, :b/:bn switch, a chip click lands blind", .run = bufline },
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
     .{ .name = "sidepane", .what = "side pane retiles the grid, flips edges, and holds the inbox", .run = sidepane },
     .{ .name = "asks", .what = "a question renders, takes keys, and produces the answer JSON", .run = asks },
@@ -892,6 +893,87 @@ fn statusbar(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctlFmt("click {d} {d}", .{ ws[0], ws[1] });
     _ = try app.waitCtl("palette", "mode:workspaces", 3000);
     _ = try app.ctl("key 1b");
+}
+
+// ------------------------------------------------------------- bufline
+
+/// The per-pane buffer line: retargeting a pane enrolls each document
+/// as a chip, :b N / :bn walk them (restoring the parked cursor line),
+/// and a chip answers a real pixel click through the pane's own grid.
+fn bufline(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var f_buf: [224]u8 = undefined;
+    const apath = try std.fmt.bufPrint(&f_buf, "{s}/alpha.txt", .{app.dirPath()});
+    try h.writeFile(apath, "A-ONE\nA-TWO\nA-THREE\n");
+    var f_buf2: [224]u8 = undefined;
+    const bpath = try std.fmt.bufPrint(&f_buf2, "{s}/beta.txt", .{app.dirPath()});
+    try h.writeFile(bpath, "B-ONE\n");
+
+    _ = try app.ctlFmt("edit {s}", .{apath});
+    _ = try app.waitCtl("panes", "edit:alpha.txt", 5000);
+    // Park the cursor on line 3, then retarget: the chip remembers.
+    _ = try app.ctl("type 2j");
+    _ = try app.ctlFmt("edit {s}", .{bpath});
+    _ = try app.waitCtl("panes", "edit:beta.txt", 5000);
+
+    // Both chips up, close marks drawn, beta's content on screen.
+    try app.waitText("alpha.txt", 5000);
+    var buf: [16 * 1024]u8 = undefined;
+    var scr = try app.screen(&buf);
+    try h.expectContains(scr, "beta.txt \u{d7}", "the active chip carries its close mark");
+    try h.expectContains(scr, "B-ONE", "the second document is on screen");
+
+    // :b 1 goes back and restores the parked line (blind: 3 in the
+    // status row's line:col).
+    _ = try app.ctl("type :b 1");
+    _ = try app.ctl("enter");
+    try app.waitText("A-THREE", 5000);
+    scr = try app.screen(&buf);
+    try h.expectContains(scr, "3:1", "the parked cursor line came back with the buffer");
+
+    // A pixel click on the beta chip switches — through the real
+    // pane-grid mapping, no ctl shortcut. The chip row is the pane's
+    // row zero; the beta chip sits right of alpha's ~10 columns.
+    const panes_out = try app.ctl("panes");
+    const rect = parseRect(panes_out) orelse return error.AssertFailed;
+    const cols = rect.cols;
+    const col: f32 = 16.5; // " alpha.txt × " spans 13 cells + a gap; this lands in "beta"
+    const px = rect.x + rect.w * (col / @as(f32, @floatFromInt(cols)));
+    const py = rect.y + rect.h * (0.5 / @as(f32, @floatFromInt(rect.rows)));
+    _ = try app.ctlFmt("click {d} {d}", .{ @as(u32, @intFromFloat(px)), @as(u32, @intFromFloat(py)) });
+    try app.waitText("B-ONE", 5000);
+
+    // :bp cycles back.
+    _ = try app.ctl("type :bp");
+    _ = try app.ctl("enter");
+    try app.waitText("A-THREE", 5000);
+}
+
+/// "rect WxH+X+Y grid CxR" for the focused pane, out of ctl `panes`.
+fn parseRect(s: []const u8) ?struct { x: f32, y: f32, w: f32, h: f32, cols: usize, rows: usize } {
+    var lines = std.mem.splitScalar(u8, s, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, " *") == null) continue;
+        const ri = std.mem.indexOf(u8, line, "rect ") orelse continue;
+        const gi = std.mem.indexOf(u8, line, " grid ") orelse continue;
+        var it = std.mem.tokenizeAny(u8, line[ri + 5 .. gi], "x+");
+        const w = std.fmt.parseFloat(f32, it.next() orelse return null) catch return null;
+        const hh = std.fmt.parseFloat(f32, it.next() orelse return null) catch return null;
+        const x = std.fmt.parseFloat(f32, it.next() orelse return null) catch return null;
+        const y = std.fmt.parseFloat(f32, it.next() orelse return null) catch return null;
+        const grid = line[gi + 6 ..];
+        const xi = std.mem.indexOfScalar(u8, grid, 'x') orelse return null;
+        const ge = std.mem.indexOfAny(u8, grid, " \r") orelse grid.len;
+        const cols = std.fmt.parseInt(usize, grid[0..xi], 10) catch return null;
+        const rows = std.fmt.parseInt(usize, grid[xi + 1 .. ge], 10) catch return null;
+        return .{ .x = x, .y = y, .w = w, .h = hh, .cols = cols, .rows = rows };
+    }
+    return null;
 }
 
 // ------------------------------------------------------------ filetree

@@ -124,6 +124,9 @@ pub const Config = struct {
     window_padding: f64 = 0,
     bell: Bell = .visual,
     clipboard_write: ClipboardWrite = .allow,
+    /// The per-pane buffer line (document chips over an editor). On
+    /// by default; `buffer-line = false` turns it off.
+    buffer_line: bool = true,
     /// Blink the focused pane's cursor (1.1s period, ~55% on — the
     /// mark every terminal shares). Ghostty's default too. The blink
     /// pauses while rook is in the background, so the zero-idle-frames
@@ -278,6 +281,13 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
                 std.debug.print("rook config: unknown clipboard-write '{s}' (allow, deny)\n", .{stripped});
                 break :blk .allow;
             };
+        } else if (std.mem.eql(u8, key, "buffer_line")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            if (std.mem.eql(u8, stripped, "true")) {
+                cfg.buffer_line = true;
+            } else if (std.mem.eql(u8, stripped, "false")) {
+                cfg.buffer_line = false;
+            } else std.debug.print("rook config: bad buffer-line '{s}' (true, false)\n", .{stripped});
         } else if (std.mem.eql(u8, key, "cursor_blink") or
             std.mem.eql(u8, key, "cursor_style_blink"))
         {

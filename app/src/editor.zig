@@ -82,6 +82,13 @@ pub const Style = enum(u8) {
     // Tree buckets — same structural family as the diff's: a row IS a
     // directory, which no grammar could tell the renderer.
     tree_dir,
+    // The status row's mode chip, one per family — vim's airline
+    // convention: you can tell the mode from color alone.
+    mode_insert,
+    mode_visual,
+    // The buffer line's chips: the active document and the others.
+    buftab_on,
+    buftab_off,
 };
 
 /// One highlight span in absolute byte offsets; later spans override.
@@ -110,6 +117,14 @@ pub fn wideCp(cp: u21) bool {
 }
 
 pub const Mode = enum { normal, insert, visual, visual_line, visual_block, command };
+
+/// One document this pane has held: where it lives and where the
+/// cursor was when the pane last looked away.
+pub const BufEntry = struct { path: []u8, line: usize };
+
+/// One chip of the rendered buffer line: its column span, the column
+/// of its close mark, and which buffer it names.
+pub const BufHit = struct { a: usize, b: usize, close: usize, idx: usize };
 
 /// How the app should place a path the editor asks it to open.
 /// `beside` is the tree's ask — reuse the pane to the right, else
@@ -329,6 +344,16 @@ pub const Editor = struct {
     /// again puts you back where you were (vim's `#`, grown here).
     alt_path: ?[]u8 = null,
     alt_line: usize = 0,
+
+    /// Every FILE this pane has held, in first-open order — the pane's
+    /// own document history (rook-buffers: a pane retargets in place,
+    /// so the pane is the window and this is its buffer list). Drawn
+    /// as the buffer line when there is more than one.
+    buffers: std.ArrayListUnmanaged(BufEntry) = .empty,
+    /// config buffer-line: the app sets it; default on.
+    bufline_enabled: bool = true,
+    /// Click ranges for the last-drawn buffer line, in grid columns.
+    bufline_hits: std.ArrayListUnmanaged(BufHit) = .empty,
 
     /// A buffer with no file behind it — a rendered transcript today,
     /// host-projected docs later. `:w` refuses on it for the same reason
@@ -605,6 +630,92 @@ pub const Editor = struct {
         self.tree_rows = .empty;
     }
 
+    /// Upsert the CURRENT buffer into the pane's document list with
+    /// the cursor's line, so switching back restores the place. No-op
+    /// for trees, synthetic views and pathless scratch buffers.
+    fn bufRemember(self: *Editor) void {
+        if (self.is_dir or self.synthetic) return;
+        const p = self.buf.path orelse return;
+        for (self.buffers.items) |*e| {
+            if (std.mem.eql(u8, e.path, p)) {
+                e.line = self.cline;
+                return;
+            }
+        }
+        const owned = self.gpa.dupe(u8, p) catch return;
+        self.buffers.append(self.gpa, .{ .path = owned, .line = self.cline }) catch {
+            self.gpa.free(owned);
+        };
+    }
+
+    /// Enroll a path in the document list (first-open order, like the
+    /// row of tabs it renders as).
+    fn bufAdd(self: *Editor, p: []const u8) void {
+        for (self.buffers.items) |e| {
+            if (std.mem.eql(u8, e.path, p)) return;
+        }
+        const owned = self.gpa.dupe(u8, p) catch return;
+        self.buffers.append(self.gpa, .{ .path = owned, .line = self.cline }) catch {
+            self.gpa.free(owned);
+        };
+    }
+
+    /// The list index of the buffer currently on screen, if enrolled.
+    fn bufCurrent(self: *const Editor) ?usize {
+        if (self.is_dir or self.synthetic) return null;
+        const p = self.buf.path orelse return null;
+        for (self.buffers.items, 0..) |e, i| {
+            if (std.mem.eql(u8, e.path, p)) return i;
+        }
+        return null;
+    }
+
+    /// Retarget to list entry `i`, restoring its cursor line. The
+    /// modified-buffer guard is open()'s own.
+    pub fn bufSwitch(self: *Editor, i: usize) void {
+        if (i >= self.buffers.items.len) return;
+        // Stable copy: open() rebuilds the list's world.
+        var pb: [max_path]u8 = undefined;
+        const e = self.buffers.items[i];
+        if (e.path.len > pb.len) return;
+        @memcpy(pb[0..e.path.len], e.path);
+        const line = e.line;
+        self.open(pb[0..e.path.len], false) catch |err| {
+            self.setStatus("open failed: {s}", .{@errorName(err)}, true);
+            return;
+        };
+        self.cline = @min(line, self.lineCountB() -| 1);
+        self.ccol = 0;
+    }
+
+    /// Drop entry `i` from the list — the chip's ×. Closing the chip
+    /// of the document ON SCREEN switches to a neighbour first (VS
+    /// Code's rule); a modified buffer refuses through open()'s guard
+    /// and keeps its chip.
+    pub fn bufClose(self: *Editor, i: usize) void {
+        if (i >= self.buffers.items.len) return;
+        if (self.bufCurrent() == i) {
+            if (self.buffers.items.len < 2) {
+                self.setStatus("last buffer — :q closes the pane", .{}, true);
+                return;
+            }
+            if (self.buf.isModified()) {
+                self.setStatus("unsaved changes (:w first, or :e! to discard)", .{}, true);
+                return;
+            }
+            self.bufSwitch(if (i == 0) 1 else i - 1);
+        }
+        const e = self.buffers.orderedRemove(i);
+        self.gpa.free(e.path);
+        self.render_dirty = true;
+    }
+
+    /// Is the buffer line on? Config on, more than one document, and
+    /// the pane tall enough that a chrome row costs nothing vital.
+    fn buflineActive(self: *const Editor) bool {
+        return self.bufline_enabled and self.buffers.items.len > 1 and self.last_rows >= 4;
+    }
+
     /// Colour the tree, line-level: directories in the tree_dir
     /// bucket, the climb row dim. Rides line_style — the same channel
     /// the diff view uses — so the render path learns nothing new.
@@ -830,6 +941,9 @@ pub const Editor = struct {
     pub fn destroy(self: *Editor) void {
         const gpa = self.gpa;
         gpa.free(self.line_buf);
+        for (self.buffers.items) |e| gpa.free(e.path);
+        self.buffers.deinit(gpa);
+        self.bufline_hits.deinit(gpa);
         self.clearTreeRows();
         var it = self.tree_expanded.keyIterator();
         while (it.next()) |k| gpa.free(k.*);
@@ -2512,6 +2626,25 @@ pub const Editor = struct {
             self.open(self.resolveTyped(arg, &rbuf), is(u8, verb, "e!")) catch |err| {
                 self.setStatus("open failed: {s}", .{@errorName(err)}, true);
             };
+        } else if (is(u8, verb, "b") or is(u8, verb, "buffer")) {
+            // 1-based, matching the chips as drawn.
+            const n = std.fmt.parseInt(usize, arg, 10) catch 0;
+            if (n == 0 or n > self.buffers.items.len) {
+                self.setStatus("no buffer {s} (1-{d})", .{ arg, self.buffers.items.len }, true);
+                return;
+            }
+            self.bufSwitch(n - 1);
+        } else if (is(u8, verb, "bn") or is(u8, verb, "bnext") or
+            is(u8, verb, "bp") or is(u8, verb, "bprev"))
+        {
+            const len = self.buffers.items.len;
+            if (len < 2) {
+                self.setStatus("no other buffer", .{}, true);
+                return;
+            }
+            const cur = self.bufCurrent() orelse 0;
+            const fwd = verb[1] == 'n';
+            self.bufSwitch(if (fwd) (cur + 1) % len else (cur + len - 1) % len);
         } else if (is(u8, verb, "vsp") or is(u8, verb, "vsplit") or
             is(u8, verb, "sp") or is(u8, verb, "split"))
         {
@@ -2726,6 +2859,10 @@ pub const Editor = struct {
         }
         var is_dir = false;
         const nb = try self.loadPath(path, &is_dir);
+        // The buffer list: remember where the OLD document's cursor
+        // was before it goes, and enroll the new one. Trees and
+        // synthetic views never enroll — the list is documents.
+        self.bufRemember();
         self.buf.deinit(self.gpa);
         self.buf = nb;
         self.buf.on_edit_ctx = self;
@@ -2734,6 +2871,9 @@ pub const Editor = struct {
         self.clearDecor();
         self.is_dir = is_dir;
         self.applyTreeDecor();
+        if (!is_dir) {
+            if (self.buf.path) |np| self.bufAdd(np);
+        }
         self.cline = 0;
         self.ccol = 0;
         self.top = 0;
@@ -5182,7 +5322,8 @@ pub const Editor = struct {
     pub fn cursorCell(self: *Editor) struct { col: u16, row: u16 } {
         const gw = self.gutterWidth();
         const rc = self.renderColAt(self.cline, self.ccol);
-        return .{ .col = @intCast(gw + rc), .row = @intCast(self.cline -| self.top) };
+        const top_rows: usize = if (self.buflineActive()) 1 else 0;
+        return .{ .col = @intCast(gw + rc), .row = @intCast(self.cline -| self.top + top_rows) };
     }
 
     /// ⌘V: the system pasteboard, vim-shaped.
@@ -5405,7 +5546,11 @@ pub const Editor = struct {
 
         const gw = self.gutterWidth();
         const text_cols = cols - @min(gw, cols - 1);
-        const text_rows = rows - 1;
+        // The buffer line, when active, takes the TOP row and the text
+        // area starts one lower — same shape as the status row's claim
+        // on the bottom.
+        const top_rows: usize = if (self.buflineActive()) 1 else 0;
+        const text_rows = rows - 1 - top_rows;
         self.ensureVisible(text_cols, text_rows);
         self.refreshHighlights(text_rows);
 
@@ -5435,7 +5580,7 @@ pub const Editor = struct {
 
         for (0..text_rows) |row| {
             const line = self.top + row;
-            const out = g[row * cols ..][0..cols];
+            const out = g[(row + top_rows) * cols ..][0..cols];
             if (line >= self.lineCountB()) {
                 out[0] = .{ .cp = '~', .st = .dim };
                 continue;
@@ -5567,8 +5712,51 @@ pub const Editor = struct {
             }
         }
 
+        if (top_rows > 0) self.fillBufferLine(g[0..cols]);
         self.fillStatusRow(g[(rows - 1) * cols ..][0..cols]);
         return g;
+    }
+
+    /// The buffer line: one chip per document this pane has held, the
+    /// on-screen one lifted, each with a close mark. Rebuilds the
+    /// click ranges the app's mouse path reads.
+    fn fillBufferLine(self: *Editor, out: []RCell) void {
+        for (out) |*c| c.* = .{ .cp = ' ', .st = .buftab_off };
+        self.bufline_hits.clearRetainingCapacity();
+        const cur = self.bufCurrent();
+        var x: usize = 0;
+        for (self.buffers.items, 0..) |e, i| {
+            if (x >= out.len) break;
+            const on: Style = if (cur != null and cur.? == i) .buftab_on else .buftab_off;
+            const a = x;
+            putStr(out, &x, " ", on);
+            putStr(out, &x, std.fs.path.basename(e.path), on);
+            if (cur != null and cur.? == i and self.buf.isModified()) putStr(out, &x, " +", on);
+            putStr(out, &x, " ", on);
+            const close = x;
+            putStr(out, &x, "\u{d7}", on); // ×
+            putStr(out, &x, " ", on);
+            self.bufline_hits.append(self.gpa, .{ .a = a, .b = @min(x, out.len), .close = close, .idx = i }) catch {};
+            x += 1;
+        }
+    }
+
+    /// A mouse press in this pane's cell grid, offered to the buffer
+    /// line. True when it acted (the app repaints); false lets the
+    /// click keep meaning "focus the pane".
+    pub fn mouseCell(self: *Editor, col: usize, row: usize) bool {
+        if (row != 0 or !self.buflineActive()) return false;
+        for (self.bufline_hits.items) |hit| {
+            if (col < hit.a or col >= hit.b) continue;
+            if (col == hit.close) {
+                self.bufClose(hit.idx);
+            } else {
+                self.bufSwitch(hit.idx);
+            }
+            self.render_dirty = true;
+            return true;
+        }
+        return false;
     }
 
     /// Point a cell at the bytes of its cluster. Bytes live in a
@@ -5682,7 +5870,11 @@ pub const Editor = struct {
             .visual_block => " V-BLOCK ",
             .command => unreachable,
         };
-        putStr(out, &x, mode_str, .mode);
+        putStr(out, &x, mode_str, switch (self.mode) {
+            .insert => .mode_insert,
+            .visual, .visual_line, .visual_block => .mode_visual,
+            else => .mode,
+        });
         x += 1;
         if (self.macro_reg != 0) {
             putStr(out, &x, "recording @", .err);
@@ -6153,6 +6345,64 @@ test "tree buffer: enter folds in place and opens files, dash climbs" {
     var subpath: [280]u8 = undefined;
     const want_sub = try std.fmt.bufPrint(&subpath, "{s}/sub", .{root});
     try testing.expectEqualStrings(want_sub, e.tree_rows.items[e.cline + 1].path);
+}
+
+test "the buffer line: documents enroll, chips switch, close, and restore the line" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pathbuf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&pathbuf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "a1\na2\na3\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "b1\n" });
+
+    var abuf: [280]u8 = undefined;
+    const apath = try std.fmt.bufPrint(&abuf, "{s}/a.txt", .{root});
+    var e = try Editor.create(gpa, io, apath);
+    defer e.destroy();
+    try testing.expectEqual(@as(usize, 1), e.buffers.items.len);
+
+    // Park the cursor somewhere, then leave: the entry remembers it.
+    keys(e, "2j");
+    keys(e, ":e b.txt");
+    e.key("\r");
+    try testing.expectEqual(@as(usize, 2), e.buffers.items.len);
+    try testing.expectEqualStrings("b.txt", std.fs.path.basename(e.buf.path.?));
+
+    // The line renders: both names, close marks, and it costs the
+    // text area exactly one row (the ~ filler starts one lower).
+    const dump = try e.dumpText(gpa, 40, 8);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "a.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "b.txt \u{d7}") != null);
+
+    // :b 1 switches back and restores the parked line.
+    keys(e, ":b 1");
+    e.key("\r");
+    try testing.expectEqualStrings("a.txt", std.fs.path.basename(e.buf.path.?));
+    try testing.expectEqual(@as(usize, 2), e.cline);
+
+    // :bn cycles forward.
+    keys(e, ":bn");
+    e.key("\r");
+    try testing.expectEqualStrings("b.txt", std.fs.path.basename(e.buf.path.?));
+
+    // A chip click switches; its × closes. Rebuild hits via a render.
+    _ = e.fillGrid(40, 8);
+    const first = e.bufline_hits.items[0];
+    try testing.expect(e.mouseCell(first.a + 1, 0)); // a.txt's chip
+    try testing.expectEqualStrings("a.txt", std.fs.path.basename(e.buf.path.?));
+    _ = e.fillGrid(40, 8);
+    const second = e.bufline_hits.items[1];
+    try testing.expect(e.mouseCell(second.close, 0)); // b.txt's ×
+    try testing.expectEqual(@as(usize, 1), e.buffers.items.len);
+    // One document left: the line retires, the top row is text again.
+    const dump2 = try e.dumpText(gpa, 40, 8);
+    defer gpa.free(dump2);
+    const row0 = dump2[0..(std.mem.indexOfScalar(u8, dump2, '\n') orelse dump2.len)];
+    try testing.expect(std.mem.indexOf(u8, row0, "a1") != null);
+    try testing.expect(std.mem.indexOf(u8, dump2, "\u{d7}") == null);
 }
 
 test "the editor leader arms in normal mode and speaks registry ids" {

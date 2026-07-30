@@ -43,6 +43,10 @@
 # window-padding-x = 4
 # window-padding-y = 4
 
+# The per-pane buffer line: open documents as chips over an editor
+# (x to close, click to switch; :b N / :bn / :bp from the keyboard).
+# buffer-line = true
+
 # Blink the focused pane's cursor (1.1s period; solid while you type,
 # solid whenever rook is in the background). `cursor-style-blink` is
 # accepted too, for ghostty muscle memory.

@@ -463,6 +463,21 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       Still owed from the mock: git-status letters on rows, file ops
       (add/rename/delete), dotfile filtering.
 
+- [x] **Buffer line — the pane's documents as chips.** rook-buffers'
+      model, rendered: a pane retargets in place, so the PANE is the
+      window and its document history is the tab row (the app's top
+      strip stays layouts). Every file a pane holds enrolls; more than
+      one and the pane's top row becomes chips — active lifted
+      (chip_active_bg, the tab bar's vocabulary one scale down), ×
+      to close, `+` on a modified active chip. Click switches (the
+      pane-grid mouse seam, `Editor.mouseCell`, claims only row zero
+      while the line is up), × closes with VS Code's
+      switch-to-neighbour rule, and the modified guard is open()'s
+      own. :b N / :bn / :bp walk the list, each restoring the cursor
+      line parked when the pane looked away. `buffer-line = false`
+      turns it off. Also: the status row's mode chip now colours by
+      mode family (insert green, visual type-gold — airline's rule:
+      tellable from colour alone). Still owed: drag to rearrange.
 - [x] **Diff / review viewer** — `<leader>d` / `:DiffOpen`, and `D` on a
       review finding opens that file's diff at that finding's line.
       Unified rather than side-by-side: side-by-side needs ~160 columns
