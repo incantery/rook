@@ -295,6 +295,34 @@ a daily driver.
       PANE's own rect (no launch geometry in an assertion) and
       asserts the numbers and tildes are gone; `vscodefeel` pins the
       one-file tab.
+- [x] **⌘P, the file finder** — the last big VS Code reflex. Its own
+      index (src/filelist.zig): a walk, not `git ls-files`, because
+      rook does not fork for this (git.zig's rule) and a fork per open
+      is a spinner on a cold cache — and a walk also works where there
+      is no repo at all. IGNORING is the whole problem, and the lesson
+      is that .gitignore is READ IN EVERY DIRECTORY: rook's own tree
+      proved it — `zig-pkg/` is ignored by app/.gitignore, and reading
+      only the root's put 26k vendored files in the picker (the entire
+      20k cap, real source pushed out). Nested reading took the index
+      from 20,000-truncated to 439. Only SIMPLE directory lines are
+      honoured (no globs, no negations): a half-implemented glob that
+      hides the file you went looking for is worse than showing an
+      extra one. Dotfiles and a builtin list (node_modules, target,
+      dist…) go too, and 20k is a hard cap that says `truncated`.
+      The palette RANKS for the first time — thousands of paths where
+      the other modes have tens — scoring basename hits, contiguous
+      runs, word boundaries (/ _ - .) and short paths, keeping the top
+      64 by insertion (a full sort is work nobody reads). Rows are VS
+      Code's two-part shape: basename left, directory right and quiet.
+      Enter opens `.here` — a new OpenHow that means "this pane takes
+      the document", which is exactly `openEditor`, so ⌘P lands where
+      ctl `edit` and `rook edit` already land (a tree pane is the
+      exception: retargeting the sidebar would dissolve it, so it
+      beside-opens). `>` as the first character switches to commands —
+      VS Code's own prefix, real muscle memory. paneRootLocked is now
+      shared with the tree so the two surfaces can never disagree
+      about which repo you are in. e2e `filefinder` builds a repo with
+      a NESTED .gitignore and pins all of it.
 - [ ] **Theme engine**: one semantic Palette, 8 builtins, runtime swap,
       **VS Code theme importer**. rook has 2 builtins and a config key
       (3 now, with vscode-dark).

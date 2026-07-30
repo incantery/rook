@@ -56,6 +56,7 @@ const scenarios = [_]Scenario{
     .{ .name = "envgraph", .what = "environment.json wins: the graph's leader and chords drive, config.toml yields", .run = envgraph },
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
+    .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
 };
@@ -2500,4 +2501,77 @@ fn vscodeFeel(gpa: std.mem.Allocator, bin: []const u8) !void {
         waited += 50;
     }
     try h.expectEq("panes after rail click", 2, try app.paneCount());
+}
+
+// --------------------------------------------------------- filefinder
+
+/// ⌘P: the repo's files, fuzzy-matched and RANKED (a picker that
+/// returns walk order is a picker you scroll). The two things a unit
+/// test cannot reach are here: the index is the walk of a real tree
+/// with real .gitignores in it, and Enter has to land the file in the
+/// pane you were looking at.
+fn fileFinder(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // A repo whose NESTED .gitignore hides a directory — the case that
+    // made rook's own picker useless (26k vendored files from
+    // app/.gitignore's `zig-pkg/`, root .gitignore silent about it).
+    var proj_buf: [192]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{app.dirPath()});
+    var p_buf: [256]u8 = undefined;
+    try h.mkdirP(try std.fmt.bufPrint(&p_buf, "{s}/src", .{proj}));
+    try h.mkdirP(try std.fmt.bufPrint(&p_buf, "{s}/sub/junk", .{proj}));
+    try h.mkdirP(try std.fmt.bufPrint(&p_buf, "{s}/node_modules/dep", .{proj}));
+    if (try h.runCmd(proj, &.{ "/usr/bin/git", "init", "-q" }) != 0) return error.NoGit;
+    try h.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/README.md", .{proj}), "hi\n");
+    try h.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/src/widget.zig", .{proj}), "const w = 1;\n");
+    try h.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/src/other.zig", .{proj}), "const o = 2;\n");
+    // The nested ignore, and something for it to hide.
+    try h.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/sub/.gitignore", .{proj}), "junk/\n");
+    try h.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/sub/keep.zig", .{proj}), "const k = 3;\n");
+    try h.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/sub/junk/hidden.zig", .{proj}), "no\n");
+    // …and the builtin skip list, which needs no .gitignore at all.
+    try h.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/node_modules/dep/index.zig", .{proj}), "no\n");
+
+    _ = try app.ctlFmt("type cd {s}/src", .{proj});
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("statusbar", "proj/src", 8000);
+
+    // The index roots at the REPO (not the cwd) and skips both kinds
+    // of ignored directory.
+    _ = try app.ctl("run palette.files");
+    const listed = try app.waitCtl("palette", "mode:files", 5000);
+    // Four: widget.zig, other.zig, keep.zig, README.md. NOT the
+    // sub/.gitignore itself — dotfiles are skipped, which is also
+    // what keeps .git out without an entry for it.
+    try h.expectContains(listed, "indexed:4\n", "exactly the four visible files");
+    try h.expectContains(listed, "src/widget.zig", "the repo's files are there");
+    try h.expectContains(listed, "sub/keep.zig", "a file beside a nested .gitignore survives");
+    try h.expectNotContains(listed, "hidden.zig", "the NESTED .gitignore's directory is skipped");
+    try h.expectNotContains(listed, "node_modules", "the builtin skip list holds");
+
+    // Fuzzy AND ranked: "wid" is a subsequence of both widget.zig and
+    // (via w-i-d) nothing else here, but the basename hit must lead.
+    _ = try app.ctl("type wid");
+    const ranked = try app.waitCtl("palette", "filter:wid", 3000);
+    const star = std.mem.indexOf(u8, ranked, "*") orelse return error.AssertFailed;
+    try h.expectContains(ranked[star..], "widget.zig", "the basename match ranks first");
+
+    // Enter opens it HERE — the terminal pane takes it over, which is
+    // what every other open in rook does (ctl edit, `rook edit`).
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("panes", "edit:widget.zig", 5000);
+    try h.expectEq("no pane was split", 1, try app.paneCount());
+    try h.expectContains(try app.ctl("dump"), "const w = 1;", "the file is open and showing");
+
+    // VS Code's `>` prefix: ⌘P then ">" is the command palette.
+    _ = try app.ctl("run palette.files");
+    _ = try app.waitCtl("palette", "mode:files", 3000);
+    _ = try app.ctl("type >");
+    _ = try app.waitCtl("palette", "mode:commands", 3000);
+    _ = try app.ctl("key 1b");
 }

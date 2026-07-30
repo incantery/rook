@@ -22,6 +22,7 @@ const pastepkg = @import("paste.zig");
 const hostc = @import("hostc.zig");
 const themepkg = @import("theme.zig");
 const cfgpkg = @import("config.zig");
+const filelistpkg = @import("filelist.zig");
 const uipkg = @import("ui.zig");
 const stats = @import("stats.zig");
 
@@ -322,7 +323,7 @@ const CompletedBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 
 /// What the palette is listing. The widget, filter, key handling and
 /// draw path are shared; only the row text and what Enter does differ.
-pub const PalMode = enum { workspaces, commands };
+pub const PalMode = enum { workspaces, commands, files };
 
 /// Which side pane a panel is slotted into. Panels are placement-
 /// agnostic: the tenant draws into a rect and does not know which edge
@@ -512,6 +513,13 @@ pub const App = struct {
     pal_items: []workspacespkg.Entry = &.{},
     pal_filtered: [64]usize = undefined,
     pal_nfiltered: usize = 0,
+    /// ⌘P's file index — walked at open, freed at the next open. A
+    /// repo's file list is thousands of entries where the other two
+    /// modes have tens, so this mode SCORES its matches and keeps the
+    /// best 64 in `pal_filtered` (parallel `pal_scores`); the other
+    /// modes keep source order, which is already meaningful for them.
+    pal_files: filelistpkg.Index = .{},
+    pal_scores: [64]i32 = undefined,
     // ---- side pane: the container every §2 panel lands in ----
     /// Closed by default. An empty container costs nothing but a branch,
     /// and the inbox is only worth screen space once something is in it.
@@ -2165,6 +2173,24 @@ pub const App = struct {
         self.resetPaletteLocked();
     }
 
+    /// Open the FILE finder (⌘P) over the focused pane's repo.
+    ///
+    /// The root is the focused pane's own context, not the space's:
+    /// `cd` is sacred, so a shell that walked into a submodule finds
+    /// the submodule's files. Walked fresh at every open — a file
+    /// created by the agent you are watching has to be findable
+    /// without a restart, and a repo-sized walk is milliseconds.
+    pub fn openFilePalette(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        var rootbuf: [1024]u8 = undefined;
+        const root = self.paneRootLocked(self.activeTab().focused, &rootbuf) orelse "";
+        self.pal_files.deinit(self.gpa);
+        self.pal_files = filelistpkg.load(self.gpa, root);
+        self.pal_mode = .files;
+        self.resetPaletteLocked();
+    }
+
     fn resetPaletteLocked(self: *App) void {
         self.pal_input_len = 0;
         self.pal_sel = 0;
@@ -2211,10 +2237,72 @@ pub const App = struct {
         return true;
     }
 
+    /// Subsequence match with a SCORE, for the one list long enough to
+    /// need ranking. A file picker that returns matches in walk order
+    /// is a file picker you scroll, which is the thing ⌘P exists not
+    /// to do. Higher is better; null is no match.
+    ///
+    /// What it rewards, in the order it matters: matching in the
+    /// BASENAME (you type "main" for main.zig, not for
+    /// src/domain/x.zig), CONTIGUOUS runs, a match at a word boundary
+    /// (start, or after / _ - .), and a short path. These four are
+    /// what separate "the file I meant is first" from "it is somewhere
+    /// in the list".
+    fn fuzzyScore(hay: []const u8, needle: []const u8) ?i32 {
+        if (needle.len == 0) return 0;
+        const base_at = if (std.mem.lastIndexOfScalar(u8, hay, '/')) |i| i + 1 else 0;
+        var score: i32 = 0;
+        var hi: usize = 0;
+        var prev_end: usize = std.math.maxInt(usize);
+        for (needle) |nc| {
+            const n = std.ascii.toLower(nc);
+            while (hi < hay.len and std.ascii.toLower(hay[hi]) != n) hi += 1;
+            if (hi == hay.len) return null;
+            if (hi >= base_at) score += 12;
+            if (prev_end == hi) score += 10; // contiguous with the last hit
+            if (hi == 0 or hi == base_at) {
+                score += 8;
+            } else switch (hay[hi - 1]) {
+                '/', '_', '-', '.' => score += 6,
+                else => {},
+            }
+            prev_end = hi + 1;
+            hi += 1;
+        }
+        // Shorter paths win ties: "src/x.zig" over "a/b/c/d/src/x.zig".
+        score -= @intCast(@min(hay.len / 4, 40));
+        return score;
+    }
+
+    /// Keep the best `pal_filtered.len` by score, insertion-sorted —
+    /// the list is thousands long and only the top dozen is ever seen,
+    /// so a full sort would be work nobody looks at.
+    fn palInsertScored(self: *App, idx: usize, score: i32) void {
+        var at = self.pal_nfiltered;
+        if (at == self.pal_filtered.len) {
+            if (score <= self.pal_scores[at - 1]) return;
+            at -= 1;
+        } else {
+            self.pal_nfiltered += 1;
+        }
+        while (at > 0 and self.pal_scores[at - 1] < score) : (at -= 1) {
+            self.pal_scores[at] = self.pal_scores[at - 1];
+            self.pal_filtered[at] = self.pal_filtered[at - 1];
+        }
+        self.pal_scores[at] = score;
+        self.pal_filtered[at] = idx;
+    }
+
     fn palRefilterLocked(self: *App) void {
         const needle = self.pal_input[0..self.pal_input_len];
         self.pal_nfiltered = 0;
         switch (self.pal_mode) {
+            // The one list that RANKS: thousands of paths, of which
+            // only the top dozen is ever read.
+            .files => for (self.pal_files.paths, 0..) |path, i| {
+                const sc = fuzzyScore(path, needle) orelse continue;
+                self.palInsertScored(i, sc);
+            },
             .workspaces => for (self.pal_items, 0..) |e, i| {
                 if (self.pal_nfiltered >= self.pal_filtered.len) break;
                 // Children match on "parent/name" so "rook/zig" and "rz"
@@ -2276,6 +2364,17 @@ pub const App = struct {
                     self.palRefilterLocked();
                 },
                 else => if (b >= 0x20 and b < 0x7f and self.pal_input_len < self.pal_input.len) {
+                    // VS Code's own prefix: `>` as the first character
+                    // of the file finder switches to commands. Real
+                    // muscle memory — ⌘P then ">" is how a lot of
+                    // people reach the command palette at all.
+                    if (b == '>' and self.pal_mode == .files and self.pal_input_len == 0) {
+                        self.pal_mode = .commands;
+                        self.pal_sel = 0;
+                        self.palRefilterLocked();
+                        i += 1;
+                        continue;
+                    }
                     self.pal_input[self.pal_input_len] = b;
                     self.pal_input_len += 1;
                     self.palRefilterLocked();
@@ -2294,6 +2393,29 @@ pub const App = struct {
     fn palActivateLocked(self: *App) void {
         if (self.pal_sel >= self.pal_nfiltered) {
             self.closePaletteLocked();
+            return;
+        }
+        if (self.pal_mode == .files) {
+            const rel = self.pal_files.paths[self.pal_filtered[self.pal_sel]];
+            var abs: [1024]u8 = undefined;
+            const full = std.fmt.bufPrint(&abs, "{s}/{s}", .{ self.pal_files.root, rel }) catch {
+                self.closePaletteLocked();
+                return;
+            };
+            self.closePaletteLocked();
+            // Through the same queue every other chrome-initiated open
+            // uses: we are under draw_lock, and pane surgery is not.
+            // `.here` is VS Code's ⌘P too — the file lands where you
+            // are looking, and the pane you were in keeps its history.
+            if (full.len <= self.pending_open_path.len) {
+                @memcpy(self.pending_open_path[0..full.len], full);
+                self.pending_open = .{
+                    .len = full.len,
+                    .line = 0,
+                    .how = .here,
+                    .from = self.activeTab().focused.id,
+                };
+            }
             return;
         }
         if (self.pal_mode == .commands) {
@@ -2368,6 +2490,7 @@ pub const App = struct {
             .tab_select => _ = self.selectTab(@as(usize, spec.arg) - 1),
             .workspace_switch => self.openPalette(),
             .palette_commands => self.openCommandPalette(),
+            .palette_files => self.openFilePalette(),
             .app_fullscreen => self.requestFullscreen(),
             .panel_attention => self.toggleSidePane(.attention),
             .panel_deck => self.toggleDeck(),
@@ -2446,10 +2569,12 @@ pub const App = struct {
     /// number), rooted at the repo of wherever the focused pane is —
     /// the filesystem .git probe, directory itself as the fallback.
     /// Caller holds draw_lock.
-    fn openTreePaneLocked(self: *App) ?*panespkg.Pane {
-        const t = self.activeTab();
-        const p = t.focused;
-        var root_buf: [1024]u8 = undefined;
+    /// The repo root a pane is "in": its file's directory for an
+    /// editor, its live cwd for a terminal, walked up to the nearest
+    /// .git — an ANCHOR, not a fence (the fallback is the directory
+    /// itself, so a non-repo still works). The tree and ⌘P share it so
+    /// the two surfaces can never disagree about where you are.
+    fn paneRootLocked(self: *App, p: *panespkg.Pane, buf: []u8) ?[]const u8 {
         const start: []const u8 = blk: {
             if (p.editor()) |ed| {
                 if (!ed.synthetic) if (ed.buf.path) |bp| {
@@ -2460,7 +2585,14 @@ pub const App = struct {
             const cwd = self.paneCwd(p) orelse return null;
             break :blk std.mem.span(cwd);
         };
-        const root = @import("git.zig").repoRootFs(self.io, self.gpa, start, &root_buf) orelse start;
+        return @import("git.zig").repoRootFs(self.io, self.gpa, start, buf) orelse start;
+    }
+
+    fn openTreePaneLocked(self: *App) ?*panespkg.Pane {
+        const t = self.activeTab();
+        const p = t.focused;
+        var root_buf: [1024]u8 = undefined;
+        const root = self.paneRootLocked(p, &root_buf) orelse return null;
 
         const ed = editorpkg.Editor.create(self.gpa, self.io, root) catch return null;
         if (!ed.is_dir) {
@@ -3351,6 +3483,26 @@ pub const App = struct {
             self.draw_lock.unlock();
             return;
         };
+
+        // Here: THIS pane takes the document — an editor retargets in
+        // place (rook-buffers: the pane is the window, and its buffer
+        // list grows by one), a terminal is taken over with the shell
+        // parked underneath. That is exactly `openEditor`, which is
+        // also what ctl `edit` and `rook edit` mean by opening a file,
+        // so ⌘P lands where every other open already lands. A TREE is
+        // the exception: retargeting the sidebar to a file would
+        // dissolve the sidebar, so it beside-opens instead.
+        if (req.how == .here) {
+            const is_tree = if (src_pane.editor()) |ed| ed.is_dir else false;
+            if (!is_tree) {
+                self.setFocusLocked(src_pane);
+                self.draw_lock.unlock();
+                if (req.line > 0) {
+                    _ = self.openEditorAtLine(path, @intCast(req.line + 1));
+                } else _ = self.openEditor(path);
+                return;
+            }
+        }
 
         // Beside: the pane to the right, if it is already a document
         // pane, retargets in place — rook-buffers' own rule.
@@ -4853,7 +5005,11 @@ pub const App = struct {
     };
     pub const rail_items = [_]RailItem{
         .{ .glyph = "\u{f07b}", .title = "explorer", .action = .tree_toggle },
-        .{ .glyph = "\u{f002}", .title = "search", .action = .palette_commands },
+        // VS Code's magnifier is find-in-files, which rook does not
+        // have yet; of the two things it could mean today, "find a
+        // file" is the closer read of the glyph than "run a command"
+        // — and the command palette has ⌘K plus a bar hint already.
+        .{ .glyph = "\u{f002}", .title = "search", .action = .palette_files },
         .{ .glyph = "\u{f126}", .title = "scm", .action = .diff_open },
         .{ .glyph = "\u{f085}", .title = "agents", .action = .panel_deck },
         .{ .glyph = "\u{f00c}", .title = "review", .action = .panel_review },
@@ -5484,6 +5640,7 @@ pub const App = struct {
         tx += ui.textOver(tx, ty, switch (self.pal_mode) {
             .workspaces => "workspace ",
             .commands => "command ",
+            .files => "file ",
         }, th.bar_fg);
         tx += ui.textOver(tx, ty, self.pal_input[0..self.pal_input_len], th.bar_value);
         ui.rect(tx, ty, cw / 4, self.renderer.cell_h, th.accent); // caret
@@ -5511,6 +5668,18 @@ pub const App = struct {
             // Both modes draw the same shape: a label on the left and one
             // quiet right-aligned detail that drops when it doesn't fit.
             const label, const detail = switch (self.pal_mode) {
+                // Basename first, then the directory it lives in —
+                // VS Code's own two-part row, and the shape that lets
+                // you scan a column of names rather than a column of
+                // paths that all start with "src/".
+                .files => blk: {
+                    const rel = self.pal_files.paths[item_i];
+                    const cut = std.mem.lastIndexOfScalar(u8, rel, '/');
+                    const base = if (cut) |c| rel[c + 1 ..] else rel;
+                    const dir = if (cut) |c| rel[0..c] else "";
+                    const l = std.fmt.bufPrint(&lbl, "{s}", .{base}) catch base;
+                    break :blk .{ l, dir };
+                },
                 .workspaces => blk: {
                     const e = self.pal_items[item_i];
                     // Worktree children sit indented under their parent as
@@ -5887,6 +6056,10 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                     },
                     'k' => {
                         app.dispatch(.{ .action = .palette_commands });
+                        return null;
+                    },
+                    'p' => {
+                        app.dispatch(.{ .action = .palette_files });
                         return null;
                     },
                     // ⌘S: the GUI hand's save, speaking `:w` itself so

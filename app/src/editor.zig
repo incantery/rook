@@ -129,7 +129,11 @@ pub const BufHit = struct { a: usize, b: usize, close: usize, idx: usize };
 /// How the app should place a path the editor asks it to open.
 /// `beside` is the tree's ask — reuse the pane to the right, else
 /// split one off; the two `split_*` are :vsp and :sp.
-pub const OpenHow = enum { beside, split_right, split_down };
+/// Where an app-level open should land. `here` retargets the ASKING
+/// pane (rook-buffers: the pane is the window, documents pass through
+/// it) — what ⌘P wants, and what a terminal pane turns into a takeover.
+/// `beside` reuses or splits off the neighbour (the tree sidebar's).
+pub const OpenHow = enum { here, beside, split_right, split_down };
 
 /// What shape a register holds. `block` is a rectangle, stored one row
 /// per line — it is the shape, not the text, that makes `p` put it back

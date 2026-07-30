@@ -295,6 +295,22 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         app.draw_lock.lock();
         if (!app.pal_open) {
             _ = w.write("closed\n") catch 0;
+        } else if (app.pal_mode == .files) {
+            // The index size comes along: "no matches" with 0 files
+            // indexed is a walk that found nothing, which is a
+            // different bug from a filter that matched nothing.
+            w.print("mode:files\nfilter:{s}\nroot:{s}\nindexed:{d}{s}\n", .{
+                app.pal_input[0..app.pal_input_len],
+                app.pal_files.root,
+                app.pal_files.paths.len,
+                @as([]const u8, if (app.pal_files.truncated) " truncated" else ""),
+            }) catch {};
+            for (app.pal_filtered[0..app.pal_nfiltered], 0..) |ii, vi| {
+                w.print("{s}{s}\n", .{
+                    @as([]const u8, if (vi == app.pal_sel) "*" else " "),
+                    app.pal_files.paths[ii],
+                }) catch break;
+            }
         } else if (app.pal_mode == .commands) {
             w.print("mode:commands\nfilter:{s}\n", .{app.pal_input[0..app.pal_input_len]}) catch {};
             const reg = @import("registry.zig");

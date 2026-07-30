@@ -90,7 +90,7 @@
 # diffs and other readonly docs stay normal either way.
 # editor-mode = "normal"
 
-# The left icon rail (VS Code's activity bar): explorer, search,
+# The left icon rail (VS Code's activity bar): explorer, go-to-file,
 # source control, agents, review — one click each, always visible.
 # activity-bar = false
 

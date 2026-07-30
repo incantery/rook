@@ -141,6 +141,17 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(registry_tests).step);
 
+    // The ⌘P index's ignore rules. Its own root because "why is my file
+    // missing from the picker" is unanswerable from the app: a skipped
+    // directory looks exactly like a directory that had nothing in it.
+    const filelist_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/filelist.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(filelist_tests).step);
+
     // The ask form's wire shape and JSON escaping. Its own root because a
     // malformed answer body is silently catastrophic: the host rejects
     // it, the answer is lost, and the asker stays blocked forever.
