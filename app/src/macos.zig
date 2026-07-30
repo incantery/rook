@@ -4840,7 +4840,21 @@ fn mouseCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) call
     const scale = app.layer.msgSend(f64, "contentsScale", .{});
     const x: f32 = @floatCast(loc.x * scale);
     const y: f32 = app.px_h - @as(f32, @floatCast(loc.y * scale));
-    if (y < 0 or y > app.px_h or x < 0 or x > app.px_w) return event_id; // titlebar etc.
+    if (y < 0 or y > app.px_h or x < 0 or x > app.px_w) return event_id; // outside the layer
+
+    // Hand back what AppKit owns: the resize border, and in glass mode
+    // the titlebar strip. Mouse-DOWN only — once AppKit takes a down it
+    // runs its own tracking loop and the drags never reach here, while a
+    // drag rook already anchored (a selection reaching the window edge)
+    // must keep coming to us.
+    //
+    // clickAt has always bailed out of the strip with the comment
+    // "titlebar drag strip — AppKit's". The intent was right and the
+    // plumbing never matched it: bailing there still left the monitor
+    // returning nil, so AppKit got nothing and the gestures it implements
+    // — move, zoom, resize — had nowhere to happen.
+    if (etype == 1 and uipkg.appKitOwns(x, y, app.px_w, app.px_h, app.top_inset, @floatCast(scale)))
+        return event_id;
 
     if (etype == 1) { // NSEventTypeLeftMouseDown
         // Shift forces LOCAL handling (selection) when an app owns

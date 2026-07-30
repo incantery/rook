@@ -179,6 +179,107 @@ pub const Ui = struct {
 
 const T = std.testing;
 
+/// Does AppKit own this point, rather than rook?
+///
+/// A local event monitor sees every mouse event before the window does,
+/// and swallowing one (returning nil) takes it away from AppKit for good.
+/// Most of the window is rook's, but three regions are not, and every one
+/// of them is a gesture the window manager implements and rook cannot:
+///
+///   the top strip  — drag to move, double-click to zoom. Only exists in
+///                    glass mode, where the layer extends UNDER the
+///                    titlebar; `top_inset` is 0 otherwise and AppKit's
+///                    own titlebar sits above the layer entirely.
+///   the side and bottom edges — drag to resize.
+///   the bottom corners — drag to resize DIAGONALLY, and they need to
+///                    reach further in than the edges do, which is the
+///                    whole reason this is not one margin.
+///
+/// Why corners were the broken case: the window's resize region also
+/// extends a pixel or two OUTSIDE the frame, into the shadow. An edge
+/// drag can land in that sliver and never reach the monitor at all, which
+/// is why edges appeared to work. At a corner the outside sliver is an L
+/// two pixels wide, so a diagonal grab almost always lands inside the
+/// layer — where it was being eaten.
+///
+/// `edge` and `corner` are in POINTS, scaled here: AppKit's regions are
+/// point-sized, so a retina window must not get a half-sized grab area.
+/// All coordinates are device pixels with the origin at the layer's top
+/// left, matching the scene.
+pub fn appKitOwns(
+    x: f32,
+    y: f32,
+    px_w: f32,
+    px_h: f32,
+    top_inset: f32,
+    scale: f32,
+) bool {
+    // AppKit's own numbers, near enough: a few points at an edge, and a
+    // noticeably larger square at a corner.
+    const edge = 5 * scale;
+    const corner = 16 * scale;
+
+    if (y < top_inset) return true;
+
+    // No top edge in the list, and that is not an omission. In glass mode
+    // the layer's top IS the window's top, and the strip above already
+    // covers it — 28 points, wider than any corner. In opaque mode the
+    // layer's top borders AppKit's titlebar rather than the outside
+    // world, so there is nothing to resize from there.
+    const near_side = x <= edge or x >= px_w - edge;
+    const near_bottom = y >= px_h - edge;
+    if (near_side or near_bottom) return true;
+
+    return (x <= corner or x >= px_w - corner) and y >= px_h - corner;
+}
+
+test "appKitOwns claims the titlebar strip, and only in glass mode" {
+    // Glass mode: the layer runs under a 28pt titlebar.
+    try std.testing.expect(appKitOwns(400, 10, 1000, 800, 28, 1));
+    try std.testing.expect(appKitOwns(400, 27, 1000, 800, 28, 1));
+    // ...and stops claiming at the strip's edge, or the tab bar under it
+    // would never get a click.
+    try std.testing.expect(!appKitOwns(400, 28, 1000, 800, 28, 1));
+    // Opaque mode has no strip: AppKit's titlebar is above the layer, so
+    // the layer's first row is rook's.
+    try std.testing.expect(!appKitOwns(400, 1, 1000, 800, 0, 1));
+}
+
+test "appKitOwns claims the sides and the bottom, but not the top" {
+    try std.testing.expect(appKitOwns(0, 400, 1000, 800, 0, 1));
+    try std.testing.expect(appKitOwns(1000, 400, 1000, 800, 0, 1));
+    try std.testing.expect(appKitOwns(500, 800, 1000, 800, 0, 1));
+    // The top edge of an opaque window's layer is not a resize border —
+    // claiming it would cost the tab bar its clicks for nothing.
+    try std.testing.expect(!appKitOwns(500, 2, 1000, 800, 0, 1));
+    // The middle is rook's, which is nearly all of it.
+    try std.testing.expect(!appKitOwns(500, 400, 1000, 800, 0, 1));
+}
+
+test "a corner reaches further in than an edge — the diagonal drag" {
+    // THE BUG. Ten pixels in from the bottom is past the 5pt edge band,
+    // so on an edge it belongs to rook...
+    try std.testing.expect(!appKitOwns(500, 790, 1000, 800, 0, 1));
+    // ...but at a corner the same depth is AppKit's, because that is what
+    // a diagonal grab has to be able to hit. One margin for both would
+    // either make corners unhittable or steal a 16pt band from every edge.
+    try std.testing.expect(appKitOwns(10, 790, 1000, 800, 0, 1));
+    try std.testing.expect(appKitOwns(990, 790, 1000, 800, 0, 1));
+    // Just outside the corner square, along both axes.
+    try std.testing.expect(!appKitOwns(17, 783, 1000, 800, 0, 1));
+}
+
+test "the grab areas are in points, so retina does not halve them" {
+    // At 2x, a 5pt edge is 10px. A margin left in pixels would give a
+    // retina window half the grab area of a non-retina one — the kind of
+    // bug that reads as "resizing feels fussy on this display".
+    try std.testing.expect(appKitOwns(500, 791, 1000, 800, 0, 2));
+    try std.testing.expect(!appKitOwns(500, 789, 1000, 800, 0, 2));
+    // ...and the corner square scales with it: 16pt = 32px.
+    try std.testing.expect(appKitOwns(20, 770, 1000, 800, 0, 2));
+    try std.testing.expect(!appKitOwns(40, 760, 1000, 800, 0, 2));
+}
+
 test "text that fits is returned untouched" {
     var buf: [64]u8 = undefined;
     try T.expectEqualStrings("hello", clip(&buf, "hello", 5));
