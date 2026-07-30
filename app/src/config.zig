@@ -312,6 +312,12 @@ pub const Config = struct {
     /// lands in $HOME, and a sidebar listing your home directory is
     /// noise, not orientation.
     explorer_auto: bool = false,
+
+    /// Run language servers at all. On by default and lazy: nothing
+    /// spawns until a file of a known language opens, so the cost of
+    /// leaving it on is zero for anyone who never opens one. Off is for
+    /// people who want the editor and nothing behind it.
+    lsp: bool = true,
 };
 
 /// One number over the config file — the live-reload poll compares this
@@ -543,6 +549,13 @@ fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
             } else if (std.mem.eql(u8, stripped, "normal")) {
                 cfg.editor_insert = false;
             } else std.debug.print("rook config: unknown editor-mode '{s}' (normal, insert)\n", .{stripped});
+        } else if (std.mem.eql(u8, key, "lsp")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            if (std.mem.eql(u8, stripped, "true")) {
+                cfg.lsp = true;
+            } else if (std.mem.eql(u8, stripped, "false")) {
+                cfg.lsp = false;
+            } else std.debug.print("rook config: unknown lsp '{s}' (true, false)\n", .{stripped});
         } else if (std.mem.eql(u8, key, "explorer_auto")) {
             const stripped = std.mem.trim(u8, val, "\"");
             if (std.mem.eql(u8, stripped, "true")) {
@@ -685,6 +698,8 @@ fn applyEnvOption(cfg: *Config, gpa: std.mem.Allocator, key_raw: []const u8, val
         cfg.activity_bar = jBool(value) orelse cfg.activity_bar;
     } else if (std.mem.eql(u8, key, "explorer_auto")) {
         cfg.explorer_auto = jBool(value) orelse cfg.explorer_auto;
+    } else if (std.mem.eql(u8, key, "lsp")) {
+        cfg.lsp = jBool(value) orelse cfg.lsp;
     } else if (std.mem.eql(u8, key, "top_bar")) {
         cfg.top_bar = jSegList(value) orelse cfg.top_bar;
     } else if (std.mem.eql(u8, key, "status_left")) {

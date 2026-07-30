@@ -425,6 +425,17 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     e2e_mod.link_libc = true;
+    // The suite re-execs itself as a FAKE language server (`--fake-lsp`),
+    // so the lsp scenario needs no gopls installed — a suite that failed
+    // on a fresh machine for want of a toolchain would be testing the
+    // machine. It speaks real framing through the real parser, which is
+    // also the point: the fake cannot drift from the client.
+    e2e_mod.addImport("lsp", b.createModule(.{
+        .root_source_file = b.path("src/lsp.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+    }));
     // Reading a `shot` back as pixels — the half of visibility a text
     // dump cannot give. Same frameworks png.zig writes through.
     e2e_mod.linkFramework("CoreGraphics", .{});

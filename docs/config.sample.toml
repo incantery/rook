@@ -100,6 +100,20 @@
 # the shell — you opened a terminal.
 # explorer-auto = false
 
+# Language servers. On by default and LAZY: nothing spawns until you
+# open a file of a language rook knows, so leaving it on costs nothing
+# if you never do. Today that means Go (gopls, found on PATH or in
+# ~/go/bin) — diagnostics in the gutter, `gd` to the definition, `K` for
+# hover, `]d`/`[d` to walk the errors. Set false for an editor with
+# nothing running behind it.
+# lsp = true
+
+# Override the server for a language, until config packages land:
+#   ROOK_LSP_GO="/path/to/gopls -mode=stdio"
+# An environment variable rather than a config key on purpose — the
+# language package is what will own this, and a key added now is a key
+# to deprecate later.
+
 
 # ── Coder ────────────────────────────────────────────────────────────────
 

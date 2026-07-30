@@ -1180,6 +1180,7 @@ extern "c" fn chdir(path: [*:0]const u8) c_int;
 extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 extern "c" fn poll(fds: [*]PollFd, n: c_uint, timeout: c_int) c_int;
+extern "c" fn getdtablesize() c_int;
 extern "c" fn _exit(code: c_int) noreturn;
 
 extern "c" fn usleep(us: u32) c_int;
@@ -1295,12 +1296,14 @@ pub const Server = struct {
             // Inheriting ours would print it over rook's own window.
             const devnull = open("/dev/null", O_WRONLY);
             if (devnull >= 0) _ = dup2(devnull, 2);
-            _ = close(in_fds[0]);
-            _ = close(in_fds[1]);
-            _ = close(out_fds[0]);
-            _ = close(out_fds[1]);
-            _ = close(wake_fds[0]);
-            _ = close(wake_fds[1]);
+            // EVERYTHING above stdio dies here, not just our own pipes.
+            // pty.zig learned this the hard way and its comment says it
+            // best: a ctl CONNECTION held open by a child keeps the
+            // client from ever seeing EOF. A language server is a child
+            // like any other, and it outlives a lot of ctl connections.
+            var cfd: c_int = 3;
+            const maxfd = getdtablesize();
+            while (cfd < maxfd) : (cfd += 1) _ = close(cfd);
             _ = chdir(croot);
             _ = execvp(cargv[0].?, cargv.ptr);
             _exit(127);

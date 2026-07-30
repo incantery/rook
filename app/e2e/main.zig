@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const h = @import("harness.zig");
+const lsp = @import("lsp");
 
 const Scenario = struct {
     name: []const u8,
@@ -58,6 +59,7 @@ const scenarios = [_]Scenario{
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
     .{ .name = "explorerauto", .what = "explorer-auto: the sidebar opens at launch inside a repo, and never takes the keys", .run = explorerAuto },
+    .{ .name = "lsp", .what = "language server: diagnostics reach the gutter, ]d walks them, an edit re-diagnoses", .run = lspScenario },
     .{ .name = "findfiles", .what = "⌘⇧F: scan honours the ignore rules, results group by file, Enter jumps to the line", .run = findInFiles },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
@@ -1884,8 +1886,33 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("usage: e2e <path-to-rook> [filter...]\n", .{});
         return error.Usage;
     }
+    // Re-exec as the fake language server. Must come before anything
+    // else: in this mode the process IS a server on stdio, and a single
+    // byte printed to stdout would corrupt the protocol.
+    if (std.mem.eql(u8, std.mem.span(argv[1]), "--fake-lsp")) {
+        if (argv.len < 3) return error.Usage;
+        return fakeLsp(gpa, std.mem.span(argv[2]));
+    }
     const bin = std.mem.span(argv[1]);
     const filters = argv[2..];
+    // Our own path, ABSOLUTE. build.zig passes a relative artifact path,
+    // and a server command is exec'd by a child that has already chdir'd
+    // to the project root — the same trap explorerauto hit, where a
+    // relative path silently execs nothing. Resolve it once, here.
+    {
+        const raw = std.mem.span(argv[0]);
+        if (raw.len > 0 and raw[0] == '/') {
+            self_exe = raw;
+        } else {
+            var cwd: [1024]u8 = undefined;
+            if (h.cwdPath(&cwd)) |dir| {
+                const trimmed = if (std.mem.startsWith(u8, raw, "./")) raw[2..] else raw;
+                // A static buffer, not an allocation: this lives for the
+                // whole run and freeing it would be ceremony.
+                self_exe = std.fmt.bufPrint(&self_exe_buf, "{s}/{s}", .{ dir, trimmed }) catch raw;
+            } else self_exe = raw;
+        }
+    }
 
     var passed: usize = 0;
     var failed: usize = 0;
@@ -2714,5 +2741,223 @@ fn explorerAuto(gpa: std.mem.Allocator, bin: []const u8) !void {
             app.deinit();
         }
         try h.expectEq("no repo, no sidebar", 1, try app.paneCount());
+    }
+}
+
+// ---------------------------------------------------------------- lsp
+
+/// A language server, end to end: spawned lazily when a Go file opens,
+/// its diagnostics converted into the buffer's own coordinates, shown
+/// in the gutter, walkable with `]d`.
+///
+/// The server is FAKE — a shell script speaking real LSP framing.
+/// Depending on a real gopls would make this suite fail on a fresh
+/// machine for a reason that has nothing to do with rook, and the
+/// protocol itself is already proven against the real one in
+/// src/lsp.zig's own tests. What this proves is the wiring: that the
+/// app finds a root, spawns for it, opens the document, routes the
+/// publish to the pane showing that file, and converts the columns.
+fn lspScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lsp-{d}", .{h.runPid()});
+    var proj_buf: [256]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{scratch});
+    try h.mkdirP(proj);
+
+    // go.mod is what makes this directory a ROOT — the server is per
+    // module, not per file, and finding it is the manager's job.
+    var f_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/go.mod", .{proj}), "module smoke\n\ngo 1.21\n");
+    var main_buf: [288]u8 = undefined;
+    const main_go = try std.fmt.bufPrint(&main_buf, "{s}/main.go", .{proj});
+    // A plain string, not a multiline literal: the indent has to be a
+    // real tab so the column under test is the one a Go file actually
+    // has, and Zig's \\ literals refuse tabs.
+    try h.writeFile(main_go, "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(nope())\n}\n");
+
+    // The fake server is THIS BINARY, re-exec'd. See fakeLsp below.
+    var envval_buf: [640]u8 = undefined;
+    const envval = try std.fmt.bufPrint(&envval_buf, "{s} --fake-lsp {s}", .{ self_exe, main_go });
+
+    const app = try h.Instance.start(gpa, bin, .{
+        .cwd = proj,
+        .env = &.{.{ "ROOK_LSP_GO", envval }},
+    });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // Nothing runs until a file of a known language opens. That is the
+    // whole lazy-start promise, and it is cheap to check.
+    try h.expectContains(try app.ctl("lsp"), "enabled:yes", "servers are on");
+    {
+        // Borrowed from the instance's own buffer — valid until the
+        // next ctl call, which is why this is scoped.
+        const before = try app.ctl("lsp");
+        if (std.mem.indexOf(u8, before, "server go") != null) {
+            std.debug.print("      a server spawned before any Go file was opened\n", .{});
+            return error.AssertFailed;
+        }
+    }
+
+    var cmd_buf: [320]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{main_go}));
+
+    // The publish arrives some frames later — poll rather than sleep.
+    _ = try app.waitCtl("lsp", "pane gutter:yes errors:1", 8_000);
+
+    const out = try app.ctl("lsp");
+    try h.expectContains(out, "server go ready", "the server came up for this module");
+    try h.expectContains(out, proj, "and it is rooted at the module, not at the file");
+    try h.expectContains(out, "pane gutter:yes", "the sign column is reserved");
+    // Column 13 in the protocol's UTF-16 is column 13 in bytes on this
+    // (ASCII) line — what is under test is that the conversion HAPPENED
+    // and landed on the right line, which is 1-based here.
+    try h.expectContains(out, "pane err 6:13 undefined: nope", "the diagnostic reached the buffer's own coordinates");
+
+    // `]d` walks to it. The cursor starts at the top of the file, so a
+    // jump to line 6 is only possible if the editor has the diagnostic.
+    _ = try app.ctl("type ]d");
+    {
+        const dump = try app.ctl("dump");
+        try h.expectContains(dump, "undefined: nope", "and `]d` puts the message in the status line");
+        // 6:17, not 6:13 — the status bar counts RENDER columns and the
+        // line starts with a tab. The diagnostic's byte column is 13;
+        // the two disagreeing is correct, and worth pinning.
+        try h.expectContains(dump, "6:17", "having landed on the diagnostic, not near it");
+    }
+
+    // `K` — the answer arrives frames later, so wait for it rather than
+    // assuming a timing.
+    _ = try app.ctl("type K");
+    {
+        const dump = try app.waitCtl("dump", "func main()", 5_000);
+        // The markdown fence is noise in a one-line status; the
+        // signature is the answer.
+        try h.expectNotContains(dump, "```", "hover shows the signature, not the fence");
+    }
+
+    // `gd` — a LocationLink, which is what a linkSupport client gets.
+    // targetSelectionRange is the identifier: line 5 of the file (the
+    // protocol's 0-based line 4), which is where the cursor must land.
+    _ = try app.ctl("type gd");
+    _ = try app.waitCtl("dump", "5:6", 5_000);
+}
+
+
+// ------------------------------------------------------- the fake server
+
+/// This binary's own path, for scenarios that re-exec it.
+var self_exe: []const u8 = "";
+var self_exe_buf: [2048]u8 = undefined;
+
+/// A language server made of the client's own framing code.
+///
+/// It answers initialize, publishes one error against `target`, and
+/// serves hover and definition. Real LSP over real stdio — the app
+/// cannot tell it from gopls, which is the point: a scenario that
+/// needed a Go toolchain installed would fail on a fresh machine for a
+/// reason that has nothing to do with rook.
+///
+/// It parses with lsp.parseFrame, the same function the client uses, so
+/// the fake cannot drift into speaking a dialect the client doesn't.
+fn fakeLsp(gpa: std.mem.Allocator, target: []const u8) !void {
+    var in: std.ArrayListUnmanaged(u8) = .empty;
+    defer in.deinit(gpa);
+    var buf: [8192]u8 = undefined;
+
+    while (true) {
+        const n = h.readStdin(&buf);
+        if (n <= 0) return; // client closed: we are done
+        try in.appendSlice(gpa, buf[0..@intCast(n)]);
+
+        while (true) {
+            const frame = lsp.parseFrame(in.items) catch return orelse break;
+            try fakeHandle(gpa, frame.body, target);
+            const used = frame.total;
+            if (used >= in.items.len) {
+                in.clearRetainingCapacity();
+            } else {
+                std.mem.copyForwards(u8, in.items[0 .. in.items.len - used], in.items[used..]);
+                in.shrinkRetainingCapacity(in.items.len - used);
+            }
+        }
+    }
+}
+
+fn fakeSend(gpa: std.mem.Allocator, body: []const u8) !void {
+    var hdr: [64]u8 = undefined;
+    const head = try std.fmt.bufPrint(&hdr, "Content-Length: {d}\r\n\r\n", .{body.len});
+    h.writeStdout(head);
+    h.writeStdout(body);
+    _ = gpa;
+}
+
+fn fakeHandle(gpa: std.mem.Allocator, body: []const u8, target: []const u8) !void {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, body, .{}) catch return;
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return,
+    };
+    const method = switch (obj.get("method") orelse .null) {
+        .string => |m| m,
+        else => return,
+    };
+    const id: ?i64 = switch (obj.get("id") orelse .null) {
+        .integer => |i| i,
+        else => null,
+    };
+
+    var w = std.Io.Writer.Allocating.init(gpa);
+    defer w.deinit();
+
+    if (std.mem.eql(u8, method, "initialize")) {
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"capabilities\":{{}}}}}}",
+            .{id orelse 1},
+        );
+        try fakeSend(gpa, w.written());
+        // The diagnostic, unprompted — which is how a real server does
+        // it: nobody asks for diagnostics, they arrive.
+        w.clearRetainingCapacity();
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{{" ++
+                "\"uri\":\"file://{s}\",\"diagnostics\":[{{\"range\":{{\"start\":{{\"line\":5,\"character\":13}}," ++
+                "\"end\":{{\"line\":5,\"character\":17}}}},\"severity\":1,\"source\":\"fake\"," ++
+                "\"message\":\"undefined: nope\"}}]}}}}",
+            .{target},
+        );
+        try fakeSend(gpa, w.written());
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/hover")) {
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"contents\":{{\"kind\":\"markdown\"," ++
+                "\"value\":\"```go\\nfunc main()\\n```\"}}}}}}",
+            .{id orelse 0},
+        );
+        try fakeSend(gpa, w.written());
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/definition")) {
+        // A LocationLink, because that is what a server answers a
+        // client that declared linkSupport — and rook does.
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[{{\"targetUri\":\"file://{s}\"," ++
+                "\"targetRange\":{{\"start\":{{\"line\":4,\"character\":0}},\"end\":{{\"line\":6,\"character\":1}}}}," ++
+                "\"targetSelectionRange\":{{\"start\":{{\"line\":4,\"character\":5}},\"end\":{{\"line\":4,\"character\":9}}}}}}]}}",
+            .{ id orelse 0, target },
+        );
+        try fakeSend(gpa, w.written());
+        return;
+    }
+    // Anything else with an id still has to be answered or the client
+    // waits forever — the same rule the client obeys in the other
+    // direction.
+    if (id) |i| {
+        try w.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":null}}", .{i});
+        try fakeSend(gpa, w.written());
     }
 }

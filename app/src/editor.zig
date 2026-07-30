@@ -89,10 +89,57 @@ pub const Style = enum(u8) {
     // The buffer line's chips: the active document and the others.
     buftab_on,
     buftab_off,
+    // Diagnostics. Their own buckets rather than reusing `err`, because
+    // `err` is rook talking (a failed :w) and these are the language
+    // server talking — the themes want to colour them separately.
+    diag_err,
+    diag_warn,
+    diag_info,
 };
 
 /// One highlight span in absolute byte offsets; later spans override.
 pub const HlSpan = struct { start: u32, end: u32, st: Style };
+
+/// One thing a language server says is wrong, in EDITOR coordinates:
+/// 0-based lines, BYTE columns. The protocol's UTF-16 columns are
+/// converted before they get here (lsp.zig owns that arithmetic), so
+/// nothing below this line has to know the protocol exists.
+pub const Diag = struct {
+    line: u32 = 0,
+    col: u32 = 0,
+    end_line: u32 = 0,
+    end_col: u32 = 0,
+    severity: Severity = .err,
+    /// Owned by the editor.
+    message: []const u8 = "",
+    /// Owned by the editor; "" when the server didn't name itself.
+    source: []const u8 = "",
+
+    pub const Severity = enum(u8) {
+        err,
+        warn,
+        info,
+        hint,
+
+        pub fn style(self: Severity) Style {
+            return switch (self) {
+                .err => .diag_err,
+                .warn => .diag_warn,
+                .info, .hint => .diag_info,
+            };
+        }
+
+        /// The sign. Errors and warnings share a glyph and differ by
+        /// colour — which is how you read a gutter at a glance, and it
+        /// keeps the column one cell wide in every font.
+        pub fn sign(self: Severity) u21 {
+            return switch (self) {
+                .err, .warn => '●',
+                .info, .hint => '·',
+            };
+        }
+    };
+};
 
 pub const RCell = struct {
     cp: u21 = ' ',
@@ -176,6 +223,11 @@ pub const Editor = struct {
     pend_g: bool = false,
     pend_z: bool = false,
     pend_r: bool = false,
+    /// `[` or `]` awaiting its second key. Only `d` answers today
+    /// (diagnostics); vim's other bracket pairs are unclaimed, and
+    /// an unknown second key falls through to nothing rather than
+    /// being eaten as a motion.
+    pend_bracket: u8 = 0,
 
     vanchor_line: usize = 0,
     vanchor_col: usize = 0,
@@ -398,6 +450,37 @@ pub const Editor = struct {
     hl_spans_buf: std.ArrayListUnmanaged(HlSpan) = .empty,
     hl_styles: std.ArrayListUnmanaged(Style) = .empty,
     hl_vstart: usize = 0,
+
+    // Language-server seam — the same function-pointer shape as the
+    // highlighter's, for the same reason: the editor must not link a
+    // process manager to run its headless tests. macos.zig attaches;
+    // null means no server, and every caller below degrades to what the
+    // editor could already do on its own.
+    lsp_ctx: ?*anyopaque = null,
+    /// Ask about the identifier under the cursor. The answer is
+    /// ASYNCHRONOUS — it arrives as a status line or a jump some frames
+    /// later — so these return nothing.
+    lsp_hover: ?*const fn (*anyopaque, *Editor) void = null,
+    lsp_definition: ?*const fn (*anyopaque, *Editor) void = null,
+    /// The buffer version the server has been told about. The app
+    /// compares it on the frame loop, so an unedited buffer costs one
+    /// integer compare per frame and no traffic.
+    lsp_version: u64 = std.math.maxInt(u64),
+    /// Debounce state: the version last OBSERVED changing, and when.
+    /// Sync fires when typing stops, not on every keystroke — a
+    /// full-text didChange per character is a lot of pipe for an
+    /// answer that would be superseded before it arrived.
+    lsp_seen_version: u64 = std.math.maxInt(u64),
+    lsp_seen_at: f64 = 0,
+
+    /// What the server says is wrong with this buffer, owned. Sorted by
+    /// position, which is what makes `]d` a walk rather than a search.
+    diags: std.ArrayListUnmanaged(Diag) = .empty,
+    /// Reserve the sign column. Set when a server is ATTACHED, not when
+    /// diagnostics arrive: widening the gutter the moment an error
+    /// appears would shove the whole document sideways while you type,
+    /// and getting an error is already enough news for one keystroke.
+    diag_gutter: bool = false,
 
     /// Per-LINE decoration for a document whose colouring and numbering
     /// come from its own structure rather than from a grammar and its own
@@ -996,6 +1079,8 @@ pub const Editor = struct {
         self.reg.deinit(gpa);
         for (&self.regs) |*r| r.text.deinit(gpa);
         self.grid.deinit(gpa);
+        self.clearDiagnostics();
+        self.diags.deinit(gpa);
         gpa.destroy(self);
     }
 
@@ -1029,7 +1114,7 @@ pub const Editor = struct {
     ///
     /// One definition, and every column that comes from a length goes
     /// through it.
-    fn lineCap(self: *Editor, line: usize) usize {
+    pub fn lineCap(self: *Editor, line: usize) usize {
         return self.ensureLineBuf(self.lineLenB(line));
     }
 
@@ -1061,7 +1146,7 @@ pub const Editor = struct {
     /// The returned slice is only valid until the NEXT call: it is one
     /// shared buffer. Every caller consumes it before asking for
     /// another line, and that is a contract, not an accident.
-    fn lineText(self: *Editor, line: usize) []const u8 {
+    pub fn lineText(self: *Editor, line: usize) []const u8 {
         return self.lineTextUpTo(line, max_line);
     }
 
@@ -1086,7 +1171,7 @@ pub const Editor = struct {
     /// the line: four callers were doing it once per frame each, which
     /// on a two-megabyte line came to more bytes copied per frame than
     /// the line itself.
-    fn renderColAt(self: *Editor, line: usize, col: usize) usize {
+    pub fn renderColAt(self: *Editor, line: usize, col: usize) usize {
         return renderCol(self.lineTextUpTo(line, col), col);
     }
 
@@ -1357,6 +1442,125 @@ pub const Editor = struct {
         self.status_err = is_err;
     }
 
+    // ------------------------------------------------------ diagnostics
+
+    pub fn clearDiagnostics(self: *Editor) void {
+        for (self.diags.items) |d| {
+            self.gpa.free(d.message);
+            self.gpa.free(d.source);
+        }
+        self.diags.clearRetainingCapacity();
+        self.render_dirty = true;
+    }
+
+    /// Replace the buffer's diagnostics. Copies — the caller's list
+    /// belongs to an event it is about to free.
+    ///
+    /// Sorted on the way in so `]d` can walk rather than search, and
+    /// because a server is free to publish in any order (gopls groups by
+    /// analyzer, which is not document order).
+    pub fn setDiagnostics(self: *Editor, items: []const Diag) void {
+        self.clearDiagnostics();
+        for (items) |d| {
+            const msg = self.gpa.dupe(u8, d.message) catch continue;
+            const src = self.gpa.dupe(u8, d.source) catch {
+                self.gpa.free(msg);
+                continue;
+            };
+            var copy = d;
+            copy.message = msg;
+            copy.source = src;
+            self.diags.append(self.gpa, copy) catch {
+                self.gpa.free(msg);
+                self.gpa.free(src);
+            };
+        }
+        const S = struct {
+            fn lt(_: void, a: Diag, b: Diag) bool {
+                if (a.line != b.line) return a.line < b.line;
+                return a.col < b.col;
+            }
+        };
+        std.mem.sort(Diag, self.diags.items, {}, S.lt);
+        self.render_dirty = true;
+    }
+
+    /// The most severe diagnostic on a line, or none. Most severe
+    /// because a line with an error and a hint is an error line — the
+    /// gutter has one cell to say so.
+    pub fn diagForLine(self: *const Editor, line: usize) ?*const Diag {
+        var best: ?*const Diag = null;
+        for (self.diags.items) |*d| {
+            if (d.line != line) continue;
+            if (best == null or @intFromEnum(d.severity) < @intFromEnum(best.?.severity)) best = d;
+        }
+        return best;
+    }
+
+    pub fn diagCounts(self: *const Editor) struct { errors: usize, warnings: usize } {
+        var e: usize = 0;
+        var w: usize = 0;
+        for (self.diags.items) |d| {
+            switch (d.severity) {
+                .err => e += 1,
+                .warn => w += 1,
+                else => {},
+            }
+        }
+        return .{ .errors = e, .warnings = w };
+    }
+
+    /// `]d` / `[d` — the next diagnostic in document order, wrapping.
+    /// Wrapping because a file with one error and a cursor below it
+    /// would otherwise answer "no more diagnostics" while showing one.
+    fn jumpDiag(self: *Editor, fwd: bool) void {
+        if (self.diags.items.len == 0) {
+            self.setStatus("no diagnostics", .{}, false);
+            return;
+        }
+        const cl: u32 = @intCast(self.cline);
+        const cc: u32 = @intCast(self.ccol);
+        var target: ?*const Diag = null;
+        if (fwd) {
+            for (self.diags.items) |*d| {
+                if (d.line > cl or (d.line == cl and d.col > cc)) {
+                    target = d;
+                    break;
+                }
+            }
+            if (target == null) target = &self.diags.items[0];
+        } else {
+            var i = self.diags.items.len;
+            while (i > 0) : (i -= 1) {
+                const d = &self.diags.items[i - 1];
+                if (d.line < cl or (d.line == cl and d.col < cc)) {
+                    target = d;
+                    break;
+                }
+            }
+            if (target == null) target = &self.diags.items[self.diags.items.len - 1];
+        }
+        const d = target.?;
+        self.setJump();
+        self.cline = @min(d.line, self.lineCountB() -| 1);
+        self.ccol = @min(d.col, self.lineCap(self.cline));
+        self.goal = renderCol(self.lineText(self.cline), self.ccol);
+        self.showDiagAtCursor();
+    }
+
+    /// Put the cursor line's diagnostic in the status line. Called after
+    /// a jump rather than on every cursor move: a message that appears
+    /// and vanishes as you walk through a file is noise, and it would
+    /// stomp whatever the last command said.
+    pub fn showDiagAtCursor(self: *Editor) void {
+        const d = self.diagForLine(self.cline) orelse return;
+        if (d.source.len > 0) {
+            self.setStatus("{s}: {s}", .{ d.source, d.message }, d.severity == .err);
+        } else {
+            self.setStatus("{s}", .{d.message}, d.severity == .err);
+        }
+    }
+
     // ------------------------------------------------------------ input
 
     /// Input is a STREAM, not a keystroke: NSEvents deliver one char,
@@ -1481,7 +1685,7 @@ pub const Editor = struct {
     /// True when nothing is half-typed — the moment a command is over.
     fn quiescent(self: *const Editor) bool {
         return self.mode == .normal and self.op == 0 and self.count == 0 and
-            !self.pend_g and !self.pend_z and !self.pend_r and self.pend_shift == 0 and
+            !self.pend_g and !self.pend_z and !self.pend_r and self.pend_bracket == 0 and self.pend_shift == 0 and
             self.pend_obj == 0 and self.pend_find == 0 and !self.pend_reg and
             self.pend_mark == 0 and self.pend_macro == 0;
     }
@@ -2808,10 +3012,13 @@ pub const Editor = struct {
         // tree costume. (One leading space stays: the fold chevrons
         // need somewhere to sit.)
         if (self.is_dir) return 1;
-        if (self.line_gutter.items.len == 0) return digits(self.lineCountB()) + 1;
+        // The sign column, when a server is attached. Leftmost, so the
+        // numbers stay flush against the text the way they always were.
+        const sign: usize = if (self.diag_gutter) 1 else 0;
+        if (self.line_gutter.items.len == 0) return sign + digits(self.lineCountB()) + 1;
         var max: u32 = 1;
         for (self.line_gutter.items) |n| max = @max(max, n);
-        return digits(max) + 1;
+        return sign + digits(max) + 1;
     }
 
     /// Show text that has no file behind it, under a display name.
@@ -2841,6 +3048,7 @@ pub const Editor = struct {
             if (self.hl_ctx) |ctx| set(ctx, null);
         }
         self.hl_version = std.math.maxInt(u64);
+        self.clearDiagnostics();
     }
 
     /// Re-read the file under this buffer, keeping where you were.
@@ -2882,6 +3090,9 @@ pub const Editor = struct {
         self.clampNormal();
         self.render_dirty = true;
         self.hl_version = std.math.maxInt(u64);
+        // Stale positions against new text; the server is about to say
+        // so itself.
+        self.clearDiagnostics();
         self.setStatus("reloaded — changed on disk", .{}, false);
     }
 
@@ -2922,6 +3133,10 @@ pub const Editor = struct {
         self.render_dirty = true;
         if (self.hl_set_path) |f| f(self.hl_ctx.?, self.buf.path);
         self.hl_version = std.math.maxInt(u64);
+        // Another file's errors drawn against this one's lines is worse
+        // than no errors at all. The server republishes for whatever we
+        // open next; until then the gutter says nothing.
+        self.clearDiagnostics();
     }
 
     /// Run one ex command as if typed at `:` — the app's ⌘S (and any
@@ -3151,6 +3366,16 @@ pub const Editor = struct {
             return;
         }
 
+        if (self.pend_bracket != 0) {
+            const open_br = self.pend_bracket == '[';
+            self.pend_bracket = 0;
+            switch (ch) {
+                'd' => self.jumpDiag(!open_br),
+                else => {},
+            }
+            return;
+        }
+
         if (self.pend_g) {
             self.pend_g = false;
             switch (ch) {
@@ -3163,7 +3388,18 @@ pub const Editor = struct {
                 'E' => self.motionCharwise(k_gE),
                 '_' => self.motionCharwise(k_glast),
                 'v' => self.reselect(),
-                'd' => self.gotoDefinition(),
+                'd' => {
+                    // The server knows; the buffer only guesses. When
+                    // one is attached it answers (asynchronously — the
+                    // jump happens when the reply lands), and the
+                    // first-occurrence search below stays as the answer
+                    // for every file no server covers.
+                    if (self.lsp_definition) |f| {
+                        self.count = 0;
+                        self.op = 0;
+                        f(self.lsp_ctx.?, self);
+                    } else self.gotoDefinition();
+                },
                 'u', 'U', '~' => {
                     if (self.inVisual()) {
                         self.visualOp(ch);
@@ -3233,6 +3469,14 @@ pub const Editor = struct {
             '*' => self.searchWord(true),
             '#' => self.searchWord(false),
             'z' => self.pend_z = true,
+            '[', ']' => self.pend_bracket = ch,
+            // vim's `K` is "look this up" — it ran `man` because that
+            // was the only index there was. A language server is a
+            // better one.
+            'K' => if (self.lsp_hover) |f| {
+                self.count = 0;
+                f(self.lsp_ctx.?, self);
+            } else self.setStatus("no language server for this file", .{}, false),
             'H', 'M', 'L' => {
                 const rows = @max(1, self.last_rows -| 1);
                 const bot = @min(self.top + rows - 1, self.lineCountB() - 1);
@@ -4386,6 +4630,10 @@ pub const Editor = struct {
     /// is the honest version of that: no scopes, no index, just the
     /// first time the name appears, which in most files IS where it is
     /// declared.
+    pub fn gotoDefinitionFallback(self: *Editor) void {
+        self.gotoDefinition();
+    }
+
     fn gotoDefinition(self: *Editor) void {
         self.count = 0;
         self.op = 0;
@@ -5662,6 +5910,15 @@ pub const Editor = struct {
                         .cp = c,
                         .st = if (line == self.cline) .text else .dim,
                     };
+                }
+            }
+
+            // The sign, in the column reserved for it. Painted after the
+            // number so a line whose digits fill the gutter still shows
+            // it — the number is what you can infer, the sign is not.
+            if (self.diag_gutter) {
+                if (self.diagForLine(line)) |d| {
+                    out[0] = .{ .cp = d.severity.sign(), .st = d.severity.style() };
                 }
             }
 

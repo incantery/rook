@@ -24,6 +24,7 @@ const themepkg = @import("theme.zig");
 const cfgpkg = @import("config.zig");
 const filelistpkg = @import("filelist.zig");
 const searchpkg = @import("search.zig");
+const lsppkg = @import("lsp.zig");
 const uipkg = @import("ui.zig");
 const stats = @import("stats.zig");
 
@@ -366,6 +367,10 @@ pub const WkItem = struct {
 const PendingOpen = struct {
     len: usize,
     line: usize,
+    /// BYTE column on that line. A definition names an identifier, not
+    /// a line — landing in column one and making you find the symbol is
+    /// what `targetSelectionRange` exists to avoid.
+    col: usize = 0,
     how: @import("editor.zig").OpenHow,
     from: u32,
 };
@@ -546,6 +551,11 @@ pub const App = struct {
     /// Columns, not pixels: the pane beside it is a character grid, and
     /// a width in px makes the split land mid-cell at some font sizes.
     side_cols: f32 = 34,
+
+    // ---- language servers ----
+    /// Owns every running server, their roots, and the diagnostics they
+    /// publish. Nothing spawns until a file of a known language opens.
+    lsp: @import("lspmgr.zig").Manager = undefined,
     /// The inbox, refreshed by attentionThread ONLY while open — a
     /// closed panel must cost nothing, including no host traffic.
     attention: @import("attention.zig").Snapshot = .{},
@@ -849,9 +859,19 @@ pub const App = struct {
     }
 
     fn drawNow(self: *App) void {
-        self.draw_lock.lock();
-        defer self.draw_lock.unlock();
-        self.drawFrame();
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            self.drawFrame();
+        }
+        // OUTSIDE the lock, for the reason pending_open exists: pane
+        // surgery cannot run while the frame holds it. Everything else
+        // that queues an open is driven by input, which drains right
+        // after — a language server's answer is the first thing that
+        // arrives with no keystroke behind it, so the frame loop has to
+        // drain too or a `gd` reply sits in the queue until you happen
+        // to press a key.
+        self.drainPendingCmd();
     }
 
     pub fn requestShot(self: *App, path: []const u8) bool {
@@ -1075,6 +1095,11 @@ pub const App = struct {
         try space_one.tabs.append(gpa, tab_one);
         try self.spaces.append(gpa, space_one);
         panespkg.layout(tab_one.root, self.paneArea(), self.sep);
+        // Nothing spawns here: the manager is a table until a file of a
+        // known language opens. That is deliberate — a language server
+        // costs ~1s and ~100MB, and launch owes it nothing.
+        self.lsp = @import("lspmgr.zig").Manager.init(gpa, init.io);
+        self.lsp.enabled = cfg.lsp;
         boot_times.create_us = usSince(boot_times.start);
         return self;
     }
@@ -1835,13 +1860,21 @@ pub const App = struct {
     /// panel's Enter: a finding names a place, and landing anywhere else
     /// makes you hunt for it.
     pub fn openEditorAtLine(self: *App, path: []const u8, line: i64) bool {
+        return self.openEditorAt(path, line, 0);
+    }
+
+    /// …and at a COLUMN, for callers that know one. Clamped to the line,
+    /// which is the whole reason it is applied here rather than by the
+    /// caller: only this side has the buffer.
+    pub fn openEditorAt(self: *App, path: []const u8, line: i64, col: usize) bool {
         if (!self.openEditor(path)) return false;
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         const ed = self.activeTab().focused.editor() orelse return true;
         const n = ed.lineCountB();
         ed.cline = @min(@as(usize, @intCast(@max(line, 1))) - 1, n -| 1);
-        ed.ccol = 0;
+        ed.ccol = @min(col, ed.lineCap(ed.cline));
+        ed.goal = ed.renderColAt(ed.cline, ed.ccol);
         self.scene_dirty = true;
         return true;
     }
@@ -1853,11 +1886,15 @@ pub const App = struct {
         const p = t.focused;
         if (p.editor()) |ed| {
             ed.open(path, false) catch return false;
+            // Retarget is an open as far as the server is concerned:
+            // new path, new document, new diagnostics.
+            self.lspAttachLocked(ed);
             self.scene_dirty = true;
             return true;
         }
         const ed = editorpkg.Editor.create(self.gpa, self.io, path) catch return false;
         @import("syntax.zig").attach(ed, self.gpa);
+        self.lspAttachLocked(ed);
         self.attachCommands(ed);
         var tm = p.content.term;
         tm.copy_mode = false;
@@ -2665,6 +2702,7 @@ pub const App = struct {
         }
         ed.tree_pinned = true;
         @import("syntax.zig").attach(ed, self.gpa);
+        self.lspAttachLocked(ed);
         self.attachCommands(ed);
         const pane = self.gpa.create(panespkg.Pane) catch {
             ed.destroy();
@@ -3184,6 +3222,234 @@ pub const App = struct {
         }
     }
 
+    // ---------------------------------------------------- language servers
+
+    /// Attach the seam and open the document. Called wherever an editor
+    /// is created or retargeted at a file — the server needs the TEXT,
+    /// not the path, because the buffer may already differ from disk.
+    fn lspAttachLocked(self: *App, ed: *editorpkg.Editor) void {
+        const path = ed.buf.path orelse return;
+        if (ed.is_dir or ed.buf.readonly) return;
+        const srv = self.lsp.ensure(path) orelse return;
+
+        ed.lsp_ctx = self;
+        ed.lsp_hover = &lspHoverHook;
+        ed.lsp_definition = &lspDefinitionHook;
+        // The sign column appears now rather than when the first error
+        // does, so the document never shifts sideways under your cursor.
+        ed.diag_gutter = true;
+
+        const text = ed.buf.rope.dupeRange(self.gpa, 0, ed.buf.rope.byteLen()) catch return;
+        defer self.gpa.free(text);
+        srv.didOpen(path, text);
+        ed.lsp_version = ed.buf.version;
+        // A file opened a second time in a server that already knows it
+        // still needs its diagnostics on screen — they were published
+        // while no pane was showing them.
+        self.applyDiagsLocked(ed, path);
+    }
+
+    /// Push whatever this buffer has become to its server. Called from
+    /// the frame loop, so it is a version COMPARISON on an idle frame
+    /// and nothing more.
+    fn lspSyncLocked(self: *App, ed: *editorpkg.Editor) void {
+        if (ed.lsp_ctx == null) return;
+        if (ed.buf.version == ed.lsp_version) return;
+        const path = ed.buf.path orelse return;
+        const srv = self.lsp.ensure(path) orelse return;
+        const text = ed.buf.rope.dupeRange(self.gpa, 0, ed.buf.rope.byteLen()) catch return;
+        defer self.gpa.free(text);
+        srv.didChange(path, text);
+        ed.lsp_version = ed.buf.version;
+    }
+
+    /// Diagnostics arrive in UTF-16 columns; the editor counts bytes.
+    /// The conversion needs the LINE, which is why it happens here —
+    /// against the rope that is actually on screen — rather than in the
+    /// manager, which only has ranges.
+    fn applyDiagsLocked(self: *App, ed: *editorpkg.Editor, path: []const u8) void {
+        const items = self.lsp.diagsFor(path);
+        var out: std.ArrayListUnmanaged(editorpkg.Diag) = .empty;
+        defer out.deinit(self.gpa);
+        const last_line = ed.lineCountB() -| 1;
+        for (items) |d| {
+            // A diagnostic past the end of the buffer is one the server
+            // computed against text we have since changed. Clamping it
+            // to the last line beats dropping it: the error is real
+            // until the next publish says otherwise.
+            const line = @min(d.range.start.line, @as(u32, @intCast(last_line)));
+            const end_line = @min(d.range.end.line, @as(u32, @intCast(last_line)));
+            const text = ed.lineText(line);
+            const end_text = ed.lineText(end_line);
+            out.append(self.gpa, .{
+                .line = line,
+                .col = @intCast(lsppkg.byteColFromUtf16(text, d.range.start.col)),
+                .end_line = end_line,
+                .end_col = @intCast(lsppkg.byteColFromUtf16(end_text, d.range.end.col)),
+                .severity = switch (d.severity) {
+                    .err => .err,
+                    .warn => .warn,
+                    .info => .info,
+                    .hint => .hint,
+                },
+                .message = d.message,
+                .source = d.source,
+            }) catch break;
+        }
+        ed.setDiagnostics(out.items);
+    }
+
+    /// How long typing has to stop before the buffer is pushed to its
+    /// server. Short enough to feel live, long enough that a burst of
+    /// keystrokes is one message rather than thirty.
+    const lsp_debounce_s: f64 = 0.15;
+
+    /// Push settled buffers. An idle frame walks the panes and compares
+    /// two integers.
+    fn lspTickLocked(self: *App, now: f64) void {
+        for (self.spaces.items) |space| for (space.tabs.items) |tab| {
+            for (tab.panes.items) |p| {
+                const ed = p.editor() orelse continue;
+                if (ed.lsp_ctx == null) continue;
+                if (ed.buf.version == ed.lsp_version) continue;
+                if (ed.buf.version != ed.lsp_seen_version) {
+                    ed.lsp_seen_version = ed.buf.version;
+                    ed.lsp_seen_at = now;
+                    continue;
+                }
+                if (now - ed.lsp_seen_at < lsp_debounce_s) continue;
+                self.lspSyncLocked(ed);
+            }
+        };
+    }
+
+    /// Everything the servers produced since the last frame.
+    fn drainLspLocked(self: *App) void {
+        if (!self.lsp.drain()) return;
+        self.scene_dirty = true;
+
+        const changed = self.lsp.takeChanged();
+        defer self.lsp.freeChanged(changed);
+        for (changed) |path| {
+            for (self.spaces.items) |space| for (space.tabs.items) |tab| {
+                for (tab.panes.items) |p| {
+                    const ed = p.editor() orelse continue;
+                    const bp = ed.buf.path orelse continue;
+                    if (!std.mem.eql(u8, bp, path)) continue;
+                    self.applyDiagsLocked(ed, path);
+                }
+            };
+        }
+
+        while (self.lsp.nextAnswer()) |ans| {
+            var a = ans;
+            defer a.deinit(self.gpa);
+            switch (a) {
+                .hover => |h| {
+                    const ed = self.editorShowingLocked(h.path) orelse continue;
+                    // One line, in the status row. Hover is often a
+                    // paragraph of markdown and a float is the right
+                    // home for it — but the signature is the answer
+                    // ninety per cent of the time, and it is the first
+                    // line.
+                    const nl = std.mem.indexOfScalar(u8, h.text, '\n');
+                    var first = if (nl) |i| h.text[0..i] else h.text;
+                    // gopls fences its signature; the fence is noise in
+                    // a one-line status.
+                    if (std.mem.startsWith(u8, first, "```")) {
+                        const rest = h.text[(nl orelse 0) + 1 ..];
+                        const nl2 = std.mem.indexOfScalar(u8, rest, '\n');
+                        first = if (nl2) |i| rest[0..i] else rest;
+                    }
+                    ed.setStatus("{s}", .{first}, false);
+                    ed.render_dirty = true;
+                },
+                .definition => |d| {
+                    const ed = self.editorShowingLocked(d.path) orelse continue;
+                    _ = ed;
+                    // Route through the same queue ⌘P and search use:
+                    // opening a file cannot happen under the draw lock
+                    // from here, and a definition in ANOTHER file is the
+                    // ordinary case.
+                    if (d.target.len <= self.pending_open_path.len) {
+                        @memcpy(self.pending_open_path[0..d.target.len], d.target);
+                        self.pending_open = .{
+                            .len = d.target.len,
+                            .line = d.line,
+                            // UTF-16 → bytes needs the TARGET's line, and
+                            // the target file may not be open yet. The
+                            // ASCII case (every identifier in practice)
+                            // is identical either way; the honest fix is
+                            // to convert after the open, which is a seam
+                            // worth taking when a non-ASCII identifier
+                            // actually shows up.
+                            .col = d.col,
+                            .how = .here,
+                            .from = self.activeTab().focused.id,
+                        };
+                    }
+                },
+                .none => |n| {
+                    const ed = self.editorShowingLocked(n.path) orelse continue;
+                    switch (n.kind) {
+                        .hover => ed.setStatus("nothing to show here", .{}, false),
+                        .definition => ed.setStatus("no definition found", .{}, false),
+                    }
+                    ed.render_dirty = true;
+                },
+            }
+        }
+    }
+
+    /// The focused editor showing `path`, else any editor showing it.
+    /// An answer belongs to where you are looking, and a pane that has
+    /// since moved on gets nothing.
+    fn editorShowingLocked(self: *App, path: []const u8) ?*editorpkg.Editor {
+        if (self.activeTab().focused.editor()) |ed| {
+            if (ed.buf.path) |bp| {
+                if (std.mem.eql(u8, bp, path)) return ed;
+            }
+        }
+        for (self.spaces.items) |space| for (space.tabs.items) |tab| {
+            for (tab.panes.items) |p| {
+                const ed = p.editor() orelse continue;
+                const bp = ed.buf.path orelse continue;
+                if (std.mem.eql(u8, bp, path)) return ed;
+            }
+        };
+        return null;
+    }
+
+    /// The cursor, in the protocol's coordinates.
+    fn lspPos(ed: *editorpkg.Editor) lsppkg.Position {
+        return .{
+            .line = @intCast(ed.cline),
+            .col = lsppkg.utf16FromByteCol(ed.lineText(ed.cline), ed.ccol),
+        };
+    }
+
+    fn lspHoverHook(ctx: *anyopaque, ed: *editorpkg.Editor) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const path = ed.buf.path orelse return;
+        // The buffer the server has must be the buffer you are looking
+        // at, or the position means something else.
+        self.lspSyncLocked(ed);
+        if (!self.lsp.hover(path, lspPos(ed))) {
+            ed.setStatus("no language server for this file", .{}, false);
+        }
+    }
+
+    fn lspDefinitionHook(ctx: *anyopaque, ed: *editorpkg.Editor) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const path = ed.buf.path orelse return;
+        self.lspSyncLocked(ed);
+        if (!self.lsp.definition(path, lspPos(ed))) {
+            // No server: the editor's own first-occurrence search is
+            // still a better answer than nothing.
+            ed.gotoDefinitionFallback();
+        }
+    }
+
     pub fn deckKeyLocked(self: *App, bytes: []const u8) void {
         const n = self.deck.slice().len;
         var i: usize = 0;
@@ -3352,6 +3618,7 @@ pub const App = struct {
         }
         const ed = editorpkg.Editor.create(self.gpa, self.io, null) catch return;
         @import("syntax.zig").attach(ed, self.gpa);
+        self.lspAttachLocked(ed);
         self.attachCommands(ed);
         ed.openText(name, text) catch {
             ed.destroy();
@@ -3725,8 +3992,8 @@ pub const App = struct {
             if (!is_tree) {
                 self.setFocusLocked(src_pane);
                 self.draw_lock.unlock();
-                if (req.line > 0) {
-                    _ = self.openEditorAtLine(path, @intCast(req.line + 1));
+                if (req.line > 0 or req.col > 0) {
+                    _ = self.openEditorAt(path, @intCast(req.line + 1), req.col);
                 } else _ = self.openEditor(path);
                 return;
             }
@@ -3742,6 +4009,7 @@ pub const App = struct {
                             self.draw_lock.unlock();
                             return;
                         };
+                        self.lspAttachLocked(ned);
                         if (req.line > 0) ned.cline = @min(req.line, ned.lineCountB() -| 1);
                         self.setFocusLocked(nb);
                         self.scene_dirty = true;
@@ -3758,6 +4026,7 @@ pub const App = struct {
             return;
         };
         @import("syntax.zig").attach(ed, self.gpa);
+        self.lspAttachLocked(ed);
         self.attachCommands(ed);
         if (req.line > 0) ed.cline = @min(req.line, ed.lineCountB() -| 1);
         const pane = self.gpa.create(panespkg.Pane) catch {
@@ -4115,6 +4384,8 @@ pub const App = struct {
         self.reapExitedLocked();
         self.drainClipboardLocked();
         self.drainSearchLocked();
+        self.drainLspLocked();
+        self.lspTickLocked(CACurrentMediaTime());
 
         // HUD refresh at ~2Hz. Runs on skipped ticks too, so the bar
         // stays live during idle — but only a text CHANGE causes a draw.
@@ -6216,6 +6487,13 @@ pub const App = struct {
                 .mode_insert, .mode_visual => th.bar_bg,
                 .buftab_on => th.bar_value,
                 .buftab_off => th.bar_fg,
+                // Diagnostics borrow colours every theme already tunes:
+                // the editor's error red, the number colour for warnings
+                // (amber-ish in every builtin), and dim for the rest —
+                // an info that shouts is an info you learn to ignore.
+                .diag_err => th.ed_err,
+                .diag_warn => th.syn_number,
+                .diag_info => th.ed_dim,
             };
             switch (st) {
                 .sel => bg = th.ed_sel_bg,

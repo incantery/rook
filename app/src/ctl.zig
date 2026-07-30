@@ -774,6 +774,33 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             .{ b.config_us, b.keybinds_us, b.appkit_us, b.renderer_us, b.session_us, b.create_us, b.ctl_ready_us },
         ) catch return;
         reply(fd, s);
+    } else if (std.mem.eql(u8, verb, "lsp") and rest.len == 0) {
+        // Every running server and every diagnostic it has published.
+        // The e2e suite's whole window into a subsystem whose real
+        // output is a coloured dot one cell wide — and the same view
+        // an agent needs, since "what is broken in this file" is a
+        // question it asks more often than a human does.
+        app.draw_lock.lock();
+        defer app.draw_lock.unlock();
+        var a: std.Io.Writer.Allocating = .init(app.gpa);
+        defer a.deinit();
+        a.writer.print("enabled:{s}\n", .{if (app.lsp.enabled) "yes" else "no"}) catch return;
+        app.lsp.describe(&a.writer);
+        // The focused editor's view of them, which is the one that can
+        // disagree: the manager holds UTF-16 columns, the buffer holds
+        // bytes, and the gutter shows whatever survived the conversion.
+        if (app.activeTab().focused.editor()) |ed| {
+            const c = ed.diagCounts();
+            a.writer.print("pane gutter:{s} errors:{d} warnings:{d}\n", .{
+                if (ed.diag_gutter) "yes" else "no", c.errors, c.warnings,
+            }) catch return;
+            for (ed.diags.items) |d| {
+                a.writer.print("  pane {s} {d}:{d} {s}\n", .{
+                    @tagName(d.severity), d.line + 1, d.col, d.message,
+                }) catch return;
+            }
+        }
+        reply(fd, a.written());
     } else if (std.mem.eql(u8, verb, "notify")) {
         // The banner itself is the OS's; this is the last thing we
         // handed it, which is the part a blind test can check.

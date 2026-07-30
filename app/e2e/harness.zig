@@ -97,6 +97,12 @@ pub const Opts = struct {
     /// `explorer-auto` gates on, so a scenario about either has to be
     /// able to choose it.
     cwd: ?[]const u8 = null,
+    /// Extra environment for the child, as name/value pairs. The
+    /// language-server scenarios drive a FAKE server through
+    /// ROOK_LSP_GO with this: a suite that needed a real gopls
+    /// installed would be a suite that fails on a fresh machine for a
+    /// reason that has nothing to do with rook.
+    env: []const [2][]const u8 = &.{},
 };
 
 var instance_seq: u32 = 0;
@@ -291,6 +297,17 @@ pub const Instance = struct {
             // Not PS1 — a login shell's /etc/profile overwrites it. The
             // sandbox's own ~/.profile is what actually sets the prompt.
             _ = setenv("HOME", @ptrCast(home.ptr), 1);
+            // Last, so a scenario can override anything above it.
+            for (opts.env) |pair| {
+                var nb: [128]u8 = undefined;
+                var vb: [1024]u8 = undefined;
+                if (pair[0].len >= nb.len or pair[1].len >= vb.len) continue;
+                @memcpy(nb[0..pair[0].len], pair[0]);
+                nb[pair[0].len] = 0;
+                @memcpy(vb[0..pair[1].len], pair[1]);
+                vb[pair[1].len] = 0;
+                _ = setenv(@ptrCast(&nb), @ptrCast(&vb), 1);
+            }
 
             var argv: [3:null]?[*:0]const u8 = .{ @ptrCast(&bin_z), "win", "--no-activate" };
             _ = execv(@ptrCast(&bin_z), &argv);
@@ -933,6 +950,29 @@ pub fn expectNotContains(haystack: []const u8, needle: []const u8, comptime labe
     if (std.mem.indexOf(u8, haystack, needle) != null) {
         std.debug.print("    ✗ {s}: found \"{s}\" and should not have\n", .{ label, needle });
         return error.UnexpectedContent;
+    }
+}
+
+/// The harness's own working directory. Scenarios need it to make
+/// argv[0] absolute — see the note where self_exe is resolved.
+pub fn cwdPath(buf: []u8) ?[]const u8 {
+    const p = getcwd(buf.ptr, buf.len) orelse return null;
+    return std.mem.span(p);
+}
+
+/// Raw stdio for the fake-server mode: the process IS a protocol
+/// endpoint there, so it reads and writes bytes rather than going
+/// through anything that might buffer or add a newline.
+pub fn readStdin(buf: []u8) isize {
+    return read(0, buf.ptr, buf.len);
+}
+
+pub fn writeStdout(bytes: []const u8) void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = write(1, bytes.ptr + off, bytes.len - off);
+        if (n <= 0) return;
+        off += @intCast(n);
     }
 }
 

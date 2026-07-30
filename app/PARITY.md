@@ -368,6 +368,39 @@ a daily driver.
       nothing ("the app never came up"), and a scenario that reuses
       one path buffer for two directories scribbles over the launch
       dir it is still using.
+- [x] **Language servers** — rook speaks LSP itself now (src/lsp.zig,
+      sans-io; src/lspmgr.zig owns processes and roots). It used to
+      live in the Go host over HTTP, which could answer `rookctl def`
+      and could never grow further: document sync is VERSIONED, the
+      editor owns the rope and the version counter, and a process
+      boundary between them forces full text per request. Proven the
+      other way round — version 1 diagnoses `undefined: nope`, an
+      in-memory edit makes it version 2 and clean, and the file on
+      disk still holds the broken line.
+      Lazy: nothing spawns until a file of a known language opens, so
+      launch pays nothing. Per (language, ROOT), not per file — a
+      second file in the same module reuses the server rather than
+      paying ~1s and ~100MB again.
+      In the editor: a sign column reserved when a server ATTACHES
+      (not when the first error arrives — widening the gutter mid-edit
+      would shove the document sideways under the cursor), `]d`/`[d`
+      to walk, `K` for hover, `gd` upgraded from first-occurrence
+      search to the real answer with that search still the fallback.
+      Sync is debounced 150ms: a full-text didChange per keystroke is
+      a lot of pipe for an answer superseded before it arrives.
+      Columns cross a boundary here — the protocol counts UTF-16 code
+      units and the buffer counts bytes — and the conversion happens
+      where the LINE is, in the app against the rope, not in the
+      manager which only has ranges.
+      Still open: incremental sync, completion, references, format on
+      save, and languages past Go (the catalog holds exactly one entry
+      on purpose — adding the second is the test of whether "add a
+      language" is really data).
+      e2e `lsp` drives a FAKE server (a shell script speaking real
+      framing) so the suite needs no gopls installed. It found the bug
+      pty.zig already had a comment about: a forked child inherits
+      EVERY descriptor, including the open ctl connection, so the
+      client never sees EOF and `edit` appears to hang forever.
 - [ ] **Theme engine**: one semantic Palette, 8 builtins, runtime swap,
       **VS Code theme importer**. rook has 2 builtins and a config key
       (3 now, with vscode-dark).
