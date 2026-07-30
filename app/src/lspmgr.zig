@@ -45,10 +45,19 @@ const max_asks = 32;
 pub const Lang = enum {
     go,
     python,
+    /// One server for the whole family. TypeScript's tooling has always
+    /// served JavaScript too — tsserver type-checks a .js file from
+    /// JSDoc — so splitting them would mean two servers indexing the
+    /// same project twice.
+    typescript,
 
     pub fn fromPath(path: []const u8) ?Lang {
         if (std.mem.endsWith(u8, path, ".go")) return .go;
         if (std.mem.endsWith(u8, path, ".py") or std.mem.endsWith(u8, path, ".pyi")) return .python;
+        const ts = [_][]const u8{ ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs" };
+        for (ts) |e| {
+            if (std.mem.endsWith(u8, path, e)) return .typescript;
+        }
         return null;
     }
 
@@ -61,6 +70,12 @@ pub const Lang = enum {
             // stray setup.py is a modern project carrying a shim, and
             // rooting at the shim finds the wrong package.
             .python => &.{ "pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "requirements.txt" },
+            // tsconfig before package.json: a monorepo has one
+            // package.json per workspace, and the tsconfig is what says
+            // which files the compiler considers one program. Rooting at
+            // the wrong one gets a server that cannot resolve half your
+            // imports.
+            .typescript => &.{ "tsconfig.json", "jsconfig.json", "deno.json", "package.json" },
         };
     }
 
@@ -72,6 +87,7 @@ pub const Lang = enum {
         return switch (self) {
             .go => "ROOK_LSP_GO",
             .python => "ROOK_LSP_PYTHON",
+            .typescript => "ROOK_LSP_TYPESCRIPT",
         };
     }
 
@@ -88,6 +104,15 @@ pub const Lang = enum {
                 .{ .bin = "pyright-langserver", .args = &.{"--stdio"} },
                 .{ .bin = "pylsp" },
                 .{ .bin = "jedi-language-server" },
+            },
+            // tsgo first, and only ever found project-locally: it ships
+            // with @typescript/native-preview, so having it means the
+            // project chose TypeScript 7 — whose lib has no tsserver.js
+            // at all and which the older servers cannot drive.
+            .typescript => &.{
+                .{ .bin = "tsgo", .args = &.{ "--lsp", "--stdio" } },
+                .{ .bin = "vtsls", .args = &.{"--stdio"} },
+                .{ .bin = "typescript-language-server", .args = &.{"--stdio"} },
             },
         };
     }
@@ -136,6 +161,45 @@ const Ask = struct {
     /// whichever pane is showing this path when it lands — or nowhere.
     path: []const u8,
 };
+
+/// The one line of a hover worth putting in a status row.
+///
+/// Hover is markdown and every server lays it out differently: gopls
+/// opens with a fenced signature, basedpyright prefixes a kind
+/// ("(function) def ..."), and typescript-language-server begins its
+/// value with a BLANK LINE before the fence. Taking "the first line"
+/// literally gives you an empty string for that last one — the status
+/// row silently stays blank, which reads as "hover is broken" rather
+/// than as a formatting difference.
+///
+/// So: the first line that is neither blank nor a fence. Borrowed from
+/// the caller's text.
+pub fn hoverSummary(text: []const u8) []const u8 {
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        if (std.mem.startsWith(u8, line, "```")) continue;
+        // A markdown rule separates the signature from the prose; one
+        // arriving first means there was no signature.
+        if (std.mem.eql(u8, line, "---") or std.mem.eql(u8, line, "___")) continue;
+        return line;
+    }
+    return "";
+}
+
+/// Two paths naming the same file.
+///
+/// Not `mem.eql`, because a server is free to hand back a URI whose
+/// case differs from the one we sent: macOS filesystems are
+/// case-insensitive by default and servers normalize. TypeScript 7's
+/// tsgo lowercases the whole path, which under an exact compare means
+/// its diagnostics arrive for a file no pane is showing — they vanish,
+/// silently, and the gutter just never fills in.
+pub fn samePath(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    return std.ascii.eqlIgnoreCase(a, b);
+}
 
 /// Diagnostics for one file, in PROTOCOL coordinates (UTF-16 columns).
 /// They are converted to byte columns where the text is — in the editor
@@ -297,7 +361,38 @@ pub const Manager = struct {
                 const py = pythonFor(root) orelse return "";
                 return std.fmt.bufPrint(buf, "{{\"python\":{{\"pythonPath\":\"{s}\"}}}}", .{py}) catch "";
             },
+            .typescript => {
+                // The project's OWN typescript, when it has one. A
+                // server running its bundled compiler against a project
+                // pinned to a different version reports errors that
+                // version does not have — and the fix it suggests is for
+                // a compiler you are not using. With none installed the
+                // server's bundled one IS right, so say nothing.
+                const tsdk = tsdkFor(root) orelse return "";
+                return std.fmt.bufPrint(buf, "{{\"typescript\":{{\"tsdk\":\"{s}\"}}}}", .{tsdk}) catch "";
+            },
         }
+    }
+
+    /// `<root>/node_modules/typescript/lib`, if the project installed
+    /// its own compiler. Static buffer, consumed immediately — the same
+    /// contract as pythonFor.
+    fn tsdkFor(root: []const u8) ?[]const u8 {
+        const S = struct {
+            var buf: [1024]u8 = undefined;
+        };
+        // Probed through tsserver.js rather than through the directory,
+        // which buys two things. A half-removed node_modules can leave
+        // an empty typescript/lib behind, and pointing a server at one
+        // is worse than not configuring it. And TypeScript 7 has no
+        // tsserver.js — it is a native binary — so the probe answers
+        // "no tsdk" for exactly the projects where a tsdk would mean
+        // nothing, without this function having to know a version.
+        var probe: [1100]u8 = undefined;
+        const lib = std.fmt.bufPrint(&S.buf, "{s}/node_modules/typescript/lib", .{root}) catch return null;
+        const file = std.fmt.bufPrintZ(&probe, "{s}/tsserver.js", .{lib}) catch return null;
+        if (access(file.ptr, 0) != 0) return null; // F_OK
+        return lib;
     }
 
     /// The interpreter a project means. Project virtualenv first, then
@@ -549,7 +644,7 @@ pub const Manager = struct {
         copy = self.gpa.realloc(copy, n) catch copy[0..n];
 
         for (self.diags.items) |*f| {
-            if (!std.mem.eql(u8, f.path, path)) continue;
+            if (!samePath(f.path, path)) continue;
             freeDiags(self.gpa, f.items);
             f.items = copy;
             self.noteChanged(path);
@@ -569,7 +664,7 @@ pub const Manager = struct {
 
     fn noteChanged(self: *Manager, path: []const u8) void {
         for (self.changed.items) |c| {
-            if (std.mem.eql(u8, c, path)) return;
+            if (samePath(c, path)) return;
         }
         const owned = self.gpa.dupe(u8, path) catch return;
         self.changed.append(self.gpa, owned) catch self.gpa.free(owned);
@@ -589,7 +684,7 @@ pub const Manager = struct {
     /// caller can tell them apart by whether a server is attached.
     pub fn diagsFor(self: *Manager, path: []const u8) []const lsp.Diagnostic {
         for (self.diags.items) |f| {
-            if (std.mem.eql(u8, f.path, path)) return f.items;
+            if (samePath(f.path, path)) return f.items;
         }
         return &.{};
     }
@@ -629,8 +724,14 @@ test "a path picks its language, and unknown ones stay unknown" {
     try testing.expectEqual(Lang.go, Lang.fromPath("/x/main.go").?);
     try testing.expectEqual(Lang.python, Lang.fromPath("/x/main.py").?);
     try testing.expectEqual(Lang.python, Lang.fromPath("/x/stubs.pyi").?);
-    try testing.expect(Lang.fromPath("/x/main.ts") == null);
+    // One entry for the whole JS/TS family: tsserver has always served
+    // JavaScript too, and two servers would index the same project
+    // twice.
+    for ([_][]const u8{ "/x/a.ts", "/x/a.tsx", "/x/a.mts", "/x/a.cts", "/x/a.js", "/x/a.jsx", "/x/a.mjs", "/x/a.cjs" }) |p| {
+        try testing.expectEqual(Lang.typescript, Lang.fromPath(p).?);
+    }
     try testing.expect(Lang.fromPath("/x/README") == null);
+    try testing.expect(Lang.fromPath("/x/main.rs") == null);
 }
 
 test "root markers are ordered, and pyproject wins over a setup.py shim" {
@@ -687,6 +788,31 @@ test "the project's own virtualenv is what a Python server is told about" {
     try testing.expect(std.mem.indexOf(u8, settings, ".venv/bin/python") != null);
     // Go is told nothing, and that is not an oversight.
     try testing.expectEqualStrings("", m.settingsFor(.go, root, &sbuf));
+}
+
+test "hover summary survives every server's markdown habits" {
+    // gopls: fenced signature, nothing before it.
+    try testing.expectEqualStrings(
+        "func greet(name string) string",
+        hoverSummary("```go\nfunc greet(name string) string\n```"),
+    );
+    // typescript-language-server: a BLANK LINE first. Taking the first
+    // line literally here returns "" and the status row stays empty,
+    // which is what this function exists to prevent.
+    try testing.expectEqualStrings(
+        "function makeGreeter(name: string): Greeter",
+        hoverSummary("\n```typescript\nfunction makeGreeter(name: string): Greeter\n```\n"),
+    );
+    // basedpyright: a kind prefix, then a rule, then prose.
+    try testing.expectEqualStrings(
+        "(function) def greet(name: str) -> str",
+        hoverSummary("```python\n(function) def greet(name: str) -> str\n```\n---\nSays hi."),
+    );
+    // Plain text, no markdown at all.
+    try testing.expectEqualStrings("just words", hoverSummary("just words"));
+    // Nothing but decoration is nothing.
+    try testing.expectEqualStrings("", hoverSummary("\n```\n```\n---\n"));
+    try testing.expectEqualStrings("", hoverSummary(""));
 }
 
 test "a multi-line server message becomes one line" {

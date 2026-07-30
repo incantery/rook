@@ -418,10 +418,42 @@ a daily driver.
       engine does not evaluate and importing it wholesale paints every
       identifier with whatever the last predicate-guarded pattern
       claimed.
+      **TS/TSX landed third**, and it was the sharpest test. Data
+      again: extensions, markers (tsconfig BEFORE package.json — a
+      monorepo has one package.json per workspace, and the tsconfig is
+      what says which files are one program), candidates, settings
+      (`typescript.tsdk` → the project's own node_modules/typescript,
+      so the server does not check against a compiler you are not
+      using). One catalog entry covers .js/.jsx too, because tsserver
+      has always served JavaScript and two servers would index the
+      same project twice.
+      The GRAMMAR is where ts and tsx split, and only there: `<T>x` is
+      a type assertion in a .ts and a JSX element in a .tsx, so no one
+      table can be both. That costs two vendored parsers (+3.3MB
+      binary, 12.6→15.9; cold build unchanged at ~19s). Plain
+      JavaScript deliberately takes the TSX grammar — it parses all of
+      JS plus JSX, and the ts grammar would choke on the JSX in every
+      pre-2020 React .js file.
+      Two real bugs only a real server could have found. **Hover was
+      silently blank for typescript-language-server**: its markdown
+      value begins with a BLANK LINE, so "take the first line" gave the
+      empty string and the status row said nothing — which reads as
+      "hover is broken" rather than as a formatting difference. Now
+      hoverSummary takes the first line that is neither blank, a fence,
+      nor a rule, with the three servers' habits pinned in tests. And
+      **path matching had to go case-insensitive**: TypeScript 7's tsgo
+      lowercases the URIs it publishes, and under an exact compare its
+      diagnostics arrive for a file no pane is showing — they vanish
+      silently and the gutter simply never fills in.
+      Worth knowing: `npm install typescript` now gets 7.x, whose lib
+      has no tsserver.js at all, so typescript-language-server cannot
+      drive it; tsgo (from @typescript/native-preview) is the server
+      for those projects and is first in the candidate list. rook's
+      tsdk probe goes through tsserver.js, which means it answers "no
+      tsdk" for exactly the projects where a tsdk would mean nothing —
+      without having to know a version number.
       Still open: incremental sync, completion, references, format on
-      save, and TS/TSX — which is where the "is it data" question gets
-      its real test, since a Node server needs a project's own
-      typescript.
+      save.
       e2e `lsp` drives a FAKE server (a shell script speaking real
       framing) so the suite needs no gopls installed. It found the bug
       pty.zig already had a comment about: a forked child inherits

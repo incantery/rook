@@ -61,6 +61,7 @@ const scenarios = [_]Scenario{
     .{ .name = "explorerauto", .what = "explorer-auto: the sidebar opens at launch inside a repo, and never takes the keys", .run = explorerAuto },
     .{ .name = "lsp", .what = "language server: diagnostics reach the gutter, ]d walks them, an edit re-diagnoses", .run = lspScenario },
     .{ .name = "lsppython", .what = "a second language is data: python roots at pyproject.toml and lands the same way", .run = lspPython },
+    .{ .name = "lspts", .what = "ts and tsx share one server, root at the tsconfig, and split only on the grammar", .run = lspTs },
     .{ .name = "findfiles", .what = "⌘⇧F: scan honours the ignore rules, results group by file, Enter jumps to the line", .run = findInFiles },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
@@ -3028,4 +3029,88 @@ fn lspPython(gpa: std.mem.Allocator, bin: []const u8) !void {
     // business, and a catalog that spawned everything would be a
     // catalog that costs a second per language you never use.
     try h.expectNotContains(out, "server go", "no server for a language this project has no files in");
+}
+
+
+// ---------------------------------------------------------------- lspts
+
+/// TypeScript, where the per-language parts are sharper than Python's.
+///
+/// Two things this pins that no other scenario can. The ROOT is the
+/// tsconfig, not the package.json above it — a monorepo has one
+/// package.json per workspace and the tsconfig is what says which files
+/// are one program, so rooting at the wrong one gets a server that
+/// cannot resolve half your imports. And .ts and .tsx share ONE server
+/// while taking different GRAMMARS: the split is about `<T>x` being a
+/// type assertion in one and a JSX element in the other, which is a
+/// parser's problem and never a server's.
+fn lspTs(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lspts-{d}", .{h.runPid()});
+    // package.json at the top, tsconfig one level down: the two markers
+    // disagree on purpose, and the tsconfig has to win.
+    var src_buf: [256]u8 = undefined;
+    const src = try std.fmt.bufPrint(&src_buf, "{s}/repo/app/src", .{scratch});
+    try h.mkdirP(src);
+    var repo_buf: [256]u8 = undefined;
+    const repo = try std.fmt.bufPrint(&repo_buf, "{s}/repo", .{scratch});
+    var appdir_buf: [256]u8 = undefined;
+    const appdir = try std.fmt.bufPrint(&appdir_buf, "{s}/repo/app", .{scratch});
+
+    var f_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/package.json", .{repo}), "{\"name\":\"mono\"}\n");
+    var f2_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&f2_buf, "{s}/tsconfig.json", .{appdir}), "{\"compilerOptions\":{}}\n");
+
+    var ts_buf: [288]u8 = undefined;
+    const ts_file = try std.fmt.bufPrint(&ts_buf, "{s}/app.ts", .{src});
+    try h.writeFile(ts_file, "export function main(): void {\n\n\n\n\n  nope();\n}\n");
+    var tsx_buf: [288]u8 = undefined;
+    const tsx_file = try std.fmt.bufPrint(&tsx_buf, "{s}/view.tsx", .{src});
+    try h.writeFile(tsx_file, "export const V = () => <span>hi</span>;\n");
+
+    var envval_buf: [640]u8 = undefined;
+    const envval = try std.fmt.bufPrint(&envval_buf, "{s} --fake-lsp {s}", .{ self_exe, ts_file });
+
+    const app = try h.Instance.start(gpa, bin, .{
+        .cwd = appdir,
+        .env = &.{.{ "ROOK_LSP_TYPESCRIPT", envval }},
+    });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var cmd_buf: [320]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{ts_file}));
+    _ = try app.waitCtl("lsp", "pane gutter:yes errors:1", 8_000);
+
+    {
+        const out = try app.ctl("lsp");
+        var want_buf: [320]u8 = undefined;
+        const want = try std.fmt.bufPrint(&want_buf, "server typescript ready {s}\n", .{appdir});
+        try h.expectContains(out, want, "rooted at the tsconfig, not the package.json above it");
+        // The fake publishes at UTF-16 column 13 and this line is nine
+        // bytes long, so the two disagree ON PURPOSE: the manager keeps
+        // what the server said, and the pane clamps to the end of the
+        // line it actually has. A server naming a column past the end
+        // is ordinary — it computed against text that has since been
+        // edited — and it must read as end-of-line, never as an overrun.
+        try h.expectContains(out, "  err 6:13 undefined: nope", "the manager keeps the server's column");
+        try h.expectContains(out, "pane err 6:9 undefined: nope", "the pane clamps it to the line");
+    }
+
+    // Now the .tsx beside it. Different grammar, SAME server — a second
+    // one starting here would mean the family had been split.
+    var cmd2_buf: [320]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd2_buf, "edit {s}", .{tsx_file}));
+    {
+        const out = try app.ctl("lsp");
+        var n: usize = 0;
+        var it = std.mem.splitScalar(u8, out, '\n');
+        while (it.next()) |line| {
+            if (std.mem.startsWith(u8, line, "server ")) n += 1;
+        }
+        try h.expectEq("one server for the whole ts/tsx/js family", 1, n);
+    }
 }

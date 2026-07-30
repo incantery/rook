@@ -25,6 +25,7 @@ const cfgpkg = @import("config.zig");
 const filelistpkg = @import("filelist.zig");
 const searchpkg = @import("search.zig");
 const lsppkg = @import("lsp.zig");
+const lspmgrpkg = @import("lspmgr.zig");
 const uipkg = @import("ui.zig");
 const stats = @import("stats.zig");
 
@@ -555,7 +556,7 @@ pub const App = struct {
     // ---- language servers ----
     /// Owns every running server, their roots, and the diagnostics they
     /// publish. Nothing spawns until a file of a known language opens.
-    lsp: @import("lspmgr.zig").Manager = undefined,
+    lsp: lspmgrpkg.Manager = undefined,
     /// The inbox, refreshed by attentionThread ONLY while open — a
     /// closed panel must cost nothing, including no host traffic.
     attention: @import("attention.zig").Snapshot = .{},
@@ -1098,7 +1099,7 @@ pub const App = struct {
         // Nothing spawns here: the manager is a table until a file of a
         // known language opens. That is deliberate — a language server
         // costs ~1s and ~100MB, and launch owes it nothing.
-        self.lsp = @import("lspmgr.zig").Manager.init(gpa, init.io);
+        self.lsp = lspmgrpkg.Manager.init(gpa, init.io);
         self.lsp.enabled = cfg.lsp;
         boot_times.create_us = usSince(boot_times.start);
         return self;
@@ -3335,7 +3336,10 @@ pub const App = struct {
                 for (tab.panes.items) |p| {
                     const ed = p.editor() orelse continue;
                     const bp = ed.buf.path orelse continue;
-                    if (!std.mem.eql(u8, bp, path)) continue;
+                    // Case-INSENSITIVE: see lspmgr.samePath. A server
+                    // that normalizes the case of what we sent it must
+                    // not have its diagnostics land nowhere.
+                    if (!lspmgrpkg.samePath(bp, path)) continue;
                     self.applyDiagsLocked(ed, path);
                 }
             };
@@ -3350,18 +3354,12 @@ pub const App = struct {
                     // One line, in the status row. Hover is often a
                     // paragraph of markdown and a float is the right
                     // home for it — but the signature is the answer
-                    // ninety per cent of the time, and it is the first
-                    // line.
-                    const nl = std.mem.indexOfScalar(u8, h.text, '\n');
-                    var first = if (nl) |i| h.text[0..i] else h.text;
-                    // gopls fences its signature; the fence is noise in
-                    // a one-line status.
-                    if (std.mem.startsWith(u8, first, "```")) {
-                        const rest = h.text[(nl orelse 0) + 1 ..];
-                        const nl2 = std.mem.indexOfScalar(u8, rest, '\n');
-                        first = if (nl2) |i| rest[0..i] else rest;
-                    }
-                    ed.setStatus("{s}", .{first}, false);
+                    // ninety per cent of the time. Which line that is
+                    // differs per server; see hoverSummary.
+                    const first = lspmgrpkg.hoverSummary(h.text);
+                    if (first.len == 0) {
+                        ed.setStatus("nothing to show here", .{}, false);
+                    } else ed.setStatus("{s}", .{first}, false);
                     ed.render_dirty = true;
                 },
                 .definition => |d| {
@@ -3407,14 +3405,14 @@ pub const App = struct {
     fn editorShowingLocked(self: *App, path: []const u8) ?*editorpkg.Editor {
         if (self.activeTab().focused.editor()) |ed| {
             if (ed.buf.path) |bp| {
-                if (std.mem.eql(u8, bp, path)) return ed;
+                if (lspmgrpkg.samePath(bp, path)) return ed;
             }
         }
         for (self.spaces.items) |space| for (space.tabs.items) |tab| {
             for (tab.panes.items) |p| {
                 const ed = p.editor() orelse continue;
                 const bp = ed.buf.path orelse continue;
-                if (std.mem.eql(u8, bp, path)) return ed;
+                if (lspmgrpkg.samePath(bp, path)) return ed;
             }
         };
         return null;

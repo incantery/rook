@@ -45,6 +45,19 @@ pub fn build(b: *std.Build) void {
     // parser.c on its own links but fails on the first indented block.
     exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/python/parser.c"), .flags = &.{"-std=c11"} });
     exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/python/scanner.c"), .flags = &.{"-std=c11"} });
+    // Both TS grammars share one scanner (common/scanner.h) and one
+    // copy of tree-sitter's own headers, which that scanner includes
+    // unqualified — so the include path is what makes it resolve, and
+    // there is deliberately ONE copy rather than the two upstream ships.
+    exe_mod.addIncludePath(b.path("vendor/grammars/typescript/include"));
+    // TypeScript ships as TWO grammars, not one with a flag: in a .ts
+    // file `<T>x` is a type assertion, in a .tsx file it opens a JSX
+    // element. One table cannot be both, so tsx is its own parser and
+    // .ts gets the one that reads angle brackets as types.
+    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/typescript/typescript/src/parser.c"), .flags = &.{"-std=c11"} });
+    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/typescript/typescript/src/scanner.c"), .flags = &.{"-std=c11"} });
+    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/typescript/tsx/src/parser.c"), .flags = &.{"-std=c11"} });
+    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/typescript/tsx/src/scanner.c"), .flags = &.{"-std=c11"} });
     exe_mod.linkFramework("AppKit", .{});
     exe_mod.linkFramework("Metal", .{});
     exe_mod.linkFramework("QuartzCore", .{});

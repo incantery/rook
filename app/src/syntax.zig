@@ -63,10 +63,17 @@ extern fn ts_node_end_byte(TSNode) u32;
 extern fn tree_sitter_zig() *const TSLanguage;
 extern fn tree_sitter_go() *const TSLanguage;
 extern fn tree_sitter_python() *const TSLanguage;
+extern fn tree_sitter_typescript() *const TSLanguage;
+extern fn tree_sitter_tsx() *const TSLanguage;
 
 const zig_query = @embedFile("queries/zig.scm");
 const go_query = @embedFile("queries/go.scm");
 const python_query = @embedFile("queries/python.scm");
+const ts_query = @embedFile("queries/typescript.scm");
+/// The shared patterns plus the JSX-only ones, joined at comptime — a
+/// query naming a node its grammar lacks fails to COMPILE, and
+/// jsx_element exists only in the tsx grammar.
+const tsx_query = ts_query ++ @embedFile("queries/tsx.scm");
 
 const Lang = struct {
     lang: *const TSLanguage,
@@ -78,6 +85,22 @@ fn langForPath(path: []const u8) ?Lang {
     if (std.mem.endsWith(u8, path, ".go")) return .{ .lang = tree_sitter_go(), .query_src = go_query };
     if (std.mem.endsWith(u8, path, ".py") or std.mem.endsWith(u8, path, ".pyi"))
         return .{ .lang = tree_sitter_python(), .query_src = python_query };
+    // .ts gets the typescript grammar for ONE reason: `<T>x` is a type
+    // assertion there and a JSX element in tsx, and no single table can
+    // be both.
+    if (std.mem.endsWith(u8, path, ".ts") or std.mem.endsWith(u8, path, ".mts") or
+        std.mem.endsWith(u8, path, ".cts"))
+        return .{ .lang = tree_sitter_typescript(), .query_src = ts_query };
+    // Everything else in the family gets TSX — including plain
+    // JavaScript. That is not a compromise: tsx parses all of JS plus
+    // JSX, and the only thing the ts grammar has over it is the
+    // angle-bracket type assertion, which JavaScript does not have. A
+    // .js file with JSX in it (every pre-2020 React project) would
+    // fail to parse under the ts grammar and reads fine under this one.
+    if (std.mem.endsWith(u8, path, ".tsx") or std.mem.endsWith(u8, path, ".js") or
+        std.mem.endsWith(u8, path, ".jsx") or std.mem.endsWith(u8, path, ".mjs") or
+        std.mem.endsWith(u8, path, ".cjs"))
+        return .{ .lang = tree_sitter_tsx(), .query_src = tsx_query };
     return null;
 }
 

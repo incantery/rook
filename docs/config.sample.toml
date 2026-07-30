@@ -107,21 +107,31 @@
 # with nothing running behind it.
 # lsp = true
 #
-# Known today: Go (gopls) and Python (basedpyright, pyright, pylsp or
-# jedi — whichever is installed, in that order). rook does not install
-# servers yet; it finds what you have. Looked for in the project's own
+# Known today:
+#   Go          gopls
+#   Python      basedpyright, pyright, pylsp, jedi-language-server
+#   TypeScript  tsgo (TypeScript 7's native server), vtsls,
+#               typescript-language-server — and the same server serves
+#               .js/.jsx, because tsserver always has
+# Whichever is installed, in that order. rook does not install servers
+# yet; it finds what you have. Looked for in the project's own
 # .venv/bin and node_modules/.bin FIRST, then PATH, then ~/.local/bin
-# and ~/go/bin — a project's virtualenv is the answer more often than
+# and ~/go/bin — a project's own tooling is the answer more often than
 # PATH is.
 #
-# A Python server is told which interpreter your project uses (the
-# .venv beside your pyproject.toml, else an activated $VIRTUAL_ENV).
-# Without that it reports every third-party import as missing, which is
-# a panel full of errors that are not errors.
+# Servers that need to be told about your project are told:
+#   Python      the interpreter (the .venv beside your pyproject.toml,
+#               else an activated $VIRTUAL_ENV). Without it, every
+#               third-party import reads as missing — a panel full of
+#               errors that are not errors.
+#   TypeScript  your own node_modules/typescript, when you have one, so
+#               the server does not type-check against a compiler you
+#               are not using.
 #
 # Override the server for a language, until config packages land:
 #   ROOK_LSP_GO="/path/to/gopls -mode=stdio"
 #   ROOK_LSP_PYTHON="/path/to/pyright-langserver --stdio"
+#   ROOK_LSP_TYPESCRIPT="/path/to/vtsls --stdio"
 # Environment variables rather than config keys on purpose — the
 # language package is what will own this, and a key added now is a key
 # to deprecate later.
