@@ -41,24 +41,39 @@ sandboxed launches per batch, medians. Wall columns are the harness's
 clock (5ms poll floor); phases are the app's own (`boottime` ctl verb,
 stamped in create() and at the ctl bind). Menlo 14pt, /bin/sh, M3 Max.
 
-| metric | pinned 3-line config | full daily-driver config |
-|---|---|---|
-| exec → ctl socket answering | 75 ms | 72 ms |
-| exec → live shell | 124 ms | 124 ms |
-| config parse | **41 µs** | **51 µs** |
-| keybinds parse | 13 µs | 16 µs |
-| AppKit + Metal + window | 59.8 ms | 57.7 ms |
-| font/renderer init | 1.7 ms | 1.7 ms |
-| shell fork (Session.start) | 1.6 ms | 2.0 ms |
-| create() total | 63.8 ms | 62.7 ms |
+| metric | pinned 3-line config | full daily-driver config | environment graph (same config) |
+|---|---|---|---|
+| exec → ctl socket answering | 81 ms | 94 ms | 79 ms |
+| exec → live shell | 118 ms | 143 ms | 138 ms |
+| config parse / graph load | **53 µs** | **66 µs** | **83 µs** |
+| keybinds parse / graph load | 16 µs | 21 µs | 31 µs |
+| AppKit + Metal + window | 66 ms | 78 ms | 64 ms |
+| font/renderer init | 1.7 ms | 1.8 ms | 1.8 ms |
+| shell fork (Session.start) | 1.7 ms | 2.0 ms | 1.8 ms |
+| create() total | 70 ms | 82 ms | 68 ms |
 
-The launch is AppKit and Metal; **the entire config cost is ~67µs —
-0.09% of time-to-usable**. This is the baseline the environments work
-(config as a materialized graph, docs/environments/) measures against:
-the graph loader replacing the TOML parse has a ~60µs bar to meet at
-launch, and anything under ~1ms stays invisible. The full-vs-pinned
-delta also says config SIZE is not the axis that matters — the fixed
-AppKit cost is 1000× the whole file.
+The launch is AppKit and Metal (note its own ±10ms run-to-run wobble —
+the wall columns move with it, the config columns don't); **the entire
+config cost is ~90µs — 0.12% of time-to-usable** even as a JSON graph
+(docs/environments/IR.md), vs ~87µs for the TOML it replaces. Config
+format is not a launch-time axis at all; the fixed AppKit cost is
+~1000× the whole file. Known slack: the graph is parsed twice (config
+load + keybinds load each parse the file) — fold to one parse if it
+ever matters, which at 50µs a parse it does not.
+
+Emit time — the EDIT→APPLY loop's cost, never paid at launch
+(`sdk/rook/example/bench.py`, medians, warm):
+
+| emitter | median |
+|---|---|
+| go, prebuilt binary | **2.6 ms** |
+| python3 | 17 ms |
+| go run (warm build cache) | 41 ms |
+| node (.ts, type stripping) | 71 ms |
+
+The launch-lag worry about real-language configs dissolves into "keep
+a compiled binary and rebuild it hash-gated": compiled Go emits in
+2.6ms, and even `go run`'s 41ms only ever lands on a config edit.
 
 ### Same-machine A/B — cat 150MB ascii (2026-07-27, Seth's hands)
 

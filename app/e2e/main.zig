@@ -53,6 +53,7 @@ const scenarios = [_]Scenario{
     .{ .name = "reviewrows", .what = "the review panel shows findings, the gate, and re-anchored lines", .run = reviewRows },
     .{ .name = "diffview", .what = "the diff view renders hunks, colours them, numbers by FILE line, and refuses edits", .run = diffView },
     .{ .name = "quitall", .what = ":qa reaches every editor pane and leaves the terminals alone", .run = quitAll },
+    .{ .name = "envgraph", .what = "environment.json wins: the graph's leader and chords drive, config.toml yields", .run = envgraph },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
 };
 
@@ -2135,7 +2136,7 @@ const bench_full_config =
     \\url = "https://api.rookide.com"
 ;
 
-fn startupBatch(gpa: std.mem.Allocator, bin: []const u8, label: []const u8, extra: []const u8) !void {
+fn startupBatch(gpa: std.mem.Allocator, bin: []const u8, label: []const u8, opts: h.Opts) !void {
     const runs = 8;
     const phases = [_][]const u8{ "config_us=", "keybinds_us=", "appkit_us=", "renderer_us=", "session_us=", "create_us=", "ctl_ready_us=" };
     var vals: [phases.len][runs]i64 = undefined;
@@ -2145,7 +2146,7 @@ fn startupBatch(gpa: std.mem.Allocator, bin: []const u8, label: []const u8, extr
     std.debug.print("      [{s}]\n", .{label});
     std.debug.print("      run  sock_ms  shell_ms | config  binds  appkit   fonts  session  create  ctl (µs)\n", .{});
     for (0..runs) |i| {
-        var app = try h.Instance.start(gpa, bin, .{ .config_extra = extra });
+        var app = try h.Instance.start(gpa, bin, opts);
         const bt = try app.ctl("boottime");
         for (phases, 0..) |key, p| vals[p][i] = try benchField(bt, key);
         sock[i] = app.boot_sock_ms;
@@ -2173,6 +2174,75 @@ fn startupBatch(gpa: std.mem.Allocator, bin: []const u8, label: []const u8, extr
 }
 
 fn startup(gpa: std.mem.Allocator, bin: []const u8) !void {
-    try startupBatch(gpa, bin, "pinned 3-line config", "");
-    try startupBatch(gpa, bin, "full daily-driver config", bench_full_config);
+    try startupBatch(gpa, bin, "pinned 3-line config", .{});
+    try startupBatch(gpa, bin, "full daily-driver config", .{ .config_extra = bench_full_config });
+    try startupBatch(gpa, bin, "environment graph (same config, materialized)", .{ .env_json = bench_env_json });
+}
+
+/// The full daily-driver config as a materialized graph — what an SDK
+/// program emits (sdk/rook/example, retargeted at the sandbox's pinned
+/// font and leader). Same knobs as bench_full_config, so the config
+/// column compares TOML parse vs graph load like for like.
+const bench_env_json =
+    \\{"rookEnvironment":1,"nodes":[
+    \\{"id":"option:app:font-family","kind":"option","scope":"app","key":"font-family","value":"Menlo"},
+    \\{"id":"option:app:font-size","kind":"option","scope":"app","key":"font-size","value":14},
+    \\{"id":"option:app:theme","kind":"option","scope":"app","key":"theme","value":"Nocturne"},
+    \\{"id":"option:app:background-opacity","kind":"option","scope":"app","key":"background-opacity","value":1},
+    \\{"id":"option:app:window-padding","kind":"option","scope":"app","key":"window-padding","value":4},
+    \\{"id":"option:app:cursor-blink","kind":"option","scope":"app","key":"cursor-blink","value":true},
+    \\{"id":"option:app:buffer-line","kind":"option","scope":"app","key":"buffer-line","value":true},
+    \\{"id":"option:app:scrollback","kind":"option","scope":"app","key":"scrollback","value":"10mb"},
+    \\{"id":"option:app:bell","kind":"option","scope":"app","key":"bell","value":"visual"},
+    \\{"id":"option:app:clipboard-write","kind":"option","scope":"app","key":"clipboard-write","value":"allow"},
+    \\{"id":"leader:app","kind":"leader","scope":"app","key":"`"},
+    \\{"id":"leader:editor","kind":"leader","scope":"editor","key":","},
+    \\{"id":"keybind:app:<leader>\"","kind":"keybind","scope":"app","chord":"<leader>\"","command":"app.split.horizontal"},
+    \\{"id":"keybind:app:<leader>v","kind":"keybind","scope":"app","chord":"<leader>v","command":"app.split.vertical"},
+    \\{"id":"keybind:app:<leader>c","kind":"keybind","scope":"app","chord":"<leader>c","command":"tab.new"},
+    \\{"id":"keybind:app:<leader>m","kind":"keybind","scope":"app","chord":"<leader>m","command":"workspace.manager"},
+    \\{"id":"keybind:editor.normal:<leader>TAB","kind":"keybind","scope":"editor.normal","chord":"<leader>TAB","command":"explorer.toggle"},
+    \\{"id":"keybind:editor.normal:<leader>o","kind":"keybind","scope":"editor.normal","chord":"<leader>o","command":"explorer.reveal"},
+    \\{"id":"option:host:coder","kind":"option","scope":"host","key":"coder","value":"claude"},
+    \\{"id":"option:host:workspace-allow","kind":"option","scope":"host","key":"workspace-allow","value":["rook","rook-cloud","rook-site","presentation"]},
+    \\{"id":"table:host:agent","kind":"table","scope":"host","name":"agent","entries":{"daily-cap-usd":1,"enabled":true,"engine":"auto","model":""}},
+    \\{"id":"table:host:lsp","kind":"table","scope":"host","name":"lsp","entries":{"enable":["go","typescript","svelte"]}},
+    \\{"id":"table:host:cloud","kind":"table","scope":"host","name":"cloud","entries":{"url":"https://api.rookide.com"}}
+    \\]}
+;
+
+// ------------------------------------------------------------ envgraph
+
+/// The materialized graph is config now (docs/environments/IR.md):
+/// when environment.json is present, ITS leader and chords drive the
+/// real key path and config.toml's are ignored; an unknown node kind
+/// from a newer graph is survived in silence. The sandbox toml pins
+/// leader "`" — the graph says "~", and which one arms is the proof.
+const envgraph_json =
+    \\{"rookEnvironment":1,"nodes":[
+    \\{"id":"option:app:font-family","kind":"option","scope":"app","key":"font-family","value":"Menlo"},
+    \\{"id":"option:app:font-size","kind":"option","scope":"app","key":"font-size","value":14},
+    \\{"id":"leader:app","kind":"leader","scope":"app","key":"~"},
+    \\{"id":"leader:editor","kind":"leader","scope":"editor","key":","},
+    \\{"id":"keybind:app:<leader>c","kind":"keybind","scope":"app","chord":"<leader>c","command":"tab.new"},
+    \\{"id":"future:hologram","kind":"hologram","scope":"app","key":"x","value":[1,2,3]}
+    \\]}
+;
+
+fn envgraph(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{ .env_json = envgraph_json });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    try h.expectEq("tabs", 1, try app.tabCount());
+    // The graph's leader arms and its chord fires.
+    _ = try app.ctl("press ~");
+    _ = try app.ctl("press c");
+    try h.expectEq("tabs after graph chord", 2, try app.tabCount());
+    // config.toml's leader must NOT arm while a graph is present — the
+    // backtick is just a character for the shell now.
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press c");
+    try h.expectEq("tabs after toml leader", 2, try app.tabCount());
 }

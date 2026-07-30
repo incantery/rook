@@ -195,6 +195,29 @@ a daily driver.
 - [ ] Config `[commands]` aliases layered onto the ex names (the wails
       `Registry.exNames(aliases)` half). `registry.isExName` is the
       validator it would need; nothing parses the table yet.
+- [x] **The environment graph, slice one** (docs/environments/ — IR.md
+      is the contract, VISION.md the direction): config as a
+      declarative environment a real-language program EMITS rather than
+      a script that runs inside rook. The app prefers
+      `~/.config/rook/environment.json` over config.toml when present
+      (replaces its view entirely — no layering until provenance),
+      falls back on absence or a parse failure (a broken apply must
+      never brick a launch), and FAILS OPEN on unknown kinds/keys/types
+      — the host-protocol-skew rule applied to config. Graph reloads
+      live (digest() hashes both files). Go SDK at sdk/rook with
+      Seth's config as the example program; TS and Python parity
+      probes beside it emit BYTE-IDENTICAL graphs (canonical bytes:
+      compact, fixed field order, sorted entries, integral floats as
+      ints, no HTML escaping — `diff` is the parity test).
+      Measured before built (the `startup` e2e bench, PERF.md): TOML
+      parse 87µs vs graph load 114µs of a ~75ms launch — config format
+      is not a launch axis; emit is apply-time only (compiled Go
+      2.6ms). e2e `envgraph` proves the graph's leader/chords drive
+      the real key path while toml's leader stays a plain character,
+      and survives an unknown node kind.
+      Zig 0.16 gotcha: `std.time.nanoTimestamp` is gone too (joins the
+      §7 list) — boot phases stamp with `CACurrentMediaTime`, the
+      app's one clock.
 - [ ] **Theme engine**: one semantic Palette, 8 builtins, runtime swap,
       **VS Code theme importer**. rook has 2 builtins and a config key.
 - [ ] **Settings UI** (⌘,): appearance, keybinds, and the token panes

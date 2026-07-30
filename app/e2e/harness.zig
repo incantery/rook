@@ -84,6 +84,11 @@ pub const Opts = struct {
     shell: [*:0]const u8 = "/bin/sh",
     /// Extra lines appended to the sandbox config.toml.
     config_extra: []const u8 = "",
+    /// When non-empty, written as the sandbox's environment.json — the
+    /// materialized graph the app prefers over config.toml
+    /// (docs/environments/IR.md). The pinned config.toml is STILL
+    /// written; a scenario proving the graph wins relies on that.
+    env_json: []const u8 = "",
     /// How long start() waits for the socket, then for a live shell.
     boot_timeout_ms: u32 = 15_000,
 };
@@ -166,6 +171,11 @@ pub const Instance = struct {
             \\
         , .{opts.config_extra});
         try writeFileZ(cfgfile, cfg);
+        if (opts.env_json.len > 0) {
+            var envfile_buf: [192]u8 = undefined;
+            const envfile = try std.fmt.bufPrint(&envfile_buf, "{s}/environment.json", .{rookcfg});
+            try writeFileZ(envfile, opts.env_json);
+        }
 
         // The sandbox gets its own HOME, for two reasons.
         //

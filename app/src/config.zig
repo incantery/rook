@@ -154,6 +154,14 @@ pub fn digest(io: std.Io, gpa: std.mem.Allocator) u64 {
             gpa.free(data);
         }
     }
+    // The environment graph reloads live too — an apply while the app
+    // runs must land like a config edit does.
+    if (envPath(&pathbuf)) |path| {
+        if (std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch null) |data| {
+            h.update(data);
+            gpa.free(data);
+        }
+    }
     return h.final();
 }
 
@@ -189,7 +197,24 @@ pub fn cfgPath(buf: []u8) ?[]const u8 {
     return std.fmt.bufPrint(buf, "{s}/.config/rook/config.toml", .{std.mem.span(home)}) catch null;
 }
 
+/// The materialized environment graph (docs/environments/IR.md) —
+/// emitted by an SDK program at APPLY time, read here at launch. When
+/// present and valid it replaces the app's view of config.toml; when
+/// absent, TOML is the front end exactly as before.
+pub fn envPath(buf: []u8) ?[]const u8 {
+    if (getenv("XDG_CONFIG_HOME")) |x| {
+        return std.fmt.bufPrint(buf, "{s}/rook/environment.json", .{std.mem.span(x)}) catch null;
+    }
+    const home = getenv("HOME") orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/.config/rook/environment.json", .{std.mem.span(home)}) catch null;
+}
+
 pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
+    if (loadEnv(io, gpa)) |cfg| return cfg;
+    return loadToml(io, gpa);
+}
+
+fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
     var cfg: Config = .{};
 
     var pathbuf: [1024]u8 = undefined;
@@ -315,6 +340,164 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
     return cfg;
 }
 
+// ---- the environment graph ----
+//
+// docs/environments/IR.md. Fail open everywhere, the host-protocol-
+// skew discipline: an unknown kind, an unknown key, a wrong value type
+// are each skipped in silence — old apps must survive new graphs. Only
+// a file that EXISTS but cannot parse warns, because that is a broken
+// apply, not a foreign key.
+
+const WireNode = struct {
+    id: []const u8 = "",
+    kind: []const u8 = "",
+    scope: []const u8 = "",
+    key: []const u8 = "",
+    value: std.json.Value = .null,
+    chord: []const u8 = "",
+    command: []const u8 = "",
+    name: []const u8 = "",
+    entries: std.json.Value = .null,
+};
+const WireEnv = struct {
+    rookEnvironment: i64 = 0,
+    nodes: []WireNode = &.{},
+};
+
+fn envData(io: std.Io, gpa: std.mem.Allocator) ?[]u8 {
+    var pathbuf: [1024]u8 = undefined;
+    const path = envPath(&pathbuf) orelse return null;
+    return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch null;
+}
+
+fn jStr(v: std.json.Value) ?[]const u8 {
+    return switch (v) {
+        .string => |s| s,
+        else => null,
+    };
+}
+fn jNum(v: std.json.Value) ?f64 {
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => null,
+    };
+}
+fn jBool(v: std.json.Value) ?bool {
+    return switch (v) {
+        .bool => |b| b,
+        else => null,
+    };
+}
+
+/// One app option off the graph. Key names are config.toml's, dashes
+/// or underscores; a wrong value TYPE leaves the default rather than
+/// guessing (the graph is machine-emitted — a type mismatch is a
+/// version skew to survive, not a typo to correct).
+fn applyEnvOption(cfg: *Config, gpa: std.mem.Allocator, key_raw: []const u8, value: std.json.Value) void {
+    var keybuf: [64]u8 = undefined;
+    if (key_raw.len > keybuf.len) return;
+    for (key_raw, 0..) |c, i| keybuf[i] = if (c == '-') '_' else c;
+    const key = keybuf[0..key_raw.len];
+
+    if (std.mem.eql(u8, key, "font_size")) {
+        cfg.font_size = jNum(value) orelse cfg.font_size;
+    } else if (std.mem.eql(u8, key, "font_family")) {
+        if (jStr(value)) |s| {
+            if (s.len > 0) cfg.font_family = gpa.dupeZ(u8, s) catch cfg.font_family;
+        }
+    } else if (std.mem.eql(u8, key, "theme")) {
+        if (jStr(value)) |s| {
+            if (s.len > 0) cfg.theme = gpa.dupe(u8, s) catch cfg.theme;
+        }
+    } else if (std.mem.eql(u8, key, "background_opacity")) {
+        cfg.background_opacity = jNum(value) orelse cfg.background_opacity;
+        if (cfg.background_opacity < 0.3 or cfg.background_opacity > 1.0) cfg.background_opacity = 1.0;
+    } else if (std.mem.eql(u8, key, "background_blur")) {
+        if (jStr(value)) |s| cfg.background_blur = blurFromName(s) orelse cfg.background_blur;
+    } else if (std.mem.eql(u8, key, "window_padding") or
+        std.mem.eql(u8, key, "window_padding_x") or
+        std.mem.eql(u8, key, "window_padding_y"))
+    {
+        cfg.window_padding = jNum(value) orelse cfg.window_padding;
+        if (cfg.window_padding < 0 or cfg.window_padding > 32) cfg.window_padding = 0;
+    } else if (std.mem.eql(u8, key, "bell")) {
+        if (jStr(value)) |s| cfg.bell = bellFromName(s) orelse cfg.bell;
+    } else if (std.mem.eql(u8, key, "scrollback") or std.mem.eql(u8, key, "scrollback_limit")) {
+        cfg.scrollback = switch (value) {
+            .integer => |i| if (i >= 0) @intCast(i) else cfg.scrollback,
+            .string => |s| parseSize(s) orelse cfg.scrollback,
+            else => cfg.scrollback,
+        };
+        if (cfg.scrollback > 1024 * 1024 * 1024) cfg.scrollback = 1024 * 1024 * 1024;
+    } else if (std.mem.eql(u8, key, "clipboard_write")) {
+        cfg.clipboard_write = switch (value) {
+            .string => |s| clipboardWriteFromName(s) orelse cfg.clipboard_write,
+            .bool => |b| if (b) .allow else .deny,
+            else => cfg.clipboard_write,
+        };
+    } else if (std.mem.eql(u8, key, "buffer_line")) {
+        cfg.buffer_line = jBool(value) orelse cfg.buffer_line;
+    } else if (std.mem.eql(u8, key, "cursor_blink") or std.mem.eql(u8, key, "cursor_style_blink")) {
+        cfg.cursor_blink = jBool(value) orelse cfg.cursor_blink;
+    }
+    // No else: an unknown key belongs to a newer graph. Fail open.
+}
+
+fn loadEnv(io: std.Io, gpa: std.mem.Allocator) ?Config {
+    const data = envData(io, gpa) orelse return null;
+    defer gpa.free(data);
+    const parsed = std.json.parseFromSlice(WireEnv, gpa, data, .{ .ignore_unknown_fields = true }) catch {
+        std.debug.print("rook environment: environment.json did not parse — falling back to config.toml\n", .{});
+        return null;
+    };
+    defer parsed.deinit();
+
+    var cfg: Config = .{};
+    for (parsed.value.nodes) |n| {
+        if (!std.mem.eql(u8, n.kind, "option")) continue;
+        if (!std.mem.eql(u8, n.scope, "app")) continue;
+        applyEnvOption(&cfg, gpa, n.key, n.value);
+    }
+    if (cfg.font_size < 6 or cfg.font_size > 72) {
+        std.debug.print("rook environment: font-size {d} out of range, using 13\n", .{cfg.font_size});
+        cfg.font_size = 13;
+    }
+    return cfg;
+}
+
+/// Keybinds off the graph: defaults first (same defaults as the TOML
+/// path — the graph, like config lines, REBINDS them), then leader
+/// nodes and app-scope keybind nodes. Editor-scope keybind nodes ride
+/// along untouched until configurable editor maps land.
+fn loadKeybindsEnv(io: std.Io, gpa: std.mem.Allocator) ?Keybinds {
+    const data = envData(io, gpa) orelse return null;
+    defer gpa.free(data);
+    // load() already warned about a file that won't parse; stay quiet.
+    const parsed = std.json.parseFromSlice(WireEnv, gpa, data, .{ .ignore_unknown_fields = true }) catch return null;
+    defer parsed.deinit();
+
+    var kb: Keybinds = .{};
+    defaultBinds(&kb);
+    for (parsed.value.nodes) |n| {
+        if (std.mem.eql(u8, n.kind, "leader")) {
+            if (std.mem.eql(u8, n.scope, "app")) {
+                kb.leader = chordChar(n.key) orelse kb.leader;
+            } else if (std.mem.eql(u8, n.scope, "editor")) {
+                kb.ed_leader = chordChar(n.key) orelse kb.ed_leader;
+            }
+        } else if (std.mem.eql(u8, n.kind, "keybind") and std.mem.eql(u8, n.scope, "app")) {
+            if (!std.mem.startsWith(u8, n.chord, "<leader>")) continue;
+            const ch = chordChar(n.chord["<leader>".len..]) orelse continue;
+            const spec = actionFromName(n.command) orelse continue;
+            kb.bind(ch, spec);
+        }
+    }
+    if (kb.n > 0 and kb.leader == null)
+        std.debug.print("rook environment: chords defined but no leader set — they are unreachable\n", .{});
+    return kb;
+}
+
 // ---- keybinds ----
 //
 // Same file. Leader chords, tmux-shaped: top-level `leader = "x"`, then
@@ -422,7 +605,11 @@ fn topLevelEq(line: []const u8) ?usize {
 }
 
 pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
-    var kb: Keybinds = .{};
+    if (loadKeybindsEnv(io, gpa)) |kb| return kb;
+    return loadKeybindsToml(io, gpa);
+}
+
+fn defaultBinds(kb: *Keybinds) void {
     // tmux's defaults: <leader>1–9 jump to tabs, <leader>[ enters copy
     // mode. Config lines rebind.
     for (1..10) |d| kb.bind(@intCast('0' + d), .{ .action = .tab_select, .arg = @intCast(d) });
@@ -454,6 +641,11 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     // ...and opened on the current file (vim-vinegar's `-` energy, but
     // the whole tree, unfolded down to where you are).
     kb.bind('o', .{ .action = .tree_reveal });
+}
+
+fn loadKeybindsToml(io: std.Io, gpa: std.mem.Allocator) Keybinds {
+    var kb: Keybinds = .{};
+    defaultBinds(&kb);
 
     var pathbuf: [1024]u8 = undefined;
     const path = cfgPath(&pathbuf) orelse return kb;
