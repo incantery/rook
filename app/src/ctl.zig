@@ -319,6 +319,29 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
     } else if (std.mem.eql(u8, verb, "palette-open") and rest.len == 0) {
         app.openPalette();
         reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "statusbar") and rest.len == 0) {
+        // The bar's where-you-are zone, blind: workspace, branch (as
+        // polled off the focused pane's cwd), the cwd label, and each
+        // drawn segment's click point.
+        var buf: [1024]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        app.draw_lock.lock();
+        w.print("workspace {s}\nbranch {s}\ncwd {s}\n", .{
+            app.activeSpace().label(),
+            if (app.bar_branch_len > 0) app.bar_branch[0..app.bar_branch_len] else "-",
+            app.hud_left[0..app.hud_left_len],
+        }) catch {};
+        const seg_y: u32 = @intFromFloat(app.px_h - app.bar_h / 2);
+        if (app.seg_ws_x[1] > 0) w.print("seg-workspace {d},{d}\n", .{
+            @as(u32, @intFromFloat((app.seg_ws_x[0] + app.seg_ws_x[1]) / 2)),
+            seg_y,
+        }) catch {};
+        if (app.seg_branch_x[1] > 0) w.print("seg-branch {d},{d}\n", .{
+            @as(u32, @intFromFloat((app.seg_branch_x[0] + app.seg_branch_x[1]) / 2)),
+            seg_y,
+        }) catch {};
+        app.draw_lock.unlock();
+        reply(fd, buf[0..w.end]);
     } else if (std.mem.eql(u8, verb, "whichkey") and rest.len == 0) {
         // The leader's teaching sheet, blind: armed/visible state, the
         // rows the sheet shows (LIVE bindings, the same list drawWhichKey

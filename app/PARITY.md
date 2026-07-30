@@ -239,8 +239,26 @@ a daily driver.
       ticks a ~2Hz redraw, and the measured zero-idle-frames property
       is kept where it was measured: an app you are not looking at.
       DECTCEM-hidden cursors don't tick the clock at all.
-- [ ] Status bar: workspace/branch/review-gate state, not just perf HUD
-      (the teaching hints above are the first non-HUD tenant)
+- [x] **Status bar: where you are.** The left zone is workspace ·
+      branch · cwd, every piece anchored to the FOCUSED PANE's live cwd
+      (proc_pidinfo at the 2Hz HUD tick) — cd is sacred, and an agent
+      switching branches in a worktree shows from the pane sitting in
+      it. The branch is read straight off .git/HEAD (`git.headBranch`:
+      walk up, follow a worktree's pointer file, no subprocess at 2Hz),
+      so it follows a checkout made entirely outside the app. Segments
+      CLICK: workspace → the switcher, branch → the diff. The bar
+      MEASURES before it draws and sheds from the diagnostics down
+      when narrow (perf HUD first, then cwd, then hints, then branch) —
+      the window's size is the window manager's, what shows at each
+      width must not be, or every layout assertion is a coin flip
+      against AppKit's clamping (found as a flaky e2e: winsize can't
+      pin geometry, AppKit clamps to the screen). ctl `statusbar`
+      exposes the zone + click points; the e2e proves cwd-follow,
+      external-checkout-follow, and both segment clicks blind.
+      Still owed: the review-gate segment — it needs gate state without
+      a panel open, i.e. an always-on poll the "closed panels cost
+      nothing" rule currently forbids; piggyback on the usage poll or
+      a host push, not a fourth poller.
 
 ## 2. The agent layer — this is the actual product
 

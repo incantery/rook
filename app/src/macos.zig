@@ -397,6 +397,16 @@ pub const App = struct {
     hint_menu_x: [2]f32 = .{ 0, 0 },
     hint_cmd_x: [2]f32 = .{ 0, 0 },
 
+    /// Status-bar WHERE-YOU-ARE segments: the focused pane's git
+    /// branch (read off .git/HEAD at the HUD tick — the pane's cwd is
+    /// the authority, so the segment follows `cd` and follows an agent
+    /// switching branches under you), plus the click zones for the
+    /// workspace and branch segments. Zero-width when not drawn.
+    bar_branch: [64]u8 = undefined,
+    bar_branch_len: usize = 0,
+    seg_ws_x: [2]f32 = .{ 0, 0 },
+    seg_branch_x: [2]f32 = .{ 0, 0 },
+
     // ---- cursor blink ----
     /// config `cursor-blink`: the focused pane's cursor blinks on the
     /// mark every terminal shares (1.1s period, ~55% on).
@@ -1286,11 +1296,16 @@ pub const App = struct {
             }
             // Outside: dismissed; the click still lands below.
         }
-        // Status-bar hints: the mouse route into the two teaching
-        // surfaces. "menu" arms the leader with the sheet shown NOW —
-        // a click is a request for the menu, not a hesitation to time.
+        // Status-bar segments and hints: the mouse route into the
+        // things the bar names. "menu" arms the leader with the sheet
+        // shown NOW — a click is a request for the menu, not a
+        // hesitation to time.
         if (y >= self.px_h - self.bar_h) {
-            if (x >= self.hint_menu_x[0] and x < self.hint_menu_x[1]) {
+            if (x >= self.seg_ws_x[0] and x < self.seg_ws_x[1]) {
+                self.pending_cmd = .{ .action = .workspace_switch };
+            } else if (x >= self.seg_branch_x[0] and x < self.seg_branch_x[1]) {
+                self.pending_cmd = .{ .action = .diff_open };
+            } else if (x >= self.hint_menu_x[0] and x < self.hint_menu_x[1]) {
                 self.wk_visible = true;
                 self.wk_armed_at = 0;
                 self.scene_dirty = true;
@@ -3937,13 +3952,22 @@ pub const App = struct {
             if (cost > vsync) fps = @intFromFloat(@round(1e6 / cost));
         }
 
+        // The left zone is WHERE YOU ARE: the focused pane's cwd, named
+        // the way a human would (workspace name + remainder), and the
+        // branch of the repo owning it. Both anchored to the PANE's live
+        // cwd rather than the space's root — cd is sacred, and an agent
+        // switching branches in a worktree should be visible from the
+        // pane sitting in it. The old "rook · N panes · #id" told you
+        // what the splits already show.
         var left: [96]u8 = undefined;
         const t = self.activeTab();
-        const l = std.fmt.bufPrint(&left, "rook · {d} pane{s} · #{d}", .{
-            t.panes.items.len,
-            @as([]const u8, if (t.panes.items.len == 1) "" else "s"),
-            t.focused.id,
-        }) catch return;
+        const cwd: []const u8 = if (self.paneCwd(t.focused)) |c| std.mem.span(c) else "";
+        const l = self.cwdLabel(cwd, &left);
+        var brbuf: [64]u8 = undefined;
+        const br: []const u8 = if (cwd.len > 0)
+            @import("git.zig").headBranch(self.io, self.gpa, cwd, &brbuf) orelse ""
+        else
+            "";
         var right: [96]u8 = undefined;
         const r = std.fmt.bufPrint(&right, "{d}.{d}ms key · {d}fps · {d}MB/s · {d}MB", .{
             key.p50 / 1000,
@@ -3971,13 +3995,16 @@ pub const App = struct {
 
         if (std.mem.eql(u8, l, self.hud_left[0..self.hud_left_len]) and
             std.mem.eql(u8, r, self.hud_right[0..self.hud_right_len]) and
-            std.mem.eql(u8, td, self.hud_tabs[0..self.hud_tabs_len])) return;
+            std.mem.eql(u8, td, self.hud_tabs[0..self.hud_tabs_len]) and
+            std.mem.eql(u8, br, self.bar_branch[0..self.bar_branch_len])) return;
         @memcpy(self.hud_left[0..l.len], l);
         self.hud_left_len = l.len;
         @memcpy(self.hud_right[0..r.len], r);
         self.hud_right_len = r.len;
         @memcpy(self.hud_tabs[0..td.len], td);
         self.hud_tabs_len = td.len;
+        @memcpy(self.bar_branch[0..br.len], br);
+        self.bar_branch_len = br.len;
         self.scene_dirty = true;
     }
 
@@ -4028,43 +4055,93 @@ pub const App = struct {
                 x += ui.text(x, ty, " /no match ", th.bar_bg, th.accent) + self.renderer.cell_w / 2;
             }
         }
-        const lw = ui.text(x, ty, self.hud_left[0..self.hud_left_len], th.bar_fg, self.glassBg(th.bar_bg));
-        const rw = ui.textRight(self.px_w - pad, ty, self.hud_right[0..self.hud_right_len], th.bar_value, self.glassBg(th.bar_bg));
-
-        // The teaching affordances, left of the perf cluster: "␣ menu"
-        // arms the leader with its menu, "⌘K commands" opens the
-        // palette. Clickable (drawBar records the hit zones) because a
-        // VS Code hand's first instinct is the mouse — each click runs
-        // the real thing while showing the key that would have. Drawn
-        // only when there is room; the panes' content never moves for
-        // them. Key glyph in accent, word in bar_fg — the mock's
-        // vocabulary: the key is the loud part.
+        // MEASURE before drawing, and shed from the diagnostics down
+        // when narrow: the perf HUD yields first (it is for us; the
+        // rest is the product), then the cwd, then the teaching hints,
+        // then the branch. The window's size is the window manager's —
+        // what shows at each width must not be, or every layout
+        // assertion is a coin flip against AppKit's clamping.
+        //
+        // The affordances: "␣ menu" arms the leader with its menu
+        // shown, "⌘K commands" opens the palette. Clickable (drawBar
+        // records the hit zones) because a VS Code hand's first
+        // instinct is the mouse — each click runs the real thing while
+        // showing the key that would have. Key glyph in accent, word
+        // in bar_fg — the mock's vocabulary: the key is the loud part.
         const cw = self.renderer.cell_w;
-        const left_end = x + lw + 2 * cw;
         const bg = self.glassBg(th.bar_bg);
+        const name = self.activeSpace().label();
+        const br = self.bar_branch[0..self.bar_branch_len];
+
+        const ws_w = @as(f32, @floatFromInt(2 + name.len)) * cw + 2 * cw;
+        const br_w: f32 = if (br.len > 0) @as(f32, @floatFromInt(2 + br.len)) * cw + 2 * cw else 0;
+        const menu_w: f32 = if (self.keybinds.leader != null) 6 * cw + 3 * cw else 0;
+        const cmd_w = 11 * cw + 3 * cw;
+        const hud_w = @as(f32, @floatFromInt(self.hud_right_len)) * cw + 3 * cw;
+
+        var budget = self.px_w - pad - x;
+        const show_ws = ws_w <= budget;
+        if (show_ws) budget -= ws_w;
+        const show_br = br_w > 0 and br_w <= budget;
+        if (show_br) budget -= br_w;
+        const show_hints = menu_w + cmd_w <= budget;
+        if (show_hints) budget -= menu_w + cmd_w;
+        const show_hud = hud_w <= budget;
+        if (show_hud) budget -= hud_w;
+
+        // Right cluster, edge inward: HUD, then the two hints.
         self.hint_menu_x = .{ 0, 0 };
         self.hint_cmd_x = .{ 0, 0 };
-        var hx = self.px_w - pad - rw - 3 * cw; // hints grow leftward
-        {
-            const w = 11 * cw; // "⌘K commands"
-            if (hx - w > left_end) {
-                var tx = hx - w;
+        var right_limit = self.px_w - pad;
+        if (show_hud)
+            right_limit -= ui.textRight(right_limit, ty, self.hud_right[0..self.hud_right_len], th.bar_value, bg) + 3 * cw;
+        if (show_hints) {
+            {
+                const w = 11 * cw;
+                var tx = right_limit - w;
+                self.hint_cmd_x = .{ tx, right_limit };
                 tx += ui.text(tx, ty, "⌘K", th.accent, bg);
                 _ = ui.text(tx + cw, ty, "commands", th.bar_fg, bg);
-                self.hint_cmd_x = .{ hx - w, hx };
-                hx -= w + 3 * cw;
+                right_limit -= w + 3 * cw;
             }
-        }
-        if (self.keybinds.leader) |ld| {
-            var gb: [4]u8 = undefined;
-            const g = keyGlyph(ld, &gb);
-            const w = 6 * cw; // "{key} menu"
-            if (hx - w > left_end) {
-                var tx = hx - w;
+            if (self.keybinds.leader) |ld| {
+                var gb: [4]u8 = undefined;
+                const g = keyGlyph(ld, &gb);
+                const w = 6 * cw;
+                var tx = right_limit - w;
+                self.hint_menu_x = .{ tx, right_limit };
                 tx += ui.text(tx, ty, g, th.accent, bg);
                 _ = ui.text(tx + cw, ty, "menu", th.bar_fg, bg);
-                self.hint_menu_x = .{ hx - w, hx };
+                right_limit -= w + 3 * cw;
             }
+        }
+
+        // The LEFT zone: where you are. Workspace (click: the
+        // switcher), branch (click: the diff — the change is the thing
+        // a branch name makes you wonder about), then the focused
+        // pane's cwd label in whatever room is left, if that room is
+        // enough to say something ("…s/s…" is not).
+        self.seg_ws_x = .{ 0, 0 };
+        self.seg_branch_x = .{ 0, 0 };
+        if (show_ws) {
+            const x0 = x;
+            x += ui.text(x, ty, "● ", th.accent, bg);
+            x += ui.text(x, ty, name, th.bar_value, bg);
+            self.seg_ws_x = .{ x0, x };
+            x += 2 * cw;
+        }
+        if (show_br) {
+            const x0 = x;
+            x += ui.text(x, ty, "⎇ ", th.bar_fg, bg);
+            x += ui.text(x, ty, br, th.bar_value, bg);
+            self.seg_branch_x = .{ x0, x };
+            x += 2 * cw;
+        }
+        const room: usize = @intFromFloat(@max(0, (right_limit - x) / cw));
+        if (self.hud_left_len > 0 and room >= 10) {
+            var clipbuf: [96]u8 = undefined;
+            const s = @import("ui.zig").clip(&clipbuf, self.hud_left[0..self.hud_left_len], room);
+            _ = ui.text(x, ty, s, th.bar_fg, bg);
         }
     }
 
