@@ -446,11 +446,17 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       Round two (same day): Nerd Font type icons per extension
       (CoreText cascade means a font without them draws blank, not
       tofu), directories in the tree_dir line style (line_style — the
-      diff view's channel), Enter on a file BESIDE-OPENS — the tree
-      stays standing at sidebar width (side_cols) and the file lands
-      in the pane to the right, reused if it's already a document —
-      and a tree standing anywhere in the tab is THE tree for
-      `<leader>⇥`/`<leader>o`. The EDITOR LEADER exists now ([editor]
+      diff view's channel), and beside-open through the app_open seam.
+      Round three (Seth's dogfood): NERDTree's contract, exactly. The
+      leader tree is a DEDICATED sidebar pane (`tree_pinned`): toggle
+      opens it as a topleft vsplit at side_cols — nothing you were
+      looking at moves — and closes it by REMOVING the pane (never by
+      resurrecting a parked shell); reveal opens-or-focuses it pointed
+      at the current file. Its files beside-open into the SIBLING
+      subtree (the sidebar never splits itself — halving 34 columns
+      leaves two slivers; found as a 2-column pane in the e2e), first
+      reusing an editor pane to the right. `:e <dir>`'s in-pane tree
+      keeps netrw's open-in-place — the pinned flag is the fork. The EDITOR LEADER exists now ([editor]
       leader in config, vim's maplocalleader): `,⇥`/`,o` reach the
       same commands through the app_command seam by registry id.
       :sp/:vsp/:split/:vsplit land on the same open-outside seam — no

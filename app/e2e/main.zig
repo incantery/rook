@@ -978,14 +978,13 @@ fn parseRect(s: []const u8) ?struct { x: f32, y: f32, w: f32, h: f32, cols: usiz
 
 // ------------------------------------------------------------ filetree
 
-/// The file tree in the focused pane: `<leader>⇥` takes over a
-/// terminal with the tree of its repo (rooted at the .git top, not the
-/// cwd), Enter folds in place, `<leader>⇥` again hands the shell back;
-/// from a file, `<leader>o` opens the tree unfolded down to that file
-/// and `<leader>⇥` toggles back to it — the alternate-buffer loop.
+/// The file tree as NERDTree's dedicated sidebar: `<leader>⇥` opens a
+/// LEFT split (nothing you were looking at moves) and closes it by
+/// removing the pane; Enter beside-opens files while the tree stands;
+/// `<leader>o` reveals the current file; the editor's own leader
+/// (`,⇥`) reaches the same commands; and `:e <dir>`'s in-pane tree
+/// keeps netrw's open-in-place.
 fn filetree(gpa: std.mem.Allocator, bin: []const u8) !void {
-    // The editor's own leader too ([editor] scope, vim's
-    // maplocalleader) — `,⇥` must reach the tree from inside a buffer.
     const app = try h.Instance.start(gpa, bin, .{
         .config_extra = "[editor]\nleader = \",\"\n",
     });
@@ -1007,90 +1006,102 @@ fn filetree(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.writeFile(mainzig, "pub fn main() void {}\n");
     if (try h.runCmd(proj, &.{ "/usr/bin/git", "init", "-q" }) != 0) return error.NoGit;
 
-    // Walk the shell into proj/SRC — the tree must root at PROJ (the
+    // Walk the shell into proj/SRC — the tree roots at PROJ (the
     // repo), which is only provable from a subdirectory.
     _ = try app.ctlFmt("type cd {s}", .{sub});
     _ = try app.ctl("enter");
     _ = try app.waitCtl("statusbar", "proj/src", 8000);
 
-    // <leader>⇥ from the terminal: a takeover tree.
+    // <leader>⇥ from the terminal: a LEFT SIDEBAR — the terminal
+    // stays; the tree pane takes focus.
     _ = try app.ctl("press `");
     _ = try app.ctl("press TAB");
     _ = try app.waitCtl("panes", "edit:proj", 5000);
+    try h.expectContains(try app.ctl("panes"), " term", "the terminal is still standing");
+    try h.expectEq("sidebar joined the terminal", 2, try app.paneCount());
     var buf: [16 * 1024]u8 = undefined;
-    var scr = try app.screen(&buf);
+    const scr = try app.screen(&buf);
     try h.expectContains(scr, "▸ src/", "the repo's dirs list folded");
     try h.expectContains(scr, "README.md", "the repo's files list");
 
-    // Enter on src/ unfolds IN PLACE. Navigated by `/` search — the
-    // tree is a BUFFER, so vim's own motions are the navigation — and
-    // search also dodges the row `.git/` occupies above it.
+    // Enter on src/ unfolds IN PLACE, navigated by `/` search — the
+    // tree is a BUFFER, so vim's motions are the navigation.
     _ = try app.ctl("type /src");
     _ = try app.ctl("enter");
     _ = try app.ctl("press RET");
     try app.waitText("▾ src/", 5000);
-    scr = try app.screen(&buf);
-    try h.expectContains(scr, "main.zig", "unfolding shows the child");
-    try h.expectContains(scr, "README.md", "the rest of the level is still there");
 
-    // <leader>⇥ again: the shell comes back (the tree had nothing else
-    // to show, so toggling off is the takeover ending).
-    _ = try app.ctl("press `");
-    _ = try app.ctl("press TAB");
-    var waited: u32 = 0;
-    while (waited < 5000) : (waited += 100) {
-        if (std.mem.indexOf(u8, try app.ctl("panes"), "edit:") == null) break;
-        h.sleepMs(100);
-    }
-    try h.expectNotContains(try app.ctl("panes"), "edit:", "toggle hands the shell back");
-
-    // From a FILE: <leader>o opens the tree revealed on it.
-    _ = try app.ctlFmt("edit {s}", .{mainzig});
-    _ = try app.waitCtl("panes", "edit:main.zig", 5000);
-    _ = try app.ctl("press `");
-    _ = try app.ctl("press o");
-    try app.waitText("▾ src/", 5000);
-    scr = try app.screen(&buf);
-    try h.expectContains(scr, "main.zig", "the target is on screen, ancestors unfolded");
-
-    // ...and <leader>⇥ toggles back to the file it covered.
-    _ = try app.ctl("press `");
-    _ = try app.ctl("press TAB");
-    _ = try app.waitCtl("panes", "edit:main.zig", 5000);
-    try app.waitText("pub fn main", 5000);
-
-    // BESIDE-OPEN: reopen the tree, Enter on README — the tree stays
-    // standing as a sidebar and the file opens in a pane to its right.
-    _ = try app.ctl("press `");
-    _ = try app.ctl("press o");
-    try app.waitText("▾ src/", 5000);
+    // Enter on a file: BESIDE-OPEN — the tree stays standing, the
+    // file lands in a new pane, focus follows the file.
     _ = try app.ctl("type /README");
     _ = try app.ctl("enter");
     _ = try app.ctl("press RET");
     _ = try app.waitCtl("panes", "edit:README.md", 5000);
-    const both = try app.ctl("panes");
-    try h.expectContains(both, "edit:proj", "the tree pane is still standing");
-    try h.expectContains(both, "*", "something holds focus");
+    try h.expectContains(try app.ctl("panes"), "edit:proj", "the tree pane is still standing");
     try h.expectContains(try app.ctl("dump"), "hi", "focus moved to the opened file");
 
-    // <leader>⇥ from the file: the standing tree is THE tree — it
-    // toggles closed (back to its alternate) from anywhere in the tab.
+    // <leader>⇥ from the file: the sidebar CLOSES — the pane is
+    // REMOVED, not turned back into anything.
+    const before_close = try app.paneCount();
     _ = try app.ctl("press `");
     _ = try app.ctl("press TAB");
-    _ = try app.waitCtl("panes", "edit:main.zig", 5000);
-    try h.expectNotContains(try app.ctl("panes"), "edit:proj", "the sidebar tree closed");
+    var waited: u32 = 0;
+    while (waited < 5000) : (waited += 100) {
+        if (std.mem.indexOf(u8, try app.ctl("panes"), "edit:proj") == null) break;
+        h.sleepMs(100);
+    }
+    try h.expectNotContains(try app.ctl("panes"), "edit:proj", "toggle removed the sidebar");
+    try h.expectEq("exactly the tree pane went away", before_close - 1, try app.paneCount());
 
     // THE EDITOR LEADER: `,⇥` (maplocalleader — a separate scope from
-    // the app's backtick) opens the tree from inside a buffer.
+    // the app's backtick) opens the sidebar from inside a buffer...
     _ = try app.ctl("press ,");
     _ = try app.ctl("press TAB");
     _ = try app.waitCtl("panes", "edit:proj", 5000);
+    // ...and closes it again.
     _ = try app.ctl("press ,");
     _ = try app.ctl("press TAB");
-    _ = try app.waitCtl("panes", "edit:README.md", 5000);
+    waited = 0;
+    while (waited < 5000) : (waited += 100) {
+        if (std.mem.indexOf(u8, try app.ctl("panes"), "edit:proj") == null) break;
+        h.sleepMs(100);
+    }
+    try h.expectNotContains(try app.ctl("panes"), "edit:proj", "the editor leader toggles too");
 
-    // :vsp — the same open-outside seam, spelled vim's way. Bare, it
-    // opens the SAME file in a new pane to the right.
+    // <leader>o reveals: the sidebar comes back pointed at the
+    // focused file, ancestors unfolded, tree focused.
+    _ = try app.ctlFmt("edit {s}", .{mainzig});
+    _ = try app.waitCtl("panes", "edit:main.zig", 5000);
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press o");
+    _ = try app.waitCtl("panes", "edit:proj", 5000);
+    try app.waitText("▾ src/", 5000);
+
+    // Close it; the in-pane tree (`:e <dir>`) keeps netrw semantics:
+    // Enter opens IN PLACE, no new pane.
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press TAB");
+    waited = 0;
+    while (waited < 5000) : (waited += 100) {
+        if (std.mem.indexOf(u8, try app.ctl("panes"), "edit:proj") == null) break;
+        h.sleepMs(100);
+    }
+    // Focus the FILE pane explicitly — the reap picked a sibling, and
+    // `:e` typed at a shell would just be shell input.
+    const file_id = try editPaneId(app, "main.zig");
+    _ = try app.ctlFmt("focus {d}", .{file_id});
+    const before_inplace = try app.paneCount();
+    _ = try app.ctlFmt("type :e {s}", .{proj});
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("panes", "edit:proj", 5000);
+    _ = try app.ctl("type /README");
+    _ = try app.ctl("enter");
+    _ = try app.ctl("press RET");
+    _ = try app.waitCtl("panes", "edit:README.md", 5000);
+    try h.expectEq("netrw-style tree opened in place", before_inplace, try app.paneCount());
+
+    // :vsp — the open-outside seam, spelled vim's way. Bare, it opens
+    // the SAME file in a new pane.
     const before_split = try app.paneCount();
     _ = try app.ctl("type :vsp");
     _ = try app.ctl("enter");
@@ -1101,12 +1112,12 @@ fn filetree(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectEq(":vsp added a pane", before_split + 1, try app.paneCount());
 
     // The teaching layer picked the new commands up for free.
-    _ = try app.ctl("press ESC"); // make sure nothing is armed
+    _ = try app.ctl("press ESC");
     _ = try app.ctl("press `");
     var wk_waited: u32 = 0;
     while (wk_waited < 5000) : (wk_waited += 100) {
-        const s = try app.ctl("whichkey");
-        if (std.mem.indexOf(u8, s, "armed visible") != null) break;
+        const w = try app.ctl("whichkey");
+        if (std.mem.indexOf(u8, w, "armed visible") != null) break;
         h.sleepMs(100);
     }
     const wk = try app.ctl("whichkey");

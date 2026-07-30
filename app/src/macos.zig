@@ -2286,124 +2286,120 @@ pub const App = struct {
         }
     }
 
-    /// `<leader>⇥` / `<leader>o` — the file tree, IN the focused pane
-    /// (netrw's heir: no global panel, every pane holds its own).
-    ///
-    /// Toggle is symmetric: a file buffer remembers itself as the
-    /// tree's alternate and comes back on the next toggle; a terminal
-    /// gets a takeover tree (shell parked under, same as any takeover
-    /// editor) and closing the tree restores it. Reveal is toggle plus
-    /// a destination: the tree opens unfolded down to the current file
-    /// with the cursor on it.
-    ///
-    /// The tree roots at the REPO of where you are (filesystem .git
-    /// probe off the pane's cwd or the buffer's path), falling back to
-    /// the directory itself — the workspace is an anchor, not a fence.
+    /// `<leader>⇥` / `<leader>o` — the file tree as a DEDICATED
+    /// sidebar pane, NERDTree's contract: toggle opens it as a split
+    /// at the tab's LEFT edge (nothing you were looking at moves) and
+    /// closes it by REMOVING the pane; reveal opens or focuses it
+    /// pointed at the current file. Only the pinned sidebar
+    /// beside-opens its files — `:e .`'s in-pane tree keeps netrw's
+    /// open-in-place.
     fn treeCommand(self: *App, reveal: bool) void {
-        var root_buf: [1024]u8 = undefined;
-        var takeover_root: ?[]const u8 = null;
-        {
-            self.draw_lock.lock();
-            defer self.draw_lock.unlock();
-            const t = self.activeTab();
-            const p = t.focused;
-            // A tree already standing ANYWHERE in this tab is THE tree
-            // (the beside-open flow leaves one as a sidebar): toggle
-            // closes it from wherever you are, reveal points it at the
-            // current file and moves you there.
-            var other_tree: ?*panespkg.Pane = null;
-            for (t.panes.items) |tp| {
-                if (tp == p) continue;
-                if (tp.editor()) |ted| if (ted.is_dir) {
-                    other_tree = tp;
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const t = self.activeTab();
+        const p = t.focused;
+
+        var pinned: ?*panespkg.Pane = null;
+        for (t.panes.items) |tp| {
+            if (tp.editor()) |ted| {
+                if (ted.is_dir and ted.tree_pinned) {
+                    pinned = tp;
                     break;
-                };
-            }
-            if (other_tree) |tp| {
-                const ted = tp.editor().?;
-                if (reveal) {
-                    if (p.editor()) |fed| {
-                        if (!fed.is_dir and !fed.synthetic) if (fed.buf.path) |bp| ted.treeReveal(bp);
-                    }
-                    self.setFocusLocked(tp);
-                } else if (ted.alt_path) |alt| {
-                    var ab: [1024]u8 = undefined;
-                    if (alt.len > ab.len) return;
-                    @memcpy(ab[0..alt.len], alt);
-                    const line = ted.alt_line;
-                    ted.open(ab[0..alt.len], false) catch return;
-                    ted.cline = @min(line, ted.lineCountB() -| 1);
-                } else {
-                    // Pure tree pane: closing IS the toggle — the reap
-                    // collapses it (or restores its parked shell).
-                    ted.closed = true;
                 }
-                self.scene_dirty = true;
-                return;
             }
-            if (p.editor()) |ed| {
-                if (ed.is_dir) {
-                    if (reveal) {
-                        // Re-reveal the alternate — the file this tree
-                        // covered is the one "current file" means here.
-                        if (ed.alt_path) |alt| ed.treeReveal(alt);
-                        self.scene_dirty = true;
-                        return;
-                    }
-                    if (ed.alt_path) |alt| {
-                        var ab: [1024]u8 = undefined;
-                        if (alt.len > ab.len) return;
-                        @memcpy(ab[0..alt.len], alt);
-                        const line = ed.alt_line;
-                        ed.open(ab[0..alt.len], false) catch return;
-                        ed.cline = @min(line, ed.lineCountB() -| 1);
-                        self.scene_dirty = true;
-                        return;
-                    }
-                    if (p.under != null) {
-                        // Takeover tree with nothing else to show:
-                        // closing it hands the shell back (the reap).
-                        ed.closed = true;
-                        self.scene_dirty = true;
-                        return;
-                    }
-                    return; // a bare tree pane: nowhere to toggle to
-                }
-                // A file buffer → the tree, remembering where we were.
-                // Copies FIRST: open() replaces the buffer these slices
-                // live in. A modified buffer refuses inside open(),
-                // with its own status — same contract as :e.
-                var cur_buf: [1024]u8 = undefined;
-                var cur: ?[]const u8 = null;
-                if (!ed.synthetic) if (ed.buf.path) |bp| {
-                    if (bp.len <= cur_buf.len) {
-                        @memcpy(cur_buf[0..bp.len], bp);
-                        cur = cur_buf[0..bp.len];
-                    }
-                };
-                const cur_line = ed.cline;
-                const start = if (cur) |c| std.fs.path.dirname(c) orelse c else blk: {
-                    const cwd = self.paneCwd(p) orelse return;
-                    break :blk std.mem.span(cwd);
-                };
-                const root = @import("git.zig").repoRootFs(self.io, self.gpa, start, &root_buf) orelse start;
-                ed.open(root, false) catch return;
-                if (!ed.is_dir) return; // raced with the dir vanishing
-                if (cur) |c| {
-                    ed.setAlt(c, cur_line);
-                    if (reveal) ed.treeReveal(ed.alt_path orelse c);
-                }
-                self.scene_dirty = true;
-                return;
-            }
-            // A terminal → takeover tree rooted at its repo. openEditor
-            // takes draw_lock itself, so the call happens outside.
-            const cwd = self.paneCwd(p) orelse return;
-            const start = std.mem.span(cwd);
-            takeover_root = @import("git.zig").repoRootFs(self.io, self.gpa, start, &root_buf) orelse
-                std.fmt.bufPrint(&root_buf, "{s}", .{start}) catch return;
         }
-        if (takeover_root) |r| _ = self.openEditor(r);
+
+        if (!reveal) {
+            if (pinned) |tp| {
+                // Toggle OFF: remove the pane; the reap heals the
+                // layout. A tab that is ONLY the tree keeps it —
+                // closing the last pane closes the tab, and a toggle
+                // must never do that.
+                if (t.panes.items.len < 2) return;
+                tp.editor().?.closed = true;
+                self.scene_dirty = true;
+                return;
+            }
+        }
+
+        // The reveal target, noted before any panes move: the focused
+        // pane's file. A terminal has none — reveal just opens/focuses.
+        var target_buf: [1024]u8 = undefined;
+        var target: ?[]const u8 = null;
+        if (reveal) {
+            if (p.editor()) |fed| {
+                if (!fed.is_dir and !fed.synthetic) if (fed.buf.path) |bp| {
+                    if (bp.len <= target_buf.len) {
+                        @memcpy(target_buf[0..bp.len], bp);
+                        target = target_buf[0..bp.len];
+                    }
+                };
+            }
+        }
+
+        const tree_pane = pinned orelse self.openTreePaneLocked() orelse return;
+        if (target) |tg| tree_pane.editor().?.treeReveal(tg);
+        self.setFocusLocked(tree_pane);
+        self.scene_dirty = true;
+    }
+
+    /// Create the dedicated tree pane: a split at the TAB's left edge,
+    /// full height, sidebar-wide (side_cols, the side panes' own
+    /// number), rooted at the repo of wherever the focused pane is —
+    /// the filesystem .git probe, directory itself as the fallback.
+    /// Caller holds draw_lock.
+    fn openTreePaneLocked(self: *App) ?*panespkg.Pane {
+        const t = self.activeTab();
+        const p = t.focused;
+        var root_buf: [1024]u8 = undefined;
+        const start: []const u8 = blk: {
+            if (p.editor()) |ed| {
+                if (!ed.synthetic) if (ed.buf.path) |bp| {
+                    if (ed.is_dir) break :blk bp; // in-pane tree: same root
+                    break :blk std.fs.path.dirname(bp) orelse bp;
+                };
+            }
+            const cwd = self.paneCwd(p) orelse return null;
+            break :blk std.mem.span(cwd);
+        };
+        const root = @import("git.zig").repoRootFs(self.io, self.gpa, start, &root_buf) orelse start;
+
+        const ed = editorpkg.Editor.create(self.gpa, self.io, root) catch return null;
+        if (!ed.is_dir) {
+            ed.destroy();
+            return null;
+        }
+        ed.tree_pinned = true;
+        @import("syntax.zig").attach(ed, self.gpa);
+        self.attachCommands(ed);
+        const pane = self.gpa.create(panespkg.Pane) catch {
+            ed.destroy();
+            return null;
+        };
+        pane.* = .{ .id = self.next_pane_id, .content = .{ .edit = ed } };
+        self.next_pane_id += 1;
+
+        // topleft vsplit: the new split becomes the tab's root, tree
+        // on the left, the WHOLE existing layout on the right.
+        const s = self.gpa.create(panespkg.Split) catch {
+            ed.destroy();
+            self.gpa.destroy(pane);
+            return null;
+        };
+        t.zoomed = null;
+        const area = self.paneArea();
+        const want = self.side_cols * self.renderer.cell_w + self.m.pane_pad * 2;
+        s.* = .{
+            .horiz = true,
+            .ratio = std.math.clamp(want / @max(1, area.w), 0.1, 0.5),
+            .a = .{ .leaf = pane },
+            .b = t.root,
+        };
+        t.root = .{ .split = s };
+        t.panes.append(self.gpa, pane) catch {};
+        self.relayoutLocked();
+        self.refreshHudLocked(CACurrentMediaTime());
+        return pane;
     }
 
     /// Toggle the side pane. Opening with a DIFFERENT panel than the one
@@ -3286,25 +3282,28 @@ pub const App = struct {
         pane.* = .{ .id = self.next_pane_id, .content = .{ .edit = ed } };
         self.next_pane_id += 1;
         const horiz = req.how != .split_down;
-        const src_w = src_pane.rect.w;
-        if (!panespkg.splitAt(self.gpa, &t.root, src_pane, pane, horiz)) {
+        // The pinned SIDEBAR never splits itself — it is a list, not a
+        // document, and halving 34 columns leaves two unusable slivers.
+        // Its file goes into the sibling subtree instead: the sidebar's
+        // root split keeps its ratio and the document lands first among
+        // everything to the tree's right (NERDTree's own shape).
+        const placed = blk: {
+            const sed = src_pane.editor() orelse break :blk false;
+            if (!sed.is_dir or !sed.tree_pinned) break :blk false;
+            const sp = panespkg.splitOf(&t.root, src_pane) orelse break :blk false;
+            if (sp.a != .leaf or sp.a.leaf != src_pane) break :blk false;
+            const inner = self.gpa.create(panespkg.Split) catch break :blk false;
+            inner.* = .{ .horiz = true, .a = .{ .leaf = pane }, .b = sp.b };
+            sp.b = .{ .split = inner };
+            break :blk true;
+        };
+        if (!placed and !panespkg.splitAt(self.gpa, &t.root, src_pane, pane, horiz)) {
             ed.destroy();
             self.gpa.destroy(pane);
             self.draw_lock.unlock();
             return;
         }
         t.panes.append(self.gpa, pane) catch {};
-        // A tree that spawns its first document keeps SIDEBAR width
-        // (side_cols, the side panes' own number) instead of half the
-        // window — it is a list, not a document.
-        if (req.how == .beside and horiz and src_w > 1) {
-            if (src_pane.editor()) |sed| if (sed.is_dir) {
-                if (panespkg.splitOf(&t.root, src_pane)) |sp| {
-                    const want = self.side_cols * self.renderer.cell_w + self.m.pane_pad * 2;
-                    sp.ratio = std.math.clamp(want / src_w, 0.1, 0.9);
-                }
-            };
-        }
         self.setFocusLocked(pane);
         self.relayoutLocked();
         self.refreshHudLocked(CACurrentMediaTime());

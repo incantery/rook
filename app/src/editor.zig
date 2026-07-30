@@ -332,6 +332,12 @@ pub const Editor = struct {
     /// on it — and still no side panel: every pane holds its own tree.
     is_dir: bool = false,
 
+    /// This editor IS the tab's dedicated tree sidebar (NERDTree's
+    /// contract, set by the app's tree.toggle): its files beside-open
+    /// so the tree stays standing, and toggle removes the whole pane.
+    /// False for `:e .`-style in-pane trees, which keep netrw's
+    /// open-in-place.
+    tree_pinned: bool = false,
     /// Which directories are unfolded, by absolute path (owned keys).
     /// Lives on the EDITOR, not the buffer: retarget to a file and back
     /// and your unfolds are still there.
@@ -760,11 +766,11 @@ pub const Editor = struct {
             self.treeToggleDir(p);
             return;
         }
-        // A file: beside-open, so the tree stays standing as the
-        // sidebar it visually is — the app reuses the pane to the
-        // right or splits one off. Headless (or the app declining)
-        // falls back to opening in place, netrw-style.
-        if (self.appOpen(p, 0, .beside)) return;
+        // A file. The PINNED sidebar beside-opens, so the tree stays
+        // standing (the app reuses the pane to the right or splits one
+        // off); an in-pane tree (`:e .`, `-`) opens in place — netrw's
+        // own contract, and the difference a user actually feels.
+        if (self.tree_pinned and self.appOpen(p, 0, .beside)) return;
         self.open(p, false) catch |err| {
             self.setStatus("open failed: {s}", .{@errorName(err)}, true);
         };
