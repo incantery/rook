@@ -443,6 +443,23 @@ must clear is "I don't reach for a terminal nvim inside rook", not
       Roots at the REPO of where you are (`git.repoRootFs`, filesystem
       probe), falling back to the directory itself — anchor, not
       fence. e2e `filetree`; unit tests own fold/reveal/climb.
+      Round two (same day): Nerd Font type icons per extension
+      (CoreText cascade means a font without them draws blank, not
+      tofu), directories in the tree_dir line style (line_style — the
+      diff view's channel), Enter on a file BESIDE-OPENS — the tree
+      stays standing at sidebar width (side_cols) and the file lands
+      in the pane to the right, reused if it's already a document —
+      and a tree standing anywhere in the tab is THE tree for
+      `<leader>⇥`/`<leader>o`. The EDITOR LEADER exists now ([editor]
+      leader in config, vim's maplocalleader): `,⇥`/`,o` reach the
+      same commands through the app_command seam by registry id.
+      :sp/:vsp/:split/:vsplit land on the same open-outside seam — no
+      shared buffers yet, so a bare :vsp opens the same FILE twice and
+      the clobber guard referees (honest scope, said in :help-speak).
+      Fixed en route: `:v` greedily claimed any verb starting with v
+      (`:vsp` read as a vglobal missing its pattern) — vim's own rule
+      is a separator must follow; and destroy() never freed
+      line_style/line_gutter, so every diff pane leaked its decor.
       Still owed from the mock: git-status letters on rows, file ops
       (add/rename/delete), dotfile filtering.
 

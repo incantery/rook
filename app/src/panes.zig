@@ -192,6 +192,19 @@ pub fn splitAt(gpa: std.mem.Allocator, node: *Node, target: *Pane, new_pane: *Pa
     }
 }
 
+/// The split whose IMMEDIATE child is `pane`'s leaf — the one whose
+/// ratio decides how much room the pane keeps. Null for the root leaf.
+pub fn splitOf(node: *Node, pane: *Pane) ?*Split {
+    switch (node.*) {
+        .leaf => return null,
+        .split => |s| {
+            if ((s.a == .leaf and s.a.leaf == pane) or
+                (s.b == .leaf and s.b.leaf == pane)) return s;
+            return splitOf(&s.a, pane) orelse splitOf(&s.b, pane);
+        },
+    }
+}
+
 /// Remove target's leaf, promoting its sibling. Returns false if target
 /// isn't in this subtree (or the subtree is just target's leaf — the
 /// caller handles the last-pane case).

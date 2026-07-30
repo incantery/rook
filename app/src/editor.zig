@@ -79,6 +79,9 @@ pub const Style = enum(u8) {
     diff_del,
     diff_hunk,
     diff_meta,
+    // Tree buckets — same structural family as the diff's: a row IS a
+    // directory, which no grammar could tell the renderer.
+    tree_dir,
 };
 
 /// One highlight span in absolute byte offsets; later spans override.
@@ -107,6 +110,11 @@ pub fn wideCp(cp: u21) bool {
 }
 
 pub const Mode = enum { normal, insert, visual, visual_line, visual_block, command };
+
+/// How the app should place a path the editor asks it to open.
+/// `beside` is the tree's ask — reuse the pane to the right, else
+/// split one off; the two `split_*` are :vsp and :sp.
+pub const OpenHow = enum { beside, split_right, split_down };
 
 /// What shape a register holds. `block` is a rectangle, stored one row
 /// per line — it is the shape, not the text, that makes `p` put it back
@@ -381,6 +389,21 @@ pub const Editor = struct {
     cmd_ctx: ?*anyopaque = null,
     app_command: ?*const fn (*anyopaque, []const u8) bool = null,
 
+    /// Open a path OUTSIDE this editor — the seam behind the tree's
+    /// beside-open and behind :sp/:vsp. The app owns panes; the editor
+    /// only says what it wants shown and how. Same queuing contract as
+    /// app_command: this fires on the key path under the app's lock,
+    /// so the app side must queue, never split panes inline. Returns
+    /// true if the app took it; headless tests run with it null and
+    /// callers fall back to opening in place (or refusing, for :sp).
+    app_open: ?*const fn (*anyopaque, path: []const u8, line: usize, how: OpenHow) bool = null,
+
+    /// The editor-scope leader (vim's maplocalleader to the app's
+    /// mapleader; config [editor] leader). Armed in normal mode only;
+    /// its chords name app commands through the app_command seam.
+    leader: ?u8 = null,
+    pend_leader: bool = false,
+
     /// A buffer whose `:w` goes somewhere other than a file — a thread
     /// projected from the host. Same seam shape as the two above, and
     /// the same reason: the editor stays a pure model that knows about
@@ -445,6 +468,52 @@ pub const Editor = struct {
         return p;
     }
 
+    /// A file's tree icon, by extension — Nerd Font glyphs, which is
+    /// what rook's default font ships. On a font without them CoreText
+    /// falls back through the system cascade and the worst case is a
+    /// blank cell, not tofu (a failed rasterize draws nothing).
+    fn iconFor(name: []const u8) []const u8 {
+        const Icon = struct { ext: []const u8, glyph: []const u8 };
+        const table = [_]Icon{
+            .{ .ext = ".zig", .glyph = "\u{e6a9}" }, // seti zig
+            .{ .ext = ".go", .glyph = "\u{e627}" }, // seti go
+            .{ .ext = ".rs", .glyph = "\u{e7a8}" }, // dev rust
+            .{ .ext = ".py", .glyph = "\u{e606}" }, // dev python
+            .{ .ext = ".ts", .glyph = "\u{e628}" }, // seti typescript
+            .{ .ext = ".tsx", .glyph = "\u{e7ba}" }, // dev react
+            .{ .ext = ".js", .glyph = "\u{e60c}" }, // seti javascript
+            .{ .ext = ".jsx", .glyph = "\u{e7ba}" },
+            .{ .ext = ".c", .glyph = "\u{e61e}" }, // custom c
+            .{ .ext = ".h", .glyph = "\u{e61e}" },
+            .{ .ext = ".cpp", .glyph = "\u{e61d}" }, // custom cpp
+            .{ .ext = ".md", .glyph = "\u{f48a}" }, // oct markdown
+            .{ .ext = ".json", .glyph = "\u{e60b}" }, // seti json
+            .{ .ext = ".toml", .glyph = "\u{e615}" }, // seti config
+            .{ .ext = ".yaml", .glyph = "\u{e615}" },
+            .{ .ext = ".yml", .glyph = "\u{e615}" },
+            .{ .ext = ".lock", .glyph = "\u{f023}" }, // fa lock
+            .{ .ext = ".sh", .glyph = "\u{f489}" }, // oct terminal
+            .{ .ext = ".zsh", .glyph = "\u{f489}" },
+            .{ .ext = ".html", .glyph = "\u{e60e}" }, // seti html
+            .{ .ext = ".css", .glyph = "\u{e614}" }, // seti css
+            .{ .ext = ".sql", .glyph = "\u{e706}" }, // dev database
+            .{ .ext = ".png", .glyph = "\u{f1c5}" }, // fa file-image-o
+            .{ .ext = ".jpg", .glyph = "\u{f1c5}" },
+            .{ .ext = ".svg", .glyph = "\u{f1c5}" },
+        };
+        // Whole-name cases first: git's own files wear git's mark.
+        if (std.mem.startsWith(u8, name, ".git")) return "\u{e702}"; // dev git
+        if (std.mem.eql(u8, name, "Makefile")) return "\u{e673}"; // seti makefile
+        if (std.mem.eql(u8, name, "LICENSE")) return "\u{f0219}"; // md scale-balance
+        const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse
+            return "\u{f016}"; // fa file-o
+        const ext = name[dot..];
+        for (table) |t| {
+            if (std.mem.eql(u8, ext, t.ext)) return t.glyph;
+        }
+        return "\u{f016}";
+    }
+
     /// Append one directory level to the tree text and row list —
     /// dirs first, alphabetical, ▾/▸ fold glyphs, two-space indent per
     /// depth — recursing into the dirs the editor has unfolded.
@@ -488,9 +557,11 @@ pub const Editor = struct {
             const unfolded = e.dir and self.tree_expanded.contains(full);
             try text.append(gpa, '\n');
             for (0..depth) |_| try text.appendSlice(gpa, "  ");
-            // The glyph column exists for files too, so names align
-            // into one readable column regardless of kind.
-            try text.appendSlice(gpa, if (!e.dir) "  " else if (unfolded) "▾ " else "▸ ");
+            // One glyph column for every kind — fold chevrons for
+            // dirs, a type icon for files — so names align into one
+            // readable column.
+            try text.appendSlice(gpa, if (!e.dir) iconFor(e.name) else if (unfolded) "▾" else "▸");
+            try text.append(gpa, ' ');
             try text.appendSlice(gpa, e.name);
             if (e.dir) try text.append(gpa, '/');
             try rows.append(gpa, .{ .path = full, .dir = e.dir });
@@ -534,6 +605,20 @@ pub const Editor = struct {
         self.tree_rows = .empty;
     }
 
+    /// Colour the tree, line-level: directories in the tree_dir
+    /// bucket, the climb row dim. Rides line_style — the same channel
+    /// the diff view uses — so the render path learns nothing new.
+    /// Called after every buffer swap that produced a tree, because
+    /// those swaps clearDecor() first.
+    fn applyTreeDecor(self: *Editor) void {
+        if (!self.is_dir) return;
+        self.line_style.clearRetainingCapacity();
+        self.line_style.ensureTotalCapacity(self.gpa, self.tree_rows.items.len) catch return;
+        for (self.tree_rows.items) |r| {
+            self.line_style.appendAssumeCapacity(if (r.climb) .dim else if (r.dir) .tree_dir else .text);
+        }
+    }
+
     /// A path becomes a buffer: directory → tree, else file contents.
     fn loadPath(self: *Editor, path: []const u8, is_dir: *bool) !bufferpkg.Buffer {
         const gpa = self.gpa;
@@ -564,6 +649,11 @@ pub const Editor = struct {
             self.treeToggleDir(p);
             return;
         }
+        // A file: beside-open, so the tree stays standing as the
+        // sidebar it visually is — the app reuses the pane to the
+        // right or splits one off. Headless (or the app declining)
+        // falls back to opening in place, netrw-style.
+        if (self.appOpen(p, 0, .beside)) return;
         self.open(p, false) catch |err| {
             self.setStatus("open failed: {s}", .{@errorName(err)}, true);
         };
@@ -617,6 +707,7 @@ pub const Editor = struct {
         self.ai_line = null;
         self.clearDecor();
         self.is_dir = true;
+        self.applyTreeDecor();
         self.ccol = 0;
         const last = self.lineCountB() -| 1;
         self.top = @min(top, last);
@@ -748,6 +839,10 @@ pub const Editor = struct {
         if (self.hl_destroy) |f| f(self.hl_ctx.?);
         self.hl_spans_buf.deinit(gpa);
         self.hl_styles.deinit(gpa);
+        // Pre-existing gap the tree decor exposed: every buffer that
+        // ever took line decoration (a diff, a tree) leaked it here.
+        self.line_style.deinit(gpa);
+        self.line_gutter.deinit(gpa);
         self.buf.deinit(gpa);
         self.cmd.deinit(gpa);
         self.dot.deinit(gpa);
@@ -2246,7 +2341,10 @@ pub const Editor = struct {
             // that only looked at one line would be a substitute.
             var gspec: ?[]const u8 = null;
             var invert = false;
-            if (ranged.len > 1 and ranged[0] == 'v') {
+            // `v` only with a separator right after (`:v/pat/cmd`) —
+            // same rule the `g` arm already has, or `:vsp` reads as a
+            // vglobal missing its pattern instead of as a split.
+            if (ranged.len > 1 and ranged[0] == 'v' and !std.ascii.isAlphanumeric(ranged[1])) {
                 gspec = ranged[1..];
                 invert = true;
             } else if (ranged.len > 1 and ranged[0] == 'g') {
@@ -2414,6 +2512,25 @@ pub const Editor = struct {
             self.open(self.resolveTyped(arg, &rbuf), is(u8, verb, "e!")) catch |err| {
                 self.setStatus("open failed: {s}", .{@errorName(err)}, true);
             };
+        } else if (is(u8, verb, "vsp") or is(u8, verb, "vsplit") or
+            is(u8, verb, "sp") or is(u8, verb, "split"))
+        {
+            // No shared buffers yet: with a path this opens IT in the
+            // new pane; bare, it opens the SAME file twice as two
+            // independent editors — the clobber guard referees writes.
+            // Honest scope, not vim's window-over-one-buffer.
+            const how: OpenHow = if (verb[0] == 'v') .split_right else .split_down;
+            var rbuf: [max_path]u8 = undefined;
+            const target = if (arg.len > 0)
+                self.resolveTyped(arg, &rbuf)
+            else
+                self.buf.path orelse {
+                    self.setStatus("nothing to split — no file behind this buffer", .{}, true);
+                    return;
+                };
+            const at_line = if (arg.len > 0) 0 else self.cline;
+            if (!self.appOpen(target, at_line, how))
+                self.setStatus("split needs the app (headless buffer)", .{}, true);
         } else if (self.appCommand(verb)) {
             // Claimed by the app's command registry.
         } else {
@@ -2458,6 +2575,24 @@ pub const Editor = struct {
         if (run(ctx, verb)) return true;
         self.setStatus("not a command: {s}", .{verb}, true);
         return true; // handled: the message is ours, not the fallthrough's
+    }
+
+    /// The same seam, addressed by registry id ("tree.toggle") — what
+    /// the editor leader's own bindings speak. No capital-letter gate:
+    /// ids are lowercase by construction and never collide with ex
+    /// verbs because they never pass through the ex parser.
+    fn appCommandById(self: *Editor, id: []const u8) bool {
+        const run = self.app_command orelse return false;
+        const ctx = self.cmd_ctx orelse return false;
+        return run(ctx, id);
+    }
+
+    /// Ask the app to open `path` outside this editor. False when the
+    /// seam is unattached (headless) or the app declined.
+    fn appOpen(self: *Editor, path: []const u8, line: usize, how: OpenHow) bool {
+        const f = self.app_open orelse return false;
+        const ctx = self.cmd_ctx orelse return false;
+        return f(ctx, path, line, how);
     }
 
     /// Attach a document's per-line decoration, and lock the buffer.
@@ -2568,6 +2703,7 @@ pub const Editor = struct {
         self.ai_line = null; // line numbers belonged to the old buffer
         self.clearDecor();
         self.is_dir = is_dir;
+        self.applyTreeDecor();
         // Clamp back onto whatever the file is NOW — it may be shorter
         // than the one we were looking at, and every motion below reads
         // these as valid.
@@ -2597,6 +2733,7 @@ pub const Editor = struct {
         self.ai_line = null; // line numbers belonged to the old buffer
         self.clearDecor();
         self.is_dir = is_dir;
+        self.applyTreeDecor();
         self.cline = 0;
         self.ccol = 0;
         self.top = 0;
@@ -2736,6 +2873,7 @@ pub const Editor = struct {
         if (ch == 0x1b) { // ESC: clear pending, leave visual
             self.count = 0;
             self.op = 0;
+            self.pend_leader = false;
             self.pend_g = false;
             self.pend_z = false;
             self.pend_shift = 0;
@@ -2746,6 +2884,20 @@ pub const Editor = struct {
             self.pend_macro = 0;
             self.sel_reg = 0;
             self.leaveVisual();
+            return;
+        }
+
+        // The editor leader's chord, resolved. Bindings name registry
+        // commands through the app_command seam — the editor stays a
+        // pure model; what "tree.toggle" DOES is the app's business.
+        // Unknown chords are swallowed, same as the app leader's.
+        if (self.pend_leader) {
+            self.pend_leader = false;
+            switch (ch) {
+                '\t' => _ = self.appCommandById("tree.toggle"),
+                'o' => _ = self.appCommandById("tree.reveal"),
+                else => {},
+            }
             return;
         }
 
@@ -2830,6 +2982,17 @@ pub const Editor = struct {
                 },
             }
             return;
+        }
+
+        // Arm the editor leader — normal mode, no operator pending, so
+        // `d,` with a comma leader still deletes to the find target.
+        // Binding the leader over a motion key (`,` shadows the f/t
+        // reverse repeat) is the user's own call to make.
+        if (self.leader) |ld| {
+            if (ch == ld and self.mode == .normal and self.op == 0) {
+                self.pend_leader = true;
+                return;
+            }
         }
 
         switch (ch) {
@@ -5942,7 +6105,7 @@ test "tree buffer: enter folds in place and opens files, dash climbs" {
     // "../", dirs first (folded), files aligned into the glyph column.
     const text = try bufText(gpa, e);
     defer gpa.free(text);
-    try testing.expectEqualStrings("../\n▸ sub/\n  alpha.txt\n  beta.txt", text);
+    try testing.expectEqualStrings("../\n▸ sub/\n\u{f016} alpha.txt\n\u{f016} beta.txt", text);
 
     // :w refuses on a tree.
     keys(e, ":w");
@@ -5959,13 +6122,13 @@ test "tree buffer: enter folds in place and opens files, dash climbs" {
     try testing.expectEqual(@as(usize, 1), e.cline);
     const unfolded = try bufText(gpa, e);
     defer gpa.free(unfolded);
-    try testing.expectEqualStrings("../\n▾ sub/\n    inner.txt\n  alpha.txt\n  beta.txt", unfolded);
+    try testing.expectEqualStrings("../\n▾ sub/\n  \u{f016} inner.txt\n\u{f016} alpha.txt\n\u{f016} beta.txt", unfolded);
 
     // Enter again folds it back.
     e.key("\r");
     const folded = try bufText(gpa, e);
     defer gpa.free(folded);
-    try testing.expectEqualStrings("../\n▸ sub/\n  alpha.txt\n  beta.txt", folded);
+    try testing.expectEqualStrings("../\n▸ sub/\n\u{f016} alpha.txt\n\u{f016} beta.txt", folded);
 
     // Enter on beta.txt opens the file.
     keys(e, "gg");
@@ -5992,6 +6155,47 @@ test "tree buffer: enter folds in place and opens files, dash climbs" {
     try testing.expectEqualStrings(want_sub, e.tree_rows.items[e.cline + 1].path);
 }
 
+test "the editor leader arms in normal mode and speaks registry ids" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    e.leader = ',';
+    const Cap = struct {
+        var got: [64]u8 = undefined;
+        var len: usize = 0;
+        fn hook(_: *anyopaque, name: []const u8) bool {
+            const n = @min(name.len, got.len);
+            @memcpy(got[0..n], name[0..n]);
+            len = n;
+            return true;
+        }
+    };
+    e.cmd_ctx = @ptrCast(e); // any non-null context
+    e.app_command = &Cap.hook;
+
+    keys(e, ",");
+    e.key("\t");
+    try testing.expectEqualStrings("tree.toggle", Cap.got[0..Cap.len]);
+    keys(e, ",o");
+    try testing.expectEqualStrings("tree.reveal", Cap.got[0..Cap.len]);
+
+    // An unknown chord is swallowed — `,x` must not delete a character.
+    keys(e, "ihi"); // buffer: "hi"
+    e.key("\x1b");
+    const before = try bufText(gpa, e);
+    defer gpa.free(before);
+    keys(e, ",x");
+    const after = try bufText(gpa, e);
+    defer gpa.free(after);
+    try testing.expectEqualStrings(before, after);
+
+    // With an operator pending the leader is NOT armed: `d,` is vim's
+    // delete-to-reverse-find, not a chord. (No find is pending here so
+    // it does nothing, but it must not leave a chord armed either.)
+    keys(e, "d,");
+    try testing.expect(!e.pend_leader);
+}
+
 test "tree reveal unfolds every ancestor down to the target" {
     const gpa = testing.allocator;
     const io = testing.io;
@@ -6014,7 +6218,7 @@ test "tree reveal unfolds every ancestor down to the target" {
     try testing.expectEqualStrings(target, e.tree_rows.items[e.cline].path);
     const text = try bufText(gpa, e);
     defer gpa.free(text);
-    try testing.expectEqualStrings("../\n▾ a/\n  ▾ b/\n      deep.txt\n  top.txt", text);
+    try testing.expectEqualStrings("../\n▾ a/\n  ▾ b/\n    \u{f016} deep.txt\n\u{f016} top.txt", text);
 
     // A target outside the tree refuses rather than half-unfolding.
     e.status_err = false;

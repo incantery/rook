@@ -460,30 +460,58 @@ fn termGlyph(gpa: std.mem.Allocator, bin: []const u8) !void {
     // matched the sentinel inside the command it had just typed, so the
     // shot was taken before any output existed at all.
     var path_buf: [192]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/marks.txt", .{app.dirPath()});
+    const bases = try std.fmt.bufPrint(&path_buf, "{s}/bases.txt", .{app.dirPath()});
+    const brow = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
+    try h.writeFile(bases, brow ++ brow ++ brow ++ brow ++ brow ++ brow ++ "ZZBASE\n");
+    var path_buf2: [192]u8 = undefined;
+    const marks = try std.fmt.bufPrint(&path_buf2, "{s}/marks.txt", .{app.dirPath()});
     const row = "x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}x\u{332}\n";
-    try h.writeFile(path, row ++ row ++ row ++ row ++ row ++ row ++ "ZZTOP\n");
+    try h.writeFile(marks, row ++ row ++ row ++ row ++ row ++ row ++ "ZZTOP\n");
 
-    _ = try app.ctlFmt("type cat {s}", .{path});
+    // SELF-CALIBRATING, not a density threshold: the same letters
+    // without their marks are the baseline, shot at the same window
+    // geometry. A fixed density constant here was the suite's last
+    // geometry-dependent number — the window's size is the window
+    // manager's, and this test went red the day the window settled
+    // taller. Two shots, two PATHS (ImageIO caches by URL).
+    _ = try app.ctlFmt("type cat {s}", .{bases});
+    _ = try app.ctl("enter");
+    try app.waitText("ZZBASE", 10_000);
+    // Let the echo's own frame present before forcing the shot frame:
+    // with a two-deep swapchain a readback can run one drawable behind,
+    // and the settle makes even that stale drawable carry this screen.
+    h.sleepMs(200);
+    var shot_buf: [192]u8 = undefined;
+    var base_shot = try app.shot(try std.fmt.bufPrint(&shot_buf, "{s}/term-base.png", .{app.dirPath()}));
+    // Band INSIDE the terminal area: ink() samples its background at
+    // the band's own top-right, and a band that starts at row zero
+    // samples the TAB BAR — against which every black terminal pixel
+    // reads as ink and an underline flipping black to white adds
+    // nothing. Found as two different screens with identical counts.
+    const top = base_shot.height / 24;
+    const bot = base_shot.height / 3;
+    const ink_base = base_shot.ink(top, bot);
+    const width = base_shot.width;
+    base_shot.deinit();
+
+    // Clear (POSIX printf, octal escapes — /bin/sh has no `clear` in a
+    // bare sandbox), then the marked rows in the same screen region.
+    _ = try app.ctl("type printf '\\33[2J\\33[H'");
+    _ = try app.ctl("enter");
+    _ = try app.ctlFmt("type cat {s}", .{marks});
     _ = try app.ctl("enter");
     try app.waitText("ZZTOP", 10_000);
+    h.sleepMs(200); // same settle as the base shot
+    var shot_buf2: [192]u8 = undefined;
+    var mark_shot = try app.shot(try std.fmt.bufPrint(&shot_buf2, "{s}/term-marks.png", .{app.dirPath()}));
+    const ink_marks = mark_shot.ink(top, bot);
+    mark_shot.deinit();
 
-    var shot_buf: [192]u8 = undefined;
-    const shot_path = try std.fmt.bufPrint(&shot_buf, "/tmp/term.png", .{});
-    _ = &shot_buf;
-    var shot = try app.shot(shot_path);
-    defer shot.deinit();
-
-    // Ink density over the output area, as a fraction of ten thousand so
-    // the number does not move with the display scale. Measured 60 with
-    // the marks drawn and 44 with only their bases.
-    // Six underlined rows, so the marks are a QUARTER of the ink in the
-    // band rather than a rounding error on one line of it.
-    const top = shot.height / 24;
-    const bot = shot.height / 3;
-    const drawn = shot.ink(top, bot);
-    const density = drawn * 10_000 / @max(shot.width * (bot - top), 1);
-    try h.expect(density > 500, "output too thin ({d}/10000) — the terminal drew each cluster's base and dropped its marks", .{density});
+    // Six rows of thirty combining low lines form six horizontal
+    // rules — measured ~1.5k px of extra ink at 2x, against ~150 px of
+    // run-to-run noise. A quarter-width demand sits 4x above the noise
+    // and 4x below the signal; dropped marks leave the delta at noise.
+    try h.expect(ink_marks > ink_base + width / 4, "marks added no ink (base {d}, marks {d}, width {d}) — the terminal drew each cluster's base and dropped its marks", .{ ink_base, ink_marks, width });
 }
 
 // -------------------------------------------------------------- clobber
@@ -874,7 +902,11 @@ fn statusbar(gpa: std.mem.Allocator, bin: []const u8) !void {
 /// from a file, `<leader>o` opens the tree unfolded down to that file
 /// and `<leader>⇥` toggles back to it — the alternate-buffer loop.
 fn filetree(gpa: std.mem.Allocator, bin: []const u8) !void {
-    const app = try h.Instance.start(gpa, bin, .{});
+    // The editor's own leader too ([editor] scope, vim's
+    // maplocalleader) — `,⇥` must reach the tree from inside a buffer.
+    const app = try h.Instance.start(gpa, bin, .{
+        .config_extra = "[editor]\nleader = \",\"\n",
+    });
     defer {
         app.stop();
         app.deinit();
@@ -944,6 +976,47 @@ fn filetree(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("press TAB");
     _ = try app.waitCtl("panes", "edit:main.zig", 5000);
     try app.waitText("pub fn main", 5000);
+
+    // BESIDE-OPEN: reopen the tree, Enter on README — the tree stays
+    // standing as a sidebar and the file opens in a pane to its right.
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press o");
+    try app.waitText("▾ src/", 5000);
+    _ = try app.ctl("type /README");
+    _ = try app.ctl("enter");
+    _ = try app.ctl("press RET");
+    _ = try app.waitCtl("panes", "edit:README.md", 5000);
+    const both = try app.ctl("panes");
+    try h.expectContains(both, "edit:proj", "the tree pane is still standing");
+    try h.expectContains(both, "*", "something holds focus");
+    try h.expectContains(try app.ctl("dump"), "hi", "focus moved to the opened file");
+
+    // <leader>⇥ from the file: the standing tree is THE tree — it
+    // toggles closed (back to its alternate) from anywhere in the tab.
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press TAB");
+    _ = try app.waitCtl("panes", "edit:main.zig", 5000);
+    try h.expectNotContains(try app.ctl("panes"), "edit:proj", "the sidebar tree closed");
+
+    // THE EDITOR LEADER: `,⇥` (maplocalleader — a separate scope from
+    // the app's backtick) opens the tree from inside a buffer.
+    _ = try app.ctl("press ,");
+    _ = try app.ctl("press TAB");
+    _ = try app.waitCtl("panes", "edit:proj", 5000);
+    _ = try app.ctl("press ,");
+    _ = try app.ctl("press TAB");
+    _ = try app.waitCtl("panes", "edit:README.md", 5000);
+
+    // :vsp — the same open-outside seam, spelled vim's way. Bare, it
+    // opens the SAME file in a new pane to the right.
+    const before_split = try app.paneCount();
+    _ = try app.ctl("type :vsp");
+    _ = try app.ctl("enter");
+    var sw: u32 = 0;
+    while (sw < 5000 and try app.paneCount() == before_split) : (sw += 100) {
+        h.sleepMs(100);
+    }
+    try h.expectEq(":vsp added a pane", before_split + 1, try app.paneCount());
 
     // The teaching layer picked the new commands up for free.
     _ = try app.ctl("press ESC"); // make sure nothing is armed

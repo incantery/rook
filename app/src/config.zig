@@ -334,6 +334,10 @@ pub const Bind = struct { ch: u8, action: Action, arg: u8 = 0 };
 
 pub const Keybinds = struct {
     leader: ?u8 = null,
+    /// The EDITOR's leader ([editor] scope — vim's maplocalleader to
+    /// the app's mapleader). Fires only inside an editor pane; the
+    /// editor's own key machine arms and resolves it.
+    ed_leader: ?u8 = null,
     entries: [32]Bind = undefined,
     n: usize = 0,
 
@@ -447,9 +451,11 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
     const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch return kb;
     defer gpa.free(data);
 
-    // `none` is the top level, where `leader` lives (the editor's own
-    // leader sits under [editor] and must not be mistaken for it).
-    var section: enum { none, app, other } = .none;
+    // `none` is the top level, where `leader` lives. The editor's own
+    // leader (vim's maplocalleader to the app's mapleader) sits under
+    // [editor] — a separate scope on purpose, and the two must never be
+    // mistaken for each other.
+    var section: enum { none, app, editor, other } = .none;
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
@@ -457,6 +463,8 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
         if (line[0] == '[') {
             section = if (std.mem.eql(u8, line, "[keybinds]") or std.mem.eql(u8, line, "[app]"))
                 .app
+            else if (std.mem.eql(u8, line, "[editor]"))
+                .editor
             else
                 .other;
             continue;
@@ -470,6 +478,17 @@ pub fn loadKeybinds(io: std.Io, gpa: std.mem.Allocator) Keybinds {
         const val = stripComment(std.mem.trim(u8, line[eq + 1 ..], " \t"));
         const value = unquote(val, &valbuf);
 
+        if (section == .editor) {
+            // Only the leader for now; [editor.keybinds.*] arrives with
+            // configurable editor maps.
+            if (std.mem.eql(u8, key, "leader")) {
+                kb.ed_leader = chordChar(value) orelse blk: {
+                    std.debug.print("rook keybinds: editor leader must be one key, got '{s}'\n", .{value});
+                    break :blk null;
+                };
+            }
+            continue;
+        }
         if (std.mem.eql(u8, key, "leader")) {
             kb.leader = chordChar(value) orelse blk: {
                 std.debug.print("rook keybinds: leader must be one key, got '{s}'\n", .{value});

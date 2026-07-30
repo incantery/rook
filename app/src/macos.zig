@@ -334,6 +334,16 @@ pub const WkItem = struct {
     click: bool,
 };
 
+/// A queued "open this path outside the asking editor" — the tree's
+/// beside-open and :sp/:vsp. Queued because the ask fires on the key
+/// path under draw_lock and pane surgery takes it again.
+const PendingOpen = struct {
+    len: usize,
+    line: usize,
+    how: @import("editor.zig").OpenHow,
+    from: u32,
+};
+
 /// How long an armed leader sits unanswered before the sheet reveals.
 /// Long enough that a practiced chord never flashes it, short enough
 /// that hesitation is answered — which-key's own default neighborhood.
@@ -585,6 +595,9 @@ pub const App = struct {
     /// running one inline is a self-deadlock. Drained by drainPendingCmd
     /// at each of the three places that let go of the lock.
     pending_cmd: ?registrypkg.Spec = null,
+    /// A queued open-outside-the-editor; see PendingOpen.
+    pending_open: ?PendingOpen = null,
+    pending_open_path: [1024]u8 = undefined,
     /// A queued `:qa`-family request. See editorQuitAll for why it cannot
     /// run where it is asked for.
     pending_quit_all: ?struct { write: bool, quit: bool, force: bool } = null,
@@ -2282,7 +2295,42 @@ pub const App = struct {
         {
             self.draw_lock.lock();
             defer self.draw_lock.unlock();
-            const p = self.activeTab().focused;
+            const t = self.activeTab();
+            const p = t.focused;
+            // A tree already standing ANYWHERE in this tab is THE tree
+            // (the beside-open flow leaves one as a sidebar): toggle
+            // closes it from wherever you are, reveal points it at the
+            // current file and moves you there.
+            var other_tree: ?*panespkg.Pane = null;
+            for (t.panes.items) |tp| {
+                if (tp == p) continue;
+                if (tp.editor()) |ted| if (ted.is_dir) {
+                    other_tree = tp;
+                    break;
+                };
+            }
+            if (other_tree) |tp| {
+                const ted = tp.editor().?;
+                if (reveal) {
+                    if (p.editor()) |fed| {
+                        if (!fed.is_dir and !fed.synthetic) if (fed.buf.path) |bp| ted.treeReveal(bp);
+                    }
+                    self.setFocusLocked(tp);
+                } else if (ted.alt_path) |alt| {
+                    var ab: [1024]u8 = undefined;
+                    if (alt.len > ab.len) return;
+                    @memcpy(ab[0..alt.len], alt);
+                    const line = ted.alt_line;
+                    ted.open(ab[0..alt.len], false) catch return;
+                    ted.cline = @min(line, ted.lineCountB() -| 1);
+                } else {
+                    // Pure tree pane: closing IS the toggle — the reap
+                    // collapses it (or restores its parked shell).
+                    ted.closed = true;
+                }
+                self.scene_dirty = true;
+                return;
+            }
             if (p.editor()) |ed| {
                 if (ed.is_dir) {
                     if (reveal) {
@@ -3142,6 +3190,115 @@ pub const App = struct {
         ed.app_command = &editorExCommand;
         ed.app_save = &editorSave;
         ed.app_quit_all = &editorQuitAll;
+        ed.app_open = &editorOpenRequest;
+        ed.leader = self.keybinds.ed_leader;
+    }
+
+    /// The editor asked for a path OUTSIDE itself (tree beside-open,
+    /// :sp/:vsp). Fired on the key path under draw_lock, so it only
+    /// QUEUES — pane surgery happens in drainPendingOpen, lock-free.
+    fn editorOpenRequest(ctx: *anyopaque, path: []const u8, line: usize, how: editorpkg.OpenHow) bool {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        if (path.len == 0 or path.len > self.pending_open_path.len) return false;
+        @memcpy(self.pending_open_path[0..path.len], path);
+        self.pending_open = .{
+            .len = path.len,
+            .line = line,
+            .how = how,
+            .from = self.activeTab().focused.id,
+        };
+        return true;
+    }
+
+    /// Serve a queued open-beside: reuse the editor pane to the right
+    /// of the asking pane, or split a fresh EDITOR pane off it (no
+    /// shell underneath — this pane exists for the document). The
+    /// asking pane stays; for the tree that is the whole point — it
+    /// keeps standing as the sidebar while files open beside it.
+    fn drainPendingOpen(self: *App) void {
+        self.draw_lock.lock();
+        const req = self.pending_open orelse {
+            self.draw_lock.unlock();
+            return;
+        };
+        self.pending_open = null;
+        var pbuf: [1024]u8 = undefined;
+        @memcpy(pbuf[0..req.len], self.pending_open_path[0..req.len]);
+        const path = pbuf[0..req.len];
+
+        const t = self.activeTab();
+        var src: ?*panespkg.Pane = null;
+        for (t.panes.items) |p| {
+            if (p.id == req.from) {
+                src = p;
+                break;
+            }
+        }
+        const src_pane = src orelse {
+            self.draw_lock.unlock();
+            return;
+        };
+
+        // Beside: the pane to the right, if it is already a document
+        // pane, retargets in place — rook-buffers' own rule.
+        if (req.how == .beside) {
+            if (panespkg.navigate(t.panes.items, src_pane, .right)) |nb| {
+                if (nb.editor()) |ned| {
+                    if (!ned.is_dir) {
+                        ned.open(path, false) catch {
+                            self.draw_lock.unlock();
+                            return;
+                        };
+                        if (req.line > 0) ned.cline = @min(req.line, ned.lineCountB() -| 1);
+                        self.setFocusLocked(nb);
+                        self.scene_dirty = true;
+                        self.draw_lock.unlock();
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Split a fresh editor pane off the asker.
+        const ed = editorpkg.Editor.create(self.gpa, self.io, path) catch {
+            self.draw_lock.unlock();
+            return;
+        };
+        @import("syntax.zig").attach(ed, self.gpa);
+        self.attachCommands(ed);
+        if (req.line > 0) ed.cline = @min(req.line, ed.lineCountB() -| 1);
+        const pane = self.gpa.create(panespkg.Pane) catch {
+            ed.destroy();
+            self.draw_lock.unlock();
+            return;
+        };
+        pane.* = .{ .id = self.next_pane_id, .content = .{ .edit = ed } };
+        self.next_pane_id += 1;
+        const horiz = req.how != .split_down;
+        const src_w = src_pane.rect.w;
+        if (!panespkg.splitAt(self.gpa, &t.root, src_pane, pane, horiz)) {
+            ed.destroy();
+            self.gpa.destroy(pane);
+            self.draw_lock.unlock();
+            return;
+        }
+        t.panes.append(self.gpa, pane) catch {};
+        // A tree that spawns its first document keeps SIDEBAR width
+        // (side_cols, the side panes' own number) instead of half the
+        // window — it is a list, not a document.
+        if (req.how == .beside and horiz and src_w > 1) {
+            if (src_pane.editor()) |sed| if (sed.is_dir) {
+                if (panespkg.splitOf(&t.root, src_pane)) |sp| {
+                    const want = self.side_cols * self.renderer.cell_w + self.m.pane_pad * 2;
+                    sp.ratio = std.math.clamp(want / src_w, 0.1, 0.9);
+                }
+            };
+        }
+        self.setFocusLocked(pane);
+        self.relayoutLocked();
+        self.refreshHudLocked(CACurrentMediaTime());
+        self.scene_dirty = true;
+        self.draw_lock.unlock();
     }
 
     /// `:qa` / `:wa` / `:wqa`, queued.
@@ -3198,7 +3355,11 @@ pub const App = struct {
     /// Enter takes, and for the same reason.
     fn editorExCommand(ctx: *anyopaque, name: []const u8) bool {
         const self: *App = @ptrCast(@alignCast(ctx));
-        const c = registrypkg.byExName(name) orelse return false;
+        // Two spellings reach this seam: derived ex names from `:`
+        // (PaneSplitRight) and raw registry ids from the editor
+        // leader's own bindings (tree.toggle). They cannot collide —
+        // ids are lowercase, ex names lead with a capital.
+        const c = registrypkg.byId(name) orelse registrypkg.byExName(name) orelse return false;
         self.pending_cmd = .{ .action = c.action, .arg = c.arg };
         return true;
     }
@@ -3211,6 +3372,7 @@ pub const App = struct {
         self.pending_cmd = null;
         self.draw_lock.unlock();
         if (spec) |s| self.dispatch(s);
+        self.drainPendingOpen();
         self.drainQuitAll();
     }
 
@@ -3801,7 +3963,9 @@ pub const App = struct {
         } else std.debug.print("rook config: unknown theme '{s}'\n", .{cfg.theme});
 
         // Retint every live emulator; the palette dirty flag forces a
-        // full RenderState rebuild next snapshot.
+        // full RenderState rebuild next snapshot. Editors also take
+        // the reloaded editor leader — a rebind must not need every
+        // pane reopened.
         const tc = termColors();
         for (self.spaces.items) |space| for (space.tabs.items) |tab| {
             for (tab.panes.items) |p| {
@@ -3812,6 +3976,7 @@ pub const App = struct {
                     tm.session.clip_allow = self.cfg_clip_allow;
                     tm.session.mutex.unlock();
                 } else if (p.editor()) |ed| ed.render_dirty = true;
+                if (p.editor()) |ed| ed.leader = self.keybinds.ed_leader;
             }
         };
         self.scene_dirty = true;
@@ -5177,6 +5342,9 @@ pub const App = struct {
                 .diff_del => th.diff_del,
                 .diff_hunk => th.diff_hunk,
                 .diff_meta => th.diff_meta,
+                // Directories borrow the function colour: an accent
+                // that reads as structure in every builtin theme.
+                .tree_dir => th.syn_func,
             };
             switch (st) {
                 .sel => bg = th.ed_sel_bg,
