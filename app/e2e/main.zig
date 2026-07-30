@@ -34,6 +34,7 @@ const scenarios = [_]Scenario{
     .{ .name = "reload", .what = "an open buffer follows the file, or says it can't", .run = reload },
     .{ .name = "pixels", .what = "the renderer actually drew (shot, decoded)", .run = pixels },
     .{ .name = "commands", .what = "registry lists, runs by name, and drives the ⌘K palette", .run = commands },
+    .{ .name = "whichkey", .what = "an unanswered leader reveals the key menu; rows and bar hints click", .run = whichkey },
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
     .{ .name = "sidepane", .what = "side pane retiles the grid, flips edges, and holds the inbox", .run = sidepane },
     .{ .name = "asks", .what = "a question renders, takes keys, and produces the answer JSON", .run = asks },
@@ -684,6 +685,117 @@ fn commands(gpa: std.mem.Allocator, bin: []const u8) !void {
     }
     try h.expectContains(try app.ctl("palette"), "mode:commands", "⌘K opens the command palette");
     _ = try app.ctl("key 1b");
+}
+
+// ------------------------------------------------------------ whichkey
+
+/// Parse "…{needle}…\t{x},{y}" (or "hint-name {x},{y}") out of ctl
+/// `whichkey` output: the last space- or tab-separated field is the
+/// click point.
+fn wkPoint(s: []const u8, needle: []const u8) ?[2]u32 {
+    var lines = std.mem.splitScalar(u8, s, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, needle) == null) continue;
+        const cut = std.mem.lastIndexOfAny(u8, line, " \t") orelse continue;
+        const xy = line[cut + 1 ..];
+        const comma = std.mem.indexOfScalar(u8, xy, ',') orelse continue;
+        const x = std.fmt.parseInt(u32, xy[0..comma], 10) catch continue;
+        const y = std.fmt.parseInt(u32, xy[comma + 1 ..], 10) catch continue;
+        return .{ x, y };
+    }
+    return null;
+}
+
+/// Arm the leader and wait for the sheet to reveal (the wk_delay is
+/// 350ms; the reveal needs a display-link tick after it). Returns the
+/// ctl `whichkey` output with row coordinates filled in.
+fn wkReveal(app: *h.Instance) ![]const u8 {
+    _ = try app.ctl("press `");
+    var waited: u32 = 0;
+    while (waited < 5000) : (waited += 100) {
+        const s = try app.ctl("whichkey");
+        if (std.mem.indexOf(u8, s, "armed visible") != null) return s;
+        h.sleepMs(100);
+    }
+    app.showScreen();
+    return error.AssertFailed;
+}
+
+fn whichkey(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // Nothing armed: the sheet is down, and the status bar already
+    // carries its two teaching hints (the harness config binds `).
+    const idle = try app.ctl("whichkey");
+    try h.expectContains(idle, "closed", "sheet down before the leader arms");
+    try h.expectContains(idle, "hint-menu", "status bar draws the menu hint");
+    try h.expectContains(idle, "hint-commands", "status bar draws the commands hint");
+
+    // Arm. Consumed by the leader machine, sheet not necessarily up yet
+    // — the reveal belongs to the tick clock, not the keystroke.
+    try h.expectContains(try app.ctl("press `"), "consumed", "leader arms");
+    try h.expectContains(try app.ctl("whichkey"), "armed", "armed state visible to ctl");
+    _ = try app.ctl("press ESC"); // disarm; wkReveal re-arms below
+
+    // An unanswered chord reveals the sheet, with the LIVE rows.
+    const shown = try wkReveal(app);
+    try h.expectContains(shown, "g\tReview", "rows resolve live bindings to titles");
+    try h.expectContains(shown, "1-9\ttab 1-9", "digit chords collapse to one teaching row");
+
+    // ...and it actually drew: the band the sheet occupies (above the
+    // status bar, below the pane's mostly-empty bottom) carries several
+    // rows' worth of non-background pixels. Absolute, not before/after
+    // — AppKit resizes the window as it settles onto the screen, so two
+    // shots this early are not the same geometry to diff.
+    var shot_path: [192]u8 = undefined;
+    const sp = try std.fmt.bufPrint(&shot_path, "{s}/wk.png", .{app.dirPath()});
+    var img = try app.shot(sp);
+    const ink = img.ink(img.height * 7 / 10, img.height * 9 / 10);
+    const floor_px = img.width * 5;
+    img.deinit();
+    try h.expect(ink > floor_px, "sheet band has ink ({d}, floor {d})", .{ ink, floor_px });
+
+    // Esc dismisses — the unknown-chord swallow, tmux-style.
+    _ = try app.ctl("press ESC");
+    try h.expectContains(try app.ctl("whichkey"), "closed", "esc dismisses the sheet");
+
+    // A chord answered through the visible sheet still fires.
+    _ = try wkReveal(app);
+    _ = try app.ctl("press g");
+    try h.expectContains(try app.ctl("whichkey"), "closed", "the chord spends the sheet");
+    try h.expectContains(try app.ctl("sidepane"), "panel:review", "the chord ran through the sheet");
+
+    // A row CLICK runs the command it teaches. The deck row, because
+    // its panel state is blind-checkable the same way.
+    const rows = try wkReveal(app);
+    const deck_pt = wkPoint(rows, "Agent Deck") orelse return error.AssertFailed;
+    _ = try app.ctlFmt("click {d} {d}", .{ deck_pt[0], deck_pt[1] });
+    try h.expectContains(try app.ctl("whichkey"), "closed", "the click spends the chord");
+    try h.expectContains(try app.ctl("sidepane"), "panel:deck", "the row click ran its command");
+
+    // A click OUTSIDE the sheet dismisses without running anything:
+    // re-arm, wait, click the middle of the pane area.
+    _ = try wkReveal(app);
+    _ = try app.ctlFmt("click {d} {d}", .{ 200, 200 });
+    try h.expectContains(try app.ctl("whichkey"), "closed", "an outside click dismisses");
+
+    // The status-bar hints are the mouse route in: "⌘K commands"
+    // opens the palette without a single keystroke.
+    const hint = wkPoint(try app.ctl("whichkey"), "hint-commands") orelse return error.AssertFailed;
+    _ = try app.ctlFmt("click {d} {d}", .{ hint[0], hint[1] });
+    _ = try app.waitCtl("palette", "mode:commands", 3000);
+    _ = try app.ctl("key 1b"); // esc: closed again
+
+    // ...and "` menu" arms the leader with the sheet up NOW — a click
+    // asked for the menu; it should not also have to wait out a delay.
+    const menu = wkPoint(try app.ctl("whichkey"), "hint-menu") orelse return error.AssertFailed;
+    _ = try app.ctlFmt("click {d} {d}", .{ menu[0], menu[1] });
+    try h.expectContains(try app.ctl("whichkey"), "armed visible", "the menu hint shows the sheet immediately");
+    _ = try app.ctl("press ESC");
 }
 
 // --------------------------------------------------------------- excmd

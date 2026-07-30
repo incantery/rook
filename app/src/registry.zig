@@ -160,6 +160,18 @@ pub fn specFromName(name: []const u8) ?Spec {
     return null;
 }
 
+/// Resolve a live keybind back to its command — the which-key menu's
+/// direction. `Command.keys` is a hand-written display string that a
+/// rebind never updates, so a menu drawn from it would lie; the
+/// truthful path is config's `Keybinds.entries` (action+arg) → this →
+/// the title. First match wins, same as the table's other lookups.
+pub fn byAction(action: Action, arg: u8) ?Command {
+    for (commands) |c| {
+        if (c.action == action and c.arg == arg) return c;
+    }
+    return null;
+}
+
 /// A command id as an ex-command name: "pane.split-right" →
 /// "PaneSplitRight". Every non-alphanumeric run is a segment break and
 /// each segment is capitalized, which lands on vim's own user-command
@@ -237,6 +249,18 @@ test "byExName round-trips every command, and refuses editor verbs" {
     for ([_][]const u8{ "w", "q", "wq", "x", "e", "noh" }) |verb| {
         try std.testing.expect(byExName(verb) == null);
     }
+}
+
+test "byAction round-trips every command" {
+    for (commands) |c| {
+        const got = byAction(c.action, c.arg) orelse return error.TestUnexpectedResult;
+        // Same action+arg, not necessarily same row — but the table has
+        // one row per capability, so it must be the same row.
+        try std.testing.expectEqualStrings(c.id, got.id);
+    }
+    // Parameterized tab.select has no table row; the menu handles it
+    // as its own collapsed entry, and this stays null on purpose.
+    try std.testing.expect(byAction(.tab_select, 3) == null);
 }
 
 test "isExName enforces the shadowing rule" {

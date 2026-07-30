@@ -124,6 +124,11 @@ pub const Config = struct {
     window_padding: f64 = 0,
     bell: Bell = .visual,
     clipboard_write: ClipboardWrite = .allow,
+    /// Blink the focused pane's cursor (1.1s period, ~55% on — the
+    /// mark every terminal shares). Ghostty's default too. The blink
+    /// pauses while rook is in the background, so the zero-idle-frames
+    /// property still holds where it was measured: an unfocused app.
+    cursor_blink: bool = true,
     /// Scrollback per pane, in BYTES (the emulator's unit; it rounds up
     /// to a page and floors at one page's worth of the active area).
     /// Ghostty's own default, and for the same reason: rook previously
@@ -273,6 +278,16 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Config {
                 std.debug.print("rook config: unknown clipboard-write '{s}' (allow, deny)\n", .{stripped});
                 break :blk .allow;
             };
+        } else if (std.mem.eql(u8, key, "cursor_blink") or
+            std.mem.eql(u8, key, "cursor_style_blink"))
+        {
+            // `cursor-style-blink` is ghostty's spelling; same knob.
+            const stripped = std.mem.trim(u8, val, "\"");
+            if (std.mem.eql(u8, stripped, "true")) {
+                cfg.cursor_blink = true;
+            } else if (std.mem.eql(u8, stripped, "false")) {
+                cfg.cursor_blink = false;
+            } else std.debug.print("rook config: bad cursor-blink '{s}' (true, false)\n", .{stripped});
         } else if (std.mem.eql(u8, key, "background_blur")) {
             const stripped = std.mem.trim(u8, val, "\"");
             cfg.background_blur = blurFromName(stripped) orelse blk: {

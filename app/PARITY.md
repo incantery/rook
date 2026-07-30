@@ -215,7 +215,32 @@ a daily driver.
       `drawAttention` takes a rect, so `panel.flip` belongs to the
       container. Tenant is an enum + switch like `pal_mode`, NOT a
       vtable: an interface designed against one tenant is a guess.
+- [x] **Which-key: the leader teaches itself.** An armed leader that
+      sits unanswered for 350ms reveals a sheet above the status bar —
+      every LIVE chord (config's binding table resolved back through
+      `registry.byAction`, never the hand-written `keys` strings, which
+      a rebind does not update) with its command title, in a grid.
+      Rows are CLICKABLE and run the command they teach; a click
+      outside dismisses; esc dismisses (the unknown-chord swallow it
+      already was). The delay means practiced hands never see it flash.
+      The status bar carries the two mouse routes in: "` menu" (arms
+      with the sheet up NOW — a click asked for it) and "⌘K commands".
+      The command palette's right column shows the same live chords
+      ("` g"), falling back to the display string only for ⌘ chords
+      that live outside the binding table. ctl `whichkey` exposes
+      state, rows, and each row's click point, and the e2e drives the
+      whole loop blind — reveal, chord-through-sheet, row click, hint
+      click — plus a pixel check that the sheet actually drew.
+- [x] Cursor blink (config `cursor-blink`, default on; ghostty's
+      `cursor-style-blink` accepted). 1.1s period, 55% on. Solid while
+      you type (every input resets the phase), solid in copy-mode-less
+      background panes by construction (only the focused pane draws a
+      cursor), and PAUSED whenever rook is not frontmost — the blink
+      ticks a ~2Hz redraw, and the measured zero-idle-frames property
+      is kept where it was measured: an app you are not looking at.
+      DECTCEM-hidden cursors don't tick the clock at all.
 - [ ] Status bar: workspace/branch/review-gate state, not just perf HUD
+      (the teaching hints above are the first non-HUD tenant)
 
 ## 2. The agent layer — this is the actual product
 

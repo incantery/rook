@@ -319,6 +319,61 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
     } else if (std.mem.eql(u8, verb, "palette-open") and rest.len == 0) {
         app.openPalette();
         reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "whichkey") and rest.len == 0) {
+        // The leader's teaching sheet, blind: armed/visible state, the
+        // rows the sheet shows (LIVE bindings, the same list drawWhichKey
+        // lays out), each row's click point once the sheet has drawn,
+        // and the status-bar hint zones — everything a test needs to
+        // drive the mouse route without pixels.
+        var buf: [4096]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        app.draw_lock.lock();
+        if (!app.leader_pending.load(.acquire)) {
+            _ = w.write("closed\n") catch 0;
+        } else {
+            w.print("armed {s}\n", .{@as([]const u8, if (app.wk_visible) "visible" else "pending")}) catch {};
+            var items: [33]macos.WkItem = undefined;
+            const n = app.wkItemsLocked(&items);
+            for (items[0..n], 0..) |it, i| {
+                var kb: [1]u8 = undefined;
+                const keyname: []const u8 = if (!it.click)
+                    "1-9"
+                else switch (it.ch) {
+                    ' ' => "SPACE",
+                    '\t' => "TAB",
+                    0x1b => "ESC",
+                    else => blk: {
+                        kb[0] = it.ch;
+                        break :blk kb[0..1];
+                    },
+                };
+                // Click point only after a frame has laid the rows out;
+                // "-" before that, so a test that reads coordinates too
+                // early fails loudly instead of clicking (0,0).
+                if (app.wk_visible and app.wk_n == n) {
+                    const hit = app.wk_hits[i];
+                    w.print("{s}\t{s}\t{d},{d}\n", .{
+                        keyname,
+                        it.title,
+                        @as(u32, @intFromFloat(hit.x + hit.w / 2)),
+                        @as(u32, @intFromFloat(hit.y + hit.h / 2)),
+                    }) catch break;
+                } else {
+                    w.print("{s}\t{s}\t-\n", .{ keyname, it.title }) catch break;
+                }
+            }
+        }
+        const hint_y: u32 = @intFromFloat(app.px_h - app.bar_h / 2);
+        if (app.hint_menu_x[1] > 0) w.print("hint-menu {d},{d}\n", .{
+            @as(u32, @intFromFloat((app.hint_menu_x[0] + app.hint_menu_x[1]) / 2)),
+            hint_y,
+        }) catch {};
+        if (app.hint_cmd_x[1] > 0) w.print("hint-commands {d},{d}\n", .{
+            @as(u32, @intFromFloat((app.hint_cmd_x[0] + app.hint_cmd_x[1]) / 2)),
+            hint_y,
+        }) catch {};
+        app.draw_lock.unlock();
+        reply(fd, buf[0..w.end]);
     } else if (std.mem.eql(u8, verb, "commands") and rest.len == 0) {
         // The agent's tool surface, and the same table the palette and
         // the keybinds read. `run` below takes any id printed here.

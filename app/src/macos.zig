@@ -311,6 +311,54 @@ pub const Side = enum { left, right };
 /// tenant interface designed against ONE tenant is a guess.
 pub const Panel = enum { attention, ask, deck, threads, review };
 
+/// One clickable row of the which-key sheet. `click` is false for the
+/// collapsed "1…9" teaching row — a row that says "tabs 1–9" and then
+/// jumps to tab 1 on click would be the menu lying about itself.
+const WkHit = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    action: registrypkg.Action,
+    arg: u8,
+    click: bool,
+};
+
+/// A which-key row before geometry: the chord char and what it runs.
+/// Pub for ctl's `whichkey` verb — the blind reader of the same list.
+pub const WkItem = struct {
+    ch: u8,
+    title: []const u8,
+    action: registrypkg.Action,
+    arg: u8,
+    click: bool,
+};
+
+/// How long an armed leader sits unanswered before the sheet reveals.
+/// Long enough that a practiced chord never flashes it, short enough
+/// that hesitation is answered — which-key's own default neighborhood.
+const wk_delay_s: f64 = 0.35;
+
+/// The cursor blink mark: 1.1s period, on for the first 55% — the
+/// mock's `cursorblink` keyframes, which are also everyone's.
+const blink_period_s: f64 = 1.1;
+const blink_on_s: f64 = 0.6;
+
+/// A chord char as the glyph a menu shows: named keys get a symbol,
+/// everything else spells itself. The buffer is for the plain-char
+/// case; the symbols are static.
+fn keyGlyph(ch: u8, buf: *[4]u8) []const u8 {
+    return switch (ch) {
+        ' ' => "␣",
+        '\t' => "⇥",
+        0x1b => "⎋",
+        else => blk: {
+            buf[0] = ch;
+            break :blk buf[0..1];
+        },
+    };
+}
+
 pub const App = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -326,6 +374,43 @@ pub const App = struct {
     /// Leader chord armed: the next key resolves a binding (or the
     /// leader again types it literally). Shown in the bar while armed.
     leader_pending: std.atomic.Value(bool) = .init(false),
+
+    // ---- which-key: the leader teaches itself ----
+    /// The sheet listing every live chord, revealed only when an armed
+    /// leader has sat unanswered for wk_delay — a fast chord never sees
+    /// it, a hesitant one gets the menu. All fields under draw_lock.
+    wk_visible: bool = false,
+    /// When the leader armed (CACurrentMediaTime); the reveal check
+    /// compares against this on every display-link tick.
+    wk_armed_at: f64 = 0,
+    /// Row hit rects, rebuilt by drawWhichKey each frame it shows.
+    /// Sized for Keybinds' 32 entries plus the collapsed 1–9 row.
+    wk_hits: [33]WkHit = undefined,
+    wk_n: usize = 0,
+    /// The sheet's own rect (x, y, w, h) — a click inside it that
+    /// misses every row is a dismiss, not a click-through to the pane.
+    wk_rect: [4]f32 = .{ 0, 0, 0, 0 },
+
+    /// Status-bar hint hit zones (x extents), rebuilt by drawBar each
+    /// frame: "␣ menu" arms the leader with the sheet, "⌘K commands"
+    /// opens the palette. Zero-width when there was no room to draw.
+    hint_menu_x: [2]f32 = .{ 0, 0 },
+    hint_cmd_x: [2]f32 = .{ 0, 0 },
+
+    // ---- cursor blink ----
+    /// config `cursor-blink`: the focused pane's cursor blinks on the
+    /// mark every terminal shares (1.1s period, ~55% on).
+    cursor_blink: bool = true,
+    /// Current phase; true = cursor drawn. Forced true (solid) whenever
+    /// blinking doesn't apply, so every fill path can read it blindly.
+    blink_phase_on: bool = true,
+    /// Phase zero — reset on every input so the cursor is SOLID while
+    /// you type and only blinks once your hands stop.
+    blink_epoch: f64 = 0,
+    /// isActive, cached off the 2Hz HUD tick: blink pauses (solid) in
+    /// the background, so the measured zero-idle-frames property still
+    /// holds where it matters — an app you are not looking at.
+    app_active: bool = true,
 
     // The scene: tabs of split trees. Mutated only under draw_lock.
     /// Workspace sessions (tmux's sessions): each owns a full tab set.
@@ -657,6 +742,14 @@ pub const App = struct {
 
     pub fn markInput(self: *App, t: f64) void {
         self.input_mark.store(t, .release);
+        // Typing keeps the cursor solid: every input restarts the blink
+        // at phase zero (on). Every caller holds draw_lock, which is
+        // what makes the two plain fields safe to touch here.
+        self.blink_epoch = t;
+        if (!self.blink_phase_on) {
+            self.blink_phase_on = true;
+            self.scene_dirty = true;
+        }
     }
 
     fn drawNow(self: *App) void {
@@ -834,6 +927,7 @@ pub const App = struct {
             .bg_opacity = cfg.background_opacity,
             .cfg_bell = cfg.bell,
             .cfg_clip_allow = cfg.clipboard_write == .allow,
+            .cursor_blink = cfg.cursor_blink,
             .cfg_scrollback = cfg.scrollback,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
             .ime_view = view,
@@ -1147,8 +1241,19 @@ pub const App = struct {
     /// A click in scene px coords: tab chips select, panes focus.
     /// Shared by the NSEvent monitor and ctl \`click\` (blind-testable).
     pub fn clickAt(self: *App, x: f32, y: f32, local: bool) void {
-        self.draw_lock.lock();
-        defer self.draw_lock.unlock();
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            self.clickLocked(x, y, local);
+        }
+        // Outside the locked block: chrome clicks (a which-key row, a
+        // status-bar hint) queue through pending_cmd because every
+        // dispatch target takes draw_lock again — same handoff the
+        // palette's Enter uses.
+        self.drainPendingCmd();
+    }
+
+    fn clickLocked(self: *App, x: f32, y: f32, local: bool) void {
         if (y < self.top_inset) return; // titlebar drag strip — AppKit's
         if (y < self.contentY()) {
             for (self.chip_x[0..self.chip_n], 0..) |cx, i| {
@@ -1156,6 +1261,42 @@ pub const App = struct {
                     self.activateTabLocked(i);
                     break;
                 }
+            }
+            return;
+        }
+        // The which-key sheet, when it is up: a row click runs the
+        // command it teaches, anywhere else dismisses — either way the
+        // chord is spent, exactly like answering it from the keyboard.
+        if (self.leader_pending.load(.acquire) and self.wk_visible) {
+            self.leader_pending.store(false, .release);
+            self.wk_visible = false;
+            self.scene_dirty = true;
+            const r = self.wk_rect;
+            if (x >= r[0] and x < r[0] + r[2] and y >= r[1] and y < r[1] + r[3]) {
+                for (self.wk_hits[0..self.wk_n]) |hit| {
+                    if (!hit.click) continue;
+                    if (x >= hit.x and x < hit.x + hit.w and y >= hit.y and y < hit.y + hit.h) {
+                        self.pending_cmd = .{ .action = hit.action, .arg = hit.arg };
+                        break;
+                    }
+                }
+                // Inside the sheet, row or not: never falls through to
+                // the pane underneath it.
+                return;
+            }
+            // Outside: dismissed; the click still lands below.
+        }
+        // Status-bar hints: the mouse route into the two teaching
+        // surfaces. "menu" arms the leader with the sheet shown NOW —
+        // a click is a request for the menu, not a hesitation to time.
+        if (y >= self.px_h - self.bar_h) {
+            if (x >= self.hint_menu_x[0] and x < self.hint_menu_x[1]) {
+                self.wk_visible = true;
+                self.wk_armed_at = 0;
+                self.scene_dirty = true;
+                self.leader_pending.store(true, .release);
+            } else if (x >= self.hint_cmd_x[0] and x < self.hint_cmd_x[1]) {
+                self.pending_cmd = .{ .action = .palette_commands };
             }
             return;
         }
@@ -1902,6 +2043,23 @@ pub const App = struct {
         self.pal_open = false;
         self.pal_nfiltered = 0;
         self.scene_dirty = true;
+    }
+
+    /// A command's LIVE chord, resolved from config's binding table —
+    /// "` g", "␣ v" — or null when no chord reaches it. This is what
+    /// the palette shows over registry's hand-written `keys` strings:
+    /// those don't follow a rebind, and a hint that teaches yesterday's
+    /// key is worse than none. Caller holds draw_lock.
+    fn liveChordHint(self: *App, action: registrypkg.Action, arg: u8, buf: []u8) ?[]const u8 {
+        const ld = self.keybinds.leader orelse return null;
+        for (self.keybinds.entries[0..self.keybinds.n]) |e| {
+            if (e.action == action and e.arg == arg) {
+                var lg: [4]u8 = undefined;
+                var cg: [4]u8 = undefined;
+                return std.fmt.bufPrint(buf, "{s} {s}", .{ keyGlyph(ld, &lg), keyGlyph(e.ch, &cg) }) catch null;
+            }
+        }
+        return null;
     }
 
     /// Case-insensitive subsequence match — the telescope basic. Items
@@ -2967,7 +3125,7 @@ pub const App = struct {
         // there) — a literal leader char costs a double-tap, same as
         // the terminal. Seth's call in TODO.md.
         if (self.leader_pending.swap(false, .acq_rel)) {
-            self.barDirty();
+            self.wkClose();
             if (ch == ld) {
                 // Double-tap: the leader typed literally.
                 self.writeFocused(&[1]u8{ch}, ts);
@@ -2980,11 +3138,27 @@ pub const App = struct {
             return true; // unknown chord: swallowed, tmux-style
         }
         if (ch == ld) {
+            // Arm, and start the which-key clock: the sheet reveals only
+            // if this chord goes unanswered for wk_delay_s (drawFrame's
+            // tick check), so practiced hands never see it flash.
+            self.draw_lock.lock();
+            self.wk_visible = false;
+            self.wk_armed_at = ts;
+            self.scene_dirty = true;
+            self.draw_lock.unlock();
             self.leader_pending.store(true, .release);
-            self.barDirty();
             return true;
         }
         return false;
+    }
+
+    /// Disarm cleanup shared by every way a chord ends: hide the
+    /// which-key sheet and repaint the bar's armed cell.
+    fn wkClose(self: *App) void {
+        self.draw_lock.lock();
+        self.wk_visible = false;
+        self.scene_dirty = true;
+        self.draw_lock.unlock();
     }
 
     fn setFocusLocked(self: *App, pane: *panespkg.Pane) void {
@@ -3159,6 +3333,18 @@ pub const App = struct {
         }
     }
 
+    /// Is there a cursor on screen worth blinking? The focused pane's
+    /// only — that is the pane the blink telegraphs — and a terminal
+    /// that hid its cursor (DECTCEM) has nothing to blink. Reads the
+    /// last snapshot's cursor state, which is exactly what fillPane
+    /// will draw. Caller holds draw_lock.
+    fn focusedCursorShowing(self: *App) bool {
+        return switch (self.activeTab().focused.content) {
+            .term => |*tm| tm.rs.cursor.visible and tm.rs.cursor.viewport != null,
+            .edit => true,
+        };
+    }
+
     fn drawFrame(self: *App) void {
         const pool = objc.AutoreleasePool.init();
         defer pool.deinit();
@@ -3172,6 +3358,33 @@ pub const App = struct {
         // HUD refresh at ~2Hz. Runs on skipped ticks too, so the bar
         // stays live during idle — but only a text CHANGE causes a draw.
         if (tick % 60 == 0) self.refreshHudLocked(t_start);
+
+        // Which-key reveal: an armed leader that has sat unanswered for
+        // wk_delay_s gets the menu. Checked on every tick because the
+        // reveal is TIME crossing a threshold, not state changing — no
+        // event will arrive to flip a dirty flag for it.
+        if (self.leader_pending.load(.acquire) and !self.wk_visible and
+            t_start - self.wk_armed_at >= wk_delay_s)
+        {
+            self.wk_visible = true;
+            self.scene_dirty = true;
+        }
+
+        // Cursor blink: the one continuous animation, kept honest about
+        // the zero-idle-frames property — it only ticks while rook is
+        // frontmost AND the focused pane is actually showing a cursor.
+        // Everywhere else the phase is forced solid, so backgrounded
+        // rook still draws nothing at all.
+        if (self.cursor_blink and self.app_active and self.focusedCursorShowing()) {
+            const on = @mod(t_start - self.blink_epoch, blink_period_s) < blink_on_s;
+            if (on != self.blink_phase_on) {
+                self.blink_phase_on = on;
+                self.scene_dirty = true;
+            }
+        } else if (!self.blink_phase_on) {
+            self.blink_phase_on = true;
+            self.scene_dirty = true;
+        }
 
         // Snapshot every ACTIVE-TAB pane under its session lock, with
         // priority over the readers' parse loops. Background tabs are
@@ -3260,7 +3473,7 @@ pub const App = struct {
                     self.fillPane(tm, p == atab.focused, cells[off .. off + cols * rows], cols, rows);
                     p.drawn_cursor = cursorKey(tm);
                 },
-                .edit => |ed| self.fillEditorPane(ed, cells[off .. off + cols * rows], cols, rows),
+                .edit => |ed| self.fillEditorPane(ed, p == atab.focused, cells[off .. off + cols * rows], cols, rows),
             }
             p.buf_off = off;
             p.drawn_cols = @intCast(cols);
@@ -3364,6 +3577,9 @@ pub const App = struct {
         // side pane included.
         if (self.side_open) self.drawSidePane(&ui);
         if (self.ime_marked_len > 0) self.drawPreedit(&ui);
+        // Unconditional: it is also the clearer of its own hit rects
+        // when the sheet isn't showing.
+        self.drawWhichKey(&ui);
         if (self.pal_open) self.drawPalette(&ui);
 
         enc.msgSend(void, "endEncoding", .{});
@@ -3476,6 +3692,7 @@ pub const App = struct {
         self.leader_pending.store(false, .release);
         self.cfg_bell = cfg.bell;
         self.cfg_clip_allow = cfg.clipboard_write == .allow;
+        self.cursor_blink = cfg.cursor_blink;
 
         if (themepkg.byName(cfg.theme)) |t| {
             th = t.*;
@@ -3685,6 +3902,10 @@ pub const App = struct {
 
     fn refreshHudLocked(self: *App, now: f64) void {
         self.hud_calls +%= 1;
+        // Cached at 2Hz for the blink gate: frontmost-ness changes at
+        // human speed, and asking AppKit on every 120Hz tick would be
+        // an objc round-trip spent answering the same thing.
+        self.app_active = self.app.msgSend(bool, "isActive", .{});
         self.drainBellsLocked();
         self.drainNotificationsLocked();
         if (self.hud_calls % 2 == 0) self.pollConfigLocked();
@@ -3779,11 +4000,14 @@ pub const App = struct {
         const pad = self.m.gutter;
         var x: f32 = pad;
         // Armed leader: an accent cell showing the leader key, tmux's
-        // prefix indicator.
+        // prefix indicator. Through keyGlyph, or a SPACE leader arms an
+        // indicator that shows nothing at all.
         if (self.leader_pending.load(.acquire)) {
             if (self.keybinds.leader) |ld| {
-                var lbuf: [3]u8 = .{ ' ', ld, ' ' };
-                x += ui.text(x, ty, &lbuf, th.bar_bg, th.accent) + self.renderer.cell_w / 2;
+                var gb: [4]u8 = undefined;
+                var lbuf: [8]u8 = undefined;
+                const s = std.fmt.bufPrint(&lbuf, " {s} ", .{keyGlyph(ld, &gb)}) catch " ";
+                x += ui.text(x, ty, s, th.bar_bg, th.accent) + self.renderer.cell_w / 2;
             }
         }
         if (self.activeTab().focused.term()) |tm| {
@@ -3804,8 +4028,151 @@ pub const App = struct {
                 x += ui.text(x, ty, " /no match ", th.bar_bg, th.accent) + self.renderer.cell_w / 2;
             }
         }
-        _ = ui.text(x, ty, self.hud_left[0..self.hud_left_len], th.bar_fg, self.glassBg(th.bar_bg));
-        _ = ui.textRight(self.px_w - pad, ty, self.hud_right[0..self.hud_right_len], th.bar_value, self.glassBg(th.bar_bg));
+        const lw = ui.text(x, ty, self.hud_left[0..self.hud_left_len], th.bar_fg, self.glassBg(th.bar_bg));
+        const rw = ui.textRight(self.px_w - pad, ty, self.hud_right[0..self.hud_right_len], th.bar_value, self.glassBg(th.bar_bg));
+
+        // The teaching affordances, left of the perf cluster: "␣ menu"
+        // arms the leader with its menu, "⌘K commands" opens the
+        // palette. Clickable (drawBar records the hit zones) because a
+        // VS Code hand's first instinct is the mouse — each click runs
+        // the real thing while showing the key that would have. Drawn
+        // only when there is room; the panes' content never moves for
+        // them. Key glyph in accent, word in bar_fg — the mock's
+        // vocabulary: the key is the loud part.
+        const cw = self.renderer.cell_w;
+        const left_end = x + lw + 2 * cw;
+        const bg = self.glassBg(th.bar_bg);
+        self.hint_menu_x = .{ 0, 0 };
+        self.hint_cmd_x = .{ 0, 0 };
+        var hx = self.px_w - pad - rw - 3 * cw; // hints grow leftward
+        {
+            const w = 11 * cw; // "⌘K commands"
+            if (hx - w > left_end) {
+                var tx = hx - w;
+                tx += ui.text(tx, ty, "⌘K", th.accent, bg);
+                _ = ui.text(tx + cw, ty, "commands", th.bar_fg, bg);
+                self.hint_cmd_x = .{ hx - w, hx };
+                hx -= w + 3 * cw;
+            }
+        }
+        if (self.keybinds.leader) |ld| {
+            var gb: [4]u8 = undefined;
+            const g = keyGlyph(ld, &gb);
+            const w = 6 * cw; // "{key} menu"
+            if (hx - w > left_end) {
+                var tx = hx - w;
+                tx += ui.text(tx, ty, g, th.accent, bg);
+                _ = ui.text(tx + cw, ty, "menu", th.bar_fg, bg);
+                self.hint_menu_x = .{ hx - w, hx };
+            }
+        }
+    }
+
+    /// The which-key row model: the LIVE bindings — config's table,
+    /// never registry's hand-written display strings, which a rebind
+    /// does not update — each resolved back to its command title.
+    /// tab.select's nine digit chords collapse to one teaching row.
+    /// Shared by the sheet and ctl `whichkey`, so what the menu shows
+    /// and what a blind test reads are one list. Caller holds draw_lock.
+    pub fn wkItemsLocked(self: *App, out: []WkItem) usize {
+        var n: usize = 0;
+        var tabs_done = false;
+        for (self.keybinds.entries[0..self.keybinds.n]) |e| {
+            if (n >= out.len) break;
+            if (e.action == .tab_select) {
+                if (tabs_done) continue;
+                tabs_done = true;
+                // ch 0 sorts the teaching row first; click=false because
+                // a row that says "1–9" and then jumps to one tab in
+                // particular would be the menu lying about itself.
+                out[n] = .{ .ch = 0, .title = "tab 1-9", .action = .tab_select, .arg = 0, .click = false };
+                n += 1;
+                continue;
+            }
+            const c = registrypkg.byAction(e.action, e.arg) orelse continue;
+            out[n] = .{ .ch = e.ch, .title = c.title, .action = e.action, .arg = e.arg, .click = true };
+            n += 1;
+        }
+        // Sorted by chord char, so the grid reads as an index rather
+        // than as the order the config file happened to bind things in.
+        std.mem.sort(WkItem, out[0..n], {}, struct {
+            fn lt(_: void, a: WkItem, b: WkItem) bool {
+                return a.ch < b.ch;
+            }
+        }.lt);
+        return n;
+    }
+
+    /// The which-key sheet: every live chord as a clickable row, laid
+    /// as a grid in a sheet above the status bar. SOLID colors like the
+    /// palette — a modal must read instantly, glass or not. Also the
+    /// writer of wk_hits/wk_rect, which clickLocked and ctl `whichkey`
+    /// read; both are cleared whenever the sheet isn't on screen so a
+    /// stale rect can never eat a click.
+    fn drawWhichKey(self: *App, ui: *@import("ui.zig").Ui) void {
+        self.wk_n = 0;
+        self.wk_rect = .{ 0, 0, 0, 0 };
+        if (!self.wk_visible or !self.leader_pending.load(.acquire)) return;
+        const ld = self.keybinds.leader orelse return;
+        var items: [33]WkItem = undefined;
+        const n = self.wkItemsLocked(&items);
+        if (n == 0) return;
+
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        const row_h = self.bar_h;
+        const gut = self.m.gutter;
+
+        // One column fits the widest row: key column (3 cells, sized
+        // for "1…9") + gap + title + trailing air.
+        var maxt: usize = 0;
+        for (items[0..n]) |it| maxt = @max(maxt, it.title.len);
+        const col_w = @as(f32, @floatFromInt(3 + 1 + maxt + 3)) * cw;
+        const avail = self.px_w - 2 * gut;
+        const ncols: usize = @max(1, @min(n, @as(usize, @intFromFloat(@max(1, avail / col_w)))));
+        const nrows = (n + ncols - 1) / ncols;
+
+        const h = row_h * @as(f32, @floatFromInt(nrows + 1)) + self.m.gap * 2 + self.sep;
+        const y0 = self.px_h - self.bar_h - h;
+
+        // Elevation, then the sheet, then its top rule. Full-width and
+        // sitting ON the status bar — it reads as the bar unfolding,
+        // which is where the armed-leader cell it explains lives.
+        ui.shadow(0, y0, self.px_w, h, 0, self.m.elevation, .{ 0, 0, 0, 150 });
+        ui.rect(0, y0, self.px_w, h, th.bar_bg);
+        ui.rect(0, y0, self.px_w, self.sep, th.sep);
+
+        // Header: the armed key, and both ways to answer it. The mouse
+        // is a first-class answer on purpose — every click runs the
+        // command whose key it just showed you.
+        var gb: [4]u8 = undefined;
+        const hty = y0 + self.sep + self.m.gap + (row_h - ch) / 2;
+        var hx = gut;
+        hx += ui.textOver(hx, hty, keyGlyph(ld, &gb), th.accent);
+        hx += ui.textOver(hx + cw, hty, "— press a key, or click", th.bar_fg) + cw;
+        _ = ui.textOverRight(self.px_w - gut, hty, "esc dismiss", th.bar_fg);
+
+        for (items[0..n], 0..) |it, i| {
+            const col = i % ncols;
+            const row = i / ncols;
+            const rx = gut + @as(f32, @floatFromInt(col)) * col_w;
+            const ry = y0 + self.sep + self.m.gap + row_h * @as(f32, @floatFromInt(row + 1));
+            const rty = ry + (row_h - ch) / 2;
+            const key: []const u8 = if (it.click) keyGlyph(it.ch, &gb) else "1…9";
+            _ = ui.textOver(rx, rty, key, th.accent);
+            _ = ui.textOver(rx + 4 * cw, rty, it.title, th.bar_value);
+            self.wk_hits[i] = .{
+                .x = rx,
+                .y = ry,
+                .w = col_w - cw,
+                .h = row_h,
+                .action = it.action,
+                .arg = it.arg,
+                .click = it.click,
+            };
+        }
+        self.wk_n = n;
+        self.wk_rect = .{ 0, y0, self.px_w, h };
     }
 
     /// The top tab bar — tabs as first-class chrome (the wails app's
@@ -4421,6 +4788,7 @@ pub const App = struct {
             }
             const rty = ry + (row_h - self.renderer.cell_h) / 2;
             var lbl: [96]u8 = undefined;
+            var kbuf: [16]u8 = undefined;
             // Both modes draw the same shape: a label on the left and one
             // quiet right-aligned detail that drops when it doesn't fit.
             const label, const detail = switch (self.pal_mode) {
@@ -4437,15 +4805,21 @@ pub const App = struct {
                 .commands => blk: {
                     const c = registrypkg.commands[item_i];
                     const l = std.fmt.bufPrint(&lbl, "{s}: {s}", .{ c.category, c.title }) catch c.title;
-                    // The key hint if there is one, else the id — an
-                    // unbound command still shows the name an agent or a
-                    // config file would call it by.
-                    break :blk .{ l, if (c.keys.len > 0) c.keys else c.id };
+                    // The LIVE chord first (config's truth), then the
+                    // hand-written hint (⌘ chords live outside the
+                    // binding table), then the id — an unbound command
+                    // still shows the name an agent or a config file
+                    // would call it by.
+                    const live = self.liveChordHint(c.action, c.arg, &kbuf);
+                    break :blk .{ l, live orelse if (c.keys.len > 0) c.keys else c.id };
                 },
             };
             _ = ui.textOver(x + gut, rty, label, if (selected) th.bar_value else th.bar_fg);
             const room = w - 2 * gut - @as(f32, @floatFromInt(label.len + 2)) * cw;
-            if (@as(f32, @floatFromInt(detail.len)) * cw < room)
+            // Cells, not bytes: "␣ g" is five bytes and three columns,
+            // and the byte count would drop hints that plainly fit.
+            const dcells = std.unicode.utf8CountCodepoints(detail) catch detail.len;
+            if (@as(f32, @floatFromInt(dcells)) * cw < room)
                 _ = ui.textOverRight(x + w - gut, rty, detail, th.bar_fg);
             ry += row_h;
         }
@@ -4470,8 +4844,10 @@ pub const App = struct {
         const row_sels = tm.rs.row_data.items(.selection);
         const cellw_px: u16 = @intCast(self.renderer.cellw_px);
         // DECTCEM hide (TUIs that paint their own cursor, e.g. claude
-        // code's inverse-space block) must actually hide ours.
-        const show_cursor = focused and tm.rs.cursor.visible;
+        // code's inverse-space block) must actually hide ours. The
+        // blink phase is one more gate — solid whenever blinking
+        // doesn't apply, so this reads it blindly.
+        const show_cursor = focused and tm.rs.cursor.visible and self.blink_phase_on;
         for (0..rows) |y| {
             const raws = row_cells[y].items(.raw);
             const styles = row_cells[y].items(.style);
@@ -4598,7 +4974,7 @@ pub const App = struct {
     /// Rasterize an editor pane: the editor lays out a styled RCell
     /// grid (pure text — the tested surface); this maps styles to
     /// colors and atlas glyphs. Last row is the editor's status line.
-    fn fillEditorPane(self: *App, ed: *editorpkg.Editor, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
+    fn fillEditorPane(self: *App, ed: *editorpkg.Editor, focused: bool, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
         const g = ed.fillGrid(cols, rows);
         const cellw_px: u16 = @intCast(self.renderer.cellw_px);
         var prev_wide: ?renderpkg.GlyphLoc = null;
@@ -4608,9 +4984,18 @@ pub const App = struct {
             // scrolled off) must not pick up the previous row's glyph.
             if (cols != 0 and i % cols == 0) prev_wide = null;
             const status_row = rows >= 1 and i >= (rows - 1) * cols;
+            // Blink's off-phase draws the cursor cell as plain text —
+            // the same terminal-cursor gate, in the editor's vocabulary.
+            // Focused pane only: it is the blink that telegraphs where
+            // the keys go, and an unfocused editor's cursor stays a
+            // solid location marker.
+            const st = if (rc.st == .cursor and focused and !self.blink_phase_on)
+                @TypeOf(rc.st).text
+            else
+                rc.st;
             var bg: [4]u8 = if (status_row) th.chip_active_bg else th.ed_bg;
             bg[3] = self.bg_alpha;
-            var fg: [4]u8 = switch (rc.st) {
+            var fg: [4]u8 = switch (st) {
                 .text => if (status_row) th.bar_value else th.ed_fg,
                 .dim => if (status_row) th.bar_fg else th.ed_dim,
                 .sel => th.ed_fg,
@@ -4629,7 +5014,7 @@ pub const App = struct {
                 .diff_hunk => th.diff_hunk,
                 .diff_meta => th.diff_meta,
             };
-            switch (rc.st) {
+            switch (st) {
                 .sel => bg = th.ed_sel_bg,
                 .cursor => {
                     bg = th.ed_fg;

@@ -43,6 +43,11 @@
 # window-padding-x = 4
 # window-padding-y = 4
 
+# Blink the focused pane's cursor (1.1s period; solid while you type,
+# solid whenever rook is in the background). `cursor-style-blink` is
+# accepted too, for ghostty muscle memory.
+# cursor-blink = true
+
 
 # ── Coder ────────────────────────────────────────────────────────────────
 
