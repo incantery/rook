@@ -34,6 +34,32 @@ session, no scrollback viewer yet — re-run as features land.
 | frame update/fill/encode p50 | 4 / 56 / 37 µs | firehose, per drawn frame |
 | GPU time p50 | ~0.3 ms | 〃 |
 
+### Startup (2026-07-30, first numbers)
+
+`zig build e2e -Doptimize=ReleaseFast -- startup` — 8 sequential
+sandboxed launches per batch, medians. Wall columns are the harness's
+clock (5ms poll floor); phases are the app's own (`boottime` ctl verb,
+stamped in create() and at the ctl bind). Menlo 14pt, /bin/sh, M3 Max.
+
+| metric | pinned 3-line config | full daily-driver config |
+|---|---|---|
+| exec → ctl socket answering | 75 ms | 72 ms |
+| exec → live shell | 124 ms | 124 ms |
+| config parse | **41 µs** | **51 µs** |
+| keybinds parse | 13 µs | 16 µs |
+| AppKit + Metal + window | 59.8 ms | 57.7 ms |
+| font/renderer init | 1.7 ms | 1.7 ms |
+| shell fork (Session.start) | 1.6 ms | 2.0 ms |
+| create() total | 63.8 ms | 62.7 ms |
+
+The launch is AppKit and Metal; **the entire config cost is ~67µs —
+0.09% of time-to-usable**. This is the baseline the environments work
+(config as a materialized graph, docs/environments/) measures against:
+the graph loader replacing the TOML parse has a ~60µs bar to meet at
+launch, and anything under ~1ms stays invisible. The full-vs-pinned
+delta also says config SIZE is not the axis that matters — the fixed
+AppKit cost is 1000× the whole file.
+
 ### Same-machine A/B — cat 150MB ascii (2026-07-27, Seth's hands)
 
 Same M3 Max, same corpus, same day. Window geometries not equalized

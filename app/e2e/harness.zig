@@ -99,6 +99,11 @@ pub const Instance = struct {
     sock_len: usize = 0,
     log_path: [160]u8 = @splat(0),
     log_len: usize = 0,
+    /// Startup wall-clock, recorded by start() for the `startup` bench:
+    /// exec → ctl socket connectable, and exec → shell answering. Every
+    /// instance pays to measure these; they cost two clock reads.
+    boot_sock_ms: i64 = 0,
+    boot_prompt_ms: i64 = 0,
     /// Replies are bounded: `dump` is the SCREEN not the scrollback, and
     /// `panes` writes into a 4KB fixed buffer app-side.
     buf: [256 * 1024]u8 = undefined,
@@ -147,7 +152,7 @@ pub const Instance = struct {
         // theme/opacity/font must not decide whether a test passes.
         var cfgfile_buf: [192]u8 = undefined;
         const cfgfile = try std.fmt.bufPrint(&cfgfile_buf, "{s}/config.toml", .{rookcfg});
-        var cfg_buf: [1024]u8 = undefined;
+        var cfg_buf: [4096]u8 = undefined;
         // A leader is set here because there is NO default one
         // (`Keybinds.leader` is `?u8 = null` — the user picks it), and
         // without it `handleCharKey` returns immediately, so every
@@ -179,6 +184,7 @@ pub const Instance = struct {
         const prof = try std.fmt.bufPrint(&prof_buf, "{s}/.profile", .{home});
         try writeFileZ(prof, "PS1='e2e$ '\nunset HISTFILE\n");
 
+        const t_exec = nowMs();
         const pid = try self.spawn(rook_bin, opts);
         self.pid = pid;
 
@@ -189,11 +195,13 @@ pub const Instance = struct {
             self.hardKill();
             return e;
         };
+        self.boot_sock_ms = nowMs() - t_exec;
         self.settle(opts.boot_timeout_ms) catch |e| {
             self.dumpLog("instance came up but its shell never answered");
             self.hardKill();
             return e;
         };
+        self.boot_prompt_ms = nowMs() - t_exec;
         return self;
     }
 
@@ -258,14 +266,16 @@ pub const Instance = struct {
     }
 
     fn waitSocket(self: *Instance, timeout_ms: u32) !void {
+        // 5ms, not 50: boot_sock_ms is a bench number now, and a failed
+        // connect to a not-yet-bound path costs microseconds.
         var waited: u32 = 0;
         while (waited < timeout_ms) {
             if (self.tryConnect()) |fd| {
                 _ = close(fd);
                 return;
             }
-            _ = usleep(50_000);
-            waited += 50;
+            _ = usleep(5_000);
+            waited += 5;
         }
         return error.NeverCameUp;
     }
@@ -283,8 +293,8 @@ pub const Instance = struct {
         while (waited < timeout_ms) {
             const d = self.ctl("dump") catch "";
             if (std.mem.indexOf(u8, d, "$") != null) break;
-            _ = usleep(100_000);
-            waited += 100;
+            _ = usleep(25_000);
+            waited += 25;
         }
         var cmd_buf: [128]u8 = undefined;
         const cmd = try std.fmt.bufPrint(&cmd_buf, "type echo {s}", .{marker});

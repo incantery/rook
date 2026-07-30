@@ -17,6 +17,11 @@ const Scenario = struct {
     name: []const u8,
     what: []const u8,
     run: *const fn (std.mem.Allocator, []const u8) anyerror!void,
+    /// A bench prints numbers rather than guarding behavior; it runs
+    /// only when named explicitly (`make e2e ARGS=startup`), never in
+    /// the default all-scenarios pass — 8 sequential app launches are
+    /// measurement, not coverage.
+    bench: bool = false,
 };
 
 const scenarios = [_]Scenario{
@@ -48,6 +53,7 @@ const scenarios = [_]Scenario{
     .{ .name = "reviewrows", .what = "the review panel shows findings, the gate, and re-anchored lines", .run = reviewRows },
     .{ .name = "diffview", .what = "the diff view renders hunks, colours them, numbers by FILE line, and refuses edits", .run = diffView },
     .{ .name = "quitall", .what = ":qa reaches every editor pane and leaves the terminals alone", .run = quitAll },
+    .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
 };
 
 // ---------------------------------------------------------------- boot
@@ -1827,6 +1833,9 @@ pub fn main(init: std.process.Init) !void {
                 skipped += 1;
                 continue;
             }
+        } else if (s.bench) {
+            skipped += 1;
+            continue;
         }
         // Printed BEFORE the run, and deliberately not overwritten after.
         // No \r or erase-line: the main consumer of this output is an
@@ -2059,4 +2068,111 @@ fn quitAll(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("enter");
     try app.waitText("alive", 5_000);
     _ = try app.screen(&buf);
+}
+
+// ------------------------------------------------------------- startup
+
+/// Bench, not a guard: how long from exec to (a) the ctl socket
+/// answering and (b) a live shell, and where create() spent it —
+/// config parse vs AppKit vs fonts vs the shell fork. This is the
+/// baseline the environments work measures against: when the TOML
+/// becomes a materialized graph, config_us is the number that must not
+/// move. Wall columns are ms (5ms poll floor); phase columns are µs
+/// from the app's own clock.
+fn benchField(s: []const u8, key: []const u8) !i64 {
+    const at = std.mem.indexOf(u8, s, key) orelse return error.MissingField;
+    var i = at + key.len;
+    var v: i64 = 0;
+    var any = false;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {
+        v = v * 10 + (s[i] - '0');
+        any = true;
+    }
+    if (!any) return error.MissingField;
+    return v;
+}
+
+fn median(vals: []i64) i64 {
+    std.mem.sort(i64, vals, {}, std.sort.asc(i64));
+    return vals[vals.len / 2];
+}
+
+/// A realistic daily-driver config: every app knob at a value, host
+/// tables to parse past, a keybinds table, the editor scope. This is
+/// what a real launch pays for, as opposed to the harness's 3-line
+/// pinned sandbox config.
+const bench_full_config =
+    \\theme = "Nocturne"
+    \\background-opacity = 1
+    \\window-padding-x = 4
+    \\window-padding-y = 4
+    \\cursor-blink = true
+    \\buffer-line = true
+    \\scrollback = "10mb"
+    \\bell = "visual"
+    \\clipboard-write = "allow"
+    \\coder = "claude"
+    \\workspace-allow = ["rook", "rook-cloud", "rook-site", "presentation"]
+    \\[keybinds]
+    \\"<leader>\"" = "app.split.horizontal"
+    \\"<leader>v" = "app.split.vertical"
+    \\"<leader>c" = "tab.new"
+    \\"<leader>m" = "workspace.manager"
+    \\[editor]
+    \\leader = ","
+    \\[editor.keybinds.normal]
+    \\"<leader>TAB" = "explorer.toggle"
+    \\"<leader>o" = "explorer.reveal"
+    \\[agent]
+    \\enabled = true
+    \\engine = "auto"
+    \\model = ""
+    \\daily-cap-usd = 1.00
+    \\[jira]
+    \\[lsp]
+    \\enable = ["go", "typescript", "svelte"]
+    \\[cloud]
+    \\url = "https://api.rookide.com"
+;
+
+fn startupBatch(gpa: std.mem.Allocator, bin: []const u8, label: []const u8, extra: []const u8) !void {
+    const runs = 8;
+    const phases = [_][]const u8{ "config_us=", "keybinds_us=", "appkit_us=", "renderer_us=", "session_us=", "create_us=", "ctl_ready_us=" };
+    var vals: [phases.len][runs]i64 = undefined;
+    var sock: [runs]i64 = undefined;
+    var prompt: [runs]i64 = undefined;
+
+    std.debug.print("      [{s}]\n", .{label});
+    std.debug.print("      run  sock_ms  shell_ms | config  binds  appkit   fonts  session  create  ctl (µs)\n", .{});
+    for (0..runs) |i| {
+        var app = try h.Instance.start(gpa, bin, .{ .config_extra = extra });
+        const bt = try app.ctl("boottime");
+        for (phases, 0..) |key, p| vals[p][i] = try benchField(bt, key);
+        sock[i] = app.boot_sock_ms;
+        prompt[i] = app.boot_prompt_ms;
+        std.debug.print("      {d:>3}  {d:>7}  {d:>8} | {d:>6} {d:>6} {d:>7} {d:>7} {d:>8} {d:>7} {d:>5}\n", .{
+            i, sock[i], prompt[i], vals[0][i], vals[1][i], vals[2][i], vals[3][i], vals[4][i], vals[5][i], vals[6][i] - vals[5][i],
+        });
+        app.stop();
+        app.deinit();
+    }
+
+    // Medians, the scoreboard line. ctl column is bind-after-create.
+    var ctl_gap: [runs]i64 = undefined;
+    for (0..runs) |i| ctl_gap[i] = vals[6][i] - vals[5][i];
+    std.debug.print("      med  {d:>7}  {d:>8} | {d:>6} {d:>6} {d:>7} {d:>7} {d:>8} {d:>7} {d:>5}\n\n", .{
+        median(&sock),    median(&prompt),  median(&vals[0]), median(&vals[1]),
+        median(&vals[2]), median(&vals[3]), median(&vals[4]), median(&vals[5]),
+        median(&ctl_gap),
+    });
+
+    // Sanity floor so the bench cannot rot into printing zeros: the
+    // phases were actually stamped, and the socket came up.
+    if (median(&vals[5]) == 0) return error.NoBoottime;
+    for (&sock) |s| if (s <= 0) return error.NoBoottime;
+}
+
+fn startup(gpa: std.mem.Allocator, bin: []const u8) !void {
+    try startupBatch(gpa, bin, "pinned 3-line config", "");
+    try startupBatch(gpa, bin, "full daily-driver config", bench_full_config);
 }

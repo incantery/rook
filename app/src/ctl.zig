@@ -95,6 +95,10 @@ fn serve(app: *macos.App) void {
         return;
     }
     if (listen(fd, 4) != 0) return;
+    // The moment the outside world can reach us — the e2e `startup`
+    // bench's "app is up" line. create() stamped the other phases.
+    if (macos.boot_times.start != 0)
+        macos.boot_times.ctl_ready_us = macos.usSince(macos.boot_times.start);
     std.debug.print("rook ctl: listening on {s}\n", .{path});
 
     while (true) {
@@ -691,6 +695,18 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                 if (app.host.owned) "yes" else "no",
                 app.host.binary(),
             },
+        ) catch return;
+        reply(fd, s);
+    } else if (std.mem.eql(u8, verb, "boottime") and rest.len == 0) {
+        // Startup phase timings (µs), stamped in create() and at the
+        // ctl bind above. No lock: written once before any client can
+        // connect, immutable after.
+        const b = macos.boot_times;
+        var buf: [256]u8 = undefined;
+        const s = std.fmt.bufPrint(
+            &buf,
+            "config_us={d} keybinds_us={d} appkit_us={d} renderer_us={d} session_us={d} create_us={d} ctl_ready_us={d}\n",
+            .{ b.config_us, b.keybinds_us, b.appkit_us, b.renderer_us, b.session_us, b.create_us, b.ctl_ready_us },
         ) catch return;
         reply(fd, s);
     } else if (std.mem.eql(u8, verb, "notify")) {

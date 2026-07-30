@@ -75,6 +75,29 @@ const win_h: f64 = 700;
 /// in App.create before any session or draw exists; read everywhere.
 var th: themepkg.Theme = themepkg.default;
 
+/// Startup phase timings, µs. Written once (create() and the ctl bind),
+/// read by the `boottime` ctl verb. This exists because config is about
+/// to stop being a TOML parse and start being a materialized environment
+/// graph — the cost of loading it at launch must stay measured, not
+/// assumed, and the e2e `startup` bench reads these numbers.
+pub const BootTimes = struct {
+    /// CACurrentMediaTime at create() entry — the app's one clock.
+    start: f64 = 0,
+    config_us: u64 = 0,
+    keybinds_us: u64 = 0,
+    appkit_us: u64 = 0,
+    renderer_us: u64 = 0,
+    session_us: u64 = 0,
+    create_us: u64 = 0,
+    ctl_ready_us: u64 = 0,
+};
+pub var boot_times: BootTimes = .{};
+
+pub fn usSince(t: f64) u64 {
+    const d = (CACurrentMediaTime() - t) * 1_000_000.0;
+    return if (d > 0) @intFromFloat(d) else 0;
+}
+
 fn rgb3(c: [3]u8) vt.color.RGB {
     return .{ .r = c[0], .g = c[1], .b = c[2] };
 }
@@ -813,12 +836,18 @@ pub const App = struct {
 
     pub fn create(init: std.process.Init) !*App {
         const gpa = init.gpa;
+        boot_times.start = CACurrentMediaTime();
+        var bt = boot_times.start;
         const cfg = @import("config.zig").load(init.io, gpa);
+        boot_times.config_us = usSince(bt);
+        bt = CACurrentMediaTime();
         const keybinds = @import("config.zig").loadKeybinds(init.io, gpa);
+        boot_times.keybinds_us = usSince(bt);
         if (themepkg.byName(cfg.theme)) |t| {
             th = t.*;
         } else std.debug.print("rook config: unknown theme '{s}' (builtin: default, nocturne)\n", .{cfg.theme});
 
+        bt = CACurrentMediaTime();
         const NSApplication = objc.getClass("NSApplication").?;
         const app = NSApplication.msgSend(objc.Object, "sharedApplication", .{});
         // NSApplicationActivationPolicyRegular = 0: real app with Dock icon.
@@ -900,9 +929,12 @@ pub const App = struct {
         const px_h = win_h * scale;
         layer.msgSend(void, "setDrawableSize:", .{NSSize{ .width = px_w, .height = px_h }});
 
+        boot_times.appkit_us = usSince(bt);
         // Nerd Font base (default) so prompt icons resolve without
         // fallback; the CoreText cascade catches everything else.
+        bt = CACurrentMediaTime();
         const renderer = try renderpkg.Renderer.init(gpa, device, cfg.font_family, cfg.font_size * scale, 64 * 1024);
+        boot_times.renderer_us = usSince(bt);
         const m = @import("ui.zig").Metrics.compute(@floatCast(scale), renderer.cell_h);
         const bar_h: f32 = m.row;
         // Standard macOS titlebar is 28pt; with fullSizeContentView we
@@ -916,7 +948,9 @@ pub const App = struct {
         const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2 - top_inset - inset, renderer.cell_h)));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
+        bt = CACurrentMediaTime();
         const session = try sessionpkg.Session.start(gpa, init.io, shell, null, termColors(), @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px), cfg.scrollback);
+        boot_times.session_us = usSince(bt);
 
         const self = try gpa.create(App);
         const pane = try gpa.create(panespkg.Pane);
@@ -983,6 +1017,7 @@ pub const App = struct {
         try space_one.tabs.append(gpa, tab_one);
         try self.spaces.append(gpa, space_one);
         panespkg.layout(tab_one.root, self.paneArea(), self.sep);
+        boot_times.create_us = usSince(boot_times.start);
         return self;
     }
 
