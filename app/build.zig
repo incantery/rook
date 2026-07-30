@@ -40,6 +40,11 @@ pub fn build(b: *std.Build) void {
     exe_mod.addCSourceFile(.{ .file = b.path("vendor/tree-sitter/src/lib.c"), .flags = &.{"-std=c11"} });
     exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/zig/parser.c"), .flags = &.{"-std=c11"} });
     exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/go/parser.c"), .flags = &.{"-std=c11"} });
+    // Python needs its external scanner too — f-strings and the
+    // INDENT/DEDENT tokens are not expressible in the parse table, so a
+    // parser.c on its own links but fails on the first indented block.
+    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/python/parser.c"), .flags = &.{"-std=c11"} });
+    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/python/scanner.c"), .flags = &.{"-std=c11"} });
     exe_mod.linkFramework("AppKit", .{});
     exe_mod.linkFramework("Metal", .{});
     exe_mod.linkFramework("QuartzCore", .{});

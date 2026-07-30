@@ -914,14 +914,25 @@ pub const Session = struct {
         self.respondError(id_json, -32601, "method not found");
     }
 
-    /// A top-level section of the settings object, re-rendered. Returned
-    /// owned because std.json owns the parse tree it came out of.
+    /// A section of the settings object, re-rendered. Returned owned
+    /// because std.json owns the parse tree it came out of.
+    ///
+    /// A section name is a DOTTED PATH, not a key: pyright asks for
+    /// "python.analysis" and expects the nested object, and answering
+    /// null because there is no top-level key of that name reads to the
+    /// server as "the client has no opinion", which silently discards
+    /// settings the user did set.
     fn settingsSection(self: *Session, section: []const u8) ?[]u8 {
         if (self.settings.len == 0) return null;
         const parsed = std.json.parseFromSlice(std.json.Value, self.gpa, self.settings, .{}) catch return null;
         defer parsed.deinit();
-        const v = jGet(parsed.value, section);
-        if (v == .null) return null;
+        var v = parsed.value;
+        var it = std.mem.splitScalar(u8, section, '.');
+        while (it.next()) |part| {
+            if (part.len == 0) continue;
+            v = jGet(v, part);
+            if (v == .null) return null;
+        }
         return std.json.Stringify.valueAlloc(self.gpa, v, .{}) catch null;
     }
 
@@ -1933,6 +1944,30 @@ test "server→client requests are answered — including the ones we refuse" {
     const out3 = sess.outbound();
     try testing.expect(std.mem.indexOf(u8, out3, "\"id\":43") != null);
     try testing.expect(std.mem.indexOf(u8, out3, "-32601") != null);
+}
+
+test "workspace/configuration answers a DOTTED section, not just a key" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work",
+        "{\"python\":{\"pythonPath\":\"/tmp/work/.venv/bin/python\",\"analysis\":{\"typeCheckingMode\":\"basic\"}}}").?;
+    defer sess.deinit();
+    try readySession(&sess, false);
+    sess.consumeOutbound(sess.outbound().len);
+
+    // pyright asks for exactly these two. Answering null to the second
+    // because there is no top-level "python.analysis" KEY would read as
+    // "the client has no opinion" and quietly drop the setting.
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"workspace/configuration\"," ++
+        "\"params\":{\"items\":[{\"section\":\"python\"},{\"section\":\"python.analysis\"}," ++
+        "{\"section\":\"python.nope\"}]}}";
+    const f = try framed(gpa, req);
+    defer gpa.free(f);
+    sess.feed(f);
+    const out = sess.outbound();
+    try testing.expect(std.mem.indexOf(u8, out, "typeCheckingMode") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "/tmp/work/.venv/bin/python") != null);
+    // A path that goes nowhere is null, not an error.
+    try testing.expect(std.mem.indexOf(u8, out, "null") != null);
 }
 
 test "a dying server releases everyone waiting on it" {

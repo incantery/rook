@@ -32,6 +32,7 @@ const gitpkg = @import("git.zig");
 
 extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn chmod(path: [*:0]const u8, mode: c_uint) c_int;
 const X_OK = 1;
 
 /// Servers alive at once. Each is a real process with a real index in
@@ -43,9 +44,11 @@ const max_asks = 32;
 
 pub const Lang = enum {
     go,
+    python,
 
     pub fn fromPath(path: []const u8) ?Lang {
         if (std.mem.endsWith(u8, path, ".go")) return .go;
+        if (std.mem.endsWith(u8, path, ".py") or std.mem.endsWith(u8, path, ".pyi")) return .python;
         return null;
     }
 
@@ -54,35 +57,68 @@ pub const Lang = enum {
     fn rootMarkers(self: Lang) []const []const u8 {
         return switch (self) {
             .go => &.{"go.mod"},
+            // pyproject first — a repo with both a pyproject and a
+            // stray setup.py is a modern project carrying a shim, and
+            // rooting at the shim finds the wrong package.
+            .python => &.{ "pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "requirements.txt" },
         };
     }
 
     /// The environment override, checked before the catalog. A raw
     /// command line, split on spaces. This is the seam the e2e suite
     /// drives a fake server through, and it is also the honest answer
-    /// to "I want my own gopls" until config packages exist.
+    /// to "I want my own server" until config packages exist.
     fn envKey(self: Lang) [*:0]const u8 {
         return switch (self) {
             .go => "ROOK_LSP_GO",
+            .python => "ROOK_LSP_PYTHON",
         };
     }
 
-    fn catalogBinary(self: Lang) []const u8 {
+    /// What to run, in preference order. A LIST rather than one name,
+    /// because Python has no single answer the way Go has gopls: people
+    /// run basedpyright, pyright, pylsp or jedi, and which one is
+    /// installed is not something rook gets to decide for them. First
+    /// one found wins; ROOK_LSP_PYTHON overrides the lot.
+    fn candidates(self: Lang) []const Candidate {
         return switch (self) {
-            .go => "gopls",
+            .go => &.{.{ .bin = "gopls" }},
+            .python => &.{
+                .{ .bin = "basedpyright-langserver", .args = &.{"--stdio"} },
+                .{ .bin = "pyright-langserver", .args = &.{"--stdio"} },
+                .{ .bin = "pylsp" },
+                .{ .bin = "jedi-language-server" },
+            },
         };
     }
 };
 
-/// Where the catalog looks when the binary is not on PATH. These are
-/// where each language's own toolchain installs by default — rook does
-/// not install anything yet, so finding what you already have is the
-/// whole of "materialization" for now.
-fn fallbackDirs(lang: Lang, home: []const u8, buf: *[512]u8) ?[]const u8 {
-    return switch (lang) {
-        .go => std.fmt.bufPrint(buf, "{s}/go/bin/gopls", .{home}) catch null,
+/// One way to run a language's server: a binary to find, and the flags
+/// it needs to speak stdio. The flags are part of the catalog entry
+/// because they are not optional — `pyright-langserver` with no
+/// `--stdio` starts a server nobody can talk to.
+const Candidate = struct {
+    bin: []const u8,
+    args: []const []const u8 = &.{},
+};
+
+/// Where to look for a server binary, in order. The ROOT-relative
+/// entries come first and they are the whole reason this is a list:
+/// Python's server usually lives in the project's own virtualenv, and a
+/// Node-based one in its node_modules — a PATH-only search finds the
+/// wrong interpreter's tooling, or nothing at all. Go never needed this
+/// because `go install` puts one binary in one place.
+fn searchDir(i: usize, root: []const u8, home: []const u8, buf: *[512]u8) ?[]const u8 {
+    return switch (i) {
+        0 => std.fmt.bufPrint(buf, "{s}/.venv/bin", .{root}) catch null,
+        1 => std.fmt.bufPrint(buf, "{s}/venv/bin", .{root}) catch null,
+        2 => std.fmt.bufPrint(buf, "{s}/node_modules/.bin", .{root}) catch null,
+        3 => if (home.len == 0) null else std.fmt.bufPrint(buf, "{s}/.local/bin", .{home}) catch null,
+        4 => if (home.len == 0) null else std.fmt.bufPrint(buf, "{s}/go/bin", .{home}) catch null,
+        else => null,
     };
 }
+const search_dirs = 5;
 
 const Entry = struct {
     lang: Lang,
@@ -182,9 +218,10 @@ pub const Manager = struct {
 
     // ------------------------------------------------------- discovery
 
-    /// The command line for a language, or null when there is nothing
-    /// to run. Written into `store`; the returned slices point into it.
-    fn command(self: *Manager, lang: Lang, store: *[512]u8, out: *[8][]const u8) ?[][]const u8 {
+    /// The command line for a language at a root, or null when there is
+    /// nothing to run. Written into `store`; the returned slices point
+    /// into it.
+    fn command(self: *Manager, lang: Lang, root: []const u8, store: *[1024]u8, out: *[8][]const u8) ?[][]const u8 {
         _ = self;
         if (getenv(lang.envKey())) |raw| {
             const line = std.mem.span(raw);
@@ -200,31 +237,88 @@ pub const Manager = struct {
             return if (n == 0) null else out[0..n];
         }
 
-        const bin = lang.catalogBinary();
-        // PATH first: whatever the user's shell would run is what they
-        // mean by "gopls", including a version manager's shim.
-        if (getenv("PATH")) |praw| {
-            var it = std.mem.tokenizeScalar(u8, std.mem.span(praw), ':');
-            while (it.next()) |dir| {
-                var pb: [512]u8 = undefined;
-                const cand = std.fmt.bufPrintZ(&pb, "{s}/{s}", .{ dir, bin }) catch continue;
-                if (access(cand.ptr, X_OK) != 0) continue;
-                if (cand.len >= store.len) return null;
-                @memcpy(store[0..cand.len], cand);
-                out[0] = store[0..cand.len];
-                return out[0..1];
+        const home = if (getenv("HOME")) |h| std.mem.span(h) else "";
+        for (lang.candidates()) |cand| {
+            var found: ?[]const u8 = null;
+            // Project-local first, then PATH, then the per-user installs.
+            var i: usize = 0;
+            while (i < search_dirs and found == null) : (i += 1) {
+                var db: [512]u8 = undefined;
+                const dir = searchDir(i, root, home, &db) orelse continue;
+                var pb: [1024]u8 = undefined;
+                const full = std.fmt.bufPrintZ(&pb, "{s}/{s}", .{ dir, cand.bin }) catch continue;
+                if (access(full.ptr, X_OK) != 0) continue;
+                if (full.len >= store.len) continue;
+                @memcpy(store[0..full.len], full);
+                found = store[0..full.len];
             }
+            if (found == null) {
+                if (getenv("PATH")) |praw| {
+                    var it = std.mem.tokenizeScalar(u8, std.mem.span(praw), ':');
+                    while (it.next()) |dir| {
+                        var pb: [1024]u8 = undefined;
+                        const full = std.fmt.bufPrintZ(&pb, "{s}/{s}", .{ dir, cand.bin }) catch continue;
+                        if (access(full.ptr, X_OK) != 0) continue;
+                        if (full.len >= store.len) continue;
+                        @memcpy(store[0..full.len], full);
+                        found = store[0..full.len];
+                        break;
+                    }
+                }
+            }
+            const bin = found orelse continue;
+            out[0] = bin;
+            var n: usize = 1;
+            for (cand.args) |a| {
+                if (n >= out.len) break;
+                out[n] = a;
+                n += 1;
+            }
+            return out[0..n];
         }
-        if (getenv("HOME")) |hraw| {
-            var pb: [512]u8 = undefined;
-            const cand = fallbackDirs(lang, std.mem.span(hraw), &pb) orelse return null;
-            var zb: [512]u8 = undefined;
-            const z = std.fmt.bufPrintZ(&zb, "{s}", .{cand}) catch return null;
-            if (access(z.ptr, X_OK) != 0) return null;
-            if (cand.len >= store.len) return null;
-            @memcpy(store[0..cand.len], cand);
-            out[0] = store[0..cand.len];
-            return out[0..1];
+        return null;
+    }
+
+    /// Server settings for a language at a root, as a JSON object; ""
+    /// for none. Sent on `initialized` and handed back whenever the
+    /// server asks with workspace/configuration.
+    ///
+    /// This is the part of adding Python that was NOT data. gopls needs
+    /// nothing — it reads go.mod and it is done. A Python server cannot
+    /// find your interpreter on its own: point pyright at a project
+    /// whose dependencies live in `.venv` without telling it so, and it
+    /// reports every third-party import as missing. Which is a diagnostic
+    /// panel full of errors that are not errors, and worse than silence.
+    fn settingsFor(self: *Manager, lang: Lang, root: []const u8, buf: *[1024]u8) []const u8 {
+        _ = self;
+        switch (lang) {
+            .go => return "",
+            .python => {
+                const py = pythonFor(root) orelse return "";
+                return std.fmt.bufPrint(buf, "{{\"python\":{{\"pythonPath\":\"{s}\"}}}}", .{py}) catch "";
+            },
+        }
+    }
+
+    /// The interpreter a project means. Project virtualenv first, then
+    /// an activated one from the environment — in that order, because a
+    /// shell that happens to have another project's venv active must not
+    /// win over the venv sitting in this project's own directory.
+    ///
+    /// Returned in a static buffer: it is consumed immediately by
+    /// settingsFor and never outlives the call.
+    fn pythonFor(root: []const u8) ?[]const u8 {
+        const S = struct {
+            var buf: [1024]u8 = undefined;
+        };
+        const local = [_][]const u8{ ".venv", "venv", ".virtualenv" };
+        for (local) |d| {
+            const cand = std.fmt.bufPrintZ(&S.buf, "{s}/{s}/bin/python", .{ root, d }) catch continue;
+            if (access(cand.ptr, X_OK) == 0) return cand;
+        }
+        if (getenv("VIRTUAL_ENV")) |ve| {
+            const cand = std.fmt.bufPrintZ(&S.buf, "{s}/bin/python", .{std.mem.span(ve)}) catch return null;
+            if (access(cand.ptr, X_OK) == 0) return cand;
         }
         return null;
     }
@@ -278,12 +372,14 @@ pub const Manager = struct {
         }
         if (self.servers.items.len >= max_servers) return null;
 
-        var store: [512]u8 = undefined;
+        var store: [1024]u8 = undefined;
         var parts: [8][]const u8 = undefined;
-        const argv = self.command(lang, &store, &parts) orelse return null;
+        const argv = self.command(lang, root, &store, &parts) orelse return null;
+        var setbuf: [1024]u8 = undefined;
+        const settings = self.settingsFor(lang, root, &setbuf);
 
         const owned_root = self.gpa.dupe(u8, root) catch return null;
-        const srv = lsp.Server.start(self.gpa, argv, root, "") orelse {
+        const srv = lsp.Server.start(self.gpa, argv, root, settings) orelse {
             self.gpa.free(owned_root);
             return null;
         };
@@ -405,11 +501,44 @@ pub const Manager = struct {
         return self.answers.orderedRemove(0);
     }
 
+    /// A diagnostic message on ONE line. pyright writes paragraphs —
+    /// "Type X is not assignable to Y" with the reasoning underneath —
+    /// and everything downstream is single-line: a status row, a ctl
+    /// reply that is a line protocol, and eventually a list. A raw
+    /// newline in either would look like a second diagnostic.
+    ///
+    /// The detail is not lost so much as deferred: the full text belongs
+    /// in a float, alongside hover's, when that lands.
+    fn flatten(gpa: Allocator, msg: []const u8) ?[]u8 {
+        const out = gpa.alloc(u8, msg.len) catch return null;
+        var n: usize = 0;
+        var space = false;
+        for (msg) |c| {
+            // Spaces count as whitespace here too, or the newline
+            // collapses and the four-space indent that FOLLOWS it
+            // survives — which is the shape pyright actually sends.
+            const ws = c == '\n' or c == '\r' or c == '\t' or c == ' ';
+            if (ws) {
+                // Collapse a run, and never lead with one.
+                if (n > 0) space = true;
+                continue;
+            }
+            if (space) {
+                out[n] = ' ';
+                n += 1;
+                space = false;
+            }
+            out[n] = c;
+            n += 1;
+        }
+        return gpa.realloc(out, n) catch out[0..n];
+    }
+
     fn storeDiags(self: *Manager, path: []const u8, items: []const lsp.Diagnostic) void {
         var copy = self.gpa.alloc(lsp.Diagnostic, items.len) catch return;
         var n: usize = 0;
         for (items) |d| {
-            const msg = self.gpa.dupe(u8, d.message) catch continue;
+            const msg = flatten(self.gpa, d.message) orelse continue;
             const src = self.gpa.dupe(u8, d.source) catch {
                 self.gpa.free(msg);
                 continue;
@@ -496,18 +625,92 @@ pub const Manager = struct {
 
 const testing = std.testing;
 
-test "language and root markers" {
+test "a path picks its language, and unknown ones stay unknown" {
     try testing.expectEqual(Lang.go, Lang.fromPath("/x/main.go").?);
-    try testing.expect(Lang.fromPath("/x/main.py") == null);
+    try testing.expectEqual(Lang.python, Lang.fromPath("/x/main.py").?);
+    try testing.expectEqual(Lang.python, Lang.fromPath("/x/stubs.pyi").?);
+    try testing.expect(Lang.fromPath("/x/main.ts") == null);
+    try testing.expect(Lang.fromPath("/x/README") == null);
+}
+
+test "root markers are ordered, and pyproject wins over a setup.py shim" {
     try testing.expectEqualStrings("go.mod", Lang.go.rootMarkers()[0]);
+    const py = Lang.python.rootMarkers();
+    try testing.expectEqualStrings("pyproject.toml", py[0]);
+    // requirements.txt last: it turns up in subdirectories of projects
+    // that are rooted somewhere else entirely.
+    try testing.expectEqualStrings("requirements.txt", py[py.len - 1]);
+}
+
+test "candidates carry the flags that are not optional" {
+    // `pyright-langserver` with no --stdio starts a server nobody can
+    // talk to, so the flag belongs to the catalog entry, not to a
+    // caller who might forget it.
+    for (Lang.python.candidates()) |c| {
+        if (std.mem.indexOf(u8, c.bin, "pyright") != null) {
+            try testing.expectEqual(@as(usize, 1), c.args.len);
+            try testing.expectEqualStrings("--stdio", c.args[0]);
+        }
+    }
+    try testing.expectEqualStrings("gopls", Lang.go.candidates()[0].bin);
+    try testing.expectEqual(@as(usize, 0), Lang.go.candidates()[0].args.len);
+}
+
+test "the project's own virtualenv is what a Python server is told about" {
+    // The part of adding Python that was not data. gopls needs nothing;
+    // pyright pointed at a project without its interpreter reports every
+    // third-party import as missing — a panel full of errors that aren't.
+    const t = testing.allocator;
+    const io = testing.io;
+    var root_buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/rook-venv-{d}", .{@intFromPtr(&root_buf)});
+    var bin_buf: [192]u8 = undefined;
+    const bindir = try std.fmt.bufPrint(&bin_buf, "{s}/.venv/bin", .{root});
+    try std.Io.Dir.cwd().createDirPath(io, bindir);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    var m = Manager.init(t, io);
+    defer m.deinit();
+    var sbuf: [1024]u8 = undefined;
+    // No interpreter yet: no settings, rather than a path that lies.
+    try testing.expectEqualStrings("", m.settingsFor(.python, root, &sbuf));
+
+    var py_buf: [256]u8 = undefined;
+    const py = try std.fmt.bufPrint(&py_buf, "{s}/python", .{bindir});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = py, .data = "#!/bin/sh\n" });
+    var pz: [256]u8 = undefined;
+    _ = try std.fmt.bufPrintZ(&pz, "{s}", .{py});
+    _ = chmod(@ptrCast(&pz), 0o755);
+
+    const settings = m.settingsFor(.python, root, &sbuf);
+    try testing.expect(std.mem.indexOf(u8, settings, "pythonPath") != null);
+    try testing.expect(std.mem.indexOf(u8, settings, ".venv/bin/python") != null);
+    // Go is told nothing, and that is not an oversight.
+    try testing.expectEqualStrings("", m.settingsFor(.go, root, &sbuf));
+}
+
+test "a multi-line server message becomes one line" {
+    const t = testing.allocator;
+    // Verbatim shape of what basedpyright sends: the claim, then the
+    // reasoning indented underneath.
+    const raw = "Type \"Literal['not a number']\" is not assignable to declared type \"int\"\n" ++
+        "    \"Literal['not a number']\" is not assignable to \"int\"";
+    const flat = Manager.flatten(t, raw).?;
+    defer t.free(flat);
+    try testing.expect(std.mem.indexOfScalar(u8, flat, '\n') == null);
+    try testing.expect(std.mem.indexOf(u8, flat, "declared type \"int\" \"Literal") != null);
+    // A run of whitespace collapses to ONE space, not to the indent.
+    try testing.expect(std.mem.indexOf(u8, flat, "  ") == null);
+
+    const lead = Manager.flatten(t, "\n\n  already indented").?;
+    defer t.free(lead);
+    try testing.expectEqualStrings("already indented", lead);
 }
 
 test "a manager with nothing to run stays silent" {
-    var m = Manager.init(testing.allocator, std.Io{ .vtable = undefined, .userdata = undefined });
+    var m = Manager.init(testing.allocator, testing.io);
     defer m.deinit();
     m.enabled = false;
-    // Disabled: no discovery, no spawn, no answer — and specifically no
-    // crash from the io handle above never being used.
     try testing.expect(m.ensure("/tmp/x.go") == null);
     try testing.expect(!m.hover("/tmp/x.go", .{}));
     try testing.expect(!m.drain());

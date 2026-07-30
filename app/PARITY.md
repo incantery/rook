@@ -392,10 +392,36 @@ a daily driver.
       units and the buffer counts bytes — and the conversion happens
       where the LINE is, in the app against the rope, not in the
       manager which only has ranges.
+      **Python landed second, and the catalog mostly held.** Data:
+      the extension map, the root markers (pyproject.toml first — a
+      repo with both a pyproject and a stray setup.py is a modern
+      project carrying a shim), and the server itself. NOT data, and
+      worth the entry it cost: (1) Python has no single answer the way
+      Go has gopls, so a catalog row is a LIST — basedpyright,
+      pyright, pylsp, jedi — first one found wins; (2) the flags are
+      part of the row, since `pyright-langserver` without `--stdio`
+      starts a server nobody can talk to; (3) servers live in the
+      PROJECT (.venv/bin, node_modules/.bin) at least as often as on
+      PATH, so the search is a dir list with root-relative entries
+      first; (4) a Python server must be TOLD its interpreter, or it
+      reports every third-party import as missing — a panel full of
+      errors that are not errors. That last one is per-language
+      settings, and it is the thing language packages will own.
+      Two smaller finds: pyright asks workspace/configuration for
+      DOTTED sections ("python.analysis"), and answering null because
+      there is no top-level key of that name silently drops settings
+      the user did set; and its messages are PARAGRAPHS, which a
+      one-line status row and a line-oriented ctl reply both have to
+      flatten.
+      Python also got its tree-sitter grammar — hand-cut queries, not
+      upstream's, because upstream leans on `#match?` predicates this
+      engine does not evaluate and importing it wholesale paints every
+      identifier with whatever the last predicate-guarded pattern
+      claimed.
       Still open: incremental sync, completion, references, format on
-      save, and languages past Go (the catalog holds exactly one entry
-      on purpose — adding the second is the test of whether "add a
-      language" is really data).
+      save, and TS/TSX — which is where the "is it data" question gets
+      its real test, since a Node server needs a project's own
+      typescript.
       e2e `lsp` drives a FAKE server (a shell script speaking real
       framing) so the suite needs no gopls installed. It found the bug
       pty.zig already had a comment about: a forked child inherits

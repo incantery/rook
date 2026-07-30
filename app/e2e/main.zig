@@ -60,6 +60,7 @@ const scenarios = [_]Scenario{
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
     .{ .name = "explorerauto", .what = "explorer-auto: the sidebar opens at launch inside a repo, and never takes the keys", .run = explorerAuto },
     .{ .name = "lsp", .what = "language server: diagnostics reach the gutter, ]d walks them, an edit re-diagnoses", .run = lspScenario },
+    .{ .name = "lsppython", .what = "a second language is data: python roots at pyproject.toml and lands the same way", .run = lspPython },
     .{ .name = "findfiles", .what = "⌘⇧F: scan honours the ignore rules, results group by file, Enter jumps to the line", .run = findInFiles },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
@@ -2960,4 +2961,71 @@ fn fakeHandle(gpa: std.mem.Allocator, body: []const u8, target: []const u8) !voi
         try w.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":null}}", .{i});
         try fakeSend(gpa, w.written());
     }
+}
+
+
+// ------------------------------------------------------------ lsppython
+
+/// The second language, which is the point of it.
+///
+/// The plan said adding a language should be DATA — a row in the
+/// catalog, not new mechanism — and a catalog with one entry proves
+/// nothing. This asserts the parts that are genuinely per-language and
+/// nothing else: the extension maps, the ROOT comes from that language's
+/// own marker (pyproject.toml, not go.mod), and the diagnostics land in
+/// the same gutter through the same path.
+///
+/// What is NOT data — that a Python server has to be told which
+/// interpreter to use — is unit-tested in lspmgr.zig, because it needs a
+/// virtualenv rather than a fake server.
+fn lspPython(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lsppy-{d}", .{h.runPid()});
+    // The file lives one directory DOWN from the marker, so a root found
+    // by walking up is distinguishable from one that just used the
+    // file's own directory.
+    var pkg_buf: [256]u8 = undefined;
+    const pkg = try std.fmt.bufPrint(&pkg_buf, "{s}/proj/demo", .{scratch});
+    try h.mkdirP(pkg);
+    var proj_buf: [256]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{scratch});
+
+    var f_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/pyproject.toml", .{proj}), "[project]\nname = \"demo\"\n");
+    var app_buf: [288]u8 = undefined;
+    const app_py = try std.fmt.bufPrint(&app_buf, "{s}/app.py", .{pkg});
+    // Shaped so the fake's fixed position (line 5, char 13) is a real
+    // place in THIS file too — the fake serves both scenarios and a
+    // diagnostic clamped to the last line would prove less.
+    try h.writeFile(app_py, "import json\n\n\ndef main() -> None:\n    \"\"\"Doc.\"\"\"\n    print(nope())\n");
+
+    var envval_buf: [640]u8 = undefined;
+    const envval = try std.fmt.bufPrint(&envval_buf, "{s} --fake-lsp {s}", .{ self_exe, app_py });
+
+    const app = try h.Instance.start(gpa, bin, .{
+        .cwd = proj,
+        .env = &.{.{ "ROOK_LSP_PYTHON", envval }},
+    });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var cmd_buf: [320]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{app_py}));
+    _ = try app.waitCtl("lsp", "pane gutter:yes errors:1", 8_000);
+
+    const out = try app.ctl("lsp");
+    // The whole server line, root and all: asserting on the root alone
+    // is not enough, because the FILE line legitimately contains the
+    // package directory and would match either way.
+    var want_buf: [320]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "server python ready {s}\n", .{proj});
+    try h.expectContains(out, want, "rooted at the pyproject, not at the file's own directory");
+    try h.expectContains(out, "pane err 6:13 undefined: nope", "same conversion, same gutter, different language");
+
+    // And the Go server did NOT start: a .py file is not gopls's
+    // business, and a catalog that spawned everything would be a
+    // catalog that costs a second per language you never use.
+    try h.expectNotContains(out, "server go", "no server for a language this project has no files in");
 }

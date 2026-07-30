@@ -62,9 +62,11 @@ extern fn ts_node_end_byte(TSNode) u32;
 
 extern fn tree_sitter_zig() *const TSLanguage;
 extern fn tree_sitter_go() *const TSLanguage;
+extern fn tree_sitter_python() *const TSLanguage;
 
 const zig_query = @embedFile("queries/zig.scm");
 const go_query = @embedFile("queries/go.scm");
+const python_query = @embedFile("queries/python.scm");
 
 const Lang = struct {
     lang: *const TSLanguage,
@@ -74,6 +76,8 @@ const Lang = struct {
 fn langForPath(path: []const u8) ?Lang {
     if (std.mem.endsWith(u8, path, ".zig")) return .{ .lang = tree_sitter_zig(), .query_src = zig_query };
     if (std.mem.endsWith(u8, path, ".go")) return .{ .lang = tree_sitter_go(), .query_src = go_query };
+    if (std.mem.endsWith(u8, path, ".py") or std.mem.endsWith(u8, path, ".pyi"))
+        return .{ .lang = tree_sitter_python(), .query_src = python_query };
     return null;
 }
 
