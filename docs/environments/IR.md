@@ -67,6 +67,17 @@ app — the live tree is the only truth it reconciles against.
 | `keybind` | `scope`, `chord`, `command` | `scope: "app"` = `[keybinds]` (`<leader>X` chords, commands by registry id). `scope: "editor.normal"` etc. carried, consumed when configurable editor maps land |
 | `table` | `scope`, `name`, `entries` | an opaque host table (`[agent]`, `[jira]`, `[lsp]`, …). Carried verbatim for the future TOML renderer |
 
+### Presets
+
+`{"kind": "option", "scope": "app", "key": "preset", "value": "vscode"}`
+is a defaults layer: the loader applies its bundle FIRST regardless of
+node position, so every explicit option overrides it. SDKs normally
+never emit it — `PresetVSCode()` expands to explicit option nodes at
+emit time so the graph shows every knob the bundle set (what
+provenance will attach to). The bundle exists twice (config.zig's
+applyPreset and the SDK); the SDK golden test and the e2e
+`presetparity` scenario are the drift guards.
+
 ## Canonical bytes
 
 Every SDK emits the same graph as the same bytes, so parity is `diff`

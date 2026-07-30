@@ -53,6 +53,37 @@
 # cursor-blink = true
 
 
+# ── Chrome arrangement ───────────────────────────────────────────────────
+#
+# rook's two chrome bars (top strip, status bar) render configurable
+# lists of segments from one vocabulary: tabs, workspace, branch, cwd,
+# hints, hud, usage, title. Identity is arrangement.
+
+# A preset is a defaults layer bundling the knobs below — every
+# explicit key in this file still overrides its bundle, wherever the
+# preset line sits. One of: rook (the defaults), tmux-neovim (no top
+# strip, the tab list as text in one bottom bar, no buffer line),
+# vscode (no top strip, a compact current-tab chip + branch bottom-left,
+# buffer line on).
+# preset = "tmux-neovim"
+
+# The top strip's contents — presence, not order (tabs left, title
+# center, usage right). [] hides the strip and panes reclaim the row.
+# top-bar = ["tabs", "title", "usage"]
+
+# The status bar's two clusters, in display order (tmux's own keys).
+# When the window is narrow, segments shed from the END of the right
+# list backward, then the end of the left list; cwd is flexible (fills
+# the gap between clusters) and never pushes a fixed segment off.
+# status-left = ["workspace", "branch", "cwd"]
+# status-right = ["hints", "hud"]
+
+# How a `tabs` segment renders: "chips" (the top strip's pill),
+# "index-name" (tmux's 1:name 2:name list), "current" (one compact
+# active-tab chip; click cycles).
+# tab-style = "chips"
+
+
 # ── Coder ────────────────────────────────────────────────────────────────
 
 # The CLI the host types into spawned task windows (spawn drafts, the

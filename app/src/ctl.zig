@@ -344,6 +344,23 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             @as(u32, @intFromFloat((app.seg_branch_x[0] + app.seg_branch_x[1]) / 2)),
             seg_y,
         }) catch {};
+        // The arrangement itself, blind: which lists drive each bar
+        // (the presetparity scenario diffs two instances on exactly
+        // these lines), plus a click point per drawn tabs chip.
+        w.print("topbar", .{}) catch {};
+        for (app.cfg_top_bar.slice()) |s| w.print(" {s}", .{@tagName(s)}) catch {};
+        w.print("\nleft", .{}) catch {};
+        for (app.cfg_status_left.slice()) |s| w.print(" {s}", .{@tagName(s)}) catch {};
+        w.print("\nright", .{}) catch {};
+        for (app.cfg_status_right.slice()) |s| w.print(" {s}", .{@tagName(s)}) catch {};
+        w.print("\ntabstyle {s}\n", .{@tagName(app.cfg_tab_style)}) catch {};
+        for (app.bar_tab_x[0..app.bar_tab_n], 0..) |zx, i| {
+            w.print("seg-tab{d} {d},{d}\n", .{
+                i + 1,
+                @as(u32, @intFromFloat((zx[0] + zx[1]) / 2)),
+                seg_y,
+            }) catch {};
+        }
         app.draw_lock.unlock();
         reply(fd, buf[0..w.end]);
     } else if (std.mem.eql(u8, verb, "whichkey") and rest.len == 0) {

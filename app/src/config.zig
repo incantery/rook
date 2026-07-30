@@ -109,6 +109,132 @@ pub fn bellFromName(name: []const u8) ?Bell {
     return null;
 }
 
+/// One thing a chrome bar can render. The two bars (top strip, status
+/// bar) share this vocabulary — "what is drawn where" is arrangement,
+/// not architecture, which is what lets a tmux hand and a VS Code hand
+/// each get their chrome from the same engine.
+pub const Segment = enum {
+    /// The session tabs — chips in the top strip, a text list or a
+    /// compact current-tab chip in the status bar (see TabStyle).
+    tabs,
+    workspace,
+    branch,
+    /// Focused pane's cwd label. FLEXIBLE: fills the gap between the
+    /// two clusters (left-aligned from the left list, right-aligned
+    /// from the right), hidden below 10 cells. Its position within
+    /// its list is not honored — it is the gap-filler.
+    cwd,
+    /// The teaching hints ("` menu", "⌘K commands").
+    hints,
+    /// The perf HUD (diagnostics; sheds first in the default layout).
+    hud,
+    usage,
+    /// The centered workspace name. Top strip only; elsewhere skipped.
+    title,
+};
+
+pub fn segFromName(name: []const u8) ?Segment {
+    const map = [_]struct { n: []const u8, s: Segment }{
+        .{ .n = "tabs", .s = .tabs },      .{ .n = "workspace", .s = .workspace },
+        .{ .n = "branch", .s = .branch },  .{ .n = "cwd", .s = .cwd },
+        .{ .n = "hints", .s = .hints },    .{ .n = "hud", .s = .hud },
+        .{ .n = "usage", .s = .usage },    .{ .n = "title", .s = .title },
+    };
+    for (map) |m| if (std.mem.eql(u8, name, m.n)) return m.s;
+    return null;
+}
+
+pub const SegList = struct {
+    items: [8]Segment = undefined,
+    n: usize = 0,
+
+    pub fn slice(self: *const SegList) []const Segment {
+        return self.items[0..self.n];
+    }
+    pub fn has(self: *const SegList, s: Segment) bool {
+        for (self.slice()) |x| if (x == s) return true;
+        return false;
+    }
+    pub fn eql(a: *const SegList, b: *const SegList) bool {
+        return std.mem.eql(Segment, a.slice(), b.slice());
+    }
+};
+
+/// Comptime SegList literal, for defaults and preset bundles.
+pub fn segs(comptime list: anytype) SegList {
+    var s = SegList{};
+    inline for (list) |x| {
+        s.items[s.n] = x;
+        s.n += 1;
+    }
+    return s;
+}
+
+/// How a `tabs` segment renders. `chips` is the top strip's pill; the
+/// two text styles exist for the status bar — tmux's `1:name 2:name`
+/// list, and a single current-tab chip (VS Code's workspace-name-in-
+/// the-bottom-bar minimalism; click cycles).
+pub const TabStyle = enum { chips, index_name, current };
+
+pub fn tabStyleFromName(name: []const u8) ?TabStyle {
+    if (std.mem.eql(u8, name, "chips")) return .chips;
+    if (std.mem.eql(u8, name, "index-name") or std.mem.eql(u8, name, "index_name")) return .index_name;
+    if (std.mem.eql(u8, name, "current")) return .current;
+    return null;
+}
+
+/// A preset is a DEFAULTS LAYER, nothing more: it rewrites the chrome
+/// fields and later keys still override ("config lines replace
+/// defaults", unchanged). The SDK expands the same bundles at emit
+/// time so a graph shows every knob a preset set — this table and the
+/// SDK's must agree, and the e2e presetparity scenario is the guard.
+pub fn applyPreset(cfg: *Config, name: []const u8) bool {
+    if (std.mem.eql(u8, name, "tmux-neovim") or std.mem.eql(u8, name, "tmux")) {
+        cfg.top_bar = segs(.{});
+        cfg.status_left = segs(.{.tabs});
+        cfg.status_right = segs(.{ .workspace, .branch, .cwd });
+        cfg.tab_style = .index_name;
+        cfg.buffer_line = false;
+        return true;
+    }
+    if (std.mem.eql(u8, name, "vscode")) {
+        cfg.top_bar = segs(.{});
+        cfg.status_left = segs(.{ .tabs, .branch });
+        cfg.status_right = segs(.{ .cwd, .hints });
+        cfg.tab_style = .current;
+        cfg.buffer_line = true;
+        return true;
+    }
+    // rook's own identity is the defaults — a no-op bundle, named so
+    // "preset = rook" reads as a statement rather than an error.
+    if (std.mem.eql(u8, name, "rook") or std.mem.eql(u8, name, "default")) return true;
+    return false;
+}
+
+/// Parse `["tabs", "usage"]` (or a bare comma list) into a SegList.
+/// An unknown segment name warns and is skipped — a list with a typo
+/// should lose one segment, not the whole arrangement.
+pub fn parseSegList(raw: []const u8) ?SegList {
+    var val = std.mem.trim(u8, raw, " \t");
+    if (val.len >= 2 and val[0] == '[' and val[val.len - 1] == ']')
+        val = val[1 .. val.len - 1];
+    var out = SegList{};
+    var it = std.mem.splitScalar(u8, val, ',');
+    while (it.next()) |part| {
+        const name = std.mem.trim(u8, part, " \t\"");
+        if (name.len == 0) continue;
+        const s = segFromName(name) orelse {
+            std.debug.print("rook config: unknown segment '{s}' (tabs, workspace, branch, cwd, hints, hud, usage, title)\n", .{name});
+            continue;
+        };
+        if (out.n < out.items.len) {
+            out.items[out.n] = s;
+            out.n += 1;
+        }
+    }
+    return out;
+}
+
 pub const Config = struct {
     font_size: f64 = 13,
     font_family: [:0]const u8 = "FiraCode Nerd Font Mono",
@@ -140,6 +266,17 @@ pub const Config = struct {
     /// rows for a terminal you live in. Launch-time only — resizing a
     /// live PageList's limit isn't something the library offers.
     scrollback: usize = 10 * 1024 * 1024,
+    /// The top strip's contents — presence, not order (tabs left,
+    /// title center, usage right). EMPTY hides the strip and the pane
+    /// area reclaims its row.
+    top_bar: SegList = segs(.{ .tabs, .title, .usage }),
+    /// The status bar's two clusters, in display order. `status-left`
+    /// / `status-right` on purpose — tmux's own keys. When narrow,
+    /// segments shed from the END of the right list backward, then
+    /// the end of the left list (cwd is flexible and never blocks).
+    status_left: SegList = segs(.{ .workspace, .branch, .cwd }),
+    status_right: SegList = segs(.{ .hints, .hud }),
+    tab_style: TabStyle = .chips,
 };
 
 /// One number over the config file — the live-reload poll compares this
@@ -222,6 +359,30 @@ fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
 
     const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch return cfg;
     defer gpa.free(data);
+
+    // The preset applies FIRST regardless of where its line sits, so
+    // every explicit key in the file overrides its bundle — a defaults
+    // layer that could shadow a key you wrote would make line order
+    // load-bearing in a file where it never was.
+    {
+        var pre_table = false;
+        var pre = std.mem.splitScalar(u8, data, '\n');
+        while (pre.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t\r");
+            if (line.len == 0 or line[0] == '#') continue;
+            if (line[0] == '[') {
+                pre_table = true;
+                continue;
+            }
+            if (pre_table) continue;
+            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            const key = std.mem.trim(u8, line[0..eq], " \t\"");
+            if (!std.mem.eql(u8, key, "preset")) continue;
+            const val = std.mem.trim(u8, stripComment(std.mem.trim(u8, line[eq + 1 ..], " \t")), "\"");
+            if (!applyPreset(&cfg, val))
+                std.debug.print("rook config: unknown preset '{s}' (rook, tmux-neovim, vscode)\n", .{val});
+        }
+    }
 
     var in_table = false;
     var lines = std.mem.splitScalar(u8, data, '\n');
@@ -329,7 +490,20 @@ fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
                 std.debug.print("rook config: unknown background-blur '{s}' (none, blur, glass, glass-clear)\n", .{stripped});
                 break :blk .none;
             };
+        } else if (std.mem.eql(u8, key, "top_bar")) {
+            cfg.top_bar = parseSegList(val) orelse cfg.top_bar;
+        } else if (std.mem.eql(u8, key, "status_left")) {
+            cfg.status_left = parseSegList(val) orelse cfg.status_left;
+        } else if (std.mem.eql(u8, key, "status_right")) {
+            cfg.status_right = parseSegList(val) orelse cfg.status_right;
+        } else if (std.mem.eql(u8, key, "tab_style")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            cfg.tab_style = tabStyleFromName(stripped) orelse blk: {
+                std.debug.print("rook config: unknown tab-style '{s}' (chips, index-name, current)\n", .{stripped});
+                break :blk cfg.tab_style;
+            };
         }
+        // `preset` was handled by the pre-scan above.
         // No else: unknown top-level keys are the host's. See the header.
     }
 
@@ -440,8 +614,38 @@ fn applyEnvOption(cfg: *Config, gpa: std.mem.Allocator, key_raw: []const u8, val
         cfg.buffer_line = jBool(value) orelse cfg.buffer_line;
     } else if (std.mem.eql(u8, key, "cursor_blink") or std.mem.eql(u8, key, "cursor_style_blink")) {
         cfg.cursor_blink = jBool(value) orelse cfg.cursor_blink;
+    } else if (std.mem.eql(u8, key, "top_bar")) {
+        cfg.top_bar = jSegList(value) orelse cfg.top_bar;
+    } else if (std.mem.eql(u8, key, "status_left")) {
+        cfg.status_left = jSegList(value) orelse cfg.status_left;
+    } else if (std.mem.eql(u8, key, "status_right")) {
+        cfg.status_right = jSegList(value) orelse cfg.status_right;
+    } else if (std.mem.eql(u8, key, "tab_style")) {
+        if (jStr(value)) |s| cfg.tab_style = tabStyleFromName(s) orelse cfg.tab_style;
     }
     // No else: an unknown key belongs to a newer graph. Fail open.
+    // (`preset` is handled by loadEnv's pre-pass, same reason as
+    // TOML's pre-scan: the bundle must never shadow an explicit key.)
+}
+
+/// An array-of-strings option value into a SegList; unknown names
+/// skipped in silence (graphs are machine-emitted — see applyEnvOption
+/// on type skew). A non-array is a type mismatch: keep the default.
+fn jSegList(v: std.json.Value) ?SegList {
+    const arr = switch (v) {
+        .array => |a| a.items,
+        else => return null,
+    };
+    var out = SegList{};
+    for (arr) |item| {
+        const name = jStr(item) orelse continue;
+        const s = segFromName(name) orelse continue;
+        if (out.n < out.items.len) {
+            out.items[out.n] = s;
+            out.n += 1;
+        }
+    }
+    return out;
 }
 
 fn loadEnv(io: std.Io, gpa: std.mem.Allocator) ?Config {
@@ -454,9 +658,22 @@ fn loadEnv(io: std.Io, gpa: std.mem.Allocator) ?Config {
     defer parsed.deinit();
 
     var cfg: Config = .{};
+    // The preset bundle first, whatever its node position — an SDK
+    // expands presets at emit so this is rare in a graph, but a
+    // hand-written one gets TOML's rule: explicit keys override.
     for (parsed.value.nodes) |n| {
         if (!std.mem.eql(u8, n.kind, "option")) continue;
         if (!std.mem.eql(u8, n.scope, "app")) continue;
+        if (!std.mem.eql(u8, n.key, "preset")) continue;
+        if (jStr(n.value)) |name| {
+            if (!applyPreset(&cfg, name))
+                std.debug.print("rook environment: unknown preset '{s}'\n", .{name});
+        }
+    }
+    for (parsed.value.nodes) |n| {
+        if (!std.mem.eql(u8, n.kind, "option")) continue;
+        if (!std.mem.eql(u8, n.scope, "app")) continue;
+        if (std.mem.eql(u8, n.key, "preset")) continue;
         applyEnvOption(&cfg, gpa, n.key, n.value);
     }
     if (cfg.font_size < 6 or cfg.font_size > 72) {
@@ -785,6 +1002,45 @@ test "clipboard-write takes both the enum names and the booleans" {
     try t.expectEqual(ClipboardWrite.allow, clipboardWriteFromName("true").?);
     try t.expectEqual(ClipboardWrite.deny, clipboardWriteFromName("false").?);
     try t.expect(clipboardWriteFromName("ask") == null);
+}
+
+test "parseSegList: brackets, quotes, order kept, typos skipped" {
+    const t = std.testing;
+    const l = parseSegList("[\"tabs\", \"usage\"]").?;
+    try t.expectEqual(@as(usize, 2), l.n);
+    try t.expect(l.items[0] == .tabs and l.items[1] == .usage);
+    // Empty is an ANSWER (hide the bar), not a parse failure.
+    try t.expectEqual(@as(usize, 0), parseSegList("[]").?.n);
+    // A typo resolves to null (parseSegList then warns and skips it —
+    // not exercised here: the build's test runner reads any stderr as
+    // a failure, the transcript suite's own known quirk).
+    try t.expect(segFromName("bogus") == null);
+    try t.expect(segFromName("cwd") == .cwd);
+}
+
+test "presets are the bundles the parity scenario pins" {
+    const t = std.testing;
+    var vs: Config = .{};
+    try t.expect(applyPreset(&vs, "vscode"));
+    try t.expect(vs.top_bar.n == 0);
+    try t.expect(vs.tab_style == .current);
+    try t.expect(vs.buffer_line);
+    try t.expect(vs.status_left.eql(&segs(.{ .tabs, .branch })));
+    try t.expect(vs.status_right.eql(&segs(.{ .cwd, .hints })));
+
+    var tm: Config = .{};
+    try t.expect(applyPreset(&tm, "tmux-neovim"));
+    try t.expect(tm.top_bar.n == 0);
+    try t.expect(tm.tab_style == .index_name);
+    try t.expect(!tm.buffer_line);
+    try t.expect(tm.status_left.eql(&segs(.{.tabs})));
+    try t.expect(tm.status_right.eql(&segs(.{ .workspace, .branch, .cwd })));
+
+    // The no-op identity, and the refusal.
+    var rk: Config = .{};
+    try t.expect(applyPreset(&rk, "rook"));
+    try t.expect(rk.top_bar.eql(&(Config{}).top_bar));
+    try t.expect(!applyPreset(&rk, "emacs"));
 }
 
 test "topLevelEq ignores '=' inside a quoted key" {

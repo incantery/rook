@@ -106,6 +106,69 @@ func (e *Env) EditorBind(mode, chord, command string) *Env {
 
 // ---- named app options, the discoverable surface ----
 
+// TopBar sets the top strip's contents (presence, not order: tabs
+// left, title center, usage right). No arguments hides the strip and
+// the pane area reclaims its row.
+func (e *Env) TopBar(segments ...string) *Env {
+	return e.Set("top-bar", segList(segments))
+}
+
+// StatusLeft / StatusRight set the status bar's two clusters, in
+// display order — tmux's own keys, on purpose. When the window is
+// narrow, segments shed from the END of the right list backward, then
+// the end of the left list; `cwd` is flexible and never blocks.
+func (e *Env) StatusLeft(segments ...string) *Env {
+	return e.Set("status-left", segList(segments))
+}
+func (e *Env) StatusRight(segments ...string) *Env {
+	return e.Set("status-right", segList(segments))
+}
+
+// TabStyle picks how a `tabs` segment renders: "chips" (the top
+// strip's pill), "index-name" (tmux's `1:name 2:name` list) or
+// "current" (one compact active-tab chip; click cycles).
+func (e *Env) TabStyle(style string) *Env { return e.Set("tab-style", style) }
+
+func segList(segments []string) []string {
+	if segments == nil {
+		return []string{}
+	}
+	return segments
+}
+
+// ---- presets: identities as bundles ----
+//
+// A preset EXPANDS at emit time — the graph shows every knob it set,
+// which is what future provenance attaches to. These bundles must
+// match config.zig's applyPreset (the TOML front end's expansion):
+// the golden test here pins this side, the e2e `presetparity`
+// scenario diffs both sides on the live app.
+
+// PresetTmuxNeovim arranges rook for a tmux+neovim hand: no top
+// strip, one bottom bar with the tab list as text (tmux's window
+// list), no buffer line (:ls people). Leaders are yours to set.
+func (e *Env) PresetTmuxNeovim() *Env {
+	e.TopBar()
+	e.StatusLeft("tabs")
+	e.StatusRight("workspace", "branch", "cwd")
+	e.TabStyle("index-name")
+	e.BufferLine(false)
+	return e
+}
+
+// PresetVSCode arranges rook for a VS Code hand: editor surfaces
+// carry identity (per-pane buffer line on), sessions demoted to a
+// compact current-tab chip in the bottom bar, branch beside it —
+// VS Code's own bottom-left — and the teaching hints kept in reach.
+func (e *Env) PresetVSCode() *Env {
+	e.TopBar()
+	e.StatusLeft("tabs", "branch")
+	e.StatusRight("cwd", "hints")
+	e.TabStyle("current")
+	e.BufferLine(true)
+	return e
+}
+
 func (e *Env) FontFamily(name string) *Env      { return e.Set("font-family", name) }
 func (e *Env) FontSize(pts float64) *Env        { return e.Set("font-size", pts) }
 func (e *Env) Theme(name string) *Env           { return e.Set("theme", name) }

@@ -21,6 +21,7 @@ const registrypkg = @import("registry.zig");
 const pastepkg = @import("paste.zig");
 const hostc = @import("hostc.zig");
 const themepkg = @import("theme.zig");
+const cfgpkg = @import("config.zig");
 const uipkg = @import("ui.zig");
 const stats = @import("stats.zig");
 
@@ -439,6 +440,19 @@ pub const App = struct {
     bar_branch_len: usize = 0,
     seg_ws_x: [2]f32 = .{ 0, 0 },
     seg_branch_x: [2]f32 = .{ 0, 0 },
+
+    /// The chrome arrangement (config: top-bar, status-left,
+    /// status-right, tab-style — or a preset bundling them). The two
+    /// bars share one segment vocabulary; identity is arrangement.
+    cfg_top_bar: cfgpkg.SegList = cfgpkg.segs(.{ .tabs, .title, .usage }),
+    cfg_status_left: cfgpkg.SegList = cfgpkg.segs(.{ .workspace, .branch, .cwd }),
+    cfg_status_right: cfgpkg.SegList = cfgpkg.segs(.{ .hints, .hud }),
+    cfg_tab_style: cfgpkg.TabStyle = .chips,
+    /// Per-tab hit zones for a `tabs` segment living in the STATUS
+    /// bar (the top strip's chips keep chip_x). current-style records
+    /// one zone; a click there cycles.
+    bar_tab_x: [12][2]f32 = undefined,
+    bar_tab_n: usize = 0,
 
     // ---- cursor blink ----
     /// config `cursor-blink`: the focused pane's cursor blinks on the
@@ -937,6 +951,9 @@ pub const App = struct {
         boot_times.renderer_us = usSince(bt);
         const m = @import("ui.zig").Metrics.compute(@floatCast(scale), renderer.cell_h);
         const bar_h: f32 = m.row;
+        // An empty top-bar list hides the strip and the panes reclaim
+        // its row — chrome is arrangement, and "none" is an arrangement.
+        const tab_h: f32 = if (cfg.top_bar.n == 0) 0 else bar_h;
         // Standard macOS titlebar is 28pt; with fullSizeContentView we
         // draw under it and shift chrome down instead.
         const top_inset: f32 = if (opaque_bg) 0 else @floatCast(28 * scale);
@@ -945,7 +962,7 @@ pub const App = struct {
         // pane padding is inside it, and the first shell sees both.
         const inset = pad * 2 + m.pane_pad * 2;
         const cols: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_w)) - inset, renderer.cell_w)));
-        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h * 2 - top_inset - inset, renderer.cell_h)));
+        const rows: u16 = @intFromFloat(@max(2, @divFloor(@as(f32, @floatCast(px_h)) - bar_h - tab_h - top_inset - inset, renderer.cell_h)));
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
         bt = CACurrentMediaTime();
@@ -979,7 +996,11 @@ pub const App = struct {
             .m = m,
             .sep = @floatCast(@max(1.0, @round(scale))),
             .bar_h = bar_h,
-            .tab_h = bar_h,
+            .tab_h = tab_h,
+            .cfg_top_bar = cfg.top_bar,
+            .cfg_status_left = cfg.status_left,
+            .cfg_status_right = cfg.status_right,
+            .cfg_tab_style = cfg.tab_style,
             .top_inset = top_inset,
             .pad_pts = @floatCast(cfg.window_padding),
             .pad = pad,
@@ -1226,7 +1247,7 @@ pub const App = struct {
         self.sep = @floatCast(@max(1.0, @round(scale)));
         self.m = @import("ui.zig").Metrics.compute(@floatCast(scale), self.renderer.cell_h);
         self.bar_h = self.m.row;
-        self.tab_h = self.bar_h;
+        self.tab_h = if (self.cfg_top_bar.n == 0) 0 else self.bar_h;
         if (self.top_inset > 0) self.top_inset = @floatCast(28 * scale);
         self.pad = @floatCast(self.pad_pts * scale);
         self.relayoutLocked();
@@ -1352,6 +1373,19 @@ pub const App = struct {
         // shown NOW — a click is a request for the menu, not a
         // hesitation to time.
         if (y >= self.px_h - self.bar_h) {
+            // A tabs segment's chips first: index-name clicks select
+            // that tab; the current-style chip cycles to the next.
+            for (self.bar_tab_x[0..self.bar_tab_n], 0..) |zx, i| {
+                if (x >= zx[0] and x < zx[1]) {
+                    const sp = self.activeSpace();
+                    if (self.cfg_tab_style == .current) {
+                        self.activateTabLocked((sp.active_tab + 1) % sp.tabs.items.len);
+                    } else if (i < sp.tabs.items.len) {
+                        self.activateTabLocked(i);
+                    }
+                    return;
+                }
+            }
             if (x >= self.seg_ws_x[0] and x < self.seg_ws_x[1]) {
                 self.pending_cmd = .{ .action = .workspace_switch };
             } else if (x >= self.seg_branch_x[0] and x < self.seg_branch_x[1]) {
@@ -3989,7 +4023,6 @@ pub const App = struct {
     }
 
     fn pollConfigLocked(self: *App) void {
-        const cfgpkg = @import("config.zig");
         const d = cfgpkg.digest(self.io, self.gpa);
         defer self.config_digest = d;
         if (self.config_digest == 0 or d == self.config_digest) return;
@@ -4003,6 +4036,22 @@ pub const App = struct {
         self.cfg_clip_allow = cfg.clipboard_write == .allow;
         self.cfg_bufline = cfg.buffer_line;
         self.cursor_blink = cfg.cursor_blink;
+
+        // Chrome arrangement: a preset (or hand-set lists) landing on
+        // a LIVE app. Hiding or showing the top strip is a retile —
+        // pty resizes and all — same path a window resize takes.
+        const chrome_changed = !self.cfg_top_bar.eql(&cfg.top_bar) or
+            !self.cfg_status_left.eql(&cfg.status_left) or
+            !self.cfg_status_right.eql(&cfg.status_right) or
+            self.cfg_tab_style != cfg.tab_style;
+        self.cfg_top_bar = cfg.top_bar;
+        self.cfg_status_left = cfg.status_left;
+        self.cfg_status_right = cfg.status_right;
+        self.cfg_tab_style = cfg.tab_style;
+        if (chrome_changed) {
+            self.tab_h = if (self.cfg_top_bar.n == 0) 0 else self.bar_h;
+            self.relayoutLocked();
+        }
 
         if (themepkg.byName(cfg.theme)) |t| {
             th = t.*;
@@ -4356,94 +4405,235 @@ pub const App = struct {
                 x += ui.text(x, ty, " /no match ", th.bar_bg, th.accent) + self.renderer.cell_w / 2;
             }
         }
-        // MEASURE before drawing, and shed from the diagnostics down
-        // when narrow: the perf HUD yields first (it is for us; the
-        // rest is the product), then the cwd, then the teaching hints,
-        // then the branch. The window's size is the window manager's —
-        // what shows at each width must not be, or every layout
-        // assertion is a coin flip against AppKit's clamping.
-        //
-        // The affordances: "␣ menu" arms the leader with its menu
-        // shown, "⌘K commands" opens the palette. Clickable (drawBar
-        // records the hit zones) because a VS Code hand's first
-        // instinct is the mouse — each click runs the real thing while
-        // showing the key that would have. Key glyph in accent, word
-        // in bar_fg — the mock's vocabulary: the key is the loud part.
+        // The SEGMENT ENGINE. What renders here is config's two lists
+        // (status-left / status-right — tmux's own keys), drawn in
+        // declared order. MEASURE before drawing, then shed OFF THE
+        // ENDS when narrow — the last segment of status-right yields
+        // first, then backward through it, then the end of
+        // status-left. A rule the user can predict from their lists,
+        // because the window's size is the window manager's — what
+        // shows at each width must not be, or every layout assertion
+        // is a coin flip against AppKit's clamping.
+        // cwd is FLEXIBLE: it reserves nothing, fills the gap between
+        // the clusters, and can never push a fixed segment off.
         const cw = self.renderer.cell_w;
         const bg = self.glassBg(th.bar_bg);
         const name = self.activeSpace().label();
         const br = self.bar_branch[0..self.bar_branch_len];
 
-        const ws_w = @as(f32, @floatFromInt(2 + name.len)) * cw + 2 * cw;
-        const br_w: f32 = if (br.len > 0) @as(f32, @floatFromInt(2 + br.len)) * cw + 2 * cw else 0;
-        const menu_w: f32 = if (self.keybinds.leader != null) 6 * cw + 3 * cw else 0;
-        const cmd_w = 11 * cw + 3 * cw;
-        const hud_w = @as(f32, @floatFromInt(self.hud_right_len)) * cw + 3 * cw;
-
-        var budget = self.px_w - pad - x;
-        const show_ws = ws_w <= budget;
-        if (show_ws) budget -= ws_w;
-        const show_br = br_w > 0 and br_w <= budget;
-        if (show_br) budget -= br_w;
-        const show_hints = menu_w + cmd_w <= budget;
-        if (show_hints) budget -= menu_w + cmd_w;
-        const show_hud = hud_w <= budget;
-        if (show_hud) budget -= hud_w;
-
-        // Right cluster, edge inward: HUD, then the two hints.
         self.hint_menu_x = .{ 0, 0 };
         self.hint_cmd_x = .{ 0, 0 };
-        var right_limit = self.px_w - pad;
-        if (show_hud)
-            right_limit -= ui.textRight(right_limit, ty, self.hud_right[0..self.hud_right_len], th.bar_value, bg) + 3 * cw;
-        if (show_hints) {
-            {
-                const w = 11 * cw;
-                var tx = right_limit - w;
-                self.hint_cmd_x = .{ tx, right_limit };
-                tx += ui.text(tx, ty, "⌘K", th.accent, bg);
-                _ = ui.text(tx + cw, ty, "commands", th.bar_fg, bg);
-                right_limit -= w + 3 * cw;
-            }
-            if (self.keybinds.leader) |ld| {
-                var gb: [4]u8 = undefined;
-                const g = keyGlyph(ld, &gb);
-                const w = 6 * cw;
-                var tx = right_limit - w;
-                self.hint_menu_x = .{ tx, right_limit };
-                tx += ui.text(tx, ty, g, th.accent, bg);
-                _ = ui.text(tx + cw, ty, "menu", th.bar_fg, bg);
-                right_limit -= w + 3 * cw;
-            }
-        }
-
-        // The LEFT zone: where you are. Workspace (click: the
-        // switcher), branch (click: the diff — the change is the thing
-        // a branch name makes you wonder about), then the focused
-        // pane's cwd label in whatever room is left, if that room is
-        // enough to say something ("…s/s…" is not).
         self.seg_ws_x = .{ 0, 0 };
         self.seg_branch_x = .{ 0, 0 };
-        if (show_ws) {
-            const x0 = x;
-            x += ui.text(x, ty, "● ", th.accent, bg);
-            x += ui.text(x, ty, name, th.bar_value, bg);
-            self.seg_ws_x = .{ x0, x };
-            x += 2 * cw;
+        self.bar_tab_n = 0;
+
+        const left = self.cfg_status_left.slice();
+        const right = self.cfg_status_right.slice();
+        var left_w: [8]f32 = @splat(0);
+        var right_w: [8]f32 = @splat(0);
+        for (left, 0..) |s, i| left_w[i] = self.segWidth(s, name, br);
+        for (right, 0..) |s, i| right_w[i] = self.segWidth(s, name, br);
+
+        const budget = self.px_w - pad - x;
+        var total: f32 = 0;
+        for (left_w[0..left.len]) |w| total += w;
+        for (right_w[0..right.len]) |w| total += w;
+        while (total > budget) {
+            var ir = right.len;
+            var shed = false;
+            while (ir > 0) : (ir -= 1) {
+                if (right_w[ir - 1] > 0) {
+                    total -= right_w[ir - 1];
+                    right_w[ir - 1] = 0;
+                    shed = true;
+                    break;
+                }
+            }
+            if (shed) continue;
+            var il = left.len;
+            while (il > 0) : (il -= 1) {
+                if (left_w[il - 1] > 0) {
+                    total -= left_w[il - 1];
+                    left_w[il - 1] = 0;
+                    shed = true;
+                    break;
+                }
+            }
+            if (!shed) break;
         }
-        if (show_br) {
-            const x0 = x;
-            x += ui.text(x, ty, "⎇ ", th.bar_fg, bg);
-            x += ui.text(x, ty, br, th.bar_value, bg);
-            self.seg_branch_x = .{ x0, x };
-            x += 2 * cw;
+
+        for (left, 0..) |s, i| {
+            if (left_w[i] > 0) self.drawSegment(ui, s, &x, ty, name, br);
         }
-        const room: usize = @intFromFloat(@max(0, (right_limit - x) / cw));
+        const left_end = x;
+        var rtotal: f32 = 0;
+        for (right_w[0..right.len]) |w| rtotal += w;
+        var rx = self.px_w - pad - rtotal;
+        const right_start = rx;
+        for (right, 0..) |s, i| {
+            if (right_w[i] > 0) self.drawSegment(ui, s, &rx, ty, name, br);
+        }
+
+        // The flexible cwd, into whatever gap the clusters left — if
+        // that gap is enough to say something ("…s/s…" is not).
+        const gap_end = if (rtotal > 0) right_start - 2 * cw else right_start;
+        const room: usize = @intFromFloat(@max(0, (gap_end - left_end) / cw));
         if (self.hud_left_len > 0 and room >= 10) {
             var clipbuf: [96]u8 = undefined;
             const s = @import("ui.zig").clip(&clipbuf, self.hud_left[0..self.hud_left_len], room);
-            _ = ui.text(x, ty, s, th.bar_fg, bg);
+            if (self.cfg_status_left.has(.cwd)) {
+                _ = ui.text(left_end, ty, s, th.bar_fg, bg);
+            } else if (self.cfg_status_right.has(.cwd)) {
+                _ = ui.textRight(gap_end, ty, s, th.bar_fg, bg);
+            }
         }
+    }
+
+    /// A status-bar segment's reserved width in px, trailing gap
+    /// included. 0 = nothing to render this frame (an empty branch, a
+    /// leaderless hints pair) — and 0 is also what the shed loop
+    /// writes, so "hidden" and "empty" are one case to the draw pass.
+    fn segWidth(self: *App, s: cfgpkg.Segment, name: []const u8, br: []const u8) f32 {
+        const cw = self.renderer.cell_w;
+        return switch (s) {
+            .workspace => @as(f32, @floatFromInt(2 + name.len)) * cw + 2 * cw,
+            .branch => if (br.len > 0) @as(f32, @floatFromInt(2 + br.len)) * cw + 2 * cw else 0,
+            // Flexible: reserves nothing (drawn into the leftover gap).
+            .cwd => 0,
+            .hints => blk: {
+                const menu: f32 = if (self.keybinds.leader != null) 6 * cw + 3 * cw else 0;
+                break :blk menu + 11 * cw + 2 * cw;
+            },
+            .hud => if (self.hud_right_len > 0) @as(f32, @floatFromInt(self.hud_right_len)) * cw + 2 * cw else 0,
+            .usage => if (self.usage.len > 0) @as(f32, @floatFromInt(self.usage.len)) * cw + 2 * cw else 0,
+            .tabs => self.barTabsSeg(null, 0, 0),
+            // Top-strip only; in the status bar it renders nothing.
+            .title => 0,
+        };
+    }
+
+    /// Draw one segment at x (which advances past it, trailing gap
+    /// included), recording its click zones. The same vocabulary the
+    /// top strip uses — a segment is a segment wherever it lands.
+    fn drawSegment(self: *App, ui: *@import("ui.zig").Ui, s: cfgpkg.Segment, x: *f32, ty: f32, name: []const u8, br: []const u8) void {
+        const cw = self.renderer.cell_w;
+        const bg = self.glassBg(th.bar_bg);
+        switch (s) {
+            .workspace => {
+                const x0 = x.*;
+                x.* += ui.text(x.*, ty, "● ", th.accent, bg);
+                x.* += ui.text(x.*, ty, name, th.bar_value, bg);
+                self.seg_ws_x = .{ x0, x.* };
+                x.* += 2 * cw;
+            },
+            .branch => {
+                const x0 = x.*;
+                x.* += ui.text(x.*, ty, "⎇ ", th.bar_fg, bg);
+                x.* += ui.text(x.*, ty, br, th.bar_value, bg);
+                self.seg_branch_x = .{ x0, x.* };
+                x.* += 2 * cw;
+            },
+            .cwd, .title => {},
+            .hints => {
+                // "␣ menu" arms the leader with its sheet shown NOW,
+                // "⌘K commands" opens the palette — the mouse routes
+                // into the things the bar names, key glyph in accent
+                // (the mock's vocabulary: the key is the loud part).
+                if (self.keybinds.leader) |ld| {
+                    var gb: [4]u8 = undefined;
+                    const g = keyGlyph(ld, &gb);
+                    const x0 = x.*;
+                    var tx = x.* + ui.text(x.*, ty, g, th.accent, bg);
+                    _ = ui.text(tx + cw, ty, "menu", th.bar_fg, bg);
+                    tx += cw + 4 * cw;
+                    self.hint_menu_x = .{ x0, tx };
+                    x.* = tx + 3 * cw;
+                }
+                const x0 = x.*;
+                var tx = x.* + ui.text(x.*, ty, "⌘K", th.accent, bg);
+                _ = ui.text(tx + cw, ty, "commands", th.bar_fg, bg);
+                tx += cw + 8 * cw;
+                self.hint_cmd_x = .{ x0, tx };
+                x.* = tx + 2 * cw;
+            },
+            .hud => {
+                if (self.hud_right_len > 0) {
+                    x.* += ui.text(x.*, ty, self.hud_right[0..self.hud_right_len], th.bar_value, bg);
+                    x.* += 2 * cw;
+                }
+            },
+            .usage => {
+                if (self.usage.len > 0) {
+                    const ufg = if (self.usage.worst >= 90)
+                        th.ed_err
+                    else if (self.usage.worst >= 70)
+                        th.accent
+                    else
+                        th.bar_fg;
+                    x.* += ui.text(x.*, ty, self.usage.slice(), ufg, bg);
+                    x.* += 2 * cw;
+                }
+            },
+            .tabs => x.* += self.barTabsSeg(ui, x.*, ty),
+        }
+    }
+
+    /// The `tabs` segment for the STATUS bar, in both roles: measure
+    /// (ui = null, returns width) and draw (returns width, records
+    /// per-tab hit zones). One function because a measured width that
+    /// disagrees with the drawn one is a shed rule that lies.
+    /// index-name is tmux's window list; current is one compact chip
+    /// of the active tab (click cycles).
+    fn barTabsSeg(self: *App, ui: ?*@import("ui.zig").Ui, x_start: f32, ty: f32) f32 {
+        const cw = self.renderer.cell_w;
+        const bg = self.glassBg(th.bar_bg);
+        const space = self.activeSpace();
+        const by = self.px_h - self.bar_h;
+        var x = x_start;
+
+        if (self.cfg_tab_style == .current) {
+            const t = space.tabs.items[space.active_tab];
+            var tbuf: [24]u8 = undefined;
+            const title = tabTitle(t, &tbuf);
+            var chip: [40]u8 = undefined;
+            const label = std.fmt.bufPrint(&chip, "{d}/{d} {s}", .{ space.active_tab + 1, space.tabs.items.len, title }) catch return 0;
+            const w = @as(f32, @floatFromInt(std.unicode.utf8CountCodepoints(label) catch label.len)) * cw;
+            if (ui) |u| {
+                _ = u.text(x, ty, label, th.bar_value, bg);
+                if (self.bar_tab_x.len > 0) {
+                    self.bar_tab_x[0] = .{ x, x + w };
+                    self.bar_tab_n = 1;
+                }
+            }
+            return w + 2 * cw;
+        }
+
+        // index-name: every tab, active on a lifted pill, bells in
+        // accent — the chip vocabulary at one-row scale.
+        for (space.tabs.items, 0..) |t, i| {
+            var tbuf: [24]u8 = undefined;
+            const title = tabTitle(t, &tbuf);
+            var chip: [44]u8 = undefined;
+            const z: []const u8 = if (t.zoomed != null) "Z" else "";
+            const label = if (t.bell)
+                std.fmt.bufPrint(&chip, " •{d}:{s}{s} ", .{ i + 1, title, z }) catch continue
+            else
+                std.fmt.bufPrint(&chip, " {d}:{s}{s} ", .{ i + 1, title, z }) catch continue;
+            const w = @as(f32, @floatFromInt(std.unicode.utf8CountCodepoints(label) catch label.len)) * cw;
+            if (ui) |u| {
+                const is_active = i == space.active_tab;
+                const fg = if (is_active) th.bar_value else if (t.bell) th.accent else th.bar_fg;
+                if (is_active)
+                    u.roundRect(x, by + self.m.gap / 2, w, self.bar_h - self.m.gap, self.glassBg(th.chip_active_bg), .{ .radius = self.m.radius });
+                _ = u.textOver(x, ty, label, fg);
+                if (i < self.bar_tab_x.len) {
+                    self.bar_tab_x[i] = .{ x, x + w };
+                    self.bar_tab_n = i + 1;
+                }
+            }
+            x += w + cw / 2;
+        }
+        return (x - x_start) + cw + cw / 2;
     }
 
     /// The which-key row model: the LIVE bindings — config's table,
@@ -4553,11 +4743,41 @@ pub const App = struct {
         self.wk_rect = .{ 0, y0, self.px_w, h };
     }
 
-    /// The top tab bar — tabs as first-class chrome (the wails app's
-    /// named tabs). Each chip shows its tab's focused-pane TITLE (OSC
-    /// 0/2, read from the emulator under its lock); the active chip
-    /// gets a lifted background and an accent underline.
+    /// A tab's display title: the focused pane's OSC 0/2 title (read
+    /// from the emulator under its lock) or the editor's file name.
+    /// Shared by the top strip's chips and the status bar's tabs
+    /// segment — one tab, one name, wherever it renders.
+    fn tabTitle(t: *panespkg.Tab, buf: []u8) []const u8 {
+        var title: []const u8 = "shell";
+        switch (t.focused.content) {
+            .term => |*tm| {
+                tm.session.mutex.lock();
+                if (tm.session.term.getTitle()) |tt| {
+                    const n = @min(tt.len, buf.len);
+                    @memcpy(buf[0..n], tt[0..n]);
+                    if (n > 0) title = buf[0..n];
+                }
+                tm.session.mutex.unlock();
+            },
+            .edit => |ed| {
+                const dn = ed.displayName();
+                const n = @min(dn.len, buf.len);
+                @memcpy(buf[0..n], dn[0..n]);
+                if (n > 0) title = buf[0..n];
+            },
+        }
+        return title;
+    }
+
+    /// The top strip — tabs as first-class chrome (the wails app's
+    /// named tabs). Each chip shows its tab's title; the active chip
+    /// gets a lifted background and an accent underline. What renders
+    /// is config's `top-bar` list (presence, not order: tabs left,
+    /// title center, usage right); an empty list skipped the strip
+    /// before we were ever called (tab_h = 0).
     fn drawTabBar(self: *App, ui: *@import("ui.zig").Ui) void {
+        self.chip_n = 0;
+        if (self.contentY() <= 0) return;
         // One slab from the window top: in glass mode it also tints the
         // titlebar strip the traffic lights float over.
         ui.rect(0, 0, self.px_w, self.contentY(), self.glassBg(th.bar_bg));
@@ -4574,10 +4794,12 @@ pub const App = struct {
         else
             ty;
         const cw = self.renderer.cell_w;
-        const name = self.activeSpace().label();
-        const nx = (self.px_w - @as(f32, @floatFromInt(name.len)) * cw) / 2;
-        _ = ui.text(nx, zone_ty, name, th.bar_value, self.glassBg(th.bar_bg));
-        if (self.usage.len > 0) {
+        if (self.cfg_top_bar.has(.title)) {
+            const name = self.activeSpace().label();
+            const nx = (self.px_w - @as(f32, @floatFromInt(name.len)) * cw) / 2;
+            _ = ui.text(nx, zone_ty, name, th.bar_value, self.glassBg(th.bar_bg));
+        }
+        if (self.cfg_top_bar.has(.usage) and self.usage.len > 0) {
             const ufg = if (self.usage.worst >= 90)
                 th.ed_err
             else if (self.usage.worst >= 70)
@@ -4586,6 +4808,7 @@ pub const App = struct {
                 th.bar_fg;
             _ = ui.textRight(self.px_w - self.m.gutter, zone_ty, self.usage.slice(), ufg, self.glassBg(th.bar_bg));
         }
+        if (!self.cfg_top_bar.has(.tabs) or self.tab_h <= 0) return;
         // Chip TEXT lands on the same gutter the status bar's text does —
         // the two bars are the window's edges and must line up. The
         // label carries a leading pad space, so the box starts a cell
@@ -4597,24 +4820,7 @@ pub const App = struct {
 
             // " {n} {title} ", title truncated to keep chips tidy.
             var title_buf: [24]u8 = undefined;
-            var title: []const u8 = "shell";
-            switch (t.focused.content) {
-                .term => |*tm| {
-                    tm.session.mutex.lock();
-                    if (tm.session.term.getTitle()) |tt| {
-                        const n = @min(tt.len, title_buf.len);
-                        @memcpy(title_buf[0..n], tt[0..n]);
-                        if (n > 0) title = title_buf[0..n];
-                    }
-                    tm.session.mutex.unlock();
-                },
-                .edit => |ed| {
-                    const dn = ed.displayName();
-                    const n = @min(dn.len, title_buf.len);
-                    @memcpy(title_buf[0..n], dn[0..n]);
-                    if (n > 0) title = title_buf[0..n];
-                },
-            }
+            const title = tabTitle(t, &title_buf);
             // A belled tab wears a dot before its number. The bell says
             // "something wants you"; the dot says WHICH tab, which is
             // the half a dock bounce can't deliver.

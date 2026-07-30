@@ -218,6 +218,33 @@ a daily driver.
       Zig 0.16 gotcha: `std.time.nanoTimestamp` is gone too (joins the
       §7 list) — boot phases stamp with `CACurrentMediaTime`, the
       app's one clock.
+- [x] **Chrome as arrangement — the persona presets.** The two bars
+      render configurable SEGMENT LISTS from one vocabulary (tabs,
+      workspace, branch, cwd, hints, hud, usage, title): `top-bar` is
+      presence (tabs left, title center, usage right; `[]` hides the
+      strip and panes RECLAIM THE ROW — tab_h goes 0, real retile),
+      `status-left`/`status-right` are ordered — tmux's own keys.
+      drawBar became a segment engine: measure, then shed off the END
+      of the right list backward, then the left (a rule a user can
+      predict from their lists; the old hand-ordered priority
+      reproduced exactly by the default lists), cwd stays flexible
+      (fills the inter-cluster gap, reserves nothing, position in its
+      list not honored). `tab-style` gives the tabs segment its three
+      costumes: chips (top strip), index-name (tmux's `1:name` text
+      list), current (one compact chip; CLICK CYCLES). Segments keep
+      their click zones wherever they land — demoted tabs still
+      select; ctl `statusbar` reports the arrangement + per-chip
+      points, which is what the e2e diffs.
+      `preset = "tmux-neovim" | "vscode"` is a DEFAULTS LAYER expanded
+      before every other key regardless of line position (a bundle
+      that could shadow a key you wrote would make line order
+      load-bearing); the SDK expands the same bundles to explicit
+      nodes at emit time. The bundle exists twice by construction —
+      Zig's applyPreset and sdk/rook's Preset* — so two guards pin it:
+      the Go golden test, and e2e `presetparity` diffing a TOML-preset
+      instance against a graph instance on the live app's ctl output.
+      Hot reload of the arrangement RETILES (pty resizes and all, the
+      window-resize path). e2e `chrome` drives both personas blind.
 - [ ] **Theme engine**: one semantic Palette, 8 builtins, runtime swap,
       **VS Code theme importer**. rook has 2 builtins and a config key.
 - [ ] **Settings UI** (⌘,): appearance, keybinds, and the token panes

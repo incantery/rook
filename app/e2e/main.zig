@@ -54,6 +54,8 @@ const scenarios = [_]Scenario{
     .{ .name = "diffview", .what = "the diff view renders hunks, colours them, numbers by FILE line, and refuses edits", .run = diffView },
     .{ .name = "quitall", .what = ":qa reaches every editor pane and leaves the terminals alone", .run = quitAll },
     .{ .name = "envgraph", .what = "environment.json wins: the graph's leader and chords drive, config.toml yields", .run = envgraph },
+    .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
+    .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
 };
 
@@ -2245,4 +2247,136 @@ fn envgraph(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("press `");
     _ = try app.ctl("press c");
     try h.expectEq("tabs after toml leader", 2, try app.tabCount());
+}
+
+// -------------------------------------------------------------- chrome
+
+/// The active tab's number, off the `tabs` verb ("*[label] N (…" —
+/// the label is the sandbox's business, the number is ours).
+fn activeTabNo(app: *h.Instance) !usize {
+    const out = try app.ctl("tabs");
+    var it = std.mem.splitScalar(u8, out, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0 or line[0] != '*') continue;
+        const close = std.mem.indexOf(u8, line, "] ") orelse continue;
+        var i = close + 2;
+        var v: usize = 0;
+        var any = false;
+        while (i < line.len and line[i] >= '0' and line[i] <= '9') : (i += 1) {
+            v = v * 10 + (line[i] - '0');
+            any = true;
+        }
+        if (any) return v;
+    }
+    return error.AssertFailed;
+}
+
+fn waitActiveTab(app: *h.Instance, want: usize, timeout_ms: u32) !void {
+    var waited: u32 = 0;
+    while (waited < timeout_ms) {
+        if ((activeTabNo(app) catch 0) == want) return;
+        h.sleepMs(50);
+        waited += 50;
+    }
+    return error.Timeout;
+}
+
+/// The two personas as ARRANGEMENTS (docs/environments/VISION.md):
+/// same engine, different lists. tmux-neovim = no top strip, the tab
+/// list as text in the bottom bar; vscode = no top strip, a single
+/// current-tab chip that cycles. Both prove the demoted tabs still
+/// CLICK — a segment keeps its affordances wherever it lands.
+fn chrome(gpa: std.mem.Allocator, bin: []const u8) !void {
+    {
+        const app = try h.Instance.start(gpa, bin, .{ .config_extra = "preset = \"tmux-neovim\"" });
+        defer {
+            app.stop();
+            app.deinit();
+        }
+        const sb = try app.ctl("statusbar");
+        try h.expectContains(sb, "topbar\nleft tabs\nright workspace branch cwd\ntabstyle index_name", "tmux arrangement");
+        try h.expectContains(sb, "seg-tab1 ", "the tab list draws in the bar");
+        _ = try app.ctl("run tab.new");
+        _ = try app.waitCtl("statusbar", "seg-tab2", 5_000);
+        try h.expectEq("active tab after tab.new", 2, try activeTabNo(app));
+        const p = wkPoint(try app.ctl("statusbar"), "seg-tab1") orelse return error.AssertFailed;
+        _ = try app.ctlFmt("click {d} {d}", .{ p[0], p[1] });
+        try waitActiveTab(app, 1, 3_000);
+    }
+    {
+        const app = try h.Instance.start(gpa, bin, .{ .config_extra = "preset = \"vscode\"" });
+        defer {
+            app.stop();
+            app.deinit();
+        }
+        const sb = try app.ctl("statusbar");
+        try h.expectContains(sb, "topbar\nleft tabs branch\nright cwd hints\ntabstyle current", "vscode arrangement");
+        _ = try app.ctl("run tab.new");
+        _ = try app.waitCtl("statusbar", "seg-tab1", 5_000);
+        try h.expectEq("active tab after tab.new", 2, try activeTabNo(app));
+        // The compact chip cycles: 2 → 1 (wrapping past the end).
+        const p = wkPoint(try app.ctl("statusbar"), "seg-tab1") orelse return error.AssertFailed;
+        _ = try app.ctlFmt("click {d} {d}", .{ p[0], p[1] });
+        try waitActiveTab(app, 1, 3_000);
+    }
+}
+
+// -------------------------------------------------------- presetparity
+
+/// The preset bundle exists twice — Zig's applyPreset (TOML front end)
+/// and the Go SDK's expansion (sdk/rook, pinned by its golden test).
+/// Two definitions drift; this diffs them where it matters, on the
+/// LIVE app: a TOML `preset = "vscode"` instance and a graph instance
+/// carrying the options the SDK emits must report identical chrome.
+const parity_env_json =
+    \\{"rookEnvironment":1,"nodes":[
+    \\{"id":"option:app:top-bar","kind":"option","scope":"app","key":"top-bar","value":[]},
+    \\{"id":"option:app:status-left","kind":"option","scope":"app","key":"status-left","value":["tabs","branch"]},
+    \\{"id":"option:app:status-right","kind":"option","scope":"app","key":"status-right","value":["cwd","hints"]},
+    \\{"id":"option:app:tab-style","kind":"option","scope":"app","key":"tab-style","value":"current"},
+    \\{"id":"option:app:buffer-line","kind":"option","scope":"app","key":"buffer-line","value":true},
+    \\{"id":"option:app:font-family","kind":"option","scope":"app","key":"font-family","value":"Menlo"},
+    \\{"id":"option:app:font-size","kind":"option","scope":"app","key":"font-size","value":14},
+    \\{"id":"leader:app","kind":"leader","scope":"app","key":"`"}
+    \\]}
+;
+
+fn chromeLines(out: []const u8, buf: []u8) ![]const u8 {
+    // The arrangement lines only (topbar…tabstyle) — click points and
+    // branch/cwd values are each instance's own business.
+    const start = std.mem.indexOf(u8, out, "topbar") orelse return error.AssertFailed;
+    const end = std.mem.indexOfPos(u8, out, start, "\ntabstyle ") orelse return error.AssertFailed;
+    const line_end = std.mem.indexOfPos(u8, out, end + 1, "\n") orelse return error.AssertFailed;
+    const s = out[start .. line_end + 1];
+    if (s.len > buf.len) return error.AssertFailed;
+    @memcpy(buf[0..s.len], s);
+    return buf[0..s.len];
+}
+
+fn presetParity(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var toml_buf: [256]u8 = undefined;
+    var graph_buf: [256]u8 = undefined;
+
+    const a = try h.Instance.start(gpa, bin, .{ .config_extra = "preset = \"vscode\"" });
+    const toml_chrome = blk: {
+        defer {
+            a.stop();
+            a.deinit();
+        }
+        break :blk try chromeLines(try a.ctl("statusbar"), &toml_buf);
+    };
+
+    const b = try h.Instance.start(gpa, bin, .{ .env_json = parity_env_json });
+    const graph_chrome = blk: {
+        defer {
+            b.stop();
+            b.deinit();
+        }
+        break :blk try chromeLines(try b.ctl("statusbar"), &graph_buf);
+    };
+
+    if (!std.mem.eql(u8, toml_chrome, graph_chrome)) {
+        std.debug.print("    preset drift!\n    toml:  {s}\n    graph: {s}\n", .{ toml_chrome, graph_chrome });
+        return error.AssertFailed;
+    }
 }
