@@ -28,11 +28,6 @@
 //	                        --dry-run previews the batch in memory, writing nothing to rook.db
 //	                        subverbs: show [<id>], gate [<id>], approve|reject|defer <id…>, score-all, score <id> <json>
 //	rookctl tasks         list a workspace's RookTasks: rookctl tasks [-w ws] [--work-type review] [--json]
-//	rookctl plugin        plugin lifecycle: list, install <name>|--all, upgrade [<name>]
-//	rookctl lsp           language servers: status [-w ws], restart <server> [-w ws]
-//	rookctl def           go to definition: rookctl def <path>:<line>[:<col>] [-w ws]
-//	rookctl refs          find references, same shape; output is path:line:col: text
-//	rookctl hover         hover docs at a position, same shape
 //	rookctl decisions     the drafter's ledger, last 7 days, with the verdict mix
 //	rookctl edit          take over this pane with the editor, vim-style, until :q
 //	                        (`re` is a symlink shim: re [file|dir…]; bare re is the
@@ -172,16 +167,10 @@ func main() {
 		err = runReview(os.Args[2:])
 	case "tasks":
 		err = runTasks(os.Args[2:])
-	case "plugin":
-		err = runPlugin(os.Args[2:])
 	case "explore":
 		err = runExplore(os.Args[2:])
 	case "grep":
 		err = runGrep(os.Args[2:])
-	case "lsp":
-		err = runLSP(os.Args[2:])
-	case "def", "refs", "hover":
-		err = runLSPQuery(cmd, os.Args[2:])
 	case "decisions":
 		err = runDecisions()
 	case "set-openai-key":

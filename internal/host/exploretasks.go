@@ -11,9 +11,11 @@ package host
 // work list to drain.
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -127,4 +129,23 @@ func (h *Host) handleTaskVisit(w http.ResponseWriter, r *http.Request, id int64)
 		return
 	}
 	writeJSON(w, child)
+}
+
+// lineAt reads one line of a file — best-effort, bounded, never an error.
+// It lived in lsp.go until the host stopped speaking LSP; the anchor text
+// an explore task records is the last thing that wanted it.
+func lineAt(path string, line int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for i := 0; sc.Scan(); i++ {
+		if i == line {
+			return strings.TrimSpace(sc.Text())
+		}
+	}
+	return ""
 }
