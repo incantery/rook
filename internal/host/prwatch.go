@@ -6,7 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/incantery/rook/internal/tracker"
+	"github.com/incantery/rook/internal/config"
+	"github.com/incantery/rook/internal/provider"
 )
 
 // PR watching closes the loop after issue work (issue #3): the host polls
@@ -15,8 +16,18 @@ import (
 // and the workspace list carries the answer. Merged is the signal the
 // cleanup nudge hangs off. READ, NEVER MIRROR: this map is the only state,
 // gone with the process.
+//
+// The answer comes from the github PROVIDER (pulls.status), the same
+// process the issue queue asks — one gh, one lifecycle, one place the
+// code host is reached from.
 
-const prTick = 60 * time.Second
+const (
+	prTick = 60 * time.Second
+	// prTimeout bounds one branch's lookup. The poll is serial across
+	// workspaces (the provider takes one request at a time), so this is
+	// also the per-workspace share of a tick.
+	prTimeout = 15 * time.Second
+)
 
 // PRSnapshot is one worktree's close-the-loop picture. State "none" means
 // checked and no PR exists — distinct from absent (unknown: gh missing,
@@ -108,15 +119,15 @@ func (h *Host) pollPRs() {
 		if gitInfo(ws.Root) == nil {
 			continue // checkout gone or broken; keep any last-known snapshot
 		}
-		pr, err := tracker.PRStatus(ws.Root, ws.Branch)
+		pr, err := h.pullStatus(ws.Root, ws.Branch)
 		if err != nil {
-			// Unknown is not "none": gh missing, offline, or a non-GitHub
-			// remote. Say nothing rather than something wrong — the
-			// last-known snapshot (if any) stands.
+			// Unknown is not "none": gh missing, offline, a non-GitHub
+			// remote, or no provider installed. Say nothing rather than
+			// something wrong — the last-known snapshot (if any) stands.
 			continue
 		}
 		snap := PRSnapshot{State: "none", CheckedAt: time.Now()}
-		if pr != nil {
+		if pr.Found {
 			snap.State = strings.ToLower(pr.State)
 			snap.Number = pr.Number
 			snap.URL = pr.URL
@@ -136,4 +147,17 @@ func (h *Host) pollPRs() {
 		}
 	}
 	h.prm.keepOnly(seen)
+}
+
+// pullStatus asks the github provider about one branch. An error here is
+// always "unknown", never "no PR" — pullsStatus reports the absence of a
+// PR as a result, so anything that arrives as an error genuinely means
+// this device could not look.
+func (h *Host) pullStatus(root, branch string) (provider.PullsStatusResult, error) {
+	ctx, cancel := context.WithTimeout(h.ctx, prTimeout)
+	defer cancel()
+	var res provider.PullsStatusResult
+	err := providerClient("github", config.Load().Providers["github"]).
+		Call(ctx, provider.OpPullsStatus, provider.PullsStatusParams{Root: root, Branch: branch}, &res)
+	return res, err
 }

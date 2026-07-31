@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -49,14 +50,18 @@ type tomlFile struct {
 	Commands          map[string]string `toml:"commands"`
 	// Verify is [verify]: suite name → command line. See Config.Verify —
 	// it is argv, so it is user-config-only by construction.
-	Verify     map[string]string        `toml:"verify"`
-	Editor     *tomlEditor              `toml:"editor"`
-	Agent      *tomlAgent               `toml:"agent"`
-	Jira       *tomlJira                `toml:"jira"`
-	Relay      *tomlRelay               `toml:"relay"`
-	Cloud      *tomlCloud               `toml:"cloud"`
-	Workspaces map[string]tomlWorkspace `toml:"workspaces"`
-	LSP        *tomlLSP                 `toml:"lsp"`
+	Verify map[string]string `toml:"verify"`
+	Editor *tomlEditor       `toml:"editor"`
+	Agent  *tomlAgent        `toml:"agent"`
+	// Providers is [providers.<name>] — see Config.Providers. Decoded as
+	// `any` and stringified rather than typed: a provider's config is its
+	// own vocabulary, and a value shape rook did not anticipate must not
+	// fail the document (that is how one bad line costs the whole file).
+	Providers  map[string]map[string]any `toml:"providers"`
+	Relay      *tomlRelay                `toml:"relay"`
+	Cloud      *tomlCloud                `toml:"cloud"`
+	Workspaces map[string]tomlWorkspace  `toml:"workspaces"`
+	LSP        *tomlLSP                  `toml:"lsp"`
 }
 
 type tomlEditor struct {
@@ -71,12 +76,6 @@ type tomlAgent struct {
 	Engine      *string  `toml:"engine"`
 	Model       *string  `toml:"model"`
 	DailyCapUSD *float64 `toml:"daily-cap-usd"`
-}
-
-type tomlJira struct {
-	URL   *string `toml:"url"`
-	Email *string `toml:"email"`
-	JQL   *string `toml:"jql"`
 }
 
 // tomlRelay is [relay] — the rook-server an ask escalates to. Only the URL
@@ -95,7 +94,6 @@ type tomlCloud struct {
 }
 
 type tomlWorkspace struct {
-	JiraProject *string `toml:"jira-project"`
 	// BranchPrefix: present-and-empty means "no prefix" (matching a CI
 	// naming scheme exactly); absent falls back to rook/.
 	BranchPrefix    *string `toml:"branch-prefix"`
@@ -108,6 +106,27 @@ type tomlWorkspace struct {
 type tomlLSP struct {
 	Enable *[]string                `toml:"enable"`
 	Server map[string]tomlLSPServer `toml:"server"`
+}
+
+// providerValue renders one provider config value as the string it will
+// become in the environment. Scalars only: a provider's config is a flat
+// set of names, and a table or list here means the author expected rook to
+// interpret something it deliberately does not.
+func providerValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case bool:
+		if t {
+			return "true"
+		}
+		return "false"
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	}
+	return ""
 }
 
 // dropAppLSPScalar removes a TOP-LEVEL `lsp = <scalar>` line.
@@ -293,25 +312,27 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 	if f.Cloud != nil && f.Cloud.Edge != nil {
 		cfg.CloudEdge = *f.Cloud.Edge
 	}
-	if f.Jira != nil {
-		if f.Jira.URL != nil {
-			cfg.JiraURL = strings.TrimRight(*f.Jira.URL, "/")
+	for name, table := range f.Providers {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
 		}
-		if f.Jira.Email != nil {
-			cfg.JiraEmail = *f.Jira.Email
+		if cfg.Providers == nil {
+			cfg.Providers = map[string]map[string]string{}
 		}
-		if f.Jira.JQL != nil {
-			cfg.JiraJQL = *f.Jira.JQL
+		if cfg.Providers[name] == nil {
+			cfg.Providers[name] = map[string]string{}
+		}
+		for k, v := range table {
+			// An empty table is meaningful — it DECLARES the provider —
+			// so the map is created above regardless of what is in it.
+			if s := providerValue(v); s != "" {
+				cfg.Providers[name][strings.TrimSpace(k)] = s
+			}
 		}
 	}
 
 	for ws, w := range f.Workspaces {
-		if w.JiraProject != nil && *w.JiraProject != "" {
-			if cfg.JiraProjects == nil {
-				cfg.JiraProjects = map[string]string{}
-			}
-			cfg.JiraProjects[ws] = *w.JiraProject
-		}
 		if w.BranchPrefix != nil {
 			if cfg.BranchPrefixes == nil {
 				cfg.BranchPrefixes = map[string]string{}

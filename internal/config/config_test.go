@@ -128,9 +128,9 @@ func TestLoadTheme(t *testing.T) {
 	}
 }
 
-// JiraTokenStatus's file branch is cross-platform (keychain is darwin-only and
-// tested there); point Path() at a temp dir via XDG and exercise file/none.
-func TestJiraTokenStatusFile(t *testing.T) {
+// LinearTokenStatus is keychain-only — a provider-owned credential never
+// had a file fallback, and this pins that it did not grow one.
+func TestLinearTokenStatusHasNoFileFallback(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	if err := os.MkdirAll(filepath.Join(dir, "rook"), 0o755); err != nil {
@@ -138,27 +138,14 @@ func TestJiraTokenStatusFile(t *testing.T) {
 	}
 	var s Service
 
-	// none: no keychain item (test env), no file
-	if got := s.JiraTokenStatus(); got != "" && got != "keychain" {
-		t.Fatalf("clean env should be \"\" (or a stray keychain item); got %q", got)
-	}
-
-	// file, but world-readable → must be ignored (0600-tight rule)
-	tok := filepath.Join(dir, "rook", "jira-token")
-	if err := os.WriteFile(tok, []byte("abc_def\n"), 0o644); err != nil {
+	// A 0600-tight file is exactly what the OpenAI key accepts, and must
+	// still read as no credential here.
+	tok := filepath.Join(dir, "rook", "linear-token")
+	if err := os.WriteFile(tok, []byte("lin_api_abc\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.JiraTokenStatus(); got == "file" {
-		t.Fatalf("loose-perm token file must not count as a source")
-	}
-
-	// file, 0600 → "file" (assuming no keychain item shadowing it)
-	if err := os.Chmod(tok, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got := s.JiraTokenStatus()
-	if got != "file" && got != "keychain" {
-		t.Fatalf("tight token file should read as \"file\"; got %q", got)
+	if got := s.LinearTokenStatus(); got == "file" {
+		t.Fatalf("a provider credential has no file fallback; got %q", got)
 	}
 }
 

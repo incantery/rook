@@ -12,7 +12,7 @@
 //	rookctl approve       send a draft (optionally edited) into its window
 //	rookctl reject        decline a draft
 //	rookctl spawn         start a claude session: rookctl spawn [-w ws] [--worktree] <task…>
-//	rookctl issues        the workspace's work queue (GitHub + Jira, mine + unassigned)
+//	rookctl issues        the workspace's work queue (providers, mine + unassigned)
 //	rookctl changes       the workspace's changed files: rookctl changes [-w ws] [--base head|branch]
 //	rookctl threads       list a workspace's threads: rookctl threads [-w ws] [--pending] [--json]
 //	rookctl comment       start a pending thread: rookctl comment [-w ws] <path>:<a>[-<b>] <text…>
@@ -43,7 +43,7 @@
 //	rookctl mcp           stdio MCP server for Claude Code — the `ask` tool is
 //	                        `rookctl ask` behind tools/call (the rook plugin wires it)
 //	rookctl set-openai-key store the drafter's API key in the keychain
-//	rookctl set-jira-token store the Jira API token (queue credential) in the keychain
+//	rookctl set-linear-token store the Linear API key (queue credential) in the keychain
 //	rookctl set-relay-token store the rook-server bearer token in the keychain
 //	rookctl set-cloud-token store the rook-cloud machine token in the keychain
 //	rookctl claim         claude SessionStart hook body (stdin → host)
@@ -186,8 +186,8 @@ func main() {
 		err = runDecisions()
 	case "set-openai-key":
 		err = runSetOpenAIKey()
-	case "set-jira-token":
-		err = runSetJiraToken()
+	case "set-linear-token":
+		err = runSetLinearToken()
 	case "set-relay-token":
 		err = runSetRelayToken()
 	case "set-cloud-token":
@@ -660,16 +660,16 @@ func shellQuote(s string) string {
 
 // ---- set-openai-key ----
 
-// ---- issues (the work queue: GitHub + Jira behind the host) ----
+// ---- issues (the work queue: providers, behind the host) ----
 
 type issueRow struct {
-	Tracker string `json:"tracker"`
-	Key     string `json:"key"`
-	Title   string `json:"title"`
-	State   string `json:"state"`
-	Mine    bool   `json:"mine"`
-	URL     string `json:"url"`
-	Task    string `json:"task"`
+	Provider string `json:"provider"`
+	Key      string `json:"key"`
+	Title    string `json:"title"`
+	State    string `json:"state"`
+	Mine     bool   `json:"mine"`
+	URL      string `json:"url"`
+	Task     string `json:"task"`
 }
 
 type issuesResp struct {
@@ -847,7 +847,10 @@ func runWork(args []string) error {
 		// and the title lets the host derive a meaningful name
 		raw, err := c.req("POST", "/workspaces", map[string]any{
 			"worktreeFrom": ws,
-			"issue":        map[string]string{"tracker": issue.Tracker, "key": issue.Key, "title": issue.Title},
+			// The workspace's provenance field is still spelled "tracker" —
+			// it is a persisted registry column, and renaming it is a
+			// migration, not a rename.
+			"issue": map[string]string{"tracker": issue.Provider, "key": issue.Key, "title": issue.Title},
 		})
 		if err != nil {
 			return err
@@ -1690,19 +1693,22 @@ func runDecisions() error {
 	return nil
 }
 
-// runSetJiraToken mirrors runSetOpenAIKey for the issue queue's Jira
-// credential (api token from id.atlassian.com; email + url live in config).
-func runSetJiraToken() error {
+// runSetLinearToken mirrors runSetOpenAIKey for the issue queue's Linear
+// credential (a personal API key from Linear's Security & access settings).
+//
+// This is the only place rook touches the key: rook-provider-linear reads
+// it back out of the keychain itself, so the host never holds it.
+func runSetLinearToken() error {
 	cmd := exec.Command("security", "add-generic-password", "-U",
-		"-s", keychain.Service, "-a", keychain.JiraAccount, "-w")
+		"-s", keychain.Service, "-a", keychain.LinearAccount, "-w")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("security add-generic-password: %w", err)
 	}
-	if k, err := keychain.Get(keychain.Service, keychain.JiraAccount); err != nil || k == "" {
+	if k, err := keychain.Get(keychain.Service, keychain.LinearAccount); err != nil || k == "" {
 		return fmt.Errorf("stored, but read-back failed — is the login keychain locked?")
 	}
-	fmt.Println("jira token stored — set jira-url, jira-email, and jira-project-<workspace> in ~/.config/rook/config")
+	fmt.Println("linear key stored — add [providers.linear] to ~/.config/rook/config.toml to turn the queue on")
 	return nil
 }
 

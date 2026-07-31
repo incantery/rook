@@ -19,7 +19,10 @@ import (
 const (
 	Service       = "rook"
 	OpenAIAccount = "openai"
-	JiraAccount   = "jira"
+	// LinearAccount is the Linear API key. rook WRITES it and never reads
+	// it — rook-provider-linear is the only thing that fetches it back,
+	// which is what keeps the credential out of rook's address space.
+	LinearAccount = "linear"
 	// RelayAccount is the bearer token for the configured rook-server
 	// (relay-url in config). A secret that reaches a network service has
 	// no business sitting in a hand-edited file — and even less once

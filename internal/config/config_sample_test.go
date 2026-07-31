@@ -38,11 +38,11 @@ func TestSampleDefaults(t *testing.T) {
 	}
 	writeConfig(t, b.String())
 	got := Load()
-	// The placeholder/example keys (jira-*, workflow, keybind, verify-*,
+	// The placeholder/example keys (provider-*, workflow, keybind, verify-*,
 	// and the per-workspace dynamic keys) carry no meaningful default — zero
 	// them so the comparison is exactly the concrete-default scalar knobs.
-	got.JiraURL, got.JiraEmail, got.JiraJQL = "", "", ""
-	got.JiraProjects, got.BranchPrefixes, got.BranchDelimiters = nil, nil, nil
+	got.Providers = nil
+	got.BranchPrefixes, got.BranchDelimiters = nil, nil
 	got.Workflow, got.Workflows, got.Keybinds, got.Verify = nil, nil, nil, nil
 	got.LSP, got.LSPServers, got.LSPRefused = nil, nil, nil
 	if !reflect.DeepEqual(got, Default()) {
