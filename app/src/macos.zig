@@ -2847,7 +2847,6 @@ pub const App = struct {
     /// shared — which is exactly the file you were looking at.
     fn newEditorLocked(self: *App, path: ?[]const u8) ?*editorpkg.Editor {
         const ed = editorpkg.Editor.create(self.gpa, self.io, null) catch return null;
-        @import("syntax.zig").attach(ed, self.gpa);
         self.attachDocsLocked(ed);
         self.attachCommands(ed);
         if (path) |p| {

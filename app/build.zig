@@ -49,30 +49,19 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption([]const u8, "version", b.option([]const u8, "version", "release version (e.g. v0.38.0)") orelse "dev");
     exe_mod.addOptions("build_options", build_opts);
 
-    // Tree-sitter runtime + vendored grammars (parser-table C files).
-    exe_mod.addIncludePath(b.path("vendor/tree-sitter/include"));
-    exe_mod.addIncludePath(b.path("vendor/tree-sitter/src"));
-    exe_mod.addCSourceFile(.{ .file = b.path("vendor/tree-sitter/src/lib.c"), .flags = &.{"-std=c11"} });
-    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/zig/parser.c"), .flags = &.{"-std=c11"} });
-    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/go/parser.c"), .flags = &.{"-std=c11"} });
-    // Python needs its external scanner too — f-strings and the
-    // INDENT/DEDENT tokens are not expressible in the parse table, so a
-    // parser.c on its own links but fails on the first indented block.
-    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/python/parser.c"), .flags = &.{"-std=c11"} });
-    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/python/scanner.c"), .flags = &.{"-std=c11"} });
-    // Both TS grammars share one scanner (common/scanner.h) and one
-    // copy of tree-sitter's own headers, which that scanner includes
-    // unqualified — so the include path is what makes it resolve, and
-    // there is deliberately ONE copy rather than the two upstream ships.
-    exe_mod.addIncludePath(b.path("vendor/grammars/typescript/include"));
-    // TypeScript ships as TWO grammars, not one with a flag: in a .ts
-    // file `<T>x` is a type assertion, in a .tsx file it opens a JSX
-    // element. One table cannot be both, so tsx is its own parser and
-    // .ts gets the one that reads angle brackets as types.
-    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/typescript/typescript/src/parser.c"), .flags = &.{"-std=c11"} });
-    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/typescript/typescript/src/scanner.c"), .flags = &.{"-std=c11"} });
-    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/typescript/tsx/src/parser.c"), .flags = &.{"-std=c11"} });
-    exe_mod.addCSourceFile(.{ .file = b.path("vendor/grammars/typescript/tsx/src/scanner.c"), .flags = &.{"-std=c11"} });
+    // Syntax highlighting used to live here: the tree-sitter runtime plus
+    // five vendored grammars, compiled straight into the binary. That was
+    // 4.6MB of generated parse table in a 7.1MB rook — 940k lines of C
+    // nobody reads — and it is not how anyone else does it. neovim, helix,
+    // emacs and zed all LOAD grammars (dylibs, or wasm in zed's case);
+    // vscode does not even have parse tables, it interprets TextMate
+    // grammars as data.
+    //
+    // So it is out, and highlighting is gone with it until the loader
+    // lands. The seam survives: editor.Editor's hl_* hooks are nullable
+    // function pointers and an editor with none set renders plain text,
+    // which is exactly what headless tests have always exercised.
+    // docs/OWED.md carries what comes back and in what shape.
     exe_mod.linkFramework("AppKit", .{});
     exe_mod.linkFramework("Metal", .{});
     exe_mod.linkFramework("QuartzCore", .{});

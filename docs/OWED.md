@@ -54,6 +54,48 @@ key has to be put there by hand today:
 This one arguably belongs in the provider rather than in core: whoever
 owns a credential should own storing it.
 
+## 5. Syntax highlighting → a loaded grammar, not a linked one
+
+Five tree-sitter grammars were compiled into the binary: 940k lines of
+generated parse table, 4.6MB of a 7.1MB rook, with typescript and tsx
+alone accounting for 3MB. Removing them took the binary to 2.7MB.
+
+**rook was the outlier here, not the innovator.** Every other editor loads
+grammars rather than linking them:
+
+| editor | how |
+|---|---|
+| neovim | `.so` per grammar, `dlopen`'d; `:TSInstall <lang>` builds one |
+| helix | `.so` per grammar, built by `hx --grammar build` |
+| emacs | `.so`, via `treesit-install-language-grammar` |
+| zed | wasm extensions |
+| vscode | no parse tables at all — TextMate grammars are JSON data |
+
+The shape to come back in is the same one: a grammar is a dylib exporting
+one `tree_sitter_<name>` symbol plus a `<name>.scm` query beside it, and
+rook `dlopen`s it on first use of a matching extension. `ts_parser_set_language`
+takes a `*const TSLanguage` pointer and does not care where it came from,
+so this is a load path, not a redesign.
+
+Note what class of plugin that is. Everything that became a plugin in the
+strip was OUT of process — a subprocess speaking newline-JSON, because it
+was reaching an external system and latency did not matter. A parser runs
+on the frame budget and has to be in-process. So grammars want a NATIVE
+plugin seam (dylib, shared address space, no protocol) that rook does not
+have, and `docs/plugins/VOCABULARY.md` does not describe. That is the real
+work here — the loader itself is a hundred lines.
+
+The mechanism survived the deletion: `editor.Editor`'s `hl_reparse` /
+`hl_spans` / `hl_set_path` / `hl_destroy` are nullable function pointers,
+and an editor with none set renders plain text. That is the path headless
+tests have always taken, so it is proven rather than hoped. Whatever loads
+grammars next fills in the same four hooks.
+
+Half the language story already works this way: LSP servers are separate
+processes rook spawns from a catalog (`lspmgr.zig`), so diagnostics,
+go-to-definition and hover are unaffected by any of this. Only the grammar
+was welded in.
+
 ## What is NOT owed
 
 The daemon. `rook-host` served nobody by the end — the app owns its ptys
