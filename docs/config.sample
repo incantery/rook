@@ -75,21 +75,20 @@
 # coder = claude
 
 
-# ── Jira issue queue (host-read) ─────────────────────────────────────────
+# ── Providers (host-read, dynamic keys) ──────────────────────────────────
 #
-# jira-url and jira-email are global. A workspace opts into the queue with a
-# per-workspace jira-project key (below). The API token is NOT set here — it
-# lives in the keychain (see the secrets note at the bottom). Empty by
-# default, which leaves the queue off.
-
-# Your Jira site.
-# jira-url = https://your-org.atlassian.net
-
-# The account email the token belongs to.
-# jira-email = you@example.com
-
-# Overrides the default issue query. Left empty, rook uses its built-in JQL.
-# jira-jql = assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC
+# A provider is a separate process that owns rook's access to ONE external
+# system (`rook-provider-<name>`). `provider-<name>-<key> = value` is one
+# setting for one provider, handed to it as environment at spawn; rook
+# never interprets the value.
+#
+# Declaring a provider is what turns it on. `github` is the exception and
+# needs no line: it is inferred wherever a workspace is a git repo, and its
+# auth is the `gh` CLI's, so there is nothing to configure or store.
+#
+# Credentials are NOT set here — a provider fetches its own from the
+# keychain (see the secrets note at the bottom).
+# provider-linear-team = ENG
 
 
 # ── Workflow: staged review pipeline (host-read) ─────────────────────────
@@ -198,11 +197,6 @@
 # with the workspace's name. They have no global default — a workspace simply
 # has no override until you add its line.
 
-# Opt a workspace into the Jira queue by naming its project key. Both parts
-# matter: the <workspace> suffix picks the workspace, the value is the Jira
-# project key. No line means that workspace pulls no Jira issues.
-# jira-project-<workspace> = KEY
-
 # The worktree-branch prefix for a workspace. The value is used verbatim, so
 # bring your own trailing separator. Unset falls back to rook/. An explicitly
 # empty value (nothing after the =) means no prefix at all, so branches match a
@@ -225,14 +219,16 @@
 
 # ── Secrets are NOT file-managed ─────────────────────────────────────────
 #
-# The OpenAI key (the agent's credential) and the Jira API token never live
-# in this file — the config stays user-owned and safe to commit or share.
-# They live in the login keychain instead:
+# The OpenAI key (the agent's credential) and every provider's credential
+# never live in this file — the config stays user-owned and safe to commit
+# or share. They live in the login keychain instead:
 #
-#   rookctl set-jira-token        # stores the Jira API token
+#   rookctl set-linear-token      # stores the Linear API key
 #
-# The OpenAI key is set from the app. Each has a file fallback for
-# headless setups, and both must be tight 0600:
+# A provider's key is written by rook and read only by the provider, so it
+# is never in rook's memory at all.
+#
+# The OpenAI key is set from the app. It has a file fallback for headless
+# setups, which must be tight 0600:
 #
 #   ~/.config/rook/openai-key
-#   ~/.config/rook/jira-token

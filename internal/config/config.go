@@ -39,14 +39,21 @@ type Config struct {
 	// (nano vs haiku), so the default can't live here.
 	AgentModel       string  `json:"agentModel"`
 	AgentDailyCapUSD float64 `json:"agentDailyCapUsd"`
-	// Jira issue queue (host-read): jira-url + jira-email are global; a
-	// workspace opts in with `jira-project-<workspace> = KEY`. The API
-	// token lives in the keychain (rookctl set-jira-token), file fallback
-	// ~/.config/rook/jira-token. jira-jql replaces the default query.
-	JiraURL      string            `json:"jiraUrl"`
-	JiraEmail    string            `json:"jiraEmail"`
-	JiraJQL      string            `json:"jiraJql"`
-	JiraProjects map[string]string `json:"jiraProjects"`
+	// Providers is `[providers.<name>]` — one table per external system
+	// rook may ask questions of, and its contents are that provider's
+	// configuration, handed over as environment at spawn (see
+	// provider.Client.Env). Values are stringified: a provider's config is
+	// a flat set of names, not a schema rook has to know.
+	//
+	// A provider that can be INFERRED from a workspace does not need a
+	// table — github is on wherever the checkout is a git repo, because
+	// the remote is better evidence than a config line. One that cannot be
+	// inferred must be declared, which is what this table is for: nothing
+	// about a checkout implies a Linear workspace.
+	//
+	// Credentials are deliberately absent. A provider fetches its own, so
+	// a token never passes through rook's config, memory, or logs.
+	Providers map[string]map[string]string `json:"providers"`
 	// BranchPrefixes maps a workspace to its worktree-branch prefix,
 	// `branch-prefix-<workspace> = seth/`. The value is used verbatim
 	// (bring your own trailing separator); unset means rook/.
@@ -275,11 +282,17 @@ func applyKey(cfg *Config, key, value string, repoLayer bool) {
 		cfg.Verify[suite] = value
 		return
 	}
-	if ws, ok := strings.CutPrefix(key, "jira-project-"); ok && ws != "" && value != "" {
-		if cfg.JiraProjects == nil {
-			cfg.JiraProjects = map[string]string{}
+	// `provider-<name>-<key> = value` is the flat form of [providers.<name>].
+	if rest, ok := strings.CutPrefix(key, "provider-"); ok && value != "" {
+		if name, k, found := strings.Cut(rest, "-"); found && name != "" && k != "" {
+			if cfg.Providers == nil {
+				cfg.Providers = map[string]map[string]string{}
+			}
+			if cfg.Providers[name] == nil {
+				cfg.Providers[name] = map[string]string{}
+			}
+			cfg.Providers[name][k] = value
 		}
-		cfg.JiraProjects[ws] = value
 		return
 	}
 	// an EMPTY value is meaningful here: `branch-prefix-<ws> =` stores an
@@ -350,12 +363,6 @@ func applyKey(cfg *Config, key, value string, repoLayer bool) {
 		if f, err := strconv.ParseFloat(value, 64); err == nil && f >= 0 {
 			cfg.AgentDailyCapUSD = f
 		}
-	case "jira-url":
-		cfg.JiraURL = strings.TrimRight(value, "/")
-	case "jira-email":
-		cfg.JiraEmail = value
-	case "jira-jql":
-		cfg.JiraJQL = value
 	case "coder":
 		if value != "" {
 			cfg.Coder = value
@@ -478,24 +485,10 @@ func (s *Service) ClearOpenAIKey() error {
 	return keychain.Delete(keychain.Service, keychain.OpenAIAccount)
 }
 
-// JiraToken resolves the Jira API token: keychain first (service rook,
-// account jira — set via `rookctl set-jira-token`), then the
-// ~/.config/rook/jira-token file (must be 0600-tight, like the OpenAI
-// fallback). "" means the Jira queue is off.
-func JiraToken() string {
-	if t, err := keychain.Get(keychain.Service, keychain.JiraAccount); err == nil && strings.TrimSpace(t) != "" {
-		return strings.TrimSpace(t)
-	}
-	tokFile := filepath.Join(filepath.Dir(Path()), "jira-token")
-	if st, err := os.Stat(tokFile); err != nil || st.Mode().Perm()&0o077 != 0 {
-		return ""
-	}
-	data, err := os.ReadFile(tokFile)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
+// There is deliberately no LinearToken() here, and that absence is the
+// point of the provider split: rook-provider-linear fetches its own key
+// from the keychain, so a Linear credential never enters this process.
+// rook writes the key (SetLinearToken, below) and never reads it back.
 
 // RelayToken resolves the rook-server bearer token: keychain first
 // (account relay — `rookctl set-relay-token`), then the
@@ -558,7 +551,7 @@ func secretFrom(account, fileName string) string {
 
 // keyStatus reports where a usable secret lives: "keychain" if the keychain
 // holds it, else "file" if a 0600-tight fallback file exists and is non-empty,
-// else "". Shared by the OpenAI and Jira status methods.
+// else "". Shared by the credential status methods.
 func keyStatus(account, fileName string) string {
 	if k, err := keychain.Get(keychain.Service, account); err == nil && k != "" {
 		return "keychain"
@@ -576,23 +569,30 @@ func (s *Service) OpenAIKeyStatus() string {
 	return keyStatus(keychain.OpenAIAccount, "openai-key")
 }
 
-// SetJiraToken stores the Jira API token in the login keychain (service rook,
-// account jira). Entering it here — not on a shell — is why special characters
-// like underscores survive.
-func (s *Service) SetJiraToken(token string) error {
+// SetLinearToken stores the Linear API key in the login keychain (service
+// rook, account linear), where rook-provider-linear will look for it.
+// Entering it here — not on a shell — is why special characters survive.
+//
+// rook writes this and never reads it: the provider is the only thing
+// that ever holds a Linear credential.
+func (s *Service) SetLinearToken(token string) error {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return errors.New("empty token")
 	}
-	return keychain.Set(keychain.Service, keychain.JiraAccount, token)
+	return keychain.Set(keychain.Service, keychain.LinearAccount, token)
 }
 
-func (s *Service) ClearJiraToken() error {
-	return keychain.Delete(keychain.Service, keychain.JiraAccount)
+func (s *Service) ClearLinearToken() error {
+	return keychain.Delete(keychain.Service, keychain.LinearAccount)
 }
 
-// JiraTokenStatus reports where the token lives: "keychain", "file"
-// (~/.config/rook/jira-token, 0600), or "" for none.
-func (s *Service) JiraTokenStatus() string {
-	return keyStatus(keychain.JiraAccount, "jira-token")
+// LinearTokenStatus reports whether the keychain holds a key: "keychain"
+// or "". No file fallback — this credential is new, so it never had one,
+// and a provider-owned secret has no reason to grow one.
+func (s *Service) LinearTokenStatus() string {
+	if k, err := keychain.Get(keychain.Service, keychain.LinearAccount); err == nil && k != "" {
+		return "keychain"
+	}
+	return ""
 }

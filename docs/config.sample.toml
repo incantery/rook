@@ -256,22 +256,26 @@
 # daily-cap-usd = 1.00
 
 
-# ── Jira issue queue (host-read) ─────────────────────────────────────────
+# ── Providers (host-read) ────────────────────────────────────────────────
 #
-# url and email are global. A workspace opts into the queue with its
-# jira-project key (see [workspaces.<name>] below). The API token is NOT
-# set here — it lives in the keychain (see the secrets note at the bottom).
-# Absent leaves the queue off.
+# A provider is a separate process that owns rook's access to ONE external
+# system, and answers questions about it (`rook-provider-<name>`). One
+# table per provider; its contents are that provider's own configuration,
+# handed to it as environment at spawn. Nothing here is interpreted by
+# rook — a provider's settings are its vocabulary, not rook's.
+#
+# CREDENTIALS ARE NOT SET HERE, and not anywhere else in this file. A
+# provider fetches its own from the keychain (see the secrets note at the
+# bottom), so a token never passes through rook at all.
+#
+# Declaring a provider is what turns it on. The exception is `github`,
+# which needs no table: it is inferred wherever a workspace is a git repo,
+# because the checkout's own remote is better evidence than a config line.
+# It uses the `gh` CLI, so its auth is gh's and there is nothing to store.
 
-[jira]
-# Your Jira site.
-# url = "https://your-org.atlassian.net"
-
-# The account email the token belongs to.
-# email = "you@example.com"
-
-# Overrides the default issue query. Absent, rook uses its built-in JQL.
-# jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
+[providers.linear]
+# Restrict the queue to one team by key. Absent, every team you can see.
+# team = "ENG"
 
 
 # ── Remote asks (host-read) ──────────────────────────────────────────────
@@ -342,9 +346,6 @@
 # configures. A workspace simply has no override until its table names one.
 
 [workspaces.myproject]
-# Opt this workspace into the Jira queue by naming its Jira project key.
-# jira-project = "KEY"
-
 # The worktree-branch prefix. Used verbatim, so bring your own trailing
 # separator. Absent falls back to rook/. An explicitly EMPTY value ("")
 # means no prefix at all, so branches match a CI naming scheme exactly —
@@ -411,17 +412,19 @@
 
 # ── Secrets are NOT file-managed ─────────────────────────────────────────
 #
-# The OpenAI key (the agent's credential), the Jira API token, the
+# The OpenAI key (the agent's credential), the Linear API key, the
 # rook-server bearer token, and the rook-cloud machine token never live in
 # this file — the config stays user-owned and safe to commit or share. They
 # live in the login keychain instead:
 #
-#   rookctl set-jira-token        # stores the Jira API token
+#   rookctl set-linear-token      # stores the Linear API key
 #   rookctl set-relay-token       # stores the rook-server bearer token
 #   rookctl set-cloud-token       # stores the rook-cloud machine token
 #
-# The OpenAI key is set from the app. Each has a file fallback for
-# headless setups, and both must be tight 0600:
+# The Linear key is the one rook writes and never reads: the provider
+# fetches it back itself, so it is never in rook's memory.
+#
+# The OpenAI key is set from the app. It has a file fallback for headless
+# setups, which must be tight 0600:
 #
 #   ~/.config/rook/openai-key
-#   ~/.config/rook/jira-token

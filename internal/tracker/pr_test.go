@@ -1,7 +1,6 @@
 package tracker
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -55,16 +54,5 @@ func TestParsePRMergeable(t *testing.T) {
 	}
 	if pr.Mergeable != "" || pr.MergeStateStatus != "" {
 		t.Fatalf("absent mergeability must stay empty: %+v", pr)
-	}
-}
-
-func TestBuildTaskClosesLoop(t *testing.T) {
-	task := BuildTask(Issue{Tracker: "github", Key: "#3", Title: "close the loop"})
-	if !strings.Contains(task, "Closes #3") {
-		t.Fatalf("github task must ask for a Closes-linked PR: %q", task)
-	}
-	task = BuildTask(Issue{Tracker: "jira", Key: "INF-7", Title: "no gh here"})
-	if strings.Contains(task, "Closes") {
-		t.Fatalf("jira task must not carry the github PR line: %q", task)
 	}
 }

@@ -25,6 +25,12 @@ APP := /Applications/rook.app
 BUILD := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit).$(shell date +%Y%m%d%H%M%S)
 BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 
+# Providers: separate processes rook spawns to reach one external system
+# each (internal/provider). They are listed rather than globbed so that
+# adding one is a deliberate line in a diff — a provider is a thing that
+# holds a credential.
+PROVIDERS := ./cmd/rook-provider-github ./cmd/rook-provider-linear
+
 .PHONY: build dev prod install clean agent release release-stage e2e e2e-clean
 
 # Compile only, and deliberately so: there is no run target that skips
@@ -42,7 +48,7 @@ build:
 # EVICTED the daily driver's (host closes the old socket "replaced"), and
 # the frontend doesn't reconnect a replaced session — freezing the pane you
 # launched from until you opened a new window. Own daemon = no contact.
-# Config is sandboxed too, so re-enter Jira/OpenAI keys in the dev instance;
+# Config is sandboxed too, so re-enter Linear/OpenAI keys in the dev instance;
 # writes stay in rook-dev and never clobber your real ~/.config/rook.
 # XDG_DATA_HOME sandboxes DataDir (internal/host: registry.go rook.db +
 # worktree.go checkouts) — else dev shares the daily driver's rook.db, so
@@ -98,12 +104,17 @@ install:
 	cd app && zig build -Doptimize=ReleaseFast -Dbuild=$(BUILD) -Dversion=$(REL_VERSION)
 	go build -ldflags "$(STAMP_FLAGS)" -o app/zig-out/bin/rook-host ./cmd/rook-host
 	go build -ldflags "$(STAMP_FLAGS)" -o app/zig-out/bin/rookctl ./cmd/rookctl
+	@# Providers ship beside the host because that is where it looks for
+	@# them (provider.Client.resolve): beside-first, so a stale copy
+	@# earlier in PATH cannot shadow the one this build expects.
+	go build -ldflags "$(STAMP_FLAGS)" -o app/zig-out/bin/ $(PROVIDERS)
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS
 	sed 's/__VERSION__/$(REL_VERSION)/g' app/bundle/Info.plist > $(APP)/Contents/Info.plist
 	cp app/zig-out/bin/rook $(APP)/Contents/MacOS/rook
 	cp app/zig-out/bin/rook-host $(APP)/Contents/MacOS/rook-host
 	cp app/zig-out/bin/rookctl $(APP)/Contents/MacOS/rookctl
+	cp app/zig-out/bin/rook-provider-* $(APP)/Contents/MacOS/
 	@# Before codesign: the seal covers Resources. Degrades to a
 	@# fallback icon without Xcode rather than failing the build.
 	scripts/build-icon.sh $(APP)/Contents
