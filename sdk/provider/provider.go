@@ -61,6 +61,14 @@ const (
 	// host. A code-host capability rather than a tracker one — a
 	// Linear-tracked repo still merges through GitHub — so a provider may
 	// well offer one of these two and not the other.
+	//
+	// Nothing in rook calls it today: its consumer was the PR watcher,
+	// which polled per worktree to drive a close-the-loop nudge, and that
+	// left in the strip along with the surfaces the nudge reached. The op
+	// stays because this module is the PROTOCOL — a published capability
+	// is a promise to plugin authors, not an internal detail — and
+	// rook-provider-github implements and tests it. The next consumer is
+	// a plugin, not core.
 	OpPullsStatus = "pulls.status"
 )
 

@@ -81,10 +81,6 @@ type Host struct {
 	pt *procTable
 
 
-	// prm caches per-worktree PR state (WatchPRs) — the close-the-loop
-	// signal on workspace cards.
-	prm *prMon
-
 	// Lifecycle root for supervised children and probers. Shutdown cancels
 	// it — child processes must die with the host, or every daemon
 	// replacement leaks orphans.
@@ -108,7 +104,6 @@ func New() *Host {
 		reg:      loadRegistry(),
 		cwdCache: make(map[int]cwdEntry),
 		pt:       newProcTable(),
-		prm:      newPRMon(),
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
 	return h
@@ -432,12 +427,9 @@ func (h *Host) Handler() http.Handler {
 }
 
 // workspaceListItem is a WorkspaceInfo plus live-session count and, for
-// worktrees, the host-polled PR state (absent = unknown; old frontends
-// ignore the field — fail open on both sides).
 type workspaceListItem struct {
 	WorkspaceInfo
-	Sessions int         `json:"sessions"`
-	PR       *PRSnapshot `json:"pr,omitempty"`
+	Sessions int `json:"sessions"`
 }
 
 // allowSet turns the workspace-allow config list into a membership set, or
@@ -482,7 +474,7 @@ func (h *Host) workspaceList() []workspaceListItem {
 		if !allowedWorkspace(ws.Name, ws.WorktreeOf, allow) {
 			continue
 		}
-		out = append(out, workspaceListItem{WorkspaceInfo: *ws, Sessions: sessions, PR: h.prm.get(ws.Name)})
+		out = append(out, workspaceListItem{WorkspaceInfo: *ws, Sessions: sessions})
 	}
 	// live sessions in unregistered workspaces (pre-registry hosts)
 	for name, n := range counts {
@@ -723,7 +715,6 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		h.reg.remove(name)
-		h.prm.forget(name)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)

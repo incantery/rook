@@ -64,27 +64,21 @@ func main() {
 
 	log.Printf("rook-host %s (build %s) listening on 127.0.0.1:%d (pid %d)", version.Version, version.Build, port, os.Getpid())
 
-	// Everything supervised runs under the host's lifecycle context, so
-	// one Shutdown reaches every prober alike.
-	ctx := h.Context()
-	// PR state per worktree — the close-the-loop signal (merged → cleanup
-	// nudge). Absent gh just means the feature is off.
-	go h.WatchPRs(ctx)
-
 	// Die clean on replacement: SIGTERM (hostclient/rook-host upgrading
-	// past us) must take the supervised children down too — before this,
-	// every daemon replacement leaked its orphaned children.
+	// past us) cancels the lifecycle context, which is what anything
+	// spawned under it watches.
+	//
+	// There is nothing spawned under it today — agentmon, rook-agent, the
+	// usage prober and the PR watcher all left in the strip, and the beat
+	// this used to sleep for was theirs. The context and the signal
+	// handler stay because the daemon's whole reason to exist is owning
+	// ptys that outlive the app, and that is the seam they hang off.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
 	go func() {
 		s := <-sig
-		log.Printf("rook-host: %v — shutting down (children included)", s)
+		log.Printf("rook-host: %v — shutting down", s)
 		h.Shutdown()
-		// The usage prober's `claude -p /usage` is killed by ctx, and
-		// CommandContext kills asynchronously — give it a beat to land.
-		// (This used to be agentmon's beat; rook stopped spawning it on
-		// 2026-07-15, but the prober inherits the same need.)
-		time.Sleep(300 * time.Millisecond)
 		os.Exit(0)
 	}()
 
