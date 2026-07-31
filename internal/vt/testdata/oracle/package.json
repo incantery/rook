@@ -1,9 +1,0 @@
-{
-  "name": "vt-oracle",
-  "private": true,
-  "type": "module",
-  "description": "Ground-truth grid extractor for internal/vt fidelity tests: headless xterm.js 6.0.0, the same emulator version the app ships.",
-  "dependencies": {
-    "@xterm/headless": "6.0.0"
-  }
-}

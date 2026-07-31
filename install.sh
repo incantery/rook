@@ -2,10 +2,10 @@
 # rook installer:
 #   curl -fsSL https://raw.githubusercontent.com/incantery/rook/main/install.sh | sh
 #
-# Installs /Applications/rook.app and rookctl from the latest GitHub release.
+# Installs /Applications/rook.app from the latest GitHub release.
 # curl downloads never set the LaunchServices quarantine attribute, so the
 # ad-hoc-signed app launches without Gatekeeper prompts — this script (and
-# `rookctl update` after it) is the supported install path, not a browser
+# is the supported install path, not a browser
 # download. No sudo.
 set -eu
 
@@ -48,26 +48,25 @@ ditto "$tmp/stage/rook.app" /Applications/rook.app
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/rook.app
 mdimport /Applications/rook.app >/dev/null 2>&1 || true
 
-# rookctl → /usr/local/bin if writable, else ~/.local/bin
+# the CLI names → /usr/local/bin if writable, else ~/.local/bin
 bindir="/usr/local/bin"
 if [ ! -d "$bindir" ] || [ ! -w "$bindir" ]; then
     bindir="$HOME/.local/bin"
     mkdir -p "$bindir"
 fi
-# A real copy, not a link into the bundle: `rookctl update` resolves
-# symlinks and writes over what it finds, and rewriting a binary inside
-# the signed bundle would invalidate its signature.
-install -m 0755 "$tmp/stage/rookctl" "$bindir/rookctl"
-# `rook` is the app AND the CLI — verbs it doesn't own it hands to the
-# rookctl inside the bundle. `re` is `rook edit` by argv[0]; the name
-# used to belong to rookctl, and the zig editor claimed it.
+# `rook` is the app AND the CLI — one binary, no second process behind
+# it. `re` is `rook edit` by argv[0].
 ln -sf /Applications/rook.app/Contents/MacOS/rook "$bindir/rook"
 ln -sf /Applications/rook.app/Contents/MacOS/rook "$bindir/re"
+
+# rookctl was a real copy here until the Go core left. A stale one on
+# PATH talks to a daemon that no longer ships, so remove ours rather
+# than leave it to fail confusingly.
+[ -f "$bindir/rookctl" ] && rm -f "$bindir/rookctl"
 
 echo "installed rook $tag"
 echo "  rook    → $bindir/rook (the app, and the CLI)"
 echo "  re      → $bindir/re (the editor: re [file…])"
-echo "  rookctl → $bindir/rookctl"
 case ":$PATH:" in
     *":$bindir:"*) ;;
     *) echo "  note: $bindir is not on your PATH — add it to use rook" ;;
@@ -76,5 +75,6 @@ esac
 echo
 echo "next:"
 echo "  open -a rook           # launch"
-echo "  rookctl install-hooks  # let rook track claude sessions"
-echo "  rookctl update         # upgrade to future releases"
+echo
+echo "note: in-app self-update left with the Go core — re-run this"
+echo "      installer to upgrade until it lands again in Zig."

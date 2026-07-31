@@ -5,25 +5,20 @@
 //!   edit <file>     open a file in the running app's editor (`re`)
 //!   demo            headless proof: bytes → vt → screen dump
 //!   exec <cmd...>   run a command under a real PTY, dump the final screen
-//!   <anything else> handed to rookctl
 //!
-//! That last line is the CLI folding in: `rook` is the whole surface,
-//! and the Go binary behind the host verbs is an implementation detail.
-//! We EXEC rather than fork so stdio, exit status, and signals pass
-//! through untouched — `rook mcp` is a stdio server, and anything less
-//! than exec would sit in the middle of it. Each verb moves to Zig by
-//! being handled above this line and deleted from the Go side, which is
-//! the same one-endpoint-at-a-time migration PARITY.md §6 describes.
+//! Unknown verbs used to exec rookctl, which carried everything rook did
+//! over HTTP to a Go daemon. Both are gone: rook is one binary now, and
+//! anything it cannot do it does not pretend to hand off. What the CLI
+//! surface becomes is the ctl socket (ctl.zig) and, for external systems,
+//! providers (sdk/provider).
 
 const std = @import("std");
 const vt = @import("ghostty-vt");
 const ptypkg = @import("pty.zig");
-const hostc = @import("hostc.zig");
 
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]const u8;
 extern "c" fn chdir(path: [*:0]const u8) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
-extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 pub fn main(init: std.process.Init) !void {
     const argv = init.minimal.args.vector;
@@ -64,29 +59,8 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    return forward(argv);
-}
-
-/// Hand an unrecognised verb to rookctl, replacing this process.
-fn forward(argv: []const [*:0]const u8) !void {
-    var buf: [1024]u8 = undefined;
-    const path = hostc.siblingBinary("rookctl", &buf) orelse {
-        std.debug.print(
-            "rook: unknown command '{s}', and no rookctl beside the app or on PATH\n",
-            .{std.mem.span(argv[1])},
-        );
-        return error.UnknownCommand;
-    };
-    var args: [64:null]?[*:0]const u8 = undefined;
-    if (argv.len >= args.len) return error.TooManyArgs;
-    // argv[0] stays OUR name so rookctl's own argv[0] dispatch (re, -c,
-    // -k) can't fire on a forwarded verb — `re` is the editor now.
-    args[0] = "rook";
-    for (argv[1..], 1..) |a, i| args[i] = a;
-    args[argv.len] = null;
-    _ = execv(path.ptr, &args);
-    std.debug.print("rook: could not exec {s}\n", .{path});
-    return error.ExecFailed;
+    std.debug.print("rook: unknown command '{s}'\n", .{cmd});
+    return error.UnknownCommand;
 }
 
 const sockaddr_un = extern struct {

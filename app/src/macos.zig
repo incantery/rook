@@ -19,7 +19,6 @@ const editorpkg = @import("editor.zig");
 const workspacespkg = @import("workspaces.zig");
 const registrypkg = @import("registry.zig");
 const pastepkg = @import("paste.zig");
-const hostc = @import("hostc.zig");
 const themepkg = @import("theme.zig");
 const cfgpkg = @import("config.zig");
 const filelistpkg = @import("filelist.zig");
@@ -588,13 +587,6 @@ pub const App = struct {
     /// run where it is asked for.
     pending_quit_all: ?struct { write: bool, quit: bool, force: bool } = null,
 
-    /// rook-host: the daemon we spawned (or adopted) at launch, and the
-    /// port+token every host-backed panel will reach it through. Filled
-    /// by hostThread, read under host_lock — `host_up` is the only safe
-    /// gate on `host` being meaningful.
-    host: hostc.Handle = .{},
-    host_up: bool = false,
-    host_lock: sessionpkg.Lock = .{},
 
     /// IME state. `ime_marked` is PREEDIT — what the input method is
     /// composing and has not committed. It is drawn at the cursor and
@@ -1033,17 +1025,10 @@ pub const App = struct {
             std.debug.print("rook ctl: failed to start: {}\n", .{err});
         };
 
-        // rook-host: spawn (or adopt) the daemon. Off-thread because a
-        // cold start costs a health-poll of up to 5s, and the first
-        // frame owes nothing to the host — the terminal opens either way.
-        if (std.Thread.spawn(.{}, hostThread, .{self})) |t| t.detach() else |err| {
-            std.debug.print("rook host: thread failed: {}\n", .{err});
-        }
-
-        // …and take it down with us. Nothing runs while rook is closed:
-        // this notification is the app's last word before AppKit exits,
-        // and the ONLY path out of `NSApp run` we get to observe (a
-        // crash or SIGKILL skips it — see hostc.zig's known gap).
+        // The app's last word before AppKit exits, and the ONLY path out
+        // of `NSApp run` we get to observe. It reaped rook-host here; the
+        // daemon left in the strip and the observer is kept because it is
+        // the seam anything with a lifetime beyond the window hangs off.
         var term_ctx = ResizeBlock.init(.{ .app = self }, &terminateCallback);
         const nc = objc.getClass("NSNotificationCenter").?
             .msgSend(objc.Object, "defaultCenter", .{});
@@ -1092,17 +1077,6 @@ pub const App = struct {
         self.link = link;
 
         self.app.msgSend(void, "run", .{});
-    }
-
-    /// Take rook-host down. Idempotent, callable from any thread, and a
-    /// no-op unless the daemon is one our own spawn became — the whole
-    /// "nothing runs while rook is closed" rule lives in hostc.shutdown.
-    pub fn shutdownHost(self: *App) void {
-        self.host_lock.lock();
-        defer self.host_lock.unlock();
-        if (!self.host_up) return;
-        hostc.shutdown(&self.host);
-        self.host_up = false;
     }
 
     /// ctl `winsize`: resize the window from any thread (points, not px).
@@ -5861,36 +5835,10 @@ fn displayLinkCallback(link: CVDisplayLinkRef, now: ?*const anyopaque, output: ?
     return 0;
 }
 
-/// Reader thread, after a parsed chunk: render immediately if a
-/// keystroke is waiting on its echo IN THE FOCUSED PANE — a background
-/// pane's firehose must not burn the latency path. Pointer compare
-/// only; the session may not be dereferenced here.
-/// Background poll of the host's usage snapshot. 30s cadence — the
-/// host itself probes cost-weighted, this just mirrors its cache. A
-/// text change dirties the scene; an unreachable host clears the
-/// cluster (fail-open, nothing drawn).
-/// Bring rook-host up once at launch. Not a poll: the daemon is ours for
-/// the app's lifetime, and if it dies the panels that need it fail open
-/// the way the host-backed panels already do.
-fn hostThread(app: *App) void {
-    const h = hostc.ensure(app.gpa, app.io) orelse {
-        std.debug.print("rook host: no rook-host (panels that need it stay empty)\n", .{});
-        return;
-    };
-    app.host_lock.lock();
-    app.host = h;
-    app.host_up = true;
-    app.host_lock.unlock();
-}
-
-/// ⌘Q and every other AppKit route out of the app. ctl `quit` calls
-/// App.shutdownHost directly instead: it `_exit`s, which no notification
-/// survives, and a lever that leaked a daemon on every use would be a
-/// bad lever to verify this with.
-fn terminateCallback(context: *const ResizeBlock.Context, notification: objc.c.id) callconv(.c) void {
-    _ = notification;
-    context.app.shutdownHost();
-}
+/// ⌘Q and every other AppKit route out of the app. It used to take
+/// rook-host down here — the daemon left in the strip, and rook owns its
+/// ptys in-process, so there is nothing outliving the app to reap.
+fn terminateCallback(_: *const ResizeBlock.Context, _: objc.c.id) callconv(.c) void {}
 
 /// Authorization result. Nothing to do but say so once: a denied
 /// notification is the user's decision, and retrying would be nagging.

@@ -61,12 +61,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # ./... covers every Go package now. It used to be an allow-list,
-      # because the webview app dragged in two packages that could not
-      # build on a Linux runner — cmd/rook (GTK4/webkitgtk headers) and
-      # the build/ios scaffold (a main that only exists under the `ios`
-      # tag). Both are gone, and an allow-list silently misses new
-      # packages, so this is a list no more.
+      # ./... is providers/, sdk/ and spike/ now — core is Zig, and the
+      # zig job above is the one that gates the app.
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.7.2

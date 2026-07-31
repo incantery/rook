@@ -1,2 +1,0 @@
-go test fuzz v1
-string("\x1bV0\r\x1b[K")

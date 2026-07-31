@@ -1,2 +1,0 @@
-go test fuzz v1
-string("떅\b\b\x1b[1@")

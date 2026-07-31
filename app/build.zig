@@ -238,19 +238,6 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(lsp_tests).step);
 
-    // hostc's HTTP framing. Its own root because of the chunked-encoding
-    // bug this exists to prevent: Go switches to chunked once a response
-    // outgrows its write buffer, so EVERY panel worked until the first
-    // big one, and the symptom was a JSON parse error that read as "the
-    // host sent garbage" rather than "we failed to decode it".
-    const hostc_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/hostc.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    hostc_tests.root_module.link_libc = true;
-    test_step.dependOn(&b.addRunArtifact(hostc_tests).step);
-
     // Running git, and the repo-path guard. Its own root because both
     // halves fail silently when wrong: `git diff --no-index` exits 1 for
     // "the files differ", so a runner that read nonzero as failure would

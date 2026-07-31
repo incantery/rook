@@ -1,5 +1,0 @@
-[2J[Hprimary top line
-primary second line
-[?1049h[HALT: this is the alternate screen
-alt line two[?1049lprimary third line after alt
-[?1049h[2J[10;30Hcentered alt content[?1049lprimary final line
