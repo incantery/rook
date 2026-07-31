@@ -33,6 +33,30 @@
 //! recorded on the handle so `ctl plugins` can show it, because "the panel
 //! is empty" and "the plugin died" look identical from the outside and are
 //! not the same problem.
+//!
+//! # Both directions, and why that needs a pump
+//!
+//! rook asks (`items.list`, `items.act`) and the plugin asks back
+//! (`attention.raise`, `session.spawn`). The second direction is the whole
+//! reason there is a thread here instead of a blocking read.
+//!
+//! A plugin that can only speak when spoken to cannot raise attention: the
+//! event that needs a human happens when nobody is asking, and a frame
+//! nobody reads sits in a pipe. So the pump owns `from_child` and runs for
+//! as long as the plugin is up. Responses go to whoever is waiting;
+//! requests are dispatched. `lsp.zig` has the same shape for the same
+//! reason — a language server publishes diagnostics unprompted too.
+//!
+//! The interleaving is the part that would break a naive client: a plugin
+//! may raise attention WHILE answering an items.act, so a reader that
+//! assumed the next frame was its response would take the request for an
+//! answer, fail the id check, and kill a plugin that did nothing wrong.
+//!
+//! `grants` covers both directions, because it is a list of capabilities
+//! rather than a list of things rook may do. `items.list` granted means
+//! rook may ask; `session.spawn` granted means the plugin may. The
+//! direction is inherent to the verb, and one list is what a human can
+//! actually read.
 
 const std = @import("std");
 const cfgpkg = @import("config.zig");
@@ -57,6 +81,21 @@ extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 extern "c" fn poll(fds: [*]PollFd, n: c_uint, timeout: c_int) c_int;
 extern "c" fn getdtablesize() c_int;
 extern "c" fn _exit(code: c_int) noreturn;
+extern "c" fn os_unfair_lock_lock(lock: *u32) void;
+extern "c" fn os_unfair_lock_unlock(lock: *u32) void;
+
+/// The same lock lsp.zig and session.zig use. std has no Mutex in this Zig
+/// and the app has settled on os_unfair_lock; a third answer here would be
+/// a third thing to reason about.
+const Lock = struct {
+    raw: u32 = 0,
+    fn lock(self: *Lock) void {
+        os_unfair_lock_lock(&self.raw);
+    }
+    fn unlock(self: *Lock) void {
+        os_unfair_lock_unlock(&self.raw);
+    }
+};
 
 // macOS `struct timeval`. CACurrentMediaTime is the app's clock, but it
 // lives in QuartzCore and this file has its own test root that links only
@@ -85,6 +124,15 @@ pub const version = 1;
 pub const default_deadline_ms: i32 = 10_000;
 pub const grace_ms: i32 = 250;
 
+/// The largest frame the pump will assemble. A plugin that sends more than
+/// this loses the frame and is told so — the alternative is a buffer that
+/// grows until the app dies, which is a plugin taking rook with it.
+pub const max_frame = 1 << 20;
+
+/// The inbound verbs: the ones a PLUGIN calls.
+pub const op_raise = "attention.raise";
+pub const op_spawn = "session.spawn";
+
 pub const Load = enum { lazy, eager };
 
 /// One declaration, off the environment graph.
@@ -101,6 +149,76 @@ pub const Spec = struct {
 };
 
 pub const State = enum { declared, up, failed };
+
+/// Split a byte stream into newline-delimited frames.
+///
+/// Sans-io on purpose: framing is where a protocol client is usually
+/// wrong, and every interesting case — a frame split across reads, several
+/// frames in one read, a frame too big to hold — is reachable here without
+/// a subprocess, a pipe or a clock.
+///
+/// A returned frame borrows `buf` and stays valid only until the next
+/// `next()`, which is when the leftover is shifted down.
+pub const FrameReader = struct {
+    buf: [max_frame]u8 = undefined,
+    used: usize = 0,
+    consume: usize = 0,
+    /// A frame that would not fit was thrown away, and the bytes after it
+    /// are the tail of something the caller never saw. Reported rather
+    /// than silently resynced: a caller that gets half a frame's worth of
+    /// JSON should know why it did not parse.
+    overflowed: bool = false,
+
+    pub fn feed(self: *FrameReader, bytes: []const u8) void {
+        var rest = bytes;
+        while (rest.len > 0) {
+            const room = self.buf.len - self.used;
+            if (room == 0) {
+                // No newline in a full buffer: the frame is too big. Drop
+                // what we have and resync on the next newline rather than
+                // handing the caller a truncated frame that would parse
+                // into something wrong.
+                self.overflowed = true;
+                self.used = 0;
+                self.consume = 0;
+                if (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
+                    rest = rest[nl + 1 ..];
+                    continue;
+                }
+                return;
+            }
+            const n = @min(room, rest.len);
+            @memcpy(self.buf[self.used..][0..n], rest[0..n]);
+            self.used += n;
+            rest = rest[n..];
+        }
+    }
+
+    pub fn next(self: *FrameReader) ?[]const u8 {
+        if (self.consume > 0) {
+            std.mem.copyForwards(u8, self.buf[0..], self.buf[self.consume..self.used]);
+            self.used -= self.consume;
+            self.consume = 0;
+        }
+        const nl = std.mem.indexOfScalar(u8, self.buf[0..self.used], '\n') orelse return null;
+        self.consume = nl + 1;
+        return self.buf[0..nl];
+    }
+};
+
+/// What the host does when a plugin asks for something.
+///
+/// A function pointer rather than an import, because the app owns panes and
+/// notifications and this file must not know about either — plugins.zig is
+/// linked into a test root that has no window.
+///
+/// Returns null when it worked, or a short reason when it did not. The
+/// reason goes back to the plugin, so it has to be something a plugin
+/// author can act on.
+pub const Host = struct {
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, plugin: []const u8, op: []const u8, params: []const u8) ?[]const u8,
+};
 
 /// What `describe` said. Recorded verbatim, including capabilities the
 /// plugin was NOT granted — that difference is the thing worth showing.
@@ -139,6 +257,47 @@ pub const Plugin = struct {
     seq: u64 = 0,
     desc: Describe = .{},
 
+    /// Where an inbound verb goes. Null in tests and before the app wires
+    /// itself up; a plugin that asks then gets a refusal rather than a
+    /// silence, which is the difference between "rook said no" and "rook
+    /// is broken".
+    host: ?Host = null,
+
+    // ---- the pump ----
+    //
+    // It owns `from_child` for as long as the plugin is up. Nothing else
+    // reads that fd, which is what makes an unsolicited frame reachable.
+    pump: ?std.Thread = null,
+    quit: std.atomic.Value(bool) = .init(false),
+    /// How the pump is woken to notice `quit` without waiting out its
+    /// poll — closing the fd it is polling would be a race against fd
+    /// reuse. Same trick as lsp.zig.
+    wake_r: c_int = -1,
+    wake_w: c_int = -1,
+
+    mu: Lock = .{},
+    /// The one in-flight call. Requests are serialised by `call_mu`, so
+    /// there is at most one waiter — the echoed id is checked anyway,
+    /// because that is what will make this safe to widen later.
+    waiting_id: u64 = 0,
+    waiting_buf: []u8 = &.{},
+    waiting_len: usize = 0,
+    waiting_ready: bool = false,
+    waiting_toobig: bool = false,
+    /// How the pump tells a waiting caller its answer has landed. A pipe
+    /// rather than a condition variable because there is no Mutex in this
+    /// Zig's std to pair one with, and because `poll` — already the way
+    /// every deadline in this file is enforced — takes an fd.
+    reply_r: c_int = -1,
+    reply_w: c_int = -1,
+    /// Held across a whole request/response pair. Without it two callers
+    /// (the panel's fetch and its act, on different workers) would
+    /// interleave writes and race for one reply slot.
+    call_mu: Lock = .{},
+    /// The pump answers inbound requests while a caller may be sending
+    /// one; two writers on one pipe would interleave mid-frame.
+    write_mu: Lock = .{},
+
     pub fn errStr(self: *const Plugin) []const u8 {
         return self.err[0..self.err_len];
     }
@@ -151,13 +310,24 @@ pub const Plugin = struct {
     }
 
     pub fn stop(self: *Plugin) void {
-        if (self.to_child >= 0) {
-            _ = close(self.to_child);
-            self.to_child = -1;
+        // The pump goes first and joins, because it is holding
+        // `from_child`: closing an fd another thread is polling is a race
+        // against whatever opens next and gets that number.
+        if (self.pump) |t| {
+            self.quit.store(true, .release);
+            const byte = [_]u8{1};
+            if (self.wake_w >= 0) _ = write(self.wake_w, &byte, 1);
+            t.join();
+            self.pump = null;
         }
-        if (self.from_child >= 0) {
-            _ = close(self.from_child);
-            self.from_child = -1;
+        // Anyone still waiting is waiting forever otherwise.
+        self.wakeWaiter();
+
+        for ([_]*c_int{ &self.to_child, &self.from_child, &self.wake_r, &self.wake_w, &self.reply_r, &self.reply_w }) |fd| {
+            if (fd.* >= 0) {
+                _ = close(fd.*);
+                fd.* = -1;
+            }
         }
         if (self.pid > 0) {
             _ = kill(self.pid, SIGKILL);
@@ -180,9 +350,136 @@ pub const Plugin = struct {
             return false;
         }
         if (!self.spawn(gpa)) return false;
+        // The pump before the handshake: describe is itself a call, and
+        // calls get their answers from the pump.
+        self.pump = std.Thread.spawn(.{}, pumpLoop, .{ self, gpa }) catch {
+            self.fail("could not start its reader", .{});
+            return false;
+        };
         if (!self.handshake(gpa)) return false;
         self.state = .up;
         return true;
+    }
+
+    /// Read frames for as long as the plugin is up: answers to whoever is
+    /// waiting, requests to the host.
+    fn pumpLoop(self: *Plugin, gpa: std.mem.Allocator) void {
+        const fr = gpa.create(FrameReader) catch return;
+        defer gpa.destroy(fr);
+        fr.* = .{};
+
+        var chunk: [64 * 1024]u8 = undefined;
+        while (!self.quit.load(.acquire)) {
+            var fds = [_]PollFd{
+                .{ .fd = self.from_child, .events = POLLIN, .revents = 0 },
+                .{ .fd = self.wake_r, .events = POLLIN, .revents = 0 },
+            };
+            const r = poll(&fds, 2, 1000);
+            if (r < 0) return;
+            if (fds[1].revents != 0) return; // stop() rang
+            if (fds[0].revents == 0) continue;
+
+            const n = read(self.from_child, &chunk, chunk.len);
+            if (n <= 0) {
+                // EOF: the plugin exited. Wake the waiter rather than
+                // letting it sit out a ten-second deadline for an answer
+                // that is never coming.
+                self.wakeWaiter();
+                return;
+            }
+            fr.feed(chunk[0..@intCast(n)]);
+            while (fr.next()) |frame| self.route(frame);
+        }
+    }
+
+    /// One frame: an answer, or something the plugin is asking for.
+    ///
+    /// Told apart by `op`. A response never carries one, so this needs no
+    /// bookkeeping about which ids are outstanding — which matters,
+    /// because a request arriving mid-call is the normal case, not an edge
+    /// one.
+    fn route(self: *Plugin, frame: []const u8) void {
+        if (frameHas(frame, "\"op\"")) {
+            self.inbound(frame);
+            return;
+        }
+        self.mu.lock();
+        defer self.mu.unlock();
+        const id = frameId(frame) orelse return; // addressed to nobody
+        if (self.waiting_id == 0 or id != self.waiting_id) return; // late, or for a call that gave up
+        if (frame.len > self.waiting_buf.len) {
+            self.waiting_toobig = true;
+        } else {
+            @memcpy(self.waiting_buf[0..frame.len], frame);
+            self.waiting_len = frame.len;
+        }
+        self.waiting_ready = true;
+        self.ring();
+    }
+
+    /// Tell the caller its slot is filled. One byte; the reader drains
+    /// whatever is there, so a stale byte from a call that timed out only
+    /// costs one extra pass round the poll loop.
+    fn ring(self: *Plugin) void {
+        const byte = [_]u8{1};
+        if (self.reply_w >= 0) _ = write(self.reply_w, &byte, 1);
+    }
+
+    /// The plugin is gone; release whoever is waiting on it. `waiting_id`
+    /// cleared with `ready` set is how the caller tells this from an
+    /// answer that actually arrived.
+    fn wakeWaiter(self: *Plugin) void {
+        self.mu.lock();
+        const had = self.waiting_id != 0;
+        self.waiting_id = 0;
+        self.waiting_ready = true;
+        self.mu.unlock();
+        if (had) self.ring();
+    }
+
+    /// A verb the plugin called. Grant-checked here, in the one place that
+    /// already knows what was granted — the direction differs but the
+    /// question does not.
+    fn inbound(self: *Plugin, frame: []const u8) void {
+        const id = frameId(frame) orelse return;
+        const op = frameOp(frame) orelse {
+            self.answer(id, false, "no op");
+            return;
+        };
+        if (!self.spec.granted(op)) {
+            // Named, not vague. A plugin author reading "not granted:
+            // session.spawn" knows to ask the human for it; "refused"
+            // sends them into their own code looking for a bug.
+            var b: [96]u8 = undefined;
+            self.answer(id, false, std.fmt.bufPrint(&b, "not granted: {s}", .{op}) catch "not granted");
+            return;
+        }
+        const h = self.host orelse {
+            self.answer(id, false, "rook cannot do that here");
+            return;
+        };
+        // Verbatim: the host parses its own params, because only it knows
+        // what session.spawn's look like.
+        const params = frameParams(frame);
+        if (h.call(h.ctx, self.spec.name, op, params)) |why| {
+            self.answer(id, false, why);
+        } else {
+            self.answer(id, true, "");
+        }
+    }
+
+    fn answer(self: *Plugin, id: u64, ok: bool, why: []const u8) void {
+        var buf: [512]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        w.print("{{\"v\":{d},\"id\":{d},\"ok\":{s}", .{ version, id, if (ok) "true" else "false" }) catch return;
+        if (!ok) {
+            w.writeAll(",\"error\":") catch return;
+            jsonString(&w, why) catch return;
+        }
+        w.writeAll("}\n") catch return;
+        self.write_mu.lock();
+        defer self.write_mu.unlock();
+        _ = writeAll(self.to_child, buf[0..w.end]);
     }
 
     fn spawn(self: *Plugin, gpa: std.mem.Allocator) bool {
@@ -195,6 +492,18 @@ pub const Plugin = struct {
         if (pipe(&out_fds) != 0) {
             _ = close(in_fds[0]);
             _ = close(in_fds[1]);
+            self.fail("pipe failed", .{});
+            return false;
+        }
+        var wake_fds: [2]c_int = undefined;
+        if (pipe(&wake_fds) != 0) {
+            for ([_]c_int{ in_fds[0], in_fds[1], out_fds[0], out_fds[1] }) |fd| _ = close(fd);
+            self.fail("pipe failed", .{});
+            return false;
+        }
+        var reply_fds: [2]c_int = undefined;
+        if (pipe(&reply_fds) != 0) {
+            for ([_]c_int{ in_fds[0], in_fds[1], out_fds[0], out_fds[1], wake_fds[0], wake_fds[1] }) |fd| _ = close(fd);
             self.fail("pipe failed", .{});
             return false;
         }
@@ -217,10 +526,7 @@ pub const Plugin = struct {
 
         const child = fork();
         if (child < 0) {
-            _ = close(in_fds[0]);
-            _ = close(in_fds[1]);
-            _ = close(out_fds[0]);
-            _ = close(out_fds[1]);
+            for ([_]c_int{ in_fds[0], in_fds[1], out_fds[0], out_fds[1], wake_fds[0], wake_fds[1], reply_fds[0], reply_fds[1] }) |fd| _ = close(fd);
             self.fail("fork failed", .{});
             return false;
         }
@@ -248,6 +554,10 @@ pub const Plugin = struct {
         self.pid = child;
         self.to_child = in_fds[1];
         self.from_child = out_fds[0];
+        self.wake_r = wake_fds[0];
+        self.wake_w = wake_fds[1];
+        self.reply_r = reply_fds[0];
+        self.reply_w = reply_fds[1];
         return true;
     }
 
@@ -308,9 +618,13 @@ pub const Plugin = struct {
         return self.rpc(gpa, op, params_json, default_deadline_ms, buf);
     }
 
-    /// One request, one response. No pipelining: `id` is echoed and
-    /// checked, so the framing can grow to concurrent calls later without
-    /// a wire change, but nothing needs it yet.
+    /// One request, one response — sent here, delivered by the pump.
+    ///
+    /// The id is registered BEFORE the write. A plugin that answers
+    /// instantly would otherwise be answering a call the pump has not been
+    /// told to expect, and the frame would be dropped as addressed to
+    /// nobody. That race is not theoretical: the e2e's fixture is a shell
+    /// loop that answers in microseconds.
     fn rpc(
         self: *Plugin,
         gpa: std.mem.Allocator,
@@ -320,11 +634,16 @@ pub const Plugin = struct {
         buf: []u8,
     ) ?[]const u8 {
         _ = gpa;
+        // One call at a time. Two panel workers can reach the same plugin.
+        self.call_mu.lock();
+        defer self.call_mu.unlock();
+
         self.seq += 1;
+        const id = self.seq;
         var req: [4096]u8 = undefined;
         const line = std.fmt.bufPrint(&req, "{{\"v\":{d},\"id\":{d},\"op\":\"{s}\",\"deadlineMs\":{d}{s}{s}}}\n", .{
             version,
-            self.seq,
+            id,
             op,
             @max(deadline_ms - grace_ms, 1),
             if (params_json.len > 0) ",\"params\":" else "",
@@ -333,32 +652,79 @@ pub const Plugin = struct {
             self.fail("request too large", .{});
             return null;
         };
-        if (!writeAll(self.to_child, line)) {
-            self.fail("plugin closed its input", .{});
-            return null;
-        }
 
-        const n = readFrame(self.from_child, buf, deadline_ms) orelse {
-            self.fail("no answer in {d}ms", .{deadline_ms});
-            return null;
-        };
-        const frame = buf[0..n];
+        self.mu.lock();
+        self.waiting_id = id;
+        self.waiting_buf = buf;
+        self.waiting_len = 0;
+        self.waiting_ready = false;
+        self.waiting_toobig = false;
+        self.mu.unlock();
 
-        // The echoed id is what will make this framing safe to grow to
-        // concurrent calls. Checking it now means a plugin that answers out
-        // of order is caught the first time, rather than after the change
-        // that makes it matter — at which point the symptom would be one
-        // panel showing another panel's data.
-        if (frameId(frame)) |got| {
-            if (got != self.seq) {
-                self.fail("answered id {d}, asked {d}", .{ got, self.seq });
+        {
+            self.write_mu.lock();
+            defer self.write_mu.unlock();
+            if (!writeAll(self.to_child, line)) {
+                self.clearWaiter();
+                self.fail("plugin closed its input", .{});
                 return null;
             }
-        } else {
-            self.fail("answer carried no id", .{});
+        }
+
+        var left = @max(deadline_ms, 1);
+        while (true) {
+            self.mu.lock();
+            const ready = self.waiting_ready;
+            self.mu.unlock();
+            if (ready) break;
+
+            var pfd = [_]PollFd{.{ .fd = self.reply_r, .events = POLLIN, .revents = 0 }};
+            const start = nowMs();
+            const r = poll(&pfd, 1, left);
+            if (r > 0) {
+                var drain: [64]u8 = undefined;
+                _ = read(self.reply_r, &drain, drain.len);
+            }
+            // The CLOCK decides how much deadline is left, not the number
+            // of times round this loop — a stale wake byte would otherwise
+            // buy the plugin another full deadline every time.
+            const spent: i32 = @intCast(@min(@as(i64, std.math.maxInt(i32)), nowMs() - start));
+            left -= @max(spent, 0);
+            if (r <= 0 or left <= 0) {
+                self.mu.lock();
+                const late = self.waiting_ready;
+                if (!late) self.waiting_id = 0;
+                self.mu.unlock();
+                if (late) break; // it landed in the gap; take it
+                self.fail("no answer in {d}ms", .{deadline_ms});
+                return null;
+            }
+        }
+
+        self.mu.lock();
+        const matched = self.waiting_id == id;
+        const toobig = self.waiting_toobig;
+        const len = self.waiting_len;
+        self.waiting_id = 0;
+        self.mu.unlock();
+
+        // The pump only ever fills this for the id it was given, so a
+        // cleared one means the plugin went away underneath us.
+        if (!matched) {
+            self.fail("exited without answering", .{});
             return null;
         }
-        return frame;
+        if (toobig) {
+            self.fail("answer larger than {d} bytes", .{buf.len});
+            return null;
+        }
+        return buf[0..len];
+    }
+
+    fn clearWaiter(self: *Plugin) void {
+        self.mu.lock();
+        self.waiting_id = 0;
+        self.mu.unlock();
     }
 };
 
@@ -372,6 +738,71 @@ fn frameId(frame: []const u8) ?u64 {
     while (i < frame.len and frame[i] >= '0' and frame[i] <= '9') i += 1;
     if (i == start) return null;
     return std.fmt.parseInt(u64, frame[start..i], 10) catch null;
+}
+
+/// Whether a key appears at the top level of a frame.
+///
+/// A substring search, and that is a deliberate limit: it would also match
+/// `"op"` inside a string value. It decides ONLY request-vs-response, where
+/// the cost of being wrong is a frame routed to a handler that then refuses
+/// it by name. A full parse on every frame — including megabyte item lists
+/// — to answer one yes/no question is the wrong trade.
+fn frameHas(frame: []const u8, key: []const u8) bool {
+    return std.mem.indexOf(u8, frame, key) != null;
+}
+
+/// The `op` a request names.
+fn frameOp(frame: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, frame, "\"op\":") orelse return null;
+    var i = at + 5;
+    while (i < frame.len and frame[i] == ' ') i += 1;
+    if (i >= frame.len or frame[i] != '"') return null;
+    i += 1;
+    const start = i;
+    // Ops are bare identifiers (`items.list`), so a quote ends it. An
+    // escape inside one would mean a plugin naming an op nothing can route.
+    while (i < frame.len and frame[i] != '"') i += 1;
+    if (i >= frame.len) return null;
+    return frame[start..i];
+}
+
+/// A request's `params`, verbatim — the host parses its own.
+///
+/// Byte-matched rather than parsed because the value is an object whose
+/// shape belongs to whoever handles the verb, and re-serialising it here
+/// would mean this file knowing every verb's schema.
+fn frameParams(frame: []const u8) []const u8 {
+    const at = std.mem.indexOf(u8, frame, "\"params\":") orelse return "";
+    var i = at + 9;
+    while (i < frame.len and frame[i] == ' ') i += 1;
+    if (i >= frame.len) return "";
+    const start = i;
+    var depth: i32 = 0;
+    var in_str = false;
+    var esc = false;
+    while (i < frame.len) : (i += 1) {
+        const c = frame[i];
+        if (in_str) {
+            if (esc) {
+                esc = false;
+            } else if (c == '\\') {
+                esc = true;
+            } else if (c == '"') {
+                in_str = false;
+            }
+            continue;
+        }
+        switch (c) {
+            '"' => in_str = true,
+            '{', '[' => depth += 1,
+            '}', ']' => {
+                depth -= 1;
+                if (depth <= 0) return frame[start .. i + 1];
+            },
+            else => {},
+        }
+    }
+    return "";
 }
 
 fn copyInto(dst: []u8, len: *usize, src: []const u8) void {
@@ -388,34 +819,6 @@ fn writeAll(fd: c_int, bytes: []const u8) bool {
         off += @intCast(n);
     }
     return true;
-}
-
-/// Read one newline-delimited frame, with a deadline.
-///
-/// The deadline is the whole reason this is not a blocking read: a plugin
-/// that never answers must not take the app with it, and cooperation is
-/// not something a host gets to assume.
-fn readFrame(fd: c_int, buf: []u8, deadline_ms: i32) ?usize {
-    var used: usize = 0;
-    var left = deadline_ms;
-    while (true) {
-        var pfd = [_]PollFd{.{ .fd = fd, .events = POLLIN, .revents = 0 }};
-        const start = nowMs();
-        const r = poll(&pfd, 1, left);
-        if (r <= 0) return null; // timed out, or the poll itself failed
-        const spent: i32 = @intCast(@min(@as(i64, std.math.maxInt(i32)), nowMs() - start));
-        left -= spent;
-        if (left <= 0) left = 1;
-
-        if (used >= buf.len) return null; // frame larger than the caller's buffer
-        const n = read(fd, buf.ptr + used, buf.len - used);
-        if (n <= 0) return null; // EOF: the plugin exited
-        const was = used;
-        used += @intCast(n);
-        if (std.mem.indexOfScalar(u8, buf[was..used], '\n')) |rel| {
-            return was + rel;
-        }
-    }
 }
 
 // ---- the render-side shape ----
@@ -749,6 +1152,12 @@ pub const Registry = struct {
         return null;
     }
 
+    /// Wire the inbound verbs up. Called once, before anything spawns —
+    /// after that the pump holds a `*Plugin` and the slice must not move.
+    pub fn setHost(self: *Registry, host: Host) void {
+        for (self.items) |*p| p.host = host;
+    }
+
     /// Start everything declared `eager`. Failures are recorded, never
     /// fatal — a broken plugin is a missing panel, not a broken launch.
     pub fn startEager(self: *Registry, gpa: std.mem.Allocator) void {
@@ -833,46 +1242,90 @@ test "a plugin with no grants is declared but inert" {
     try testing.expect(!s.granted("describe"));
 }
 
-test "readFrame returns the frame without its newline" {
-    var fds: [2]c_int = undefined;
-    try testing.expect(pipe(&fds) == 0);
-    defer _ = close(fds[0]);
-    const payload = "{\"ok\":true}\n";
-    try testing.expect(writeAll(fds[1], payload));
-    _ = close(fds[1]);
 
-    var buf: [128]u8 = undefined;
-    const n = readFrame(fds[0], &buf, 1000) orelse return error.NoFrame;
-    try testing.expectEqualStrings("{\"ok\":true}", buf[0..n]);
+
+
+test "FrameReader reassembles a frame split across reads" {
+    // The normal case on a pipe, not an edge one.
+    const fr = try testing.allocator.create(FrameReader);
+    defer testing.allocator.destroy(fr);
+    fr.* = .{};
+    fr.feed("{\"a\":");
+    try testing.expect(fr.next() == null);
+    fr.feed("1}\n");
+    try testing.expectEqualStrings("{\"a\":1}", fr.next().?);
+    try testing.expect(fr.next() == null);
 }
 
-test "readFrame reassembles a frame split across writes" {
-    var fds: [2]c_int = undefined;
-    try testing.expect(pipe(&fds) == 0);
-    defer _ = close(fds[0]);
-    // The case a single read() would get wrong: a frame arriving in
-    // pieces is the normal case on a pipe, not an edge one.
-    try testing.expect(writeAll(fds[1], "{\"a\":"));
-    try testing.expect(writeAll(fds[1], "1}\n"));
-    _ = close(fds[1]);
-
-    var buf: [128]u8 = undefined;
-    const n = readFrame(fds[0], &buf, 1000) orelse return error.NoFrame;
-    try testing.expectEqualStrings("{\"a\":1}", buf[0..n]);
+test "FrameReader yields every frame in one read" {
+    // A plugin raising attention while answering sends two frames, and
+    // they arrive in one read(). A reader that took one per wakeup would
+    // hold the second until the next byte arrived — which, for a plugin
+    // that has finished talking, is never.
+    const fr = try testing.allocator.create(FrameReader);
+    defer testing.allocator.destroy(fr);
+    fr.* = .{};
+    fr.feed("{\"one\":1}\n{\"two\":2}\n{\"part\":");
+    try testing.expectEqualStrings("{\"one\":1}", fr.next().?);
+    try testing.expectEqualStrings("{\"two\":2}", fr.next().?);
+    try testing.expect(fr.next() == null);
+    fr.feed("3}\n");
+    try testing.expectEqualStrings("{\"part\":3}", fr.next().?);
 }
 
-test "readFrame gives up on a silent writer rather than blocking" {
-    var fds: [2]c_int = undefined;
-    try testing.expect(pipe(&fds) == 0);
-    defer _ = close(fds[0]);
-    defer _ = close(fds[1]); // held open: nothing to read, no EOF either
+test "FrameReader drops an oversized frame and resyncs on the next one" {
+    const fr = try testing.allocator.create(FrameReader);
+    defer testing.allocator.destroy(fr);
+    fr.* = .{};
+    const huge = try testing.allocator.alloc(u8, max_frame + 4096);
+    defer testing.allocator.free(huge);
+    @memset(huge, 'x');
+    huge[huge.len - 1] = '\n';
+    fr.feed(huge);
+    // Not a truncated frame handed over as if it were whole: that would
+    // parse into something wrong, which is worse than losing it.
+    try testing.expect(fr.next() == null);
+    try testing.expect(fr.overflowed);
+    // …and the plugin is not dead to us. The next frame lands.
+    fr.feed("{\"ok\":true}\n");
+    try testing.expectEqualStrings("{\"ok\":true}", fr.next().?);
+}
 
-    var buf: [64]u8 = undefined;
-    const start = nowMs();
-    try testing.expect(readFrame(fds[0], &buf, 60) == null);
-    // The point is that it RETURNED. A blocking read here would hang the
-    // caller forever on a plugin that never answers.
-    try testing.expect(nowMs() - start < 5000);
+test "a request is told from a response by its op" {
+    // The whole demux. A response never carries an op, so no bookkeeping
+    // about outstanding ids is needed to know which is which.
+    try testing.expect(frameHas("{\"v\":1,\"id\":3,\"op\":\"attention.raise\"}", "\"op\""));
+    try testing.expect(!frameHas("{\"v\":1,\"id\":3,\"ok\":true,\"result\":{}}", "\"op\""));
+}
+
+test "frameOp reads the verb a plugin is asking for" {
+    try testing.expectEqualStrings("attention.raise", frameOp("{\"v\":1,\"id\":3,\"op\":\"attention.raise\",\"params\":{}}").?);
+    try testing.expectEqualStrings("session.spawn", frameOp("{\"op\": \"session.spawn\"}").?);
+    try testing.expect(frameOp("{\"ok\":true}") == null);
+    try testing.expect(frameOp("{\"op\":7}") == null);
+}
+
+test "frameParams hands the host its object verbatim" {
+    // Nesting, strings containing braces, and an escaped quote — all of
+    // which a naive scan for the matching '}' gets wrong, and all of which
+    // reach here as soon as a command has an argument.
+    const f =
+        \\{"v":1,"id":2,"op":"session.spawn","params":{"command":["sh","-c","echo }{"],"cwd":"/tmp/a\"b"}}
+    ;
+    const p = frameParams(f);
+    const Wire = struct {
+        command: [][]const u8,
+        cwd: []const u8,
+    };
+    const parsed = try std.json.parseFromSlice(Wire, testing.allocator, p, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 3), parsed.value.command.len);
+    try testing.expectEqualStrings("echo }{", parsed.value.command[2]);
+    try testing.expectEqualStrings("/tmp/a\"b", parsed.value.cwd);
+}
+
+test "frameParams is empty when a request carries none" {
+    try testing.expectEqualStrings("", frameParams("{\"v\":1,\"id\":1,\"op\":\"attention.raise\"}"));
 }
 
 test "an id with a quote in it still produces a frame that parses" {
@@ -932,12 +1385,3 @@ test "INPUT_NONE is not input" {
     try testing.expect(a.wantsInput());
 }
 
-test "readFrame reports EOF as no frame" {
-    var fds: [2]c_int = undefined;
-    try testing.expect(pipe(&fds) == 0);
-    defer _ = close(fds[0]);
-    _ = close(fds[1]); // the plugin exited without answering
-
-    var buf: [64]u8 = undefined;
-    try testing.expect(readFrame(fds[0], &buf, 1000) == null);
-}

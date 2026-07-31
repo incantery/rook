@@ -472,6 +472,21 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else {
             reply(fd, "err unknown command (see `commands`)\n");
         }
+    } else if (std.mem.eql(u8, verb, "attention") and rest.len == 0) {
+        // What plugins have raised, newest last, each with the plugin that
+        // raised it. Provenance is not something the caller states — a
+        // plugin that could name someone else as the source of an
+        // interruption is a plugin that can blame someone else for it.
+        var buf: [4096]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        app.draw_lock.lock();
+        if (app.att_n == 0) {
+            _ = w.write("none\n") catch 0;
+        } else for (app.att[0..app.att_n]) |*r| {
+            w.print("{d}\t{s}\t{s}\t{s}\n", .{ r.seq, r.fromStr(), r.titleStr(), r.bodyStr() }) catch break;
+        }
+        app.draw_lock.unlock();
+        reply(fd, buf[0..w.end]);
     } else if (std.mem.eql(u8, verb, "plugin-show") and rest.len > 0) {
         // Open the side pane on a plugin. The fetch is queued, not run
         // here: items.list has a deadline of seconds and this is a ctl

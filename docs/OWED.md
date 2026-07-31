@@ -18,6 +18,11 @@ and the shape each should come back in is the interesting part.
 > `drawPlugin`/`pluginKeyLocked` in `app/src/macos.zig`, e2e scenario
 > `plugins`).
 >
+> **And the inbound verbs.** `attention.raise` and `session.spawn` now work
+> in the other direction — a plugin asks rook, over a per-plugin pump. The
+> attention inbox this file mourns is not back, but the verb that fed it is,
+> and `ctl attention` is where what it collects shows up.
+>
 > What is still owed here is the *issues* half specifically: a provider
 > speaks `sdk/provider`, not the plugin protocol, so either the two grow a
 > shim or a provider becomes a plugin. That is a decision, not a port.

@@ -343,6 +343,42 @@ pub const Side = enum { left, right };
 /// tenant interface designed against ONE tenant is a guess.
 pub const Panel = enum { search, plugin };
 
+/// One `attention.raise`: a plugin saying a human is needed.
+///
+/// The plugin that raised it is recorded alongside, and is not something
+/// the plugin gets to state — provenance a caller can set is not
+/// provenance. `attention.raise` is the one verb whose whole job is to
+/// interrupt someone, so being able to say WHO is the difference between
+/// a signal and a nuisance you cannot turn off.
+/// Copy into a fixed buffer, truncating rather than failing — every
+/// caller here is a label, and a label that is too long is still worth
+/// most of what it says.
+fn copyStr(dst: []u8, len: *usize, src: []const u8) void {
+    const n = @min(dst.len, src.len);
+    @memcpy(dst[0..n], src[0..n]);
+    len.* = n;
+}
+
+pub const Raise = struct {
+    seq: u32 = 0,
+    from: [64]u8 = @splat(0),
+    from_len: usize = 0,
+    title: [96]u8 = @splat(0),
+    title_len: usize = 0,
+    body: [160]u8 = @splat(0),
+    body_len: usize = 0,
+
+    pub fn fromStr(self: *const Raise) []const u8 {
+        return self.from[0..self.from_len];
+    }
+    pub fn titleStr(self: *const Raise) []const u8 {
+        return self.title[0..self.title_len];
+    }
+    pub fn bodyStr(self: *const Raise) []const u8 {
+        return self.body[0..self.body_len];
+    }
+};
+
 /// One clickable row of the which-key sheet. `click` is false for the
 /// collapsed "1…9" teaching row — a row that says "tabs 1–9" and then
 /// jumps to tab 1 on click would be the menu lying about itself.
@@ -449,6 +485,14 @@ pub const App = struct {
     plug_acting: std.atomic.Value(bool) = .init(false),
     /// Queued like plug_refetch, and for the same reason.
     plug_run: bool = false,
+
+    /// What plugins have raised. A ring rather than a list: attention that
+    /// nobody looked at for a hundred events is not attention, and an
+    /// unbounded queue fed by a subprocess is a subprocess that can grow
+    /// rook's memory without limit.
+    att: [16]Raise = @splat(.{}),
+    att_n: usize = 0,
+    att_seq: u32 = 0,
 
     /// Leader chord armed: the next key resolves a binding (or the
     /// leader again types it literally). Shown in the bar while armed.
@@ -958,7 +1002,7 @@ pub const App = struct {
 
         const shell = getenv("SHELL") orelse "/bin/zsh";
         bt = CACurrentMediaTime();
-        const session = try sessionpkg.Session.start(gpa, init.io, shell, null, termColors(), @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px), cfg.scrollback);
+        const session = try sessionpkg.Session.start(gpa, init.io, shell, null, null, termColors(), @intCast(cols), @intCast(rows), @intCast(renderer.cellw_px), @intCast(renderer.cellh_px), cfg.scrollback);
         boot_times.session_us = usSince(bt);
 
         const self = try gpa.create(App);
@@ -1041,6 +1085,12 @@ pub const App = struct {
         self.docs = docspkg.Registry.init(gpa);
         self.lsp = lspmgrpkg.Manager.init(gpa, init.io);
         self.lsp.enabled = cfg.lsp;
+
+        // Both halves of the plugin wire, in this order: the host has to be
+        // reachable BEFORE anything spawns, or an eager plugin that raises
+        // attention on startup gets told rook cannot do that.
+        self.plugins.setHost(.{ .ctx = self, .call = &pluginInbound });
+        self.plugins.startEager(gpa);
         boot_times.create_us = usSince(boot_times.start);
         return self;
     }
@@ -1721,7 +1771,14 @@ pub const App = struct {
     /// into a tree and a tab (holding draw_lock — focusedCwd reads the
     /// focused pane).
     fn makePane(self: *App, cwd: ?[*:0]const u8) !*panespkg.Pane {
-        const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, cwd, termColors(), 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px), self.cfg_scrollback);
+        return self.makePaneCmd(cwd, null);
+    }
+
+    /// …with a command the shell runs instead of going interactive. The
+    /// pane lives as long as the command does, which is what `session.spawn`
+    /// means by a session.
+    fn makePaneCmd(self: *App, cwd: ?[*:0]const u8, cmd: ?[*:0]const u8) !*panespkg.Pane {
+        const session = try sessionpkg.Session.start(self.gpa, self.io, self.shell, cwd, cmd, termColors(), 80, 24, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px), self.cfg_scrollback);
         session.kick = &inputKick;
         session.kick_ctx = self;
         session.clip_allow = self.cfg_clip_allow;
@@ -5106,6 +5163,143 @@ pub const App = struct {
         }
     }
 
+    // ---- the inbound verbs: what a plugin may ask rook to do ----
+
+    /// Every inbound call lands here, on the plugin's pump thread.
+    ///
+    /// Grants were already checked in plugins.zig — this is the half that
+    /// knows what the verbs MEAN. Refusals come back as a short reason,
+    /// because the plugin author is the one who has to act on it.
+    ///
+    /// Synchronous on purpose: the plugin asked and is waiting, so a spawn
+    /// that takes 40ms holds the pump for 40ms. That is the honest
+    /// semantics of a request, and doing it asynchronously would mean
+    /// answering "yes" before knowing whether it worked.
+    fn pluginInbound(ctx: *anyopaque, from: []const u8, op: []const u8, params: []const u8) ?[]const u8 {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        if (std.mem.eql(u8, op, plugpkg.op_raise)) return self.raiseAttention(from, params);
+        if (std.mem.eql(u8, op, plugpkg.op_spawn)) return self.spawnSession(params);
+        // Granted, but not something rook knows how to do — which is a
+        // config naming a verb from a newer rook, not a plugin misbehaving.
+        return "rook does not know that verb";
+    }
+
+    /// `attention.raise` — a plugin says a human is needed.
+    fn raiseAttention(self: *App, from: []const u8, params: []const u8) ?[]const u8 {
+        const Wire = struct {
+            title: []const u8 = "",
+            body: []const u8 = "",
+        };
+        const parsed = std.json.parseFromSlice(Wire, self.gpa, if (params.len > 0) params else "{}", .{
+            .ignore_unknown_fields = true,
+        }) catch return "params did not parse";
+        defer parsed.deinit();
+        if (parsed.value.title.len == 0) return "attention.raise needs a title";
+
+        var r = Raise{};
+        copyStr(&r.from, &r.from_len, from);
+        copyStr(&r.title, &r.title_len, parsed.value.title);
+        copyStr(&r.body, &r.body_len, parsed.value.body);
+
+        self.draw_lock.lock();
+        self.att_seq += 1;
+        r.seq = self.att_seq;
+        // A ring: the newest wins, and the oldest falls off the end.
+        if (self.att_n < self.att.len) {
+            self.att[self.att_n] = r;
+            self.att_n += 1;
+        } else {
+            std.mem.copyForwards(Raise, self.att[0 .. self.att.len - 1], self.att[1..]);
+            self.att[self.att.len - 1] = r;
+        }
+        // What `ctl notify` reports, so a test that cannot see a banner can
+        // still tell whether one was posted — the same reason the OSC 9
+        // path records it.
+        self.notify_last_len = @min(
+            r.fromStr().len + r.titleStr().len + r.bodyStr().len + 5,
+            self.notify_last.len,
+        );
+        _ = std.fmt.bufPrint(&self.notify_last, "{s}: {s} | {s}", .{
+            r.fromStr(), r.titleStr(), r.bodyStr(),
+        }) catch {};
+        self.scene_dirty = true;
+        self.draw_lock.unlock();
+
+        // The banner and the dock bounce are the same ones a BEL gets:
+        // attention is attention, and rook already decided what that looks
+        // like. postNotification is main-thread-only work in AppKit terms,
+        // but it is also what the OSC 9 reader threads already do.
+        var titled: [128]u8 = undefined;
+        const title = std.fmt.bufPrint(&titled, "{s}: {s}", .{ r.fromStr(), r.titleStr() }) catch r.titleStr();
+        self.postNotification(title, r.bodyStr());
+        if (!self.app.msgSend(bool, "isActive", .{}))
+            _ = self.app.msgSend(c_long, "requestUserAttention:", .{@as(c_long, 10)});
+        return null;
+    }
+
+    /// `session.spawn` — a plugin asks for a pane running something.
+    ///
+    /// Not a privilege escalation: the plugin is already a process rook
+    /// forked, so it could run this itself. What the verb buys is that the
+    /// command runs WHERE THE HUMAN CAN SEE IT — in a pane, with scrollback
+    /// and a cwd — instead of invisibly inside the plugin. The grant is
+    /// what keeps it from being a surprise.
+    fn spawnSession(self: *App, params: []const u8) ?[]const u8 {
+        const Wire = struct {
+            command: []const u8 = "",
+            cwd: []const u8 = "",
+            where: []const u8 = "",
+        };
+        const parsed = std.json.parseFromSlice(Wire, self.gpa, if (params.len > 0) params else "{}", .{
+            .ignore_unknown_fields = true,
+        }) catch return "params did not parse";
+        defer parsed.deinit();
+        if (parsed.value.command.len == 0) return "session.spawn needs a command";
+
+        var cmd_buf: [4096]u8 = undefined;
+        if (parsed.value.command.len >= cmd_buf.len) return "command too long";
+        @memcpy(cmd_buf[0..parsed.value.command.len], parsed.value.command);
+        cmd_buf[parsed.value.command.len] = 0;
+        const cmd: [*:0]const u8 = @ptrCast(&cmd_buf);
+
+        var cwd_buf: [1024]u8 = undefined;
+        var cwd: ?[*:0]const u8 = null;
+        if (parsed.value.cwd.len > 0) {
+            if (parsed.value.cwd.len >= cwd_buf.len) return "cwd too long";
+            @memcpy(cwd_buf[0..parsed.value.cwd.len], parsed.value.cwd);
+            cwd_buf[parsed.value.cwd.len] = 0;
+            cwd = @ptrCast(&cwd_buf);
+        }
+        const as_tab = std.mem.eql(u8, parsed.value.where, "tab");
+
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        // Inheriting the focused pane's cwd when none was named: a plugin
+        // that knows nothing about the filesystem still lands somewhere
+        // sensible, which is the same rule a split follows.
+        const pane = self.makePaneCmd(cwd orelse self.focusedCwd(), cmd) catch return "could not start a session";
+        if (as_tab) {
+            const t = self.gpa.create(panespkg.Tab) catch return "out of memory";
+            t.* = .{ .id = self.next_tab_id, .root = .{ .leaf = pane }, .focused = pane };
+            self.next_tab_id += 1;
+            t.panes.append(self.gpa, pane) catch {};
+            const s = self.activeSpace();
+            s.tabs.append(self.gpa, t) catch return "out of memory";
+            self.activateTabLocked(s.tabs.items.len - 1);
+        } else {
+            const t = self.activeTab();
+            if (!panespkg.splitAt(self.gpa, &t.root, t.focused, pane, true))
+                return "could not place the session";
+            t.panes.append(self.gpa, pane) catch {};
+            // NOT focused. A plugin gets to put something on your screen;
+            // it does not get to take your keystrokes mid-sentence.
+            self.relayoutLocked();
+        }
+        self.refreshHudLocked(CACurrentMediaTime());
+        self.scene_dirty = true;
+        return null;
+    }
+
     /// Run the selected action on a worker.
     ///
     /// Off the key path for the same reason the fetch is: items.act reaches
@@ -5211,9 +5405,7 @@ pub const App = struct {
     }
 
     fn plugSay(self: *App, msg: []const u8) void {
-        const n = @min(self.plug_msg.len, msg.len);
-        @memcpy(self.plug_msg[0..n], msg[0..n]);
-        self.plug_msg_len = n;
+        copyStr(&self.plug_msg, &self.plug_msg_len, msg);
     }
 
     /// The plugin panel's keys: move, descend into an action, confirm it,

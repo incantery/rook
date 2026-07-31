@@ -1458,7 +1458,12 @@ fn seedRegistry(app: *h.Instance) !Registry {
 /// The item carries one action of each interesting shape — plain, confirm,
 /// and one wanting input — because those are three different paths through
 /// the panel and only the plugin knows which is which.
+/// Two of the actions ask rook for something back — and read the answer,
+/// so the plugin's own message reports whether it was allowed. That is the
+/// hard case the pump exists for: an inbound REQUEST arrives while rook is
+/// waiting for the RESPONSE to items.act, in the same read.
 const sh_plugin =
+    \\n=0
     \\acts='[{"id":"poke","label":"Poke"},{"id":"burn","label":"Burn it","confirm":true},{"id":"say","label":"Say","input":"INPUT_TEXT"}]'
     \\while IFS= read -r line; do
     \\  id=`expr "$line" : '.*"id":\([0-9]*\)'`
@@ -1469,7 +1474,20 @@ const sh_plugin =
     \\      printf '{"v":1,"id":%s,"ok":true,"result":{"items":[{"id":"a","title":"alpha","state":"ok","fields":[{"key":"n","kind":"NUMBER","value":"7"}],"actions":%s,"children":[{"id":"a1","title":"kid","state":"sub"}]}]}}\n' "$id" "$acts" ;;
     \\    *'"op":"items.act"'*)
     \\      act=`expr "$line" : '.*"actionId":"\([a-z]*\)"'`
-    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"message":"ran %s","item":{"id":"a","title":"alpha","state":"done","fields":[{"key":"n","kind":"NUMBER","value":"8"}],"actions":%s}}}\n' "$id" "$act" "$acts" ;;
+    \\      extra=""
+    \\      n=`expr $n + 1`
+    \\      rid=`expr 1000 + $n`
+    \\      case "$act" in
+    \\        poke)
+    \\          printf '{"v":1,"id":%s,"op":"attention.raise","params":{"title":"needs you","body":"from the fixture"}}\n' "$rid"
+    \\          IFS= read -r rep
+    \\          case "$rep" in *'"ok":true'*) extra=" raise:ok" ;; *) extra=" raise:no" ;; esac ;;
+    \\        burn)
+    \\          printf '{"v":1,"id":%s,"op":"session.spawn","params":{"command":"echo spawned-by-plugin; sleep 30"}}\n' "$rid"
+    \\          IFS= read -r rep
+    \\          case "$rep" in *'"ok":true'*) extra=" spawn:ok" ;; *) extra=" spawn:no" ;; esac ;;
+    \\      esac
+    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"message":"ran %s%s","item":{"id":"a","title":"alpha","state":"done","fields":[{"key":"n","kind":"NUMBER","value":"8"}],"actions":%s}}}\n' "$id" "$act" "$extra" "$acts" ;;
     \\    *)
     \\      printf '{"v":1,"id":%s,"ok":false,"error":"unsupported op"}\n' "$id" ;;
     \\  esac
@@ -1490,15 +1508,21 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     // SAME script and differ only in what they were granted — which is the
     // point: what a plugin may do is the human's decision, recorded in
     // config, not something the plugin gets a say in.
-    var json_buf: [2048]u8 = undefined;
+    // Five declarations over two binaries. `shplug`, `acty` and `norais`
+    // run the SAME script and differ only in what they were granted —
+    // which is the point: what a plugin may do is the human's decision,
+    // recorded in config, not something the plugin gets a say in. `acty`
+    // may ask rook for things; `norais` may not.
+    var json_buf: [4096]u8 = undefined;
     const graph = try std.fmt.bufPrint(&json_buf,
         \\{{"rookEnvironment":1,"nodes":[
         \\{{"id":"plugin:shplug","kind":"plugin","scope":"app","name":"shplug","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list"]}},
-        \\{{"id":"plugin:acty","kind":"plugin","scope":"app","name":"acty","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act"]}},
+        \\{{"id":"plugin:acty","kind":"plugin","scope":"app","name":"acty","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act","attention.raise","session.spawn"]}},
+        \\{{"id":"plugin:norais","kind":"plugin","scope":"app","name":"norais","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act"]}},
         \\{{"id":"plugin:nogrant","kind":"plugin","scope":"app","name":"nogrant","command":["/bin/sh","{s}"],"load":"lazy","grants":[]}},
         \\{{"id":"plugin:missing","kind":"plugin","scope":"app","name":"missing","command":["/nope/not-a-binary"],"load":"lazy","grants":["items.list"]}}
         \\]}}
-    , .{ script, script, script });
+    , .{ script, script, script, script });
 
     const app = try h.Instance.start(gpa, bin, .{ .env_json = graph });
     defer {
@@ -1665,10 +1689,20 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(declined, "n=7", "and its field too");
 
     // y runs it, and the plugin's answer lands.
+    //
+    // This action also asks rook for something back — see the fixture: it
+    // sends a session.spawn and READS the reply, so its own message says
+    // whether it was allowed. Which makes this the interleaving case: an
+    // inbound request arrives while rook is waiting for the response to
+    // items.act, in the same read. A client that assumed the next frame
+    // was its answer would fail the id check and kill a working plugin.
+    const panes_before = try app.paneCount();
+    const focus_before = try app.focusedPane();
     _ = try app.ctl("key 0d");
     _ = try app.waitCtl("sidepane", "mode:confirm", 5_000);
     _ = try app.ctl("key 79"); // y
     const ran = try app.waitCtl("sidepane", "ran burn", 5_000);
+    try h.expectContains(ran, "spawn:ok", "the plugin was told its spawn was allowed");
     // The plugin sent back the row as it now is, so ONE line repainted
     // rather than the list relisting. Both halves changed, which is what
     // says the returned item was used and not just the message.
@@ -1678,6 +1712,60 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     // The child came from the LIST, not from the act — a replacement that
     // took the whole snapshot with it would have lost this.
     try h.expectContains(ran, " \x20sub\tkid", "the rest of the list survived");
+
+    // ---- the inbound verbs ----
+    //
+    // session.spawn actually ran: a pane appeared. The plugin does not get
+    // to say so — this is the host's side of the same event.
+    var waited: u32 = 0;
+    while (waited < 5000 and try app.paneCount() == panes_before) : (waited += 100) h.sleepMs(100);
+    try h.expectEq("session.spawn opened a pane", panes_before + 1, try app.paneCount());
+    // A plugin may put something on your screen. It does not get to take
+    // your keystrokes mid-sentence.
+    try h.expectEq("and did NOT steal focus", focus_before, try app.focusedPane());
+
+    // And it is a real session running the plugin's command, not an empty
+    // rectangle. The panel has the keys, so hand them back first.
+    _ = try app.ctl("key 1b");
+    _ = try app.ctl("focus right");
+    try app.waitText("spawned-by-plugin", 10_000);
+    _ = try app.ctl("focus left");
+
+    // attention.raise: Poke asks, and reads the answer.
+    _ = try app.ctl("plugin-show acty");
+    _ = try app.waitCtl("sidepane", "alpha", 5_000);
+    _ = try app.ctl("key 0d"); // menu, on Poke
+    _ = try app.waitCtl("sidepane", "mode:actions", 5_000);
+    _ = try app.ctl("key 0d");
+    const poked = try app.waitCtl("sidepane", "ran poke", 5_000);
+    try h.expectContains(poked, "raise:ok", "the plugin was told its raise was allowed");
+
+    const raised = try app.waitCtl("attention", "needs you", 5_000);
+    try h.expectContains(raised, "acty", "the raise records WHO raised it");
+    try h.expectContains(raised, "from the fixture", "and what it said");
+    // Provenance the caller can set is not provenance, so the plugin name
+    // comes from the declaration rather than from the params. Nothing in
+    // the fixture's request says "acty".
+    try h.expectNotContains(sh_plugin, "acty", "the fixture must not be able to name itself");
+    // The banner is the one thing a blind test cannot see, so rook records
+    // the last one posted — the same seam OSC 9 uses.
+    try h.expectContains(try app.ctl("notify"), "needs you", "a raise posts a notification");
+
+    // THE ASSERTION THE INBOUND HALF EXISTS FOR: the same script, the same
+    // action, a plugin that was not granted the verb. Refused, and told so
+    // BY NAME — the plugin author needs to know to ask for the grant, not
+    // to go looking in their own code.
+    _ = try app.ctl("plugin-show norais");
+    _ = try app.waitCtl("sidepane", "alpha", 5_000);
+    _ = try app.ctl("key 0d");
+    _ = try app.waitCtl("sidepane", "mode:actions", 5_000);
+    _ = try app.ctl("key 0d");
+    const norais = try app.waitCtl("sidepane", "ran poke", 5_000);
+    try h.expectContains(norais, "raise:no", "an ungranted inbound verb is refused");
+    // …and nothing was recorded. A refusal that still raises attention is
+    // not a refusal.
+    const after_refusal = try app.ctl("attention");
+    try h.expectEq("the refused raise left no trace", @as(usize, 1), h.countLines(after_refusal));
 
     // And the same panel, on a plugin granted only items.list: the refusal
     // reaches the human rather than the key doing nothing. This is the

@@ -306,7 +306,12 @@ pub const Session = struct {
     /// `scrollback` is in BYTES, the emulator's own unit — it rounds up
     /// to a page and floors at one page's worth of the active area, so
     /// small values don't mean small in any exact sense.
-    pub fn start(gpa: std.mem.Allocator, io: anytype, shell: [*:0]const u8, cwd: ?[*:0]const u8, colors: vt.Terminal.Colors, cols: u16, rows: u16, cell_w_px: u32, cell_h_px: u32, scrollback: usize) !*Session {
+    /// `cmd`, when given, is what the shell runs instead of going
+    /// interactive — the pane lives as long as the command does. It goes
+    /// through the shell rather than being exec'd directly because the
+    /// caller supplies a command LINE (quoting, pipes, `&&`), and because
+    /// -l still sources the profile that puts things on PATH.
+    pub fn start(gpa: std.mem.Allocator, io: anytype, shell: [*:0]const u8, cwd: ?[*:0]const u8, cmd: ?[*:0]const u8, colors: vt.Terminal.Colors, cols: u16, rows: u16, cell_w_px: u32, cell_h_px: u32, scrollback: usize) !*Session {
         const self = try gpa.create(Session);
         errdefer gpa.destroy(self);
 
@@ -331,8 +336,13 @@ pub const Session = struct {
         // Login shell (-l): a Dock-launched app has a skeleton env, and
         // .zprofile is where PATH/homebrew/starship come from — the
         // convention every terminal app follows.
-        const argv = [_][*:0]const u8{ shell, "-l" };
-        self.pid = try self.pty.spawnIn(&argv, cwd);
+        if (cmd) |c| {
+            const argv = [_][*:0]const u8{ shell, "-l", "-c", c };
+            self.pid = try self.pty.spawnIn(&argv, cwd);
+        } else {
+            const argv = [_][*:0]const u8{ shell, "-l" };
+            self.pid = try self.pty.spawnIn(&argv, cwd);
+        }
 
         self.thread = try std.Thread.spawn(.{}, readLoop, .{self});
         return self;

@@ -137,6 +137,36 @@ verb any plugin may call, and core ranks and renders what it collects.
 That makes "human attention is the scarce resource" a core primitive
 that every plugin feeds, instead of a feature living in one of them.
 
+**Landed, 2026-07-31: `attention.raise` and `session.spawn`.** The two
+that were only ever schema. What building them cost, and what that says:
+
+- **A pump.** A plugin that can only speak when spoken to cannot raise
+  attention — the event that needs a human happens when nobody is asking,
+  and a frame nobody reads sits in a pipe. So each up plugin gets a reader
+  thread, exactly as a language server does, for exactly the same reason.
+  This is the cost the old edge protocol never paid, and why it could not
+  become a provider.
+- **One grant list, both directions.** `grants` is a list of capabilities,
+  not a list of things rook may do. `items.list` granted means rook may
+  ask; `session.spawn` granted means the plugin may. The direction is
+  inherent to the verb, and one list is what a human can read.
+- **Provenance is not a parameter.** A raise records which plugin raised
+  it, taken from the declaration and never from the params. A plugin that
+  could name someone else as the source of an interruption is a plugin
+  that can blame someone else for it.
+- **`session.spawn` does not steal focus.** A plugin may put something on
+  your screen; it does not get to take your keystrokes mid-sentence.
+
+`session.send` and `notify` are still schema. `notify` looks like a
+special case of `attention.raise` with a level, and until something wants
+the distinction it should not have one.
+
+The Go SDK in rook-demos cannot yet SEND these — `Serve` reads requests
+and writes responses, one direction. Giving a plugin author the verbs
+means the same demux on the plugin side, and handlers that run without
+blocking the reader. That is the next piece, and it is a design decision
+(concurrent handlers) rather than a port.
+
 ## The exercise, honestly
 
 Ten features. Five reduced cleanly; five did not, and the second column

@@ -741,7 +741,7 @@ pub fn sandboxCount() usize {
     return made_n;
 }
 
-fn countLines(s: []const u8) usize {
+pub fn countLines(s: []const u8) usize {
     var n: usize = 0;
     var it = std.mem.splitScalar(u8, s, '\n');
     while (it.next()) |row| {
