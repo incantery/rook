@@ -311,6 +311,26 @@
 # edge = false
 
 
+# ── Verification suites (edge only) ──────────────────────────────────────
+#
+# What a cloud-coordinated run may execute here to check an agent's work.
+# The cloud names a SUITE and never a command line, so this table is the
+# whole vocabulary: a name that is not here is refused, and nothing is
+# built in — an unconfigured device runs nothing.
+#
+# Suite name → command line, run by your shell in the run's worktree. A
+# non-zero exit is a failed gate, which the run takes to its supervisor;
+# an unknown name is a refusal, which it takes to a human.
+#
+# This is argv, so it is honoured ONLY from your own config. A repository's
+# .rook/config can neither add nor redefine a suite — a clone that could
+# name a command would be code execution on clone.
+
+[verify]
+# go-test = "go test ./..."
+# build = "make build"
+
+
 # ── Per-workspace overrides ──────────────────────────────────────────────
 #
 # One [workspaces.<name>] table per workspace, named for the workspace it

@@ -18,6 +18,12 @@ package host
 // signature check would call the journal a liar. Acked rows stay: the
 // journal is a ledger, not a queue.
 //
+// Not every event resolves a command. A cloud-started agent session
+// outlives the command that started it, and its own facts take
+// sequences from this same space (edgeagent.go) — which is why the
+// session bindings live here too, and why sequence allocation is now
+// mutex-guarded rather than merely serial.
+//
 // Same posture as decisions (errNoDB): a host without a database
 // refuses edge work outright. Executing commands that leave no receipt
 // would be worse than executing nothing.
@@ -93,12 +99,205 @@ func (r *registry) markEdgeExecuting(id string) error {
 
 // journaledEdgeEvent is one signed result event with the device
 // sequence its signature covers. Sequences are allocated by the caller
-// (edgeMaxSeq + n) — the executor is the journal's only writer and runs
-// serially, so pre-allocation cannot race; signing needs the sequence
-// before the insert, because the sequence is a signed field.
+// (edgeMaxSeq + n); signing needs the sequence before the insert,
+// because the sequence is a signed field.
+//
+// The executor was once the journal's only writer, which made
+// pre-allocation race-free by construction. Agent sessions ended that:
+// a session's own facts (edgeagent.go) are observed on the transcript
+// and pty goroutines, not the edge loop. Host.edgeSeqMu is what that
+// invariant became — every allocate→sign→insert runs under it, so
+// sequences stay dense and each is signed by exactly the writer that
+// claimed it.
 type journaledEdgeEvent struct {
 	Seq uint64
 	Raw []byte
+}
+
+// appendEdgeEvent journals one signed event that resolves no command —
+// an agent session's own word. Same ledger, same sequence space, same
+// submit loop as a receipt; the only difference is that nothing else
+// belongs in the transaction, because a session fact settles nothing.
+func (r *registry) appendEdgeEvent(seq uint64, raw []byte) error {
+	if r.db == nil {
+		return errNoEdgeDB
+	}
+	_, err := r.db.Exec(
+		`INSERT INTO edge_events (device_seq, event, created_at) VALUES (?, ?, ?)`,
+		int64(seq), raw, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// edgeAgentSession is the device's binding for one cloud-started
+// session: the identity it minted, and the window that identity means.
+type edgeAgentSession struct {
+	SessionID   string
+	CommandID   string
+	Workspace   string
+	RookSession string
+	Profile     string
+	Fence       uint64
+	Kind        string // last kind reported; "" = the cloud has not been told it started
+	// Released: the run let go of this session (§6.6 compensation). The
+	// window may well still be running — what ended is the device's
+	// obligation to narrate it, not the agent.
+	Released bool
+}
+
+// releaseEdgeSession records that the run has let go. Converges: a hold
+// released twice is released.
+func (r *registry) releaseEdgeSession(sessionID string) error {
+	if r.db == nil {
+		return errNoEdgeDB
+	}
+	_, err := r.db.Exec(
+		`UPDATE edge_sessions SET released_at = ? WHERE session_id = ? AND released_at IS NULL`,
+		time.Now().UTC().Format(time.RFC3339Nano), sessionID)
+	return err
+}
+
+// claimEdgeSession records the identity BEFORE the window exists.
+// Returns false when the identity is already claimed — the caller's cue
+// that this start command is a redelivery and must not spawn again.
+func (r *registry) claimEdgeSession(s edgeAgentSession) (bool, error) {
+	if r.db == nil {
+		return false, errNoEdgeDB
+	}
+	res, err := r.db.Exec(
+		`INSERT OR IGNORE INTO edge_sessions
+		   (session_id, command_id, workspace, profile, fence, started_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		s.SessionID, s.CommandID, s.Workspace, s.Profile, int64(s.Fence),
+		time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// dropEdgeSession gives an identity back. Only one caller may use it, and
+// only in one situation: the spawn failed IN PROCESS, so the device knows
+// no window was started and the claim is protecting nothing. A claim left
+// standing there would make the command id unusable forever and tell the
+// next delivery a story about a restart that never happened.
+//
+// A claim orphaned by an actual crash is NOT this case — nobody is left
+// to know whether a window came up — and it keeps the row.
+func (r *registry) dropEdgeSession(sessionID string) error {
+	if r.db == nil {
+		return errNoEdgeDB
+	}
+	_, err := r.db.Exec(
+		`DELETE FROM edge_sessions WHERE session_id = ? AND rook_session = ''`, sessionID)
+	return err
+}
+
+// bindEdgeSession names the window the identity got. Separate from the
+// claim on purpose: between the two there is a spawn that can fail or be
+// interrupted, and the gap is exactly what the reconciler reads.
+func (r *registry) bindEdgeSession(sessionID, rookSession string) error {
+	if r.db == nil {
+		return errNoEdgeDB
+	}
+	_, err := r.db.Exec(
+		`UPDATE edge_sessions SET rook_session = ? WHERE session_id = ?`, rookSession, sessionID)
+	return err
+}
+
+func scanEdgeSession(row *sql.Row) (*edgeAgentSession, error) {
+	var s edgeAgentSession
+	var fence int64
+	var released sql.NullString
+	err := row.Scan(&s.SessionID, &s.CommandID, &s.Workspace, &s.RookSession,
+		&s.Profile, &fence, &s.Kind, &released)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.Fence, s.Released = uint64(max(fence, 0)), released.Valid
+	return &s, nil
+}
+
+const edgeSessionCols = `session_id, command_id, workspace, rook_session, profile, fence, kind, released_at`
+
+// edgeSession looks a binding up by the identity the cloud knows.
+func (r *registry) edgeSession(sessionID string) (*edgeAgentSession, error) {
+	if r.db == nil {
+		return nil, errNoEdgeDB
+	}
+	return scanEdgeSession(r.db.QueryRow(
+		`SELECT `+edgeSessionCols+` FROM edge_sessions WHERE session_id = ?`, sessionID))
+}
+
+// edgeSessionForWindow looks a binding up by the window — the direction
+// the sensors need, since what they observe is a rook session.
+func (r *registry) edgeSessionForWindow(rookSession string) (*edgeAgentSession, error) {
+	if r.db == nil || rookSession == "" {
+		return nil, nil
+	}
+	return scanEdgeSession(r.db.QueryRow(
+		`SELECT `+edgeSessionCols+` FROM edge_sessions WHERE rook_session = ?`, rookSession))
+}
+
+// reportEdgeSessionKind records the kind about to be reported, and says
+// whether it is news. A state the cloud already holds is not: without
+// this every assistant record would mint a "progress" event, and the
+// run's history would fill with facts no step can act on.
+//
+// The compare-and-set is one statement so two sensors observing the same
+// transition cannot both call it news.
+func (r *registry) reportEdgeSessionKind(sessionID, kind string) (bool, error) {
+	if r.db == nil {
+		return false, errNoEdgeDB
+	}
+	res, err := r.db.Exec(
+		`UPDATE edge_sessions SET kind = ? WHERE session_id = ? AND kind != ?`,
+		kind, sessionID, kind)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// claimEdgeArtifact records that this device is about to declare an
+// artifact. Returns false when the declaration already crossed — the
+// caller's cue to re-report the receipt and say nothing new. The id is
+// content-addressed, so "already declared" and "identical bytes" are the
+// same statement.
+func (r *registry) claimEdgeArtifact(artifactID, sessionID, commandID string) (bool, error) {
+	if r.db == nil {
+		return false, errNoEdgeDB
+	}
+	res, err := r.db.Exec(
+		`INSERT OR IGNORE INTO edge_artifacts (artifact_id, session_id, command_id, declared_at)
+		 VALUES (?, ?, ?, ?)`,
+		artifactID, sessionID, commandID, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// announceEdgeSession flips a claimed session to announced exactly once
+// — the started event's own gate. Until it succeeds no other fact about
+// this session may be reported, because the cloud refuses events about a
+// session no receipt introduced.
+func (r *registry) announceEdgeSession(sessionID string) (bool, error) {
+	if r.db == nil {
+		return false, errNoEdgeDB
+	}
+	res, err := r.db.Exec(
+		`UPDATE edge_sessions SET kind = 'started' WHERE session_id = ? AND kind = ''`, sessionID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // resolveEdgeCommand is the journal's one composed write: the outcome,

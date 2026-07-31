@@ -127,9 +127,14 @@ func (a *agentWatch) applyRecord(ln transcript.Line) {
 	}
 	st.LastEvent = now
 
+	// entered names the state this record moved the session INTO, "" when
+	// it stayed put. A transition is the only thing worth reporting to a
+	// remote coordinator — see agentWatch.onSignal.
+	var entered string
 	setState := func(s string) {
 		if st.State != s {
 			st.State, st.Since = s, now
+			entered = s
 		}
 	}
 	record := func(role, text string) {
@@ -235,7 +240,7 @@ func (a *agentWatch) applyRecord(ln transcript.Line) {
 		turnFinished = true
 	}
 
-	askSeq := st.AskSeq
+	askSeq, askText := st.AskSeq, st.Ask
 	a.mu.Unlock()
 
 	if !ln.Live {
@@ -249,6 +254,19 @@ func (a *agentWatch) applyRecord(ln transcript.Line) {
 	}
 	if turnFinished && a.onTurnFinished != nil {
 		a.onTurnFinished(ln.SessionID)
+	}
+	if a.onSignal != nil {
+		// One classification, in the order the vocabulary distinguishes:
+		// a finished turn is a claim; an unfinished turn that stopped for
+		// input is a pause; anything else that reached working is progress.
+		switch {
+		case turnFinished:
+			a.onSignal(ln.SessionID, "completion_claimed", askText)
+		case turnDone:
+			a.onSignal(ln.SessionID, "waiting_input", askText)
+		case entered == "working":
+			a.onSignal(ln.SessionID, "progress", "")
+		}
 	}
 }
 

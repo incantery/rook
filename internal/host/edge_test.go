@@ -31,7 +31,18 @@ func newEdgeHost(t *testing.T) (h *Host, repo string) {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfgDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgDir)
+	// No test in this file starts a real coder: the agent actuator types
+	// whatever `coder` names into a real pty, and a test that launched
+	// claude would spend money to prove a journal works.
+	if err := os.MkdirAll(filepath.Join(cfgDir, "rook"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "rook", "config"),
+		[]byte("coder = /usr/bin/true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	repo = t.TempDir()
 	gitT(t, repo, "init", "-b", "main")
 	if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("hello\n"), 0o644); err != nil {
@@ -252,7 +263,7 @@ func TestEdgeWorktreeLifecycle(t *testing.T) {
 
 	create := edgeCmd(t, priv, "cmd_create", run, "create_worktree",
 		&edgev1.CreateWorktree{Repository: "src", BaseRef: "main"}, nil)
-	status, result := h.edgeExecuteOne(create, pub)
+	status, result := h.edgeExecuteOne(create, pub, false)
 	if status != "succeeded" {
 		t.Fatalf("create: %s %s", status, result)
 	}
@@ -272,7 +283,7 @@ func TestEdgeWorktreeLifecycle(t *testing.T) {
 	}
 
 	// Redelivery converges on the same receipt, no second tree.
-	status2, result2 := h.edgeExecuteOne(create, pub)
+	status2, result2 := h.edgeExecuteOne(create, pub, false)
 	if status2 != "succeeded" || result2 != result {
 		t.Fatalf("redelivered create: %s %s, want the same receipt", status2, result2)
 	}
@@ -287,7 +298,7 @@ func TestEdgeWorktreeLifecycle(t *testing.T) {
 			c.ApprovalGrant = grantFor(t, priv, c)
 			edgesign.SignCommand(priv, c)
 		})
-	status, result = h.edgeExecuteOne(cleanup, pub)
+	status, result = h.edgeExecuteOne(cleanup, pub, false)
 	if status != "failed" || !strings.Contains(result, "dirty") {
 		t.Fatalf("dirty cleanup: %s %s, want failed with dirty named", status, result)
 	}
@@ -299,20 +310,27 @@ func TestEdgeWorktreeLifecycle(t *testing.T) {
 	if err := os.Remove(filepath.Join(ws.Root, "wip.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if status, result = h.edgeExecuteOne(cleanup, pub); status != "succeeded" {
+	if status, result = h.edgeExecuteOne(cleanup, pub, false); status != "succeeded" {
 		t.Fatalf("clean cleanup: %s %s", status, result)
 	}
 	if h.reg.get(name) != nil {
 		t.Fatal("cleanup must drop the workspace")
 	}
-	if status, _ = h.edgeExecuteOne(cleanup, pub); status != "succeeded" {
+	if status, _ = h.edgeExecuteOne(cleanup, pub, false); status != "succeeded" {
 		t.Fatalf("cleanup of the already-gone: %s, want succeeded", status)
 	}
 
-	// An op outside the device's capabilities is a named rejection.
-	agent := edgeCmd(t, priv, "cmd_agent", run, "start_agent_session",
-		&edgev1.StartAgentSession{WorktreeId: "worktree_" + run}, nil)
-	if status, result = h.edgeExecuteOne(agent, pub); status != "rejected" || !strings.Contains(result, "not offered") {
+	// A payload this device does not actuate is a NAMED rejection, not
+	// silence — the run hears "rejected" and routes instead of waiting on
+	// a capability nobody has.
+	//
+	// The probe is deliberately a payload that can never become an op: it
+	// is an event body, so no future slice can quietly turn this
+	// assertion into a test of something that now works. Three real ops
+	// were consumed here before that was worth doing.
+	unknown := edgeCmd(t, priv, "cmd_unknown", run, "not_an_op",
+		&edgev1.CommandResult{CommandId: "cmd_x", Status: "succeeded"}, nil)
+	if status, result = h.edgeExecuteOne(unknown, pub, false); status != "rejected" || !strings.Contains(result, "not offered") {
 		t.Fatalf("unsupported op: %s %s", status, result)
 	}
 }

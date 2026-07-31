@@ -8,6 +8,7 @@ package host
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -113,6 +114,19 @@ type Host struct {
 	// edge.go): typed commands arrive, are journaled, verified, and
 	// executed here. nil = this machine takes no orders from anywhere.
 	edge *edge.Client
+	// edgeSeqMu serializes device-sequence allocation across the whole
+	// allocate→sign→insert, because the executor is no longer the edge
+	// journal's only writer — a live session's own facts are journaled
+	// from the transcript and pty goroutines (edgeagent.go). It also
+	// guards the identity a signature needs: edgeKey and edgeDevice are
+	// written once, when registration completes.
+	edgeSeqMu  sync.Mutex
+	edgeKey    ed25519.PrivateKey
+	edgeDevice string
+	// edgeNudge cuts the sync loop's wait short — the cloud's wake stream
+	// on one end, a live session's own news on the other. Buffered(1):
+	// a pending nudge needs no second one.
+	edgeNudge chan struct{}
 
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
@@ -217,6 +231,9 @@ func New() *Host {
 	// The workflow engine's stage-completion sensor — genuine turn ends
 	// only, never AskUserQuestion/notify (see agentwatch.onTurnFinished).
 	h.aw.onTurnFinished = h.onTurnFinished
+	// The same moments in the cloud's vocabulary, for sessions a remote
+	// run started (edgeagent.go). Inert without an edge client.
+	h.aw.onSignal = h.edgeAgentSignal
 	// Restart reconciliation: running stages lost their windows with the
 	// old host. ✗ + detail is the honest surface — no auto-respawn, no
 	// surprise spend.
@@ -294,15 +311,38 @@ func (h *Host) claimAliveLocked(agentSession string, s *session) bool {
 // already trusts, exact and one ioctl. A claude with no live claim (hooks
 // never installed, or a claim orphaned by ^C) reports false and keeps the
 // pre-existing yield, which is the safe direction to fail.
-func (h *Host) agentPane(s *session) bool {
+func (h *Host) agentPane(s *session) bool { return h.agentClaimOn(s) != "" }
+
+// agentClaimOn is the same question with the answer kept: the transcript
+// session id of the LIVE claim on this window, "" when there is none.
+// Anything that means to ask agentwatch about the agent IN a window needs
+// the id rather than the yes/no — see edgeSendAgentInput.
+func (h *Host) agentClaimOn(s *session) string {
+	if tid, alive := h.claimOnWindow(s); alive {
+		return tid
+	}
+	return ""
+}
+
+// claimOnWindow separates the two answers agentClaimOn collapses: whether
+// this window was ever claimed at all, and whether the claimer is still
+// the thing on the tty.
+//
+// The distinction is only interesting to a caller reporting on liveness,
+// and there it is the whole story. A claim that died means the agent left
+// a window that is still up — the "process lost, device fine" case §8.4
+// calls Disconnected. NO claim means the hooks never ran, so this device
+// simply cannot see whether an agent is in there, and saying "gone" would
+// be inventing a fact rather than reporting one.
+func (h *Host) claimOnWindow(s *session) (agentSession string, alive bool) {
 	h.bindMu.Lock()
 	defer h.bindMu.Unlock()
 	for tid, sid := range h.claims {
-		if sid == s.info.ID && h.claimAliveLocked(tid, s) {
-			return true
+		if sid == s.info.ID {
+			return tid, h.claimAliveLocked(tid, s)
 		}
 	}
-	return false
+	return "", false
 }
 
 func (h *Host) Token() string { return h.token }
@@ -589,12 +629,29 @@ func (h *Host) readPump(s *session) {
 	if fc != nil {
 		fc.Close(websocket.StatusNormalClosure, "session-exited")
 	}
+	// A cloud run waiting on this session learns it the same way: the
+	// window's death is the device's own observation, not the transcript's.
+	h.edgeWindowClosed(s.info.ID)
 }
 
 func (h *Host) get(id string) *session {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.sessions[id]
+}
+
+// sessionsIn lists the live windows in a workspace — everyone who would
+// be surprised by something removing its checkout.
+func (h *Host) sessionsIn(workspace string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var ids []string
+	for id, s := range h.sessions {
+		if s.info.Workspace == workspace {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func (h *Host) kill(id string) bool {

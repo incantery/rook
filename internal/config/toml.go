@@ -34,25 +34,28 @@ func TOMLPath() string {
 // map, nil when absent) so present-vs-absent survives decoding — several
 // keys give an explicitly empty value a meaning an absent key doesn't have.
 type tomlFile struct {
-	FontFamily        *string                  `toml:"font-family"`
-	FontSize          *int                     `toml:"font-size"`
-	BackgroundOpacity *float64                 `toml:"background-opacity"`
-	WindowPaddingX    *int                     `toml:"window-padding-x"`
-	WindowPaddingY    *int                     `toml:"window-padding-y"`
-	Theme             *string                  `toml:"theme"`
-	Coder             *string                  `toml:"coder"`
-	Leader            *string                  `toml:"leader"`
-	Workflow          *[]string                `toml:"workflow"`
-	WorkspaceAllow    *[]string                `toml:"workspace-allow"`
-	Keybinds          map[string]string        `toml:"keybinds"`
-	Commands          map[string]string        `toml:"commands"`
-	Editor            *tomlEditor              `toml:"editor"`
-	Agent             *tomlAgent               `toml:"agent"`
-	Jira              *tomlJira                `toml:"jira"`
-	Relay             *tomlRelay               `toml:"relay"`
-	Cloud             *tomlCloud               `toml:"cloud"`
-	Workspaces        map[string]tomlWorkspace `toml:"workspaces"`
-	LSP               *tomlLSP                 `toml:"lsp"`
+	FontFamily        *string           `toml:"font-family"`
+	FontSize          *int              `toml:"font-size"`
+	BackgroundOpacity *float64          `toml:"background-opacity"`
+	WindowPaddingX    *int              `toml:"window-padding-x"`
+	WindowPaddingY    *int              `toml:"window-padding-y"`
+	Theme             *string           `toml:"theme"`
+	Coder             *string           `toml:"coder"`
+	Leader            *string           `toml:"leader"`
+	Workflow          *[]string         `toml:"workflow"`
+	WorkspaceAllow    *[]string         `toml:"workspace-allow"`
+	Keybinds          map[string]string `toml:"keybinds"`
+	Commands          map[string]string `toml:"commands"`
+	// Verify is [verify]: suite name → command line. See Config.Verify —
+	// it is argv, so it is user-config-only by construction.
+	Verify     map[string]string        `toml:"verify"`
+	Editor     *tomlEditor              `toml:"editor"`
+	Agent      *tomlAgent               `toml:"agent"`
+	Jira       *tomlJira                `toml:"jira"`
+	Relay      *tomlRelay               `toml:"relay"`
+	Cloud      *tomlCloud               `toml:"cloud"`
+	Workspaces map[string]tomlWorkspace `toml:"workspaces"`
+	LSP        *tomlLSP                 `toml:"lsp"`
 }
 
 type tomlEditor struct {
@@ -183,6 +186,18 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 		}
 		for a, c := range f.Commands {
 			cfg.Commands[strings.TrimSpace(a)] = strings.TrimSpace(c)
+		}
+	}
+	if len(f.Verify) > 0 {
+		if cfg.Verify == nil {
+			cfg.Verify = map[string]string{}
+		}
+		for suite, line := range f.Verify {
+			// An empty command line is dropped rather than stored: a suite
+			// that names nothing would be a gate that always passes.
+			if suite, line = strings.TrimSpace(suite), strings.TrimSpace(line); suite != "" && line != "" {
+				cfg.Verify[suite] = line
+			}
 		}
 	}
 

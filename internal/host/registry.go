@@ -216,6 +216,33 @@ CREATE TABLE IF NOT EXISTS edge_fences (
 	resource TEXT PRIMARY KEY,                      -- <type>:<id>
 	token    INTEGER NOT NULL
 );
+-- Cloud-started agent sessions (edgeagent.go): the binding between the
+-- session identity this device MINTED for the cloud and the window it
+-- actually spawned. The row is the device's claim on that identity, and
+-- it is written BEFORE the spawn — so a redelivered start command can
+-- never put a second agent in the same worktree.
+CREATE TABLE IF NOT EXISTS edge_sessions (
+	session_id   TEXT PRIMARY KEY,
+	command_id   TEXT NOT NULL,
+	workspace    TEXT NOT NULL,
+	rook_session TEXT NOT NULL DEFAULT '',          -- '' until the window exists
+	profile      TEXT NOT NULL DEFAULT '',
+	fence        INTEGER NOT NULL DEFAULT 0,
+	kind         TEXT NOT NULL DEFAULT '',          -- last kind reported; '' = not announced
+	started_at   TEXT NOT NULL,
+	released_at  TEXT                               -- set: the run let go; the device stops reporting
+);
+CREATE INDEX IF NOT EXISTS edge_sessions_rook ON edge_sessions(rook_session);
+-- Artifacts this device has DECLARED to the cloud (edgeartifact.go). The
+-- id is content-addressed, so this table answers exactly one question —
+-- has the cloud already been told about these bytes — and one row means
+-- one declaration however many times a collect is redelivered.
+CREATE TABLE IF NOT EXISTS edge_artifacts (
+	artifact_id TEXT PRIMARY KEY,
+	session_id  TEXT NOT NULL,
+	command_id  TEXT NOT NULL,
+	declared_at TEXT NOT NULL
+);
 `
 
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS

@@ -16,9 +16,13 @@ package host
 // Delivery is at-least-once and the journal makes the effect
 // at-most-once; a crash between any two steps re-runs the step, and
 // every actuator converges (create finds its tree, cleanup finds its
-// absence). What this device offers today is deliberately narrow —
-// worktree create/inspect/cleanup — and everything else is REJECTED by
-// name: agent sessions arrive with the adapter work, not by accident.
+// absence, a started session refuses to start twice). What this device
+// offers is worktree create/inspect/cleanup and starting an agent
+// session in one — everything else is REJECTED by name.
+//
+// A session, once started, outlives the command that started it, and its
+// own facts ride the same journal on the same sequence: that half lives
+// in edgeagent.go.
 //
 // The unit of trust is the checklist, not the transport: a command that
 // fails any check is resolved "rejected" without effect, which the run
@@ -49,7 +53,20 @@ import (
 // edgeCapabilities is what this device honestly offers (§11.5). Ops
 // outside it are rejected by name — capability growth is a code change
 // here and a registration change on the wire, never an accident.
-var edgeCapabilities = []string{"worktree"}
+//
+// They are separate on purpose, because they fail differently and a run
+// should be able to tell before it routes: "worktree" is filesystem
+// work; "agent" starts a session and reports on it; "agent_control"
+// reaches back INTO a live one, the only capability here that puts
+// keystrokes in front of a running agent and the only one whose effect
+// cannot be re-run to converge; "verify" runs a named suite the USER
+// configured, and is the only one whose absence is a matter of local
+// config rather than of code (see edgeverify.go); "artifact" declares
+// what a run produced without the bytes ever leaving (edgeartifact.go);
+// "release" is §6.6 compensation — dropping a hold, which is a different
+// authority from cleanup's and spans more than one resource type
+// (edgerelease.go).
+var edgeCapabilities = []string{"worktree", "agent", "agent_control", "verify", "artifact", "release"}
 
 const eventTypeCommandResult = "com.rook.edge.command_result.v1"
 
@@ -70,6 +87,7 @@ func (h *Host) initEdge() {
 		return
 	}
 	h.edge = c
+	h.edgeNudge = make(chan struct{}, 1)
 	go h.runEdge(h.ctx)
 }
 
@@ -131,7 +149,14 @@ func (h *Host) runEdge(ctx context.Context) {
 	log.Printf("edge: device %s registered (cloud signing: %v, capabilities: %s)",
 		reg.DeviceId, len(cloudKey) > 0, strings.Join(edgeCapabilities, ","))
 
-	wake := make(chan struct{}, 1)
+	// Publish the signing identity: until this lands, a session's sensors
+	// have nothing to sign with and drop what they see. Nothing has been
+	// started from the cloud yet at this point, so nothing is lost.
+	h.edgeSeqMu.Lock()
+	h.edgeKey, h.edgeDevice = key, reg.DeviceId
+	h.edgeSeqMu.Unlock()
+
+	wake := h.edgeNudge
 	go h.edge.Watch(ctx, wake)
 
 	failed := false
@@ -210,8 +235,13 @@ func (h *Host) edgeSyncPass(ctx context.Context, cloudKey ed25519.PublicKey, dev
 
 // edgeExecutePending drains the journal's unresolved commands serially —
 // one journal, one executor, mirroring the one-writer discipline the
-// registry already lives by. A row found in 'executing' is a crash
-// scar: re-execution is safe because every offered actuator converges.
+// registry already lives by.
+//
+// A row found in 'executing' is a crash scar, and the executor tells the
+// actuator so. Most actuators do not care: they converge, and re-running
+// is how they finish. The ones that CANNOT converge — typing at a live
+// agent is the standing example, because a second delivery is a second
+// message, not the same one — use the flag to refuse rather than repeat.
 func (h *Host) edgeExecutePending(cloudKey ed25519.PublicKey, devKey ed25519.PrivateKey) error {
 	pending, err := h.reg.unresolvedEdgeCommands()
 	if err != nil {
@@ -229,14 +259,18 @@ func (h *Host) edgeExecutePending(cloudKey ed25519.PublicKey, devKey ed25519.Pri
 			}
 			continue
 		}
-		if row.Phase == "executing" {
-			log.Printf("edge: reconciling %s after restart — re-running the converging actuator", row.CommandID)
+		reconciling := row.Phase == "executing"
+		if reconciling {
+			log.Printf("edge: reconciling %s after restart", row.CommandID)
 		}
-		status, result := h.edgeExecuteOne(&cmd, cloudKey)
+		status, result := h.edgeExecuteOne(&cmd, cloudKey, reconciling)
 		if err := h.resolveEdge(&cmd, cmd.CommandId, status, result, devKey); err != nil {
 			return err
 		}
 		log.Printf("edge: %s (%s) for run %s -> %s", cmd.CommandId, cmd.Payload.GetTypeUrl(), cmd.WorkflowRunId, status)
+		// Only now may the session speak: the receipt that introduces it
+		// holds the lower sequence, and the cloud applies them in order.
+		h.edgeAnnounceSession(&cmd, status, result)
 	}
 	return nil
 }
@@ -244,7 +278,10 @@ func (h *Host) edgeExecutePending(cloudKey ed25519.PublicKey, devKey ed25519.Pri
 // edgeExecuteOne runs the checklist and, if every check holds, the
 // typed actuator. The returned status uses the ledger vocabulary the
 // cloud accepts from devices: succeeded | failed | rejected.
-func (h *Host) edgeExecuteOne(cmd *edgev1.EdgeCommand, cloudKey ed25519.PublicKey) (string, string) {
+//
+// reconciling says this row was already 'executing' when the pass began
+// — see edgeExecutePending.
+func (h *Host) edgeExecuteOne(cmd *edgev1.EdgeCommand, cloudKey ed25519.PublicKey, reconciling bool) (string, string) {
 	if reason := h.refuseEdge(cmd, cloudKey); reason != "" {
 		log.Printf("edge: refusing %s without executing: %s", cmd.CommandId, reason)
 		data, _ := json.Marshal(map[string]string{"reason": reason})
@@ -254,7 +291,7 @@ func (h *Host) edgeExecuteOne(cmd *edgev1.EdgeCommand, cloudKey ed25519.PublicKe
 		data, _ := json.Marshal(map[string]string{"reason": "journal unavailable: " + err.Error()})
 		return "rejected", string(data)
 	}
-	return h.edgeActuate(cmd)
+	return h.edgeActuate(cmd, reconciling)
 }
 
 // refuseEdge is the pre-execution checklist; a non-empty return is the
@@ -296,7 +333,13 @@ func (h *Host) refuseEdge(cmd *edgev1.EdgeCommand, cloudKey ed25519.PublicKey) s
 
 // resolveEdge signs the result event and lands outcome + event + grant
 // spend + fence raise in the journal's one composed transaction.
+//
+// The sequence mutex is held across allocate→sign→write because the
+// executor is no longer the journal's only writer: a live session's own
+// facts are journaled from the transcript and pty goroutines.
 func (h *Host) resolveEdge(cmd *edgev1.EdgeCommand, commandID, status, result string, devKey ed25519.PrivateKey) error {
+	h.edgeSeqMu.Lock()
+	defer h.edgeSeqMu.Unlock()
 	maxSeq, err := h.reg.edgeMaxSeq()
 	if err != nil {
 		return err
@@ -376,7 +419,7 @@ func edgeWorkspaceName(workflowRunID string) string {
 	return truncateSlug(slugify(strings.ToLower(workflowRunID)), 48)
 }
 
-func (h *Host) edgeActuate(cmd *edgev1.EdgeCommand) (string, string) {
+func (h *Host) edgeActuate(cmd *edgev1.EdgeCommand, reconciling bool) (string, string) {
 	switch {
 	case cmd.Payload.MessageIs(&edgev1.CreateWorktree{}):
 		var p edgev1.CreateWorktree
@@ -388,6 +431,34 @@ func (h *Host) edgeActuate(cmd *edgev1.EdgeCommand) (string, string) {
 		var p edgev1.InspectRepository
 		_ = cmd.Payload.UnmarshalTo(&p)
 		return h.edgeInspectRepository(&p)
+	case cmd.Payload.MessageIs(&edgev1.StartAgentSession{}):
+		var p edgev1.StartAgentSession
+		_ = cmd.Payload.UnmarshalTo(&p)
+		return h.edgeStartAgentSession(cmd, &p)
+	case cmd.Payload.MessageIs(&edgev1.SendAgentInput{}):
+		var p edgev1.SendAgentInput
+		_ = cmd.Payload.UnmarshalTo(&p)
+		return h.edgeSendAgentInput(cmd, &p, reconciling)
+	case cmd.Payload.MessageIs(&edgev1.InterruptAgentSession{}):
+		var p edgev1.InterruptAgentSession
+		_ = cmd.Payload.UnmarshalTo(&p)
+		return h.edgeInterruptAgentSession(cmd, &p)
+	case cmd.Payload.MessageIs(&edgev1.RunVerification{}):
+		var p edgev1.RunVerification
+		_ = cmd.Payload.UnmarshalTo(&p)
+		return h.edgeRunVerification(cmd, &p)
+	case cmd.Payload.MessageIs(&edgev1.CollectArtifact{}):
+		var p edgev1.CollectArtifact
+		_ = cmd.Payload.UnmarshalTo(&p)
+		return h.edgeCollectArtifact(cmd, &p)
+	case cmd.Payload.MessageIs(&edgev1.ReconcileSession{}):
+		var p edgev1.ReconcileSession
+		_ = cmd.Payload.UnmarshalTo(&p)
+		return h.edgeReconcileSession(cmd, &p)
+	case cmd.Payload.MessageIs(&edgev1.ReleaseResource{}):
+		var p edgev1.ReleaseResource
+		_ = cmd.Payload.UnmarshalTo(&p)
+		return h.edgeReleaseResource(cmd, &p)
 	default:
 		// Named refusal, not silence: the run hears "rejected" and routes,
 		// instead of waiting on a capability this device never offered.
@@ -484,15 +555,7 @@ func (h *Host) edgeCleanupWorktree(cmd *edgev1.EdgeCommand) (string, string) {
 				"reason": fmt.Sprintf("worktree has %d dirty file(s) and %d unmerged commit(s) on %s — preserved", dirty, unmerged, ws.Branch)})
 			return "failed", string(data)
 		}
-		h.mu.Lock()
-		var ids []string
-		for id, s := range h.sessions {
-			if s.info.Workspace == name {
-				ids = append(ids, id)
-			}
-		}
-		h.mu.Unlock()
-		for _, id := range ids {
+		for _, id := range h.sessionsIn(name) {
 			h.kill(id)
 		}
 		if err := worktreeRemove(ws.Root, false); err != nil {

@@ -173,6 +173,25 @@
 # keybind = ctrl+h=
 
 
+# ── Verification suites (edge only, dynamic keys) ────────────────────────
+#
+# What a cloud-coordinated run may execute here to check an agent's work.
+# The cloud names a SUITE and never a command line, so these lines are the
+# whole vocabulary: a name with no line here is refused, and nothing is
+# built in — an unconfigured device runs nothing.
+#
+# The suffix is the suite name, the value is a command line, run by your
+# shell in the run's worktree. A non-zero exit is a failed gate, which the
+# run takes to its supervisor; an unknown name is a refusal, which it takes
+# to a human.
+#
+# This is argv, so it is honoured ONLY from your own config. A repository's
+# .rook/config can neither add nor redefine a suite — a clone that could
+# name a command would be code execution on clone.
+# verify-go-test = go test ./...
+# verify-build = make build
+
+
 # ── Per-workspace overrides (dynamic keys) ───────────────────────────────
 #
 # These keys carry a workspace name in the key itself. Replace <workspace>

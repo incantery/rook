@@ -79,6 +79,18 @@ type Config struct {
 	// default — status reporting is telemetry, this is the cloud asking
 	// the machine to act, and that deserves its own explicit yes.
 	CloudEdge bool `json:"cloudEdge"`
+	// Verify maps a verification SUITE NAME to the command line that runs
+	// it ([verify] in TOML, `verify-<name> =` in the legacy file). The
+	// cloud's run_verification names a suite and never a command line
+	// (§11.2), so this table is the whole vocabulary of what a remote run
+	// may execute here — an unlisted name is refused.
+	//
+	// It lives in the USER's config and nowhere else. A `.rook/config`
+	// arrives by git clone, and a repo that could name argv would be
+	// arbitrary code execution on clone; applyKey/applyTOML stop the repo
+	// layer before it reaches any key but lsp*, and that bound is what
+	// makes this table safe to consult.
+	Verify map[string]string `json:"verify"`
 	// Workflow is the staged review pipeline run after a worktree's coding
 	// agent opens its PR: slash commands, comma-separated (`workflow =
 	// /security-review, /review`), each spawned sequentially in its own
@@ -252,6 +264,17 @@ func applyKey(cfg *Config, key, value string, repoLayer bool) {
 		return // fail open: a repo file may carry keys a newer rook reads
 	}
 	// dynamic keys first — the switch below only knows fixed names
+	//
+	// `verify-<suite> = <command line>` is the flat form of [verify]. An
+	// empty value is dropped: a suite that names nothing would be a gate
+	// that always passes.
+	if suite, ok := strings.CutPrefix(key, "verify-"); ok && suite != "" && value != "" {
+		if cfg.Verify == nil {
+			cfg.Verify = map[string]string{}
+		}
+		cfg.Verify[suite] = value
+		return
+	}
 	if ws, ok := strings.CutPrefix(key, "jira-project-"); ok && ws != "" && value != "" {
 		if cfg.JiraProjects == nil {
 			cfg.JiraProjects = map[string]string{}
