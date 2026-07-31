@@ -6,7 +6,7 @@
 //!
 //! ONE FILE, TWO READERS. This is rook-host's config too, and most of
 //! what is in it belongs to the host: coder, workflow, workspace-allow,
-//! [agent], [jira], [lsp], [cloud], [workspaces.*]. So:
+//! [jira], [lsp], [cloud], [workspaces.*]. So:
 //!
 //!   - Only TOP-LEVEL keys are ours. A key inside any [table] is
 //!     someone else's by definition — parsing `url` out of [jira] as if

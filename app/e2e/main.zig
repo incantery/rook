@@ -2295,11 +2295,6 @@ const bench_full_config =
     \\[editor.keybinds.normal]
     \\"<leader>TAB" = "explorer.toggle"
     \\"<leader>o" = "explorer.reveal"
-    \\[agent]
-    \\enabled = true
-    \\engine = "auto"
-    \\model = ""
-    \\daily-cap-usd = 1.00
     \\[jira]
     \\[lsp]
     \\enable = ["go", "typescript", "svelte"]

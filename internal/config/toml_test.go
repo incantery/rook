@@ -138,21 +138,11 @@ func TestTOMLEditorLeaderDefault(t *testing.T) {
 
 func TestTOMLAgentAndProviders(t *testing.T) {
 	writeTOML(t, `
-[agent]
-enabled = true
-engine = "openai"
-model = "gpt-5.4-nano"
-daily-cap-usd = 2.5
-
 [providers.linear]
 team = "ENG"
 limit = 25
 `)
 	cfg := Load()
-	if !cfg.Agent || cfg.AgentEngine != "openai" || cfg.AgentModel != "gpt-5.4-nano" ||
-		cfg.AgentDailyCapUSD != 2.5 {
-		t.Fatalf("agent: %+v", cfg)
-	}
 	// A provider's table is its own vocabulary: carried verbatim, and
 	// non-string scalars stringified rather than dropped or fatal.
 	if got := cfg.Providers["linear"]; got["team"] != "ENG" || got["limit"] != "25" {

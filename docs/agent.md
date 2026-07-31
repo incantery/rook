@@ -1,5 +1,18 @@
 # The Rook Agent: developer, not coder
 
+> **Status, 2026-07-31: the drafter half of this document is code that no
+> longer exists.** `rook-agent`, the decisions ledger, and the
+> draft/approve/reject flow were removed in the strip — they were one
+> instance of "something proposes, a human disposes", and that belongs to
+> a plugin rather than to core. The **sensor** half survives and is still
+> live code: `agentwatch.go`, `transcriptwatch.go`, `internal/transcript`,
+> and the `/attention` list all work as described here.
+>
+> The mechanism the deletion leaves behind is `attention.raise` — any
+> plugin may declare that something needs a human, and core ranks and
+> renders what it collects. See `docs/plugins/VOCABULARY.md`. This file is
+> kept as the design record the sensor layer still cites.
+
 The goal of the built-in agent, distilled from the design conversation on
 2026-07-11. This extends README decisions 3, 4, and 6; nothing here starts
 until rook is the daily driver.

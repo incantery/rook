@@ -2,7 +2,7 @@
 //!
 //! "Every claude session waiting on you, across workspaces", oldest
 //! first. The host already computes it (internal/host/attention.go); the
-//! inbox, the notifications and rook-agent all consume the same shape,
+//! inbox and the notifications all consume the same shape,
 //! so this is a projection rather than a second source of truth.
 //!
 //! Shaped after usage.zig, and fail-open the same way: no host.json, a

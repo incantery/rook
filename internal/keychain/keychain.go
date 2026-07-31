@@ -1,6 +1,6 @@
 // Package keychain stores rook's secrets in the macOS login keychain.
 // Everything goes through /usr/bin/security on purpose: keychain ACLs are
-// per-binary, and rook-agent is rebuilt constantly (`make agent`) — linking
+// per-binary, and providers are rebuilt constantly — linking
 // Security.framework would mean a permission prompt on every rebuild. The
 // Apple-signed security tool is the stable identity that gets the ACL, so
 // writes and reads never prompt.
@@ -14,11 +14,9 @@ import (
 	"strings"
 )
 
-// The items rook owns: the drafter's OpenAI key and the issue queue's
-// Jira API token (`security find-generic-password -s rook -a <account>`).
+// The items rook owns (`security find-generic-password -s rook -a <account>`).
 const (
-	Service       = "rook"
-	OpenAIAccount = "openai"
+	Service = "rook"
 	// LinearAccount is the Linear API key. rook WRITES it and never reads
 	// it — rook-provider-linear is the only thing that fetches it back,
 	// which is what keeps the credential out of rook's address space.

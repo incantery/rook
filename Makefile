@@ -16,7 +16,7 @@
 # install gets a fresh BUILD id stamped into ALL binaries, and the app
 # replaces a daemon whose build differs — so relaunch is guaranteed to
 # run the latest everything, at the cost of that daemon's shells (the
-# tmux server-upgrade reality; rook-agent respawns via mtime, no cost).
+# tmux server-upgrade reality).
 
 APP := /Applications/rook.app
 
@@ -33,7 +33,7 @@ BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 # would only mean somebody could compile it.
 PROVIDER_DIRS := $(wildcard providers/*)
 
-.PHONY: build dev prod install clean agent release release-stage e2e e2e-clean providers
+.PHONY: build dev prod install clean release release-stage e2e e2e-clean providers
 
 # Compile only, and deliberately so: there is no run target that skips
 # DEV_ENV, because an instance on the default socket unlinks-then-binds
@@ -157,13 +157,6 @@ install:
 	@echo "installed $(APP) (v$(REL_VERSION), build $(BUILD)) + ~/.local/bin/{rook,re,rookctl}"
 	@echo "quit + relaunch rook to pick it up"
 
-# The drafter's dev loop: rebuild, and the running host's supervisor
-# notices the new mtime and respawns rook-agent — no daemon replacement,
-# no shell deaths. Deliberately NOT bundled into the .app: next-to-binary
-# would shadow this loop.
-agent:
-	go build -ldflags "$(BUILD_FLAG)" -o $(shell go env GOPATH)/bin/rook-agent ./cmd/rook-agent
-
 # The real app, driven end to end: each scenario spawns a SANDBOXED rook
 # (own ctl socket, own config, own state dir, /bin/sh, no rook-host) and
 # asserts against both truths — `dump` for what the emulator holds and a
@@ -204,8 +197,6 @@ clean:
 # Builds arm64 on this machine (no CI), zips rook.app + rookctl, tags the
 # current commit, and publishes via gh. Users install with install.sh
 # (curl → no quarantine → no Gatekeeper prompt on our ad-hoc signature)
-# and upgrade with `rookctl update`. rook-agent is not shipped yet — the
-# drafter stays a from-source feature until it settles.
 #
 # The bundle is assembled by hand, right here: `rook` plus the two Go
 # binaries it resolves beside its own executable (hostc.siblingBinary).

@@ -124,12 +124,6 @@ type Host struct {
 	// exactly, and for one ioctl. Keyed like claims: transcript session id.
 	claimFg map[string]int
 
-	// Live drafts by transcript session id — what /attention decorates its
-	// items with. The decisions table is the durable ledger; this map is
-	// just the "current open draft" index over it.
-	draftMu sync.Mutex
-	drafts  map[string]draftInfo
-
 	// um caches subscription usage windows (WatchUsage).
 	um *usageMon
 
@@ -144,8 +138,7 @@ type Host struct {
 	// wfMu serializes workflow advancement (see advanceWorkflow).
 	wfMu sync.Mutex
 
-	// Lifecycle root for supervised children (agentmon, and rook-agent via
-	// SuperviseAgent when callers pass Done()'s context). Shutdown cancels
+	// Lifecycle root for supervised children and probers. Shutdown cancels
 	// it — child processes must die with the host, or every daemon
 	// replacement leaks orphans.
 	ctx    context.Context
@@ -173,15 +166,10 @@ func New() *Host {
 		claims:   make(map[string]string),
 		claimFg:  make(map[string]int),
 		binds:    make(map[string]string),
-		drafts:   make(map[string]draftInfo),
 		um:       newUsageMon(),
 		prm:      newPRMon(),
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
-	// Manual-attribution + stale-ask hooks: the transcript is the ground
-	// truth for what actually got answered (see onUserReply).
-	h.aw.onUserReply = h.onUserReply
-	h.aw.onTurnCompleted = h.onTurnCompleted
 	// The workflow engine's stage-completion sensor — genuine turn ends
 	// only, never AskUserQuestion/notify (see agentwatch.onTurnFinished).
 	h.aw.onTurnFinished = h.onTurnFinished
@@ -199,8 +187,8 @@ func New() *Host {
 // Shutdown reaches everything.
 func (h *Host) Context() context.Context { return h.ctx }
 
-// Shutdown kills the host's supervised children (agentmon, rook-agent).
-// Call it on the way out — SIGTERM from a replacing daemon included.
+// Shutdown kills the host's supervised children and probers. Call it on
+// the way out — SIGTERM from a replacing daemon included.
 func (h *Host) Shutdown() { h.cancel() }
 
 // cachedCwdOf is cwdOf behind a short TTL: the status endpoint gets polled
@@ -602,7 +590,6 @@ func (h *Host) Handler() http.Handler {
 		writeJSON(w, h.um.current())
 	})
 	mux.HandleFunc("/costs", h.handleCosts)
-	mux.HandleFunc("/drafts/", h.handleDraftDecide)
 	mux.HandleFunc("/asks/", h.handleAsks)
 	// The session-less ask queue: create and list. A client that does not
 	// hold a wire-v3 session socket (the zig app owns its ptys in-process
@@ -612,8 +599,6 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/threads/", h.handleThread)
 	// per-task verbs (RookTask) — global ids, same as threads
 	mux.HandleFunc("/tasks/", h.handleTask)
-	mux.HandleFunc("/agent/spend", h.handleSpend)
-	mux.HandleFunc("/decisions", h.handleDecisions)
 	// pprof rides the same authenticated loopback surface as everything
 	// else — no side door (README decision 3). Reach it with the token:
 	//   go tool pprof "http://127.0.0.1:$PORT/debug/pprof/heap?token=$TOKEN"

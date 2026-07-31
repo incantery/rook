@@ -49,7 +49,6 @@ type tomlFile struct {
 	Keybinds          map[string]string `toml:"keybinds"`
 	Commands          map[string]string `toml:"commands"`
 	Editor            *tomlEditor       `toml:"editor"`
-	Agent             *tomlAgent        `toml:"agent"`
 	// Providers is [providers.<name>] — see Config.Providers. Decoded as
 	// `any` and stringified rather than typed: a provider's config is its
 	// own vocabulary, and a value shape rook did not anticipate must not
@@ -66,13 +65,6 @@ type tomlEditor struct {
 	// Keybinds is mode → trigger → command (vim's nmap/imap/vmap as
 	// tables: [editor.keybinds.normal] etc.).
 	Keybinds map[string]map[string]string `toml:"keybinds"`
-}
-
-type tomlAgent struct {
-	Enabled     *bool    `toml:"enabled"`
-	Engine      *string  `toml:"engine"`
-	Model       *string  `toml:"model"`
-	DailyCapUSD *float64 `toml:"daily-cap-usd"`
 }
 
 // tomlRelay is [relay] — the rook-server an ask escalates to. Only the URL
@@ -270,17 +262,6 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 					m[strings.TrimSpace(t)] = strings.TrimSpace(c)
 				}
 			}
-		}
-	}
-
-	if f.Agent != nil {
-		if f.Agent.Enabled != nil {
-			cfg.Agent = *f.Agent.Enabled
-		}
-		setStr(&cfg.AgentEngine, f.Agent.Engine)
-		setStr(&cfg.AgentModel, f.Agent.Model)
-		if f.Agent.DailyCapUSD != nil && *f.Agent.DailyCapUSD >= 0 {
-			cfg.AgentDailyCapUSD = *f.Agent.DailyCapUSD
 		}
 	}
 

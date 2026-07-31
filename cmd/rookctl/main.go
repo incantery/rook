@@ -9,8 +9,6 @@
 //	rookctl attention     who's waiting on you, cross-workspace (text inbox)
 //	rookctl usage         subscription usage windows (host-cached)
 //	rookctl send          type into a window: rookctl send s3 yes
-//	rookctl approve       send a draft (optionally edited) into its window
-//	rookctl reject        decline a draft
 //	rookctl spawn         start a claude session: rookctl spawn [-w ws] [--worktree] <task…>
 //	rookctl issues        the workspace's work queue (providers, mine + unassigned)
 //	rookctl changes       the workspace's changed files: rookctl changes [-w ws] [--base head|branch]
@@ -28,13 +26,11 @@
 //	                        --dry-run previews the batch in memory, writing nothing to rook.db
 //	                        subverbs: show [<id>], gate [<id>], approve|reject|defer <id…>, score-all, score <id> <json>
 //	rookctl tasks         list a workspace's RookTasks: rookctl tasks [-w ws] [--work-type review] [--json]
-//	rookctl decisions     the drafter's ledger, last 7 days, with the verdict mix
 //	rookctl ask           ask the human a question in a split beside this pane,
 //	                        blocking until answered: rookctl ask '<json>' (or stdin);
 //	                        answer JSON on stdout, exit 0 answered / 1 dismissed
 //	rookctl mcp           stdio MCP server for Claude Code — the `ask` tool is
 //	                        `rookctl ask` behind tools/call (the rook plugin wires it)
-//	rookctl set-openai-key store the drafter's API key in the keychain
 //	rookctl set-linear-token store the Linear API key (queue credential) in the keychain
 //	rookctl set-relay-token store the rook-server bearer token in the keychain
 //	rookctl set-cloud-token store the rook-cloud machine token in the keychain
@@ -126,10 +122,6 @@ func main() {
 		err = runUsage()
 	case "send":
 		err = runSend(os.Args[2:])
-	case "approve":
-		err = runApprove(os.Args[2:])
-	case "reject":
-		err = runReject(os.Args[2:])
 	case "spawn":
 		err = runSpawn(os.Args[2:])
 	case "issues":
@@ -162,10 +154,6 @@ func main() {
 		err = runExplore(os.Args[2:])
 	case "grep":
 		err = runGrep(os.Args[2:])
-	case "decisions":
-		err = runDecisions()
-	case "set-openai-key":
-		err = runSetOpenAIKey()
 	case "set-linear-token":
 		err = runSetLinearToken()
 	case "set-relay-token":
@@ -192,7 +180,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|approve <draft-id> [text…]|reject <draft-id>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|thread doc|note|ask <id>|edit [file…]|ask [json]|mcp|set-openai-key|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|thread doc|note|ask <id>|edit [file…]|ask [json]|mcp|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -348,8 +336,8 @@ func runAgents() error {
 	return nil
 }
 
-// ---- attention / send / approve / reject (the parity proof: everything
-// the inbox can do, scriptable) ----
+// ---- attention / send (the parity proof: everything the inbox can do,
+// scriptable) ----
 
 type attentionItem struct {
 	Workspace    string    `json:"workspace"`
@@ -361,13 +349,6 @@ type attentionItem struct {
 	Ask          string    `json:"ask"`
 	Interactive  bool      `json:"interactive"`
 	Since        time.Time `json:"since"`
-	Draft        *struct {
-		ID         int64   `json:"id"`
-		Action     string  `json:"action"`
-		Reply      string  `json:"reply"`
-		Reason     string  `json:"reason"`
-		Confidence float64 `json:"confidence"`
-	} `json:"draft"`
 }
 
 func runAttention() error {
@@ -395,24 +376,6 @@ func runAttention() error {
 		}
 		if it.Interactive {
 			fmt.Println("   ⌨ interactive prompt — answer in the window")
-		}
-		if it.Draft != nil {
-			switch it.Draft.Action {
-			case "draft":
-				fmt.Printf("   ✎ draft #%d (%.0f%%): %s\n", it.Draft.ID, it.Draft.Confidence*100,
-					strings.ReplaceAll(it.Draft.Reply, "\n", " "))
-				fmt.Printf("     rookctl approve %d | rookctl reject %d\n", it.Draft.ID, it.Draft.ID)
-			case "spawn":
-				fmt.Printf("   ▶ new session #%d (%.0f%%): %s\n", it.Draft.ID, it.Draft.Confidence*100,
-					strings.ReplaceAll(it.Draft.Reply, "\n", " "))
-				fmt.Printf("     rookctl approve %d | rookctl reject %d\n", it.Draft.ID, it.Draft.ID)
-			case "escalate":
-				if it.Draft.Reason != "" {
-					fmt.Printf("   ⚑ yours to answer — %s\n", strings.ReplaceAll(it.Draft.Reason, "\n", " "))
-				} else {
-					fmt.Printf("   ⚑ yours to answer (draft #%d escalated)\n", it.Draft.ID)
-				}
-			}
 		}
 	}
 	return nil
@@ -450,16 +413,11 @@ func runUsage() error {
 	// billing (host-observed raw-inference pricing)
 	if raw, err := c.req("GET", "/costs", nil); err == nil {
 		var costs struct {
-			TodayUSD        float64 `json:"todayUsd"`
-			WeekUSD         float64 `json:"weekUsd"`
-			DrafterTodayUSD float64 `json:"drafterTodayUsd"`
+			TodayUSD float64 `json:"todayUsd"`
+			WeekUSD  float64 `json:"weekUsd"`
 		}
 		if json.Unmarshal(raw, &costs) == nil && (costs.TodayUSD > 0 || costs.WeekUSD > 0) {
-			fmt.Printf("raw-inference value: $%.2f today · $%.2f 7d", costs.TodayUSD, costs.WeekUSD)
-			if costs.DrafterTodayUSD > 0 {
-				fmt.Printf(" · drafter $%.2f today", costs.DrafterTodayUSD)
-			}
-			fmt.Println()
+			fmt.Printf("raw-inference value: $%.2f today · $%.2f 7d\n", costs.TodayUSD, costs.WeekUSD)
 		}
 	}
 	return nil
@@ -476,43 +434,6 @@ func runSend(args []string) error {
 	// \r submits — same as pressing enter in the window
 	_, err = c.req("POST", "/sessions/"+args[0]+"/input",
 		map[string]string{"data": strings.Join(args[1:], " ") + "\r"})
-	return err
-}
-
-func runApprove(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: rookctl approve <draft-id> [text…]")
-	}
-	c, err := connect()
-	if err != nil {
-		return err
-	}
-	body := map[string]string{}
-	if len(args) > 1 {
-		body["text"] = strings.Join(args[1:], " ")
-	}
-	raw, err := c.req("POST", "/drafts/"+args[0]+"/approve", body)
-	if err != nil {
-		return err
-	}
-	var res struct {
-		RookSession string `json:"rookSession"`
-		Verdict     string `json:"verdict"`
-	}
-	json.Unmarshal(raw, &res)
-	fmt.Printf("%s → %s\n", res.Verdict, res.RookSession)
-	return nil
-}
-
-func runReject(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: rookctl reject <draft-id>")
-	}
-	c, err := connect()
-	if err != nil {
-		return err
-	}
-	_, err = c.req("POST", "/drafts/"+args[0]+"/reject", map[string]string{})
 	return err
 }
 
@@ -635,8 +556,6 @@ func runSpawn(args []string) error {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
-
-// ---- set-openai-key ----
 
 // ---- issues (the work queue: providers, behind the host) ----
 
@@ -1623,56 +1542,8 @@ func runTasks(args []string) error {
 	return nil
 }
 
-// ---- decisions (the drafter's ledger, human-readable) ----
-
-func runDecisions() error {
-	c, err := connect()
-	if err != nil {
-		return err
-	}
-	since := time.Now().Add(-7 * 24 * time.Hour)
-	raw, err := c.req("GET", "/decisions?since="+since.UTC().Format("2006-01-02T15:04:05Z"), nil)
-	if err != nil {
-		return err
-	}
-	var rows []struct {
-		Action     string  `json:"action"`
-		Verdict    string  `json:"verdict"`
-		Confidence float64 `json:"confidence"`
-		Model      string  `json:"model"`
-		CostUSD    float64 `json:"costUsd"`
-		Ask        string  `json:"ask"`
-	}
-	if err := json.Unmarshal(raw, &rows); err != nil {
-		return err
-	}
-	if len(rows) == 0 {
-		fmt.Println("no decisions in the last 7 days")
-		return nil
-	}
-	mix := map[string]int{}
-	var usd float64
-	for _, r := range rows {
-		mix[r.Verdict]++
-		usd += r.CostUSD
-		ask := strings.ReplaceAll(r.Ask, "\n", " ")
-		if len(ask) > 60 {
-			ask = ask[:60] + "…"
-		}
-		fmt.Printf("%-9s %-9s %4.2f  $%.4f  %s\n", r.Action, r.Verdict, r.Confidence, r.CostUSD, ask)
-	}
-	fmt.Printf("\n%d decisions, $%.4f — verdicts:", len(rows), usd)
-	for _, v := range []string{"approved", "edited", "rejected", "manual", "stale", "open", "auto"} {
-		if mix[v] > 0 {
-			fmt.Printf(" %s %d", v, mix[v])
-		}
-	}
-	fmt.Println()
-	return nil
-}
-
-// runSetLinearToken mirrors runSetOpenAIKey for the issue queue's Linear
-// credential (a personal API key from Linear's Security & access settings).
+// runSetLinearToken stores the issue queue's Linear credential (a personal
+// API key from Linear's Security & access settings).
 //
 // This is the only place rook touches the key: rook-provider-linear reads
 // it back out of the keychain itself, so the host never holds it.
@@ -1721,26 +1592,6 @@ func runSetCloudToken() error {
 		return fmt.Errorf("stored, but read-back failed — is the login keychain locked?")
 	}
 	fmt.Println("cloud token stored — set [cloud] url in ~/.config/rook/config.toml, then restart rook-host")
-	return nil
-}
-
-// runSetOpenAIKey hands the whole prompt to the security tool: it reads
-// the key with hidden input on the tty, so the secret never appears in
-// argv, shell history, or this process at all. Creating the item via
-// /usr/bin/security also puts the ACL on that stable Apple-signed binary —
-// rook-agent's reads (same tool) never trigger keychain prompts, no matter
-// how often `make agent` rebuilds it.
-func runSetOpenAIKey() error {
-	cmd := exec.Command("security", "add-generic-password", "-U",
-		"-s", keychain.Service, "-a", keychain.OpenAIAccount, "-w")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("security add-generic-password: %w", err)
-	}
-	if k, err := keychain.Get(keychain.Service, keychain.OpenAIAccount); err != nil || k == "" {
-		return fmt.Errorf("stored, but read-back failed — is the login keychain locked?")
-	}
-	fmt.Println("key stored in the login keychain — rook-agent picks it up within a minute")
 	return nil
 }
 

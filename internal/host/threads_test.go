@@ -411,7 +411,6 @@ func threadHost(t *testing.T) (*Host, *os.File, string) {
 		cwdCache: make(map[int]cwdEntry),
 		claims:   map[string]string{"t1": "w1"},
 		binds:    map[string]string{},
-		drafts:   make(map[string]draftInfo),
 	}
 	if h.reg.db == nil {
 		t.Fatal("test registry has no db")
@@ -611,7 +610,6 @@ func TestThreadSubmitMultipleClaimsPicksNewest(t *testing.T) {
 		cwdCache: make(map[int]cwdEntry),
 		claims:   map[string]string{"t1": "s1", "t2": "s2"},
 		binds:    map[string]string{},
-		drafts:   make(map[string]draftInfo),
 	}
 	if h.reg.db == nil {
 		t.Fatal("test registry has no db")
@@ -678,7 +676,6 @@ func TestThreadSubmitDeadPtyFallthrough(t *testing.T) {
 		cwdCache: make(map[int]cwdEntry),
 		claims:   map[string]string{"t1": "s1"},
 		binds:    map[string]string{},
-		drafts:   make(map[string]draftInfo),
 	}
 	if h.reg.db == nil {
 		t.Fatal("test registry has no db")

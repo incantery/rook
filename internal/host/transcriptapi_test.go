@@ -3,9 +3,36 @@ package host
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
+
+// agentHost builds a Host with a real (temp-dir) registry, a wired
+// agentwatch, and one fake window whose "pty" is a pipe. No HTTP listener.
+// It was draftHost until the drafter left in the strip; the fixture
+// outlived it because the transcript endpoints share the same shape.
+func agentHost(t *testing.T) (*Host, *os.File) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	h := &Host{
+		sessions: map[string]*session{"w1": {info: SessionInfo{ID: "w1", Workspace: "ws"}, pty: pw}},
+		reg:      loadRegistry(),
+		aw:       newAgentWatch(),
+		cwdCache: make(map[int]cwdEntry),
+		claims:   map[string]string{"t1": "w1"},
+		binds:    map[string]string{},
+	}
+	if h.reg.db == nil {
+		t.Fatal("test registry has no db")
+	}
+	return h, pr
+}
 
 func getTranscript(t *testing.T, h *Host, path string) (*httptest.ResponseRecorder, wireTranscript) {
 	t.Helper()
@@ -25,7 +52,7 @@ func getTranscript(t *testing.T, h *Host, path string) (*httptest.ResponseRecord
 // missing session is the only thing it can be asked for deterministically.
 // The rendering contract is tested through toWire/conversational directly.
 func TestTranscriptEndpointUnknownSessionIs404(t *testing.T) {
-	h, _ := draftHost(t)
+	h, _ := agentHost(t)
 	w, _ := getTranscript(t, h, "/agents/00000000-dead-beef-0000-000000000000/transcript")
 	if w.Code != 404 {
 		t.Errorf("unknown session: code %d, want 404", w.Code)
@@ -36,7 +63,7 @@ func TestTranscriptEndpointUnknownSessionIs404(t *testing.T) {
 // read a file outside the tree, and FindSession must refuse before any
 // filesystem work happens.
 func TestTranscriptEndpointRefusesTraversal(t *testing.T) {
-	h, _ := draftHost(t)
+	h, _ := agentHost(t)
 	for _, bad := range []string{"..%2f..%2fetc%2fpasswd", "..", "%2e%2e"} {
 		w, _ := getTranscript(t, h, "/agents/"+bad+"/transcript")
 		if w.Code == 200 {

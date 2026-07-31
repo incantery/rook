@@ -25,20 +25,6 @@ type Config struct {
 	// "One Light"). Empty = the frontend's default. Frontend-only: the host
 	// stores it, the webview builds and applies the palette.
 	Theme string `json:"theme"`
-	// Agent settings (docs/agent.md): read by rook-agent, never by the
-	// host — the host supervises the process, the process reads its own
-	// policy. Off by default; the whole feature is opt-in.
-	Agent bool `json:"agent"`
-	// AgentEngine picks the drafter's model backend: "claude" shells out to
-	// the coder CLI the user already has (no key, no setup — claude is
-	// already a hard dependency, since agentmon reads its transcripts),
-	// "openai" uses an API key, "auto" (the default) prefers claude when
-	// it's on PATH and falls back to a key. Empty means auto.
-	AgentEngine string `json:"agentEngine"`
-	// AgentModel empty means the engine's own default — the engines disagree
-	// (nano vs haiku), so the default can't live here.
-	AgentModel       string  `json:"agentModel"`
-	AgentDailyCapUSD float64 `json:"agentDailyCapUsd"`
 	// Providers is `[providers.<name>]` — one table per external system
 	// rook may ask questions of, and its contents are that provider's
 	// configuration, handed over as environment at spawn (see
@@ -159,10 +145,6 @@ func Default() Config {
 		WindowPaddingX:    4,
 		WindowPaddingY:    4,
 		Theme:             "Material Ocean",
-		Agent:             false,
-		AgentEngine:       "auto",
-		AgentModel:        "", // engine's default
-		AgentDailyCapUSD:  1.00,
 		Coder:             "claude",
 		Leader:            "`",
 		EditorLeader:      ",",
@@ -319,20 +301,6 @@ func applyKey(cfg *Config, key, value string, repoLayer bool) {
 		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
 			cfg.WindowPaddingY = n
 		}
-	case "agent":
-		cfg.Agent = value == "on" || value == "true"
-	case "agent-model":
-		if value != "" {
-			cfg.AgentModel = value
-		}
-	case "agent-engine":
-		if value != "" {
-			cfg.AgentEngine = value
-		}
-	case "agent-daily-cap-usd":
-		if f, err := strconv.ParseFloat(value, 64); err == nil && f >= 0 {
-			cfg.AgentDailyCapUSD = f
-		}
 	case "coder":
 		if value != "" {
 			cfg.Coder = value
@@ -438,23 +406,6 @@ func (s *Service) Get() Config {
 	return Load()
 }
 
-// ---- OpenAI key management (the drafter's credential, docs/agent.md) ----
-// The app writes ONLY to the keychain — the config file stays user-owned,
-// ghostty-style. rook-agent reads keychain first, key file second.
-
-// SetOpenAIKey stores the drafter's API key in the login keychain.
-func (s *Service) SetOpenAIKey(key string) error {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return errors.New("empty key")
-	}
-	return keychain.Set(keychain.Service, keychain.OpenAIAccount, key)
-}
-
-func (s *Service) ClearOpenAIKey() error {
-	return keychain.Delete(keychain.Service, keychain.OpenAIAccount)
-}
-
 // There is deliberately no LinearToken() here, and that absence is the
 // point of the provider split: rook-provider-linear fetches its own key
 // from the keychain, so a Linear credential never enters this process.
@@ -507,12 +458,6 @@ func keyStatus(account, fileName string) string {
 		return "file"
 	}
 	return ""
-}
-
-// OpenAIKeyStatus reports where a usable key currently lives: "keychain",
-// "file" (the ~/.config/rook/openai-key fallback), or "" for none.
-func (s *Service) OpenAIKeyStatus() string {
-	return keyStatus(keychain.OpenAIAccount, "openai-key")
 }
 
 // SetLinearToken stores the Linear API key in the login keychain (service

@@ -1,7 +1,7 @@
 //! rook-host: the client, and the lifecycle.
 //!
 //! `internal/host` is the product's server half — threads, review, asks,
-//! attention, transcripts, decisions, worktrees. It speaks localhost
+//! attention, transcripts, worktrees. It speaks localhost
 //! HTTP with a bearer token, and `~/.local/state/rook/host.json` is how
 //! anything finds it (port + token + pid + build). rookctl and the MCP
 //! server use the same door; this is rook walking through it.

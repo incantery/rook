@@ -3,6 +3,7 @@ package host
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +13,12 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// errNoDB: the registry runs without persistence when the data dir is
+// unavailable. Workspaces degrade gracefully; anything that must write a
+// durable row refuses instead, because a row that was never written is
+// indistinguishable from one that was.
+var errNoDB = errors.New("registry has no database")
 
 // WorkspaceInfo is a persistent workspace: it exists independent of live
 // sessions (VS Code-style) and survives host restarts. Scratch workspaces
@@ -72,29 +79,6 @@ CREATE TABLE IF NOT EXISTS workspaces (
 	scratch    INTEGER NOT NULL DEFAULT 0,
 	created_at TEXT NOT NULL,
 	last_used  TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS decisions (
-	id            INTEGER PRIMARY KEY,
-	agent_session TEXT NOT NULL,
-	ask_seq       INTEGER NOT NULL,
-	workspace     TEXT DEFAULT '',
-	rook_session  TEXT DEFAULT '',
-	cwd           TEXT DEFAULT '',
-	ask           TEXT NOT NULL,
-	action        TEXT NOT NULL, -- draft | escalate
-	draft         TEXT,
-	confidence    REAL,
-	model         TEXT,
-	input_tokens  INT,
-	output_tokens INT,
-	cached_tokens INT,
-	cost_usd      REAL,
-	verdict       TEXT DEFAULT 'open', -- open|approved|edited|rejected|manual|stale|auto
-	final_text    TEXT,
-	reason        TEXT, -- nano's own why, verbatim (drafted because…/escalated because…)
-	created_at    TEXT NOT NULL,
-	decided_at    TEXT,
-	UNIQUE(agent_session, ask_seq)
 );
 CREATE TABLE IF NOT EXISTS costs (
 	day TEXT PRIMARY KEY, -- local date, 2006-01-02
@@ -184,8 +168,10 @@ CREATE INDEX IF NOT EXISTS recents_ws ON recents(workspace, opened_at DESC);
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS
 // won't touch an existing table, so each ALTER runs and "duplicate column"
 // is the expected steady-state error.
+// The decisions table is deliberately absent: the drafter's ledger left in
+// the strip, and an existing database keeps its rows rather than having them
+// dropped out from under it. Nothing reads them; nothing destroys them.
 var migrations = []string{
-	`ALTER TABLE decisions ADD COLUMN reason TEXT`,
 	`ALTER TABLE workspaces ADD COLUMN worktree_of TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workspaces ADD COLUMN branch TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workspaces ADD COLUMN issue_tracker TEXT NOT NULL DEFAULT ''`,

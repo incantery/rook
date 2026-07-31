@@ -133,7 +133,7 @@ in those configs doesn't exist for MVP.
 8. **Extensibility: out-of-process, API-first — no plugin side doors.**
    (Starting posture, 2026-07-12 — expect refinement.) A rook plugin is a
    process speaking the authenticated host API and dispatching registry
-   commands, exactly like rook-agent, agentmon, and rookctl already do —
+   commands, exactly like rookctl already does —
    the Neovim/tmux model, not Hyper's inject-components-into-the-tree
    model, which fossilized its internals. Decision 3's "no agent-only side
    doors" generalizes: no plugin-only side doors either. If UI extension

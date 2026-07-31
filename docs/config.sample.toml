@@ -229,33 +229,6 @@
 [editor.keybinds.insert]
 
 
-# ── Built-in agent (opt-in; see docs/agent.md) ───────────────────────────
-
-[agent]
-# The whole agent feature is off until you turn it on.
-# enabled = false
-
-# Which model backend the drafter runs on.
-#   "auto"    prefer claude when it's on PATH, else an OpenAI key (default)
-#   "claude"  shell out to the coder CLI you already have. No API key, no
-#             setup: rook already needs claude to have anything to watch.
-#             Costs the drafter your subscription's rate limit alongside
-#             your coding sessions.
-#   "openai"  an API key (rookctl set-openai-key). Keeps the drafter's
-#             spend off your subscription — two tiers, two billing models.
-# Either way the drafter only ever proposes; you send.
-# engine = "auto"
-
-# Model the drafter runs. Empty means the engine's own default: haiku for
-# claude, gpt-5.4-nano for openai.
-# model = ""
-
-# Hard daily spend ceiling for the agent, in US dollars. Note that on the
-# claude engine with a subscription, spend is what the calls WOULD have
-# cost via the API — the cap reads as a rate limiter, not a bill.
-# daily-cap-usd = 1.00
-
-
 # ── Providers (host-read) ────────────────────────────────────────────────
 #
 # A provider is a separate process that owns rook's access to ONE external
@@ -399,8 +372,3 @@
 #
 # The Linear key is the one rook writes and never reads: the provider
 # fetches it back itself, so it is never in rook's memory.
-#
-# The OpenAI key is set from the app. It has a file fallback for headless
-# setups, which must be tight 0600:
-#
-#   ~/.config/rook/openai-key

@@ -149,8 +149,6 @@ func (h *Host) handleCosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	drafter, _ := h.reg.spendSince(midnight)
 	type wsCost struct {
 		Workspace string  `json:"workspace"` // "" = not in a rook window
 		USD       float64 `json:"usd"`
@@ -172,10 +170,9 @@ func (h *Host) handleCosts(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(live, func(i, j int) bool { return live[i].USD > live[j].USD })
 	writeJSON(w, map[string]any{
-		"todayUsd":        h.reg.costSince(now.Format("2006-01-02")),
-		"weekUsd":         h.reg.costSince(now.AddDate(0, 0, -6).Format("2006-01-02")),
-		"drafterTodayUsd": drafter,
-		"live":            live,
+		"todayUsd": h.reg.costSince(now.Format("2006-01-02")),
+		"weekUsd":  h.reg.costSince(now.AddDate(0, 0, -6).Format("2006-01-02")),
+		"live":     live,
 	})
 }
 

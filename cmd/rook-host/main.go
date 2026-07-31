@@ -65,15 +65,8 @@ func main() {
 	log.Printf("rook-host %s (build %s) listening on 127.0.0.1:%d (pid %d)", version.Version, version.Build, port, os.Getpid())
 
 	// Everything supervised runs under the host's lifecycle context, so
-	// one Shutdown reaches rook-agent and the usage prober alike.
+	// one Shutdown reaches every prober alike.
 	ctx := h.Context()
-	// The drafter (rook-agent) is a supervised child, not a third daemon —
-	// absent binary just means the feature is off.
-	agentDone := make(chan struct{})
-	go func() {
-		h.SuperviseAgent(ctx, fmt.Sprintf("http://127.0.0.1:%d", port))
-		close(agentDone)
-	}()
 	// Subscription usage windows, probed on a cost-weighted cadence.
 	go h.WatchUsage(ctx)
 	// PR state per worktree — the close-the-loop signal (merged → cleanup
@@ -89,10 +82,6 @@ func main() {
 		s := <-sig
 		log.Printf("rook-host: %v — shutting down (children included)", s)
 		h.Shutdown()
-		select {
-		case <-agentDone:
-		case <-time.After(2 * time.Second):
-		}
 		// The usage prober's `claude -p /usage` is killed by ctx, and
 		// CommandContext kills asynchronously — give it a beat to land.
 		// (This used to be agentmon's beat; rook stopped spawning it on
