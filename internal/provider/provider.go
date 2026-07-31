@@ -57,6 +57,11 @@ const (
 	OpDescribe = "describe"
 	// OpIssuesList is the work queue: issues that could be my next task.
 	OpIssuesList = "issues.list"
+	// OpPullsStatus resolves a branch to its pull request on the code
+	// host. A code-host capability rather than a tracker one — a
+	// Linear-tracked repo still merges through GitHub — so a provider may
+	// well offer one of these two and not the other.
+	OpPullsStatus = "pulls.status"
 )
 
 // Request is one call. ID is unique per connection and echoes back, so
@@ -120,4 +125,31 @@ type Issue struct {
 // IssuesListResult is OpIssuesList's payload.
 type IssuesListResult struct {
 	Issues []Issue `json:"issues"`
+}
+
+// PullsStatusParams asks about one branch in one checkout.
+type PullsStatusParams struct {
+	Root   string `json:"root"`
+	Branch string `json:"branch"`
+}
+
+// PullsStatusResult is OpPullsStatus's payload.
+//
+// Found=false is the load-bearing field: it means CHECKED, and there is
+// no PR — which is a fact, and must never be confused with the error
+// case (no gh, offline, a remote that is not GitHub), where nothing is
+// known and the caller keeps whatever it knew before. Collapsing those
+// two would report "no PR" for a branch that has one.
+type PullsStatusResult struct {
+	Found    bool   `json:"found"`
+	Number   int    `json:"number,omitempty"`
+	State    string `json:"state,omitempty"` // OPEN | CLOSED | MERGED
+	URL      string `json:"url,omitempty"`
+	MergedAt string `json:"mergedAt,omitempty"`
+	// Mergeable is the code host's merge check: MERGEABLE | CONFLICTING |
+	// UNKNOWN, or empty from a gh too old to report it. Callers must test
+	// for CONFLICTING exactly — every other value, including the empty
+	// one, has to read as "fine" so a missing answer never invents a
+	// conflict.
+	Mergeable string `json:"mergeable,omitempty"`
 }

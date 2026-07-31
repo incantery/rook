@@ -37,9 +37,56 @@ func main() {
 	provider.Serve(
 		provider.Describe{Name: "github"},
 		map[string]provider.Handler{
-			provider.OpIssuesList: issuesList,
+			provider.OpIssuesList:  issuesList,
+			provider.OpPullsStatus: pullsStatus,
 		},
 	)
+}
+
+// pullsStatus resolves a branch to its PR, run in the checkout so gh
+// finds the repo from its remote.
+//
+// "No PR for this branch" is a RESULT, not an error: gh says so in prose
+// on stderr, and the difference between that and a real failure is the
+// whole reason the caller can tell "there is no PR yet" from "I could not
+// look". GitHub keeps the PR↔branch association even after the remote
+// branch is auto-deleted post-merge, so a merged PR still resolves here.
+func pullsStatus(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p provider.PullsStatusParams
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+	}
+	if p.Root == "" || p.Branch == "" {
+		return nil, fmt.Errorf("a checkout and a branch are both required")
+	}
+	out, err := runGH(ctx, p.Root, "pr", "view", p.Branch,
+		"--json", "number,state,url,mergedAt,mergeable")
+	if err != nil {
+		if strings.Contains(err.Error(), "no pull requests found") {
+			return provider.PullsStatusResult{Found: false}, nil
+		}
+		return nil, err
+	}
+	return parsePR([]byte(out))
+}
+
+func parsePR(data []byte) (provider.PullsStatusResult, error) {
+	var pr struct {
+		Number    int    `json:"number"`
+		State     string `json:"state"`
+		URL       string `json:"url"`
+		MergedAt  string `json:"mergedAt"`
+		Mergeable string `json:"mergeable"`
+	}
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return provider.PullsStatusResult{}, fmt.Errorf("gh pr json: %w", err)
+	}
+	return provider.PullsStatusResult{
+		Found: true, Number: pr.Number, State: pr.State, URL: pr.URL,
+		MergedAt: pr.MergedAt, Mergeable: pr.Mergeable,
+	}, nil
 }
 
 // issuesList is the open queue scoped to "could be my next task":
