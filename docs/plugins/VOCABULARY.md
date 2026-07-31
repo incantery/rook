@@ -88,11 +88,35 @@ So it is a field kind of its own, resolved by core, never by the plugin.
 | **Detail** | a ref for the selected item | transcripts, diffs, documents |
 | **Form** | questions out, answers in | asks |
 | **Series** | a value over time, or a gauge | usage windows |
+| **Decoration** | anchored items projected into an open document | gutter marks, diagnostics, thread markers |
 
-Six, not the five predicted. **Table** is the one the exercise added:
+Seven, not the five predicted. **Table** is the one the exercise added:
 the decisions ledger has five numeric columns and exists to be summed
 and sorted, and rendering it as a list of titles throws away the reason
 anyone opens it.
+
+**Decoration** came from a sharper reading of the same question, and it
+is the one that pays for the anchor. Ask "is the diff viewer core?" and
+the answer is neither yes nor no: *rendering a document with change
+marks* is a primitive, and *where this particular diff comes from* is a
+feature. Same for the gutter — the ability to put a mark beside a line
+belongs to core; git's opinion about which lines changed does not.
+
+Which means the gutter is not a surface of its own. It is **the List,
+projected onto the document its items are anchored to** — the same items,
+selected by whether their anchor falls in the open file:
+
+| what appears in a gutter | it is |
+|---|---|
+| git change marks | anchored items, state = added/modified/deleted |
+| LSP diagnostics | anchored items, state = error/warn/info, detail = message |
+| thread markers | anchored items, state = open/resolved, detail = conversation |
+| review leaves | anchored items, state = pending/resolved, actions |
+
+Four features, one mechanism, and core is the only thing that needs to
+know how a mark is drawn or how an anchor drifts. This is what the
+`anchor` field is *for* — without it these are four bespoke integrations,
+and with it they are one projection.
 
 ## The inbound verbs
 
@@ -139,8 +163,26 @@ cost as a string and code locations as opaque blobs — both unrecoverable
 without a protocol break.
 
 Nothing in the ten needed a layout language. That is the result worth
-keeping: six surfaces and a typed item covered every feature rook has,
+keeping: seven surfaces and a typed item covered every feature rook has,
 so plugins never need to describe pixels.
+
+## The rule the strip follows
+
+Every feature below reduces to *a mechanism core keeps* and *an instance
+that leaves*. The strip removes instances and keeps mechanisms, which is
+why it is not the same as deleting the feature list:
+
+| kept (mechanism) | stripped (instance) |
+|---|---|
+| render a document with change marks | `diffdoc`, `diffsource` — where a diff comes from |
+| put a mark beside a line | git's change computation, blame, branch in the bar |
+| anchor and re-resolve a location | threads, review leaves, explore breadcrumbs |
+| own a pty, a pane, a layout | the agent deck, the session view |
+| a registry of workspaces | worktree creation and cleanup |
+| the door | every endpoint behind it |
+
+If a deletion cannot name the mechanism it leaves behind, it is removing
+too much.
 
 ## Deliberately not here
 
