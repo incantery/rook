@@ -30,6 +30,7 @@ const docspkg = @import("docs.zig");
 const bufferpkg = @import("buffer.zig");
 const uipkg = @import("ui.zig");
 const stats = @import("stats.zig");
+const keyenc = @import("keyenc.zig");
 
 extern "c" fn CACurrentMediaTime() f64;
 /// AppKit's system alert sound — the audible half of the bell.
@@ -73,6 +74,7 @@ const NSEventMaskLeftMouseDragged: u64 = 1 << 6;
 const NSEventMaskScrollWheel: u64 = 1 << 22;
 const flag_shift: u64 = 1 << 17;
 const flag_ctrl: u64 = 1 << 18;
+const flag_alt: u64 = 1 << 19;
 const flag_cmd: u64 = 1 << 20;
 
 const win_w: f64 = 1024;
@@ -458,6 +460,9 @@ pub const App = struct {
     cfg_status_left: cfgpkg.SegList = cfgpkg.segs(.{ .workspace, .branch, .cwd }),
     cfg_status_right: cfgpkg.SegList = cfgpkg.segs(.{ .hints, .hud }),
     cfg_tab_style: cfgpkg.TabStyle = .chips,
+    /// Programs ⌃HJKL yields to (config: nav-yield). Read on the
+    /// keystroke by navYields().
+    cfg_nav_yield: cfgpkg.NameList = cfgpkg.names(.{ "vim", "nvim", "vi", "view", "tmux" }),
     /// Per-tab hit zones for a `tabs` segment living in the STATUS
     /// bar (the top strip's chips keep chip_x). current-style records
     /// one zone; a click there cycles.
@@ -1070,6 +1075,7 @@ pub const App = struct {
             .cfg_bell = cfg.bell,
             .cfg_clip_allow = cfg.clipboard_write == .allow,
             .cfg_bufline = cfg.buffer_line,
+            .cfg_nav_yield = cfg.nav_yield,
             .cfg_ed_insert = cfg.editor_insert,
             .cfg_activity_bar = cfg.activity_bar,
             .cfg_explorer_auto = cfg.explorer_auto,
@@ -2061,6 +2067,44 @@ pub const App = struct {
             .attention => return false,
         }
         return true;
+    }
+
+    /// The question the ENCODER has to ask, and the mirror of the
+    /// routing rule directly above: is a live pty going to receive
+    /// these bytes, and if so what has it asked for?
+    ///
+    /// It lives here, touching the same fields in the same order, for
+    /// the reason that function gives for existing at all — a priority
+    /// kept in two places drifts. Adding a tenant means adding it to
+    /// both, and they are adjacent so that you see the second one.
+    ///
+    /// Null means chrome or an editor owns the keys. Those read the
+    /// small stream rook has always spoken — bare arrows, a plain tab —
+    /// and would mis-parse a `CSI 1;5D` into three typed characters.
+    /// Only a terminal gets the full encoding, because only a terminal
+    /// can say what it wants. Caller holds draw_lock.
+    pub fn ptyModesLocked(self: *App) ?keyenc.Modes {
+        if (self.pal_open) return null;
+        if (self.side_focus and self.side_panel != .attention) return null;
+        const tm = switch (self.activeTab().focused.content) {
+            .term => |*t| t,
+            .edit => return null,
+        };
+        // Read without the session mutex, like the alt-screen check in
+        // the event monitor: both screens outlive any single keystroke,
+        // so the worst a race costs is one key encoded against the mode
+        // set from a frame ago.
+        const k = tm.session.term.screens.active.kitty_keyboard.current();
+        return .{
+            .cursor_keys = tm.session.term.modes.get(.cursor_keys),
+            .kitty = .{
+                .disambiguate = k.disambiguate,
+                .report_events = k.report_events,
+                .report_alternates = k.report_alternates,
+                .report_all = k.report_all,
+                .report_associated = k.report_associated,
+            },
+        };
     }
 
     /// Route input into a pane: editors take the modal machine, a
@@ -4281,6 +4325,32 @@ pub const App = struct {
         return true;
     }
 
+    /// Does the focused pane's program own ⌃HJKL for itself?
+    ///
+    /// Asked fresh on every press, because the answer changes the
+    /// instant you type `vim` and again the instant you leave it —
+    /// anything cached is wrong for exactly as long as it is cached.
+    /// Two syscalls; the keystroke does not notice.
+    ///
+    /// Only terminals can answer. An editor pane is rook's own and
+    /// keeps the keys; a shell at its prompt is not in the list and
+    /// keeps nothing.
+    pub fn navYields(self: *App) bool {
+        self.draw_lock.lock();
+        const session = switch (self.activeTab().focused.content) {
+            .term => |*tm| tm.session,
+            .edit => {
+                self.draw_lock.unlock();
+                return false;
+            },
+        };
+        self.draw_lock.unlock();
+
+        var buf: [cfgpkg.NameList.max_len]u8 = undefined;
+        const name = session.fgName(&buf) orelse return false;
+        return self.cfg_nav_yield.has(name);
+    }
+
     /// Move focus in a direction within the active tab. Any thread.
     /// Returns false if no pane lies that way.
     pub fn focusMove(self: *App, dir: panespkg.NavDir) bool {
@@ -4784,6 +4854,7 @@ pub const App = struct {
         self.cfg_bell = cfg.bell;
         self.cfg_clip_allow = cfg.clipboard_write == .allow;
         self.cfg_bufline = cfg.buffer_line;
+        self.cfg_nav_yield = cfg.nav_yield;
         self.cursor_blink = cfg.cursor_blink;
 
         // Chrome arrangement: a preset (or hand-set lists) landing on
@@ -6653,6 +6724,24 @@ pub const App = struct {
     }
 };
 
+/// An NSString's UTF-8 bytes, or empty. The storage is the NSString's
+/// own and lives as long as the event does, which outlasts the encode.
+fn objcString(s: objc.Object) []const u8 {
+    if (s.value == null) return "";
+    const cstr = s.msgSend(?[*:0]const u8, "UTF8String", .{}) orelse return "";
+    return std.mem.span(cstr);
+}
+
+/// The first codepoint of a string, or 0. keyenc wants the key as a
+/// number, and a key is one codepoint by definition — anything longer
+/// came from an input method, not from a keycap.
+fn firstCodepoint(s: []const u8) u21 {
+    if (s.len == 0) return 0;
+    const n = std.unicode.utf8ByteSequenceLength(s[0]) catch return 0;
+    if (n > s.len) return 0;
+    return std.unicode.utf8Decode(s[0..n]) catch 0;
+}
+
 fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) callconv(.c) objc.c.id {
     const app: *App = context.app;
     const event = objc.Object.fromId(event_id);
@@ -6743,9 +6832,16 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
         return event_id; // other cmd chords stay AppKit's
     }
 
-    // ⌃HJKL pane nav — yielding to alternate-screen apps (vim owns its
-    // own splits). rook reads alt-screen truth straight from the
-    // emulator; the webview app needed a 3s-stale `fg` heuristic here.
+    // ⌃HJKL pane nav — yielding to programs that own their own splits.
+    //
+    // This used to yield to the alternate screen, read straight from
+    // the emulator. Exact, and the wrong question: it answers "is this
+    // program drawing full-screen", when what we need is "does this
+    // program have splits of its own to protect". Those were the same
+    // set for as long as the set was {vim}. Claude Code entered the
+    // alternate screen and ⌃HJKL died in the pane rook is FOR.
+    //
+    // So ask by name — see Session.fgName and the `nav-yield` config.
     if (flags & flag_ctrl != 0) {
         const chars = event.msgSend(objc.Object, "charactersIgnoringModifiers", .{});
         if (chars.value != null) {
@@ -6759,13 +6855,7 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                         else => null,
                     };
                     if (dir) |d| {
-                        app.draw_lock.lock();
-                        const alt = switch (app.activeTab().focused.content) {
-                            .term => |*tm| tm.session.term.screens.active_key == .alternate,
-                            .edit => false,
-                        };
-                        app.draw_lock.unlock();
-                        if (!alt and app.focusMove(d)) return null;
+                        if (!app.navYields() and app.focusMove(d)) return null;
                         // fall through: cooked control byte to the pty
                     }
                 }
@@ -6795,28 +6885,45 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
         }
     }
 
-    // Arrows by keyCode; everything else via the cooked characters, which
-    // already encode control (^C = 0x03), Enter (\r), Backspace (0x7f).
-    // Throwaway: vt.input.encodeKey is the real path once modes matter.
+    // Everything that is not committed IME text goes through keyenc,
+    // which is where the modes finally matter. What used to be here —
+    // four arrows by keycode and the cooked `characters` for everything
+    // else — is still the fast path for ordinary typing (keyenc returns
+    // that text untouched), but it is no longer the WHOLE path: named
+    // keys now carry their modifiers, arrows follow DECCKM, and
+    // shift+Tab is `ESC [ Z` rather than the 0x19 macOS calls it.
     const keycode = event.msgSend(u16, "keyCode", .{});
-    const arrow: ?[]const u8 = switch (keycode) {
-        123 => "\x1b[D",
-        124 => "\x1b[C",
-        125 => "\x1b[B",
-        126 => "\x1b[A",
-        else => null,
-    };
     const chars = event.msgSend(objc.Object, "characters", .{});
-    const bytes: []const u8 = ime_bytes orelse arrow orelse blk: {
-        if (chars.value == null) break :blk "";
-        const s = chars.msgSend(?[*:0]const u8, "UTF8String", .{}) orelse break :blk "";
-        break :blk std.mem.span(s);
+    const unmod = event.msgSend(objc.Object, "charactersIgnoringModifiers", .{});
+    var enc_buf: [keyenc.max_len]u8 = undefined;
+    const bytes: []const u8 = ime_bytes orelse blk: {
+        const key = keyenc.keyFromKeycode(keycode);
+        const modes: keyenc.Modes = modes: {
+            app.draw_lock.lock();
+            defer app.draw_lock.unlock();
+            break :modes app.ptyModesLocked() orelse .{};
+        };
+        break :blk keyenc.encode(&enc_buf, .{
+            .key = key,
+            .mods = .{
+                .shift = flags & flag_shift != 0,
+                // Option is Alt only for keys that compose nothing.
+                // On a key that produces text it is macOS's compose
+                // key and the IME above has already had its say —
+                // treating it as Alt there would turn é into ESC e.
+                .alt = key != .text and flags & flag_alt != 0,
+                .ctrl = flags & flag_ctrl != 0,
+                .super = flags & flag_cmd != 0,
+            },
+            .text = objcString(chars),
+            .unshifted = firstCodepoint(objcString(unmod)),
+        }, modes);
     };
     if (bytes.len > 0) {
         const ts = event.msgSend(f64, "timestamp", .{});
         // Leader chords see plain single-byte keys only — modified or
         // multi-byte input can never arm or resolve a chord.
-        if (bytes.len == 1 and flags & (flag_ctrl | (1 << 19)) == 0) {
+        if (bytes.len == 1 and flags & (flag_ctrl | flag_alt) == 0) {
             if (app.handleCharKey(bytes[0], ts)) return null;
         }
         // The kernel's receipt time, same clock as presentedTime: this

@@ -65,6 +65,7 @@ const scenarios = [_]Scenario{
     .{ .name = "docshare", .what = "one file in two panes is ONE document: edits, dirty flag and :w are shared", .run = docShare },
     .{ .name = "findfiles", .what = "⌘⇧F: scan honours the ignore rules, results group by file, Enter jumps to the line", .run = findInFiles },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
+    .{ .name = "keys", .what = "shift+Tab reaches the pty as CSI Z, and ⌃HJKL yields by program rather than by alternate screen", .run = keys },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
 };
 
@@ -83,6 +84,78 @@ fn boot(gpa: std.mem.Allocator, bin: []const u8) !void {
     // as a mystery timeout in every other scenario.
     var buf: [64 * 1024]u8 = undefined;
     try h.expectContains(try app.screen(&buf), "e2e$", "prompt");
+}
+
+// ---------------------------------------------------------------- keys
+
+/// Two bugs that looked like one, because they were both "a key I
+/// pressed did nothing in Claude Code".
+///
+/// This has to go through `nskey` — a real NSEvent through AppKit's
+/// dispatch and our own monitor — because both fixes live in that path.
+/// `ctl key` writes bytes straight at the pane and would prove nothing:
+/// it starts downstream of the encoder and downstream of the nav check.
+fn keys(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // -- shift+Tab is ESC [ Z ------------------------------------------
+    //
+    // `cat -v` spells what it receives, so the assertion is on the
+    // BYTES the pty got rather than on anything drawn. macOS hands
+    // shift+Tab over as 0x19 (NSBackTabCharacter), which is what rook
+    // used to forward verbatim — `^Y` here would be the old bug.
+    _ = try app.ctl("type cat -v");
+    _ = try app.ctl("enter");
+    h.sleepMs(300);
+    // keycode 48 = Tab, modmask 0x20000 = shift. The characters on the
+    // event are deliberately the WRONG answer: the encoder works from
+    // the keycode, and passing 0x19 here proves it ignores them.
+    _ = try app.ctl("nskey 48 20000 \\t");
+    _ = try app.ctl("key 0d");
+    try app.waitText("^[[Z", 10_000);
+
+    var buf: [64 * 1024]u8 = undefined;
+    try h.expectNotContains(try app.screen(&buf), "^Y", "shift+Tab must not arrive as 0x19");
+    _ = try app.ctl("key 04"); // ⌃D ends cat
+    h.sleepMs(300);
+
+    // -- ⌃HJKL yields by PROGRAM, not by alternate screen --------------
+    const first = try app.focusedPane();
+    _ = try app.ctl("split right");
+    const second = try app.focusedPane();
+    try h.expect(second != first, "split should focus the new pane", .{});
+
+    // A full-screen program with no splits of its own: the alternate
+    // screen is on, and the foreground program is `sleep`. This is the
+    // Claude Code shape, and under the old alt-screen rule ⌃H died here.
+    _ = try app.ctl("type printf '\\033[?1049h'; sleep 30");
+    _ = try app.ctl("enter");
+    h.sleepMs(700);
+    // keycode 4 = 'h', modmask 0x40000 = control.
+    _ = try app.ctl("nskey 4 40000 h");
+    h.sleepMs(400);
+    try h.expectEq("⌃H moves focus out of a full-screen program that has no splits", first, try app.focusedPane());
+
+    // And the half the old rule got right, which the new rule has to
+    // keep: vim owns ⌃HJKL, because vim has windows of its own to move
+    // between. Nothing about the screen says so — only the name does.
+    _ = try app.ctl("focus right");
+    try h.expectEq("back on the sleeping pane", second, try app.focusedPane());
+    _ = try app.ctl("key 03"); // ⌃C ends sleep
+    h.sleepMs(300);
+    _ = try app.ctl("type vim -u NONE");
+    _ = try app.ctl("enter");
+    h.sleepMs(1500);
+    _ = try app.ctl("nskey 4 40000 h");
+    h.sleepMs(400);
+    try h.expectEq("⌃H stays inside vim", second, try app.focusedPane());
+    _ = try app.ctl("key 1b"); // ESC, then :q!
+    _ = try app.ctl("type :q!");
+    _ = try app.ctl("key 0d");
 }
 
 // ---------------------------------------------------------------- echo

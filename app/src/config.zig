@@ -258,6 +258,56 @@ pub fn parseSegList(raw: []const u8) ?SegList {
     return out;
 }
 
+/// A short list of program names, stored inline. These are argv[0]
+/// basenames — `nvim`, never a path — so both bounds are generous.
+/// Inline because Config is copied by value on every live reload and a
+/// list of five words is not worth an allocator.
+pub const NameList = struct {
+    pub const max_names = 12;
+    pub const max_len = 24;
+
+    names: [max_names][max_len]u8 = undefined,
+    lens: [max_names]u8 = @splat(0),
+    n: usize = 0,
+
+    pub fn get(self: *const NameList, i: usize) []const u8 {
+        return self.names[i][0..self.lens[i]];
+    }
+
+    pub fn has(self: *const NameList, name: []const u8) bool {
+        for (0..self.n) |i| if (std.mem.eql(u8, self.get(i), name)) return true;
+        return false;
+    }
+
+    pub fn push(self: *NameList, name: []const u8) void {
+        if (self.n >= max_names or name.len == 0 or name.len > max_len) return;
+        @memcpy(self.names[self.n][0..name.len], name);
+        self.lens[self.n] = @intCast(name.len);
+        self.n += 1;
+    }
+};
+
+/// Comptime NameList literal, for defaults.
+pub fn names(comptime list: anytype) NameList {
+    var out = NameList{};
+    inline for (list) |x| out.push(x);
+    return out;
+}
+
+/// Parse `["vim", "nvim"]` (or a bare comma list) into a NameList.
+/// Deliberately total: any word is a legal program name, so unlike
+/// parseSegList there is nothing here that can be a typo we could warn
+/// about. An empty list is a real answer — it means "yield to nobody".
+pub fn parseNameList(raw: []const u8) NameList {
+    var val = std.mem.trim(u8, raw, " \t");
+    if (val.len >= 2 and val[0] == '[' and val[val.len - 1] == ']')
+        val = val[1 .. val.len - 1];
+    var out = NameList{};
+    var it = std.mem.splitScalar(u8, val, ',');
+    while (it.next()) |part| out.push(std.mem.trim(u8, part, " \t\""));
+    return out;
+}
+
 pub const Config = struct {
     font_size: f64 = 13,
     font_family: [:0]const u8 = "FiraCode Nerd Font Mono",
@@ -318,6 +368,21 @@ pub const Config = struct {
     /// leaving it on is zero for anyone who never opens one. Off is for
     /// people who want the editor and nothing behind it.
     lsp: bool = true,
+
+    /// Programs that own ⌃HJKL for themselves, by argv[0] name.
+    ///
+    /// The keys mean "move focus between rook's panes" everywhere
+    /// except inside a program that splits its own window, where they
+    /// have to keep meaning what that program says they mean. rook used
+    /// to infer that from the alternate screen — a good proxy right up
+    /// until Claude Code started using it, at which point ⌃HJKL stopped
+    /// working in the pane rook exists to hold.
+    ///
+    /// So it asks instead: `tcgetpgrp` on the pty, at the moment of the
+    /// keystroke. That is the same question the deleted webview app's
+    /// 3s-stale `fg` poll was trying to answer, minus the staleness.
+    /// An empty list yields to nobody.
+    nav_yield: NameList = names(.{ "vim", "nvim", "vi", "view", "tmux" }),
 };
 
 /// One number over the config file — the live-reload poll compares this
@@ -536,6 +601,8 @@ fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
             cfg.status_left = parseSegList(val) orelse cfg.status_left;
         } else if (std.mem.eql(u8, key, "status_right")) {
             cfg.status_right = parseSegList(val) orelse cfg.status_right;
+        } else if (std.mem.eql(u8, key, "nav_yield")) {
+            cfg.nav_yield = parseNameList(val);
         } else if (std.mem.eql(u8, key, "tab_style")) {
             const stripped = std.mem.trim(u8, val, "\"");
             cfg.tab_style = tabStyleFromName(stripped) orelse blk: {
@@ -1114,6 +1181,32 @@ test "parseSegList: brackets, quotes, order kept, typos skipped" {
     // a failure, the transcript suite's own known quirk).
     try t.expect(segFromName("bogus") == null);
     try t.expect(segFromName("cwd") == .cwd);
+}
+
+test "parseNameList: brackets, quotes, and an empty list that means it" {
+    const t = std.testing;
+    const l = parseNameList("[\"vim\", \"nvim\"]");
+    try t.expectEqual(@as(usize, 2), l.n);
+    try t.expect(l.has("vim") and l.has("nvim"));
+    // Substrings must not match: `vi` is in the default list and `vim`
+    // starts with it, so a prefix test here would yield to everything.
+    try t.expect(!l.has("vi"));
+    try t.expect(!l.has("v"));
+    // Yield to nobody — a real setting, and the one a person reaches
+    // for when they want ⌃HJKL to mean panes everywhere, always.
+    try t.expectEqual(@as(usize, 0), parseNameList("[]").n);
+    // A bare comma list, same as the segment lists accept.
+    try t.expectEqual(@as(usize, 2), parseNameList("vim, tmux").n);
+}
+
+test "nav-yield defaults to the programs that own their own splits" {
+    const t = std.testing;
+    const d = (Config{}).nav_yield;
+    try t.expect(d.has("vim") and d.has("nvim") and d.has("tmux"));
+    // The regression this whole change exists for: Claude Code draws
+    // full-screen but has no splits, so ⌃HJKL is rook's.
+    try t.expect(!d.has("claude"));
+    try t.expect(!d.has("bash") and !d.has("zsh"));
 }
 
 test "presets are the bundles the parity scenario pins" {

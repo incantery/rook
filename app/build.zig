@@ -181,6 +181,19 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(search_tests).step);
 
+    // Key encoding. The strongest case in the tree for a headless root:
+    // every one of these is an exact byte sequence, the failure mode is
+    // a key that silently does nothing in one program, and you cannot
+    // see any of it without a window unless the table is testable
+    // alone. shift+Tab reached Claude Code as 0x19 for weeks.
+    const keyenc_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/keyenc.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(keyenc_tests).step);
+
     // The open-document table. Its own root because what it guards is
     // an OWNERSHIP invariant, and both ways of getting it wrong are
     // silent: one reference too many leaks a document for the life of

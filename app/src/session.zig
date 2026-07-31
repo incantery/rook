@@ -18,6 +18,15 @@ extern "c" fn os_unfair_lock_lock(l: *u32) void;
 extern "c" fn os_unfair_lock_unlock(l: *u32) void;
 extern "c" fn usleep(us: u32) c_int;
 
+/// Who is reading this pty right now — see fgName. tcgetpgrp works on
+/// the MASTER side on macOS (verified against a real vim under a forked
+/// pty), which matters because the master is the only end rook holds.
+extern "c" fn tcgetpgrp(fd: ptypkg.fd_t) ptypkg.pid_t;
+/// <libproc.h>, in libSystem. Gives the full executable path, so the
+/// name survives without p_comm's 16-byte truncation.
+extern "c" fn proc_pidpath(pid: ptypkg.pid_t, buf: [*]u8, len: u32) c_int;
+const proc_pidpathinfo_maxsize = 4 * 1024;
+
 /// Tiny mutex over macOS os_unfair_lock: zero-init, callable from any
 /// thread (display link, reader), no Io handle required.
 pub const Lock = struct {
@@ -477,6 +486,35 @@ pub const Session = struct {
 
     pub fn write(self: *Session, bytes: []const u8) void {
         self.pty.writeMaster(bytes) catch {};
+    }
+
+    /// The name of the program currently reading this pty — `nvim`, or
+    /// `bash` when the shell is at its prompt. Null when there is no
+    /// foreground group or the lookup fails; the caller decides what
+    /// silence means, and for the ⌃HJKL check it means "not one of
+    /// yours", so an unanswerable question costs a key nothing.
+    ///
+    /// Cheap enough to ask on the keystroke: two syscalls, no
+    /// allocation, no cache to go stale. That last part is the point.
+    /// The webview app answered this from a 3s `fg` poll and got it
+    /// wrong for three seconds after every `vim`; the Zig app then
+    /// answered it from the alternate screen, which was exact but
+    /// asked the wrong question — plenty of full-screen programs have
+    /// no splits to protect.
+    ///
+    /// Note the pgid, not the pid: the foreground process GROUP leader
+    /// is the program the tty is talking to. A pipeline reports its
+    /// first command, which is the right answer for this question.
+    pub fn fgName(self: *Session, buf: []u8) ?[]const u8 {
+        const pgrp = tcgetpgrp(self.pty.master);
+        if (pgrp <= 0) return null;
+        var path: [proc_pidpathinfo_maxsize]u8 = undefined;
+        const n = proc_pidpath(pgrp, &path, path.len);
+        if (n <= 0) return null;
+        const base = std.fs.path.basename(path[0..@intCast(n)]);
+        if (base.len == 0 or base.len > buf.len) return null;
+        @memcpy(buf[0..base.len], base);
+        return buf[0..base.len];
     }
 
     /// Resize the emulator (reflow included) and tell the child via

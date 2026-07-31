@@ -76,6 +76,35 @@ a daily driver.
       NSTextInputClient, the IME gets first refusal on unmodified keys,
       preedit draws at the cursor. ctl `nskey` posts real NSEvents so
       the path is testable; ctl `ime` reports the state.
+- [x] **Key encoding** — `src/keyenc.zig`, its own test root. Was a
+      passthrough of NSEvent's cooked `characters` plus four arrows by
+      keycode, which is enough right up until a program asks a real
+      question: **shift+Tab** reached Claude Code as 0x19 (macOS's
+      NSBackTabCharacter) instead of `ESC [ Z`, so its mode cycle never
+      fired, and every modified arrow arrived stripped. Now the xterm
+      PC-style table (modified arrows, Home/End/PgUp/PgDn/Delete,
+      F1–F12, `CSI 27;<mods>;<code>~` for tab/enter/escape), DECCKM, and
+      the **kitty keyboard protocol** — which rook was already
+      advertising whether it meant to or not, since ghostty-vt answers
+      `CSI ? u` and honours pushes on its behalf. Tables ported from
+      ghostty's `input/key_encode.zig`; they are not importable
+      (`lib_vt.zig` publishes the emulator, not the input side), so the
+      tests pin the transcription. Two macOS divergences, both
+      deliberate: Option composes rather than Alt-prefixes on text keys
+      (it IS Alt on the named keys, where alt+backspace is load-bearing),
+      and the C0 path is a fallback because macOS cooks ctrl+C to 0x03
+      before rook sees it. NOT implemented: kitty key-RELEASE events —
+      the monitor subscribes to keyDown alone, so a release never
+      reaches rook — and alternate-key reporting.
+- [x] **⌃HJKL yields by program, not by screen** — pane nav has to give
+      the keys up inside something with splits of its own. That was read
+      off the alternate screen: exact, and the wrong question. Claude
+      Code entered the alternate screen and ⌃HJKL died in the pane rook
+      is FOR. Now `tcgetpgrp` on the pty at the moment of the keystroke
+      (`Session.fgName`), matched against `nav-yield` (default `vim`,
+      `nvim`, `vi`, `view`, `tmux`; empty yields to nobody). Two
+      syscalls, nothing cached — which is the whole difference from the
+      deleted webview app's 3s-stale `fg` poll. e2e `keys`.
 - [x] **OSC 52** (clipboard write) — yanking in vim or tmux over ssh
       reaches the macOS pasteboard. The library hands it over already
       base64-decoded, and it NEVER forwards read requests (`?`), so no
