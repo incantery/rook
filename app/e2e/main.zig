@@ -1363,9 +1363,9 @@ fn sidepane(gpa: std.mem.Allocator, bin: []const u8) !void {
     // The assertion that separates a real container from a slab painted
     // OVER the panes: opening it must narrow the terminal's grid, which
     // means a pty resize reached the shell.
-    _ = try app.ctl("run attention.inbox");
+    _ = try app.ctl("run threads.toggle");
     const st = try app.ctl("sidepane");
-    try h.expectContains(st, "open side:right panel:attention", "opened on the right");
+    try h.expectContains(st, "open side:right panel:threads", "opened on the right");
     const narrow = try paneCols(app);
     try h.expect(narrow < wide, "pane should narrow: {d} cols before, {d} after", .{ wide, narrow });
 
@@ -1386,20 +1386,20 @@ fn sidepane(gpa: std.mem.Allocator, bin: []const u8) !void {
     // against the OPEN width, not the startup one: the direction is what
     // this asserts, and it is the part that cannot drift.
     const still_narrow = try paneCols(app);
-    _ = try app.ctl("run attention.inbox");
+    _ = try app.ctl("run threads.toggle");
     try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
     const restored = try paneCols(app);
     try h.expect(restored > still_narrow, "closing should give columns back: {d} open, {d} closed", .{ still_narrow, restored });
 
     // And the real chord, through AppKit's leader machine.
     _ = try app.ctl("press `");
-    _ = try app.ctl("press a");
+    _ = try app.ctl("press t");
     var waited: u32 = 0;
     while (waited < 3000) : (waited += 100) {
         if (std.mem.indexOf(u8, try app.ctl("sidepane"), "open") != null) break;
         h.sleepMs(100);
     }
-    try h.expectContains(try app.ctl("sidepane"), "open", "<leader>a toggles it");
+    try h.expectContains(try app.ctl("sidepane"), "open", "<leader>t toggles it");
 }
 
 // ---------------------------------------------------------------- asks
@@ -1447,7 +1447,7 @@ fn asks(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(other, "\"selected\":[]", "Other does not pick an option too");
 
     // The form yields the key path back when it is done.
-    try h.expectContains(try app.ctl("sidepane"), "panel:attention", "form closes to the inbox");
+    try h.expectContains(try app.ctl("sidepane"), "closed", "the answered form gives the container back");
     _ = try app.ctl("type back-to-shell");
     _ = try app.ctl("enter");
     try app.waitTextCount("back-to-shell", 2, 5_000);
@@ -1473,7 +1473,7 @@ fn asks(gpa: std.mem.Allocator, bin: []const u8) !void {
     );
     _ = try app.ctl("key 1b"); // ESC
     try h.expectContains(try app.ctl("ask-answer"), "{\"canceled\":true}", "ESC produces a dismissal");
-    try h.expectContains(try app.ctl("sidepane"), "panel:attention", "dismissal closes the form");
+    try h.expectContains(try app.ctl("sidepane"), "closed", "dismissal closes the form");
 
     // --- free text (a question with no options) ---
     _ = try app.ctl(
@@ -1521,8 +1521,8 @@ fn asks(gpa: std.mem.Allocator, bin: []const u8) !void {
     // The form holds the ask while open, so the poller will not offer
     // another — without a way back, a pending question would be alive
     // but unreachable and the asker blocked with no way to answer.
-    _ = try app.ctl("run attention.inbox");
-    try h.expectContains(try app.ctl("sidepane"), "panel:attention", "switched away from the question");
+    _ = try app.ctl("run threads.toggle");
+    try h.expectContains(try app.ctl("sidepane"), "panel:threads", "switched away from the question");
     _ = try app.ctl("run ask.show");
     try h.expectContains(try app.ctl("sidepane"), "Where from?", "the pending question comes back");
     _ = try app.ctl("enter");

@@ -568,7 +568,6 @@ func (h *Host) Handler() http.Handler {
 		writeJSON(w, h.aw.snapshot())
 	})
 	mux.HandleFunc("/agents/", h.handleAgent)
-	mux.HandleFunc("/attention", h.handleAttention)
 	mux.HandleFunc("/asks/", h.handleAsks)
 	// The session-less ask queue: create and list. A client that does not
 	// hold a wire-v3 session socket (the zig app owns its ptys in-process

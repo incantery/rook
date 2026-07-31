@@ -1,7 +1,7 @@
 //! rook-host: the client, and the lifecycle.
 //!
 //! `internal/host` is the product's server half — threads, review, asks,
-//! attention, transcripts, worktrees. It speaks localhost
+//! transcripts, worktrees. It speaks localhost
 //! HTTP with a bearer token, and `~/.local/state/rook/host.json` is how
 //! anything finds it (port + token + pid + build). rookctl and the MCP
 //! server use the same door; this is rook walking through it.
@@ -29,7 +29,7 @@
 //! reaped by the next build change. Same as today's behaviour, so not a
 //! regression — but it is why `owned` is reported by ctl `version`.
 //!
-//! Fail-open everywhere, like attention.zig: no host.json, no binary, a dead
+//! Fail-open everywhere: no host.json, no binary, a dead
 //! daemon, bad JSON → null. The terminal must open with or without a host.
 
 const std = @import("std");
@@ -72,7 +72,7 @@ const O_RDWR = 2;
 /// What host.json says, flattened into fixed storage so callers can hold
 /// it without owning an allocation. The daemon rewrites the file on every
 /// start (new port, new token), so anything cached goes stale on restart
-/// — `attention.zig` re-reads per fetch for exactly that reason, and long
+/// — the host-backed panels re-read per fetch for that reason, and long
 /// -lived holders should refresh through `App.hostInfo()`.
 pub const Info = struct {
     port: u16 = 0,
@@ -234,7 +234,7 @@ pub fn request(
 ///
 /// Go's net/http switches to it once a response outgrows its write
 /// buffer, so this stayed invisible until the first BIG one: /usage,
-/// /attention and /agents all fit in a Content-Length response, and the
+/// /agents and the transcript endpoints fit in a Content-Length response, and the
 /// transcript endpoint does not. Without de-chunking, the caller gets a
 /// body with `1000\r\n` framing sprinkled through it and reports a JSON
 /// parse error — which reads as "the host sent garbage", not "we did".
@@ -490,7 +490,7 @@ pub fn ensure(gpa: std.mem.Allocator, io: std.Io) ?Handle {
     // a pid about to vanish, which means quitting rook leaves the real
     // daemon running — exactly the thing this module exists to prevent.
     // It presents as an app pointing at a dead port, and it survived
-    // testing because attention.zig re-reads host.json on every fetch.
+    // testing because the host-backed panels re-read host.json per fetch.
     //
     // So: while the child LIVES, only a host.json naming the child is
     // acceptable. Once it EXITS, it declined, and whatever is healthy is

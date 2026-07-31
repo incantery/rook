@@ -341,7 +341,7 @@ pub const Side = enum { left, right };
 /// where §2's inbox/deck/threads/review join it, the same way pal_mode
 /// grew a second list. Deliberately an enum rather than a vtable — a
 /// tenant interface designed against ONE tenant is a guess.
-pub const Panel = enum { attention, ask, threads, review, search };
+pub const Panel = enum { ask, threads, review, search };
 
 /// One clickable row of the which-key sheet. `click` is false for the
 /// collapsed "1…9" teaching row — a row that says "tabs 1–9" and then
@@ -539,7 +539,7 @@ pub const App = struct {
     /// and the inbox is only worth screen space once something is in it.
     side_open: bool = false,
     side: Side = .right,
-    side_panel: Panel = .attention,
+    side_panel: Panel = .threads,
     // ---- find in files (⌘⇧F) ----
     /// The query box and the results it produced. Two states, because
     /// a search panel is two things: a box you type in, then a list
@@ -569,13 +569,6 @@ pub const App = struct {
     /// Owns every running server, their roots, and the diagnostics they
     /// publish. Nothing spawns until a file of a known language opens.
     lsp: lspmgrpkg.Manager = undefined,
-    /// The inbox, refreshed by attentionThread ONLY while open — a
-    /// closed panel must cost nothing, including no host traffic.
-    attention: @import("attention.zig").Snapshot = .{},
-    attention_digest: u64 = 0,
-    /// Set when the panel opens so the poller fetches immediately
-    /// instead of after its next sleep.
-    attention_wake: std.atomic.Value(bool) = .init(false),
     /// Set when an answer is queued, so the poster posts it now.
     ask_wake: std.atomic.Value(bool) = .init(false),
     /// An agent id whose transcript has been requested. The fetch is
@@ -1147,12 +1140,6 @@ pub const App = struct {
             @as(objc.c.id, null),
             &term_ctx,
         });
-
-        // The attention inbox. Spawned always, but it only FETCHES while
-        // its panel is open — a closed panel owes the host nothing.
-        if (std.Thread.spawn(.{}, attentionThread, .{self})) |t| t.detach() else |err| {
-            std.debug.print("rook attention: thread failed: {}\n", .{err});
-        }
 
         // Review: gate, verdicts, jumps.
         if (std.Thread.spawn(.{}, reviewThread, .{self})) |t| t.detach() else |err| {
@@ -2042,8 +2029,6 @@ pub const App = struct {
             .threads => self.threadsKeyLocked(bytes),
             .review => self.reviewKeyLocked(bytes),
             .search => self.searchKeyLocked(bytes),
-            // Read-only tenant: it never takes the keys.
-            .attention => return false,
         }
         return true;
     }
@@ -2064,7 +2049,7 @@ pub const App = struct {
     /// can say what it wants. Caller holds draw_lock.
     pub fn ptyModesLocked(self: *App) ?keyenc.Modes {
         if (self.pal_open) return null;
-        if (self.side_focus and self.side_panel != .attention) return null;
+        if (self.side_focus) return null;
         const tm = switch (self.activeTab().focused.content) {
             .term => |*t| t,
             .edit => return null,
@@ -2589,7 +2574,6 @@ pub const App = struct {
             .palette_files => self.openFilePalette(),
             .panel_search => self.openSearchPanel(),
             .app_fullscreen => self.requestFullscreen(),
-            .panel_attention => self.toggleSidePane(.attention),
             .panel_threads => self.toggleThreads(),
             .panel_review => self.toggleReview(),
             .thread_note => self.threadVerb("note"),
@@ -2781,9 +2765,6 @@ pub const App = struct {
             self.relayoutLocked();
             self.scene_dirty = true;
         }
-        // Wake the poller so an opened panel fills in now rather than at
-        // the next tick. Cheap: it only ever skips ahead one sleep.
-        self.attention_wake.store(true, .release);
     }
 
     /// Rows the current question offers: its options, plus the "Other…"
@@ -2983,10 +2964,10 @@ pub const App = struct {
         self.ask = null;
         self.ask_text_len = 0;
         self.side_focus = false;
-        // Leave the panel open on the inbox rather than yanking the whole
-        // container away: the answer usually is not the last thing you
-        // wanted to see.
-        self.side_panel = .attention;
+        // The inbox used to take the container back here — it was the
+        // "you are not done, look at the rest" tenant. It left in the
+        // strip, and there is nothing to fall back TO, so the pane closes.
+        self.side_open = false;
         self.relayoutLocked();
         self.scene_dirty = true;
     }
@@ -3106,7 +3087,6 @@ pub const App = struct {
             if (!was) self.relayoutLocked();
             self.scene_dirty = true;
         }
-        self.attention_wake.store(true, .release);
     }
 
     /// Run the query on a worker: a repo-wide scan is milliseconds but
@@ -3140,10 +3120,6 @@ pub const App = struct {
                 app.draw_lock.unlock();
                 app.sr_running.store(false, .release);
                 app.gpa.destroy(args);
-                // Wake the frame loop: the result arrived off-tick, and
-                // a dirty-skip renderer has no reason to draw without
-                // being told (the same nudge the attention poller uses).
-                app.attention_wake.store(true, .release);
             }
         };
         if (std.Thread.spawn(.{}, T.go, .{a})) |t| {
@@ -5682,7 +5658,6 @@ pub const App = struct {
         var y = r.y;
         const tx = r.x + self.m.gutter;
         _ = ui.text(tx, y + (row_h - ch) / 2, switch (self.side_panel) {
-            .attention => "ATTENTION",
             .ask => "QUESTION",
             .threads => "THREADS",
             .review => "REVIEW",
@@ -5701,7 +5676,6 @@ pub const App = struct {
         y += self.sep + self.m.gap;
 
         switch (self.side_panel) {
-            .attention => self.drawAttention(ui, r, y),
             .ask => self.drawAsk(ui, r, y),
             .threads => self.drawThreads(ui, r, y),
             .review => self.drawReview(ui, r, y),
@@ -6078,55 +6052,6 @@ pub const App = struct {
             _ = self;
         }
         return y;
-    }
-
-    fn drawAttention(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
-        const cw = self.renderer.cell_w;
-        const ch = self.renderer.cell_h;
-        const row_h = self.bar_h;
-        const bg = self.glassBg(th.bar_bg);
-        const tx = r.x + self.m.gutter;
-        var y = top;
-        var clipbuf: [256]u8 = undefined;
-
-        // "Nothing needs you" and "we can't reach the host" are
-        // different facts and must not render the same.
-        if (!self.attention.live) {
-            _ = ui.text(tx, y + (row_h - ch) / 2, "host unreachable", th.bar_fg, bg);
-            return;
-        }
-        if (self.attention.n == 0) {
-            _ = ui.text(tx, y + (row_h - ch) / 2, "nothing waiting", th.bar_fg, bg);
-            return;
-        }
-
-        // Room for the rows, less one line kept back for the overflow
-        // note when there is one.
-        const avail = r.y + r.h - top - (if (self.attention.more > 0) row_h else 0);
-        const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h * 2)));
-        const shown = @min(self.attention.slice().len, fits);
-
-        for (self.attention.slice()[0..shown]) |*it| {
-            // Two lines per item: workspace, then what it wants. An ask
-            // is a sentence — one line would truncate all of them.
-            ui.rect(r.x, y + self.sep, self.sep * 2, row_h * 2 - self.sep * 2, th.accent);
-            _ = ui.text(tx, y + (row_h - ch) / 2, it.workspace(), th.bar_value, bg);
-            if (it.interactive)
-                _ = ui.textRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2, "picker", th.bar_fg, bg);
-            y += row_h;
-            const room: usize = @intFromFloat(@max(0, @divFloor(r.w - self.m.gutter * 2, cw)));
-            _ = ui.text(tx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, it.text(), room), th.bar_fg, bg);
-            y += row_h;
-        }
-
-        // NEVER a silent cap: rows dropped for want of space and rows
-        // dropped by the fetch cap both say so.
-        const hidden = self.attention.slice().len - shown + self.attention.more;
-        if (hidden > 0) {
-            var buf: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "+{d} more", .{hidden}) catch "+more";
-            _ = ui.text(tx, y + (row_h - ch) / 2, s, th.bar_fg, bg);
-        }
     }
 
     fn drawPalette(self: *App, ui: *@import("ui.zig").Ui) void {
@@ -6875,7 +6800,7 @@ fn displayLinkCallback(link: CVDisplayLinkRef, now: ?*const anyopaque, output: ?
 /// cluster (fail-open, nothing drawn).
 /// Bring rook-host up once at launch. Not a poll: the daemon is ours for
 /// the app's lifetime, and if it dies the panels that need it fail open
-/// the way attention.zig already does.
+/// the way the host-backed panels already do.
 fn hostThread(app: *App) void {
     const h = hostc.ensure(app.gpa, app.io) orelse {
         std.debug.print("rook host: no rook-host (panels that need it stay empty)\n", .{});
@@ -6912,35 +6837,6 @@ fn authCallback(_: *const AuthBlock.Context, granted: bool, err: objc.c.id) call
 ///    when the DIGEST changes.
 ///  - the fetch is blocking (3s socket timeouts) and happens off the
 ///    render path; only the assignment takes draw_lock.
-fn attentionThread(app: *App) void {
-    const att = @import("attention.zig");
-    while (true) {
-        const open = blk: {
-            app.draw_lock.lock();
-            defer app.draw_lock.unlock();
-            break :blk app.side_open and app.side_panel == .attention;
-        };
-        if (open) {
-            const snap = att.fetch(app.gpa, app.io);
-            const d = snap.digest();
-            app.draw_lock.lock();
-            if (d != app.attention_digest) {
-                app.attention = snap;
-                app.attention_digest = d;
-                app.scene_dirty = true;
-            }
-            app.draw_lock.unlock();
-        }
-        // 100ms slices so an open-toggle is picked up promptly without
-        // a condvar; the loop is a null check when the panel is closed.
-        var slept: u32 = 0;
-        while (slept < 2000) : (slept += 100) {
-            if (app.attention_wake.swap(false, .acq_rel)) break;
-            _ = usleep(100 * 1000);
-        }
-    }
-}
-
 /// The asks loop's client half: poll for a pending question, and post
 /// whatever the form decided.
 ///

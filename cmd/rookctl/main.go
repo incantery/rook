@@ -6,7 +6,6 @@
 //	rookctl ls            workspace → window tree with live detail
 //	rookctl ls --json     the same, as the raw status payloads
 //	rookctl agents        every claude session agentwatch sees (raw JSON)
-//	rookctl attention     who's waiting on you, cross-workspace (text inbox)
 //	rookctl send          type into a window: rookctl send s3 yes
 //	rookctl spawn         start a claude session: rookctl spawn [-w ws] [--worktree] <task…>
 //	rookctl issues        the workspace's work queue (providers, mine + unassigned)
@@ -115,8 +114,6 @@ func main() {
 		err = runLs(len(os.Args) > 2 && os.Args[2] == "--json")
 	case "agents":
 		err = runAgents()
-	case "attention":
-		err = runAttention()
 	case "send":
 		err = runSend(os.Args[2:])
 	case "spawn":
@@ -177,7 +174,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|send <session> <text…>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|thread doc|note|ask <id>|edit [file…]|ask [json]|mcp|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|send <session> <text…>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|thread doc|note|ask <id>|edit [file…]|ask [json]|mcp|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -333,50 +330,7 @@ func runAgents() error {
 	return nil
 }
 
-// ---- attention / send (the parity proof: everything the inbox can do,
-// scriptable) ----
-
-type attentionItem struct {
-	Workspace    string    `json:"workspace"`
-	RookSession  string    `json:"rookSession"`
-	Window       int       `json:"window"`
-	AgentSession string    `json:"agentSession"`
-	AskSeq       int       `json:"askSeq"`
-	Title        string    `json:"title"`
-	Ask          string    `json:"ask"`
-	Interactive  bool      `json:"interactive"`
-	Since        time.Time `json:"since"`
-}
-
-func runAttention() error {
-	c, err := connect()
-	if err != nil {
-		return err
-	}
-	raw, err := c.req("GET", "/attention", nil)
-	if err != nil {
-		return err
-	}
-	var items []attentionItem
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return err
-	}
-	if len(items) == 0 {
-		fmt.Println("nobody needs you")
-		return nil
-	}
-	for _, it := range items {
-		age := time.Since(it.Since).Round(time.Second)
-		fmt.Printf("%s · window %d (%s)  ◉ waiting %s\n", it.Workspace, it.Window, it.RookSession, age)
-		if it.Ask != "" {
-			fmt.Printf("   ↳ %s\n", strings.ReplaceAll(it.Ask, "\n", " "))
-		}
-		if it.Interactive {
-			fmt.Println("   ⌨ interactive prompt — answer in the window")
-		}
-	}
-	return nil
-}
+// ---- send ----
 
 func runSend(args []string) error {
 	if len(args) < 2 {

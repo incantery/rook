@@ -47,9 +47,6 @@ pub const Action = enum {
     /// Find in files — the search panel, a side-pane tenant.
     panel_search,
     app_fullscreen,
-    /// Toggle the side pane holding the attention inbox.
-    panel_attention,
-    /// The agent deck — every claude session, at once.
     /// The workspace's threads.
     panel_threads,
     /// The review: the changes list and the gate.
@@ -119,7 +116,6 @@ pub const commands = [_]Command{
     .{ .id = "palette.files", .title = "Go to File", .category = "App", .action = .palette_files, .keys = "⌘P" },
     .{ .id = "panel.search", .title = "Find in Files", .category = "App", .action = .panel_search, .keys = "⌘⇧F" },
     .{ .id = "app.fullscreen", .title = "Toggle Fullscreen", .category = "App", .action = .app_fullscreen },
-    .{ .id = "attention.inbox", .title = "Attention Inbox", .category = "Panel", .action = .panel_attention, .keys = "<leader>a" },
     .{ .id = "threads.toggle", .title = "Threads", .category = "Panel", .action = .panel_threads, .keys = "<leader>t" },
     .{ .id = "review.changes", .title = "Review", .category = "Panel", .action = .panel_review, .keys = "<leader>g" },
     .{ .id = "thread.note", .title = "Land Draft as a Note", .category = "Thread", .action = .thread_note },

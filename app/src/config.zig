@@ -1001,8 +1001,6 @@ fn defaultBinds(kb: *Keybinds) void {
     kb.bind('s', .{ .action = .workspace_switch });
     // tmux: prefix-z = resize-pane -Z. Same key, same muscle memory.
     kb.bind('z', .{ .action = .pane_zoom });
-    // The attention inbox — the wails app's <leader>a, kept.
-    kb.bind('a', .{ .action = .panel_attention });
     // …and back to a question you stepped away from.
     kb.bind('q', .{ .action = .panel_ask });
     // The agent deck — the wails app's <leader>v, kept.

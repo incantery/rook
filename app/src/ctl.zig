@@ -517,21 +517,6 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                 @tagName(app.side_panel),
             }) catch {};
             switch (app.side_panel) {
-                .attention => {
-                    if (!app.attention.live) {
-                        _ = w.write("host unreachable\n") catch 0;
-                    } else if (app.attention.n == 0) {
-                        _ = w.write("nothing waiting\n") catch 0;
-                    } else for (app.attention.slice()) |*it| {
-                        w.print("{s}\t{s}{s}\n", .{
-                            it.workspace(),
-                            it.text(),
-                            @as([]const u8, if (it.interactive) "\t(picker)" else ""),
-                        }) catch break;
-                    }
-                    if (app.attention.more > 0)
-                        w.print("+{d} more\n", .{app.attention.more}) catch {};
-                },
                 .search => {
                     // The query, what it scanned, and every hit — the
                     // panel's whole state, so find-in-files is
