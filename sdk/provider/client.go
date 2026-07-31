@@ -91,10 +91,30 @@ func New(name string) *Client { return &Client{Name: name} }
 // — how a caller decides a provider is available at all.
 func (c *Client) Find() bool { _, err := c.resolve(); return err == nil }
 
-// resolve looks beside the running binary first, then PATH. Beside-first
-// because rook and its providers are installed together and must upgrade
-// together; a stale copy earlier in PATH would be a version skew nobody
-// asked for.
+// InstallDir is where installed providers live:
+// $XDG_DATA_HOME/rook/providers (default ~/.local/share/rook/providers),
+// one binary per provider. This is the home a third-party provider gets
+// instead of "drop it on PATH and hope".
+func InstallDir() string {
+	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		base = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(base, "rook", "providers")
+}
+
+// resolve searches, in order: beside the running binary, the install
+// directory, then PATH.
+//
+// Beside-first is for the ones rook SHIPS — they are built and installed
+// with it and must upgrade with it, so a stale copy elsewhere must never
+// win. The install directory is where everyone else's land. PATH is last
+// and is really for development: it is the only one of the three a
+// provider can end up on without anybody deciding to put it there.
 func (c *Client) resolve() (string, error) {
 	if c.Path != "" {
 		if !isExec(c.Path) {
@@ -105,6 +125,11 @@ func (c *Client) resolve() (string, error) {
 	bin := "rook-provider-" + c.Name
 	if self, err := os.Executable(); err == nil {
 		if p := filepath.Join(filepath.Dir(self), bin); isExec(p) {
+			return p, nil
+		}
+	}
+	if dir := InstallDir(); dir != "" {
+		if p := filepath.Join(dir, bin); isExec(p) {
 			return p, nil
 		}
 	}

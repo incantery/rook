@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/incantery/rook/internal/provider"
+	"github.com/incantery/rook/sdk/provider"
 )
 
 // The queue's scope rule: mine, or nobody's. Work someone else already

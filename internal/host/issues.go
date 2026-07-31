@@ -7,7 +7,7 @@ package host
 // gone with the process; rook.db never sees an issue. A stale copy of
 // someone else's tracker is a tar pit rook stays out of by construction.
 //
-// Providers are separate processes (internal/provider). What that buys
+// Providers are separate processes (sdk/provider). What that buys
 // here, concretely: a Linear API key never enters rook, a hung tracker
 // cannot hang the host, and adding a third tracker adds no code to this
 // file. What it costs is one process per provider, started on first use.
@@ -34,7 +34,7 @@ import (
 	"time"
 
 	"github.com/incantery/rook/internal/config"
-	"github.com/incantery/rook/internal/provider"
+	"github.com/incantery/rook/sdk/provider"
 )
 
 const (

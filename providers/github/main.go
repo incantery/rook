@@ -30,7 +30,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/incantery/rook/internal/provider"
+	"github.com/incantery/rook/sdk/provider"
 )
 
 func main() {

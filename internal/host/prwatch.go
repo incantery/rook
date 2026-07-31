@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/incantery/rook/internal/config"
-	"github.com/incantery/rook/internal/provider"
+	"github.com/incantery/rook/sdk/provider"
 )
 
 // PR watching closes the loop after issue work (issue #3): the host polls

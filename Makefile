@@ -26,12 +26,14 @@ BUILD := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit).$(shell d
 BUILD_FLAG := -X github.com/incantery/rook/internal/version.Build=$(BUILD)
 
 # Providers: separate processes rook spawns to reach one external system
-# each (internal/provider). They are listed rather than globbed so that
-# adding one is a deliberate line in a diff — a provider is a thing that
-# holds a credential.
-PROVIDERS := ./cmd/rook-provider-github ./cmd/rook-provider-linear
+# each (sdk/provider). DISCOVERED, not listed — one directory under
+# providers/ is one provider, so adding one is never an edit to core's
+# build. The deliberate, reviewed act is a USER declaring a provider in
+# their config and granting it what it asks for; a name in this file
+# would only mean somebody could compile it.
+PROVIDER_DIRS := $(wildcard providers/*)
 
-.PHONY: build dev prod install clean agent release release-stage e2e e2e-clean
+.PHONY: build dev prod install clean agent release release-stage e2e e2e-clean providers
 
 # Compile only, and deliberately so: there is no run target that skips
 # DEV_ENV, because an instance on the default socket unlinks-then-binds
@@ -73,6 +75,19 @@ dev:
 prod:
 	cd app && zig build -Doptimize=ReleaseFast && $(DEV_ENV) ./zig-out/bin/rook win
 
+# The providers rook SHIPS — the "official tier". They are built exactly
+# the way a stranger's would be (sdk/provider and the standard library;
+# sdk/provider's boundary test fails the build if one reaches into
+# internal/), and they land beside rook-host because that is where
+# provider.Client.resolve looks first — shipped providers upgrade with
+# rook, so a stale copy elsewhere must never win. Everyone else's go to
+# provider.InstallDir().
+providers:
+	@for d in $(PROVIDER_DIRS); do \
+	  echo "  provider $$(basename $$d)"; \
+	  go build -ldflags "$(STAMP_FLAGS)" -o app/zig-out/bin/rook-provider-$$(basename $$d) ./$$d || exit 1; \
+	done
+
 # The daily driver: the ZIG app as /Applications/rook.app. ReleaseFast,
 # minimal hand-rolled bundle, ad-hoc signed, ctl socket on the default
 # /tmp/rook.sock (the agent-visibility surface rides along on purpose).
@@ -104,10 +119,7 @@ install:
 	cd app && zig build -Doptimize=ReleaseFast -Dbuild=$(BUILD) -Dversion=$(REL_VERSION)
 	go build -ldflags "$(STAMP_FLAGS)" -o app/zig-out/bin/rook-host ./cmd/rook-host
 	go build -ldflags "$(STAMP_FLAGS)" -o app/zig-out/bin/rookctl ./cmd/rookctl
-	@# Providers ship beside the host because that is where it looks for
-	@# them (provider.Client.resolve): beside-first, so a stale copy
-	@# earlier in PATH cannot shadow the one this build expects.
-	go build -ldflags "$(STAMP_FLAGS)" -o app/zig-out/bin/ $(PROVIDERS)
+	$(MAKE) providers
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS
 	sed 's/__VERSION__/$(REL_VERSION)/g' app/bundle/Info.plist > $(APP)/Contents/Info.plist

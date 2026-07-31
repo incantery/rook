@@ -32,7 +32,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/incantery/rook/internal/provider"
+	"github.com/incantery/rook/sdk/provider"
 )
 
 const endpoint = "https://api.linear.app/graphql"
