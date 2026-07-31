@@ -472,6 +472,15 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else {
             reply(fd, "err unknown command (see `commands`)\n");
         }
+    } else if (std.mem.eql(u8, verb, "plugin-show") and rest.len > 0) {
+        // Open the side pane on a plugin. The fetch is queued, not run
+        // here: items.list has a deadline of seconds and this is a ctl
+        // reply, not a place to wait.
+        if (app.showPlugin(rest)) {
+            reply(fd, "ok\n");
+        } else {
+            reply(fd, "err no such plugin (see `plugins`)\n");
+        }
     } else if (std.mem.eql(u8, verb, "plugins") and rest.len == 0) {
         // Every declaration, and what became of it. DECLARED vs GRANTED vs
         // what the plugin ASKED FOR are three different things, and this
@@ -558,6 +567,31 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                 @tagName(app.side_panel),
             }) catch {};
             switch (app.side_panel) {
+                .plugin => {
+                    // The rows as drawn, so a scenario can assert on the
+                    // panel without a screenshot. `live` and empty are
+                    // different facts and print differently.
+                    w.print("plugin:{s}\n", .{app.plug_name[0..app.plug_name_len]}) catch {};
+                    if (app.plug_loading.load(.acquire)) {
+                        _ = w.write("loading\n") catch 0;
+                    } else if (!app.plug.live) {
+                        w.print("unreachable: {s}\n", .{app.plug.err.get()}) catch {};
+                    } else if (app.plug.n == 0) {
+                        _ = w.write("nothing to show\n") catch 0;
+                    } else for (app.plug.slice(), 0..) |*it, i| {
+                        w.print("{s}{s}{s}\t{s}", .{
+                            @as([]const u8, if (i == app.plug_sel) "*" else " "),
+                            @as([]const u8, if (it.depth > 0) "  " else ""),
+                            it.state.get(),
+                            it.title.get(),
+                        }) catch break;
+                        for (it.fields[0..it.fields_n]) |*f| {
+                            w.print("\t{s}={s}", .{ f.key.get(), f.value.get() }) catch break;
+                        }
+                        _ = w.write("\n") catch 0;
+                    }
+                    if (app.plug.more > 0) w.print("+{d} more\n", .{app.plug.more}) catch {};
+                },
                 .search => {
                     // The query, what it scanned, and every hit — the
                     // panel's whole state, so find-in-files is

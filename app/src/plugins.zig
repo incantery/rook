@@ -418,6 +418,177 @@ fn readFrame(fd: c_int, buf: []u8, deadline_ms: i32) ?usize {
     }
 }
 
+// ---- the render-side shape ----
+//
+// Fixed buffers, copied out of the parse. The draw path must not hold a
+// borrowed slice into a JSON arena, and it must not allocate: a panel
+// redrawing at 120fps against a heap is a frame budget spent on nothing.
+// Same shape the old host-backed panels used, for the same reason.
+
+pub const max_items = 128;
+pub const max_fields = 6;
+
+fn Text(comptime n: usize) type {
+    return struct {
+        b: [n]u8 = @splat(0),
+        n: usize = 0,
+        pub fn set(self: *@This(), s: []const u8) void {
+            self.n = @min(n, s.len);
+            @memcpy(self.b[0..self.n], s[0..self.n]);
+        }
+        pub fn get(self: *const @This()) []const u8 {
+            return self.b[0..self.n];
+        }
+    };
+}
+
+pub const Field = struct {
+    key: Text(24) = .{},
+    kind: Text(16) = .{},
+    value: Text(32) = .{},
+};
+
+pub const Item = struct {
+    id: Text(64) = .{},
+    title: Text(96) = .{},
+    subtitle: Text(96) = .{},
+    state: Text(24) = .{},
+    depth: u8 = 0,
+    fields: [max_fields]Field = @splat(.{}),
+    fields_n: usize = 0,
+};
+
+/// One answer to items.list, ready to draw.
+///
+/// `live` and an empty list are DIFFERENT facts and must not render the
+/// same: "this plugin says there is nothing" and "we could not reach this
+/// plugin" are different problems, and a panel that shows both as blank
+/// makes the second one invisible.
+pub const Snapshot = struct {
+    items: [max_items]Item = @splat(.{}),
+    n: usize = 0,
+    more: usize = 0,
+    live: bool = false,
+    err: Text(96) = .{},
+
+    pub fn slice(self: *const Snapshot) []const Item {
+        return self.items[0..self.n];
+    }
+};
+
+/// Call items.list and shape the answer for the panel.
+///
+/// Children are FLATTENED with a depth, not dropped: children are the only
+/// structural difference between a list and a tree, and a renderer that
+/// ignores them turns one of the seven surfaces into another.
+pub fn fetchItems(p: *Plugin, gpa: std.mem.Allocator, root: []const u8) Snapshot {
+    var snap = Snapshot{};
+
+    var params: [512]u8 = undefined;
+    const pj = std.fmt.bufPrint(&params, "{{\"root\":\"{s}\",\"limit\":{d}}}", .{ root, max_items }) catch {
+        snap.err.set("workspace path too long");
+        return snap;
+    };
+
+    const buf = gpa.alloc(u8, 1 << 20) catch {
+        snap.err.set("out of memory");
+        return snap;
+    };
+    defer gpa.free(buf);
+
+    const frame = p.call(gpa, "items.list", pj, buf) orelse {
+        snap.err.set(if (p.errStr().len > 0) p.errStr() else "not granted");
+        return snap;
+    };
+
+    const WireField = struct {
+        key: []const u8 = "",
+        kind: []const u8 = "",
+        value: []const u8 = "",
+    };
+    // Recursion needs a named type; children are the same shape one level
+    // down, and two levels is as deep as this renders for now.
+    const WireItem = struct {
+        id: []const u8 = "",
+        title: []const u8 = "",
+        subtitle: []const u8 = "",
+        state: []const u8 = "",
+        fields: []WireField = &.{},
+        children: []struct {
+            id: []const u8 = "",
+            title: []const u8 = "",
+            subtitle: []const u8 = "",
+            state: []const u8 = "",
+            fields: []WireField = &.{},
+        } = &.{},
+    };
+    const Wire = struct {
+        ok: bool = false,
+        @"error": []const u8 = "",
+        result: struct {
+            items: []WireItem = &.{},
+            truncated: bool = false,
+        } = .{},
+    };
+
+    const parsed = std.json.parseFromSlice(Wire, gpa, frame, .{ .ignore_unknown_fields = true }) catch {
+        snap.err.set("answer did not parse");
+        return snap;
+    };
+    defer parsed.deinit();
+    if (!parsed.value.ok) {
+        snap.err.set(parsed.value.@"error");
+        return snap;
+    }
+
+    for (parsed.value.result.items) |wi| {
+        if (snap.n >= max_items) {
+            snap.more += 1;
+            continue;
+        }
+        var it = Item{};
+        it.id.set(wi.id);
+        it.title.set(wi.title);
+        it.subtitle.set(wi.subtitle);
+        it.state.set(wi.state);
+        for (wi.fields) |wf| {
+            if (it.fields_n >= max_fields) break;
+            it.fields[it.fields_n] = .{};
+            it.fields[it.fields_n].key.set(wf.key);
+            it.fields[it.fields_n].kind.set(wf.kind);
+            it.fields[it.fields_n].value.set(wf.value);
+            it.fields_n += 1;
+        }
+        snap.items[snap.n] = it;
+        snap.n += 1;
+
+        for (wi.children) |wc| {
+            if (snap.n >= max_items) {
+                snap.more += 1;
+                continue;
+            }
+            var c = Item{ .depth = 1 };
+            c.id.set(wc.id);
+            c.title.set(wc.title);
+            c.subtitle.set(wc.subtitle);
+            c.state.set(wc.state);
+            for (wc.fields) |wf| {
+                if (c.fields_n >= max_fields) break;
+                c.fields[c.fields_n] = .{};
+                c.fields[c.fields_n].key.set(wf.key);
+                c.fields[c.fields_n].kind.set(wf.kind);
+                c.fields[c.fields_n].value.set(wf.value);
+                c.fields_n += 1;
+            }
+            snap.items[snap.n] = c;
+            snap.n += 1;
+        }
+    }
+    if (parsed.value.result.truncated) snap.more += 1;
+    snap.live = true;
+    return snap;
+}
+
 // ---- the registry ----
 
 /// Every declared plugin, owning its strings for the process lifetime.

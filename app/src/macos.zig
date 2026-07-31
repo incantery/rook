@@ -340,7 +340,7 @@ pub const Side = enum { left, right };
 /// where §2's inbox/deck/threads/review join it, the same way pal_mode
 /// grew a second list. Deliberately an enum rather than a vtable — a
 /// tenant interface designed against ONE tenant is a guess.
-pub const Panel = enum { search };
+pub const Panel = enum { search, plugin };
 
 /// One clickable row of the which-key sheet. `click` is false for the
 /// collapsed "1…9" teaching row — a row that says "tabs 1–9" and then
@@ -419,6 +419,21 @@ pub const App = struct {
     /// Declared plugins (plugins.zig). Read at launch; nothing spawns
     /// until something asks unless a declaration said `eager`.
     plugins: @import("plugins.zig").Registry,
+
+    // ---- the plugin panel ----
+    /// Which plugin the side pane is showing, and its last answer.
+    /// The fetch runs OFF the key path: items.list has a deadline of
+    /// seconds, and a panel that blocks the frame while a subprocess
+    /// thinks is a panel that drops the window.
+    plug_name: [64]u8 = @splat(0),
+    plug_name_len: usize = 0,
+    plug: @import("plugins.zig").Snapshot = .{},
+    plug_sel: usize = 0,
+    plug_loading: std.atomic.Value(bool) = .init(false),
+    /// Set by the key path (which holds draw_lock) and drained by the
+    /// caller after it releases — startPluginFetch takes the lock itself,
+    /// so calling it inline would deadlock. Same shape as pending_cmd.
+    plug_refetch: bool = false,
 
     /// Leader chord armed: the next key resolves a binding (or the
     /// leader again types it literally). Shown in the bar while armed.
@@ -1898,6 +1913,7 @@ pub const App = struct {
         if (!self.side_focus) return false;
         switch (self.side_panel) {
             .search => self.searchKeyLocked(bytes),
+            .plugin => self.pluginKeyLocked(bytes),
         }
         return true;
     }
@@ -3403,6 +3419,13 @@ pub const App = struct {
         if (spec) |s| self.dispatch(s);
         self.drainPendingOpen();
         self.drainQuitAll();
+        // The plugin panel's r: startPluginFetch takes draw_lock, so the
+        // key path can only ask for it, never call it.
+        self.draw_lock.lock();
+        const refetch = self.plug_refetch;
+        self.plug_refetch = false;
+        self.draw_lock.unlock();
+        if (refetch) self.startPluginFetch();
     }
 
     /// The leader state machine — ONE path for real keystrokes (the
@@ -4935,6 +4958,7 @@ pub const App = struct {
         const tx = r.x + self.m.gutter;
         _ = ui.text(tx, y + (row_h - ch) / 2, switch (self.side_panel) {
             .search => "SEARCH",
+            .plugin => self.plug_name[0..self.plug_name_len],
         }, th.bar_value, self.glassBg(th.bar_bg));
         // The focus telegraph: an interactive panel has to look like it
         // is the thing your keys are going to.
@@ -4950,6 +4974,7 @@ pub const App = struct {
 
         switch (self.side_panel) {
             .search => self.drawSearch(ui, r, y),
+            .plugin => self.drawPlugin(ui, r, y),
         }
     }
 
@@ -4965,6 +4990,197 @@ pub const App = struct {
     /// Find in files: the query box, then the hits GROUPED BY FILE —
     /// a path header, then its lines indented under it. A flat list of
     /// 200 hits is a list you scroll; grouped, it is a list you read.
+    /// Open the side pane on a plugin and queue a fetch.
+    pub fn showPlugin(self: *App, name: []const u8) bool {
+        if (self.plugins.find(name) == null) return false;
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            const n = @min(self.plug_name.len, name.len);
+            @memcpy(self.plug_name[0..n], name[0..n]);
+            self.plug_name_len = n;
+            self.plug = .{};
+            self.plug_sel = 0;
+            self.side_panel = .plugin;
+            self.side_open = true;
+            self.side_focus = true;
+            self.relayoutLocked();
+            self.scene_dirty = true;
+        }
+        self.startPluginFetch();
+        return true;
+    }
+
+    /// Fetch the panel's items on a worker.
+    ///
+    /// Off the key path for the same reason search is: items.list has a
+    /// deadline measured in seconds, and a frame that waits on a
+    /// subprocess is a dropped window. The panel says "asking…" meanwhile,
+    /// because a blank panel and a slow one look the same and are not.
+    fn startPluginFetch(self: *App) void {
+        if (self.plug_loading.load(.acquire)) return;
+        var name_buf: [64]u8 = undefined;
+        var root_buf: [1024]u8 = undefined;
+        var name_len: usize = 0;
+        var root_len: usize = 0;
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            name_len = self.plug_name_len;
+            if (name_len == 0) return;
+            @memcpy(name_buf[0..name_len], self.plug_name[0..name_len]);
+            if (self.paneRootLocked(self.activeTab().focused, &root_buf)) |r| root_len = r.len;
+        }
+
+        const Args = struct {
+            app: *App,
+            name: [64]u8,
+            name_len: usize,
+            root: [1024]u8,
+            root_len: usize,
+        };
+        const a = self.gpa.create(Args) catch return;
+        a.* = .{ .app = self, .name = name_buf, .name_len = name_len, .root = root_buf, .root_len = root_len };
+        self.plug_loading.store(true, .release);
+        const T = struct {
+            fn go(args: *Args) void {
+                const app = args.app;
+                const pl = @import("plugins.zig");
+                // The registry is only mutated at launch, and Plugin owns
+                // its own fds — so the call runs outside draw_lock, which
+                // is the whole point of being on a worker.
+                const snap = if (app.plugins.find(args.name[0..args.name_len])) |p|
+                    pl.fetchItems(p, app.gpa, args.root[0..args.root_len])
+                else
+                    pl.Snapshot{};
+                app.draw_lock.lock();
+                // Only land it if the panel is still on the same plugin —
+                // switching while a fetch is in flight must not paint one
+                // plugin's items under another's name.
+                if (app.plug_name_len == args.name_len and
+                    std.mem.eql(u8, app.plug_name[0..app.plug_name_len], args.name[0..args.name_len]))
+                {
+                    app.plug = snap;
+                    if (app.plug_sel >= app.plug.n) app.plug_sel = app.plug.n -| 1;
+                    app.scene_dirty = true;
+                }
+                app.draw_lock.unlock();
+                app.plug_loading.store(false, .release);
+                app.gpa.destroy(args);
+            }
+        };
+        if (std.Thread.spawn(.{}, T.go, .{a})) |t| {
+            t.detach();
+        } else |_| {
+            self.plug_loading.store(false, .release);
+            self.gpa.destroy(a);
+        }
+    }
+
+    /// The plugin panel's keys: move, and hand them back.
+    ///
+    /// Deliberately read-only for now. Enter would mean running an action,
+    /// and an action is a thing that can DELETE a branch — that wants a
+    /// confirm path designed rather than added to a first slice.
+    pub fn pluginKeyLocked(self: *App, bytes: []const u8) void {
+        const n = self.plug.slice().len;
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const b = bytes[i];
+            if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
+                switch (bytes[i + 2]) {
+                    'A' => self.plug_sel -|= 1,
+                    'B' => self.plug_sel = @min(self.plug_sel + 1, n -| 1),
+                    else => {},
+                }
+                i += 3;
+                continue;
+            }
+            switch (b) {
+                0x1b => { // ESC yields the keys back to the panes
+                    self.side_focus = false;
+                    self.scene_dirty = true;
+                    return;
+                },
+                'k', 0x10 => self.plug_sel -|= 1,
+                'j', 0x0e => self.plug_sel = @min(self.plug_sel + 1, n -| 1),
+                'g' => self.plug_sel = 0,
+                'G' => self.plug_sel = n -| 1,
+                'r' => self.plug_refetch = true, // drained after the lock
+                else => {},
+            }
+            i += 1;
+        }
+        self.scene_dirty = true;
+    }
+
+    fn drawPlugin(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        const row_h = self.bar_h;
+        const bg = self.glassBg(th.bar_bg);
+        const tx = r.x + self.m.gutter;
+        var y = top;
+        var clipbuf: [256]u8 = undefined;
+        const cols: usize = @intFromFloat(@max(8, (r.w - self.m.gutter * 2) / cw));
+
+        if (self.plug_loading.load(.acquire)) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "asking…", th.bar_fg, bg);
+            return;
+        }
+        // "This plugin says there is nothing" and "we could not reach this
+        // plugin" are different facts. A panel that renders both as blank
+        // makes the second one invisible.
+        if (!self.plug.live) {
+            const msg = if (self.plug.err.n > 0) self.plug.err.get() else "no answer";
+            _ = ui.text(tx, y + (row_h - ch) / 2, msg, th.ed_err, bg);
+            return;
+        }
+        if (self.plug.n == 0) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "nothing to show", th.bar_fg, bg);
+            return;
+        }
+
+        const avail = r.y + r.h - top - (if (self.plug.more > 0) row_h else 0);
+        const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h)));
+        const shown = @min(self.plug.slice().len, fits);
+
+        for (self.plug.slice()[0..shown], 0..) |*it, idx| {
+            var x = tx;
+            if (idx == self.plug_sel) self.drawRowSelection(ui, r, y, row_h);
+
+            // State first and always — it is the one thing every item has
+            // and the thing a human scans down.
+            if (it.state.n > 0) {
+                x += ui.text(x, y + (row_h - ch) / 2, it.state.get(), th.accent, bg);
+                x += cw;
+            }
+            // Children are indented rather than dropped: they are the only
+            // structural difference between a list and a tree.
+            x += @as(f32, @floatFromInt(it.depth)) * 2 * cw;
+            const title = @import("ui.zig").clip(&clipbuf, it.title.get(), cols);
+            x += ui.text(x, y + (row_h - ch) / 2, title, th.bar_value, bg);
+
+            // Fields right-aligned, values only — the label is the column
+            // header a list does not have room for.
+            var fx = r.x + r.w - self.m.gutter;
+            var fi = it.fields_n;
+            while (fi > 0) {
+                fi -= 1;
+                const v = it.fields[fi].value.get();
+                if (v.len == 0) continue;
+                fx -= @as(f32, @floatFromInt(v.len)) * cw + cw;
+                _ = ui.text(fx, y + (row_h - ch) / 2, v, th.bar_fg, bg);
+            }
+            y += row_h;
+        }
+        if (self.plug.more > 0) {
+            var mb: [64]u8 = undefined;
+            const m = std.fmt.bufPrint(&mb, "+{d} more", .{self.plug.more}) catch "+more";
+            _ = ui.text(tx, y + (row_h - ch) / 2, m, th.bar_fg, bg);
+        }
+    }
+
     fn drawSearch(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
         const cw = self.renderer.cell_w;
         const ch = self.renderer.cell_h;

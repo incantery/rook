@@ -827,6 +827,32 @@ pub const Shot = struct {
         return n;
     }
 
+    /// Pixels in a RECTANGLE that differ from its background.
+    ///
+    /// `ink` is full width, which is useless for a side pane: the terminal
+    /// beside it always has a prompt in it, so a full-width band passes
+    /// whether or not the panel drew anything.
+    ///
+    /// The background reference is the rect's bottom-right corner rather
+    /// than its top-left, because a short list leaves the bottom of a
+    /// panel empty — and sampling from inside the text would make the text
+    /// itself the "background" and count zero.
+    pub fn inkRect(self: *const Shot, x0: usize, y0: usize, x1: usize, y1: usize) usize {
+        const xe = @min(x1, self.width);
+        const ye = @min(y1, self.height);
+        if (x0 >= xe or y0 >= ye) return 0;
+        const bg = self.pixel(xe - 2, ye - 1);
+        var n: usize = 0;
+        var y = y0;
+        while (y < ye) : (y += 1) {
+            var x = x0;
+            while (x < xe) : (x += 1) {
+                if (self.pixel(x, y) != bg) n += 1;
+            }
+        }
+        return n;
+    }
+
     /// The inkiest single pixel row in a band, as a count. Bands full of
     /// blank rows dilute a density until a real difference reads as
     /// noise; one row through the middle of the text does not.

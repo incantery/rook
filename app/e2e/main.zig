@@ -1461,7 +1461,7 @@ const sh_plugin =
     \\    *'"op":"describe"'*)
     \\      printf '{"v":1,"id":%s,"ok":true,"result":{"name":"shplug","version":"9.9","capabilities":["items.list","items.act"]}}\n' "$id" ;;
     \\    *'"op":"items.list"'*)
-    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"items":[{"id":"a","title":"alpha","state":"ok"}]}}\n' "$id" ;;
+    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"items":[{"id":"a","title":"alpha","state":"ok","fields":[{"key":"n","kind":"NUMBER","value":"7"}],"children":[{"id":"a1","title":"kid","state":"sub"}]}]}}\n' "$id" ;;
     \\    *)
     \\      printf '{"v":1,"id":%s,"ok":false,"error":"unsupported op"}\n' "$id" ;;
     \\  esac
@@ -1539,6 +1539,65 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("type echo still-here");
     _ = try app.ctl("enter");
     try app.waitTextCount("still-here", 2, 5_000);
+
+    // ---- the surface ----
+    //
+    // The item model has to survive a renderer, which is a different
+    // question from surviving a wire. Here it becomes rows in a side pane.
+
+    // A panel nobody can fill says WHY, and is shot FIRST so it can be the
+    // baseline below. "This plugin has nothing" and "we could not reach
+    // it" are different facts; a blank panel makes the second invisible.
+    _ = try app.ctl("plugin-show missing");
+    const dead = try app.waitCtl("sidepane", "unreachable", 5_000);
+    try h.expectContains(dead, "unreachable", "a dead plugin says so rather than rendering empty");
+    var empty_path: [192]u8 = undefined;
+    const ep = try std.fmt.bufPrint(&empty_path, "{s}/plug-empty.png", .{app.dirPath()});
+    var empty_img = try app.shot(ep);
+    const empty_ink = empty_img.inkRect(empty_img.width * 3 / 4, 0, empty_img.width - 1, empty_img.height * 9 / 10);
+    empty_img.deinit();
+
+    _ = try app.ctl("plugin-show shplug");
+    const st = try app.ctl("sidepane");
+    try h.expectContains(st, "open side:right panel:plugin", "the panel took the pane");
+
+    // The fetch is off the key path, so the panel may still be asking.
+    const rows = try app.waitCtl("sidepane", "alpha", 5_000);
+    try h.expectContains(rows, "plugin:shplug", "the panel names its plugin");
+    try h.expectContains(rows, "*ok\talpha", "the item rendered, selected");
+    try h.expectContains(rows, "n=7", "a typed field reached the row");
+    // Children are the only structural difference between a list and a
+    // tree, so a renderer that drops them turns one surface into another.
+    try h.expectContains(rows, " \x20sub\tkid", "the child rendered, indented");
+
+    // …and the ROWS actually drew. State being right and pixels being
+    // right are different claims, which is why this suite asserts on both.
+    //
+    // A DIFFERENTIAL, not a threshold — and both earlier attempts were
+    // wrong in instructive ways. A band a fifth down the window was all
+    // background (the rows sit near the top), so it read 0 and flaked two
+    // runs in three. Widening it to the whole panel then passed with the
+    // row-drawing loop DELETED, because it was counting the panel's own
+    // title and divider. Comparing the same region with rows against
+    // without is the only version that measures the rows themselves.
+    var shot_path: [192]u8 = undefined;
+    const sp = try std.fmt.bufPrint(&shot_path, "{s}/plug.png", .{app.dirPath()});
+    var img = try app.shot(sp);
+    const ink = img.inkRect(img.width * 3 / 4, 0, img.width - 1, img.height * 9 / 10);
+    img.deinit();
+    try h.expect(ink > empty_ink, "rows should add ink: {d} with rows vs {d} without", .{ ink, empty_ink });
+
+    // Naming one that was never declared is refused, not silently ignored.
+    try h.expectContains(try app.ctl("plugin-show nope"), "no such plugin", "an undeclared name is refused");
+
+    // The panel takes the keys and hands them back — the same contract
+    // every side-pane tenant has.
+    _ = try app.ctl("plugin-show shplug");
+    _ = try app.waitCtl("sidepane", "alpha", 5_000);
+    _ = try app.ctl("key 1b"); // ESC yields
+    _ = try app.ctl("type after-panel");
+    _ = try app.ctl("enter");
+    try app.waitTextCount("after-panel", 2, 5_000);
 }
 
 // ---------------------------------------------------------------- runner
