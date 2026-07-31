@@ -416,6 +416,10 @@ pub const App = struct {
     shell: [*:0]const u8,
     keybinds: @import("config.zig").Keybinds,
 
+    /// Declared plugins (plugins.zig). Read at launch; nothing spawns
+    /// until something asks unless a declaration said `eager`.
+    plugins: @import("plugins.zig").Registry,
+
     /// Leader chord armed: the next key resolves a binding (or the
     /// leader again types it literally). Shown in the bar while armed.
     leader_pending: std.atomic.Value(bool) = .init(false),
@@ -812,6 +816,9 @@ pub const App = struct {
         bt = CACurrentMediaTime();
         const keybinds = @import("config.zig").loadKeybinds(init.io, gpa);
         boot_times.keybinds_us = usSince(bt);
+        // Declarations only — reading them is a JSON pass over a file
+        // already in cache. Spawning is what costs, and that is lazy.
+        const plugins = @import("plugins.zig").load(init.io, gpa);
         if (themepkg.byName(cfg.theme)) |t| {
             th = t.*;
         } else std.debug.print("rook config: unknown theme '{s}' (builtin: default, nocturne)\n", .{cfg.theme});
@@ -971,6 +978,7 @@ pub const App = struct {
             .cfg_scrollback = cfg.scrollback,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
             .ime_view = view,
+            .plugins = plugins,
         };
         // The input-method callbacks are context-free C functions; one
         // window means one App to find. Set before the view can become

@@ -682,7 +682,10 @@ const WireEnv = struct {
     nodes: []WireNode = &.{},
 };
 
-fn envData(io: std.Io, gpa: std.mem.Allocator) ?[]u8 {
+/// The raw environment.json bytes. Exported because plugins.zig reads the
+/// same file for its own node kind — one file, two consumers, and neither
+/// should own the other's parse.
+pub fn envData(io: std.Io, gpa: std.mem.Allocator) ?[]u8 {
     var pathbuf: [1024]u8 = undefined;
     const path = envPath(&pathbuf) orelse return null;
     return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch null;

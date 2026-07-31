@@ -472,6 +472,78 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else {
             reply(fd, "err unknown command (see `commands`)\n");
         }
+    } else if (std.mem.eql(u8, verb, "plugins") and rest.len == 0) {
+        // Every declaration, and what became of it. DECLARED vs GRANTED vs
+        // what the plugin ASKED FOR are three different things, and this
+        // prints all three — an empty panel and a dead plugin look
+        // identical from outside, and they are not the same problem.
+        var buf: [8192]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        if (app.plugins.items.len == 0) {
+            _ = w.write("none declared\n") catch 0;
+        } else for (app.plugins.items) |*p| {
+            w.print("{s}\t{s}\t{s}\tgrants=", .{
+                p.spec.name,
+                @tagName(p.spec.load),
+                @tagName(p.state),
+            }) catch break;
+            if (p.spec.grants.len == 0) {
+                _ = w.write("-") catch 0;
+            } else for (p.spec.grants, 0..) |g, i| {
+                if (i > 0) _ = w.write(",") catch 0;
+                _ = w.write(g) catch 0;
+            }
+            // What describe said, which may be MORE than was granted.
+            // That gap is the trust surface, so it is printed rather than
+            // reconciled away.
+            if (p.state == .up) {
+                w.print("\twants=", .{}) catch break;
+                if (p.desc.caps_n == 0) {
+                    _ = w.write("-") catch 0;
+                } else for (0..p.desc.caps_n) |i| {
+                    if (i > 0) _ = w.write(",") catch 0;
+                    _ = w.write(p.desc.cap(i)) catch 0;
+                }
+                w.print("\tv={s}", .{p.desc.versionStr()}) catch break;
+            }
+            if (p.state == .failed) w.print("\t{s}", .{p.errStr()}) catch break;
+            _ = w.write("\n") catch 0;
+        }
+        reply(fd, buf[0..w.end]);
+    } else if (std.mem.startsWith(u8, verb, "plugin") and rest.len > 0) {
+        // `plugin <name> <op> [params-json]` — call a plugin and hand back
+        // its answer verbatim. Deliberately raw: this is the seam being
+        // proven, and a renderer between it and the wire would be a second
+        // thing that could be wrong.
+        var it = std.mem.tokenizeScalar(u8, rest, ' ');
+        const name = it.next() orelse {
+            reply(fd, "err usage: plugin <name> <op> [params-json]\n");
+            return;
+        };
+        const op = it.next() orelse {
+            reply(fd, "err usage: plugin <name> <op> [params-json]\n");
+            return;
+        };
+        const params = it.rest();
+        const p = app.plugins.find(name) orelse {
+            reply(fd, "err no such plugin (see `plugins`)\n");
+            return;
+        };
+        if (!p.spec.granted(op)) {
+            // Refused HERE, before the plugin is told — it should never
+            // learn it was asked for something it may not do.
+            reply(fd, "err not granted\n");
+            return;
+        }
+        var buf: [256 * 1024]u8 = undefined;
+        const answer = p.call(app.gpa, op, params, &buf) orelse {
+            var ebuf: [256]u8 = undefined;
+            const e = std.fmt.bufPrint(&ebuf, "err {s}\n", .{p.errStr()}) catch "err call failed\n";
+            reply(fd, e);
+            return;
+        };
+        reply(fd, answer);
+        reply(fd, "\n");
     } else if (std.mem.eql(u8, verb, "sidepane") and rest.len == 0) {
         // Container state + the tenant's rows, so the whole panel is
         // verifiable without a screenshot.

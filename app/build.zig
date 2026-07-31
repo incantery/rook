@@ -240,6 +240,19 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(git_tests).step);
 
+    // The plugin client: grant enforcement and the frame reader. Its own
+    // root because the frame reader is the part that has to be right — a
+    // plugin that answers in pieces, or never, is the normal case rather
+    // than the edge one, and neither is reachable from a unit test that
+    // does not open a real pipe.
+    const plugins_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/plugins.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    plugins_tests.root_module.link_libc = true;
+    test_step.dependOn(&b.addRunArtifact(plugins_tests).step);
+
     // The UI layer's text fitting. Its own root for the reason logged
     // above editor_tests — the exe module's test collection does not
     // reach these decls, and a suite that is never run is worse than no

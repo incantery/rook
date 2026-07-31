@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const h = @import("harness.zig");
+extern "c" fn getpid() c_int;
 const lsp = @import("lsp");
 
 const Scenario = struct {
@@ -47,6 +48,7 @@ const scenarios = [_]Scenario{
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
     .{ .name = "sidepane", .what = "side pane retiles the grid and flips edges", .run = sidepane },
     .{ .name = "quitall", .what = ":qa reaches every editor pane and leaves the terminals alone", .run = quitAll },
+    .{ .name = "plugins", .what = "declared plugins spawn lazily, answer over the wire, and are refused what config did not grant", .run = plugins },
     .{ .name = "envgraph", .what = "environment.json wins: the graph's leader and chords drive, config.toml yields", .run = envgraph },
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
@@ -1436,6 +1438,107 @@ fn seedRegistry(app: *h.Instance) !Registry {
     if (try h.runCmd(app.dirPath(), &.{ "/usr/bin/sqlite3", db.ptr, sql.ptr }) != 0)
         return error.SeedFailed;
     return reg;
+}
+
+// -------------------------------------------------------------- plugins
+
+/// A plugin, in nine lines of sh.
+///
+/// The fixture is a SHELL SCRIPT on purpose. rook's e2e cannot depend on
+/// rook-demos being checked out, and a script proves the thing the protocol
+/// claims: a plugin is any process that reads a JSON line and writes one.
+/// No SDK, no build step, no language.
+///
+/// It echoes the request's id, because rook checks it — a plugin answering
+/// out of order is caught rather than rendered.
+///
+/// Note what it DECLARES: items.list and items.act. The graph below grants
+/// only items.list. That gap is the point of the scenario.
+const sh_plugin =
+    \\while IFS= read -r line; do
+    \\  id=`expr "$line" : '.*"id":\([0-9]*\)'`
+    \\  case "$line" in
+    \\    *'"op":"describe"'*)
+    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"name":"shplug","version":"9.9","capabilities":["items.list","items.act"]}}\n' "$id" ;;
+    \\    *'"op":"items.list"'*)
+    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"items":[{"id":"a","title":"alpha","state":"ok"}]}}\n' "$id" ;;
+    \\    *)
+    \\      printf '{"v":1,"id":%s,"ok":false,"error":"unsupported op"}\n' "$id" ;;
+    \\  esac
+    \\done
+;
+
+fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
+    // The script has to exist before the app launches, and the graph has to
+    // name it absolutely — so it goes to a pid-scoped path rather than into
+    // the sandbox the harness has not created yet.
+    var path_buf: [128]u8 = undefined;
+    const script = try std.fmt.bufPrint(&path_buf, "/tmp/rook-e2e-plug-{d}.sh", .{getpid()});
+    try h.writeFile(script, sh_plugin);
+    // Left behind on purpose when a scenario fails — the harness keeps its
+    // sandbox for inspection and the fixture is part of what you would read.
+
+    var json_buf: [2048]u8 = undefined;
+    const graph = try std.fmt.bufPrint(&json_buf,
+        \\{{"rookEnvironment":1,"nodes":[
+        \\{{"id":"plugin:shplug","kind":"plugin","scope":"app","name":"shplug","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list"]}},
+        \\{{"id":"plugin:nogrant","kind":"plugin","scope":"app","name":"nogrant","command":["/bin/sh","{s}"],"load":"lazy","grants":[]}},
+        \\{{"id":"plugin:missing","kind":"plugin","scope":"app","name":"missing","command":["/nope/not-a-binary"],"load":"lazy","grants":["items.list"]}}
+        \\]}}
+    , .{ script, script });
+
+    const app = try h.Instance.start(gpa, bin, .{ .env_json = graph });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // LAZY IS THE DEFAULT, and this is what that means: three declarations,
+    // nothing spawned. A surface nobody opened costs nothing.
+    const before = try app.ctl("plugins");
+    try h.expectContains(before, "shplug\tlazy\tdeclared", "declared, not spawned");
+    try h.expectContains(before, "nogrant\tlazy\tdeclared", "declared, not spawned");
+    try h.expectContains(before, "missing\tlazy\tdeclared", "declared, not spawned");
+
+    // A granted op spawns it, handshakes, and comes back with real data
+    // over the real wire.
+    const listed = try app.ctl("plugin shplug items.list");
+    try h.expectContains(listed, "\"ok\":true", "the call succeeded");
+    try h.expectContains(listed, "\"title\":\"alpha\"", "the plugin's items came back");
+
+    // …and now it is up, with BOTH sides recorded: what config granted and
+    // what the plugin said it wants. The gap is the trust surface — a
+    // plugin asking for more than it was given is a fact to show, not an
+    // error to swallow.
+    const after = try app.ctl("plugins");
+    try h.expectContains(after, "shplug\tlazy\tup", "spawned on first use");
+    try h.expectContains(after, "grants=items.list", "what config allowed");
+    try h.expectContains(after, "wants=items.list,items.act", "what the plugin asked for");
+    try h.expectContains(after, "v=9.9", "describe's version was kept");
+
+    // THE ASSERTION THIS SCENARIO EXISTS FOR: the plugin declares
+    // items.act, and rook refuses because the config did not grant it.
+    // Declared by the plugin is not the same as granted by the human.
+    const ungranted = try app.ctl("plugin shplug items.act");
+    try h.expectContains(ungranted, "not granted", "an ungranted op is refused");
+
+    // A plugin granted nothing is inert, and stays UNSPAWNED — the refusal
+    // happens before anything is told anything.
+    const inert = try app.ctl("plugin nogrant items.list");
+    try h.expectContains(inert, "not granted", "no grants means nothing runs");
+    try h.expectContains(try app.ctl("plugins"), "nogrant\tlazy\tdeclared", "a refused call must not spawn it");
+
+    // A binary that is not there fails the plugin, not the app — and says
+    // which, because an empty panel and a dead plugin look identical from
+    // outside.
+    _ = try app.ctl("plugin missing items.list");
+    const failed = try app.ctl("plugins");
+    try h.expectContains(failed, "missing\tlazy\tfailed", "a missing binary fails its plugin");
+
+    // The app is still perfectly alive: a broken plugin is a missing panel.
+    _ = try app.ctl("type echo still-here");
+    _ = try app.ctl("enter");
+    try app.waitTextCount("still-here", 2, 5_000);
 }
 
 // ---------------------------------------------------------------- runner
