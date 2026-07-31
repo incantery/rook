@@ -1,9 +1,0 @@
-{
-  "name": "termdiff",
-  "private": true,
-  "type": "module",
-  "description": "spike: diff a Go VT emulator grid against xterm.js on the corpus",
-  "dependencies": {
-    "@xterm/headless": "6.0.0"
-  }
-}

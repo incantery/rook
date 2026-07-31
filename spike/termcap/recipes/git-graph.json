@@ -1,8 +1,0 @@
-{
-  "name": "git-graph",
-  "cols": 120,
-  "rows": 40,
-  "cmd": ["bash", "-lc", "git --no-pager log --graph --oneline --color=always --all -80"],
-  "captureMs": 2500,
-  "steps": []
-}

@@ -1,4 +1,25 @@
-# spike: server-side terminal grid
+# spike: server-side terminal grid (settled; code removed)
+
+> **Historical.** This is the record of a question rook answered and moved
+> past. It asked whether a Go VT emulator could match xterm.js well enough
+> to hold the authoritative terminal grid in the host — and the answer it
+> reached, plus the fidelity harness and the packed-cell ceiling
+> measurement, is why `internal/vt` existed.
+>
+> The app no longer has either side of that question. rook is one Zig
+> binary on **libghostty-vt**, which is a better answer than either arm of
+> this spike: a real terminal's emulator, maintained by people who do
+> nothing else. `internal/vt` left with the Go host on 2026-07-31, and
+> `spike/` — the benchmarks, the fidelity differ, the packed-cell
+> prototype — left with it. Every external Go dependency the repo had
+> existed for that code.
+>
+> Kept because the METHOD is reusable and the numbers are the evidence
+> for a decision that shaped the app: measure fidelity before performance,
+> and diff against a reference implementation rather than a spec. See
+> [`PERF.md`](PERF.md) for the scoreboard and
+> [`render-latency.md`](render-latency.md) for the diagnosis.
+
 
 Deciding whether the terminal emulator can move out of the browser (xterm.js
 today, holding the authoritative grid) and into the Go host — making xterm.js
