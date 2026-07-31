@@ -1,7 +1,7 @@
 # Up Next
 
 - [x] Fix the attach replay gap: handleAttach copies the ring, replays, THEN sets s.attach — pty bytes arriving during replay never reach that client. Silent scrollback loss on reload today; constant loss once detach/reattach becomes routine (CHATGPTFEEDBACK.md). Step zero of the background-session detach work.
-- [ ] TODO item/ticket tracking
+- [ ] TODO item/ticket tracking — designed: docs/superpowers/specs/2026-07-27-todos-and-workspace-rename-design.md (a `todo` work_type over the existing rook_tasks table, `workspace = ''` meaning unscoped, global = the unfiltered view; ships with workspace rename, which is what makes losing a name expensive)
 - [ ] TOML plugin
 - [ ] Better Window Naming (maybe AI assisted naming)
 
@@ -20,6 +20,7 @@
 
 - [x] Better total cost tracking in a sort of app wide status bar with more details on the main "workspace manager" screen
 - [x] Baked in claude code usage. We still track total "cost" when using a claude subscription, but we want to also keep track of remaining usage for the period for subscription accounts
+- [ ] Adding rook cloud shouldn't need a daemon restart. `initCloud` (cloud.go:45) is the one setting decided at boot and never revisited — it returns early when `[cloud] url` or the token is missing, which is why `rookctl set-cloud-token` has to say "then restart rook-host" (main.go:1732). That instruction is worse than it sounds: the host owns the PTYs precisely so the UI can crash and reattach without killing shells (decision 2), so bouncing it to pick up a token kills every shell in every window of every workspace. Everything else is already hot — `config.Load()` re-reads from disk on every call and the call sites read per-use (monitor, plugins, issues, relay, spawntask, workflow, agent); cloud is the lone outlier, and because of HOW it's wired, not what it reads. Shape: make it a supervisor rather than one-shot wiring — always start `runCloud`, re-read config each tick, attach on the transition into configured and detach on the way out. Cheap because `h.cloud` has exactly one reader goroutine (cloud.go:78/89/92, plus usagepush.go:136 which runCloud calls synchronously), so the loop can own the field with no mutex. Two details to place rather than invent: the Whoami "which machine is this token FOR" line moves to the attach transition so it still fires once per attach — and now fires when you add the token, which is when you'd read it — and `enableUsagePush` (usagepush.go:31, documented "called once from initCloud") becomes transition-guarded. Pickup is one idle tick (2 min); a recheck POST from `set-cloud-token` would make it instant, but the poll is what makes it correct and the nudge only makes it fast.
 
 # Issue Tracking
 
@@ -121,3 +122,37 @@ is brutal — isolation boundary, plugin-qualified identity, permission scopes,
 - [ ] Revisit trigger: a second REAL kind exists. Watch for it in the
       presentation direction (asks/RUI/"dynamic web interfaces"), which already
       ships, rather than inventing one.
+# Rootless workspaces — the boot default that 400s (2026-07-27)
+
+Found by `re <abs-path>` returning `400 workspace has no root` on a fresh
+install. Rootless is *intentional*: `App.svelte:2552` says a fresh install
+spawns a first shell and "a rootless one opens in $HOME", because opening rook
+is opening a terminal. The bug is that nothing carried that intent to the eight
+endpoints that require a root — file/changes/diff/write (`review.go`), plus
+`grep.go`, `threads.go`, `lsp.go`, `exploretasks.go` — which treat "no root" as
+an error rather than as a state.
+
+Boot chain: `manager.ts:215` `current = "main"` → `host.go:1231` `ws = "main"`
+→ **`host.go:1237` `upsert(ws, "", false)` hardcodes an empty root**. `upsert`
+only ever *fills* a root (`root = CASE WHEN excluded.root != ''`), so nothing
+later repairs it and the workspace is permanently rootless. Compounded by
+`workspace-allow`: the boot workspace `main` is in nobody's allowlist by
+default, so the workspace you are actually sitting in is invisible in the
+workspace list — no affordance to notice the sessions went somewhere else.
+
+- [ ] **Adopt a root on first spawn.** After spawning into a rootless
+      workspace, set the root from the shell's real cwd. `cwdOf(pid)` is
+      already called two lines away (`host.go:1240`) and is portable (lsof on
+      darwin, `/proc` on linux). Self-healing: the first session in a workspace
+      defines its root.
+- [ ] **Make the error actionable.** `400 workspace has no root` is a dead end
+      — there is no `rookctl ws` verb at all, so a user reading it has nowhere
+      to go. Name the workspace and name the fix.
+- [ ] **`re` with an absolute path shouldn't need the workspace root.**
+      Confinement needs *a* root, but for an absolute path it can resolve the
+      repo top from the path itself (`repoTop`, already used elsewhere). The
+      failing request carried a fully absolute path inside a real git repo and
+      was rejected anyway — the path was never the problem. Larger change to
+      the edit path than the two above; the difference between "self-heals
+      eventually" and "never fails in the first place". Related: the
+      file-tree-should-follow-CWD question under Issue Tracking.
