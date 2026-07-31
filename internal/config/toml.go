@@ -14,6 +14,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,6 +110,48 @@ type tomlLSP struct {
 	Server map[string]tomlLSPServer `toml:"server"`
 }
 
+// dropAppLSPScalar removes a TOP-LEVEL `lsp = <scalar>` line.
+//
+// One file, two readers, and for a while both claimed this name: the app's
+// knob was a boolean (`lsp = true`, "run language servers in the editor at
+// all") while the host's is the [lsp] table above. TOML lets a name be one
+// or the other and never both — so a file carrying the app's old spelling
+// failed to DECODE, and applyTOML fails open, which meant losing every
+// host setting in the file (coder, theme, workflow, the lot) to a key that
+// was not even the host's. Silently, because a config loader has nobody to
+// tell.
+//
+// The app's key is `editor-lsp` now, but files outlive renames. Removing
+// the line here is what lets an old one keep working: the app reads the
+// file itself and still sees its own line, and the host stops choking on
+// it. Both spellings of the mistake are covered — the scalar alone, and
+// the scalar sitting above a real [lsp] table, which TOML rejects outright
+// ("key lsp should be a table, not a value").
+//
+// Line-based on purpose, and only ever reached after the document has
+// already failed to parse. This mirrors the APP's own reader — top-level
+// keys only, everything from the first [table] on is someone else's — so
+// the line it drops is exactly the line the app claims.
+func dropAppLSPScalar(data []byte) ([]byte, bool) {
+	lines := bytes.Split(data, []byte("\n"))
+	out, dropped, inTable := make([][]byte, 0, len(lines)), false, false
+	for _, raw := range lines {
+		line := bytes.TrimSpace(raw)
+		switch {
+		case len(line) == 0 || line[0] == '#':
+		case line[0] == '[':
+			inTable = true
+		case !inTable:
+			if k, _, ok := bytes.Cut(line, []byte("=")); ok && string(bytes.TrimSpace(k)) == "lsp" {
+				dropped = true
+				continue
+			}
+		}
+		out = append(out, raw)
+	}
+	return bytes.Join(out, []byte("\n")), dropped
+}
+
 type tomlLSPServer struct {
 	Command   *string   `toml:"command"`
 	Off       *bool     `toml:"off"`
@@ -132,10 +175,20 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 	}
 	var f tomlFile
 	if err := toml.Unmarshal(data, &f); err != nil {
-		// fail open: a broken file changes nothing, and we don't fall
-		// back to the legacy file — that would silently apply stale
-		// settings the user thinks they replaced.
-		return true
+		// One rescue before giving up, because one collision was ours to
+		// cause: a top-level `lsp` scalar is the app's old key, and losing
+		// the whole file to it would punish the user for our rename.
+		clean, dropped := dropAppLSPScalar(data)
+		if !dropped {
+			// fail open: a broken file changes nothing, and we don't fall
+			// back to the legacy file — that would silently apply stale
+			// settings the user thinks they replaced.
+			return true
+		}
+		f = tomlFile{}
+		if toml.Unmarshal(clean, &f) != nil {
+			return true
+		}
 	}
 
 	if f.LSP != nil {

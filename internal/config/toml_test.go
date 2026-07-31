@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -367,5 +368,64 @@ empty = ""
 	}
 	if got := LoadWorkspace(repo); got.Verify["go-test"] != "go test ./..." {
 		t.Fatalf("a repo must not redefine a suite: %q", got.Verify["go-test"])
+	}
+}
+
+// One file, two readers, and for a while both claimed the name `lsp`:
+// here it is the host's TABLE, and in the app it was a boolean. TOML lets
+// a name be one or the other and never both, so the app's spelling was
+// costing the user every OTHER setting in the file — applyTOML fails open,
+// and a config loader has nobody to tell. The app's key is `editor-lsp`
+// now; a file written before that must not be expensive.
+func TestTOMLAppLSPScalarIsNotFatal(t *testing.T) {
+	// The scalar alone. It parses as TOML and blows up on decode, which is
+	// the shape most users would have had.
+	writeTOML(t, `
+lsp = true
+coder = "claude-next"
+theme = "nocturne"
+`)
+	cfg := Load()
+	if cfg.Coder != "claude-next" || cfg.Theme != "nocturne" {
+		t.Fatalf("a key that is not even ours must not cost the file: %+v", cfg)
+	}
+
+	// The scalar above the host's own table — the shape TOML itself
+	// rejects, before any struct is involved. The table still applies whole.
+	writeTOML(t, `
+lsp = false
+coder = "claude-next"
+[lsp]
+enable = ["go", "zig"]
+[lsp.server.zls]
+command = "zls --stdio"
+`)
+	cfg = Load()
+	if cfg.Coder != "claude-next" {
+		t.Fatalf("coder: %q", cfg.Coder)
+	}
+	if !reflect.DeepEqual(cfg.LSP, []string{"go", "zig"}) {
+		t.Fatalf("the host's table must still apply: %v", cfg.LSP)
+	}
+	if got := cfg.LSPServers["zls"].Command; got != "zls --stdio" {
+		t.Fatalf("the server tables must survive too: %q", got)
+	}
+
+	// A `lsp` INSIDE a table is not the app's key and is not touched —
+	// the rescue reads the file the way the app does, top-level only.
+	writeTOML(t, `
+coder = "claude-next"
+[workspaces.myproject]
+lsp = true
+`)
+	if cfg := Load(); cfg.Coder != "claude-next" {
+		t.Fatalf("a table's own key must be left alone: %+v", cfg)
+	}
+
+	// And a file broken for any other reason still fails open. The rescue
+	// is one specific line, not a tolerant parser.
+	writeTOML(t, "coder = \"claude-next\"\nthis is not toml ][\n")
+	if cfg := Load(); cfg.Coder != Default().Coder {
+		t.Fatalf("broken TOML must still load pure defaults: %+v", cfg)
 	}
 }

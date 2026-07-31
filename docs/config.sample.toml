@@ -100,12 +100,17 @@
 # the shell — you opened a terminal.
 # explorer-auto = false
 
-# Language servers. On by default and LAZY: nothing spawns until you
-# open a file of a language rook knows, so leaving it on costs nothing
-# if you never do — diagnostics in the gutter, `gd` to the definition,
-# `K` for hover, `]d`/`[d` to walk the errors. Set false for an editor
-# with nothing running behind it.
-# lsp = true
+# Language servers, in the editor. On by default and LAZY: nothing
+# spawns until you open a file of a language rook knows, so leaving it on
+# costs nothing if you never do — diagnostics in the gutter, `gd` to the
+# definition, `K` for hover, `]d`/`[d` to walk the errors. Set false for
+# an editor with nothing running behind it.
+#
+# This was once plain `lsp`, which is the one name it could not have:
+# WHICH servers rook runs is the host's [lsp] table further down, and
+# TOML lets a name be a scalar or a table, never both. The old spelling
+# is still read, with a notice.
+# editor-lsp = true
 #
 # Known today:
 #   Go          gopls

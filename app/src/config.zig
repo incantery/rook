@@ -549,13 +549,23 @@ fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
             } else if (std.mem.eql(u8, stripped, "normal")) {
                 cfg.editor_insert = false;
             } else std.debug.print("rook config: unknown editor-mode '{s}' (normal, insert)\n", .{stripped});
-        } else if (std.mem.eql(u8, key, "lsp")) {
+        } else if (std.mem.eql(u8, key, "editor_lsp") or std.mem.eql(u8, key, "lsp")) {
+            // `lsp` was this knob's first name, and it is the one name in
+            // this file we could not have: the HOST's language-server
+            // config is the [lsp] TABLE, and TOML lets a name be a scalar
+            // or a table, never both. A file carrying both failed to parse
+            // for the host, which fails open — so our boolean silently
+            // cost the user every host setting in the file. The old
+            // spelling is still honoured (files outlive renames, and the
+            // host now steps over it); the notice is how it gets fixed.
+            if (std.mem.eql(u8, key, "lsp"))
+                std.debug.print("rook config: `lsp` is now `editor-lsp` — [lsp] is the host's own table\n", .{});
             const stripped = std.mem.trim(u8, val, "\"");
             if (std.mem.eql(u8, stripped, "true")) {
                 cfg.lsp = true;
             } else if (std.mem.eql(u8, stripped, "false")) {
                 cfg.lsp = false;
-            } else std.debug.print("rook config: unknown lsp '{s}' (true, false)\n", .{stripped});
+            } else std.debug.print("rook config: unknown editor-lsp '{s}' (true, false)\n", .{stripped});
         } else if (std.mem.eql(u8, key, "explorer_auto")) {
             const stripped = std.mem.trim(u8, val, "\"");
             if (std.mem.eql(u8, stripped, "true")) {
@@ -698,7 +708,9 @@ fn applyEnvOption(cfg: *Config, gpa: std.mem.Allocator, key_raw: []const u8, val
         cfg.activity_bar = jBool(value) orelse cfg.activity_bar;
     } else if (std.mem.eql(u8, key, "explorer_auto")) {
         cfg.explorer_auto = jBool(value) orelse cfg.explorer_auto;
-    } else if (std.mem.eql(u8, key, "lsp")) {
+    } else if (std.mem.eql(u8, key, "editor_lsp") or std.mem.eql(u8, key, "lsp")) {
+        // Both spellings, no notice: the graph is machine-written, so
+        // there is no line for a human to go and fix.
         cfg.lsp = jBool(value) orelse cfg.lsp;
     } else if (std.mem.eql(u8, key, "top_bar")) {
         cfg.top_bar = jSegList(value) orelse cfg.top_bar;
@@ -1142,4 +1154,28 @@ test "topLevelEq ignores '=' inside a quoted key" {
     const eq = topLevelEq(line).?;
     var buf: [64]u8 = undefined;
     try t.expectEqualStrings("<leader>\"", unquote(std.mem.trim(u8, line[0..eq], " \t"), &buf));
+}
+
+test "editor-lsp is the name; `lsp` still answers to it" {
+    const t = std.testing;
+    // One file, two readers, and this is the name they collided on: the
+    // host's language-server config is the [lsp] TABLE, and TOML lets a
+    // name be a scalar or a table and never both — so the app's boolean
+    // had to move rather than the host's table. Old files outlive the
+    // rename, so the old spelling still lands on the same field.
+    var cfg: Config = .{};
+    try t.expect(cfg.lsp); // on by default, and lazy
+
+    applyEnvOption(&cfg, t.allocator, "editor-lsp", .{ .bool = false });
+    try t.expect(!cfg.lsp);
+    applyEnvOption(&cfg, t.allocator, "editor_lsp", .{ .bool = true });
+    try t.expect(cfg.lsp);
+
+    applyEnvOption(&cfg, t.allocator, "lsp", .{ .bool = false });
+    try t.expect(!cfg.lsp);
+
+    // A wrong value TYPE leaves what was there — the graph is emitted,
+    // so a mismatch is version skew to survive, not a typo to correct.
+    applyEnvOption(&cfg, t.allocator, "editor-lsp", .{ .string = "true" });
+    try t.expect(!cfg.lsp);
 }
