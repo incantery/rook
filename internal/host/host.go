@@ -25,9 +25,7 @@ import (
 
 	cpty "github.com/creack/pty"
 
-	"github.com/incantery/rook/internal/cloud"
 	"github.com/incantery/rook/internal/config"
-	"github.com/incantery/rook/internal/relay"
 	"github.com/incantery/rook/internal/version"
 )
 
@@ -74,17 +72,6 @@ type Host struct {
 	// real actuator (claimed window, else spawned task) runs.
 	nudgeFn func(ws, prompt string) (mode, rookSession string, err error)
 
-	// pending `rookctl ask` requests (ask.go), keyed by ask id
-	askMu sync.Mutex
-	asks  map[string]*askState
-
-	// The configured rook-server, if any (relay.go): asks escalate to it so
-	// they can be answered from a phone. nil = no remote, path inert.
-	relay *relay.Client
-
-	// The configured rook-cloud, if any (cloud.go): status snapshots go up
-	// so the dashboard can show this machine. nil = nothing leaves here.
-	cloud *cloud.Client
 
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
@@ -124,8 +111,6 @@ func New() *Host {
 		prm:      newPRMon(),
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
-	h.initRelay()
-	h.initCloud()
 	return h
 }
 
@@ -433,11 +418,6 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/workspaces", h.handleWorkspaces)
 	mux.HandleFunc("/workspaces/", h.handleWorkspace)
 	// cross-workspace status in one call — mission control's poll
-	mux.HandleFunc("/asks/", h.handleAsks)
-	// The session-less ask queue: create and list. A client that does not
-	// hold a wire-v3 session socket (the zig app owns its ptys in-process
-	// and never attaches one) has no other way to see a pending ask.
-	mux.HandleFunc("/asks", h.handleAskQueue)
 	// per-thread verbs — ids are global, no workspace in the path
 	// per-task verbs (RookTask) — global ids, same as threads
 	// pprof rides the same authenticated loopback surface as everything
@@ -936,13 +916,6 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 		// the shell's live working directory — feeds "set workspace root
 		// to here" and anything else that wants where the user actually is
 		writeJSON(w, map[string]string{"cwd": cwdOf(s.cmd.Process.Pid)})
-	case action == "ask" && r.Method == http.MethodPost:
-		// `rookctl ask` (and the MCP tool): a question for the human,
-		// delivered to the phone via the relay — see ask.go
-		h.handleSessionAsk(w, r, s)
-	case action == "asks" && r.Method == http.MethodGet:
-		// the async drain: decided asks out (consumed), pending ids listed
-		h.handleSessionAsks(w, s)
 	case action == "input" && r.Method == http.MethodPost:
 		// Raw, byte-faithful pty write (`rookctl send`). Callers append
 		// "\r" to submit; the host adds nothing.

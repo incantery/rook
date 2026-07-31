@@ -52,19 +52,6 @@ type Config struct {
 	// the conflict-resolve chip, thread nudges). claude unless
 	// overridden.
 	Coder string `json:"coder"`
-	// RelayURL is a rook-server (self-hosted or rook-cloud): when set, an
-	// ask ALSO lands there, so a question raised while you're away from the
-	// desk can be answered from your phone. Empty = no remote, and the
-	// whole path is inert. The token lives in the keychain
-	// (`rookctl set-relay-token`), never in this file.
-	RelayURL string `json:"relayUrl"`
-	// CloudURL is rook-cloud's machine API ([cloud] url): when set, the
-	// host reports what is happening here — workspaces, agent states,
-	// pending asks — so the dashboard can show this machine from anywhere.
-	// Empty = nothing leaves the machine. The token comes from the
-	// dashboard's "Add machine" and lives in the keychain
-	// (`rookctl set-cloud-token`), never in this file.
-	CloudURL string `json:"cloudUrl"`
 	// Leader is the tmux-style prefix that arms the bare-key bindings: a
 	// single key (`leader = \`, the backtick default) or a modifier chord
 	// (`leader = ctrl+b`, the tmux default). Pressing it twice passes the
@@ -390,24 +377,6 @@ func (s *Service) Get() Config {
 // point of the provider split: rook-provider-linear fetches its own key
 // from the keychain, so a Linear credential never enters this process.
 // rook writes the key (SetLinearToken, below) and never reads it back.
-
-// RelayToken resolves the rook-server bearer token: keychain first
-// (account relay — `rookctl set-relay-token`), then the
-// ~/.config/rook/relay-token file, 0600-tight like the others. The file
-// fallback is not a convenience here: keychain.Get is macOS-only, so
-// without it a Linux host could never reach a relay — and self-hosting is
-// most of the point. "" means no remote.
-func RelayToken() string {
-	return secretFrom(keychain.RelayAccount, "relay-token")
-}
-
-// CloudToken resolves the rook-cloud machine token: keychain first
-// (account cloud — `rookctl set-cloud-token`), then the
-// ~/.config/rook/cloud-token file, 0600-tight like the others. "" means
-// this machine does not report.
-func CloudToken() string {
-	return secretFrom(keychain.CloudAccount, "cloud-token")
-}
 
 // secretFrom is the keychain-then-tight-file resolution the secrets share.
 func secretFrom(account, fileName string) string {

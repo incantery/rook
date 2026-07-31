@@ -8,16 +8,7 @@
 //	rookctl send          type into a window: rookctl send s3 yes
 //	rookctl spawn         start a claude session: rookctl spawn [-w ws] [--worktree] <task…>
 //	rookctl issues        the workspace's work queue (providers, mine + unassigned)
-//	rookctl ask           ask the human a question, delivered to their phone via
-//	                        the relay, blocking until answered: rookctl ask '<json>'
-//	                        (or stdin); answer JSON on stdout, exit 0 / 1 dismissed.
-//	                        503 with no relay: nothing can answer it (the local
-//	                        form left in the strip)
-//	rookctl mcp           stdio MCP server for Claude Code — the `ask` tool is
-//	                        `rookctl ask` behind tools/call (the rook plugin wires it)
 //	rookctl set-linear-token store the Linear API key (queue credential) in the keychain
-//	rookctl set-relay-token store the rook-server bearer token in the keychain
-//	rookctl set-cloud-token store the rook-cloud machine token in the keychain
 //	rookctl version       release version of this install
 //	rookctl update        fetch + install the latest release (--check to look)
 package main
@@ -99,14 +90,6 @@ func main() {
 		err = runIssues(os.Args[2:])
 	case "set-linear-token":
 		err = runSetLinearToken()
-	case "set-relay-token":
-		err = runSetRelayToken()
-	case "set-cloud-token":
-		err = runSetCloudToken()
-	case "ask":
-		err = runAsk(os.Args[2:])
-	case "mcp":
-		err = runMcp()
 	case "version":
 		fmt.Printf("%s (build %s)\n", version.Version, version.Build)
 		if st, err := host.ReadState(); err == nil {
@@ -115,7 +98,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|send <session> <text…>|spawn [-w ws] [--worktree] <task…>|issues|ask [json]|mcp|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|send <session> <text…>|spawn [-w ws] [--worktree] <task…>|issues|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -142,18 +125,10 @@ type wsStatus struct {
 		Behind int    `json:"behind"`
 	} `json:"git"`
 	Sessions []struct {
-		ID           string `json:"id"`
-		Fg           string `json:"fg"`
-		Cwd          string `json:"cwd"`
-		AgentSession string `json:"agentSession"`
-		Agent        *struct {
-			State   string  `json:"state"`
-			Ask     string  `json:"ask"`
-			Tool    string  `json:"tool"`
-			CostUSD float64 `json:"costUsd"`
-		} `json:"agent"`
+		ID  string `json:"id"`
+		Fg  string `json:"fg"`
+		Cwd string `json:"cwd"`
 	} `json:"sessions"`
-	Attention int `json:"attention"`
 }
 
 func tilde(p string) string {
@@ -218,37 +193,7 @@ func runLs(asJSON bool) error {
 			if s.ID == self && self != "" {
 				mark = "*"
 			}
-			line := fmt.Sprintf("%s %-4s %-8s %s", mark, s.ID, s.Fg, tilde(s.Cwd))
-			if s.Agent != nil {
-				switch s.Agent.State {
-				case "needs_input":
-					line += "  ◉ needs you"
-				case "quiet":
-					line += "  ◌ quiet"
-					if s.Agent.Tool != "" {
-						line += " — " + s.Agent.Tool
-					}
-				default:
-					line += "  ● working"
-					if s.Agent.Tool != "" {
-						line += " — " + s.Agent.Tool
-					}
-				}
-				if s.Agent.CostUSD > 0 {
-					line += fmt.Sprintf(" $%.2f", s.Agent.CostUSD)
-				}
-			}
-			if s.AgentSession != "" {
-				line += "  [" + s.AgentSession[:min(8, len(s.AgentSession))] + "]"
-			}
-			fmt.Println(line)
-			if s.Agent != nil && s.Agent.State == "needs_input" && s.Agent.Ask != "" {
-				ask := s.Agent.Ask
-				if len(ask) > 120 {
-					ask = ask[:120] + "…"
-				}
-				fmt.Printf("       ↳ %s\n", strings.ReplaceAll(ask, "\n", " "))
-			}
+			fmt.Printf("%s %-4s %-8s %s\n", mark, s.ID, s.Fg, tilde(s.Cwd))
 		}
 	}
 	return nil
@@ -465,40 +410,6 @@ func runSetLinearToken() error {
 		return fmt.Errorf("stored, but read-back failed — is the login keychain locked?")
 	}
 	fmt.Println("linear key stored — add [providers.linear] to ~/.config/rook/config.toml to turn the queue on")
-	return nil
-}
-
-// runSetRelayToken stores the bearer token for the configured rook-server
-// (relay-url in config.toml). Same posture as the other two: the security
-// tool reads it, so the secret never enters argv or shell history.
-func runSetRelayToken() error {
-	cmd := exec.Command("security", "add-generic-password", "-U",
-		"-s", keychain.Service, "-a", keychain.RelayAccount, "-w")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("security add-generic-password: %w", err)
-	}
-	if k, err := keychain.Get(keychain.Service, keychain.RelayAccount); err != nil || k == "" {
-		return fmt.Errorf("stored, but read-back failed — is the login keychain locked?")
-	}
-	fmt.Println("relay token stored — set [relay] url in ~/.config/rook/config.toml, then restart rook-host")
-	return nil
-}
-
-// runSetCloudToken stores the machine token rook-cloud showed exactly once
-// when the machine was added on the dashboard. Same posture as the others:
-// the security tool reads it, so the secret never enters argv or history.
-func runSetCloudToken() error {
-	cmd := exec.Command("security", "add-generic-password", "-U",
-		"-s", keychain.Service, "-a", keychain.CloudAccount, "-w")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("security add-generic-password: %w", err)
-	}
-	if k, err := keychain.Get(keychain.Service, keychain.CloudAccount); err != nil || k == "" {
-		return fmt.Errorf("stored, but read-back failed — is the login keychain locked?")
-	}
-	fmt.Println("cloud token stored — set [cloud] url in ~/.config/rook/config.toml, then restart rook-host")
 	return nil
 }
 

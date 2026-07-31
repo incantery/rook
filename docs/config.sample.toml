@@ -244,44 +244,6 @@
 # team = "ENG"
 
 
-# ── Remote asks (host-read) ──────────────────────────────────────────────
-#
-# A rook-server — self-hosted, or rook-cloud. A question from an agent
-# lands in the mailbox, so you can answer it from your phone.
-#
-# This is now the ONLY surface an ask can reach: the local form left in
-# the strip, and rook does not render questions in a pane any more. With
-# no relay configured the host REFUSES to create an ask (503) rather than
-# accepting one nothing can answer — `rookctl ask` and the MCP `ask` tool
-# both fail fast, and Claude Code's own AskUserQuestion is the fallback.
-#
-# The bearer token is NOT set here — it lives in the keychain
-# (`rookctl set-relay-token`; see the secrets note at the bottom).
-# Changes need a daemon restart.
-
-[relay]
-# Base URL of the rook-server.
-# url = "https://cloud.rookide.com"
-
-
-# ── Cloud status (host-read) ─────────────────────────────────────────────
-#
-# rook-cloud's machine API. When set, the host reports what is happening
-# here — workspaces, agent states, pending asks — so the dashboard at
-# cloud.rookide.com can show this machine from anywhere. Absent means
-# nothing leaves the machine.
-#
-# The machine token is NOT set here — add the machine on the dashboard,
-# then store the token it shows with `rookctl set-cloud-token`.
-# Changes need a daemon restart.
-
-[cloud]
-# Base URL of rook-cloud's machine API.
-# url = "https://api.rookide.com"
-
-
-
-
 # ── Per-workspace overrides ──────────────────────────────────────────────
 #
 # One [workspaces.<name>] table per workspace, named for the workspace it
@@ -352,14 +314,11 @@
 
 # ── Secrets are NOT file-managed ─────────────────────────────────────────
 #
-# The OpenAI key (the agent's credential), the Linear API key, the
-# rook-server bearer token, and the rook-cloud machine token never live in
-# this file — the config stays user-owned and safe to commit or share. They
-# live in the login keychain instead:
+# The Linear API key never lives in this file — the config stays
+# user-owned and safe to commit or share. It lives in the login keychain
+# instead:
 #
 #   rookctl set-linear-token      # stores the Linear API key
-#   rookctl set-relay-token       # stores the rook-server bearer token
-#   rookctl set-cloud-token       # stores the rook-cloud machine token
 #
 # The Linear key is the one rook writes and never reads: the provider
 # fetches it back itself, so it is never in rook's memory.

@@ -145,10 +145,8 @@ install:
 	@# `re` = rook edit (argv[0] dispatch). CLAIMED from rookctl, which
 	@# used the same trick — the zig editor is the editor now.
 	ln -sf $(APP)/Contents/MacOS/rook $(HOME)/.local/bin/re
-	@# rookctl stays on PATH under its own name too: claude-plugin invokes
-	@# `rookctl mcp` and `rookctl claim` BY NAME, and an installed plugin
-	@# breaking mid-session is not an acceptable cutover cost. It goes
-	@# when the plugin has moved to `rook`.
+	@# rookctl stays on PATH under its own name: it is rook's scripting
+	@# surface, and scripts name it.
 	@# A COPY, not a symlink: selfupdate.Apply EvalSymlinks's the running
 	@# rookctl and writes over what it resolves to, so a link into the
 	@# bundle would make `rookctl update` rewrite a sealed binary and
@@ -253,14 +251,3 @@ release-stage:
 	@# No backticks in this message: the shell would run what is in them.
 	@echo "staged $(DIST)/$(RELEASE_ZIP) — 'make release VERSION=$(VERSION)' tags and publishes"
 
-# Regenerate the copied edge protocol (proto/rook/edge/v1 — rook-cloud
-# is the source of truth; re-copy its proto first when the contract
-# changes). Plugins are installed at the exact versions go.mod declares,
-# so generated code and runtime library cannot drift; the gen/ tree is
-# committed and this target is only needed when proto/ changes.
-.PHONY: proto
-proto:
-	go install google.golang.org/protobuf/cmd/protoc-gen-go@$$(go list -m -f '{{.Version}}' google.golang.org/protobuf)
-	go install connectrpc.com/connect/cmd/protoc-gen-connect-go@$$(go list -m -f '{{.Version}}' connectrpc.com/connect)
-	buf lint
-	buf generate

@@ -21,15 +21,6 @@ const (
 	// it — rook-provider-linear is the only thing that fetches it back,
 	// which is what keeps the credential out of rook's address space.
 	LinearAccount = "linear"
-	// RelayAccount is the bearer token for the configured rook-server
-	// (relay-url in config). A secret that reaches a network service has
-	// no business sitting in a hand-edited file — and even less once
-	// config starts syncing between machines.
-	RelayAccount = "relay"
-	// CloudAccount is the machine token rook-cloud mints when you add a
-	// machine on the dashboard ([cloud] url in config). One token per
-	// machine by design — revoking one machine never touches the others.
-	CloudAccount = "cloud"
 )
 
 var ErrUnsupported = errors.New("keychain: only supported on macOS")
