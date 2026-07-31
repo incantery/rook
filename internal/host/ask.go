@@ -112,90 +112,6 @@ func (h *Host) handleSessionAsk(w http.ResponseWriter, r *http.Request, s *sessi
 	writeJSON(w, map[string]string{"askId": id})
 }
 
-// askDoorbell types a one-line pointer at the asking session's pty — the
-// automated "I've left comments on the file". Only when a live claude
-// claim holds that window: at a bare shell the line would run as a
-// command, so a dead claim means the answer just waits in the drain.
-// One line, no embedded newline — same delivery rule as the thread nudge.
-//
-// Reports whether it actually rang. A false here is the quiet failure mode
-// that used to strand an answer forever: the human decided, the agent was
-// between lives, and nothing ever told the next one to look.
-func (h *Host) askDoorbell(sessionID, askID string) bool {
-	s := h.get(sessionID)
-	if s == nil {
-		return false
-	}
-	h.bindMu.Lock()
-	alive := false
-	for tid, sid := range h.claims {
-		if sid == sessionID && h.claimAliveLocked(tid, s) {
-			alive = true
-			break
-		}
-	}
-	h.bindMu.Unlock()
-	if !alive {
-		return false
-	}
-	h.typeLine(s, "rook ask "+askID+" answered — collect it with the rook answers tool")
-	return true
-}
-
-// ringOwedDoorbells delivers the pointers that had nobody to point at.
-// Called when a claude session claims this window (host.go's claim
-// handler): a fresh agent in the window the question came from is exactly
-// who the answer was for. It is the same line, so the new agent does what
-// the old one would have — call the answers tool, which still holds the
-// decision because the drain is read-once and nobody read it.
-//
-// Deliberately not a ticker: the trigger is a claim, and a claim is the
-// only evidence that typing at this pty is safe.
-func (h *Host) ringOwedDoorbells(sessionID string) {
-	h.askMu.Lock()
-	var owed []string
-	for id, a := range h.asks {
-		if a.session == sessionID && a.done && a.doorbellOwed {
-			owed = append(owed, id)
-		}
-	}
-	h.askMu.Unlock()
-
-	for _, id := range owed {
-		if !h.askDoorbell(sessionID, id) {
-			return // still nobody home; the next claim tries again
-		}
-		h.askMu.Lock()
-		if a := h.asks[id]; a != nil {
-			a.doorbellOwed = false
-		}
-		h.askMu.Unlock()
-	}
-}
-
-// typeLine is the pty write behind the doorbell — a seam so tests can
-// observe a delivery without a tty (nil typeLineFn = the real thing).
-func (h *Host) typeLine(s *session, line string) {
-	if h.typeLineFn != nil {
-		h.typeLineFn(s, line)
-		return
-	}
-	typeLineAt(s, line)
-}
-
-// typeLineAt delivers one line to an agent's TUI as TYPED input: the text,
-// a beat, then Enter as its own write. Text and \r in a single burst read
-// as a PASTE to claude code's heuristic — the newline lands in the input
-// box as a literal newline and nothing submits (found live, 07-24). The
-// gap makes the \r a keypress.
-func typeLineAt(s *session, line string) {
-	if _, err := s.pty.Write([]byte(line)); err != nil {
-		return
-	}
-	time.Sleep(150 * time.Millisecond)
-	s.pty.Write([]byte("\r"))
-}
-
 // handleSessionAsks is GET /sessions/{id}/asks — the drain the MCP answers
 // tool reads: every DECIDED async ask for this session (consumed by the
 // read), plus the ids still waiting. Blocking asks belong to their
@@ -259,7 +175,7 @@ func (h *Host) settleAsk(id string, answer json.RawMessage, src settleSource) se
 		return settledAlready
 	}
 	a.done, a.acked, a.answer = true, true, answer
-	ring, session, escalated := a.notify, a.session, a.escalated
+	session, escalated := a.session, a.escalated
 	close(a.doneCh)
 	h.askMu.Unlock()
 
@@ -268,21 +184,6 @@ func (h *Host) settleAsk(id string, answer json.RawMessage, src settleSource) se
 	h.pushAskDone(session, id)
 	if escalated && src != sourceRelay {
 		h.withdraw(id) // answered at the desk; the card leaves the phone
-	}
-	if ring {
-		// off the request path: the pty write can stall on a wedged tty
-		go func() {
-			if h.askDoorbell(session, id) {
-				return
-			}
-			// nobody to tell yet — the answer waits in the drain and the
-			// next claim on this window rings it
-			h.askMu.Lock()
-			if a := h.asks[id]; a != nil {
-				a.doorbellOwed = true
-			}
-			h.askMu.Unlock()
-		}()
 	}
 	return settledOK
 }

@@ -104,57 +104,45 @@ func (h *Host) runCloud(ctx context.Context) {
 	}
 }
 
-// busy reports whether the snapshot shows anything worth a brisk cadence —
-// an agent working, or one waiting on a human who might be watching the
-// dashboard rather than the desk.
+// busy reports whether the snapshot shows anything worth a brisk cadence.
+// It used to mean "an agent is working or waiting on a human"; the sensor
+// that knew took that with it, so a live workspace is the signal left.
 func busy(st cloud.Status) bool {
-	for _, ws := range st.Workspaces {
-		for _, a := range ws.Agents {
-			if a.State == "working" || a.State == "needs_input" {
-				return true
-			}
-		}
-	}
-	return false
+	return len(st.Workspaces) > 0
 }
 
 // cloudSnapshot reads the machine's live picture and projects it.
 func (h *Host) cloudSnapshot(hostname string) cloud.Status {
-	return cloudProject(hostname, version.Version, h.overviewItems())
+	return cloudProject(hostname, version.Version, h.workspaceList())
 }
 
-// cloudProject turns overview items into the wire shape. Workspaces with no
-// live sessions are omitted — an idle registry entry is not "going on", and
-// leaving it out is also what keeps the payload small on machines with long
+// cloudProject turns the workspace list into the wire shape. Workspaces
+// with no live sessions are omitted — an idle registry entry is not "going
+// on", and leaving it out keeps the payload small on machines with long
 // workspace lists.
 //
 // Split from the read so it can be tested: this function IS the privacy
 // line. Everything it copies leaves the machine, and everything it declines
 // to copy — Fg, the foreground commands — stays home. A field quietly added
 // here is a field quietly published, so the test states the whole set.
-func cloudProject(hostname, ver string, items []overviewItem) cloud.Status {
+//
+// It used to carry per-agent rows and an attention count, read off the
+// transcript sensor. The sensor left in the strip; what a machine reports
+// now is which workspaces are alive and what branch each is on.
+func cloudProject(hostname, ver string, items []workspaceListItem) cloud.Status {
 	st := cloud.Status{
 		Hostname:    hostname,
 		RookVersion: ver,
 	}
 	for _, it := range items {
-		if it.Sessions == 0 && len(it.Agents) == 0 {
+		if it.Sessions == 0 {
 			continue
 		}
-		ws := cloud.Workspace{Name: it.Name, Attention: it.Attention}
-		if it.Git != nil {
-			ws.Branch = it.Git.Branch
-		}
-		for _, a := range it.Agents {
-			ws.Agents = append(ws.Agents, cloud.Agent{
-				State:     a.State,
-				Title:     a.Title,
-				Ask:       a.Ask,
-				Model:     a.Model,
-				CostUSD:   a.CostUSD,
-				LastEvent: a.LastEvent,
-			})
-		}
+		// The RECORDED branch (worktree workspaces carry one), not a live
+		// git read: the old projection got that from the status rollup,
+		// which cost a probe per workspace per tick and went with the
+		// sensor. Empty for workspaces rook did not carve.
+		ws := cloud.Workspace{Name: it.Name, Branch: it.Branch}
 		st.Workspaces = append(st.Workspaces, ws)
 	}
 	return st

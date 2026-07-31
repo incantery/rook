@@ -234,7 +234,7 @@ pub fn request(
 ///
 /// Go's net/http switches to it once a response outgrows its write
 /// buffer, so this stayed invisible until the first BIG one: /usage,
-/// /agents and the transcript endpoints fit in a Content-Length response, and the
+/// the endpoints rook reads fit in a Content-Length response, and the
 /// transcript endpoint does not. Without de-chunking, the caller gets a
 /// body with `1000\r\n` framing sprinkled through it and reports a JSON
 /// parse error — which reads as "the host sent garbage", not "we did".

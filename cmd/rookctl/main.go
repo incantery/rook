@@ -5,7 +5,6 @@
 //
 //	rookctl ls            workspace → window tree with live detail
 //	rookctl ls --json     the same, as the raw status payloads
-//	rookctl agents        every claude session agentwatch sees (raw JSON)
 //	rookctl send          type into a window: rookctl send s3 yes
 //	rookctl spawn         start a claude session: rookctl spawn [-w ws] [--worktree] <task…>
 //	rookctl issues        the workspace's work queue (providers, mine + unassigned)
@@ -19,10 +18,6 @@
 //	rookctl set-linear-token store the Linear API key (queue credential) in the keychain
 //	rookctl set-relay-token store the rook-server bearer token in the keychain
 //	rookctl set-cloud-token store the rook-cloud machine token in the keychain
-//	rookctl claim         claude SessionStart hook body (stdin → host)
-//	rookctl unclaim       claude SessionEnd hook body
-//	rookctl notify-hook   claude Notification hook body (permission prompts)
-//	rookctl install-hooks add the claim hooks to ~/.claude/settings.json
 //	rookctl version       release version of this install
 //	rookctl update        fetch + install the latest release (--check to look)
 package main
@@ -35,7 +30,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -97,8 +91,6 @@ func main() {
 	switch cmd {
 	case "ls":
 		err = runLs(len(os.Args) > 2 && os.Args[2] == "--json")
-	case "agents":
-		err = runAgents()
 	case "send":
 		err = runSend(os.Args[2:])
 	case "spawn":
@@ -115,14 +107,6 @@ func main() {
 		err = runAsk(os.Args[2:])
 	case "mcp":
 		err = runMcp()
-	case "claim":
-		err = runClaim(false)
-	case "unclaim":
-		err = runClaim(true)
-	case "notify-hook":
-		err = runNotifyHook()
-	case "install-hooks":
-		err = runInstallHooks()
 	case "version":
 		fmt.Printf("%s (build %s)\n", version.Version, version.Build)
 		if st, err := host.ReadState(); err == nil {
@@ -131,15 +115,11 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|send <session> <text…>|spawn [-w ws] [--worktree] <task…>|issues|ask [json]|mcp|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|send <session> <text…>|spawn [-w ws] [--worktree] <task…>|issues|ask [json]|mcp|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "rookctl:", err)
-		// hook invocations must never break claude startup/shutdown
-		if cmd == "claim" || cmd == "unclaim" || cmd == "notify-hook" {
-			os.Exit(0)
-		}
 		os.Exit(1)
 	}
 }
@@ -271,19 +251,6 @@ func runLs(asJSON bool) error {
 			}
 		}
 	}
-	return nil
-}
-
-func runAgents() error {
-	c, err := connect()
-	if err != nil {
-		return err
-	}
-	raw, err := c.req("GET", "/agents", nil)
-	if err != nil {
-		return err
-	}
-	os.Stdout.Write(raw)
 	return nil
 }
 
@@ -537,110 +504,7 @@ func runSetCloudToken() error {
 
 // ---- claim / unclaim (Claude Code hook bodies) ----
 
-// runClaim reads the hook payload from stdin. Outside a rook window (no
-// ROOK_SESSION) it does nothing, successfully — the hook is installed
-// globally but only means something inside rook.
-func runClaim(release bool) error {
-	rookID := os.Getenv("ROOK_SESSION")
-	if rookID == "" {
-		return nil
-	}
-	var in struct {
-		SessionID string `json:"session_id"`
-	}
-	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil || in.SessionID == "" {
-		return nil
-	}
-	c, err := connect()
-	if err != nil {
-		return err
-	}
-	_, err = c.req("POST", "/sessions/"+rookID+"/claim",
-		map[string]any{"agentSession": in.SessionID, "release": release})
-	return err
-}
-
-// runNotifyHook relays Claude Code's Notification hook (permission
-// prompts, idle reminders) to the host — the only mechanical source for
-// "claude is blocked on a permission menu", which the transcript cannot
-// see. Outside a rook window it does nothing, successfully.
-func runNotifyHook() error {
-	if os.Getenv("ROOK_SESSION") == "" {
-		return nil
-	}
-	var in struct {
-		SessionID string `json:"session_id"`
-		Message   string `json:"message"`
-	}
-	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil || in.SessionID == "" {
-		return nil
-	}
-	c, err := connect()
-	if err != nil {
-		return err
-	}
-	_, err = c.req("POST", "/agents/"+in.SessionID+"/notify",
-		map[string]string{"message": in.Message})
-	return err
-}
-
 // ---- install-hooks ----
-
-// runInstallHooks merges SessionStart/SessionEnd hooks into
-// ~/.claude/settings.json, referencing this binary by absolute path
-// (hooks run under claude's environment; PATH is not to be trusted).
-// Idempotent: an existing rookctl hook is left alone.
-func runInstallHooks() error {
-	self, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(home, ".claude", "settings.json")
-	settings := map[string]any{}
-	if raw, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(raw, &settings); err != nil {
-			return fmt.Errorf("%s is not valid JSON, not touching it: %v", path, err)
-		}
-	}
-	hooks, _ := settings["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = map[string]any{}
-		settings["hooks"] = hooks
-	}
-	changed := false
-	for evt, sub := range map[string]string{"SessionStart": "claim", "SessionEnd": "unclaim", "Notification": "notify-hook"} {
-		entries, _ := hooks[evt].([]any)
-		if hasRookctl(entries) {
-			fmt.Printf("%s: rookctl hook already present\n", evt)
-			continue
-		}
-		entries = append(entries, map[string]any{
-			"hooks": []any{map[string]any{"type": "command", "command": self + " " + sub}},
-		})
-		hooks[evt] = entries
-		changed = true
-		fmt.Printf("%s: added `%s %s`\n", evt, self, sub)
-	}
-	if !changed {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	out, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
-		return err
-	}
-	fmt.Printf("wrote %s — applies to newly started claude sessions\n", path)
-	return nil
-}
 
 func hasRookctl(entries []any) bool {
 	for _, e := range entries {

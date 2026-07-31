@@ -6,7 +6,6 @@
 package host
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -18,7 +17,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -37,7 +35,6 @@ import (
 // together agree by construction; on drift the daemon is replaced and its
 // sessions die with it (the tmux server-upgrade reality). There is no
 // hand-bumped protocol number to forget. See internal/hostclient.
-const ringCap = 512 * 1024
 
 type SessionInfo struct {
 	ID   string `json:"id"`
@@ -55,8 +52,7 @@ type session struct {
 	pty  *os.File
 	cmd  *exec.Cmd
 
-	mu   sync.Mutex // guards ring, frameConn
-	ring []byte     // recent output, for correlate/normRing — NOT replay
+	mu sync.Mutex
 
 	// emu parses this session's pty output. Nothing RENDERS it any more —
 	// the framed remote-client transport is gone and the app draws its own
@@ -74,7 +70,6 @@ type Host struct {
 	nextID   int
 	token    string
 	reg      *registry
-	aw       *agentWatch
 	// nudgeFn overrides nudge() in tests — nil in production, where the
 	// real actuator (claimed window, else spawned task) runs.
 	nudgeFn func(ws, prompt string) (mode, rookSession string, err error)
@@ -82,9 +77,6 @@ type Host struct {
 	// pending `rookctl ask` requests (ask.go), keyed by ask id
 	askMu sync.Mutex
 	asks  map[string]*askState
-	// typeLineFn overrides the doorbell's pty write in tests — nil in
-	// production, where typeLineAt types at the real tty.
-	typeLineFn func(s *session, line string)
 
 	// The configured rook-server, if any (relay.go): asks escalate to it so
 	// they can be answered from a phone. nil = no remote, path inert.
@@ -101,23 +93,6 @@ type Host struct {
 	// fgOf and the monitor (procsample.go, monitor.go).
 	pt *procTable
 
-	// Two tiers of transcript↔window pairing (see correlate): claims are
-	// authoritative (a SessionStart hook inside the claude process told us,
-	// via `rookctl claim`); binds are heuristic (proven by ring content).
-	// Both map transcript session id → rook session id.
-	bindMu sync.Mutex
-	claims map[string]string
-	binds  map[string]string
-	// claimFg is the pty's foreground process group at the moment each claim
-	// was made — the agent's own, since the SessionStart hook runs inside it.
-	// A claim only survives its process if nothing releases it, and the
-	// SessionEnd hook does not run for ^C, a crash, or a kill -9. The claim
-	// then still names a window, but that window has moved on to a shell, or
-	// an editor. Typing a prompt at it is not delivery; it is keystrokes into
-	// whatever is there. Comparing this against the tty's current foreground
-	// group answers "is the thing that claimed this still the thing running"
-	// exactly, and for one ioctl. Keyed like claims: transcript session id.
-	claimFg map[string]int
 
 	// prm caches per-worktree PR state (WatchPRs) — the close-the-loop
 	// signal on workspace cards.
@@ -144,16 +119,11 @@ func New() *Host {
 		sessions: make(map[string]*session),
 		token:    hex.EncodeToString(b),
 		reg:      loadRegistry(),
-		aw:       newAgentWatch(),
 		cwdCache: make(map[int]cwdEntry),
 		pt:       newProcTable(),
-		claims:   make(map[string]string),
-		claimFg:  make(map[string]int),
-		binds:    make(map[string]string),
 		prm:      newPRMon(),
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
-	go h.aw.runTranscript(h.ctx)
 	h.initRelay()
 	h.initCloud()
 	return h
@@ -181,73 +151,6 @@ func (h *Host) cachedCwdOf(pid int) string {
 	h.cwdCache[pid] = cwdEntry{cwd, time.Now()}
 	h.cwdMu.Unlock()
 	return cwd
-}
-
-// claimAliveLocked reports whether the window a claim names is still running
-// the process that claimed it. Callers must hold bindMu.
-//
-// A claim is only as durable as the hook that releases it, and SessionEnd
-// does not run for ^C, a crash, or a kill -9. What is left then is a claim
-// pointing at a window where the agent has been replaced by a shell prompt —
-// or by whatever the user started next. Every actuator that types at a claim
-// has to ask this first, because typing at the wrong window is not a missed
-// delivery, it is keystrokes into someone's editor.
-//
-// The test is the tty's foreground process group against the one recorded
-// when the claim was made. Exact, and one ioctl: no `ps`, no lsof, nothing
-// that would make it too expensive for an actuation path.
-//
-// Nothing recorded means a claim older than this check — fail open, since
-// inventing an answer is worse than the behaviour that shipped before.
-func (h *Host) claimAliveLocked(agentSession string, s *session) bool {
-	want, ok := h.claimFg[agentSession]
-	if !ok || want <= 0 {
-		return true
-	}
-	return fgPgrp(s.pty) == want
-}
-
-// agentPane reports whether this session is a live claimed agent window — a
-// claude the SessionStart hook named via `rookctl claim`, still the thing on
-// the tty.
-//
-// This is the keyboard-routing half of the claim machinery. The framed
-// transport ships it to the client (termframe.go), where it carves the
-// navigation chords back out of the blanket "a full-screen app owns the
-// keyboard" yield: claude is a full-screen TUI, and in an AI-native terminal
-// it is the pane you live in, so that rule cost ⌃hjkl exactly where it was
-// needed most.
-//
-// Note what this is NOT: a name match on the foreground process. `fgOf`
-// would go through the 2s proc table and would flap the moment claude ran
-// something — this is claimAliveLocked, the same pgrp test every actuator
-// already trusts, exact and one ioctl. A claude with no live claim (hooks
-// never installed, or a claim orphaned by ^C) reports false and keeps the
-// pre-existing yield, which is the safe direction to fail.
-func (h *Host) agentPane(s *session) bool {
-	tid, alive := h.claimOnWindow(s)
-	return tid != "" && alive
-}
-
-// claimOnWindow separates the two answers agentClaimOn collapses: whether
-// this window was ever claimed at all, and whether the claimer is still
-// the thing on the tty.
-//
-// The distinction is only interesting to a caller reporting on liveness,
-// and there it is the whole story. A claim that died means the agent left
-// a window that is still up — the "process lost, device fine" case §8.4
-// calls Disconnected. NO claim means the hooks never ran, so this device
-// simply cannot see whether an agent is in there, and saying "gone" would
-// be inventing a fact rather than reporting one.
-func (h *Host) claimOnWindow(s *session) (agentSession string, alive bool) {
-	h.bindMu.Lock()
-	defer h.bindMu.Unlock()
-	for tid, sid := range h.claims {
-		if sid == s.info.ID {
-			return tid, h.claimAliveLocked(tid, s)
-		}
-	}
-	return "", false
 }
 
 func (h *Host) Token() string { return h.token }
@@ -465,15 +368,6 @@ func (h *Host) readPump(s *session) {
 					s.pty.Write(reply)
 				}
 			}
-			// The ring is retained for correlate/normRing (transcript↔window
-			// binding), not for replay — the framed transport snapshots from a
-			// blank Surface, so there is nothing to replay.
-			s.mu.Lock()
-			s.ring = append(s.ring, buf[:n]...)
-			if len(s.ring) > ringCap {
-				s.ring = s.ring[len(s.ring)-ringCap:]
-			}
-			s.mu.Unlock()
 		}
 		// recycle the chunk, but let a firehose-sized buffer go once the
 		// burst is over — two 1MB slabs per idle session is not a deal
@@ -497,19 +391,6 @@ func (h *Host) readPump(s *session) {
 		delete(h.cwdCache, s.cmd.Process.Pid)
 		h.cwdMu.Unlock()
 	}
-	h.bindMu.Lock()
-	for tid, sid := range h.binds {
-		if sid == s.info.ID {
-			delete(h.binds, tid)
-		}
-	}
-	for tid, sid := range h.claims {
-		if sid == s.info.ID {
-			delete(h.claims, tid)
-			delete(h.claimFg, tid)
-		}
-	}
-	h.bindMu.Unlock()
 	h.mu.Lock()
 	delete(h.sessions, s.info.ID)
 	remaining := 0
@@ -552,12 +433,6 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/workspaces", h.handleWorkspaces)
 	mux.HandleFunc("/workspaces/", h.handleWorkspace)
 	// cross-workspace status in one call — mission control's poll
-	// every live claude session agentwatch knows about, uncorrelated —
-	// the sensor's raw dump, for debugging (`rookctl agents`)
-	mux.HandleFunc("/agents", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, h.aw.snapshot())
-	})
-	mux.HandleFunc("/agents/", h.handleAgent)
 	mux.HandleFunc("/asks/", h.handleAsks)
 	// The session-less ask queue: create and list. A client that does not
 	// hold a wire-v3 session socket (the zig app owns its ptys in-process
@@ -883,11 +758,6 @@ type sessionStatus struct {
 	SessionInfo
 	Fg  string `json:"fg"`
 	Cwd string `json:"cwd"`
-	// AgentSession is the claude transcript id claimed for this window
-	// (set even while the agent isn't foreground); Agent is that
-	// session's live state when one is paired.
-	AgentSession string       `json:"agentSession,omitempty"`
-	Agent        *AgentStatus `json:"agent,omitempty"`
 }
 
 type workspaceStatus struct {
@@ -896,170 +766,8 @@ type workspaceStatus struct {
 	Scratch  bool            `json:"scratch,omitempty"`
 	Git      *GitInfo        `json:"git,omitempty"`
 	Sessions []sessionStatus `json:"sessions"`
-	// Attention counts sessions whose agent is waiting on the user.
-	Attention int `json:"attention"`
 }
 
-// ansiRE strips escape sequences (CSI, OSC, single-char ESC) so ring
-// content can be compared to transcript text.
-var ansiRE = regexp.MustCompile(`\x1b(\[[0-9;:?<=>]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)?|[@-Z\\-_])`)
-
-// normText reduces text to lowercase alphanumerics: TUI rendering differs
-// from transcript text by markdown markers, wrapping, and color — none of
-// which survive this.
-func normText(b []byte) []byte {
-	b = ansiRE.ReplaceAll(b, nil)
-	out := b[:0]
-	for _, c := range b {
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-			out = append(out, c)
-		case c >= 'A' && c <= 'Z':
-			out = append(out, c+'a'-'A')
-		}
-	}
-	return out
-}
-
-// askProbe is the tail of an ask, normalized — long enough to be
-// distinctive, short enough to survive agentmon's content truncation.
-func askProbe(ask string) []byte {
-	p := normText([]byte(ask))
-	if len(p) > 160 {
-		p = p[len(p)-160:]
-	}
-	if len(p) < 12 {
-		return nil // too generic to be evidence
-	}
-	return p
-}
-
-func (s *session) normRing() []byte {
-	s.mu.Lock()
-	ring := make([]byte, len(s.ring))
-	copy(ring, s.ring)
-	s.mu.Unlock()
-	return normText(ring)
-}
-
-// correlate pairs rook windows running claude with agentwatch's transcript
-// sessions. Working directory narrows the field, but several claude
-// sessions can share one dir (including ones running outside rook), so
-// within a dir the evidence hierarchy is:
-//
-//  0. claims — the claude session said so itself (SessionStart hook via
-//     rookctl); a claimed transcript never falls through to heuristics
-//  1. sticky bindings — pairs proven earlier by ring content stay paired
-//  2. ring content — at needs_input, claude's ask text is on exactly one
-//     window's PTY; a unique match proves the pair and binds it
-//  3. recency — last resort, never binds (guesses must not stick)
-//
-// live is index-aligned with sessions and supplies the ring buffers.
-func (h *Host) correlate(sessions []sessionStatus, live []*session, states []*AgentStatus) {
-	sort.Slice(states, func(i, j int) bool { return states[i].LastEvent.After(states[j].LastEvent) })
-	h.bindMu.Lock()
-	defer h.bindMu.Unlock()
-
-	// surface claims regardless of what's foreground right now
-	rookToClaim := make(map[string]string, len(h.claims))
-	for tid, sid := range h.claims {
-		rookToClaim[sid] = tid
-	}
-	for i := range sessions {
-		sessions[i].AgentSession = rookToClaim[sessions[i].ID]
-	}
-
-	var windows []int // claude windows, still unassigned
-	for i := range sessions {
-		if sessions[i].Fg == "claude" && sessions[i].Cwd != "" {
-			windows = append(windows, i)
-		}
-	}
-	dirMatch := func(st *AgentStatus, i int) bool {
-		return st.CWD == sessions[i].Cwd || st.Project == sessions[i].Cwd
-	}
-	assign := func(st *AgentStatus, i int) {
-		sessions[i].Agent = st
-		for k, w := range windows {
-			if w == i {
-				windows = append(windows[:k], windows[k+1:]...)
-				break
-			}
-		}
-	}
-
-	var unbound []*AgentStatus
-	for _, st := range states {
-		// tier 0: claimed transcripts belong to their window, period —
-		// even when that window's claude isn't foreground (suspended,
-		// shelled out), the state must not drift to another window.
-		if id := h.claims[st.SessionID]; id != "" {
-			for _, i := range windows {
-				if sessions[i].ID == id {
-					assign(st, i)
-					break
-				}
-			}
-			continue
-		}
-		if id := h.binds[st.SessionID]; id != "" {
-			bound := false
-			for _, i := range windows {
-				if sessions[i].ID == id {
-					assign(st, i)
-					bound = true
-					break
-				}
-			}
-			if bound {
-				continue
-			}
-			delete(h.binds, st.SessionID) // window is gone; unpin
-		}
-		unbound = append(unbound, st)
-	}
-
-	var leftover []*AgentStatus
-	rings := make(map[int][]byte)
-	for _, st := range unbound {
-		probe := askProbe(st.Ask)
-		if st.State != "needs_input" || probe == nil {
-			leftover = append(leftover, st)
-			continue
-		}
-		match := -1
-		for _, i := range windows {
-			if !dirMatch(st, i) {
-				continue
-			}
-			if _, ok := rings[i]; !ok {
-				rings[i] = live[i].normRing()
-			}
-			if bytes.Contains(rings[i], probe) {
-				if match != -1 {
-					match = -1 // two windows show the same text: not evidence
-					break
-				}
-				match = i
-			}
-		}
-		if match == -1 {
-			leftover = append(leftover, st)
-			continue
-		}
-		h.binds[st.SessionID] = sessions[match].ID
-		assign(st, match)
-	}
-
-	for _, st := range leftover {
-		for _, i := range windows {
-			if dirMatch(st, i) {
-				assign(st, i)
-				break
-			}
-		}
-	}
-}
 
 func (h *Host) handleWorkspaceStatus(w http.ResponseWriter, name string) {
 	writeJSON(w, h.statusFor(name, true))
@@ -1115,12 +823,6 @@ func (h *Host) statusFor(name string, withGit bool) workspaceStatus {
 			dir = out.Sessions[0].Cwd
 		}
 		out.Git = gitInfo(dir)
-	}
-	h.correlate(out.Sessions, sess, h.aw.snapshot())
-	for _, s := range out.Sessions {
-		if s.Agent != nil && s.Agent.State == "needs_input" {
-			out.Attention++
-		}
 	}
 	return out
 }
@@ -1236,56 +938,14 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"cwd": cwdOf(s.cmd.Process.Pid)})
 	case action == "ask" && r.Method == http.MethodPost:
 		// `rookctl ask` (and the MCP tool): a question for the human,
-		// rendered as a split beside this session's pane — see ask.go
+		// delivered to the phone via the relay — see ask.go
 		h.handleSessionAsk(w, r, s)
 	case action == "asks" && r.Method == http.MethodGet:
 		// the async drain: decided asks out (consumed), pending ids listed
 		h.handleSessionAsks(w, s)
-	case action == "claim" && r.Method == http.MethodPost:
-		// A claude session announcing which window it lives in — sent by
-		// `rookctl claim` from a SessionStart hook (ROOK_SESSION names the
-		// window, the hook's stdin names the transcript). Authoritative:
-		// it displaces heuristic evidence for both parties.
-		var req struct {
-			AgentSession string
-			Release      bool
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		if req.AgentSession == "" {
-			http.Error(w, "agentSession required", http.StatusBadRequest)
-			return
-		}
-		h.bindMu.Lock()
-		if req.Release {
-			if h.claims[req.AgentSession] == id {
-				delete(h.claims, req.AgentSession)
-				delete(h.claimFg, req.AgentSession)
-			}
-		} else {
-			// one live claude per window: a new claim evicts older ones
-			for tid, sid := range h.claims {
-				if sid == id {
-					delete(h.claims, tid)
-					delete(h.claimFg, tid)
-				}
-			}
-			h.claims[req.AgentSession] = id
-			// The hook runs inside the agent, so the tty's foreground group
-			// right now IS the agent's. See claimFg.
-			h.claimFg[req.AgentSession] = fgPgrp(s.pty)
-			delete(h.binds, req.AgentSession)
-		}
-		h.bindMu.Unlock()
-		if !req.Release {
-			// an answer decided while this window had no live agent has
-			// been waiting for someone to tell (ask.go) — this is them
-			go h.ringOwedDoorbells(id)
-		}
-		w.WriteHeader(http.StatusNoContent)
 	case action == "input" && r.Method == http.MethodPost:
-		// Raw, byte-faithful pty write — the attention surface's actuator
-		// (rookctl send, draft approval). Callers append "\r" to submit;
-		// the host adds nothing.
+		// Raw, byte-faithful pty write (`rookctl send`). Callers append
+		// "\r" to submit; the host adds nothing.
 		var req struct{ Data string }
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Data == "" {
 			http.Error(w, "data required", http.StatusBadRequest)

@@ -1,6 +1,6 @@
 {
     "name": "rook",
-    "description": "rook's RUI ask: claude's questions open as a form in a split beside its pane, not in the TUI",
+    "description": "rook's ask: send a question to the phone through rook's relay, and collect the answer",
     "version": "0.1.0",
     "author": {"name": "incantery"},
     "mcpServers": {

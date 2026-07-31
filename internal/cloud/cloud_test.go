@@ -57,7 +57,7 @@ func TestPostStatusSendsTheSnapshotAuthenticated(t *testing.T) {
 	}
 	err := c.PostStatus(context.Background(), Status{
 		Hostname:   "workbench.local",
-		Workspaces: []Workspace{{Name: "rook", Agents: []Agent{{State: "working"}}}},
+		Workspaces: []Workspace{{Name: "rook", Branch: "main"}},
 	})
 	if err != nil {
 		t.Fatalf("PostStatus: %v", err)

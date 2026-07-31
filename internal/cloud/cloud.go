@@ -27,8 +27,8 @@ import (
 )
 
 // Status is the snapshot rook-cloud stores. The detail level is a decided
-// line: states, titles, and pending ask text go up; foreground commands,
-// terminal contents, and file paths stay home.
+// line: which workspaces are alive and what branch each is on goes up;
+// foreground commands, terminal contents, and file paths stay home.
 type Status struct {
 	Hostname    string      `json:"hostname,omitempty"`
 	RookVersion string      `json:"rookVersion,omitempty"`
@@ -36,24 +36,10 @@ type Status struct {
 }
 
 type Workspace struct {
-	Name      string  `json:"name"`
-	Branch    string  `json:"branch,omitempty"`
-	Attention int     `json:"attention,omitempty"`
-	Agents    []Agent `json:"agents,omitempty"`
+	Name   string `json:"name"`
+	Branch string `json:"branch,omitempty"`
 }
 
-type Agent struct {
-	State   string  `json:"state"` // working | needs_input | quiet
-	Title   string  `json:"title,omitempty"`
-	Ask     string  `json:"ask,omitempty"`
-	Model   string  `json:"model,omitempty"`
-	CostUSD float64 `json:"costUsd,omitempty"`
-	// No omitempty: encoding/json never omits a struct, so the tag would
-	// promise something it cannot do — a zero time goes up as
-	// 0001-01-01T00:00:00Z either way. Same reason overviewAgent, the type
-	// this is projected from, spells it out.
-	LastEvent time.Time `json:"lastEvent"`
-}
 
 type Client struct {
 	base  string

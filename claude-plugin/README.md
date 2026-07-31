@@ -1,57 +1,31 @@
-# rook plugin for Claude Code
+# rook — a Claude Code plugin
 
-Inside a rook terminal, claude's questions stop rendering in the TUI and
-open as a form in a split beside its pane — rook's RUI. Claude writes one
-line ("Asked in rook →") and keeps working: the `ask` tool returns
-immediately, the human decides with j/k · 1-9 · Enter (Esc dismisses)
-whenever they're ready, and rook rings a doorbell line into claude's
-session — claude collects the answer with the `answers` tool. No parked
-call, no timeout to outwait.
+Registers rook's MCP server, which carries two tools:
 
-Four parts, all inert outside rook:
+- **`ask`** — pose questions to the human. They are delivered to their
+  **phone**, through the relay configured in `~/.config/rook/config.toml`.
+  Returns immediately with an ask id.
+- **`answers`** — collect what came back. Read-once.
 
-- **claim hooks** — `rookctl claim` on SessionStart, `rookctl unclaim` on
-  SessionEnd. The claim is what lets rook deliver anything back to this
-  window (the answer doorbell, thread nudges); without it every delivery
-  stays silent by design. Previously these needed a separate
-  `rookctl install-hooks` — the plugin now carries them.
+## What this plugin used to do, and why it stopped
 
-- **`mcpServers.rook`** — `rookctl mcp`, a stdio server exposing `ask`
-  (post questions, return `{askId, pending}`) and `answers` (drain decided
-  asks). Needs `rookctl` on PATH and `$ROOK_SESSION` in the environment,
-  which every rook pty exports. The doorbell only types into a window
-  holding a LIVE claude claim — at a bare shell the answer waits in the
-  drain and the line is delivered to the next claude that claims the
-  window, so an answer given between agents is never stranded.
-- **`hooks/session-context.sh`** — a SessionStart hook that teaches claude
-  to route questions through the ask tool proactively. Without it, models
-  mostly ask in prose and nothing else ever fires.
-- **`hooks/ask-redirect.sh`** — a PreToolUse hook that denies the built-in
-  AskUserQuestion, catching the structured path the same way.
+It used to hijack asking entirely: a `PreToolUse` hook denied Claude Code's
+built-in `AskUserQuestion` and steered every question into rook, where a
+form opened in a split beside the terminal; a `SessionStart` hook taught
+the model to prefer it in prose too; and `SessionStart`/`SessionEnd` hooks
+ran `rookctl claim`/`unclaim` so rook could pair a transcript to a window
+and type "rook ask <id> answered" into it when you decided.
 
-Install (this directory is both the marketplace and its one plugin —
-marketplace.json points at "./"):
+All of that is gone. The form, the transcript sensor, and the claim
+machinery left in the strip (see `docs/plugins/VOCABULARY.md`), so:
 
-    claude plugin marketplace add /path/to/rook/claude-plugin
-    claude plugin install rook@incantery
+- **`AskUserQuestion` is the right tool when you are at the desk.** The
+  hook that denied it would now be steering to a worse path, so it is
+  removed rather than left to misfire.
+- **`ask` is for when you are not.** With no relay configured it fails
+  fast with 503 instead of parking forever.
+- **Nothing announces an answer.** The doorbell that typed into your
+  window needed the claim machinery. Callers poll `answers`.
 
-After changing the plugin source, re-sync the installed copy:
-
-    claude plugin marketplace update incantery
-
-A dismissed ask answers `{"canceled":true}` and claude proceeds on its
-own judgment. There is no timeout to configure: the ask call never waits.
-
-The form is more than a list of radio buttons, and the session-context
-hook teaches claude to use all of it:
-
-| field                | what it does                                                  |
-| -------------------- | ------------------------------------------------------------- |
-| `multiSelect: true`  | space toggles any number of rows; an empty `selected` in the answer means "none of these" — a decision, not a dismissal |
-| `preview` (option)   | a concrete artifact — mockup, snippet, config — shown verbatim in a panel that follows the cursor |
-| `recommended` (option) | the cursor starts there, and in a multiSelect it starts ticked, so Enter alone is a complete answer |
-| no `options` at all  | a free-text question: the input is the whole form              |
-
-Every path has a pointer twin — rows click, and multi-select and
-free-text commit with the Send button — because the same question can be
-answered on a phone through rook-server.
+The hooks file is deliberately empty rather than deleted — it is where
+hooks go when there are hooks worth having again.

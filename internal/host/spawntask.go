@@ -86,3 +86,10 @@ func resolveConflictsTask(ws *WorkspaceInfo) string {
 	fmt.Fprintf(&b, "4. Commit the merge and push the branch so the PR updates.\n")
 	return b.String()
 }
+
+// shellQuote single-quotes s for a POSIX shell (the only escape needed
+// inside single quotes is the quote itself). It lived in the agent API
+// until the transcript sensor left in the strip; this is its only caller.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
