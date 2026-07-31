@@ -109,8 +109,13 @@ providers:
 # backwards into the last release. NewerThan is string inequality, so a
 # `git describe` suffix like v0.38.1-3-gabc would read as "not the
 # latest" and roll the daily driver back; "dev" is the guard.
-REL_VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0)
-VERSION_STAMP := $(shell test -z "$$(git status --porcelain)" && git describe --tags --exact-match 2>/dev/null || echo dev)
+# --match 'v[0-9]*' so only RELEASE tags count. The repo also carries
+# tags that are not releases — sdk/provider/vX.Y.Z for the plugin SDK,
+# edge-v1 for stripped code kept recoverable — and an unfiltered
+# describe would feed one of those into CFBundleVersion, which has to be
+# a number.
+REL_VERSION := $(shell git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null | sed 's/^v//' || echo 0.0.0)
+VERSION_STAMP := $(shell test -z "$$(git status --porcelain)" && git describe --tags --exact-match --match 'v[0-9]*' 2>/dev/null || echo dev)
 STAMP_FLAGS = $(BUILD_FLAG) -X github.com/incantery/rook/internal/version.Version=$(VERSION_STAMP)
 # A bare cp skips the registration Finder/installers do — without this,
 # Spotlight won't offer the app.

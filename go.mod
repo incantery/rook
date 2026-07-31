@@ -2,11 +2,18 @@ module github.com/incantery/rook
 
 go 1.25.0
 
+// The provider SDK is a separate module (sdk/provider/go.mod) so that a
+// plugin author depends on the protocol alone. rook consumes it like
+// anyone else would; the replace is what lets local edits to the SDK be
+// picked up without a tag round-trip.
+require github.com/incantery/rook/sdk/provider v0.1.0
+
+replace github.com/incantery/rook/sdk/provider => ./sdk/provider
+
 require (
 	github.com/charmbracelet/ultraviolet v0.0.0-20260303162955-0b88c25f3fff
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/vt v0.0.0-20260720091843-3eef36eaaa28
-	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/mattn/go-runewidth v0.0.23

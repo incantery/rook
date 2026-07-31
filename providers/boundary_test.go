@@ -1,4 +1,4 @@
-package provider
+package providers
 
 // The boundary, enforced rather than described.
 //
@@ -23,14 +23,14 @@ import (
 )
 
 func TestProvidersUseOnlyThePublicSDK(t *testing.T) {
-	dirs, err := filepath.Glob(filepath.Join("..", "..", "providers", "*"))
+	dirs, err := filepath.Glob("*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var pkgs []string
 	for _, d := range dirs {
 		if st, err := os.Stat(d); err == nil && st.IsDir() {
-			pkgs = append(pkgs, "./"+filepath.ToSlash(d))
+			pkgs = append(pkgs, "./"+d)
 		}
 	}
 	if len(pkgs) == 0 {

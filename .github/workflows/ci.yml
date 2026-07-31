@@ -74,3 +74,10 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      # sdk/provider is its own module (it depends on nothing, so a plugin
+      # author's go.sum stays empty), and ./... in the root module does not
+      # reach it. Tested here rather than trusted.
+      - name: Test the provider SDK
+        working-directory: sdk/provider
+        run: go test ./...
