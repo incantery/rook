@@ -1,5 +1,22 @@
 # Rook Review Workspace — Design Notes
 
+> **Status, 2026-07-31: this is a THESIS, and its implementation was
+> stripped.** rook had a review workspace — hunk-level review tasks, a
+> gate, anchored threads, Haiku triage — and all of it was removed along
+> with the rest of the Go layer. See [`docs/OWED.md`](docs/OWED.md).
+>
+> The removal was not a verdict on the argument below. It was a verdict on
+> the shape: every feature here had grown its own endpoints and its own
+> storage, and none of it could have been written by anyone outside the
+> repo. If this thesis is right, it should be expressible as plugins over
+> the item model in
+> [`docs/plugins/VOCABULARY.md`](docs/plugins/VOCABULARY.md) — and the
+> exercise that produced that vocabulary took the review queue as one of
+> its ten test cases, so the fit is at least plausible.
+>
+> Read this as the product argument, still open, not as a description of
+> anything that runs.
+
 ## Core Thesis
 
 The future bottleneck in software engineering is no longer writing code.

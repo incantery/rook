@@ -1,5 +1,22 @@
 Rook Zig Editor: Directional Architecture Notes
 
+> **Status, 2026-07-31.** Written mid-experiment, when the Zig app was a
+> promising branch beside a shipping webview. It is still what it says it
+> is — hypotheses, not decisions — but several have since been settled by
+> events rather than by argument:
+>
+> - The Go host is **gone**, not receding. So is rookctl.
+> - Language support is **half** what this describes: LSP servers are
+>   spawned from a catalog and that works; tree-sitter grammars were
+>   removed outright and want a native (dylib) plugin class rook does not
+>   have.
+> - Extensions/plugins now have a written vocabulary to aim at —
+>   [`../docs/plugins/VOCABULARY.md`](../docs/plugins/VOCABULARY.md) — and
+>   a shipped out-of-process protocol in `sdk/provider`.
+>
+> [`../STATUS.md`](../STATUS.md) is the current picture;
+> [`../docs/OWED.md`](../docs/OWED.md) is what was removed and why.
+
 This document collects current thoughts, hypotheses, and possible directions for the Zig rewrite of Rook. It is intentionally not a record of final decisions. The implementation should remain free to validate, reject, or refine these ideas as real constraints emerge.
 
 Context

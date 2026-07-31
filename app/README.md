@@ -2,11 +2,20 @@
 
 Numbers live in [PERF.md](PERF.md); `./bench.sh` reproduces them.
 
-This IS rook now: `make install` puts it at `/Applications/rook.app`,
-and it replaced the webview app that used to live there. `rook` is the
-app and the CLI both — verbs it doesn't own are handed to the bundled
-`rookctl` (see `src/main.zig`), and `re` is `rook edit`. The webview
-app is still buildable with `make install-web` if this one misbehaves.
+This IS rook: `make install` puts it at `/Applications/rook.app`. It is
+the whole app and the whole CLI — one 2.7MB binary, no daemon and no
+companion process. `re` is `rook edit` by argv[0].
+
+> Written while a Go host still stood behind the app. That host, and
+> everything it carried — threads, review, asks, attention, transcripts,
+> the tree-sitter grammars — left on 2026-07-31. Sections below that
+> describe talking to `rook-host` or forwarding a verb to `rookctl` are
+> historical. [`../STATUS.md`](../STATUS.md) is the current picture and
+> [`../docs/OWED.md`](../docs/OWED.md) is what was removed.
+>
+> The parts about the renderer, the emulator, panes, the editor, the
+> config graph and the e2e harness are all still accurate — that is most
+> of this file, and it is why it is worth reading.
 
 Standalone Zig desktop terminal:
 pty → ghostty-vt → RenderState → instanced Metal grid in an owned
