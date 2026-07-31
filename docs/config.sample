@@ -102,10 +102,12 @@
 # ── Language servers (plugins, host-managed) ─────────────────────────────
 #
 # The plugin intent tier: language names, comma-separated, expanded through
-# rook's curated catalog (go, typescript, svelte). Rook installs and manages
-# these servers itself under ~/.local/share/rook/plugins — pinned versions,
-# lazy install on first use, nothing touches your global environment. Empty
-# means no language support.
+# a curated catalog. Empty means no language support.
+#
+# NOTE: rook no longer INSTALLS servers — that moved out with the host's own
+# LSP client, and belongs in a language plugin's manifest. The editor finds
+# what you have installed. These keys are carried for the language-plugin
+# surface to consume; today nothing reads them.
 # lsp =
 
 # The explicit tier addresses one server by name. A command line brings your
@@ -171,24 +173,6 @@
 # keybind = ctrl+l=
 # keybind = ctrl+h=
 
-
-# ── Verification suites (edge only, dynamic keys) ────────────────────────
-#
-# What a cloud-coordinated run may execute here to check an agent's work.
-# The cloud names a SUITE and never a command line, so these lines are the
-# whole vocabulary: a name with no line here is refused, and nothing is
-# built in — an unconfigured device runs nothing.
-#
-# The suffix is the suite name, the value is a command line, run by your
-# shell in the run's worktree. A non-zero exit is a failed gate, which the
-# run takes to its supervisor; an unknown name is a refusal, which it takes
-# to a human.
-#
-# This is argv, so it is honoured ONLY from your own config. A repository's
-# .rook/config can neither add nor redefine a suite — a clone that could
-# name a command would be code execution on clone.
-# verify-go-test = go test ./...
-# verify-build = make build
 
 
 # ── Per-workspace overrides (dynamic keys) ───────────────────────────────

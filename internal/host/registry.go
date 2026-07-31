@@ -186,63 +186,6 @@ CREATE TABLE IF NOT EXISTS recents (
 	PRIMARY KEY (workspace, path)
 );
 CREATE INDEX IF NOT EXISTS recents_ws ON recents(workspace, opened_at DESC);
--- The edge journal (edgejournal.go): the device half of the Cloud–IDE
--- delivery contract — at-least-once arrival, at-most-once local effect.
--- Commands are journaled by id BEFORE any ack or effect; events are
--- allocated a device sequence once, kept verbatim (they are signed), and
--- resubmitted until the cloud's cursor covers them. Rows are never
--- deleted: like decisions, this ledger IS the audit surface.
-CREATE TABLE IF NOT EXISTS edge_commands (
-	command_id  TEXT PRIMARY KEY,
-	received_at TEXT NOT NULL,
-	command     BLOB NOT NULL,                      -- wire EdgeCommand, as received
-	phase       TEXT NOT NULL DEFAULT 'journaled',  -- journaled|executing|resolved
-	status      TEXT NOT NULL DEFAULT '',           -- succeeded|failed|rejected once resolved
-	result      TEXT NOT NULL DEFAULT '',
-	resolved_at TEXT
-);
-CREATE TABLE IF NOT EXISTS edge_events (
-	device_seq INTEGER PRIMARY KEY,                 -- allocated once, NEVER reused
-	event      BLOB NOT NULL,                       -- signed EdgeEvent, resubmitted verbatim
-	created_at TEXT NOT NULL,
-	acked      INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS edge_grants (
-	grant_id   TEXT PRIMARY KEY,                    -- single-use: one spender, ever
-	command_id TEXT NOT NULL,
-	spent_at   TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS edge_fences (
-	resource TEXT PRIMARY KEY,                      -- <type>:<id>
-	token    INTEGER NOT NULL
-);
--- Cloud-started agent sessions (edgeagent.go): the binding between the
--- session identity this device MINTED for the cloud and the window it
--- actually spawned. The row is the device's claim on that identity, and
--- it is written BEFORE the spawn — so a redelivered start command can
--- never put a second agent in the same worktree.
-CREATE TABLE IF NOT EXISTS edge_sessions (
-	session_id   TEXT PRIMARY KEY,
-	command_id   TEXT NOT NULL,
-	workspace    TEXT NOT NULL,
-	rook_session TEXT NOT NULL DEFAULT '',          -- '' until the window exists
-	profile      TEXT NOT NULL DEFAULT '',
-	fence        INTEGER NOT NULL DEFAULT 0,
-	kind         TEXT NOT NULL DEFAULT '',          -- last kind reported; '' = not announced
-	started_at   TEXT NOT NULL,
-	released_at  TEXT                               -- set: the run let go; the device stops reporting
-);
-CREATE INDEX IF NOT EXISTS edge_sessions_rook ON edge_sessions(rook_session);
--- Artifacts this device has DECLARED to the cloud (edgeartifact.go). The
--- id is content-addressed, so this table answers exactly one question —
--- has the cloud already been told about these bytes — and one row means
--- one declaration however many times a collect is redelivered.
-CREATE TABLE IF NOT EXISTS edge_artifacts (
-	artifact_id TEXT PRIMARY KEY,
-	session_id  TEXT NOT NULL,
-	command_id  TEXT NOT NULL,
-	declared_at TEXT NOT NULL
-);
 `
 
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS

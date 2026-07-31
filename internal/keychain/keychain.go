@@ -32,12 +32,6 @@ const (
 	// machine on the dashboard ([cloud] url in config). One token per
 	// machine by design — revoking one machine never touches the others.
 	CloudAccount = "cloud"
-	// EdgeAccount is the device's Ed25519 signing seed (base64), minted
-	// locally on the edge client's first run. It signs every event this
-	// device reports to rook-cloud; registering its public half is a
-	// commitment, so it must survive restarts — rotation is deliberate,
-	// never incidental.
-	EdgeAccount = "edge"
 )
 
 var ErrUnsupported = errors.New("keychain: only supported on macOS")

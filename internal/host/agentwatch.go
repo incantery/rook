@@ -46,18 +46,6 @@ type agentWatch struct {
 	// The workflow engine keys stage completion on this distinction: an
 	// agent asking a question has NOT finished its stage.
 	onTurnFinished func(sessionID string)
-	// onSignal reports the same moments in the cloud's session vocabulary,
-	// for a REMOTE coordinator that has no window to look at (edgeagent.go).
-	// It is a second projection of what the hooks above already saw, not a
-	// second sensor: the classification is made once, here, where the
-	// record that justifies it is still in hand.
-	//
-	// The three it can honestly name — a genuine turn end is a completion
-	// CLAIM, an interactive prompt is a pause for input, and re-entering
-	// working is progress. Silence is not one of them: sweepTranscript's
-	// "quiet" cannot tell a long tool run from a permission prompt, and
-	// guessing between them is how a run learns to distrust its device.
-	onSignal func(sessionID, kind, summary string)
 
 	// The usage outbox (usagepush.go): one event per API response, awaiting
 	// the next cloud push. usagePush gates the queueing — without a cloud
@@ -151,12 +139,6 @@ func (a *agentWatch) notify(sessionID, message string) {
 	a.mu.Unlock()
 	if a.onTurnCompleted != nil {
 		a.onTurnCompleted(sessionID, seq) // prior asks' open drafts → stale
-	}
-	if a.onSignal != nil {
-		// A permission prompt is the most common "needs you" there is, and
-		// it is exactly a pause for input: the turn did not end, and what
-		// it wants is a confirmation, not a decision.
-		a.onSignal(sessionID, "waiting_input", message)
 	}
 }
 

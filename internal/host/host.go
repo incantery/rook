@@ -8,7 +8,6 @@ package host
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -31,7 +30,6 @@ import (
 
 	"github.com/incantery/rook/internal/cloud"
 	"github.com/incantery/rook/internal/config"
-	"github.com/incantery/rook/internal/edge"
 	"github.com/incantery/rook/internal/relay"
 	"github.com/incantery/rook/internal/version"
 )
@@ -108,24 +106,6 @@ type Host struct {
 	// The configured rook-cloud, if any (cloud.go): status snapshots go up
 	// so the dashboard can show this machine. nil = nothing leaves here.
 	cloud *cloud.Client
-
-	// The edge client, if this machine opted in ([cloud] edge = true,
-	// edge.go): typed commands arrive, are journaled, verified, and
-	// executed here. nil = this machine takes no orders from anywhere.
-	edge *edge.Client
-	// edgeSeqMu serializes device-sequence allocation across the whole
-	// allocate→sign→insert, because the executor is no longer the edge
-	// journal's only writer — a live session's own facts are journaled
-	// from the transcript and pty goroutines (edgeagent.go). It also
-	// guards the identity a signature needs: edgeKey and edgeDevice are
-	// written once, when registration completes.
-	edgeSeqMu  sync.Mutex
-	edgeKey    ed25519.PrivateKey
-	edgeDevice string
-	// edgeNudge cuts the sync loop's wait short — the cloud's wake stream
-	// on one end, a live session's own news on the other. Buffered(1):
-	// a pending nudge needs no second one.
-	edgeNudge chan struct{}
 
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
@@ -222,9 +202,6 @@ func New() *Host {
 	// The workflow engine's stage-completion sensor — genuine turn ends
 	// only, never AskUserQuestion/notify (see agentwatch.onTurnFinished).
 	h.aw.onTurnFinished = h.onTurnFinished
-	// The same moments in the cloud's vocabulary, for sessions a remote
-	// run started (edgeagent.go). Inert without an edge client.
-	h.aw.onSignal = h.edgeAgentSignal
 	// Restart reconciliation: running stages lost their windows with the
 	// old host. ✗ + detail is the honest surface — no auto-respawn, no
 	// surprise spend.
@@ -233,7 +210,6 @@ func New() *Host {
 	go h.runUpdateCheck()
 	h.initRelay()
 	h.initCloud()
-	h.initEdge()
 	return h
 }
 
@@ -302,17 +278,9 @@ func (h *Host) claimAliveLocked(agentSession string, s *session) bool {
 // already trusts, exact and one ioctl. A claude with no live claim (hooks
 // never installed, or a claim orphaned by ^C) reports false and keeps the
 // pre-existing yield, which is the safe direction to fail.
-func (h *Host) agentPane(s *session) bool { return h.agentClaimOn(s) != "" }
-
-// agentClaimOn is the same question with the answer kept: the transcript
-// session id of the LIVE claim on this window, "" when there is none.
-// Anything that means to ask agentwatch about the agent IN a window needs
-// the id rather than the yes/no — see edgeSendAgentInput.
-func (h *Host) agentClaimOn(s *session) string {
-	if tid, alive := h.claimOnWindow(s); alive {
-		return tid
-	}
-	return ""
+func (h *Host) agentPane(s *session) bool {
+	tid, alive := h.claimOnWindow(s)
+	return tid != "" && alive
 }
 
 // claimOnWindow separates the two answers agentClaimOn collapses: whether
@@ -620,29 +588,12 @@ func (h *Host) readPump(s *session) {
 	if fc != nil {
 		fc.Close(websocket.StatusNormalClosure, "session-exited")
 	}
-	// A cloud run waiting on this session learns it the same way: the
-	// window's death is the device's own observation, not the transcript's.
-	h.edgeWindowClosed(s.info.ID)
 }
 
 func (h *Host) get(id string) *session {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.sessions[id]
-}
-
-// sessionsIn lists the live windows in a workspace — everyone who would
-// be surprised by something removing its checkout.
-func (h *Host) sessionsIn(workspace string) []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	var ids []string
-	for id, s := range h.sessions {
-		if s.info.Workspace == workspace {
-			ids = append(ids, id)
-		}
-	}
-	return ids
 }
 
 func (h *Host) kill(id string) bool {
@@ -1252,7 +1203,16 @@ func (h *Host) statusFor(name string, withGit bool) workspaceStatus {
 			s.mu.Lock()
 			info := s.info
 			s.mu.Unlock()
-			pid := s.cmd.Process.Pid
+			// A session in the map always has a started process in
+			// production — spawn registers it only after StartWithSize
+			// succeeds. Tests build sessions by hand without one, and this
+			// runs on a goroutine any background poll can reach, so an
+			// unguarded deref makes the suite panic at random. Zero reads
+			// as "no process to inspect" everywhere downstream.
+			pid := 0
+			if s.cmd != nil && s.cmd.Process != nil {
+				pid = s.cmd.Process.Pid
+			}
 			out.Sessions[i] = sessionStatus{SessionInfo: info, Fg: h.fgOf(s.pty, pid), Cwd: h.cachedCwdOf(pid)}
 		}(i, s)
 	}

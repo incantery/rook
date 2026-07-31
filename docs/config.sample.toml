@@ -310,34 +310,7 @@
 # Base URL of rook-cloud's machine API.
 # url = "https://api.rookide.com"
 
-# Set true to opt this machine into the edge client: the host connects
-# out to the cloud's edge protocol, journals its typed commands durably
-# (SQLite), verifies every command signature and approval grant
-# on-device, and executes them here — today that means real git
-# worktrees for cloud-coordinated runs. Off by default: status reporting
-# above is telemetry, this is the cloud asking the machine to ACT, and
-# that deserves its own explicit yes. Uses the same machine token.
-# edge = false
 
-
-# ── Verification suites (edge only) ──────────────────────────────────────
-#
-# What a cloud-coordinated run may execute here to check an agent's work.
-# The cloud names a SUITE and never a command line, so this table is the
-# whole vocabulary: a name that is not here is refused, and nothing is
-# built in — an unconfigured device runs nothing.
-#
-# Suite name → command line, run by your shell in the run's worktree. A
-# non-zero exit is a failed gate, which the run takes to its supervisor;
-# an unknown name is a refusal, which it takes to a human.
-#
-# This is argv, so it is honoured ONLY from your own config. A repository's
-# .rook/config can neither add nor redefine a suite — a clone that could
-# name a command would be code execution on clone.
-
-[verify]
-# go-test = "go test ./..."
-# build = "make build"
 
 
 # ── Per-workspace overrides ──────────────────────────────────────────────
@@ -369,11 +342,14 @@
 # ── Language servers (plugins, host-managed) ─────────────────────────────
 
 [lsp]
-# The plugin intent tier: language names expanded through rook's curated
-# catalog (go, typescript, svelte). Rook installs and manages these servers
-# itself under ~/.local/share/rook/plugins — pinned versions, lazy install
-# on first use, nothing touches your global environment. Absent means no
-# language support.
+# The plugin intent tier: language names expanded through a curated
+# catalog. Absent means no language support.
+#
+# NOTE: rook no longer INSTALLS servers — that moved out with the host's
+# own LSP client, and belongs in a language plugin's manifest beside its
+# filetypes and roots. The editor finds what you have installed (see
+# editor-lsp above for where it looks). This table is carried for the
+# language-plugin surface to consume; today nothing reads it.
 # enable = ["go", "typescript"]
 
 # The explicit tier addresses one server by name: [lsp.server.<name>].

@@ -3,7 +3,6 @@ module github.com/incantery/rook
 go 1.25.0
 
 require (
-	connectrpc.com/connect v1.20.0
 	github.com/charmbracelet/ultraviolet v0.0.0-20260303162955-0b88c25f3fff
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/vt v0.0.0-20260720091843-3eef36eaaa28
@@ -14,7 +13,6 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.47
 	github.com/pelletier/go-toml/v2 v2.4.3
 	golang.org/x/sys v0.43.0
-	google.golang.org/protobuf v1.36.11
 )
 
 require (

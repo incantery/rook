@@ -48,11 +48,8 @@ type tomlFile struct {
 	WorkspaceAllow    *[]string         `toml:"workspace-allow"`
 	Keybinds          map[string]string `toml:"keybinds"`
 	Commands          map[string]string `toml:"commands"`
-	// Verify is [verify]: suite name → command line. See Config.Verify —
-	// it is argv, so it is user-config-only by construction.
-	Verify map[string]string `toml:"verify"`
-	Editor *tomlEditor       `toml:"editor"`
-	Agent  *tomlAgent        `toml:"agent"`
+	Editor            *tomlEditor       `toml:"editor"`
+	Agent             *tomlAgent        `toml:"agent"`
 	// Providers is [providers.<name>] — see Config.Providers. Decoded as
 	// `any` and stringified rather than typed: a provider's config is its
 	// own vocabulary, and a value shape rook did not anticipate must not
@@ -88,9 +85,6 @@ type tomlRelay struct {
 // status to. Same rule as [relay]: only the URL lives here.
 type tomlCloud struct {
 	URL *string `toml:"url"`
-	// Edge opts this machine into executing the cloud's typed edge
-	// commands (worktrees for cloud-coordinated runs). See Config.CloudEdge.
-	Edge *bool `toml:"edge"`
 }
 
 type tomlWorkspace struct {
@@ -260,19 +254,6 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 			cfg.Commands[strings.TrimSpace(a)] = strings.TrimSpace(c)
 		}
 	}
-	if len(f.Verify) > 0 {
-		if cfg.Verify == nil {
-			cfg.Verify = map[string]string{}
-		}
-		for suite, line := range f.Verify {
-			// An empty command line is dropped rather than stored: a suite
-			// that names nothing would be a gate that always passes.
-			if suite, line = strings.TrimSpace(suite), strings.TrimSpace(line); suite != "" && line != "" {
-				cfg.Verify[suite] = line
-			}
-		}
-	}
-
 	if f.Editor != nil {
 		setStr(&cfg.EditorLeader, f.Editor.Leader)
 		if len(f.Editor.Keybinds) > 0 {
@@ -308,9 +289,6 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 	}
 	if f.Cloud != nil && f.Cloud.URL != nil {
 		cfg.CloudURL = strings.TrimRight(strings.TrimSpace(*f.Cloud.URL), "/")
-	}
-	if f.Cloud != nil && f.Cloud.Edge != nil {
-		cfg.CloudEdge = *f.Cloud.Edge
 	}
 	for name, table := range f.Providers {
 		name = strings.TrimSpace(name)
