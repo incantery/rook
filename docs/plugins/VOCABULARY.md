@@ -161,11 +161,17 @@ that were only ever schema. What building them cost, and what that says:
 special case of `attention.raise` with a level, and until something wants
 the distinction it should not have one.
 
-The Go SDK in rook-demos cannot yet SEND these — `Serve` reads requests
-and writes responses, one direction. Giving a plugin author the verbs
-means the same demux on the plugin side, and handlers that run without
-blocking the reader. That is the next piece, and it is a design decision
-(concurrent handlers) rather than a port.
+The Go SDK in rook-demos speaks them too, as of the same day. It needed
+the same demux on the plugin side — a handler calling `Host.Raise` and
+waiting would otherwise be waiting for itself, since the loop that would
+read the reply is the loop running the handler. Handlers stayed
+**sequential**: concurrency there would have been a silent contract change
+for every plugin that keeps state, to buy throughput nothing asked for.
+
+The shape that justifies the verb turned out to be `Plugin.Start` — a
+goroutine for the life of the process, watching. A verb only reachable
+from inside a handler would be a verb only usable when the human is
+already looking.
 
 ## The exercise, honestly
 
