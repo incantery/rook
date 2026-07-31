@@ -43,3 +43,28 @@ test("a later explicit key overrides its preset's node in place", () => {
   assert.ok(g.includes(`"key":"buffer-line","value":false`));
   assert.ok(!g.includes(`"key":"buffer-line","value":true`));
 });
+
+// The same literal the Go SDK pins (sdk/rook/rook_test.go,
+// wantPluginGraph). Parity between the two SDKs is a byte diff, so this
+// test failing while Go's passes means the emitters have drifted — which
+// is exactly what it is for.
+test("the plugin node is byte-identical to the Go SDK's", () => {
+  const g = env()
+    .plugin("hello", ["hello"], "lazy", ["items.list"])
+    .plugin("demo-list", ["demo-list"], "eager", ["items.list", "items.act"])
+    .plugin("untrusted", ["untrusted"])
+    .json();
+  const want =
+    `{"rookEnvironment":1,"nodes":[` +
+    `{"id":"plugin:hello","kind":"plugin","scope":"app","name":"hello","command":["hello"],"load":"lazy","grants":["items.list"]},` +
+    `{"id":"plugin:demo-list","kind":"plugin","scope":"app","name":"demo-list","command":["demo-list"],"load":"eager","grants":["items.list","items.act"]},` +
+    `{"id":"plugin:untrusted","kind":"plugin","scope":"app","name":"untrusted","command":["untrusted"],"load":"lazy","grants":[]}` +
+    `]}\n`;
+  assert.strictEqual(g, want);
+});
+
+// Declared with no grants is INERT, not ungoverned — staging a plugin
+// before you trust it has to be expressible.
+test("no grants emits an empty array, never null", () => {
+  assert.ok(env().plugin("p", ["p"]).json().includes(`"grants":[]`));
+});

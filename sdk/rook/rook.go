@@ -39,8 +39,12 @@ type node struct {
 	value   any    // option
 	chord   string // keybind
 	command string // keybind
-	name    string // table
+	name    string // table, plugin
 	entries map[string]any
+	// plugin
+	argv   []string
+	load   string
+	grants []string
 }
 
 func New() *Env { return &Env{} }
@@ -74,6 +78,41 @@ func (e *Env) Set(key string, value any) *Env { return e.Option("app", key, valu
 // Carried in the graph; the host consumes it via the TOML renderer
 // slice (IR.md).
 func (e *Env) Host(key string, value any) *Env { return e.Option("host", key, value) }
+
+// Plugin declares a plugin: what to run, when to run it, and what it is
+// allowed to do.
+//
+// This is where the plugin system meets configuration, and it is the
+// USER-facing half of it. Writing a plugin is the protocol
+// (github.com/incantery/rook-demos/sdk/go/plugin); declaring one is this,
+// and a plugin rook was never told about does not exist.
+//
+// DECLARED vs GRANTED is the load-bearing distinction. A plugin's own
+// `describe` says what it WANTS — items.list, session.spawn. This says what
+// it MAY HAVE. The gap between the two is what preview shows you before
+// anything runs (VISION.md): adopting a stranger's environment tells you
+// which plugins it adds and what they asked for, and a capability is never
+// inherited silently from a composed package.
+//
+// load is WHEN, and lazy is the default for the reason every poller in
+// rook's history learned the hard way: a surface nobody opened must cost
+// nothing. "eager" is for a plugin that has to be watching before you look.
+//
+//	eager  spawn at launch
+//	lazy   spawn on first use (default)
+//
+// Grants are op names from the plugin protocol — "items.list", "items.act".
+// Empty grants nothing, which makes a plugin declared-but-inert: useful for
+// staging one before you trust it.
+func (e *Env) Plugin(name string, command []string, load string, grants ...string) *Env {
+	if load == "" {
+		load = "lazy"
+	}
+	return e.put(node{
+		id: "plugin:" + name, kind: "plugin", scope: "app",
+		name: name, argv: command, load: load, grants: grants,
+	})
+}
 
 // Table declares an opaque host table ([agent], [jira], [lsp], …).
 func (e *Env) Table(name string, entries map[string]any) *Env {
@@ -242,6 +281,15 @@ func (e *Env) JSON() []byte {
 			writeString(&b, n.name)
 			b.WriteString(`,"entries":`)
 			writeEntries(&b, n.entries)
+		case "plugin":
+			b.WriteString(`,"name":`)
+			writeString(&b, n.name)
+			b.WriteString(`,"command":`)
+			writeStrings(&b, n.argv)
+			b.WriteString(`,"load":`)
+			writeString(&b, n.load)
+			b.WriteString(`,"grants":`)
+			writeStrings(&b, n.grants)
 		}
 		b.WriteByte('}')
 	}
@@ -292,6 +340,20 @@ func writeString(b *strings.Builder, s string) {
 		}
 	}
 	b.WriteByte('"')
+}
+
+// writeStrings emits a JSON array, ALWAYS — never null. An absent grants
+// list and an empty one mean the same thing (nothing granted) and a reader
+// that has to handle both shapes is a reader that will get one wrong.
+func writeStrings(b *strings.Builder, ss []string) {
+	b.WriteByte('[')
+	for i, s := range ss {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		writeString(b, s)
+	}
+	b.WriteByte(']')
 }
 
 func writeValue(b *strings.Builder, v any) {

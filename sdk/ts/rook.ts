@@ -37,6 +37,42 @@ export class Env {
   host(key: string, value: unknown): this {
     return this.option("host", key, value);
   }
+  // Declare a plugin: what to run, when, and what it may do.
+  //
+  // This is where the plugin system meets configuration, and it is the
+  // USER-facing half of it. Writing a plugin is the protocol
+  // (rook-demos/sdk/go/plugin); declaring one is this, and a plugin rook
+  // was never told about does not exist.
+  //
+  // DECLARED vs GRANTED is the load-bearing distinction. The plugin's own
+  // `describe` says what it WANTS; this says what it MAY HAVE. The gap is
+  // what preview shows before anything runs — adopting a stranger's
+  // environment tells you which plugins it adds and what they asked for.
+  //
+  // `load` is WHEN: "lazy" (default) spawns on first use, because a
+  // surface nobody opened must cost nothing; "eager" spawns at launch,
+  // for a plugin that has to be watching before you look.
+  plugin(
+    name: string,
+    command: string[],
+    load: "lazy" | "eager" = "lazy",
+    grants: string[] = [],
+  ): this {
+    // Key order is the canon — it must match the Go SDK's emitter
+    // exactly, since parity is a byte diff. grants is ALWAYS an array,
+    // never null: absent and empty mean the same thing, and a reader
+    // handling both shapes will get one wrong.
+    return this.put({
+      id: `plugin:${name}`,
+      kind: "plugin",
+      scope: "app",
+      name,
+      command,
+      load,
+      grants,
+    });
+  }
+
   table(name: string, entries: Record<string, unknown>): this {
     const sorted = Object.fromEntries(
       Object.entries(entries).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),

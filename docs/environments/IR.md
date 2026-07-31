@@ -66,6 +66,39 @@ app — the live tree is the only truth it reconciles against.
 | `leader` | `scope`, `key` | the app leader (`scope: "app"`) or editor leader (`"editor"`). One key; `TAB`/`SPACE`/`ESC` accepted |
 | `keybind` | `scope`, `chord`, `command` | `scope: "app"` = `[keybinds]` (`<leader>X` chords, commands by registry id). `scope: "editor.normal"` etc. carried, consumed when configurable editor maps land |
 | `table` | `scope`, `name`, `entries` | an opaque host table (`[agent]`, `[jira]`, `[lsp]`, …). Carried verbatim for the future TOML renderer |
+| `plugin` | `scope`, `name`, `command`, `load`, `grants` | a plugin: what to run, when, and what it may do. Carried; the app's caller is owed (rook-demos) |
+
+### The plugin node
+
+```json
+{"id":"plugin:hello","kind":"plugin","scope":"app","name":"hello",
+ "command":["hello"],"load":"lazy","grants":["items.list"]}
+```
+
+This is where the plugin system meets configuration, and it is the
+**user-facing half of it**. Writing a plugin is the protocol
+([rook-demos](https://github.com/incantery/rook-demos)); *declaring* one
+is this node, and a plugin rook was never told about does not exist.
+
+**`grants` is the point, and it is not the same as what the plugin
+declares.** A plugin's own `describe` says what it WANTS — `items.list`,
+`session.spawn`. This says what it MAY HAVE. The gap between the two is
+what preview shows before anything runs (VISION.md): adopting a
+stranger's environment tells you which plugins it adds and what they
+asked for, and a capability is never inherited silently from a composed
+package. A plugin declared with `"grants":[]` is inert but present —
+which is how you stage one before you trust it.
+
+`grants` is ALWAYS an array, never null or absent. Empty and missing
+would mean the same thing, and a reader handling both shapes will get
+one wrong.
+
+**`load` is WHEN**, and `lazy` is the default:
+
+| | |
+|---|---|
+| `lazy` | spawn on first use (default) — a surface nobody opened must cost nothing, which is the rule every poller in rook's history had to learn |
+| `eager` | spawn at launch, for a plugin that has to be watching before you look |
 
 ### Presets
 
@@ -83,8 +116,13 @@ applyPreset and the SDK); the SDK golden test and the e2e
 Every SDK emits the same graph as the same bytes, so parity is `diff`
 and provenance diffs stay noise-free: compact JSON (no whitespace),
 node fields in the order id, kind, scope, key/chord/name, value/command/
-entries; `entries` keys sorted; integral floats as integers; no HTML
-escaping; UTF-8 raw.
+entries; for `plugin`, id, kind, scope, name, command, load, grants;
+`entries` keys sorted; integral floats as integers; no HTML escaping;
+UTF-8 raw.
+
+The plugin node's bytes are pinned by the same literal in both SDKs
+(`sdk/rook/rook_test.go`'s `wantPluginGraph` and the matching case in
+`sdk/ts/rook.test.ts`), so a key-order drift in one fails the other.
 
 ## What v1 deliberately does not have
 

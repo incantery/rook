@@ -59,3 +59,60 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// The plugin node is the user-facing half of the plugin system, so its
+// exact bytes matter: the TS SDK pins the SAME literal (sdk/ts/rook.test.ts),
+// and parity between them is a byte diff.
+//
+// Note what is asserted beyond the shape: `grants` is an ARRAY even when
+// empty, never null. Absent and empty mean the same thing — nothing
+// granted — and a reader that has to handle both will get one wrong.
+const wantPluginGraph = `{"rookEnvironment":1,"nodes":[` +
+	`{"id":"plugin:hello","kind":"plugin","scope":"app","name":"hello","command":["hello"],"load":"lazy","grants":["items.list"]},` +
+	`{"id":"plugin:demo-list","kind":"plugin","scope":"app","name":"demo-list","command":["demo-list"],"load":"eager","grants":["items.list","items.act"]},` +
+	`{"id":"plugin:untrusted","kind":"plugin","scope":"app","name":"untrusted","command":["untrusted"],"load":"lazy","grants":[]}` +
+	`]}` + "\n"
+
+func TestPluginNodeBytes(t *testing.T) {
+	e := New()
+	e.Plugin("hello", []string{"hello"}, "", "items.list")
+	e.Plugin("demo-list", []string{"demo-list"}, "eager", "items.list", "items.act")
+	e.Plugin("untrusted", []string{"untrusted"}, "lazy")
+	if got := string(e.JSON()); got != wantPluginGraph {
+		t.Errorf("plugin graph moved.\n got: %s\nwant: %s", got, wantPluginGraph)
+	}
+}
+
+// lazy is the DEFAULT, and it is a decision rather than a convenience: a
+// surface nobody opened must cost nothing, which is the rule every poller
+// in rook's history had to learn.
+func TestPluginDefaultsToLazy(t *testing.T) {
+	got := string(New().Plugin("p", []string{"p"}, "").JSON())
+	if !contains(got, `"load":"lazy"`) {
+		t.Errorf("empty load did not default to lazy: %s", got)
+	}
+}
+
+// A plugin declared with no grants is INERT, not ungoverned. Staging one
+// before you trust it has to be expressible.
+func TestPluginWithNoGrantsIsDeclaredButInert(t *testing.T) {
+	got := string(New().Plugin("p", []string{"p"}, "lazy").JSON())
+	if !contains(got, `"grants":[]`) {
+		t.Errorf("no grants should emit an empty array: %s", got)
+	}
+}
+
+// Same id replaces in place — composing a base environment then overriding
+// one plugin's grants has to mean something.
+func TestPluginOverrideReplacesInPlace(t *testing.T) {
+	e := New()
+	e.Plugin("p", []string{"p"}, "eager", "items.list", "items.act")
+	e.Plugin("p", []string{"p"}, "lazy") // the override: revoke everything
+	got := string(e.JSON())
+	if !contains(got, `"load":"lazy","grants":[]`) {
+		t.Errorf("override lost: %s", got)
+	}
+	if contains(got, `"items.act"`) {
+		t.Errorf("revoked grant survived the override: %s", got)
+	}
+}
