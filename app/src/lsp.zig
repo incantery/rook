@@ -1154,7 +1154,7 @@ fn appendHoverText(w: *std.Io.Writer, contents: std.json.Value) void {
     }
 }
 
-/// JSON-escape into a writer. Same rules as asks.zig's — kept local so
+/// JSON-escape into a writer. Same rules as threaddoc.zig's — kept local so
 /// this module has no dependency beyond std, since it is also the module
 /// most likely to be lifted into a test harness on its own.
 pub fn writeJsonString(w: *std.Io.Writer, s: []const u8) void {

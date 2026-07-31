@@ -1,5 +1,5 @@
 // `rookctl mcp` — a stdio MCP server exposing rook's ask surface to Claude
-// Code. One tool: `ask`, the RUI question form (ask.go's blockingAsk behind
+// Code. One tool: `ask`, the relay-delivered question (ask.go's flow behind
 // a tools/call). The rook plugin points Claude at this server and denies
 // the built-in AskUserQuestion, so questions land in a rook split instead
 // of the TUI — asked once, in one place.
@@ -28,15 +28,17 @@ const mcpProtocolVersion = "2024-11-05"
 // redirection etiquette so the plugin's hook can stay a one-liner: what to
 // say inline (one short pointer, not a restatement of the options), and to
 // never double-ask.
-const askToolDescription = "Ask the user one or more questions through rook's UI. " +
-	"The form opens in a split beside this terminal and this call returns IMMEDIATELY with {\"askId\":…,\"pending\":true} — it does not wait. " +
-	"Use this INSTEAD of the built-in AskUserQuestion tool whenever it is available. " +
-	"Before calling, write one short line telling the user you've asked in rook — e.g. \"Asked in rook →\" — and do NOT restate the question or options in text: the form shows them. " +
+const askToolDescription = "Ask the user one or more questions through rook, delivered to their PHONE via the configured relay. " +
+	"This call returns IMMEDIATELY with {\"askId\":…,\"pending\":true} — it does not wait. " +
+	"Use this when the user is away from the desk, or the question can wait for them; " +
+	"the built-in AskUserQuestion tool is the right one when they are sitting here, since rook no longer renders a local form. " +
+	"It fails with 503 when no relay is configured — fall back to AskUserQuestion then. " +
+	"Before calling, write one short line telling the user you've asked in rook — e.g. \"Asked in rook →\" — and do NOT restate the question or options in text: the ask carries them. " +
 	"Use the whole form: set multiSelect:true whenever several options can apply together (\"pick as many as apply\"), " +
 	"give an option a `preview` when the choice is between concrete artifacts worth reading side by side (mockups, code snippets, config variants — it renders verbatim in a monospace panel), " +
 	"mark at most one option `recommended:true` when you have a real recommendation, and omit `options` entirely for a free-text question (naming, a value, a sentence). " +
 	"When the user answers, a line like 'rook ask <id> answered' appears in this session — collect the answer with the rook answers tool. " +
-	"If you have other useful work, continue it while you wait; if everything depends on the answer, end your turn and say you're waiting on the panel."
+	"If you have other useful work, continue it while you wait; if everything depends on the answer, end your turn and say you're waiting on them."
 
 // answersToolDescription — the read half of the ask/answer split.
 const answersToolDescription = "Collect the user's answers to rook asks posed in this session. " +
@@ -47,7 +49,7 @@ const answersToolDescription = "Collect the user's answers to rook asks posed in
 	"Answered asks are consumed by the read. Call this when a 'rook ask … answered' line appears, or before deciding anything that waited on an ask."
 
 // askToolSchema is AskUserQuestion's input shape — so the model can forward
-// a denied call's arguments verbatim — plus what the rook form can do that
+// a denied call's arguments verbatim — plus what a rook ask can carry that
 // the TUI cannot: previews, a marked recommendation, and a question with no
 // options at all. Every addition is optional, so the verbatim forward keeps
 // working.
@@ -68,7 +70,7 @@ var askToolSchema = json.RawMessage(`{
           "multiSelect": {"type": "boolean", "description": "True when several options can apply together — the user ticks any number of them and may tick none. Use it for 'pick as many as apply'; leave it off when the options are mutually exclusive."},
           "options": {
             "type": "array",
-            "description": "2-4 options. Omit entirely for a free-text question — the form becomes a single input.",
+            "description": "2-4 options. Omit entirely for a free-text question — the ask becomes a single input.",
             "items": {
               "type": "object",
               "required": ["label"],

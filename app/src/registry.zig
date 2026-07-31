@@ -60,7 +60,6 @@ pub const Action = enum {
     /// Bring a pending question back. Without this, switching panels
     /// while an ask is open strands it: the form still holds the ask, so
     /// the poller will not offer another, and nothing shows it.
-    panel_ask,
     /// Move the side pane to the other edge — panels are placement-
     /// agnostic, so this is a property of the container, not the tenant.
     panel_flip,
@@ -121,7 +120,6 @@ pub const commands = [_]Command{
     .{ .id = "thread.note", .title = "Land Draft as a Note", .category = "Thread", .action = .thread_note },
     .{ .id = "thread.ask", .title = "Send Draft to the Agent", .category = "Thread", .action = .thread_ask },
     .{ .id = "thread.resolve", .title = "Resolve Thread", .category = "Thread", .action = .thread_resolve },
-    .{ .id = "ask.show", .title = "Show Pending Question", .category = "Panel", .action = .panel_ask, .keys = "<leader>q" },
     .{ .id = "panel.flip", .title = "Move Side Pane to Other Edge", .category = "Panel", .action = .panel_flip },
     .{ .id = "diff.open", .title = "Diff: Working Changes", .category = "Review", .action = .diff_open, .keys = "<leader>d" },
     .{ .id = "tree.toggle", .title = "File Tree", .category = "Pane", .action = .tree_toggle, .keys = "<leader>⇥" },

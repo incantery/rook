@@ -363,6 +363,21 @@ func (h *Host) handleAskQueue(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "questions required", http.StatusBadRequest)
 			return
 		}
+		// An ask nobody can answer is worse than a refused one: the
+		// caller blocks on the long-poll until someone kills it.
+		//
+		// The local form used to be the guaranteed answerer, so this
+		// could not happen. It left in the strip, and the relay is now
+		// the ONLY surface an ask can reach — so with no relay
+		// configured, this ask has nowhere to go and says so instead of
+		// parking forever. When something renders asks locally again,
+		// this check is what should relax.
+		if h.relay == nil {
+			http.Error(w, "no surface can answer an ask: no relay configured "+
+				"(set relay-url + `rookctl set-relay-token`), and the local form "+
+				"left in the strip", http.StatusServiceUnavailable)
+			return
+		}
 		idb := make([]byte, 8)
 		rand.Read(idb)
 		id := hex.EncodeToString(idb)

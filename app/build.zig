@@ -238,16 +238,6 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(lsp_tests).step);
 
-    // The ask form's wire shape and JSON escaping. Its own root because a
-    // malformed answer body is silently catastrophic: the host rejects
-    // it, the answer is lost, and the asker stays blocked forever.
-    const asks_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/asks.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    test_step.dependOn(&b.addRunArtifact(asks_tests).step);
-
     // The session view's record→document rendering. Its own root because
     // the shape is the host's to change and a silent mismatch would show
     // up as an empty or misleading transcript, not a crash.

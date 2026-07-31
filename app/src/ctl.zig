@@ -472,16 +472,6 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else {
             reply(fd, "err unknown command (see `commands`)\n");
         }
-    } else if (std.mem.eql(u8, verb, "ask") and rest.len > 0) {
-        // Put a question on screen without a host — the same role `paste
-        // <text>` plays for the pasteboard. Takes {"questions":[…]} or a
-        // bare […], through the SAME parse the poller uses, so the form
-        // is never exercised by a second code path.
-        const asks = @import("asks.zig");
-        if (asks.parsePayload(app.gpa, "ctl", "", rest)) |a| {
-            app.presentAsk(a);
-            reply(fd, "ok\n");
-        } else reply(fd, "err bad questions JSON\n");
     } else if (std.mem.eql(u8, verb, "transcript") and rest.len > 0) {
         // Open an agent's transcript as a buffer. Async by design: the
         // fetch is a document-sized blocking read, so this only queues.
@@ -489,20 +479,6 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         app.requestTranscriptLocked(rest);
         app.draw_lock.unlock();
         reply(fd, "ok\n");
-    } else if (std.mem.eql(u8, verb, "ask-answer") and rest.len == 0) {
-        // What the form last decided, verbatim. This is the body that
-        // unblocks the asker, so it is the thing worth asserting on.
-        app.draw_lock.lock();
-        const n = app.ask_last_len;
-        var buf: [4096]u8 = undefined;
-        @memcpy(buf[0..n], app.ask_last[0..n]);
-        app.draw_lock.unlock();
-        if (n == 0) {
-            reply(fd, "none\n");
-        } else {
-            reply(fd, buf[0..n]);
-            reply(fd, "\n");
-        }
     } else if (std.mem.eql(u8, verb, "sidepane") and rest.len == 0) {
         // Container state + the tenant's rows, so the whole panel is
         // verifiable without a screenshot.
@@ -581,33 +557,6 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                         }) catch break;
                     }
                     if (app.thr.more > 0) w.print("+{d} more\n", .{app.thr.more}) catch {};
-                },
-                .ask => {
-                    if (app.ask) |a| {
-                        const q = a.questions[app.ask_qi];
-                        w.print("ask:{s} q:{d}/{d}{s}\n", .{
-                            a.id.get(),
-                            app.ask_qi + 1,
-                            a.n,
-                            @as([]const u8, if (q.multi) " multi" else ""),
-                        }) catch {};
-                        if (a.cwd.len > 0) {
-                            var srcbuf: [96]u8 = undefined;
-                            w.print("{s} ({s})\n", .{ app.askSourceLabel(&srcbuf), a.cwd.get() }) catch {};
-                        }
-                        w.print("{s}\n", .{q.text.get()}) catch {};
-                        for (q.options[0..q.n], 0..) |o, i| {
-                            w.print("{s}{s} {s}\n", .{
-                                @as([]const u8, if (i == app.ask_sel) "*" else " "),
-                                @as([]const u8, if (q.multi and app.ask_picked[i]) "[x]" else if (q.multi) "[ ]" else "( )"),
-                                o.label.get(),
-                            }) catch break;
-                        }
-                        w.print("{s}other: {s}\n", .{
-                            @as([]const u8, if (app.ask_sel == q.n) "*" else " "),
-                            app.ask_text[0..app.ask_text_len],
-                        }) catch {};
-                    } else _ = w.write("no question\n") catch 0;
                 },
             }
         }

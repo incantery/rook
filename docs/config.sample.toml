@@ -246,11 +246,14 @@
 
 # ── Remote asks (host-read) ──────────────────────────────────────────────
 #
-# A rook-server — self-hosted, or rook-cloud. When set, a question from an
-# agent still opens its pane here AND lands in the mailbox, so you can
-# answer it from your phone after you've walked away. Answering in either
-# place settles it in both. Absent means no remote and the whole path is
-# inert.
+# A rook-server — self-hosted, or rook-cloud. A question from an agent
+# lands in the mailbox, so you can answer it from your phone.
+#
+# This is now the ONLY surface an ask can reach: the local form left in
+# the strip, and rook does not render questions in a pane any more. With
+# no relay configured the host REFUSES to create an ask (503) rather than
+# accepting one nothing can answer — `rookctl ask` and the MCP `ask` tool
+# both fail fast, and Claude Code's own AskUserQuestion is the fallback.
 #
 # The bearer token is NOT set here — it lives in the keychain
 # (`rookctl set-relay-token`; see the secrets note at the bottom).

@@ -341,7 +341,7 @@ pub const Side = enum { left, right };
 /// where §2's inbox/deck/threads/review join it, the same way pal_mode
 /// grew a second list. Deliberately an enum rather than a vtable — a
 /// tenant interface designed against ONE tenant is a guess.
-pub const Panel = enum { ask, threads, review, search };
+pub const Panel = enum { threads, review, search };
 
 /// One clickable row of the which-key sheet. `click` is false for the
 /// collapsed "1…9" teaching row — a row that says "tabs 1–9" and then
@@ -570,7 +570,6 @@ pub const App = struct {
     /// publish. Nothing spawns until a file of a known language opens.
     lsp: lspmgrpkg.Manager = undefined,
     /// Set when an answer is queued, so the poster posts it now.
-    ask_wake: std.atomic.Value(bool) = .init(false),
     /// An agent id whose transcript has been requested. The fetch is
     /// blocking HTTP over a document-sized body, so the key path only
     /// ever queues — transcriptThread does the work and opens the pane.
@@ -631,36 +630,9 @@ pub const App = struct {
     diff_line: i64 = 0,
 
     /// The side pane takes the key path. Needed the moment a tenant is
-    /// INTERACTIVE — the inbox is read-only, the ask form is not. Modal
-    /// like the palette, but it owns a region rather than the screen, so
-    /// it yields back to the panes instead of closing.
+    /// INTERACTIVE. Modal like the palette, but it owns a region rather
+    /// than the screen, so it yields back to the panes instead of closing.
     side_focus: bool = false,
-
-    // ---- the ask form (asks.zig) ----
-    ask: ?@import("asks.zig").Ask = null,
-    /// Which question of the ask we are on.
-    ask_qi: usize = 0,
-    /// Cursor row within the current question.
-    ask_sel: usize = 0,
-    /// Ticks for the current question (multi-select), and the answers
-    /// already decided for earlier questions.
-    ask_picked: [@import("asks.zig").max_options]bool = @splat(false),
-    ask_answers: [@import("asks.zig").max_questions][@import("asks.zig").max_options]bool = @splat(@splat(false)),
-    /// Free-text input, and the "Other…" row's text.
-    ask_text: [240]u8 = @splat(0),
-    ask_text_len: usize = 0,
-    /// A body queued for the poster thread: answering must not block the
-    /// key path on an HTTP round trip.
-    ask_post_id: [24]u8 = @splat(0),
-    ask_post_id_len: usize = 0,
-    ask_post_body: [4096]u8 = @splat(0),
-    ask_post_len: usize = 0,
-    /// The last answer body the form produced, RETAINED after the poster
-    /// consumes it. Observability: a malformed body loses the answer and
-    /// leaves the asker blocked, and "what exactly did we send" is the
-    /// first question when that happens. ctl `ask-answer` reads it.
-    ask_last: [4096]u8 = @splat(0),
-    ask_last_len: usize = 0,
 
     /// A command the palette picked, waiting for draw_lock to be RELEASED.
     /// The palette's key path runs under the lock and every dispatch
@@ -1154,12 +1126,6 @@ pub const App = struct {
         // Transcript fetches, on demand.
         if (std.Thread.spawn(.{}, transcriptThread, .{self})) |t| t.detach() else |err| {
             std.debug.print("rook transcript: thread failed: {}\n", .{err});
-        }
-
-        // The asks loop. Polls unconditionally: a question is the app's
-        // reason to interrupt, so it cannot wait for a panel to be open.
-        if (std.Thread.spawn(.{}, asksThread, .{self})) |t| t.detach() else |err| {
-            std.debug.print("rook asks: thread failed: {}\n", .{err});
         }
 
         // Keys → pty (Cmd+Q quits). AppKit copies the handler block, so the
@@ -2025,7 +1991,6 @@ pub const App = struct {
         }
         if (!self.side_focus) return false;
         switch (self.side_panel) {
-            .ask => self.askKeyLocked(bytes),
             .threads => self.threadsKeyLocked(bytes),
             .review => self.reviewKeyLocked(bytes),
             .search => self.searchKeyLocked(bytes),
@@ -2579,7 +2544,6 @@ pub const App = struct {
             .thread_note => self.threadVerb("note"),
             .thread_ask => self.threadVerb("ask"),
             .thread_resolve => self.threadVerb("resolve"),
-            .panel_ask => self.showPendingAsk(),
             .panel_flip => self.flipSidePane(),
             .diff_open => self.requestDiff("", 0),
             .tree_toggle => self.treeCommand(false),
@@ -2767,111 +2731,6 @@ pub const App = struct {
         }
     }
 
-    /// Rows the current question offers: its options, plus the "Other…"
-    /// row that lets a human answer in their own words. A free-text
-    /// question is that row alone.
-    fn askRowCount(self: *App) usize {
-        const a = self.ask orelse return 0;
-        const q = a.questions[self.ask_qi];
-        return q.n + 1;
-    }
-
-    fn askOtherRow(self: *App) usize {
-        const a = self.ask orelse return 0;
-        return a.questions[self.ask_qi].n;
-    }
-
-    /// Seed the cursor and ticks for a question. `recommended` is
-    /// load-bearing: pre-ticked in multi, under the cursor in single, so
-    /// Enter alone is a complete answer to a well-formed ask.
-    fn askSeedLocked(self: *App) void {
-        const a = self.ask orelse return;
-        const q = a.questions[self.ask_qi];
-        self.ask_picked = @splat(false);
-        self.ask_sel = 0;
-        self.ask_text_len = 0;
-        for (q.options[0..q.n], 0..) |o, i| {
-            if (!o.recommended) continue;
-            if (q.multi) self.ask_picked[i] = true else if (self.ask_sel == 0) self.ask_sel = i;
-        }
-        if (q.free_text) self.ask_sel = 0;
-    }
-
-    /// Take an ask and put it on screen. Opens the panel and TAKES FOCUS:
-    /// a question nobody notices is the failure mode this whole loop
-    /// exists to fix.
-    fn presentAskLocked(self: *App, a: @import("asks.zig").Ask) void {
-        self.ask = a;
-        self.ask_qi = 0;
-        self.ask_answers = @splat(@splat(false));
-        self.askSeedLocked();
-        self.side_panel = .ask;
-        self.side_open = true;
-        self.side_focus = true;
-        self.relayoutLocked();
-        self.scene_dirty = true;
-    }
-
-    /// Build the answer JSON and hand it to the poster thread.
-    /// {"answers":[{question, header?, selected:[…], other?}]} — the
-    /// shape the MCP `answers` tool and the blocked rookctl both read.
-    fn askSubmitLocked(self: *App) void {
-        const a = self.ask orelse return;
-        const asks = @import("asks.zig");
-        var w: std.Io.Writer = .fixed(&self.ask_post_body);
-        _ = w.write("{\"answers\":[") catch {};
-        for (a.questions[0..a.n], 0..) |q, qi| {
-            if (qi > 0) _ = w.write(",") catch {};
-            _ = w.write("{\"question\":") catch {};
-            asks.writeJsonString(&w, q.text.get());
-            if (q.header.len > 0) {
-                _ = w.write(",\"header\":") catch {};
-                asks.writeJsonString(&w, q.header.get());
-            }
-            _ = w.write(",\"selected\":[") catch {};
-            var first = true;
-            for (q.options[0..q.n], 0..) |o, oi| {
-                if (!self.ask_answers[qi][oi]) continue;
-                if (!first) _ = w.write(",") catch {};
-                first = false;
-                asks.writeJsonString(&w, o.label.get());
-            }
-            _ = w.write("]") catch {};
-            // `other` is the human's own words, and the tool description
-            // tells the agent to treat it as such. Only the LAST question
-            // can carry one — it is whatever is in the text buffer when
-            // they submit.
-            if (qi + 1 == a.n and self.ask_text_len > 0) {
-                _ = w.write(",\"other\":") catch {};
-                asks.writeJsonString(&w, self.ask_text[0..self.ask_text_len]);
-            }
-            _ = w.write("}") catch {};
-        }
-        _ = w.write("]}") catch {};
-        self.queueAskPostLocked(a.id.get(), self.ask_post_body[0..w.end]);
-        self.dismissAskLocked();
-    }
-
-    /// Jump to where an ask came from (⌃G).
-    ///
-    /// There is no session to jump TO — the app owns its ptys and the
-    /// queue is session-less — so the link back is the asker's cwd
-    /// against each pane's shell cwd, read from the kernel. Best match
-    /// wins: an exact directory beats a parent, and a deeper parent
-    /// beats a shallower one, so the pane the agent is actually running
-    /// in outranks the shell that happens to sit at the repo root.
-    ///
-    /// Deliberately does NOT dismiss the question. You jump to look at
-    /// what is being asked about, and the form has to still be there
-    /// when you look back.
-    fn askJumpLocked(self: *App) bool {
-        const a = self.ask orelse return false;
-        if (!self.jumpToCwdLocked(a.cwd.get())) return false;
-        // The panes own the keys now — you asked to go look at something.
-        self.side_focus = false;
-        return true;
-    }
-
     /// Focus the pane whose shell cwd best matches `raw`.
     ///
     /// This is the link back to "where an agent is" in an app with no
@@ -2926,143 +2785,6 @@ pub const App = struct {
         self.setFocusLocked(p);
         self.scene_dirty = true;
         return true;
-    }
-
-    /// ESC: the asker sees {"canceled":true} and exits 1. Deliberately a
-    /// real answer rather than silence — a dismissal has to unblock the
-    /// asker, or `rookctl ask` hangs until someone kills it.
-    fn askCancelLocked(self: *App) void {
-        const a = self.ask orelse return;
-        const body = "{\"canceled\":true}";
-        @memcpy(self.ask_post_body[0..body.len], body);
-        self.queueAskPostLocked(a.id.get(), self.ask_post_body[0..body.len]);
-        self.dismissAskLocked();
-    }
-
-    fn queueAskPostLocked(self: *App, id: []const u8, body: []const u8) void {
-        const n = @min(id.len, self.ask_post_id.len);
-        @memcpy(self.ask_post_id[0..n], id[0..n]);
-        self.ask_post_id_len = n;
-        // body already lives in ask_post_body; record how much of it.
-        self.ask_post_len = @min(body.len, self.ask_post_body.len);
-        // Keep a copy the poster does not consume — see ask_last.
-        @memcpy(self.ask_last[0..self.ask_post_len], self.ask_post_body[0..self.ask_post_len]);
-        self.ask_last_len = self.ask_post_len;
-        self.ask_wake.store(true, .release);
-    }
-
-    /// Put a question on screen directly. ctl's `ask` verb — the same
-    /// role `paste <text>` plays for the pasteboard: drive the real form
-    /// without needing the thing that normally feeds it.
-    pub fn presentAsk(self: *App, a: @import("asks.zig").Ask) void {
-        self.draw_lock.lock();
-        defer self.draw_lock.unlock();
-        self.presentAskLocked(a);
-    }
-
-    fn dismissAskLocked(self: *App) void {
-        self.ask = null;
-        self.ask_text_len = 0;
-        self.side_focus = false;
-        // The inbox used to take the container back here — it was the
-        // "you are not done, look at the rest" tenant. It left in the
-        // strip, and there is nothing to fall back TO, so the pane closes.
-        self.side_open = false;
-        self.relayoutLocked();
-        self.scene_dirty = true;
-    }
-
-    /// The ask form's key path. Same stream contract as the palette and
-    /// the editor: NSEvents deliver chars and whole CSI arrows, ctl
-    /// delivers strings. Caller holds draw_lock.
-    pub fn askKeyLocked(self: *App, bytes: []const u8) void {
-        if (self.ask == null) return;
-        const rows = self.askRowCount();
-        const other = self.askOtherRow();
-        var i: usize = 0;
-        while (i < bytes.len) {
-            const b = bytes[i];
-            if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
-                switch (bytes[i + 2]) {
-                    'A' => self.ask_sel -|= 1,
-                    'B' => self.ask_sel = @min(self.ask_sel + 1, rows -| 1),
-                    else => {},
-                }
-                i += 3;
-                continue;
-            }
-            switch (b) {
-                0x1b => {
-                    self.askCancelLocked();
-                    return;
-                },
-                '\r', '\n' => {
-                    self.askAdvanceLocked();
-                    return;
-                },
-                0x10 => self.ask_sel -|= 1, // ⌃P
-                0x0e => self.ask_sel = @min(self.ask_sel + 1, rows -| 1), // ⌃N
-                0x07 => { // ⌃G — go to where the ask came from
-                    _ = self.askJumpLocked();
-                    return;
-                },
-                0x7f, 0x08 => {
-                    if (self.ask_text_len > 0) self.ask_text_len -= 1;
-                },
-                ' ' => {
-                    // Space toggles a tick in multi-select; on the Other
-                    // row it is just a space in the text.
-                    const q = self.ask.?.questions[self.ask_qi];
-                    if (q.multi and self.ask_sel < q.n) {
-                        self.ask_picked[self.ask_sel] = !self.ask_picked[self.ask_sel];
-                    } else if (self.ask_sel == other and self.ask_text_len < self.ask_text.len) {
-                        self.ask_text[self.ask_text_len] = ' ';
-                        self.ask_text_len += 1;
-                    }
-                },
-                else => {
-                    // Typing anywhere jumps to Other and starts writing:
-                    // the row exists so a human never has to pick from
-                    // options that miss the point.
-                    if (b >= 0x20 and b < 0x7f and self.ask_text_len < self.ask_text.len) {
-                        self.ask_sel = other;
-                        self.ask_text[self.ask_text_len] = b;
-                        self.ask_text_len += 1;
-                    }
-                },
-            }
-            i += 1;
-        }
-        self.scene_dirty = true;
-    }
-
-    /// Enter: record this question's picks, then move on or submit.
-    fn askAdvanceLocked(self: *App) void {
-        const a = self.ask orelse return;
-        const q = a.questions[self.ask_qi];
-        if (q.multi) {
-            self.ask_answers[self.ask_qi] = self.ask_picked;
-        } else if (self.ask_sel < q.n) {
-            self.ask_answers[self.ask_qi][self.ask_sel] = true;
-        }
-        // Nothing chosen and nothing typed on a question that HAS options
-        // is not an answer — hold rather than sending an empty decision
-        // the agent would have to interpret.
-        const picked_any = blk: {
-            for (self.ask_answers[self.ask_qi][0..q.n]) |p| {
-                if (p) break :blk true;
-            }
-            break :blk false;
-        };
-        if (!picked_any and self.ask_text_len == 0 and !q.free_text) return;
-
-        if (self.ask_qi + 1 < a.n) {
-            self.ask_qi += 1;
-            self.askSeedLocked();
-            self.scene_dirty = true;
-            return;
-        }
-        self.askSubmitLocked();
     }
 
     /// The deck's key path — vim keys over the list, Enter to go there.
@@ -3693,24 +3415,6 @@ pub const App = struct {
         ed.cline = @min(row, doc.rows.len -| 1);
         ed.ccol = 0;
         ed.top = row -| 3; // a little context above where you landed
-        self.scene_dirty = true;
-    }
-
-    /// Bring a pending question back to the front.
-    ///
-    /// Needed because the form HOLDS the ask while it is open, so the
-    /// poller will not offer another one — switching panels (or jumping
-    /// to source) without this leaves the question alive but unreachable,
-    /// and the asker blocked with no way to answer it. Found by writing
-    /// the e2e for the jump.
-    pub fn showPendingAsk(self: *App) void {
-        self.draw_lock.lock();
-        defer self.draw_lock.unlock();
-        if (self.ask == null) return;
-        self.side_panel = .ask;
-        self.side_open = true;
-        self.side_focus = true;
-        self.relayoutLocked();
         self.scene_dirty = true;
     }
 
@@ -5658,7 +5362,6 @@ pub const App = struct {
         var y = r.y;
         const tx = r.x + self.m.gutter;
         _ = ui.text(tx, y + (row_h - ch) / 2, switch (self.side_panel) {
-            .ask => "QUESTION",
             .threads => "THREADS",
             .review => "REVIEW",
             .search => "SEARCH",
@@ -5676,7 +5379,6 @@ pub const App = struct {
         y += self.sep + self.m.gap;
 
         switch (self.side_panel) {
-            .ask => self.drawAsk(ui, r, y),
             .threads => self.drawThreads(ui, r, y),
             .review => self.drawReview(ui, r, y),
             .search => self.drawSearch(ui, r, y),
@@ -5892,103 +5594,6 @@ pub const App = struct {
         }
         if (self.side_focus)
             _ = ui.text(tx, y + (row_h - ch) / 2, "j/k · enter opens", th.bar_fg, bg);
-    }
-
-    fn drawAsk(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
-        const cw = self.renderer.cell_w;
-        const ch = self.renderer.cell_h;
-        const row_h = self.bar_h;
-        const bg = self.glassBg(th.bar_bg);
-        const tx = r.x + self.m.gutter;
-        var y = top;
-        var clipbuf: [256]u8 = undefined;
-        const a = self.ask orelse {
-            _ = ui.text(tx, y + (row_h - ch) / 2, "no question", th.bar_fg, bg);
-            return;
-        };
-        const q = a.questions[self.ask_qi];
-        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - self.m.gutter * 2, cw)));
-
-        // WHO is asking. Without it a question is a demand from nowhere,
-        // and with several agents running it is unanswerable — you cannot
-        // judge "ship it?" without knowing which repo is shipping.
-        if (a.cwd.len > 0) {
-            var srcbuf: [96]u8 = undefined;
-            const src = self.askSourceLabel(&srcbuf);
-            _ = ui.text(tx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, src, cols), th.accent, bg);
-            y += row_h;
-        }
-
-        // "2/3" when an ask has several questions — a form that hides how
-        // much is left is a form people abandon.
-        if (a.n > 1) {
-            var buf: [16]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}/{d}", .{ self.ask_qi + 1, a.n }) catch "";
-            _ = ui.textRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2 - row_h, s, th.bar_fg, bg);
-        }
-
-        // The question, wrapped by hand — ui.text does not wrap and an
-        // ask is a sentence, not a label.
-        y = self.wrapText(ui, q.text.get(), tx, y, cols, row_h, ch, th.bar_value, bg);
-        y += self.sep * 2;
-
-        for (q.options[0..q.n], 0..) |o, i| {
-            const selected = i == self.ask_sel;
-            if (selected) self.drawRowSelection(ui, r, y, row_h);
-            // ● / ○ for single, [x] / [ ] for multi — the mark says which
-            // KIND of question this is without a word of explanation.
-            const mark: []const u8 = if (q.multi)
-                (if (self.ask_picked[i]) "[x] " else "[ ] ")
-            else
-                (if (selected) "(*) " else "( ) ");
-            var mx = tx;
-            mx += ui.textOver(mx, y + (row_h - ch) / 2, mark, if (selected) th.accent else th.bar_fg);
-            const lbl = o.label.get();
-            _ = ui.textOver(mx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, lbl, cols -| 4), if (selected) th.bar_value else th.bar_fg);
-            y += row_h;
-            // The description only for the row under the cursor: all of
-            // them at once is a wall, none of them loses the tradeoff.
-            if (selected and o.desc.len > 0)
-                y = self.wrapText(ui, o.desc.get(), tx + cw * 4, y, cols -| 4, row_h, ch, th.bar_fg, bg);
-        }
-
-        // The Other row — always present, so a human is never forced to
-        // pick from options that miss the point.
-        const other = self.askOtherRow();
-        const osel = self.ask_sel == other;
-        if (osel) self.drawRowSelection(ui, r, y, row_h);
-        var ox = tx;
-        ox += ui.textOver(ox, y + (row_h - ch) / 2, if (q.free_text) "> " else "(+) ", if (osel) th.accent else th.bar_fg);
-        if (self.ask_text_len > 0) {
-            const t = self.ask_text[0..self.ask_text_len];
-            _ = ui.textOver(ox, y + (row_h - ch) / 2, t[t.len -| (cols -| 4) ..], th.bar_value);
-        } else {
-            _ = ui.textOver(ox, y + (row_h - ch) / 2, if (q.free_text) "type an answer" else "Other…", th.bar_fg);
-        }
-        if (osel) {
-            const used: f32 = @floatFromInt(@min(self.ask_text_len, cols -| 4) + 4);
-            ui.rect(tx + used * cw, y + (row_h - ch) / 2, cw / 4, ch, th.accent);
-        }
-        y += row_h * 2;
-
-        var hint: [96]u8 = undefined;
-        const h = std.fmt.bufPrint(&hint, "{s}enter sends · esc dismisses{s}", .{
-            @as([]const u8, if (q.multi) "space ticks · " else ""),
-            @as([]const u8, if (a.cwd.len > 0) " · ^G goes there" else ""),
-        }) catch "enter sends · esc dismisses";
-        _ = ui.text(tx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, h, cols), th.bar_fg, bg);
-    }
-
-    /// How to name where an ask came from. A workspace name if the cwd is
-    /// inside one — that is the word a human thinks in — else the tail of
-    /// the path, which is still more use than the whole thing truncated
-    /// at the wrong end. Caller holds draw_lock.
-    pub fn askSourceLabel(self: *App, buf: []u8) []const u8 {
-        const a = self.ask orelse return "";
-        if (a.cwd.len == 0) return "";
-        var inner: [96]u8 = undefined;
-        const lbl = self.cwdLabel(a.cwd.get(), &inner);
-        return std.fmt.bufPrint(buf, "from {s}", .{lbl}) catch lbl;
     }
 
     /// Resolve a workspace-relative path against the active space's
@@ -6826,68 +6431,6 @@ fn terminateCallback(context: *const ResizeBlock.Context, notification: objc.c.i
 fn authCallback(_: *const AuthBlock.Context, granted: bool, err: objc.c.id) callconv(.c) void {
     _ = err;
     if (!granted) std.debug.print("rook: notification permission denied (System Settings > Notifications > rook)\n", .{});
-}
-
-/// Background poll of the attention inbox, 2s, and ONLY while the panel
-/// is open — a closed panel costs no host traffic, no wakeups, and no
-/// frames. Two properties this must not break:
-///
-///  - idle frames stay 0. A poll that repainted unconditionally would
-///    cost 30 frames/minute forever, so a fetch only dirties the scene
-///    when the DIGEST changes.
-///  - the fetch is blocking (3s socket timeouts) and happens off the
-///    render path; only the assignment takes draw_lock.
-/// The asks loop's client half: poll for a pending question, and post
-/// whatever the form decided.
-///
-/// Polls ALWAYS, unlike the inbox — an ask is the app's reason to
-/// interrupt you, so it cannot be gated on a panel already being open.
-/// 1s, and only while nothing is on screen: a second question would have
-/// nowhere to go until the first is answered.
-fn asksThread(app: *App) void {
-    const asks = @import("asks.zig");
-    while (true) {
-        // Post first: an answer the human already gave outranks looking
-        // for the next question.
-        var post_id: [24]u8 = undefined;
-        var post_body: [4096]u8 = undefined;
-        var id_len: usize = 0;
-        var body_len: usize = 0;
-        app.draw_lock.lock();
-        if (app.ask_post_len > 0) {
-            id_len = app.ask_post_id_len;
-            body_len = app.ask_post_len;
-            @memcpy(post_id[0..id_len], app.ask_post_id[0..id_len]);
-            @memcpy(post_body[0..body_len], app.ask_post_body[0..body_len]);
-            app.ask_post_len = 0;
-        }
-        const busy = app.ask != null;
-        app.draw_lock.unlock();
-
-        if (body_len > 0)
-            _ = asks.answer(app.gpa, app.io, post_id[0..id_len], post_body[0..body_len]);
-
-        if (!busy) {
-            if (asks.poll(app.gpa, app.io)) |a| {
-                app.draw_lock.lock();
-                // Re-check under the lock: the form may have taken one
-                // while we were on the wire.
-                const took = app.ask == null;
-                if (took) app.presentAskLocked(a);
-                app.draw_lock.unlock();
-                // Ack OUTSIDE the lock, and only if we actually took it.
-                // rookctl gives up after 5s without one, so a question
-                // the human is still reading would kill its asker.
-                if (took) asks.ack(app.gpa, app.io, a.id.get());
-            }
-        }
-
-        var slept: u32 = 0;
-        while (slept < 1000) : (slept += 100) {
-            if (app.ask_wake.swap(false, .acq_rel)) break;
-            _ = usleep(100 * 1000);
-        }
-    }
 }
 
 /// Review: poll the workspace's review, apply verdicts, open findings.

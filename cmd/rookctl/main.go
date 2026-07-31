@@ -24,9 +24,11 @@
 //	                        --dry-run previews the batch in memory, writing nothing to rook.db
 //	                        subverbs: show [<id>], gate [<id>], approve|reject|defer <id…>, score-all, score <id> <json>
 //	rookctl tasks         list a workspace's RookTasks: rookctl tasks [-w ws] [--work-type review] [--json]
-//	rookctl ask           ask the human a question in a split beside this pane,
-//	                        blocking until answered: rookctl ask '<json>' (or stdin);
-//	                        answer JSON on stdout, exit 0 answered / 1 dismissed
+//	rookctl ask           ask the human a question, delivered to their phone via
+//	                        the relay, blocking until answered: rookctl ask '<json>'
+//	                        (or stdin); answer JSON on stdout, exit 0 / 1 dismissed.
+//	                        503 with no relay: nothing can answer it (the local
+//	                        form left in the strip)
 //	rookctl mcp           stdio MCP server for Claude Code — the `ask` tool is
 //	                        `rookctl ask` behind tools/call (the rook plugin wires it)
 //	rookctl set-linear-token store the Linear API key (queue credential) in the keychain

@@ -3,11 +3,14 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/incantery/rook/internal/relay"
 )
 
 // typedLines records what the doorbell would have typed, so these tests can
@@ -246,10 +249,25 @@ func TestAskQueueListsSessionScopedAsks(t *testing.T) {
 // its shells, so the push path is unreachable from it in both directions.
 func TestAskQueueCreatesListsAndSettles(t *testing.T) {
 	h, _, _ := askHost(t, map[string]*askState{})
+	body := `{"questions":[{"question":"Ship it?","options":[{"label":"Yes"},{"label":"No"}]}]}`
+
+	// With NO relay there is no surface that can answer, and creating the
+	// ask anyway would park `rookctl ask` on its long-poll until someone
+	// killed it. The local form was the guaranteed answerer until it left
+	// in the strip, so this refusal is what replaced that guarantee.
+	w := httptest.NewRecorder()
+	h.handleAskQueue(w, httptest.NewRequest("POST", "/asks", strings.NewReader(body)))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("undeliverable ask: got %d, want 503 (%s)", w.Code, w.Body.String())
+	}
+
+	// A configured relay IS a surface — the phone. The URL never resolves
+	// here and does not need to: escalation is best-effort and off the
+	// request path, so the create must succeed regardless.
+	h.relay = relay.New("http://127.0.0.1:1", "tok")
 
 	// Create, session-less.
-	w := httptest.NewRecorder()
-	body := `{"questions":[{"question":"Ship it?","options":[{"label":"Yes"},{"label":"No"}]}]}`
+	w = httptest.NewRecorder()
 	h.handleAskQueue(w, httptest.NewRequest("POST", "/asks", strings.NewReader(body)))
 	if w.Code != 200 {
 		t.Fatalf("create: got %d, want 200 (%s)", w.Code, w.Body.String())

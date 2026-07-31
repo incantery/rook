@@ -319,7 +319,7 @@ pub fn saveDoc(gpa: std.mem.Allocator, io: std.Io, id: i64, content: []const u8)
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     _ = aw.writer.write("{\"content\":") catch return .failed;
-    @import("asks.zig").writeJsonString(&aw.writer, content);
+    writeJsonString(&aw.writer, content);
     _ = aw.writer.write("}") catch return .failed;
 
     var resp = hostc.post(gpa, &info, path, aw.writer.buffered(), 4 * 1024 * 1024) orelse return .failed;
@@ -644,4 +644,40 @@ test "an outdated anchor still points at its stored line" {
     const snap = readList(T.allocator, T.io, "src") orelse return error.RegistryUnreachable;
     try T.expectEqual(@as(i32, 3), snap.slice()[0].line);
     try T.expectEqualStrings("l3", snap.slice()[0].anchor.get());
+}
+
+/// JSON-escape into a writer. A comment body is human text and a stray
+/// quote or backslash in one would produce a body the host rejects,
+/// losing the write. It lived in asks.zig until the ask form left in the
+/// strip; this is its only caller. (lsp.zig keeps its own copy on
+/// purpose — that one is on a hot path.)
+pub fn writeJsonString(w: *std.Io.Writer, s: []const u8) void {
+    w.writeByte('"') catch return;
+    for (s) |c| {
+        switch (c) {
+            '"' => _ = w.write("\\\"") catch return,
+            '\\' => _ = w.write("\\\\") catch return,
+            '\n' => _ = w.write("\\n") catch return,
+            '\r' => _ = w.write("\\r") catch return,
+            '\t' => _ = w.write("\\t") catch return,
+            else => if (c < 0x20) {
+                w.print("\\u{x:0>4}", .{c}) catch return;
+            } else w.writeByte(c) catch return,
+        }
+    }
+    w.writeByte('"') catch return;
+}
+
+test "writeJsonString escapes what JSON requires" {
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    writeJsonString(&w, "a\"b\\c\nd\te");
+    try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\nd\\te\"", buf[0..w.end]);
+}
+
+test "writeJsonString escapes control characters" {
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    writeJsonString(&w, "a\x01b");
+    try std.testing.expectEqualStrings("\"a\\u0001b\"", buf[0..w.end]);
 }

@@ -1,10 +1,14 @@
-// `rookctl ask` — pose a question to the human through the rook UI and
-// block until they answer. The RUI counterpart of `re`: where edit takes
-// over this pane, ask opens a split beside it, so an agent running here
-// keeps its window while the question gets its own.
+// `rookctl ask` — pose a question to the human and block until they
+// answer.
+//
+// It used to open a form in a split beside this pane. That form left in
+// the strip, so the RELAY is the only surface an ask can reach now: the
+// question goes to the mailbox and is answered from the phone. With no
+// relay configured the host refuses the create with 503 rather than
+// letting this park on its long-poll forever — see handleAskQueue.
 //
 // Questions ride in as JSON — an argument or stdin — shaped like Claude
-// Code's AskUserQuestion input, plus what rook's form can do that a TUI
+// Code's AskUserQuestion input, plus what a rook ask can carry that a TUI
 // cannot (mcp.go's schema is the full contract):
 //
 //	{"questions":[{"question":"…","header":"…","multiSelect":false,
@@ -35,7 +39,7 @@ import (
 const ackDeadline = 5 * time.Second
 
 // askQuestions validates the outer shape and returns the questions array
-// as raw JSON — the host and the form own the finer shapes.
+// as raw JSON — the host and the answering surface own the finer shapes.
 func askQuestions(input []byte) (json.RawMessage, error) {
 	var outer struct {
 		Questions json.RawMessage `json:"questions"`
