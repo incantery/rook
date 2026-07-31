@@ -16,7 +16,22 @@ pub fn build(b: *std.Build) void {
     // target+optimize MUST flow to the dependency or ghostty-vt builds at
     // its own default (Debug) even in a ReleaseFast bench build — which
     // showed up as a 100x parse throughput hole in the first benchmark.
-    if (b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize })) |dep| {
+    //
+    // emit-xcframework=false because we consume ghostty as a Zig module,
+    // not as a framework. Left at its default it is ON for a macOS host,
+    // and building it retargets to iOS — which wants the iphoneos SDK that
+    // only full Xcode ships. On a Command Line Tools-only machine ghostty's
+    // build.zig then dies at configure time with DarwinSdkNotFound, before
+    // one line of rook compiles. Off also defaults emit-macos-app off, so
+    // we never shell out to xcodebuild for an app bundle we don't want.
+    // One args value for every ghostty dep call below: differing args mean
+    // a differently-configured second instance, so this has to stay shared.
+    const ghostty_args = .{
+        .target = target,
+        .optimize = optimize,
+        .@"emit-xcframework" = false,
+    };
+    if (b.lazyDependency("ghostty", ghostty_args)) |dep| {
         exe_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     }
     if (b.lazyDependency("zig_objc", .{ .target = target, .optimize = optimize })) |dep| {
@@ -101,7 +116,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    if (b.lazyDependency("ghostty", .{ .target = target, .optimize = optimize })) |dep| {
+    if (b.lazyDependency("ghostty", ghostty_args)) |dep| {
         editor_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     }
     const editor_tests = b.addTest(.{ .root_module = editor_mod });

@@ -40,7 +40,12 @@ res="$CONTENTS/Resources"
 
 mkdir -p "$res"
 
-if command -v actool >/dev/null 2>&1 && [ -d "$icon_doc" ]; then
+# The probe RUNS actool rather than looking for it: /usr/bin/actool is a
+# stub present on every mac, so `command -v` says yes even with only the
+# Command Line Tools installed and the real tool absent — the fallback
+# below never fired and the build died on xcode-select's error instead.
+# `--version` is the cheapest call that makes the stub admit it.
+if actool --version >/dev/null 2>&1 && [ -d "$icon_doc" ]; then
 	# --minimum-deployment-target does not change the output here (13.0
 	# and 26.0 produce byte-identical files), but actool requires one.
 	plist=$(mktemp -t rook-icon)
@@ -57,7 +62,7 @@ if command -v actool >/dev/null 2>&1 && [ -d "$icon_doc" ]; then
 fi
 
 if [ "$STRICT" = "--strict" ]; then
-	echo "build-icon: actool not found — it ships with Xcode, not the" >&2
+	echo "build-icon: actool unusable — it ships with Xcode, not the" >&2
 	echo "  Command Line Tools. A release must carry the real icon, so" >&2
 	echo "  this is fatal here even though 'make install' would degrade." >&2
 	exit 1
@@ -66,7 +71,7 @@ fi
 # Fallback: the flattened 1024 render, resized into a full icns ladder.
 # A DIFFERENT composition from the one above (this one bakes in its own
 # container), which is why it is the fallback and not the source.
-echo "build-icon: actool not found (needs Xcode) — falling back to the" >&2
+echo "build-icon: actool unusable (needs Xcode) — falling back to the" >&2
 echo "  flattened appicon.png. The icon will not get the macOS 26" >&2
 echo "  treatment. Install Xcode for the real one." >&2
 
