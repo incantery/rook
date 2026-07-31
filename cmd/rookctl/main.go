@@ -29,9 +29,6 @@
 //	                        subverbs: show [<id>], gate [<id>], approve|reject|defer <id…>, score-all, score <id> <json>
 //	rookctl tasks         list a workspace's RookTasks: rookctl tasks [-w ws] [--work-type review] [--json]
 //	rookctl decisions     the drafter's ledger, last 7 days, with the verdict mix
-//	rookctl edit          take over this pane with the editor, vim-style, until :q
-//	                        (`re` is a symlink shim: re [file|dir…]; bare re is the
-//	                        empty buffer, `re .` opens the tree there, netrw-style)
 //	rookctl ask           ask the human a question in a split beside this pane,
 //	                        blocking until answered: rookctl ask '<json>' (or stdin);
 //	                        answer JSON on stdout, exit 0 answered / 1 dismissed
@@ -114,14 +111,8 @@ func (c *client) req(method, path string, body any) ([]byte, error) {
 
 func main() {
 	cmd := "ls"
-	// the `re` shim: a symlink to rookctl whose name IS the verb —
-	// `re file.go` reads as `rookctl edit file.go`
-	editArgs := os.Args[1:]
-	if filepath.Base(os.Args[0]) == "re" {
-		cmd = "edit"
-	} else if len(os.Args) > 1 {
+	if len(os.Args) > 1 {
 		cmd = os.Args[1]
-		editArgs = os.Args[2:]
 	}
 	var err error
 	switch cmd {
@@ -181,8 +172,6 @@ func main() {
 		err = runSetRelayToken()
 	case "set-cloud-token":
 		err = runSetCloudToken()
-	case "edit":
-		err = runEdit(editArgs)
 	case "ask":
 		err = runAsk(os.Args[2:])
 	case "mcp":

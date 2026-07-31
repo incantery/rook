@@ -53,12 +53,10 @@ func (m *fakeMailbox) sent() ([]relay.Ask, []string) {
 	return append([]relay.Ask(nil), m.published...), append([]string(nil), m.retracted...)
 }
 
-// hostWithAsk builds a host holding one session and one pending ask, with
-// an oob channel standing in for an attached app.
-func hostWithAsk(t *testing.T, escalated bool) (*Host, *session, chan []byte) {
+// hostWithAsk builds a host holding one session and one pending ask.
+func hostWithAsk(t *testing.T, escalated bool) (*Host, *session) {
 	t.Helper()
-	oob := make(chan []byte, 4)
-	s := &session{info: SessionInfo{ID: "s1", Workspace: "rook"}, oob: oob}
+	s := &session{info: SessionInfo{ID: "s1", Workspace: "rook"}}
 	h := &Host{
 		sessions: map[string]*session{"s1": s},
 		asks: map[string]*askState{"a1": {
@@ -70,7 +68,7 @@ func hostWithAsk(t *testing.T, escalated bool) (*Host, *session, chan []byte) {
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
 	t.Cleanup(h.cancel)
-	return h, s, oob
+	return h, s
 }
 
 // waitFor polls until cond holds — publish and retract run off the request
@@ -96,7 +94,7 @@ func settleQuiet() { time.Sleep(150 * time.Millisecond) }
 // waiter wakes, and every attached surface is told to stand down.
 func TestRemoteAnswerSettlesLikeTheDesk(t *testing.T) {
 	m := &fakeMailbox{}
-	h, _, oob := hostWithAsk(t, true)
+	h, _ := hostWithAsk(t, true)
 	h.relay = m.server(t)
 
 	answer := json.RawMessage(`{"answers":[{"question":"?","selected":["yes"]}]}`)
@@ -118,20 +116,14 @@ func TestRemoteAnswerSettlesLikeTheDesk(t *testing.T) {
 		t.Fatal("doneCh not closed — a blocked rookctl would still be parked")
 	}
 
-	// the pane stands down: the human decided this in another room
-	select {
-	case msg := <-oob:
-		if msg[0] != msgAskDone {
-			t.Fatalf("oob frame tag %#x, want msgAskDone", msg[0])
-		}
-		var body struct {
-			ID string `json:"id"`
-		}
-		if json.Unmarshal(msg[1:], &body); body.ID != "a1" {
-			t.Fatalf("stand-down names %q, want a1", body.ID)
-		}
-	default:
-		t.Fatal("no stand-down pushed — the pane would sit open on a settled ask")
+	// The pane stands down by the ask leaving the queue: there is no push
+	// any more (the frame socket went with the webview), so `done` IS the
+	// stand-down — GET /asks stops listing it and the app drops the form.
+	h.askMu.Lock()
+	listed := !h.asks["a1"].done
+	h.askMu.Unlock()
+	if listed {
+		t.Fatal("a settled ask must leave the queue — the pane would sit open on it")
 	}
 
 	// an answer that came THROUGH the relay was already consumed by the
@@ -146,7 +138,7 @@ func TestRemoteAnswerSettlesLikeTheDesk(t *testing.T) {
 // ignore the phone.
 func TestDeskAnswerRetractsFromTheMailbox(t *testing.T) {
 	m := &fakeMailbox{}
-	h, _, _ := hostWithAsk(t, true)
+	h, _ := hostWithAsk(t, true)
 	h.relay = m.server(t)
 
 	if got := h.settleAsk("a1", json.RawMessage(`{"canceled":true}`), sourceApp); got != settledOK {
@@ -162,7 +154,7 @@ func TestDeskAnswerRetractsFromTheMailbox(t *testing.T) {
 // remote configured, or the publish failed.
 func TestUnescalatedAskIsNotRetracted(t *testing.T) {
 	m := &fakeMailbox{}
-	h, _, _ := hostWithAsk(t, false)
+	h, _ := hostWithAsk(t, false)
 	h.relay = m.server(t)
 
 	h.settleAsk("a1", json.RawMessage(`{"canceled":true}`), sourceApp)
@@ -174,7 +166,7 @@ func TestUnescalatedAskIsNotRetracted(t *testing.T) {
 
 // First write wins across surfaces, and the loser is told which it was.
 func TestSettleRaceAndUnknown(t *testing.T) {
-	h, _, _ := hostWithAsk(t, false)
+	h, _ := hostWithAsk(t, false)
 	if got := h.settleAsk("a1", json.RawMessage(`1`), sourceApp); got != settledOK {
 		t.Fatalf("first settle = %v, want settledOK", got)
 	}
@@ -190,7 +182,7 @@ func TestSettleRaceAndUnknown(t *testing.T) {
 // the phone gets about which agent is talking.
 func TestEscalateCarriesWorkspace(t *testing.T) {
 	m := &fakeMailbox{}
-	h, _, _ := hostWithAsk(t, false)
+	h, _ := hostWithAsk(t, false)
 	h.relay = m.server(t)
 
 	h.askMu.Lock()
@@ -220,7 +212,7 @@ func TestEscalateCarriesWorkspace(t *testing.T) {
 // outstanding() is what keeps the poll off the network when nothing is
 // waiting: steady state must be idle.
 func TestOutstanding(t *testing.T) {
-	h, _, _ := hostWithAsk(t, false)
+	h, _ := hostWithAsk(t, false)
 	if h.outstanding() {
 		t.Fatal("un-escalated ask counts as outstanding — the poll would never idle")
 	}

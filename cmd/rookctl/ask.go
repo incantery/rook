@@ -28,6 +28,12 @@ import (
 	"time"
 )
 
+// ackDeadline bounds how long we wait for the app to acknowledge the edit
+// before declaring it unreachable — an old app ignores the frame kind
+// entirely (fail open), and this timeout is what turns that into a message
+// instead of a hang.
+const ackDeadline = 5 * time.Second
+
 // askQuestions validates the outer shape and returns the questions array
 // as raw JSON — the host and the form own the finer shapes.
 func askQuestions(input []byte) (json.RawMessage, error) {

@@ -79,9 +79,6 @@ func main() {
 	// PR state per worktree — the close-the-loop signal (merged → cleanup
 	// nudge). Absent gh just means the feature is off.
 	go h.WatchPRs(ctx)
-	// What rook costs the machine: process RSS/CPU by role, host runtime,
-	// and the long-lived map sizes that are the real leak gauges.
-	go h.WatchMonitor(ctx)
 
 	// Die clean on replacement: SIGTERM (hostclient/rook-host upgrading
 	// past us) must take the supervised children down too — before this,

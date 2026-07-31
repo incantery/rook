@@ -33,7 +33,7 @@ func (tl *typedLines) all() []string {
 // test names, with the doorbell's pty write captured.
 func askHost(t *testing.T, asks map[string]*askState) (*Host, *session, *typedLines) {
 	t.Helper()
-	s := &session{info: SessionInfo{ID: "s1", Workspace: "rook"}, oob: make(chan []byte, 8)}
+	s := &session{info: SessionInfo{ID: "s1", Workspace: "rook"}}
 	for _, a := range asks {
 		if a.doneCh == nil {
 			a.doneCh = make(chan struct{})
@@ -198,19 +198,45 @@ func TestOwedAnswerIsStillInTheDrain(t *testing.T) {
 	}
 }
 
-// A UI reload re-attaches and the host re-pushes what is still open —
-// undecided asks only, and only this session's.
-func TestPendingAskFramesAreTheUndecidedOnes(t *testing.T) {
+// The queue lists what is still open, and a SESSION-SCOPED ask is in it.
+//
+// It did not used to be: a session ask was pushed over that session's frame
+// socket and skipped here to avoid double-rendering it. That socket went
+// with the webview, so skipping made the MCP ask tool's questions invisible
+// — created, escalated, and listed nowhere. The session survives as
+// provenance, which is what the app renders "where did this come from" from.
+func TestAskQueueListsSessionScopedAsks(t *testing.T) {
 	h, _, _ := askHost(t, map[string]*askState{
-		"a1": {session: "s1", frame: []byte{msgAsk, 'a'}},
-		"a2": {session: "s1", frame: []byte{msgAsk, 'b'}},
-		"a3": {session: "other", frame: []byte{msgAsk, 'c'}},
+		"a1": {session: "s1", questions: json.RawMessage(`[{"q":"a"}]`)},
+		"a2": {session: "s1", questions: json.RawMessage(`[{"q":"b"}]`)},
+		"a3": {questions: json.RawMessage(`[{"q":"c"}]`)},
 	})
 	h.settleAsk("a2", json.RawMessage(`{"canceled":true}`), sourceApp)
 
-	frames := h.pendingAskFrames("s1")
-	if len(frames) != 1 || frames[0][1] != 'a' {
-		t.Fatalf("re-pushed %d frames %v, want just a1's", len(frames), frames)
+	w := httptest.NewRecorder()
+	h.handleAskQueue(w, httptest.NewRequest("GET", "/asks", nil))
+	var got []struct {
+		ID      string `json:"id"`
+		Session string `json:"session"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("queue listed %d asks %+v, want the two undecided", len(got), got)
+	}
+	seen := map[string]string{}
+	for _, g := range got {
+		seen[g.ID] = g.Session
+	}
+	if _, ok := seen["a2"]; ok {
+		t.Fatal("a settled ask must leave the queue")
+	}
+	if seen["a1"] != "s1" {
+		t.Fatalf("a session ask must carry its provenance: %+v", got)
+	}
+	if seen["a3"] != "" {
+		t.Fatalf("a session-less ask has no provenance to carry: %+v", got)
 	}
 }
 
@@ -270,16 +296,10 @@ func TestAskQueueCreatesListsAndSettles(t *testing.T) {
 	}
 }
 
-// Session-scoped asks were already delivered over their own socket. Listing
-// them in the queue too would double-render them in any app holding both
-// paths, so the queue is deliberately only the session-less ones.
-func TestAskQueueOmitsSessionScopedAsks(t *testing.T) {
-	h, _, _ := askHost(t, map[string]*askState{
-		"scoped": {session: "s1", questions: json.RawMessage(`[{"question":"pushed"}]`)},
-	})
-	w := httptest.NewRecorder()
-	h.handleAskQueue(w, httptest.NewRequest("GET", "/asks", nil))
-	if got := w.Body.String(); !strings.Contains(got, "[]") {
-		t.Errorf("session-scoped ask leaked into the queue: %s", got)
-	}
-}
+// This used to assert the OPPOSITE — that the queue omits session-scoped
+// asks, because they were delivered over that session's frame socket and
+// listing them too would double-render them. The socket is gone with the
+// webview it served, so the exclusion stopped being deduplication and
+// became a disappearance: an MCP ask was created, escalated to the relay,
+// and then listed nowhere any app could see it. See
+// TestAskQueueListsSessionScopedAsks for the behaviour that replaced it.

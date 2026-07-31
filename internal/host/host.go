@@ -25,7 +25,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/coder/websocket"
 	cpty "github.com/creack/pty"
 
 	"github.com/incantery/rook/internal/cloud"
@@ -59,21 +58,14 @@ type session struct {
 	mu   sync.Mutex // guards ring, frameConn
 	ring []byte     // recent output, for correlate/normRing — NOT replay
 
-	// The framed transport (termframe.go): a host-side emulator and the client
-	// that renders its grid diffs.
-	emu       Terminal
-	emuMu     sync.Mutex    // guards emu across readPump, render loop, resize
-	dirty     chan struct{} // buffered(1): pty output happened, render loop wake
-	frameConn *websocket.Conn
-	// lastInput is when this session last received a keystroke (UnixNano, 0 if
-	// never). The render loop reads it to let an echo skip the coalescing wait
-	// — see framedRenderLoop. Atomic because the input loop writes it on a
-	// different goroutine than the render loop that reads it, and neither may
-	// block the other over it.
-	lastInput atomic.Int64
-	// oob carries pre-framed control messages (edit requests) to the render
-	// loop — the frame socket's sole writer. Set per attach, nil when detached.
-	oob chan []byte
+	// emu parses this session's pty output. Nothing RENDERS it any more —
+	// the framed remote-client transport is gone and the app draws its own
+	// terminals — but a TUI still asks the terminal questions (DA, DSR),
+	// and readPump writes the emulator's replies back to the pty. An
+	// emulator that stopped answering would hang the coder in a
+	// host-spawned workflow stage.
+	emu   Terminal
+	emuMu sync.Mutex
 }
 
 type Host struct {
@@ -87,10 +79,6 @@ type Host struct {
 	// nudgeFn overrides nudge() in tests — nil in production, where the
 	// real actuator (claimed window, else spawned task) runs.
 	nudgeFn func(ws, prompt string) (mode, rookSession string, err error)
-
-	// pending `rookctl edit` requests (edit.go), keyed by edit id
-	editMu sync.Mutex
-	edits  map[string]*editState
 
 	// pending `rookctl ask` requests (ask.go), keyed by ask id
 	askMu sync.Mutex
@@ -144,11 +132,6 @@ type Host struct {
 
 	// um caches subscription usage windows (WatchUsage).
 	um *usageMon
-
-	// latestTag caches the newest published release (runUpdateCheck) —
-	// the /update indicator's answer.
-	updMu     sync.Mutex
-	latestTag string
 
 	// anchorMemo caches re-anchor diffs per (old,cur) blob pair
 	// (threads.go / reanchor.go).
@@ -207,7 +190,6 @@ func New() *Host {
 	// surprise spend.
 	h.reg.failRunningStages("host restarted — window lost")
 	go h.aw.runTranscript(h.ctx)
-	go h.runUpdateCheck()
 	h.initRelay()
 	h.initCloud()
 	return h
@@ -368,10 +350,9 @@ func (h *Host) spawn(cols, rows int, cwd, workspace string) (*session, error) {
 			Rows:      rows,
 			Created:   time.Now(),
 		},
-		pty:   f,
-		cmd:   cmd,
-		emu:   newTerminal(cols, rows),
-		dirty: make(chan struct{}, 1),
+		pty: f,
+		cmd: cmd,
+		emu: newTerminal(cols, rows),
 	}
 	h.sessions[s.info.ID] = s
 	h.mu.Unlock()
@@ -494,7 +475,9 @@ func (g *gather) signal(ch chan struct{}) {
 // while detached, and the ring is what a reattaching client replays. It is the
 // parse half of the gather pair (see gather).
 func (h *Host) readPump(s *session) {
-	g := &gather{notify: make(chan struct{}, 1), drained: make(chan struct{}, 1), input: &s.lastInput}
+	// input nil: the typing heuristic existed to let an echo skip the
+	// render loop's coalescing wait, and there is no render loop now.
+	g := &gather{notify: make(chan struct{}, 1), drained: make(chan struct{}, 1)}
 	go g.run(s.pty)
 	var chunk []byte
 	for {
@@ -517,7 +500,6 @@ func (h *Host) readPump(s *session) {
 				if len(reply) > 0 {
 					s.pty.Write(reply)
 				}
-				s.signalDirty()
 			}
 			// The ring is retained for correlate/normRing (transcript↔window
 			// binding), not for replay — the framed transport snapshots from a
@@ -579,15 +561,6 @@ func (h *Host) readPump(s *session) {
 			h.reg.remove(s.info.Workspace)
 		}
 	}
-	s.mu.Lock()
-	fc := s.frameConn
-	s.frameConn = nil
-	s.mu.Unlock()
-	// Close the framed socket so the client learns the session is gone and tears
-	// its pane down (without this, `exit` hung: shell dead, socket still open).
-	if fc != nil {
-		fc.Close(websocket.StatusNormalClosure, "session-exited")
-	}
 }
 
 func (h *Host) get(id string) *session {
@@ -630,7 +603,6 @@ func (h *Host) Handler() http.Handler {
 	})
 	mux.HandleFunc("/costs", h.handleCosts)
 	mux.HandleFunc("/drafts/", h.handleDraftDecide)
-	mux.HandleFunc("/edits/", h.handleEdits)
 	mux.HandleFunc("/asks/", h.handleAsks)
 	// The session-less ask queue: create and list. A client that does not
 	// hold a wire-v3 session socket (the zig app owns its ptys in-process
@@ -642,8 +614,6 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/tasks/", h.handleTask)
 	mux.HandleFunc("/agent/spend", h.handleSpend)
 	mux.HandleFunc("/decisions", h.handleDecisions)
-	mux.HandleFunc("/runtime", h.handleRuntime)
-	mux.HandleFunc("/update", h.handleUpdate)
 	// pprof rides the same authenticated loopback surface as everything
 	// else — no side door (README decision 3). Reach it with the token:
 	//   go tool pprof "http://127.0.0.1:$PORT/debug/pprof/heap?token=$TOKEN"
@@ -903,8 +873,6 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleWorkspaceRecents(w, r, name)
 	case action == "grep" && r.Method == http.MethodGet:
 		h.handleWorkspaceGrep(w, r, name)
-	case action == "gutter":
-		h.handleWorkspaceGutter(w, r, name)
 	// threads: file-anchored AI conversations (threads.go)
 	case action == "threads/submit" && r.Method == http.MethodPost:
 		h.handleThreadsSubmit(w, r, name)
@@ -1344,10 +1312,6 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 		// the shell's live working directory — feeds "set workspace root
 		// to here" and anything else that wants where the user actually is
 		writeJSON(w, map[string]string{"cwd": cwdOf(s.cmd.Process.Pid)})
-	case action == "edit" && r.Method == http.MethodPost:
-		// `rookctl edit` (the `re` shim): take over this session's pane
-		// with the editor, vim-style — see edit.go
-		h.handleSessionEdit(w, r, s)
 	case action == "ask" && r.Method == http.MethodPost:
 		// `rookctl ask` (and the MCP tool): a question for the human,
 		// rendered as a split beside this session's pane — see ask.go
@@ -1425,10 +1389,6 @@ func (h *Host) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.info.Cols, s.info.Rows = req.Cols, req.Rows
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
-	case action == "framed":
-		// The host-side-emulator transport (termframe.go): the only terminal
-		// transport since HI-C retired the raw byte-stream + ring replay.
-		h.handleAttachFramed(w, r, s)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}

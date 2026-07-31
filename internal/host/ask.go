@@ -43,9 +43,6 @@ type askState struct {
 	escalated bool
 	// the answer JSON the app posted — {"canceled":true} for a dismissal
 	answer json.RawMessage
-	// the msgAsk frame, kept so a fresh attach can re-push a pending ask:
-	// the blocked rookctl outlives a UI reload, so its question must too
-	frame []byte
 	// the questions themselves, for the session-LESS queue: a polling app
 	// has no frame to be re-pushed, so GET /asks serves these directly.
 	questions json.RawMessage
@@ -86,18 +83,7 @@ func (h *Host) handleSessionAsk(w http.ResponseWriter, r *http.Request, s *sessi
 
 	idb := make([]byte, 8)
 	rand.Read(idb)
-	payload := askPayload{ID: hex.EncodeToString(idb), Questions: req.Questions}
-
-	body, _ := json.Marshal(payload)
-	msg := append([]byte{msgAsk}, body...)
-
-	s.mu.Lock()
-	oob := s.oob
-	s.mu.Unlock()
-	if oob == nil {
-		http.Error(w, "no app attached to this session — is the rook window open?", http.StatusConflict)
-		return
-	}
+	id := hex.EncodeToString(idb)
 
 	h.askMu.Lock()
 	if h.asks == nil {
@@ -105,50 +91,25 @@ func (h *Host) handleSessionAsk(w http.ResponseWriter, r *http.Request, s *sessi
 	}
 	// lazy sweep: an abandoned ask (rookctl ^C'd, app gone) shouldn't
 	// accumulate forever
-	for id, a := range h.asks {
+	for old, a := range h.asks {
 		if time.Since(a.created) > 24*time.Hour {
-			delete(h.asks, id)
+			delete(h.asks, old)
 		}
 	}
 	st := &askState{
-		session: s.info.ID,
-		notify:  req.Notify,
-		frame:   msg,
-		doneCh:  make(chan struct{}),
-		created: time.Now(),
+		session:   s.info.ID,
+		notify:    req.Notify,
+		questions: req.Questions,
+		doneCh:    make(chan struct{}),
+		created:   time.Now(),
 	}
-	h.asks[payload.ID] = st
+	h.asks[id] = st
 	h.askMu.Unlock()
 
-	select {
-	case oob <- msg:
-	default:
-		h.askMu.Lock()
-		delete(h.asks, payload.ID)
-		h.askMu.Unlock()
-		http.Error(w, "app not keeping up — try again", http.StatusConflict)
-		return
-	}
-	// …and to whatever screen the human is actually near. Unconditional:
-	// there is no gesture to make before walking away, which is the point.
-	h.escalate(st, payload.ID, req.Questions)
-	writeJSON(w, map[string]string{"askId": payload.ID})
-}
-
-// pendingAskFrames returns the msgAsk frames of this session's undecided
-// asks — handleAttachFramed re-pushes them on every fresh attach, so a UI
-// reload re-renders the question instead of leaving the asker parked
-// against a pane that no longer exists. The app dedupes by ask id.
-func (h *Host) pendingAskFrames(sessionID string) [][]byte {
-	h.askMu.Lock()
-	defer h.askMu.Unlock()
-	var out [][]byte
-	for _, a := range h.asks {
-		if a.session == sessionID && !a.done {
-			out = append(out, a.frame)
-		}
-	}
-	return out
+	// Unconditional escalation: there is no gesture to make before walking
+	// away, which is the point.
+	h.escalate(st, id, req.Questions)
+	writeJSON(w, map[string]string{"askId": id})
 }
 
 // askDoorbell types a one-line pointer at the asking session's pty — the
@@ -338,16 +299,7 @@ func (h *Host) pushAskDone(sessionID, askID string) {
 	if err != nil {
 		return
 	}
-	s.mu.Lock()
-	oob := s.oob
-	s.mu.Unlock()
-	if oob == nil {
-		return
-	}
-	select {
-	case oob <- append([]byte{msgAskDone}, body...):
-	default:
-	}
+	_ = body
 }
 
 // handleAsks routes /asks/{id} (GET, ?wait=seconds long-poll),
@@ -385,13 +337,12 @@ func (h *Host) handleAskQueue(w http.ResponseWriter, r *http.Request) {
 			if a.done {
 				continue
 			}
-			// Session-scoped asks were already delivered over their
-			// socket; listing them here would double-render them in an
-			// app that holds both paths.
-			if a.session != "" {
-				continue
-			}
-			out = append(out, pending{ID: id, Questions: a.questions, Cwd: a.cwd})
+			// Session-scoped asks used to be delivered over that
+			// session's frame socket and were skipped here to avoid
+			// double-rendering. There is no such socket any more — the
+			// queue is the only delivery — so they belong in this list,
+			// with their session as the provenance the app renders from.
+			out = append(out, pending{ID: id, Questions: a.questions, Cwd: a.cwd, Session: a.session})
 		}
 		h.askMu.Unlock()
 		// Oldest first is the /attention rule and the right one here too:

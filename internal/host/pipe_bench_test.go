@@ -31,11 +31,10 @@ func benchPipeWith(b *testing.B, line string, mk func(cols, rows int) Terminal) 
 	const cols, rows = 405, 113
 	cpty.Setsize(ptm, &cpty.Winsize{Cols: cols, Rows: rows})
 	s := &session{
-		info:  SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
-		pty:   ptm,
-		cmd:   exec.Command("true"),
-		emu:   mk(cols, rows),
-		dirty: make(chan struct{}, 1),
+		info: SessionInfo{ID: "s1", Name: "s1", Workspace: "t", Cols: cols, Rows: rows, Created: time.Now()},
+		pty:  ptm,
+		cmd:  exec.Command("true"),
+		emu:  mk(cols, rows),
 	}
 	h.mu.Lock()
 	h.sessions["s1"] = s
