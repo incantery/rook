@@ -2,8 +2,6 @@ package host
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,10 +10,13 @@ import (
 	"time"
 )
 
-// TestOverview covers the mission-control endpoint's two tiers: idle
-// workspaces come back as bare list items (no probes spent on them), live
-// ones carry the status rollup — and unregistered workspaces with live
-// sessions still appear.
+// TestOverview covers the projection's two tiers: idle workspaces come back
+// as bare list items (no probes spent on them), live ones carry the status
+// rollup — and unregistered workspaces with live sessions still appear.
+//
+// It used to drive GET /overview. The endpoint went with the agent deck in
+// the strip and overviewItems() is now called directly, which is also how
+// its one remaining caller (cloudProject) reaches it.
 func TestOverview(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	// overview runs through workspaceList, which reads config.Load() fresh for
@@ -50,23 +51,8 @@ func TestOverview(t *testing.T) {
 	h.sessions["s1"] = s
 	h.mu.Unlock()
 
-	srv := httptest.NewServer(h.Handler())
-	defer srv.Close()
 
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/overview", nil)
-	req.Header.Set("Authorization", "Bearer "+h.Token())
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /overview: %d", resp.StatusCode)
-	}
-	var items []overviewItem
-	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
-		t.Fatal(err)
-	}
+	items := h.overviewItems()
 
 	byName := map[string]overviewItem{}
 	for _, it := range items {
@@ -213,19 +199,7 @@ func TestOverviewRowsCarryIdentityEndToEnd(t *testing.T) {
 	}
 	h.aw.mu.Unlock()
 
-	srv := httptest.NewServer(h.Handler())
-	defer srv.Close()
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/overview", nil)
-	req.Header.Set("Authorization", "Bearer "+h.Token())
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var items []overviewItem
-	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
-		t.Fatal(err)
-	}
+	items := h.overviewItems()
 
 	var got *overviewAgent
 	for _, it := range items {
@@ -234,7 +208,7 @@ func TestOverviewRowsCarryIdentityEndToEnd(t *testing.T) {
 		}
 	}
 	if got == nil {
-		t.Fatalf("no correlated agent row in /overview: %+v", items)
+		t.Fatalf("no correlated agent row in the projection: %+v", items)
 	}
 	// the two ids, from two different objects — the reason for all of this
 	if got.SessionID != "transcript-abc" {

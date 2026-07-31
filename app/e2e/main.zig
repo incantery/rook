@@ -47,7 +47,6 @@ const scenarios = [_]Scenario{
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
     .{ .name = "sidepane", .what = "side pane retiles the grid, flips edges, and holds the inbox", .run = sidepane },
     .{ .name = "asks", .what = "a question renders, takes keys, and produces the answer JSON", .run = asks },
-    .{ .name = "deck", .what = "the agent deck opens focused and yields the keys back", .run = deck },
     .{ .name = "threads", .what = "the threads panel, and :Thread* refuses a non-thread buffer", .run = threads },
     .{ .name = "review", .what = "the review panel opens focused and keeps its verdict keys", .run = review },
     .{ .name = "threadrows", .what = "the sidebar lists real threads and re-anchors their lines", .run = threadRows },
@@ -891,16 +890,20 @@ fn whichkey(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(try app.ctl("whichkey"), "closed", "the chord spends the sheet");
     try h.expectContains(try app.ctl("sidepane"), "panel:review", "the chord ran through the sheet");
 
-    // A row CLICK runs the command it teaches. The deck row, because
-    // its panel state is blind-checkable the same way.
+    // A row CLICK runs the command it teaches. The review row, because
+    // its panel state is blind-checkable the same way. (This was the deck
+    // row until the agent deck left in the strip — same property, and the
+    // chord above already closed the review panel, so the click reopens it.)
+    _ = try app.ctl("run review.changes");
+    try h.expectContains(try app.ctl("sidepane"), "closed", "review starts shut for the click");
     const rows = try wkReveal(app);
-    const deck_pt = wkPoint(rows, "Agent Deck") orelse {
-        std.debug.print("      no deck row point; whichkey said: {s}\n", .{rows});
+    const review_pt = wkPoint(rows, "Review") orelse {
+        std.debug.print("      no review row point; whichkey said: {s}\n", .{rows});
         return error.AssertFailed;
     };
-    _ = try app.ctlFmt("click {d} {d}", .{ deck_pt[0], deck_pt[1] });
+    _ = try app.ctlFmt("click {d} {d}", .{ review_pt[0], review_pt[1] });
     try h.expectContains(try app.ctl("whichkey"), "closed", "the click spends the chord");
-    try h.expectContains(try app.ctl("sidepane"), "panel:deck", "the row click ran its command");
+    try h.expectContains(try app.ctl("sidepane"), "panel:review", "the row click ran its command");
 
     // A click OUTSIDE the sheet dismisses without running anything:
     // re-arm, wait, click the middle of the pane area.
@@ -1534,56 +1537,6 @@ fn asks(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("enter");
     const esc = try app.ctl("ask-answer");
     try h.expectContains(esc, "\\\"", "quotes are escaped in the answer");
-}
-
-// ---------------------------------------------------------------- deck
-
-fn deck(gpa: std.mem.Allocator, bin: []const u8) !void {
-    const app = try h.Instance.start(gpa, bin, .{});
-    defer {
-        app.stop();
-        app.deinit();
-    }
-    const wide = try paneCols(app);
-
-    _ = try app.ctl("run agent.view");
-    const st = try app.ctl("sidepane");
-    try h.expectContains(st, "panel:deck", "the deck takes the side pane");
-    // No daemon in the sandbox, so the honest render is "unreachable" —
-    // NOT "no agents running", which would claim we looked and found
-    // nothing. Same rule as the inbox.
-    try h.expectContains(st, "host unreachable", "fails open, and says which");
-    try h.expect(try paneCols(app) < wide, "deck retiles like any tenant", .{});
-
-    // It opens FOCUSED — unlike the inbox, it is a list you navigate, so
-    // handing it the keys is the action you asked for. Proof: typing
-    // must not reach the shell.
-    _ = try app.ctl("type jjjj");
-    try h.expectContains(try app.ctl("dump"), "e2e$", "deck keys did NOT reach the shell");
-
-    // ⌃G means "go to its pane" in the deck exactly as it does in the ask
-    // form; Enter means "open it" (its transcript). With no host there is
-    // nothing to open, so this only asserts neither key wedges the form.
-    _ = try app.ctl("key 07");
-    _ = try app.ctl("key 0d");
-    try h.expectContains(try app.ctl("sidepane"), "panel:deck", "deck survives enter/^G with no host");
-
-    // ESC yields the keys back without closing the panel — you want to
-    // keep looking at the list while you work.
-    _ = try app.ctl("key 1b");
-    try h.expectContains(try app.ctl("sidepane"), "panel:deck", "ESC leaves the panel open");
-    _ = try app.ctl("type back-in-shell");
-    _ = try app.ctl("enter");
-    try app.waitTextCount("back-in-shell", 2, 5_000);
-
-    // Toggling the same panel closes it and gives the columns back.
-    _ = try app.ctl("run agent.view");
-    try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
-    try h.expect(try paneCols(app) > 1, "columns came back", .{});
-
-    // The deck is a registry command like any other, so the palette
-    // lists it — that is the whole point of the spine.
-    try h.expectContains(try app.ctl("commands"), "agent.view", "registered as a command");
 }
 
 // ------------------------------------------------------------- threads

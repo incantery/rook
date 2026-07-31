@@ -562,9 +562,8 @@ func (h *Host) Handler() http.Handler {
 	mux.HandleFunc("/workspaces", h.handleWorkspaces)
 	mux.HandleFunc("/workspaces/", h.handleWorkspace)
 	// cross-workspace status in one call — mission control's poll
-	mux.HandleFunc("/overview", h.handleOverview)
 	// every live claude session agentwatch knows about, uncorrelated —
-	// debugging surface now, the drafter's read surface via /agents/{id}
+	// the sensor's raw dump, for debugging (`rookctl agents`)
 	mux.HandleFunc("/agents", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, h.aw.snapshot())
 	})
@@ -624,7 +623,7 @@ func allowedWorkspace(name, worktreeOf string, allow map[string]bool) bool {
 }
 
 // workspaceList assembles the workspace list with live-session counts and
-// PR snapshots — GET /workspaces verbatim, and /overview's base layer.
+// PR snapshots — GET /workspaces verbatim.
 func (h *Host) workspaceList() []workspaceListItem {
 	counts := map[string]int{}
 	h.mu.Lock()

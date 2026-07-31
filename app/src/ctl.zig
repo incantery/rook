@@ -597,21 +597,6 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     }
                     if (app.thr.more > 0) w.print("+{d} more\n", .{app.thr.more}) catch {};
                 },
-                .deck => {
-                    if (!app.deck.live) {
-                        _ = w.write("host unreachable\n") catch 0;
-                    } else if (app.deck.n == 0) {
-                        _ = w.write("no agents running\n") catch 0;
-                    } else for (app.deck.slice(), 0..) |*a, i| {
-                        w.print("{s}{s}\t{s}\t{s}\n", .{
-                            @as([]const u8, if (i == app.deck_sel) "*" else " "),
-                            @tagName(a.state),
-                            a.cwd.get(),
-                            a.what.get(),
-                        }) catch break;
-                    }
-                    if (app.deck.more > 0) w.print("+{d} more\n", .{app.deck.more}) catch {};
-                },
                 .ask => {
                     if (app.ask) |a| {
                         const q = a.questions[app.ask_qi];

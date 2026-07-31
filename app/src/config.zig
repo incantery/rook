@@ -1006,7 +1006,6 @@ fn defaultBinds(kb: *Keybinds) void {
     // …and back to a question you stepped away from.
     kb.bind('q', .{ .action = .panel_ask });
     // The agent deck — the wails app's <leader>v, kept.
-    kb.bind('v', .{ .action = .panel_deck });
     // Threads, likewise.
     kb.bind('t', .{ .action = .panel_threads });
     // Review — the wails app's <leader>g (the Gate).

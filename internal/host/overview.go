@@ -1,19 +1,20 @@
 package host
 
 import (
-	"net/http"
 	"slices"
 	"sort"
 	"sync"
 	"time"
 )
 
-// GET /overview: the mission-control payload (issue #12) — every workspace
-// in ONE call, each carrying the live rollup its dashboard would show:
-// agent states, attention, git, foreground processes. One endpoint instead
-// of N status calls so the landing screen can poll it like the dashboard
-// polls /workspaces/{name}/status. Old frontends never ask; new frontends
-// fall back to /workspaces when this 404s on an old daemon.
+// overviewItems is the machine's live picture: every workspace in ONE
+// pass, each carrying its live rollup — agent states, attention, git,
+// foreground processes.
+//
+// It was GET /overview, the webview's mission-control payload. The endpoint
+// went with the agent deck in the strip; the projection stayed, because
+// cloudProject reads it to build the status snapshot this machine pushes.
+// That is now its only caller, and cloudProject is the privacy line.
 
 // overviewAgent is the row-sized slice of an AgentStatus: enough to say what
 // the agent is doing (and asking), and enough to OPEN it.
@@ -23,8 +24,9 @@ import (
 // an agent could only be addressed as "the workspace it happens to be in". A
 // row you press ↵ on is a different contract: SessionID addresses the
 // transcript (the conversation view), RookSession addresses the pty (raw
-// attach). Two ids because they are two different things, and the deck offers
-// both verbs. Same asymmetry PaneRef had, same fix.
+// attach). Two ids because they are two different things. Same asymmetry
+// PaneRef had, same fix. The deck that pressed ↵ has left; the ids stay,
+// because whatever renders this list next needs to address both.
 //
 // In practice BOTH are always set, and that is worth knowing rather than
 // hoping. Rows are built from correlated sessions only (see handleOverview),
@@ -73,18 +75,6 @@ type overviewItem struct {
 	Attention int             `json:"attention,omitempty"`
 }
 
-func (h *Host) handleOverview(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	writeJSON(w, h.overviewItems())
-}
-
-// overviewItems assembles the mission-control rollup. Split from the
-// handler because the cloud reporter (cloud.go) sends the same picture the
-// deck renders — one assembly, two consumers, no drift between what you
-// see at the desk and what you see on your phone.
 func (h *Host) overviewItems() []overviewItem {
 	items := h.workspaceList()
 	out := make([]overviewItem, len(items))

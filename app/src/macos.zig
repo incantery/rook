@@ -341,7 +341,7 @@ pub const Side = enum { left, right };
 /// where §2's inbox/deck/threads/review join it, the same way pal_mode
 /// grew a second list. Deliberately an enum rather than a vtable — a
 /// tenant interface designed against ONE tenant is a guess.
-pub const Panel = enum { attention, ask, deck, threads, review, search };
+pub const Panel = enum { attention, ask, threads, review, search };
 
 /// One clickable row of the which-key sheet. `click` is false for the
 /// collapsed "1…9" teaching row — a row that says "tabs 1–9" and then
@@ -573,16 +573,11 @@ pub const App = struct {
     /// closed panel must cost nothing, including no host traffic.
     attention: @import("attention.zig").Snapshot = .{},
     attention_digest: u64 = 0,
-    /// The agent deck, refreshed by deckThread while its panel is open.
-    deck: @import("agents.zig").Snapshot = .{},
-    deck_digest: u64 = 0,
-    deck_sel: usize = 0,
     /// Set when the panel opens so the poller fetches immediately
     /// instead of after its next sleep.
     attention_wake: std.atomic.Value(bool) = .init(false),
     /// Set when an answer is queued, so the poster posts it now.
     ask_wake: std.atomic.Value(bool) = .init(false),
-    deck_wake: std.atomic.Value(bool) = .init(false),
     /// An agent id whose transcript has been requested. The fetch is
     /// blocking HTTP over a document-sized body, so the key path only
     /// ever queues — transcriptThread does the work and opens the pane.
@@ -1172,11 +1167,6 @@ pub const App = struct {
         // Transcript fetches, on demand.
         if (std.Thread.spawn(.{}, transcriptThread, .{self})) |t| t.detach() else |err| {
             std.debug.print("rook transcript: thread failed: {}\n", .{err});
-        }
-
-        // The agent deck, gated on its panel like the inbox.
-        if (std.Thread.spawn(.{}, deckThread, .{self})) |t| t.detach() else |err| {
-            std.debug.print("rook deck: thread failed: {}\n", .{err});
         }
 
         // The asks loop. Polls unconditionally: a question is the app's
@@ -2049,7 +2039,6 @@ pub const App = struct {
         if (!self.side_focus) return false;
         switch (self.side_panel) {
             .ask => self.askKeyLocked(bytes),
-            .deck => self.deckKeyLocked(bytes),
             .threads => self.threadsKeyLocked(bytes),
             .review => self.reviewKeyLocked(bytes),
             .search => self.searchKeyLocked(bytes),
@@ -2601,7 +2590,6 @@ pub const App = struct {
             .panel_search => self.openSearchPanel(),
             .app_fullscreen => self.requestFullscreen(),
             .panel_attention => self.toggleSidePane(.attention),
-            .panel_deck => self.toggleDeck(),
             .panel_threads => self.toggleThreads(),
             .panel_review => self.toggleReview(),
             .thread_note => self.threadVerb("note"),
@@ -3547,55 +3535,6 @@ pub const App = struct {
         }
     }
 
-    pub fn deckKeyLocked(self: *App, bytes: []const u8) void {
-        const n = self.deck.slice().len;
-        var i: usize = 0;
-        while (i < bytes.len) {
-            const b = bytes[i];
-            if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
-                switch (bytes[i + 2]) {
-                    'A' => self.deck_sel -|= 1,
-                    'B' => self.deck_sel = @min(self.deck_sel + 1, n -| 1),
-                    else => {},
-                }
-                i += 3;
-                continue;
-            }
-            switch (b) {
-                0x1b => { // ESC yields the keys back to the panes
-                    self.side_focus = false;
-                    self.scene_dirty = true;
-                    return;
-                },
-                'k', 0x10 => self.deck_sel -|= 1,
-                'j', 0x0e => self.deck_sel = @min(self.deck_sel + 1, n -| 1),
-                'g' => self.deck_sel = 0,
-                'G' => self.deck_sel = n -| 1,
-                '\r', '\n' => {
-                    // Enter OPENS the agent — its transcript. That is what
-                    // "open this row" means in a deck, and it is the
-                    // question the deck could not answer before: what did
-                    // it actually say.
-                    if (self.deck_sel < n)
-                        self.requestTranscriptLocked(self.deck.slice()[self.deck_sel].id.get());
-                    self.scene_dirty = true;
-                    return;
-                },
-                0x07 => { // ⌃G — go to its pane, same meaning as in the ask form
-                    if (self.deck_sel < n) {
-                        const a = self.deck.slice()[self.deck_sel];
-                        if (self.jumpToCwdLocked(a.cwd.get())) self.side_focus = false;
-                    }
-                    self.scene_dirty = true;
-                    return;
-                },
-                else => {},
-            }
-            i += 1;
-        }
-        self.scene_dirty = true;
-    }
-
     /// Ask for an agent's transcript. Returns immediately — the fetch is
     /// a document-sized blocking HTTP read and must not sit on the key
     /// path. Caller holds draw_lock.
@@ -3797,28 +3736,6 @@ pub const App = struct {
         self.side_focus = true;
         self.relayoutLocked();
         self.scene_dirty = true;
-    }
-
-    /// Toggle the deck. Unlike the inbox it opens FOCUSED: it is a
-    /// navigable list whose whole point is that you move through it and
-    /// pick one, so handing it the keys is the action you wanted.
-    pub fn toggleDeck(self: *App) void {
-        {
-            self.draw_lock.lock();
-            defer self.draw_lock.unlock();
-            if (self.side_open and self.side_panel == .deck) {
-                self.side_open = false;
-                self.side_focus = false;
-            } else {
-                self.side_panel = .deck;
-                self.side_open = true;
-                self.side_focus = true;
-                self.deck_sel = 0;
-            }
-            self.relayoutLocked();
-            self.scene_dirty = true;
-        }
-        self.deck_wake.store(true, .release);
     }
 
     pub fn toggleThreads(self: *App) void {
@@ -5614,7 +5531,6 @@ pub const App = struct {
         .{ .glyph = "\u{f07b}", .title = "explorer", .action = .tree_toggle },
         .{ .glyph = "\u{f002}", .title = "search", .action = .panel_search },
         .{ .glyph = "\u{f126}", .title = "scm", .action = .diff_open },
-        .{ .glyph = "\u{f085}", .title = "agents", .action = .panel_deck },
         .{ .glyph = "\u{f00c}", .title = "review", .action = .panel_review },
     };
 
@@ -5623,7 +5539,6 @@ pub const App = struct {
     /// is modal) — the rest never light.
     fn railActive(self: *App, action: cfgpkg.Action) bool {
         return switch (action) {
-            .panel_deck => self.side_open and self.side_panel == .deck,
             .panel_review => self.side_open and self.side_panel == .review,
             else => false,
         };
@@ -5769,7 +5684,6 @@ pub const App = struct {
         _ = ui.text(tx, y + (row_h - ch) / 2, switch (self.side_panel) {
             .attention => "ATTENTION",
             .ask => "QUESTION",
-            .deck => "AGENTS",
             .threads => "THREADS",
             .review => "REVIEW",
             .search => "SEARCH",
@@ -5789,7 +5703,6 @@ pub const App = struct {
         switch (self.side_panel) {
             .attention => self.drawAttention(ui, r, y),
             .ask => self.drawAsk(ui, r, y),
-            .deck => self.drawDeck(ui, r, y),
             .threads => self.drawThreads(ui, r, y),
             .review => self.drawReview(ui, r, y),
             .search => self.drawSearch(ui, r, y),
@@ -6005,70 +5918,6 @@ pub const App = struct {
         }
         if (self.side_focus)
             _ = ui.text(tx, y + (row_h - ch) / 2, "j/k · enter opens", th.bar_fg, bg);
-    }
-
-    fn drawDeck(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
-        const cw = self.renderer.cell_w;
-        const ch = self.renderer.cell_h;
-        const row_h = self.bar_h;
-        const bg = self.glassBg(th.bar_bg);
-        const tx = r.x + self.m.gutter;
-        var y = top;
-        var clipbuf: [256]u8 = undefined;
-
-        if (!self.deck.live) {
-            _ = ui.text(tx, y + (row_h - ch) / 2, "host unreachable", th.bar_fg, bg);
-            return;
-        }
-        if (self.deck.n == 0) {
-            _ = ui.text(tx, y + (row_h - ch) / 2, "no agents running", th.bar_fg, bg);
-            return;
-        }
-
-        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - self.m.gutter * 2, cw)));
-        const avail = r.y + r.h - top - row_h; // keep a line for the hint
-        const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h * 2)));
-        const shown = @min(self.deck.slice().len, fits);
-
-        for (self.deck.slice()[0..shown], 0..) |*a, i| {
-            const selected = i == self.deck_sel;
-            if (selected) self.drawRowSelection(ui, r, y, row_h * 2);
-            // The state dot carries the whole triage: what needs you is
-            // the accent, what is moving is normal, what is idle recedes.
-            const dot: []const u8 = switch (a.state) {
-                .needs_input => "● ",
-                .working => "◐ ",
-                .quiet => "○ ",
-            };
-            const dotfg = switch (a.state) {
-                .needs_input => th.accent,
-                .working => th.bar_value,
-                .quiet => th.bar_fg,
-            };
-            var mx = tx;
-            mx += ui.textOver(mx, y + (row_h - ch) / 2, dot, dotfg);
-            // Workspace-relative, not the last path segment: an agent in
-            // rook/app must not read as "app", which every repo has.
-            var lblbuf: [96]u8 = undefined;
-            const name = self.cwdLabel(a.cwd.get(), &lblbuf);
-            _ = ui.textOver(mx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, name, cols -| 2), if (selected) th.bar_value else th.bar_fg);
-            if (a.interactive)
-                _ = ui.textOverRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2, "picker", th.bar_fg);
-            y += row_h;
-            const what = a.what.get();
-            _ = ui.textOver(tx + cw * 2, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, what, cols -| 2), th.bar_fg);
-            y += row_h;
-        }
-
-        const hidden = self.deck.slice().len - shown + self.deck.more;
-        if (hidden > 0) {
-            var buf: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "+{d} more", .{hidden}) catch "+more";
-            _ = ui.text(tx, y + (row_h - ch) / 2, s, th.bar_fg, bg);
-            y += row_h;
-        }
-        if (self.side_focus)
-            _ = ui.text(tx, y + (row_h - ch) / 2, "j/k · enter opens · ^G goes there", th.bar_fg, bg);
     }
 
     fn drawAsk(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
@@ -7439,36 +7288,6 @@ fn transcriptThread(app: *App) void {
 /// The agent deck's poller. Same contract as the inbox's: fetches only
 /// while its panel is open, and dirties the scene only on a digest
 /// change, so idle frames stay 0.
-fn deckThread(app: *App) void {
-    const agents = @import("agents.zig");
-    while (true) {
-        const open = blk: {
-            app.draw_lock.lock();
-            defer app.draw_lock.unlock();
-            break :blk app.side_open and app.side_panel == .deck;
-        };
-        if (open) {
-            const snap = agents.fetch(app.gpa, app.io);
-            const d = snap.digest();
-            app.draw_lock.lock();
-            if (d != app.deck_digest) {
-                app.deck = snap;
-                app.deck_digest = d;
-                // Keep the cursor in range when the list shrinks under
-                // it — an agent can exit while you are looking at it.
-                if (app.deck_sel >= app.deck.n) app.deck_sel = app.deck.n -| 1;
-                app.scene_dirty = true;
-            }
-            app.draw_lock.unlock();
-        }
-        var slept: u32 = 0;
-        while (slept < 2000) : (slept += 100) {
-            if (app.deck_wake.swap(false, .acq_rel)) break;
-            _ = usleep(100 * 1000);
-        }
-    }
-}
-
 extern "c" fn usleep(us: u32) c_int;
 
 fn inputKick(ctx: *anyopaque, sess: *sessionpkg.Session) void {

@@ -95,7 +95,7 @@ type Config struct {
 	// WorkspaceAllow is a presentation-only visibility filter: when
 	// non-empty, only the named workspaces (and any worktree carved from
 	// one of them) appear in the host's workspace list — the dashboard,
-	// mission control, and /overview. Empty/unset means every workspace
+	// mission control. Empty/unset means every workspace
 	// shows. `workspace-allow = rook, dora`. Not access control:
 	// registration and per-workspace endpoints are unaffected.
 	WorkspaceAllow []string `json:"workspaceAllow"`

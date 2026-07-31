@@ -248,16 +248,6 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(asks_tests).step);
 
-    // The agent deck's wire mapping, pinned against a real /agents
-    // response — a field renamed upstream shows up as a failing test
-    // rather than as a silently empty deck.
-    const agents_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/agents.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    test_step.dependOn(&b.addRunArtifact(agents_tests).step);
-
     // The session view's record→document rendering. Its own root because
     // the shape is the host's to change and a silent mismatch would show
     // up as an empty or misleading transcript, not a crash.
