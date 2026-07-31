@@ -6,8 +6,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/incantery/rook/internal/cloud"
 )
 
 // agentwatch is the attention router's sensor layer (docs/agent.md,
@@ -46,12 +44,6 @@ type agentWatch struct {
 	// The workflow engine keys stage completion on this distinction: an
 	// agent asking a question has NOT finished its stage.
 	onTurnFinished func(sessionID string)
-
-	// The usage outbox (usagepush.go): one event per API response, awaiting
-	// the next cloud push. usagePush gates the queueing — without a cloud
-	// nothing drains it, so it stays off rather than filling to its cap.
-	usagePush bool
-	usageOut  []cloud.UsageEvent
 }
 
 // histMsg is one entry of a session's recent-conversation ring: the context

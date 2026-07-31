@@ -124,9 +124,6 @@ type Host struct {
 	// exactly, and for one ioctl. Keyed like claims: transcript session id.
 	claimFg map[string]int
 
-	// um caches subscription usage windows (WatchUsage).
-	um *usageMon
-
 	// anchorMemo caches re-anchor diffs per (old,cur) blob pair
 	// (threads.go / reanchor.go).
 	anchorMemo hunkMemo
@@ -166,7 +163,6 @@ func New() *Host {
 		claims:   make(map[string]string),
 		claimFg:  make(map[string]int),
 		binds:    make(map[string]string),
-		um:       newUsageMon(),
 		prm:      newPRMon(),
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
@@ -584,12 +580,6 @@ func (h *Host) Handler() http.Handler {
 	})
 	mux.HandleFunc("/agents/", h.handleAgent)
 	mux.HandleFunc("/attention", h.handleAttention)
-	// subscription usage windows, cached from the cost-weighted prober —
-	// {windows: []} until the first probe lands (or claude is absent)
-	mux.HandleFunc("/usage", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, h.um.current())
-	})
-	mux.HandleFunc("/costs", h.handleCosts)
 	mux.HandleFunc("/asks/", h.handleAsks)
 	// The session-less ask queue: create and list. A client that does not
 	// hold a wire-v3 session socket (the zig app owns its ptys in-process

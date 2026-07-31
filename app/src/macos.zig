@@ -456,7 +456,7 @@ pub const App = struct {
     /// The chrome arrangement (config: top-bar, status-left,
     /// status-right, tab-style — or a preset bundling them). The two
     /// bars share one segment vocabulary; identity is arrangement.
-    cfg_top_bar: cfgpkg.SegList = cfgpkg.segs(.{ .tabs, .title, .usage }),
+    cfg_top_bar: cfgpkg.SegList = cfgpkg.segs(.{ .tabs, .title }),
     cfg_status_left: cfgpkg.SegList = cfgpkg.segs(.{ .workspace, .branch, .cwd }),
     cfg_status_right: cfgpkg.SegList = cfgpkg.segs(.{ .hints, .hud }),
     cfg_tab_style: cfgpkg.TabStyle = .chips,
@@ -686,11 +686,6 @@ pub const App = struct {
     /// A queued `:qa`-family request. See editorQuitAll for why it cannot
     /// run where it is asked for.
     pending_quit_all: ?struct { write: bool, quit: bool, force: bool } = null,
-
-    /// Subscription usage cluster (host-cached windows), refreshed by
-    /// a background thread every 30s; shown right-aligned in the title
-    /// zone. Guarded by draw_lock.
-    usage: @import("usage.zig").Snapshot = .{},
 
     /// rook-host: the daemon we spawned (or adopted) at launch, and the
     /// port+token every host-backed panel will reach it through. Filled
@@ -1157,11 +1152,6 @@ pub const App = struct {
             @as(objc.c.id, null),
             &term_ctx,
         });
-
-        // Usage cluster: poll the host's cached snapshot off-thread.
-        if (std.Thread.spawn(.{}, usageThread, .{self})) |t| t.detach() else |err| {
-            std.debug.print("rook usage: thread failed: {}\n", .{err});
-        }
 
         // The attention inbox. Spawned always, but it only FETCHES while
         // its panel is open — a closed panel owes the host nothing.
@@ -5353,7 +5343,6 @@ pub const App = struct {
                 break :blk menu + 11 * cw + 2 * cw;
             },
             .hud => if (self.hud_right_len > 0) @as(f32, @floatFromInt(self.hud_right_len)) * cw + 2 * cw else 0,
-            .usage => if (self.usage.len > 0) @as(f32, @floatFromInt(self.usage.len)) * cw + 2 * cw else 0,
             .tabs => self.barTabsSeg(null, 0, 0),
             // Top-strip only; in the status bar it renders nothing.
             .title => 0,
@@ -5407,18 +5396,6 @@ pub const App = struct {
             .hud => {
                 if (self.hud_right_len > 0) {
                     x.* += ui.text(x.*, ty, self.hud_right[0..self.hud_right_len], statusValue(), bg);
-                    x.* += 2 * cw;
-                }
-            },
-            .usage => {
-                if (self.usage.len > 0) {
-                    const ufg = if (self.usage.worst >= 90)
-                        th.ed_err
-                    else if (self.usage.worst >= 70)
-                        statusAccent()
-                    else
-                        statusFg();
-                    x.* += ui.text(x.*, ty, self.usage.slice(), ufg, bg);
                     x.* += 2 * cw;
                 }
             },
@@ -5715,15 +5692,6 @@ pub const App = struct {
             const name = self.activeSpace().label();
             const nx = (self.px_w - @as(f32, @floatFromInt(name.len)) * cw) / 2;
             _ = ui.text(nx, zone_ty, name, th.bar_value, self.glassBg(th.bar_bg));
-        }
-        if (self.cfg_top_bar.has(.usage) and self.usage.len > 0) {
-            const ufg = if (self.usage.worst >= 90)
-                th.ed_err
-            else if (self.usage.worst >= 70)
-                th.accent
-            else
-                th.bar_fg;
-            _ = ui.textRight(self.px_w - self.m.gutter, zone_ty, self.usage.slice(), ufg, self.glassBg(th.bar_bg));
         }
         if (!self.cfg_top_bar.has(.tabs) or self.tab_h <= 0) return;
         // Chip TEXT lands on the same gutter the status bar's text does —
@@ -7058,7 +7026,7 @@ fn displayLinkCallback(link: CVDisplayLinkRef, now: ?*const anyopaque, output: ?
 /// cluster (fail-open, nothing drawn).
 /// Bring rook-host up once at launch. Not a poll: the daemon is ours for
 /// the app's lifetime, and if it dies the panels that need it fail open
-/// the way usage.zig already does.
+/// the way attention.zig already does.
 fn hostThread(app: *App) void {
     const h = hostc.ensure(app.gpa, app.io) orelse {
         std.debug.print("rook host: no rook-host (panels that need it stay empty)\n", .{});
@@ -7498,19 +7466,6 @@ fn deckThread(app: *App) void {
             if (app.deck_wake.swap(false, .acq_rel)) break;
             _ = usleep(100 * 1000);
         }
-    }
-}
-
-fn usageThread(app: *App) void {
-    while (true) {
-        const snap = @import("usage.zig").fetch(app.gpa, app.io);
-        app.draw_lock.lock();
-        if (!std.mem.eql(u8, snap.slice(), app.usage.slice())) {
-            app.usage = snap;
-            app.scene_dirty = true;
-        }
-        app.draw_lock.unlock();
-        _ = usleep(30 * 1000 * 1000);
     }
 }
 

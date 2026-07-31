@@ -4,7 +4,7 @@ package host
 // every trigger (rookctl review score-all, the review hero's Triage button).
 // The host still holds no model SDK and no API key — it execs the user's own
 // claude CLI (findClaude, the usage prober's resolver), the same trust
-// boundary as the drafter and the prober. Scoring is async: the endpoint
+// boundary as the review pane itself. Scoring is async: the endpoint
 // returns immediately, results land per-hunk in each task's detail bag, and
 // the in-flight flag rides the task payloads so clients poll instead of
 // blocking.
@@ -13,7 +13,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -156,4 +158,28 @@ func extractAnalysis(out []byte) (*hunkAnalysis, error) {
 		return nil, err
 	}
 	return &a, nil
+}
+
+// findClaude resolves the coder CLI: PATH first, then the install spots
+// claude's own installer uses. It lived in usage.go until the subscription
+// prober left in the strip; scoring is the surviving caller.
+func findClaude() string {
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	for _, p := range []string{
+		filepath.Join(home, ".claude", "local", "claude"),
+		filepath.Join(home, ".local", "bin", "claude"),
+		"/opt/homebrew/bin/claude",
+		"/usr/local/bin/claude",
+	} {
+		if st, err := os.Stat(p); err == nil && st.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
 }

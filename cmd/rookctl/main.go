@@ -7,7 +7,6 @@
 //	rookctl ls --json     the same, as the raw status payloads
 //	rookctl agents        every claude session agentwatch sees (raw JSON)
 //	rookctl attention     who's waiting on you, cross-workspace (text inbox)
-//	rookctl usage         subscription usage windows (host-cached)
 //	rookctl send          type into a window: rookctl send s3 yes
 //	rookctl spawn         start a claude session: rookctl spawn [-w ws] [--worktree] <task…>
 //	rookctl issues        the workspace's work queue (providers, mine + unassigned)
@@ -118,8 +117,6 @@ func main() {
 		err = runAgents()
 	case "attention":
 		err = runAttention()
-	case "usage":
-		err = runUsage()
 	case "send":
 		err = runSend(os.Args[2:])
 	case "spawn":
@@ -180,7 +177,7 @@ func main() {
 	case "update":
 		err = runUpdate(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|usage|send <session> <text…>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|thread doc|note|ask <id>|edit [file…]|ask [json]|mcp|claim|unclaim|install-hooks|version|update [--check]]\n")
+		fmt.Fprintf(os.Stderr, "usage: rookctl [ls [--json]|agents|attention|send <session> <text…>|spawn [-w ws] [--worktree] <task…>|changes [-w ws] [--base head|branch]|threads [-w ws] [--pending] [--json]|comment [-w ws] path:a-b <text…>|submit [-w ws]|reply [--user] <id> <text…>|resolve [--user] <id>|reopen [--agent] <id>|thread doc|note|ask <id>|edit [file…]|ask [json]|mcp|claim|unclaim|install-hooks|version|update [--check]]\n")
 		os.Exit(2)
 	}
 	if err != nil {
@@ -376,48 +373,6 @@ func runAttention() error {
 		}
 		if it.Interactive {
 			fmt.Println("   ⌨ interactive prompt — answer in the window")
-		}
-	}
-	return nil
-}
-
-func runUsage() error {
-	c, err := connect()
-	if err != nil {
-		return err
-	}
-	raw, err := c.req("GET", "/usage", nil)
-	if err != nil {
-		return err
-	}
-	var snap struct {
-		Windows []struct {
-			Label  string `json:"label"`
-			Pct    int    `json:"pct"`
-			Resets string `json:"resets"`
-		} `json:"windows"`
-		CapturedAt time.Time `json:"capturedAt"`
-	}
-	if err := json.Unmarshal(raw, &snap); err != nil {
-		return err
-	}
-	if len(snap.Windows) == 0 {
-		fmt.Println("no usage data yet (first probe pending, or API billing)")
-		return nil
-	}
-	for _, w := range snap.Windows {
-		fmt.Printf("%-22s %3d%%  resets %s\n", w.Label, w.Pct, w.Resets)
-	}
-	fmt.Printf("as of %s\n", snap.CapturedAt.Local().Format("3:04pm"))
-	// the other half of the picture: what this usage would cost on API
-	// billing (host-observed raw-inference pricing)
-	if raw, err := c.req("GET", "/costs", nil); err == nil {
-		var costs struct {
-			TodayUSD float64 `json:"todayUsd"`
-			WeekUSD  float64 `json:"weekUsd"`
-		}
-		if json.Unmarshal(raw, &costs) == nil && (costs.TodayUSD > 0 || costs.WeekUSD > 0) {
-			fmt.Printf("raw-inference value: $%.2f today · $%.2f 7d\n", costs.TodayUSD, costs.WeekUSD)
 		}
 	}
 	return nil

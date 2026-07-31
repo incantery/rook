@@ -102,14 +102,6 @@ func (a *agentWatch) applyRecord(ln transcript.Line) {
 		now = time.Now()
 	}
 
-	// The usage prober's own headless runs land in the same tree. They are
-	// rook's artifact, not sessions.
-	if probe := usageProbeDir(); probe != "" && (rec.CWD == probe || (st != nil && st.Project == probe)) {
-		delete(a.states, ln.SessionID)
-		a.mu.Unlock()
-		return
-	}
-
 	if st == nil {
 		st = &AgentStatus{
 			SessionID: ln.SessionID,
@@ -197,7 +189,6 @@ func (a *agentWatch) applyRecord(ln transcript.Line) {
 			if priced {
 				st.CostUSD += usd
 			}
-			a.queueUsageLocked(m, usd, now)
 		}
 		text := m.Text()
 		if text != "" {

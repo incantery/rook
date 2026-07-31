@@ -29,7 +29,7 @@
 //! reaped by the next build change. Same as today's behaviour, so not a
 //! regression — but it is why `owned` is reported by ctl `version`.
 //!
-//! Fail-open everywhere, like usage.zig: no host.json, no binary, a dead
+//! Fail-open everywhere, like attention.zig: no host.json, no binary, a dead
 //! daemon, bad JSON → null. The terminal must open with or without a host.
 
 const std = @import("std");
@@ -72,7 +72,7 @@ const O_RDWR = 2;
 /// What host.json says, flattened into fixed storage so callers can hold
 /// it without owning an allocation. The daemon rewrites the file on every
 /// start (new port, new token), so anything cached goes stale on restart
-/// — `usage.zig` re-reads per fetch for exactly that reason, and long
+/// — `attention.zig` re-reads per fetch for exactly that reason, and long
 /// -lived holders should refresh through `App.hostInfo()`.
 pub const Info = struct {
     port: u16 = 0,
@@ -490,7 +490,7 @@ pub fn ensure(gpa: std.mem.Allocator, io: std.Io) ?Handle {
     // a pid about to vanish, which means quitting rook leaves the real
     // daemon running — exactly the thing this module exists to prevent.
     // It presents as an app pointing at a dead port, and it survived
-    // testing because usage.zig re-reads host.json on every fetch.
+    // testing because attention.zig re-reads host.json on every fetch.
     //
     // So: while the child LIVES, only a host.json naming the child is
     // acceptable. Once it EXITS, it declined, and whatever is healthy is

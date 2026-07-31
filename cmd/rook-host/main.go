@@ -67,8 +67,6 @@ func main() {
 	// Everything supervised runs under the host's lifecycle context, so
 	// one Shutdown reaches every prober alike.
 	ctx := h.Context()
-	// Subscription usage windows, probed on a cost-weighted cadence.
-	go h.WatchUsage(ctx)
 	// PR state per worktree — the close-the-loop signal (merged → cleanup
 	// nudge). Absent gh just means the feature is off.
 	go h.WatchPRs(ctx)

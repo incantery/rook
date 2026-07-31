@@ -5,7 +5,7 @@
 //! inbox and the notifications all consume the same shape,
 //! so this is a projection rather than a second source of truth.
 //!
-//! Shaped after usage.zig, and fail-open the same way: no host.json, a
+//! Fail-open throughout: no host.json, a
 //! dead host, or unparseable JSON gives an EMPTY snapshot rather than an
 //! error. A panel that can't reach the daemon shows nothing and says so
 //! — it never blocks a frame or takes the app down with it.

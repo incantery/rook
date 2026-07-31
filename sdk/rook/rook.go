@@ -107,7 +107,7 @@ func (e *Env) EditorBind(mode, chord, command string) *Env {
 // ---- named app options, the discoverable surface ----
 
 // TopBar sets the top strip's contents (presence, not order: tabs
-// left, title center, usage right). No arguments hides the strip and
+// left, title center). No arguments hides the strip and
 // the pane area reclaims its row.
 func (e *Env) TopBar(segments ...string) *Env {
 	return e.Set("top-bar", segList(segments))

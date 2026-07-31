@@ -54,10 +54,6 @@ func (h *Host) initCloud() {
 	}
 	h.cloud = c
 	log.Printf("cloud: status reports to %s", c.Base())
-	// From here on the transcript reader queues per-response token counts
-	// for the push. Records reduced before this line aren't queued — they
-	// are at most a few, and the next backlog replay re-offers them.
-	h.aw.enableUsagePush()
 	go h.runCloud(h.ctx)
 }
 
@@ -81,10 +77,6 @@ func (h *Host) runCloud(ctx context.Context) {
 	cancel()
 
 	failed := false
-	// usage rides the status tick: lastLimits is the newest snapshot that
-	// made it up, usageFailed keeps its log line to first-failure-only.
-	var lastLimits time.Time
-	usageFailed := false
 	for {
 		st := h.cloudSnapshot(hostname)
 
@@ -99,8 +91,6 @@ func (h *Host) runCloud(ctx context.Context) {
 		} else {
 			failed = false
 		}
-
-		h.pushUsage(ctx, &lastLimits, &usageFailed)
 
 		wait := cloudTickIdle
 		if busy(st) {

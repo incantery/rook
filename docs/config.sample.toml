@@ -59,7 +59,7 @@
 #
 # rook's two chrome bars (top strip, status bar) render configurable
 # lists of segments from one vocabulary: tabs, workspace, branch, cwd,
-# hints, hud, usage, title. Identity is arrangement.
+# hints, hud, title. Identity is arrangement.
 
 # A preset is a defaults layer bundling the knobs below — every
 # explicit key in this file still overrides its bundle, wherever the
@@ -70,8 +70,8 @@
 # preset = "tmux-neovim"
 
 # The top strip's contents — presence, not order (tabs left, title
-# center, usage right). [] hides the strip and panes reclaim the row.
-# top-bar = ["tabs", "title", "usage"]
+# center). [] hides the strip and panes reclaim the row.
+# top-bar = ["tabs", "title"]
 
 # The status bar's two clusters, in display order (tmux's own keys).
 # When the window is narrow, segments shed from the END of the right

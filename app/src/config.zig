@@ -128,7 +128,6 @@ pub const Segment = enum {
     hints,
     /// The perf HUD (diagnostics; sheds first in the default layout).
     hud,
-    usage,
     /// The centered workspace name. Top strip only; elsewhere skipped.
     title,
 };
@@ -138,7 +137,7 @@ pub fn segFromName(name: []const u8) ?Segment {
         .{ .n = "tabs", .s = .tabs },      .{ .n = "workspace", .s = .workspace },
         .{ .n = "branch", .s = .branch },  .{ .n = "cwd", .s = .cwd },
         .{ .n = "hints", .s = .hints },    .{ .n = "hud", .s = .hud },
-        .{ .n = "usage", .s = .usage },    .{ .n = "title", .s = .title },
+        .{ .n = "title", .s = .title },
     };
     for (map) |m| if (std.mem.eql(u8, name, m.n)) return m.s;
     return null;
@@ -234,7 +233,7 @@ pub fn applyPreset(cfg: *Config, name: []const u8) bool {
     return false;
 }
 
-/// Parse `["tabs", "usage"]` (or a bare comma list) into a SegList.
+/// Parse `["tabs", "hud"]` (or a bare comma list) into a SegList.
 /// An unknown segment name warns and is skipped — a list with a typo
 /// should lose one segment, not the whole arrangement.
 pub fn parseSegList(raw: []const u8) ?SegList {
@@ -343,7 +342,7 @@ pub const Config = struct {
     /// The top strip's contents — presence, not order (tabs left,
     /// title center, usage right). EMPTY hides the strip and the pane
     /// area reclaims its row.
-    top_bar: SegList = segs(.{ .tabs, .title, .usage }),
+    top_bar: SegList = segs(.{ .tabs, .title }),
     /// The status bar's two clusters, in display order. `status-left`
     /// / `status-right` on purpose — tmux's own keys. When narrow,
     /// segments shed from the END of the right list backward, then
@@ -1171,9 +1170,9 @@ test "clipboard-write takes both the enum names and the booleans" {
 
 test "parseSegList: brackets, quotes, order kept, typos skipped" {
     const t = std.testing;
-    const l = parseSegList("[\"tabs\", \"usage\"]").?;
+    const l = parseSegList("[\"tabs\", \"hud\"]").?;
     try t.expectEqual(@as(usize, 2), l.n);
-    try t.expect(l.items[0] == .tabs and l.items[1] == .usage);
+    try t.expect(l.items[0] == .tabs and l.items[1] == .hud);
     // Empty is an ANSWER (hide the bar), not a parse failure.
     try t.expectEqual(@as(usize, 0), parseSegList("[]").?.n);
     // A typo resolves to null (parseSegList then warns and skips it —
