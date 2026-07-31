@@ -206,6 +206,13 @@ too much.
 3. **Actions that take input.** "Approve" is an id; "reply with this
    text" is an id plus a payload the human edited. Does that fold into
    Form, or is it a third thing?
+
+   *Where it stands:* actions landed without it. The panel runs an action
+   by id, gates a `confirm` one behind y/n, and **refuses one that declares
+   `INPUT_TEXT` by name** — sending an empty payload would make the plugin
+   act on nothing, and a greyed-out row would leave the human guessing why.
+   So the question is now visible in the product rather than only on this
+   page, which is the point at which it gets answered.
 4. **Table vs List.** Is Table a distinct surface, or a List with a
    column projection? Cheaper if it's a projection.
 

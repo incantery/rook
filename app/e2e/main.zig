@@ -1452,16 +1452,24 @@ fn seedRegistry(app: *h.Instance) !Registry {
 /// It echoes the request's id, because rook checks it — a plugin answering
 /// out of order is caught rather than rendered.
 ///
-/// Note what it DECLARES: items.list and items.act. The graph below grants
-/// only items.list. That gap is the point of the scenario.
+/// Note what it DECLARES: items.list and items.act. `shplug` below is
+/// granted only items.list. That gap is the point of the scenario.
+///
+/// The item carries one action of each interesting shape — plain, confirm,
+/// and one wanting input — because those are three different paths through
+/// the panel and only the plugin knows which is which.
 const sh_plugin =
+    \\acts='[{"id":"poke","label":"Poke"},{"id":"burn","label":"Burn it","confirm":true},{"id":"say","label":"Say","input":"INPUT_TEXT"}]'
     \\while IFS= read -r line; do
     \\  id=`expr "$line" : '.*"id":\([0-9]*\)'`
     \\  case "$line" in
     \\    *'"op":"describe"'*)
     \\      printf '{"v":1,"id":%s,"ok":true,"result":{"name":"shplug","version":"9.9","capabilities":["items.list","items.act"]}}\n' "$id" ;;
     \\    *'"op":"items.list"'*)
-    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"items":[{"id":"a","title":"alpha","state":"ok","fields":[{"key":"n","kind":"NUMBER","value":"7"}],"children":[{"id":"a1","title":"kid","state":"sub"}]}]}}\n' "$id" ;;
+    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"items":[{"id":"a","title":"alpha","state":"ok","fields":[{"key":"n","kind":"NUMBER","value":"7"}],"actions":%s,"children":[{"id":"a1","title":"kid","state":"sub"}]}]}}\n' "$id" "$acts" ;;
+    \\    *'"op":"items.act"'*)
+    \\      act=`expr "$line" : '.*"actionId":"\([a-z]*\)"'`
+    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"message":"ran %s","item":{"id":"a","title":"alpha","state":"done","fields":[{"key":"n","kind":"NUMBER","value":"8"}],"actions":%s}}}\n' "$id" "$act" "$acts" ;;
     \\    *)
     \\      printf '{"v":1,"id":%s,"ok":false,"error":"unsupported op"}\n' "$id" ;;
     \\  esac
@@ -1478,14 +1486,19 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     // Left behind on purpose when a scenario fails — the harness keeps its
     // sandbox for inspection and the fixture is part of what you would read.
 
+    // Four declarations over two binaries. `shplug` and `acty` run the
+    // SAME script and differ only in what they were granted — which is the
+    // point: what a plugin may do is the human's decision, recorded in
+    // config, not something the plugin gets a say in.
     var json_buf: [2048]u8 = undefined;
     const graph = try std.fmt.bufPrint(&json_buf,
         \\{{"rookEnvironment":1,"nodes":[
         \\{{"id":"plugin:shplug","kind":"plugin","scope":"app","name":"shplug","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list"]}},
+        \\{{"id":"plugin:acty","kind":"plugin","scope":"app","name":"acty","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act"]}},
         \\{{"id":"plugin:nogrant","kind":"plugin","scope":"app","name":"nogrant","command":["/bin/sh","{s}"],"load":"lazy","grants":[]}},
         \\{{"id":"plugin:missing","kind":"plugin","scope":"app","name":"missing","command":["/nope/not-a-binary"],"load":"lazy","grants":["items.list"]}}
         \\]}}
-    , .{ script, script });
+    , .{ script, script, script });
 
     const app = try h.Instance.start(gpa, bin, .{ .env_json = graph });
     defer {
@@ -1598,6 +1611,84 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("type after-panel");
     _ = try app.ctl("enter");
     try app.waitTextCount("after-panel", 2, 5_000);
+
+    // ---- acting ----
+    //
+    // A list you cannot act on is half a surface. This is the other half,
+    // and the reason it took a design rather than a keybinding is that an
+    // action can DELETE something.
+
+    _ = try app.ctl("plugin-show acty");
+    const acty = try app.waitCtl("sidepane", "alpha", 5_000);
+    try h.expectContains(acty, "mode:rows", "the panel starts on the list");
+    // The menu is CLOSED until asked for — the actions exist on the item
+    // the whole time, and showing them unprompted would make every list a
+    // wall of buttons.
+    try h.expectNotContains(acty, ">Poke", "actions are not shown until asked for");
+
+    // Enter descends into what the item offers.
+    _ = try app.ctl("key 0d");
+    const menu = try app.waitCtl("sidepane", "mode:actions", 5_000);
+    try h.expectContains(menu, "*  >Poke", "the first action, selected");
+    // A confirm action is marked BEFORE it is chosen: the human should know
+    // which way Enter is about to go while still deciding.
+    try h.expectContains(menu, "   !Burn it", "a confirm action is marked");
+
+    // ESC backs out one level rather than closing the panel. Proving it
+    // did not yield takes a second key: if the keys had gone back to the
+    // panes, this Enter would land in the shell instead.
+    _ = try app.ctl("key 1b");
+    try h.expectContains(try app.ctl("sidepane"), "mode:rows", "ESC backs out of the menu");
+    _ = try app.ctl("key 0d");
+    try h.expectContains(try app.ctl("sidepane"), "mode:actions", "ESC must not have yielded the keys");
+
+    // An action that needs input is refused BY NAME. Open question 3 in
+    // VOCABULARY.md — until it is settled, sending an empty payload would
+    // make the plugin act on nothing.
+    _ = try app.ctl("key 6a"); // j
+    _ = try app.ctl("key 6a"); // j — onto "Say", which wants text
+    _ = try app.ctl("key 0d");
+    const wants = try app.waitCtl("sidepane", "needs input", 5_000);
+    try h.expectContains(wants, "mode:actions", "and does not run, or leave the menu");
+
+    // The confirm gate, and the half of it that matters: n means no.
+    _ = try app.ctl("key 6b"); // k, back onto "Burn it"
+    _ = try app.ctl("key 0d");
+    const asking = try app.waitCtl("sidepane", "mode:confirm", 5_000);
+    try h.expectContains(asking, "confirm? y/n", "the panel asks before a confirm action");
+    _ = try app.ctl("key 6e"); // n
+    const declined = try app.waitCtl("sidepane", "cancelled", 5_000);
+    try h.expectContains(declined, "mode:actions", "declining returns to the menu");
+    // THE ASSERTION: nothing ran. The row is untouched — same state, same
+    // field. A confirm that does not actually gate the call is decoration.
+    try h.expectContains(declined, "*ok\talpha", "the row must be untouched");
+    try h.expectContains(declined, "n=7", "and its field too");
+
+    // y runs it, and the plugin's answer lands.
+    _ = try app.ctl("key 0d");
+    _ = try app.waitCtl("sidepane", "mode:confirm", 5_000);
+    _ = try app.ctl("key 79"); // y
+    const ran = try app.waitCtl("sidepane", "ran burn", 5_000);
+    // The plugin sent back the row as it now is, so ONE line repainted
+    // rather than the list relisting. Both halves changed, which is what
+    // says the returned item was used and not just the message.
+    try h.expectContains(ran, "*done\talpha", "the returned item replaced the row");
+    try h.expectContains(ran, "n=8", "including its fields");
+    try h.expectContains(ran, "mode:rows", "a completed action returns you to the list");
+    // The child came from the LIST, not from the act — a replacement that
+    // took the whole snapshot with it would have lost this.
+    try h.expectContains(ran, " \x20sub\tkid", "the rest of the list survived");
+
+    // And the same panel, on a plugin granted only items.list: the refusal
+    // reaches the human rather than the key doing nothing. This is the
+    // grant check from the top of the scenario, seen from the surface.
+    _ = try app.ctl("plugin-show shplug");
+    _ = try app.waitCtl("sidepane", "alpha", 5_000);
+    _ = try app.ctl("key 0d");
+    _ = try app.waitCtl("sidepane", "mode:actions", 5_000);
+    _ = try app.ctl("key 0d"); // Poke — declared by the plugin, not granted
+    const refused = try app.waitCtl("sidepane", "not granted", 5_000);
+    try h.expectContains(refused, "*ok\talpha", "and the row is untouched");
 }
 
 // ---------------------------------------------------------------- runner

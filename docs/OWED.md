@@ -10,12 +10,17 @@ and the shape each should come back in is the interesting part.
 
 ## 1. The issue queue → a plugin, not a port
 
-> **Update, 2026-07-31: the loader landed.** rook reads `plugin` nodes,
-> spawns what they name, speaks the protocol, and refuses ops the config
-> did not grant (`app/src/plugins.zig`, e2e scenario `plugins`). What is
-> still owed here is the *caller for issues specifically* — something that
-> asks a provider for `issues.list` and renders the result — plus a surface
-> to render into. `ctl plugin <name> <op>` is the seam today.
+> **Update, 2026-07-31: the loader, the surface and actions landed.** rook
+> reads `plugin` nodes, spawns what they name, speaks the protocol, refuses
+> ops the config did not grant, renders the items as a side-pane List, and
+> runs `items.act` on a row — with the plugin's own `confirm` standing
+> between the human and anything destructive (`app/src/plugins.zig`,
+> `drawPlugin`/`pluginKeyLocked` in `app/src/macos.zig`, e2e scenario
+> `plugins`).
+>
+> What is still owed here is the *issues* half specifically: a provider
+> speaks `sdk/provider`, not the plugin protocol, so either the two grow a
+> shim or a provider becomes a plugin. That is a decision, not a port.
 
 `rookctl issues` asked the host, which spawned `rook-provider-github` /
 `rook-provider-linear` and merged their answers. The provider protocol

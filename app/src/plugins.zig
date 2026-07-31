@@ -427,6 +427,7 @@ fn readFrame(fd: c_int, buf: []u8, deadline_ms: i32) ?usize {
 
 pub const max_items = 128;
 pub const max_fields = 6;
+pub const max_actions = 6;
 
 fn Text(comptime n: usize) type {
     return struct {
@@ -448,6 +449,24 @@ pub const Field = struct {
     value: Text(32) = .{},
 };
 
+pub const Action = struct {
+    id: Text(32) = .{},
+    label: Text(48) = .{},
+    /// Ask first. The plugin decides this, not the host — only the plugin
+    /// knows whether its action destroys or publishes something.
+    confirm: bool = false,
+    /// `INPUT_TEXT`/`INPUT_CHOICE` mean the human has to supply a payload,
+    /// and rook has nowhere to type one yet. Kept verbatim so the panel can
+    /// refuse it BY NAME instead of sending an empty payload and letting
+    /// the plugin act on nothing.
+    input: Text(16) = .{},
+
+    pub fn wantsInput(self: *const Action) bool {
+        const s = self.input.get();
+        return s.len > 0 and !std.mem.eql(u8, s, "INPUT_NONE");
+    }
+};
+
 pub const Item = struct {
     id: Text(64) = .{},
     title: Text(96) = .{},
@@ -456,6 +475,8 @@ pub const Item = struct {
     depth: u8 = 0,
     fields: [max_fields]Field = @splat(.{}),
     fields_n: usize = 0,
+    actions: [max_actions]Action = @splat(.{}),
+    actions_n: usize = 0,
 };
 
 /// One answer to items.list, ready to draw.
@@ -501,27 +522,6 @@ pub fn fetchItems(p: *Plugin, gpa: std.mem.Allocator, root: []const u8) Snapshot
         return snap;
     };
 
-    const WireField = struct {
-        key: []const u8 = "",
-        kind: []const u8 = "",
-        value: []const u8 = "",
-    };
-    // Recursion needs a named type; children are the same shape one level
-    // down, and two levels is as deep as this renders for now.
-    const WireItem = struct {
-        id: []const u8 = "",
-        title: []const u8 = "",
-        subtitle: []const u8 = "",
-        state: []const u8 = "",
-        fields: []WireField = &.{},
-        children: []struct {
-            id: []const u8 = "",
-            title: []const u8 = "",
-            subtitle: []const u8 = "",
-            state: []const u8 = "",
-            fields: []WireField = &.{},
-        } = &.{},
-    };
     const Wire = struct {
         ok: bool = false,
         @"error": []const u8 = "",
@@ -546,20 +546,7 @@ pub fn fetchItems(p: *Plugin, gpa: std.mem.Allocator, root: []const u8) Snapshot
             snap.more += 1;
             continue;
         }
-        var it = Item{};
-        it.id.set(wi.id);
-        it.title.set(wi.title);
-        it.subtitle.set(wi.subtitle);
-        it.state.set(wi.state);
-        for (wi.fields) |wf| {
-            if (it.fields_n >= max_fields) break;
-            it.fields[it.fields_n] = .{};
-            it.fields[it.fields_n].key.set(wf.key);
-            it.fields[it.fields_n].kind.set(wf.kind);
-            it.fields[it.fields_n].value.set(wf.value);
-            it.fields_n += 1;
-        }
-        snap.items[snap.n] = it;
+        snap.items[snap.n] = shape(wi, 0);
         snap.n += 1;
 
         for (wi.children) |wc| {
@@ -567,26 +554,182 @@ pub fn fetchItems(p: *Plugin, gpa: std.mem.Allocator, root: []const u8) Snapshot
                 snap.more += 1;
                 continue;
             }
-            var c = Item{ .depth = 1 };
-            c.id.set(wc.id);
-            c.title.set(wc.title);
-            c.subtitle.set(wc.subtitle);
-            c.state.set(wc.state);
-            for (wc.fields) |wf| {
-                if (c.fields_n >= max_fields) break;
-                c.fields[c.fields_n] = .{};
-                c.fields[c.fields_n].key.set(wf.key);
-                c.fields[c.fields_n].kind.set(wf.kind);
-                c.fields[c.fields_n].value.set(wf.value);
-                c.fields_n += 1;
-            }
-            snap.items[snap.n] = c;
+            snap.items[snap.n] = shape(wc, 1);
             snap.n += 1;
         }
     }
     if (parsed.value.result.truncated) snap.more += 1;
     snap.live = true;
     return snap;
+}
+
+// The wire shapes, named because `act` returns one too and two copies of
+// this would drift.
+
+const WireField = struct {
+    key: []const u8 = "",
+    kind: []const u8 = "",
+    value: []const u8 = "",
+};
+
+const WireAction = struct {
+    id: []const u8 = "",
+    label: []const u8 = "",
+    confirm: bool = false,
+    input: []const u8 = "",
+};
+
+/// A child is the same shape one level down, minus its own children —
+/// two levels is as deep as this renders, and a self-referential type
+/// would claim otherwise.
+const WireChild = struct {
+    id: []const u8 = "",
+    title: []const u8 = "",
+    subtitle: []const u8 = "",
+    state: []const u8 = "",
+    fields: []WireField = &.{},
+    actions: []WireAction = &.{},
+};
+
+const WireItem = struct {
+    id: []const u8 = "",
+    title: []const u8 = "",
+    subtitle: []const u8 = "",
+    state: []const u8 = "",
+    fields: []WireField = &.{},
+    actions: []WireAction = &.{},
+    children: []WireChild = &.{},
+};
+
+/// Copy one wire item into the fixed-buffer shape the draw path uses.
+/// `anytype` because a parent and a child differ only in the field this
+/// does not read.
+fn shape(wi: anytype, depth: u8) Item {
+    var it = Item{ .depth = depth };
+    it.id.set(wi.id);
+    it.title.set(wi.title);
+    it.subtitle.set(wi.subtitle);
+    it.state.set(wi.state);
+    for (wi.fields) |wf| {
+        if (it.fields_n >= max_fields) break;
+        it.fields[it.fields_n] = .{};
+        it.fields[it.fields_n].key.set(wf.key);
+        it.fields[it.fields_n].kind.set(wf.kind);
+        it.fields[it.fields_n].value.set(wf.value);
+        it.fields_n += 1;
+    }
+    for (wi.actions) |wa| {
+        if (it.actions_n >= max_actions) break;
+        // An action with no id cannot be invoked, so it is dropped rather
+        // than drawn — offering a human a button that cannot work is worse
+        // than not offering it.
+        if (wa.id.len == 0) continue;
+        it.actions[it.actions_n] = .{ .confirm = wa.confirm };
+        it.actions[it.actions_n].id.set(wa.id);
+        it.actions[it.actions_n].label.set(if (wa.label.len > 0) wa.label else wa.id);
+        it.actions[it.actions_n].input.set(wa.input);
+        it.actions_n += 1;
+    }
+    return it;
+}
+
+// ---- acting ----
+
+/// What came back from items.act.
+///
+/// `item` is the plugin's chance to hand back the row as it now is, so the
+/// host repaints one line instead of relisting everything. It is optional,
+/// and a plugin that omits it gets a refetch.
+pub const Acted = struct {
+    ok: bool = false,
+    msg: Text(160) = .{},
+    item: ?Item = null,
+};
+
+/// Invoke an action on an item.
+///
+/// No payload parameter: an action that wants input is refused before it
+/// gets here, because rook has nowhere to type one yet and sending an empty
+/// payload would make the plugin act on nothing. When the Form surface
+/// exists this grows a parameter; until then the absence is the honest
+/// shape. (`ctl plugin <name> items.act <json>` reaches the raw wire for
+/// anyone who needs it today.)
+pub fn act(p: *Plugin, gpa: std.mem.Allocator, item_id: []const u8, action_id: []const u8) Acted {
+    var out = Acted{};
+
+    // The ids came from the plugin and go back out inside a JSON string.
+    // Escaping is not paranoia about a hostile plugin so much as about a
+    // branch named `it's "fine"` — a quote in an id would otherwise emit a
+    // frame that does not parse, and the failure would read as a protocol
+    // bug rather than as a name.
+    // Sized for the worst case: an id whose every byte escapes to six.
+    var params: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&params);
+    actParams(&w, item_id, action_id) catch {
+        out.msg.set("ids too long to send");
+        return out;
+    };
+
+    const buf = gpa.alloc(u8, 1 << 20) catch {
+        out.msg.set("out of memory");
+        return out;
+    };
+    defer gpa.free(buf);
+
+    const frame = p.call(gpa, "items.act", params[0..w.end], buf) orelse {
+        out.msg.set(if (p.errStr().len > 0) p.errStr() else "not granted");
+        return out;
+    };
+
+    const Wire = struct {
+        ok: bool = false,
+        @"error": []const u8 = "",
+        result: struct {
+            message: []const u8 = "",
+            item: ?WireItem = null,
+        } = .{},
+    };
+    const parsed = std.json.parseFromSlice(Wire, gpa, frame, .{ .ignore_unknown_fields = true }) catch {
+        out.msg.set("answer did not parse");
+        return out;
+    };
+    defer parsed.deinit();
+
+    // A refused action is REPORTED, not swallowed. The human pressed a key
+    // and something has to answer.
+    if (!parsed.value.ok) {
+        out.msg.set(if (parsed.value.@"error".len > 0) parsed.value.@"error" else "refused");
+        return out;
+    }
+    out.ok = true;
+    out.msg.set(if (parsed.value.result.message.len > 0) parsed.value.result.message else "done");
+    if (parsed.value.result.item) |wi| out.item = shape(wi, 0);
+    return out;
+}
+
+fn actParams(w: *std.Io.Writer, item_id: []const u8, action_id: []const u8) !void {
+    try w.writeAll("{\"itemId\":");
+    try jsonString(w, item_id);
+    try w.writeAll(",\"actionId\":");
+    try jsonString(w, action_id);
+    try w.writeAll("}");
+}
+
+/// Write `s` as a JSON string, quotes and all.
+fn jsonString(w: *std.Io.Writer, s: []const u8) !void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        // Everything else below a space has to be escaped; above it, UTF-8
+        // bytes are already valid JSON and pass through untouched.
+        0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
+        else => try w.writeByte(c),
+    };
+    try w.writeByte('"');
 }
 
 // ---- the registry ----
@@ -730,6 +873,63 @@ test "readFrame gives up on a silent writer rather than blocking" {
     // The point is that it RETURNED. A blocking read here would hang the
     // caller forever on a plugin that never answers.
     try testing.expect(nowMs() - start < 5000);
+}
+
+test "an id with a quote in it still produces a frame that parses" {
+    // Not hypothetical: item ids are branch names, ticket keys and paths.
+    // Concatenating one straight into a request would emit JSON that does
+    // not parse, and the failure would read as a protocol bug.
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try actParams(&w, "it's \"fine\"\n", "burn\\it");
+
+    const Wire = struct { itemId: []const u8, actionId: []const u8 };
+    const parsed = try std.json.parseFromSlice(Wire, testing.allocator, buf[0..w.end], .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("it's \"fine\"\n", parsed.value.itemId);
+    try testing.expectEqualStrings("burn\\it", parsed.value.actionId);
+}
+
+test "actParams refuses rather than truncating when the ids will not fit" {
+    // A truncated frame is a frame that acts on the WRONG item. Failing is
+    // the only safe answer.
+    var small: [16]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&small);
+    try testing.expectError(error.WriteFailed, actParams(&w, "a-rather-long-item-id", "act"));
+}
+
+test "an action with no id is dropped, and a label defaults to the id" {
+    const wi = WireItem{
+        .id = "i",
+        .title = "t",
+        .actions = @constCast(&[_]WireAction{
+            .{ .id = "poke" }, // no label
+            .{ .id = "", .label = "unusable" }, // no id: cannot be invoked
+            .{ .id = "burn", .label = "Burn it", .confirm = true },
+            .{ .id = "say", .label = "Say", .input = "INPUT_TEXT" },
+        }),
+    };
+    const it = shape(wi, 0);
+    try testing.expectEqual(@as(usize, 3), it.actions_n);
+    // Offering a button that cannot work is worse than not offering it.
+    try testing.expectEqualStrings("poke", it.actions[0].id.get());
+    try testing.expectEqualStrings("poke", it.actions[0].label.get());
+    try testing.expect(!it.actions[0].confirm);
+    try testing.expectEqualStrings("burn", it.actions[1].id.get());
+    try testing.expect(it.actions[1].confirm);
+    try testing.expect(!it.actions[1].wantsInput());
+    try testing.expect(it.actions[2].wantsInput());
+}
+
+test "INPUT_NONE is not input" {
+    // The proto spells "no input" as a value rather than as an absence, so
+    // a plugin that sends it explicitly must not get a refusal.
+    var a = Action{};
+    try testing.expect(!a.wantsInput());
+    a.input.set("INPUT_NONE");
+    try testing.expect(!a.wantsInput());
+    a.input.set("INPUT_TEXT");
+    try testing.expect(a.wantsInput());
 }
 
 test "readFrame reports EOF as no frame" {

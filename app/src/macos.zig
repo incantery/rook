@@ -24,6 +24,7 @@ const cfgpkg = @import("config.zig");
 const filelistpkg = @import("filelist.zig");
 const searchpkg = @import("search.zig");
 const lsppkg = @import("lsp.zig");
+const plugpkg = @import("plugins.zig");
 const lspmgrpkg = @import("lspmgr.zig");
 const docspkg = @import("docs.zig");
 const bufferpkg = @import("buffer.zig");
@@ -434,6 +435,20 @@ pub const App = struct {
     /// caller after it releases — startPluginFetch takes the lock itself,
     /// so calling it inline would deadlock. Same shape as pending_cmd.
     plug_refetch: bool = false,
+
+    /// Where the panel's keys go. Enter descends into the selected row's
+    /// actions, and an action the plugin marked `confirm` descends once
+    /// more — a plugin action can delete a branch, and the confirm is the
+    /// plugin's to ask for rather than the host's to guess at.
+    plug_mode: enum { rows, actions, confirm } = .rows,
+    plug_act_sel: usize = 0,
+    /// What the last action said. A human pressed a key; something has to
+    /// answer, including when the answer is a refusal.
+    plug_msg: [160]u8 = @splat(0),
+    plug_msg_len: usize = 0,
+    plug_acting: std.atomic.Value(bool) = .init(false),
+    /// Queued like plug_refetch, and for the same reason.
+    plug_run: bool = false,
 
     /// Leader chord armed: the next key resolves a binding (or the
     /// leader again types it literally). Shown in the bar while armed.
@@ -3419,13 +3434,17 @@ pub const App = struct {
         if (spec) |s| self.dispatch(s);
         self.drainPendingOpen();
         self.drainQuitAll();
-        // The plugin panel's r: startPluginFetch takes draw_lock, so the
-        // key path can only ask for it, never call it.
+        // The plugin panel's r and its Enter: both start workers, and
+        // startPluginFetch/Act take draw_lock — so the key path can only
+        // ask for them, never call them.
         self.draw_lock.lock();
         const refetch = self.plug_refetch;
+        const act = self.plug_run;
         self.plug_refetch = false;
+        self.plug_run = false;
         self.draw_lock.unlock();
         if (refetch) self.startPluginFetch();
+        if (act) self.startPluginAct();
     }
 
     /// The leader state machine — ONE path for real keystrokes (the
@@ -5001,6 +5020,9 @@ pub const App = struct {
             self.plug_name_len = n;
             self.plug = .{};
             self.plug_sel = 0;
+            self.plug_mode = .rows;
+            self.plug_act_sel = 0;
+            self.plug_msg_len = 0;
             self.side_panel = .plugin;
             self.side_open = true;
             self.side_focus = true;
@@ -5062,6 +5084,13 @@ pub const App = struct {
                 {
                     app.plug = snap;
                     if (app.plug_sel >= app.plug.n) app.plug_sel = app.plug.n -| 1;
+                    // A new list means the action menu was opened on an
+                    // item that may no longer be the one under the cursor.
+                    // Backing out is the only safe answer — a confirm left
+                    // standing over a re-fetched row is a confirm for the
+                    // wrong thing.
+                    app.plug_mode = .rows;
+                    app.plug_act_sel = 0;
                     app.scene_dirty = true;
                 }
                 app.draw_lock.unlock();
@@ -5077,41 +5106,224 @@ pub const App = struct {
         }
     }
 
-    /// The plugin panel's keys: move, and hand them back.
+    /// Run the selected action on a worker.
     ///
-    /// Deliberately read-only for now. Enter would mean running an action,
-    /// and an action is a thing that can DELETE a branch — that wants a
-    /// confirm path designed rather than added to a first slice.
+    /// Off the key path for the same reason the fetch is: items.act reaches
+    /// whatever the plugin reaches — git, a network, a human's laptop fan —
+    /// and a frame that waits on that is a dropped window.
+    fn startPluginAct(self: *App) void {
+        if (self.plug_acting.load(.acquire)) return;
+        const Args = struct {
+            app: *App,
+            name: [64]u8,
+            name_len: usize,
+            item: [64]u8,
+            item_len: usize,
+            action: [32]u8,
+            action_len: usize,
+            row: usize,
+        };
+        const a = self.gpa.create(Args) catch return;
+        a.* = std.mem.zeroInit(Args, .{ .app = self });
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            const it = self.plugItemLocked() orelse {
+                self.gpa.destroy(a);
+                return;
+            };
+            if (self.plug_act_sel >= it.actions_n or self.plug_name_len == 0) {
+                self.gpa.destroy(a);
+                return;
+            }
+            const act = &it.actions[self.plug_act_sel];
+            a.name_len = self.plug_name_len;
+            @memcpy(a.name[0..a.name_len], self.plug_name[0..a.name_len]);
+            a.item_len = it.id.get().len;
+            @memcpy(a.item[0..a.item_len], it.id.get());
+            a.action_len = act.id.get().len;
+            @memcpy(a.action[0..a.action_len], act.id.get());
+            a.row = self.plug_sel;
+            self.plugSay("running…");
+            self.scene_dirty = true;
+        }
+
+        self.plug_acting.store(true, .release);
+        const T = struct {
+            fn go(args: *Args) void {
+                const app = args.app;
+                const done = if (app.plugins.find(args.name[0..args.name_len])) |p|
+                    plugpkg.act(p, app.gpa, args.item[0..args.item_len], args.action[0..args.action_len])
+                else
+                    plugpkg.Acted{};
+
+                var stale = false;
+                app.draw_lock.lock();
+                // Only land it if the panel is still on the same plugin —
+                // switching mid-flight must not paint one plugin's answer
+                // under another's name.
+                if (app.plug_name_len == args.name_len and
+                    std.mem.eql(u8, app.plug_name[0..app.plug_name_len], args.name[0..args.name_len]))
+                {
+                    app.plugSay(if (done.msg.n > 0) done.msg.get() else "no answer");
+                    if (done.ok) {
+                        // It ran, so the menu has served its purpose. A
+                        // refusal leaves you in the menu, because there the
+                        // next thing you want is probably another action.
+                        app.plug_mode = .rows;
+                        if (done.item) |updated| {
+                            // The plugin handed back the row as it now is,
+                            // so one line repaints instead of the list
+                            // relisting. Depth is the HOST's — the plugin
+                            // answered about an item, not about a tree.
+                            if (args.row < app.plug.n) {
+                                const depth = app.plug.items[args.row].depth;
+                                app.plug.items[args.row] = updated;
+                                app.plug.items[args.row].depth = depth;
+                            }
+                        } else {
+                            // It did not, so the list is now a guess.
+                            stale = true;
+                        }
+                    }
+                    app.scene_dirty = true;
+                }
+                app.draw_lock.unlock();
+                app.plug_acting.store(false, .release);
+                app.gpa.destroy(args);
+                // After the unlock: startPluginFetch takes the lock itself.
+                if (stale) app.startPluginFetch();
+            }
+        };
+        if (std.Thread.spawn(.{}, T.go, .{a})) |t| {
+            t.detach();
+        } else |_| {
+            self.plug_acting.store(false, .release);
+            self.gpa.destroy(a);
+        }
+    }
+
+    /// The selected item, or null when the panel has nothing.
+    fn plugItemLocked(self: *App) ?*const plugpkg.Item {
+        const rows = self.plug.slice();
+        if (self.plug_sel >= rows.len) return null;
+        return &rows[self.plug_sel];
+    }
+
+    fn plugSay(self: *App, msg: []const u8) void {
+        const n = @min(self.plug_msg.len, msg.len);
+        @memcpy(self.plug_msg[0..n], msg[0..n]);
+        self.plug_msg_len = n;
+    }
+
+    /// The plugin panel's keys: move, descend into an action, confirm it,
+    /// and hand the keys back.
+    ///
+    /// Three modes rather than one, because an action can DELETE a branch.
+    /// Enter on a row opens what the item offers; Enter on an action runs
+    /// it, unless the plugin marked it `confirm`, in which case y/n stands
+    /// between the human and it. The plugin decides that — only the plugin
+    /// knows which of its actions destroys something.
     pub fn pluginKeyLocked(self: *App, bytes: []const u8) void {
         const n = self.plug.slice().len;
         var i: usize = 0;
         while (i < bytes.len) {
             const b = bytes[i];
+            // Arrows move in whichever list has the keys.
             if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
-                switch (bytes[i + 2]) {
-                    'A' => self.plug_sel -|= 1,
-                    'B' => self.plug_sel = @min(self.plug_sel + 1, n -| 1),
-                    else => {},
-                }
+                const up = bytes[i + 2] == 'A';
+                const down = bytes[i + 2] == 'B';
+                if (up or down) self.plugMoveLocked(down);
                 i += 3;
                 continue;
             }
-            switch (b) {
-                0x1b => { // ESC yields the keys back to the panes
-                    self.side_focus = false;
-                    self.scene_dirty = true;
-                    return;
+            switch (self.plug_mode) {
+                .rows => switch (b) {
+                    0x1b => { // ESC yields the keys back to the panes
+                        self.side_focus = false;
+                        self.scene_dirty = true;
+                        return;
+                    },
+                    'k', 0x10 => self.plug_sel -|= 1,
+                    'j', 0x0e => self.plug_sel = @min(self.plug_sel + 1, n -| 1),
+                    'g' => self.plug_sel = 0,
+                    'G' => self.plug_sel = n -| 1,
+                    'r' => self.plug_refetch = true, // drained after the lock
+                    0x0d => if (self.plugItemLocked()) |it| {
+                        // Silence here would read as a broken key. An item
+                        // with nothing to do says so.
+                        if (it.actions_n == 0) {
+                            self.plugSay("no actions on this item");
+                        } else {
+                            self.plug_mode = .actions;
+                            self.plug_act_sel = 0;
+                            self.plug_msg_len = 0;
+                        }
+                    },
+                    else => {},
                 },
-                'k', 0x10 => self.plug_sel -|= 1,
-                'j', 0x0e => self.plug_sel = @min(self.plug_sel + 1, n -| 1),
-                'g' => self.plug_sel = 0,
-                'G' => self.plug_sel = n -| 1,
-                'r' => self.plug_refetch = true, // drained after the lock
-                else => {},
+                .actions => switch (b) {
+                    // ESC backs out one level rather than closing the
+                    // panel: the human descended, so the way out is up.
+                    0x1b => self.plug_mode = .rows,
+                    'k', 0x10 => self.plugMoveLocked(false),
+                    'j', 0x0e => self.plugMoveLocked(true),
+                    0x0d => self.plugChooseLocked(),
+                    else => {},
+                },
+                .confirm => switch (b) {
+                    'y', 'Y' => {
+                        self.plug_run = true; // drained after the lock
+                        self.plug_mode = .actions;
+                    },
+                    'n', 'N', 0x1b => {
+                        self.plug_mode = .actions;
+                        self.plugSay("cancelled");
+                    },
+                    // Anything else is NOT consent. A confirm that any key
+                    // dismisses is not a confirm.
+                    else => {},
+                },
             }
             i += 1;
         }
         self.scene_dirty = true;
+    }
+
+    fn plugMoveLocked(self: *App, down: bool) void {
+        switch (self.plug_mode) {
+            .rows => {
+                const n = self.plug.slice().len;
+                if (down) self.plug_sel = @min(self.plug_sel + 1, n -| 1) else self.plug_sel -|= 1;
+            },
+            .actions => {
+                const it = self.plugItemLocked() orelse return;
+                if (down) self.plug_act_sel = @min(self.plug_act_sel + 1, it.actions_n -| 1) else self.plug_act_sel -|= 1;
+            },
+            // A confirm is a question with two answers, and the arrow keys
+            // are not either of them.
+            .confirm => {},
+        }
+    }
+
+    /// Enter on an action: run it, ask first, or refuse it by name.
+    fn plugChooseLocked(self: *App) void {
+        const it = self.plugItemLocked() orelse return;
+        if (self.plug_act_sel >= it.actions_n) return;
+        const a = &it.actions[self.plug_act_sel];
+        if (a.wantsInput()) {
+            // Open question 3 in docs/plugins/VOCABULARY.md: is "reply with
+            // this text" an action with a payload or a Form? Until that is
+            // settled, refusing BY NAME is the honest answer — sending an
+            // empty payload would make the plugin act on nothing.
+            self.plugSay("this action needs input; rook has no form yet");
+            return;
+        }
+        if (a.confirm) {
+            self.plug_mode = .confirm;
+            return;
+        }
+        self.plug_run = true;
     }
 
     fn drawPlugin(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
@@ -5141,7 +5353,15 @@ pub const App = struct {
             return;
         }
 
-        const avail = r.y + r.h - top - (if (self.plug.more > 0) row_h else 0);
+        // The action menu and the message both take a row off the top of
+        // what the list can use, because both are drawn below it.
+        const menu_rows: f32 = if (self.plug_mode == .rows) 0 else blk: {
+            const it = self.plugItemLocked() orelse break :blk 0;
+            break :blk @floatFromInt(it.actions_n);
+        };
+        const reserved = (if (self.plug.more > 0) row_h else 0) +
+            (if (self.plug_msg_len > 0) row_h else 0) + menu_rows * row_h;
+        const avail = r.y + r.h - top - reserved;
         const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h)));
         const shown = @min(self.plug.slice().len, fits);
 
@@ -5173,11 +5393,40 @@ pub const App = struct {
                 _ = ui.text(fx, y + (row_h - ch) / 2, v, th.bar_fg, bg);
             }
             y += row_h;
+
+            // The actions hang UNDER the row they belong to rather than
+            // replacing the list: the item you are acting on is the context
+            // for the choice, and a menu that hides it takes that away.
+            if (idx != self.plug_sel or self.plug_mode == .rows) continue;
+            for (it.actions[0..it.actions_n], 0..) |*a, ai| {
+                const on = ai == self.plug_act_sel;
+                if (on) self.drawRowSelection(ui, r, y, row_h);
+                var ax = tx + 2 * cw;
+                // A confirm action is marked before it is chosen, so the
+                // human knows which way Enter is about to go.
+                const mark: []const u8 = if (a.confirm) "!" else "\u{203a}";
+                ax += ui.text(ax, y + (row_h - ch) / 2, mark, if (a.confirm) th.ed_err else th.accent, bg);
+                ax += cw;
+                const label = @import("ui.zig").clip(&clipbuf, a.label.get(), cols);
+                ax += ui.text(ax, y + (row_h - ch) / 2, label, if (on) th.bar_value else th.bar_fg, bg);
+                if (on and self.plug_mode == .confirm) {
+                    ax += cw;
+                    _ = ui.text(ax, y + (row_h - ch) / 2, "confirm? y/n", th.ed_err, bg);
+                }
+                y += row_h;
+            }
         }
         if (self.plug.more > 0) {
             var mb: [64]u8 = undefined;
             const m = std.fmt.bufPrint(&mb, "+{d} more", .{self.plug.more}) catch "+more";
             _ = ui.text(tx, y + (row_h - ch) / 2, m, th.bar_fg, bg);
+            y += row_h;
+        }
+        // What the last action said, refusals included. A human pressed a
+        // key and something has to answer.
+        if (self.plug_msg_len > 0) {
+            const msg = @import("ui.zig").clip(&clipbuf, self.plug_msg[0..self.plug_msg_len], cols);
+            _ = ui.text(tx, y + (row_h - ch) / 2, msg, th.bar_fg, bg);
         }
     }
 

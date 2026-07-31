@@ -589,8 +589,28 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                             w.print("\t{s}={s}", .{ f.key.get(), f.value.get() }) catch break;
                         }
                         _ = w.write("\n") catch 0;
+
+                        // The action menu, where it is drawn: under its
+                        // row. A confirm is marked, so a scenario can tell
+                        // "about to run" from "asking first".
+                        if (i != app.plug_sel or app.plug_mode == .rows) continue;
+                        for (it.actions[0..it.actions_n], 0..) |*a, ai| {
+                            const on = ai == app.plug_act_sel;
+                            w.print("{s}  {s}{s}{s}\n", .{
+                                @as([]const u8, if (on) "*" else " "),
+                                @as([]const u8, if (a.confirm) "!" else ">"),
+                                a.label.get(),
+                                @as([]const u8, if (on and app.plug_mode == .confirm) " confirm? y/n" else ""),
+                            }) catch break;
+                        }
                     }
                     if (app.plug.more > 0) w.print("+{d} more\n", .{app.plug.more}) catch {};
+                    w.print("mode:{s}{s}\n", .{
+                        @tagName(app.plug_mode),
+                        @as([]const u8, if (app.plug_acting.load(.acquire)) " acting" else ""),
+                    }) catch {};
+                    if (app.plug_msg_len > 0)
+                        w.print("msg: {s}\n", .{app.plug_msg[0..app.plug_msg_len]}) catch {};
                 },
                 .search => {
                     // The query, what it scanned, and every hit — the
