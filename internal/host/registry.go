@@ -80,19 +80,6 @@ CREATE TABLE IF NOT EXISTS workspaces (
 	created_at TEXT NOT NULL,
 	last_used  TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS stages (
-	id           INTEGER PRIMARY KEY,
-	workspace    TEXT NOT NULL,
-	idx          INTEGER NOT NULL,
-	name         TEXT NOT NULL,                     -- the slash command
-	status       TEXT NOT NULL DEFAULT 'pending',   -- pending|running|done|error
-	rook_session TEXT NOT NULL DEFAULT '',          -- attribution key: the stage's window
-	detail       TEXT NOT NULL DEFAULT '',
-	created_at   TEXT NOT NULL,
-	started_at   TEXT,
-	finished_at  TEXT,
-	UNIQUE(workspace, idx)
-);
 CREATE TABLE IF NOT EXISTS threads (
 	id            INTEGER PRIMARY KEY,
 	workspace     TEXT NOT NULL,
@@ -164,10 +151,11 @@ CREATE INDEX IF NOT EXISTS recents_ws ON recents(workspace, opened_at DESC);
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS
 // won't touch an existing table, so each ALTER runs and "duplicate column"
 // is the expected steady-state error.
-// The decisions and costs tables are deliberately absent: the drafter's
-// ledger and the cost ledger left in the strip, and an existing database
-// keeps its rows rather than having them dropped out from under it.
-// Nothing reads them; nothing destroys them.
+// The decisions, costs and stages tables are deliberately absent: the
+// drafter's ledger, the cost ledger and the workflow pipeline all left in
+// the strip, and an existing database keeps its rows rather than having
+// them dropped out from under it. Nothing reads them; nothing destroys
+// them.
 var migrations = []string{
 	`ALTER TABLE workspaces ADD COLUMN worktree_of TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workspaces ADD COLUMN branch TEXT NOT NULL DEFAULT ''`,

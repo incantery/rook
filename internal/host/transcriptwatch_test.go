@@ -128,7 +128,7 @@ func TestRecordAskSeq(t *testing.T) {
 	}
 }
 
-// onTurnFinished is the workflow engine's stage-completion signal, and its
+// onTurnFinished is the genuine turn-completion signal, and its
 // whole contract is discipline: genuine turn ends ONLY. AskUserQuestion and
 // permission notifies also invalidate asks (onTurnCompleted fires for them —
 // that's ITS contract), but an agent asking a question has not finished its
@@ -353,7 +353,7 @@ func TestRecordPickerSurvivesPastAgentmonsCap(t *testing.T) {
 }
 
 // Backlog rebuilds state but must not fire side effects: replaying a
-// discovered file would otherwise advance workflow stages for turns that
+// discovered file would otherwise signal turn completion for turns that
 // ended hours ago.
 func TestRecordBacklogReducesStateButFiresNoHooks(t *testing.T) {
 	a := newAgentWatch()

@@ -79,7 +79,7 @@ func (a *agentWatch) runTranscript(ctx context.Context) {
 // State is reduced from every record, including backlog — that is how a
 // session discovered mid-flight gets a correct state. Side effects fire
 // only for records we watched land: replaying a file from zero would
-// otherwise invalidate drafts and advance workflow stages for turns that
+// otherwise invalidate asks and signal turn completion for turns that
 // ended hours ago.
 func (a *agentWatch) applyRecord(ln transcript.Line) {
 	rec := ln.Record

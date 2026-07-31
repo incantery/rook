@@ -5,7 +5,7 @@
 //! Missing file = defaults.
 //!
 //! ONE FILE, TWO READERS. This is rook-host's config too, and most of
-//! what is in it belongs to the host: coder, workflow, workspace-allow,
+//! what is in it belongs to the host: coder, workspace-allow,
 //! [jira], [lsp], [cloud], [workspaces.*]. So:
 //!
 //!   - Only TOP-LEVEL keys are ours. A key inside any [table] is

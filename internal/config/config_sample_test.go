@@ -38,12 +38,12 @@ func TestSampleDefaults(t *testing.T) {
 	}
 	writeConfig(t, b.String())
 	got := Load()
-	// The placeholder/example keys (provider-*, workflow, keybind,
+	// The placeholder/example keys (provider-*, keybind,
 	// and the per-workspace dynamic keys) carry no meaningful default — zero
 	// them so the comparison is exactly the concrete-default scalar knobs.
 	got.Providers = nil
 	got.BranchPrefixes, got.BranchDelimiters = nil, nil
-	got.Workflow, got.Workflows, got.Keybinds = nil, nil, nil
+	got.Keybinds = nil
 	got.LSP, got.LSPServers, got.LSPRefused = nil, nil, nil
 	if !reflect.DeepEqual(got, Default()) {
 		t.Fatalf("sample defaults drifted from config.Default():\n got %+v\nwant %+v", got, Default())

@@ -144,16 +144,9 @@
 
 # ── Coder ────────────────────────────────────────────────────────────────
 
-# The CLI the host types into spawned task windows (spawn drafts, the
-# conflict-resolve chip, workflow stages).
+# The CLI the host types into spawned task windows (the conflict-resolve
+# chip, thread nudges).
 # coder = "claude"
-
-
-# ── Workflow: staged review pipeline (host-read) ─────────────────────────
-
-# Slash commands, run in sequence after a worktree's coding agent opens its
-# PR — each spawned in its own window. Empty (or absent) means off.
-# workflow = ["/security-review", "/review"]
 
 
 # ── Workspace visibility filter (presentation-only) ──────────────────────
@@ -305,11 +298,6 @@
 # only: the workspace is a directory too, and stays FOO-123-bar-baz either
 # way.
 # branch-delimiter = "/"
-
-# Override the global workflow for this workspace. An explicitly EMPTY list
-# ([]) opts this workspace out of the global pipeline entirely; a non-empty
-# list replaces it here.
-# workflow = ["/review"]
 
 
 # ── Language servers (plugins, host-managed) ─────────────────────────────

@@ -13,7 +13,7 @@ import (
 // spawnTask is the shared "start the coder on a task" actuator: a fresh
 // window in the workspace's root, the coder command typed in once the shell
 // has had a beat to come up. Spawn drafts, the conflict-resolve chip, and
-// workflow stages all actuate through this one seam. The coder CLI comes
+// thread nudges all actuate through this one seam. The coder CLI comes
 // from the (hot-read) config — `coder = ...`, claude unless overridden —
 // and the claim hook correlates the new session on its own.
 func (h *Host) spawnTask(ws, task string) (*session, error) {

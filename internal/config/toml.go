@@ -44,7 +44,6 @@ type tomlFile struct {
 	Theme             *string           `toml:"theme"`
 	Coder             *string           `toml:"coder"`
 	Leader            *string           `toml:"leader"`
-	Workflow          *[]string         `toml:"workflow"`
 	WorkspaceAllow    *[]string         `toml:"workspace-allow"`
 	Keybinds          map[string]string `toml:"keybinds"`
 	Commands          map[string]string `toml:"commands"`
@@ -84,9 +83,6 @@ type tomlWorkspace struct {
 	// naming scheme exactly); absent falls back to rook/.
 	BranchPrefix    *string `toml:"branch-prefix"`
 	BranchDelimiter *string `toml:"branch-delimiter"`
-	// Workflow: present-and-empty is an explicit opt-out of the global
-	// pipeline; absent inherits it.
-	Workflow *[]string `toml:"workflow"`
 }
 
 type tomlLSP struct {
@@ -122,7 +118,7 @@ func providerValue(v any) string {
 // all") while the host's is the [lsp] table above. TOML lets a name be one
 // or the other and never both — so a file carrying the app's old spelling
 // failed to DECODE, and applyTOML fails open, which meant losing every
-// host setting in the file (coder, theme, workflow, the lot) to a key that
+// host setting in the file (coder, theme, workspace-allow, the lot) to a key that
 // was not even the host's. Silently, because a config loader has nobody to
 // tell.
 //
@@ -224,9 +220,6 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 	if f.WindowPaddingY != nil && *f.WindowPaddingY >= 0 {
 		cfg.WindowPaddingY = *f.WindowPaddingY
 	}
-	if f.Workflow != nil {
-		cfg.Workflow = *f.Workflow
-	}
 	if f.WorkspaceAllow != nil {
 		cfg.WorkspaceAllow = *f.WorkspaceAllow
 	}
@@ -304,16 +297,6 @@ func applyTOML(cfg *Config, path string, repoLayer bool) bool {
 				cfg.BranchDelimiters = map[string]string{}
 			}
 			cfg.BranchDelimiters[ws] = *w.BranchDelimiter
-		}
-		if w.Workflow != nil {
-			if cfg.Workflows == nil {
-				cfg.Workflows = map[string][]string{}
-			}
-			wf := *w.Workflow
-			if wf == nil {
-				wf = []string{}
-			}
-			cfg.Workflows[ws] = wf
 		}
 	}
 	return true

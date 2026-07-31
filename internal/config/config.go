@@ -49,7 +49,7 @@ type Config struct {
 	// FOO-123/bar-baz. Unset (or empty) means "-".
 	BranchDelimiters map[string]string `json:"branchDelimiters"`
 	// Coder is the CLI the host types into spawned task windows (spawn
-	// drafts, the conflict-resolve chip, workflow stages). claude unless
+	// the conflict-resolve chip, thread nudges). claude unless
 	// overridden.
 	Coder string `json:"coder"`
 	// RelayURL is a rook-server (self-hosted or rook-cloud): when set, an
@@ -65,15 +65,6 @@ type Config struct {
 	// dashboard's "Add machine" and lives in the keychain
 	// (`rookctl set-cloud-token`), never in this file.
 	CloudURL string `json:"cloudUrl"`
-	// Workflow is the staged review pipeline run after a worktree's coding
-	// agent opens its PR: slash commands, comma-separated (`workflow =
-	// /security-review, /review`), each spawned sequentially in its own
-	// window. Empty = feature off. Workflows carries per-workspace
-	// overrides (`workflow-<ws> = ...`); an explicitly empty value there
-	// is a non-nil empty list — that workspace opts out of the global
-	// pipeline.
-	Workflow  []string            `json:"workflow"`
-	Workflows map[string][]string `json:"workflows"`
 	// Leader is the tmux-style prefix that arms the bare-key bindings: a
 	// single key (`leader = \`, the backtick default) or a modifier chord
 	// (`leader = ctrl+b`, the tmux default). Pressing it twice passes the
@@ -267,15 +258,6 @@ func applyKey(cfg *Config, key, value string, repoLayer bool) {
 		cfg.BranchDelimiters[ws] = value
 		return
 	}
-	// likewise for workflows: `workflow-<ws> =` stores an empty non-nil
-	// list — that workspace explicitly opts out of the global workflow.
-	if ws, ok := strings.CutPrefix(key, "workflow-"); ok && ws != "" {
-		if cfg.Workflows == nil {
-			cfg.Workflows = map[string][]string{}
-		}
-		cfg.Workflows[ws] = splitList(value)
-		return
-	}
 	switch key {
 	case "font-family":
 		if value != "" {
@@ -309,8 +291,6 @@ func applyKey(cfg *Config, key, value string, repoLayer bool) {
 		if value != "" {
 			cfg.Leader = value
 		}
-	case "workflow":
-		cfg.Workflow = splitList(value)
 	case "workspace-allow":
 		cfg.WorkspaceAllow = splitList(value)
 	case "keybind":

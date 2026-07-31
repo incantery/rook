@@ -10,8 +10,9 @@ job today is to get out of neovim's way, and it already does.
 Status as of 2026-07-28, shipped in v0.38.2.
 
 > **Amendment, 2026-07-31 (the strip).** Entries below that describe the
-> subscription usage cluster, `/usage`, `/costs`, the usage push, and the
-> drafter are describing code that no longer exists — they were instances,
+> subscription usage cluster, `/usage`, `/costs`, the usage push, the
+> drafter, and the staged workflow pipeline are describing code that no
+> longer exists — they were instances,
 > and instances are moving to plugins. The mechanisms they cite (the
 > segment vocabulary, hostc's fail-open fetch, the pane model) all
 > survive. See `docs/plugins/VOCABULARY.md` for what replaces them.

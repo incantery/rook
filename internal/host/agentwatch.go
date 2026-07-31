@@ -41,8 +41,10 @@ type agentWatch struct {
 	// onTurnFinished fires ONLY on a genuine turn_completed event — never
 	// for AskUserQuestion or a permission notify, which also route through
 	// onTurnCompleted (its contract is ask-invalidation, not "turn done").
-	// The workflow engine keys stage completion on this distinction: an
-	// agent asking a question has NOT finished its stage.
+	// The distinction is the point: an agent asking a question has NOT
+	// finished its turn, and anything sequencing work on "done" must not
+	// be fooled by one. The workflow engine keyed on this until it left in
+	// the strip; the guarantee outlived it (see transcriptwatch_test).
 	onTurnFinished func(sessionID string)
 }
 

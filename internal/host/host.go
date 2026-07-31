@@ -63,7 +63,7 @@ type session struct {
 	// terminals — but a TUI still asks the terminal questions (DA, DSR),
 	// and readPump writes the emulator's replies back to the pty. An
 	// emulator that stopped answering would hang the coder in a
-	// host-spawned workflow stage.
+	// host-spawned session.
 	emu   Terminal
 	emuMu sync.Mutex
 }
@@ -132,9 +132,6 @@ type Host struct {
 	// signal on workspace cards.
 	prm *prMon
 
-	// wfMu serializes workflow advancement (see advanceWorkflow).
-	wfMu sync.Mutex
-
 	// Lifecycle root for supervised children and probers. Shutdown cancels
 	// it — child processes must die with the host, or every daemon
 	// replacement leaks orphans.
@@ -166,13 +163,6 @@ func New() *Host {
 		prm:      newPRMon(),
 	}
 	h.ctx, h.cancel = context.WithCancel(context.Background())
-	// The workflow engine's stage-completion sensor — genuine turn ends
-	// only, never AskUserQuestion/notify (see agentwatch.onTurnFinished).
-	h.aw.onTurnFinished = h.onTurnFinished
-	// Restart reconciliation: running stages lost their windows with the
-	// old host. ✗ + detail is the honest surface — no auto-respawn, no
-	// surprise spend.
-	h.reg.failRunningStages("host restarted — window lost")
 	go h.aw.runTranscript(h.ctx)
 	h.initRelay()
 	h.initCloud()
@@ -625,7 +615,7 @@ func allowSet(names []string) map[string]bool {
 // allowedWorkspace reports whether a workspace is visible under the
 // workspace-allow filter. An empty set means the filter is off (everything
 // visible). A workspace passes if its own name or its worktree source is
-// listed — the name-or-WorktreeOf pattern shared with Jira/workflow lookups.
+// listed — the name-or-WorktreeOf pattern shared with tracker lookups.
 func allowedWorkspace(name, worktreeOf string, allow map[string]bool) bool {
 	if len(allow) == 0 {
 		return true
@@ -921,7 +911,6 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		}
 		h.reg.remove(name)
 		h.prm.forget(name)
-		h.reg.deleteStages(name)
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)

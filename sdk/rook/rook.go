@@ -70,7 +70,7 @@ func (e *Env) Option(scope, key string, value any) *Env {
 // Set sets an app option.
 func (e *Env) Set(key string, value any) *Env { return e.Option("app", key, value) }
 
-// Host sets a host option (coder, workflow, workspace-allow, …).
+// Host sets a host option (coder, workspace-allow, …).
 // Carried in the graph; the host consumes it via the TOML renderer
 // slice (IR.md).
 func (e *Env) Host(key string, value any) *Env { return e.Option("host", key, value) }

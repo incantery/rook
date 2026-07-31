@@ -71,7 +71,7 @@
 # ── Coder ────────────────────────────────────────────────────────────────
 
 # The CLI the host types into spawned task windows (spawn drafts, the
-# conflict-resolve chip, workflow stages).
+# conflict-resolve chip, thread nudges).
 # coder = claude
 
 
@@ -89,14 +89,6 @@
 # Credentials are NOT set here — a provider fetches its own from the
 # keychain (see the secrets note at the bottom).
 # provider-linear-team = ENG
-
-
-# ── Workflow: staged review pipeline (host-read) ─────────────────────────
-#
-# Slash commands, comma-separated, run in sequence after a worktree's coding
-# agent opens its PR — each spawned in its own window. Empty means the
-# feature is off.
-# workflow = /security-review, /review
 
 
 # ── Language servers (plugins, host-managed) ─────────────────────────────
@@ -194,12 +186,6 @@
 # to / for the scheme that reads rook/FOO-123/bar-baz. Branch names only: the
 # workspace is a directory too, and stays FOO-123-bar-baz either way.
 # branch-delimiter-<workspace> = /
-
-# Override the global workflow for one workspace. An explicitly empty value
-# (nothing after the =) opts that workspace out of the global pipeline
-# entirely; a non-empty value replaces it for that workspace.
-# workflow-<workspace> = /review
-
 
 # ── Secrets are NOT file-managed ─────────────────────────────────────────
 #

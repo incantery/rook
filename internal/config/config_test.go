@@ -19,37 +19,16 @@ func writeConfig(t *testing.T, content string) {
 	}
 }
 
-func TestLoadWorkflow(t *testing.T) {
-	writeConfig(t, `
-workflow = /security-review, /review
-workflow-special = /review
-# opt-out: empty value must store an empty NON-NIL list, not vanish
-workflow-quiet =
-coder = my-coder
-`)
-	cfg := Load()
-	if !slices.Equal(cfg.Workflow, []string{"/security-review", "/review"}) {
-		t.Fatalf("workflow: %v", cfg.Workflow)
-	}
-	if !slices.Equal(cfg.Workflows["special"], []string{"/review"}) {
-		t.Fatalf("workflow-special: %v", cfg.Workflows["special"])
-	}
-	quiet, ok := cfg.Workflows["quiet"]
-	if !ok || quiet == nil || len(quiet) != 0 {
-		t.Fatalf("workflow-quiet must be an explicit empty list: %v (present %v)", quiet, ok)
-	}
-	if cfg.Coder != "my-coder" {
+func TestLoadCoder(t *testing.T) {
+	writeConfig(t, "coder = my-coder\n")
+	if cfg := Load(); cfg.Coder != "my-coder" {
 		t.Fatalf("coder: %q", cfg.Coder)
 	}
 }
 
-func TestLoadWorkflowDefaults(t *testing.T) {
+func TestLoadCoderDefault(t *testing.T) {
 	writeConfig(t, "# nothing configured\n")
-	cfg := Load()
-	if len(cfg.Workflow) != 0 || cfg.Workflows != nil {
-		t.Fatalf("workflow must default off: %v %v", cfg.Workflow, cfg.Workflows)
-	}
-	if cfg.Coder != "claude" {
+	if cfg := Load(); cfg.Coder != "claude" {
 		t.Fatalf("coder must default to claude: %q", cfg.Coder)
 	}
 }

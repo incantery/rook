@@ -24,7 +24,7 @@ type Line struct {
 	// catch up. It is load-bearing, not informational: a consumer replays a
 	// discovered file from zero to rebuild state, and every historical turn
 	// in it would otherwise look like a turn that just ended — firing
-	// draft invalidation and advancing workflow stages for turns that
+	// ask invalidation and turn-completion signals for turns that
 	// finished hours ago. Reduce state from every line; fire side effects
 	// only on Live ones.
 	Live bool

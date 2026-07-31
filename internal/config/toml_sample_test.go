@@ -54,13 +54,13 @@ func TestSampleTOMLDefaults(t *testing.T) {
 	writeTOML(t, uncommentSample(t))
 
 	got := Load()
-	// The placeholder/example keys (providers, relay, workflow, keybinds,
+	// The placeholder/example keys (providers, relay, keybinds,
 	// workspace tables, lsp) carry no meaningful default — zero them so the
 	// comparison is exactly the concrete-default scalar knobs.
 	got.RelayURL, got.CloudURL = "", ""
 	got.Providers = nil
 	got.BranchPrefixes, got.BranchDelimiters = nil, nil
-	got.Workflow, got.Workflows, got.Keybinds, got.WorkspaceAllow = nil, nil, nil, nil
+	got.Keybinds, got.WorkspaceAllow = nil, nil
 	got.EditorKeybinds = nil
 	got.LSP, got.LSPServers, got.LSPRefused = nil, nil, nil
 	if !reflect.DeepEqual(got, Default()) {

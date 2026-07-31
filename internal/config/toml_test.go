@@ -152,38 +152,23 @@ limit = 25
 
 func TestTOMLWorkspaces(t *testing.T) {
 	writeTOML(t, `
-workflow = ["/security-review", "/review"]
-
 [workspaces.rook]
 branch-prefix = "seth/"
 branch-delimiter = "/"
-workflow = ["/review"]
 
 [workspaces.ci-exact]
 # present-and-empty prefix is meaningful: branches carry NO prefix
 branch-prefix = ""
-# present-and-empty workflow is the explicit opt-out
-workflow = []
 # empty delimiter is a typo, falls back like unset
 branch-delimiter = ""
 `)
 	cfg := Load()
-	if !slices.Equal(cfg.Workflow, []string{"/security-review", "/review"}) {
-		t.Fatalf("workflow: %v", cfg.Workflow)
-	}
 	if cfg.BranchPrefixes["rook"] != "seth/" ||
 		cfg.BranchDelimiters["rook"] != "/" {
 		t.Fatalf("rook ws: %+v", cfg)
 	}
-	if !slices.Equal(cfg.Workflows["rook"], []string{"/review"}) {
-		t.Fatalf("rook workflow: %v", cfg.Workflows["rook"])
-	}
 	if p, ok := cfg.BranchPrefixes["ci-exact"]; !ok || p != "" {
 		t.Fatalf("empty branch-prefix must be stored: %q (present %v)", p, ok)
-	}
-	wf, ok := cfg.Workflows["ci-exact"]
-	if !ok || wf == nil || len(wf) != 0 {
-		t.Fatalf("empty workflow must be an explicit empty list: %v (present %v)", wf, ok)
 	}
 	if _, ok := cfg.BranchDelimiters["ci-exact"]; ok {
 		t.Fatalf("empty delimiter must fall back to unset")

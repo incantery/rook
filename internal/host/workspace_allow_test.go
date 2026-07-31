@@ -1,6 +1,8 @@
 package host
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -29,8 +31,22 @@ func TestAllowedWorkspace(t *testing.T) {
 	}
 }
 
-// writeHostConfig is defined in workflow_test.go; it expects XDG_CONFIG_HOME
-// to already be set and writes the rook config file config.Load() reads.
+// writeHostConfig expects XDG_CONFIG_HOME to already be set, and writes the
+// rook config file config.Load() reads. It lived in workflow_test.go until
+// the workflow engine left in the strip.
+func writeHostConfig(t *testing.T, content string) {
+	t.Helper()
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		t.Fatal("test must set XDG_CONFIG_HOME first")
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "rook"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rook", "config"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func listNames(items []workspaceListItem) []string {
 	out := make([]string, 0, len(items))
