@@ -75,7 +75,6 @@ type Host struct {
 	token    string
 	reg      *registry
 	aw       *agentWatch
-	tw       *threadWatch // thread change fan-out (threadwatch.go)
 	// nudgeFn overrides nudge() in tests — nil in production, where the
 	// real actuator (claimed window, else spawned task) runs.
 	nudgeFn func(ws, prompt string) (mode, rookSession string, err error)
@@ -98,10 +97,6 @@ type Host struct {
 	cwdMu    sync.Mutex
 	cwdCache map[int]cwdEntry
 
-	// review roots with a Haiku triage fan-out in flight (reviewscore.go)
-	scoreMu sync.Mutex
-	scoring map[int64]bool
-
 	// pt is the batched process table: one `ps` behind a TTL, shared by
 	// fgOf and the monitor (procsample.go, monitor.go).
 	pt *procTable
@@ -123,10 +118,6 @@ type Host struct {
 	// group answers "is the thing that claimed this still the thing running"
 	// exactly, and for one ioctl. Keyed like claims: transcript session id.
 	claimFg map[string]int
-
-	// anchorMemo caches re-anchor diffs per (old,cur) blob pair
-	// (threads.go / reanchor.go).
-	anchorMemo hunkMemo
 
 	// prm caches per-worktree PR state (WatchPRs) — the close-the-loop
 	// signal on workspace cards.
@@ -154,7 +145,6 @@ func New() *Host {
 		token:    hex.EncodeToString(b),
 		reg:      loadRegistry(),
 		aw:       newAgentWatch(),
-		tw:       newThreadWatch(),
 		cwdCache: make(map[int]cwdEntry),
 		pt:       newProcTable(),
 		claims:   make(map[string]string),
@@ -574,9 +564,7 @@ func (h *Host) Handler() http.Handler {
 	// and never attaches one) has no other way to see a pending ask.
 	mux.HandleFunc("/asks", h.handleAskQueue)
 	// per-thread verbs — ids are global, no workspace in the path
-	mux.HandleFunc("/threads/", h.handleThread)
 	// per-task verbs (RookTask) — global ids, same as threads
-	mux.HandleFunc("/tasks/", h.handleTask)
 	// pprof rides the same authenticated loopback surface as everything
 	// else — no side door (README decision 3). Reach it with the token:
 	//   go tool pprof "http://127.0.0.1:$PORT/debug/pprof/heap?token=$TOKEN"
@@ -820,37 +808,9 @@ func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		h.handleWorkspaceIssues(w, r, name)
 	case action == "spawn" && r.Method == http.MethodPost:
 		h.handleWorkspaceSpawn(w, r, name)
-	// the read-only review surface (review.go) — the Monaco pane's data
-	case action == "changes" && r.Method == http.MethodGet:
-		h.handleWorkspaceChanges(w, r, name)
-	case action == "diff" && r.Method == http.MethodGet:
-		h.handleWorkspaceDiff(w, r, name)
-	case action == "file" && r.Method == http.MethodGet:
-		h.handleWorkspaceFile(w, r, name)
-	case action == "write" && r.Method == http.MethodPost:
-		h.handleWorkspaceWrite(w, r, name)
-	case action == "files" && r.Method == http.MethodGet:
-		h.handleWorkspaceFiles(w, r, name)
 	// what the editor's start screen leads with (recents.go)
 	case action == "recents":
 		h.handleWorkspaceRecents(w, r, name)
-	case action == "grep" && r.Method == http.MethodGet:
-		h.handleWorkspaceGrep(w, r, name)
-	// threads: file-anchored AI conversations (threads.go)
-	case action == "threads/submit" && r.Method == http.MethodPost:
-		h.handleThreadsSubmit(w, r, name)
-	case action == "threads/watch" && r.Method == http.MethodGet:
-		h.handleThreadsWatch(w, r, name)
-	case action == "threads":
-		h.handleWorkspaceThreads(w, r, name)
-	// review work-type over RookTask (reviewtasks.go / tasksapi.go)
-	case action == "review" && r.Method == http.MethodPost:
-		h.handleWorkspaceReview(w, r, name)
-	// explore work-type — investigations with breadcrumb trails
-	case action == "explore" && r.Method == http.MethodPost:
-		h.handleWorkspaceExplore(w, r, name)
-	case action == "tasks" && r.Method == http.MethodGet:
-		h.handleWorkspaceTasks(w, r, name)
 	case action == "" && r.Method == http.MethodDelete:
 		force := r.URL.Query().Get("force") == "1"
 		// prune also deletes the worktree's local branch — the close-the-

@@ -341,7 +341,7 @@ pub const Side = enum { left, right };
 /// where §2's inbox/deck/threads/review join it, the same way pal_mode
 /// grew a second list. Deliberately an enum rather than a vtable — a
 /// tenant interface designed against ONE tenant is a guess.
-pub const Panel = enum { threads, review, search };
+pub const Panel = enum { search };
 
 /// One clickable row of the which-key sheet. `click` is false for the
 /// collapsed "1…9" teaching row — a row that says "tabs 1–9" and then
@@ -539,7 +539,7 @@ pub const App = struct {
     /// and the inbox is only worth screen space once something is in it.
     side_open: bool = false,
     side: Side = .right,
-    side_panel: Panel = .threads,
+    side_panel: Panel = .search,
     // ---- find in files (⌘⇧F) ----
     /// The query box and the results it produced. Two states, because
     /// a search panel is two things: a box you type in, then a list
@@ -570,65 +570,6 @@ pub const App = struct {
     /// publish. Nothing spawns until a file of a known language opens.
     lsp: lspmgrpkg.Manager = undefined,
     /// Set when an answer is queued, so the poster posts it now.
-    /// An agent id whose transcript has been requested. The fetch is
-    /// blocking HTTP over a document-sized body, so the key path only
-    /// ever queues — transcriptThread does the work and opens the pane.
-    tx_req: [64]u8 = @splat(0),
-    tx_req_len: usize = 0,
-    tx_wake: std.atomic.Value(bool) = .init(false),
-
-    // ---- threads ----
-    /// The workspace thread list, polled while its panel is open.
-    thr: @import("threaddoc.zig").Snapshot = .{},
-    thr_digest: u64 = 0,
-    thr_sel: usize = 0,
-    thr_wake: std.atomic.Value(bool) = .init(false),
-    /// A thread id whose doc has been requested (open), and one whose
-    /// doc is queued to save. Both are network work, so the key path
-    /// only ever queues.
-    thr_open_req: i64 = 0,
-    thr_save_id: i64 = 0,
-    thr_save_len: usize = 0,
-    thr_save_body: [256 * 1024]u8 = undefined,
-    /// A verb (note|ask|resolve) queued against a thread.
-    thr_verb_id: i64 = 0,
-    thr_verb: [16]u8 = @splat(0),
-    thr_verb_len: usize = 0,
-    /// The immutable prefix of the doc currently open, as handed out.
-    /// Saving splits the buffer on exactly this — never by scanning for
-    /// the scissors line, which a comment body could legally contain.
-    thr_prefix: []u8 = &.{},
-    thr_prefix_id: i64 = 0,
-
-    // ---- review ----
-    rev: @import("review.zig").Snapshot = .{},
-    rev_digest: u64 = 0,
-    rev_sel: usize = 0,
-    rev_wake: std.atomic.Value(bool) = .init(false),
-    /// A verdict queued against a finding: id + state name.
-    rev_set_id: i64 = 0,
-    rev_set: [12]u8 = @splat(0),
-    rev_set_len: usize = 0,
-    /// A finding's location queued to open — the fetch/open happens off
-    /// the key path like every other network-adjacent action.
-    rev_open_path: [128]u8 = @splat(0),
-    rev_open_path_len: usize = 0,
-    rev_open_line: i64 = 0,
-    /// A diff view queued to build. Off the key path for the same reason
-    /// everything else here is, only more so: one diff is a `git diff`
-    /// per changed file, so building it on the UI thread would stall the
-    /// frame for as long as the repo is large.
-    ///
-    /// When `diff_path_len` is non-zero it is ONE file's diff; otherwise
-    /// the whole changes list.
-    diff_req: bool = false,
-    diff_path: [256]u8 = @splat(0),
-    diff_path_len: usize = 0,
-    /// The modified-side line to land on, or 0 for the top. A finding
-    /// names a line, and a diff that opened at row one would make you
-    /// hunt for it — the same rule openEditorAtLine follows.
-    diff_line: i64 = 0,
-
     /// The side pane takes the key path. Needed the moment a tenant is
     /// INTERACTIVE. Modal like the palette, but it owns a region rather
     /// than the screen, so it yields back to the panes instead of closing.
@@ -1113,21 +1054,6 @@ pub const App = struct {
             &term_ctx,
         });
 
-        // Review: gate, verdicts, jumps.
-        if (std.Thread.spawn(.{}, reviewThread, .{self})) |t| t.detach() else |err| {
-            std.debug.print("rook review: thread failed: {}\n", .{err});
-        }
-
-        // Threads: list, open, save, verbs.
-        if (std.Thread.spawn(.{}, threadsThread, .{self})) |t| t.detach() else |err| {
-            std.debug.print("rook threads: thread failed: {}\n", .{err});
-        }
-
-        // Transcript fetches, on demand.
-        if (std.Thread.spawn(.{}, transcriptThread, .{self})) |t| t.detach() else |err| {
-            std.debug.print("rook transcript: thread failed: {}\n", .{err});
-        }
-
         // Keys → pty (Cmd+Q quits). AppKit copies the handler block, so the
         // stack context is fine here.
         var block_ctx = MonitorBlock.init(.{ .app = self }, &monitorCallback);
@@ -1416,8 +1342,6 @@ pub const App = struct {
             }
             if (x >= self.seg_ws_x[0] and x < self.seg_ws_x[1]) {
                 self.pending_cmd = .{ .action = .workspace_switch };
-            } else if (x >= self.seg_branch_x[0] and x < self.seg_branch_x[1]) {
-                self.pending_cmd = .{ .action = .diff_open };
             } else if (x >= self.hint_menu_x[0] and x < self.hint_menu_x[1]) {
                 self.wk_visible = true;
                 self.wk_armed_at = 0;
@@ -1991,8 +1915,6 @@ pub const App = struct {
         }
         if (!self.side_focus) return false;
         switch (self.side_panel) {
-            .threads => self.threadsKeyLocked(bytes),
-            .review => self.reviewKeyLocked(bytes),
             .search => self.searchKeyLocked(bytes),
         }
         return true;
@@ -2539,13 +2461,8 @@ pub const App = struct {
             .palette_files => self.openFilePalette(),
             .panel_search => self.openSearchPanel(),
             .app_fullscreen => self.requestFullscreen(),
-            .panel_threads => self.toggleThreads(),
-            .panel_review => self.toggleReview(),
-            .thread_note => self.threadVerb("note"),
-            .thread_ask => self.threadVerb("ask"),
-            .thread_resolve => self.threadVerb("resolve"),
             .panel_flip => self.flipSidePane(),
-            .diff_open => self.requestDiff("", 0),
+            .panel_close => self.closeSidePane(),
             .tree_toggle => self.treeCommand(false),
             .tree_reveal => self.treeCommand(true),
         }
@@ -2710,25 +2627,23 @@ pub const App = struct {
         return pane;
     }
 
-    /// Toggle the side pane. Opening with a DIFFERENT panel than the one
-    /// showing switches tenants instead of closing — the VS Code rule,
-    /// and the one that makes a second tenant behave sensibly the day it
-    /// arrives.
-    pub fn toggleSidePane(self: *App, panel: Panel) void {
-        {
-            self.draw_lock.lock();
-            defer self.draw_lock.unlock();
-            if (self.side_open and self.side_panel == panel) {
-                self.side_open = false;
-            } else {
-                self.side_panel = panel;
-                self.side_open = true;
-            }
-            // The panes beside it must retile: their COLUMN COUNT
-            // changes, which means a pty resize, not just a redraw.
-            self.relayoutLocked();
-            self.scene_dirty = true;
-        }
+    /// Close the side pane, whatever tenant is in it.
+    ///
+    /// It used to be toggleSidePane, and every tenant closed itself by
+    /// being toggled again. Search deliberately does NOT toggle — ⌘⇧F
+    /// with results up means "search again", never "throw away what I am
+    /// reading" — so when the other tenants left in the strip the pane
+    /// became openable and not closeable. This is the way out.
+    pub fn closeSidePane(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        if (!self.side_open) return;
+        self.side_open = false;
+        self.side_focus = false;
+        // The panes beside it must retile: their COLUMN COUNT changes,
+        // which means a pty resize, not just a redraw.
+        self.relayoutLocked();
+        self.scene_dirty = true;
     }
 
     /// Focus the pane whose shell cwd best matches `raw`.
@@ -3233,108 +3148,6 @@ pub const App = struct {
         }
     }
 
-    /// Ask for an agent's transcript. Returns immediately — the fetch is
-    /// a document-sized blocking HTTP read and must not sit on the key
-    /// path. Caller holds draw_lock.
-    pub fn requestTranscriptLocked(self: *App, id: []const u8) void {
-        const n = @min(id.len, self.tx_req.len);
-        if (n == 0) return;
-        @memcpy(self.tx_req[0..n], id[0..n]);
-        self.tx_req_len = n;
-        self.tx_wake.store(true, .release);
-    }
-
-    /// The editor's save seam for projected buffers. Queues; never
-    /// blocks the key path on the network.
-    ///
-    /// The buffer NAME carries the identity (`thread:42`), the same
-    /// trick the transcript pane uses — so which thread a save belongs
-    /// to is a property of the pane, not of some "currently open thread"
-    /// on the App that a second pane would fight over.
-    fn editorSave(ctx: *anyopaque, name: []const u8, content: []const u8) bool {
-        const self: *App = @ptrCast(@alignCast(ctx));
-        const id = threadIdOf(name) orelse return false;
-        if (content.len > self.thr_save_body.len) return false;
-        @memcpy(self.thr_save_body[0..content.len], content);
-        self.thr_save_len = content.len;
-        self.thr_save_id = id;
-        self.thr_wake.store(true, .release);
-        return true;
-    }
-
-    /// Remember the immutable prefix we were handed, so a later save can
-    /// split the buffer on it EXACTLY rather than by scanning for the
-    /// scissors line — which a comment body could legally contain.
-    pub fn rememberThreadPrefix(self: *App, id: i64, prefix: []const u8) void {
-        self.draw_lock.lock();
-        defer self.draw_lock.unlock();
-        if (self.thr_prefix.len > 0) self.gpa.free(self.thr_prefix);
-        self.thr_prefix = self.gpa.dupe(u8, prefix) catch &.{};
-        self.thr_prefix_id = id;
-    }
-
-    /// Put a fresh doc into whichever pane holds this thread, keeping
-    /// the pane and the cursor's line where they were.
-    pub fn replaceThreadDoc(self: *App, id: i64, content: []const u8, prefix: []const u8, note: ?[]const u8) void {
-        self.rememberThreadPrefix(id, prefix);
-        var name: [32]u8 = undefined;
-        const label = std.fmt.bufPrint(&name, "thread:{d}", .{id}) catch return;
-        self.draw_lock.lock();
-        defer self.draw_lock.unlock();
-        for (self.spaces.items) |s| {
-            for (s.tabs.items) |t| {
-                for (t.panes.items) |p| {
-                    const ed = p.editor() orelse continue;
-                    if (!std.mem.eql(u8, ed.buf.path orelse "", label)) continue;
-                    const line = ed.cline;
-                    ed.openText(label, content) catch continue;
-                    ed.cline = @min(line, ed.lineCountB() -| 1);
-                    if (note) |n| ed.setStatus("{s}", .{n}, false);
-                    self.scene_dirty = true;
-                }
-            }
-        }
-    }
-
-    /// Report a save/verb outcome on the thread's own pane.
-    pub fn setThreadStatus(self: *App, id: i64, msg: []const u8) void {
-        var name: [32]u8 = undefined;
-        const label = std.fmt.bufPrint(&name, "thread:{d}", .{id}) catch return;
-        self.draw_lock.lock();
-        defer self.draw_lock.unlock();
-        for (self.spaces.items) |s| {
-            for (s.tabs.items) |t| {
-                for (t.panes.items) |p| {
-                    const ed = p.editor() orelse continue;
-                    if (!std.mem.eql(u8, ed.buf.path orelse "", label)) continue;
-                    ed.setStatus("{s}", .{msg}, false);
-                    self.scene_dirty = true;
-                }
-            }
-        }
-    }
-
-    /// `thread:42` → 42. Any other buffer name is not a thread.
-    fn threadIdOf(name: []const u8) ?i64 {
-        if (!std.mem.startsWith(u8, name, "thread:")) return null;
-        return std.fmt.parseInt(i64, name["thread:".len..], 10) catch null;
-    }
-
-    /// The thread under the deck-style cursor, if the focused pane holds
-    /// one. Used by :ThreadNote / :ThreadAsk / :ThreadResolve.
-    fn focusedThreadId(self: *App) ?i64 {
-        const ed = self.activeTab().focused.editor() orelse return null;
-        return threadIdOf(ed.buf.path orelse "");
-    }
-
-    fn queueThreadVerbLocked(self: *App, id: i64, name: []const u8) void {
-        const n = @min(name.len, self.thr_verb.len);
-        @memcpy(self.thr_verb[0..n], name[0..n]);
-        self.thr_verb_len = n;
-        self.thr_verb_id = id;
-        self.thr_wake.store(true, .release);
-    }
-
     /// Put rendered text into an editor pane, under a display name.
     ///
     /// Takeover, exactly like `edit`: the shell parks underneath and
@@ -3365,224 +3178,6 @@ pub const App = struct {
         self.scene_dirty = true;
     }
 
-    /// Queue a diff view. Empty `path` means every changed file.
-    ///
-    /// Queued rather than built, because building forks git once per file
-    /// and this is called from the key path — including from the review
-    /// panel, where the alternative is the whole window freezing on the
-    /// keystroke that was supposed to show you the code.
-    pub fn requestDiff(self: *App, path: []const u8, line: i64) void {
-        self.draw_lock.lock();
-        self.diff_path_len = @min(path.len, self.diff_path.len);
-        @memcpy(self.diff_path[0..self.diff_path_len], path[0..self.diff_path_len]);
-        self.diff_line = line;
-        self.diff_req = true;
-        self.draw_lock.unlock();
-        self.rev_wake.store(true, .release);
-    }
-
-    /// Put a built diff document into a pane, decorated and locked.
-    ///
-    /// The three arrays travel together and are indexed by the same line,
-    /// which is the invariant diffdoc.zig exists to hold — so they are
-    /// handed over in one call rather than assembled here.
-    pub fn showDiff(self: *App, name: []const u8, doc: *const @import("diffdoc.zig").Doc, row: usize) void {
-        self.openTextPane(name, doc.text);
-        self.draw_lock.lock();
-        defer self.draw_lock.unlock();
-        const ed = self.activeTab().focused.editor() orelse return;
-
-        var styles = self.gpa.alloc(editorpkg.Style, doc.rows.len) catch return;
-        defer self.gpa.free(styles);
-        var nums = self.gpa.alloc(u32, doc.rows.len) catch return;
-        defer self.gpa.free(nums);
-        for (doc.rows, 0..) |r, i| {
-            styles[i] = switch (r.kind) {
-                .add => .diff_add,
-                .del => .diff_del,
-                .hunk => .diff_hunk,
-                .meta => .diff_meta,
-                .context => .text,
-            };
-            // ONE number, and which side it is depends on the row: a
-            // deletion belongs to the original, everything else to the
-            // modified side. The +/- prefix already says which file the
-            // number is in, so a second column would be spending four
-            // columns of a terminal to repeat it.
-            nums[i] = if (r.kind == .del) r.old_line else r.new_line;
-        }
-        ed.setDecor(styles, nums) catch return;
-        ed.cline = @min(row, doc.rows.len -| 1);
-        ed.ccol = 0;
-        ed.top = row -| 3; // a little context above where you landed
-        self.scene_dirty = true;
-    }
-
-    pub fn toggleThreads(self: *App) void {
-        {
-            self.draw_lock.lock();
-            defer self.draw_lock.unlock();
-            if (self.side_open and self.side_panel == .threads) {
-                self.side_open = false;
-                self.side_focus = false;
-            } else {
-                self.side_panel = .threads;
-                self.side_open = true;
-                self.side_focus = true;
-                self.thr_sel = 0;
-            }
-            self.relayoutLocked();
-            self.scene_dirty = true;
-        }
-        self.thr_wake.store(true, .release);
-    }
-
-    /// A thread verb against whatever thread the focused pane holds.
-    /// Says so when the pane is not a thread, rather than doing nothing —
-    /// a silent no-op on `:ThreadNote` is indistinguishable from a bug.
-    pub fn threadVerb(self: *App, name: []const u8) void {
-        self.draw_lock.lock();
-        defer self.draw_lock.unlock();
-        const id = self.focusedThreadId() orelse {
-            if (self.activeTab().focused.editor()) |ed|
-                ed.setStatus("not a thread buffer", .{}, true);
-            self.scene_dirty = true;
-            return;
-        };
-        self.queueThreadVerbLocked(id, name);
-    }
-
-    /// The threads panel's key path: vim keys, Enter opens the doc.
-    pub fn threadsKeyLocked(self: *App, bytes: []const u8) void {
-        const n = self.thr.slice().len;
-        var i: usize = 0;
-        while (i < bytes.len) {
-            const b = bytes[i];
-            if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
-                switch (bytes[i + 2]) {
-                    'A' => self.thr_sel -|= 1,
-                    'B' => self.thr_sel = @min(self.thr_sel + 1, n -| 1),
-                    else => {},
-                }
-                i += 3;
-                continue;
-            }
-            switch (b) {
-                0x1b => {
-                    self.side_focus = false;
-                    self.scene_dirty = true;
-                    return;
-                },
-                'k', 0x10 => self.thr_sel -|= 1,
-                'j', 0x0e => self.thr_sel = @min(self.thr_sel + 1, n -| 1),
-                'g' => self.thr_sel = 0,
-                'G' => self.thr_sel = n -| 1,
-                '\r', '\n' => {
-                    if (self.thr_sel < n) {
-                        self.thr_open_req = self.thr.slice()[self.thr_sel].id;
-                        self.thr_wake.store(true, .release);
-                        self.side_focus = false;
-                    }
-                    self.scene_dirty = true;
-                    return;
-                },
-                else => {},
-            }
-            i += 1;
-        }
-        self.scene_dirty = true;
-    }
-
-    pub fn toggleReview(self: *App) void {
-        {
-            self.draw_lock.lock();
-            defer self.draw_lock.unlock();
-            if (self.side_open and self.side_panel == .review) {
-                self.side_open = false;
-                self.side_focus = false;
-            } else {
-                self.side_panel = .review;
-                self.side_open = true;
-                self.side_focus = true;
-                self.rev_sel = 0;
-            }
-            self.relayoutLocked();
-            self.scene_dirty = true;
-        }
-        self.rev_wake.store(true, .release);
-    }
-
-    /// The review panel's keys: move, open, and the three verdicts.
-    /// a/r/d rather than a menu, because triaging 52 findings is the
-    /// actual workload and every extra keystroke is paid 52 times.
-    pub fn reviewKeyLocked(self: *App, bytes: []const u8) void {
-        const n = self.rev.slice().len;
-        var i: usize = 0;
-        while (i < bytes.len) {
-            const b = bytes[i];
-            if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
-                switch (bytes[i + 2]) {
-                    'A' => self.rev_sel -|= 1,
-                    'B' => self.rev_sel = @min(self.rev_sel + 1, n -| 1),
-                    else => {},
-                }
-                i += 3;
-                continue;
-            }
-            switch (b) {
-                0x1b => {
-                    self.side_focus = false;
-                    self.scene_dirty = true;
-                    return;
-                },
-                'k', 0x10 => self.rev_sel -|= 1,
-                'j', 0x0e => self.rev_sel = @min(self.rev_sel + 1, n -| 1),
-                'g' => self.rev_sel = 0,
-                'G' => self.rev_sel = n -| 1,
-                'a' => self.queueVerdictLocked("approved"),
-                'r' => self.queueVerdictLocked("rejected"),
-                'd' => self.queueVerdictLocked("deferred"),
-                // The CHANGE this finding is about, rather than the file
-                // it lives in. Additive: Enter still opens the file at
-                // the line, because that is the motion already in
-                // people's hands and a verdict often needs the
-                // surrounding code rather than the patch.
-                //
-                // Set inline instead of through requestDiff: the caller
-                // holds draw_lock, and taking it again would deadlock on
-                // the keystroke.
-                'D' => {
-                    if (self.rev_sel < n) {
-                        const f = self.rev.slice()[self.rev_sel];
-                        const p = f.path.get();
-                        self.diff_path_len = @min(p.len, self.diff_path.len);
-                        @memcpy(self.diff_path[0..self.diff_path_len], p[0..self.diff_path_len]);
-                        self.diff_line = f.line;
-                        self.diff_req = true;
-                        self.rev_wake.store(true, .release);
-                        self.side_focus = false;
-                    }
-                    self.scene_dirty = true;
-                    return;
-                },
-                '\r', '\n' => {
-                    if (self.rev_sel < n) {
-                        const f = self.rev.slice()[self.rev_sel];
-                        self.rev_open_path_len = @min(f.path.get().len, self.rev_open_path.len);
-                        @memcpy(self.rev_open_path[0..self.rev_open_path_len], f.path.get()[0..self.rev_open_path_len]);
-                        self.rev_open_line = f.line;
-                        self.side_focus = false;
-                    }
-                    self.scene_dirty = true;
-                    return;
-                },
-                else => {},
-            }
-            i += 1;
-        }
-        self.scene_dirty = true;
-    }
-
     fn queueVerdictLocked(self: *App, state: []const u8) void {
         if (self.rev_sel >= self.rev.slice().len) return;
         const f = self.rev.slice()[self.rev_sel];
@@ -3610,7 +3205,6 @@ pub const App = struct {
     pub fn attachCommands(self: *App, ed: *editorpkg.Editor) void {
         ed.cmd_ctx = self;
         ed.app_command = &editorExCommand;
-        ed.app_save = &editorSave;
         ed.app_quit_all = &editorQuitAll;
         ed.app_open = &editorOpenRequest;
         ed.leader = self.keybinds.ed_leader;
@@ -5210,18 +4804,15 @@ pub const App = struct {
     pub const rail_items = [_]RailItem{
         .{ .glyph = "\u{f07b}", .title = "explorer", .action = .tree_toggle },
         .{ .glyph = "\u{f002}", .title = "search", .action = .panel_search },
-        .{ .glyph = "\u{f126}", .title = "scm", .action = .diff_open },
-        .{ .glyph = "\u{f00c}", .title = "review", .action = .panel_review },
     };
 
     /// Is a rail item's surface currently up? Only the side-pane
     /// tenants can answer honestly (the tree is per-pane, the palette
     /// is modal) — the rest never light.
-    fn railActive(self: *App, action: cfgpkg.Action) bool {
-        return switch (action) {
-            .panel_review => self.side_open and self.side_panel == .review,
-            else => false,
-        };
+    fn railActive(_: *App, _: cfgpkg.Action) bool {
+        // Every side-pane tenant that could light this left in the strip;
+        // the survivors (tree, palette) are per-pane or modal and never do.
+        return false;
     }
 
     /// The icon rail (config `activity-bar`; the vscode preset turns
@@ -5362,8 +4953,6 @@ pub const App = struct {
         var y = r.y;
         const tx = r.x + self.m.gutter;
         _ = ui.text(tx, y + (row_h - ch) / 2, switch (self.side_panel) {
-            .threads => "THREADS",
-            .review => "REVIEW",
             .search => "SEARCH",
         }, th.bar_value, self.glassBg(th.bar_bg));
         // The focus telegraph: an interactive panel has to look like it
@@ -5379,8 +4968,6 @@ pub const App = struct {
         y += self.sep + self.m.gap;
 
         switch (self.side_panel) {
-            .threads => self.drawThreads(ui, r, y),
-            .review => self.drawReview(ui, r, y),
             .search => self.drawSearch(ui, r, y),
         }
     }
@@ -5473,127 +5060,6 @@ pub const App = struct {
             _ = ui.textOver(tx + 2 * cw, y + (row_h - ch) / 2, s, if (selected) th.bar_value else th.bar_fg);
             y += row_h;
         }
-    }
-
-    fn drawReview(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
-        const cw = self.renderer.cell_w;
-        const ch = self.renderer.cell_h;
-        const row_h = self.bar_h;
-        const bg = self.glassBg(th.bar_bg);
-        const tx = r.x + self.m.gutter;
-        var y = top;
-        var clipbuf: [256]u8 = undefined;
-
-        if (!self.rev.live) {
-            _ = ui.text(tx, y + (row_h - ch) / 2, "host unreachable", th.bar_fg, bg);
-            return;
-        }
-        if (!self.rev.any) {
-            _ = ui.text(tx, y + (row_h - ch) / 2, "no review in this workspace", th.bar_fg, bg);
-            return;
-        }
-
-        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - self.m.gutter * 2, cw)));
-        // THE GATE, first and unmissable: it is the answer to the only
-        // question this panel exists for — can I ship this yet.
-        var gbuf: [96]u8 = undefined;
-        const g = if (self.rev.ready)
-            std.fmt.bufPrint(&gbuf, "{s} READY · {d} reviewed", .{ self.rev.verb.get(), self.rev.total }) catch ""
-        else
-            std.fmt.bufPrint(&gbuf, "{s} blocked · {d} of {d} left", .{ self.rev.verb.get(), self.rev.blocking, self.rev.total }) catch "";
-        _ = ui.text(tx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, g, cols), if (self.rev.ready) th.accent else th.ed_err, bg);
-        y += row_h;
-        const lbl = self.rev.label.get();
-        _ = ui.text(tx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, lbl, cols), th.bar_fg, bg);
-        y += row_h;
-
-        const avail = r.y + r.h - y - row_h;
-        const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h * 2)));
-        const shown = @min(self.rev.slice().len, fits);
-
-        for (self.rev.slice()[0..shown], 0..) |*f, i| {
-            const selected = i == self.rev_sel;
-            if (selected) self.drawRowSelection(ui, r, y, row_h * 2);
-            const mfg = switch (f.state) {
-                .approved, .deferred => th.bar_fg,
-                .rejected => th.ed_err,
-                else => th.accent,
-            };
-            var mx = tx;
-            mx += ui.textOver(mx, y + (row_h - ch) / 2, f.state.mark(), mfg);
-            var loc: [140]u8 = undefined;
-            const base = f.path.get();
-            const file = if (std.mem.lastIndexOfScalar(u8, base, '/')) |sl| base[sl + 1 ..] else base;
-            const s2 = std.fmt.bufPrint(&loc, "{s}:{d}", .{ file, f.line }) catch file;
-            _ = ui.textOver(mx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, s2, cols -| 2), if (selected) th.bar_value else th.bar_fg);
-            if (f.risk >= 7)
-                _ = ui.textOverRight(r.x + r.w - self.m.gutter, y + (row_h - ch) / 2, "risk", th.ed_err);
-            y += row_h;
-            const wtxt = f.what.get();
-            _ = ui.textOver(tx + cw * 2, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, wtxt, cols -| 2), th.bar_fg);
-            y += row_h;
-        }
-        const hidden = self.rev.slice().len - shown + self.rev.more;
-        if (hidden > 0) {
-            var buf: [32]u8 = undefined;
-            const s3 = std.fmt.bufPrint(&buf, "+{d} more", .{hidden}) catch "+more";
-            _ = ui.text(tx, y + (row_h - ch) / 2, s3, th.bar_fg, bg);
-            y += row_h;
-        }
-        if (self.side_focus)
-            _ = ui.text(tx, y + (row_h - ch) / 2, "a/r/d verdict · enter file · D diff", th.bar_fg, bg);
-    }
-
-    fn drawThreads(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
-        const cw = self.renderer.cell_w;
-        const ch = self.renderer.cell_h;
-        const row_h = self.bar_h;
-        const bg = self.glassBg(th.bar_bg);
-        const tx = r.x + self.m.gutter;
-        var y = top;
-        var clipbuf: [256]u8 = undefined;
-
-        if (!self.thr.live) {
-            _ = ui.text(tx, y + (row_h - ch) / 2, "host unreachable", th.bar_fg, bg);
-            return;
-        }
-        if (self.thr.n == 0) {
-            _ = ui.text(tx, y + (row_h - ch) / 2, "no open threads", th.bar_fg, bg);
-            return;
-        }
-        const cols: usize = @intFromFloat(@max(1, @divFloor(r.w - self.m.gutter * 2, cw)));
-        const avail = r.y + r.h - top - row_h;
-        const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h * 2)));
-        const shown = @min(self.thr.slice().len, fits);
-
-        for (self.thr.slice()[0..shown], 0..) |*t, i| {
-            const selected = i == self.thr_sel;
-            if (selected) self.drawRowSelection(ui, r, y, row_h * 2);
-            // An UNDELIVERED thread is the one failure the old model
-            // rendered as a normal wait: submitted, and nobody was told.
-            const mark: []const u8 = if (t.undelivered) "! " else if (t.has_draft) "✎ " else "· ";
-            const mfg = if (t.undelivered) th.ed_err else if (t.has_draft) th.accent else th.bar_fg;
-            var mx = tx;
-            mx += ui.textOver(mx, y + (row_h - ch) / 2, mark, mfg);
-            var loc: [140]u8 = undefined;
-            const base = t.path.get();
-            const file = if (std.mem.lastIndexOfScalar(u8, base, '/')) |sl| base[sl + 1 ..] else base;
-            const s2 = std.fmt.bufPrint(&loc, "{s}:{d}", .{ file, t.line }) catch file;
-            _ = ui.textOver(mx, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, s2, cols -| 2), if (selected) th.bar_value else th.bar_fg);
-            y += row_h;
-            const a = t.anchor.get();
-            _ = ui.textOver(tx + cw * 2, y + (row_h - ch) / 2, uipkg.clip(&clipbuf, a, cols -| 2), th.bar_fg);
-            y += row_h;
-        }
-        const hidden = self.thr.slice().len - shown + self.thr.more;
-        if (hidden > 0) {
-            var buf: [32]u8 = undefined;
-            const s3 = std.fmt.bufPrint(&buf, "+{d} more", .{hidden}) catch "+more";
-            _ = ui.text(tx, y + (row_h - ch) / 2, s3, th.bar_fg, bg);
-            y += row_h;
-        }
-        if (self.side_focus)
-            _ = ui.text(tx, y + (row_h - ch) / 2, "j/k · enter opens", th.bar_fg, bg);
     }
 
     /// Resolve a workspace-relative path against the active space's
@@ -6431,297 +5897,6 @@ fn terminateCallback(context: *const ResizeBlock.Context, notification: objc.c.i
 fn authCallback(_: *const AuthBlock.Context, granted: bool, err: objc.c.id) callconv(.c) void {
     _ = err;
     if (!granted) std.debug.print("rook: notification permission denied (System Settings > Notifications > rook)\n", .{});
-}
-
-/// Review: poll the workspace's review, apply verdicts, open findings.
-fn reviewThread(app: *App) void {
-    const sub = @import("substrate.zig");
-    while (true) {
-        var set_id: i64 = 0;
-        var set_name: [12]u8 = undefined;
-        var set_len: usize = 0;
-        var open_path: [128]u8 = undefined;
-        var open_len: usize = 0;
-        var open_line: i64 = 0;
-        var ws_buf: [64]u8 = undefined;
-        var ws_len: usize = 0;
-        var want_diff = false;
-        var diff_path: [256]u8 = undefined;
-        var diff_len: usize = 0;
-        var diff_line: i64 = 0;
-        const open_panel = blk: {
-            app.draw_lock.lock();
-            defer app.draw_lock.unlock();
-            set_id = app.rev_set_id;
-            set_len = app.rev_set_len;
-            if (set_id != 0) {
-                @memcpy(set_name[0..set_len], app.rev_set[0..set_len]);
-                app.rev_set_id = 0;
-                app.rev_set_len = 0;
-            }
-            open_len = app.rev_open_path_len;
-            if (open_len > 0) {
-                @memcpy(open_path[0..open_len], app.rev_open_path[0..open_len]);
-                open_line = app.rev_open_line;
-                app.rev_open_path_len = 0;
-            }
-            want_diff = app.diff_req;
-            if (want_diff) {
-                diff_len = app.diff_path_len;
-                @memcpy(diff_path[0..diff_len], app.diff_path[0..diff_len]);
-                diff_line = app.diff_line;
-                app.diff_req = false;
-            }
-            const label = app.activeSpace().label();
-            ws_len = @min(label.len, ws_buf.len);
-            @memcpy(ws_buf[0..ws_len], label[0..ws_len]);
-            break :blk app.side_open and app.side_panel == .review;
-        };
-
-        // A verdict outranks polling: it is what the human just did.
-        var forced = false;
-        if (set_id != 0) {
-            _ = sub.Substrate.select(app.gpa, app.io).setReviewState(set_id, set_name[0..set_len]);
-            forced = true; // re-fetch so the gate reflects it immediately
-        }
-
-        if (open_len > 0) {
-            // Paths are workspace-relative; resolve against the space's
-            // root by way of the focused pane's cwd.
-            var full: [512]u8 = undefined;
-            const p = open_path[0..open_len];
-            const resolved = if (p.len > 0 and p[0] == '/')
-                p
-            else if (app.spaceRoot(&full, p)) |r| r else p;
-            _ = app.openEditorAtLine(resolved, open_line);
-        }
-
-        if (want_diff) buildDiff(app, ws_buf[0..ws_len], diff_path[0..diff_len], diff_line);
-
-        if (open_panel or forced) {
-            const snap = sub.Substrate.select(app.gpa, app.io).reviewSnapshot(ws_buf[0..ws_len]);
-            const d = snap.digest();
-            app.draw_lock.lock();
-            if (d != app.rev_digest) {
-                app.rev = snap;
-                app.rev_digest = d;
-                if (app.rev_sel >= app.rev.n) app.rev_sel = app.rev.n -| 1;
-                app.scene_dirty = true;
-            }
-            app.draw_lock.unlock();
-        }
-
-        var slept: u32 = 0;
-        while (slept < 2000) : (slept += 50) {
-            if (app.rev_wake.swap(false, .acq_rel)) break;
-            _ = usleep(50 * 1000);
-        }
-    }
-}
-
-/// Build a diff view and hand it to a pane.
-///
-/// Runs on the review thread, off the key path — one diff is a `git diff`
-/// per changed file, and a big repo would otherwise stall the frame for
-/// the duration.
-///
-/// `path` empty means every changed file in one document. The empty
-/// answer is still a document ("no changes"), because a keystroke that
-/// appears to do nothing is indistinguishable from a broken one.
-fn buildDiff(app: *App, workspace: []const u8, path: []const u8, line: i64) void {
-    const ds = @import("diffsource.zig");
-    const dd = @import("diffdoc.zig");
-    const sub = @import("substrate.zig");
-    if (workspace.len == 0) return;
-    const s = sub.Substrate.select(app.gpa, app.io);
-
-    // Base "": let the source decide — a worktree diffs its whole task,
-    // everything else its uncommitted work. Overriding here would make
-    // the view disagree with the review panel above it.
-    if (path.len > 0) {
-        var sides = s.diffSides(workspace, path, "");
-        defer sides.deinit();
-        var doc = dd.one(app.gpa, app.io, path, &sides, .{});
-        defer doc.deinit();
-        const row = if (line > 0) doc.rowForLine(0, @intCast(line)) else 0;
-        var name: [288]u8 = undefined;
-        const label = std.fmt.bufPrint(&name, "diff:{s}", .{path}) catch "diff";
-        app.showDiff(label, &doc, row);
-        return;
-    }
-
-    var changes = s.changes(workspace, "");
-    defer changes.deinit();
-
-    // The fetch closure, so diffdoc never needs to know what a substrate
-    // is — it takes two texts per file and nothing else.
-    const Fetch = struct {
-        sb: sub.Substrate,
-        ws: []const u8,
-        fn get(self: @This(), p: []const u8) ds.Sides {
-            return self.sb.diffSides(self.ws, p, "");
-        }
-    };
-    var doc = dd.all(app.gpa, app.io, &changes, Fetch{ .sb = s, .ws = workspace }, Fetch.get, .{});
-    defer doc.deinit();
-    app.showDiff("diff:changes", &doc, 0);
-}
-
-/// Threads: list, open, save, and the verbs.
-///
-/// One thread because they are all network work against the same
-/// resource and must not interleave — a save racing its own re-open
-/// would splice the wrong tail.
-fn threadsThread(app: *App) void {
-    const thr = @import("threaddoc.zig");
-    const sub = @import("substrate.zig");
-    while (true) {
-        // --- save first: what the human already typed outranks polling
-        var save_id: i64 = 0;
-        var save_len: usize = 0;
-        var save_body: []u8 = &.{};
-        var verb_id: i64 = 0;
-        var verb_name: [16]u8 = undefined;
-        var verb_len: usize = 0;
-        var open_id: i64 = 0;
-        var ws_buf: [64]u8 = undefined;
-        var ws_len: usize = 0;
-        const want_list = blk: {
-            app.draw_lock.lock();
-            defer app.draw_lock.unlock();
-            save_id = app.thr_save_id;
-            save_len = app.thr_save_len;
-            if (save_id != 0) {
-                save_body = app.gpa.dupe(u8, app.thr_save_body[0..save_len]) catch &.{};
-                app.thr_save_id = 0;
-                app.thr_save_len = 0;
-            }
-            verb_id = app.thr_verb_id;
-            verb_len = app.thr_verb_len;
-            if (verb_id != 0) {
-                @memcpy(verb_name[0..verb_len], app.thr_verb[0..verb_len]);
-                app.thr_verb_id = 0;
-                app.thr_verb_len = 0;
-            }
-            open_id = app.thr_open_req;
-            app.thr_open_req = 0;
-            const label = app.activeSpace().label();
-            ws_len = @min(label.len, ws_buf.len);
-            @memcpy(ws_buf[0..ws_len], label[0..ws_len]);
-            break :blk app.side_open and app.side_panel == .threads;
-        };
-
-        if (save_id != 0 and save_body.len > 0) {
-            defer app.gpa.free(save_body);
-            switch (sub.Substrate.select(app.gpa, app.io).saveThreadDoc(save_id, save_body)) {
-                .ok => app.setThreadStatus(save_id, "saved"),
-                .failed => app.setThreadStatus(save_id, "save failed"),
-                .stale => |fresh| {
-                    // A concurrent agent reply. History is append-only,
-                    // so this always merges: take our tail and put it
-                    // under the grown prefix.
-                    var f = fresh;
-                    defer f.deinit(app.gpa);
-                    app.draw_lock.lock();
-                    const our_prefix = app.thr_prefix;
-                    const tail: []const u8 = if (app.thr_prefix_id == save_id)
-                        thr.tailOf(save_body, our_prefix) orelse ""
-                    else
-                        "";
-                    app.draw_lock.unlock();
-                    if (thr.splice(app.gpa, &f, tail)) |merged| {
-                        defer app.gpa.free(merged);
-                        _ = sub.Substrate.select(app.gpa, app.io).saveThreadDoc(save_id, merged);
-                        app.replaceThreadDoc(save_id, merged, f.prefix(), "merged a reply");
-                    }
-                },
-            }
-        }
-
-        if (verb_id != 0) {
-            const ok = sub.Substrate.select(app.gpa, app.io).threadVerb(verb_id, verb_name[0..verb_len]);
-            app.setThreadStatus(verb_id, if (ok) "done" else "refused");
-            // The doc changed underneath us (a note becomes a comment).
-            if (ok) {
-                if (sub.Substrate.select(app.gpa, app.io).threadDoc(verb_id)) |d| {
-                    var doc = d;
-                    defer doc.deinit(app.gpa);
-                    app.replaceThreadDoc(verb_id, doc.content, doc.prefix(), null);
-                }
-            }
-        }
-
-        if (open_id != 0) {
-            if (sub.Substrate.select(app.gpa, app.io).threadDoc(open_id)) |d| {
-                var doc = d;
-                defer doc.deinit(app.gpa);
-                var name: [32]u8 = undefined;
-                const label = std.fmt.bufPrint(&name, "thread:{d}", .{open_id}) catch "thread";
-                app.rememberThreadPrefix(open_id, doc.prefix());
-                app.openTextPane(label, doc.content);
-            }
-        }
-
-        if (want_list) {
-            const snap = sub.Substrate.select(app.gpa, app.io).threadList(ws_buf[0..ws_len]);
-            const d = snap.digest();
-            app.draw_lock.lock();
-            if (d != app.thr_digest) {
-                app.thr = snap;
-                app.thr_digest = d;
-                if (app.thr_sel >= app.thr.n) app.thr_sel = app.thr.n -| 1;
-                app.scene_dirty = true;
-            }
-            app.draw_lock.unlock();
-        }
-
-        var slept: u32 = 0;
-        while (slept < 2000) : (slept += 50) {
-            if (app.thr_wake.swap(false, .acq_rel)) break;
-            _ = usleep(50 * 1000);
-        }
-    }
-}
-
-/// Fetch a requested transcript and open it as a buffer.
-///
-/// Its own thread because the body is document-sized (the host's own
-/// note: 200 records of a real transcript is ~485KB) and the fetch is
-/// blocking. Rendering allocates, unlike every other panel — a timeline
-/// IS a document — and the editor takes ownership of the text.
-fn transcriptThread(app: *App) void {
-    const tx = @import("transcript.zig");
-    while (true) {
-        var id: [64]u8 = undefined;
-        var n: usize = 0;
-        app.draw_lock.lock();
-        if (app.tx_req_len > 0) {
-            n = app.tx_req_len;
-            @memcpy(id[0..n], app.tx_req[0..n]);
-            app.tx_req_len = 0;
-        }
-        app.draw_lock.unlock();
-
-        if (n > 0) {
-            if (tx.fetchRendered(app.gpa, app.io, id[0..n])) |text| {
-                defer app.gpa.free(text);
-                var name: [80]u8 = undefined;
-                // Short id: a uuid is 36 characters of nothing a human
-                // reads, and the pane's name is chrome.
-                const short = id[0..@min(n, 8)];
-                const label = std.fmt.bufPrint(&name, "agent:{s}", .{short}) catch "agent";
-                app.openTextPane(label, text);
-            } else {
-                std.debug.print("rook: transcript fetch failed for {s}\n", .{id[0..n]});
-            }
-        }
-
-        var slept: u32 = 0;
-        while (slept < 1000) : (slept += 50) {
-            if (app.tx_wake.swap(false, .acq_rel)) break;
-            _ = usleep(50 * 1000);
-        }
-    }
 }
 
 /// The agent deck's poller. Same contract as the inbox's: fetches only

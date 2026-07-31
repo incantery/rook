@@ -472,13 +472,6 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else {
             reply(fd, "err unknown command (see `commands`)\n");
         }
-    } else if (std.mem.eql(u8, verb, "transcript") and rest.len > 0) {
-        // Open an agent's transcript as a buffer. Async by design: the
-        // fetch is a document-sized blocking read, so this only queues.
-        app.draw_lock.lock();
-        app.requestTranscriptLocked(rest);
-        app.draw_lock.unlock();
-        reply(fd, "ok\n");
     } else if (std.mem.eql(u8, verb, "sidepane") and rest.len == 0) {
         // Container state + the tenant's rows, so the whole panel is
         // verifiable without a screenshot.
@@ -514,49 +507,6 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                             hit.text,
                         }) catch break;
                     }
-                },
-                .review => {
-                    if (!app.rev.live) {
-                        _ = w.write("host unreachable\n") catch 0;
-                    } else if (!app.rev.any) {
-                        _ = w.write("no review in this workspace\n") catch 0;
-                    } else {
-                        w.print("gate {s} {s} blocking={d} total={d}\n{s}\n", .{
-                            app.rev.verb.get(),
-                            @as([]const u8, if (app.rev.ready) "READY" else "blocked"),
-                            app.rev.blocking,
-                            app.rev.total,
-                            app.rev.label.get(),
-                        }) catch {};
-                        for (app.rev.slice(), 0..) |*f, i| {
-                            w.print("{s}{d}\t{s}\t{s}:{d}\t{s}\n", .{
-                                @as([]const u8, if (i == app.rev_sel) "*" else " "),
-                                f.id,
-                                @tagName(f.state),
-                                f.path.get(),
-                                f.line,
-                                f.what.get(),
-                            }) catch break;
-                        }
-                        if (app.rev.more > 0) w.print("+{d} more\n", .{app.rev.more}) catch {};
-                    }
-                },
-                .threads => {
-                    if (!app.thr.live) {
-                        _ = w.write("host unreachable\n") catch 0;
-                    } else if (app.thr.n == 0) {
-                        _ = w.write("no open threads\n") catch 0;
-                    } else for (app.thr.slice(), 0..) |*t, i| {
-                        w.print("{s}{d}\t{s}:{d}\t{s}{s}\n", .{
-                            @as([]const u8, if (i == app.thr_sel) "*" else " "),
-                            t.id,
-                            t.path.get(),
-                            t.line,
-                            t.anchor.get(),
-                            @as([]const u8, if (t.undelivered) "\t(undelivered)" else if (t.has_draft) "\t(draft)" else ""),
-                        }) catch break;
-                    }
-                    if (app.thr.more > 0) w.print("+{d} more\n", .{app.thr.more}) catch {};
                 },
             }
         }

@@ -73,7 +73,7 @@ pub const Style = enum(u8) {
     syn_type,
     syn_func,
     // Diff buckets. Structural rather than syntactic: they come from a
-    // document's own shape (diffdoc.zig's row map), not from a grammar,
+    // document's own shape, not from a grammar,
     // which is why they arrive through setDecor instead of hl_spans.
     diff_add,
     diff_del,

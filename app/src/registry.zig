@@ -48,25 +48,22 @@ pub const Action = enum {
     panel_search,
     app_fullscreen,
     /// The workspace's threads.
-    panel_threads,
     /// The review: the changes list and the gate.
-    panel_review,
     /// Thread verbs, on whichever thread the focused pane holds. Reached
     /// as :ThreadNote / :ThreadAsk / :ThreadResolve through the
     /// ex-command bridge, which is exactly what that bridge is for.
-    thread_note,
-    thread_ask,
-    thread_resolve,
     /// Bring a pending question back. Without this, switching panels
     /// while an ask is open strands it: the form still holds the ask, so
     /// the poller will not offer another, and nothing shows it.
     /// Move the side pane to the other edge — panels are placement-
     /// agnostic, so this is a property of the container, not the tenant.
     panel_flip,
+    /// Close the side pane — search does not toggle, so this is the
+    /// only way out of it.
+    panel_close,
     /// The workspace's changes as a unified diff, in a pane. A view, not
     /// a panel: it is a DOCUMENT — scrolled, searched and navigated with
     /// the editor's own keys — and the side panes are for lists.
-    diff_open,
     /// The file tree, IN the focused pane (netrw's heir — no global
     /// panel; every pane can hold its own). Toggle puts back whatever
     /// the tree replaced: the file it covered, or the parked shell.
@@ -115,13 +112,8 @@ pub const commands = [_]Command{
     .{ .id = "palette.files", .title = "Go to File", .category = "App", .action = .palette_files, .keys = "⌘P" },
     .{ .id = "panel.search", .title = "Find in Files", .category = "App", .action = .panel_search, .keys = "⌘⇧F" },
     .{ .id = "app.fullscreen", .title = "Toggle Fullscreen", .category = "App", .action = .app_fullscreen },
-    .{ .id = "threads.toggle", .title = "Threads", .category = "Panel", .action = .panel_threads, .keys = "<leader>t" },
-    .{ .id = "review.changes", .title = "Review", .category = "Panel", .action = .panel_review, .keys = "<leader>g" },
-    .{ .id = "thread.note", .title = "Land Draft as a Note", .category = "Thread", .action = .thread_note },
-    .{ .id = "thread.ask", .title = "Send Draft to the Agent", .category = "Thread", .action = .thread_ask },
-    .{ .id = "thread.resolve", .title = "Resolve Thread", .category = "Thread", .action = .thread_resolve },
     .{ .id = "panel.flip", .title = "Move Side Pane to Other Edge", .category = "Panel", .action = .panel_flip },
-    .{ .id = "diff.open", .title = "Diff: Working Changes", .category = "Review", .action = .diff_open, .keys = "<leader>d" },
+    .{ .id = "panel.close", .title = "Close Side Pane", .category = "Panel", .action = .panel_close },
     .{ .id = "tree.toggle", .title = "File Tree", .category = "Pane", .action = .tree_toggle, .keys = "<leader>⇥" },
     .{ .id = "tree.reveal", .title = "File Tree: Reveal File", .category = "Pane", .action = .tree_reveal, .keys = "<leader>o" },
 };

@@ -238,16 +238,6 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(lsp_tests).step);
 
-    // The session view's record→document rendering. Its own root because
-    // the shape is the host's to change and a silent mismatch would show
-    // up as an empty or misleading transcript, not a crash.
-    const transcript_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/transcript.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    test_step.dependOn(&b.addRunArtifact(transcript_tests).step);
-
     // hostc's HTTP framing. Its own root because of the chunked-encoding
     // bug this exists to prevent: Go switches to chunked once a response
     // outgrows its write buffer, so EVERY panel worked until the first
@@ -260,52 +250,6 @@ pub fn build(b: *std.Build) void {
     }) });
     hostc_tests.root_module.link_libc = true;
     test_step.dependOn(&b.addRunArtifact(hostc_tests).step);
-
-    // The thread-document contract: the prefix arithmetic and the
-    // concurrent-reply splice. Its own root because getting the prefix
-    // wrong loses a draft — the host 409s and the client has to merge,
-    // and a merge that splices at the wrong place eats what you typed.
-    const threaddoc_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/threaddoc.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    threaddoc_tests.root_module.link_libc = true;
-    // sqlite since the list moved onto the registry. Its parity test is
-    // the one that matters here: the local path and the host path must
-    // agree row for row, or the cutover leaves two panels that disagree.
-    threaddoc_tests.root_module.linkSystemLibrary("sqlite3", .{});
-    test_step.dependOn(&b.addRunArtifact(threaddoc_tests).step);
-
-    // The review panel: gate rules, and since the registry cutover, the
-    // whole local read path. Its own root because a client that
-    // disagreed with the host about what BLOCKS would render a gate the
-    // host will not honour — the worst kind of wrong for this panel —
-    // and because these tests now drive a real registry, a real repo and
-    // a real git diff end to end, which is the only way to catch the
-    // panel silently falling back to stored line numbers.
-    const review_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/review.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    review_tests.root_module.link_libc = true;
-    review_tests.root_module.linkSystemLibrary("sqlite3", .{});
-    test_step.dependOn(&b.addRunArtifact(review_tests).step);
-
-    // Re-anchoring arithmetic — the first piece of the Go host's review
-    // substrate to land here, and it gets its own root for a reason the
-    // others don't have: for now the SAME rules exist twice, in
-    // internal/host/reanchor.go and in src/anchor.zig, and the two must
-    // agree exactly. These tests are ports of reanchor_test.go's, input
-    // for input, so a divergence surfaces as one side going red rather
-    // than as a comment quietly rendering two lines off its code.
-    const anchor_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/anchor.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    test_step.dependOn(&b.addRunArtifact(anchor_tests).step);
 
     // Running git, and the repo-path guard. Its own root because both
     // halves fail silently when wrong: `git diff --no-index` exits 1 for
@@ -335,98 +279,6 @@ pub fn build(b: *std.Build) void {
     blobs_tests.root_module.link_libc = true;
     blobs_tests.root_module.linkSystemLibrary("sqlite3", .{});
     test_step.dependOn(&b.addRunArtifact(blobs_tests).step);
-
-    // The substrate contract: which arm answers, and the promise that
-    // they stay separate. Its own root because the failure it guards is
-    // invisible — a remote arm that quietly read the local registry
-    // would pass every other test in the tree while making the interface
-    // a lie, and a caller on another machine would be the one to find
-    // out. Its tests assert both directions of the choice.
-    const substrate_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/substrate.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    substrate_tests.root_module.link_libc = true;
-    substrate_tests.root_module.linkSystemLibrary("sqlite3", .{});
-    test_step.dependOn(&b.addRunArtifact(substrate_tests).step);
-
-    // Thread rows and their comments. Its own root for the same reason
-    // tasks has one — the scan is POSITIONAL against the Go host's
-    // threadCols — plus one this table owns: submitted_at is the only
-    // NULLable column in the read path, and collapsing NULL to ""
-    // silently turns "never submitted" into "submitted at an unknown
-    // time", which is a thread nobody was ever told about reading as a
-    // normal wait.
-    const threads_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/threads.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    threads_tests.root_module.link_libc = true;
-    threads_tests.root_module.linkSystemLibrary("sqlite3", .{});
-    test_step.dependOn(&b.addRunArtifact(threads_tests).step);
-
-    // RookTask reads and the review gate. Its own root because both
-    // failure modes are quiet: the scan is POSITIONAL, so a column-order
-    // drift from the Go host's taskCols mislabels every row rather than
-    // erroring, and a gate that failed open on an unrecognised state
-    // would pass a review because of a typo.
-    const tasks_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/tasks.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    tasks_tests.root_module.link_libc = true;
-    tasks_tests.root_module.linkSystemLibrary("sqlite3", .{});
-    test_step.dependOn(&b.addRunArtifact(tasks_tests).step);
-
-    // Re-anchoring assembled — the arithmetic against real git and a
-    // real sqlite fixture. Its own root because the parts worth testing
-    // here are exactly the ones a fake would paper over: what git calls
-    // a hunk, and whether a missing row reads as pruned. It reaches
-    // anchor/git/blobs through their imports, so those suites run here
-    // too; they keep their own roots so a failure still names the layer
-    // it came from.
-    const reanchor_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/reanchor.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    reanchor_tests.root_module.link_libc = true;
-    reanchor_tests.root_module.linkSystemLibrary("sqlite3", .{});
-    test_step.dependOn(&b.addRunArtifact(reanchor_tests).step);
-
-    // Diff sources: where "what changed" comes from. Its own root, and
-    // it needs neither sqlite nor a registry — a diff source is git and
-    // bytes, which is exactly why it is separable from the substrate at
-    // all, and why substrate.zig rather than this module is what turns a
-    // workspace NAME into a repo. What it guards is a pair of
-    // INDEX-WALKING parsers over flat
-    // NUL-separated field arrays, where a rename record consumes a
-    // variable number of fields: mis-advance by one and a status field is
-    // read as a path, so the pane offers a diff of a file called "M" and
-    // silently loses the real one. The shared fixture table it runs off
-    // is answered by internal/host/review.go too.
-    const diffsource_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/diffsource.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    test_step.dependOn(&b.addRunArtifact(diffsource_tests).step);
-
-    // A diff as a readable document. Its own root because the invariant
-    // it holds is one a compiler cannot: ONE row of the map per line of
-    // the text. A patch line the walk forgets to map slides the gutter by
-    // one from that point down, and the numbers keep looking plausible
-    // all the way — a reviewer would trust a wrong line, which is worse
-    // than showing no numbers at all.
-    const diffdoc_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/diffdoc.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    }) });
-    test_step.dependOn(&b.addRunArtifact(diffdoc_tests).step);
 
     // The UI layer's text fitting. Its own root for the reason logged
     // above editor_tests — the exe module's test collection does not

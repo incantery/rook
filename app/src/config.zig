@@ -1002,12 +1002,9 @@ fn defaultBinds(kb: *Keybinds) void {
     // tmux: prefix-z = resize-pane -Z. Same key, same muscle memory.
     kb.bind('z', .{ .action = .pane_zoom });
     // Threads.
-    kb.bind('t', .{ .action = .panel_threads });
     // Review — the wails app's <leader>g (the Gate).
-    kb.bind('g', .{ .action = .panel_review });
     // ...and the Diff the gate is about. Next to it on purpose: the list
     // of findings and the change they are about are one motion apart.
-    kb.bind('d', .{ .action = .diff_open });
     // The file tree, in the focused pane. THE APP'S leader, on purpose:
     // the editor has its own leader (config [editor], a separate
     // namespace) and could never fire this from a terminal pane, which

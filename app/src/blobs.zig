@@ -3,7 +3,7 @@
 //! `anchor_blobs(sha, content)` holds the file snapshots an anchor was
 //! taken against. Re-anchoring needs exactly one thing from it: given a
 //! stored blob sha, the content that sha names, so the current file can
-//! be diffed against it (see anchor.zig for what happens to the hunks).
+//! be diffed against it.
 //!
 //! Read-only on purpose, and it is not a gap. anchorNow only ever reads;
 //! every WRITE to this table happens inside the transaction that creates

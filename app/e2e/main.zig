@@ -45,12 +45,7 @@ const scenarios = [_]Scenario{
     .{ .name = "filetree", .what = "the tree takes over a pane, folds in place, reveals the current file, toggles back", .run = filetree },
     .{ .name = "bufline", .what = "the buffer line: documents chip up, :b/:bn switch, a chip click lands blind", .run = bufline },
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
-    .{ .name = "sidepane", .what = "side pane retiles the grid, flips edges, and holds the inbox", .run = sidepane },
-    .{ .name = "threads", .what = "the threads panel, and :Thread* refuses a non-thread buffer", .run = threads },
-    .{ .name = "review", .what = "the review panel opens focused and keeps its verdict keys", .run = review },
-    .{ .name = "threadrows", .what = "the sidebar lists real threads and re-anchors their lines", .run = threadRows },
-    .{ .name = "reviewrows", .what = "the review panel shows findings, the gate, and re-anchored lines", .run = reviewRows },
-    .{ .name = "diffview", .what = "the diff view renders hunks, colours them, numbers by FILE line, and refuses edits", .run = diffView },
+    .{ .name = "sidepane", .what = "side pane retiles the grid and flips edges", .run = sidepane },
     .{ .name = "quitall", .what = ":qa reaches every editor pane and leaves the terminals alone", .run = quitAll },
     .{ .name = "envgraph", .what = "environment.json wins: the graph's leader and chords drive, config.toml yields", .run = envgraph },
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
@@ -863,7 +858,7 @@ fn whichkey(gpa: std.mem.Allocator, bin: []const u8) !void {
 
     // An unanswered chord reveals the sheet, with the LIVE rows.
     const shown = try wkReveal(app);
-    try h.expectContains(shown, "g\tReview", "rows resolve live bindings to titles");
+    try h.expectContains(shown, "s\tSwitch Workspace", "rows resolve live bindings to titles");
     try h.expectContains(shown, "1-9\ttab 1-9", "digit chords collapse to one teaching row");
 
     // ...and it actually drew: the band the sheet occupies (above the
@@ -885,24 +880,23 @@ fn whichkey(gpa: std.mem.Allocator, bin: []const u8) !void {
 
     // A chord answered through the visible sheet still fires.
     _ = try wkReveal(app);
-    _ = try app.ctl("press g");
+    _ = try app.ctl("press s");
     try h.expectContains(try app.ctl("whichkey"), "closed", "the chord spends the sheet");
-    try h.expectContains(try app.ctl("sidepane"), "panel:review", "the chord ran through the sheet");
+    _ = try app.waitCtl("palette", "mode:workspaces", 3000);
+    _ = try app.ctl("key 1b");
 
-    // A row CLICK runs the command it teaches. The review row, because
-    // its panel state is blind-checkable the same way. (This was the deck
-    // row until the agent deck left in the strip — same property, and the
-    // chord above already closed the review panel, so the click reopens it.)
-    _ = try app.ctl("run review.changes");
-    try h.expectContains(try app.ctl("sidepane"), "closed", "review starts shut for the click");
+    // A row CLICK runs the command it teaches. The workspace row, because
+    // its result is blind-checkable the same way. (It was the agent deck's
+    // row, then review's; both left in the strip.)
     const rows = try wkReveal(app);
-    const review_pt = wkPoint(rows, "Review") orelse {
-        std.debug.print("      no review row point; whichkey said: {s}\n", .{rows});
+    const ws_pt = wkPoint(rows, "Switch Workspace") orelse {
+        std.debug.print("      no workspace row point; whichkey said: {s}\n", .{rows});
         return error.AssertFailed;
     };
-    _ = try app.ctlFmt("click {d} {d}", .{ review_pt[0], review_pt[1] });
+    _ = try app.ctlFmt("click {d} {d}", .{ ws_pt[0], ws_pt[1] });
     try h.expectContains(try app.ctl("whichkey"), "closed", "the click spends the chord");
-    try h.expectContains(try app.ctl("sidepane"), "panel:review", "the row click ran its command");
+    _ = try app.waitCtl("palette", "mode:workspaces", 3000);
+    _ = try app.ctl("key 1b");
 
     // A click OUTSIDE the sheet dismisses without running anything:
     // re-arm, wait, click the middle of the pane area.
@@ -976,10 +970,10 @@ fn statusbar(gpa: std.mem.Allocator, bin: []const u8) !void {
         return error.GitFailed;
     _ = try app.waitCtl("statusbar", "branch feat/wip", 8000);
 
-    // The branch segment clicks into the diff of what changed.
-    const br = wkPoint(try app.ctl("statusbar"), "seg-branch") orelse return error.AssertFailed;
-    _ = try app.ctlFmt("click {d} {d}", .{ br[0], br[1] });
-    try app.waitText("@@", 10_000);
+    // The branch segment still REPORTS its zone (the bar's hit-testing is
+    // the mechanism) — it just has nothing to open since the diff view
+    // left in the strip.
+    _ = wkPoint(try app.ctl("statusbar"), "seg-branch") orelse return error.AssertFailed;
 
     // The workspace segment clicks into the switcher.
     const ws = wkPoint(try app.ctl("statusbar"), "seg-workspace") orelse return error.AssertFailed;
@@ -1362,16 +1356,11 @@ fn sidepane(gpa: std.mem.Allocator, bin: []const u8) !void {
     // The assertion that separates a real container from a slab painted
     // OVER the panes: opening it must narrow the terminal's grid, which
     // means a pty resize reached the shell.
-    _ = try app.ctl("run threads.toggle");
+    _ = try app.ctl("run panel.search");
     const st = try app.ctl("sidepane");
-    try h.expectContains(st, "open side:right panel:threads", "opened on the right");
+    try h.expectContains(st, "open side:right panel:search", "opened on the right");
     const narrow = try paneCols(app);
     try h.expect(narrow < wide, "pane should narrow: {d} cols before, {d} after", .{ wide, narrow });
-
-    // The sandbox has no rook-host (XDG_STATE_HOME is unwritable on
-    // purpose), so the honest render is "unreachable" — NOT an empty
-    // list, which would read as "nothing needs you" and be a lie.
-    try h.expectContains(try app.ctl("sidepane"), "host unreachable", "fails open, and says which");
 
     // Placement-agnostic: same tenant, other edge, same width.
     _ = try app.ctl("run panel.flip");
@@ -1384,80 +1373,27 @@ fn sidepane(gpa: std.mem.Allocator, bin: []const u8) !void {
     // Toggling the SAME panel closes and gives the columns back. Compared
     // against the OPEN width, not the startup one: the direction is what
     // this asserts, and it is the part that cannot drift.
+    // Search deliberately does not toggle (⌘⇧F with results up means
+    // "search again"), so panel.close is the way out — and with search the
+    // only surviving tenant, it is the ONLY way out.
     const still_narrow = try paneCols(app);
-    _ = try app.ctl("run threads.toggle");
-    try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
+    _ = try app.ctl("run panel.close");
+    try h.expectContains(try app.ctl("sidepane"), "closed", "panel.close shuts it");
     const restored = try paneCols(app);
     try h.expect(restored > still_narrow, "closing should give columns back: {d} open, {d} closed", .{ still_narrow, restored });
 
     // And the real chord, through AppKit's leader machine.
-    _ = try app.ctl("press `");
-    _ = try app.ctl("press t");
-    var waited: u32 = 0;
-    while (waited < 3000) : (waited += 100) {
-        if (std.mem.indexOf(u8, try app.ctl("sidepane"), "open") != null) break;
-        h.sleepMs(100);
-    }
-    try h.expectContains(try app.ctl("sidepane"), "open", "<leader>t toggles it");
-}
-
-// ------------------------------------------------------------- threads
-
-fn threads(gpa: std.mem.Allocator, bin: []const u8) !void {
-    const app = try h.Instance.start(gpa, bin, .{});
-    defer {
-        app.stop();
-        app.deinit();
-    }
-    const wide = try paneCols(app);
-
-    _ = try app.ctl("run threads.toggle");
-    const st = try app.ctl("sidepane");
-    try h.expectContains(st, "panel:threads", "threads takes the side pane");
-    try h.expectContains(st, "host unreachable", "fails open, and says which");
-    try h.expect(try paneCols(app) < wide, "threads retiles like any tenant", .{});
-
-    // Opens focused, like the deck: it is a list you pick from.
-    _ = try app.ctl("type jjkk");
-    try h.expectContains(try app.ctl("dump"), "e2e$", "panel keys did NOT reach the shell");
-    _ = try app.ctl("key 1b");
-    _ = try app.ctl("run threads.toggle");
-    try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
-
-    // The thread verbs reach the registry AND the ex-command bridge.
-    const cmds = try app.ctl("commands");
-    try h.expectContains(cmds, "thread.note", "thread verbs are commands");
-    try h.expectContains(cmds, ":ThreadNote", "…and have derived ex-names");
-
-    // :ThreadNote on a buffer that is NOT a thread must SAY so. A silent
-    // no-op here is indistinguishable from a bug, and this is the only
-    // half of the thread verbs testable without a host.
-    var path_buf: [192]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/plain.txt", .{app.dirPath()});
-    try h.writeFile(path, "not a thread\n");
-    _ = try app.ctlFmt("edit {s}", .{path});
-    try app.waitText("not a thread", 5_000);
-    _ = try app.ctl("type :ThreadNote");
-    _ = try app.ctl("enter");
-    try app.waitText("not a thread buffer", 5_000);
+    _ = try app.ctl("run panel.search");
+    try h.expectContains(try app.ctl("sidepane"), "open", "panel.search reopens it");
+    _ = try app.ctl("run panel.close");
+    try h.expectContains(try app.ctl("sidepane"), "closed", "and closes again");
 }
 
 // ------------------------------------------------- seeding a registry
 //
-// Both panel scenarios need the same thing: a git repo whose file has
-// MOVED since the anchors were taken, and a registry the app will
-// actually find. Shared because the schema DDL is the part that must not
-// drift between them — two copies would be two chances to test against a
-// shape rook does not have.
-
-/// git's own hash of the snapshot below:
-///   printf 'l1\nl2\nl3\nl4\nl5\n' | git hash-object --stdin
-///
-/// Hardcoded rather than computed, so these stay BLACK-BOX checks of the
-/// shipped binary: if the app's blobSha ever disagreed with git, the
-/// snapshot would not be found, rows would go outdated, and the line
-/// assertions are what would catch it.
-const snapshot_sha = "b8cb000a15a7fc5e44750b59e867c859c6050a92";
+// A git repo plus a registry the app will actually find. It seeded the
+// thread and review tables too until those panels left in the strip;
+// what remains is what the status bar needs to name a workspace.
 
 const Registry = struct {
     db_buf: [256]u8 = undefined,
@@ -1468,42 +1404,11 @@ const Registry = struct {
     fn db(self: *const Registry) [:0]const u8 {
         return self.db_buf[0..self.db_len :0];
     }
-    pub fn repo(self: *const Registry) []const u8 {
+    fn repo(self: *const Registry) []const u8 {
         return self.repo_buf[0..self.repo_len];
-    }
-
-    /// Run more SQL against the seeded db. "SNAPSHOT" in `sql` is
-    /// replaced by the snapshot's sha, which keeps the fixtures readable
-    /// — a 40-char hex string repeated inline hides which rows share an
-    /// anchor.
-    pub fn exec(self: *const Registry, app: *h.Instance, comptime sql: []const u8) !void {
-        var buf: [4096]u8 = undefined;
-        var w = std.Io.Writer.fixed(&buf);
-        var rest: []const u8 = sql;
-        while (std.mem.indexOf(u8, rest, "SNAPSHOT")) |i| {
-            try w.writeAll(rest[0..i]);
-            try w.writeAll(snapshot_sha);
-            rest = rest["SNAPSHOT".len + i ..];
-        }
-        try w.writeAll(rest);
-        try w.writeByte(0);
-        const sqlz: [*:0]const u8 = @ptrCast(buf[0 .. w.end - 1 :0].ptr);
-        if (try h.runCmd(app.dirPath(), &.{ "/usr/bin/sqlite3", self.db().ptr, sqlz }) != 0)
-            return error.SeedFailed;
     }
 };
 
-/// A repo whose f.zig has drifted from the snapshot by TWO separate
-/// insertions — two lines at the top and two more between l2 and l3 —
-/// plus an empty registry at XDG_DATA_HOME/rook/rook.db holding a
-/// workspace named for the space the sandbox boots into.
-///
-/// Two insertions rather than one on purpose: an anchor on line 1 sits
-/// below only the first and rides to 3, while one on line 3 sits below
-/// both and rides to 7. Different DELTAS are what separate real
-/// re-anchoring from a constant offset applied to every row — with a
-/// single insertion both anchors move by 2 and the assertion proves
-/// nothing about the mapping.
 fn seedRegistry(app: *h.Instance) !Registry {
     var reg: Registry = .{};
 
@@ -1523,247 +1428,14 @@ fn seedRegistry(app: *h.Instance) !Registry {
     const db = try std.fmt.bufPrintZ(&reg.db_buf, "{s}/rook.db", .{rookdir});
     reg.db_len = db.len;
 
-    // The subset of rook's schema the read side touches, verbatim from
-    // internal/host/registry.go — including the three thread columns it
-    // adds by ALTER TABLE, because a migrated db is the only shape that
-    // exists in the wild.
-    var sql_buf: [4096]u8 = undefined;
+    var sql_buf: [1024]u8 = undefined;
     const sql = try std.fmt.bufPrintZ(&sql_buf,
         \\CREATE TABLE workspaces (name TEXT PRIMARY KEY, root TEXT NOT NULL DEFAULT '', scratch INTEGER NOT NULL DEFAULT 0, worktree_of TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_used TEXT NOT NULL);
-        \\CREATE TABLE anchor_blobs (sha TEXT PRIMARY KEY, content BLOB NOT NULL);
-        \\CREATE TABLE threads (id INTEGER PRIMARY KEY, workspace TEXT NOT NULL, path TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, side TEXT NOT NULL DEFAULT 'modified', blob_sha TEXT NOT NULL, commit_sha TEXT NOT NULL DEFAULT '', anchor_text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', resolved_by TEXT NOT NULL DEFAULT '', agent_reopens INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, submitted_at TEXT, rook_task_id INTEGER NOT NULL DEFAULT 0, deliver_error TEXT NOT NULL DEFAULT '', draft TEXT NOT NULL DEFAULT '');
-        \\CREATE TABLE thread_comments (id INTEGER PRIMARY KEY, thread_id INTEGER NOT NULL, author TEXT NOT NULL, agent_session TEXT NOT NULL DEFAULT '', body TEXT NOT NULL, created_at TEXT NOT NULL);
-        \\CREATE TABLE rook_tasks (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL DEFAULT 0, workspace TEXT NOT NULL, work_type TEXT NOT NULL, state TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', anchor_kind TEXT NOT NULL DEFAULT 'none', path TEXT NOT NULL DEFAULT '', start_line INTEGER NOT NULL DEFAULT 0, end_line INTEGER NOT NULL DEFAULT 0, side TEXT NOT NULL DEFAULT 'modified', blob_sha TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '', anchor_text TEXT NOT NULL DEFAULT '', anchor_ref TEXT NOT NULL DEFAULT '', origin TEXT NOT NULL DEFAULT 'rook', source_ref TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         \\INSERT INTO workspaces VALUES ('scratch','{s}',0,'','t','t');
-        \\INSERT INTO anchor_blobs VALUES ('{s}','l1
-        \\l2
-        \\l3
-        \\l4
-        \\l5
-        \\');
-    , .{ repo, snapshot_sha });
+    , .{repo});
     if (try h.runCmd(app.dirPath(), &.{ "/usr/bin/sqlite3", db.ptr, sql.ptr }) != 0)
         return error.SeedFailed;
     return reg;
-}
-
-/// The sidebar with actual threads in it, read from a registry rather
-/// than asked of a host — and re-anchored, which is the behaviour no
-/// unit test can show you on screen.
-///
-/// The `threads` scenario above covers the empty/host-unreachable side.
-/// This one seeds the sandbox's own registry so the LOCAL arm engages.
-fn threadRows(gpa: std.mem.Allocator, bin: []const u8) !void {
-    const app = try h.Instance.start(gpa, bin, .{});
-    defer {
-        app.stop();
-        app.deinit();
-    }
-
-    var reg = try seedRegistry(app);
-    try reg.exec(app,
-        \\INSERT INTO threads (id,workspace,path,start_line,end_line,blob_sha,anchor_text,state,created_at,updated_at,draft,deliver_error)
-        \\ VALUES (1,'scratch','f.zig',3,4,'SNAPSHOT','l3','open','t','t','',''),
-        \\        (2,'scratch','other.zig',9,9,'nosnapshot','x','pending','t','t','tail',''),
-        \\        (3,'scratch','gone.zig',1,1,'nosnapshot','y','resolved','t','t','','');
-    );
-
-    _ = try app.ctl("run threads.toggle");
-    try h.expectContains(try app.ctl("sidepane"), "panel:threads", "threads takes the side pane");
-
-    // THE assertion, and it doubles as the wait: the row shows line 7,
-    // not the 3 the thread was written against. That is the re-anchor
-    // happening inside the shipped binary, against a real working tree,
-    // with no host anywhere.
-    //
-    // Read through ctl rather than the screen: a side panel is window
-    // chrome, and `screen` dumps the focused pane's grid — asserting
-    // there passes only by accident and fails with a shell prompt as
-    // evidence.
-    const rows = try app.waitCtl("sidepane", "f.zig:7", 10_000);
-
-    // The local arm answered, so the panel is not reporting a host it
-    // never needed.
-    try h.expectNotContains(rows, "host unreachable", "the local arm answered");
-    try h.expectContains(rows, "l3", "the row renders its anchor text");
-
-    // The un-snapshotted thread cannot be re-anchored, so it keeps its
-    // stored line rather than guessing — and it shows its draft mark.
-    try h.expectContains(rows, "other.zig:9", "no snapshot, no movement");
-    try h.expectContains(rows, "(draft)", "an unsent draft is marked");
-
-    // The resolved one is absent: the list is what still wants you.
-    try h.expectNotContains(rows, "gone.zig", "resolved threads are history");
-
-    // ...and it actually DREW. Two shots — panel shut, panel open — and
-    // the right-hand strip has to differ. Self-calibrating: it needs no
-    // constant for the panel's width, and it is the only assertion here
-    // that a data-correct panel rendering nothing would fail.
-    _ = try app.ctl("run threads.toggle");
-    try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
-    var p1: [256]u8 = undefined;
-    var shut = try app.shot(try std.fmt.bufPrint(&p1, "{s}/shut.png", .{app.dirPath()}));
-    defer shut.deinit();
-
-    _ = try app.ctl("run threads.toggle");
-    _ = try app.waitCtl("sidepane", "f.zig:7", 10_000);
-    var p2: [256]u8 = undefined;
-    var open = try app.shot(try std.fmt.bufPrint(&p2, "{s}/open.png", .{app.dirPath()}));
-    defer open.deinit();
-
-    try h.expect(
-        shut.width == open.width and shut.height == open.height,
-        "shots disagree on size: {d}x{d} vs {d}x{d}",
-        .{ shut.width, shut.height, open.width, open.height },
-    );
-    var changed: usize = 0;
-    var y: usize = 0;
-    while (y < open.height) : (y += 4) {
-        var x = open.width - open.width / 5;
-        while (x < open.width) : (x += 4) {
-            if (shut.pixel(x, y) != open.pixel(x, y)) changed += 1;
-        }
-    }
-    try h.expect(changed > 50, "the panel strip barely changed ({d} px) — the rows were right but nothing drew", .{changed});
-}
-
-/// The review panel with an actual review in it, computed here rather
-/// than handed over by a host: the gate, the attention order, and the
-/// re-anchored lines.
-///
-/// The `review` scenario above covers the empty/host-unreachable side and
-/// the verdict keys. This one seeds the sandbox's own registry so the
-/// LOCAL arm engages and the gate is computed in this process.
-fn reviewRows(gpa: std.mem.Allocator, bin: []const u8) !void {
-    const app = try h.Instance.start(gpa, bin, .{});
-    defer {
-        app.stop();
-        app.deinit();
-    }
-
-    var reg = try seedRegistry(app);
-    // A review parent and three findings. Two share the snapshot and sit
-    // below different amounts of drift, so they re-anchor by different
-    // DELTAS — line 3 rides to 7 (below both insertions) and line 1 to 3
-    // (below only the first). Equal deltas would not distinguish real
-    // mapping from a constant offset. The third has no snapshot at all
-    // and must not move.
-    //
-    // States are chosen so the gate has something to say: rejected and
-    // proposed block, approved does not, so 2 of 3 block and the gate is
-    // shut. Risks 9 and 2 fix the attention order between the blockers.
-    try reg.exec(app,
-        \\INSERT INTO rook_tasks (id,parent_id,workspace,work_type,state,title,anchor_kind,detail,created_at,updated_at)
-        \\ VALUES (1,0,'scratch','review','reviewing','review','ref','{"label":"unstaged","verb":"commit"}','t','t');
-        \\INSERT INTO rook_tasks (id,parent_id,workspace,work_type,state,title,anchor_kind,path,start_line,end_line,blob_sha,detail,created_at,updated_at)
-        \\ VALUES (2,1,'scratch','review','rejected','f.zig:3','code','f.zig',3,4,'SNAPSHOT','{"summary":"off by one","category":"logic","score":{"risk":9}}','t','t'),
-        \\        (3,1,'scratch','review','proposed','other.zig:9','code','other.zig',9,9,'','{"summary":"unclear name","category":"style","score":{"risk":2}}','t','t'),
-        \\        (4,1,'scratch','review','approved','f.zig:1','code','f.zig',1,1,'SNAPSHOT','{"summary":"reads fine","category":"style","score":{"risk":1}}','t','t');
-    );
-
-    _ = try app.ctl("run review.changes");
-    try h.expectContains(try app.ctl("sidepane"), "panel:review", "review takes the side pane");
-
-    // Doubles as the wait: the finding was written against line 3 and the
-    // row has to say 7. Read through ctl, because a side panel is window
-    // chrome and `screen` dumps the focused pane's grid.
-    const out = try app.waitCtl("sidepane", "f.zig:7", 10_000);
-
-    // The local arm answered, so the panel is not reporting a host it
-    // never needed.
-    try h.expectNotContains(out, "host unreachable", "the local arm answered");
-
-    // The GATE, computed in this process from the children's states —
-    // not a number the host handed over. 2 of 3 block, so it is shut.
-    try h.expectContains(out, "gate commit blocked blocking=2 total=3", "the gate is computed locally");
-    try h.expectContains(out, "unstaged", "the review's label, from its detail bag");
-
-    // The second re-anchored row moves by a DIFFERENT delta: 1 -> 3,
-    // where the first went 3 -> 7. That difference is the thing that
-    // separates a real mapping from a constant offset applied to
-    // everything, and it is why the fixture has two insertions.
-    try h.expectContains(out, "f.zig:3", "the second anchor re-anchored by its own delta");
-    // No snapshot, so no movement — a finding that cannot be mapped keeps
-    // where it was written rather than guessing.
-    try h.expectContains(out, "other.zig:9", "no snapshot, no movement");
-
-    // Summaries, not titles: the title is just path:line, which the row
-    // already shows.
-    try h.expectContains(out, "off by one", "the summary is what you triage on");
-
-    // Attention order: blocking first, riskiest first. The rejected
-    // risk-9 finding leads, the approved one is last.
-    const rejected_at = std.mem.indexOf(u8, out, "rejected").?;
-    const proposed_at = std.mem.indexOf(u8, out, "proposed").?;
-    const approved_at = std.mem.indexOf(u8, out, "approved").?;
-    try h.expect(rejected_at < proposed_at, "riskier blocker should sort first", .{});
-    try h.expect(proposed_at < approved_at, "blockers should sort before cleared findings", .{});
-
-    // ...and it actually DREW. Two shots, panel shut then open, and the
-    // right-hand strip has to differ. Self-calibrating — no constant for
-    // the panel's width — and the only assertion here that a
-    // data-correct panel rendering nothing would fail.
-    _ = try app.ctl("run review.changes");
-    try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
-    var p1: [256]u8 = undefined;
-    var shut = try app.shot(try std.fmt.bufPrint(&p1, "{s}/shut.png", .{app.dirPath()}));
-    defer shut.deinit();
-
-    _ = try app.ctl("run review.changes");
-    _ = try app.waitCtl("sidepane", "f.zig:7", 10_000);
-    var p2: [256]u8 = undefined;
-    var open = try app.shot(try std.fmt.bufPrint(&p2, "{s}/open.png", .{app.dirPath()}));
-    defer open.deinit();
-
-    try h.expect(
-        shut.width == open.width and shut.height == open.height,
-        "shots disagree on size: {d}x{d} vs {d}x{d}",
-        .{ shut.width, shut.height, open.width, open.height },
-    );
-    var changed: usize = 0;
-    var y: usize = 0;
-    while (y < open.height) : (y += 4) {
-        var x = open.width - open.width / 5;
-        while (x < open.width) : (x += 4) {
-            if (shut.pixel(x, y) != open.pixel(x, y)) changed += 1;
-        }
-    }
-    try h.expect(changed > 50, "the panel strip barely changed ({d} px) — the rows were right but nothing drew", .{changed});
-}
-
-// -------------------------------------------------------------- review
-
-fn review(gpa: std.mem.Allocator, bin: []const u8) !void {
-    const app = try h.Instance.start(gpa, bin, .{});
-    defer {
-        app.stop();
-        app.deinit();
-    }
-    const wide = try paneCols(app);
-
-    _ = try app.ctl("run review.changes");
-    const st = try app.ctl("sidepane");
-    try h.expectContains(st, "panel:review", "review takes the side pane");
-    try h.expectContains(st, "host unreachable", "fails open, and says which");
-    try h.expect(try paneCols(app) < wide, "review retiles like any tenant", .{});
-
-    // Opens FOCUSED and holds the verdict keys. a/r/d are single letters
-    // on purpose — triaging 52 findings pays every extra keystroke 52
-    // times — which makes "do they leak to the shell" the sharp question.
-    _ = try app.ctl("type ard");
-    _ = try app.ctl("type jjkk");
-    try h.expectContains(try app.ctl("dump"), "e2e$", "verdict keys did NOT reach the shell");
-
-    _ = try app.ctl("key 1b");
-    try h.expectContains(try app.ctl("sidepane"), "panel:review", "ESC leaves the panel open");
-    _ = try app.ctl("type back-in-shell");
-    _ = try app.ctl("enter");
-    try app.waitTextCount("back-in-shell", 2, 5_000);
-
-    _ = try app.ctl("run review.changes");
-    try h.expectContains(try app.ctl("sidepane"), "closed", "toggled shut");
-    try h.expect(try paneCols(app) > 1, "columns came back", .{});
-    try h.expectContains(try app.ctl("commands"), "review.changes", "registered as a command");
 }
 
 // ---------------------------------------------------------------- runner
@@ -1856,111 +1528,6 @@ pub fn main(init: std.process.Init) !void {
     if (failed > 0) return error.E2eFailed;
 }
 
-
-/// The diff view: a real patch, in a pane, with the gutter numbering by
-/// FILE line rather than by buffer row.
-///
-/// That last part is the reason this scenario exists at all. Every unit
-/// test here can check the row map; only the app can show that the map
-/// reached the gutter, and a gutter that silently counted rows would look
-/// entirely plausible while sending a reviewer to the wrong line.
-fn diffView(gpa: std.mem.Allocator, bin: []const u8) !void {
-    const app = try h.Instance.start(gpa, bin, .{});
-    defer {
-        app.stop();
-        app.deinit();
-    }
-
-    var reg = try seedRegistry(app);
-
-    // Commit a five-line base, then put the seeded nine-line version
-    // back, so f.zig is MODIFIED with two separate insertions rather than
-    // untracked. Two insertions at different depths is what makes the
-    // gutter numbers diverge from the row numbers by different amounts —
-    // a single insertion would move everything below it by one constant
-    // and a row-counting gutter could still look right.
-    var f_buf: [256]u8 = undefined;
-    const f_path = try std.fmt.bufPrint(&f_buf, "{s}/f.zig", .{reg.repo()});
-    try h.writeFile(f_path, "l1\nl2\nl3\nl4\nl5\n");
-    if (try h.runCmd(reg.repo(), &.{ "/usr/bin/git", "add", "f.zig" }) != 0) return error.GitFailed;
-    if (try h.runCmd(reg.repo(), &.{
-        "/usr/bin/git", "-c", "user.email=t@example.com", "-c", "user.name=t",
-        "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base",
-    }) != 0) return error.GitFailed;
-    // l4 becomes L4 as well, so the patch has a real deletion in it. Only
-    // a del row can show that the gutter picks the ORIGINAL side's number
-    // for one — every other row reads from the modified side, so a gutter
-    // that always did would pass without it.
-    try h.writeFile(f_path, "a\nb\nl1\nl2\nX\nY\nl3\nL4\nl5\n");
-
-    _ = try app.ctl("run diff.open");
-
-    // The pane, not a side panel: a diff is a document, so it goes where
-    // documents go and `screen` is the right surface to read it from.
-    try app.waitText("@@", 10_000);
-    var buf: [16 * 1024]u8 = undefined;
-    const out = try app.screen(&buf);
-
-    // The header rook wrote, naming the real path and base. git's own
-    // --no-index headers name scratch files and must not have survived.
-    try h.expectContains(out, "f.zig", "the header names the file");
-    try h.expectContains(out, "modified · base HEAD", "the status and the base it diffed against");
-    try h.expectNotContains(out, "a/a", "git's scratch-file headers are dropped");
-    try h.expectNotContains(out, "diff --git", "git's scratch-file headers are dropped");
-
-    // THE ASSERTION THIS SCENARIO EXISTS FOR. `l1` is the sixth row of
-    // the buffer and the third line of the file, and the gutter says 3.
-    // A gutter counting buffer rows would render "6  l1" here — equally
-    // plausible on screen, and it would send every reviewer following a
-    // finding to the wrong line.
-    try h.expectContains(out, "3  l1", "the gutter numbers by FILE line, not buffer row");
-    try h.expectNotContains(out, "6  l1", "the gutter is not counting buffer rows");
-
-    // Additions carry the modified side's numbers: a and b are the file's
-    // lines 1 and 2 even though they are rows 4 and 5.
-    try h.expectContains(out, "1 +a", "an addition is numbered on the modified side");
-    try h.expectContains(out, "5 +X", "the second insertion, deeper in the file");
-
-    // ...and the deletion carries the ORIGINAL side's: old line 4, next
-    // to the addition that replaced it at new line 8.
-    try h.expectContains(out, "4 -l4", "a deletion is numbered on the original side");
-    try h.expectContains(out, "8 +L4", "and its replacement on the modified side");
-
-    // Structural rows are lines of no file, so they get no number.
-    try h.expectContains(out, "  @@ -1,5 +1,9 @@", "a hunk header has a blank gutter");
-
-    // The rows are COLOURED, checked against the theme's own values.
-    //
-    // Taken here, before anything can put an error on screen, and that
-    // ordering is load-bearing: the default theme spells diff_del and
-    // ed_err with the same hue, so a shot taken after the refusal message
-    // below would find that red whatever the diff rows were painted.
-    // Counting a colour is geometry-free — no cell metrics, no pane
-    // origin — which is what keeps it robust to a window resize.
-    {
-        var shot_path: [256]u8 = undefined;
-        const sp = try std.fmt.bufPrint(&shot_path, "{s}/diff.png", .{app.dirPath()});
-        var shot = try app.shot(sp);
-        defer shot.deinit();
-        // Thresholds far under what was measured (766 / 2250 / 5293) and
-        // far over antialiasing noise, which is nil here: nothing else in
-        // this frame is near any of the three.
-        try h.expect(shot.countColorNear(0x9ECE6A, 12) > 100, "additions are painted diff_add", .{});
-        try h.expect(shot.countColorNear(0xF7768E, 12) > 100, "deletions are painted diff_del", .{});
-        try h.expect(shot.countColorNear(0x7AA2F7, 12) > 100, "hunk headers are painted diff_hunk", .{});
-    }
-
-    // Read-only, and it SAYS so. `x` would delete the character under the
-    // cursor in any other buffer; here it must change nothing and explain
-    // why, because a pane that silently eats keystrokes reads as broken
-    // rather than as protected.
-    _ = try app.ctl("type x");
-    const after = try app.screen(&buf);
-    try h.expectContains(after, "this buffer is a view", "a refused edit says so");
-    try h.expectContains(after, "3  l1", "and the document is untouched");
-    try h.expectContains(after, "1 +a", "and the document is untouched");
-
-}
 
 
 /// The id of the pane holding `name`, from `panes` ("… 2 rect … edit:b.txt").
