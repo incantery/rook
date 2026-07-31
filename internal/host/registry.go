@@ -42,9 +42,8 @@ type WorkspaceInfo struct {
 	IssueRef *IssueRef `json:"issueRef,omitempty"`
 }
 
-// IssueRef identifies a tracker issue: provenance for workspaces spawned
-// off the queue — the key downstream hooks (issue badges, spend
-// attribution, close-the-loop) hang off.
+// IssueRef identifies a tracker issue: provenance for a workspace spawned
+// off the queue.
 type IssueRef struct {
 	Tracker string `json:"tracker"` // "github" | "jira"
 	Key     string `json:"key"`     // "#123" | "PROJ-42"
@@ -80,98 +79,25 @@ CREATE TABLE IF NOT EXISTS workspaces (
 	created_at TEXT NOT NULL,
 	last_used  TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS threads (
-	id            INTEGER PRIMARY KEY,
-	workspace     TEXT NOT NULL,
-	path          TEXT NOT NULL,
-	start_line    INTEGER NOT NULL,
-	end_line      INTEGER NOT NULL,
-	side          TEXT NOT NULL DEFAULT 'modified', -- modified|original (diff side)
-	blob_sha      TEXT NOT NULL,              -- content identity at anchor time
-	commit_sha    TEXT NOT NULL DEFAULT '',   -- HEAD at anchor time, informational
-	anchor_text   TEXT NOT NULL,              -- the anchored lines verbatim
-	state         TEXT NOT NULL DEFAULT 'pending', -- pending|open|resolved
-	resolved_by   TEXT NOT NULL DEFAULT '',   -- ''|user|agent
-	agent_reopens INTEGER NOT NULL DEFAULT 0, -- user reopened an agent-resolve (verdict datum)
-	created_at    TEXT NOT NULL,
-	updated_at    TEXT NOT NULL,
-	submitted_at  TEXT
-);
-CREATE TABLE IF NOT EXISTS thread_comments (
-	id            INTEGER PRIMARY KEY,
-	thread_id     INTEGER NOT NULL,
-	author        TEXT NOT NULL,              -- user|agent (declared, not authenticated)
-	agent_session TEXT NOT NULL DEFAULT '',
-	body          TEXT NOT NULL,
-	created_at    TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS anchor_blobs (
-	sha     TEXT PRIMARY KEY,                 -- git blob hash of content
-	content BLOB NOT NULL
-);
-CREATE TABLE IF NOT EXISTS rook_tasks (
-	id           INTEGER PRIMARY KEY,
-	parent_id    INTEGER NOT NULL DEFAULT 0,       -- 0 = root; self-ref, arbitrary depth
-	workspace    TEXT    NOT NULL,
-	work_type    TEXT    NOT NULL,                 -- 'review' (first); interprets state
-	state        TEXT    NOT NULL,                 -- opaque token, owned by work_type
-	title        TEXT    NOT NULL DEFAULT '',
-	-- anchor: kind-tagged union. 'code' promotes the threads columns so a
-	-- hunk-child speaks the same anchor vocabulary; 'ref' points at a
-	-- subject (parent review scope, mirrored ticket); 'none' is freeform.
-	anchor_kind  TEXT    NOT NULL DEFAULT 'none',  -- code|ref|none
-	path         TEXT    NOT NULL DEFAULT '',
-	start_line   INTEGER NOT NULL DEFAULT 0,
-	end_line     INTEGER NOT NULL DEFAULT 0,
-	side         TEXT    NOT NULL DEFAULT 'modified',
-	blob_sha     TEXT    NOT NULL DEFAULT '',
-	commit_sha   TEXT    NOT NULL DEFAULT '',
-	anchor_text  TEXT    NOT NULL DEFAULT '',
-	anchor_ref   TEXT    NOT NULL DEFAULT '',      -- 'unstaged', 'commit:<sha>', 'linear:INF-7'
-	origin       TEXT    NOT NULL DEFAULT 'rook',  -- rook|mirror (mirror = seam only)
-	source_ref   TEXT    NOT NULL DEFAULT '',      -- foreign id when origin=mirror
-	detail       TEXT    NOT NULL DEFAULT '',      -- JSON, work_type-owned (score, base, scope)
-	created_at   TEXT    NOT NULL,
-	updated_at   TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS rook_tasks_parent ON rook_tasks(parent_id);
-CREATE INDEX IF NOT EXISTS rook_tasks_ws     ON rook_tasks(workspace, work_type);
--- Recently-opened documents, per workspace (recents.go). The frontend's
--- app.buffers is the session's open set; this is the durable one the start
--- screen reads on a cold boot.
-CREATE TABLE IF NOT EXISTS recents (
-	workspace TEXT NOT NULL,
-	path      TEXT NOT NULL,  -- ws-relative under the root, absolute if external
-	opened_at TEXT NOT NULL,
-	PRIMARY KEY (workspace, path)
-);
-CREATE INDEX IF NOT EXISTS recents_ws ON recents(workspace, opened_at DESC);
 `
+
+// One table left. decisions, costs, stages, threads, thread_comments,
+// anchor_blobs, rook_tasks and recents were all here until the features
+// they backed left in the strip — a fresh database has no reason to create
+// tables nothing reads.
+//
+// Nothing DROPs them either. An existing rook.db keeps every row it has;
+// the code that wrote them is in git history, and deleting a user's data
+// to tidy a schema is not a trade this makes.
 
 // migrations are columns added after a table shipped — CREATE IF NOT EXISTS
 // won't touch an existing table, so each ALTER runs and "duplicate column"
 // is the expected steady-state error.
-// The decisions, costs and stages tables are deliberately absent: the
-// drafter's ledger, the cost ledger and the workflow pipeline all left in
-// the strip, and an existing database keeps its rows rather than having
-// them dropped out from under it. Nothing reads them; nothing destroys
-// them.
 var migrations = []string{
 	`ALTER TABLE workspaces ADD COLUMN worktree_of TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workspaces ADD COLUMN branch TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workspaces ADD COLUMN issue_tracker TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE workspaces ADD COLUMN issue_key TEXT NOT NULL DEFAULT ''`,
-	// a thread may hang off a review task (0 = code-only, the original shape)
-	`ALTER TABLE threads ADD COLUMN rook_task_id INTEGER NOT NULL DEFAULT 0`,
-	// Why the nudge didn't reach a responder, '' when it did. Until this
-	// column existed a failed delivery was INDISTINGUISHABLE from a
-	// successful one: both submit handlers flip state to open, then 500 on
-	// the nudge error, leaving a thread that looks submitted and waiting
-	// forever. The gutter can only warn about what the row remembers.
-	`ALTER TABLE threads ADD COLUMN deliver_error TEXT NOT NULL DEFAULT ''`,
-	// The thread-buffer tail (threaddoc.go): what sits below the scissors
-	// line, saved by :w but not yet crystallized into a comment.
-	`ALTER TABLE threads ADD COLUMN draft TEXT NOT NULL DEFAULT ''`,
 }
 
 func loadRegistry() *registry {

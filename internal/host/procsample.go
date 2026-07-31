@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// procTTL matches the fastest poller hitting /attention (2s): inside one
-// tick every caller reads the same table.
+// procTTL is the table's staleness bound: inside one tick every caller
+// reads the same snapshot.
 const procTTL = 2 * time.Second
 
 // procSnap is one row of the process table.
@@ -23,11 +23,11 @@ type procSnap struct {
 }
 
 // procTable is the host's one process sensor. fgOf used to fork `ps` per
-// session per call, and three pollers hit /attention every 2-5s — so idle
+// session per call, and several pollers wanted it every 2-5s — so idle
 // cost scaled with window count. One batched `ps -axo` behind a TTL costs
-// one fork per tick no matter how many sessions are open, and it carries
-// RSS/PPID the per-pid probe never asked for, which is what the monitor
-// (monitor.go) samples.
+// one fork per tick no matter how many sessions are open. Those pollers
+// are gone; the batching is kept because the shape is right, not because
+// of what used to hit it.
 //
 // Refresh swaps in a new map rather than mutating the old one, so readers
 // holding a previous table stay safe without copying it.
