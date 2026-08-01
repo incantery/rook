@@ -431,7 +431,32 @@ pub fn stripComment(val: []const u8) []const u8 {
     return val;
 }
 
+// ---- `--config=DIR`: one directory that IS the config ----
+//
+// Not XDG_CONFIG_HOME, which means the directory ABOVE a `rook/` — a
+// throwaway instance should be one directory you can name, delete, and
+// point at again, not a directory that has to contain a directory with a
+// particular name.
+
+var dir_buf: [1024]u8 = undefined;
+var dir_len: usize = 0;
+
+/// Point every config lookup at `d`. Called once, before anything reads
+/// config — after that the answer has to stay the same, or two callers
+/// would disagree about which rook they are configuring.
+pub fn setDir(d: []const u8) void {
+    dir_len = @min(dir_buf.len, d.len);
+    @memcpy(dir_buf[0..dir_len], d[0..dir_len]);
+}
+
+pub fn dir() ?[]const u8 {
+    return if (dir_len == 0) null else dir_buf[0..dir_len];
+}
+
 pub fn cfgPath(buf: []u8) ?[]const u8 {
+    if (dir()) |d| {
+        return std.fmt.bufPrint(buf, "{s}/config.toml", .{d}) catch null;
+    }
     if (getenv("XDG_CONFIG_HOME")) |x| {
         return std.fmt.bufPrint(buf, "{s}/rook/config.toml", .{std.mem.span(x)}) catch null;
     }
@@ -444,6 +469,9 @@ pub fn cfgPath(buf: []u8) ?[]const u8 {
 /// present and valid it replaces the app's view of config.toml; when
 /// absent, TOML is the front end exactly as before.
 pub fn envPath(buf: []u8) ?[]const u8 {
+    if (dir()) |d| {
+        return std.fmt.bufPrint(buf, "{s}/environment.json", .{d}) catch null;
+    }
     if (getenv("XDG_CONFIG_HOME")) |x| {
         return std.fmt.bufPrint(buf, "{s}/rook/environment.json", .{std.mem.span(x)}) catch null;
     }
@@ -1264,4 +1292,32 @@ test "editor-lsp is the name; `lsp` still answers to it" {
     // so a mismatch is version skew to survive, not a typo to correct.
     applyEnvOption(&cfg, t.allocator, "editor-lsp", .{ .string = "true" });
     try t.expect(!cfg.lsp);
+}
+
+test "--config makes ONE directory the whole config" {
+    // Deliberately not XDG_CONFIG_HOME, which means the directory ABOVE a
+    // `rook/`. A throwaway instance should be one directory you can name,
+    // delete and point at again — not a directory that has to contain a
+    // directory with a particular name.
+    defer dir_len = 0;
+    setDir("/tmp/scratch");
+
+    var buf: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings("/tmp/scratch/config.toml", cfgPath(&buf).?);
+    try std.testing.expectEqualStrings("/tmp/scratch/environment.json", envPath(&buf).?);
+}
+
+test "without --config the XDG rules are untouched" {
+    // The override is opt-in. A daily driver that never passes the flag
+    // must resolve exactly where it always did, and the two paths have to
+    // stay in step: both keys live in one file (see rook-config-lsp
+    // -collision — a key that meant different things to two readers cost
+    // an entire config once).
+    try std.testing.expect(dir() == null);
+    var buf: [1024]u8 = undefined;
+    const cfg = cfgPath(&buf) orelse return error.NoPath;
+    try std.testing.expect(std.mem.endsWith(u8, cfg, "/rook/config.toml"));
+    var buf2: [1024]u8 = undefined;
+    const env = envPath(&buf2) orelse return error.NoPath;
+    try std.testing.expect(std.mem.endsWith(u8, env, "/rook/environment.json"));
 }

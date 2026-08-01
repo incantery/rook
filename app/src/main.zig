@@ -6,6 +6,11 @@
 //!   demo            headless proof: bytes → vt → screen dump
 //!   exec <cmd...>   run a command under a real PTY, dump the final screen
 //!
+//! Flags:
+//!   --config=DIR    run against DIR instead of ~/.config/rook, with the
+//!                   socket and data alongside it — a whole rook in one
+//!                   directory you can delete
+//!
 //! Unknown verbs used to exec rookctl, which carried everything rook did
 //! over HTTP to a Go daemon. Both are gone: rook is one binary now, and
 //! anything it cannot do it does not pretend to hand off. What the CLI
@@ -19,6 +24,64 @@ const ptypkg = @import("pty.zig");
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]const u8;
 extern "c" fn chdir(path: [*:0]const u8) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn mkdir(path: [*:0]const u8, mode: u16) c_int;
+extern "c" fn realpath(path: [*:0]const u8, resolved: [*]u8) ?[*:0]u8;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+/// `--config=DIR` — everything this instance touches, under one directory.
+///
+/// The point is a rook you can throw away: a scratch config, its own ctl
+/// socket, its own data. Without the socket part it would not be isolated
+/// at all — a second instance on /tmp/rook.sock either loses the race to
+/// bind or answers a `quit` meant for the other one, and the second is
+/// worse because it looks like it worked.
+///
+/// Set as ENVIRONMENT, not just internal state, because shells inside the
+/// instance inherit it: `rook edit` from a pane then reaches THIS rook,
+/// which is the whole reason ROOK_SOCK is a variable and not a constant.
+/// Never with overwrite — an explicit ROOK_SOCK still wins.
+///
+/// Returns false if the directory could not be made, which is fatal: a
+/// caller who named a config directory and silently got the default one
+/// would be testing the wrong rook.
+fn useConfigDir(raw: []const u8) bool {
+    if (raw.len == 0 or raw.len > 900) {
+        std.debug.print("rook: --config needs a directory\n", .{});
+        return false;
+    }
+    var z: [1024]u8 = undefined;
+    @memcpy(z[0..raw.len], raw);
+    z[raw.len] = 0;
+
+    // Created rather than required. "rook from scratch" starts with a
+    // directory that does not exist yet, and the socket needs somewhere to
+    // live before the app comes up. EEXIST is the normal case.
+    _ = mkdir(@ptrCast(&z), 0o755);
+
+    // ABSOLUTE from here on: the app chdirs, and panes chdir further. A
+    // relative --config would resolve against whatever directory a shell
+    // happened to be in by the time something read it.
+    var abs: [1024]u8 = undefined;
+    const resolved = realpath(@ptrCast(&z), &abs) orelse {
+        std.debug.print("rook: --config: cannot use {s}\n", .{raw});
+        return false;
+    };
+    const dir = std.mem.span(resolved);
+
+    @import("config.zig").setDir(dir);
+
+    var buf: [1024]u8 = undefined;
+    if (std.fmt.bufPrintZ(&buf, "{s}/rook.sock", .{dir})) |sock| {
+        _ = setenv("ROOK_SOCK", sock.ptr, 0);
+    } else |_| {}
+    // The registry lives at $XDG_DATA_HOME/rook/rook.db, so this points at
+    // DIR/rook/rook.db — a path that will not exist, which is exactly what
+    // "from scratch" means. It is read-only and absent is a normal state.
+    if (std.fmt.bufPrintZ(&buf, "{s}", .{dir})) |data| {
+        _ = setenv("XDG_DATA_HOME", data.ptr, 0);
+    } else |_| {}
+    return true;
+}
 
 pub fn main(init: std.process.Init) !void {
     const argv = init.minimal.args.vector;
@@ -34,6 +97,28 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("rook {s} (build {s})\n", .{ bo.version, bo.id });
         return;
     }
+    // --config BEFORE the dispatch below, because everything after this
+    // reads config: App.create loads it, and `edit` resolves the socket
+    // that --config moves.
+    {
+        var i: usize = 1;
+        while (i < argv.len) : (i += 1) {
+            const arg = std.mem.span(argv[i]);
+            if (std.mem.startsWith(u8, arg, "--config=")) {
+                if (!useConfigDir(arg["--config=".len..])) return error.BadConfigDir;
+            } else if (std.mem.eql(u8, arg, "--config")) {
+                // The spaced form too. People type both, and refusing one
+                // of them is a paper cut with no upside.
+                if (i + 1 >= argv.len) {
+                    std.debug.print("rook: --config needs a directory\n", .{});
+                    return error.BadConfigDir;
+                }
+                i += 1;
+                if (!useConfigDir(std.mem.span(argv[i]))) return error.BadConfigDir;
+            }
+        }
+    }
+
     // No subcommand = the app (a Dock launch has no argv to give, or
     // hands us flags like -psn_… / --no-activate directly).
     const cmd: []const u8 = if (argv.len > 1 and argv[1][0] != '-') first else "win";

@@ -103,6 +103,11 @@ pub const Opts = struct {
     /// installed would be a suite that fails on a fresh machine for a
     /// reason that has nothing to do with rook.
     env: []const [2][]const u8 = &.{},
+    /// One extra argv entry, before --no-activate. For flags that have to
+    /// be read at startup rather than set through the environment —
+    /// --config is the whole reason this exists, since its point is being
+    /// an alternative to the env vars this harness sets.
+    arg: ?[]const u8 = null,
 };
 
 var instance_seq: u32 = 0;
@@ -309,6 +314,15 @@ pub const Instance = struct {
                 _ = setenv(@ptrCast(&nb), @ptrCast(&vb), 1);
             }
 
+            var arg_z: [512]u8 = undefined;
+            if (opts.arg) |a| {
+                if (a.len < arg_z.len) {
+                    @memcpy(arg_z[0..a.len], a);
+                    arg_z[a.len] = 0;
+                    var argv4: [4:null]?[*:0]const u8 = .{ @ptrCast(&bin_z), "win", @ptrCast(&arg_z), "--no-activate" };
+                    _ = execv(@ptrCast(&bin_z), &argv4);
+                }
+            }
             var argv: [3:null]?[*:0]const u8 = .{ @ptrCast(&bin_z), "win", "--no-activate" };
             _ = execv(@ptrCast(&bin_z), &argv);
             _exit(127);

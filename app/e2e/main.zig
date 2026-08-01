@@ -50,6 +50,7 @@ const scenarios = [_]Scenario{
     .{ .name = "quitall", .what = ":qa reaches every editor pane and leaves the terminals alone", .run = quitAll },
     .{ .name = "plugins", .what = "declared plugins spawn lazily, answer over the wire, and are refused what config did not grant", .run = plugins },
     .{ .name = "envgraph", .what = "environment.json wins: the graph's leader and chords drive, config.toml yields", .run = envgraph },
+    .{ .name = "configdir", .what = "--config=DIR: one directory is the whole config, and the XDG one is not read", .run = configDir },
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
@@ -1438,6 +1439,73 @@ fn seedRegistry(app: *h.Instance) !Registry {
     if (try h.runCmd(app.dirPath(), &.{ "/usr/bin/sqlite3", db.ptr, sql.ptr }) != 0)
         return error.SeedFailed;
     return reg;
+}
+
+// ------------------------------------------------------------ configdir
+
+/// `--config=DIR` — a whole rook in one directory you can delete.
+///
+/// The assertion that matters is the NEGATIVE one. Pointing rook at a
+/// scratch directory is only useful if it stops reading the other one, and
+/// a flag that adds a config directory without replacing one would be
+/// worse than no flag: the instance would look configured-from-scratch
+/// while quietly inheriting whatever the developer has at home.
+///
+/// So the sandbox gets TWO graphs — the XDG one the harness always writes,
+/// and a scratch one — declaring different plugins under different names.
+/// Exactly one may show up.
+fn configDir(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var path_buf: [128]u8 = undefined;
+    const script = try std.fmt.bufPrint(&path_buf, "/tmp/rook-e2e-cfgdir-{d}.sh", .{getpid()});
+    try h.writeFile(script, sh_plugin);
+
+    // The graph the harness writes into XDG_CONFIG_HOME. If --config is
+    // doing its job, nothing here is ever read.
+    var xdg_buf: [1024]u8 = undefined;
+    const xdg_graph = try std.fmt.bufPrint(&xdg_buf,
+        \\{{"rookEnvironment":1,"nodes":[
+        \\{{"id":"plugin:xdgonly","kind":"plugin","scope":"app","name":"xdgonly","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list"]}}
+        \\]}}
+    , .{script});
+
+    const app = try h.Instance.start(gpa, bin, .{
+        .env_json = xdg_graph,
+        .arg = "--config=/tmp/rook-e2e-cfgdir-scratch",
+    });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // Written AFTER start, because the flag creates the directory — which
+    // is the behaviour a scratch instance needs: "from scratch" begins
+    // with a directory that does not exist yet.
+    var scratch_buf: [1024]u8 = undefined;
+    const scratch_graph = try std.fmt.bufPrint(&scratch_buf,
+        \\{{"rookEnvironment":1,"nodes":[
+        \\{{"id":"plugin:scratchonly","kind":"plugin","scope":"app","name":"scratchonly","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list"]}}
+        \\]}}
+    , .{script});
+    try h.writeFile("/tmp/rook-e2e-cfgdir-scratch/environment.json", scratch_graph);
+
+    // The graph is re-read live, so this lands without a relaunch — but
+    // the plugin REGISTRY is built at launch, so the declaration itself
+    // needs one. Prove the directory is the one being read by restarting
+    // into it.
+    app.stop();
+    const app2 = try h.Instance.start(gpa, bin, .{
+        .env_json = xdg_graph,
+        .arg = "--config=/tmp/rook-e2e-cfgdir-scratch",
+    });
+    defer {
+        app2.stop();
+        app2.deinit();
+    }
+
+    const plugins_out = try app2.ctl("plugins");
+    try h.expectContains(plugins_out, "scratchonly", "the plugin declared in the --config directory loads");
+    // THE ASSERTION: the XDG graph is not merged, not layered, not read.
+    try h.expectNotContains(plugins_out, "xdgonly", "--config REPLACES the config directory, it does not add one");
 }
 
 // -------------------------------------------------------------- plugins
