@@ -44,6 +44,7 @@ pub const Action = enum {
     palette_commands,
     /// The file finder: the repo's files, over the same widget.
     palette_files,
+    palette_plugins,
     /// Find in files — the search panel, a side-pane tenant.
     panel_search,
     app_fullscreen,
@@ -110,6 +111,10 @@ pub const commands = [_]Command{
     .{ .id = "workspace.switch", .title = "Switch Workspace", .category = "Workspace", .action = .workspace_switch, .keys = "<leader>s" },
     .{ .id = "palette.commands", .title = "Command Palette", .category = "App", .action = .palette_commands, .keys = "⌘K" },
     .{ .id = "palette.files", .title = "Go to File", .category = "App", .action = .palette_files, .keys = "⌘P" },
+    // The one door to a plugin that is not the ctl socket. Plugins are
+    // declared at RUNTIME and this table is compiled in, so the command
+    // is "pick one" rather than one command per plugin.
+    .{ .id = "plugin.open", .title = "Open a Plugin", .category = "Plugin", .action = .palette_plugins, .keys = "<leader>p" },
     .{ .id = "panel.search", .title = "Find in Files", .category = "App", .action = .panel_search, .keys = "⌘⇧F" },
     .{ .id = "app.fullscreen", .title = "Toggle Fullscreen", .category = "App", .action = .app_fullscreen },
     .{ .id = "panel.flip", .title = "Move Side Pane to Other Edge", .category = "Panel", .action = .panel_flip },

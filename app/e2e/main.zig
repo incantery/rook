@@ -1719,6 +1719,33 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     // Naming one that was never declared is refused, not silently ignored.
     try h.expectContains(try app.ctl("plugin-show nope"), "no such plugin", "an undeclared name is refused");
 
+    // ---- the door that is not the ctl socket ----
+    //
+    // A plugin nobody can open from the UI is a plugin only an agent can
+    // reach. The command table is compiled in and plugins are declared at
+    // runtime, so the bridge is one command that lists them.
+    //
+    // Driven through `press` — the REAL key path, leader state machine
+    // included — because `plugin-show` would prove nothing: it starts
+    // downstream of the picker this is about.
+    _ = try app.ctl("key 1b"); // make sure nothing else holds the keys
+    _ = try app.ctl("press `");
+    _ = try app.ctl("press p");
+    const picker = try app.waitCtl("palette", "mode:plugins", 5_000);
+    try h.expectContains(picker, "declared:5", "every declared plugin is offered");
+    try h.expectContains(picker, "shplug", "…by name");
+    // State comes along: an empty panel and a dead plugin look identical
+    // from outside, and you should know which you are about to open.
+    try h.expectContains(picker, "missing\tfailed", "and by state");
+
+    // Enter opens the panel on the one under the cursor.
+    _ = try app.ctl("type acty");
+    _ = try app.waitCtl("palette", "acty", 5_000);
+    _ = try app.ctl("key 0d");
+    const opened = try app.waitCtl("sidepane", "plugin:acty", 5_000);
+    try h.expectContains(opened, "panel:plugin", "the picker opens the panel");
+    _ = try app.waitCtl("sidepane", "alpha", 5_000);
+
     // The panel takes the keys and hands them back — the same contract
     // every side-pane tenant has.
     _ = try app.ctl("plugin-show shplug");

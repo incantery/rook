@@ -295,6 +295,21 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         app.draw_lock.lock();
         if (!app.pal_open) {
             _ = w.write("closed\n") catch 0;
+        } else if (app.pal_mode == .plugins) {
+            // The picker: name and state, so a scenario can prove the
+            // GUI door to a plugin exists without a screenshot.
+            w.print("mode:plugins\nfilter:{s}\ndeclared:{d}\n", .{
+                app.pal_input[0..app.pal_input_len],
+                app.plugins.items.len,
+            }) catch {};
+            for (app.pal_filtered[0..app.pal_nfiltered], 0..) |idx, i| {
+                const p = &app.plugins.items[idx];
+                w.print("{s}{s}\t{s}\n", .{
+                    @as([]const u8, if (i == app.pal_sel) "*" else " "),
+                    p.spec.name,
+                    @tagName(p.state),
+                }) catch break;
+            }
         } else if (app.pal_mode == .files) {
             // The index size comes along: "no matches" with 0 files
             // indexed is a walk that found nothing, which is a

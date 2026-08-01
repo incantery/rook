@@ -701,7 +701,18 @@ const WireNode = struct {
     key: []const u8 = "",
     value: std.json.Value = .null,
     chord: []const u8 = "",
-    command: []const u8 = "",
+    /// A std.json.Value, NOT a string, and that is load-bearing.
+    ///
+    /// A keybind node's `command` is a command id ("pane.split-right").
+    /// A plugin node's is an ARGV — an array. One flat struct parses every
+    /// node kind, so a field whose type differs by kind must be typed as
+    /// "whatever JSON is here" or the mismatch fails the WHOLE document.
+    ///
+    /// It did. Declaring one plugin made the entire graph unparseable and
+    /// rook fell back to config.toml — silently losing the fonts, theme,
+    /// leader and every keybind in it. `value` and `entries` beside this
+    /// are Values for the same reason; `command` was the one that was not.
+    command: std.json.Value = .null,
     name: []const u8 = "",
     entries: std.json.Value = .null,
 };
@@ -901,7 +912,7 @@ fn loadKeybindsEnv(io: std.Io, gpa: std.mem.Allocator) ?Keybinds {
         } else if (std.mem.eql(u8, n.kind, "keybind") and std.mem.eql(u8, n.scope, "app")) {
             if (!std.mem.startsWith(u8, n.chord, "<leader>")) continue;
             const ch = chordChar(n.chord["<leader>".len..]) orelse continue;
-            const spec = actionFromName(n.command) orelse continue;
+            const spec = actionFromName(jStr(n.command) orelse continue) orelse continue;
             kb.bind(ch, spec);
         }
     }
@@ -938,7 +949,15 @@ const actionFromName = registry.specFromName;
 pub const Bind = struct { ch: u8, action: Action, arg: u8 = 0 };
 
 pub const Keybinds = struct {
-    leader: ?u8 = null,
+    /// BACKTICK, not null. defaultBinds below binds a dozen tmux-shaped
+    /// chords behind the leader, and config.sample.toml calls this "the
+    /// backtick default" — but the default was null, so a rook with no
+    /// config had every one of those chords dead. Zoom, copy mode, the
+    /// workspace switcher, the file tree: all unreachable until you wrote
+    /// a config line saying the thing the docs said was already true.
+    ///
+    /// Press it twice to type a literal backtick.
+    leader: ?u8 = '`',
     /// The EDITOR's leader ([editor] scope — vim's maplocalleader to
     /// the app's mapleader). Fires only inside an editor pane; the
     /// editor's own key machine arms and resolves it.
@@ -1032,6 +1051,17 @@ fn defaultBinds(kb: *Keybinds) void {
     kb.bind('s', .{ .action = .workspace_switch });
     // tmux: prefix-z = resize-pane -Z. Same key, same muscle memory.
     kb.bind('z', .{ .action = .pane_zoom });
+    // The plugin picker. Plugins are declared at RUNTIME and the command
+    // table is compiled in, so this is "pick one" rather than a command
+    // per plugin — and without it a plugin is reachable only from the ctl
+    // socket, which makes every plugin invisible to anyone using rook by
+    // hand rather than by script.
+    kb.bind('p', .{ .action = .palette_plugins });
+    // The plugin picker. Plugins are declared at runtime and the command
+    // table is compiled in, so this is "pick one" — and without it a
+    // plugin is reachable only from the ctl socket, which makes every
+    // plugin invisible to anyone driving rook by hand.
+
     // Threads.
     // Review — the wails app's <leader>g (the Gate).
     // ...and the Diff the gate is about. Next to it on purpose: the list
@@ -1320,4 +1350,39 @@ test "without --config the XDG rules are untouched" {
     var buf2: [1024]u8 = undefined;
     const env = envPath(&buf2) orelse return error.NoPath;
     try std.testing.expect(std.mem.endsWith(u8, env, "/rook/environment.json"));
+}
+
+test "a plugin node must not take the rest of the graph with it" {
+    // THE COLLISION. A keybind node's `command` is a command id; a plugin
+    // node's is an argv ARRAY. One flat WireNode parses every kind, so a
+    // field whose type differs by kind failed the WHOLE document — and
+    // rook fell back to config.toml, silently losing the fonts, theme,
+    // leader and keybinds in it. Declaring one plugin cost the whole
+    // environment. Same shape as the editor-lsp collision before it.
+    const graph =
+        \\{"rookEnvironment":1,"nodes":[
+        \\{"id":"keybind:app:m","kind":"keybind","scope":"app","chord":"<leader>m","command":"workspace.manager"},
+        \\{"id":"plugin:hello","kind":"plugin","scope":"app","name":"hello","command":["/bin/sh","x.sh"],"grants":["items.list"]}
+        \\]}
+    ;
+    const parsed = try std.json.parseFromSlice(WireEnv, std.testing.allocator, graph, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.nodes.len);
+    // The keybind's command still reads as a string…
+    try std.testing.expectEqualStrings("workspace.manager", jStr(parsed.value.nodes[0].command).?);
+    // …and the plugin's is simply not one, which is fine and must stay fine.
+    try std.testing.expect(jStr(parsed.value.nodes[1].command) == null);
+}
+
+test "the leader has a default, because a dozen chords hang off it" {
+    // config.sample.toml calls backtick "the default". It was null, so a
+    // rook with no config had every leader chord dead — zoom, copy mode,
+    // the workspace switcher, the file tree — while the docs said
+    // otherwise. defaultBinds binds them; something has to arm them.
+    var kb: Keybinds = .{};
+    try std.testing.expectEqual(@as(?u8, '`'), kb.leader);
+    defaultBinds(&kb);
+    try std.testing.expect(kb.n > 0);
+    try std.testing.expect(kb.lookup('z') != null); // pane.zoom
+    try std.testing.expect(kb.lookup('p') != null); // the plugin picker
 }

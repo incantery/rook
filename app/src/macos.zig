@@ -330,7 +330,7 @@ const CompletedBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 
 /// What the palette is listing. The widget, filter, key handling and
 /// draw path are shared; only the row text and what Enter does differ.
-pub const PalMode = enum { workspaces, commands, files };
+pub const PalMode = enum { workspaces, commands, files, plugins };
 
 /// Which side pane a panel is slotted into. Panels are placement-
 /// agnostic: the tenant draws into a rect and does not know which edge
@@ -485,6 +485,10 @@ pub const App = struct {
     plug_acting: std.atomic.Value(bool) = .init(false),
     /// Queued like plug_refetch, and for the same reason.
     plug_run: bool = false,
+    /// The plugin the picker chose, drained after the lock — showPlugin
+    /// takes draw_lock and the palette's Enter is holding it.
+    plug_pending: [64]u8 = @splat(0),
+    plug_pending_len: usize = 0,
 
     /// What plugins have raised. A ring rather than a list: attention that
     /// nobody looked at for a hundred events is not attention, and an
@@ -2229,6 +2233,22 @@ pub const App = struct {
         self.resetPaletteLocked();
     }
 
+    /// Open the PLUGIN picker (`<leader>p`).
+    ///
+    /// The bridge between a command table that is compiled in and plugins
+    /// that are declared at runtime: one command that lists them, rather
+    /// than a command per plugin that the registry could not hold. Without
+    /// it a plugin is reachable only from the ctl socket, which makes every
+    /// plugin invisible to anyone using rook as a GUI.
+    ///
+    /// No load step — the registry was read at launch and does not move.
+    pub fn openPluginPalette(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        self.pal_mode = .plugins;
+        self.resetPaletteLocked();
+    }
+
     fn resetPaletteLocked(self: *App) void {
         self.pal_input_len = 0;
         self.pal_sel = 0;
@@ -2340,6 +2360,15 @@ pub const App = struct {
             .files => for (self.pal_files.paths, 0..) |path, i| {
                 const sc = fuzzyScore(path, needle) orelse continue;
                 self.palInsertScored(i, sc);
+            },
+            // Name and state both: "up" and "failed" are worth filtering
+            // on when several are declared and one is broken.
+            .plugins => for (self.plugins.items, 0..) |*p, i| {
+                if (self.pal_nfiltered >= self.pal_filtered.len) break;
+                if (fuzzyMatch(p.spec.name, needle) or fuzzyMatch(@tagName(p.state), needle)) {
+                    self.pal_filtered[self.pal_nfiltered] = i;
+                    self.pal_nfiltered += 1;
+                }
             },
             .workspaces => for (self.pal_items, 0..) |e, i| {
                 if (self.pal_nfiltered >= self.pal_filtered.len) break;
@@ -2456,6 +2485,12 @@ pub const App = struct {
             }
             return;
         }
+        if (self.pal_mode == .plugins) {
+            const p = &self.plugins.items[self.pal_filtered[self.pal_sel]];
+            copyStr(&self.plug_pending, &self.plug_pending_len, p.spec.name);
+            self.closePaletteLocked();
+            return;
+        }
         if (self.pal_mode == .commands) {
             const c = registrypkg.commands[self.pal_filtered[self.pal_sel]];
             // Close FIRST: a command may open the palette again
@@ -2529,6 +2564,7 @@ pub const App = struct {
             .workspace_switch => self.openPalette(),
             .palette_commands => self.openCommandPalette(),
             .palette_files => self.openFilePalette(),
+            .palette_plugins => self.openPluginPalette(),
             .panel_search => self.openSearchPanel(),
             .app_fullscreen => self.requestFullscreen(),
             .panel_flip => self.flipSidePane(),
@@ -3497,9 +3533,14 @@ pub const App = struct {
         self.draw_lock.lock();
         const refetch = self.plug_refetch;
         const act = self.plug_run;
+        var chosen: [64]u8 = undefined;
+        const chosen_len = self.plug_pending_len;
+        if (chosen_len > 0) @memcpy(chosen[0..chosen_len], self.plug_pending[0..chosen_len]);
         self.plug_refetch = false;
         self.plug_run = false;
+        self.plug_pending_len = 0;
         self.draw_lock.unlock();
+        if (chosen_len > 0) _ = self.showPlugin(chosen[0..chosen_len]);
         if (refetch) self.startPluginFetch();
         if (act) self.startPluginAct();
     }
@@ -5810,6 +5851,10 @@ pub const App = struct {
             .workspaces => "workspace ",
             .commands => "command ",
             .files => "file ",
+            // A first press with nothing declared would otherwise be an
+            // empty modal with no explanation. The prompt IS the empty
+            // state; there is nowhere else on a palette to put one.
+            .plugins => if (self.plugins.items.len == 0) "no plugins declared " else "plugin ",
         }, th.bar_fg);
         tx += ui.textOver(tx, ty, self.pal_input[0..self.pal_input_len], th.bar_value);
         ui.rect(tx, ty, cw / 4, self.renderer.cell_h, th.accent); // caret
@@ -5858,6 +5903,13 @@ pub const App = struct {
                     else
                         e.name;
                     break :blk .{ l, e.root };
+                },
+                .plugins => blk: {
+                    const p = &self.plugins.items[item_i];
+                    // State on the right, because "declared" vs "failed"
+                    // is the thing you want to see before you pick one —
+                    // an empty panel and a dead plugin look identical.
+                    break :blk .{ p.spec.name, @tagName(p.state) };
                 },
                 .commands => blk: {
                     const c = registrypkg.commands[item_i];
