@@ -908,11 +908,17 @@ pub const Snapshot = struct {
 pub fn fetchItems(p: *Plugin, gpa: std.mem.Allocator, root: []const u8) Snapshot {
     var snap = Snapshot{};
 
-    var params: [512]u8 = undefined;
-    const pj = std.fmt.bufPrint(&params, "{{\"root\":\"{s}\",\"limit\":{d}}}", .{ root, max_items }) catch {
+    // ESCAPED, like every other string this file puts on the wire. A path
+    // is not a safe JSON literal: a directory named `it's "fine"` would
+    // emit a frame the plugin cannot parse, and the failure would read as
+    // a dead plugin rather than as a folder name.
+    var params: [8192]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&params);
+    listParams(&w, root, max_items) catch {
         snap.err.set("workspace path too long");
         return snap;
     };
+    const pj = params[0..w.end];
 
     const buf = gpa.alloc(u8, 1 << 20) catch {
         snap.err.set("out of memory");
@@ -1108,6 +1114,12 @@ pub fn act(p: *Plugin, gpa: std.mem.Allocator, item_id: []const u8, action_id: [
     out.msg.set(if (parsed.value.result.message.len > 0) parsed.value.result.message else "done");
     if (parsed.value.result.item) |wi| out.item = shape(wi, 0);
     return out;
+}
+
+fn listParams(w: *std.Io.Writer, root: []const u8, limit: usize) !void {
+    try w.writeAll("{\"root\":");
+    try jsonString(w, root);
+    try w.print(",\"limit\":{d}}}", .{limit});
 }
 
 fn actParams(w: *std.Io.Writer, item_id: []const u8, action_id: []const u8) !void {
@@ -1326,6 +1338,23 @@ test "frameParams hands the host its object verbatim" {
 
 test "frameParams is empty when a request carries none" {
     try testing.expectEqualStrings("", frameParams("{\"v\":1,\"id\":1,\"op\":\"attention.raise\"}"));
+}
+
+test "a workspace path with a quote in it still produces a frame that parses" {
+    // The list root is a DIRECTORY NAME, and a directory may be called
+    // anything. Concatenating one straight into a request emits JSON the
+    // plugin cannot parse — and since a plugin that refuses a frame looks
+    // exactly like a plugin that died, the failure would be read as a dead
+    // plugin rather than as a folder name.
+    var buf: [8192]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try listParams(&w, "/tmp/it's \"fine\"\\here", 128);
+
+    const Wire = struct { root: []const u8, limit: u32 };
+    const parsed = try std.json.parseFromSlice(Wire, testing.allocator, buf[0..w.end], .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("/tmp/it's \"fine\"\\here", parsed.value.root);
+    try testing.expectEqual(@as(u32, 128), parsed.value.limit);
 }
 
 test "an id with a quote in it still produces a frame that parses" {

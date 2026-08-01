@@ -5108,7 +5108,16 @@ pub const App = struct {
             name_len = self.plug_name_len;
             if (name_len == 0) return;
             @memcpy(name_buf[0..name_len], self.plug_name[0..name_len]);
-            if (self.paneRootLocked(self.activeTab().focused, &root_buf)) |r| root_len = r.len;
+            // COPY the returned slice. paneRootLocked only writes into the
+            // buffer it is handed when it finds a repo root — otherwise it
+            // returns a slice into the pane's cwd or its own stack. Taking
+            // the length and keeping the buffer got a length that was right
+            // and bytes that were never written.
+            var scratch: [1024]u8 = undefined;
+            if (self.paneRootLocked(self.activeTab().focused, &scratch)) |r| {
+                root_len = @min(root_buf.len, r.len);
+                @memcpy(root_buf[0..root_len], r[0..root_len]);
+            }
         }
 
         const Args = struct {

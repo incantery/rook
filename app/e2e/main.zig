@@ -1471,7 +1471,9 @@ const sh_plugin =
     \\    *'"op":"describe"'*)
     \\      printf '{"v":1,"id":%s,"ok":true,"result":{"name":"shplug","version":"9.9","capabilities":["items.list","items.act"]}}\n' "$id" ;;
     \\    *'"op":"items.list"'*)
-    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"items":[{"id":"a","title":"alpha","state":"ok","fields":[{"key":"n","kind":"NUMBER","value":"7"}],"actions":%s,"children":[{"id":"a1","title":"kid","state":"sub"}]}]}}\n' "$id" "$acts" ;;
+    \\      root=`expr "$line" : '.*"root":"\([^"]*\)"'`
+    \\      case "$root" in /*) ;; *) root="NOT-A-PATH" ;; esac
+    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"items":[{"id":"a","title":"alpha","state":"ok","fields":[{"key":"n","kind":"NUMBER","value":"7"},{"key":"root","kind":"TEXT","value":"%s"}],"actions":%s,"children":[{"id":"a1","title":"kid","state":"sub"}]}]}}\n' "$id" "$root" "$acts" ;;
     \\    *'"op":"items.act"'*)
     \\      act=`expr "$line" : '.*"actionId":"\([a-z]*\)"'`
     \\      extra=""
@@ -1524,7 +1526,14 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
         \\]}}
     , .{ script, script, script, script });
 
-    const app = try h.Instance.start(gpa, bin, .{ .env_json = graph });
+    // Launched OUTSIDE a git repo, deliberately.
+    //
+    // The list root comes from paneRootLocked, which takes two very
+    // different paths: a repo root (written into the caller's buffer) or a
+    // fallback to the pane's cwd (a slice into memory the caller does not
+    // own). Every other scenario runs inside rook's own checkout, so the
+    // fallback — the one that was broken — was unreachable from the suite.
+    const app = try h.Instance.start(gpa, bin, .{ .env_json = graph, .cwd = "/tmp" });
     defer {
         app.stop();
         app.deinit();
@@ -1603,6 +1612,21 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(rows, "plugin:shplug", "the panel names its plugin");
     try h.expectContains(rows, "*ok\talpha", "the item rendered, selected");
     try h.expectContains(rows, "n=7", "a typed field reached the row");
+    // THE PARAMS ROOK SENT, echoed back as a field.
+    //
+    // This assertion exists because its absence hid a real bug. The fixture
+    // pattern-matched on `op` and never looked at the request, so a request
+    // carrying uninitialised bytes where the root should be still got a
+    // valid answer here — while every real plugin, being something that
+    // actually parses JSON, refused the frame and looked dead. A fixture
+    // more permissive than the thing it stands in for passes for the wrong
+    // reason.
+    //
+    // Not an equality check: the root is the pane's REPO root when there is
+    // one, which is not the sandbox, and the field truncates. Absolute-path
+    // -ness is the guarantee that broke and the one worth pinning.
+    try h.expectContains(rows, "root=/", "rook must send a real path as the list root");
+    try h.expectNotContains(rows, "NOT-A-PATH", "the root rook sent was not a path at all");
     // Children are the only structural difference between a list and a
     // tree, so a renderer that drops them turns one surface into another.
     try h.expectContains(rows, " \x20sub\tkid", "the child rendered, indented");
