@@ -51,6 +51,7 @@ const scenarios = [_]Scenario{
     .{ .name = "plugins", .what = "declared plugins spawn lazily, answer over the wire, and are refused what config did not grant", .run = plugins },
     .{ .name = "envgraph", .what = "environment.json wins: the graph's leader and chords drive, config.toml yields", .run = envgraph },
     .{ .name = "configdir", .what = "--config=DIR: one directory is the whole config, and the XDG one is not read", .run = configDir },
+    .{ .name = "apply", .what = "config is a program: rook runs it, shows the diff, and applies nothing until told", .run = applyScenario },
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
@@ -1439,6 +1440,105 @@ fn seedRegistry(app: *h.Instance) !Registry {
     if (try h.runCmd(app.dirPath(), &.{ "/usr/bin/sqlite3", db.ptr, sql.ptr }) != 0)
         return error.SeedFailed;
     return reg;
+}
+
+// ---------------------------------------------------------------- apply
+
+/// Config is a program, and rook runs it.
+///
+/// Driven with a SHELL SCRIPT as the config program rather than Go: the
+/// suite must not need a toolchain, and what is under test is the loop —
+/// notice, run, diff, hold, apply — not `go build`. rook picks its runner
+/// off the source file's name, so a `config.ts` whose "npx" is a stub in
+/// PATH exercises exactly the same path a real one does.
+fn applyScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var dir_buf: [128]u8 = undefined;
+    const dirz = try std.fmt.bufPrintZ(&dir_buf, "/tmp/rook-e2e-apply-{d}", .{getpid()});
+    const dir: []const u8 = dirz;
+    _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", dirz.ptr }) catch {};
+    _ = try h.runCmd("/tmp", &.{ "/bin/mkdir", "-p", dirz.ptr });
+    var bin_buf: [160]u8 = undefined;
+    const stubdirz = try std.fmt.bufPrintZ(&bin_buf, "{s}/bin", .{dir});
+    const stubdir: []const u8 = stubdirz;
+    _ = try h.runCmd("/tmp", &.{ "/bin/mkdir", "-p", stubdirz.ptr });
+
+    // The stub `npx`: it IS the config program's runner, and it writes
+    // whatever `graph.json` currently holds. That makes the config program
+    // a file the scenario can rewrite between assertions.
+    var stub_path: [192]u8 = undefined;
+    const stubz = try std.fmt.bufPrintZ(&stub_path, "{s}/npx", .{stubdir});
+    const stub: []const u8 = stubz;
+    var stub_body: [512]u8 = undefined;
+    try h.writeFile(stub, try std.fmt.bufPrint(&stub_body,
+        \\#!/bin/sh
+        \\# args: tsx config.ts --out <path>
+        \\[ -f {s}/fail ] && {{ echo "config.ts:3: it did not compile" >&2; exit 1; }}
+        \\cat {s}/graph.json > "$4"
+    , .{ dir, dir }));
+    _ = try h.runCmd("/tmp", &.{ "/bin/chmod", "+x", stubz.ptr });
+
+    var cfgts: [192]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&cfgts, "{s}/config.ts", .{dir}), "// v1\n");
+    var graph_path: [192]u8 = undefined;
+    const graph = try std.fmt.bufPrint(&graph_path, "{s}/graph.json", .{dir});
+    try h.writeFile(graph,
+        \\{"rookEnvironment":1,"nodes":[{"id":"option:app:font-size","kind":"option","scope":"app","key":"font-size","value":16}]}
+    );
+    // The applied graph rook launches with.
+    var env_path: [192]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&env_path, "{s}/environment.json", .{dir}),
+        \\{"rookEnvironment":1,"nodes":[{"id":"option:app:font-size","kind":"option","scope":"app","key":"font-size","value":16}]}
+    );
+
+    var argbuf: [192]u8 = undefined;
+    var pathbuf: [256]u8 = undefined;
+    const app = try h.Instance.start(gpa, bin, .{
+        .arg = try std.fmt.bufPrint(&argbuf, "--config={s}", .{dir}),
+        .env = &.{.{ "PATH", try std.fmt.bufPrint(&pathbuf, "{s}:/usr/bin:/bin", .{stubdir}) }},
+    });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // Launching next to a config it has already applied must say nothing.
+    // A notification on every start is a notification nobody reads.
+    try h.expectContains(try app.ctl("env"), "no pending changes", "a quiet launch");
+
+    // Edit the program. rook notices and runs it — WITHOUT being asked, and
+    // without the human running a build step.
+    try h.writeFile(graph,
+        \\{"rookEnvironment":1,"nodes":[{"id":"option:app:font-size","kind":"option","scope":"app","key":"font-size","value":22},{"id":"option:app:theme","kind":"option","scope":"app","key":"theme","value":"Dracula"}]}
+    );
+    try h.writeFile(try std.fmt.bufPrint(&cfgts, "{s}/config.ts", .{dir}), "// v2\n");
+    const pending = try app.waitCtl("env", "pending:", 15_000);
+    // Readable, not a blob: which node, and both sides of the value.
+    try h.expectContains(pending, "~ option:app:font-size\tvalue: 16 → 22", "a changed value reads");
+    try h.expectContains(pending, "+ option:app:theme", "and an added node");
+
+    // THE ASSERTION THIS SCENARIO EXISTS FOR: it did NOT apply.
+    var envbuf: [4096]u8 = undefined;
+    try h.expectContains(try h.readFile(try std.fmt.bufPrint(&env_path, "{s}/environment.json", .{dir}), &envbuf), "\"value\":16", "a preview must not apply itself");
+    // …and the human was told, through the same door a plugin's attention
+    // uses.
+    try h.expectContains(try app.ctl("attention"), "config changes pending", "pending changes raise attention");
+
+    // Apply is a decision, and taking it writes the graph.
+    _ = try app.ctl("env apply");
+    try h.expectContains(try h.readFile(try std.fmt.bufPrint(&env_path, "{s}/environment.json", .{dir}), &envbuf), "\"value\":22", "apply writes the candidate");
+    try h.expectContains(try app.ctl("env"), "no pending changes", "and the preview goes clean");
+
+    // A program that does not compile: its OWN error, and apply refuses.
+    // "apply failed" would send you looking in rook; a line number does not.
+    var failflag: [192]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&failflag, "{s}/fail", .{dir}), "");
+    try h.writeFile(try std.fmt.bufPrint(&cfgts, "{s}/config.ts", .{dir}), "// v3 broken\n");
+    const broken = try app.waitCtl("env", "broken", 15_000);
+    try h.expectContains(broken, "config.ts:3", "the program's own error, with its line");
+    try h.expectContains(try app.ctl("env apply"), "err", "apply refuses a broken candidate");
+    try h.expectContains(try h.readFile(try std.fmt.bufPrint(&env_path, "{s}/environment.json", .{dir}), &envbuf), "\"value\":22", "and what is running is untouched");
+
+    _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", dirz.ptr }) catch {};
 }
 
 // ------------------------------------------------------------ configdir

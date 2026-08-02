@@ -487,6 +487,52 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else {
             reply(fd, "err unknown command (see `commands`)\n");
         }
+    } else if (std.mem.eql(u8, verb, "env")) {
+        // `env`        what applying would change (the preview)
+        // `env apply`  do it
+        //
+        // The preview is the trust surface: it is the ONLY place you see
+        // what a config program does before it does it.
+        if (std.mem.eql(u8, rest, "apply")) {
+            reply(fd, if (app.applyEnv()) "ok\n" else "err nothing to apply\n");
+            return;
+        }
+        if (rest.len > 0) {
+            reply(fd, "err usage: env | env apply\n");
+            return;
+        }
+        var buf: [8192]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        app.draw_lock.lock();
+        const d = &app.env_diff;
+        if (app.env_checking.load(.acquire)) {
+            _ = w.write("checking\n") catch 0;
+        } else if (!d.ok and d.err.get().len == 0) {
+            // Never run: there is no config program, or it has not changed
+            // since launch.
+            _ = w.write("no pending changes\n") catch 0;
+        } else if (!d.ok) {
+            // The program's own words, verbatim — a compile error names a
+            // line, and a summary would send you looking in rook.
+            w.print("broken\n{s}\n", .{d.err.get()}) catch {};
+        } else if (d.empty()) {
+            _ = w.write("no pending changes\n") catch 0;
+        } else {
+            w.print("pending:{d}\n", .{d.n + d.more}) catch {};
+            for (d.slice()) |c| {
+                const mark: []const u8 = switch (c.kind) {
+                    .add => "+",
+                    .remove => "-",
+                    .change => "~",
+                };
+                w.print("{s} {s}", .{ mark, c.id.get() }) catch break;
+                if (c.detail.get().len > 0) w.print("\t{s}", .{c.detail.get()}) catch break;
+                _ = w.write("\n") catch 0;
+            }
+            if (d.more > 0) w.print("+{d} more\n", .{d.more}) catch {};
+        }
+        app.draw_lock.unlock();
+        reply(fd, buf[0..w.end]);
     } else if (std.mem.eql(u8, verb, "attention") and rest.len == 0) {
         // What plugins have raised, newest last, each with the plugin that
         // raised it. Provenance is not something the caller states — a

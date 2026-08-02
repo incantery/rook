@@ -1130,6 +1130,13 @@ fn actParams(w: *std.Io.Writer, item_id: []const u8, action_id: []const u8) !voi
     try w.writeAll("}");
 }
 
+/// Write `s` as a JSON string, quotes and all. Exported because the
+/// app builds inbound params of its own — config's own attention goes
+/// through the same door a plugin's does.
+pub fn jsonStringTo(w: *std.Io.Writer, s: []const u8) !void {
+    return jsonString(w, s);
+}
+
 /// Write `s` as a JSON string, quotes and all.
 fn jsonString(w: *std.Io.Writer, s: []const u8) !void {
     try w.writeByte('"');

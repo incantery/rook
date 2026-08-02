@@ -25,6 +25,7 @@ const filelistpkg = @import("filelist.zig");
 const searchpkg = @import("search.zig");
 const lsppkg = @import("lsp.zig");
 const plugpkg = @import("plugins.zig");
+const envpkg = @import("envapply.zig");
 const lspmgrpkg = @import("lspmgr.zig");
 const docspkg = @import("docs.zig");
 const bufferpkg = @import("buffer.zig");
@@ -489,6 +490,22 @@ pub const App = struct {
     /// takes draw_lock and the palette's Enter is holding it.
     plug_pending: [64]u8 = @splat(0),
     plug_pending_len: usize = 0,
+
+    // ---- apply: config is a program, and rook runs it ----
+    /// Hash of the config SOURCE (main.go / config.ts), polled beside the
+    /// graph's own digest. When it moves, the program is re-run — running a
+    /// build step is not a human's job.
+    env_src_digest: u64 = 0,
+    env_checking: std.atomic.Value(bool) = .init(false),
+    /// Queued by the poll and drained outside draw_lock, because the check
+    /// forks a toolchain and takes a second.
+    env_check_wanted: bool = false,
+    /// What running the program produced, and how it differs from what rook
+    /// is running. Held, NOT applied — that is the whole point.
+    env_diff: envpkg.Diff = .{},
+    env_candidate: []u8 = &.{},
+    env_log: [512]u8 = @splat(0),
+    env_log_len: usize = 0,
 
     /// What plugins have raised. A ring rather than a list: attention that
     /// nobody looked at for a hundred events is not attention, and an
@@ -2565,6 +2582,7 @@ pub const App = struct {
             .palette_commands => self.openCommandPalette(),
             .palette_files => self.openFilePalette(),
             .palette_plugins => self.openPluginPalette(),
+            .env_apply => _ = self.applyEnv(),
             .panel_search => self.openSearchPanel(),
             .app_fullscreen => self.requestFullscreen(),
             .panel_flip => self.flipSidePane(),
@@ -3531,6 +3549,8 @@ pub const App = struct {
         // startPluginFetch/Act take draw_lock — so the key path can only
         // ask for them, never call them.
         self.draw_lock.lock();
+        const check = self.env_check_wanted;
+        self.env_check_wanted = false;
         const refetch = self.plug_refetch;
         const act = self.plug_run;
         var chosen: [64]u8 = undefined;
@@ -3540,6 +3560,7 @@ pub const App = struct {
         self.plug_run = false;
         self.plug_pending_len = 0;
         self.draw_lock.unlock();
+        if (check) self.startEnvCheck();
         if (chosen_len > 0) _ = self.showPlugin(chosen[0..chosen_len]);
         if (refetch) self.startPluginFetch();
         if (act) self.startPluginAct();
@@ -4144,6 +4165,26 @@ pub const App = struct {
     }
 
     fn pollConfigLocked(self: *App) void {
+        // The SOURCE, first and separately: editing main.go must not apply
+        // anything, it must offer. The graph's own digest below still
+        // applies live, because writing environment.json IS the apply.
+        var dirbuf: [1024]u8 = undefined;
+        if (cfgpkg.configDir(&dirbuf)) |dir| {
+            const sd = envpkg.sourceDigest(self.io, self.gpa, dir);
+            if (sd != 0 and sd != self.env_src_digest) {
+                // FIRST sight is decided by mtime, not by the digest: at
+                // launch there is no previous digest to compare against, and
+                // calling that "no change" would mean an edit made while
+                // rook was closed is never mentioned at all. After launch the
+                // digest is the authority — a touched file with the same
+                // bytes is not a change.
+                var gbuf: [1088]u8 = undefined;
+                self.env_check_wanted = self.env_src_digest != 0 or
+                    (if (cfgpkg.envPath(&gbuf)) |gp| envpkg.sourceNewerThanGraph(self.io, dir, gp) else false);
+                self.env_src_digest = sd;
+            }
+        }
+
         const d = cfgpkg.digest(self.io, self.gpa);
         defer self.config_digest = d;
         if (self.config_digest == 0 or d == self.config_digest) return;
@@ -5211,6 +5252,118 @@ pub const App = struct {
             self.plug_loading.store(false, .release);
             self.gpa.destroy(a);
         }
+    }
+
+    // ---- apply ----
+
+    /// Run the config program and hold the result up against what is
+    /// running. On a worker: `go run` forks a compiler and takes a second,
+    /// and the frame loop is not somewhere to spend one.
+    fn startEnvCheck(self: *App) void {
+        if (self.env_checking.load(.acquire)) return;
+        self.env_checking.store(true, .release);
+        const T = struct {
+            fn go(app: *App) void {
+                defer app.env_checking.store(false, .release);
+
+                var dirbuf: [1024]u8 = undefined;
+                const dir = cfgpkg.configDir(&dirbuf) orelse return;
+                const src = envpkg.findSource(app.io, dir) orelse return;
+
+                // Into a temp file beside the config, NOT over
+                // environment.json: a candidate that is never applied must
+                // leave no trace on what is running.
+                var outbuf: [1088]u8 = undefined;
+                const out = std.fmt.bufPrint(&outbuf, "{s}/.rook-candidate.json", .{dir}) catch return;
+                const r = envpkg.run(dir, src, out);
+
+                var candidate: []u8 = &.{};
+                var d = envpkg.Diff{};
+                if (r.ok) {
+                    if (std.Io.Dir.cwd().readFileAlloc(app.io, out, app.gpa, .limited(1 << 20)) catch null) |data| {
+                        candidate = data;
+                        var abuf: [1088]u8 = undefined;
+                        const applied_path = cfgpkg.envPath(&abuf);
+                        const applied: []u8 = if (applied_path) |ap|
+                            (std.Io.Dir.cwd().readFileAlloc(app.io, ap, app.gpa, .limited(1 << 20)) catch null) orelse &.{}
+                        else
+                            &.{};
+                        defer if (applied.len > 0) app.gpa.free(applied);
+                        d = envpkg.diff(app.gpa, applied, candidate);
+                    } else {
+                        d.err.set("the config program wrote no graph");
+                    }
+                } else {
+                    // The program's OWN output, not a summary of it. A Go
+                    // compile error names a line; "apply failed" sends you
+                    // looking in rook.
+                    d.err.set(if (r.logStr().len > 0) r.logStr() else "the config program failed");
+                }
+                std.Io.Dir.cwd().deleteFile(app.io, out) catch {};
+
+                app.draw_lock.lock();
+                if (app.env_candidate.len > 0) app.gpa.free(app.env_candidate);
+                app.env_candidate = candidate;
+                app.env_diff = d;
+                copyStr(&app.env_log, &app.env_log_len, r.logStr());
+                app.scene_dirty = true;
+                const pending = d.ok and !d.empty();
+                const broke = !d.ok;
+                app.draw_lock.unlock();
+
+                // Attention, not application. The whole point is that a
+                // human decides — and a config that silently did what it
+                // liked is what this replaces.
+                if (pending or broke) {
+                    // Through the same door a plugin uses, params and all —
+                    // config is not a special case of "a human is needed",
+                    // it is an instance of it.
+                    var pbuf: [512]u8 = undefined;
+                    var w: std.Io.Writer = .fixed(&pbuf);
+                    w.writeAll("{\"title\":") catch return;
+                    plugpkg.jsonStringTo(&w, if (broke) "config is broken" else "config changes pending") catch return;
+                    w.writeAll(",\"body\":") catch return;
+                    var b: [160]u8 = undefined;
+                    plugpkg.jsonStringTo(&w, if (broke)
+                        "the config program failed — run `env` to see why"
+                    else
+                        std.fmt.bufPrint(&b, "{d} change(s) — apply from the palette", .{d.n + d.more}) catch "changes pending") catch return;
+                    w.writeAll("}") catch return;
+                    _ = app.raiseAttention("config", pbuf[0..w.end]);
+                }
+            }
+        };
+        if (std.Thread.spawn(.{}, T.go, .{self})) |t| {
+            t.detach();
+        } else |_| {
+            self.env_checking.store(false, .release);
+        }
+    }
+
+    /// Apply the held candidate: write it over environment.json.
+    ///
+    /// That is the whole operation. environment.json IS the applied state,
+    /// so writing it is applying it, and the existing 1Hz reload picks it
+    /// up the same way it always did for a hand-edited graph.
+    pub fn applyEnv(self: *App) bool {
+        self.draw_lock.lock();
+        const ok = self.env_diff.ok and self.env_candidate.len > 0;
+        const data = if (ok) self.gpa.dupe(u8, self.env_candidate) catch null else null;
+        self.draw_lock.unlock();
+        const bytes = data orelse return false;
+        defer self.gpa.free(bytes);
+
+        var buf: [1088]u8 = undefined;
+        const path = cfgpkg.envPath(&buf) orelse return false;
+        std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = bytes }) catch return false;
+
+        self.draw_lock.lock();
+        self.env_diff = .{};
+        if (self.env_candidate.len > 0) self.gpa.free(self.env_candidate);
+        self.env_candidate = &.{};
+        self.scene_dirty = true;
+        self.draw_lock.unlock();
+        return true;
     }
 
     // ---- the inbound verbs: what a plugin may ask rook to do ----

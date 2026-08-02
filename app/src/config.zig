@@ -453,6 +453,22 @@ pub fn dir() ?[]const u8 {
     return if (dir_len == 0) null else dir_buf[0..dir_len];
 }
 
+/// The config DIRECTORY — where config.toml, environment.json and the
+/// config program all live. `--config` names it directly; otherwise it is
+/// the XDG rule.
+pub fn configDir(buf: []u8) ?[]const u8 {
+    if (dir()) |d| {
+        const n = @min(buf.len, d.len);
+        @memcpy(buf[0..n], d[0..n]);
+        return buf[0..n];
+    }
+    if (getenv("XDG_CONFIG_HOME")) |x| {
+        return std.fmt.bufPrint(buf, "{s}/rook", .{std.mem.span(x)}) catch null;
+    }
+    const home = getenv("HOME") orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/.config/rook", .{std.mem.span(home)}) catch null;
+}
+
 pub fn cfgPath(buf: []u8) ?[]const u8 {
     if (dir()) |d| {
         return std.fmt.bufPrint(buf, "{s}/config.toml", .{d}) catch null;

@@ -45,6 +45,7 @@ pub const Action = enum {
     /// The file finder: the repo's files, over the same widget.
     palette_files,
     palette_plugins,
+    env_apply,
     /// Find in files — the search panel, a side-pane tenant.
     panel_search,
     app_fullscreen,
@@ -115,6 +116,10 @@ pub const commands = [_]Command{
     // declared at RUNTIME and this table is compiled in, so the command
     // is "pick one" rather than one command per plugin.
     .{ .id = "plugin.open", .title = "Open a Plugin", .category = "Plugin", .action = .palette_plugins, .keys = "<leader>p" },
+    // Apply is a DECISION, so it is a command you run rather than
+    // something that happens to you. `ctl env` is the preview it is worth
+    // reading first.
+    .{ .id = "config.apply", .title = "Apply Pending Config", .category = "Config", .action = .env_apply },
     .{ .id = "panel.search", .title = "Find in Files", .category = "App", .action = .panel_search, .keys = "⌘⇧F" },
     .{ .id = "app.fullscreen", .title = "Toggle Fullscreen", .category = "App", .action = .app_fullscreen },
     .{ .id = "panel.flip", .title = "Move Side Pane to Other Edge", .category = "Panel", .action = .panel_flip },

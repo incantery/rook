@@ -253,6 +253,17 @@ pub fn build(b: *std.Build) void {
     plugins_tests.root_module.link_libc = true;
     test_step.dependOn(&b.addRunArtifact(plugins_tests).step);
 
+    // The apply diff. Its own root because it is PURE — a graph in, a list
+    // of changes out — and the whole value of a preview is that it is
+    // right, which is a thing you check without a window or a toolchain.
+    const envapply_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/envapply.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    envapply_tests.root_module.link_libc = true;
+    test_step.dependOn(&b.addRunArtifact(envapply_tests).step);
+
     // The UI layer's text fitting. Its own root for the reason logged
     // above editor_tests — the exe module's test collection does not
     // reach these decls, and a suite that is never run is worse than no
