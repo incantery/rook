@@ -331,7 +331,24 @@ const CompletedBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 
 /// What the palette is listing. The widget, filter, key handling and
 /// draw path are shared; only the row text and what Enter does differ.
-pub const PalMode = enum { workspaces, commands, files, plugins };
+pub const PalMode = enum { workspaces, commands, files, plugins, setup };
+
+/// The onboarding questions.
+///
+/// One today. The shape is a LIST OF STEPS on purpose — "what editor are
+/// you coming from", "which theme", "import your tmux config" are the same
+/// question with different choices, and a wizard that can only ask one
+/// thing has to be rewritten to ask two.
+pub const SetupChoice = struct {
+    label: []const u8,
+    detail: []const u8,
+    lang: envpkg.Lang,
+};
+
+pub const setup_choices = [_]SetupChoice{
+    .{ .label = "Go", .detail = "a Go program — go.mod and main.go", .lang = .go },
+    .{ .label = "TypeScript", .detail = "a TypeScript program — config.ts", .lang = .ts },
+};
 
 /// Which side pane a panel is slotted into. Panels are placement-
 /// agnostic: the tenant draws into a rect and does not know which edge
@@ -506,6 +523,11 @@ pub const App = struct {
     env_candidate: []u8 = &.{},
     env_log: [512]u8 = @splat(0),
     env_log_len: usize = 0,
+    /// Chosen in the setup palette, drained outside draw_lock — writing
+    /// files and running `go mod tidy` is not frame-loop work.
+    setup_wanted: ?envpkg.Lang = null,
+    /// Nothing configured at all: ask, once, after the window is up.
+    setup_needed: bool = false,
 
     /// What plugins have raised. A ring rather than a list: attention that
     /// nobody looked at for a hundred events is not attention, and an
@@ -1112,6 +1134,28 @@ pub const App = struct {
         // attention on startup gets told rook cannot do that.
         self.plugins.setHost(.{ .ctx = self, .call = &pluginInbound });
         self.plugins.startEager(gpa);
+
+        // First run: nothing configured at all, so ask. Only when there is
+        // NOTHING — a config.toml, a hand-written graph or a config program
+        // all mean the question has been answered, and re-asking someone
+        // who already decided is how an onboarding step becomes an
+        // annoyance to be dismissed forever.
+        {
+            var dirbuf: [1024]u8 = undefined;
+            if (cfgpkg.configDir(&dirbuf)) |dir| {
+                const cwd = std.Io.Dir.cwd();
+                var has: bool = envpkg.findSource(init.io, dir) != null;
+                if (!has) {
+                    var pb: [1088]u8 = undefined;
+                    if (cfgpkg.envPath(&pb)) |gp| has = cwd.access(init.io, gp, .{}) != error.FileNotFound;
+                }
+                if (!has) {
+                    var pb2: [1088]u8 = undefined;
+                    if (cfgpkg.cfgPath(&pb2)) |cp| has = cwd.access(init.io, cp, .{}) != error.FileNotFound;
+                }
+                self.setup_needed = !has;
+            }
+        }
         boot_times.create_us = usSince(boot_times.start);
         return self;
     }
@@ -2378,6 +2422,13 @@ pub const App = struct {
                 const sc = fuzzyScore(path, needle) orelse continue;
                 self.palInsertScored(i, sc);
             },
+            .setup => for (setup_choices, 0..) |c, i| {
+                if (self.pal_nfiltered >= self.pal_filtered.len) break;
+                if (fuzzyMatch(c.label, needle)) {
+                    self.pal_filtered[self.pal_nfiltered] = i;
+                    self.pal_nfiltered += 1;
+                }
+            },
             // Name and state both: "up" and "failed" are worth filtering
             // on when several are declared and one is broken.
             .plugins => for (self.plugins.items, 0..) |*p, i| {
@@ -2502,6 +2553,12 @@ pub const App = struct {
             }
             return;
         }
+        if (self.pal_mode == .setup) {
+            const lang = setup_choices[self.pal_filtered[self.pal_sel]].lang;
+            self.closePaletteLocked();
+            self.setup_wanted = lang;
+            return;
+        }
         if (self.pal_mode == .plugins) {
             const p = &self.plugins.items[self.pal_filtered[self.pal_sel]];
             copyStr(&self.plug_pending, &self.plug_pending_len, p.spec.name);
@@ -2583,6 +2640,8 @@ pub const App = struct {
             .palette_files => self.openFilePalette(),
             .palette_plugins => self.openPluginPalette(),
             .env_apply => _ = self.applyEnv(),
+            .config_edit => self.editConfig(),
+            .config_setup => self.openSetupPalette(),
             .panel_search => self.openSearchPanel(),
             .app_fullscreen => self.requestFullscreen(),
             .panel_flip => self.flipSidePane(),
@@ -3550,7 +3609,9 @@ pub const App = struct {
         // ask for them, never call them.
         self.draw_lock.lock();
         const check = self.env_check_wanted;
+        const setup = self.setup_wanted;
         self.env_check_wanted = false;
+        self.setup_wanted = null;
         const refetch = self.plug_refetch;
         const act = self.plug_run;
         var chosen: [64]u8 = undefined;
@@ -3560,6 +3621,7 @@ pub const App = struct {
         self.plug_run = false;
         self.plug_pending_len = 0;
         self.draw_lock.unlock();
+        if (setup) |l| self.startSetup(l);
         if (check) self.startEnvCheck();
         if (chosen_len > 0) _ = self.showPlugin(chosen[0..chosen_len]);
         if (refetch) self.startPluginFetch();
@@ -4447,6 +4509,17 @@ pub const App = struct {
         self.drainBellsLocked();
         self.drainNotificationsLocked();
         if (self.hud_calls % 2 == 0) self.pollConfigLocked();
+        // Onboarding opens ITSELF only over a window you are looking at.
+        // The palette takes the keys while it is up, so a prompt that
+        // appeared on a background window would silently eat the first
+        // thing typed into a terminal — which is exactly what a new user
+        // does next. Backgrounded, it waits; `⌘K → Set Up Config` is
+        // always there.
+        if (self.setup_needed and self.app_active) {
+            self.setup_needed = false;
+            self.pal_mode = .setup;
+            self.resetPaletteLocked();
+        }
         if (self.hud_calls % 2 == 1) self.pollBuffersLocked();
         const bytes = stats.global.bytes_in.load(.monotonic);
         if (self.hud_last_t > 0 and now > self.hud_last_t) {
@@ -5254,6 +5327,90 @@ pub const App = struct {
         }
     }
 
+    /// The onboarding prompt.
+    ///
+    /// A palette rather than a modal: it is the surface rook already uses
+    /// for "pick one of these", ESC already dismisses it, and a second
+    /// question later is a second step rather than a second dialog.
+    pub fn openSetupPalette(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        self.pal_mode = .setup;
+        self.resetPaletteLocked();
+    }
+
+    /// Write the starter config and open it.
+    ///
+    /// Opening it is half the point: the answer to "how do I configure
+    /// this" should be a file on screen with your cursor in it, not a path
+    /// in a doc you have to go and find.
+    fn startSetup(self: *App, lang: envpkg.Lang) void {
+        const T = struct {
+            fn go(app: *App, l: envpkg.Lang) void {
+                var dirbuf: [1024]u8 = undefined;
+                const dir = cfgpkg.configDir(&dirbuf) orelse return;
+                const cwd = std.Io.Dir.cwd();
+                cwd.createDirPath(app.io, dir) catch {};
+
+                var pbuf: [1088]u8 = undefined;
+                var openbuf: [1088]u8 = undefined;
+                var open_len: usize = 0;
+                switch (l) {
+                    .go => {
+                        const gm = std.fmt.bufPrint(&pbuf, "{s}/go.mod", .{dir}) catch return;
+                        cwd.writeFile(app.io, .{ .sub_path = gm, .data = envpkg.go_mod }) catch return;
+                        const mg = std.fmt.bufPrint(&openbuf, "{s}/main.go", .{dir}) catch return;
+                        open_len = mg.len;
+                        cwd.writeFile(app.io, .{ .sub_path = mg, .data = envpkg.go_main }) catch return;
+                        // Resolve the SDK now, so the first apply is not the
+                        // thing that discovers the module is missing.
+                        _ = envpkg.tidy(dir);
+                    },
+                    .ts => {
+                        // The SDK travels WITH the starter: @incantery/rook
+                        // is not on npm, and a starter whose first line
+                        // imports a package that does not exist is not a
+                        // starter.
+                        const sdk = std.fmt.bufPrint(&pbuf, "{s}/rook.ts", .{dir}) catch return;
+                        cwd.writeFile(app.io, .{ .sub_path = sdk, .data = envpkg.ts_sdk }) catch return;
+                        const ct = std.fmt.bufPrint(&openbuf, "{s}/config.ts", .{dir}) catch return;
+                        open_len = ct.len;
+                        cwd.writeFile(app.io, .{ .sub_path = ct, .data = envpkg.ts_main }) catch return;
+                    },
+                }
+                if (open_len > 0) _ = app.openEditorAt(openbuf[0..open_len], 1, 0);
+            }
+        };
+        if (std.Thread.spawn(.{}, T.go, .{ self, lang })) |t| t.detach() else |_| {}
+    }
+
+    /// Open the config program in rook's own editor.
+    ///
+    /// `⌘K` → "Edit Config". No path to remember, no `cd`, and no leaving
+    /// rook to change rook — the editor is right there and the config is
+    /// just a file.
+    ///
+    /// With no config program yet, this is the onboarding prompt instead:
+    /// asking someone to edit a file that does not exist is not an answer.
+    pub fn editConfig(self: *App) void {
+        var dirbuf: [1024]u8 = undefined;
+        const dir = cfgpkg.configDir(&dirbuf) orelse return;
+        if (envpkg.findSource(self.io, dir)) |src| {
+            _ = self.openEditorAt(src.path(), 1, 0);
+            return;
+        }
+        // No program, but a hand-written graph: open that rather than
+        // pretending there is nothing here.
+        var gbuf: [1088]u8 = undefined;
+        if (cfgpkg.envPath(&gbuf)) |gp| {
+            if (std.Io.Dir.cwd().access(self.io, gp, .{})) |_| {
+                _ = self.openEditorAt(gp, 1, 0);
+                return;
+            } else |_| {}
+        }
+        self.openSetupPalette();
+    }
+
     // ---- apply ----
 
     /// Run the config program and hold the result up against what is
@@ -6008,6 +6165,7 @@ pub const App = struct {
             // empty modal with no explanation. The prompt IS the empty
             // state; there is nowhere else on a palette to put one.
             .plugins => if (self.plugins.items.len == 0) "no plugins declared " else "plugin ",
+            .setup => "set up your config in ",
         }, th.bar_fg);
         tx += ui.textOver(tx, ty, self.pal_input[0..self.pal_input_len], th.bar_value);
         ui.rect(tx, ty, cw / 4, self.renderer.cell_h, th.accent); // caret
@@ -6056,6 +6214,10 @@ pub const App = struct {
                     else
                         e.name;
                     break :blk .{ l, e.root };
+                },
+                .setup => blk: {
+                    const c = setup_choices[item_i];
+                    break :blk .{ c.label, c.detail };
                 },
                 .plugins => blk: {
                     const p = &self.plugins.items[item_i];

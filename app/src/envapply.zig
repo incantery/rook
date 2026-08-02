@@ -504,6 +504,21 @@ pub fn run(dir: []const u8, src: Source, out_path: []const u8) Run {
         },
     };
     if (argv.len == 0) return r;
+    return runArgv(dir, argv);
+}
+
+/// pipe, fork, exec, read, wait. Shared by the emitter and by `go mod
+/// tidy`, which want the same thing: an exit status and whatever the tool
+/// had to say about it.
+fn runArgv(dir: []const u8, argv: []const [:0]const u8) Run {
+    var r = Run{};
+    var dirz: [512]u8 = undefined;
+    if (dir.len >= dirz.len) {
+        setLog(&r, "path too long");
+        return r;
+    }
+    @memcpy(dirz[0..dir.len], dir);
+    dirz[dir.len] = 0;
 
     var fds: [2]c_int = undefined;
     if (pipe(&fds) != 0) {
@@ -522,8 +537,8 @@ pub fn run(dir: []const u8, src: Source, out_path: []const u8) Run {
         return r;
     }
     if (child == 0) {
-        // The program is run FROM the config directory, so `go run .` and a
-        // relative config.ts both mean what they look like.
+        // Run FROM the config directory, so `go run .` and a relative
+        // config.ts both mean what they look like.
         _ = chdir(@ptrCast(&dirz));
         _ = dup2(fds[1], 1);
         _ = dup2(fds[1], 2);
@@ -548,10 +563,7 @@ pub fn run(dir: []const u8, src: Source, out_path: []const u8) Run {
     _ = waitpid(child, &status, 0);
     const code: u8 = @truncate(@as(u32, @bitCast(status)) >> 8);
     if (code == 127 and r.log_len == 0) {
-        setLog(&r, switch (src.lang) {
-            .go => "`go` is not on PATH — a Go config needs the Go toolchain",
-            .ts => "`npx` is not on PATH — a TypeScript config needs node",
-        });
+        setLog(&r, "not on PATH — that toolchain is not installed");
         return r;
     }
     r.ok = code == 0;
@@ -561,6 +573,17 @@ pub fn run(dir: []const u8, src: Source, out_path: []const u8) Run {
 fn setLog(r: *Run, msg: []const u8) void {
     r.log_len = @min(r.log.len, msg.len);
     @memcpy(r.log[0..r.log_len], msg[0..r.log_len]);
+}
+
+/// `go mod tidy`, so the first apply is not what discovers the SDK is
+/// missing. Best-effort: no toolchain means the starter is still written
+/// and the failure surfaces at apply, where it is already explained.
+pub fn tidy(dir: []const u8) void {
+    var argv_buf: [4][:0]const u8 = undefined;
+    argv_buf[0] = "go";
+    argv_buf[1] = "mod";
+    argv_buf[2] = "tidy";
+    _ = runArgv(dir, argv_buf[0..3]);
 }
 
 /// A hash of the config program, for the poll loop. Zero when there is no
@@ -618,3 +641,57 @@ test "findSource prefers a real file and reports the language" {
     try cwd.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&gob, "{s}/main.go", .{dir}), .data = "x" });
     try testing.expectEqual(Lang.go, findSource(io, dir).?.lang);
 }
+
+
+// ---- setup: the first-run prompt ----
+
+/// The TypeScript SDK, carried in the binary.
+///
+/// `@incantery/rook` is not on npm, and a starter that imports a package
+/// that does not exist is a starter that fails on the first line. Writing
+/// the file out instead is also better than the npm version would be: it is
+/// offline, and it cannot drift from the rook that wrote it.
+pub const ts_sdk = @embedFile("ts_sdk");
+
+pub const go_mod =
+    \\module rookconfig
+    \\
+    \\go 1.23
+    \\
+;
+
+pub const go_main =
+    \\// Your rook configuration.
+    \\//
+    \\// This is a PROGRAM, not a settings file: it runs, and what it emits is
+    \\// what rook materializes. Edit it, and rook will notice, run it, and show
+    \\// you what would change before anything happens.
+    \\package main
+    \\
+    \\import "github.com/incantery/rook/sdk/rook"
+    \\
+    \\func main() {
+    \\    e := rook.New()
+    \\
+    \\    e.FontSize(14)
+    \\
+    \\    e.Run()
+    \\}
+    \\
+;
+
+pub const ts_main =
+    \\// Your rook configuration.
+    \\//
+    \\// This is a PROGRAM, not a settings file: it runs, and what it emits is
+    \\// what rook materializes. Edit it, and rook will notice, run it, and show
+    \\// you what would change before anything happens.
+    \\import { env } from "./rook.ts";
+    \\
+    \\const e = env();
+    \\
+    \\e.fontSize(14);
+    \\
+    \\e.run();
+    \\
+;

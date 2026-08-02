@@ -295,7 +295,23 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         app.draw_lock.lock();
         if (!app.pal_open) {
             _ = w.write("closed\n") catch 0;
-        } else if (app.pal_mode == .plugins) {
+        } else switch (app.pal_mode) {
+            // EXHAUSTIVE, not an if-chain. The chain here fell through to
+            // the workspace arm for a mode it had never heard of and
+            // indexed a different array — a panic, from a dump verb, on a
+            // new palette mode. A switch makes the compiler ask.
+            .setup => {
+                w.print("mode:setup\nfilter:{s}\n", .{app.pal_input[0..app.pal_input_len]}) catch {};
+                for (app.pal_filtered[0..app.pal_nfiltered], 0..) |ii, vi| {
+                    const c = macos.setup_choices[ii];
+                    w.print("{s}{s}\t{s}\n", .{
+                        @as([]const u8, if (vi == app.pal_sel) "*" else " "),
+                        c.label,
+                        c.detail,
+                    }) catch break;
+                }
+            },
+            .plugins => {
             // The picker: name and state, so a scenario can prove the
             // GUI door to a plugin exists without a screenshot.
             w.print("mode:plugins\nfilter:{s}\ndeclared:{d}\n", .{
@@ -310,7 +326,8 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     @tagName(p.state),
                 }) catch break;
             }
-        } else if (app.pal_mode == .files) {
+            },
+            .files => {
             // The index size comes along: "no matches" with 0 files
             // indexed is a walk that found nothing, which is a
             // different bug from a filter that matched nothing.
@@ -326,7 +343,8 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     app.pal_files.paths[ii],
                 }) catch break;
             }
-        } else if (app.pal_mode == .commands) {
+            },
+            .commands => {
             w.print("mode:commands\nfilter:{s}\n", .{app.pal_input[0..app.pal_input_len]}) catch {};
             const reg = @import("registry.zig");
             for (app.pal_filtered[0..app.pal_nfiltered], 0..) |ii, vi| {
@@ -338,16 +356,18 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     c.title,
                 }) catch break;
             }
-        } else {
-            w.print("mode:workspaces\nfilter:{s}\n", .{app.pal_input[0..app.pal_input_len]}) catch {};
-            for (app.pal_filtered[0..app.pal_nfiltered], 0..) |ii, vi| {
-                const e = app.pal_items[ii];
-                w.print("{s}{s}\t{s}\n", .{
-                    @as([]const u8, if (vi == app.pal_sel) "*" else " "),
-                    e.name,
-                    e.root,
-                }) catch break;
-            }
+            },
+            .workspaces => {
+                w.print("mode:workspaces\nfilter:{s}\n", .{app.pal_input[0..app.pal_input_len]}) catch {};
+                for (app.pal_filtered[0..app.pal_nfiltered], 0..) |ii, vi| {
+                    const e = app.pal_items[ii];
+                    w.print("{s}{s}\t{s}\n", .{
+                        @as([]const u8, if (vi == app.pal_sel) "*" else " "),
+                        e.name,
+                        e.root,
+                    }) catch break;
+                }
+            },
         }
         app.draw_lock.unlock();
         reply(fd, buf[0..w.end]);

@@ -52,6 +52,7 @@ const scenarios = [_]Scenario{
     .{ .name = "envgraph", .what = "environment.json wins: the graph's leader and chords drive, config.toml yields", .run = envgraph },
     .{ .name = "configdir", .what = "--config=DIR: one directory is the whole config, and the XDG one is not read", .run = configDir },
     .{ .name = "apply", .what = "config is a program: rook runs it, shows the diff, and applies nothing until told", .run = applyScenario },
+    .{ .name = "setup", .what = "a rook with nothing configured asks, writes a starter, and opens it in the editor", .run = setupScenario },
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
@@ -1440,6 +1441,77 @@ fn seedRegistry(app: *h.Instance) !Registry {
     if (try h.runCmd(app.dirPath(), &.{ "/usr/bin/sqlite3", db.ptr, sql.ptr }) != 0)
         return error.SeedFailed;
     return reg;
+}
+
+// ---------------------------------------------------------------- setup
+
+/// First run: rook asks rather than assuming.
+///
+/// TypeScript, not Go, because the Go starter runs `go mod tidy` — network
+/// and a toolchain, in a suite that must pass on a fresh machine offline.
+/// The TS starter writes the SDK out of the binary and touches neither.
+fn setupScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var dir_buf: [128]u8 = undefined;
+    const dirz = try std.fmt.bufPrintZ(&dir_buf, "/tmp/rook-e2e-setup-{d}", .{getpid()});
+    const dir: []const u8 = dirz;
+    _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", dirz.ptr }) catch {};
+
+    var argbuf: [192]u8 = undefined;
+    const app = try h.Instance.start(gpa, bin, .{
+        .arg = try std.fmt.bufPrint(&argbuf, "--config={s}", .{dir}),
+    });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // Nothing configured, so it asks. The AUTO-open is gated on the window
+    // being frontmost — the palette takes the keys, and a prompt that
+    // appeared behind you would eat the first thing typed into a terminal.
+    // The harness launches with --no-activate precisely so scenarios do not
+    // steal focus, so here it is opened the other way it is always
+    // available: by name.
+    _ = try app.ctl("run config.setup");
+    const asked = try app.waitCtl("palette", "mode:setup", 10_000);
+    try h.expectContains(asked, "Go", "the languages rook can be configured in");
+    try h.expectContains(asked, "TypeScript", "both of them");
+
+    // Choosing writes a starter AND opens it. Opening it is half the
+    // point: the answer to "how do I configure this" should be a file on
+    // screen with a cursor in it, not a path in a document.
+    _ = try app.ctl("type Type");
+    _ = try app.waitCtl("palette", "*TypeScript", 5_000);
+    _ = try app.ctl("key 0d");
+    _ = try app.waitCtl("panes", "edit:config.ts", 10_000);
+
+    // The SDK travels with it. A starter whose first line imports a
+    // package that does not exist is not a starter — and @incantery/rook
+    // is not published.
+    var buf: [16 * 1024]u8 = undefined;
+    var pbuf: [192]u8 = undefined;
+    const sdk = try h.readFile(try std.fmt.bufPrint(&pbuf, "{s}/rook.ts", .{dir}), &buf);
+    try h.expect(sdk.len > 1000, "the TS SDK is written beside the config, got {d} bytes", .{sdk.len});
+    const cfg = try h.readFile(try std.fmt.bufPrint(&pbuf, "{s}/config.ts", .{dir}), &buf);
+    try h.expectContains(cfg, "./rook.ts", "and the starter imports it relatively");
+
+    // THE ASSERTION: a configured rook does not ask again. An onboarding
+    // step that re-fires is an onboarding step people learn to dismiss.
+    app.stop();
+    const app2 = try h.Instance.start(gpa, bin, .{
+        .arg = try std.fmt.bufPrint(&argbuf, "--config={s}", .{dir}),
+    });
+    defer {
+        app2.stop();
+        app2.deinit();
+    }
+    h.sleepMs(2500); // past the tick that would have opened it
+    try h.expectContains(try app2.ctl("palette"), "closed", "a configured rook stays quiet");
+
+    // …and the config is reachable without knowing where it lives.
+    _ = try app2.ctl("run config.edit");
+    _ = try app2.waitCtl("panes", "edit:config.ts", 5_000);
+
+    _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", dirz.ptr }) catch {};
 }
 
 // ---------------------------------------------------------------- apply

@@ -74,6 +74,11 @@ pub fn build(b: *std.Build) void {
     // The workspace registry: rook's own sqlite db, read via the
     // system libsqlite3 (macOS ships it; no vendored dependency).
     exe_mod.linkSystemLibrary("sqlite3", .{});
+    // The TypeScript SDK travels IN the binary: @incantery/rook is not on
+    // npm, and setup's starter config imports it relatively. Embedding also
+    // means the SDK a config was written against cannot drift from the rook
+    // that wrote it.
+    exe_mod.addAnonymousImport("ts_sdk", .{ .root_source_file = b.path("../sdk/ts/rook.ts") });
 
     const exe = b.addExecutable(.{
         .name = "rook",

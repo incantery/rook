@@ -46,6 +46,8 @@ pub const Action = enum {
     palette_files,
     palette_plugins,
     env_apply,
+    config_edit,
+    config_setup,
     /// Find in files — the search panel, a side-pane tenant.
     panel_search,
     app_fullscreen,
@@ -120,6 +122,10 @@ pub const commands = [_]Command{
     // something that happens to you. `ctl env` is the preview it is worth
     // reading first.
     .{ .id = "config.apply", .title = "Apply Pending Config", .category = "Config", .action = .env_apply },
+    // Config is a program, and rook is an editor. Nobody should have to
+    // leave rook, or remember a path, to change how rook behaves.
+    .{ .id = "config.edit", .title = "Edit Config", .category = "Config", .action = .config_edit },
+    .{ .id = "config.setup", .title = "Set Up Config", .category = "Config", .action = .config_setup },
     .{ .id = "panel.search", .title = "Find in Files", .category = "App", .action = .panel_search, .keys = "⌘⇧F" },
     .{ .id = "app.fullscreen", .title = "Toggle Fullscreen", .category = "App", .action = .app_fullscreen },
     .{ .id = "panel.flip", .title = "Move Side Pane to Other Edge", .category = "Panel", .action = .panel_flip },
