@@ -1469,9 +1469,10 @@ fn pluginFetch(gpa: std.mem.Allocator, bin: []const u8) !void {
     const graph = try std.fmt.bufPrint(&json_buf,
         \\{{"rookEnvironment":1,"nodes":[
         \\{{"id":"plugin:remote-plugin","kind":"plugin","scope":"app","name":"remote-plugin","source":"file://{s}/remote-plugin","load":"lazy","grants":["items.list"]}},
-        \\{{"id":"plugin:insecure","kind":"plugin","scope":"app","name":"insecure","source":"http://example.invalid/x","load":"lazy","grants":["items.list"]}}
+        \\{{"id":"plugin:insecure","kind":"plugin","scope":"app","name":"insecure","source":"http://example.invalid/x","load":"lazy","grants":["items.list"]}},
+        \\{{"id":"plugin:wrongpin","kind":"plugin","scope":"app","name":"wrongpin","source":"file://{s}/remote-plugin","sha256":"0000000000000000000000000000000000000000000000000000000000000000","load":"lazy","grants":["items.list"]}}
         \\]}}
-    , .{dir});
+    , .{ dir, dir });
     var envp: [192]u8 = undefined;
     try h.writeFile(try std.fmt.bufPrint(&envp, "{s}/environment.json", .{dir}), graph);
 
@@ -1509,6 +1510,35 @@ fn pluginFetch(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("plugin-show insecure");
     const bad = try app.waitCtl("sidepane", "unreachable", 15_000);
     try h.expectContains(bad, "https", "an http source is refused by name");
+
+    // A PIN THAT DOES NOT MATCH is refused, and nothing runs. This is the
+    // strong form: it catches a remote that changed on a machine that has
+    // never seen the old version.
+    _ = try app.ctl("plugin-show wrongpin");
+    const pinned = try app.waitCtl("sidepane", "unreachable", 20_000);
+    try h.expectContains(pinned, "pin", "a mismatched pin is refused by name");
+
+    // AND THE CACHE ITSELF. rook recorded what it first downloaded; a
+    // binary that changed underneath is refused rather than silently run,
+    // and rather than silently re-downloaded — replacing it would be the
+    // failure this exists to prevent.
+    app.stop();
+    try h.writeFile(cached, "#!/bin/sh\nexit 0\n");
+    const app2 = try h.Instance.start(gpa, bin, .{
+        .arg = try std.fmt.bufPrint(&argbuf, "--config={s}", .{dir}),
+        .env = &.{.{ "XDG_DATA_HOME", try std.fmt.bufPrint(&datap, "{s}/data", .{dir}) }},
+    });
+    defer {
+        app2.stop();
+        app2.deinit();
+    }
+    _ = try app2.ctl("plugin-show remote-plugin");
+    const tampered = try app2.waitCtl("sidepane", "unreachable", 15_000);
+    try h.expectContains(tampered, "changed", "a cache that changed is refused");
+    // …and it was NOT quietly re-fetched over the top.
+    var after: [64]u8 = undefined;
+    const still = try h.readFile(cached, &after);
+    try h.expectContains(still, "exit 0", "and not silently replaced");
 
     _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", dirz.ptr }) catch {};
 }

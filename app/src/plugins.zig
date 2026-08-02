@@ -147,6 +147,14 @@ pub const Spec = struct {
     /// is the difference between declaring a plugin and installing one by
     /// hand and then pointing config at the result.
     source: []const u8 = "",
+    /// The sha256 config PINNED, if it pinned one. Hex, lowercase.
+    ///
+    /// A pin is the strong form: it travels with the config, it is
+    /// reviewable in a diff, and a remote that changes under you is caught
+    /// on a machine that has never downloaded the old one. Without a pin
+    /// rook still records what it first saw and refuses a cache that stops
+    /// matching — but that only protects a machine that already fetched.
+    sha256: []const u8 = "",
 
     pub fn granted(self: *const Spec, op: []const u8) bool {
         for (self.grants) |g| if (std.mem.eql(u8, g, op)) return true;
@@ -358,10 +366,19 @@ pub const Plugin = struct {
         // A sourced plugin fetches on first use, not at launch: lazy is the
         // rule, and a launch that downloads things is a launch that waits
         // on someone else's server.
-        if (self.spec.source.len > 0 and !exists(self.spec.argv[0])) {
+        if (self.spec.source.len > 0) {
             var why: [128]u8 = undefined;
-            if (!fetch(self.spec.source, self.spec.argv[0], &why)) {
-                self.fail("could not download: {s}", .{std.mem.sliceTo(&why, 0)});
+            if (!exists(self.spec.argv[0])) {
+                if (!fetch(self.spec.source, self.spec.argv[0], &why)) {
+                    self.fail("could not download: {s}", .{std.mem.sliceTo(&why, 0)});
+                    return false;
+                }
+            }
+            // EVERY time, not only after a download. The cache is a
+            // directory on disk like any other, and a binary that changed
+            // since rook last looked is the case worth catching.
+            if (!self.verify(&why)) {
+                self.fail("{s}", .{std.mem.sliceTo(&why, 0)});
                 return false;
             }
         }
@@ -617,6 +634,43 @@ pub const Plugin = struct {
         return true;
     }
 
+    /// Is the cached binary the one we are supposed to be running?
+    ///
+    /// Config's pin wins when there is one. Otherwise rook compares against
+    /// what it recorded the first time it downloaded this — trust on first
+    /// use, which is weaker than a pin and says so, but does catch a cache
+    /// that changed underneath a machine that had already fetched.
+    ///
+    /// A mismatch REFUSES rather than re-downloading. Silently replacing a
+    /// binary that stopped matching is the failure this exists to prevent.
+    fn verify(self: *Plugin, why: *[128]u8) bool {
+        var got: [64]u8 = undefined;
+        if (!hashFile(self.spec.argv[0], &got)) {
+            _ = std.fmt.bufPrintZ(why, "downloaded, then could not be read", .{}) catch {};
+            return false;
+        }
+        if (self.spec.sha256.len > 0) {
+            if (!std.ascii.eqlIgnoreCase(self.spec.sha256, &got)) {
+                _ = std.fmt.bufPrintZ(why, "sha256 does not match the pin: got {s}…", .{got[0..16]}) catch {};
+                return false;
+            }
+            return true;
+        }
+        // No pin: compare with, or establish, what we first saw.
+        var sidecar: [1088]u8 = undefined;
+        const sc = std.fmt.bufPrint(&sidecar, "{s}.sha256", .{self.spec.argv[0]}) catch return true;
+        var seen: [64]u8 = undefined;
+        if (readAll(sc, &seen)) |n| {
+            if (n == 64 and !std.ascii.eqlIgnoreCase(seen[0..64], &got)) {
+                _ = std.fmt.bufPrintZ(why, "changed since it was downloaded — delete it to accept the new one", .{}) catch {};
+                return false;
+            }
+            return true;
+        }
+        _ = writeAllTo(sc, &got);
+        return true;
+    }
+
     /// Call an op. Refuses anything the config did not grant, BEFORE
     /// sending — a plugin should never learn it was asked for something it
     /// is not allowed to do.
@@ -837,6 +891,32 @@ fn writeAll(fd: c_int, bytes: []const u8) bool {
     return true;
 }
 
+// ---- what was downloaded, and is it still that ----
+
+/// sha256 of a file, lowercase hex. Null when it cannot be read.
+pub fn hashFile(path: []const u8, out: *[64]u8) bool {
+    var z: [1024]u8 = undefined;
+    if (path.len >= z.len) return false;
+    @memcpy(z[0..path.len], path);
+    z[path.len] = 0;
+    const fd = open(@ptrCast(&z), 0);
+    if (fd < 0) return false;
+    defer _ = close(fd);
+
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    var buf: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = read(fd, &buf, buf.len);
+        if (n < 0) return false;
+        if (n == 0) break;
+        h.update(buf[0..@intCast(n)]);
+    }
+    var digest: [32]u8 = undefined;
+    h.final(&digest);
+    _ = std.fmt.bufPrint(out, "{x}", .{&digest}) catch return false;
+    return true;
+}
+
 // ---- fetching ----
 
 extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
@@ -953,6 +1033,31 @@ pub fn fetch(source: []const u8, dest: []const u8, why: *[128]u8) bool {
 }
 
 extern "c" fn unlink(path: [*:0]const u8) c_int;
+const O_CREAT: c_int = 0x0200;
+const O_TRUNC: c_int = 0x0400;
+
+fn readAll(path: []const u8, out: []u8) ?usize {
+    var z: [1024]u8 = undefined;
+    if (path.len >= z.len) return null;
+    @memcpy(z[0..path.len], path);
+    z[path.len] = 0;
+    const fd = open(@ptrCast(&z), 0);
+    if (fd < 0) return null;
+    defer _ = close(fd);
+    const n = read(fd, out.ptr, out.len);
+    return if (n < 0) null else @intCast(n);
+}
+
+fn writeAllTo(path: []const u8, data: []const u8) bool {
+    var z: [1024]u8 = undefined;
+    if (path.len >= z.len) return false;
+    @memcpy(z[0..path.len], path);
+    z[path.len] = 0;
+    const fd = open(@ptrCast(&z), O_WRONLY | O_CREAT | O_TRUNC, @as(c_int, 0o644));
+    if (fd < 0) return false;
+    defer _ = close(fd);
+    return writeAll(fd, data);
+}
 fn deleteZ(p: [:0]const u8) c_int {
     return unlink(p.ptr);
 }
@@ -1358,6 +1463,7 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Registry {
             name: []const u8 = "",
             command: [][]const u8 = &.{},
             source: []const u8 = "",
+            sha256: []const u8 = "",
             load: []const u8 = "",
             grants: [][]const u8 = &.{},
         } = &.{},
@@ -1396,6 +1502,7 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Registry {
             .load = if (std.mem.eql(u8, n.load, "eager")) .eager else .lazy,
             .grants = grants,
             .source = a.dupe(u8, n.source) catch "",
+            .sha256 = a.dupe(u8, n.sha256) catch "",
         } }) catch continue;
     }
     reg.items = list.items;
@@ -1589,3 +1696,33 @@ test "INPUT_NONE is not input" {
     try testing.expect(a.wantsInput());
 }
 
+
+test "hashFile is the sha256 everyone else computes" {
+    // Pinned against the value `shasum -a 256` gives for the same bytes —
+    // a hash rook agrees with only itself on is a hash nobody can pin.
+    var pathbuf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pathbuf, "/tmp/rook-hash-test-{d}", .{std.Thread.getCurrentId()});
+    try testing.expect(writeAllTo(path, "hello, world\n"));
+    defer {
+        var z: [128]u8 = undefined;
+        @memcpy(z[0..path.len], path);
+        z[path.len] = 0;
+        _ = unlink(@ptrCast(&z));
+    }
+    var got: [64]u8 = undefined;
+    try testing.expect(hashFile(path, &got));
+    try testing.expectEqualStrings(
+        "853ff93762a06ddbf722c4ebe9ddd66d8f63ddaea97f521c3ecc20da7c976020",
+        &got,
+    );
+}
+
+test "a source rook does not know how to reach is refused before curl runs" {
+    var why: [128]u8 = undefined;
+    // Not a network test: the scheme check is the point, and it happens
+    // before anything is spawned.
+    try testing.expect(!fetch("http://example.invalid/x", "/tmp/nope", &why));
+    try testing.expect(std.mem.indexOf(u8, std.mem.sliceTo(&why, 0), "https") != null);
+    try testing.expect(!fetch("ftp://example.invalid/x", "/tmp/nope", &why));
+    try testing.expect(!fetch("/etc/passwd", "/tmp/nope", &why));
+}

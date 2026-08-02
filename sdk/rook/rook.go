@@ -33,6 +33,7 @@ type Env struct {
 
 type node struct {
 	source  string
+	sha256  string
 	id      string
 	kind    string
 	scope   string
@@ -129,14 +130,34 @@ func (e *Env) Plugin(name string, command []string, load string, grants ...strin
 // https only. Executing something downloaded over plain http is not a
 // thing to make easy.
 func (e *Env) PluginFrom(source string, grants ...string) *Env {
+	return e.put(pluginNode(source, grants))
+}
+
+func pluginNode(source string, grants []string) node {
 	name := source
 	if i := strings.LastIndex(name, "/"); i >= 0 {
 		name = name[i+1:]
 	}
-	return e.put(node{
+	return node{
 		id: "plugin:" + name, kind: "plugin", scope: "app",
 		name: name, source: source, load: "lazy", grants: grants,
-	})
+	}
+}
+
+// PluginPinned is PluginFrom with the artifact's sha256 nailed down.
+//
+// The strong form, and the one to use once you know the hash: it travels
+// with the config, it is reviewable in a diff, and a remote that changes
+// under you is caught on a machine that has never seen the old version.
+//
+// Without a pin rook still records what it first downloaded and refuses a
+// cache that stops matching — but that only protects a machine that
+// already fetched, which is why this exists. rook prints the hash it saw
+// on first download; paste it here.
+func (e *Env) PluginPinned(source, sha256 string, grants ...string) *Env {
+	n := pluginNode(source, grants)
+	n.sha256 = sha256
+	return e.put(n)
 }
 
 // Table declares an opaque host table ([agent], [jira], [lsp], …).
@@ -316,6 +337,10 @@ func (e *Env) JSON() []byte {
 			if n.source != "" {
 				b.WriteString(`,"source":`)
 				writeString(&b, n.source)
+				if n.sha256 != "" {
+					b.WriteString(`,"sha256":`)
+					writeString(&b, n.sha256)
+				}
 			} else {
 				b.WriteString(`,"command":`)
 				writeStrings(&b, n.argv)

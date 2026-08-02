@@ -80,15 +80,26 @@ export class Env {
   // https only. Executing something downloaded over plain http is not a
   // thing to make easy.
   pluginFrom(source: string, grants: string[] = []): this {
-    const name = source.slice(source.lastIndexOf("/") + 1);
+    return this.put(pluginNode(source, grants));
+  }
+
+  // pluginFrom with the artifact's sha256 nailed down — the strong form,
+  // and the one to use once you know the hash. It travels with the config
+  // and is reviewable in a diff. rook prints the hash it saw on first
+  // download; paste it here.
+  pluginPinned(source: string, sha256: string, grants: string[] = []): this {
+    const n = pluginNode(source, grants) as Record<string, unknown>;
+    // After `source`, before `load` — key order is the canon, and parity
+    // with the Go emitter is a byte diff.
     return this.put({
-      id: `plugin:${name}`,
-      kind: "plugin",
-      scope: "app",
-      name,
-      source,
-      load: "lazy",
-      grants,
+      id: n.id,
+      kind: n.kind,
+      scope: n.scope,
+      name: n.name,
+      source: n.source,
+      sha256,
+      load: n.load,
+      grants: n.grants,
     });
   }
 
@@ -188,6 +199,19 @@ export class Env {
     }
     process.stdout.write(this.json());
   }
+}
+
+function pluginNode(source: string, grants: string[]) {
+  const name = source.slice(source.lastIndexOf("/") + 1);
+  return {
+    id: `plugin:${name}`,
+    kind: "plugin",
+    scope: "app",
+    name,
+    source,
+    load: "lazy",
+    grants,
+  };
 }
 
 export function env(): Env {
