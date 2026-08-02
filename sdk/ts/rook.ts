@@ -73,6 +73,26 @@ export class Env {
     });
   }
 
+  // Declare a plugin by WHERE IT COMES FROM, and let rook do the rest: it
+  // downloads the binary into its own cache on first use, and nothing in
+  // your config names a path. The name is the source's last segment.
+  //
+  // https only. Executing something downloaded over plain http is not a
+  // thing to make easy.
+  pluginFrom(source: string, grants: string[] = []): this {
+    const name = source.slice(source.lastIndexOf("/") + 1);
+    return this.put({
+      id: `plugin:${name}`,
+      kind: "plugin",
+      scope: "app",
+      name,
+      source,
+      load: "lazy",
+      grants,
+    });
+  }
+
+
   table(name: string, entries: Record<string, unknown>): this {
     const sorted = Object.fromEntries(
       Object.entries(entries).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),

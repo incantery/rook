@@ -80,6 +80,7 @@ extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 extern "c" fn poll(fds: [*]PollFd, n: c_uint, timeout: c_int) c_int;
 extern "c" fn getdtablesize() c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn _exit(code: c_int) noreturn;
 extern "c" fn os_unfair_lock_lock(lock: *u32) void;
 extern "c" fn os_unfair_lock_unlock(lock: *u32) void;
@@ -141,6 +142,11 @@ pub const Spec = struct {
     argv: []const []const u8,
     load: Load = .lazy,
     grants: []const []const u8 = &.{},
+    /// Where the binary comes FROM, when config named a source rather than
+    /// a path. rook downloads it into a cache the human never types, which
+    /// is the difference between declaring a plugin and installing one by
+    /// hand and then pointing config at the result.
+    source: []const u8 = "",
 
     pub fn granted(self: *const Spec, op: []const u8) bool {
         for (self.grants) |g| if (std.mem.eql(u8, g, op)) return true;
@@ -348,6 +354,16 @@ pub const Plugin = struct {
         if (self.spec.argv.len == 0) {
             self.fail("no command declared", .{});
             return false;
+        }
+        // A sourced plugin fetches on first use, not at launch: lazy is the
+        // rule, and a launch that downloads things is a launch that waits
+        // on someone else's server.
+        if (self.spec.source.len > 0 and !exists(self.spec.argv[0])) {
+            var why: [128]u8 = undefined;
+            if (!fetch(self.spec.source, self.spec.argv[0], &why)) {
+                self.fail("could not download: {s}", .{std.mem.sliceTo(&why, 0)});
+                return false;
+            }
         }
         if (!self.spawn(gpa)) return false;
         // The pump before the handshake: describe is itself a call, and
@@ -821,6 +837,143 @@ fn writeAll(fd: c_int, bytes: []const u8) bool {
     return true;
 }
 
+// ---- fetching ----
+
+extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+extern "c" fn mkdir(path: [*:0]const u8, mode: u16) c_int;
+extern "c" fn rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
+extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;
+
+fn exists(path: []const u8) bool {
+    var z: [1024]u8 = undefined;
+    if (path.len >= z.len) return false;
+    @memcpy(z[0..path.len], path);
+    z[path.len] = 0;
+    return access(@ptrCast(&z), 0) == 0;
+}
+
+/// Where a sourced plugin's binary lives: `$XDG_DATA_HOME/rook/plugins/`.
+///
+/// rook's data dir, not the config dir. A downloaded binary is not
+/// configuration — it is a build artifact of one, and a config directory
+/// you can copy between machines should not carry executables.
+pub fn cachePath(buf: []u8, name: []const u8) ?[]const u8 {
+    const base = if (getenv("XDG_DATA_HOME")) |x|
+        std.fmt.bufPrint(buf, "{s}/rook/plugins", .{std.mem.span(x)}) catch return null
+    else blk: {
+        const home = getenv("HOME") orelse return null;
+        break :blk std.fmt.bufPrint(buf, "{s}/.local/share/rook/plugins", .{std.mem.span(home)}) catch return null;
+    };
+    // The caller wants the FILE; rebuild with the name appended, in place.
+    var tmp: [1024]u8 = undefined;
+    if (base.len >= tmp.len) return null;
+    @memcpy(tmp[0..base.len], base);
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ tmp[0..base.len], name }) catch null;
+}
+
+/// Download `source` to `dest`, executable.
+///
+/// Through `curl`, not an HTTP client compiled into rook. macOS ships it,
+/// install.sh already depends on it, and a TLS stack is a large thing to
+/// carry for an operation that happens once per plugin. `-f` so a 404 is a
+/// failure rather than a file containing the word "Not Found".
+///
+/// Downloaded to a temp name and RENAMED, so an interrupted fetch cannot
+/// leave a half-written binary that looks present and runs.
+pub fn fetch(source: []const u8, dest: []const u8, why: *[128]u8) bool {
+    @memset(why, 0);
+    const say = struct {
+        fn it(w: *[128]u8, m: []const u8) bool {
+            const n = @min(w.len - 1, m.len);
+            @memcpy(w[0..n], m[0..n]);
+            return false;
+        }
+    }.it;
+
+    // Only what curl can be trusted to treat as a URL, and only schemes we
+    // mean. file:// is here because the e2e must not need a network.
+    if (!std.mem.startsWith(u8, source, "https://") and !std.mem.startsWith(u8, source, "file://"))
+        return say(why, "only https:// (or file://) sources");
+
+    const cut = std.mem.lastIndexOfScalar(u8, dest, '/') orelse return say(why, "bad destination");
+    var dirz: [1024]u8 = undefined;
+    if (cut >= dirz.len) return say(why, "path too long");
+    @memcpy(dirz[0..cut], dest[0..cut]);
+    dirz[cut] = 0;
+    makePath(dirz[0..cut :0]);
+
+    var tmpz: [1024]u8 = undefined;
+    const tmp = std.fmt.bufPrintZ(&tmpz, "{s}.part", .{dest}) catch return say(why, "path too long");
+    var srcz: [1024]u8 = undefined;
+    const src = std.fmt.bufPrintZ(&srcz, "{s}", .{source}) catch return say(why, "source too long");
+
+    var fds: [2]c_int = undefined;
+    if (pipe(&fds) != 0) return say(why, "pipe failed");
+    const child = fork();
+    if (child < 0) {
+        _ = close(fds[0]);
+        _ = close(fds[1]);
+        return say(why, "fork failed");
+    }
+    if (child == 0) {
+        _ = dup2(fds[1], 1);
+        _ = dup2(fds[1], 2);
+        var fd: c_int = 3;
+        const maxfd = getdtablesize();
+        while (fd < maxfd) : (fd += 1) _ = close(fd);
+        var argv = [_:null]?[*:0]const u8{ "curl", "-fsSL", "--max-time", "60", "-o", tmp.ptr, src.ptr, null };
+        _ = execvp("curl", &argv);
+        _exit(127);
+    }
+    _ = close(fds[1]);
+    var log: [256]u8 = undefined;
+    var log_len: usize = 0;
+    while (log_len < log.len) {
+        const n = read(fds[0], @as([*]u8, &log) + log_len, log.len - log_len);
+        if (n <= 0) break;
+        log_len += @intCast(n);
+    }
+    _ = close(fds[0]);
+    var status: c_int = 0;
+    _ = waitpid(child, &status, 0);
+    const code: u8 = @truncate(@as(u32, @bitCast(status)) >> 8);
+    if (code != 0) {
+        _ = deleteZ(tmp);
+        return say(why, if (log_len > 0) log[0..log_len] else "curl failed");
+    }
+
+    var destz: [1024]u8 = undefined;
+    const dz = std.fmt.bufPrintZ(&destz, "{s}", .{dest}) catch return say(why, "path too long");
+    _ = chmod(tmp.ptr, 0o755);
+    if (rename(tmp.ptr, dz.ptr) != 0) {
+        _ = deleteZ(tmp);
+        return say(why, "could not place the download");
+    }
+    return true;
+}
+
+extern "c" fn unlink(path: [*:0]const u8) c_int;
+fn deleteZ(p: [:0]const u8) c_int {
+    return unlink(p.ptr);
+}
+
+/// mkdir -p, one component at a time.
+fn makePath(dir: [:0]const u8) void {
+    var buf: [1024]u8 = undefined;
+    if (dir.len >= buf.len) return;
+    @memcpy(buf[0..dir.len], dir);
+    buf[dir.len] = 0;
+    var i: usize = 1;
+    while (i <= dir.len) : (i += 1) {
+        if (i == dir.len or buf[i] == '/') {
+            const save = buf[i];
+            buf[i] = 0;
+            _ = mkdir(@ptrCast(&buf), 0o755);
+            buf[i] = save;
+        }
+    }
+}
+
 // ---- the render-side shape ----
 //
 // Fixed buffers, copied out of the parse. The draw path must not hold a
@@ -1204,6 +1357,7 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Registry {
             kind: []const u8 = "",
             name: []const u8 = "",
             command: [][]const u8 = &.{},
+            source: []const u8 = "",
             load: []const u8 = "",
             grants: [][]const u8 = &.{},
         } = &.{},
@@ -1214,10 +1368,23 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Registry {
     var list: std.ArrayListUnmanaged(Plugin) = .empty;
     for (parsed.value.nodes) |n| {
         if (!std.mem.eql(u8, n.kind, "plugin")) continue;
-        if (n.name.len == 0 or n.command.len == 0) continue;
+        if (n.name.len == 0) continue;
+        // A source and a command are the two ways to say where the binary
+        // is; one of them has to be there.
+        if (n.command.len == 0 and n.source.len == 0) continue;
 
-        const argv = a.alloc([]const u8, n.command.len) catch continue;
-        for (n.command, 0..) |c, i| argv[i] = a.dupe(u8, c) catch return reg;
+        // A sourced plugin runs from rook's cache — a path the human never
+        // types, and never has to keep in step with config.
+        var argv: [][]const u8 = undefined;
+        if (n.source.len > 0) {
+            var cbuf: [1024]u8 = undefined;
+            const cp = cachePath(&cbuf, n.name) orelse continue;
+            argv = a.alloc([]const u8, 1) catch continue;
+            argv[0] = a.dupe(u8, cp) catch return reg;
+        } else {
+            argv = a.alloc([]const u8, n.command.len) catch continue;
+            for (n.command, 0..) |c, i| argv[i] = a.dupe(u8, c) catch return reg;
+        }
         const grants = a.alloc([]const u8, n.grants.len) catch continue;
         for (n.grants, 0..) |g, i| grants[i] = a.dupe(u8, g) catch return reg;
 
@@ -1228,6 +1395,7 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Registry {
             // an old app meeting a new graph must still run.
             .load = if (std.mem.eql(u8, n.load, "eager")) .eager else .lazy,
             .grants = grants,
+            .source = a.dupe(u8, n.source) catch "",
         } }) catch continue;
     }
     reg.items = list.items;

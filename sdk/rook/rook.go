@@ -32,6 +32,7 @@ type Env struct {
 }
 
 type node struct {
+	source  string
 	id      string
 	kind    string
 	scope   string
@@ -111,6 +112,30 @@ func (e *Env) Plugin(name string, command []string, load string, grants ...strin
 	return e.put(node{
 		id: "plugin:" + name, kind: "plugin", scope: "app",
 		name: name, argv: command, load: load, grants: grants,
+	})
+}
+
+// PluginFrom declares a plugin by WHERE IT COMES FROM, and lets rook do
+// the rest: it downloads the binary into its own cache on first use, and
+// nothing in your config names a path.
+//
+// The alternative — fetch it yourself, chmod it, then point Plugin at the
+// result — is installing a plugin by hand and then telling config about
+// it, which is a symlink with extra steps.
+//
+// The name is the source's last path segment. rook records what the
+// plugin's own `describe` calls itself too, and shows both.
+//
+// https only. Executing something downloaded over plain http is not a
+// thing to make easy.
+func (e *Env) PluginFrom(source string, grants ...string) *Env {
+	name := source
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return e.put(node{
+		id: "plugin:" + name, kind: "plugin", scope: "app",
+		name: name, source: source, load: "lazy", grants: grants,
 	})
 }
 
@@ -284,8 +309,17 @@ func (e *Env) JSON() []byte {
 		case "plugin":
 			b.WriteString(`,"name":`)
 			writeString(&b, n.name)
-			b.WriteString(`,"command":`)
-			writeStrings(&b, n.argv)
+			// One of the two, never both: a source says where the binary
+			// comes FROM and rook caches it; a command says where it
+			// already IS. Emitting both would leave two answers to the
+			// same question.
+			if n.source != "" {
+				b.WriteString(`,"source":`)
+				writeString(&b, n.source)
+			} else {
+				b.WriteString(`,"command":`)
+				writeStrings(&b, n.argv)
+			}
 			b.WriteString(`,"load":`)
 			writeString(&b, n.load)
 			b.WriteString(`,"grants":`)

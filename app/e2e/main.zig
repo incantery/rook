@@ -53,6 +53,7 @@ const scenarios = [_]Scenario{
     .{ .name = "configdir", .what = "--config=DIR: one directory is the whole config, and the XDG one is not read", .run = configDir },
     .{ .name = "apply", .what = "config is a program: rook runs it, shows the diff, and applies nothing until told", .run = applyScenario },
     .{ .name = "setup", .what = "a rook with nothing configured asks, writes a starter, and opens it in the editor", .run = setupScenario },
+    .{ .name = "pluginfetch", .what = "a plugin declared by source downloads itself on first use — no path in config", .run = pluginFetch },
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
@@ -1441,6 +1442,75 @@ fn seedRegistry(app: *h.Instance) !Registry {
     if (try h.runCmd(app.dirPath(), &.{ "/usr/bin/sqlite3", db.ptr, sql.ptr }) != 0)
         return error.SeedFailed;
     return reg;
+}
+
+// ----------------------------------------------------------- pluginfetch
+
+/// Declaring a plugin should not mean installing one by hand first.
+///
+/// `file://` rather than `https://`, because the suite must not need a
+/// network — the scheme is the only difference, and curl treats both the
+/// same. The https-only rule is checked separately below, where it costs
+/// nothing.
+fn pluginFetch(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var dir_buf: [128]u8 = undefined;
+    const dirz = try std.fmt.bufPrintZ(&dir_buf, "/tmp/rook-e2e-fetch-{d}", .{getpid()});
+    const dir: []const u8 = dirz;
+    _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", dirz.ptr }) catch {};
+    _ = try h.runCmd("/tmp", &.{ "/bin/mkdir", "-p", dirz.ptr });
+
+    // The "remote": a plugin sitting somewhere rook has to go and get.
+    var src_buf: [192]u8 = undefined;
+    const srcz = try std.fmt.bufPrintZ(&src_buf, "{s}/remote-plugin", .{dir});
+    try h.writeFile(srcz, sh_plugin);
+    _ = try h.runCmd("/tmp", &.{ "/bin/chmod", "+x", srcz.ptr });
+
+    var json_buf: [1024]u8 = undefined;
+    const graph = try std.fmt.bufPrint(&json_buf,
+        \\{{"rookEnvironment":1,"nodes":[
+        \\{{"id":"plugin:remote-plugin","kind":"plugin","scope":"app","name":"remote-plugin","source":"file://{s}/remote-plugin","load":"lazy","grants":["items.list"]}},
+        \\{{"id":"plugin:insecure","kind":"plugin","scope":"app","name":"insecure","source":"http://example.invalid/x","load":"lazy","grants":["items.list"]}}
+        \\]}}
+    , .{dir});
+    var envp: [192]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&envp, "{s}/environment.json", .{dir}), graph);
+
+    var argbuf: [192]u8 = undefined;
+    var datap: [192]u8 = undefined;
+    const app = try h.Instance.start(gpa, bin, .{
+        .arg = try std.fmt.bufPrint(&argbuf, "--config={s}", .{dir}),
+        .env = &.{.{ "XDG_DATA_HOME", try std.fmt.bufPrint(&datap, "{s}/data", .{dir}) }},
+    });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // NOTHING is downloaded at launch. Lazy is the rule, and a launch that
+    // fetches is a launch that waits on someone else's server.
+    var cachep: [192]u8 = undefined;
+    const cached = try std.fmt.bufPrint(&cachep, "{s}/data/rook/plugins/remote-plugin", .{dir});
+    var probe: [64]u8 = undefined;
+    try h.expect(h.readFile(cached, &probe) catch null == null, "nothing downloads until something asks", .{});
+
+    // Opening it fetches it, and it works. Note what is NOT in the graph:
+    // a path. The config named a source; where the binary lives is rook's
+    // business.
+    _ = try app.ctl("plugin-show remote-plugin");
+    const rows = try app.waitCtl("sidepane", "alpha", 20_000);
+    try h.expectContains(rows, "*ok\talpha", "the downloaded plugin ran");
+
+    var buf: [8 * 1024]u8 = undefined;
+    const got = try h.readFile(cached, &buf);
+    try h.expect(got.len > 100, "and it landed in rook's cache, not the config dir", .{});
+
+    // http:// is refused. Executing something fetched over plain http is
+    // not a thing to make easy, and the refusal names the reason.
+    _ = try app.ctl("plugin-show insecure");
+    const bad = try app.waitCtl("sidepane", "unreachable", 15_000);
+    try h.expectContains(bad, "https", "an http source is refused by name");
+
+    _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", dirz.ptr }) catch {};
 }
 
 // ---------------------------------------------------------------- setup
