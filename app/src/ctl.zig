@@ -620,6 +620,11 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                 }
                 w.print("\tv={s}", .{p.desc.versionStr()}) catch break;
             }
+            // The hash, for a sourced plugin that is up and not pinned.
+            // This is what you paste into config, and printing it is the
+            // difference between pinning being possible and being likely.
+            if (p.state == .up and p.spec.source.len > 0 and !p.pinned_ok)
+                w.print("\tsha256={s}", .{&p.pin}) catch break;
             if (p.state == .failed) w.print("\t{s}", .{p.errStr()}) catch break;
             _ = w.write("\n") catch 0;
         }

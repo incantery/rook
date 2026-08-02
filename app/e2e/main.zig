@@ -1505,6 +1505,24 @@ fn pluginFetch(gpa: std.mem.Allocator, bin: []const u8) !void {
     const got = try h.readFile(cached, &buf);
     try h.expect(got.len > 100, "and it landed in rook's cache, not the config dir", .{});
 
+    // ROOK HANDS YOU THE PIN. A hash you have to go and compute yourself
+    // is a hash nobody pins, so `plugins` offers it and the panel yanks it
+    // — as a line in the language the config is actually written in, not a
+    // bare hex string you then have to wrap.
+    const offered = try app.ctl("plugins");
+    try h.expectContains(offered, "sha256=", "an unpinned plugin offers its hash");
+    _ = try app.ctl("key 79"); // y, vim's yank
+    h.sleepMs(300);
+    const clip = try app.ctl("clipboard");
+    try h.expectContains(clip, "PluginPinned", "y copies a ready-to-paste pin");
+    // The PID-SCOPED source, not just "remote-plugin". `ctl clipboard`
+    // reads the real system pasteboard, so a previous run's copy sits
+    // there and an assertion on anything stable passes without y ever
+    // firing — which is exactly how this test first passed with the
+    // keybinding deleted.
+    try h.expectContains(clip, dir, "naming THIS run's source");
+    try h.expectContains(clip, "items.list", "and carrying the grants forward");
+
     // http:// is refused. Executing something fetched over plain http is
     // not a thing to make easy, and the refusal names the reason.
     _ = try app.ctl("plugin-show insecure");

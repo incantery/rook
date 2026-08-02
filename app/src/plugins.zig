@@ -270,6 +270,12 @@ pub const Plugin = struct {
     from_child: c_int = -1,
     seq: u64 = 0,
     desc: Describe = .{},
+    /// The sha256 of the binary actually running, once it has been
+    /// verified. Recorded so rook can HAND IT TO YOU: a pin nobody can
+    /// read is a pin nobody sets, and telling someone to go and run
+    /// shasum is telling them not to bother.
+    pin: [64]u8 = @splat(0),
+    pinned_ok: bool = false,
 
     /// Where an inbound verb goes. Null in tests and before the app wires
     /// itself up; a plugin that asks then gets a refusal rather than a
@@ -649,11 +655,13 @@ pub const Plugin = struct {
             _ = std.fmt.bufPrintZ(why, "downloaded, then could not be read", .{}) catch {};
             return false;
         }
+        self.pin = got;
         if (self.spec.sha256.len > 0) {
             if (!std.ascii.eqlIgnoreCase(self.spec.sha256, &got)) {
                 _ = std.fmt.bufPrintZ(why, "sha256 does not match the pin: got {s}…", .{got[0..16]}) catch {};
                 return false;
             }
+            self.pinned_ok = true;
             return true;
         }
         // No pin: compare with, or establish, what we first saw.

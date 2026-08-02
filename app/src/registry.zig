@@ -46,6 +46,7 @@ pub const Action = enum {
     palette_files,
     palette_plugins,
     env_apply,
+    plugin_pin,
     config_preview,
     config_edit,
     config_setup,
@@ -122,6 +123,7 @@ pub const commands = [_]Command{
     // Apply is a DECISION, so it is a command you run rather than
     // something that happens to you. `ctl env` is the preview it is worth
     // reading first.
+    .{ .id = "plugin.pin", .title = "Copy Plugin Pin", .category = "Plugin", .action = .plugin_pin },
     .{ .id = "config.preview", .title = "Preview Pending Config", .category = "Config", .action = .config_preview },
     .{ .id = "config.apply", .title = "Apply Pending Config", .category = "Config", .action = .env_apply },
     // Config is a program, and rook is an editor. Nobody should have to

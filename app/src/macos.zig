@@ -507,6 +507,8 @@ pub const App = struct {
     /// takes draw_lock and the palette's Enter is holding it.
     plug_pending: [64]u8 = @splat(0),
     plug_pending_len: usize = 0,
+    /// Queued: the copy takes draw_lock and the key path holds it.
+    plug_pin_wanted: bool = false,
 
     // ---- apply: config is a program, and rook runs it ----
     /// Hash of the config SOURCE (main.go / config.ts), polled beside the
@@ -2640,6 +2642,7 @@ pub const App = struct {
             .palette_files => self.openFilePalette(),
             .palette_plugins => self.openPluginPalette(),
             .env_apply => _ = self.applyEnv(),
+            .plugin_pin => self.copyPluginPin(),
             .config_preview => self.showConfigPreview(true),
             .config_edit => self.editConfig(),
             .config_setup => self.openSetupPalette(),
@@ -3612,6 +3615,8 @@ pub const App = struct {
         const check = self.env_check_wanted;
         const setup = self.setup_wanted;
         const apply_now = self.env_apply_wanted;
+        const pin_now = self.plug_pin_wanted;
+        self.plug_pin_wanted = false;
         self.env_apply_wanted = false;
         self.env_check_wanted = false;
         self.setup_wanted = null;
@@ -3624,6 +3629,7 @@ pub const App = struct {
         self.plug_run = false;
         self.plug_pending_len = 0;
         self.draw_lock.unlock();
+        if (pin_now) self.copyPluginPin();
         if (apply_now) _ = self.applyEnv();
         if (setup) |l| self.startSetup(l);
         if (check) self.startEnvCheck();
@@ -5867,6 +5873,9 @@ pub const App = struct {
                     'g' => self.plug_sel = 0,
                     'G' => self.plug_sel = n -| 1,
                     'r' => self.plug_refetch = true, // drained after the lock
+                // vim's yank. The panel is where you are when you have just
+                // watched a downloaded plugin work and want to pin it.
+                'y' => self.plug_pin_wanted = true,
                     0x0d => if (self.plugItemLocked()) |it| {
                         // Silence here would read as a broken key. An item
                         // with nothing to do says so.
@@ -6187,6 +6196,49 @@ pub const App = struct {
             _ = self;
         }
         return y;
+    }
+
+    /// Put the pin for the panel's plugin on the clipboard, ready to paste.
+    ///
+    /// In the language your config is actually written in. Handing a Go
+    /// user a TypeScript line, or either of them a bare hex string they
+    /// then have to wrap themselves, is the kind of "here is the
+    /// information, you do the rest" that means nobody does the rest.
+    pub fn copyPluginPin(self: *App) void {
+        var line: [512]u8 = undefined;
+        var len: usize = 0;
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            if (self.plug_name_len == 0) return;
+            const p = self.plugins.find(self.plug_name[0..self.plug_name_len]) orelse return;
+            // Nothing to pin: a plugin declared by PATH has no artifact to
+            // pin, and one rook has not run yet has no hash to offer.
+            if (p.spec.source.len == 0 or p.state != .up) return;
+
+            var dirbuf: [1024]u8 = undefined;
+            const lang: envpkg.Lang = if (cfgpkg.configDir(&dirbuf)) |dir|
+                if (envpkg.findSource(self.io, dir)) |src| src.lang else .go
+            else
+                .go;
+
+            var gbuf: [256]u8 = undefined;
+            var gw: std.Io.Writer = .fixed(&gbuf);
+            for (p.spec.grants, 0..) |g, i| {
+                if (i > 0) gw.writeAll(", ") catch break;
+                gw.print("\"{s}\"", .{g}) catch break;
+            }
+            const grants = gbuf[0..gw.end];
+
+            const s2 = switch (lang) {
+                .go => std.fmt.bufPrint(&line, "e.PluginPinned(\"{s}\", \"{s}\", {s})", .{ p.spec.source, &p.pin, grants }),
+                .ts => std.fmt.bufPrint(&line, "e.pluginPinned(\"{s}\", \"{s}\", [{s}]);", .{ p.spec.source, &p.pin, grants }),
+            } catch return;
+            len = s2.len;
+            self.plugSay("pin copied");
+            self.scene_dirty = true;
+        }
+        self.setPasteboard(line[0..len]);
     }
 
     /// Show the pending diff.
