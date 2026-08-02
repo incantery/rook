@@ -300,17 +300,6 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             // the workspace arm for a mode it had never heard of and
             // indexed a different array — a panic, from a dump verb, on a
             // new palette mode. A switch makes the compiler ask.
-            .setup => {
-                w.print("mode:setup\nfilter:{s}\n", .{app.pal_input[0..app.pal_input_len]}) catch {};
-                for (app.pal_filtered[0..app.pal_nfiltered], 0..) |ii, vi| {
-                    const c = macos.setup_choices[ii];
-                    w.print("{s}{s}\t{s}\n", .{
-                        @as([]const u8, if (vi == app.pal_sel) "*" else " "),
-                        c.label,
-                        c.detail,
-                    }) catch break;
-                }
-            },
             .plugins => {
             // The picker: name and state, so a scenario can prove the
             // GUI door to a plugin exists without a screenshot.
@@ -507,6 +496,26 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else {
             reply(fd, "err unknown command (see `commands`)\n");
         }
+    } else if (std.mem.eql(u8, verb, "welcome") and rest.len == 0) {
+        // The onboarding screen, as text. It owns the whole window and the
+        // keys while it is up, so a scenario has to be able to see it.
+        var buf: [1024]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        app.draw_lock.lock();
+        if (!app.welcome_open) {
+            _ = w.write("closed\n") catch 0;
+        } else {
+            _ = w.write("open\n") catch 0;
+            for (macos.setup_choices, 0..) |c, i| {
+                w.print("{s}{s}\t{s}\n", .{
+                    @as([]const u8, if (i == app.welcome_sel) "*" else " "),
+                    c.label,
+                    c.detail,
+                }) catch break;
+            }
+        }
+        app.draw_lock.unlock();
+        reply(fd, buf[0..w.end]);
     } else if (std.mem.eql(u8, verb, "env")) {
         // `env`        what applying would change (the preview)
         // `env apply`  do it

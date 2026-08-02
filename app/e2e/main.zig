@@ -1465,24 +1465,28 @@ fn setupScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
         app.deinit();
     }
 
-    // Nothing configured, so it asks. The AUTO-open is gated on the window
-    // being frontmost — the palette takes the keys, and a prompt that
-    // appeared behind you would eat the first thing typed into a terminal.
-    // The harness launches with --no-activate precisely so scenarios do not
-    // steal focus, so here it is opened the other way it is always
-    // available: by name.
+    // Nothing configured, so it asks — on its OWN SCREEN, not a palette.
+    // The auto-open is gated on the window being frontmost (it owns the
+    // keys while it is up, and a greeting that appeared behind you would
+    // eat the first thing typed into a terminal). The harness launches
+    // --no-activate precisely so scenarios do not steal focus, so here it
+    // is opened the other way it is always available: by name.
     _ = try app.ctl("run config.setup");
-    const asked = try app.waitCtl("palette", "mode:setup", 10_000);
+    const asked = try app.waitCtl("welcome", "open", 10_000);
     try h.expectContains(asked, "Go", "the languages rook can be configured in");
     try h.expectContains(asked, "TypeScript", "both of them");
+
+    // It takes the keys, so j moves rather than typing. The screen has no
+    // filter box — there is nothing here to filter.
+    _ = try app.ctl("key 6a");
+    try h.expectContains(try app.ctl("welcome"), "*TypeScript", "j moves the selection");
 
     // Choosing writes a starter AND opens it. Opening it is half the
     // point: the answer to "how do I configure this" should be a file on
     // screen with a cursor in it, not a path in a document.
-    _ = try app.ctl("type Type");
-    _ = try app.waitCtl("palette", "*TypeScript", 5_000);
     _ = try app.ctl("key 0d");
     _ = try app.waitCtl("panes", "edit:config.ts", 10_000);
+    try h.expectContains(try app.ctl("welcome"), "closed", "and the screen gets out of the way");
 
     // The SDK travels with it. A starter whose first line imports a
     // package that does not exist is not a starter — and @incantery/rook
@@ -1505,7 +1509,7 @@ fn setupScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
         app2.deinit();
     }
     h.sleepMs(2500); // past the tick that would have opened it
-    try h.expectContains(try app2.ctl("palette"), "closed", "a configured rook stays quiet");
+    try h.expectContains(try app2.ctl("welcome"), "closed", "a configured rook stays quiet");
 
     // …and the config is reachable without knowing where it lives.
     _ = try app2.ctl("run config.edit");

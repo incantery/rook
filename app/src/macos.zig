@@ -331,7 +331,7 @@ const CompletedBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 
 /// What the palette is listing. The widget, filter, key handling and
 /// draw path are shared; only the row text and what Enter does differ.
-pub const PalMode = enum { workspaces, commands, files, plugins, setup };
+pub const PalMode = enum { workspaces, commands, files, plugins };
 
 /// The onboarding questions.
 ///
@@ -528,6 +528,11 @@ pub const App = struct {
     setup_wanted: ?envpkg.Lang = null,
     /// Nothing configured at all: ask, once, after the window is up.
     setup_needed: bool = false,
+    /// The welcome screen. Its OWN screen rather than a palette: a palette
+    /// is for picking something out of a list you already understand, and
+    /// the first thing rook ever shows you has to explain itself first.
+    welcome_open: bool = false,
+    welcome_sel: usize = 0,
 
     /// What plugins have raised. A ring rather than a list: attention that
     /// nobody looked at for a hundred events is not attention, and an
@@ -2043,6 +2048,10 @@ pub const App = struct {
     /// bug this replaced. Returns true if chrome consumed the bytes.
     /// Caller holds draw_lock.
     pub fn routeChromeKeyLocked(self: *App, bytes: []const u8) bool {
+        if (self.welcome_open) {
+            self.welcomeKeyLocked(bytes);
+            return true;
+        }
         if (self.pal_open) {
             self.palKeyLocked(bytes);
             return true;
@@ -2422,13 +2431,6 @@ pub const App = struct {
                 const sc = fuzzyScore(path, needle) orelse continue;
                 self.palInsertScored(i, sc);
             },
-            .setup => for (setup_choices, 0..) |c, i| {
-                if (self.pal_nfiltered >= self.pal_filtered.len) break;
-                if (fuzzyMatch(c.label, needle)) {
-                    self.pal_filtered[self.pal_nfiltered] = i;
-                    self.pal_nfiltered += 1;
-                }
-            },
             // Name and state both: "up" and "failed" are worth filtering
             // on when several are declared and one is broken.
             .plugins => for (self.plugins.items, 0..) |*p, i| {
@@ -2551,12 +2553,6 @@ pub const App = struct {
                     .from = self.activeTab().focused.id,
                 };
             }
-            return;
-        }
-        if (self.pal_mode == .setup) {
-            const lang = setup_choices[self.pal_filtered[self.pal_sel]].lang;
-            self.closePaletteLocked();
-            self.setup_wanted = lang;
             return;
         }
         if (self.pal_mode == .plugins) {
@@ -4128,6 +4124,8 @@ pub const App = struct {
         // when the sheet isn't showing.
         self.drawWhichKey(&ui);
         if (self.pal_open) self.drawPalette(&ui);
+        // Over EVERYTHING, palette included: it is a screen, not a layer.
+        if (self.welcome_open) self.drawWelcome(&ui);
 
         enc.msgSend(void, "endEncoding", .{});
 
@@ -4517,8 +4515,9 @@ pub const App = struct {
         // always there.
         if (self.setup_needed and self.app_active) {
             self.setup_needed = false;
-            self.pal_mode = .setup;
-            self.resetPaletteLocked();
+            self.welcome_open = true;
+            self.welcome_sel = 0;
+            self.scene_dirty = true;
         }
         if (self.hud_calls % 2 == 1) self.pollBuffersLocked();
         const bytes = stats.global.bytes_in.load(.monotonic);
@@ -5335,8 +5334,53 @@ pub const App = struct {
     pub fn openSetupPalette(self: *App) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
-        self.pal_mode = .setup;
-        self.resetPaletteLocked();
+        // A palette open behind it would take the keys back the moment
+        // this closes.
+        self.closePaletteLocked();
+        // Asked is asked, whichever route got here. Without this, opening
+        // setup by hand still left the automatic one armed, and it fired
+        // later — over whatever you were doing by then.
+        self.setup_needed = false;
+        self.welcome_open = true;
+        self.welcome_sel = 0;
+        self.scene_dirty = true;
+    }
+
+    fn welcomeKeyLocked(self: *App, bytes: []const u8) void {
+        const n = setup_choices.len;
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const b = bytes[i];
+            if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
+                switch (bytes[i + 2]) {
+                    'A' => self.welcome_sel -|= 1,
+                    'B' => self.welcome_sel = @min(self.welcome_sel + 1, n - 1),
+                    else => {},
+                }
+                i += 3;
+                continue;
+            }
+            switch (b) {
+                // Skippable. Someone who wants a terminal right now should
+                // get one; `⌘K → Set Up Config` is still there afterwards.
+                0x1b => {
+                    self.welcome_open = false;
+                    self.scene_dirty = true;
+                    return;
+                },
+                'k', 0x10 => self.welcome_sel -|= 1,
+                'j', 0x0e => self.welcome_sel = @min(self.welcome_sel + 1, n - 1),
+                0x0d => {
+                    self.setup_wanted = setup_choices[self.welcome_sel].lang;
+                    self.welcome_open = false;
+                    self.scene_dirty = true;
+                    return;
+                },
+                else => {},
+            }
+            i += 1;
+        }
+        self.scene_dirty = true;
     }
 
     /// Write the starter config and open it.
@@ -6123,6 +6167,70 @@ pub const App = struct {
         return y;
     }
 
+    /// The welcome screen.
+    ///
+    /// OPAQUE and full-window, not a card over the terminal. Everything
+    /// else rook floats — the palette, the which-key sheet — is something
+    /// you invoked over work you were already doing. This is the opposite:
+    /// there is no work behind it yet, and a translucent panel over an
+    /// empty shell would read as an accident rather than a greeting.
+    fn drawWelcome(self: *App, ui: *@import("ui.zig").Ui) void {
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        const row = self.bar_h;
+
+        ui.rect(0, 0, self.px_w, self.px_h, th.bar_bg);
+
+        // Centred as a BLOCK, not line by line: ragged centring on a list
+        // of choices makes the choices hard to compare, which is the one
+        // thing this screen exists to let you do.
+        const body_w = 52 * cw;
+        const left = @max(cw * 2, (self.px_w - body_w) / 2);
+        var y = @max(row, (self.px_h - row * 12) / 2);
+
+        const line = struct {
+            fn at(u: *@import("ui.zig").Ui, x: f32, yy: f32, s2: []const u8, c: [4]u8) void {
+                _ = u.text(x, yy, s2, c, th.bar_bg);
+            }
+        };
+
+        line.at(ui, left, y, "rook", th.accent);
+        y += row;
+        line.at(ui, left, y, "a terminal, a multiplexer and an editor", th.bar_fg);
+        y += row * 2;
+
+        // What is about to happen, before it happens. The config model is
+        // the one genuinely surprising thing about rook, and finding it out
+        // by having a file appear is worse than being told.
+        line.at(ui, left, y, "Your configuration is a program.", th.bar_value);
+        y += row;
+        line.at(ui, left, y, "rook runs it, shows what would change, and", th.bar_fg);
+        y += row;
+        line.at(ui, left, y, "applies nothing until you say so.", th.bar_fg);
+        y += row * 2;
+
+        line.at(ui, left, y, "Which language?", th.bar_value);
+        y += row;
+
+        for (setup_choices, 0..) |c, i| {
+            const on = i == self.welcome_sel;
+            if (on) {
+                // The same rounded selection the side pane uses, so "the
+                // thing Enter acts on" looks identical everywhere.
+                ui.roundRect(left - cw, y, body_w + cw, row, th.chip_active_bg, .{ .radius = self.m.radius });
+            }
+            // textOver, not text: a per-glyph background would punch the
+            // selection out from behind the very row it marks.
+            var x = left;
+            x += ui.textOver(x, y + (row - ch) / 2, if (on) "\u{203a} " else "  ", th.accent);
+            x += ui.textOver(x, y + (row - ch) / 2, c.label, if (on) th.bar_value else th.bar_fg);
+            _ = ui.textOver(left + 16 * cw, y + (row - ch) / 2, c.detail, th.bar_fg);
+            y += row;
+        }
+        y += row;
+        line.at(ui, left, y, "\u{2191}\u{2193} move   \u{23ce} choose   esc skip for now", th.bar_fg);
+    }
+
     fn drawPalette(self: *App, ui: *@import("ui.zig").Ui) void {
         const cw = self.renderer.cell_w;
         const row_h = self.bar_h;
@@ -6165,7 +6273,6 @@ pub const App = struct {
             // empty modal with no explanation. The prompt IS the empty
             // state; there is nowhere else on a palette to put one.
             .plugins => if (self.plugins.items.len == 0) "no plugins declared " else "plugin ",
-            .setup => "set up your config in ",
         }, th.bar_fg);
         tx += ui.textOver(tx, ty, self.pal_input[0..self.pal_input_len], th.bar_value);
         ui.rect(tx, ty, cw / 4, self.renderer.cell_h, th.accent); // caret
@@ -6214,10 +6321,6 @@ pub const App = struct {
                     else
                         e.name;
                     break :blk .{ l, e.root };
-                },
-                .setup => blk: {
-                    const c = setup_choices[item_i];
-                    break :blk .{ c.label, c.detail };
                 },
                 .plugins => blk: {
                     const p = &self.plugins.items[item_i];
