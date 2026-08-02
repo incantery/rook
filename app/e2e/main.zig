@@ -1592,6 +1592,19 @@ fn applyScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(pending, "~ option:app:font-size\tvalue: 16 → 22", "a changed value reads");
     try h.expectContains(pending, "+ option:app:theme", "and an added node");
 
+    // It SHOWS the diff, in a panel, without being asked — and without
+    // taking the keys. A count in a banner says how many; this says what.
+    const panel = try app.waitCtl("sidepane", "panel:config", 10_000);
+    try h.expectContains(panel, "~ option:app:font-size", "the changed node");
+    try h.expectContains(panel, "value: 16 → 22", "and what happens to it");
+    try h.expectContains(panel, "+ option:app:theme", "and the added one");
+
+    // Unfocused: changes landing is not a reason to take someone's keys
+    // mid-sentence. The shell still has them.
+    _ = try app.ctl("type still-mine");
+    _ = try app.ctl("enter");
+    try app.waitTextCount("still-mine", 2, 5_000);
+
     // THE ASSERTION THIS SCENARIO EXISTS FOR: it did NOT apply.
     var envbuf: [4096]u8 = undefined;
     try h.expectContains(try h.readFile(try std.fmt.bufPrint(&env_path, "{s}/environment.json", .{dir}), &envbuf), "\"value\":16", "a preview must not apply itself");
@@ -1599,10 +1612,15 @@ fn applyScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
     // uses.
     try h.expectContains(try app.ctl("attention"), "config changes pending", "pending changes raise attention");
 
-    // Apply is a decision, and taking it writes the graph.
-    _ = try app.ctl("env apply");
+    // Apply is a decision, and taking it writes the graph. From the panel,
+    // which is where you just read what it would do.
+    _ = try app.ctl("run config.preview");
+    _ = try app.ctl("key 0d");
+    h.sleepMs(500);
     try h.expectContains(try h.readFile(try std.fmt.bufPrint(&env_path, "{s}/environment.json", .{dir}), &envbuf), "\"value\":22", "apply writes the candidate");
     try h.expectContains(try app.ctl("env"), "no pending changes", "and the preview goes clean");
+    // A panel showing a diff that no longer exists is a panel in the way.
+    try h.expectContains(try app.ctl("sidepane"), "closed", "applying closes the preview");
 
     // A program that does not compile: its OWN error, and apply refuses.
     // "apply failed" would send you looking in rook; a line number does not.

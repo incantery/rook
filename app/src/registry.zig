@@ -46,6 +46,7 @@ pub const Action = enum {
     palette_files,
     palette_plugins,
     env_apply,
+    config_preview,
     config_edit,
     config_setup,
     /// Find in files — the search panel, a side-pane tenant.
@@ -121,6 +122,7 @@ pub const commands = [_]Command{
     // Apply is a DECISION, so it is a command you run rather than
     // something that happens to you. `ctl env` is the preview it is worth
     // reading first.
+    .{ .id = "config.preview", .title = "Preview Pending Config", .category = "Config", .action = .config_preview },
     .{ .id = "config.apply", .title = "Apply Pending Config", .category = "Config", .action = .env_apply },
     // Config is a program, and rook is an editor. Nobody should have to
     // leave rook, or remember a path, to change how rook behaves.

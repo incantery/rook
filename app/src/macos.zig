@@ -359,7 +359,7 @@ pub const Side = enum { left, right };
 /// where §2's inbox/deck/threads/review join it, the same way pal_mode
 /// grew a second list. Deliberately an enum rather than a vtable — a
 /// tenant interface designed against ONE tenant is a guess.
-pub const Panel = enum { search, plugin };
+pub const Panel = enum { search, plugin, config };
 
 /// One `attention.raise`: a plugin saying a human is needed.
 ///
@@ -533,6 +533,9 @@ pub const App = struct {
     /// the first thing rook ever shows you has to explain itself first.
     welcome_open: bool = false,
     welcome_sel: usize = 0,
+    /// The pending-config panel's cursor, and its queued apply.
+    cfg_sel: usize = 0,
+    env_apply_wanted: bool = false,
 
     /// What plugins have raised. A ring rather than a list: attention that
     /// nobody looked at for a hundred events is not attention, and an
@@ -2060,6 +2063,7 @@ pub const App = struct {
         switch (self.side_panel) {
             .search => self.searchKeyLocked(bytes),
             .plugin => self.pluginKeyLocked(bytes),
+            .config => self.configKeyLocked(bytes),
         }
         return true;
     }
@@ -2636,6 +2640,7 @@ pub const App = struct {
             .palette_files => self.openFilePalette(),
             .palette_plugins => self.openPluginPalette(),
             .env_apply => _ = self.applyEnv(),
+            .config_preview => self.showConfigPreview(true),
             .config_edit => self.editConfig(),
             .config_setup => self.openSetupPalette(),
             .panel_search => self.openSearchPanel(),
@@ -3606,6 +3611,8 @@ pub const App = struct {
         self.draw_lock.lock();
         const check = self.env_check_wanted;
         const setup = self.setup_wanted;
+        const apply_now = self.env_apply_wanted;
+        self.env_apply_wanted = false;
         self.env_check_wanted = false;
         self.setup_wanted = null;
         const refetch = self.plug_refetch;
@@ -3617,6 +3624,7 @@ pub const App = struct {
         self.plug_run = false;
         self.plug_pending_len = 0;
         self.draw_lock.unlock();
+        if (apply_now) _ = self.applyEnv();
         if (setup) |l| self.startSetup(l);
         if (check) self.startEnvCheck();
         if (chosen_len > 0) _ = self.showPlugin(chosen[0..chosen_len]);
@@ -5189,6 +5197,7 @@ pub const App = struct {
         _ = ui.text(tx, y + (row_h - ch) / 2, switch (self.side_panel) {
             .search => "SEARCH",
             .plugin => self.plug_name[0..self.plug_name_len],
+            .config => "PENDING CONFIG",
         }, th.bar_value, self.glassBg(th.bar_bg));
         // The focus telegraph: an interactive panel has to look like it
         // is the thing your keys are going to.
@@ -5205,6 +5214,7 @@ pub const App = struct {
         switch (self.side_panel) {
             .search => self.drawSearch(ui, r, y),
             .plugin => self.drawPlugin(ui, r, y),
+            .config => self.drawConfig(ui, r, y),
         }
     }
 
@@ -5515,6 +5525,12 @@ pub const App = struct {
                 // Attention, not application. The whole point is that a
                 // human decides — and a config that silently did what it
                 // liked is what this replaces.
+                // SHOW it, unfocused. "N changes pending" in a banner is a
+                // count; the panel is the answer to what they are — and
+                // opening it without focus means it informs rather than
+                // interrupts.
+                // SHOW it, unfocused.
+                if (pending or broke) app.showConfigPreview(false);
                 if (pending or broke) {
                     // Through the same door a plugin uses, params and all —
                     // config is not a special case of "a human is needed",
@@ -5562,6 +5578,12 @@ pub const App = struct {
         self.env_diff = .{};
         if (self.env_candidate.len > 0) self.gpa.free(self.env_candidate);
         self.env_candidate = &.{};
+        // The panel was opened to show a diff that no longer exists.
+        if (self.side_open and self.side_panel == .config) {
+            self.side_open = false;
+            self.side_focus = false;
+            self.relayoutLocked();
+        }
         self.scene_dirty = true;
         self.draw_lock.unlock();
         return true;
@@ -5968,14 +5990,14 @@ pub const App = struct {
             // State first and always — it is the one thing every item has
             // and the thing a human scans down.
             if (it.state.n > 0) {
-                x += ui.text(x, y + (row_h - ch) / 2, it.state.get(), th.accent, bg);
+                x += ui.textOver(x, y + (row_h - ch) / 2, it.state.get(), th.accent);
                 x += cw;
             }
             // Children are indented rather than dropped: they are the only
             // structural difference between a list and a tree.
             x += @as(f32, @floatFromInt(it.depth)) * 2 * cw;
             const title = @import("ui.zig").clip(&clipbuf, it.title.get(), cols);
-            x += ui.text(x, y + (row_h - ch) / 2, title, th.bar_value, bg);
+            x += ui.textOver(x, y + (row_h - ch) / 2, title, th.bar_value);
 
             // Fields right-aligned, values only — the label is the column
             // header a list does not have room for.
@@ -5986,7 +6008,7 @@ pub const App = struct {
                 const v = it.fields[fi].value.get();
                 if (v.len == 0) continue;
                 fx -= @as(f32, @floatFromInt(v.len)) * cw + cw;
-                _ = ui.text(fx, y + (row_h - ch) / 2, v, th.bar_fg, bg);
+                _ = ui.textOver(fx, y + (row_h - ch) / 2, v, th.bar_fg);
             }
             y += row_h;
 
@@ -6165,6 +6187,134 @@ pub const App = struct {
             _ = self;
         }
         return y;
+    }
+
+    /// Show the pending diff.
+    ///
+    /// `focused` is false when rook opens this ITSELF, which is the common
+    /// case: changes landing is not a reason to take someone's keys
+    /// mid-sentence. It is visible, and it is one ⌃L away.
+    pub fn showConfigPreview(self: *App, focused: bool) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        self.side_panel = .config;
+        self.side_open = true;
+        if (focused) self.side_focus = true;
+        self.cfg_sel = 0;
+        self.relayoutLocked();
+        self.scene_dirty = true;
+    }
+
+    /// The preview's keys. One verb, because there is one: a diff is
+    /// applied whole. Per-row Enter would imply you could take half a
+    /// config, and half a config is not a state the graph has.
+    pub fn configKeyLocked(self: *App, bytes: []const u8) void {
+        const n = self.env_diff.slice().len;
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const b = bytes[i];
+            if (b == 0x1b and i + 2 < bytes.len and bytes[i + 1] == '[') {
+                switch (bytes[i + 2]) {
+                    'A' => self.cfg_sel -|= 1,
+                    'B' => self.cfg_sel = @min(self.cfg_sel + 1, n -| 1),
+                    else => {},
+                }
+                i += 3;
+                continue;
+            }
+            switch (b) {
+                0x1b => {
+                    self.side_focus = false;
+                    self.scene_dirty = true;
+                    return;
+                },
+                'k', 0x10 => self.cfg_sel -|= 1,
+                'j', 0x0e => self.cfg_sel = @min(self.cfg_sel + 1, n -| 1),
+                'g' => self.cfg_sel = 0,
+                'G' => self.cfg_sel = n -| 1,
+                // Queued, not done: applyEnv takes draw_lock and the key
+                // path is holding it.
+                '\r', '\n', 'a' => self.env_apply_wanted = true,
+                else => {},
+            }
+            i += 1;
+        }
+        self.scene_dirty = true;
+    }
+
+    fn drawConfig(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        const row_h = self.bar_h;
+        const bg = self.glassBg(th.bar_bg);
+        const tx = r.x + self.m.gutter;
+        var y = top;
+        var clipbuf: [256]u8 = undefined;
+        const cols: usize = @intFromFloat(@max(8, (r.w - self.m.gutter * 2) / cw));
+
+        const d = &self.env_diff;
+        if (self.env_checking.load(.acquire)) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "running your config…", th.bar_fg, bg);
+            return;
+        }
+        if (!d.ok) {
+            // The program's OWN error, wrapped over as many rows as it
+            // takes. A compile error names a line, and truncating it to
+            // one row would throw away the only useful part.
+            var it = std.mem.splitScalar(u8, d.err.get(), '\n');
+            while (it.next()) |ln| {
+                if (ln.len == 0) continue;
+                if (y + row_h > r.y + r.h) break;
+                _ = ui.text(tx, y + (row_h - ch) / 2, @import("ui.zig").clip(&clipbuf, ln, cols), th.ed_err, bg);
+                y += row_h;
+            }
+            return;
+        }
+        if (d.empty()) {
+            _ = ui.text(tx, y + (row_h - ch) / 2, "no pending changes", th.bar_fg, bg);
+            return;
+        }
+
+        const avail = r.y + r.h - top - row_h; // the footer keeps a row
+        const bottom = top + avail;
+        for (d.slice(), 0..) |*c, idx| {
+            if (y + row_h > bottom) break;
+            if (idx == self.cfg_sel) self.drawRowSelection(ui, r, y, row_h);
+            var x = tx;
+            // The mark carries the meaning and the colour repeats it, so
+            // the shape is readable without the colour.
+            const mark: []const u8, const col = switch (c.kind) {
+                // The theme already names the added/removed axis; a
+                // config diff is a diff.
+                .add => .{ "+", th.diff_add },
+                .remove => .{ "-", th.diff_del },
+                .change => .{ "~", th.diff_hunk },
+            };
+            // textOver: a per-glyph background would punch the selection
+            // out from behind the row it marks.
+            x += ui.textOver(x, y + (row_h - ch) / 2, mark, col);
+            x += cw;
+            var idbuf: [256]u8 = undefined;
+            _ = ui.textOver(x, y + (row_h - ch) / 2, @import("ui.zig").clip(&idbuf, c.id.get(), cols -| 2), th.bar_value);
+            y += row_h;
+            // The detail gets its OWN line, indented. Side panes are narrow
+            // and an id is long, so sharing a row truncated the change to
+            // "value: 1…" — which is exactly the part you opened this to
+            // read. The id says which node; this says what happens to it.
+            if (c.detail.get().len > 0 and y + row_h <= bottom) {
+                if (idx == self.cfg_sel) self.drawRowSelection(ui, r, y, row_h);
+                _ = ui.textOver(tx + 2 * cw, y + (row_h - ch) / 2, @import("ui.zig").clip(&clipbuf, c.detail.get(), cols -| 2), th.bar_fg);
+                y += row_h;
+            }
+        }
+        if (d.more > 0) {
+            var mb: [64]u8 = undefined;
+            _ = ui.text(tx, y + (row_h - ch) / 2, std.fmt.bufPrint(&mb, "+{d} more", .{d.more}) catch "+more", th.bar_fg, bg);
+            y += row_h;
+        }
+        // The verb, spelled out. Nothing else in this panel says what to
+        // do with it, and a list of changes you cannot act on is a report.
+        _ = ui.text(tx, r.y + r.h - row_h + (row_h - ch) / 2, "\u{23ce} apply   esc close", th.bar_fg, bg);
     }
 
     /// The welcome screen.

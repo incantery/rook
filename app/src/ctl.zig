@@ -717,6 +717,32 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     if (app.plug_msg_len > 0)
                         w.print("msg: {s}\n", .{app.plug_msg[0..app.plug_msg_len]}) catch {};
                 },
+                .config => {
+                    // The diff, as rows. `env` prints the same thing
+                    // without the panel; this is what is ON SCREEN.
+                    const d = &app.env_diff;
+                    if (!d.ok) {
+                        w.print("config broken\n{s}\n", .{d.err.get()}) catch {};
+                    } else if (d.empty()) {
+                        _ = w.write("config clean\n") catch 0;
+                    } else {
+                        w.print("config pending:{d}\n", .{d.n + d.more}) catch {};
+                        for (d.slice(), 0..) |*c, i| {
+                            const mark: []const u8 = switch (c.kind) {
+                                .add => "+",
+                                .remove => "-",
+                                .change => "~",
+                            };
+                            w.print("{s}{s} {s}", .{
+                                @as([]const u8, if (i == app.cfg_sel) "*" else " "),
+                                mark,
+                                c.id.get(),
+                            }) catch break;
+                            if (c.detail.get().len > 0) w.print("\t{s}", .{c.detail.get()}) catch break;
+                            _ = w.write("\n") catch 0;
+                        }
+                    }
+                },
                 .search => {
                     // The query, what it scanned, and every hit — the
                     // panel's whole state, so find-in-files is
