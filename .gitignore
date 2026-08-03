@@ -15,3 +15,8 @@ spike/**/termcap
 spike/**/extract-vt
 
 TODO.md
+
+# --config=DIR sandboxes used to exercise a throwaway rook (each holds a
+# rook.sock, a config program, and whatever the shell inside dropped)
+/test/
+/test-config/
