@@ -64,9 +64,30 @@ ln -sf /Applications/rook.app/Contents/MacOS/rook "$bindir/re"
 # than leave it to fail confusingly.
 [ -f "$bindir/rookctl" ] && rm -f "$bindir/rookctl"
 
+# Man pages ship inside the bundle. macOS man(1) derives its search path
+# from PATH (<bindir>/../share/man), so mirror wherever the CLI went;
+# fall back to ~/.local/share/man if that spot is not writable. Guarded:
+# releases older than the pages simply have no man/ to copy.
+srcman="/Applications/rook.app/Contents/Resources/man"
+haveman=""
+if [ -d "$srcman" ]; then
+    mandir="${bindir%/bin}/share/man"
+    if ! mkdir -p "$mandir" 2>/dev/null || [ ! -w "$mandir" ]; then
+        mandir="$HOME/.local/share/man"
+        mkdir -p "$mandir"
+    fi
+    for s in 1 5 7; do
+        [ -d "$srcman/man$s" ] || continue
+        mkdir -p "$mandir/man$s"
+        cp "$srcman/man$s/"* "$mandir/man$s/"
+    done
+    haveman=yes
+fi
+
 echo "installed rook $tag"
 echo "  rook    → $bindir/rook (the app, and the CLI)"
-echo "  re      → $bindir/re (the editor: re [file…])"
+echo "  re      → $bindir/re (the editor: re file)"
+[ -n "$haveman" ] && echo "  man     → man rook (also re, rook-config, rook-ctl, rook-plugin)"
 case ":$PATH:" in
     *":$bindir:"*) ;;
     *) echo "  note: $bindir is not on your PATH — add it to use rook" ;;
