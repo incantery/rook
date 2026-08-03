@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -61,6 +62,7 @@ type Session struct {
 	State    State
 	Mtime    time.Time
 	TurnDur  time.Duration // how long the just-finished turn ran; 0 if unknown
+	Present  bool          // the human typed in this session's pane moments ago
 }
 
 type Scanner struct {
@@ -69,6 +71,56 @@ type Scanner struct {
 	Idle   time.Duration // quiet longer than this = idle
 	Quiet  time.Duration // a pending tool call quiet longer than this = blocked?
 	Max    int
+}
+
+// PaneActivity is one pane's row from rook's `panes.activity` answer:
+// ms since the child last wrote / the human last typed (-1 = never),
+// the foreground program, the shell's cwd.
+type PaneActivity struct {
+	ID    int    `json:"id"`
+	OutMs int64  `json:"outMs"`
+	InMs  int64  `json:"inMs"`
+	Fg    string `json:"fg"`
+	Cwd   string `json:"cwd"`
+}
+
+// fuse folds the substrate's view into the transcript's. A session is
+// matched to panes by cwd plus a Claude-looking foreground program;
+// unmatched sessions (another machine's transcripts, a session run
+// outside rook) keep their transcript-only state untouched.
+//
+// Two corrections, one per direction of the pty:
+//   - OUTPUT: a "blocked?" whose pane is still redrawing is a long tool
+//     run, not a stuck approval — the spinner is proof of life the
+//     transcript cannot give, because a running tool logs nothing.
+//   - INPUT: a human who typed in that pane moments ago is PRESENT, and
+//     a banner for the pane you are looking at is noise. The state
+//     still shows in the panel; only the interruption is suppressed.
+func fuse(sessions []Session, panes []PaneActivity, names []string, alive, present time.Duration) {
+	for i := range sessions {
+		s := &sessions[i]
+		outBest, inBest := int64(-1), int64(-1)
+		for _, p := range panes {
+			if p.Cwd != s.Cwd || !nameMatch(p.Fg, names) {
+				continue
+			}
+			if p.OutMs >= 0 && (outBest < 0 || p.OutMs < outBest) {
+				outBest = p.OutMs
+			}
+			if p.InMs >= 0 && (inBest < 0 || p.InMs < inBest) {
+				inBest = p.InMs
+			}
+		}
+		if s.State == StateBlocked && outBest >= 0 && outBest < alive.Milliseconds() {
+			s.State = StateWorking
+		}
+		s.Present = inBest >= 0 && inBest < present.Milliseconds()
+	}
+	sortSessions(sessions)
+}
+
+func nameMatch(fg string, names []string) bool {
+	return slices.Contains(names, fg)
 }
 
 // Scan lists the sessions worth showing, most urgent first.
@@ -103,16 +155,20 @@ func (sc *Scanner) Scan(now time.Time) []Session {
 			out = append(out, s)
 		}
 	}
+	sortSessions(out)
+	if sc.Max > 0 && len(out) > sc.Max {
+		out = out[:sc.Max]
+	}
+	return out
+}
+
+func sortSessions(out []Session) {
 	sort.Slice(out, func(i, j int) bool {
 		if a, b := out[i].State.prio(), out[j].State.prio(); a != b {
 			return a < b
 		}
 		return out[i].Mtime.After(out[j].Mtime)
 	})
-	if sc.Max > 0 && len(out) > sc.Max {
-		out = out[:sc.Max]
-	}
-	return out
 }
 
 // The transcript line shapes this cares about. Claude Code's format is

@@ -5610,13 +5610,60 @@ pub const App = struct {
     /// that takes 40ms holds the pump for 40ms. That is the honest
     /// semantics of a request, and doing it asynchronously would mean
     /// answering "yes" before knowing whether it worked.
-    fn pluginInbound(ctx: *anyopaque, from: []const u8, op: []const u8, params: []const u8) ?[]const u8 {
+    fn pluginInbound(ctx: *anyopaque, from: []const u8, op: []const u8, params: []const u8, result: *std.Io.Writer) ?[]const u8 {
         const self: *App = @ptrCast(@alignCast(ctx));
         if (std.mem.eql(u8, op, plugpkg.op_raise)) return self.raiseAttention(from, params);
         if (std.mem.eql(u8, op, plugpkg.op_spawn)) return self.spawnSession(params);
+        if (std.mem.eql(u8, op, "panes.activity")) {
+            self.activityReport(result, true);
+            return null;
+        }
         // Granted, but not something rook knows how to do — which is a
         // config naming a verb from a newer rook, not a plugin misbehaving.
         return "rook does not know that verb";
+    }
+
+    /// `panes.activity` (and `ctl activity`) — the substrate half of
+    /// "is that session alive": per terminal pane, how long since the
+    /// child last wrote and since the human last typed there. The two
+    /// travel different directions through different code paths, so
+    /// "the TUI is redrawing" and "the human is present" are separate
+    /// facts, not a heuristic. A transcript-watching plugin joins this
+    /// against what it reads on cwd + foreground program.
+    fn activityReport(self: *App, w: *std.Io.Writer, comptime as_json: bool) void {
+        const now = sessionpkg.clockMs();
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        if (as_json) w.writeAll("{\"panes\":[") catch return;
+        var first = true;
+        for (self.spaces.items) |s| for (s.tabs.items) |t| for (t.panes.items) |p| {
+            const tm = p.term() orelse (if (p.under) |*ut| ut else continue);
+            const out_ms = tm.session.last_out_ms.load(.monotonic);
+            const in_ms = tm.session.last_in_ms.load(.monotonic);
+            const out_age: i64 = if (out_ms == 0) -1 else now - out_ms;
+            const in_age: i64 = if (in_ms == 0) -1 else now - in_ms;
+            var fgbuf: [64]u8 = undefined;
+            const fg = tm.session.fgName(&fgbuf) orelse "-";
+            const cwd: []const u8 = if (self.paneCwd(p)) |c| std.mem.span(c) else "";
+            if (as_json) {
+                if (!first) w.writeAll(",") catch return;
+                w.print("{{\"id\":{d},\"outMs\":{d},\"inMs\":{d},\"fg\":", .{ p.id, out_age, in_age }) catch return;
+                plugpkg.jsonStringTo(w, fg) catch return;
+                w.writeAll(",\"cwd\":") catch return;
+                plugpkg.jsonStringTo(w, cwd) catch return;
+                w.writeAll("}") catch return;
+            } else {
+                w.print("{d}\t{d}\t{d}\t{s}\t{s}\n", .{ p.id, out_age, in_age, fg, cwd }) catch return;
+            }
+            first = false;
+        };
+        if (as_json) w.writeAll("]}") catch return;
+        if (!as_json and first) w.writeAll("none\n") catch return;
+    }
+
+    /// The ctl face of the same report.
+    pub fn activityText(self: *App, w: *std.Io.Writer) void {
+        self.activityReport(w, false);
     }
 
     /// `attention.raise` — a plugin says a human is needed.
@@ -6896,6 +6943,15 @@ fn firstCodepoint(s: []const u8) u21 {
 fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) callconv(.c) objc.c.id {
     const app: *App = context.app;
     const event = objc.Object.fromId(event_id);
+
+    // The physical keyboard is the one proof a human is HERE, so the
+    // focused pane's presence stamp happens before anything else can eat
+    // the event. ctl-driven input deliberately does not stamp: an agent
+    // typing into a pane is not a human looking at it.
+    app.draw_lock.lock();
+    if (app.activeTab().focused.term()) |tm|
+        tm.session.last_in_ms.store(sessionpkg.clockMs(), .monotonic);
+    app.draw_lock.unlock();
 
     const flags = event.msgSend(u64, "modifierFlags", .{});
     if (flags & flag_cmd != 0) {

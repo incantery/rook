@@ -225,6 +225,71 @@ func TestPlainStringContentAndSnip(t *testing.T) {
 	}
 }
 
+func TestFuseRedrawingPaneKillsFalseBlocked(t *testing.T) {
+	ss := []Session{{ID: "a", Cwd: "/w", State: StateBlocked}}
+	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", OutMs: 500, InMs: -1}}
+	fuse(ss, panes, []string{"claude", "node"}, 3*time.Second, 45*time.Second)
+	if ss[0].State != StateWorking {
+		t.Fatalf("state = %q, want working (the spinner is proof of life)", ss[0].State)
+	}
+}
+
+func TestFuseQuietPaneLeavesBlockedAlone(t *testing.T) {
+	ss := []Session{{ID: "a", Cwd: "/w", State: StateBlocked}}
+	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", OutMs: 90_000, InMs: -1}}
+	fuse(ss, panes, []string{"claude"}, 3*time.Second, 45*time.Second)
+	if ss[0].State != StateBlocked {
+		t.Fatalf("state = %q, want blocked? (a quiet pane confirms the transcript)", ss[0].State)
+	}
+}
+
+func TestFuseWrongProgramOrDirIsNoMatch(t *testing.T) {
+	ss := []Session{{ID: "a", Cwd: "/w", State: StateBlocked}}
+	panes := []PaneActivity{
+		{Cwd: "/w", Fg: "vim", OutMs: 100, InMs: 100},     // right dir, wrong program
+		{Cwd: "/elsewhere", Fg: "claude", OutMs: 100, InMs: 100}, // right program, wrong dir
+	}
+	fuse(ss, panes, []string{"claude"}, 3*time.Second, 45*time.Second)
+	if ss[0].State != StateBlocked || ss[0].Present {
+		t.Fatalf("state/present = %q/%v — an unmatched session keeps the transcript's word", ss[0].State, ss[0].Present)
+	}
+}
+
+func TestFusePresenceFromRecentKeyboard(t *testing.T) {
+	ss := []Session{
+		{ID: "a", Cwd: "/w", State: StateNeedsYou},
+		{ID: "b", Cwd: "/x", State: StateNeedsYou},
+	}
+	panes := []PaneActivity{
+		{Cwd: "/w", Fg: "claude", OutMs: 100, InMs: 2_000},
+		{Cwd: "/x", Fg: "claude", OutMs: 100, InMs: 300_000},
+	}
+	fuse(ss, panes, []string{"claude"}, 3*time.Second, 45*time.Second)
+	byID := map[string]Session{}
+	for _, s := range ss {
+		byID[s.ID] = s
+	}
+	if !byID["a"].Present {
+		t.Errorf("a: typed 2s ago, should be present")
+	}
+	if byID["b"].Present {
+		t.Errorf("b: typed 5m ago, should not be present")
+	}
+}
+
+func TestFuseResorts(t *testing.T) {
+	// Fusion can demote blocked? to working, which changes panel order.
+	ss := []Session{
+		{ID: "was-blocked", Cwd: "/w", State: StateBlocked, Mtime: t0},
+		{ID: "stays-needs", Cwd: "/n", State: StateNeedsYou, Mtime: t0},
+	}
+	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", OutMs: 100, InMs: -1}}
+	fuse(ss, panes, []string{"claude"}, 3*time.Second, 45*time.Second)
+	if ss[0].ID != "stays-needs" {
+		t.Fatalf("needs-you should lead after the demotion, got %s first", ss[0].ID)
+	}
+}
+
 func TestTailAlignment(t *testing.T) {
 	// A file bigger than the tail window whose oldest visible line is
 	// partial: the partial line must be dropped, the rest parsed.

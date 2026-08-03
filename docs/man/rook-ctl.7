@@ -150,6 +150,23 @@ Copy-mode search state of the focused terminal.
 Pasteboard content and write-allowance; input-method state; last user
 notification.
 Introspection for tests.
+.It Cm activity
+Per-pane pty liveness:
+.Ql id<TAB>out_ms<TAB>in_ms<TAB>fg<TAB>cwd
+\(em milliseconds since the child last wrote and since the human last
+typed there
+.Pq physical keyboard only; \-1 = never ,
+the foreground program, the shell's working directory.
+Output and input travel different directions through different code
+paths, so
+.Dq the TUI is redrawing
+and
+.Dq the human is present
+are two separate facts.
+Plugins get the same answer as JSON through the
+.Ql panes.activity
+grant \(em see
+.Xr rook-plugin 7 .
 .It Cm hud
 The performance HUD line.
 .It Cm stats

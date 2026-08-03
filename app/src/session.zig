@@ -22,6 +22,12 @@ extern "c" fn usleep(us: u32) c_int;
 /// the MASTER side on macOS (verified against a real vim under a forked
 /// pty), which matters because the master is the only end rook holds.
 extern "c" fn tcgetpgrp(fd: ptypkg.fd_t) ptypkg.pid_t;
+extern "c" fn CACurrentMediaTime() f64;
+
+/// The app's one clock, in the milliseconds the activity stamps use.
+pub fn clockMs() i64 {
+    return @intFromFloat(CACurrentMediaTime() * 1000.0);
+}
 /// <libproc.h>, in libSystem. Gives the full executable path, so the
 /// name survives without p_comm's 16-byte truncation.
 extern "c" fn proc_pidpath(pid: ptypkg.pid_t, buf: [*]u8, len: u32) c_int;
@@ -136,6 +142,17 @@ pub const Session = struct {
     /// from. A flag rather than a count: ten bells in a burst are one
     /// "something wants you", and that is the whole signal.
     bell: std.atomic.Value(bool) = .init(false),
+
+    /// Substrate observability (`ctl activity`, plugin op
+    /// `panes.activity`): when the child last WROTE — a TUI redrawing its
+    /// spinner is proof of life even while it logs nothing — and when the
+    /// human last TYPED here, physical keyboard only. The two directions
+    /// go through two different code paths, which is what makes them two
+    /// different facts rather than a heuristic. Milliseconds on the app
+    /// clock; 0 = never; atomic because the reader thread stamps one, the
+    /// main thread the other, and any thread reads both.
+    last_out_ms: std.atomic.Value(i64) = .init(0),
+    last_in_ms: std.atomic.Value(i64) = .init(0),
 
     // Geometry for XTWINOPS size reports; updated by resize().
     cols: u16,
@@ -386,6 +403,7 @@ pub const Session = struct {
             const n = self.pty.readMaster(&buf);
             if (n == 0) break;
             _ = @import("stats.zig").global.bytes_in.fetchAdd(n, .monotonic);
+            self.last_out_ms.store(clockMs(), .monotonic);
             // Yield to a waiting renderer before re-acquiring.
             while (self.snapshot_wanted.load(.acquire)) _ = usleep(50);
             self.mutex.lock();

@@ -1765,7 +1765,7 @@ fn claudeWatch(gpa: std.mem.Allocator, bin: []const u8) !void {
     var json_buf: [1024]u8 = undefined;
     const graph = try std.fmt.bufPrint(&json_buf,
         \\{{"rookEnvironment":1,"nodes":[
-        \\{{"id":"plugin:claude","kind":"plugin","scope":"app","name":"claude","command":["{s}","--dir","{s}/projects","--poll","200ms","--min-turn","0s"],"load":"eager","grants":["items.list","items.act","attention.raise"]}}
+        \\{{"id":"plugin:claude","kind":"plugin","scope":"app","name":"claude","command":["{s}","--dir","{s}/projects","--poll","200ms","--min-turn","0s"],"load":"eager","grants":["items.list","items.act","attention.raise","panes.activity"]}}
         \\]}}
     , .{ plug, root });
 
@@ -1778,6 +1778,14 @@ fn claudeWatch(gpa: std.mem.Allocator, bin: []const u8) !void {
     // Eager means UP at launch, before any panel is opened — a watcher
     // that only watches while being watched is not one.
     _ = try app.waitCtl("plugins", "claude\teager\tup", 10_000);
+
+    // The substrate report the watcher fuses against: one line per pane
+    // with output/input ages. The sandbox pane's shell has drawn a
+    // prompt, so the report is real rows, not "none" — and the same
+    // answer reaches the plugin as JSON over the granted panes.activity.
+    const act0 = try app.ctl("activity");
+    try h.expect(!std.mem.startsWith(u8, act0, "none"), "activity lists the pane", .{});
+    try h.expectContains(act0, "\t", "tab-separated ages per pane");
 
     // Three sessions, three lives, each read from its transcript's tail.
     const listed = try app.ctl("plugin claude items.list");

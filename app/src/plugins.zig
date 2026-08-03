@@ -231,7 +231,12 @@ pub const FrameReader = struct {
 /// author can act on.
 pub const Host = struct {
     ctx: *anyopaque,
-    call: *const fn (ctx: *anyopaque, plugin: []const u8, op: []const u8, params: []const u8) ?[]const u8,
+    /// Handle one inbound verb. Returns an error string, or null for
+    /// success — in which case whatever was written to `result` (JSON,
+    /// possibly nothing) rides back to the plugin in the reply's
+    /// `result` field. Most inbound verbs are effects and write nothing;
+    /// `panes.activity` is the first that answers with data.
+    call: *const fn (ctx: *anyopaque, plugin: []const u8, op: []const u8, params: []const u8, result: *std.Io.Writer) ?[]const u8,
 };
 
 /// What `describe` said. Recorded verbatim, including capabilities the
@@ -482,7 +487,7 @@ pub const Plugin = struct {
     fn inbound(self: *Plugin, frame: []const u8) void {
         const id = frameId(frame) orelse return;
         const op = frameOp(frame) orelse {
-            self.answer(id, false, "no op");
+            self.answer(id, false, "no op", "");
             return;
         };
         if (!self.spec.granted(op)) {
@@ -490,30 +495,38 @@ pub const Plugin = struct {
             // session.spawn" knows to ask the human for it; "refused"
             // sends them into their own code looking for a bug.
             var b: [96]u8 = undefined;
-            self.answer(id, false, std.fmt.bufPrint(&b, "not granted: {s}", .{op}) catch "not granted");
+            self.answer(id, false, std.fmt.bufPrint(&b, "not granted: {s}", .{op}) catch "not granted", "");
             return;
         }
         const h = self.host orelse {
-            self.answer(id, false, "rook cannot do that here");
+            self.answer(id, false, "rook cannot do that here", "");
             return;
         };
         // Verbatim: the host parses its own params, because only it knows
-        // what session.spawn's look like.
+        // what session.spawn's look like. The host may also write a JSON
+        // answer — sized for panes.activity's worst honest day, and a
+        // host that overflows it truncates its own reply, not rook.
+        var rbuf: [8192]u8 = undefined;
+        var rw: std.Io.Writer = .fixed(&rbuf);
         const params = frameParams(frame);
-        if (h.call(h.ctx, self.spec.name, op, params)) |why| {
-            self.answer(id, false, why);
+        if (h.call(h.ctx, self.spec.name, op, params, &rw)) |why| {
+            self.answer(id, false, why, "");
         } else {
-            self.answer(id, true, "");
+            self.answer(id, true, "", rbuf[0..rw.end]);
         }
     }
 
-    fn answer(self: *Plugin, id: u64, ok: bool, why: []const u8) void {
-        var buf: [512]u8 = undefined;
+    fn answer(self: *Plugin, id: u64, ok: bool, why: []const u8, result: []const u8) void {
+        var buf: [9216]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
         w.print("{{\"v\":{d},\"id\":{d},\"ok\":{s}", .{ version, id, if (ok) "true" else "false" }) catch return;
         if (!ok) {
             w.writeAll(",\"error\":") catch return;
             jsonString(&w, why) catch return;
+        }
+        if (ok and result.len > 0) {
+            w.writeAll(",\"result\":") catch return;
+            w.writeAll(result) catch return;
         }
         w.writeAll("}\n") catch return;
         self.write_mu.lock();

@@ -243,6 +243,23 @@ Params:
 .Ql where
 .Pq Ql tab No for a new tab; default a split .
 Opens without stealing focus.
+.It Cm panes.activity
+No params.
+The first inbound verb that answers with data:
+.Bd -literal -offset indent
+{"panes":[{"id":1,"outMs":120,"inMs":-1,
+  "fg":"claude","cwd":"/path/to/repo"}]}
+.Ed
+.Pp
+Per terminal pane, milliseconds since the child last wrote and since the
+human last typed there
+.Pq physical keyboard only; \-1 = never ,
+plus the foreground program and the shell's cwd.
+This is the substrate's half of
+.Dq is that session alive :
+a transcript goes quiet during a long tool run, but the pane keeps
+redrawing \(em and a human who typed there moments ago is already
+watching, so a banner would be noise.
 .El
 .Sh THE PANEL
 Open with
@@ -296,8 +313,21 @@ rook.Plugin{Name: "claude",
     Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-claude"},
     Load:    rook.Eager,
     Grants:  []string{rook.OpItemsList, rook.OpItemsAct,
-        rook.OpAttentionRaise, rook.OpSessionSpawn}}
+        rook.OpAttentionRaise, rook.OpSessionSpawn,
+        "panes.activity"}}
 .Ed
+.Pp
+Grant
+.Ql panes.activity
+and the transcript's word is fused with the substrate's: a pane still
+redrawing its spinner keeps a quiet transcript
+.Ql working
+rather than
+.Ql blocked?
+.Pq a running tool logs nothing; the redraw is the proof of life ,
+and a session whose pane you typed in moments ago never banners you \(em
+you are already looking at it.
+Withhold the grant and the watcher still works from transcripts alone.
 .Pp
 Flags, for a sandbox or a different taste:
 .Fl -dir
@@ -305,7 +335,9 @@ Flags, for a sandbox or a different taste:
 .Fl -poll ,
 .Fl -min-turn ,
 .Fl -window
-.Pq how far back sessions are listed; default 48h .
+.Pq how far back sessions are listed; default 48h ,
+.Fl -alive , Fl -present , Fl -claude-names
+.Pq the fusion knobs .
 Actions:
 .Ql open
 splits a shell at the session's directory

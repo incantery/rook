@@ -888,6 +888,15 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             @import("build_options").id,
         }) catch return;
         reply(fd, s);
+    } else if (std.mem.eql(u8, verb, "activity") and rest.len == 0) {
+        // Per-pane pty liveness: `id\tout_ms\tin_ms\tfg\tcwd` — ms since
+        // the child last wrote and the human last typed (-1 = never),
+        // the foreground program, the shell's cwd. The substrate half of
+        // "is that session alive"; see rook-ctl(7) and the claude plugin.
+        var buf: [8192]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        app.activityText(&w);
+        reply(fd, buf[0..w.end]);
     } else if (std.mem.eql(u8, verb, "boottime") and rest.len == 0) {
         // Startup phase timings (µs), stamped in create() and at the
         // ctl bind above. No lock: written once before any client can
