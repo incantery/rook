@@ -1816,6 +1816,26 @@ fn claudeWatch(gpa: std.mem.Allocator, bin: []const u8) !void {
     const peeked = try app.ctl("plugin claude items.act {\"itemId\":\"sessA\",\"actionId\":\"peek\"}");
     try h.expectContains(peeked, "the frobnicator is fixed", "peek answers with the last reply");
 
+    // The focus choreography, straight from live dogfood: the panel
+    // opens holding the keys, ⌃H (away from a right panel) hands them
+    // back, ⌃L from the edge pane walks back in, ⌃J moves the panel's
+    // own selection. The old behavior moved pane focus invisibly under
+    // a panel that kept eating the typing.
+    // nskey lands asynchronously (dispatch_async to the main thread), so
+    // every chord is followed by a wait on the state it changes.
+    _ = try app.ctl("plugin-show claude");
+    _ = try app.waitCtl("sidepane", "needs you", 5_000);
+    _ = try app.waitCtl("sidepane", "focus:panel", 2_000);
+    try h.expectContains(try app.ctl("press j"), "consumed", "the focused panel eats plain keys");
+    _ = try app.ctl("nskey 4 40000 h"); // ⌃H
+    _ = try app.waitCtl("sidepane", "focus:panes", 2_000);
+    try h.expectContains(try app.ctl("press j"), "typed", "away-from-the-panel hands the keys back");
+    _ = try app.ctl("nskey 37 40000 l"); // ⌃L — no pane lies right, so it enters the panel
+    _ = try app.waitCtl("sidepane", "focus:panel", 2_000);
+    try h.expectContains(try app.ctl("press j"), "consumed", "the edge pane's chord walks into the panel");
+    _ = try app.ctl("nskey 38 40000 j"); // ⌃J — selection, same as j
+    _ = try app.waitCtl("sidepane", "*idle", 2_000);
+
     var rootz: [104]u8 = undefined;
     _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", (try std.fmt.bufPrintZ(&rootz, "{s}", .{root})).ptr }) catch {};
 }

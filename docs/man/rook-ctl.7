@@ -127,7 +127,14 @@ The side panel:
 .Ql closed ,
 or which edge and tenant
 .Pq plugin, config, search
-plus the tenant's rows.
+plus
+.Ql focus:panel
+or
+.Ql focus:panes
+\(em who holds the keys \(em and the tenant's rows.
+A focused panel eats plain typing; \(^H
+.Pq away from a right-edge panel
+hands the keys back, \(^L from the edge pane walks in.
 .It Cm welcome
 The onboarding screen, if open, and its choices.
 A FRESH instance

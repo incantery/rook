@@ -2031,16 +2031,23 @@ pub const App = struct {
     /// bytes go to the pty, editor bytes drive the modal machine. Both
     /// mark input — the editor's echo is synchronous, so its dirty
     /// frame carries the key→photon mark the same way a pty echo does.
-    pub fn writeFocused(self: *App, bytes: []const u8, ts: f64) void {
+    /// Returns true when CHROME consumed the bytes (welcome, palette, a
+    /// focused side panel) — `ctl press` reports consumed/typed from
+    /// this, and it used to answer from the leader machine alone, which
+    /// called a key the panel ate "typed".
+    pub fn writeFocused(self: *App, bytes: []const u8, ts: f64) bool {
+        var chrome: bool = undefined;
         {
             self.draw_lock.lock();
             defer self.draw_lock.unlock();
             self.markInput(ts);
-            if (!self.routeChromeKeyLocked(bytes))
+            chrome = self.routeChromeKeyLocked(bytes);
+            if (!chrome)
                 self.paneInput(self.activeTab().focused, bytes);
         }
         // Outside the block on purpose — see pending_cmd.
         self.drainPendingCmd();
+        return chrome;
     }
 
     /// THE routing rule for untargeted input: the palette owns the whole
@@ -3656,7 +3663,7 @@ pub const App = struct {
             self.wkClose();
             if (ch == ld) {
                 // Double-tap: the leader typed literally.
-                self.writeFocused(&[1]u8{ch}, ts);
+                _ = self.writeFocused(&[1]u8{ch}, ts);
                 return true;
             }
             if (self.keybinds.lookup(ch)) |b| {
@@ -3773,6 +3780,48 @@ pub const App = struct {
             return false;
         };
         self.setFocusLocked(target);
+        return true;
+    }
+
+    /// ⌃HJKL while the side panel HOLDS the keys. The chord stays
+    /// chrome: away-from-the-panel hands focus back to the panes,
+    /// up/down move the panel's own selection, and everything else is
+    /// consumed — the old behavior moved pane focus invisibly UNDER a
+    /// panel that kept eating the typing, which read as broken focus.
+    /// Returns true when the key is spoken for.
+    pub fn sidePaneNav(self: *App, dir: panespkg.NavDir) bool {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        if (!self.side_open or !self.side_focus) return false;
+        const away: panespkg.NavDir = if (self.side == .left) .right else .left;
+        if (dir == away) {
+            self.side_focus = false;
+            self.scene_dirty = true;
+            return true;
+        }
+        switch (dir) {
+            .up, .down => if (self.side_panel == .plugin) {
+                self.plugMoveLocked(dir == .down);
+                self.scene_dirty = true;
+            },
+            else => {},
+        }
+        return true;
+    }
+
+    /// The other half: the panel is open but unfocused, and the chord
+    /// walked off the edge pane toward it — step INTO the panel, the
+    /// same way one more ⌃L would have entered one more split. Costs
+    /// the cooked control byte at the edge, the same trade ⌃HJKL nav
+    /// made on day one.
+    pub fn sidePaneEnter(self: *App, dir: panespkg.NavDir) bool {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        if (!self.side_open or self.side_focus) return false;
+        const toward: panespkg.NavDir = if (self.side == .left) .left else .right;
+        if (dir != toward) return false;
+        self.side_focus = true;
+        self.scene_dirty = true;
         return true;
     }
 
@@ -7068,7 +7117,16 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
                         else => null,
                     };
                     if (dir) |d| {
-                        if (!app.navYields() and app.focusMove(d)) return null;
+                        // The side panel first, both directions: while it
+                        // holds the keys the chord is chrome, and from the
+                        // edge pane the chord walks in. navYields() is not
+                        // consulted while the panel is focused — a panel
+                        // is not a pty and has no splits to protect.
+                        if (app.sidePaneNav(d)) return null;
+                        if (!app.navYields()) {
+                            if (app.focusMove(d)) return null;
+                            if (app.sidePaneEnter(d)) return null;
+                        }
                         // fall through: cooked control byte to the pty
                     }
                 }
@@ -7143,7 +7201,7 @@ fn monitorCallback(context: *const MonitorBlock.Context, event_id: objc.c.id) ca
         // makes key_present a true key-to-photon number. Writes go to
         // the focused pane, under the scene lock so reap can't free the
         // session mid-write.
-        app.writeFocused(bytes, ts);
+        _ = app.writeFocused(bytes, ts);
     }
     return null;
 }

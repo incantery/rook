@@ -290,6 +290,12 @@ runs and only
 or
 .Ql ESC
 cancels \(em a confirm that any key dismisses is not a confirm.
+.Pp
+The panel opens holding the keys, and \(^HJKL treats it as one more
+split: the away direction
+.Pq \(^H for a right-edge panel
+hands the keys back to the panes, \(^L from the edge pane walks back
+in, and \(^J / \(^K move the selection.
 .Sh THE SHIPPED PLUGIN
 rook's first first-party plugin rides inside the bundle at
 .Pa /Applications/rook.app/Contents/MacOS/rook-plugin-claude

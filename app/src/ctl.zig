@@ -692,9 +692,14 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         if (!app.side_open) {
             _ = w.write("closed\n") catch 0;
         } else {
-            w.print("open side:{s} panel:{s}\n", .{
+            // `focus:` says who holds the keys — the difference between
+            // "typing reaches the shell" and "typing moves a selection",
+            // which an agent (or a test racing an async key) must read
+            // rather than guess.
+            w.print("open side:{s} panel:{s} focus:{s}\n", .{
                 @tagName(app.side),
                 @tagName(app.side_panel),
+                @as([]const u8, if (app.side_focus) "panel" else "panes"),
             }) catch {};
             switch (app.side_panel) {
                 .plugin => {
@@ -1093,8 +1098,11 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         if (ch) |c| {
             if (app.handleCharKey(c, CACurrentMediaTime())) {
                 reply(fd, "consumed\n");
+            } else if (app.writeFocused(&[1]u8{c}, CACurrentMediaTime())) {
+                // Chrome ate it downstream of the leader machine — the
+                // welcome screen, the palette, a focused side panel.
+                reply(fd, "consumed\n");
             } else {
-                app.writeFocused(&[1]u8{c}, CACurrentMediaTime());
                 reply(fd, "typed\n");
             }
         } else reply(fd, "err press <char|TAB|SPACE|ESC>\n");
