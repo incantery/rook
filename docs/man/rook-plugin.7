@@ -53,10 +53,20 @@ The ops this plugin may be asked, and may ask \(em by name, both
 directions.
 .El
 .Pp
-SDK spellings:
-.Ql e.Plugin(name, argv, load, grants...) ,
-.Ql e.PluginFrom(source, grants...) ,
-.Ql e.PluginPinned(source, sha256, grants...) .
+SDK spellings \(em Go
+.Pq one struct, three strengths :
+.Bd -literal -offset indent
+rook.Plugin{Name: "hello", Command: []string{"/path/hello"},
+    Grants: []string{rook.OpItemsList}}
+rook.Plugin{Source: "https://.../hello-plugin", SHA256: "459e...",
+    Grants: []string{rook.OpItemsList}}
+.Ed
+.Pp
+TypeScript
+.Pq fluent :
+.Ql e.plugin(name, argv, load, grants) ,
+.Ql e.pluginFrom(source, grants) ,
+.Ql e.pluginPinned(source, sha256, grants) .
 .Sh LIFECYCLE
 For a
 .Cm source
@@ -96,10 +106,13 @@ prints its
 .Ql sha256= ,
 and
 .Ql y
-in the plugin panel copies a ready-to-paste
-.Ql PluginPinned(...)
-line
-.Em in the language your config program is written in .
+in the plugin panel copies a ready-to-paste pinned declaration
+.Em in the language your config program is written in
+\(em a
+.Ql rook.Plugin{Source: ..., SHA256: ...}
+declaration for a Go config, the
+.Ql e.pluginPinned(...)
+call for TypeScript.
 .Pp
 A spawned plugin's stderr goes to
 .Pa /dev/null ;
