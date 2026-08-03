@@ -167,6 +167,7 @@ pub fn main(init: std.process.Init) !void {
                 if (getenv("HOME")) |home| _ = chdir(home);
             }
         }
+        adoptLoginPath();
         const app = try @import("macos.zig").App.create(init);
         for (argv[1..]) |arg| {
             if (std.mem.eql(u8, std.mem.span(arg), "--no-activate")) app.activate = false;
@@ -177,6 +178,60 @@ pub fn main(init: std.process.Init) !void {
 
     // Everything else is a control verb for the running instance.
     ctlPass(argv[cmd_idx..]);
+}
+
+/// A Dock launch inherits launchd's PATH (/usr/bin:/bin:/usr/sbin:/sbin),
+/// where neither go nor node nor anyone's language servers live. The
+/// PANES never notice — they run login shells that rebuild PATH from
+/// /etc/zprofile — but the APP's own children (the config program the
+/// env check runs, LSP servers, path-named plugins) inherit the process
+/// env, so a Dock-launched rook reported every Go config as "go: not on
+/// PATH" while the same config checked fine from a terminal launch.
+///
+/// So ask a login shell once, before anything spawns, and adopt its
+/// answer. Gated on launchd's exact default: a terminal launch already
+/// has the user's PATH and pays nothing.
+fn adoptLoginPath() void {
+    const cur = getenv("PATH") orelse return;
+    if (!std.mem.eql(u8, std.mem.span(cur), "/usr/bin:/bin:/usr/sbin:/sbin")) return;
+
+    var fds: [2]c_int = undefined;
+    if (pipe(&fds) != 0) return;
+    const child = fork();
+    if (child < 0) {
+        _ = close(fds[0]);
+        _ = close(fds[1]);
+        return;
+    }
+    if (child == 0) {
+        _ = dup2(fds[1], 1);
+        _ = close(fds[0]);
+        _ = close(fds[1]);
+        const sh: [*:0]const u8 = getenv("SHELL") orelse "/bin/zsh";
+        // -l -c, no interactive: zprofile runs (path_helper lives
+        // there), zshrc does not — nobody's plugin manager boots here.
+        const argv = [_:null]?[*:0]const u8{ sh, "-l", "-c", "printf %s \"$PATH\"", null };
+        _ = execvp(sh, &argv);
+        _exit(127);
+    }
+    _ = close(fds[1]);
+    var buf: [4096]u8 = undefined;
+    var len: usize = 0;
+    while (len < buf.len - 1) {
+        const n = read(fds[0], buf[len..].ptr, buf.len - 1 - len);
+        if (n <= 0) break;
+        len += @intCast(n);
+    }
+    _ = close(fds[0]);
+    var status: c_int = 0;
+    _ = waitpid(child, &status, 0);
+
+    const got = std.mem.trim(u8, buf[0..len], " \t\r\n");
+    // A real PATH has separators; anything else is a shell that failed.
+    if (got.len == 0 or std.mem.indexOfScalar(u8, got, ':') == null) return;
+    var z: [4096]u8 = undefined;
+    const pz = std.fmt.bufPrintZ(&z, "{s}", .{got}) catch return;
+    _ = setenv("PATH", pz.ptr, 1);
 }
 
 /// `rook install <target>` — teach a tool about rook.
@@ -360,6 +415,11 @@ extern "c" fn shutdown(fd: c_int, how: c_int) c_int;
 extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn _exit(code: c_int) noreturn;
+extern "c" fn pipe(fds: *[2]c_int) c_int;
+extern "c" fn fork() c_int;
+extern "c" fn dup2(old: c_int, new: c_int) c_int;
+extern "c" fn execvp(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn waitpid(pid: c_int, status: *c_int, options: c_int) c_int;
 
 /// `rook edit <file>` — the dogfood door: from a shell inside rook,
 /// open the file in an editor pane of THIS instance (shells inherit
