@@ -531,12 +531,14 @@ everything else and re-read each open, so it always reflects what
 config last applied (a machine with no graph just gets an empty
 palette). This was ~/.local/share/rook/rook.db through libsqlite3
 until 2026-08-03: the db's last writer left in the strip, and a
-registry nobody can write is not a registry — recency ordering and
-worktree children went with it, owed back as ephemeral state and
-git-derived facts respectively. The grouping pass survives: entries
-with a parent sit indented under it as `rook/zig`, and the filter
-matches the combined name — nothing sets a parent today, worktree
-derivation will. Enter attaches
+registry nobody can write is not a registry — recency ordering went
+with it, owed back as ephemeral state. Worktree children came back
+DERIVED the same day: each declared workspace's `.git/worktrees/`
+records are read live, so children sit indented under their parent as
+`rook/zig` (filter matches the combined name) with nothing stored and
+nothing to go stale — `ctl worktree add|remove` are the write half,
+with rook refusing unmerged commits and git refusing a dirty checkout
+in its own words. Enter attaches
 the workspace's session — existing space switches in with its tabs
 intact, first visit creates it with one shell in the root. Inside a
 space, cd stays sacred: tab chips wear the name of whatever workspace

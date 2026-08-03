@@ -81,10 +81,15 @@ marks the focused pane and current space.
 .It Cm tabs
 Tabs of the current space with pane counts and bell flags.
 .It Cm workspaces
-The declared workspaces, freshly read from the environment graph
-.Pq see Xr rook-config 5 :
+The workspaces, freshly read: declared ones from the environment graph
+.Pq see Xr rook-config 5 ,
+each followed by its git worktrees, derived live from the repo's own
+.Pa .git/worktrees
+records.
 .Ql name<TAB>root
-per line, or
+per line
+.Pq children as Ql parent/name ,
+or
 .Ql none .
 .It Cm docs
 Open documents and how many panes hold each \(em one file open twice is one
@@ -258,6 +263,28 @@ Failures carry their reason.
 .It Cm plugin-show Ar name
 Open the plugin panel on
 .Ar name .
+.It Cm worktree Cm add Ar workspace name
+Carve a git worktree of the declared
+.Ar workspace
+on branch
+.Ar name
+.Pq created if new ,
+under
+.Pa $XDG_DATA_HOME/rook/worktrees/ .
+Replies
+.Ql ok <path>
+\(em the path is the point; cd there.
+The new checkout appears in
+.Cm workspaces
+immediately, derived from git.
+.It Cm worktree Cm remove Ar workspace name
+Remove that worktree and delete its branch.
+Refuses, in order: commits on the branch the workspace's HEAD cannot
+reach
+.Pq merge them first ,
+and a dirty checkout
+.Pq git's own refusal, quoted verbatim .
+A branch git will not delete is kept and said so.
 .It Cm plugin Ar name op Op Ar params-json
 Call a plugin op directly and print its raw answer.
 Refused with

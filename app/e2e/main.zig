@@ -43,6 +43,7 @@ const scenarios = [_]Scenario{
     .{ .name = "commands", .what = "registry lists, runs by name, and drives the ⌘K palette", .run = commands },
     .{ .name = "whichkey", .what = "an unanswered leader reveals the key menu; rows and bar hints click", .run = whichkey },
     .{ .name = "statusbar", .what = "the bar knows where you are: cwd + branch follow the pane, segments click", .run = statusbar },
+    .{ .name = "worktrees", .what = "worktree add carves a checkout git can see, remove refuses unmerged and dirty, then lets go", .run = worktrees },
     .{ .name = "filetree", .what = "the tree takes over a pane, folds in place, reveals the current file, toggles back", .run = filetree },
     .{ .name = "bufline", .what = "the buffer line: documents chip up, :b/:bn switch, a chip click lands blind", .run = bufline },
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
@@ -1002,6 +1003,78 @@ fn statusbar(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.waitCtl("palette", "mode:workspaces", 3000);
     try h.expectContains(try app.ctl("palette"), "wsdecl", "the declared workspace is a picker row");
     _ = try app.ctl("key 1b");
+}
+
+// ------------------------------------------------------------ worktrees
+
+/// The worktree verbs, full lifecycle. `add` carves a checkout on a new
+/// branch under the sandbox's data dir and the child DERIVES into
+/// `workspaces` (nothing is stored — git's records are the registry).
+/// `remove` refuses unmerged commits (rook's guard), then a dirty
+/// checkout (git's own guard, surfaced verbatim), and once the branch
+/// is merged and the tree clean it removes checkout and branch both.
+fn worktrees(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var repo_buf: [128]u8 = undefined;
+    const repo = try seedWorkspaceRepo(&repo_buf);
+    if (try h.runCmd(repo, &.{ "/usr/bin/git", "checkout", "-q", "-b", "trunk" }) != 0)
+        return error.GitFailed;
+    if (try h.runCmd(repo, &.{ "/usr/bin/git", "add", "f.zig" }) != 0) return error.GitFailed;
+    if (try h.runCmd(repo, &.{
+        "/usr/bin/git", "-c", "user.email=t@example.com", "-c", "user.name=t",
+        "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base",
+    }) != 0) return error.GitFailed;
+
+    var env_buf: [512]u8 = undefined;
+    const graph = try std.fmt.bufPrint(&env_buf,
+        \\{{"rookEnvironment":1,"nodes":[{{"id":"workspace:wsdecl","kind":"workspace","scope":"app","name":"wsdecl","root":"{s}"}}]}}
+    , .{repo});
+    const app = try h.Instance.start(gpa, bin, .{ .env_json = graph });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // add answers `ok <path>` — the path is the point, an agent wants
+    // somewhere to cd. Copied out at once: ctl replies share one buffer.
+    const added = try app.ctl("worktree add wsdecl feat1");
+    if (!std.mem.startsWith(u8, added, "ok /")) {
+        std.debug.print("worktree add said: {s}\n", .{added});
+        return error.AssertFailed;
+    }
+    var wt_buf: [512]u8 = undefined;
+    const wt = blk: {
+        const t = std.mem.trim(u8, added[3..], " \r\n");
+        if (t.len >= wt_buf.len) return error.AssertFailed;
+        @memcpy(wt_buf[0..t.len], t);
+        break :blk wt_buf[0..t.len];
+    };
+    try h.expectContains(try app.ctl("workspaces"), "wsdecl/feat1", "the child derives from git's records");
+    try h.expectContains(try app.ctl("workspaces"), wt, "with the checkout as its root");
+
+    // A commit on feat1 that trunk cannot reach: rook's guard refuses.
+    var p_buf: [600]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/g.zig", .{wt}), "g\n");
+    if (try h.runCmd(wt, &.{ "/usr/bin/git", "add", "g.zig" }) != 0) return error.GitFailed;
+    if (try h.runCmd(wt, &.{
+        "/usr/bin/git", "-c", "user.email=t@example.com", "-c", "user.name=t",
+        "-c", "commit.gpgsign=false", "commit", "-q", "-m", "wip",
+    }) != 0) return error.GitFailed;
+    try h.expectContains(try app.ctl("worktree remove wsdecl feat1"), "unmerged", "unmerged commits refuse removal");
+
+    // Merge it, then dirty the checkout: git's guard refuses, its words.
+    if (try h.runCmd(repo, &.{ "/usr/bin/git", "merge", "-q", "feat1" }) != 0) return error.GitFailed;
+    try h.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/dirty.txt", .{wt}), "x\n");
+    try h.expectContains(try app.ctl("worktree remove wsdecl feat1"), "err", "a dirty checkout refuses removal");
+    try h.expectContains(try app.ctl("workspaces"), "wsdecl/feat1", "refused means still there");
+
+    // Clean and merged: checkout gone, branch gone, parent stays.
+    if (try h.runCmd(wt, &.{ "/bin/rm", "dirty.txt" }) != 0) return error.GitFailed;
+    try h.expectContains(try app.ctl("worktree remove wsdecl feat1"), "ok removed", "clean and merged removes");
+    const after = try app.ctl("workspaces");
+    try h.expectContains(after, "wsdecl", "the parent stays");
+    try h.expectNotContains(after, "feat1", "the child is gone");
+    if (try h.runCmd(repo, &.{ "/usr/bin/git", "rev-parse", "-q", "--verify", "feat1" }) == 0)
+        return error.AssertFailed; // the branch went with the checkout
 }
 
 // ------------------------------------------------------------- bufline

@@ -109,8 +109,9 @@ presets.
    `rook-provider-linear` are built, bundled and tested; the thing that
    spawned them was `rookctl issues`, which left with the Go. The caller
    is the first real plugin surface — `docs/OWED.md` §1.
-4. **Worktree creation, self-update, and the keychain writer** — all
-   `docs/OWED.md`.
+4. **Self-update and the keychain writer** — both `docs/OWED.md`.
+   (Worktree creation came back 2026-08-03 as `ctl worktree add|remove`,
+   with worktrees derived live from git rather than registered.)
 5. **Signing and notarization.** Ad-hoc signed today.
 
 ## Accepted regressions

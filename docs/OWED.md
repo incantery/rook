@@ -39,16 +39,20 @@ the item model rather than as a hardcoded issues panel.
 
 ## 2. Worktree creation
 
+> **Paid, 2026-08-03.** `ctl worktree add|remove` (`workspaces.zig`,
+> e2e scenario `worktrees`). The listing half came back as derivation,
+> not storage: children are read live from `.git/worktrees/`, so a
+> worktree added by anyone — rook or not — is in the palette on the
+> next open, and nothing can go stale. The guards kept their teeth:
+> unmerged commits are rook's refusal, a dirty checkout is git's own,
+> quoted verbatim. What remains owed here is a HUMAN affordance —
+> creating a worktree from the palette needs a text input, the same
+> form surface plugin actions are waiting on.
+
 `POST /workspaces/{name}` with a `worktreeOf` carved a git worktree under
 the data dir, on a branch named by the workspace. The deletion guard
 (refuse to remove a worktree with dirty files or unmerged commits) was the
 part with the teeth.
-
-All of it is `git` subprocess work. It belongs in Zig beside
-`workspaces.zig`, which now reads workspaces from the environment graph
-— and the LISTING half should not come back as storage at all: a
-declared workspace's worktrees are already enumerated by
-`.git/worktrees/`, so rook can derive the children the old db stored.
 
 ## 3. Self-update
 

@@ -507,10 +507,10 @@ pub fn run(dir: []const u8, src: Source, out_path: []const u8) Run {
     return runArgv(dir, argv);
 }
 
-/// pipe, fork, exec, read, wait. Shared by the emitter and by `go mod
-/// tidy`, which want the same thing: an exit status and whatever the tool
-/// had to say about it.
-fn runArgv(dir: []const u8, argv: []const [:0]const u8) Run {
+/// pipe, fork, exec, read, wait. Shared by the emitter, by `go mod
+/// tidy`, and by workspaces.zig's worktree verbs — all wanting the same
+/// thing: an exit status and whatever the tool had to say about it.
+pub fn runArgv(dir: []const u8, argv: []const [:0]const u8) Run {
     var r = Run{};
     var dirz: [512]u8 = undefined;
     if (dir.len >= dirz.len) {

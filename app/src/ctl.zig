@@ -289,6 +289,25 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         }
         if (list.len == 0) _ = w.write("none\n") catch 0;
         reply(fd, buf[0..w.end]);
+    } else if (std.mem.eql(u8, verb, "worktree")) {
+        // The write half of `workspaces`: carve or remove a git worktree
+        // of a DECLARED workspace. Guards: unmerged commits (ours),
+        // dirty checkout (git's own, surfaced verbatim). Blocking a ctl
+        // connection on git is fine — the caller asked for git to run.
+        var it = std.mem.tokenizeScalar(u8, rest, ' ');
+        const op = it.next() orelse "";
+        const ws = it.next() orelse "";
+        const name = it.next() orelse "";
+        var obuf: [4096]u8 = undefined;
+        if (name.len == 0 or it.next() != null) {
+            reply(fd, "err usage: worktree add|remove <workspace> <name>\n");
+        } else if (std.mem.eql(u8, op, "add")) {
+            reply(fd, @import("workspaces.zig").worktreeAdd(app.io, app.gpa, ws, name, &obuf));
+        } else if (std.mem.eql(u8, op, "remove")) {
+            reply(fd, @import("workspaces.zig").worktreeRemove(app.io, app.gpa, ws, name, &obuf));
+        } else {
+            reply(fd, "err usage: worktree add|remove <workspace> <name>\n");
+        }
     } else if (std.mem.eql(u8, verb, "palette") and rest.len == 0) {
         // Palette state: closed, or the filter + rows (* = selected).
         var buf: [4096]u8 = undefined;
