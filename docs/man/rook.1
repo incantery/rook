@@ -10,13 +10,17 @@
 .Op Cm win
 .Op Fl -no-activate
 .Nm
+.Ar file
+.Nm
+.Ar verb Op Ar args ...
+.Nm
 .Cm edit Ar file
 .Nm
 .Cm exec Ar command ...
 .Nm
 .Cm demo
 .Nm
-.Fl -version
+.Fl -version | -help
 .Nm re
 .Ar file
 .Sh DESCRIPTION
@@ -38,15 +42,32 @@ write \(em see
 External systems are reached through plugins \(em see
 .Xr rook-plugin 7 .
 .Sh SUBCOMMANDS
-The first argument selects a subcommand.
-An argument starting with
-.Ql -
-is not treated as a subcommand: the app launches, which is what makes
-plain
-.Nm
-and Dock launches
-.Pq argv like Fl psn_...
-work.
+The first non-flag argument selects a subcommand; none means the app
+.Pq which is what makes plain Nm and Dock launches with Fl psn_... No argv work .
+Four subcommands are local \(em
+.Cm win , edit , exec , demo
+\(em and
+.Sy every other subcommand is a control verb ,
+sent to the running rook over its socket with the reply on stdout:
+.Bd -literal -offset indent
+rook panes
+rook workspaces
+rook worktree add rook feat-x
+rook run pane.zoom
+rook shot /tmp/rook.png
+.Ed
+.Pp
+The CLI is a ctl client — the same verbs
+.Xr rook-ctl 7
+documents, with no client-side table to drift.
+An
+.Ql err
+reply exits 1.
+A LONE argument the server does not know but the filesystem does is
+opened in the editor instead \(em
+.Ql rook main.go
+does what a hand expects; verb wins over file, so muscle memory never
+depends on the working directory.
 .Bl -tag -width "exec command"
 .It Cm win
 The default: open the application window.
@@ -111,16 +132,9 @@ deliberately inherits that rook's socket unless you unset
 .Ev ROOK_SOCK
 first.
 .Pp
-The option composes only with the app itself:
-.Ql rook --config=DIR
-and
-.Ql rook win --config=DIR
-work;
-combined with
-.Cm edit
-or
-.Cm exec
-the flag is taken as an ordinary argument.
+The option composes with the app and with verbs \(em
+.Ql rook --config=DIR panes
+asks DIR's instance \(em wherever it sits before the subcommand.
 .It Fl -no-activate
 Open the window without stealing focus.
 Only meaningful with
@@ -133,19 +147,18 @@ Print
 and exit.
 .El
 .Sh AUTOMATION
-Everything the window shows can be read, and everything the keyboard does
-can be driven, over the control socket \(em one connection, newline-delimited
-commands:
-.Bd -literal -offset indent
-printf 'panes\en' | nc -U /tmp/rook.sock
-.Ed
-.Pp
+Everything the window shows can be read, and everything the keyboard
+does can be driven:
+.Ql rook <verb>
+from any shell, or the raw socket
+.Pq Ql printf 'panes\en' | nc -U /tmp/rook.sock
+for a client that is not rook.
 The full verb set
 .Pq screen dumps, screenshots, synthetic input, layout, config, plugins
 is documented in
 .Xr rook-ctl 7 .
-The socket is also how an agent verifies its own work against the real
-app instead of asking a human to look.
+This is also how an agent verifies its own work against the real app
+instead of asking a human to look.
 .Sh ENVIRONMENT
 .Bl -tag -width ROOK_LSP_TYPESCRIPT
 .It Ev ROOK_SOCK
@@ -231,21 +244,9 @@ printf 'dump\en' | nc -U /tmp/rook.sock
 .Pp
 .Lk https://github.com/incantery/rook
 .Sh CAVEATS
-There is no
-.Fl -help :
-an argument starting with
-.Ql -
-launches the app, so
-.Ql rook --help
-opens a window.
-This page is the help.
-.Pp
-.Ql rook Ar file
-does not open the file \(em it is an unknown-command error.
-Use
-.Nm re Ar file
-.Pq or Cm edit ,
-which needs a running instance.
+Verb arguments are joined with single spaces before sending \(em the
+line protocol has no quoting, so an argument containing a space
+reaches the server as two tokens.
 .Pp
 Shells die with the app: rook owns its ptys in-process, so quitting rook
 ends every shell in every space.

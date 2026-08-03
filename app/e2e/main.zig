@@ -44,6 +44,7 @@ const scenarios = [_]Scenario{
     .{ .name = "whichkey", .what = "an unanswered leader reveals the key menu; rows and bar hints click", .run = whichkey },
     .{ .name = "statusbar", .what = "the bar knows where you are: cwd + branch follow the pane, segments click", .run = statusbar },
     .{ .name = "worktrees", .what = "worktree add carves a checkout git can see, remove refuses unmerged and dirty, then lets go", .run = worktrees },
+    .{ .name = "cli", .what = "the binary is its own ctl client: rook <verb> answers, err exits 1, a file opens", .run = cli },
     .{ .name = "filetree", .what = "the tree takes over a pane, folds in place, reveals the current file, toggles back", .run = filetree },
     .{ .name = "bufline", .what = "the buffer line: documents chip up, :b/:bn switch, a chip click lands blind", .run = bufline },
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
@@ -1075,6 +1076,58 @@ fn worktrees(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectNotContains(after, "feat1", "the child is gone");
     if (try h.runCmd(repo, &.{ "/usr/bin/git", "rev-parse", "-q", "--verify", "feat1" }) == 0)
         return error.AssertFailed; // the branch went with the checkout
+}
+
+// ------------------------------------------------------------------ cli
+
+/// The CLI is a ctl client: `rook <verb>` reaches the instance named by
+/// ROOK_SOCK, an `err` reply is exit 1, an unknown lone argument that
+/// names a real file becomes `edit`, and --help answers with no app at
+/// all. Driven through /usr/bin/env so each call targets the sandbox.
+fn cli(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var env_buf: [160]u8 = undefined;
+    const sockenv = try std.fmt.bufPrintZ(&env_buf, "ROOK_SOCK={s}", .{app.sockPath()});
+    var bin_buf: [512]u8 = undefined;
+    const binz = try std.fmt.bufPrintZ(&bin_buf, "{s}", .{bin});
+
+    // A verb with a side effect proves the line actually landed.
+    if (try h.runCmd(".", &.{ "/usr/bin/env", sockenv.ptr, binz.ptr, "run", "tab.new" }) != 0)
+        return error.AssertFailed;
+    try h.expectEq("tabs after cli run", 2, try app.tabCount());
+
+    // A reply verb answers and exits clean.
+    if (try h.runCmd(".", &.{ "/usr/bin/env", sockenv.ptr, binz.ptr, "panes" }) != 0)
+        return error.AssertFailed;
+
+    // An err reply is exit 1 — zoom with a single pane refuses.
+    if (try h.runCmd(".", &.{ "/usr/bin/env", sockenv.ptr, binz.ptr, "zoom" }) == 0)
+        return error.AssertFailed;
+
+    // So is an unknown verb.
+    if (try h.runCmd(".", &.{ "/usr/bin/env", sockenv.ptr, binz.ptr, "definitely-not-a-verb" }) == 0)
+        return error.AssertFailed;
+
+    // A lone argument naming a real file opens it in the editor.
+    var f_buf: [128]u8 = undefined;
+    const f = try std.fmt.bufPrintZ(&f_buf, "/tmp/rook-e2e-cli-{d}.txt", .{getpid()});
+    try h.writeFile(f, "cli\n");
+    if (try h.runCmd(".", &.{ "/usr/bin/env", sockenv.ptr, binz.ptr, f.ptr }) != 0)
+        return error.AssertFailed;
+    try h.expectContains(try app.ctl("docs"), "rook-e2e-cli", "the file landed in an editor");
+
+    // No app on the socket: a clear failure, not a hang.
+    if (try h.runCmd(".", &.{ "/usr/bin/env", "ROOK_SOCK=/tmp/rook-e2e-no-such.sock", binz.ptr, "panes" }) == 0)
+        return error.AssertFailed;
+
+    // --help needs no app and exits 0.
+    if (try h.runCmd(".", &.{ binz.ptr, "--help" }) != 0)
+        return error.AssertFailed;
 }
 
 // ------------------------------------------------------------- bufline

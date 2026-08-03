@@ -13,7 +13,15 @@ keyboard could produce.
 It exists so that scripts \(em and above all agents \(em can verify their own
 work against the real app instead of asking a human to look.
 .Pp
-There is no client program; the protocol is plain enough not to need one:
+The rook binary is its own client \(em any subcommand it does not
+recognize locally is sent as a verb, reply on stdout,
+.Ql err
+as exit 1:
+.Bd -literal -offset indent
+rook panes
+.Ed
+.Pp
+And the protocol is plain enough that anything else can speak it raw:
 .Bd -literal -offset indent
 printf 'panes\en' | nc -U /tmp/rook.sock
 .Ed
@@ -326,10 +334,6 @@ printf 'run pane.split-right\en' | nc -U /tmp/rook.sock
 .Xr rook-config 5 ,
 .Xr rook-plugin 7
 .Sh CAVEATS
-The
-.Ql err unknown
-fallback lists only a dozen core verbs; this page is the complete list.
-.Pp
 .Cm shot , winsize , fullscreen , hud , stats , quit
 match the whole line and so cannot take a pane suffix.
 .Pp

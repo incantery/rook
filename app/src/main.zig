@@ -1,21 +1,29 @@
 //! rook — the app and the CLI, one binary on libghostty-vt.
 //!
-//! Subcommands:
+//! Local subcommands:
 //!   win             the app (the default; a Dock launch gets here)
 //!   edit <file>     open a file in the running app's editor (`re`)
 //!   demo            headless proof: bytes → vt → screen dump
 //!   exec <cmd...>   run a command under a real PTY, dump the final screen
 //!
+//! EVERY OTHER subcommand is a control verb, sent to the running rook
+//! over its socket: `rook panes`, `rook workspaces`, `rook worktree add
+//! rook feat`, `rook run pane.zoom`, `rook shot /tmp/x.png`. The CLI is
+//! a ctl client — the same forty-odd verbs rook-ctl(7) documents, with
+//! the `printf | nc -U` ceremony removed and nothing to keep in step,
+//! because there is no verb table here to drift: the server answers or
+//! it doesn't. A lone argument naming an existing file opens it in the
+//! editor instead, so `rook main.go` does what a hand expects.
+//!
 //! Flags:
 //!   --config=DIR    run against DIR instead of ~/.config/rook, with the
 //!                   socket and data alongside it — a whole rook in one
-//!                   directory you can delete
+//!                   directory you can delete. Composes with verbs:
+//!                   `rook --config=DIR panes` asks DIR's instance.
 //!
-//! Unknown verbs used to exec rookctl, which carried everything rook did
-//! over HTTP to a Go daemon. Both are gone: rook is one binary now, and
-//! anything it cannot do it does not pretend to hand off. What the CLI
-//! surface becomes is the ctl socket (ctl.zig) and, for external systems,
-//! providers (sdk/provider).
+//! Unknown verbs once exec'd rookctl, which carried everything over HTTP
+//! to a Go daemon; both are gone. This time the verb goes to the app
+//! itself, because the app is the only process there is.
 
 const std = @import("std");
 const vt = @import("ghostty-vt");
@@ -87,45 +95,68 @@ pub fn main(init: std.process.Init) !void {
     const argv = init.minimal.args.vector;
     // Invoked as `re` (the ~/.local/bin symlink): straight to edit —
     // `re foo.zig` is the daily-driver spelling.
-    if (argv.len > 0 and std.mem.eql(u8, std.fs.path.basename(std.mem.span(argv[0])), "re"))
-        return edit(argv[1..]);
+    if (argv.len > 0 and std.mem.eql(u8, std.fs.path.basename(std.mem.span(argv[0])), "re")) {
+        edit(argv[1..]) catch _exit(1);
+        return;
+    }
     const first: []const u8 = if (argv.len > 1) std.mem.span(argv[1]) else "";
-    // Before the default below, which swallows anything flag-shaped:
-    // a Dock launch hands us -psn_…, so `-` normally means "the app".
+    // Before the flag-swallowing below: a Dock launch hands us -psn_…,
+    // so `-` normally means "the app" — but these two are answers, not
+    // window requests.
     if (std.mem.eql(u8, first, "--version") or std.mem.eql(u8, first, "-V")) {
         const bo = @import("build_options");
         std.debug.print("rook {s} (build {s})\n", .{ bo.version, bo.id });
         return;
     }
+    if (std.mem.eql(u8, first, "--help") or std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "help"))
+        return help();
     // --config BEFORE the dispatch below, because everything after this
-    // reads config: App.create loads it, and `edit` resolves the socket
-    // that --config moves.
+    // reads config: App.create loads it, and every socket client
+    // resolves the socket that --config moves.
     {
         var i: usize = 1;
         while (i < argv.len) : (i += 1) {
             const arg = std.mem.span(argv[i]);
             if (std.mem.startsWith(u8, arg, "--config=")) {
-                if (!useConfigDir(arg["--config=".len..])) return error.BadConfigDir;
+                if (!useConfigDir(arg["--config=".len..])) _exit(1);
             } else if (std.mem.eql(u8, arg, "--config")) {
                 // The spaced form too. People type both, and refusing one
                 // of them is a paper cut with no upside.
                 if (i + 1 >= argv.len) {
                     std.debug.print("rook: --config needs a directory\n", .{});
-                    return error.BadConfigDir;
+                    _exit(1);
                 }
                 i += 1;
-                if (!useConfigDir(std.mem.span(argv[i]))) return error.BadConfigDir;
+                if (!useConfigDir(std.mem.span(argv[i]))) _exit(1);
             }
         }
     }
 
-    // No subcommand = the app (a Dock launch has no argv to give, or
-    // hands us flags like -psn_… / --no-activate directly).
-    const cmd: []const u8 = if (argv.len > 1 and argv[1][0] != '-') first else "win";
+    // The subcommand is the FIRST NON-FLAG argument, wherever it sits —
+    // `rook --config=DIR panes` composes. None = the app (a Dock launch
+    // has no argv to give, or hands us -psn_… / --no-activate directly).
+    var cmd: []const u8 = "win";
+    var cmd_idx: usize = 0;
+    {
+        var i: usize = 1;
+        while (i < argv.len) : (i += 1) {
+            const a = std.mem.span(argv[i]);
+            if (a.len == 0 or a[0] == '-') {
+                if (std.mem.eql(u8, a, "--config")) i += 1; // skip its value
+                continue;
+            }
+            cmd = a;
+            cmd_idx = i;
+            break;
+        }
+    }
 
     if (std.mem.eql(u8, cmd, "demo")) return demo(init);
-    if (std.mem.eql(u8, cmd, "exec")) return exec(init, argv[2..]);
-    if (std.mem.eql(u8, cmd, "edit")) return edit(argv[2..]);
+    if (std.mem.eql(u8, cmd, "exec")) return exec(init, argv[cmd_idx + 1 ..]);
+    if (std.mem.eql(u8, cmd, "edit")) {
+        edit(argv[cmd_idx + 1 ..]) catch _exit(1);
+        return;
+    }
     if (std.mem.eql(u8, cmd, "win")) {
         // Dock/Finder launches start at "/" — a terminal's shells
         // belong in $HOME.
@@ -136,16 +167,111 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         const app = try @import("macos.zig").App.create(init);
-        const flag_start: usize = if (argv.len > 1 and argv[1][0] == '-') 1 else 2;
-        for (argv[@min(flag_start, argv.len)..]) |arg| {
+        for (argv[1..]) |arg| {
             if (std.mem.eql(u8, std.mem.span(arg), "--no-activate")) app.activate = false;
         }
         app.run();
         return;
     }
 
-    std.debug.print("rook: unknown command '{s}'\n", .{cmd});
-    return error.UnknownCommand;
+    // Everything else is a control verb for the running instance.
+    ctlPass(argv[cmd_idx..]);
+}
+
+/// The whole help. Deliberately short: the real reference is the man
+/// pages, and a --help that scrolls is a --help nobody reads.
+fn help() void {
+    const text =
+        \\rook — terminal, multiplexer, editor. One binary.
+        \\
+        \\usage:
+        \\  rook [--config DIR] [--no-activate]   open the app
+        \\  rook <file>                           open a file in the running rook (also: re <file>)
+        \\  rook <verb> [args...]                 send a control verb to the running rook
+        \\  rook exec <cmd...> | demo             headless probes
+        \\  rook --version | --help
+        \\
+        \\verbs answer over the control socket ($ROOK_SOCK, default
+        \\/tmp/rook.sock); the full list is man rook-ctl. A taste:
+        \\  panes  dump  workspaces  worktree add|remove <ws> <name>
+        \\  attention  plugins  env [apply]  run <command>  shot <path>
+        \\
+        \\config: ~/.config/rook — man rook-config. the app: man rook.
+        \\
+    ;
+    _ = write(1, text.ptr, text.len);
+}
+
+/// The CLI is a ctl client: the verb and its arguments go to the
+/// running rook as one line, the reply streams back, `err` becomes
+/// exit 1. `rook panes` IS `printf 'panes\n' | nc -U /tmp/rook.sock`
+/// with the ceremony removed — one vocabulary, no client-side verb
+/// table to drift.
+///
+/// A LONE argument that the server does not know but the filesystem
+/// does is handed to `edit` — `rook main.go` opens the file. Verb
+/// first, file second: an agent's muscle memory must never depend on
+/// what happens to be in the working directory.
+fn ctlPass(args: []const [*:0]const u8) void {
+    var line_buf: [4096]u8 = undefined;
+    var len: usize = 0;
+    for (args, 0..) |a, i| {
+        const s = std.mem.span(a);
+        if (len + s.len + 2 > line_buf.len) {
+            std.debug.print("rook: command too long\n", .{});
+            _exit(1);
+        }
+        if (i > 0) {
+            line_buf[len] = ' ';
+            len += 1;
+        }
+        @memcpy(line_buf[len..][0..s.len], s);
+        len += s.len;
+    }
+    line_buf[len] = '\n';
+    len += 1;
+
+    const sock_env = getenv("ROOK_SOCK");
+    const sock: []const u8 = if (sock_env) |sp| std.mem.span(sp) else "/tmp/rook.sock";
+    const fd = socket(1, 1, 0); // AF_UNIX, SOCK_STREAM
+    if (fd < 0) _exit(1);
+    defer _ = close(fd);
+    var addr: sockaddr_un = .{};
+    if (sock.len >= addr.sun_path.len) _exit(1);
+    @memcpy(addr.sun_path[0..sock.len], sock);
+    if (connect(fd, &addr, @sizeOf(sockaddr_un)) != 0) {
+        std.debug.print("rook: no app listening on {s} (is rook running?)\n", .{sock});
+        _exit(1);
+    }
+    var off: usize = 0;
+    while (off < len) {
+        const n = write(fd, line_buf[off..].ptr, len - off);
+        if (n <= 0) _exit(1);
+        off += @intCast(n);
+    }
+    // Half-close: the server replies per line and closes on EOF, so the
+    // reply is everything until our read returns 0.
+    _ = shutdown(fd, 1); // SHUT_WR
+
+    // The first chunk decides three ways: an ok reply streams to
+    // stdout; `err unknown` on a lone existing file becomes `edit`;
+    // any other `err` streams too but exits 1.
+    var buf: [65536]u8 = undefined;
+    var got = read(fd, &buf, buf.len);
+    if (got < 0) _exit(1);
+    const head = buf[0..@intCast(got)];
+    if (std.mem.startsWith(u8, head, "err unknown") and args.len == 1) {
+        if (access(args[0], 0) == 0) {
+            edit(args) catch _exit(1);
+            return;
+        }
+    }
+    const failed = std.mem.startsWith(u8, head, "err");
+    while (got > 0) {
+        _ = write(1, &buf, @intCast(got));
+        got = read(fd, &buf, buf.len);
+    }
+    if (failed) _exit(1);
 }
 
 const sockaddr_un = extern struct {
@@ -158,6 +284,9 @@ extern "c" fn connect(fd: c_int, addr: *const sockaddr_un, len: u32) c_int;
 extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
 extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
 extern "c" fn close(fd: c_int) c_int;
+extern "c" fn shutdown(fd: c_int, how: c_int) c_int;
+extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+extern "c" fn _exit(code: c_int) noreturn;
 
 /// `rook edit <file>` — the dogfood door: from a shell inside rook,
 /// open the file in an editor pane of THIS instance (shells inherit

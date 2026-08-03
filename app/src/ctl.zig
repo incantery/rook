@@ -1160,6 +1160,9 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         reply(fd, "ok\n");
         _exit(0);
     } else {
-        reply(fd, "err unknown (panes|edit <path>|split right|down|focus <id|dir>|dump[@id]|type[@id] <s>|enter[@id]|ctrlc[@id]|key[@id] <hex>|shot <path>|winsize <w> <h>|stats|quit)\n");
+        // The complete list lives in one place and it is not this
+        // string — a dozen-verb sampler here once masqueraded as the
+        // whole surface.
+        reply(fd, "err unknown verb (man rook-ctl lists them all)\n");
     }
 }
