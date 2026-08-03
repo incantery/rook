@@ -80,11 +80,21 @@ rm -rf /tmp/try                              # it never happened
 
 Prefer this over experimenting on the user's live instance.
 
+A FRESH instance opens its config-onboarding screen (a Go/TypeScript
+chooser) over the first pane. Check `rook welcome`; if it says `open`,
+send `rook press ESC` to dismiss it before driving the pty — an Enter
+while it is up CHOOSES a config language and opens the starter config
+in an editor, which is almost never what your keystrokes meant.
+
 ## Cautions
 
 - `rook quit` exits the app IMMEDIATELY and kills every shell in every
   pane — possibly including the one you are running in. Never send it
   to the user's instance unasked.
+- Before typing into a pane, `dump` it: chrome may be between you and
+  the pty (a fresh instance's onboarding screen — see above), and a
+  brand-new pane's shell may not be at a prompt yet. Type when the
+  screen shows a prompt and `rook welcome` says `closed`.
 - The line protocol has no quoting: arguments are joined with single
   spaces, so an argument containing a space arrives as two tokens.
 - The socket has no authentication; treat verbs against the user's
