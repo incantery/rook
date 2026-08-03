@@ -228,8 +228,16 @@ fn captureShellPath(interactive: bool) bool {
             _ = dup2(devnull, 1);
             _ = dup2(devnull, 2);
         }
-        _ = dup2(fds[1], 3);
+        // Close the read end BEFORE dup2'ing onto 3: on a clean Dock
+        // launch only 0/1/2 are open, so pipe() hands back 3 and 4 —
+        // and closing fds[0] after the dup2 closes fd 3 again, killing
+        // the very channel just created. Found in the field: the shell
+        // said "/dev/fd/3: bad file descriptor", zero bytes came back,
+        // and PATH stayed launchd's skeleton. A test launched from a
+        // shell with extra fds open never collides, which is how the
+        // bug's own proof passed.
         _ = close(fds[0]);
+        _ = dup2(fds[1], 3);
         if (fds[1] != 3) _ = close(fds[1]);
         const sh: [*:0]const u8 = getenv("SHELL") orelse "/bin/zsh";
         // /dev/fd/3 rather than >&3: every shell spells it the same way.
