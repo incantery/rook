@@ -30,9 +30,9 @@ const version = "0.1.0"
 
 // Fusion knobs, set from flags. See fuse() for what they mean.
 var (
-	fuseNames   []string
-	fuseAlive   time.Duration
-	fusePresent time.Duration
+	fuseNames    []string
+	fuseBusyRate float64
+	fusePresent  time.Duration
 )
 
 func main() {
@@ -40,7 +40,7 @@ func main() {
 	poll := flag.Duration("poll", 2*time.Second, "watch interval")
 	minTurn := flag.Duration("min-turn", 30*time.Second, "shortest finished turn worth a banner")
 	window := flag.Duration("window", 48*time.Hour, "how far back sessions are listed")
-	alive := flag.Duration("alive", 3*time.Second, "pane output younger than this proves the session is working")
+	busyRate := flag.Float64("busy-rate", 200, "pane output above this (bytes/sec) proves the session is working")
 	present := flag.Duration("present", 45*time.Second, "keyboard input younger than this means the human is watching")
 	names := flag.String("claude-names", "claude,node", "foreground program names that count as Claude Code")
 	flag.Parse()
@@ -54,7 +54,7 @@ func main() {
 		*dir = filepath.Join(home, ".claude", "projects")
 	}
 	fuseNames = strings.Split(*names, ",")
-	fuseAlive = *alive
+	fuseBusyRate = *busyRate
 	fusePresent = *present
 	sc := &Scanner{
 		Dir:    *dir,
@@ -89,6 +89,28 @@ func (a *activityCache) get() []PaneActivity {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.panes
+}
+
+// paneSample remembers one tick's byte counter so the next tick can
+// turn two counters into a rate.
+type paneSample struct {
+	bytes uint64
+	at    time.Time
+}
+
+// computeRates fills each pane's RateBps from the previous tick's
+// sample. The first sighting of a pane has no previous sample and gets
+// rate 0 — one tick of patience beats one tick of guessing.
+func computeRates(prev map[int]paneSample, panes []PaneActivity, now time.Time) {
+	for i := range panes {
+		p := &panes[i]
+		if s, ok := prev[p.ID]; ok {
+			if dt := now.Sub(s.at).Seconds(); dt > 0 && p.OutBytes >= s.bytes {
+				p.RateBps = float64(p.OutBytes-s.bytes) / dt
+			}
+		}
+		prev[p.ID] = paneSample{p.OutBytes, now}
+	}
 }
 
 // fetchActivity asks rook who is redrawing and who is typing. Degrades
@@ -229,7 +251,7 @@ func serve(c *conn, sc *Scanner, cache *activityCache) {
 			}, ""})
 		case "items.list":
 			sessions := sc.Scan(time.Now())
-			fuse(sessions, cache.get(), fuseNames, fuseAlive, fusePresent)
+			fuse(sessions, cache.get(), fuseNames, fuseBusyRate, fusePresent)
 			c.send(reply{1, req.ID, true, map[string]any{
 				"items":     items(sessions),
 				"truncated": false,
@@ -343,12 +365,15 @@ func act(c *conn, sc *Scanner, id uint64, params json.RawMessage) reply {
 // banner is suppressed.
 func watch(c *conn, sc *Scanner, cache *activityCache, poll, minTurn time.Duration) {
 	prev := map[string]State{}
+	samples := map[int]paneSample{}
 	first := true
 	for {
 		now := time.Now()
-		cache.set(fetchActivity(c))
+		panes := fetchActivity(c)
+		computeRates(samples, panes, now)
+		cache.set(panes)
 		sessions := sc.Scan(now)
-		fuse(sessions, cache.get(), fuseNames, fuseAlive, fusePresent)
+		fuse(sessions, cache.get(), fuseNames, fuseBusyRate, fusePresent)
 		cur := map[string]State{}
 		for _, s := range sessions {
 			cur[s.ID] = s.State

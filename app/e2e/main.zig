@@ -1836,6 +1836,13 @@ fn claudeWatch(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("nskey 38 40000 j"); // ⌃J — selection, same as j
     _ = try app.waitCtl("sidepane", "*idle", 2_000);
 
+    // The panel is LIVE: the transcript changes on disk and the open
+    // panel's rows follow on their own — no `r`, no reopen. (The
+    // selection stays put through the refresh: it follows the item id.)
+    try h.writeFile(sess_a, sess_a_working);
+    const live = try app.waitCtl("sidepane", "working\tFix the frobnicator", 12_000);
+    try h.expectContains(live, "*idle", "the refresh must not move the human's selection");
+
     var rootz: [104]u8 = undefined;
     _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", (try std.fmt.bufPrintZ(&rootz, "{s}", .{root})).ptr }) catch {};
 }

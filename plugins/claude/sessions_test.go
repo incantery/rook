@@ -225,12 +225,46 @@ func TestPlainStringContentAndSnip(t *testing.T) {
 	}
 }
 
-func TestFuseRedrawingPaneKillsFalseBlocked(t *testing.T) {
+func TestFuseSpinnerRateMeansWorking(t *testing.T) {
+	// A pane writing at spinner rate is an agent working, whatever the
+	// transcript says — blocked? and idle both promote.
+	ss := []Session{
+		{ID: "a", Cwd: "/w", State: StateBlocked},
+		{ID: "b", Cwd: "/x", State: StateIdle},
+	}
+	panes := []PaneActivity{
+		{Cwd: "/w", Fg: "claude", RateBps: 900, InMs: -1},
+		{Cwd: "/x", Fg: "claude", RateBps: 900, InMs: -1},
+	}
+	fuse(ss, panes, []string{"claude", "node"}, 200, 45*time.Second)
+	for _, s := range ss {
+		if s.State != StateWorking {
+			t.Fatalf("%s = %q, want working (spinner rate is proof of work)", s.ID, s.State)
+		}
+	}
+}
+
+func TestFuseCursorBlinkIsNotWork(t *testing.T) {
+	// An idle TUI's cursor blink also wrote "just now" — but at a
+	// hundredth the rate. Rate below the bar changes nothing.
 	ss := []Session{{ID: "a", Cwd: "/w", State: StateBlocked}}
-	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", OutMs: 500, InMs: -1}}
-	fuse(ss, panes, []string{"claude", "node"}, 3*time.Second, 45*time.Second)
-	if ss[0].State != StateWorking {
-		t.Fatalf("state = %q, want working (the spinner is proof of life)", ss[0].State)
+	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", RateBps: 40, InMs: -1}}
+	fuse(ss, panes, []string{"claude"}, 200, 45*time.Second)
+	if ss[0].State != StateBlocked {
+		t.Fatalf("state = %q, want blocked? (a blink is not a spinner)", ss[0].State)
+	}
+}
+
+func TestFuseEchoDoesNotCountAsWork(t *testing.T) {
+	// High output right after a keystroke is the TUI echoing the human.
+	ss := []Session{{ID: "a", Cwd: "/w", State: StateIdle}}
+	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", RateBps: 900, InMs: 500}}
+	fuse(ss, panes, []string{"claude"}, 200, 45*time.Second)
+	if ss[0].State != StateIdle {
+		t.Fatalf("state = %q, want idle (echo is the human's doing)", ss[0].State)
+	}
+	if !ss[0].Present {
+		t.Errorf("typed 500ms ago — should be present")
 	}
 }
 
@@ -239,29 +273,20 @@ func TestFuseVersionedBinaryMatchesByPath(t *testing.T) {
 	// "2.1.220" — the name says nothing, the path still says whose it is.
 	ss := []Session{{ID: "a", Cwd: "/w", State: StateBlocked}}
 	panes := []PaneActivity{{Cwd: "/w", Fg: "2.1.220",
-		Path: "/Users/u/.local/share/claude/versions/2.1.220", OutMs: 500, InMs: -1}}
-	fuse(ss, panes, []string{"claude", "node"}, 3*time.Second, 45*time.Second)
+		Path: "/Users/u/.local/share/claude/versions/2.1.220", RateBps: 900, InMs: -1}}
+	fuse(ss, panes, []string{"claude", "node"}, 200, 45*time.Second)
 	if ss[0].State != StateWorking {
 		t.Fatalf("state = %q, want working (matched by path)", ss[0].State)
-	}
-}
-
-func TestFuseQuietPaneLeavesBlockedAlone(t *testing.T) {
-	ss := []Session{{ID: "a", Cwd: "/w", State: StateBlocked}}
-	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", OutMs: 90_000, InMs: -1}}
-	fuse(ss, panes, []string{"claude"}, 3*time.Second, 45*time.Second)
-	if ss[0].State != StateBlocked {
-		t.Fatalf("state = %q, want blocked? (a quiet pane confirms the transcript)", ss[0].State)
 	}
 }
 
 func TestFuseWrongProgramOrDirIsNoMatch(t *testing.T) {
 	ss := []Session{{ID: "a", Cwd: "/w", State: StateBlocked}}
 	panes := []PaneActivity{
-		{Cwd: "/w", Fg: "vim", OutMs: 100, InMs: 100},     // right dir, wrong program
-		{Cwd: "/elsewhere", Fg: "claude", OutMs: 100, InMs: 100}, // right program, wrong dir
+		{Cwd: "/w", Fg: "vim", RateBps: 900, InMs: 100},          // right dir, wrong program
+		{Cwd: "/elsewhere", Fg: "claude", RateBps: 900, InMs: 100}, // right program, wrong dir
 	}
-	fuse(ss, panes, []string{"claude"}, 3*time.Second, 45*time.Second)
+	fuse(ss, panes, []string{"claude"}, 200, 45*time.Second)
 	if ss[0].State != StateBlocked || ss[0].Present {
 		t.Fatalf("state/present = %q/%v — an unmatched session keeps the transcript's word", ss[0].State, ss[0].Present)
 	}
@@ -273,10 +298,10 @@ func TestFusePresenceFromRecentKeyboard(t *testing.T) {
 		{ID: "b", Cwd: "/x", State: StateNeedsYou},
 	}
 	panes := []PaneActivity{
-		{Cwd: "/w", Fg: "claude", OutMs: 100, InMs: 2_000},
-		{Cwd: "/x", Fg: "claude", OutMs: 100, InMs: 300_000},
+		{Cwd: "/w", Fg: "claude", InMs: 2_000},
+		{Cwd: "/x", Fg: "claude", InMs: 300_000},
 	}
-	fuse(ss, panes, []string{"claude"}, 3*time.Second, 45*time.Second)
+	fuse(ss, panes, []string{"claude"}, 200, 45*time.Second)
 	byID := map[string]Session{}
 	for _, s := range ss {
 		byID[s.ID] = s
@@ -290,15 +315,29 @@ func TestFusePresenceFromRecentKeyboard(t *testing.T) {
 }
 
 func TestFuseResorts(t *testing.T) {
-	// Fusion can demote blocked? to working, which changes panel order.
+	// Fusion can promote blocked? to working, which changes panel order.
 	ss := []Session{
 		{ID: "was-blocked", Cwd: "/w", State: StateBlocked, Mtime: t0},
 		{ID: "stays-needs", Cwd: "/n", State: StateNeedsYou, Mtime: t0},
 	}
-	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", OutMs: 100, InMs: -1}}
-	fuse(ss, panes, []string{"claude"}, 3*time.Second, 45*time.Second)
+	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", RateBps: 900, InMs: -1}}
+	fuse(ss, panes, []string{"claude"}, 200, 45*time.Second)
 	if ss[0].ID != "stays-needs" {
-		t.Fatalf("needs-you should lead after the demotion, got %s first", ss[0].ID)
+		t.Fatalf("needs-you should lead after the promotion, got %s first", ss[0].ID)
+	}
+}
+
+func TestComputeRates(t *testing.T) {
+	prev := map[int]paneSample{}
+	p1 := []PaneActivity{{ID: 1, OutBytes: 10_000}}
+	computeRates(prev, p1, t0)
+	if p1[0].RateBps != 0 {
+		t.Fatalf("first sighting must have rate 0, got %v", p1[0].RateBps)
+	}
+	p2 := []PaneActivity{{ID: 1, OutBytes: 12_000}}
+	computeRates(prev, p2, t0.Add(2*time.Second))
+	if p2[0].RateBps != 1000 {
+		t.Fatalf("2000 bytes over 2s = 1000 B/s, got %v", p2[0].RateBps)
 	}
 }
 

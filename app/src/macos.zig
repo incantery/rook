@@ -489,6 +489,11 @@ pub const App = struct {
     /// caller after it releases — startPluginFetch takes the lock itself,
     /// so calling it inline would deadlock. Same shape as pending_cmd.
     plug_refetch: bool = false,
+    /// The panel's self-refresh, raised by drawFrame's tick (which runs
+    /// under draw_lock, which startPluginFetch also takes) and acted on
+    /// by drawNow after the lock is gone — the pending_cmd arrangement,
+    /// for the same reason.
+    plug_auto_wanted: bool = false,
 
     /// Where the panel's keys go. Enter descends into the selected row's
     /// actions, and an action the plugin marked `confirm` descends once
@@ -904,6 +909,12 @@ pub const App = struct {
         // drain too or a `gd` reply sits in the queue until you happen
         // to press a key.
         self.drainPendingCmd();
+        // Same shape: startPluginFetch takes draw_lock, so the frame
+        // only raised the flag.
+        if (self.plug_auto_wanted) {
+            self.plug_auto_wanted = false;
+            if (!self.plug_loading.load(.acquire)) self.startPluginFetch();
+        }
     }
 
     pub fn requestShot(self: *App, path: []const u8) bool {
@@ -3966,6 +3977,18 @@ pub const App = struct {
         // stays live during idle — but only a text CHANGE causes a draw.
         if (tick % 60 == 0) self.refreshHudLocked(t_start);
 
+        // The plugin panel refreshes itself while it is open (~2s): a
+        // watcher whose panel shows open-time state is a photograph, not
+        // a panel. Rows mode only — a menu or a confirm mid-interaction
+        // must not have the ground move under it — and only after one
+        // GOOD answer (plug.live): a failing plugin is retried by the
+        // human's `r`, not by a clock.
+        if (tick % 240 == 0 and self.side_open and self.side_panel == .plugin and
+            self.plug_mode == .rows and self.plug.live)
+        {
+            self.plug_auto_wanted = true;
+        }
+
         // Which-key reveal: an armed leader that has sat unanswered for
         // wk_delay_s gets the menu. Checked on every tick because the
         // reveal is TIME crossing a threshold, not state changing — no
@@ -5370,7 +5393,25 @@ pub const App = struct {
                 if (app.plug_name_len == args.name_len and
                     std.mem.eql(u8, app.plug_name[0..app.plug_name_len], args.name[0..args.name_len]))
                 {
+                    // The selection follows the item's ID, not its row
+                    // number: with the panel refreshing itself, a list
+                    // that re-sorts under the cursor must not carry the
+                    // cursor to a different item.
+                    var keep: [64]u8 = undefined;
+                    var keep_len: usize = 0;
+                    if (app.plug_sel < app.plug.n) {
+                        const cur = app.plug.items[app.plug_sel].id.get();
+                        keep_len = cur.len;
+                        @memcpy(keep[0..cur.len], cur);
+                    }
                     app.plug = snap;
+                    app.plug_sel = 0;
+                    if (keep_len > 0) for (app.plug.slice(), 0..) |*it, idx| {
+                        if (std.mem.eql(u8, it.id.get(), keep[0..keep_len])) {
+                            app.plug_sel = idx;
+                            break;
+                        }
+                    };
                     if (app.plug_sel >= app.plug.n) app.plug_sel = app.plug.n -| 1;
                     // A new list means the action menu was opened on an
                     // item that may no longer be the one under the cursor.
@@ -5393,6 +5434,7 @@ pub const App = struct {
             self.gpa.destroy(a);
         }
     }
+
 
     /// The onboarding prompt.
     ///
@@ -5689,6 +5731,7 @@ pub const App = struct {
             const tm = p.term() orelse (if (p.under) |*ut| ut else continue);
             const out_ms = tm.session.last_out_ms.load(.monotonic);
             const in_ms = tm.session.last_in_ms.load(.monotonic);
+            const out_bytes = tm.session.out_bytes.load(.monotonic);
             const out_age: i64 = if (out_ms == 0) -1 else now - out_ms;
             const in_age: i64 = if (in_ms == 0) -1 else now - in_ms;
             var fgbuf: [1024]u8 = undefined;
@@ -5697,7 +5740,7 @@ pub const App = struct {
             const cwd: []const u8 = if (self.paneCwd(p)) |c| std.mem.span(c) else "";
             if (as_json) {
                 if (!first) w.writeAll(",") catch return;
-                w.print("{{\"id\":{d},\"outMs\":{d},\"inMs\":{d},\"fg\":", .{ p.id, out_age, in_age }) catch return;
+                w.print("{{\"id\":{d},\"outMs\":{d},\"inMs\":{d},\"outBytes\":{d},\"fg\":", .{ p.id, out_age, in_age, out_bytes }) catch return;
                 plugpkg.jsonStringTo(w, fg) catch return;
                 // The full path too: Claude Code's versioned install runs
                 // as a binary named `2.1.220`, and only the path still
@@ -5708,7 +5751,7 @@ pub const App = struct {
                 plugpkg.jsonStringTo(w, cwd) catch return;
                 w.writeAll("}") catch return;
             } else {
-                w.print("{d}\t{d}\t{d}\t{s}\t{s}\n", .{ p.id, out_age, in_age, fg, cwd }) catch return;
+                w.print("{d}\t{d}\t{d}\t{d}\t{s}\t{s}\n", .{ p.id, out_age, in_age, out_bytes, fg, cwd }) catch return;
             }
             first = false;
         };

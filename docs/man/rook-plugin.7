@@ -291,11 +291,11 @@ or
 .Ql ESC
 cancels \(em a confirm that any key dismisses is not a confirm.
 .Pp
-The panel opens holding the keys, and \(^HJKL treats it as one more
+The panel opens holding the keys, and ^HJKL treats it as one more
 split: the away direction
-.Pq \(^H for a right-edge panel
-hands the keys back to the panes, \(^L from the edge pane walks back
-in, and \(^J / \(^K move the selection.
+.Pq ^H for a right-edge panel
+hands the keys back to the panes, ^L from the edge pane walks back
+in, and ^J / ^K move the selection.
 .Sh THE SHIPPED PLUGIN
 rook's first first-party plugin rides inside the bundle at
 .Pa /Applications/rook.app/Contents/MacOS/rook-plugin-claude
@@ -347,8 +347,11 @@ Flags, for a sandbox or a different taste:
 .Fl -min-turn ,
 .Fl -window
 .Pq how far back sessions are listed; default 48h ,
-.Fl -alive , Fl -present , Fl -claude-names
+.Fl -busy-rate , Fl -present , Fl -claude-names
 .Pq the fusion knobs .
+Measured, not guessed: a working Claude TUI writes ~500 B/s, an idle
+one ~3, a dialog waiting on a human 0 \(em the default busy-rate of 200
+sits between the orders of magnitude.
 Actions:
 .Ql open
 splits a shell at the session's directory

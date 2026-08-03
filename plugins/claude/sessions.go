@@ -77,13 +77,24 @@ type Scanner struct {
 // ms since the child last wrote / the human last typed (-1 = never),
 // the foreground program, the shell's cwd.
 type PaneActivity struct {
-	ID    int    `json:"id"`
-	OutMs int64  `json:"outMs"`
-	InMs  int64  `json:"inMs"`
-	Fg    string `json:"fg"`
-	Path  string `json:"path"` // full exec path; the basename can lie
-	Cwd   string `json:"cwd"`
+	ID       int    `json:"id"`
+	OutMs    int64  `json:"outMs"`
+	InMs     int64  `json:"inMs"`
+	OutBytes uint64 `json:"outBytes"` // total ever written by the child
+	Fg       string `json:"fg"`
+	Path     string `json:"path"` // full exec path; the basename can lie
+	Cwd      string `json:"cwd"`
+
+	// Computed between two samples by the watch loop, not sent by rook:
+	// how fast the child is writing right now. A timestamp cannot tell a
+	// working spinner from an idle cursor blink — both are "output just
+	// now" — but their rates differ by orders of magnitude.
+	RateBps float64 `json:"-"`
 }
+
+// How close on the heels of a keystroke output still counts as echo:
+// the TUI re-rendering because the human typed is not the agent working.
+const echoGuardMs = 3000
 
 // fuse folds the substrate's view into the transcript's. A session is
 // matched to panes by cwd plus a Claude-looking foreground program;
@@ -91,28 +102,32 @@ type PaneActivity struct {
 // outside rook) keep their transcript-only state untouched.
 //
 // Two corrections, one per direction of the pty:
-//   - OUTPUT: a "blocked?" whose pane is still redrawing is a long tool
-//     run, not a stuck approval — the spinner is proof of life the
-//     transcript cannot give, because a running tool logs nothing.
+//   - OUTPUT: a pane writing at spinner rate is an agent WORKING,
+//     whatever the transcript says — a running tool logs nothing, a long
+//     think logs nothing, and both repaint the whole time. The signal is
+//     the byte RATE, not the last-output clock: an idle TUI's cursor
+//     blink also wrote "just now", but at a hundredth the rate. Output
+//     hot on the heels of typing is echo and does not count.
 //   - INPUT: a human who typed in that pane moments ago is PRESENT, and
 //     a banner for the pane you are looking at is noise. The state
 //     still shows in the panel; only the interruption is suppressed.
-func fuse(sessions []Session, panes []PaneActivity, names []string, alive, present time.Duration) {
+func fuse(sessions []Session, panes []PaneActivity, names []string, busyRate float64, present time.Duration) {
 	for i := range sessions {
 		s := &sessions[i]
-		outBest, inBest := int64(-1), int64(-1)
+		inBest := int64(-1)
+		busy := false
 		for _, p := range panes {
 			if p.Cwd != s.Cwd || !claudeLike(p, names) {
 				continue
 			}
-			if p.OutMs >= 0 && (outBest < 0 || p.OutMs < outBest) {
-				outBest = p.OutMs
-			}
 			if p.InMs >= 0 && (inBest < 0 || p.InMs < inBest) {
 				inBest = p.InMs
 			}
+			if p.RateBps >= busyRate && (p.InMs < 0 || p.InMs > echoGuardMs) {
+				busy = true
+			}
 		}
-		if s.State == StateBlocked && outBest >= 0 && outBest < alive.Milliseconds() {
+		if busy && (s.State == StateBlocked || s.State == StateIdle) {
 			s.State = StateWorking
 		}
 		s.Present = inBest >= 0 && inBest < present.Milliseconds()

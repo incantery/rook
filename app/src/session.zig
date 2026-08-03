@@ -153,6 +153,11 @@ pub const Session = struct {
     /// main thread the other, and any thread reads both.
     last_out_ms: std.atomic.Value(i64) = .init(0),
     last_in_ms: std.atomic.Value(i64) = .init(0),
+    /// Total bytes the child has ever written. A timestamp alone cannot
+    /// tell a spinner from a cursor blink — both are "output just now" —
+    /// but their RATES differ by an order of magnitude, and a rate needs
+    /// two samples of a counter.
+    out_bytes: std.atomic.Value(u64) = .init(0),
 
     // Geometry for XTWINOPS size reports; updated by resize().
     cols: u16,
@@ -404,6 +409,7 @@ pub const Session = struct {
             if (n == 0) break;
             _ = @import("stats.zig").global.bytes_in.fetchAdd(n, .monotonic);
             self.last_out_ms.store(clockMs(), .monotonic);
+            _ = self.out_bytes.fetchAdd(n, .monotonic);
             // Yield to a waiting renderer before re-acquiring.
             while (self.snapshot_wanted.load(.acquire)) _ = usleep(50);
             self.mutex.lock();
