@@ -131,7 +131,14 @@ install:
 	ln -sf $(APP)/Contents/MacOS/rook $(HOME)/.local/bin/rook
 	@# `re` = rook edit (argv[0] dispatch).
 	ln -sf $(APP)/Contents/MacOS/rook $(HOME)/.local/bin/re
-	@echo "installed $(APP) (v$(REL_VERSION), build $(BUILD)) + ~/.local/bin/{rook,re}"
+	@# Man pages. ~/.local/share/man is on the default macOS manpath, so
+	@# `man rook` works with no MANPATH ceremony — and an agent's first
+	@# question about rook has a canonical answer.
+	mkdir -p $(HOME)/.local/share/man/man1 $(HOME)/.local/share/man/man5 $(HOME)/.local/share/man/man7
+	cp docs/man/rook.1 docs/man/re.1 $(HOME)/.local/share/man/man1/
+	cp docs/man/rook-config.5 $(HOME)/.local/share/man/man5/
+	cp docs/man/rook-ctl.7 docs/man/rook-plugin.7 $(HOME)/.local/share/man/man7/
+	@echo "installed $(APP) (v$(REL_VERSION), build $(BUILD)) + ~/.local/bin/{rook,re} + man pages"
 	@echo "quit + relaunch rook to pick it up"
 
 # The real app, driven end to end: each scenario spawns a SANDBOXED rook

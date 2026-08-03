@@ -1,0 +1,311 @@
+.Dd August 3, 2026
+.Dt ROOK-CTL 7
+.Os
+.Sh NAME
+.Nm rook-ctl
+.Nd rook's control socket protocol
+.Sh DESCRIPTION
+Every running
+.Xr rook 1
+serves a Unix-domain control socket that exposes the whole application:
+what every pane shows, what the renderer drew, and every input the
+keyboard could produce.
+It exists so that scripts \(em and above all agents \(em can verify their own
+work against the real app instead of asking a human to look.
+.Pp
+There is no client program; the protocol is plain enough not to need one:
+.Bd -literal -offset indent
+printf 'panes\en' | nc -U /tmp/rook.sock
+.Ed
+.Ss Connection
+.Bl -bullet -compact
+.It
+Socket path:
+.Ev ROOK_SOCK ,
+default
+.Pa /tmp/rook.sock .
+A sandboxed instance
+.Pq Ql rook --config=DIR
+serves
+.Pa DIR/rook.sock .
+.It
+Commands are newline-delimited, several per connection if you like.
+A line over 4096 bytes drops the connection.
+.It
+Replies are plain text.
+Errors start with
+.Ql err .
+.It
+When the socket binds, the app prints
+.Ql rook ctl: listening on <path>
+to stderr \(em the readiness signal.
+.It
+A second instance finding its socket already served by a live rook runs
+.Em without
+a control surface and says so on stderr; set
+.Ev ROOK_SOCK
+before launching to give it one.
+A stale socket file left by a dead instance is unlinked and reused.
+.It
+There is no authentication.
+Filesystem permissions on the socket are the whole security model:
+whoever can connect can read every pane, drive input, take screenshots,
+and
+.Cm quit
+the app.
+.El
+.Ss Pane addressing
+A verb may carry a pane id suffix:
+.Ql dump@3 ,
+.Ql type@3 <text> .
+Honoured by
+.Cm dump , Cm type , Cm enter , Cm ctrlc , Cm key ;
+everything else acts on the focused pane or the app.
+Ids come from
+.Cm panes .
+.Sh READING THE APP
+.Bl -tag -width "workspaces"
+.It Cm dump Ns Op @ Ns Ar id
+The pane's content as text:
+.Ql pane <id> grid <c>x<r>
+then the screen \(em the terminal's plain text, or the editor's buffer view.
+The ground truth for
+.Dq what is rook showing .
+.It Cm panes
+One line per pane across all spaces and tabs:
+space, tab, id, pixel rect, grid, zoom flag, and whether it is a terminal
+or an editor
+.Pq with the document name .
+.Ql *
+marks the focused pane and current space.
+.It Cm tabs
+Tabs of the current space with pane counts and bell flags.
+.It Cm workspaces
+The workspace registry, freshly read from sqlite:
+.Ql name<TAB>root
+per line, or
+.Ql none .
+.It Cm docs
+Open documents and how many panes hold each \(em one file open twice is one
+document.
+.It Cm lsp
+Language-server state: enabled or not, per-server status, and the focused
+editor's diagnostics
+.Pq gutter counts and each message .
+.It Cm statusbar
+The chrome, with hit-test coordinates: workspace/branch/cwd segments,
+top-bar and status-bar layouts, tab style, activity-bar rail entries.
+.It Cm whichkey
+The which-key sheet:
+.Ql closed ,
+or armed state plus each visible chord hint with its screen position.
+.It Cm palette
+The command palette:
+.Ql closed ,
+or its mode
+.Pq commands, files, workspaces, plugins ,
+current filter, and rows; a
+.Ql *
+marks the selection.
+Files mode adds the index root and count.
+.It Cm sidepane
+The side panel:
+.Ql closed ,
+or which edge and tenant
+.Pq plugin, config, search
+plus the tenant's rows.
+.It Cm welcome
+The onboarding screen, if open, and its choices.
+.It Cm attention
+The attention inbox: one
+.Ql seq<TAB>from<TAB>title<TAB>body
+line per raise
+.Pq see Xr rook-plugin 7 ,
+or
+.Ql none .
+.It Cm search
+Copy-mode search state of the focused terminal.
+.It Cm clipboard , Cm ime , Cm notify
+Pasteboard content and write-allowance; input-method state; last user
+notification.
+Introspection for tests.
+.It Cm hud
+The performance HUD line.
+.It Cm stats
+The perf counters report.
+.Ql stats reset
+zeroes them.
+.It Cm boottime
+Startup phase timings in microseconds.
+.It Cm version
+.Ql rook <version> build=<id> .
+.El
+.Sh DRIVING INPUT
+.Bl -tag -width "nskey k m c"
+.It Cm run Ar name
+Execute a registry command by id
+.Pq Ql pane.split-right , Ql config.apply , ... ,
+alias, or
+.Ql tab.select-N .
+.Cm commands
+lists every id; this is the highest-level way to drive rook.
+.It Cm commands
+The command registry:
+.Ql id<TAB>category: title<TAB>keys<TAB>:ExName
+per command.
+Every command is also an ex-command inside the editor.
+.It Cm press Ar key
+One keystroke through the full chrome pipeline
+.Pq leader, which-key, palette :
+a single character or
+.Cm TAB , SPACE , ESC , RET , BS .
+Replies
+.Ql consumed
+.Pq chrome ate it
+or
+.Ql typed
+.Pq it reached the pane .
+.It Cm type Ns Oo @ Ns Ar id Oc Ar text
+Write
+.Ar text
+into the pane's pty
+.Pq or editor
+verbatim.
+.It Cm enter Ns Op @ Ns Ar id , Cm ctrlc Ns Op @ Ns Ar id
+Send return / interrupt to the pane.
+.It Cm key Ns Oo @ Ns Ar id Oc Ar hex
+Raw bytes to the pane, hex-encoded
+.Pq Ql 1b5b41 No is Up Arrow .
+.It Cm nskey Ar keycode mods-hex chars
+A synthetic AppKit key event, for chords the higher layers cannot spell.
+.It Cm paste Op Ar text
+With
+.Ar text :
+paste it
+.Pq Ql \een No escapes supported .
+Bare: paste the real pasteboard, echoing what was pasted.
+.It Cm click Ar x y , Cm drag Ar x1 y1 x2 y2 , Cm wheel Ar x y lines
+Mouse, in pixels.
+.It Cm copy
+The current selection's text, or
+.Ql err nothing selected .
+.El
+.Sh LAYOUT AND WINDOW
+.Bl -tag -width "winsize w h"
+.It Cm split Cm right Ns | Ns Cm down
+Split the focused pane.
+.It Cm focus Ar id Ns | Ns Cm left Ns | Ns Cm right Ns | Ns Cm up Ns | Ns Cm down
+Move focus by id or direction.
+.It Cm zoom
+Toggle pane zoom.
+.It Cm close
+Close the focused pane
+.Pq the cmd-W path .
+.It Cm tab Cm new Ns | Ns Cm next Ns | Ns Cm prev Ns | Ns Ar n
+Tab management.
+.It Cm winsize Ar w h
+Resize the window
+.Pq points, minimum 100 .
+.It Cm fullscreen
+Toggle fullscreen.
+.It Cm palette-open
+Open the command palette.
+.It Cm edit Ar path
+Open
+.Ar path
+in the editor.
+Prefer absolute paths: a relative one resolves against the
+.Em app's
+working directory, not yours.
+.Pq this is the verb Xr re 1 speaks .
+.It Cm shot Ar path
+Write a PNG of the window to
+.Ar path
+\(em rook's own Metal drawable, so no screen-recording permission is
+involved.
+Fails
+.Ql err busy
+or
+.Ql err timeout
+.Pq 2s .
+.El
+.Sh CONFIG AND PLUGINS
+.Bl -tag -width "plugin-show name"
+.It Cm env
+Pending configuration changes:
+.Ql checking ,
+.Ql no pending changes ,
+.Ql broken
+followed by the config program's own output, or
+.Ql pending:N
+with one
+.Ql + ,
+.Ql - ,
+.Ql ~
+row per changed node.
+See
+.Xr rook-config 5 .
+.It Cm env Cm apply
+Apply the pending diff \(em the whole diff; there is no partial apply.
+.It Cm plugins
+Every declared plugin:
+name, load mode, state, grants, capabilities it asked for, version,
+and \(em for an up, sourced, unpinned plugin \(em its
+.Ql sha256=
+ready for pinning.
+Failures carry their reason.
+.It Cm plugin-show Ar name
+Open the plugin panel on
+.Ar name .
+.It Cm plugin Ar name op Op Ar params-json
+Call a plugin op directly and print its raw answer.
+Refused with
+.Ql err not granted
+unless the config grants
+.Ar op .
+See
+.Xr rook-plugin 7 .
+.El
+.Sh LIFECYCLE
+.Bl -tag -width "stats reset"
+.It Cm quit
+.Ql ok ,
+then immediate exit \(em no teardown, the socket file is left behind
+.Pq the next launch cleans it up .
+.El
+.Sh EXAMPLES
+Is the app up, and what is it showing?
+.Bd -literal -offset indent
+printf 'version\enpanes\endump\en' | nc -U /tmp/rook.sock
+.Ed
+.Pp
+Drive the leader chord and see what the which-key sheet offers:
+.Bd -literal -offset indent
+printf 'press SPACE\enwhichkey\en' | nc -U /tmp/rook.sock
+.Ed
+.Pp
+Prove a change visually:
+.Bd -literal -offset indent
+printf 'shot /tmp/rook.png\en' | nc -U /tmp/rook.sock
+.Ed
+.Pp
+Run a command the way the palette would:
+.Bd -literal -offset indent
+printf 'run pane.split-right\en' | nc -U /tmp/rook.sock
+.Ed
+.Sh SEE ALSO
+.Xr rook 1 ,
+.Xr rook-config 5 ,
+.Xr rook-plugin 7
+.Sh CAVEATS
+The
+.Ql err unknown
+fallback lists only a dozen core verbs; this page is the complete list.
+.Pp
+.Cm shot , winsize , fullscreen , hud , stats , quit
+match the whole line and so cannot take a pane suffix.
+.Pp
+.Cm plugin
+is matched as a prefix, so a misspelling like
+.Ql pluginx
+is parsed as a plugin call rather than an unknown verb.

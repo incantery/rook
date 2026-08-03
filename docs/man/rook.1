@@ -1,0 +1,257 @@
+.Dd August 3, 2026
+.Dt ROOK 1
+.Os
+.Sh NAME
+.Nm rook
+.Nd native terminal, multiplexer and editor
+.Sh SYNOPSIS
+.Nm
+.Op Fl -config Ar dir
+.Op Cm win
+.Op Fl -no-activate
+.Nm
+.Cm edit Ar file
+.Nm
+.Cm exec Ar command ...
+.Nm
+.Cm demo
+.Nm
+.Fl -version
+.Nm re
+.Ar file
+.Sh DESCRIPTION
+.Nm
+is a native macOS terminal, multiplexer and editor in one binary: splits,
+tabs and workspace-scoped spaces; a vim-shaped modal editor; LSP
+diagnostics; and a declarative environment graph for its own chrome and
+keybindings.
+It renders through its own Metal pipeline and owns its ptys in-process
+.Pq quitting rook kills every shell in every space .
+There is no daemon.
+.Pp
+Every running instance serves a control socket that exposes the whole
+application to scripts and agents \(em see
+.Xr rook-ctl 7 .
+Configuration is a graph of nodes, usually emitted by a small program you
+write \(em see
+.Xr rook-config 5 .
+External systems are reached through plugins \(em see
+.Xr rook-plugin 7 .
+.Sh SUBCOMMANDS
+The first argument selects a subcommand.
+An argument starting with
+.Ql -
+is not treated as a subcommand: the app launches, which is what makes
+plain
+.Nm
+and Dock launches
+.Pq argv like Fl psn_...
+work.
+.Bl -tag -width "exec command"
+.It Cm win
+The default: open the application window.
+When launched from the Dock or Finder with a working directory of
+.Pa / ,
+rook changes to
+.Ev $HOME
+first.
+Once the control socket is bound, rook prints
+.Ql rook ctl: listening on <path>
+to stderr \(em tooling can treat that line as the
+.Dq app is up
+signal.
+.It Cm edit Ar file
+Open
+.Ar file
+in the
+.Em running
+rook, through the control socket.
+This is a thin client: if no instance is listening it fails with
+.Ql no app listening on <sock> (is rook running?) .
+Exactly one file; a relative path is resolved against the caller's working
+directory before sending.
+Installed as
+.Xr re 1 ,
+which is the same binary dispatching on
+.Ql argv[0] .
+.It Cm exec Ar command ...
+Headless probe: run
+.Ar command
+under a real 80x24 pty
+.Pq with Ev TERM Ns =xterm-256color , Ev COLORTERM Ns =truecolor ,
+pump until it exits, and print the final screen to stdout.
+Useful for checking what a terminal program actually draws.
+.It Cm demo
+Feed a few canned escape-sequence lines through the terminal emulator and
+print the result.
+A smoke test that the VT stack is alive; no window, no socket.
+.El
+.Sh OPTIONS
+.Bl -tag -width Fl
+.It Fl -config Ar dir , Fl -config Ns = Ns Ar dir
+Run a whole rook out of
+.Ar dir :
+its config directory, its control socket
+.Pq Ar dir Ns /rook.sock ,
+and its data root
+.Pq Ar dir
+as
+.Ev XDG_DATA_HOME ,
+which also relocates the plugin cache.
+The directory is created if missing.
+Delete the directory and the instance never happened.
+.Pp
+Both variables are exported to shells spawned inside, so
+.Nm re
+from a pane inside the sandbox reaches the sandbox.
+Values already present in the parent environment are
+.Em not
+overridden \(em an instance launched from inside another rook's pane
+deliberately inherits that rook's socket unless you unset
+.Ev ROOK_SOCK
+first.
+.Pp
+The option composes only with the app itself:
+.Ql rook --config=DIR
+and
+.Ql rook win --config=DIR
+work;
+combined with
+.Cm edit
+or
+.Cm exec
+the flag is taken as an ordinary argument.
+.It Fl -no-activate
+Open the window without stealing focus.
+Only meaningful with
+.Cm win ;
+this is how test harnesses launch instances without disturbing the person
+at the keyboard.
+.It Fl -version , Fl V
+Print
+.Ql rook <version> (build <id>)
+and exit.
+.El
+.Sh AUTOMATION
+Everything the window shows can be read, and everything the keyboard does
+can be driven, over the control socket \(em one connection, newline-delimited
+commands:
+.Bd -literal -offset indent
+printf 'panes\en' | nc -U /tmp/rook.sock
+.Ed
+.Pp
+The full verb set
+.Pq screen dumps, screenshots, synthetic input, layout, config, plugins
+is documented in
+.Xr rook-ctl 7 .
+The socket is also how an agent verifies its own work against the real
+app instead of asking a human to look.
+.Sh ENVIRONMENT
+.Bl -tag -width ROOK_LSP_TYPESCRIPT
+.It Ev ROOK_SOCK
+Control socket path.
+Default
+.Pa /tmp/rook.sock .
+Read by the app when binding and by
+.Cm edit Ns / Ns Nm re
+when connecting.
+.It Ev XDG_CONFIG_HOME
+Config directory is
+.Pa $XDG_CONFIG_HOME/rook ,
+else
+.Pa ~/.config/rook .
+.It Ev XDG_DATA_HOME
+Data root: the workspace registry
+.Pa rook/rook.db
+and the plugin cache
+.Pa rook/plugins/
+live under it, else under
+.Pa ~/.local/share .
+.It Ev SHELL
+Shell spawned in each new pane.
+Default
+.Pa /bin/zsh .
+.It Ev PATH
+Searched for language servers and for the config-program toolchains
+.Pq Ql go , Ql npx .
+.It Ev VIRTUAL_ENV
+Selects the Python interpreter for the Python language server.
+.It Ev ROOK_LSP_GO , Ev ROOK_LSP_PYTHON , Ev ROOK_LSP_TYPESCRIPT
+Override the respective language-server command line
+.Pq space-split .
+.El
+.Sh FILES
+.Bl -tag -width "~/.local/share/rook/plugins/" -compact
+.It Pa ~/.config/rook/environment.json
+The applied environment graph; wins over TOML when present.
+See
+.Xr rook-config 5 .
+.It Pa ~/.config/rook/config.toml
+Fallback configuration when no graph exists.
+.It Pa ~/.config/rook/main.go , Pa ~/.config/rook/config.ts
+The config program, if you use one.
+.It Pa ~/.local/share/rook/rook.db
+Workspace registry
+.Pq sqlite, opened read-only ; absence is a normal state.
+.It Pa ~/.local/share/rook/plugins/
+Downloaded plugin binaries and their
+.Pa .sha256
+sidecars.
+.It Pa /tmp/rook.sock
+Default control socket.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Cm edit
+fails when no instance is listening or the app refuses the open;
+.Cm exec
+fails without a command.
+A second instance whose socket is already served by another rook still
+runs, but without a control surface
+.Pq a warning is printed to stderr ;
+set
+.Ev ROOK_SOCK
+to give it one.
+.Sh EXAMPLES
+Try rook without touching your real configuration, then throw it away:
+.Bd -literal -offset indent
+rook --config=/tmp/try-rook
+rm -rf /tmp/try-rook
+.Ed
+.Pp
+Open a file in the running instance from any pane:
+.Bd -literal -offset indent
+re src/main.zig
+.Ed
+.Pp
+Ask the running app what it is showing:
+.Bd -literal -offset indent
+printf 'dump\en' | nc -U /tmp/rook.sock
+.Ed
+.Sh SEE ALSO
+.Xr re 1 ,
+.Xr rook-config 5 ,
+.Xr rook-ctl 7 ,
+.Xr rook-plugin 7
+.Pp
+.Lk https://github.com/incantery/rook
+.Sh CAVEATS
+There is no
+.Fl -help :
+an argument starting with
+.Ql -
+launches the app, so
+.Ql rook --help
+opens a window.
+This page is the help.
+.Pp
+.Ql rook Ar file
+does not open the file \(em it is an unknown-command error.
+Use
+.Nm re Ar file
+.Pq or Cm edit ,
+which needs a running instance.
+.Pp
+Shells die with the app: rook owns its ptys in-process, so quitting rook
+ends every shell in every space.
+This is a design choice, not an accident.

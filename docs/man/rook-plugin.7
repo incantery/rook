@@ -1,0 +1,307 @@
+.Dd August 3, 2026
+.Dt ROOK-PLUGIN 7
+.Os
+.Sh NAME
+.Nm rook-plugin
+.Nd rook's plugin protocol
+.Sh DESCRIPTION
+A rook plugin is a separate process speaking newline-delimited JSON over
+its own stdin and stdout.
+rook spawns it, asks it questions
+.Pq Cm items.list , Cm items.act ,
+renders its answers in the side panel, and lets it ask two things back
+.Pq Cm attention.raise , Cm session.spawn .
+Every operation, in both directions, is gated by
+.Em grants
+declared in the configuration \(em a plugin can do exactly what its
+declaration says and nothing else.
+.Pp
+Anything a plugin can be: a shell script, a Go binary, anything that reads
+lines and writes lines.
+The canonical minimal plugin,
+.Pa examples/hello-plugin
+in the rook repository, is 1.3 KB of POSIX sh.
+.Sh DECLARING
+A plugin is a node in the environment graph
+.Pq see Xr rook-config 5 :
+.Bd -literal -offset indent
+{"id": "plugin.hello", "kind": "plugin", "name": "hello",
+ "command": ["/path/to/hello-plugin"],
+ "load": "lazy", "grants": ["items.list", "attention.raise"]}
+.Ed
+.Bl -tag -width "command" -offset indent
+.It Cm name
+Required.
+The registry key, and the cache filename for sourced plugins.
+.It Cm command
+Argv of a binary already on disk.
+.It Cm source
+A URL to fetch the binary from
+.Pq Ql https:// No or Ql file:// .
+Mutually exclusive with
+.Cm command .
+.It Cm sha256
+The pin: lowercase hex digest the downloaded binary must match.
+.It Cm load
+.Ql eager
+.Pq spawn at launch
+or
+.Ql lazy
+.Pq spawn on first use; the default .
+.It Cm grants
+The ops this plugin may be asked, and may ask \(em by name, both
+directions.
+.El
+.Pp
+SDK spellings:
+.Ql e.Plugin(name, argv, load, grants...) ,
+.Ql e.PluginFrom(source, grants...) ,
+.Ql e.PluginPinned(source, sha256, grants...) .
+.Sh LIFECYCLE
+For a
+.Cm source
+plugin, first use downloads via curl to
+.Pa <cache>/<name>.part
+and renames into place
+.Pq an interrupted fetch cannot leave a half binary that looks present ;
+the cache is
+.Pa $XDG_DATA_HOME/rook/plugins/ ,
+default
+.Pa ~/.local/share/rook/plugins/ .
+.Pp
+The binary is verified on
+.Em every
+launch, not only after download:
+.Bl -bullet -offset indent -compact
+.It
+With a
+.Cm sha256
+pin: mismatch is refusal.
+.It
+Without one: trust-on-first-use \(em the first hash is recorded in a
+.Pa .sha256
+sidecar, and a later change is refusal
+.Pq Dq changed since it was downloaded \(em delete it to accept the new one .
+.It
+A refusal never re-downloads.
+The plugin is marked failed, its reason readable via
+.Ql ctl plugins
+and in the panel.
+.El
+.Pp
+rook offers the pin rather than making you compute it: while a sourced
+plugin is up and unpinned,
+.Ql ctl plugins
+prints its
+.Ql sha256= ,
+and
+.Ql y
+in the plugin panel copies a ready-to-paste
+.Ql PluginPinned(...)
+line
+.Em in the language your config program is written in .
+.Pp
+A spawned plugin's stderr goes to
+.Pa /dev/null ;
+a plugin that fails stays failed until relaunch.
+The failure is a row in
+.Ql ctl plugins ,
+never a crash of rook.
+.Sh THE PROTOCOL
+Version 1.
+One JSON object per line, at most 1 MiB.
+Requests from rook:
+.Bd -literal -offset indent
+{"v":1,"id":7,"op":"items.list","deadlineMs":9750,
+ "params":{"root":"/path/to/repo","limit":128}}
+.Ed
+.Pp
+Replies carry the same
+.Cm id :
+.Bd -literal -offset indent
+{"v":1,"id":7,"ok":true,"result":{...}}
+{"v":1,"id":7,"ok":false,"error":"why"}
+.Ed
+.Pp
+Answer within
+.Cm deadlineMs
+.Pq rook waits 10 s by default and gives you that minus a grace .
+Frames from the plugin
+.Em with
+an
+.Ql op
+field are requests to rook; without one they are replies.
+That is the whole framing rule, and it is what lets a plugin raise an
+attention in the middle of answering a call.
+.Ss Operations rook sends
+.Bl -tag -width "items.list"
+.It Cm describe
+The handshake, sent once after spawn; not grant-gated.
+Reply:
+.Bd -literal -offset indent
+{"v":1,"id":1,"ok":true,"result":{"name":"hello",
+ "version":"0.1.0","capabilities":["items.list"]}}
+.Ed
+.Pp
+A
+.Ql v
+other than 1 is refused outright.
+.Cm capabilities
+is what the plugin
+.Em wants ;
+grants are what it
+.Em gets ;
+.Ql ctl plugins
+shows both so the gap is visible.
+.It Cm items.list
+Params:
+.Ql root
+.Pq the focused pane's repository root, possibly empty
+and
+.Ql limit .
+Reply
+.Ql result.items
+.Pq plus Ql truncated bool :
+.Bd -literal -offset indent
+{"id":"pr-12","title":"fix the frobnicator","state":"running",
+ "subtitle":"opened 2h ago",
+ "fields":[{"key":"count","kind":"NUMBER","value":"42"}],
+ "actions":[{"id":"merge","label":"Merge","confirm":true}],
+ "children":[...]}
+.Ed
+.Pp
+Everything except
+.Cm id
+and
+.Cm title
+is optional.
+Caps: 128 items, 6 fields and 6 actions per item, two levels deep
+.Pq children of children do not render .
+An action with
+.Cm confirm
+true gets a real y/n confirm in the panel before
+.Cm items.act
+is sent.
+.It Cm items.act
+Params:
+.Ql itemId
+and
+.Ql actionId .
+Reply
+.Ql result.message
+.Pq shown in the panel
+and optionally
+.Ql result.item ,
+the updated item; omit it and rook refetches the list instead.
+.It Ar anything else
+.Ql ctl plugin <name> <op> [params-json]
+calls any op directly, still grant-gated \(em the escape hatch for ops the
+panel has no surface for yet.
+.El
+.Ss Operations a plugin may send
+Same frame shape, plugin's own
+.Cm id ;
+rook answers
+.Ql {"v":1,"id":N,"ok":true}
+or an error.
+Each requires its grant, refused by name
+.Pq Ql not granted: session.spawn .
+.Bl -tag -width "attention.raise"
+.It Cm attention.raise
+Params:
+.Ql title
+.Pq required
+and
+.Ql body .
+Lands in the attention inbox
+.Pq Ql ctl attention .
+Provenance is server-assigned from the declaration \(em a plugin cannot
+claim to be another.
+.It Cm session.spawn
+Params:
+.Ql command
+.Pq required ,
+.Ql cwd
+.Pq default: the focused pane's ,
+.Ql where
+.Pq Ql tab No for a new tab; default a split .
+Opens without stealing focus.
+.El
+.Sh THE PANEL
+Open with
+.Ql <leader>p
+.Pq the plugin picker
+or
+.Ql ctl plugin-show <name> .
+.Ql j / k
+move,
+.Ql Enter
+descends into an item's actions and runs one
+.Pq through its confirm if it asks for one ,
+.Ql r
+refetches,
+.Ql y
+copies the pin line,
+.Ql ESC
+backs out.
+In a confirm, only
+.Ql y
+runs and only
+.Ql n
+or
+.Ql ESC
+cancels \(em a confirm that any key dismisses is not a confirm.
+.Sh A MINIMAL PLUGIN
+The essence of
+.Pa examples/hello-plugin ,
+a sh script:
+.Bd -literal -offset indent
+#!/bin/sh
+while IFS= read -r line; do
+  id=$(expr "$line" : '.*"id":\e([0-9]*\e)')
+  case $line in
+  *'"op":"describe"'*)
+    printf '{"v":1,"id":%s,"ok":true,"result":{"name":"hello",
+      "version":"0.1.0","capabilities":["items.list"]}}\en' "$id" ;;
+  *'"op":"items.list"'*)
+    printf '{"v":1,"id":%s,"ok":true,"result":{"items":[
+      {"id":"one","title":"hello from a plugin","state":"ok"}
+      ],"truncated":false}}\en' "$id" ;;
+  *)
+    printf '{"v":1,"id":%s,"ok":false,
+      "error":"hello only does items.list"}\en' "$id" ;;
+  esac
+done
+.Ed
+.Pp
+No build step, no network, no clock \(em and it exercises the whole
+machinery.
+Declare it, grant
+.Ql items.list ,
+relaunch, open the panel.
+.Sh SEE ALSO
+.Xr rook 1 ,
+.Xr rook-config 5 ,
+.Xr rook-ctl 7
+.Pp
+.Pa docs/plugins/VOCABULARY.md
+in the repository \(em the item model this protocol is designed against,
+including the parts not yet implemented.
+.Sh CAVEATS
+Only the List surface renders today;
+.Ql surfaces
+in
+.Cm describe
+is accepted and ignored.
+.Pp
+Actions that declare an
+.Cm input
+are refused by name \(em rook has no form surface yet.
+.Pp
+The plugin set is read at launch: adding or removing a declaration takes
+a relaunch.
+.Pp
+.Cm session.send
+and
+.Cm notify
+appear in the vocabulary document but are not implemented.
