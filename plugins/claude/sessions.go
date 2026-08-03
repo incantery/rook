@@ -112,10 +112,30 @@ const echoGuardMs = 3000
 //     a banner for the pane you are looking at is noise. The state
 //     still shows in the panel; only the interruption is suppressed.
 func fuse(sessions []Session, panes []PaneActivity, names []string, busyRate float64, present time.Duration) {
+	// Which directories hold a busy Claude pane right now.
+	busyCwd := map[string]bool{}
+	for _, p := range panes {
+		if claudeLike(p, names) && p.RateBps >= busyRate && (p.InMs < 0 || p.InMs > echoGuardMs) {
+			busyCwd[p.Cwd] = true
+		}
+	}
+	// A pane runs ONE session, and several transcripts can share a cwd
+	// (every past session in this repo does). The one the busy pane is
+	// running is the freshest transcript; the directory's older sessions
+	// are bystanders and stay what they are — without this, one working
+	// pane promoted ten hours of history to "working" with it.
+	freshest := map[string]int{}
+	for i, s := range sessions {
+		if j, ok := freshest[s.Cwd]; !ok || s.Mtime.After(sessions[j].Mtime) {
+			freshest[s.Cwd] = i
+		}
+	}
 	for i := range sessions {
 		s := &sessions[i]
+		if busyCwd[s.Cwd] && freshest[s.Cwd] == i && (s.State == StateBlocked || s.State == StateIdle) {
+			s.State = StateWorking
+		}
 		inBest := int64(-1)
-		busy := false
 		for _, p := range panes {
 			if p.Cwd != s.Cwd || !claudeLike(p, names) {
 				continue
@@ -123,12 +143,6 @@ func fuse(sessions []Session, panes []PaneActivity, names []string, busyRate flo
 			if p.InMs >= 0 && (inBest < 0 || p.InMs < inBest) {
 				inBest = p.InMs
 			}
-			if p.RateBps >= busyRate && (p.InMs < 0 || p.InMs > echoGuardMs) {
-				busy = true
-			}
-		}
-		if busy && (s.State == StateBlocked || s.State == StateIdle) {
-			s.State = StateWorking
 		}
 		s.Present = inBest >= 0 && inBest < present.Milliseconds()
 	}

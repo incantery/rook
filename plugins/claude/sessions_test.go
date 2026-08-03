@@ -244,6 +244,28 @@ func TestFuseSpinnerRateMeansWorking(t *testing.T) {
 	}
 }
 
+func TestFuseOnlyTheFreshestSessionInACwdPromotes(t *testing.T) {
+	// Every past session in a repo shares its cwd. One busy pane runs
+	// ONE of them — the freshest transcript — not ten hours of history.
+	ss := []Session{
+		{ID: "old", Cwd: "/w", State: StateIdle, Mtime: t0.Add(-10 * time.Hour)},
+		{ID: "live", Cwd: "/w", State: StateIdle, Mtime: t0},
+		{ID: "mid", Cwd: "/w", State: StateIdle, Mtime: t0.Add(-3 * time.Hour)},
+	}
+	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", RateBps: 900, InMs: -1}}
+	fuse(ss, panes, []string{"claude"}, 200, 45*time.Second)
+	byID := map[string]State{}
+	for _, s := range ss {
+		byID[s.ID] = s.State
+	}
+	if byID["live"] != StateWorking {
+		t.Errorf("live = %q, want working", byID["live"])
+	}
+	if byID["old"] != StateIdle || byID["mid"] != StateIdle {
+		t.Errorf("bystanders promoted: old=%q mid=%q, want idle", byID["old"], byID["mid"])
+	}
+}
+
 func TestFuseCursorBlinkIsNotWork(t *testing.T) {
 	// An idle TUI's cursor blink also wrote "just now" — but at a
 	// hundredth the rate. Rate below the bar changes nothing.
