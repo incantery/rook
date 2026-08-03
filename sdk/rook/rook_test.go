@@ -1,6 +1,9 @@
 package rook
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The preset bundles exist twice — here and config.zig's applyPreset
 // (the TOML front end's expansion). This golden pins the Go side to
@@ -8,7 +11,7 @@ import "testing"
 // implementations on the live app. Change a bundle → change BOTH
 // definitions and this golden, or one of the guards goes red.
 func TestPresetGoldens(t *testing.T) {
-	tmux := string(New().PresetTmuxNeovim().JSON())
+	tmux := string(JSON(PresetTmuxNeovim()))
 	wantTmux := `{"rookEnvironment":1,"nodes":[` +
 		`{"id":"option:app:top-bar","kind":"option","scope":"app","key":"top-bar","value":[]},` +
 		`{"id":"option:app:status-left","kind":"option","scope":"app","key":"status-left","value":["tabs"]},` +
@@ -20,7 +23,7 @@ func TestPresetGoldens(t *testing.T) {
 		t.Errorf("tmux-neovim bundle drifted:\n got %s\nwant %s", tmux, wantTmux)
 	}
 
-	vscode := string(New().PresetVSCode().JSON())
+	vscode := string(JSON(PresetVSCode()))
 	wantVSCode := `{"rookEnvironment":1,"nodes":[` +
 		`{"id":"option:app:top-bar","kind":"option","scope":"app","key":"top-bar","value":[]},` +
 		`{"id":"option:app:status-left","kind":"option","scope":"app","key":"status-left","value":["tabs","branch"]},` +
@@ -37,27 +40,16 @@ func TestPresetGoldens(t *testing.T) {
 	}
 }
 
-// A preset is a defaults layer: an explicit key AFTER it overrides the
-// bundle's node in place (same id, later call wins).
+// A preset is a defaults layer: a declaration AFTER it overrides the
+// bundle's node in place (same id, later declaration wins).
 func TestPresetOverride(t *testing.T) {
-	e := New().PresetVSCode().BufferLine(false)
-	got := string(e.JSON())
-	want := `"key":"buffer-line","value":false`
-	if !contains(got, want) {
+	got := string(JSON(PresetVSCode(), BufferLineOff))
+	if !strings.Contains(got, `"key":"buffer-line","value":"off"`) {
 		t.Errorf("override lost: %s", got)
 	}
-	if contains(got, `"key":"buffer-line","value":true`) {
+	if strings.Contains(got, `"key":"buffer-line","value":"always"`) {
 		t.Errorf("bundle value survived beside the override: %s", got)
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
 
 // The plugin node is the user-facing half of the plugin system, so its
@@ -66,7 +58,7 @@ func contains(s, sub string) bool {
 //
 // Note what is asserted beyond the shape: `grants` is an ARRAY even when
 // empty, never null. Absent and empty mean the same thing — nothing
-// granted — and a reader that has to handle both will get one wrong.
+// granted — and a reader handling both shapes will get one wrong.
 const wantPluginGraph = `{"rookEnvironment":1,"nodes":[` +
 	`{"id":"plugin:hello","kind":"plugin","scope":"app","name":"hello","command":["hello"],"load":"lazy","grants":["items.list"]},` +
 	`{"id":"plugin:demo-list","kind":"plugin","scope":"app","name":"demo-list","command":["demo-list"],"load":"eager","grants":["items.list","items.act"]},` +
@@ -74,12 +66,24 @@ const wantPluginGraph = `{"rookEnvironment":1,"nodes":[` +
 	`]}` + "\n"
 
 func TestPluginNodeBytes(t *testing.T) {
-	e := New()
-	e.Plugin("hello", []string{"hello"}, "", "items.list")
-	e.Plugin("demo-list", []string{"demo-list"}, "eager", "items.list", "items.act")
-	e.Plugin("untrusted", []string{"untrusted"}, "lazy")
-	if got := string(e.JSON()); got != wantPluginGraph {
+	got := string(JSON(
+		Plugin{Name: "hello", Command: []string{"hello"}, Grants: []string{OpItemsList}},
+		Plugin{Name: "demo-list", Command: []string{"demo-list"}, Load: Eager, Grants: []string{OpItemsList, OpItemsAct}},
+		Plugin{Name: "untrusted", Command: []string{"untrusted"}, Load: Lazy},
+	))
+	if got != wantPluginGraph {
 		t.Errorf("plugin graph moved.\n got: %s\nwant: %s", got, wantPluginGraph)
+	}
+}
+
+// A sourced plugin names itself from the URL's last segment, and a pin
+// rides beside the source.
+func TestPluginFromSource(t *testing.T) {
+	got := string(JSON(Plugin{Source: "https://example.com/x/hello-plugin", SHA256: "abc123", Grants: []string{OpItemsList}}))
+	want := `{"id":"plugin:hello-plugin","kind":"plugin","scope":"app","name":"hello-plugin",` +
+		`"source":"https://example.com/x/hello-plugin","sha256":"abc123","load":"lazy","grants":["items.list"]}`
+	if !strings.Contains(got, want) {
+		t.Errorf("sourced plugin moved:\n got: %s\nwant: %s", got, want)
 	}
 }
 
@@ -93,44 +97,66 @@ const wantWorkspaceGraph = `{"rookEnvironment":1,"nodes":[` +
 	`]}` + "\n"
 
 func TestWorkspaceNodeBytes(t *testing.T) {
-	e := New()
-	e.Workspace("rook", "~/src/rook")
-	e.Workspace("dora", "/w/dora")
-	if got := string(e.JSON()); got != wantWorkspaceGraph {
+	// Singles, in declaration order — the ordered form.
+	got := string(JSON(
+		Workspace{Name: "rook", Root: "~/src/rook"},
+		Workspace{Name: "dora", Root: "/w/dora"},
+	))
+	if got != wantWorkspaceGraph {
 		t.Errorf("workspace graph moved.\n got: %s\nwant: %s", got, wantWorkspaceGraph)
 	}
 }
 
-// lazy is the DEFAULT, and it is a decision rather than a convenience: a
-// surface nobody opened must cost nothing, which is the rule every poller
-// in rook's history had to learn.
-func TestPluginDefaultsToLazy(t *testing.T) {
-	got := string(New().Plugin("p", []string{"p"}, "").JSON())
-	if !contains(got, `"load":"lazy"`) {
-		t.Errorf("empty load did not default to lazy: %s", got)
+// The group forms are sugar over the same nodes: maps emit SORTED
+// (canonical bytes cannot ride Go's random map order), and merging is
+// per entry — a later group's chord replaces, in place, only the
+// chords it names.
+func TestGroupsSortAndMergePerEntry(t *testing.T) {
+	got := string(JSON(Workspaces{
+		"rook": "~/src/rook",
+		"dora": "/w/dora",
+	}))
+	dora := strings.Index(got, `"workspace:dora"`)
+	rk := strings.Index(got, `"workspace:rook"`)
+	if dora == -1 || rk == -1 || dora > rk {
+		t.Errorf("workspaces not sorted by name: %s", got)
+	}
+
+	got = string(JSON(
+		Binds{"<leader>v": CmdPaneSplitRight, "<leader>c": CmdTabNew},
+		Binds{"<leader>v": CmdPaneSplitDown}, // rebind ONE chord
+	))
+	if !strings.Contains(got, `"chord":"<leader>v","command":"pane.split-down"`) {
+		t.Errorf("later group's chord did not win: %s", got)
+	}
+	if !strings.Contains(got, `"chord":"<leader>c","command":"tab.new"`) {
+		t.Errorf("merge was not per-entry — untouched chord lost: %s", got)
+	}
+	if strings.Contains(got, "pane.split-right") {
+		t.Errorf("replaced chord survived: %s", got)
 	}
 }
 
-// A plugin declared with no grants is INERT, not ungoverned. Staging one
-// before you trust it has to be expressible.
-func TestPluginWithNoGrantsIsDeclaredButInert(t *testing.T) {
-	got := string(New().Plugin("p", []string{"p"}, "lazy").JSON())
-	if !contains(got, `"grants":[]`) {
-		t.Errorf("no grants should emit an empty array: %s", got)
+// Zero fields in the grouped structs are UNSET, not zero-values on the
+// wire — Font{Size: 16} must leave font-family alone.
+func TestZeroFieldsAreUnset(t *testing.T) {
+	got := string(JSON(Font{Size: 16}))
+	if strings.Contains(got, "font-family") {
+		t.Errorf("zero Family emitted: %s", got)
+	}
+	if !strings.Contains(got, `"key":"font-size","value":16`) {
+		t.Errorf("size lost: %s", got)
 	}
 }
 
-// Same id replaces in place — composing a base environment then overriding
-// one plugin's grants has to mean something.
-func TestPluginOverrideReplacesInPlace(t *testing.T) {
-	e := New()
-	e.Plugin("p", []string{"p"}, "eager", "items.list", "items.act")
-	e.Plugin("p", []string{"p"}, "lazy") // the override: revoke everything
-	got := string(e.JSON())
-	if !contains(got, `"load":"lazy","grants":[]`) {
-		t.Errorf("override lost: %s", got)
+// The typed command constants are generated from the app's registry;
+// this smoke-checks the generator's naming so a regeneration that
+// drifts fails here before it confuses anyone.
+func TestGeneratedCmds(t *testing.T) {
+	if CmdPaneSplitRight != "pane.split-right" || CmdTreeToggle != "tree.toggle" {
+		t.Fatal("cmds.go naming drifted from registry ids")
 	}
-	if contains(got, `"items.act"`) {
-		t.Errorf("revoked grant survived the override: %s", got)
+	if TabSelect(3) != "tab.select-3" {
+		t.Fatal("TabSelect misrenders")
 	}
 }

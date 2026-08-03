@@ -907,8 +907,9 @@ fn loadEnv(io: std.Io, gpa: std.mem.Allocator) ?Config {
 
 /// Keybinds off the graph: defaults first (same defaults as the TOML
 /// path — the graph, like config lines, REBINDS them), then leader
-/// nodes and app-scope keybind nodes. Editor-scope keybind nodes ride
-/// along untouched until configurable editor maps land.
+/// nodes, app-scope keybind nodes, and editor.normal keybind nodes —
+/// the one editor mode whose leader arms. Other editor scopes ride
+/// along unconsumed.
 fn loadKeybindsEnv(io: std.Io, gpa: std.mem.Allocator) ?Keybinds {
     const data = envData(io, gpa) orelse return null;
     defer gpa.free(data);
@@ -930,6 +931,14 @@ fn loadKeybindsEnv(io: std.Io, gpa: std.mem.Allocator) ?Keybinds {
             const ch = chordChar(n.chord["<leader>".len..]) orelse continue;
             const spec = actionFromName(jStr(n.command) orelse continue) orelse continue;
             kb.bind(ch, spec);
+        } else if (std.mem.eql(u8, n.kind, "keybind") and std.mem.eql(u8, n.scope, "editor.normal")) {
+            if (!std.mem.startsWith(u8, n.chord, "<leader>")) continue;
+            const ch = chordChar(n.chord["<leader>".len..]) orelse continue;
+            // canonicalId, not specFromName: the editor stores the ID
+            // (static registry string) and dispatches through its id
+            // seam. Unknown names skip, same as the app scope.
+            const id = registry.canonicalId(jStr(n.command) orelse continue) orelse continue;
+            kb.edBind(ch, id);
         }
     }
     if (kb.n > 0 and kb.leader == null)
@@ -964,6 +973,12 @@ const actionFromName = registry.specFromName;
 
 pub const Bind = struct { ch: u8, action: Action, arg: u8 = 0 };
 
+/// One editor-leader chord: a key and the canonical registry id it
+/// speaks through the editor's app_command seam. registry.zig's type,
+/// so Keybinds.edBinds() hands the editor's Editor.leader_binds the
+/// exact type it wants — a lookalike struct would need a copy.
+pub const EdBind = registry.LeaderBind;
+
 pub const Keybinds = struct {
     /// BACKTICK, not null. defaultBinds below binds a dozen tmux-shaped
     /// chords behind the leader, and config.sample.toml calls this "the
@@ -980,6 +995,31 @@ pub const Keybinds = struct {
     ed_leader: ?u8 = null,
     entries: [32]Bind = undefined,
     n: usize = 0,
+    /// Editor-leader chords (scope `editor.normal` in the graph — the
+    /// only mode the editor leader arms in). Ids are CANONICAL registry
+    /// strings with static lifetime; the editor dispatches them through
+    /// its id seam without ever owning them.
+    ed_entries: [16]EdBind = undefined,
+    ed_n: usize = 0,
+
+    pub fn edBinds(self: *const Keybinds) []const EdBind {
+        return self.ed_entries[0..self.ed_n];
+    }
+
+    /// Bind or rebind an editor-leader chord — same replace rule as
+    /// the app side: config lines replace defaults.
+    fn edBind(self: *Keybinds, ch: u8, id: []const u8) void {
+        for (self.ed_entries[0..self.ed_n]) |*e| {
+            if (e.ch == ch) {
+                e.* = .{ .ch = ch, .id = id };
+                return;
+            }
+        }
+        if (self.ed_n < self.ed_entries.len) {
+            self.ed_entries[self.ed_n] = .{ .ch = ch, .id = id };
+            self.ed_n += 1;
+        }
+    }
 
     pub fn lookup(self: *const Keybinds, ch: u8) ?Bind {
         for (self.entries[0..self.n]) |e| {
@@ -1090,6 +1130,12 @@ fn defaultBinds(kb: *Keybinds) void {
     // ...and opened on the current file (vim-vinegar's `-` energy, but
     // the whole tree, unfolded down to where you are).
     kb.bind('o', .{ .action = .tree_reveal });
+
+    // The EDITOR leader's defaults — the two chords that were welded
+    // into editor.zig until 2026-08-03. Same rule as everything above:
+    // graph lines (scope editor.normal) rebind them.
+    kb.edBind('\t', "tree.toggle");
+    kb.edBind('o', "tree.reveal");
 }
 
 fn loadKeybindsToml(io: std.Io, gpa: std.mem.Allocator) Keybinds {

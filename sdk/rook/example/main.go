@@ -1,53 +1,57 @@
-// Seth's live config.toml (2026-07-30), as a Go environment — the
-// first real program against the SDK, and the parity fixture: the
-// TypeScript and Python probes beside it (main.ts, main.py) must emit
-// byte-identical graphs, and the e2e `envgraph` scenario proves the
-// app actually consumes what this describes.
+// An example environment — the SDK's showcase config, in the node-list
+// shape: a config is a LIST OF DECLARATIONS, values not statements.
+// Commands are typed constants generated from the app's own registry,
+// so a bind to a command that does not exist fails to compile — the
+// old fluent form of this very file bound "workspace.manager" and
+// "explorer.toggle", neither of which exists, and nothing noticed.
 //
-//	go run ./sdk/rook/example --out ~/.config/rook/environment.json
+// (main.ts and main.py beside this are July's cross-language parity
+// probes, kept as history; the byte contract lives in the SDK goldens.)
+//
+//	go run ./sdk/rook/example --out /tmp/environment.json
 package main
 
 import "github.com/incantery/rook/sdk/rook"
 
 func main() {
-	e := rook.New()
+	rook.Main(
+		// Fonts and window chrome. Zero fields are unset, not zero.
+		rook.Font{Family: "Hack Nerd Font Mono", Size: 18},
+		rook.Window{Opacity: 1, Padding: 4},
+		rook.Theme("nocturne"),
 
-	// Fonts and window chrome.
-	e.FontFamily("Hack Nerd Font Mono")
-	e.FontSize(18)
-	e.BackgroundOpacity(1)
-	e.WindowPadding(4)
-	e.Theme("Nocturne")
+		// Leaders: app (tmux's prefix) and the editor's own.
+		rook.Leaders{App: "`", Editor: ","},
 
-	// Leaders: app (tmux's prefix) and the editor's own.
-	e.Leader("`")
-	e.EditorLeader(",")
+		// The app leader's chords. A duplicate chord here is a COMPILE
+		// error; a later Binds{} group rebinds per chord.
+		rook.Binds{
+			`<leader>"`: rook.CmdPaneSplitDown,
+			"<leader>v": rook.CmdPaneSplitRight,
+			"<leader>c": rook.CmdTabNew,
+			"<leader>m": rook.CmdWorkspaceSwitch,
+		},
 
-	// App-scope chords, by registry command id.
-	e.Bind(`<leader>"`, "app.split.horizontal")
-	e.Bind("<leader>v", "app.split.vertical")
-	e.Bind("<leader>c", "tab.new")
-	e.Bind("<leader>m", "workspace.manager")
+		// The editor leader's chords (normal mode — the mode the
+		// editor leader arms in).
+		rook.EditorBinds{
+			"<leader>TAB": rook.CmdTreeToggle,
+			"<leader>o":   rook.CmdTreeReveal,
+		},
 
-	// Editor-scope chords (explorer.*, the registry's names).
-	e.EditorBind("normal", "<leader>TAB", "explorer.toggle")
-	e.EditorBind("normal", "<leader>o", "explorer.reveal")
+		// Workspaces: named roots, listed alphabetically in the palette.
+		// rook derives each root's git worktrees live — no second list.
+		rook.Workspaces{
+			"rook": "~/go/src/github.com/incantery/rook",
+		},
 
-	// The host's half of the file, carried in the graph.
-	e.Host("coder", "claude")
-	e.Host("workspace-allow", []string{"rook", "rook-cloud", "rook-site", "presentation"})
-	e.Table("agent", map[string]any{
-		"enabled":       true,
-		"engine":        "auto",
-		"model":         "",
-		"daily-cap-usd": 1.0,
-	})
-	e.Table("lsp", map[string]any{
-		"enable": []string{"go", "typescript", "svelte"},
-	})
-	e.Table("cloud", map[string]any{
-		"url": "https://api.rookide.com",
-	})
-
-	e.Run()
+		// A plugin by source: rook fetches and caches it, and grants
+		// exactly what is written here. Once it runs, press `y` in the
+		// plugin panel — rook hands you the SHA256-pinned form of this
+		// declaration to paste back.
+		rook.Plugin{
+			Source: "https://raw.githubusercontent.com/incantery/rook/main/examples/hello-plugin",
+			Grants: []string{rook.OpItemsList},
+		},
+	)
 }

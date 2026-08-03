@@ -21,9 +21,9 @@ wt=$(q "SELECT name, root, worktree_of FROM workspaces WHERE root != '' AND work
 
 [ -n "$top" ] || { echo "migrate-workspaces: $db has no workspaces" >&2; exit 0; }
 
-echo "// Go (main.go):"
+echo "// Go (main.go) — entries for a rook.Workspaces{...} group:"
 echo "$top" | while IFS='	' read -r name root; do
-    printf 'e.Workspace("%s", "%s")\n' "$name" "$root"
+    printf '"%s": "%s",\n' "$name" "$root"
 done
 echo
 echo "// TypeScript (config.ts):"

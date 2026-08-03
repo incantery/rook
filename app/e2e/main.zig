@@ -1573,7 +1573,10 @@ fn pluginFetch(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("key 79"); // y, vim's yank
     h.sleepMs(300);
     const clip = try app.ctl("clipboard");
-    try h.expectContains(clip, "PluginPinned", "y copies a ready-to-paste pin");
+    // The Go SDK's node-list shape: a rook.Plugin{...} declaration with
+    // the SHA256 filled in, ready to paste into rook.Main(...).
+    try h.expectContains(clip, "rook.Plugin{Source:", "y copies a ready-to-paste pin");
+    try h.expectContains(clip, "SHA256:", "with the hash filled in");
     // The PID-SCOPED source, not just "remote-plugin". `ctl clipboard`
     // reads the real system pasteboard, so a previous run's copy sits
     // there and an assertion on anything stable passes without y ever
@@ -2604,6 +2607,7 @@ const envgraph_json =
     \\{"id":"leader:app","kind":"leader","scope":"app","key":"~"},
     \\{"id":"leader:editor","kind":"leader","scope":"editor","key":","},
     \\{"id":"keybind:app:<leader>c","kind":"keybind","scope":"app","chord":"<leader>c","command":"tab.new"},
+    \\{"id":"keybind:editor.normal:<leader>t","kind":"keybind","scope":"editor.normal","chord":"<leader>t","command":"tab.new"},
     \\{"id":"future:hologram","kind":"hologram","scope":"app","key":"x","value":[1,2,3]}
     \\]}
 ;
@@ -2624,6 +2628,17 @@ fn envgraph(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("press `");
     _ = try app.ctl("press c");
     try h.expectEq("tabs after toml leader", 2, try app.tabCount());
+
+    // The graph's EDITOR-scope bind (editor.normal): inside an editor
+    // pane, the editor leader arms and its configured chord fires the
+    // same registry command the app scope speaks.
+    var f_buf: [128]u8 = undefined;
+    const f = try std.fmt.bufPrint(&f_buf, "/tmp/rook-e2e-envgraph-{d}.txt", .{getpid()});
+    try h.writeFile(f, "hello\n");
+    _ = try app.ctlFmt("edit {s}", .{f});
+    _ = try app.ctl("press ,");
+    _ = try app.ctl("press t");
+    try h.expectEq("tabs after editor chord", 3, try app.tabCount());
 }
 
 // -------------------------------------------------------------- chrome

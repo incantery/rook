@@ -86,6 +86,12 @@ prod:
 # provider.InstallDir().
 #
 # These are the only Go this repo still builds. Core is Zig.
+# sdk/rook/cmds.go is generated from the app's command registry, so the
+# SDK's typed Cmd constants cannot drift from what the app dispatches.
+# CI check: make gen-cmds && git diff --exit-code sdk/rook/cmds.go
+gen-cmds:
+	scripts/gen-cmds.sh
+
 providers:
 	@for d in $(PROVIDER_DIRS); do \
 	  echo "  provider $$(basename $$d)"; \

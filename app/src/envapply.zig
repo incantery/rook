@@ -666,16 +666,18 @@ pub const go_main =
     \\// This is a PROGRAM, not a settings file: it runs, and what it emits is
     \\// what rook materializes. Edit it, and rook will notice, run it, and show
     \\// you what would change before anything happens.
+    \\//
+    \\// A config is a list of declarations. Commands are typed constants
+    \\// (rook.CmdTabNew, ...) generated from rook's own command registry, so
+    \\// a bind to a command that does not exist fails to compile.
     \\package main
     \\
     \\import "github.com/incantery/rook/sdk/rook"
     \\
     \\func main() {
-    \\    e := rook.New()
-    \\
-    \\    e.FontSize(14)
-    \\
-    \\    e.Run()
+    \\    rook.Main(
+    \\        rook.Font{Size: 14},
+    \\    )
     \\}
     \\
 ;

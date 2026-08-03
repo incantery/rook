@@ -199,6 +199,18 @@ pub const TreeRow = struct {
     climb: bool = false,
 };
 
+/// One editor-leader chord — registry.zig's type (std-only import, so
+/// headless tests are unaffected). The ids must be static strings.
+pub const LeaderBind = @import("registry.zig").LeaderBind;
+
+/// What the leader speaks when nobody configured it — the two chords
+/// that were welded into the key machine until config's editor.normal
+/// scope became consumable.
+const default_leader_binds = [_]LeaderBind{
+    .{ .ch = '\t', .id = "tree.toggle" },
+    .{ .ch = 'o', .id = "tree.reveal" },
+};
+
 pub const Editor = struct {
     gpa: Allocator,
     io: std.Io,
@@ -551,6 +563,11 @@ pub const Editor = struct {
     /// callers fall back to opening in place (or refusing, for :sp).
     app_open: ?*const fn (*anyopaque, path: []const u8, line: usize, how: OpenHow) bool = null,
 
+    /// The editor leader's chord table, canonical registry ids spoken
+    /// through app_command. Defaults below; config's editor.normal
+    /// keybind nodes replace the whole slice (macos.zig hands over
+    /// Keybinds.edBinds(), defaults already installed and rebound).
+    leader_binds: []const LeaderBind = &default_leader_binds,
     /// The editor-scope leader (vim's maplocalleader to the app's
     /// mapleader; config [editor] leader). Armed in normal mode only;
     /// its chords name app commands through the app_command seam.
@@ -3411,16 +3428,19 @@ pub const Editor = struct {
             return;
         }
 
-        // The editor leader's chord, resolved. Bindings name registry
-        // commands through the app_command seam — the editor stays a
-        // pure model; what "tree.toggle" DOES is the app's business.
-        // Unknown chords are swallowed, same as the app leader's.
+        // The editor leader's chord, resolved against the bind table
+        // (config's editor.normal scope; defaults when unconfigured).
+        // Bindings name registry commands through the app_command seam
+        // — the editor stays a pure model; what "tree.toggle" DOES is
+        // the app's business. Unknown chords are swallowed, same as
+        // the app leader's.
         if (self.pend_leader) {
             self.pend_leader = false;
-            switch (ch) {
-                '\t' => _ = self.appCommandById("tree.toggle"),
-                'o' => _ = self.appCommandById("tree.reveal"),
-                else => {},
+            for (self.leader_binds) |b| {
+                if (b.ch == ch) {
+                    _ = self.appCommandById(b.id);
+                    break;
+                }
             }
             return;
         }
@@ -6902,6 +6922,45 @@ test "the editor leader arms in normal mode and speaks registry ids" {
     // it does nothing, but it must not leave a chord armed either.)
     keys(e, "d,");
     try testing.expect(!e.pend_leader);
+}
+
+test "leader binds are a table config can replace, not a switch" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    e.leader = ',';
+    const Cap = struct {
+        var got: [64]u8 = undefined;
+        var len: usize = 0;
+        fn hook(_: *anyopaque, name: []const u8) bool {
+            const n = @min(name.len, got.len);
+            @memcpy(got[0..n], name[0..n]);
+            len = n;
+            return true;
+        }
+    };
+    e.cmd_ctx = @ptrCast(e);
+    e.app_command = &Cap.hook;
+
+    // A configured table: TAB rebound away from the default, a new
+    // chord added, and the default `o` gone entirely.
+    const binds = [_]LeaderBind{
+        .{ .ch = '\t', .id = "pane.zoom" },
+        .{ .ch = 'c', .id = "tab.new" },
+    };
+    e.leader_binds = &binds;
+
+    keys(e, ",");
+    e.key("\t");
+    try testing.expectEqualStrings("pane.zoom", Cap.got[0..Cap.len]);
+    keys(e, ",c");
+    try testing.expectEqualStrings("tab.new", Cap.got[0..Cap.len]);
+
+    // The unbound default is swallowed, not inherited: a replaced
+    // table is the whole table.
+    Cap.len = 0;
+    keys(e, ",o");
+    try testing.expectEqual(@as(usize, 0), Cap.len);
 }
 
 test "tree reveal unfolds every ancestor down to the target" {

@@ -153,6 +153,28 @@ const aliases = [_]struct { name: []const u8, id: []const u8 }{
     .{ .name = "palette.toggle", .id = "palette.commands" },
 };
 
+/// One editor-leader chord: a key, and the canonical registry id it
+/// speaks. Lives HERE because both sides of the seam need the type —
+/// config.zig builds the table, editor.zig dispatches it — and this is
+/// the only file both can import (std-only, so the editor stays
+/// headless-testable).
+pub const LeaderBind = struct { ch: u8, id: []const u8 };
+
+/// The canonical id for any accepted spelling, as a STATIC string —
+/// what an editor bind stores (the wire JSON it was parsed from is
+/// freed) and what the id seam dispatches. The parameterized
+/// `tab.select-N` has no static id and stays app-leader territory; it
+/// resolves null here on purpose.
+pub fn canonicalId(name: []const u8) ?[]const u8 {
+    if (byId(name)) |c| return c.id;
+    for (aliases) |a| {
+        if (std.mem.eql(u8, name, a.name)) {
+            if (byId(a.id)) |c| return c.id;
+        }
+    }
+    return null;
+}
+
 pub fn byId(id: []const u8) ?Command {
     for (commands) |c| {
         if (std.mem.eql(u8, c.id, id)) return c;

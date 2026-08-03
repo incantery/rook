@@ -3395,6 +3395,7 @@ pub const App = struct {
         ed.app_quit_all = &editorQuitAll;
         ed.app_open = &editorOpenRequest;
         ed.leader = self.keybinds.ed_leader;
+        ed.leader_binds = self.keybinds.edBinds();
         ed.bufline_mode = switch (self.cfg_bufline) {
             .off => .off,
             .multiple => .multiple,
@@ -4314,6 +4315,7 @@ pub const App = struct {
                 } else if (p.editor()) |ed| ed.render_dirty = true;
                 if (p.editor()) |ed| {
                     ed.leader = self.keybinds.ed_leader;
+                    ed.leader_binds = self.keybinds.edBinds();
                     ed.bufline_mode = switch (self.cfg_bufline) {
                         .off => .off,
                         .multiple => .multiple,
@@ -6232,7 +6234,9 @@ pub const App = struct {
             const grants = gbuf[0..gw.end];
 
             const s2 = switch (lang) {
-                .go => std.fmt.bufPrint(&line, "e.PluginPinned(\"{s}\", \"{s}\", {s})", .{ p.spec.source, &p.pin, grants }),
+                // The Go SDK's node-list shape: a declaration to paste
+                // into rook.Main(...), trailing comma included.
+                .go => std.fmt.bufPrint(&line, "rook.Plugin{{Source: \"{s}\", SHA256: \"{s}\", Grants: []string{{{s}}}}},", .{ p.spec.source, &p.pin, grants }),
                 .ts => std.fmt.bufPrint(&line, "e.pluginPinned(\"{s}\", \"{s}\", [{s}]);", .{ p.spec.source, &p.pin, grants }),
             } catch return;
             len = s2.len;
