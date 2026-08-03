@@ -190,6 +190,10 @@ and
 is optional.
 Caps: 128 items, 6 fields and 6 actions per item, two levels deep
 .Pq children of children do not render .
+The panel right-aligns field values on the row and, when width runs out,
+sheds whole fields off the left of the run \(em so declare fields
+.Em least important first ;
+the last one survives longest.
 An action with
 .Cm confirm
 true gets a real y/n confirm in the panel before
@@ -264,6 +268,50 @@ runs and only
 or
 .Ql ESC
 cancels \(em a confirm that any key dismisses is not a confirm.
+.Sh THE SHIPPED PLUGIN
+rook's first first-party plugin rides inside the bundle at
+.Pa /Applications/rook.app/Contents/MacOS/rook-plugin-claude
+and watches Claude Code: every recent session on the machine becomes an
+item whose state is derived from the tail of the transcript Claude Code
+already writes
+.Pq Pa ~/.claude/projects
+\(em
+.Ql working ,
+.Ql needs you
+.Pq the turn ended, a human is next ,
+.Ql blocked?
+.Pq a tool call sits unanswered under a permission mode that prompts ,
+.Ql idle .
+When a session finishes a turn that ran longer than
+.Fl -min-turn
+.Pq default 30s
+it raises an attention \(em the
+.Dq a session is waiting on you
+banner from a pane you forgot is the reason it exists.
+Declare it
+.Ql eager
+or it cannot do that job.
+.Bd -literal -offset indent
+rook.Plugin{Name: "claude",
+    Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-claude"},
+    Load:    rook.Eager,
+    Grants:  []string{rook.OpItemsList, rook.OpItemsAct,
+        rook.OpAttentionRaise, rook.OpSessionSpawn}}
+.Ed
+.Pp
+Flags, for a sandbox or a different taste:
+.Fl -dir
+.Pq the projects directory ,
+.Fl -poll ,
+.Fl -min-turn ,
+.Fl -window
+.Pq how far back sessions are listed; default 48h .
+Actions:
+.Ql open
+splits a shell at the session's directory
+.Pq via Cm session.spawn ,
+.Ql peek
+answers with the last thing the assistant said.
 .Sh A MINIMAL PLUGIN
 The essence of
 .Pa examples/hello-plugin ,

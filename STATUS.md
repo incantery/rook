@@ -101,10 +101,13 @@ presets.
    generated parse table in a 7.1MB binary. They are out, and the way back
    is how every other editor already does it — load a grammar rather than
    link it. `docs/OWED.md` §5.
-2. **The agent layer.** No attention inbox, no asks, no threads, no
-   review, no transcript reading. This was the product thesis and it is
-   currently absent by choice: it comes back as plugins over the item
-   model, not as more endpoints.
+2. **The agent layer.** No asks, no threads, no review. This was the
+   product thesis and it is mostly still absent by choice: it comes back
+   as plugins over the item model, not as more endpoints. The first piece
+   returned 2026-08-03: `plugins/claude`, a first-party plugin that
+   watches Claude Code transcripts, lists every session as an item with an
+   honest state, and raises attention when a turn finishes — see
+   `man 7 rook-plugin`, "THE SHIPPED PLUGIN".
 3. **Providers ship but nothing calls them.** `rook-provider-github` and
    `rook-provider-linear` are built, bundled and tested; the thing that
    spawned them was `rookctl issues`, which left with the Go. The caller

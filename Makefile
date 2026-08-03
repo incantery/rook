@@ -35,7 +35,13 @@ BUILD := $(shell git rev-parse --short HEAD 2>/dev/null || echo nogit).$(shell d
 # trailing slash and matches those files too.
 PROVIDER_DIRS := $(patsubst %/main.go,%,$(wildcard providers/*/main.go))
 
-.PHONY: build dev prod install clean release release-stage e2e e2e-clean providers
+# First-party plugins (plugins/*): separate processes speaking the plugin
+# protocol of rook-plugin(7), discovered the same way providers are. They
+# ship inside the bundle at Contents/MacOS/rook-plugin-<name>, so a config
+# declares them by that stable path and they upgrade with the app.
+PLUGIN_DIRS := $(patsubst %/main.go,%,$(wildcard plugins/*/main.go))
+
+.PHONY: build dev prod install clean release release-stage e2e e2e-clean providers plugins
 
 # Compile only, and deliberately so: there is no run target that skips
 # DEV_ENV, because an instance on the default socket unlinks-then-binds
@@ -85,7 +91,7 @@ prod:
 # rook, so a stale copy elsewhere must never win. Everyone else's go to
 # provider.InstallDir().
 #
-# These are the only Go this repo still builds. Core is Zig.
+# Providers and plugins are the only Go this repo still builds. Core is Zig.
 # sdk/rook/cmds.go is generated from the app's command registry, so the
 # SDK's typed Cmd constants cannot drift from what the app dispatches.
 # CI check: make gen-cmds && git diff --exit-code sdk/rook/cmds.go
@@ -96,6 +102,12 @@ providers:
 	@for d in $(PROVIDER_DIRS); do \
 	  echo "  provider $$(basename $$d)"; \
 	  go build -o app/zig-out/bin/rook-provider-$$(basename $$d) ./$$d || exit 1; \
+	done
+
+plugins:
+	@for d in $(PLUGIN_DIRS); do \
+	  echo "  plugin $$(basename $$d)"; \
+	  go build -o app/zig-out/bin/rook-plugin-$$(basename $$d) ./$$d || exit 1; \
 	done
 
 # The daily driver: the ZIG app as /Applications/rook.app. ReleaseFast,
@@ -131,11 +143,13 @@ endef
 install:
 	cd app && zig build -Doptimize=ReleaseFast -Dbuild=$(BUILD) -Dversion=$(REL_VERSION)
 	$(MAKE) providers
+	$(MAKE) plugins
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS
 	sed 's/__VERSION__/$(REL_VERSION)/g' app/bundle/Info.plist > $(APP)/Contents/Info.plist
 	cp app/zig-out/bin/rook $(APP)/Contents/MacOS/rook
 	cp app/zig-out/bin/rook-provider-* $(APP)/Contents/MacOS/
+	cp app/zig-out/bin/rook-plugin-* $(APP)/Contents/MacOS/
 	@# Before codesign: the seal covers Resources. Degrades to a
 	@# fallback icon without Xcode rather than failing the build.
 	scripts/build-icon.sh $(APP)/Contents
@@ -232,10 +246,14 @@ release-stage:
 	@for d in $(PROVIDER_DIRS); do \
 	  $(GO_RELEASE) -o app/zig-out/bin/rook-provider-$$(basename $$d) ./$$d || exit 1; \
 	done
+	@for d in $(PLUGIN_DIRS); do \
+	  $(GO_RELEASE) -o app/zig-out/bin/rook-plugin-$$(basename $$d) ./$$d || exit 1; \
+	done
 	mkdir -p $(STAGED_APP)/Contents/MacOS
 	sed 's/__VERSION__/$(VERSION:v%=%)/g' app/bundle/Info.plist > $(STAGED_APP)/Contents/Info.plist
 	cp app/zig-out/bin/rook $(STAGED_APP)/Contents/MacOS/rook
 	cp app/zig-out/bin/rook-provider-* $(STAGED_APP)/Contents/MacOS/
+	cp app/zig-out/bin/rook-plugin-* $(STAGED_APP)/Contents/MacOS/
 	@# --strict: a release must carry the real icon, so a missing actool
 	@# fails here rather than quietly shipping the fallback.
 	scripts/build-icon.sh $(STAGED_APP)/Contents --strict

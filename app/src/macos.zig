@@ -6008,20 +6008,34 @@ pub const App = struct {
             // Children are indented rather than dropped: they are the only
             // structural difference between a list and a tree.
             x += @as(f32, @floatFromInt(it.depth)) * 2 * cw;
-            const title = @import("ui.zig").clip(&clipbuf, it.title.get(), cols);
-            x += ui.textOver(x, y + (row_h - ch) / 2, title, th.bar_value);
 
             // Fields right-aligned, values only — the label is the column
-            // header a list does not have room for.
+            // header a list does not have room for. The title is guaranteed
+            // half the row; a field that would cross into that sheds, and
+            // it sheds WHOLE and takes the rest of the run with it —
+            // right-aligned fragments of two different fields read as one
+            // wrong value. Least-important-first is therefore the field
+            // order a plugin should declare.
+            const title_full = it.title.get();
+            const half: usize = @max(8, cols / 2);
+            const title_claim: f32 = @floatFromInt(@min(title_full.len, half));
+            const fields_floor = x + title_claim * cw + cw;
             var fx = r.x + r.w - self.m.gutter;
             var fi = it.fields_n;
             while (fi > 0) {
                 fi -= 1;
                 const v = it.fields[fi].value.get();
                 if (v.len == 0) continue;
-                fx -= @as(f32, @floatFromInt(v.len)) * cw + cw;
+                const w = @as(f32, @floatFromInt(v.len)) * cw + cw;
+                if (fx - w < fields_floor) break;
+                fx -= w;
                 _ = ui.textOver(fx, y + (row_h - ch) / 2, v, th.bar_fg);
             }
+            // …and the title stops a cell short of whatever survived, so
+            // the two can never overprint each other.
+            const title_cols: usize = @intFromFloat(@max(1.0, (fx - x) / cw - 1.0));
+            const title = @import("ui.zig").clip(&clipbuf, title_full, @min(cols, title_cols));
+            x += ui.textOver(x, y + (row_h - ch) / 2, title, th.bar_value);
             y += row_h;
 
             // The actions hang UNDER the row they belong to rather than

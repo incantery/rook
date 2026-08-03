@@ -56,6 +56,7 @@ const scenarios = [_]Scenario{
     .{ .name = "apply", .what = "config is a program: rook runs it, shows the diff, and applies nothing until told", .run = applyScenario },
     .{ .name = "setup", .what = "a rook with nothing configured asks, writes a starter, and opens it in the editor", .run = setupScenario },
     .{ .name = "pluginfetch", .what = "a plugin declared by source downloads itself on first use — no path in config", .run = pluginFetch },
+    .{ .name = "claudewatch", .what = "the claude watcher: sessions are items with honest states, and a finished turn raises attention", .run = claudeWatch },
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
@@ -1691,6 +1692,126 @@ fn pluginFetch(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(still, "exit 0", "and not silently replaced");
 
     _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", dirz.ptr }) catch {};
+}
+
+// --------------------------------------------------------- claude watch
+
+// Fixture transcripts in Claude Code's own jsonl shapes — the fields the
+// watcher reads, nothing more. Timestamps are fixed: state comes from the
+// file's mtime and its last event, and only TurnDur (which the scenario
+// disarms with --min-turn=0s) ever subtracts two of them.
+const sess_a_working =
+    \\{"type":"user","timestamp":"2026-08-03T10:00:00.000Z","cwd":"/tmp","gitBranch":"main","message":{"role":"user","content":"fix the frobnicator"}}
+    \\{"type":"ai-title","aiTitle":"Fix the frobnicator"}
+    \\{"type":"last-prompt","lastPrompt":"fix the frobnicator"}
+    \\{"type":"permission-mode","permissionMode":"default"}
+    \\{"type":"assistant","timestamp":"2026-08-03T10:00:05.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1"}]}}
+    \\{"type":"user","timestamp":"2026-08-03T10:00:06.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}}
+    \\
+;
+const sess_a_done = sess_a_working ++
+    \\{"type":"assistant","timestamp":"2026-08-03T10:01:40.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"the frobnicator is fixed"}]}}
+    \\
+;
+const sess_b_pending =
+    \\{"type":"user","timestamp":"2026-08-03T10:00:00.000Z","cwd":"/tmp/somewhere","message":{"role":"user","content":"audit everything"}}
+    \\{"type":"permission-mode","permissionMode":"default"}
+    \\{"type":"assistant","timestamp":"2026-08-03T10:00:05.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t9"}]}}
+    \\
+;
+const sess_c_idle =
+    \\{"type":"assistant","timestamp":"2026-08-03T09:00:00.000Z","cwd":"/tmp","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"all done long ago"}]}}
+    \\
+;
+
+/// rook's first first-party plugin, driven end to end: the real binary
+/// (built from plugins/claude right here — needs a Go toolchain on PATH,
+/// the same thing a Go config program needs), fixture transcripts standing
+/// in for ~/.claude/projects, and the loop the plugin exists for: a
+/// session's turn ends in the transcript, and an attention arrives without
+/// any panel ever being opened.
+fn claudeWatch(gpa: std.mem.Allocator, bin: []const u8) !void {
+    // Built by the scenario so the scenario cannot pass against a stale
+    // binary. Pure stdlib inside the root module: no network, build cache
+    // makes the second run instant.
+    try h.expect(try h.runCmd("..", &.{ "/usr/bin/env", "go", "build", "-o", "app/zig-out/bin/rook-plugin-claude", "./plugins/claude" }) == 0, "go build ./plugins/claude", .{});
+    var cwd_buf: [512]u8 = undefined;
+    const cwd = getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    var bin_buf: [600]u8 = undefined;
+    const plug = try std.fmt.bufPrint(&bin_buf, "{s}/zig-out/bin/rook-plugin-claude", .{cwd});
+
+    // A stand-in projects directory with three sessions mid-life.
+    var root_buf: [96]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/rook-e2e-claude-{d}", .{h.runPid()});
+    var proj_buf: [128]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/projects/-tmp-proj", .{root});
+    try h.mkdirP(proj);
+    var pa: [160]u8 = undefined;
+    const sess_a = try std.fmt.bufPrint(&pa, "{s}/sessA.jsonl", .{proj});
+    try h.writeFile(sess_a, sess_a_working);
+    var pb: [160]u8 = undefined;
+    const sess_b = try std.fmt.bufPrintZ(&pb, "{s}/sessB.jsonl", .{proj});
+    try h.writeFile(sess_b, sess_b_pending);
+    var pc: [160]u8 = undefined;
+    const sess_c = try std.fmt.bufPrintZ(&pc, "{s}/sessC.jsonl", .{proj});
+    try h.writeFile(sess_c, sess_c_idle);
+    // B has sat on a pending tool call for two minutes under a permission
+    // mode that prompts; C has been quiet half an hour. mtime is the clock
+    // the watcher reads, so mtime is what the fixture sets.
+    const now: i64 = @divTrunc(h.nowMs(), 1000);
+    try setMtime(sess_b, now - 120);
+    try setMtime(sess_c, now - 1800);
+
+    var json_buf: [1024]u8 = undefined;
+    const graph = try std.fmt.bufPrint(&json_buf,
+        \\{{"rookEnvironment":1,"nodes":[
+        \\{{"id":"plugin:claude","kind":"plugin","scope":"app","name":"claude","command":["{s}","--dir","{s}/projects","--poll","200ms","--min-turn","0s"],"load":"eager","grants":["items.list","items.act","attention.raise"]}}
+        \\]}}
+    , .{ plug, root });
+
+    const app = try h.Instance.start(gpa, bin, .{ .env_json = graph });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // Eager means UP at launch, before any panel is opened — a watcher
+    // that only watches while being watched is not one.
+    _ = try app.waitCtl("plugins", "claude\teager\tup", 10_000);
+
+    // Three sessions, three lives, each read from its transcript's tail.
+    const listed = try app.ctl("plugin claude items.list");
+    try h.expectContains(listed, "Fix the frobnicator", "the session carries Claude's own title");
+    try h.expectContains(listed, "\"state\":\"working\"", "a pending tool call, fresh, is working");
+    try h.expectContains(listed, "\"state\":\"blocked?\"", "a pending tool call gone quiet may be an approval");
+    try h.expectContains(listed, "\"state\":\"idle\"", "an old session is idle");
+    try h.expectContains(listed, "somewhere · sessB", "no ai-title falls back to the directory");
+
+    // THE POINT: the turn ends in the transcript, and the attention
+    // arrives on its own — no panel, no poll from the human's side.
+    try h.writeFile(sess_a, sess_a_done);
+    const att = try app.waitCtl("attention", "is waiting on you", 10_000);
+    try h.expectContains(att, "claude\t", "provenance is the declared name, server-assigned");
+    try h.expectContains(att, "the frobnicator is fixed", "the banner carries what was said");
+
+    const relisted = try app.ctl("plugin claude items.list");
+    try h.expectContains(relisted, "\"state\":\"needs you\"", "the panel agrees with the banner");
+
+    // And an action reads back into the transcript.
+    const peeked = try app.ctl("plugin claude items.act {\"itemId\":\"sessA\",\"actionId\":\"peek\"}");
+    try h.expectContains(peeked, "the frobnicator is fixed", "peek answers with the last reply");
+
+    var rootz: [104]u8 = undefined;
+    _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", (try std.fmt.bufPrintZ(&rootz, "{s}", .{root})).ptr }) catch {};
+}
+
+const Timeval = extern struct { sec: i64, usec: i32 };
+extern "c" fn utimes(path: [*:0]const u8, times: *const [2]Timeval) c_int;
+extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]const u8;
+
+fn setMtime(path_z: [:0]const u8, sec: i64) !void {
+    const tv = [2]Timeval{ .{ .sec = sec, .usec = 0 }, .{ .sec = sec, .usec = 0 } };
+    if (utimes(path_z.ptr, &tv) != 0) return error.Utimes;
 }
 
 // ---------------------------------------------------------------- setup
