@@ -5642,13 +5642,19 @@ pub const App = struct {
             const in_ms = tm.session.last_in_ms.load(.monotonic);
             const out_age: i64 = if (out_ms == 0) -1 else now - out_ms;
             const in_age: i64 = if (in_ms == 0) -1 else now - in_ms;
-            var fgbuf: [64]u8 = undefined;
-            const fg = tm.session.fgName(&fgbuf) orelse "-";
+            var fgbuf: [1024]u8 = undefined;
+            const fg_path = tm.session.fgPath(&fgbuf) orelse "-";
+            const fg = std.fs.path.basename(fg_path);
             const cwd: []const u8 = if (self.paneCwd(p)) |c| std.mem.span(c) else "";
             if (as_json) {
                 if (!first) w.writeAll(",") catch return;
                 w.print("{{\"id\":{d},\"outMs\":{d},\"inMs\":{d},\"fg\":", .{ p.id, out_age, in_age }) catch return;
                 plugpkg.jsonStringTo(w, fg) catch return;
+                // The full path too: Claude Code's versioned install runs
+                // as a binary named `2.1.220`, and only the path still
+                // says whose it is.
+                w.writeAll(",\"path\":") catch return;
+                plugpkg.jsonStringTo(w, fg_path) catch return;
                 w.writeAll(",\"cwd\":") catch return;
                 plugpkg.jsonStringTo(w, cwd) catch return;
                 w.writeAll("}") catch return;

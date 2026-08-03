@@ -1473,27 +1473,44 @@ pub const Registry = struct {
 /// warning twice.
 pub fn load(io: std.Io, gpa: std.mem.Allocator) Registry {
     var reg = Registry{ .arena = std.heap.ArenaAllocator.init(gpa) };
-    const a = reg.arena.allocator();
-
     const data = cfgpkg.envData(io, gpa) orelse return reg;
     defer gpa.free(data);
+    loadFromJson(&reg, gpa, data);
+    return reg;
+}
 
-    const Wire = struct {
-        nodes: []struct {
-            kind: []const u8 = "",
-            name: []const u8 = "",
-            command: [][]const u8 = &.{},
-            source: []const u8 = "",
-            sha256: []const u8 = "",
-            load: []const u8 = "",
-            grants: [][]const u8 = &.{},
-        } = &.{},
-    };
-    const parsed = std.json.parseFromSlice(Wire, gpa, data, .{ .ignore_unknown_fields = true }) catch return reg;
+/// Pick the plugin nodes out of the graph — NODE BY NODE, leniently, on
+/// purpose. The graph holds every kind of node and their shapes disagree:
+/// a keybind's `command` is a string where a plugin's is an argv. This
+/// used to parse the whole file against the plugin shape, so any config
+/// with both keybinds and plugins threw on the first keybind and loaded
+/// NO plugins at all — silently, because the catch returned an empty
+/// registry. Every e2e graph with plugins had only plugin nodes, which
+/// made the suite vacuously green; the first real mixed config was the
+/// one that found it. Now a node that does not parse as a plugin is
+/// simply not a plugin.
+fn loadFromJson(reg: *Registry, gpa: std.mem.Allocator, data: []const u8) void {
+    const a = reg.arena.allocator();
+
+    const Wire = struct { nodes: []std.json.Value = &.{} };
+    const parsed = std.json.parseFromSlice(Wire, gpa, data, .{ .ignore_unknown_fields = true }) catch return;
     defer parsed.deinit();
 
+    const Node = struct {
+        kind: []const u8 = "",
+        name: []const u8 = "",
+        command: [][]const u8 = &.{},
+        source: []const u8 = "",
+        sha256: []const u8 = "",
+        load: []const u8 = "",
+        grants: [][]const u8 = &.{},
+    };
+
     var list: std.ArrayListUnmanaged(Plugin) = .empty;
-    for (parsed.value.nodes) |n| {
+    for (parsed.value.nodes) |nv| {
+        const np = std.json.parseFromValue(Node, gpa, nv, .{ .ignore_unknown_fields = true }) catch continue;
+        defer np.deinit();
+        const n = np.value;
         if (!std.mem.eql(u8, n.kind, "plugin")) continue;
         if (n.name.len == 0) continue;
         // A source and a command are the two ways to say where the binary
@@ -1507,13 +1524,13 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Registry {
             var cbuf: [1024]u8 = undefined;
             const cp = cachePath(&cbuf, n.name) orelse continue;
             argv = a.alloc([]const u8, 1) catch continue;
-            argv[0] = a.dupe(u8, cp) catch return reg;
+            argv[0] = a.dupe(u8, cp) catch return;
         } else {
             argv = a.alloc([]const u8, n.command.len) catch continue;
-            for (n.command, 0..) |c, i| argv[i] = a.dupe(u8, c) catch return reg;
+            for (n.command, 0..) |c, i| argv[i] = a.dupe(u8, c) catch return;
         }
         const grants = a.alloc([]const u8, n.grants.len) catch continue;
-        for (n.grants, 0..) |g, i| grants[i] = a.dupe(u8, g) catch return reg;
+        for (n.grants, 0..) |g, i| grants[i] = a.dupe(u8, g) catch return;
 
         list.append(a, .{ .spec = .{
             .name = a.dupe(u8, n.name) catch continue,
@@ -1527,7 +1544,6 @@ pub fn load(io: std.Io, gpa: std.mem.Allocator) Registry {
         } }) catch continue;
     }
     reg.items = list.items;
-    return reg;
 }
 
 // ------------------------------------------------------------------ tests
@@ -1541,6 +1557,25 @@ test "frameId reads the id a response echoes" {
     // rather than something to guess at.
     try testing.expectEqual(@as(?u64, null), frameId("{\"ok\":true}"));
     try testing.expectEqual(@as(?u64, null), frameId("{\"id\":\"x\"}"));
+}
+
+test "a mixed graph still yields its plugins" {
+    // The regression that reached the field: a keybind node rode in the
+    // same `nodes` array with a string `command`, the whole-file parse
+    // threw, and every plugin declaration vanished. A graph is mixed by
+    // construction; the loader has to be.
+    var reg = Registry{ .arena = std.heap.ArenaAllocator.init(testing.allocator) };
+    defer reg.arena.deinit();
+    loadFromJson(&reg, testing.allocator,
+        \\{"rookEnvironment":1,"nodes":[
+        \\{"id":"font","kind":"font","family":"Hack","size":16},
+        \\{"id":"kb","kind":"keybind","chord":"<leader>v","command":"pane.split-right"},
+        \\{"id":"plugin:p","kind":"plugin","scope":"app","name":"p","command":["/bin/p"],"load":"eager","grants":["items.list"]}
+        \\]}
+    );
+    try testing.expectEqual(@as(usize, 1), reg.items.len);
+    try testing.expectEqualStrings("p", reg.items[0].spec.name);
+    try testing.expect(reg.items[0].spec.load == .eager);
 }
 
 test "granted is exact, not a prefix" {

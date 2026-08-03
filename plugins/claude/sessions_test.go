@@ -234,6 +234,18 @@ func TestFuseRedrawingPaneKillsFalseBlocked(t *testing.T) {
 	}
 }
 
+func TestFuseVersionedBinaryMatchesByPath(t *testing.T) {
+	// Claude Code's versioned install runs as a binary literally named
+	// "2.1.220" — the name says nothing, the path still says whose it is.
+	ss := []Session{{ID: "a", Cwd: "/w", State: StateBlocked}}
+	panes := []PaneActivity{{Cwd: "/w", Fg: "2.1.220",
+		Path: "/Users/u/.local/share/claude/versions/2.1.220", OutMs: 500, InMs: -1}}
+	fuse(ss, panes, []string{"claude", "node"}, 3*time.Second, 45*time.Second)
+	if ss[0].State != StateWorking {
+		t.Fatalf("state = %q, want working (matched by path)", ss[0].State)
+	}
+}
+
 func TestFuseQuietPaneLeavesBlockedAlone(t *testing.T) {
 	ss := []Session{{ID: "a", Cwd: "/w", State: StateBlocked}}
 	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", OutMs: 90_000, InMs: -1}}

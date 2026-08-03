@@ -81,6 +81,7 @@ type PaneActivity struct {
 	OutMs int64  `json:"outMs"`
 	InMs  int64  `json:"inMs"`
 	Fg    string `json:"fg"`
+	Path  string `json:"path"` // full exec path; the basename can lie
 	Cwd   string `json:"cwd"`
 }
 
@@ -101,7 +102,7 @@ func fuse(sessions []Session, panes []PaneActivity, names []string, alive, prese
 		s := &sessions[i]
 		outBest, inBest := int64(-1), int64(-1)
 		for _, p := range panes {
-			if p.Cwd != s.Cwd || !nameMatch(p.Fg, names) {
+			if p.Cwd != s.Cwd || !claudeLike(p, names) {
 				continue
 			}
 			if p.OutMs >= 0 && (outBest < 0 || p.OutMs < outBest) {
@@ -119,8 +120,12 @@ func fuse(sessions []Session, panes []PaneActivity, names []string, alive, prese
 	sortSessions(sessions)
 }
 
-func nameMatch(fg string, names []string) bool {
-	return slices.Contains(names, fg)
+// claudeLike: is this pane's foreground program Claude Code? By name
+// when the name is honest ("claude", "node"), by path when it is not —
+// the versioned install runs a binary literally named "2.1.220", and
+// only its path (…/claude/versions/2.1.220) still says whose it is.
+func claudeLike(p PaneActivity, names []string) bool {
+	return slices.Contains(names, p.Fg) || strings.Contains(p.Path, "claude")
 }
 
 // Scan lists the sessions worth showing, most urgent first.

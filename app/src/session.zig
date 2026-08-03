@@ -534,15 +534,26 @@ pub const Session = struct {
     /// is the program the tty is talking to. A pipeline reports its
     /// first command, which is the right answer for this question.
     pub fn fgName(self: *Session, buf: []u8) ?[]const u8 {
+        const p = self.fgPath(buf) orelse return null;
+        const base = std.fs.path.basename(p);
+        std.mem.copyForwards(u8, buf[0..base.len], base);
+        return buf[0..base.len];
+    }
+
+    /// The full executable path of the same program. The basename can be
+    /// meaningless on its own — Claude Code's versioned install runs as a
+    /// binary literally named `2.1.220` — and the path is what still says
+    /// whose it is. Same two syscalls.
+    pub fn fgPath(self: *Session, buf: []u8) ?[]const u8 {
         const pgrp = tcgetpgrp(self.pty.master);
         if (pgrp <= 0) return null;
         var path: [proc_pidpathinfo_maxsize]u8 = undefined;
         const n = proc_pidpath(pgrp, &path, path.len);
         if (n <= 0) return null;
-        const base = std.fs.path.basename(path[0..@intCast(n)]);
-        if (base.len == 0 or base.len > buf.len) return null;
-        @memcpy(buf[0..base.len], base);
-        return buf[0..base.len];
+        const p = path[0..@intCast(n)];
+        if (p.len == 0 or p.len > buf.len) return null;
+        @memcpy(buf[0..p.len], p);
+        return buf[0..p.len];
     }
 
     /// Resize the emulator (reflow included) and tell the child via

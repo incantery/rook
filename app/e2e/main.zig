@@ -1762,9 +1762,16 @@ fn claudeWatch(gpa: std.mem.Allocator, bin: []const u8) !void {
     try setMtime(sess_b, now - 120);
     try setMtime(sess_c, now - 1800);
 
-    var json_buf: [1024]u8 = undefined;
+    // A MIXED graph, deliberately: the keybind rides along because its
+    // `command` is a string where the plugin's is an argv, and a loader
+    // that parses the whole file against the plugin shape chokes on it —
+    // which is exactly how every real config looks and exactly what a
+    // plugin-only fixture graph failed to catch once already.
+    var json_buf: [1280]u8 = undefined;
     const graph = try std.fmt.bufPrint(&json_buf,
         \\{{"rookEnvironment":1,"nodes":[
+        \\{{"id":"font","kind":"font","scope":"app","family":"Menlo","size":12}},
+        \\{{"id":"kb","kind":"keybind","scope":"app","chord":"<leader>z","command":"pane.zoom"}},
         \\{{"id":"plugin:claude","kind":"plugin","scope":"app","name":"claude","command":["{s}","--dir","{s}/projects","--poll","200ms","--min-turn","0s"],"load":"eager","grants":["items.list","items.act","attention.raise","panes.activity"]}}
         \\]}}
     , .{ plug, root });

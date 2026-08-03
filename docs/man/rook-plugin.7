@@ -247,14 +247,19 @@ Opens without stealing focus.
 No params.
 The first inbound verb that answers with data:
 .Bd -literal -offset indent
-{"panes":[{"id":1,"outMs":120,"inMs":-1,
-  "fg":"claude","cwd":"/path/to/repo"}]}
+{"panes":[{"id":1,"outMs":120,"inMs":-1,"fg":"2.1.220",
+  "path":"/Users/u/.local/share/claude/versions/2.1.220",
+  "cwd":"/path/to/repo"}]}
 .Ed
 .Pp
 Per terminal pane, milliseconds since the child last wrote and since the
 human last typed there
 .Pq physical keyboard only; \-1 = never ,
-plus the foreground program and the shell's cwd.
+plus the foreground program \(em name and full executable path, because
+the name can lie; Claude Code's versioned install runs a binary
+literally named
+.Ql 2.1.220
+\(em and the shell's cwd.
 This is the substrate's half of
 .Dq is that session alive :
 a transcript goes quiet during a long tool run, but the pane keeps
