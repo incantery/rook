@@ -188,50 +188,90 @@ pub fn main(init: std.process.Init) !void {
 /// env, so a Dock-launched rook reported every Go config as "go: not on
 /// PATH" while the same config checked fine from a terminal launch.
 ///
-/// So ask a login shell once, before anything spawns, and adopt its
-/// answer. Gated on launchd's exact default: a terminal launch already
-/// has the user's PATH and pays nothing.
+/// So ask the user's shell once, before anything spawns, and adopt its
+/// answer. INTERACTIVE login first (-l -i): version managers — mise,
+/// nvm, rbenv — activate in .zshrc, which only interactive shells read,
+/// so a login-only capture returns a PATH that still has no go and the
+/// fix looks present-but-useless (found the hard way, on the first
+/// machine where go came from mise). Non-interactive login is the
+/// fallback for an rc file that misbehaves without a terminal.
+///
+/// The answer travels on fd 3, not stdout — an interactive rc file
+/// prints banners and plugin-manager chatter, and parsing a PATH out of
+/// that is a bug factory. stdin/out/err get /dev/null (a prompting rc
+/// file reads EOF and moves on), and a poll deadline kills a shell that
+/// hangs anyway: a broken zshrc must cost seconds once, never a launch.
+///
+/// Gated on launchd's exact default: a terminal launch pays nothing.
 fn adoptLoginPath() void {
     const cur = getenv("PATH") orelse return;
     if (!std.mem.eql(u8, std.mem.span(cur), "/usr/bin:/bin:/usr/sbin:/sbin")) return;
+    if (captureShellPath(true)) return;
+    _ = captureShellPath(false);
+}
 
+const PollFd = extern struct { fd: c_int, events: i16, revents: i16 };
+
+fn captureShellPath(interactive: bool) bool {
     var fds: [2]c_int = undefined;
-    if (pipe(&fds) != 0) return;
+    if (pipe(&fds) != 0) return false;
     const child = fork();
     if (child < 0) {
         _ = close(fds[0]);
         _ = close(fds[1]);
-        return;
+        return false;
     }
     if (child == 0) {
-        _ = dup2(fds[1], 1);
+        const devnull = open("/dev/null", 2, @as(c_uint, 0)); // O_RDWR
+        if (devnull >= 0) {
+            _ = dup2(devnull, 0);
+            _ = dup2(devnull, 1);
+            _ = dup2(devnull, 2);
+        }
+        _ = dup2(fds[1], 3);
         _ = close(fds[0]);
-        _ = close(fds[1]);
+        if (fds[1] != 3) _ = close(fds[1]);
         const sh: [*:0]const u8 = getenv("SHELL") orelse "/bin/zsh";
-        // -l -c, no interactive: zprofile runs (path_helper lives
-        // there), zshrc does not — nobody's plugin manager boots here.
-        const argv = [_:null]?[*:0]const u8{ sh, "-l", "-c", "printf %s \"$PATH\"", null };
-        _ = execvp(sh, &argv);
+        // /dev/fd/3 rather than >&3: every shell spells it the same way.
+        const cmd = "printf %s \"$PATH\" > /dev/fd/3";
+        const argv_i = [_:null]?[*:0]const u8{ sh, "-l", "-i", "-c", cmd, null };
+        const argv_l = [_:null]?[*:0]const u8{ sh, "-l", "-c", cmd, null };
+        _ = execvp(sh, if (interactive) &argv_i else &argv_l);
         _exit(127);
     }
     _ = close(fds[1]);
+    defer _ = close(fds[0]);
+
     var buf: [4096]u8 = undefined;
     var len: usize = 0;
-    while (len < buf.len - 1) {
+    // ~8s of QUIET kills the child; time spent actually streaming does
+    // not count against it. A cold plugin manager gets its seconds, a
+    // hung rc file does not get the launch.
+    var quiet_ms: i32 = 0;
+    while (len < buf.len - 1 and quiet_ms < 8_000) {
+        var p = [1]PollFd{.{ .fd = fds[0], .events = 1, .revents = 0 }}; // POLLIN
+        const r = poll(&p, 1, 200);
+        if (r < 0) break;
+        if (r == 0) {
+            quiet_ms += 200;
+            continue;
+        }
         const n = read(fds[0], buf[len..].ptr, buf.len - 1 - len);
         if (n <= 0) break;
         len += @intCast(n);
+        quiet_ms = 0;
     }
-    _ = close(fds[0]);
+    if (quiet_ms >= 8_000) _ = kill(child, 9);
     var status: c_int = 0;
     _ = waitpid(child, &status, 0);
 
     const got = std.mem.trim(u8, buf[0..len], " \t\r\n");
     // A real PATH has separators; anything else is a shell that failed.
-    if (got.len == 0 or std.mem.indexOfScalar(u8, got, ':') == null) return;
+    if (got.len == 0 or std.mem.indexOfScalar(u8, got, ':') == null) return false;
     var z: [4096]u8 = undefined;
-    const pz = std.fmt.bufPrintZ(&z, "{s}", .{got}) catch return;
+    const pz = std.fmt.bufPrintZ(&z, "{s}", .{got}) catch return false;
     _ = setenv("PATH", pz.ptr, 1);
+    return true;
 }
 
 /// `rook install <target>` — teach a tool about rook.
@@ -420,6 +460,8 @@ extern "c" fn fork() c_int;
 extern "c" fn dup2(old: c_int, new: c_int) c_int;
 extern "c" fn execvp(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn waitpid(pid: c_int, status: *c_int, options: c_int) c_int;
+extern "c" fn poll(fds: [*]PollFd, n: c_uint, timeout_ms: c_int) c_int;
+extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 
 /// `rook edit <file>` — the dogfood door: from a shell inside rook,
 /// open the file in an editor pane of THIS instance (shells inherit
