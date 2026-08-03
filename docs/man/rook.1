@@ -106,6 +106,15 @@ Useful for checking what a terminal program actually draws.
 Feed a few canned escape-sequence lines through the terminal emulator and
 print the result.
 A smoke test that the VT stack is alive; no window, no socket.
+.It Cm install Cm claude
+Write the rook skill into
+.Pa ~/.claude/skills/rook ,
+teaching Claude Code to see and drive rook
+.Pq the verbs of Xr rook-ctl 7 , the cautions included .
+The content ships inside the binary, so the skill always matches the
+rook that wrote it \(em re-run after upgrades.
+Remove with
+.Ql rm -r ~/.claude/skills/rook .
 .El
 .Sh OPTIONS
 .Bl -tag -width Fl

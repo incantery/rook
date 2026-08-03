@@ -1128,6 +1128,23 @@ fn cli(gpa: std.mem.Allocator, bin: []const u8) !void {
     // --help needs no app and exits 0.
     if (try h.runCmd(".", &.{ binz.ptr, "--help" }) != 0)
         return error.AssertFailed;
+
+    // `install claude` writes the embedded skill under $HOME — the
+    // sandbox's HOME, so the developer's real ~/.claude stays theirs.
+    var home_buf: [192]u8 = undefined;
+    const homeenv = try std.fmt.bufPrintZ(&home_buf, "HOME={s}/home", .{app.dirPath()});
+    if (try h.runCmd(".", &.{ "/usr/bin/env", homeenv.ptr, binz.ptr, "install", "claude" }) != 0)
+        return error.AssertFailed;
+    var skill_buf: [256]u8 = undefined;
+    const skill_path = try std.fmt.bufPrint(&skill_buf, "{s}/home/.claude/skills/rook/SKILL.md", .{app.dirPath()});
+    var content_buf: [16 * 1024]u8 = undefined;
+    const skill = try h.readFile(skill_path, &content_buf);
+    try h.expect(std.mem.indexOf(u8, skill, "name: rook") != null, "the skill has its frontmatter", .{});
+    try h.expect(std.mem.indexOf(u8, skill, "man rook-ctl") != null, "and points at the reference", .{});
+
+    // An unknown target is usage, not a silent no-op.
+    if (try h.runCmd(".", &.{ binz.ptr, "install", "emacs" }) == 0)
+        return error.AssertFailed;
 }
 
 // ------------------------------------------------------------- bufline

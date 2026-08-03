@@ -76,6 +76,9 @@ pub fn build(b: *std.Build) void {
     // means the SDK a config was written against cannot drift from the rook
     // that wrote it.
     exe_mod.addAnonymousImport("ts_sdk", .{ .root_source_file = b.path("../sdk/ts/rook.ts") });
+    // The Claude skill travels IN the binary for the same reason: `rook
+    // install claude` writes the skill that matches the rook it ships in.
+    exe_mod.addAnonymousImport("claude_skill", .{ .root_source_file = b.path("../docs/claude/rook-skill.md") });
 
     const exe = b.addExecutable(.{
         .name = "rook",

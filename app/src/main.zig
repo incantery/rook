@@ -152,6 +152,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (std.mem.eql(u8, cmd, "demo")) return demo(init);
+    if (std.mem.eql(u8, cmd, "install")) return install(argv[cmd_idx + 1 ..]);
     if (std.mem.eql(u8, cmd, "exec")) return exec(init, argv[cmd_idx + 1 ..]);
     if (std.mem.eql(u8, cmd, "edit")) {
         edit(argv[cmd_idx + 1 ..]) catch _exit(1);
@@ -178,6 +179,76 @@ pub fn main(init: std.process.Init) !void {
     ctlPass(argv[cmd_idx..]);
 }
 
+/// `rook install <target>` — teach a tool about rook.
+///
+/// `claude` writes the rook skill into ~/.claude/skills/rook, where
+/// Claude Code loads it on demand: one description line rides along in
+/// every session, the full instructions only when rook is relevant —
+/// which is why this is a skill and not a CLAUDE.md paragraph. The
+/// content is EMBEDDED (build.zig), so the skill always matches the
+/// binary that wrote it; re-run after an upgrade, or just re-run
+/// anytime — overwriting rook's own file is the idempotent case.
+fn install(args: []const [*:0]const u8) void {
+    const target: []const u8 = if (args.len > 0) std.mem.span(args[0]) else "";
+    if (!std.mem.eql(u8, target, "claude")) {
+        std.debug.print(
+            \\usage: rook install claude
+            \\  claude   the rook skill into ~/.claude/skills/rook, so Claude
+            \\           Code knows how to see and drive rook (man rook-ctl)
+            \\
+        , .{});
+        _exit(1);
+    }
+    const home = getenv("HOME") orelse {
+        std.debug.print("rook install: no $HOME\n", .{});
+        _exit(1);
+    };
+    var dir_buf: [1024]u8 = undefined;
+    const dir = std.fmt.bufPrint(&dir_buf, "{s}/.claude/skills/rook", .{std.mem.span(home)}) catch _exit(1);
+    makePath(dir);
+    var path_buf: [1024]u8 = undefined;
+    const pathz = std.fmt.bufPrintZ(&path_buf, "{s}/SKILL.md", .{dir}) catch _exit(1);
+
+    const skill = @embedFile("claude_skill");
+    const fd = open(pathz.ptr, 0x601, @as(c_uint, 0o644)); // O_WRONLY|O_CREAT|O_TRUNC
+    if (fd < 0) {
+        std.debug.print("rook install: cannot write {s}\n", .{pathz});
+        _exit(1);
+    }
+    defer _ = close(fd);
+    var off: usize = 0;
+    while (off < skill.len) {
+        const n = write(fd, skill.ptr + off, skill.len - off);
+        if (n <= 0) {
+            std.debug.print("rook install: short write to {s}\n", .{pathz});
+            _exit(1);
+        }
+        off += @intCast(n);
+    }
+    std.debug.print(
+        \\installed {s}
+        \\Claude Code picks it up from the next session on.
+        \\(remove with: rm -r ~/.claude/skills/rook — or re-run this after upgrades)
+        \\
+    , .{pathz});
+}
+
+fn makePath(dir: []const u8) void {
+    var buf: [1024]u8 = undefined;
+    if (dir.len >= buf.len) return;
+    @memcpy(buf[0..dir.len], dir);
+    buf[dir.len] = 0;
+    var i: usize = 1;
+    while (i <= dir.len) : (i += 1) {
+        if (i == dir.len or buf[i] == '/') {
+            const save = buf[i];
+            buf[i] = 0;
+            _ = mkdir(@ptrCast(&buf), 0o755);
+            buf[i] = save;
+        }
+    }
+}
+
 /// The whole help. Deliberately short: the real reference is the man
 /// pages, and a --help that scrolls is a --help nobody reads.
 fn help() void {
@@ -189,6 +260,7 @@ fn help() void {
         \\  rook <file>                           open a file in the running rook (also: re <file>)
         \\  rook <verb> [args...]                 send a control verb to the running rook
         \\  rook exec <cmd...> | demo             headless probes
+        \\  rook install claude                   teach Claude Code to drive rook
         \\  rook --version | --help
         \\
         \\verbs answer over the control socket ($ROOK_SOCK, default
@@ -286,6 +358,7 @@ extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn shutdown(fd: c_int, how: c_int) c_int;
 extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn _exit(code: c_int) noreturn;
 
 /// `rook edit <file>` — the dogfood door: from a shell inside rook,
