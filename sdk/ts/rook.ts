@@ -150,6 +150,8 @@ export class Env {
   // The three-way form: "off", "multiple" (default), "always" (VS Code's).
   bufferLineMode(mode: string): this { return this.set("buffer-line", mode); }
   cursorBlink(on: boolean): this { return this.set("cursor-blink", on); }
+  // Fade unfocused panes toward their background, 0 (off) to 0.9.
+  paneDim(amount: number): this { return this.set("pane-dim", amount); }
   scrollback(size: string): this { return this.set("scrollback", size); }
 
   // ---- chrome arrangement ----

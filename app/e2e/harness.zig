@@ -867,6 +867,34 @@ pub const Shot = struct {
         return n;
     }
 
+    /// The loudest single-channel departure from the rect's background
+    /// — "how bright is the brightest ink here", 0–255. pane-dim's
+    /// meter: `inkRect` counts dimmed pixels all the same, but a pane
+    /// slid 60% toward its background peaks at ~40% of the contrast.
+    /// Antialiasing only interpolates between text and background, so
+    /// the peak never exceeds the text color itself.
+    pub fn maxContrast(self: *const Shot, x0: usize, y0: usize, x1: usize, y1: usize) usize {
+        const xe = @min(x1, self.width);
+        const ye = @min(y1, self.height);
+        if (x0 >= xe or y0 >= ye) return 0;
+        const bg = self.pixel(xe - 2, ye - 1);
+        const bch: [3]i32 = .{ @intCast((bg >> 16) & 0xff), @intCast((bg >> 8) & 0xff), @intCast(bg & 0xff) };
+        var best: i32 = 0;
+        var y = y0;
+        while (y < ye) : (y += 1) {
+            var x = x0;
+            while (x < xe) : (x += 1) {
+                const p = self.pixel(x, y);
+                const pch: [3]i32 = .{ @intCast((p >> 16) & 0xff), @intCast((p >> 8) & 0xff), @intCast(p & 0xff) };
+                for (pch, bch) |pc, bc| {
+                    const d = if (pc > bc) pc - bc else bc - pc;
+                    if (d > best) best = d;
+                }
+            }
+        }
+        return @intCast(best);
+    }
+
     /// The inkiest single pixel row in a band, as a count. Bands full of
     /// blank rows dilute a density until a real difference reads as
     /// noise; one row through the middle of the text does not.

@@ -68,6 +68,7 @@ const scenarios = [_]Scenario{
     .{ .name = "findfiles", .what = "⌘⇧F: scan honours the ignore rules, results group by file, Enter jumps to the line", .run = findInFiles },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
     .{ .name = "keys", .what = "shift+Tab reaches the pty as CSI Z, and ⌃HJKL yields by program rather than by alternate screen", .run = keys },
+    .{ .name = "panedim", .what = "pane-dim: the unfocused pane fades toward its background, and the fade follows focus", .run = paneDim },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
 };
 
@@ -3724,4 +3725,47 @@ fn docShare(gpa: std.mem.Allocator, bin: []const u8) !void {
         // now alone.
         try h.expectContains(out, "views:1", "each held by one pane");
     }
+}
+
+// ------------------------------------------------------------- panedim
+
+fn paneDim(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{ .config_extra = "pane-dim = 0.6\n" });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // Text in the first pane, then a split — the new pane takes focus,
+    // and gets text of its own. Same words on both sides on purpose:
+    // the claim is about brightness, and different content would make
+    // the meter compare apples to prompts.
+    _ = try app.ctl("type echo DIMMER-PROOF");
+    _ = try app.ctl("enter");
+    try app.waitTextCount("DIMMER-PROOF", 2, 10_000);
+    _ = try app.ctl("split right");
+    _ = try app.ctl("type echo DIMMER-PROOF");
+    _ = try app.ctl("enter");
+    try app.waitTextCount("DIMMER-PROOF", 2, 10_000);
+
+    // A DIFFERENTIAL between the two halves of one shot: thresholds on
+    // absolute pixel values would encode the theme. The text band sits
+    // in the top third (echo output), clear of the mid separator and
+    // the status bar.
+    var p1: [192]u8 = undefined;
+    var img = try app.shot(try std.fmt.bufPrint(&p1, "{s}/dim-right-focused.png", .{app.dirPath()}));
+    const l1 = img.maxContrast(img.width / 16, img.height / 20, img.width * 7 / 16, img.height / 3);
+    const r1 = img.maxContrast(img.width * 9 / 16, img.height / 20, img.width * 15 / 16, img.height / 3);
+    img.deinit();
+    try h.expect(l1 < r1 * 3 / 5, "the unfocused left pane should be dimmer: left {d} vs right {d}", .{ l1, r1 });
+    try h.expect(l1 > 15, "dim means faded, not blank: left contrast {d}", .{l1});
+
+    // The fade follows focus, live — no restart, no relayout.
+    _ = try app.ctl("focus left");
+    var p2: [192]u8 = undefined;
+    var img2 = try app.shot(try std.fmt.bufPrint(&p2, "{s}/dim-left-focused.png", .{app.dirPath()}));
+    const l2 = img2.maxContrast(img2.width / 16, img2.height / 20, img2.width * 7 / 16, img2.height / 3);
+    const r2 = img2.maxContrast(img2.width * 9 / 16, img2.height / 20, img2.width * 15 / 16, img2.height / 3);
+    img2.deinit();
+    try h.expect(r2 < l2 * 3 / 5, "after focus left the RIGHT pane is the dim one: left {d} vs right {d}", .{ l2, r2 });
 }

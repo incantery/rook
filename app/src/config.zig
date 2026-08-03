@@ -331,6 +331,11 @@ pub const Config = struct {
     /// pauses while rook is in the background, so the zero-idle-frames
     /// property still holds where it was measured: an unfocused app.
     cursor_blink: bool = true,
+    /// Dim unfocused panes' content toward their own background —
+    /// iTerm's "dim inactive panes", with the amount exposed. 0 (off,
+    /// the default) to 0.9; ~0.2–0.4 is the useful range. Background
+    /// stays put, so panes fade rather than repaint.
+    pane_dim: f64 = 0,
     /// Scrollback per pane, in BYTES (the emulator's unit; it rounds up
     /// to a page and floors at one page's worth of the active area).
     /// Ghostty's own default, and for the same reason: rook previously
@@ -578,6 +583,12 @@ fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
             if (stripped.len > 0) {
                 cfg.theme = gpa.dupe(u8, stripped) catch cfg.theme;
             }
+        } else if (std.mem.eql(u8, key, "pane_dim")) {
+            cfg.pane_dim = std.fmt.parseFloat(f64, val) catch 0;
+            if (cfg.pane_dim < 0 or cfg.pane_dim > 0.9) {
+                std.debug.print("rook config: pane-dim {d} out of [0, 0.9], using 0\n", .{cfg.pane_dim});
+                cfg.pane_dim = 0;
+            }
         } else if (std.mem.eql(u8, key, "window_padding") or
             std.mem.eql(u8, key, "window_padding_x") or
             std.mem.eql(u8, key, "window_padding_y"))
@@ -822,6 +833,9 @@ fn applyEnvOption(cfg: *Config, gpa: std.mem.Allocator, key_raw: []const u8, val
         };
     } else if (std.mem.eql(u8, key, "cursor_blink") or std.mem.eql(u8, key, "cursor_style_blink")) {
         cfg.cursor_blink = jBool(value) orelse cfg.cursor_blink;
+    } else if (std.mem.eql(u8, key, "pane_dim")) {
+        cfg.pane_dim = jNum(value) orelse cfg.pane_dim;
+        if (cfg.pane_dim < 0 or cfg.pane_dim > 0.9) cfg.pane_dim = 0;
     } else if (std.mem.eql(u8, key, "editor_mode")) {
         if (jStr(value)) |s| {
             if (std.mem.eql(u8, s, "insert")) {
@@ -1384,6 +1398,18 @@ test "editor-lsp is the name; `lsp` still answers to it" {
     // so a mismatch is version skew to survive, not a typo to correct.
     applyEnvOption(&cfg, t.allocator, "editor-lsp", .{ .string = "true" });
     try t.expect(!cfg.lsp);
+}
+
+test "pane-dim is an amount, and past 0.9 it is a blank pane, not a dim one" {
+    const t = std.testing;
+    var cfg: Config = .{};
+    try t.expectEqual(@as(f64, 0), cfg.pane_dim); // off by default
+
+    applyEnvOption(&cfg, t.allocator, "pane-dim", .{ .float = 0.3 });
+    try t.expectEqual(@as(f64, 0.3), cfg.pane_dim);
+
+    applyEnvOption(&cfg, t.allocator, "pane_dim", .{ .float = 1.5 });
+    try t.expectEqual(@as(f64, 0), cfg.pane_dim);
 }
 
 test "--config makes ONE directory the whole config" {

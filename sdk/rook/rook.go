@@ -262,6 +262,7 @@ func segStrings(segments []Seg) []string {
 func ActivityBar(on bool) Node    { return opt{"activity-bar", on} }    // VS Code's icon rail
 func ExplorerAuto(on bool) Node   { return opt{"explorer-auto", on} }   // file tree opens with a repo
 func CursorBlink(on bool) Node    { return opt{"cursor-blink", on} }    //
+func PaneDim(amount float64) Node { return opt{"pane-dim", amount} }    // fade unfocused panes, 0–0.9
 func ClipboardWrite(on bool) Node { return opt{"clipboard-write", on} } // OSC 52 writes
 func Scrollback(size string) Node { return opt{"scrollback", size} }    // "10mb", or lines
 

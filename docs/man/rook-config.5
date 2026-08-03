@@ -219,6 +219,14 @@ Per-pane buffer line:
 .Pq bool accepted: true means Ql multiple .
 .It Cm cursor-blink
 Bool.
+The focused pane's terminal cursor, and every editor's \(em an editor
+cursor blinks whether or not its pane holds the keys.
+.It Cm pane-dim
+How far unfocused panes fade toward their own background:
+0
+.Pq off, the default
+to 0.9; 0.2\(en0.4 is the useful range.
+The background itself stays put, so panes fade rather than repaint.
 .It Cm editor-mode
 Mode a fresh editor starts in:
 .Ql normal

@@ -608,6 +608,10 @@ pub const App = struct {
     /// config `cursor-blink`: the focused pane's cursor blinks on the
     /// mark every terminal shares (1.1s period, ~55% on).
     cursor_blink: bool = true,
+    /// config `pane-dim`: how far unfocused panes' colors slide toward
+    /// their own background (0 = off). Applied at fill time, so it
+    /// costs nothing while nothing draws.
+    pane_dim: f32 = 0,
     /// Current phase; true = cursor drawn. Forced true (solid) whenever
     /// blinking doesn't apply, so every fill path can read it blindly.
     blink_phase_on: bool = true,
@@ -1113,6 +1117,7 @@ pub const App = struct {
             .cfg_activity_bar = cfg.activity_bar,
             .cfg_explorer_auto = cfg.explorer_auto,
             .cursor_blink = cfg.cursor_blink,
+            .pane_dim = @floatCast(cfg.pane_dim),
             .cfg_scrollback = cfg.scrollback,
             .bg_alpha = @intFromFloat(@round(cfg.background_opacity * 255.0)),
             .ime_view = view,
@@ -3948,15 +3953,24 @@ pub const App = struct {
     }
 
     /// Is there a cursor on screen worth blinking? The focused pane's
-    /// only — that is the pane the blink telegraphs — and a terminal
-    /// that hid its cursor (DECTCEM) has nothing to blink. Reads the
-    /// last snapshot's cursor state, which is exactly what fillPane
+    /// terminal cursor — a terminal that hid its cursor (DECTCEM) has
+    /// nothing to blink, and unfocused terminals draw no cursor at all
+    /// — or ANY visible editor's: editors blink focused or not (the
+    /// solid-marker design read as broken from one pane over), so a
+    /// visible unfocused editor keeps the phase ticking. Reads the
+    /// last snapshot's cursor state, which is exactly what the fills
     /// will draw. Caller holds draw_lock.
     fn focusedCursorShowing(self: *App) bool {
-        return switch (self.activeTab().focused.content) {
-            .term => |*tm| tm.rs.cursor.visible and tm.rs.cursor.viewport != null,
-            .edit => true,
-        };
+        const atab = self.activeTab();
+        switch (atab.focused.content) {
+            .term => |*tm| if (tm.rs.cursor.visible and tm.rs.cursor.viewport != null) return true,
+            .edit => return true,
+        }
+        for (atab.panes.items) |p| {
+            if (p.rect.w == 0) continue;
+            if (p.content == .edit) return true;
+        }
+        return false;
     }
 
     fn drawFrame(self: *App) void {
@@ -4347,6 +4361,10 @@ pub const App = struct {
         self.cfg_bufline = cfg.buffer_line;
         self.cfg_nav_yield = cfg.nav_yield;
         self.cursor_blink = cfg.cursor_blink;
+        if (self.pane_dim != @as(f32, @floatCast(cfg.pane_dim))) {
+            self.pane_dim = @floatCast(cfg.pane_dim);
+            self.scene_dirty = true;
+        }
 
         // Chrome arrangement: a preset (or hand-set lists) landing on
         // a LIVE app. Hiding or showing the top strip is a retile —
@@ -6729,6 +6747,13 @@ pub const App = struct {
         return (@as(u32, cur.y) << 16) | cur.x;
     }
 
+    /// pane-dim: one channel slid toward the pane's own background.
+    fn dimTo(c: u8, toward: u8, amt: f32) u8 {
+        const cf: f32 = @floatFromInt(c);
+        const tf: f32 = @floatFromInt(toward);
+        return @intFromFloat(std.math.clamp(@round(cf + (tf - cf) * amt), 0, 255));
+    }
+
     fn fillPane(self: *App, tm: *panespkg.Term, focused: bool, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
         const colors = &tm.rs.colors;
         const default_bg = colors.background;
@@ -6741,6 +6766,10 @@ pub const App = struct {
         // blink phase is one more gate — solid whenever blinking
         // doesn't apply, so this reads it blindly.
         const show_cursor = focused and tm.rs.cursor.visible and self.blink_phase_on;
+        // config `pane-dim`: the unfocused pane's colors slide toward
+        // its background. The background itself stays put — the pane
+        // fades, it doesn't repaint.
+        const dim: f32 = if (focused) 0 else self.pane_dim;
         for (0..rows) |y| {
             const raws = row_cells[y].items(.raw);
             const styles = row_cells[y].items(.style);
@@ -6849,8 +6878,12 @@ pub const App = struct {
                         if (cur.x == x and cur.y == y) inv = !inv;
                     }
                 }
-                const eff_bg = if (inv) fg else bg;
-                const eff_fg = if (styled and st.flags.invisible) eff_bg else if (inv) bg else fg;
+                var eff_bg = if (inv) fg else bg;
+                var eff_fg = if (styled and st.flags.invisible) eff_bg else if (inv) bg else fg;
+                if (dim > 0) {
+                    eff_fg = .{ .r = dimTo(eff_fg.r, default_bg.r, dim), .g = dimTo(eff_fg.g, default_bg.g, dim), .b = dimTo(eff_fg.b, default_bg.b, dim) };
+                    eff_bg = .{ .r = dimTo(eff_bg.r, default_bg.r, dim), .g = dimTo(eff_bg.g, default_bg.g, dim), .b = dimTo(eff_bg.b, default_bg.b, dim) };
+                }
 
                 const cell_a: u8 = if (bg_explicit or inv) 255 else self.bg_alpha;
                 cells[y * cols + x] = .{
@@ -6870,6 +6903,9 @@ pub const App = struct {
     fn fillEditorPane(self: *App, ed: *editorpkg.Editor, focused: bool, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
         const g = ed.fillGrid(cols, rows);
         const cellw_px: u16 = @intCast(self.renderer.cellw_px);
+        // config `pane-dim`, the editor's half: everything slides
+        // toward ed_bg, status row included.
+        const dim: f32 = if (focused) 0 else self.pane_dim;
         var prev_wide: ?renderpkg.GlyphLoc = null;
         for (g, 0..) |rc, i| {
             // The grid is walked flat, so the carry has to be dropped at
@@ -6879,10 +6915,10 @@ pub const App = struct {
             const status_row = rows >= 1 and i >= (rows - 1) * cols;
             // Blink's off-phase draws the cursor cell as plain text —
             // the same terminal-cursor gate, in the editor's vocabulary.
-            // Focused pane only: it is the blink that telegraphs where
-            // the keys go, and an unfocused editor's cursor stays a
-            // solid location marker.
-            const st = if (rc.st == .cursor and focused and !self.blink_phase_on)
+            // Every editor pane, focused or not: the solid-marker design
+            // read as "the cursor broke" from one pane over. Focus is
+            // telegraphed by pane-dim and the mode chip instead.
+            const st = if (rc.st == .cursor and !self.blink_phase_on)
                 @TypeOf(rc.st).text
             else
                 rc.st;
@@ -6985,6 +7021,12 @@ pub const App = struct {
                     uvy = loc.uvy;
                     flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
                 };
+            }
+            if (dim > 0) {
+                for (0..3) |c| {
+                    fg[c] = dimTo(fg[c], th.ed_bg[c], dim);
+                    bg[c] = dimTo(bg[c], th.ed_bg[c], dim);
+                }
             }
             cells[i] = .{
                 .bg = bg,
