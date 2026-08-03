@@ -939,40 +939,54 @@ fn whichkey(gpa: std.mem.Allocator, bin: []const u8) !void {
 /// truth is .git/HEAD, not shell activity. Then the segments as click
 /// targets: branch → the diff, workspace → the switcher.
 fn statusbar(gpa: std.mem.Allocator, bin: []const u8) !void {
-    const app = try h.Instance.start(gpa, bin, .{});
-    defer {
-        app.stop();
-        app.deinit();
-    }
-
-    // A repo with a real change in it (seedRegistry's registry also
-    // names it as the 'scratch' workspace root, which is what lets the
-    // branch-segment click resolve a diff). The branch name is pinned
-    // — the machine's init.defaultBranch is not this test's to assume.
-    var reg = try seedRegistry(app);
-    if (try h.runCmd(reg.repo(), &.{ "/usr/bin/git", "checkout", "-q", "-b", "trunk" }) != 0)
+    // A repo with a real change in it, declared as a workspace through
+    // the environment graph — the only registry there is now, which is
+    // why it exists before the app does. The branch name is pinned —
+    // the machine's init.defaultBranch is not this test's to assume.
+    var repo_buf: [128]u8 = undefined;
+    const repo = try seedWorkspaceRepo(&repo_buf);
+    if (try h.runCmd(repo, &.{ "/usr/bin/git", "checkout", "-q", "-b", "trunk" }) != 0)
         return error.GitFailed;
     var f_buf: [256]u8 = undefined;
-    const f_path = try std.fmt.bufPrint(&f_buf, "{s}/f.zig", .{reg.repo()});
+    const f_path = try std.fmt.bufPrint(&f_buf, "{s}/f.zig", .{repo});
     try h.writeFile(f_path, "l1\nl2\nl3\nl4\nl5\n");
-    if (try h.runCmd(reg.repo(), &.{ "/usr/bin/git", "add", "f.zig" }) != 0) return error.GitFailed;
-    if (try h.runCmd(reg.repo(), &.{
+    if (try h.runCmd(repo, &.{ "/usr/bin/git", "add", "f.zig" }) != 0) return error.GitFailed;
+    if (try h.runCmd(repo, &.{
         "/usr/bin/git", "-c", "user.email=t@example.com", "-c", "user.name=t",
         "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base",
     }) != 0) return error.GitFailed;
     try h.writeFile(f_path, "a\nb\nl1\nl2\nl3\nl4\nl5\n");
 
+    // 'wsdecl', not 'scratch': the space's default name IS 'scratch',
+    // and a declared workspace that happened to share it would let the
+    // workspace-segment assertion pass with the graph never read.
+    var env_buf: [512]u8 = undefined;
+    const graph = try std.fmt.bufPrint(&env_buf,
+        \\{{"rookEnvironment":1,"nodes":[{{"id":"workspace:wsdecl","kind":"workspace","scope":"app","name":"wsdecl","root":"{s}"}}]}}
+    , .{repo});
+
+    const app = try h.Instance.start(gpa, bin, .{ .env_json = graph });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // The graph is the registry: the declared workspace comes back over
+    // ctl, root and all.
+    try h.expectContains(try app.ctl("workspaces"), "wsdecl", "the declared workspace is listed");
+    try h.expectContains(try app.ctl("workspaces"), repo, "with its declared root");
+
     // Walk the SHELL into the repo. The segments follow the pane's own
     // cwd, not the space's root — cd is sacred.
-    _ = try app.ctlFmt("type cd {s}", .{reg.repo()});
+    _ = try app.ctlFmt("type cd {s}", .{repo});
     _ = try app.ctl("enter");
     _ = try app.waitCtl("statusbar", "branch trunk", 8000);
     try h.expectContains(try app.ctl("statusbar"), "workspace scratch", "the workspace segment names the space");
-    try h.expectContains(try app.ctl("statusbar"), "repo", "the cwd label shows where the pane is");
+    try h.expectContains(try app.ctl("statusbar"), "rook-e2e-ws", "the cwd label shows where the pane is");
 
     // The branch switches OUTSIDE the app — an agent in another
     // terminal, exactly the case the segment exists for.
-    if (try h.runCmd(reg.repo(), &.{ "/usr/bin/git", "checkout", "-q", "-b", "feat/wip" }) != 0)
+    if (try h.runCmd(repo, &.{ "/usr/bin/git", "checkout", "-q", "-b", "feat/wip" }) != 0)
         return error.GitFailed;
     _ = try app.waitCtl("statusbar", "branch feat/wip", 8000);
 
@@ -981,10 +995,12 @@ fn statusbar(gpa: std.mem.Allocator, bin: []const u8) !void {
     // left in the strip.
     _ = wkPoint(try app.ctl("statusbar"), "seg-branch") orelse return error.AssertFailed;
 
-    // The workspace segment clicks into the switcher.
+    // The workspace segment clicks into the switcher, and the switcher
+    // lists what the graph declared.
     const ws = wkPoint(try app.ctl("statusbar"), "seg-workspace") orelse return error.AssertFailed;
     _ = try app.ctlFmt("click {d} {d}", .{ ws[0], ws[1] });
     _ = try app.waitCtl("palette", "mode:workspaces", 3000);
+    try h.expectContains(try app.ctl("palette"), "wsdecl", "the declared workspace is a picker row");
     _ = try app.ctl("key 1b");
 }
 
@@ -1395,53 +1411,23 @@ fn sidepane(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(try app.ctl("sidepane"), "closed", "and closes again");
 }
 
-// ------------------------------------------------- seeding a registry
+// ------------------------------------------------- seeding a workspace
 //
-// A git repo plus a registry the app will actually find. It seeded the
-// thread and review tables too until those panels left in the strip;
-// what remains is what the status bar needs to name a workspace.
+// A git repo the environment graph will DECLARE as a workspace. This was
+// a sqlite registry (rook.db) until the db left with its last writer;
+// now the repo has to exist BEFORE the app starts, because the workspace
+// node naming it is written into the sandbox's environment.json.
 
-const Registry = struct {
-    db_buf: [256]u8 = undefined,
-    db_len: usize = 0,
-    repo_buf: [256]u8 = undefined,
-    repo_len: usize = 0,
-
-    fn db(self: *const Registry) [:0]const u8 {
-        return self.db_buf[0..self.db_len :0];
-    }
-    fn repo(self: *const Registry) []const u8 {
-        return self.repo_buf[0..self.repo_len];
-    }
-};
-
-fn seedRegistry(app: *h.Instance) !Registry {
-    var reg: Registry = .{};
-
-    const repo = try std.fmt.bufPrint(&reg.repo_buf, "{s}/repo", .{app.dirPath()});
-    reg.repo_len = repo.len;
+fn seedWorkspaceRepo(buf: []u8) ![]const u8 {
+    const repo = try std.fmt.bufPrint(buf, "/tmp/rook-e2e-ws-{d}", .{getpid()});
+    var repoz_buf: [256]u8 = undefined;
+    const repoz = try std.fmt.bufPrintZ(&repoz_buf, "{s}", .{repo});
+    _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", repoz.ptr }) catch {};
     try h.mkdirP(repo);
     if (try h.runCmd(repo, &.{ "/usr/bin/git", "init", "-q" }) != 0) return error.NoGit;
     var f_buf: [256]u8 = undefined;
     try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/f.zig", .{repo}), "a\nb\nl1\nl2\nX\nY\nl3\nl4\nl5\n");
-
-    var rookdir_buf: [256]u8 = undefined;
-    const rookdir = try std.fmt.bufPrint(&rookdir_buf, "{s}/data/rook", .{app.dirPath()});
-    try h.mkdirP(rookdir);
-    // bufPrintZ, not bufPrint: this crosses into execv as a C string, and
-    // an unterminated slice pointer is a path sqlite cannot open — which
-    // surfaces only as a nonzero exit with the output discarded.
-    const db = try std.fmt.bufPrintZ(&reg.db_buf, "{s}/rook.db", .{rookdir});
-    reg.db_len = db.len;
-
-    var sql_buf: [1024]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(&sql_buf,
-        \\CREATE TABLE workspaces (name TEXT PRIMARY KEY, root TEXT NOT NULL DEFAULT '', scratch INTEGER NOT NULL DEFAULT 0, worktree_of TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_used TEXT NOT NULL);
-        \\INSERT INTO workspaces VALUES ('scratch','{s}',0,'','t','t');
-    , .{repo});
-    if (try h.runCmd(app.dirPath(), &.{ "/usr/bin/sqlite3", db.ptr, sql.ptr }) != 0)
-        return error.SeedFailed;
-    return reg;
+    return repo;
 }
 
 // ----------------------------------------------------------- pluginfetch

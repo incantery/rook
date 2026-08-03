@@ -67,6 +67,7 @@ app — the live tree is the only truth it reconciles against.
 | `keybind` | `scope`, `chord`, `command` | `scope: "app"` = `[keybinds]` (`<leader>X` chords, commands by registry id). `scope: "editor.normal"` etc. carried, consumed when configurable editor maps land |
 | `table` | `scope`, `name`, `entries` | an opaque host table (`[agent]`, `[jira]`, `[lsp]`, …). Carried verbatim for the future TOML renderer |
 | `plugin` | `scope`, `name`, `command`, `load`, `grants` | a plugin: what to run, when, and what it may do. Carried; the app's caller is owed (rook-demos) |
+| `workspace` | `scope`, `name`, `root` | a named directory: the palette lists it, a space inside it wears its name, worktree tooling anchors on its root. `~/` in root expands against `$HOME` app-side. Replaced the sqlite registry 2026-08-03; worktrees are derived from git, never declared |
 
 ### The plugin node
 
@@ -117,6 +118,7 @@ Every SDK emits the same graph as the same bytes, so parity is `diff`
 and provenance diffs stay noise-free: compact JSON (no whitespace),
 node fields in the order id, kind, scope, key/chord/name, value/command/
 entries; for `plugin`, id, kind, scope, name, command, load, grants;
+for `workspace`, id, kind, scope, name, root;
 `entries` keys sorted; integral floats as integers; no HTML escaping;
 UTF-8 raw.
 

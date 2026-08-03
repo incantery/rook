@@ -74,9 +74,9 @@ fn useConfigDir(raw: []const u8) bool {
     if (std.fmt.bufPrintZ(&buf, "{s}/rook.sock", .{dir})) |sock| {
         _ = setenv("ROOK_SOCK", sock.ptr, 0);
     } else |_| {}
-    // The registry lives at $XDG_DATA_HOME/rook/rook.db, so this points at
-    // DIR/rook/rook.db — a path that will not exist, which is exactly what
-    // "from scratch" means. It is read-only and absent is a normal state.
+    // The plugin cache lives under $XDG_DATA_HOME/rook/plugins, so this
+    // points it at DIR/rook/plugins — empty, which is exactly what "from
+    // scratch" means. Deleting DIR deletes everything the instance grew.
     if (std.fmt.bufPrintZ(&buf, "{s}", .{dir})) |data| {
         _ = setenv("XDG_DATA_HOME", data.ptr, 0);
     } else |_| {}

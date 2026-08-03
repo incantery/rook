@@ -45,7 +45,10 @@ the data dir, on a branch named by the workspace. The deletion guard
 part with the teeth.
 
 All of it is `git` subprocess work. It belongs in Zig beside
-`workspaces.zig`, which already reads the registry.
+`workspaces.zig`, which now reads workspaces from the environment graph
+— and the LISTING half should not come back as storage at all: a
+declared workspace's worktrees are already enumerated by
+`.git/worktrees/`, so rook can derive the children the old db stored.
 
 ## 3. Self-update
 
@@ -116,9 +119,16 @@ was welded in.
 ## What is NOT owed
 
 The daemon. `rook-host` served nobody by the end — the app owns its ptys
-in-process and reads the workspace registry through sqlite directly, so
+in-process and read the workspace registry through sqlite directly, so
 the daemon was spawned at launch, health-checked, and killed on quit
 without a single call in between.
+
+The workspace db followed it on 2026-08-03: nothing had written rook.db
+since the host left, so workspaces became `workspace` nodes in the
+environment graph (`scripts/migrate-workspaces.sh` prints an old db as
+paste-ready config lines). What the db held that the graph does not —
+`last_used` recency, `worktree_of` children — is owed back as ephemeral
+UI state and as facts derived from `.git/worktrees/`, not as a database.
 
 The tmux-style split (ptys that survive the app) is still wanted, and
 when it is built it should be Zig, designed for that job, rather than the

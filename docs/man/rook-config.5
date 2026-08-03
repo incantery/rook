@@ -125,6 +125,8 @@ the live reload does the rest.
      "key": "SPACE"},
     {"id": "bind.app.p", "kind": "keybind", "scope": "app",
      "chord": "<leader>p", "command": "plugin.open"},
+    {"id": "workspace:rook", "kind": "workspace", "scope": "app",
+     "name": "rook", "root": "~/src/rook"},
     {"id": "plugin.hello", "kind": "plugin", "name": "hello",
      "command": ["/path/to/hello-plugin"], "load": "lazy",
      "grants": ["items.list"]}
@@ -161,6 +163,19 @@ bound to a registry command by name
 .Pq Ql ctl commands No lists them .
 Defaults are installed first; the graph rebinds.
 Unknown command names are skipped silently.
+.It Cm workspace
+A named directory rook treats as a workspace:
+.Cm name
+and
+.Cm root .
+The palette lists it, a space launched inside it wears its name, and
+worktree tooling anchors on its root.
+A leading
+.Ql ~/
+in root expands against
+.Ev $HOME .
+This is the whole workspace registry \(em there is no database behind it;
+worktrees are derived from git rather than declared.
 .It Cm plugin
 A plugin declaration \(em see
 .Xr rook-plugin 7 .
@@ -262,6 +277,7 @@ e.run();
 The surface is the option keys above as named methods, plus
 .Ql leader / editorLeader ,
 .Ql bind ,
+.Ql workspace ,
 .Ql plugin / pluginFrom / pluginPinned ,
 generic
 .Ql set / option

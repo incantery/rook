@@ -51,7 +51,7 @@ One process, and two kinds of thing beside it:
 
 | | |
 |---|---|
-| **rook** | the app and the CLI. Zig, Metal, owns its ptys in-process, reads the workspace registry straight from sqlite. `re` is `rook edit`. |
+| **rook** | the app and the CLI. Zig, Metal, owns its ptys in-process; workspaces are `workspace` nodes in the environment graph. `re` is `rook edit`. |
 | **providers** | separate processes reaching one external system each, speaking newline-JSON over stdio ([`sdk/provider`](sdk/provider)). Go, and deliberately so. |
 | **LSP servers** | separate processes rook spawns from a catalog (`app/src/lspmgr.zig`). |
 

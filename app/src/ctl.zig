@@ -276,8 +276,9 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         app.draw_lock.unlock();
         reply(fd, buf[0..w.end]);
     } else if (std.mem.eql(u8, verb, "workspaces") and rest.len == 0) {
-        // Fresh read of rook.db — proves the sqlite path blind.
-        const list = @import("workspaces.zig").load(app.gpa);
+        // Fresh read of the environment graph — the same path the
+        // palette takes, proved blind.
+        const list = @import("workspaces.zig").load(app.io, app.gpa);
         defer @import("workspaces.zig").free(app.gpa, list);
         var buf: [4096]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);

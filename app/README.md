@@ -525,13 +525,18 @@ choose-session; `w` stays reserved for a choose-window picker) opens
 the WORKSPACE PALETTE —
 the first modal chrome tenant, and the seed of every future picker
 (file finder, themes, commands): type-to-filter fuzzy list, arrows or
-⌃N/⌃P, Enter, ESC. The list is rook's own registry — rook reads
-`workspaces(name, root, worktree_of, last_used)` from
-~/.local/share/rook/rook.db through the system libsqlite3, read-only,
-re-queried each open, so it always reflects what wails-rook/rook-host
-last touched (a machine without the db just gets an empty palette).
-GROUPED: worktree children sit indented under their parent as
-`rook/zig`, and the filter matches the combined name. Enter attaches
+⌃N/⌃P, Enter, ESC. The list is the environment graph — `workspace`
+nodes (name + root, `~/` expanded), declared by the config program like
+everything else and re-read each open, so it always reflects what
+config last applied (a machine with no graph just gets an empty
+palette). This was ~/.local/share/rook/rook.db through libsqlite3
+until 2026-08-03: the db's last writer left in the strip, and a
+registry nobody can write is not a registry — recency ordering and
+worktree children went with it, owed back as ephemeral state and
+git-derived facts respectively. The grouping pass survives: entries
+with a parent sit indented under it as `rook/zig`, and the filter
+matches the combined name — nothing sets a parent today, worktree
+derivation will. Enter attaches
 the workspace's session — existing space switches in with its tabs
 intact, first visit creates it with one shell in the root. Inside a
 space, cd stays sacred: tab chips wear the name of whatever workspace

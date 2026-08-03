@@ -47,6 +47,8 @@ type node struct {
 	argv   []string
 	load   string
 	grants []string
+	// workspace
+	root string
 }
 
 func New() *Env { return &Env{} }
@@ -158,6 +160,21 @@ func (e *Env) PluginPinned(source, sha256 string, grants ...string) *Env {
 	n := pluginNode(source, grants)
 	n.sha256 = sha256
 	return e.put(n)
+}
+
+// Workspace declares a named directory rook treats as a workspace: the
+// palette lists it, a space launched inside it wears its name, and the
+// worktree tooling anchors on its root. Declared, not registered — the
+// list lives here with the rest of your environment, which is what lets
+// a root be COMPUTED (filepath.Join(home, "src", name), a hostname
+// switch) rather than remembered per machine. A leading "~/" is
+// expanded by rook against $HOME.
+//
+// Worktrees are deliberately absent: git already knows a repo's
+// worktrees, so rook derives those from the declared root rather than
+// asking you to keep a second list in step.
+func (e *Env) Workspace(name, root string) *Env {
+	return e.put(node{id: "workspace:" + name, kind: "workspace", scope: "app", name: name, root: root})
 }
 
 // Table declares an opaque host table ([agent], [jira], [lsp], …).
@@ -327,6 +344,11 @@ func (e *Env) JSON() []byte {
 			writeString(&b, n.name)
 			b.WriteString(`,"entries":`)
 			writeEntries(&b, n.entries)
+		case "workspace":
+			b.WriteString(`,"name":`)
+			writeString(&b, n.name)
+			b.WriteString(`,"root":`)
+			writeString(&b, n.root)
 		case "plugin":
 			b.WriteString(`,"name":`)
 			writeString(&b, n.name)

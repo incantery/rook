@@ -1116,7 +1116,7 @@ pub const App = struct {
         // Workspace registry up front — space one takes the name of
         // whatever workspace the launch cwd is inside (else scratch),
         // and tab chips wear their workspace from the first frame.
-        self.pal_items = workspacespkg.load(gpa);
+        self.pal_items = workspacespkg.load(init.io, gpa);
         const space_one = try gpa.create(panespkg.Space);
         space_one.* = .{};
         var cwdbuf: [1024]u8 = undefined;
@@ -2271,12 +2271,13 @@ pub const App = struct {
     // (file finder, themes, commands): type-to-filter over a list, a
     // modal that owns the key path while open.
 
-    /// Open the workspace picker with a fresh read of rook.db. Any thread.
+    /// Open the workspace picker with a fresh read of the environment
+    /// graph, so it lists what config last applied. Any thread.
     pub fn openPalette(self: *App) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         workspacespkg.free(self.gpa, self.pal_items);
-        self.pal_items = workspacespkg.load(self.gpa);
+        self.pal_items = workspacespkg.load(self.io, self.gpa);
         self.pal_mode = .workspaces;
         self.resetPaletteLocked();
     }

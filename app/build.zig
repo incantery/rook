@@ -71,9 +71,6 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkFramework("ImageIO", .{});
     // OSC 9 / OSC 777 desktop notifications (UNUserNotificationCenter).
     exe_mod.linkFramework("UserNotifications", .{});
-    // The workspace registry: rook's own sqlite db, read via the
-    // system libsqlite3 (macOS ships it; no vendored dependency).
-    exe_mod.linkSystemLibrary("sqlite3", .{});
     // The TypeScript SDK travels IN the binary: @incantery/rook is not on
     // npm, and setup's starter config imports it relatively. Embedding also
     // means the SDK a config was written against cannot drift from the rook

@@ -63,6 +63,19 @@ test("the plugin node is byte-identical to the Go SDK's", () => {
   assert.strictEqual(g, want);
 });
 
+// The same literal the Go SDK pins (sdk/rook/rook_test.go,
+// wantWorkspaceGraph). The workspace node replaces the sqlite registry;
+// `~/` ships unexpanded — expansion is the app's job.
+test("the workspace node is byte-identical to the Go SDK's", () => {
+  const g = env().workspace("rook", "~/src/rook").workspace("dora", "/w/dora").json();
+  const want =
+    `{"rookEnvironment":1,"nodes":[` +
+    `{"id":"workspace:rook","kind":"workspace","scope":"app","name":"rook","root":"~/src/rook"},` +
+    `{"id":"workspace:dora","kind":"workspace","scope":"app","name":"dora","root":"/w/dora"}` +
+    `]}\n`;
+  assert.strictEqual(g, want);
+});
+
 // Declared with no grants is INERT, not ungoverned — staging a plugin
 // before you trust it has to be expressible.
 test("no grants emits an empty array, never null", () => {

@@ -104,6 +104,17 @@ export class Env {
   }
 
 
+  // Declare a named directory rook treats as a workspace: the palette
+  // lists it, a space launched inside it wears its name, and worktree
+  // tooling anchors on its root. Declared, not registered — a root can
+  // be computed per machine rather than remembered. Leading "~/" is
+  // expanded by rook against $HOME. Worktrees are deliberately absent:
+  // rook derives them from git, not from a second list you keep in step.
+  workspace(name: string, root: string): this {
+    // Key order is the canon — must match the Go emitter byte-for-byte.
+    return this.put({ id: `workspace:${name}`, kind: "workspace", scope: "app", name, root });
+  }
+
   table(name: string, entries: Record<string, unknown>): this {
     const sorted = Object.fromEntries(
       Object.entries(entries).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),

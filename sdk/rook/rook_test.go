@@ -83,6 +83,24 @@ func TestPluginNodeBytes(t *testing.T) {
 	}
 }
 
+// The workspace node replaces the sqlite registry, so its bytes are the
+// contract the app parses and the TS SDK pins the same literal
+// (sdk/ts/rook.test.ts). `~/` roots ship unexpanded — expansion is the
+// app's job, against the machine the graph lands on.
+const wantWorkspaceGraph = `{"rookEnvironment":1,"nodes":[` +
+	`{"id":"workspace:rook","kind":"workspace","scope":"app","name":"rook","root":"~/src/rook"},` +
+	`{"id":"workspace:dora","kind":"workspace","scope":"app","name":"dora","root":"/w/dora"}` +
+	`]}` + "\n"
+
+func TestWorkspaceNodeBytes(t *testing.T) {
+	e := New()
+	e.Workspace("rook", "~/src/rook")
+	e.Workspace("dora", "/w/dora")
+	if got := string(e.JSON()); got != wantWorkspaceGraph {
+		t.Errorf("workspace graph moved.\n got: %s\nwant: %s", got, wantWorkspaceGraph)
+	}
+}
+
 // lazy is the DEFAULT, and it is a decision rather than a convenience: a
 // surface nobody opened must cost nothing, which is the rule every poller
 // in rook's history had to learn.

@@ -161,11 +161,9 @@ Config directory is
 else
 .Pa ~/.config/rook .
 .It Ev XDG_DATA_HOME
-Data root: the workspace registry
-.Pa rook/rook.db
-and the plugin cache
+Data root: the plugin cache
 .Pa rook/plugins/
-live under it, else under
+lives under it, else under
 .Pa ~/.local/share .
 .It Ev SHELL
 Shell spawned in each new pane.
@@ -190,9 +188,6 @@ See
 Fallback configuration when no graph exists.
 .It Pa ~/.config/rook/main.go , Pa ~/.config/rook/config.ts
 The config program, if you use one.
-.It Pa ~/.local/share/rook/rook.db
-Workspace registry
-.Pq sqlite, opened read-only ; absence is a normal state.
 .It Pa ~/.local/share/rook/plugins/
 Downloaded plugin binaries and their
 .Pa .sha256
