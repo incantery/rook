@@ -296,6 +296,13 @@ split: the away direction
 .Pq ^H for a right-edge panel
 hands the keys back to the panes, ^L from the edge pane walks back
 in, and ^J / ^K move the selection.
+.Pp
+The panel's inner edge is a drag handle, like a split's separator:
+pull it to resize, from a floor of 20 columns to half the window.
+Rows render by kind \(em a parent is a title and clips to one line, a
+child is prose and
+.Em wraps ,
+which is what makes a digest's bullets readable at any width.
 .Sh THE SHIPPED PLUGINS
 rook's first first-party plugin rides inside the bundle at
 .Pa /Applications/rook.app/Contents/MacOS/rook-plugin-claude

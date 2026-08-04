@@ -880,6 +880,9 @@ pub const App = struct {
     /// (tree mutation invalidates the pointer) and on mouse-up.
     drag_split: ?*panespkg.Split = null,
     drag_split_rect: panespkg.Rect = .{},
+    /// Mid-drag on the side pane's divider: the drag writes side_cols
+    /// live, so the panes beside it reflow while you pull.
+    drag_side: bool = false,
 
     // ctl `shot` handoff: the socket thread stores a path and flips the
     // flag; the render thread services it after the next commit.
@@ -1383,7 +1386,7 @@ pub const App = struct {
     /// The side pane's own rect. Full content height — it is WINDOW
     /// chrome, not a tab's, so it does not move when you switch tabs
     /// and every tab sees the same inbox.
-    fn sideArea(self: *App) panespkg.Rect {
+    pub fn sideArea(self: *App) panespkg.Rect {
         const w = self.sideWidth();
         return .{
             .x = if (self.side == .left) self.railWidth() else self.px_w - w,
@@ -1516,6 +1519,18 @@ pub const App = struct {
             }
             return;
         }
+        // The side pane's inner edge is a resize handle with the splits'
+        // ±4px slop, checked before the panes because the slop overlaps
+        // the pane beside it. The pane wins nothing by winning: a click
+        // 4px from the divider was aimed at the divider.
+        if (self.side_open) {
+            const sr = self.sideArea();
+            const edge = if (self.side == .left) sr.x + sr.w else sr.x;
+            if (@abs(x - edge) <= 4 and y >= self.contentY()) {
+                self.drag_side = true;
+                return;
+            }
+        }
         const t = self.activeTab();
         // Separators are resize handles first (±4px grab slop) — but a
         // zoomed tab shows none, and dragging an invisible one would
@@ -1598,6 +1613,18 @@ pub const App = struct {
     pub fn dragTo(self: *App, x: f32, y: f32) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
+        if (self.drag_side) {
+            const cw = @max(1, self.renderer.cell_w);
+            const w = if (self.side == .left) x - self.railWidth() else self.px_w - x;
+            // Live: every pane beside it reflows as you pull. The floor
+            // keeps the pane readable and its divider grabbable; the
+            // ceiling is sideWidth's own half-window rule, restated in
+            // cols so the stored value never exceeds what draws.
+            self.side_cols = std.math.clamp(w / cw, 20, @max(20, (self.px_w / 2) / cw));
+            self.relayoutLocked();
+            self.scene_dirty = true;
+            return;
+        }
         if (self.drag_split) |sp| {
             const r = self.drag_split_rect;
             const ratio = if (sp.horiz)
@@ -1637,6 +1664,7 @@ pub const App = struct {
         }
         self.drag_pane = null;
         self.drag_split = null;
+        self.drag_side = false;
     }
 
     /// ⌘C: focused terminal's selection (or editor's register) → the
@@ -6119,6 +6147,68 @@ pub const App = struct {
         self.plug_run = true;
     }
 
+    /// Where an item's title begins: state chip, then tree indent.
+    /// Arithmetic (state is ASCII, one byte one cell) rather than the
+    /// draw call's return value, so the measure pass and the draw pass
+    /// cannot disagree about where the title starts.
+    fn plugTitleX(self: *App, it: *const plugpkg.Item, tx: f32) f32 {
+        const cw = self.renderer.cell_w;
+        var x = tx;
+        if (it.state.n > 0) x += @as(f32, @floatFromInt(it.state.get().len)) * cw + cw;
+        return x + @as(f32, @floatFromInt(it.depth)) * 2 * cw;
+    }
+
+    /// The right-aligned field shed, shared by measuring and drawing so
+    /// the two cannot drift: fields shed WHOLE from the right until one
+    /// would cross `floor_x`, and the survivors' left edge comes back.
+    /// Pass `ui` to actually draw what survives.
+    fn plugShedFields(self: *App, ui: ?*@import("ui.zig").Ui, it: *const plugpkg.Item, floor_x: f32, y: f32, right: f32) f32 {
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        const row_h = self.bar_h;
+        var fx = right;
+        var fi = it.fields_n;
+        while (fi > 0) {
+            fi -= 1;
+            const v = it.fields[fi].value.get();
+            if (v.len == 0) continue;
+            const w = @as(f32, @floatFromInt(v.len)) * cw + cw;
+            if (fx - w < floor_x) break;
+            fx -= w;
+            if (ui) |u| _ = u.textOver(fx, y + (row_h - ch) / 2, v, th.bar_fg);
+        }
+        return fx;
+    }
+
+    /// The title's floor against the fields: it is guaranteed half the
+    /// row, so a field that would cross into that sheds.
+    fn plugFieldsFloor(self: *App, it: *const plugpkg.Item, x: f32, cols: usize) f32 {
+        const half: usize = @max(8, cols / 2);
+        const claim: f32 = @floatFromInt(@min(it.title.get().len, half));
+        return x + claim * self.renderer.cell_w + self.renderer.cell_w;
+    }
+
+    /// Rows this item takes: a parent is one (titles scan), a child
+    /// wraps (prose reads). The fold walk and the draw loop both call
+    /// this, which is what keeps the fold honest.
+    fn plugRowLines(self: *App, it: *const plugpkg.Item, tx: f32, right: f32, cols: usize) usize {
+        if (it.depth == 0) return 1;
+        const cw = self.renderer.cell_w;
+        const x = self.plugTitleX(it, tx);
+        const fx = self.plugShedFields(null, it, self.plugFieldsFloor(it, x, cols), 0, right);
+        var wit = @import("ui.zig").WrapIter{
+            .s = it.title.get(),
+            .cols = @intFromFloat(@max(4, (fx - x) / cw - 1)),
+        };
+        const rest_cols: usize = @intFromFloat(@max(4, (right - x) / cw));
+        var lines: usize = 0;
+        while (wit.next()) |_| {
+            lines += 1;
+            wit.cols = rest_cols;
+        }
+        return @max(1, lines);
+    }
+
     fn drawPlugin(self: *App, ui: *@import("ui.zig").Ui, r: panespkg.Rect, top: f32) void {
         const cw = self.renderer.cell_w;
         const ch = self.renderer.cell_h;
@@ -6155,51 +6245,67 @@ pub const App = struct {
         const reserved = (if (self.plug.more > 0) row_h else 0) +
             (if (self.plug_msg_len > 0) row_h else 0) + menu_rows * row_h;
         const avail = r.y + r.h - top - reserved;
-        const fits: usize = @intFromFloat(@max(0, @divFloor(avail, row_h)));
-        const shown = @min(self.plug.slice().len, fits);
+        const right = r.x + r.w - self.m.gutter;
+
+        // The fold walk: parents are one row, children wrap, and this
+        // must agree with the draw below or the fold lies.
+        var shown: usize = 0;
+        var used_h: f32 = 0;
+        for (self.plug.slice()) |*it| {
+            const lh = @as(f32, @floatFromInt(self.plugRowLines(it, tx, right, cols))) * row_h;
+            if (used_h + lh > avail) break;
+            used_h += lh;
+            shown += 1;
+        }
 
         for (self.plug.slice()[0..shown], 0..) |*it, idx| {
-            var x = tx;
-            if (idx == self.plug_sel) self.drawRowSelection(ui, r, y, row_h);
+            const x = self.plugTitleX(it, tx);
+            const title_full = it.title.get();
+            const lines = self.plugRowLines(it, tx, right, cols);
+            if (idx == self.plug_sel)
+                self.drawRowSelection(ui, r, y, @as(f32, @floatFromInt(lines)) * row_h);
 
             // State first and always — it is the one thing every item has
-            // and the thing a human scans down.
-            if (it.state.n > 0) {
-                x += ui.textOver(x, y + (row_h - ch) / 2, it.state.get(), th.accent);
-                x += cw;
-            }
-            // Children are indented rather than dropped: they are the only
-            // structural difference between a list and a tree.
-            x += @as(f32, @floatFromInt(it.depth)) * 2 * cw;
+            // and the thing a human scans down. (plugTitleX already made
+            // room; children are indented rather than dropped — the only
+            // structural difference between a list and a tree.)
+            if (it.state.n > 0)
+                _ = ui.textOver(tx, y + (row_h - ch) / 2, it.state.get(), th.accent);
 
             // Fields right-aligned, values only — the label is the column
-            // header a list does not have room for. The title is guaranteed
-            // half the row; a field that would cross into that sheds, and
-            // it sheds WHOLE and takes the rest of the run with it —
-            // right-aligned fragments of two different fields read as one
-            // wrong value. Least-important-first is therefore the field
-            // order a plugin should declare.
-            const title_full = it.title.get();
-            const half: usize = @max(8, cols / 2);
-            const title_claim: f32 = @floatFromInt(@min(title_full.len, half));
-            const fields_floor = x + title_claim * cw + cw;
-            var fx = r.x + r.w - self.m.gutter;
-            var fi = it.fields_n;
-            while (fi > 0) {
-                fi -= 1;
-                const v = it.fields[fi].value.get();
-                if (v.len == 0) continue;
-                const w = @as(f32, @floatFromInt(v.len)) * cw + cw;
-                if (fx - w < fields_floor) break;
-                fx -= w;
-                _ = ui.textOver(fx, y + (row_h - ch) / 2, v, th.bar_fg);
+            // header a list does not have room for. The title is
+            // guaranteed half the row; a field that would cross into that
+            // sheds, and it sheds WHOLE (right-aligned fragments of two
+            // different fields read as one wrong value). Least-important-
+            // first is therefore the field order a plugin should declare.
+            const fx = self.plugShedFields(ui, it, self.plugFieldsFloor(it, x, cols), y, right);
+
+            if (it.depth == 0) {
+                // A parent is a title: one line, stopped a cell short of
+                // whatever fields survived, so the two never overprint.
+                const title_cols: usize = @intFromFloat(@max(1.0, (fx - x) / cw - 1.0));
+                const title = @import("ui.zig").clip(&clipbuf, title_full, @min(cols, title_cols));
+                _ = ui.textOver(x, y + (row_h - ch) / 2, title, th.bar_value);
+                y += row_h;
+            } else {
+                // A child is prose — a digest bullet, a sub-item — and
+                // prose wraps where a title would clip. The first line
+                // still stops short of the fields; continuation lines run
+                // the full row.
+                var wit = @import("ui.zig").WrapIter{
+                    .s = title_full,
+                    .cols = @intFromFloat(@max(4, (fx - x) / cw - 1)),
+                };
+                const rest_cols: usize = @intFromFloat(@max(4, (right - x) / cw));
+                var drew: usize = 0;
+                while (wit.next()) |line| {
+                    _ = ui.textOver(x, y + (row_h - ch) / 2, line, th.bar_value);
+                    y += row_h;
+                    drew += 1;
+                    wit.cols = rest_cols;
+                }
+                if (drew == 0) y += row_h; // an empty title still holds its row
             }
-            // …and the title stops a cell short of whatever survived, so
-            // the two can never overprint each other.
-            const title_cols: usize = @intFromFloat(@max(1.0, (fx - x) / cw - 1.0));
-            const title = @import("ui.zig").clip(&clipbuf, title_full, @min(cols, title_cols));
-            x += ui.textOver(x, y + (row_h - ch) / 2, title, th.bar_value);
-            y += row_h;
 
             // The actions hang UNDER the row they belong to rather than
             // replacing the list: the item you are acting on is the context

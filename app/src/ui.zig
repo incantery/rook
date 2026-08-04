@@ -90,6 +90,44 @@ pub fn clip(buf: []u8, s: []const u8, cols: usize) []const u8 {
     return buf[0 .. head.len + 3];
 }
 
+/// Greedy word wrap, clip()'s sibling: each next() is the longest prefix
+/// of what remains that fits `cols`, broken at a space when one offers
+/// itself and mid-run when nothing does (a long path wraps hard rather
+/// than vanishing). Same unit as clip — codepoints as cells — and the
+/// same rule: never split a codepoint. `cols` is mutable on purpose:
+/// a row whose first line is narrowed by right-aligned fields sets it
+/// once, then widens for the continuation lines.
+pub const WrapIter = struct {
+    s: []const u8,
+    cols: usize,
+    pos: usize = 0,
+
+    pub fn next(self: *WrapIter) ?[]const u8 {
+        if (self.pos >= self.s.len or self.cols == 0) return null;
+        const rest = self.s[self.pos..];
+        var i: usize = 0;
+        var n: usize = 0;
+        var brk: usize = 0; // byte index of the last space seen
+        while (i < rest.len and n < self.cols) : (n += 1) {
+            if (rest[i] == ' ') brk = i;
+            i = @min(rest.len, i + (std.unicode.utf8ByteSequenceLength(rest[i]) catch 1));
+        }
+        if (i >= rest.len) {
+            self.pos = self.s.len;
+            return rest;
+        }
+        // The cell after the fold: a space there means the line fits
+        // exactly, and the break lands on it.
+        if (rest[i] == ' ') brk = i;
+        if (brk == 0) {
+            self.pos += i;
+            return rest[0..i];
+        }
+        self.pos += brk + 1; // the space is the break; nobody renders it
+        return rest[0..brk];
+    }
+};
+
 pub const Ui = struct {
     r: *renderpkg.Renderer,
     enc: objc.Object,
@@ -305,4 +343,51 @@ test "one cell of room is all mark" {
     var buf: [64]u8 = undefined;
     try T.expectEqualStrings("…", clip(&buf, "abcdef", 1));
     try T.expectEqualStrings("", clip(&buf, "abcdef", 0));
+}
+
+test "wrap breaks at spaces and swallows them" {
+    var it = WrapIter{ .s = "one two three four", .cols = 9 };
+    try T.expectEqualStrings("one two", it.next().?);
+    try T.expectEqualStrings("three", it.next().?);
+    try T.expectEqualStrings("four", it.next().?);
+    try T.expect(it.next() == null);
+}
+
+test "wrap keeps a line that fits exactly, space on the fold included" {
+    // "one two" is 7 cells; at 7 the fold lands ON the space after it.
+    var it = WrapIter{ .s = "one two three", .cols = 7 };
+    try T.expectEqualStrings("one two", it.next().?);
+    try T.expectEqualStrings("three", it.next().?);
+    try T.expect(it.next() == null);
+}
+
+test "an unbreakable run wraps hard instead of vanishing" {
+    var it = WrapIter{ .s = "/a/very/long/path/nobody/spaced", .cols = 10 };
+    try T.expectEqualStrings("/a/very/lo", it.next().?);
+    try T.expectEqualStrings("ng/path/no", it.next().?);
+    try T.expectEqualStrings("body/space", it.next().?);
+    try T.expectEqualStrings("d", it.next().?);
+    try T.expect(it.next() == null);
+}
+
+test "a hard wrap never splits a codepoint" {
+    var it = WrapIter{ .s = "ééééé", .cols = 3 };
+    const first = it.next().?;
+    try T.expect(std.unicode.utf8ValidateSlice(first));
+    try T.expectEqualStrings("ééé", first);
+    try T.expectEqualStrings("éé", it.next().?);
+}
+
+test "widening mid-iteration widens the continuation lines" {
+    // The first line is narrowed by fields; the rest get the full row.
+    var it = WrapIter{ .s = "aa bb cc dd ee ff", .cols = 5 };
+    try T.expectEqualStrings("aa bb", it.next().?);
+    it.cols = 11;
+    try T.expectEqualStrings("cc dd ee ff", it.next().?);
+    try T.expect(it.next() == null);
+}
+
+test "zero cols yields nothing rather than spinning" {
+    var it = WrapIter{ .s = "abc", .cols = 0 };
+    try T.expect(it.next() == null);
 }

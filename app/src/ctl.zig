@@ -696,10 +696,19 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             // "typing reaches the shell" and "typing moves a selection",
             // which an agent (or a test racing an async key) must read
             // rather than guess.
-            w.print("open side:{s} panel:{s} focus:{s}\n", .{
+            // The rect is the divider's address: for a right-side pane
+            // its left edge IS the drag handle, so `drag x … x∓Δ …`
+            // resizes it — no pixel-hunting from a screenshot.
+            const sr = app.sideArea();
+            w.print("open side:{s} panel:{s} focus:{s} cols:{d} rect:{d},{d},{d},{d}\n", .{
                 @tagName(app.side),
                 @tagName(app.side_panel),
                 @as([]const u8, if (app.side_focus) "panel" else "panes"),
+                @as(usize, @intFromFloat(app.side_cols)),
+                @as(i64, @intFromFloat(sr.x)),
+                @as(i64, @intFromFloat(sr.y)),
+                @as(i64, @intFromFloat(sr.w)),
+                @as(i64, @intFromFloat(sr.h)),
             }) catch {};
             switch (app.side_panel) {
                 .plugin => {

@@ -69,6 +69,7 @@ const scenarios = [_]Scenario{
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
     .{ .name = "keys", .what = "shift+Tab reaches the pty as CSI Z, and ⌃HJKL yields by program rather than by alternate screen", .run = keys },
     .{ .name = "panedim", .what = "pane-dim: the unfocused pane fades toward its background, and the fade follows focus", .run = paneDim },
+    .{ .name = "panelwrap", .what = "a child row wraps as prose, and the side pane's divider drags wider", .run = panelWrap },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
 };
 
@@ -3768,4 +3769,139 @@ fn paneDim(gpa: std.mem.Allocator, bin: []const u8) !void {
     const r2 = img2.maxContrast(img2.width * 9 / 16, img2.height / 20, img2.width * 15 / 16, img2.height / 3);
     img2.deinit();
     try h.expect(r2 < l2 * 3 / 5, "after focus left the RIGHT pane is the dim one: left {d} vs right {d}", .{ l2, r2 });
+}
+
+// ----------------------------------------------------------- panelwrap
+
+/// The stub speaks just enough protocol: one parent with a field, one
+/// child whose title is ~170 bytes of prose (a digest bullet at the
+/// caps the agent plugin asks for), and one short last child as a
+/// position marker.
+const sh_wrap_plugin =
+    \\while IFS= read -r line; do
+    \\  id=`expr "$line" : '.*"id":\([0-9]*\)'`
+    \\  case "$line" in
+    \\    *'"op":"describe"'*)
+    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"name":"wrapper","version":"1.0","capabilities":["items.list"]}}\n' "$id" ;;
+    \\    *'"op":"items.list"'*)
+    \\      printf '{"v":1,"id":%s,"ok":true,"result":{"items":[{"id":"d","title":"the digest headline","state":"new","fields":[{"key":"cost","kind":"MONEY","value":"$0.0002"}],"children":[{"id":"b0","title":"the summarizer writes prose exactly this long on purpose so the panel has no honest choice but to fold the sentence across several rows and prove it kept END-OF-THE-BULLET"},{"id":"b1","title":"ZZZ-LAST-ROW"}]}]}}\n' "$id" ;;
+    \\    *)
+    \\      printf '{"v":1,"id":%s,"ok":false,"error":"unsupported"}\n' "$id" ;;
+    \\  esac
+    \\done
+;
+
+/// Parse "key:" followed by a decimal int out of a ctl line.
+fn ctlInt(s: []const u8, key: []const u8) !i64 {
+    const at = std.mem.indexOf(u8, s, key) orelse return error.KeyMissing;
+    const i = at + key.len;
+    var end = i;
+    while (end < s.len and (s[end] == '-' or (s[end] >= '0' and s[end] <= '9'))) end += 1;
+    return std.fmt.parseInt(i64, s[i..end], 10);
+}
+
+/// The sidepane header's numbers: cols and the panel rect.
+const SideGeom = struct { cols: i64, x: i64, y: i64, w: i64, h: i64 };
+fn sideGeom(s: []const u8) !SideGeom {
+    const at = std.mem.indexOf(u8, s, "rect:") orelse return error.KeyMissing;
+    var it = std.mem.tokenizeAny(u8, s[at + 5 ..], ",\n ");
+    return .{
+        .cols = try ctlInt(s, "cols:"),
+        .x = try std.fmt.parseInt(i64, it.next() orelse "", 10),
+        .y = try std.fmt.parseInt(i64, it.next() orelse "", 10),
+        .w = try std.fmt.parseInt(i64, it.next() orelse "", 10),
+        .h = try std.fmt.parseInt(i64, it.next() orelse "", 10),
+    };
+}
+
+/// The lowest 4px band inside [x0,x1]×[y0,y1] with real ink, scanning
+/// bottom-up — where the panel's LAST row sits. The band's background
+/// reference lands in the panel's right gutter, which nothing paints.
+fn bottomInk(img: *h.Shot, x0: usize, y0: usize, x1: usize, y1: usize) usize {
+    var y = y1;
+    while (y > y0 + 4) {
+        y -= 4;
+        if (img.inkRect(x0, y, x1, y + 4) > 12) return y;
+    }
+    return y0;
+}
+
+/// Two claims in one panel: a child row WRAPS as prose (through the
+/// title buffer that used to truncate at 96 bytes), and the divider is
+/// a drag handle — wider panel, fewer wrapped lines, floor at 20 cols.
+fn panelWrap(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var path_buf: [128]u8 = undefined;
+    const script = try std.fmt.bufPrint(&path_buf, "/tmp/rook-e2e-wrap-{d}.sh", .{getpid()});
+    try h.writeFile(script, sh_wrap_plugin);
+
+    var json_buf: [1024]u8 = undefined;
+    const graph = try std.fmt.bufPrint(&json_buf,
+        \\{{"rookEnvironment":1,"nodes":[
+        \\{{"id":"plugin:wrapper","kind":"plugin","scope":"app","name":"wrapper","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list"]}}
+        \\]}}
+    , .{script});
+
+    const app = try h.Instance.start(gpa, bin, .{ .env_json = graph });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    _ = try app.ctl("plugin-show wrapper");
+    // The marker sits past byte 150 of the child's title: seeing it in
+    // the rows proves the 256-byte intake, not just the fetch.
+    const rows = try app.waitCtl("sidepane", "END-OF-THE-BULLET", 20_000);
+    try h.expectContains(rows, "ZZZ-LAST-ROW", "the short last child listed");
+
+    // AppKit owns window geometry and delivers the real one a beat
+    // after launch — a rect read mid-settle aims the drag at where the
+    // divider USED to be (observed: a click at x=1504 in a window that
+    // had settled to 980 wide, and the settle arriving 400ms in). Two
+    // agreeing reads are not settledness; hold out for a rect that
+    // stays put for 300ms straight.
+    var g1 = try sideGeom(try app.ctl("sidepane"));
+    var stable: usize = 0;
+    var settles: usize = 0;
+    while (settles < 100 and stable < 6) : (settles += 1) {
+        h.sleepMs(50);
+        const g = try sideGeom(try app.ctl("sidepane"));
+        if (g.x == g1.x and g.h == g1.h) {
+            stable += 1;
+        } else {
+            stable = 0;
+            g1 = g;
+        }
+    }
+
+    // At the 34-col default the long bullet already folds; note where
+    // the panel's LAST row sits.
+    var p1: [192]u8 = undefined;
+    var img = try app.shot(try std.fmt.bufPrint(&p1, "{s}/wrap-default.png", .{app.dirPath()}));
+    const bottom_default = bottomInk(&img, @intCast(g1.x + 8), @intCast(g1.y + 4), @intCast(g1.x + g1.w - 2), @intCast(g1.y + g1.h - 4));
+    img.deinit();
+
+    // Drag the divider toward the window edge: a right-side pane
+    // SHRINKS rightward. (Wider would be the prettier claim, but the
+    // e2e window is small and 34 cols can already sit at sideWidth's
+    // half-window cap — narrower is the direction that is always legal,
+    // and the wrap adapting is the same fact either way.)
+    var dbuf: [96]u8 = undefined;
+    const midy = @divTrunc(g1.y * 2 + g1.h, 2);
+    _ = try app.ctl(try std.fmt.bufPrint(&dbuf, "drag {d} {d} {d} {d}", .{ g1.x, midy, g1.x + 220, midy }));
+    const g2 = try sideGeom(try app.ctl("sidepane"));
+    try h.expect(g2.cols <= g1.cols - 8, "the drag narrowed the pane: {d} -> {d} cols", .{ g1.cols, g2.cols });
+
+    // Narrower means MORE folded lines, so the last row SINKS. This is
+    // the differential that proves the wrap adapts — a clipped one-line
+    // child would sit at the same height at every width.
+    var p2: [192]u8 = undefined;
+    var img2 = try app.shot(try std.fmt.bufPrint(&p2, "{s}/wrap-narrow.png", .{app.dirPath()}));
+    const bottom_narrow = bottomInk(&img2, @intCast(g2.x + 8), @intCast(g2.y + 4), @intCast(g2.x + g2.w - 2), @intCast(g2.y + g2.h - 4));
+    img2.deinit();
+    try h.expect(bottom_narrow > bottom_default + 20, "the last row sinks when the pane narrows: default bottom {d}, narrow bottom {d}", .{ bottom_default, bottom_narrow });
+
+    // The floor: a drag far past the window edge cannot make the pane
+    // vanish — 20 cols is as thin as it gets, and it stays grabbable.
+    _ = try app.ctl(try std.fmt.bufPrint(&dbuf, "drag {d} {d} 99999 {d}", .{ g2.x, midy, midy }));
+    try h.expect((try sideGeom(try app.ctl("sidepane"))).cols == 20, "the floor holds at 20 cols", .{});
 }

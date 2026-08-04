@@ -1151,7 +1151,10 @@ pub const Action = struct {
 
 pub const Item = struct {
     id: Text(64) = .{},
-    title: Text(96) = .{},
+    // 256, not 96: a digest bullet is prose (~170 bytes at the caps the
+    // agent plugin asks for), and the panel wraps children now — a title
+    // truncated at intake is a wrap that lies.
+    title: Text(256) = .{},
     subtitle: Text(96) = .{},
     state: Text(24) = .{},
     depth: u8 = 0,
