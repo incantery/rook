@@ -145,10 +145,33 @@ func TestWhoamiThenPushCarriesTheToken(t *testing.T) {
 	if f.statuses[0].Hostname == "" {
 		t.Fatal("a push without a hostname is an anonymous machine")
 	}
-	// The panel row reads connected.
+	// The panel row reads connected — and names the non-default target,
+	// because "connected" to the wrong cloud reads exactly like
+	// connected to the right one.
 	row := items(br, t0)[0]
 	if row.State != "up" || !strings.Contains(row.Title, "seth-mbp") {
 		t.Fatalf("row: %+v", row)
+	}
+	var apiField string
+	for _, f := range row.Fields {
+		if f.Key == "api" {
+			apiField = f.Value
+		}
+	}
+	if !strings.Contains(srv.URL, apiField) || apiField == "" {
+		t.Fatalf("a non-default target must be named: %+v", row.Fields)
+	}
+}
+
+func TestTheDefaultCloudNeedsNoNameTag(t *testing.T) {
+	br := testBridge(t, defaultAPI, "tok")
+	br.mu.Lock()
+	br.machineID, br.machineName = "m1", "seth-mbp"
+	br.mu.Unlock()
+	for _, f := range items(br, t0)[0].Fields {
+		if f.Key == "api" {
+			t.Fatal("the default target labeled itself — noise on every healthy row")
+		}
 	}
 }
 

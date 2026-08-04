@@ -41,8 +41,13 @@ import (
 
 const version = "0.1.0"
 
+// defaultAPI is the live cloud; --api points the bridge anywhere — a
+// localhost rook-cloud, a LAN box — and the panel row names the target
+// whenever it is not this one.
+const defaultAPI = "https://api.rookide.com"
+
 func main() {
-	api := flag.String("api", "https://api.rookide.com", "rook-cloud API base")
+	api := flag.String("api", defaultAPI, "rook-cloud API base")
 	tokenFile := flag.String("token-file", "", "machine token file (default ~/.config/rook/cloud_token)")
 	interval := flag.Duration("interval", 20*time.Second, "status push interval")
 	dir := flag.String("dir", "", "projects directory (default ~/.claude/projects)")
@@ -520,6 +525,11 @@ func items(br *bridge, now time.Time) []wireItem {
 	default:
 		it.Title = fmt.Sprintf("connected as %q — %d agent(s) on the fleet page", name, agents)
 		it.State = "up"
+		// A non-default target is worth a field: "connected" to the
+		// wrong cloud reads exactly like connected to the right one.
+		if br.api != defaultAPI {
+			it.Fields = append(it.Fields, wireField{"api", "TEXT", strings.TrimPrefix(strings.TrimPrefix(br.api, "https://"), "http://")})
+		}
 		if !lastPush.IsZero() {
 			it.Fields = append(it.Fields, wireField{"pushed", "TEXT", transcript.RelAge(now.Sub(lastPush)) + " ago"})
 		}
