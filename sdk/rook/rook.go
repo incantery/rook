@@ -550,7 +550,7 @@ type Cloud struct {
 	// any non-default target so "connected to the wrong one" never
 	// reads like the right one.
 	API    string
-	Grants []string // default: list/act, panes.activity, session.send
+	Grants []string // default: list/act, panes.activity, session.send, session.spawn
 	Load   Load     // default Eager
 }
 
@@ -563,7 +563,7 @@ func (c Cloud) appendTo(e *env) {
 		Name:    "cloud",
 		Command: cmd,
 		Load:    eagerUnless(c.Load),
-		Grants:  grantsOr(c.Grants, []string{OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend}),
+		Grants:  grantsOr(c.Grants, []string{OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend, OpSessionSpawn}),
 	}.appendTo(e)
 }
 

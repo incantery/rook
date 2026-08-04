@@ -523,6 +523,19 @@ into the session's pane \(em under the same gates and the same rules,
 plus one of its own: a mid-turn session is left alone and retried,
 then dropped with its reason.
 The cloud requests; this machine decides.
+.Pp
+Two more kinds ride the same rail:
+.Ql resume
+reopens a quiet session
+.Pq Ql claude --resume No in its own directory, refused if it is already on a screen ,
+and
+.Ql spawn
+starts a fresh claude in a workspace the machine itself reported,
+then types the phone's prompt in through
+.Cm session.send .
+Nothing from the wire ever reaches a shell: the bridge builds what it
+runs from its own local data, and the prompt is typed text \(em which
+is the whole reason the prompt hop exists.
 .Bd -literal -offset indent
 rook.Cloud{}
 .Ed

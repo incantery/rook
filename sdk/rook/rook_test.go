@@ -187,7 +187,7 @@ func TestFirstPartyPluginsLowerToTheHandWrittenBytes(t *testing.T) {
 			Name:    "cloud",
 			Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-cloud"},
 			Load:    Eager,
-			Grants:  []string{OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend},
+			Grants:  []string{OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend, OpSessionSpawn},
 		},
 	))
 	if got != want {

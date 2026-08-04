@@ -171,6 +171,9 @@ func testBridge(t *testing.T, api, token string) *bridge {
 		sc:     &transcript.Scanner{Dir: t.TempDir(), Window: time.Hour, Idle: 10 * time.Minute, Quiet: time.Minute, Max: 20},
 		names:  []string{"claude"},
 		kick:   make(chan struct{}, 1),
+		// The spawn->prompt poll, at test speed.
+		spawnTries: 3,
+		spawnWait:  time.Millisecond,
 	}
 }
 
@@ -550,6 +553,195 @@ func TestUnknownSessionOrKindIsAckedAwayWithItsReason(t *testing.T) {
 		t.Fatalf("unknown kind must ack: %v", got)
 	}
 	if note := items(br, t0); !strings.Contains(note[1].Title, "does not know") {
+		t.Fatalf("receipt: %+v", note)
+	}
+}
+
+// Resume spawns `claude --resume <id>` in the session's own directory.
+// The id in that command comes from the LOCAL scanner, and the whole
+// path re-acks without re-spawning on a lost ack.
+func TestResumeSpawnsClaudeWithTheLocalSessionID(t *testing.T) {
+	sess := needsInputSession()
+	sess.State = transcript.StateIdle
+	f := &fakeCloud{token: "tok"}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	br := testBridge(t, srv.URL, "tok")
+	withCommands(f, cloudCommand{ID: "resume:sess1", Kind: "resume", SessionID: "sess1"})
+
+	frames := make(chan string, 4)
+	c := &conn{out: chanWriter{frames}}
+	done := make(chan struct{})
+	go func() {
+		br.executeCommands(c, []transcript.Session{sess}, nil)
+		close(done)
+	}()
+	frame := <-frames
+	if !strings.Contains(frame, `"op":"session.spawn"`) ||
+		!strings.Contains(frame, "claude --resume sess1") ||
+		!strings.Contains(frame, sess.Cwd) {
+		t.Fatalf("frame: %s", frame)
+	}
+	var req struct {
+		ID uint64 `json:"id"`
+	}
+	json.Unmarshal([]byte(frame), &req)
+	c.deliver(req.ID, true, "", nil)
+	<-done
+	if got := f.cmdAcked(); len(got) != 1 || got[0] != "resume:sess1" {
+		t.Fatalf("acks: %v", got)
+	}
+	withCommands(f, cloudCommand{ID: "resume:sess1", Kind: "resume", SessionID: "sess1"})
+	br.executeCommands(c, []transcript.Session{sess}, nil)
+	select {
+	case fr := <-frames:
+		t.Fatalf("resumed twice: %s", fr)
+	default:
+	}
+	if len(f.cmdAcked()) != 2 {
+		t.Fatalf("redelivery not re-acked: %v", f.cmdAcked())
+	}
+}
+
+// A session that is already on a screen (a claude pane in its
+// directory, and it is the directory's freshest) is not resumed into
+// a second instance; and a session id that is not shell-safe is
+// refused outright, because session.spawn's command reaches a shell.
+func TestResumeRefusesOpenSessionsAndUnsafeIDs(t *testing.T) {
+	sess := needsInputSession()
+	f := &fakeCloud{token: "tok"}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	br := testBridge(t, srv.URL, "tok")
+
+	withCommands(f, cloudCommand{ID: "resume:sess1", Kind: "resume", SessionID: "sess1"})
+	frames := make(chan string, 1)
+	br.executeCommands(&conn{out: chanWriter{frames}}, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
+	select {
+	case fr := <-frames:
+		t.Fatalf("resumed an open session: %s", fr)
+	default:
+	}
+	if got := f.cmdAcked(); len(got) != 1 {
+		t.Fatalf("acks: %v", got)
+	}
+	if note := items(br, t0); !strings.Contains(note[1].Title, "already open") {
+		t.Fatalf("receipt: %+v", note)
+	}
+
+	evil := sess
+	evil.ID = "x; rm -rf ~"
+	withCommands(f, cloudCommand{ID: "resume:x; rm -rf ~", Kind: "resume", SessionID: "x; rm -rf ~"})
+	br.executeCommands(&conn{out: chanWriter{frames}}, []transcript.Session{evil}, nil)
+	select {
+	case fr := <-frames:
+		t.Fatalf("an unsafe id reached session.spawn: %s", fr)
+	default:
+	}
+	if note := items(br, t0); !strings.Contains(note[1].Title, "not shell-safe") {
+		t.Fatalf("receipt: %+v", note)
+	}
+}
+
+// The spawn round trip: `claude` (the literal string — the prompt is
+// NOT in it) starts in the workspace's directory, then the prompt is
+// typed into the NEW pane once it looks like claude, and the receipt
+// says both hops landed.
+func TestSpawnStartsClaudeThenTypesThePrompt(t *testing.T) {
+	sess := needsInputSession() // maps workspace "rook" -> its cwd
+	f := &fakeCloud{token: "tok"}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	br := testBridge(t, srv.URL, "tok")
+	withCommands(f, cloudCommand{ID: "spawn:rook:abc", Kind: "spawn", Workspace: "rook", Prompt: "fix the flaky test; keep the API"})
+
+	frames := make(chan string, 8)
+	c := &conn{out: chanWriter{frames}}
+	done := make(chan struct{})
+	// The old pane (id 7) exists BEFORE the spawn; the new claude pane
+	// is id 9. The prompt must go to 9, never 7.
+	go func() {
+		br.executeCommands(c, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
+		close(done)
+	}()
+	reply := func(frame string, result string) uint64 {
+		var req struct {
+			ID uint64 `json:"id"`
+		}
+		json.Unmarshal([]byte(frame), &req)
+		c.deliver(req.ID, true, "", json.RawMessage(result))
+		return req.ID
+	}
+	spawnFrame := <-frames
+	if !strings.Contains(spawnFrame, `"op":"session.spawn"`) || !strings.Contains(spawnFrame, `"command":"claude"`) {
+		t.Fatalf("spawn frame: %s", spawnFrame)
+	}
+	if strings.Contains(spawnFrame, "flaky") {
+		t.Fatalf("the prompt reached the shell command: %s", spawnFrame)
+	}
+	reply(spawnFrame, "null")
+	actFrame := <-frames
+	if !strings.Contains(actFrame, `"op":"panes.activity"`) {
+		t.Fatalf("activity frame: %s", actFrame)
+	}
+	reply(actFrame, `{"panes":[{"id":7,"fg":"claude","path":"/usr/local/bin/claude","cwd":"/Users/u/src/rook"},{"id":9,"fg":"claude","path":"/usr/local/bin/claude","cwd":"/Users/u/src/rook"}]}`)
+	sendFrame := <-frames
+	if !strings.Contains(sendFrame, `"op":"session.send"`) || !strings.Contains(sendFrame, `"pane":9`) || !strings.Contains(sendFrame, "flaky test") {
+		t.Fatalf("send frame: %s", sendFrame)
+	}
+	reply(sendFrame, "null")
+	<-done
+	if got := f.cmdAcked(); len(got) != 1 || got[0] != "spawn:rook:abc" {
+		t.Fatalf("acks: %v", got)
+	}
+	if note := items(br, t0); !strings.Contains(note[1].Title, "handed it the prompt") {
+		t.Fatalf("receipt: %+v", note)
+	}
+}
+
+// A workspace the machine never showed the phone cannot be spawned
+// into — the name maps through this machine's own sessions or not at
+// all. And a promptless spawn is complete at the first hop.
+func TestSpawnUnknownWorkspaceAndPromptless(t *testing.T) {
+	sess := needsInputSession()
+	f := &fakeCloud{token: "tok"}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	br := testBridge(t, srv.URL, "tok")
+
+	withCommands(f, cloudCommand{ID: "spawn:dora:x", Kind: "spawn", Workspace: "dora"})
+	br.executeCommands(&conn{out: chanWriter{make(chan string, 1)}}, []transcript.Session{sess}, nil)
+	if got := f.cmdAcked(); len(got) != 1 {
+		t.Fatalf("unknown workspace must ack away: %v", got)
+	}
+	if note := items(br, t0); !strings.Contains(note[1].Title, "no workspace called dora") {
+		t.Fatalf("receipt: %+v", note)
+	}
+
+	withCommands(f, cloudCommand{ID: "spawn:rook:0", Kind: "spawn", Workspace: "rook"})
+	frames := make(chan string, 4)
+	c := &conn{out: chanWriter{frames}}
+	done := make(chan struct{})
+	go func() {
+		br.executeCommands(c, []transcript.Session{sess}, nil)
+		close(done)
+	}()
+	frame := <-frames
+	if !strings.Contains(frame, `"op":"session.spawn"`) {
+		t.Fatalf("frame: %s", frame)
+	}
+	var req struct {
+		ID uint64 `json:"id"`
+	}
+	json.Unmarshal([]byte(frame), &req)
+	c.deliver(req.ID, true, "", nil)
+	<-done
+	select {
+	case fr := <-frames:
+		t.Fatalf("a promptless spawn kept talking: %s", fr)
+	default:
+	}
+	if note := items(br, t0); !strings.Contains(note[1].Title, "started a session in rook") {
 		t.Fatalf("receipt: %+v", note)
 	}
 }

@@ -82,9 +82,11 @@ func main() {
 			Quiet:  60 * time.Second,
 			Max:    50,
 		},
-		names:    strings.Split(*names, ","),
-		busyRate: *busyRate,
-		kick:     make(chan struct{}, 1),
+		names:      strings.Split(*names, ","),
+		busyRate:   *busyRate,
+		kick:       make(chan struct{}, 1),
+		spawnTries: 6,
+		spawnWait:  2 * time.Second,
 	}
 	c := &conn{out: os.Stdout}
 	if br.token != "" {
@@ -118,6 +120,11 @@ type bridge struct {
 	names    []string
 	busyRate float64
 	kick     chan struct{} // the "push now" action's doorbell
+
+	// How long a spawn waits for its new claude pane to be ready for
+	// the prompt: spawnTries polls of the pane list, spawnWait apart.
+	spawnTries int
+	spawnWait  time.Duration
 
 	mu          sync.Mutex
 	token       string
@@ -466,13 +473,15 @@ func (br *bridge) collect(c *conn, sessions []transcript.Session, panes []transc
 }
 
 // executeCommands drains the second outbox — the verb rail beside the
-// answers. One kind today: "compact", which types /compact into the
-// session's pane. Answers' rules carry over exactly (at-most-once at
-// the keyboard, delivered-before-ack, bounded retries, notes on the
-// record), plus one of its own: a WORKING session is left alone — the
-// command retries on later heartbeats and drops with its reason if the
-// turn outlasts the patience. The host's session.send gates still
-// stand under all of it; the cloud requests, this machine decides.
+// answers. Three kinds: "compact" types /compact into the session's
+// pane, "resume" reopens a quiet session (`claude --resume` in its own
+// directory), "spawn" starts a fresh claude in a named workspace and
+// types the prompt in. Answers' rules carry over exactly (at-most-once
+// at the keyboard, delivered-before-ack, bounded retries, notes on the
+// record), and nothing from the wire ever reaches a shell: commands
+// are built from local data, prompts are typed text. The host's gates
+// still stand under all of it; the cloud requests, this machine
+// decides.
 func (br *bridge) executeCommands(c *conn, sessions []transcript.Session, panes []transcript.PaneActivity) {
 	cmds := br.fetchCommands()
 	if len(cmds) == 0 {
@@ -488,74 +497,234 @@ func (br *bridge) executeCommands(c *conn, sessions []transcript.Session, panes 
 			br.ackCommand(cmd.ID)
 			continue
 		}
-		if cmd.Kind != "compact" {
+		switch cmd.Kind {
+		case "compact":
+			br.runCompact(c, cmd, key, sessions, panes)
+		case "resume":
+			br.runResume(c, cmd, key, sessions, panes)
+		case "spawn":
+			br.runSpawn(c, cmd, key, sessions, panes)
+		default:
 			// A kind this rook does not speak: honestly refused, never
 			// guessed at. (An older bridge meeting a newer cloud.)
 			br.ackCommand(cmd.ID)
 			br.note("dropped a command this rook does not know: " + cmd.Kind)
-			continue
 		}
-		var target *transcript.Session
-		for i := range sessions {
-			if sessions[i].ID == cmd.SessionID {
-				target = &sessions[i]
-				break
-			}
+	}
+}
+
+func findSession(sessions []transcript.Session, id string) *transcript.Session {
+	for i := range sessions {
+		if sessions[i].ID == id {
+			return &sessions[i]
 		}
-		if target == nil {
+	}
+	return nil
+}
+
+func (br *bridge) runCompact(c *conn, cmd cloudCommand, key string, sessions []transcript.Session, panes []transcript.PaneActivity) {
+	target := findSession(sessions, cmd.SessionID)
+	if target == nil {
+		br.ackCommand(cmd.ID)
+		br.note("dropped a compact — that session is gone")
+		return
+	}
+	if target.State == transcript.StateWorking {
+		br.attempts[key]++
+		if br.attempts[key] > 5 {
 			br.ackCommand(cmd.ID)
-			br.note("dropped a compact — that session is gone")
-			continue
+			br.note("dropped a compact — " + transcript.Snip(target.Title, 40) + " stayed mid-turn")
 		}
-		if target.State == transcript.StateWorking {
-			br.attempts[key]++
-			if br.attempts[key] > 5 {
-				br.ackCommand(cmd.ID)
-				br.note("dropped a compact — " + transcript.Snip(target.Title, 40) + " stayed mid-turn")
-			}
-			continue
+		return
+	}
+	var pane *transcript.PaneActivity
+	for i := range panes {
+		if panes[i].Cwd == target.Cwd && transcript.ClaudeLike(panes[i], br.names) {
+			pane = &panes[i]
+			break
 		}
-		var pane *transcript.PaneActivity
+	}
+	if pane == nil {
+		br.attempts[key]++
+		if br.attempts[key] > 5 {
+			br.ackCommand(cmd.ID)
+			br.note("dropped a compact — no agent pane for " + transcript.Snip(target.Title, 40))
+		}
+		return
+	}
+	if c == nil {
+		return
+	}
+	_, err := c.call("session.send",
+		map[string]any{"pane": pane.ID, "text": "/compact"}, 5*time.Second)
+	if err != nil {
+		br.attempts[key]++
+		if br.attempts[key] > 5 {
+			br.ackCommand(cmd.ID)
+			br.note("could not deliver a compact: " + err.Error())
+		} else {
+			br.note("compact refused, retrying: " + err.Error())
+		}
+		return
+	}
+
+	br.delivered[key] = true
+	br.ackCommand(cmd.ID)
+	br.note("compacted " + transcript.Snip(target.Title, 40) + " from the phone")
+}
+
+// runResume reopens a quiet session: a new pane running
+// `claude --resume <id>` in the session's own directory. The command
+// string is built from LOCAL data only — the id comes from this
+// machine's transcript filename, never from the wire, and is charset-
+// checked besides, because session.spawn hands its command to a shell.
+func (br *bridge) runResume(c *conn, cmd cloudCommand, key string, sessions []transcript.Session, panes []transcript.PaneActivity) {
+	target := findSession(sessions, cmd.SessionID)
+	if target == nil {
+		br.ackCommand(cmd.ID)
+		br.note("dropped a resume — that session is gone")
+		return
+	}
+	if !shellSafeID(target.ID) {
+		br.ackCommand(cmd.ID)
+		br.note("refused a resume — session id is not shell-safe")
+		return
+	}
+	// Already on a screen? A claude pane in this directory running the
+	// directory's freshest session IS this session (the same heuristic
+	// Fuse stands on); resuming it twice makes two instances fight
+	// over one transcript.
+	if target.ID == freshestInCwd(sessions, target.Cwd) {
 		for i := range panes {
 			if panes[i].Cwd == target.Cwd && transcript.ClaudeLike(panes[i], br.names) {
-				pane = &panes[i]
-				break
-			}
-		}
-		if pane == nil {
-			br.attempts[key]++
-			if br.attempts[key] > 5 {
 				br.ackCommand(cmd.ID)
-				br.note("dropped a compact — no agent pane for " + transcript.Snip(target.Title, 40))
+				br.note("skipped a resume — " + transcript.Snip(target.Title, 40) + " is already open")
+				return
 			}
-			continue
 		}
-		if c == nil {
-			continue
-		}
-		_, err := c.call("session.send",
-			map[string]any{"pane": pane.ID, "text": "/compact"}, 5*time.Second)
-		if err != nil {
-			br.attempts[key]++
-			if br.attempts[key] > 5 {
-				br.ackCommand(cmd.ID)
-				br.note("could not deliver a compact: " + err.Error())
-			} else {
-				br.note("compact refused, retrying: " + err.Error())
-			}
-			continue
-		}
-
-		br.delivered[key] = true
-		br.ackCommand(cmd.ID)
-		br.note("compacted " + transcript.Snip(target.Title, 40) + " from the phone")
 	}
+	if c == nil {
+		return
+	}
+	_, err := c.call("session.spawn",
+		map[string]any{"command": "claude --resume " + target.ID, "cwd": target.Cwd}, 5*time.Second)
+	if err != nil {
+		br.attempts[key]++
+		if br.attempts[key] > 5 {
+			br.ackCommand(cmd.ID)
+			br.note("could not resume: " + err.Error())
+		} else {
+			br.note("resume refused, retrying: " + err.Error())
+		}
+		return
+	}
+	br.delivered[key] = true
+	br.ackCommand(cmd.ID)
+	br.note("resumed " + transcript.Snip(target.Title, 40) + " from the phone")
+}
+
+// runSpawn opens a fresh claude session in a named workspace. The
+// workspace name maps to a directory through this machine's OWN
+// sessions (the same vocabulary the status push spoke — the phone can
+// only name what the machine showed it), the spawned command is the
+// literal string "claude", and the prompt goes in afterwards as TYPED
+// TEXT through session.send's gates — cloud words never touch a shell.
+func (br *bridge) runSpawn(c *conn, cmd cloudCommand, key string, sessions []transcript.Session, panes []transcript.PaneActivity) {
+	cwd := ""
+	var newest time.Time
+	for _, s := range sessions {
+		if filepath.Base(s.Cwd) == cmd.Workspace && (cwd == "" || s.Mtime.After(newest)) {
+			cwd, newest = s.Cwd, s.Mtime
+		}
+	}
+	if cwd == "" {
+		br.ackCommand(cmd.ID)
+		br.note("dropped a spawn — no workspace called " + transcript.Snip(cmd.Workspace, 40) + " in view")
+		return
+	}
+	if c == nil {
+		return
+	}
+	// Which panes exist NOW: the new session is the claude pane that
+	// appears in this directory afterwards and is not one of these.
+	before := map[int]bool{}
+	for _, p := range panes {
+		before[p.ID] = true
+	}
+	_, err := c.call("session.spawn", map[string]any{"command": "claude", "cwd": cwd}, 5*time.Second)
+	if err != nil {
+		br.attempts[key]++
+		if br.attempts[key] > 5 {
+			br.ackCommand(cmd.ID)
+			br.note("could not spawn: " + err.Error())
+		} else {
+			br.note("spawn refused, retrying: " + err.Error())
+		}
+		return
+	}
+	// Spawned exactly once — marked and acked BEFORE the prompt hop,
+	// because a redelivered spawn must never open a second pane. A
+	// prompt that then fails to land costs a note, not a duplicate.
+	br.delivered[key] = true
+	br.ackCommand(cmd.ID)
+	if cmd.Prompt == "" {
+		br.note("started a session in " + cmd.Workspace + " from the phone")
+		return
+	}
+	for i := 0; i < br.spawnTries; i++ {
+		time.Sleep(br.spawnWait)
+		for _, p := range fetchActivity(c) {
+			if before[p.ID] || p.Cwd != cwd || !transcript.ClaudeLike(p, br.names) {
+				continue
+			}
+			if _, err := c.call("session.send",
+				map[string]any{"pane": p.ID, "text": cmd.Prompt}, 5*time.Second); err == nil {
+				br.note("started a session in " + cmd.Workspace + " and handed it the prompt")
+				return
+			}
+			break // found the pane but it is not ready — wait and retry
+		}
+	}
+	br.note("started a session in " + cmd.Workspace + " — the prompt did not land, type it there")
+}
+
+// freshestInCwd names the newest session working in a directory — the
+// one a claude pane there is presumed to run.
+func freshestInCwd(sessions []transcript.Session, cwd string) string {
+	id := ""
+	var newest time.Time
+	for _, s := range sessions {
+		if s.Cwd == cwd && (id == "" || s.Mtime.After(newest)) {
+			id, newest = s.ID, s.Mtime
+		}
+	}
+	return id
+}
+
+// shellSafeID: session ids are transcript filenames (UUIDs in
+// practice), but session.spawn's command reaches a shell, so anything
+// beyond [A-Za-z0-9._-] is refused outright.
+func shellSafeID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 type cloudCommand struct {
 	ID        string `json:"id"`
 	Kind      string `json:"kind"`
 	SessionID string `json:"sessionId"`
+	Workspace string `json:"workspace"`
+	Prompt    string `json:"prompt"`
 }
 
 func (br *bridge) fetchCommands() []cloudCommand {
