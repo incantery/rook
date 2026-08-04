@@ -296,7 +296,7 @@ split: the away direction
 .Pq ^H for a right-edge panel
 hands the keys back to the panes, ^L from the edge pane walks back
 in, and ^J / ^K move the selection.
-.Sh THE SHIPPED PLUGIN
+.Sh THE SHIPPED PLUGINS
 rook's first first-party plugin rides inside the bundle at
 .Pa /Applications/rook.app/Contents/MacOS/rook-plugin-claude
 and watches Claude Code: every recent session on the machine becomes an
@@ -358,6 +358,48 @@ splits a shell at the session's directory
 .Pq via Cm session.spawn ,
 .Ql peek
 answers with the last thing the assistant said.
+.Ss The agent
+The second shipped plugin,
+.Pa rook-plugin-agent ,
+is an OpenAI-backed worker whose first job is compression: when a
+Claude Code turn finishes with a reply longer than
+.Fl -min-words
+.Pq default 120 ,
+one model call turns it into a digest \(em a headline and up to five
+bullets, in the discipline of Simplified Technical English
+.Pq ASD-STE100: active voice, one idea per sentence, hard word caps .
+The bullets are the item's children, the bill is a
+.Ql MONEY
+field on the row, and the full reply stays in the session \(em the
+digest makes the reading terse, never the writing.
+.Bd -literal -offset indent
+rook.Plugin{Name: "agent",
+    Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-agent"},
+    Load:    rook.Eager,
+    Grants:  []string{rook.OpItemsList, rook.OpItemsAct}}
+.Ed
+.Pp
+The API key comes from
+.Ev OPENAI_API_KEY
+or, because an app launched from the Dock never ran a shell profile,
+from
+.Fl -key-file
+.Pq default Pa ~/.config/rook/openai_key .
+Without one the panel says exactly that and nothing runs \(em a missing
+key is configuration, not damage.
+Digests live in memory only and each reply is billed at most once,
+retries included; a reply that breaks the shape gets one correction and
+is then taken as it came.
+Flags:
+.Fl -model
+.Pq default Ql gpt-5-mini ,
+.Fl -effort ,
+.Fl -min-words , Fl -poll , Fl -window , Fl -keep ,
+.Fl -max-chars
+.Pq input cap per reply ,
+.Fl -api-base
+.Pq point it at a stub and no real money moves ,
+.Fl -key-file , Fl -dir .
 .Sh A MINIMAL PLUGIN
 The essence of
 .Pa examples/hello-plugin ,

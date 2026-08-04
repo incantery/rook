@@ -1,5 +1,10 @@
-// Session discovery: what is every Claude Code session on this machine
-// doing right now?
+// Package transcript answers: what is every Claude Code session on this
+// machine doing right now?
+//
+// Two plugins stand on this one answer — the watcher (plugins/claude)
+// turns state transitions into attention, and the summarizer
+// (plugins/agent) turns finished turns into digests. The state machine
+// is the shared mechanism; what each does with a transition is theirs.
 //
 // The answer is derived, never stored. Claude Code appends every event to
 // a transcript under ~/.claude/projects/<munged-cwd>/<session>.jsonl, and
@@ -14,7 +19,7 @@
 // transcripts sit in a subagents/ subdirectory per session and are
 // deliberately out of scope: a subagent is the session's business, not the
 // human's.
-package main
+package transcript
 
 import (
 	"bytes"
@@ -92,6 +97,28 @@ type PaneActivity struct {
 	RateBps float64 `json:"-"`
 }
 
+// PaneSample remembers one tick's byte counter so the next tick can
+// turn two counters into a rate.
+type PaneSample struct {
+	Bytes uint64
+	At    time.Time
+}
+
+// ComputeRates fills each pane's RateBps from the previous tick's
+// sample. The first sighting of a pane has no previous sample and gets
+// rate 0 — one tick of patience beats one tick of guessing.
+func ComputeRates(prev map[int]PaneSample, panes []PaneActivity, now time.Time) {
+	for i := range panes {
+		p := &panes[i]
+		if s, ok := prev[p.ID]; ok {
+			if dt := now.Sub(s.At).Seconds(); dt > 0 && p.OutBytes >= s.Bytes {
+				p.RateBps = float64(p.OutBytes-s.Bytes) / dt
+			}
+		}
+		prev[p.ID] = PaneSample{p.OutBytes, now}
+	}
+}
+
 // How close on the heels of a keystroke output still counts as echo:
 // the TUI re-rendering because the human typed is not the agent working.
 const echoGuardMs = 3000
@@ -111,7 +138,7 @@ const echoGuardMs = 3000
 //   - INPUT: a human who typed in that pane moments ago is PRESENT, and
 //     a banner for the pane you are looking at is noise. The state
 //     still shows in the panel; only the interruption is suppressed.
-func fuse(sessions []Session, panes []PaneActivity, names []string, busyRate float64, present time.Duration) {
+func Fuse(sessions []Session, panes []PaneActivity, names []string, busyRate float64, present time.Duration) {
 	// Which directories hold a busy Claude pane right now.
 	busyCwd := map[string]bool{}
 	for _, p := range panes {
@@ -398,7 +425,7 @@ func fallbackTitle(cwd, projDir, id string) string {
 }
 
 // relAge renders "how long ago" at the resolution a human cares about.
-func relAge(d time.Duration) string {
+func RelAge(d time.Duration) string {
 	switch {
 	case d < 5*time.Second:
 		return "now"
@@ -414,7 +441,7 @@ func relAge(d time.Duration) string {
 }
 
 // snip truncates for a fixed-width wire field without splitting a rune.
-func snip(s string, max int) string {
+func Snip(s string, max int) string {
 	s = strings.Join(strings.Fields(s), " ") // one line, one space
 	if len(s) <= max {
 		return s

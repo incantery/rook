@@ -106,8 +106,12 @@ presets.
    as plugins over the item model, not as more endpoints. The first piece
    returned 2026-08-03: `plugins/claude`, a first-party plugin that
    watches Claude Code transcripts, lists every session as an item with an
-   honest state, and raises attention when a turn finishes — see
-   `man 7 rook-plugin`, "THE SHIPPED PLUGIN".
+   honest state, and raises attention when a turn finishes. The second,
+   same day: `plugins/agent`, an OpenAI-backed worker whose first job is
+   compressing finished turns into STE digests (headline + bullets as
+   children, the bill as a MONEY field); both stand on the shared scanner
+   in `plugins/internal/transcript` — see `man 7 rook-plugin`,
+   "THE SHIPPED PLUGINS".
 3. **Providers ship but nothing calls them.** `rook-provider-github` and
    `rook-provider-linear` are built, bundled and tested; the thing that
    spawned them was `rookctl issues`, which left with the Go. The caller

@@ -24,11 +24,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/incantery/rook/plugins/internal/transcript"
 )
 
 const version = "0.1.0"
 
-// Fusion knobs, set from flags. See fuse() for what they mean.
+// Fusion knobs, set from flags. See transcript.Fuse() for what they mean.
 var (
 	fuseNames    []string
 	fuseBusyRate float64
@@ -56,7 +58,7 @@ func main() {
 	fuseNames = strings.Split(*names, ",")
 	fuseBusyRate = *busyRate
 	fusePresent = *present
-	sc := &Scanner{
+	sc := &transcript.Scanner{
 		Dir:    *dir,
 		Window: *window,
 		Idle:   10 * time.Minute,
@@ -76,53 +78,31 @@ func main() {
 // the reply — asking from there would be waiting on itself.
 type activityCache struct {
 	mu    sync.Mutex
-	panes []PaneActivity
+	panes []transcript.PaneActivity
 }
 
-func (a *activityCache) set(p []PaneActivity) {
+func (a *activityCache) set(p []transcript.PaneActivity) {
 	a.mu.Lock()
 	a.panes = p
 	a.mu.Unlock()
 }
 
-func (a *activityCache) get() []PaneActivity {
+func (a *activityCache) get() []transcript.PaneActivity {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.panes
 }
 
-// paneSample remembers one tick's byte counter so the next tick can
-// turn two counters into a rate.
-type paneSample struct {
-	bytes uint64
-	at    time.Time
-}
-
-// computeRates fills each pane's RateBps from the previous tick's
-// sample. The first sighting of a pane has no previous sample and gets
-// rate 0 — one tick of patience beats one tick of guessing.
-func computeRates(prev map[int]paneSample, panes []PaneActivity, now time.Time) {
-	for i := range panes {
-		p := &panes[i]
-		if s, ok := prev[p.ID]; ok {
-			if dt := now.Sub(s.at).Seconds(); dt > 0 && p.OutBytes >= s.bytes {
-				p.RateBps = float64(p.OutBytes-s.bytes) / dt
-			}
-		}
-		prev[p.ID] = paneSample{p.OutBytes, now}
-	}
-}
-
 // fetchActivity asks rook who is redrawing and who is typing. Degrades
 // to nil on refusal (the grant is the human's choice) or timeout —
 // fusion simply switches off and the transcript's word stands alone.
-func fetchActivity(c *conn) []PaneActivity {
+func fetchActivity(c *conn) []transcript.PaneActivity {
 	raw, err := c.call("panes.activity", struct{}{}, 1500*time.Millisecond)
 	if err != nil {
 		return nil
 	}
 	var rep struct {
-		Panes []PaneActivity `json:"panes"`
+		Panes []transcript.PaneActivity `json:"panes"`
 	}
 	if json.Unmarshal(raw, &rep) != nil {
 		return nil
@@ -210,7 +190,7 @@ func (c *conn) call(op string, params any, timeout time.Duration) (json.RawMessa
 }
 
 // serve answers rook until stdin closes, which is how a plugin ends.
-func serve(c *conn, sc *Scanner, cache *activityCache) {
+func serve(c *conn, sc *transcript.Scanner, cache *activityCache) {
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	for in.Scan() {
@@ -251,7 +231,7 @@ func serve(c *conn, sc *Scanner, cache *activityCache) {
 			}, ""})
 		case "items.list":
 			sessions := sc.Scan(time.Now())
-			fuse(sessions, cache.get(), fuseNames, fuseBusyRate, fusePresent)
+			transcript.Fuse(sessions, cache.get(), fuseNames, fuseBusyRate, fusePresent)
 			c.send(reply{1, req.ID, true, map[string]any{
 				"items":     items(sessions),
 				"truncated": false,
@@ -284,14 +264,14 @@ type wireItem struct {
 	Actions  []wireAction `json:"actions,omitempty"`
 }
 
-func items(sessions []Session) []wireItem {
+func items(sessions []transcript.Session) []wireItem {
 	now := time.Now()
 	out := make([]wireItem, 0, len(sessions))
 	for _, s := range sessions {
 		it := wireItem{
 			ID:       s.ID,
-			Title:    snip(s.Title, 90),
-			Subtitle: relAge(now.Sub(s.Mtime)) + " · " + filepath.Base(s.Cwd),
+			Title:    transcript.Snip(s.Title, 90),
+			Subtitle: transcript.RelAge(now.Sub(s.Mtime)) + " · " + filepath.Base(s.Cwd),
 			State:    string(s.State),
 			Actions: []wireAction{
 				{ID: "open", Label: "open a pane here"},
@@ -301,7 +281,7 @@ func items(sessions []Session) []wireItem {
 		// Least important first: the panel sheds fields off the left of
 		// the row when width runs out, so the last field survives longest.
 		if s.Prompt != "" {
-			it.Fields = append(it.Fields, wireField{"asked", "TEXT", snip(s.Prompt, 40)})
+			it.Fields = append(it.Fields, wireField{"asked", "TEXT", transcript.Snip(s.Prompt, 40)})
 		}
 		if s.Branch != "" {
 			it.Fields = append(it.Fields, wireField{"branch", "TEXT", s.Branch})
@@ -310,13 +290,13 @@ func items(sessions []Session) []wireItem {
 		if where == "." || where == "/" || where == "" {
 			where = "?"
 		}
-		it.Fields = append(it.Fields, wireField{"where", "TEXT", where + " · " + relAge(now.Sub(s.Mtime))})
+		it.Fields = append(it.Fields, wireField{"where", "TEXT", where + " · " + transcript.RelAge(now.Sub(s.Mtime))})
 		out = append(out, it)
 	}
 	return out
 }
 
-func act(c *conn, sc *Scanner, id uint64, params json.RawMessage) reply {
+func act(c *conn, sc *transcript.Scanner, id uint64, params json.RawMessage) reply {
 	var p struct {
 		ItemID   string `json:"itemId"`
 		ActionID string `json:"actionId"`
@@ -324,7 +304,7 @@ func act(c *conn, sc *Scanner, id uint64, params json.RawMessage) reply {
 	if json.Unmarshal(params, &p) != nil {
 		return reply{1, id, false, nil, "params did not parse"}
 	}
-	var target *Session
+	var target *transcript.Session
 	for _, s := range sc.Scan(time.Now()) {
 		if s.ID == p.ItemID {
 			target = &s
@@ -346,7 +326,7 @@ func act(c *conn, sc *Scanner, id uint64, params json.RawMessage) reply {
 		c.request("session.spawn", map[string]string{"command": shell, "cwd": target.Cwd})
 		return reply{1, id, true, map[string]string{"message": "opened a pane at " + target.Cwd}, ""}
 	case "peek":
-		msg := snip(target.LastText, 150)
+		msg := transcript.Snip(target.LastText, 150)
 		if msg == "" {
 			msg = "nothing said yet"
 		}
@@ -363,18 +343,18 @@ func act(c *conn, sc *Scanner, id uint64, params json.RawMessage) reply {
 // transcript honest ("working", not "blocked?"), and a human who just
 // typed in the session's pane is watching it — the state stands, the
 // banner is suppressed.
-func watch(c *conn, sc *Scanner, cache *activityCache, poll, minTurn time.Duration) {
-	prev := map[string]State{}
-	samples := map[int]paneSample{}
+func watch(c *conn, sc *transcript.Scanner, cache *activityCache, poll, minTurn time.Duration) {
+	prev := map[string]transcript.State{}
+	samples := map[int]transcript.PaneSample{}
 	first := true
 	for {
 		now := time.Now()
 		panes := fetchActivity(c)
-		computeRates(samples, panes, now)
+		transcript.ComputeRates(samples, panes, now)
 		cache.set(panes)
 		sessions := sc.Scan(now)
-		fuse(sessions, cache.get(), fuseNames, fuseBusyRate, fusePresent)
-		cur := map[string]State{}
+		transcript.Fuse(sessions, cache.get(), fuseNames, fuseBusyRate, fusePresent)
+		cur := map[string]transcript.State{}
 		for _, s := range sessions {
 			cur[s.ID] = s.State
 			old, seen := prev[s.ID]
@@ -382,29 +362,29 @@ func watch(c *conn, sc *Scanner, cache *activityCache, poll, minTurn time.Durati
 				continue
 			}
 			switch s.State {
-			case StateNeedsYou:
+			case transcript.StateNeedsYou:
 				// Only a turn that was RUNNING and took a while: a two-
 				// second answer the human watched happen needs no banner,
 				// an interrupt was the human's own hand, and a human
 				// present at the pane is already looking at the answer.
-				if (old != StateWorking && old != StateBlocked) || s.TurnDur < minTurn || s.Present {
+				if (old != transcript.StateWorking && old != transcript.StateBlocked) || s.TurnDur < minTurn || s.Present {
 					continue
 				}
-				body := snip(s.LastText, 200)
+				body := transcript.Snip(s.LastText, 200)
 				if body == "" {
-					body = snip(s.Prompt, 200)
+					body = transcript.Snip(s.Prompt, 200)
 				}
 				c.request("attention.raise", map[string]string{
-					"title": snip(s.Title, 80) + " is waiting on you",
+					"title": transcript.Snip(s.Title, 80) + " is waiting on you",
 					"body":  body,
 				})
-			case StateBlocked:
-				if old != StateWorking || s.Present {
+			case transcript.StateBlocked:
+				if old != transcript.StateWorking || s.Present {
 					continue
 				}
 				c.request("attention.raise", map[string]string{
-					"title": snip(s.Title, 80) + " may need an approval",
-					"body":  snip(s.Prompt, 200),
+					"title": transcript.Snip(s.Title, 80) + " may need an approval",
+					"body":  transcript.Snip(s.Prompt, 200),
 				})
 			}
 		}
