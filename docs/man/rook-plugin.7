@@ -450,6 +450,37 @@ Flags:
 .Fl -api-base
 .Pq point it at a stub and no real money moves ,
 .Fl -key-file , Fl -dir .
+.Ss The cloud bridge
+The third shipped plugin,
+.Pa rook-plugin-cloud ,
+is the thin line to rook-cloud: it holds a machine token
+.Pq minted once at cloud.rookide.com, read from Ev ROOK_CLOUD_TOKEN or Fl -key-file Ns 's sibling Fl -token-file , default Pa ~/.config/rook/cloud_token ,
+proves it with
+.Ql GET /v1/whoami ,
+and pushes a status snapshot every
+.Fl -interval
+.Pq default 20s :
+workspaces, each with its agents and their honest states
+.Pq Ql working , Ql needs_input , Ql quiet
+derived from the same transcript scanner the watcher uses, fused with
+.Cm panes.activity
+when granted.
+The fleet pages at cloud.rookide.com render it \(em your machine,
+visible from your phone.
+The panel row is the connection truth: connected-as, last push, or
+exactly what is wrong
+.Pq no token, unreachable, revoked ;
+a revoked token names the fix and a re-minted token in the same file
+resurrects the bridge without a restart.
+.Ql push now
+is the one action.
+.Bd -literal -offset indent
+rook.Plugin{Name: "cloud",
+    Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-cloud"},
+    Load:    rook.Eager,
+    Grants:  []string{rook.OpItemsList, rook.OpItemsAct,
+        "panes.activity"}}
+.Ed
 .Sh A MINIMAL PLUGIN
 The essence of
 .Pa examples/hello-plugin ,
