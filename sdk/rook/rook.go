@@ -418,8 +418,8 @@ const (
 	OpItemsAct       = "items.act"
 	OpAttentionRaise = "attention.raise"
 	OpSessionSpawn   = "session.spawn"
-	OpSessionSend    = "session.send" // type into an agent pane; the ask round trip's last hop
-	OpClipboardSet   = "clipboard.set" // plugin → pasteboard; the human's ⌘V is the last hop
+	OpSessionSend    = "session.send"   // type into an agent pane; the ask round trip's last hop
+	OpClipboardSet   = "clipboard.set"  // plugin → pasteboard; the human's ⌘V is the last hop
 	OpPanesActivity  = "panes.activity" // read pane output rates and last-input ages
 )
 
@@ -474,6 +474,13 @@ type Agent struct {
 	// the price table does not know show no cost rather than a
 	// made-up one.
 	API AgentAPI
+	// KeyFile names the file holding the key for the chosen API, for
+	// when it is not the OpenAI one. Borrowing the fleet's key (see
+	// CloudAPI) means naming the machine token here: the two
+	// credentials live in separate files on purpose, because they are
+	// minted and revoked in different places by different people.
+	// Empty keeps the plugin's default, ~/.config/rook/openai_key.
+	KeyFile string
 	// MinWords is the shortest reply worth compressing; 0 keeps the
 	// plugin's default (120).
 	MinWords int
@@ -489,6 +496,9 @@ func (a Agent) appendTo(e *env) {
 	cmd := []string{bundleBin + "rook-plugin-agent", "--model", model}
 	if a.API.base != "" {
 		cmd = append(cmd, "--api-base", a.API.base)
+	}
+	if a.KeyFile != "" {
+		cmd = append(cmd, "--key-file", a.KeyFile)
 	}
 	if a.MinWords > 0 {
 		cmd = append(cmd, "--min-words", strconv.Itoa(a.MinWords))
@@ -511,6 +521,25 @@ func APIBase(url string) AgentAPI { return AgentAPI{base: url} }
 
 // Ollama is ollama's default local endpoint.
 var Ollama = APIBase("http://localhost:11434/v1")
+
+// CloudAPI sends the agent's completions through rook-cloud rather than
+// straight to OpenAI: the fleet's key pays, the fleet's meter records
+// what it cost, and this machine needs no OpenAI key of its own. Same
+// OpenAI-compatible wire either way — nothing about the agent changes
+// but where it points.
+//
+// Pair it with the machine token, which is the bearer that endpoint
+// authenticates — the cloud token, not an OpenAI one:
+//
+//	rook.Agent{API: rook.CloudAPI, KeyFile: rook.CloudTokenFile}
+//
+// The model has to be one the proxy is willing to pay for, and its
+// refusal names the list. The zero-value model is on it.
+var CloudAPI = APIBase("https://api.rookide.com/v1")
+
+// CloudTokenFile is where the machine token lives, minted once on the
+// machines page — the same file the cloud bridge reads.
+const CloudTokenFile = "~/.config/rook/cloud_token"
 
 // Cloud is the bridge to cloud.rookide.com: this machine on the fleet
 // pages, its needs-input sessions answerable from your phone. Token:

@@ -62,9 +62,15 @@ func main() {
 		}
 		*dir = filepath.Join(home, ".claude", "projects")
 	}
+	explicitKeyFile := *keyFile != ""
 	if *keyFile == "" && home != "" {
 		*keyFile = filepath.Join(home, ".config", "rook", "openai_key")
 	}
+	// rook launches plugins directly, with no shell in between, so a
+	// tilde in a flag is a literal directory named "~" and the read
+	// fails into an empty key — which presents as a 401 from whatever
+	// the key was for, several layers from the cause.
+	*keyFile = expandHome(*keyFile, home)
 
 	sc := &transcript.Scanner{
 		Dir:    *dir,
@@ -74,7 +80,7 @@ func main() {
 		Max:    20,
 	}
 	st := &store{keep: *keep}
-	key := apiKey(*keyFile)
+	key := apiKey(*keyFile, explicitKeyFile)
 	var sum *Summarizer
 	if notice := nokeyNotice(key, *apiBase, *keyFile); notice != "" {
 		st.nokey = notice
@@ -110,15 +116,39 @@ func nokeyNotice(key, base, keyFile string) string {
 // apiKey: the environment when there is one, a file when there is not —
 // rook launched from the Dock inherits launchd's environment, and no
 // shell profile ran there.
-func apiKey(path string) string {
-	if k := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); k != "" {
-		return k
+//
+// An EXPLICIT --key-file overturns that order. $OPENAI_API_KEY is
+// ambient and a named file is a decision, and the case that matters is
+// borrowing the fleet's key: a developer with OPENAI_API_KEY exported
+// who points the agent at rook-cloud would otherwise send their OpenAI
+// key as the machine bearer, and meet a 401 that names neither the key
+// they sent nor the one they meant to.
+func apiKey(path string, explicit bool) string {
+	if !explicit {
+		if k := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); k != "" {
+			return k
+		}
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// expandHome resolves a leading ~ the way a shell would, which is the
+// only place one can appear: rook execs plugins directly.
+func expandHome(path, home string) string {
+	if home == "" || path == "~" {
+		if path == "~" && home != "" {
+			return home
+		}
+		return path
+	}
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }
 
 // watch turns state transitions into digests, the same edge the claude
