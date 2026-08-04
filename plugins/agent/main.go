@@ -14,6 +14,11 @@
 // plugin still serves its panel and says exactly what is missing: a
 // plugin that exits on a missing key is indistinguishable from a broken
 // one, and this failure is configuration, not damage.
+//
+// Any OpenAI-compatible server works via --api-base — ollama, LM
+// Studio, llama.cpp all speak the same wire — and a non-default base
+// needs no key. Costs are only reported for models the price table
+// knows; a local model shows no cost rather than a made-up one.
 package main
 
 import (
@@ -42,7 +47,7 @@ func main() {
 	window := flag.Duration("window", 48*time.Hour, "how far back sessions are watched")
 	minWords := flag.Int("min-words", 120, "shortest reply worth compressing")
 	model := flag.String("model", "gpt-5-mini", "OpenAI model")
-	apiBase := flag.String("api-base", "https://api.openai.com/v1", "API base URL")
+	apiBase := flag.String("api-base", defaultAPIBase, "API base URL (any OpenAI-compatible server)")
 	effort := flag.String("effort", "low", "reasoning effort (empty omits the field)")
 	keyFile := flag.String("key-file", "", "API key file (default ~/.config/rook/openai_key)")
 	keep := flag.Int("keep", 100, "digests remembered")
@@ -71,8 +76,8 @@ func main() {
 	st := &store{keep: *keep}
 	key := apiKey(*keyFile)
 	var sum *Summarizer
-	if key == "" {
-		st.nokey = "no OpenAI key — set $OPENAI_API_KEY or write " + *keyFile
+	if notice := nokeyNotice(key, *apiBase, *keyFile); notice != "" {
+		st.nokey = notice
 	} else {
 		sum = &Summarizer{
 			Client:   &http.Client{Timeout: 90 * time.Second},
@@ -85,6 +90,21 @@ func main() {
 		go watch(sc, st, sum, *poll, *minWords)
 	}
 	serve(&conn{out: os.Stdout}, st, sum)
+}
+
+const defaultAPIBase = "https://api.openai.com/v1"
+
+// nokeyNotice: a missing key is a standing notice only where the
+// default API lives. A non-default base is a local server (ollama,
+// LM Studio) or someone's proxy — those want no auth, and demanding a
+// key they would ignore turns "works out of the box" into false
+// weather. If a custom base DOES want auth, its 401 shows up as an
+// honest error row instead.
+func nokeyNotice(key, base, keyFile string) string {
+	if key != "" || base != defaultAPIBase {
+		return ""
+	}
+	return "no OpenAI key — set $OPENAI_API_KEY or write " + keyFile
 }
 
 // apiKey: the environment when there is one, a file when there is not —

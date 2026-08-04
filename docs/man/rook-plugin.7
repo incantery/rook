@@ -423,11 +423,19 @@ The bullets are the item's children, the bill is a
 field on the row, and the full reply stays in the session \(em the
 digest makes the reading terse, never the writing.
 .Bd -literal -offset indent
-rook.Plugin{Name: "agent",
-    Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-agent"},
-    Load:    rook.Eager,
-    Grants:  []string{rook.OpItemsList, rook.OpItemsAct}}
+rook.Agent{}                                  // OpenAI, gpt-5.6-luna
+rook.Agent{Model: "llama3.2", API: rook.Ollama} // local, no key
+rook.Agent{API: rook.APIBase("http://box:8000/v1")}
 .Ed
+.Pp
+Each first-party plugin has a typed declaration
+.Pq Vt rook.Claude , Vt rook.Agent , Vt rook.Cloud
+that lowers to a plain
+.Vt rook.Plugin
+at emit time \(em the graph shows the flags it chose, and a
+hand-written
+.Vt Plugin
+stays the escape hatch for any knob without a field.
 .Pp
 Each digest carries the reply loop:
 .Ql draft a reply
@@ -450,6 +458,12 @@ from
 .Pq default Pa ~/.config/rook/openai_key .
 Without one the panel says exactly that and nothing runs \(em a missing
 key is configuration, not damage.
+The notice belongs only to the default base: any OpenAI-compatible
+server works via
+.Fl -api-base
+.Pq ollama, LM Studio, llama.cpp all speak the same wire ,
+a non-default base needs no key, and a model the price table does not
+know shows no cost rather than a made-up one.
 Digests live in memory only and each reply is billed at most once,
 retries included; a reply that breaks the shape gets one correction and
 is then taken as it came.

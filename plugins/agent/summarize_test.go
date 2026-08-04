@@ -308,3 +308,44 @@ func TestStoreKeepsNewestFirstAndBounded(t *testing.T) {
 		t.Fatalf("ring: %+v", ds)
 	}
 }
+
+// A local server (ollama, LM Studio) wants no auth. A keyless
+// Summarizer must send NO Authorization header — "Bearer " with
+// nothing after it is a malformed credential some servers reject —
+// and an unknown local model must show no cost, not a made-up one.
+func TestLocalAPINeedsNoKeyAndInventsNoCost(t *testing.T) {
+	var auth string
+	var hasAuth bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		_, hasAuth = r.Header["Authorization"]
+		io.WriteString(w, completion("It shipped.\n- Relaunch rook.", 1000, 100))
+	}))
+	defer srv.Close()
+	z := &Summarizer{Client: srv.Client(), Base: srv.URL, Key: "", Model: "llama3.2", MaxChars: 16000}
+	d := z.Summarize(stubSession(), t0)
+	if d.Err != "" {
+		t.Fatal(d.Err)
+	}
+	if hasAuth {
+		t.Fatalf("keyless request carried an Authorization header: %q", auth)
+	}
+	if d.CostUSD != 0 {
+		t.Fatalf("unknown model priced anyway: %v", d.CostUSD)
+	}
+}
+
+// The standing no-key notice belongs ONLY to the default OpenAI base:
+// a custom base is a local server or a proxy, where a missing key is
+// not a misconfiguration to nag about.
+func TestNokeyNoticeOnlyForTheDefaultBase(t *testing.T) {
+	if n := nokeyNotice("", defaultAPIBase, "/k"); n == "" {
+		t.Fatal("default base with no key must notice")
+	}
+	if n := nokeyNotice("sk-x", defaultAPIBase, "/k"); n != "" {
+		t.Fatalf("keyed run noticed anyway: %q", n)
+	}
+	if n := nokeyNotice("", "http://localhost:11434/v1", "/k"); n != "" {
+		t.Fatalf("local base demanded a key: %q", n)
+	}
+}

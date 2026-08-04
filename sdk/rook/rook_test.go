@@ -160,3 +160,71 @@ func TestGeneratedCmds(t *testing.T) {
 		t.Fatal("TabSelect misrenders")
 	}
 }
+
+// The typed first-party declarations are sugar over Plugin, and the
+// proof they are PURE sugar is byte equality: each zero-value form
+// must emit exactly the argv and grants a hand written its config
+// with before these types existed — so adopting them shows "no
+// pending changes" in rook env, not a diff.
+func TestFirstPartyPluginsLowerToTheHandWrittenBytes(t *testing.T) {
+	got := string(JSON(Claude{}, Agent{}, Cloud{}))
+	want := string(JSON(
+		Plugin{
+			Name:    "claude",
+			Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-claude"},
+			Load:    Eager,
+			Grants: []string{
+				OpItemsList, OpItemsAct, OpAttentionRaise, OpSessionSpawn, OpPanesActivity,
+			},
+		},
+		Plugin{
+			Name:    "agent",
+			Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-agent", "--model", "gpt-5.6-luna"},
+			Load:    Eager,
+			Grants:  []string{OpItemsList, OpItemsAct, OpClipboardSet},
+		},
+		Plugin{
+			Name:    "cloud",
+			Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-cloud"},
+			Load:    Eager,
+			Grants:  []string{OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend},
+		},
+	))
+	if got != want {
+		t.Errorf("typed forms are not pure sugar.\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// Each option becomes a visible flag in the graph — expansion where
+// provenance can see it, never a default hidden in the binary.
+func TestAgentOptionsBecomeFlags(t *testing.T) {
+	got := string(JSON(Agent{Model: "llama3.2", API: Ollama, MinWords: 200}))
+	want := `"command":["/Applications/rook.app/Contents/MacOS/rook-plugin-agent",` +
+		`"--model","llama3.2","--api-base","http://localhost:11434/v1","--min-words","200"]`
+	if !strings.Contains(got, want) {
+		t.Errorf("agent options lost in lowering:\n got: %s\nwant contains: %s", got, want)
+	}
+
+	got = string(JSON(Cloud{API: "http://192.168.4.22:8080"}))
+	if !strings.Contains(got, `"command":["/Applications/rook.app/Contents/MacOS/rook-plugin-cloud","--api","http://192.168.4.22:8080"]`) {
+		t.Errorf("cloud API target lost: %s", got)
+	}
+}
+
+// Overrides must really override: narrowed grants replace the default
+// set (and an EMPTY slice stages the plugin inert — nil means default,
+// empty means nothing, and those are different declarations), and an
+// explicit Lazy beats the watchers' Eager default.
+func TestFirstPartyOverrides(t *testing.T) {
+	got := string(JSON(Agent{Grants: []string{OpItemsList}, Load: Lazy}))
+	if !strings.Contains(got, `"load":"lazy","grants":["items.list"]`) {
+		t.Errorf("overrides lost: %s", got)
+	}
+	if strings.Contains(got, "clipboard.set") {
+		t.Errorf("default grant survived beside the override: %s", got)
+	}
+	got = string(JSON(Claude{Grants: []string{}}))
+	if !strings.Contains(got, `"grants":[]`) {
+		t.Errorf("empty grants must stage inert, not fall back to defaults: %s", got)
+	}
+}

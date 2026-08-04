@@ -166,7 +166,9 @@ func (z *Summarizer) complete(msgs []chatMsg) (content string, cost float64, err
 		return "", 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+z.Key)
+	if z.Key != "" {
+		req.Header.Set("Authorization", "Bearer "+z.Key)
+	}
 	resp, err := z.Client.Do(req)
 	if err != nil {
 		return "", 0, err

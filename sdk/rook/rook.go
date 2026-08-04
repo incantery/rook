@@ -420,7 +420,140 @@ const (
 	OpSessionSpawn   = "session.spawn"
 	OpSessionSend    = "session.send" // type into an agent pane; the ask round trip's last hop
 	OpClipboardSet   = "clipboard.set" // plugin → pasteboard; the human's ⌘V is the last hop
+	OpPanesActivity  = "panes.activity" // read pane output rates and last-input ages
 )
+
+// ---- first-party plugins: typed declarations ----
+//
+// The plugins that ship inside the app bundle, declared by FIELD
+// instead of by argv — the same reason commands are typed constants:
+// nobody should remember a flag to use their own tools. Each lowers
+// to a plain Plugin at emit time, so the graph records the exact
+// flags it chose (a preset's rule: expand where provenance can see),
+// `rook env` diffs the same truth either way, and a hand-written
+// Plugin{} stays the escape hatch for any knob without a field here.
+//
+// Grants default to each plugin's working set. That is a deliberate
+// stance for FIRST-PARTY plugins only: choosing rook.Agent{} is
+// choosing the agent, and the grants it runs on are shown in the
+// apply diff where consent actually happens. Narrow with Grants;
+// stage one inert with Grants: []string{}.
+
+const bundleBin = "/Applications/rook.app/Contents/MacOS/"
+
+// Claude is the Claude Code watcher: it reads transcripts, raises
+// attention when a session finishes a long turn or looks stuck on an
+// approval, and can spawn sessions from the panel.
+type Claude struct {
+	Grants []string // default: list/act, attention.raise, session.spawn, panes.activity
+	Load   Load     // default Eager — a watcher that loads lazily watches nothing
+}
+
+func (c Claude) appendTo(e *env) {
+	Plugin{
+		Name:    "claude",
+		Command: []string{bundleBin + "rook-plugin-claude"},
+		Load:    eagerUnless(c.Load),
+		Grants: grantsOr(c.Grants, []string{
+			OpItemsList, OpItemsAct, OpAttentionRaise, OpSessionSpawn, OpPanesActivity,
+		}),
+	}.appendTo(e)
+}
+
+// Agent is the rook agent — the membrane between you and your
+// agents. It compresses finished turns into STE digests, drafts and
+// expands replies, and hands them back through the clipboard.
+type Agent struct {
+	// Model names what does the compressing. Empty means
+	// "gpt-5.6-luna" — the 2026-08-03 bake-off winner (hardest
+	// compression, kept done-vs-todo, cheapest measured bill).
+	Model string
+	// API is where completions go. The zero value is OpenAI, keyed
+	// from ~/.config/rook/openai_key or $OPENAI_API_KEY. See Ollama
+	// and APIBase for local servers — those need no key, and models
+	// the price table does not know show no cost rather than a
+	// made-up one.
+	API AgentAPI
+	// MinWords is the shortest reply worth compressing; 0 keeps the
+	// plugin's default (120).
+	MinWords int
+	Grants   []string // default: list/act, clipboard.set
+	Load     Load     // default Eager
+}
+
+func (a Agent) appendTo(e *env) {
+	model := a.Model
+	if model == "" {
+		model = "gpt-5.6-luna"
+	}
+	cmd := []string{bundleBin + "rook-plugin-agent", "--model", model}
+	if a.API.base != "" {
+		cmd = append(cmd, "--api-base", a.API.base)
+	}
+	if a.MinWords > 0 {
+		cmd = append(cmd, "--min-words", strconv.Itoa(a.MinWords))
+	}
+	Plugin{
+		Name:    "agent",
+		Command: cmd,
+		Load:    eagerUnless(a.Load),
+		Grants:  grantsOr(a.Grants, []string{OpItemsList, OpItemsAct, OpClipboardSet}),
+	}.appendTo(e)
+}
+
+// AgentAPI is where the rook agent sends completions. The zero value
+// is OpenAI; any OpenAI-compatible server is one APIBase call away.
+type AgentAPI struct{ base string }
+
+// APIBase points the agent at any OpenAI-compatible endpoint —
+// ollama, LM Studio, llama.cpp, vLLM, or a proxy of your own.
+func APIBase(url string) AgentAPI { return AgentAPI{base: url} }
+
+// Ollama is ollama's default local endpoint.
+var Ollama = APIBase("http://localhost:11434/v1")
+
+// Cloud is the bridge to cloud.rookide.com: this machine on the fleet
+// pages, its needs-input sessions answerable from your phone. Token:
+// ~/.config/rook/cloud_token, minted once on the machines page.
+type Cloud struct {
+	// API overrides the rook-cloud endpoint — a localhost or LAN
+	// deployment. Empty means the live cloud, and the panel names
+	// any non-default target so "connected to the wrong one" never
+	// reads like the right one.
+	API    string
+	Grants []string // default: list/act, panes.activity, session.send
+	Load   Load     // default Eager
+}
+
+func (c Cloud) appendTo(e *env) {
+	cmd := []string{bundleBin + "rook-plugin-cloud"}
+	if c.API != "" {
+		cmd = append(cmd, "--api", c.API)
+	}
+	Plugin{
+		Name:    "cloud",
+		Command: cmd,
+		Load:    eagerUnless(c.Load),
+		Grants:  grantsOr(c.Grants, []string{OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend}),
+	}.appendTo(e)
+}
+
+// eagerUnless: the first-party plugins are watchers, and a watcher
+// that loads lazily watches nothing — so their unset Load means
+// Eager, the opposite of Plugin's own default.
+func eagerUnless(l Load) Load {
+	if l == "" {
+		return Eager
+	}
+	return l
+}
+
+func grantsOr(got, def []string) []string {
+	if got == nil {
+		return def
+	}
+	return got
+}
 
 // ---- presets: identities as bundles ----
 //
