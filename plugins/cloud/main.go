@@ -148,6 +148,7 @@ func (br *bridge) loop(c *conn, interval time.Duration) {
 		if br.machineIDLocked() != "" {
 			sessions, panes := br.push(c, samples)
 			br.collect(c, sessions, panes)
+			br.executeCommands(c, sessions, panes)
 		}
 		select {
 		case <-time.After(interval):
@@ -288,11 +289,13 @@ type wireWorkspace struct {
 }
 
 type wireAgent struct {
-	State     string    `json:"state"` // working | needs_input | quiet
+	ID        string    `json:"id,omitempty"` // session id — what a phone-issued command names
+	State     string    `json:"state"`        // working | needs_input | quiet
 	Title     string    `json:"title,omitempty"`
 	Ask       string    `json:"ask,omitempty"`
 	AskID     string    `json:"askId,omitempty"`
 	Model     string    `json:"model,omitempty"`
+	CtxPct    int       `json:"ctxPct,omitempty"` // context occupancy, percent of the model's window
 	LastEvent time.Time `json:"lastEvent,omitzero"`
 }
 
@@ -346,9 +349,13 @@ func statusFrom(sessions []transcript.Session, rookVer string) wireStatus {
 			order = append(order, name)
 		}
 		a := wireAgent{
+			ID:        s.ID,
 			Title:     transcript.Snip(s.Title, 80),
 			Model:     "claude",
 			LastEvent: s.Mtime,
+		}
+		if p := transcript.CtxPct(s.CtxTokens, s.Model); p > 0 {
+			a.CtxPct = p
 		}
 		switch s.State {
 		case transcript.StateNeedsYou:
@@ -455,6 +462,137 @@ func (br *bridge) collect(c *conn, sessions []transcript.Session, panes []transc
 		br.delivered[ans.AskID] = true
 		br.ack(ans.AskID)
 		br.note("answered " + transcript.Snip(target.Title, 40) + " from the phone")
+	}
+}
+
+// executeCommands drains the second outbox — the verb rail beside the
+// answers. One kind today: "compact", which types /compact into the
+// session's pane. Answers' rules carry over exactly (at-most-once at
+// the keyboard, delivered-before-ack, bounded retries, notes on the
+// record), plus one of its own: a WORKING session is left alone — the
+// command retries on later heartbeats and drops with its reason if the
+// turn outlasts the patience. The host's session.send gates still
+// stand under all of it; the cloud requests, this machine decides.
+func (br *bridge) executeCommands(c *conn, sessions []transcript.Session, panes []transcript.PaneActivity) {
+	cmds := br.fetchCommands()
+	if len(cmds) == 0 {
+		return
+	}
+	if br.delivered == nil {
+		br.delivered = map[string]bool{}
+		br.attempts = map[string]int{}
+	}
+	for _, cmd := range cmds {
+		key := "cmd:" + cmd.ID
+		if br.delivered[key] {
+			br.ackCommand(cmd.ID)
+			continue
+		}
+		if cmd.Kind != "compact" {
+			// A kind this rook does not speak: honestly refused, never
+			// guessed at. (An older bridge meeting a newer cloud.)
+			br.ackCommand(cmd.ID)
+			br.note("dropped a command this rook does not know: " + cmd.Kind)
+			continue
+		}
+		var target *transcript.Session
+		for i := range sessions {
+			if sessions[i].ID == cmd.SessionID {
+				target = &sessions[i]
+				break
+			}
+		}
+		if target == nil {
+			br.ackCommand(cmd.ID)
+			br.note("dropped a compact — that session is gone")
+			continue
+		}
+		if target.State == transcript.StateWorking {
+			br.attempts[key]++
+			if br.attempts[key] > 5 {
+				br.ackCommand(cmd.ID)
+				br.note("dropped a compact — " + transcript.Snip(target.Title, 40) + " stayed mid-turn")
+			}
+			continue
+		}
+		var pane *transcript.PaneActivity
+		for i := range panes {
+			if panes[i].Cwd == target.Cwd && transcript.ClaudeLike(panes[i], br.names) {
+				pane = &panes[i]
+				break
+			}
+		}
+		if pane == nil {
+			br.attempts[key]++
+			if br.attempts[key] > 5 {
+				br.ackCommand(cmd.ID)
+				br.note("dropped a compact — no agent pane for " + transcript.Snip(target.Title, 40))
+			}
+			continue
+		}
+		if c == nil {
+			continue
+		}
+		_, err := c.call("session.send",
+			map[string]any{"pane": pane.ID, "text": "/compact"}, 5*time.Second)
+		if err != nil {
+			br.attempts[key]++
+			if br.attempts[key] > 5 {
+				br.ackCommand(cmd.ID)
+				br.note("could not deliver a compact: " + err.Error())
+			} else {
+				br.note("compact refused, retrying: " + err.Error())
+			}
+			continue
+		}
+
+		br.delivered[key] = true
+		br.ackCommand(cmd.ID)
+		br.note("compacted " + transcript.Snip(target.Title, 40) + " from the phone")
+	}
+}
+
+type cloudCommand struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	SessionID string `json:"sessionId"`
+}
+
+func (br *bridge) fetchCommands() []cloudCommand {
+	req, err := http.NewRequest("GET", br.api+"/v1/commands", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+br.getToken())
+	resp, err := br.client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != 200 {
+		return nil
+	}
+	var rep struct {
+		Commands []cloudCommand `json:"commands"`
+	}
+	if json.Unmarshal(raw, &rep) != nil {
+		return nil
+	}
+	return rep.Commands
+}
+
+func (br *bridge) ackCommand(id string) {
+	body, _ := json.Marshal(map[string]string{"id": id})
+	req, err := http.NewRequest("POST", br.api+"/v1/commands/ack", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+br.getToken())
+	if resp, err := br.client.Do(req); err == nil {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
+		resp.Body.Close()
 	}
 }
 

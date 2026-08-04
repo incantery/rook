@@ -18,7 +18,8 @@ var t0 = time.Date(2026, 8, 4, 9, 0, 0, 0, time.UTC)
 func fixtureSessions() []transcript.Session {
 	return []transcript.Session{
 		{ID: "a", Title: "fix the socket bind", Cwd: "/Users/u/src/rook", Branch: "main",
-			State: transcript.StateNeedsYou, LastText: "The fix is in. Ship it?", Mtime: t0},
+			State: transcript.StateNeedsYou, LastText: "The fix is in. Ship it?", Mtime: t0,
+			CtxTokens: 106_000, Model: "claude-fable-5"},
 		{ID: "b", Title: "migrate the schema", Cwd: "/Users/u/src/rook", Branch: "main",
 			State: transcript.StateWorking, Mtime: t0},
 		{ID: "c", Title: "docs pass", Cwd: "/Users/u/src/dora",
@@ -50,6 +51,18 @@ func TestStatusFromSpeaksTheCloudsVocabulary(t *testing.T) {
 	if rook.Agents[1].State != "working" || rook.Agents[1].Ask != "" {
 		t.Fatalf("working agent carries no ask: %+v", rook.Agents[1])
 	}
+	// Every agent names its session — a phone-issued command needs the
+	// handle — and context occupancy rides along when the transcript
+	// reported usage, omitted (zero) when it never did.
+	if rook.Agents[0].ID != "a" || rook.Agents[1].ID != "b" {
+		t.Fatalf("agents must carry session ids: %+v", rook.Agents)
+	}
+	if rook.Agents[0].CtxPct != 53 {
+		t.Fatalf("ctx pct: %+v", rook.Agents[0])
+	}
+	if rook.Agents[1].CtxPct != 0 {
+		t.Fatalf("unknown ctx must stay omitted: %+v", rook.Agents[1])
+	}
 	// blocked? maps to needs_input — the approval you left the room on —
 	// and carries the prompt, marked as an approval guess.
 	if dora.Agents[0].State != "needs_input" || !strings.Contains(dora.Agents[0].Ask, "approval? run the deploy") {
@@ -67,9 +80,11 @@ type fakeCloud struct {
 	token    string
 	statuses []wireStatus
 	auths    []string
-	answers  []cloudAnswer // the outbox /v1/answers serves
-	acks     []string      // askIds acked via /v1/answers/ack
-	dead     bool          // flips every response to 401 — the revoked-token story
+	answers  []cloudAnswer  // the outbox /v1/answers serves
+	acks     []string       // askIds acked via /v1/answers/ack
+	commands []cloudCommand // the outbox /v1/commands serves
+	cmdAcks  []string       // command ids acked via /v1/commands/ack
+	dead     bool           // flips every response to 401 — the revoked-token story
 }
 
 func (f *fakeCloud) acked() []string {
@@ -110,6 +125,22 @@ func (f *fakeCloud) handler() http.Handler {
 		json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
 		f.acks = append(f.acks, body.AskID)
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	mux.HandleFunc("GET /v1/commands", auth(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		out, _ := json.Marshal(map[string]any{"commands": f.commands})
+		f.mu.Unlock()
+		w.Write(out)
+	}))
+	mux.HandleFunc("POST /v1/commands/ack", auth(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ID string `json:"id"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.cmdAcks = append(f.cmdAcks, body.ID)
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -404,5 +435,121 @@ func TestAskIDRidesTheStatusForNeedsInputOnly(t *testing.T) {
 	}
 	if withID != 2 || withoutID != 2 {
 		t.Fatalf("fixture spread: %d with, %d without", withID, withoutID)
+	}
+}
+
+func withCommands(f *fakeCloud, cmds ...cloudCommand) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commands = cmds
+}
+
+func (f *fakeCloud) cmdAcked() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cmdAcks...)
+}
+
+func compactCmd(sessID string) cloudCommand {
+	return cloudCommand{ID: "compact:" + sessID, Kind: "compact", SessionID: sessID}
+}
+
+// The command rail's happy path mirrors the answers': /compact typed
+// into the agent's pane exactly once, delivered marked before the ack,
+// and a redelivered command re-acked without a second keystroke.
+func TestCompactCommandTypesOnceAndAcks(t *testing.T) {
+	sess := needsInputSession()
+	f := &fakeCloud{token: "tok"}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	br := testBridge(t, srv.URL, "tok")
+	withCommands(f, compactCmd(sess.ID))
+
+	frames := make(chan string, 4)
+	c := &conn{out: chanWriter{frames}}
+	done := make(chan struct{})
+	go func() {
+		br.executeCommands(c, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
+		close(done)
+	}()
+	frame := <-frames
+	if !strings.Contains(frame, `"op":"session.send"`) || !strings.Contains(frame, `"pane":7`) || !strings.Contains(frame, "/compact") {
+		t.Fatalf("frame: %s", frame)
+	}
+	var req struct {
+		ID uint64 `json:"id"`
+	}
+	json.Unmarshal([]byte(frame), &req)
+	c.deliver(req.ID, true, "", nil)
+	<-done
+	if got := f.cmdAcked(); len(got) != 1 || got[0] != "compact:sess1" {
+		t.Fatalf("acks: %v", got)
+	}
+	withCommands(f, compactCmd(sess.ID))
+	br.executeCommands(c, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
+	select {
+	case fr := <-frames:
+		t.Fatalf("typed twice: %s", fr)
+	default:
+	}
+	if len(f.cmdAcked()) != 2 {
+		t.Fatalf("the redelivery was not re-acked: %v", f.cmdAcked())
+	}
+}
+
+// A working session is left alone: typing /compact into a mid-turn
+// composer interleaves with the agent's own work. Retried while the
+// turn runs, dropped with its reason when patience runs out.
+func TestCompactHoldsWhileWorkingThenDrops(t *testing.T) {
+	sess := needsInputSession()
+	sess.State = transcript.StateWorking
+	f := &fakeCloud{token: "tok"}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	br := testBridge(t, srv.URL, "tok")
+
+	for i := 0; i < 5; i++ {
+		withCommands(f, compactCmd(sess.ID))
+		br.executeCommands(nil, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
+		if n := len(f.cmdAcked()); n != 0 {
+			t.Fatalf("acked while the turn still ran (attempt %d): %d", i, n)
+		}
+	}
+	withCommands(f, compactCmd(sess.ID))
+	br.executeCommands(nil, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
+	if n := len(f.cmdAcked()); n != 1 {
+		t.Fatalf("the sixth mid-turn miss must drop with an ack: %d", n)
+	}
+	if note := items(br, t0); len(note) < 2 || !strings.Contains(note[1].Title, "mid-turn") {
+		t.Fatalf("the drop needs its receipt: %+v", note)
+	}
+}
+
+// A command for a session that no longer exists, or of a kind this
+// rook does not speak, is acked away with its reason — never guessed
+// at, never left pending forever.
+func TestUnknownSessionOrKindIsAckedAwayWithItsReason(t *testing.T) {
+	sess := needsInputSession()
+	f := &fakeCloud{token: "tok"}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	br := testBridge(t, srv.URL, "tok")
+
+	withCommands(f, compactCmd("nope"))
+	br.executeCommands(nil, []transcript.Session{sess}, nil)
+	if got := f.cmdAcked(); len(got) != 1 || got[0] != "compact:nope" {
+		t.Fatalf("gone session: %v", got)
+	}
+	if note := items(br, t0); !strings.Contains(note[1].Title, "gone") {
+		t.Fatalf("receipt: %+v", note)
+	}
+
+	withCommands(f, cloudCommand{ID: "reboot:x", Kind: "reboot", SessionID: sess.ID})
+	br.executeCommands(nil, []transcript.Session{sess}, nil)
+	if got := f.cmdAcked(); len(got) != 2 {
+		t.Fatalf("unknown kind must ack: %v", got)
+	}
+	if note := items(br, t0); !strings.Contains(note[1].Title, "does not know") {
+		t.Fatalf("receipt: %+v", note)
 	}
 }

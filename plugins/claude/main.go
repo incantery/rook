@@ -283,6 +283,9 @@ func items(sessions []transcript.Session) []wireItem {
 		if s.Prompt != "" {
 			it.Fields = append(it.Fields, wireField{"asked", "TEXT", transcript.Snip(s.Prompt, 40)})
 		}
+		if p := transcript.CtxPct(s.CtxTokens, s.Model); p > 0 {
+			it.Fields = append(it.Fields, wireField{"ctx", "PERCENT", fmt.Sprintf("%d%%", p)})
+		}
 		if s.Branch != "" {
 			it.Fields = append(it.Fields, wireField{"branch", "TEXT", s.Branch})
 		}

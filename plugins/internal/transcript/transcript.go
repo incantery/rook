@@ -68,6 +68,35 @@ type Session struct {
 	Mtime    time.Time
 	TurnDur  time.Duration // how long the just-finished turn ran; 0 if unknown
 	Present  bool          // the human typed in this session's pane moments ago
+
+	// Context occupancy, from the LAST main-chain assistant message's
+	// usage: input + cache reads + cache writes + output is what the
+	// next request starts from. 0 means no usage seen in the tail —
+	// unknown, never "empty" — and Model names who reported it, so a
+	// window lookup has something to go on.
+	CtxTokens int
+	Model     string
+}
+
+// CtxPct renders occupancy as a percent of the model's window; -1 when
+// unknown. Deliberately uncapped past 100 — a session reading 140%
+// means the window table is wrong about this model, and an honest
+// wrong number gets fixed where a clamped one never would.
+func CtxPct(tokens int, model string) int {
+	if tokens <= 0 {
+		return -1
+	}
+	return tokens * 100 / Window(model)
+}
+
+// Window is the model's context length in tokens. The table is small
+// on purpose: today's Claude models are 200k unless the id says
+// otherwise, and a default beats a stale catalog.
+func Window(model string) int {
+	if strings.Contains(model, "[1m]") {
+		return 1_000_000
+	}
+	return 200_000
 }
 
 type Scanner struct {
@@ -255,8 +284,17 @@ type wireLine struct {
 
 type wireMsg struct {
 	Role       string          `json:"role"`
+	Model      string          `json:"model"`
 	StopReason string          `json:"stop_reason"`
 	Content    json.RawMessage `json:"content"`
+	Usage      *wireUsage      `json:"usage"`
+}
+
+type wireUsage struct {
+	In      int `json:"input_tokens"`
+	CacheWr int `json:"cache_creation_input_tokens"`
+	CacheRd int `json:"cache_read_input_tokens"`
+	Out     int `json:"output_tokens"`
 }
 
 const tailBytes = 256 * 1024
@@ -319,6 +357,15 @@ func parseTail(path string, mtime, now time.Time, idle, quiet time.Duration) Ses
 			interrupted = false
 			if t := contentText(l.Message.Content); t != "" {
 				s.LastText = t
+			}
+			// Later lines overwrite earlier: the freshest usage is where
+			// the context stands. A synthetic line with zero usage (an
+			// error event, an aborted call) must not erase a real reading.
+			if u := l.Message.Usage; u != nil {
+				if total := u.In + u.CacheWr + u.CacheRd + u.Out; total > 0 {
+					s.CtxTokens = total
+					s.Model = l.Message.Model
+				}
 			}
 		case "user":
 			if isToolResult(l.Message.Content) {

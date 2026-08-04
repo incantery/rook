@@ -511,12 +511,20 @@ valid answer is typed into the agent's pane via
 .Pq answered at the desk, or a new turn
 is acked away with a note, never typed, and no answer is ever typed
 twice.
+.Pp
+Beside the answers runs the command rail: every agent reports its
+session id and its context occupancy
+.Pq Ql ctxPct , measured from the transcript's own usage records ,
+and the fleet page's
+.Ql compact
+button queues a command the bridge executes by typing
+.Ql /compact
+into the session's pane \(em under the same gates and the same rules,
+plus one of its own: a mid-turn session is left alone and retried,
+then dropped with its reason.
+The cloud requests; this machine decides.
 .Bd -literal -offset indent
-rook.Plugin{Name: "cloud",
-    Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-cloud"},
-    Load:    rook.Eager,
-    Grants:  []string{rook.OpItemsList, rook.OpItemsAct,
-        "panes.activity"}}
+rook.Cloud{}
 .Ed
 .Sh A MINIMAL PLUGIN
 The essence of

@@ -380,3 +380,42 @@ func TestTailAlignment(t *testing.T) {
 		t.Fatalf("state/text = %q/%q", s.State, s.LastText)
 	}
 }
+
+// Context occupancy comes from the LAST main-chain assistant usage —
+// input + cache writes + cache reads + output is what the next request
+// starts from — and a zero-usage synthetic line must not erase a real
+// reading. A sidechain's usage is the subagent's business, not the
+// session's.
+func TestCtxTokensFromLastRealUsage(t *testing.T) {
+	early := fmt.Sprintf(`{"type":"assistant","timestamp":"%s","message":{"role":"assistant","model":"claude-fable-5","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":3000,"cache_read_input_tokens":90000,"output_tokens":500}}}`, ts(10*time.Second))
+	side := fmt.Sprintf(`{"type":"assistant","timestamp":"%s","isSidechain":true,"message":{"role":"assistant","model":"claude-haiku-4-5","stop_reason":"end_turn","content":[{"type":"text","text":"sub"}],"usage":{"input_tokens":1,"cache_read_input_tokens":180000,"output_tokens":9}}}`, ts(11*time.Second))
+	late := fmt.Sprintf(`{"type":"assistant","timestamp":"%s","message":{"role":"assistant","model":"claude-fable-5","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":2890,"cache_read_input_tokens":102969,"output_tokens":212}}}`, ts(20*time.Second))
+	synthetic := fmt.Sprintf(`{"type":"assistant","timestamp":"%s","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"note"}],"usage":{"input_tokens":0,"output_tokens":0}}}`, ts(21*time.Second))
+	dir := t.TempDir()
+	writeSession(t, dir, "-home-u-proj", "ctx1", 21*time.Second, early, side, late, synthetic)
+	s := one(t, testScanner(dir), t0.Add(30*time.Second))
+	if want := 2 + 2890 + 102969 + 212; s.CtxTokens != want {
+		t.Fatalf("ctx %d want %d", s.CtxTokens, want)
+	}
+	if s.Model != "claude-fable-5" {
+		t.Fatalf("model %q", s.Model)
+	}
+}
+
+// Percent is honest arithmetic: -1 when nothing was seen, uncapped
+// past 100 (a wrong window table should LOOK wrong), and the [1m]
+// window when the model id says so.
+func TestCtxPctAndWindow(t *testing.T) {
+	if p := CtxPct(0, "claude-fable-5"); p != -1 {
+		t.Fatalf("unknown must be -1, got %d", p)
+	}
+	if p := CtxPct(106073, "claude-fable-5"); p != 53 {
+		t.Fatalf("pct %d want 53", p)
+	}
+	if p := CtxPct(300_000, "claude-fable-5"); p != 150 {
+		t.Fatalf("uncapped pct %d want 150", p)
+	}
+	if p := CtxPct(300_000, "claude-sonnet-4-5[1m]"); p != 30 {
+		t.Fatalf("1m window pct %d want 30", p)
+	}
+}
