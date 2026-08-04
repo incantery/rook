@@ -133,6 +133,7 @@ pub const max_frame = 1 << 20;
 /// The inbound verbs: the ones a PLUGIN calls.
 pub const op_raise = "attention.raise";
 pub const op_spawn = "session.spawn";
+pub const op_clipboard = "clipboard.set";
 
 pub const Load = enum { lazy, eager };
 

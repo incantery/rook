@@ -19,6 +19,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -69,10 +70,11 @@ func main() {
 	}
 	st := &store{keep: *keep}
 	key := apiKey(*keyFile)
+	var sum *Summarizer
 	if key == "" {
 		st.nokey = "no OpenAI key — set $OPENAI_API_KEY or write " + *keyFile
 	} else {
-		sum := &Summarizer{
+		sum = &Summarizer{
 			Client:   &http.Client{Timeout: 90 * time.Second},
 			Base:     *apiBase,
 			Key:      key,
@@ -82,7 +84,7 @@ func main() {
 		}
 		go watch(sc, st, sum, *poll, *minWords)
 	}
-	serve(&conn{out: os.Stdout}, st)
+	serve(&conn{out: os.Stdout}, st, sum)
 }
 
 // apiKey: the environment when there is one, a file when there is not —
@@ -163,6 +165,32 @@ func (st *store) add(d Digest) {
 	}
 }
 
+func (st *store) has(id string) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for i := range st.ds {
+		if st.ds[i].ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// update runs f on the digest with this id under the lock. False when
+// it is gone — which a caller racing a dismissal must treat as the
+// dismissal winning, never as a reason to re-add.
+func (st *store) update(id string, f func(*Digest)) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for i := range st.ds {
+		if st.ds[i].ID == id {
+			f(&st.ds[i])
+			return true
+		}
+	}
+	return false
+}
+
 func (st *store) dismiss(id string) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -185,14 +213,20 @@ func (st *store) list() []Digest {
 
 // ---- the wire ----
 //
-// The protocol boilerplate below is the claude plugin's, trimmed: this
-// plugin never calls rook back, so there is no pending-reply demux. The
-// second in-repo copy of this shape is the argument for a shared wire
-// package; the third copy should be the one that writes it.
+// The protocol boilerplate below is the claude plugin's — the second
+// in-repo copy of this shape is the argument for a shared wire package;
+// the third copy should be the one that writes it.
 
 type conn struct {
-	mu  sync.Mutex
-	out io.Writer
+	mu      sync.Mutex
+	out     io.Writer
+	nextID  uint64
+	pending map[uint64]chan callResult
+}
+
+type callResult struct {
+	ok  bool
+	err string
 }
 
 func (c *conn) send(v any) {
@@ -213,8 +247,55 @@ type reply struct {
 	Error  string `json:"error,omitempty"`
 }
 
+type request struct {
+	V      int    `json:"v"`
+	ID     uint64 `json:"id"`
+	Op     string `json:"op"`
+	Params any    `json:"params"`
+}
+
+// call asks rook for something (clipboard.set) and waits for the
+// verdict. MUST NOT run on the serve goroutine: serve is what delivers
+// the reply, so a handler that called this inline would wait on itself.
+func (c *conn) call(op string, params any, timeout time.Duration) error {
+	ch := make(chan callResult, 1)
+	c.mu.Lock()
+	c.nextID++
+	id := c.nextID
+	if c.pending == nil {
+		c.pending = map[uint64]chan callResult{}
+	}
+	c.pending[id] = ch
+	c.mu.Unlock()
+	c.send(request{1, id, op, params})
+	select {
+	case r := <-ch:
+		if !r.ok {
+			return errors.New(r.err)
+		}
+		return nil
+	case <-time.After(timeout):
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return errors.New("timeout: " + op)
+	}
+}
+
+// deliver hands rook's answer to whoever is waiting on it. Split out of
+// serve so a test can play rook's half of the conversation.
+func (c *conn) deliver(id uint64, ok bool, errText string) {
+	c.mu.Lock()
+	ch := c.pending[id]
+	delete(c.pending, id)
+	c.mu.Unlock()
+	if ch != nil {
+		ch <- callResult{ok, errText}
+	}
+}
+
 // serve answers rook until stdin closes, which is how a plugin ends.
-func serve(c *conn, st *store) {
+func serve(c *conn, st *store, sum *Summarizer) {
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	for in.Scan() {
@@ -223,7 +304,19 @@ func serve(c *conn, st *store) {
 			Op     string          `json:"op"`
 			Params json.RawMessage `json:"params"`
 		}
-		if json.Unmarshal(in.Bytes(), &req) != nil || req.Op == "" {
+		if json.Unmarshal(in.Bytes(), &req) != nil {
+			continue
+		}
+		if req.Op == "" {
+			// rook answering one of our requests.
+			var rep struct {
+				ID    uint64 `json:"id"`
+				OK    bool   `json:"ok"`
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(in.Bytes(), &rep) == nil {
+				c.deliver(rep.ID, rep.OK, rep.Error)
+			}
 			continue
 		}
 		switch req.Op {
@@ -231,7 +324,7 @@ func serve(c *conn, st *store) {
 			c.send(reply{1, req.ID, true, map[string]any{
 				"name":         "agent",
 				"version":      version,
-				"capabilities": []string{"items.list", "items.act"},
+				"capabilities": []string{"items.list", "items.act", "clipboard.set"},
 				"surfaces":     []string{"LIST"},
 			}, ""})
 		case "items.list":
@@ -240,7 +333,7 @@ func serve(c *conn, st *store) {
 				"truncated": false,
 			}, ""})
 		case "items.act":
-			c.send(act(st, req.ID, req.Params))
+			c.send(act(c, st, sum, req.ID, req.Params))
 		default:
 			c.send(reply{1, req.ID, false, nil, "agent does not do " + req.Op})
 		}
@@ -298,15 +391,43 @@ func items(st *store, now time.Time) []wireItem {
 		}
 		it := wireItem{
 			ID:       d.ID,
-			Title:    transcript.Snip(d.Headline, 120),
+			Title:    transcript.Snip(d.Headline, 250),
 			Subtitle: transcript.Snip(d.SessionTitle, 40) + " · " + transcript.RelAge(now.Sub(d.At)),
-			Actions:  []wireAction{{ID: "dismiss", Label: "dismiss"}},
+			State:    d.ReplyState,
 		}
+		// The action order is the menu order: the likeliest next act
+		// first. A drafted reply's next act is copying it.
+		if d.Reply != "" {
+			it.Actions = append(it.Actions, wireAction{ID: "copy", Label: "copy reply"})
+			it.Actions = append(it.Actions, wireAction{ID: "draft", Label: "redraft"})
+		} else if d.ReplyState != "drafting" {
+			it.Actions = append(it.Actions, wireAction{ID: "draft", Label: "draft a reply"})
+		}
+		it.Actions = append(it.Actions, wireAction{ID: "dismiss", Label: "dismiss"})
 		for i, b := range d.Bullets {
 			it.Children = append(it.Children, wireChild{
 				ID:    fmt.Sprintf("%s:b%d", d.ID, i),
-				Title: transcript.Snip(b, 140),
+				Title: transcript.Snip(b, 250),
 			})
+		}
+		if d.ReplyErr != "" {
+			it.Children = append(it.Children, wireChild{
+				ID:    d.ID + ":rerr",
+				Title: transcript.Snip(d.ReplyErr, 250),
+			})
+		}
+		if d.Reply != "" {
+			// The reply rides as children so the wrap renders it; the
+			// marker row keeps it visually apart from the bullets. Chunks
+			// stay under the wire's title cap — the clipboard carries the
+			// uncut text, the panel only has to show it.
+			it.Children = append(it.Children, wireChild{ID: d.ID + ":rhead", Title: "↩ suggested reply:"})
+			for i, chunk := range chunkText(d.Reply, 240) {
+				it.Children = append(it.Children, wireChild{
+					ID:    fmt.Sprintf("%s:r%d", d.ID, i),
+					Title: chunk,
+				})
+			}
 		}
 		// Least important first: the panel sheds fields off the left of
 		// the row when width runs out, so the last field survives longest.
@@ -320,7 +441,7 @@ func items(st *store, now time.Time) []wireItem {
 	return out
 }
 
-func act(st *store, id uint64, params json.RawMessage) reply {
+func act(c *conn, st *store, sum *Summarizer, id uint64, params json.RawMessage) reply {
 	var p struct {
 		ItemID   string `json:"itemId"`
 		ActionID string `json:"actionId"`
@@ -328,17 +449,79 @@ func act(st *store, id uint64, params json.RawMessage) reply {
 	if json.Unmarshal(params, &p) != nil {
 		return reply{1, id, false, nil, "params did not parse"}
 	}
-	// A bullet's id is its parent's plus a suffix; acting on a child acts
-	// on the digest it belongs to.
+	// A child's id is its parent's plus one ":suffix" (bullets, reply
+	// chunks, the marker row); acting on any of them acts on the digest
+	// it belongs to. Exact match first — a digest id contains a colon of
+	// its own, so blind stripping would eat the hash.
 	itemID := p.ItemID
-	if i := strings.LastIndex(itemID, ":b"); i > 0 {
-		itemID = itemID[:i]
+	if !st.has(itemID) {
+		if i := strings.LastIndex(itemID, ":"); i > 0 {
+			itemID = itemID[:i]
+		}
 	}
-	if p.ActionID != "dismiss" {
-		return reply{1, id, false, nil, "no such action: " + p.ActionID}
+	switch p.ActionID {
+	case "dismiss":
+		if !st.dismiss(itemID) {
+			return reply{1, id, false, nil, "that digest is gone"}
+		}
+		return reply{1, id, true, map[string]string{"message": "dismissed"}, ""}
+
+	case "draft":
+		if sum == nil {
+			return reply{1, id, false, nil, "no OpenAI key, nothing to draft with"}
+		}
+		var seed Digest
+		if !st.update(itemID, func(d *Digest) {
+			d.ReplyState = "drafting"
+			seed = *d
+		}) {
+			return reply{1, id, false, nil, "that digest is gone"}
+		}
+		// The call takes seconds and this is the serve goroutine, so the
+		// draft lands via the store and the panel's own refresh — the
+		// answer here is only "started". A dismissal mid-draft wins:
+		// update() on a gone digest is a no-op, not a resurrection.
+		go func() {
+			text, cost, err := sum.Draft(seed)
+			st.update(itemID, func(d *Digest) {
+				d.CostUSD += cost
+				if err != nil {
+					d.ReplyState = "draft failed"
+					d.ReplyErr = err.Error()
+					return
+				}
+				d.Reply = text
+				d.ReplyState = "ready"
+				d.ReplyErr = ""
+			})
+		}()
+		return reply{1, id, true, map[string]string{"message": "drafting…"}, ""}
+
+	case "copy":
+		var text string
+		if !st.update(itemID, func(d *Digest) { text = d.Reply }) {
+			return reply{1, id, false, nil, "that digest is gone"}
+		}
+		if text == "" {
+			return reply{1, id, false, nil, "no reply drafted yet"}
+		}
+		// Same shape as draft, same reason: call() waits for rook's
+		// verdict and serve is the goroutine that delivers it. The
+		// refusal is worth waiting for — "copied" on a missing grant
+		// would be the panel lying about the pasteboard.
+		go func() {
+			err := c.call("clipboard.set", map[string]string{"text": text}, 3*time.Second)
+			st.update(itemID, func(d *Digest) {
+				if err != nil {
+					d.ReplyState = "clip refused"
+					d.ReplyErr = err.Error()
+				} else {
+					d.ReplyState = "copied"
+					d.ReplyErr = ""
+				}
+			})
+		}()
+		return reply{1, id, true, map[string]string{"message": "sending to the clipboard…"}, ""}
 	}
-	if !st.dismiss(itemID) {
-		return reply{1, id, false, nil, "that digest is gone"}
-	}
-	return reply{1, id, true, map[string]string{"message": "dismissed"}, ""}
+	return reply{1, id, false, nil, "no such action: " + p.ActionID}
 }

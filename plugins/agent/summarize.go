@@ -56,6 +56,18 @@ type Digest struct {
 	Model        string
 	At           time.Time
 	Err          string
+
+	// The raw material a draft works from — the digest is a reading
+	// aid, and drafting from a summary would compound its lossiness.
+	Prompt   string
+	FullText string
+
+	// The suggested-reply lifecycle: Reply once drafted; ReplyState is
+	// the row's chip ("drafting", "ready", "copied", "draft failed",
+	// "clip refused"); ReplyErr carries the reason when one failed.
+	Reply      string
+	ReplyState string
+	ReplyErr   string
 }
 
 type Summarizer struct {
@@ -83,6 +95,8 @@ func (z *Summarizer) Summarize(s transcript.Session, now time.Time) Digest {
 	if z.MaxChars > 0 && len(text) > z.MaxChars {
 		text = text[:z.MaxChars] + "\n[truncated]"
 	}
+	d.Prompt = s.Prompt
+	d.FullText = text
 	msgs := []chatMsg{
 		{"system", sysPrompt},
 		{"user", "The human asked:\n" + transcript.Snip(s.Prompt, 600) + "\n\nThe reply to compress:\n" + text},
@@ -197,6 +211,28 @@ func (z *Summarizer) complete(msgs []chatMsg) (content string, cost float64, err
 	return rep.Choices[0].Message.Content, cost, nil
 }
 
+const draftPrompt = `You draft the user's next reply to their AI coding agent. From the agent's last message and the user's earlier prompt, write the reply the user most plausibly wants to send: answer the agent's questions, pick among options it offered when one is clearly better (and say why in a clause), approve good plans, flag real risks. First person, direct, specific, at most 120 words, plain text only — no greeting, no signature, no markdown.`
+
+// Draft writes the reply the human would probably send back. It works
+// from the FULL turn, not the digest — drafting from a summary would
+// compound its lossiness — and it is only ever called on demand: a
+// draft nobody asked for is a bill nobody wanted.
+func (z *Summarizer) Draft(d Digest) (text string, cost float64, err error) {
+	msgs := []chatMsg{
+		{"system", draftPrompt},
+		{"user", "The user had asked:\n" + transcript.Snip(d.Prompt, 600) + "\n\nThe agent replied:\n" + d.FullText + "\n\nDraft the user's reply."},
+	}
+	content, c, cerr := z.complete(msgs)
+	if cerr != nil {
+		return "", c, cerr
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", c, errors.New("the model sent nothing usable")
+	}
+	return content, c, nil
+}
+
 // parseDigest holds the model to the shape it was asked for.
 func parseDigest(content string) (headline string, bullets []string, err error) {
 	for line := range strings.SplitSeq(content, "\n") {
@@ -292,6 +328,27 @@ func price(model string) (in, out float64, ok bool) {
 }
 
 func wordCount(s string) int { return len(strings.Fields(s)) }
+
+// chunkText splits prose into pieces at most max bytes each, breaking
+// at spaces (falling back to a hard cut for an unbreakable run) — the
+// wire caps child titles, and a chunk that silently vanished would be
+// a reply the panel misquotes.
+func chunkText(s string, max int) []string {
+	s = strings.Join(strings.Fields(s), " ")
+	var out []string
+	for len(s) > max {
+		cut := strings.LastIndexByte(s[:max+1], ' ')
+		if cut <= 0 {
+			cut = max
+		}
+		out = append(out, strings.TrimSpace(s[:cut]))
+		s = strings.TrimSpace(s[cut:])
+	}
+	if s != "" {
+		out = append(out, s)
+	}
+	return out
+}
 
 // shortHash identifies a turn by its text, so a state that flaps back
 // through "needs you" cannot bill the same reply twice. FNV-1a: this is

@@ -5751,6 +5751,7 @@ pub const App = struct {
         const self: *App = @ptrCast(@alignCast(ctx));
         if (std.mem.eql(u8, op, plugpkg.op_raise)) return self.raiseAttention(from, params);
         if (std.mem.eql(u8, op, plugpkg.op_spawn)) return self.spawnSession(params);
+        if (std.mem.eql(u8, op, plugpkg.op_clipboard)) return self.clipboardSet(params);
         if (std.mem.eql(u8, op, "panes.activity")) {
             self.activityReport(result, true);
             return null;
@@ -5870,6 +5871,25 @@ pub const App = struct {
     /// command runs WHERE THE HUMAN CAN SEE IT — in a pane, with scrollback
     /// and a cwd — instead of invisibly inside the plugin. The grant is
     /// what keeps it from being a surprise.
+    /// clipboard.set: a plugin hands the human text to paste — the
+    /// agent's drafted reply riding to the Claude pane through the
+    /// human's own ⌘V. Grant-gated like every inbound verb, and the
+    /// OSC 52 `clipboard-write` option is the precedent that writing
+    /// the pasteboard is a permission, not a given.
+    fn clipboardSet(self: *App, params: []const u8) ?[]const u8 {
+        const Wire = struct { text: []const u8 = "" };
+        const parsed = std.json.parseFromSlice(Wire, self.gpa, if (params.len > 0) params else "{}", .{
+            .ignore_unknown_fields = true,
+        }) catch return "params did not parse";
+        defer parsed.deinit();
+        if (parsed.value.text.len == 0) return "clipboard.set needs text";
+        // The pump assembles frames far larger than any honest paste;
+        // this cap is about what a human would ever ⌘V into a prompt.
+        if (parsed.value.text.len > 256 * 1024) return "text too large to paste";
+        self.setPasteboard(parsed.value.text);
+        return null;
+    }
+
     fn spawnSession(self: *App, params: []const u8) ?[]const u8 {
         const Wire = struct {
             command: []const u8 = "",

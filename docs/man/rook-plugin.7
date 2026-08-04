@@ -243,6 +243,18 @@ Params:
 .Ql where
 .Pq Ql tab No for a new tab; default a split .
 Opens without stealing focus.
+.It Cm clipboard.set
+Params:
+.Ql text
+.Pq required, up to 256 KiB .
+Replaces the system pasteboard \(em how a plugin hands the human text
+to paste, with the human's own \(u2318V as the last hop.
+The
+.Cm clipboard-write
+option
+.Pq OSC 52's gate
+is the precedent: writing the pasteboard is a permission, and this
+verb's permission is its grant.
 .It Cm panes.activity
 No params.
 The first inbound verb that answers with data:

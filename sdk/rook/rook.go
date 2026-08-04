@@ -418,6 +418,7 @@ const (
 	OpItemsAct       = "items.act"
 	OpAttentionRaise = "attention.raise"
 	OpSessionSpawn   = "session.spawn"
+	OpClipboardSet   = "clipboard.set" // plugin → pasteboard; the human's ⌘V is the last hop
 )
 
 // ---- presets: identities as bundles ----

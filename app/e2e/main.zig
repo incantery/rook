@@ -2141,7 +2141,7 @@ fn configDir(gpa: std.mem.Allocator, bin: []const u8) !void {
 /// waiting for the RESPONSE to items.act, in the same read.
 const sh_plugin =
     \\n=0
-    \\acts='[{"id":"poke","label":"Poke"},{"id":"burn","label":"Burn it","confirm":true},{"id":"say","label":"Say","input":"INPUT_TEXT"}]'
+    \\acts='[{"id":"poke","label":"Poke"},{"id":"burn","label":"Burn it","confirm":true},{"id":"say","label":"Say","input":"INPUT_TEXT"},{"id":"clip","label":"Clip"}]'
     \\while IFS= read -r line; do
     \\  id=`expr "$line" : '.*"id":\([0-9]*\)'`
     \\  case "$line" in
@@ -2165,6 +2165,10 @@ const sh_plugin =
     \\          printf '{"v":1,"id":%s,"op":"session.spawn","params":{"command":"echo spawned-by-plugin; sleep 30"}}\n' "$rid"
     \\          IFS= read -r rep
     \\          case "$rep" in *'"ok":true'*) extra=" spawn:ok" ;; *) extra=" spawn:no" ;; esac ;;
+    \\        clip)
+    \\          printf '{"v":1,"id":%s,"op":"clipboard.set","params":{"text":"from-the-plugin-pasteboard"}}\n' "$rid"
+    \\          IFS= read -r rep
+    \\          case "$rep" in *'"ok":true'*) extra=" clip:ok" ;; *) extra=" clip:no" ;; esac ;;
     \\      esac
     \\      printf '{"v":1,"id":%s,"ok":true,"result":{"message":"ran %s%s","item":{"id":"a","title":"alpha","state":"done","fields":[{"key":"n","kind":"NUMBER","value":"8"}],"actions":%s}}}\n' "$id" "$act" "$extra" "$acts" ;;
     \\    *)
@@ -2196,7 +2200,7 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     const graph = try std.fmt.bufPrint(&json_buf,
         \\{{"rookEnvironment":1,"nodes":[
         \\{{"id":"plugin:shplug","kind":"plugin","scope":"app","name":"shplug","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list"]}},
-        \\{{"id":"plugin:acty","kind":"plugin","scope":"app","name":"acty","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act","attention.raise","session.spawn"]}},
+        \\{{"id":"plugin:acty","kind":"plugin","scope":"app","name":"acty","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act","attention.raise","session.spawn","clipboard.set"]}},
         \\{{"id":"plugin:norais","kind":"plugin","scope":"app","name":"norais","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act"]}},
         \\{{"id":"plugin:nogrant","kind":"plugin","scope":"app","name":"nogrant","command":["/bin/sh","{s}"],"load":"lazy","grants":[]}},
         \\{{"id":"plugin:missing","kind":"plugin","scope":"app","name":"missing","command":["/nope/not-a-binary"],"load":"lazy","grants":["items.list"]}}
@@ -2467,6 +2471,16 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("key 0d");
     const poked = try app.waitCtl("sidepane", "ran poke", 5_000);
     try h.expectContains(poked, "raise:ok", "the plugin was told its raise was allowed");
+
+    // clipboard.set: the drafted-reply exit path. The REAL pasteboard is
+    // read back, so this proves the bytes reached the system — and the
+    // same action from a plugin without the grant is refused before the
+    // pasteboard hears about it.
+    const clipped = try app.ctl("plugin acty items.act {\"itemId\":\"a\",\"actionId\":\"clip\"}");
+    try h.expectContains(clipped, "clip:ok", "the granted plugin's clip was allowed");
+    try h.expectContains(try app.ctl("clipboard"), "from-the-plugin-pasteboard", "the text reached the system pasteboard");
+    const unclipped = try app.ctl("plugin norais items.act {\"itemId\":\"a\",\"actionId\":\"clip\"}");
+    try h.expectContains(unclipped, "clip:no", "no grant, no pasteboard");
 
     const raised = try app.waitCtl("attention", "needs you", 5_000);
     try h.expectContains(raised, "acty", "the raise records WHO raised it");
