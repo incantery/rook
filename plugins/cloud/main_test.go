@@ -95,7 +95,7 @@ func (f *fakeCloud) handler() http.Handler {
 		f.mu.Lock()
 		f.statuses = append(f.statuses, st)
 		f.mu.Unlock()
-		io.WriteString(w, `{}`)
+		w.WriteHeader(http.StatusNoContent) // what the real server sends
 	}))
 	return mux
 }

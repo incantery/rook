@@ -232,7 +232,9 @@ func (br *bridge) push(c *conn, samples map[int]transcript.PaneSample) {
 		br.mu.Unlock()
 		return
 	}
-	if resp.StatusCode != 200 {
+	// The server answers 204 on a stored snapshot — accept the whole
+	// success class; insisting on 200 called every good push an error.
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		br.fail(fmt.Sprintf("push: HTTP %d", resp.StatusCode))
 		return
 	}
