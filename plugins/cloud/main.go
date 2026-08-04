@@ -296,6 +296,34 @@ type wireAgent struct {
 	LastEvent time.Time `json:"lastEvent,omitzero"`
 }
 
+// maxCloudAsk is what rook-cloud stores for an ask, whose own comment
+// calls it "the one field worth reading in full".
+const maxCloudAsk = 2000
+
+// askText is the question as the phone will read and answer it.
+//
+// Snip is right for the panel: cell rows are one line, so it flattens
+// whitespace and cuts hard. It is wrong here. We were sending 200 bytes,
+// a tenth of what the wire allows, so every ask longer than a sentence
+// reached the phone already ending in an ellipsis — and a reply written
+// against a tenth of a question is a reply to a different question.
+//
+// Line structure survives for the same reason. The asks that are hardest
+// to answer away from the keyboard are the ones offering numbered
+// choices, and flattening them to one line is exactly what makes them
+// unreadable on the surface that most needs them readable.
+func askText(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxCloudAsk {
+		return s
+	}
+	cut := maxCloudAsk - len("…")
+	for cut > 0 && s[cut]&0xC0 == 0x80 { // land on a rune boundary
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
 // statusFrom folds sessions into the cloud's vocabulary. The mapping
 // is deliberately conservative in one place: `blocked?` becomes
 // needs_input, because a session that may be sitting on an approval is
@@ -325,10 +353,10 @@ func statusFrom(sessions []transcript.Session, rookVer string) wireStatus {
 		switch s.State {
 		case transcript.StateNeedsYou:
 			a.State = "needs_input"
-			a.Ask = transcript.Snip(s.LastText, 200)
+			a.Ask = askText(s.LastText)
 		case transcript.StateBlocked:
 			a.State = "needs_input"
-			a.Ask = transcript.Snip("approval? "+s.Prompt, 200)
+			a.Ask = askText("approval? " + s.Prompt)
 		case transcript.StateWorking:
 			a.State = "working"
 		default:
