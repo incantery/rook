@@ -315,6 +315,16 @@ Rows render by kind \(em a parent is a title and clips to one line, a
 child is prose and
 .Em wraps ,
 which is what makes a digest's bullets readable at any width.
+.Pp
+Children fold into the selected group: every other parent is one
+headline wearing
+.Ql \(u25b8+N ,
+and moving the selection is what expands a group \(em headlines scan,
+the group you are on reads.
+The list scrolls to keep the selection on screen, and the mouse is
+j/k too: a click selects its row, a click on the
+.Em selected
+row opens its actions.
 .Sh THE SHIPPED PLUGINS
 rook's first first-party plugin rides inside the bundle at
 .Pa /Applications/rook.app/Contents/MacOS/rook-plugin-claude

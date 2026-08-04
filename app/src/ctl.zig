@@ -712,10 +712,19 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             }) catch {};
             switch (app.side_panel) {
                 .plugin => {
-                    // The rows as drawn, so a scenario can assert on the
-                    // panel without a screenshot. `live` and empty are
-                    // different facts and print differently.
-                    w.print("plugin:{s}\n", .{app.plug_name[0..app.plug_name_len]}) catch {};
+                    // The rows AS DRAWN — the last frame's window, with
+                    // collapsed groups folded — so a scenario can assert
+                    // on the panel without a screenshot. `shown` is the
+                    // drawn flat-index range and `top` the first row's
+                    // y, which is what a blind click aims with. `live`
+                    // and empty are different facts and print
+                    // differently.
+                    w.print("plugin:{s} shown:{d}-{d} top:{d}\n", .{
+                        app.plug_name[0..app.plug_name_len],
+                        app.plug_drawn[0],
+                        app.plug_drawn[1],
+                        @as(i64, if (app.plug_hit_n > 0) @intFromFloat(app.plug_hit[0][0]) else 0),
+                    }) catch {};
                     if (app.plug_loading.load(.acquire)) {
                         _ = w.write("loading\n") catch 0;
                     } else if (!app.plug.live) {
@@ -723,12 +732,17 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     } else if (app.plug.n == 0) {
                         _ = w.write("nothing to show\n") catch 0;
                     } else for (app.plug.slice(), 0..) |*it, i| {
+                        if (i < app.plug_drawn[0] or i > app.plug_drawn[1]) continue;
+                        if (!app.plugVisible(i)) continue;
                         w.print("{s}{s}{s}\t{s}", .{
                             @as([]const u8, if (i == app.plug_sel) "*" else " "),
                             @as([]const u8, if (it.depth > 0) "  " else ""),
                             it.state.get(),
                             it.title.get(),
                         }) catch break;
+                        if (it.depth == 0 and app.plugChildCount(i) > 0 and app.plugParentOf(app.plug_sel) != i) {
+                            w.print("\t\u{25b8}+{d}", .{app.plugChildCount(i)}) catch break;
+                        }
                         for (it.fields[0..it.fields_n]) |*f| {
                             w.print("\t{s}={s}", .{ f.key.get(), f.value.get() }) catch break;
                         }

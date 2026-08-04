@@ -484,6 +484,16 @@ pub const App = struct {
     plug_name_len: usize = 0,
     plug: @import("plugins.zig").Snapshot = .{},
     plug_sel: usize = 0,
+    /// First flat index drawn — selection-follows scroll, adjusted by the
+    /// draw pass so the selected row is always on screen.
+    plug_scroll: usize = 0,
+    /// What the last frame actually drew: the flat index range and one
+    /// click band per drawn top-level row group. The click map and the
+    /// ctl introspection both read the DRAWN truth rather than recompute
+    /// it — two layout walks would be two chances to disagree.
+    plug_drawn: [2]usize = .{ 0, 0 },
+    plug_hit: [plugpkg.max_items][3]f32 = undefined, // y0, y1, flat idx
+    plug_hit_n: usize = 0,
     plug_loading: std.atomic.Value(bool) = .init(false),
     /// Set by the key path (which holds draw_lock) and drained by the
     /// caller after it releases — startPluginFetch takes the lock itself,
@@ -1528,6 +1538,33 @@ pub const App = struct {
             const edge = if (self.side == .left) sr.x + sr.w else sr.x;
             if (@abs(x - edge) <= 4 and y >= self.contentY()) {
                 self.drag_side = true;
+                return;
+            }
+            if (x >= sr.x and x < sr.x + sr.w and y >= sr.y and y < sr.y + sr.h) {
+                // A click in the panel gives it the keys; a row click
+                // moves the selection, and clicking the row that HAS the
+                // selection opens its actions — the second click is the
+                // Enter. Bands come from the last drawn frame, the same
+                // truth the eye aimed the mouse with.
+                self.side_focus = true;
+                self.scene_dirty = true;
+                if (self.side_panel == .plugin and self.plug_mode == .rows) {
+                    for (self.plug_hit[0..self.plug_hit_n]) |hb| {
+                        if (y >= hb[0] and y < hb[1]) {
+                            const hit_idx: usize = @intFromFloat(hb[2]);
+                            if (hit_idx == self.plug_sel) {
+                                if (self.plugItemLocked()) |sel_it| {
+                                    if (sel_it.actions_n > 0) {
+                                        self.plug_mode = .actions;
+                                        self.plug_act_sel = 0;
+                                        self.plug_msg_len = 0;
+                                    }
+                                }
+                            } else self.plug_sel = hit_idx;
+                            break;
+                        }
+                    }
+                }
                 return;
             }
         }
@@ -5368,6 +5405,7 @@ pub const App = struct {
             self.plug_name_len = n;
             self.plug = .{};
             self.plug_sel = 0;
+            self.plug_scroll = 0;
             self.plug_mode = .rows;
             self.plug_act_sel = 0;
             self.plug_msg_len = 0;
@@ -6208,6 +6246,35 @@ pub const App = struct {
         return x + claim * self.renderer.cell_w + self.renderer.cell_w;
     }
 
+    /// The top-level row a flat index belongs to: itself for a parent,
+    /// the nearest preceding parent for a child.
+    pub fn plugParentOf(self: *App, idx: usize) usize {
+        const items = self.plug.slice();
+        if (items.len == 0) return 0;
+        var i = @min(idx, items.len - 1);
+        while (i > 0 and items[i].depth > 0) i -= 1;
+        return i;
+    }
+
+    /// Collapse: children render only inside the SELECTED group —
+    /// headlines scan, the group you are on reads. Selection can never
+    /// land on a hidden row, because being selected is what makes a
+    /// group visible; j/k walk the flat list and the collapse follows.
+    pub fn plugVisible(self: *App, idx: usize) bool {
+        const items = self.plug.slice();
+        if (idx >= items.len or items[idx].depth == 0) return true;
+        return self.plugParentOf(idx) == self.plugParentOf(self.plug_sel);
+    }
+
+    /// How many children this parent holds — the ▸ affordance's number.
+    pub fn plugChildCount(self: *App, idx: usize) usize {
+        const items = self.plug.slice();
+        if (idx >= items.len or items[idx].depth > 0) return 0;
+        var n: usize = 0;
+        while (idx + 1 + n < items.len and items[idx + 1 + n].depth > 0) n += 1;
+        return n;
+    }
+
     /// Rows this item takes: a parent is one (titles scan), a child
     /// wraps (prose reads). The fold walk and the draw loop both call
     /// this, which is what keeps the fold honest.
@@ -6265,23 +6332,64 @@ pub const App = struct {
         const reserved = (if (self.plug.more > 0) row_h else 0) +
             (if (self.plug_msg_len > 0) row_h else 0) + menu_rows * row_h;
         const avail = r.y + r.h - top - reserved;
+        const bottom = top + avail;
         const right = r.x + r.w - self.m.gutter;
+        const items = self.plug.slice();
+        const gap = self.m.gap * 2; // breathing room between groups
 
-        // The fold walk: parents are one row, children wrap, and this
-        // must agree with the draw below or the fold lies.
-        var shown: usize = 0;
-        var used_h: f32 = 0;
-        for (self.plug.slice()) |*it| {
-            const lh = @as(f32, @floatFromInt(self.plugRowLines(it, tx, right, cols))) * row_h;
-            if (used_h + lh > avail) break;
-            used_h += lh;
-            shown += 1;
+        // Selection-follows scroll over the VISIBLE rows. Group gaps
+        // count in the fit walk — a fold that forgot them would lie by
+        // one row per group.
+        if (self.plug_sel < self.plug_scroll) self.plug_scroll = self.plug_sel;
+        if (self.plug_scroll >= items.len) self.plug_scroll = 0;
+        if (!self.plugVisible(self.plug_scroll)) self.plug_scroll = self.plugParentOf(self.plug_scroll);
+        while (self.plug_scroll < self.plug_sel) {
+            var used: f32 = 0;
+            var fits = false;
+            var first = true;
+            var i = self.plug_scroll;
+            while (i < items.len) : (i += 1) {
+                if (!self.plugVisible(i)) continue;
+                var lh = @as(f32, @floatFromInt(self.plugRowLines(&items[i], tx, right, cols))) * row_h;
+                if (items[i].depth == 0 and !first) lh += gap;
+                first = false;
+                used += lh;
+                if (used > avail) break;
+                if (i == self.plug_sel) {
+                    fits = true;
+                    break;
+                }
+            }
+            if (fits) break;
+            var nxt = self.plug_scroll + 1;
+            while (nxt < items.len and !self.plugVisible(nxt)) nxt += 1;
+            if (nxt >= items.len) break;
+            self.plug_scroll = nxt;
         }
 
-        for (self.plug.slice()[0..shown], 0..) |*it, idx| {
+        // The draw walk records what it drew — the click map and the ctl
+        // introspection read the DRAWN truth rather than recomputing it.
+        self.plug_hit_n = 0;
+        self.plug_drawn = .{ self.plug_scroll, self.plug_scroll };
+        var first_drawn = true;
+        var idx = self.plug_scroll;
+        while (idx < items.len) : (idx += 1) {
+            if (!self.plugVisible(idx)) continue;
+            const it = &items[idx];
             const x = self.plugTitleX(it, tx);
             const title_full = it.title.get();
             const lines = self.plugRowLines(it, tx, right, cols);
+            var lh = @as(f32, @floatFromInt(lines)) * row_h;
+            if (it.depth == 0 and !first_drawn) lh += gap;
+            if (!first_drawn and y + lh > bottom) break;
+            if (it.depth == 0 and !first_drawn) y += gap;
+            first_drawn = false;
+            if (self.plug_hit_n < self.plug_hit.len) {
+                self.plug_hit[self.plug_hit_n] = .{ y, y + @as(f32, @floatFromInt(lines)) * row_h, @floatFromInt(idx) };
+                self.plug_hit_n += 1;
+            }
+            self.plug_drawn[1] = idx;
+
             if (idx == self.plug_sel)
                 self.drawRowSelection(ui, r, y, @as(f32, @floatFromInt(lines)) * row_h);
 
@@ -6303,15 +6411,23 @@ pub const App = struct {
             if (it.depth == 0) {
                 // A parent is a title: one line, stopped a cell short of
                 // whatever fields survived, so the two never overprint.
-                const title_cols: usize = @intFromFloat(@max(1.0, (fx - x) / cw - 1.0));
+                // The fold glyph says children exist without showing them.
+                var x2 = x;
+                if (self.plugChildCount(idx) > 0) {
+                    const open = self.plugParentOf(self.plug_sel) == idx;
+                    _ = ui.textOver(x2, y + (row_h - ch) / 2, if (open) "▾" else "▸", th.bar_fg);
+                    x2 += 2 * cw;
+                }
+                const title_cols: usize = @intFromFloat(@max(1.0, (fx - x2) / cw - 1.0));
                 const title = @import("ui.zig").clip(&clipbuf, title_full, @min(cols, title_cols));
-                _ = ui.textOver(x, y + (row_h - ch) / 2, title, th.bar_value);
+                _ = ui.textOver(x2, y + (row_h - ch) / 2, title, th.bar_value);
                 y += row_h;
             } else {
                 // A child is prose — a digest bullet, a sub-item — and
-                // prose wraps where a title would clip. The first line
-                // still stops short of the fields; continuation lines run
-                // the full row.
+                // prose wraps where a title would clip, one shade down so
+                // the headlines stay the thing a scan catches. The first
+                // line still stops short of the fields; continuation
+                // lines run the full row.
                 var wit = @import("ui.zig").WrapIter{
                     .s = title_full,
                     .cols = @intFromFloat(@max(4, (fx - x) / cw - 1)),
@@ -6319,7 +6435,7 @@ pub const App = struct {
                 const rest_cols: usize = @intFromFloat(@max(4, (right - x) / cw));
                 var drew: usize = 0;
                 while (wit.next()) |line| {
-                    _ = ui.textOver(x, y + (row_h - ch) / 2, line, th.bar_value);
+                    _ = ui.textOver(x, y + (row_h - ch) / 2, line, th.bar_fg);
                     y += row_h;
                     drew += 1;
                     wit.cols = rest_cols;

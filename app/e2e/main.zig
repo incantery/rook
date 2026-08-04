@@ -70,6 +70,7 @@ const scenarios = [_]Scenario{
     .{ .name = "keys", .what = "shift+Tab reaches the pty as CSI Z, and ⌃HJKL yields by program rather than by alternate screen", .run = keys },
     .{ .name = "panedim", .what = "pane-dim: the unfocused pane fades toward its background, and the fade follows focus", .run = paneDim },
     .{ .name = "panelwrap", .what = "a child row wraps as prose, and the side pane's divider drags wider", .run = panelWrap },
+    .{ .name = "panelfold", .what = "children fold into the selected group, the list scrolls to the selection, and a click selects", .run = panelFold },
     .{ .name = "startup", .what = "bench: launch → ctl-ready → shell, with in-app phase timings", .run = startup, .bench = true },
 };
 
@@ -3810,7 +3811,9 @@ fn ctlInt(s: []const u8, key: []const u8) !i64 {
     const at = std.mem.indexOf(u8, s, key) orelse return error.KeyMissing;
     const i = at + key.len;
     var end = i;
-    while (end < s.len and (s[end] == '-' or (s[end] >= '0' and s[end] <= '9'))) end += 1;
+    // A leading minus is a sign; one later is a range ("shown:12-119").
+    if (end < s.len and s[end] == '-') end += 1;
+    while (end < s.len and s[end] >= '0' and s[end] <= '9') end += 1;
     return std.fmt.parseInt(i64, s[i..end], 10);
 }
 
@@ -3918,4 +3921,104 @@ fn panelWrap(gpa: std.mem.Allocator, bin: []const u8) !void {
     // vanish — 20 cols is as thin as it gets, and it stays grabbable.
     _ = try app.ctl(try std.fmt.bufPrint(&dbuf, "drag {d} {d} 99999 {d}", .{ g2.x, midy, midy }));
     try h.expect((try sideGeom(try app.ctl("sidepane"))).cols == 20, "the floor holds at 20 cols", .{});
+}
+
+// ----------------------------------------------------------- panelfold
+
+/// Sixty digest-shaped groups: collapse keeps the list scannable, the
+/// scroll keeps the selection on screen, and a click is j/k for the
+/// mouse. The fixture is generated — sixty parents each holding one
+/// child marker — because the claims are about SHAPE at scale, and a
+/// three-item fixture cannot overflow anything.
+fn panelFold(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var items_buf: [24 * 1024]u8 = undefined;
+    var iw: usize = 0;
+    for (0..60) |i| {
+        const chunk = try std.fmt.bufPrint(items_buf[iw..],
+            \\{s}{{"id":"p{d}","title":"P{d}-HEAD","actions":[{{"id":"noop","label":"Noop"}}],"children":[{{"id":"p{d}c","title":"C{d}-MARK"}}]}}
+        , .{ @as([]const u8, if (i == 0) "" else ","), i, i, i, i });
+        iw += chunk.len;
+    }
+    var script_buf: [32 * 1024]u8 = undefined;
+    const script_body = try std.fmt.bufPrint(&script_buf,
+        \\while IFS= read -r line; do
+        \\  id=`expr "$line" : '.*"id":\([0-9]*\)'`
+        \\  case "$line" in
+        \\    *'"op":"describe"'*)
+        \\      printf '{{"v":1,"id":%s,"ok":true,"result":{{"name":"fold","version":"1.0","capabilities":["items.list"]}}}}\n' "$id" ;;
+        \\    *'"op":"items.list"'*)
+        \\      printf '{{"v":1,"id":%s,"ok":true,"result":{{"items":[{s}]}}}}\n' "$id" ;;
+        \\    *)
+        \\      printf '{{"v":1,"id":%s,"ok":false,"error":"no"}}\n' "$id" ;;
+        \\  esac
+        \\done
+    , .{items_buf[0..iw]});
+    var path_buf: [128]u8 = undefined;
+    const script = try std.fmt.bufPrint(&path_buf, "/tmp/rook-e2e-fold-{d}.sh", .{getpid()});
+    try h.writeFile(script, script_body);
+
+    var json_buf: [1024]u8 = undefined;
+    const graph = try std.fmt.bufPrint(&json_buf,
+        \\{{"rookEnvironment":1,"nodes":[
+        \\{{"id":"plugin:fold","kind":"plugin","scope":"app","name":"fold","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act"]}}
+        \\]}}
+    , .{script});
+
+    const app = try h.Instance.start(gpa, bin, .{ .env_json = graph });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    _ = try app.ctl("plugin-show fold");
+    const first = try app.waitCtl("sidepane", "C0-MARK", 20_000);
+    // Collapse: the selected group reads, every other group is a
+    // headline wearing its child count.
+    try h.expectContains(first, "*\tP0-HEAD", "group 0 selected");
+    try h.expectNotContains(first, "C1-MARK", "other groups' children are folded");
+    try h.expectContains(first, "\u{25b8}+1", "a folded parent wears its child count");
+
+    // Geometry settles a beat after launch (the panelwrap lesson) —
+    // wait it out before trusting any coordinate.
+    var g = try sideGeom(try app.ctl("sidepane"));
+    var stable: usize = 0;
+    var settles: usize = 0;
+    while (settles < 100 and stable < 6) : (settles += 1) {
+        h.sleepMs(50);
+        const g2 = try sideGeom(try app.ctl("sidepane"));
+        if (g2.x == g.x and g2.h == g.h) {
+            stable += 1;
+        } else {
+            stable = 0;
+            g = g2;
+        }
+    }
+
+    // G: the selection jumps to the last flat row (group 59's child) and
+    // the list scrolls to keep it on screen — sixty groups cannot fit.
+    _ = try app.ctl("key 47"); // G
+    var p1: [192]u8 = undefined;
+    var shot1 = try app.shot(try std.fmt.bufPrint(&p1, "{s}/fold-bottom.png", .{app.dirPath()}));
+    shot1.deinit();
+    const bottomv = try app.ctl("sidepane");
+    try h.expectContains(bottomv, "C59-MARK", "the last group is expanded and drawn");
+    try h.expectNotContains(bottomv, "P0-HEAD", "the top scrolled away");
+    const shown_a = try ctlInt(bottomv, "shown:");
+    try h.expect(shown_a > 0, "the drawn window starts past the top: shown {d}", .{shown_a});
+
+    // A click on the first drawn row selects it (j/k for the mouse), and
+    // the fold follows the selection.
+    const top = try ctlInt(bottomv, "top:");
+    var cbuf: [64]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cbuf, "click {d} {d}", .{ g.x + @divTrunc(g.w, 2), top + 5 }));
+    const clicked = try app.ctl("sidepane");
+    try h.expectContains(clicked, "focus:panel", "the click gave the panel the keys");
+    try h.expectNotContains(clicked, "C59-MARK", "the old group folded when the selection left it");
+    var star_buf: [64]u8 = undefined;
+    const want_star = try std.fmt.bufPrint(&star_buf, "*\tP{d}-HEAD", .{@divTrunc(shown_a, 2)});
+    try h.expectContains(clicked, want_star, "the first drawn row took the selection");
+
+    // A second click on the selected row is the Enter: the action menu.
+    _ = try app.ctl(try std.fmt.bufPrint(&cbuf, "click {d} {d}", .{ g.x + @divTrunc(g.w, 2), top + 5 }));
+    try h.expectContains(try app.ctl("sidepane"), "mode:actions", "clicking the selected row opens its menu");
 }
