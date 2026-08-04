@@ -418,6 +418,7 @@ const (
 	OpItemsAct       = "items.act"
 	OpAttentionRaise = "attention.raise"
 	OpSessionSpawn   = "session.spawn"
+	OpSessionSend    = "session.send" // type into an agent pane; the ask round trip's last hop
 	OpClipboardSet   = "clipboard.set" // plugin → pasteboard; the human's ⌘V is the last hop
 )
 

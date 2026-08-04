@@ -176,6 +176,11 @@ func Fuse(sessions []Session, panes []PaneActivity, names []string, busyRate flo
 	sortSessions(sessions)
 }
 
+// ClaudeLike reports whether a pane's foreground program is Claude
+// Code — exported for the cloud bridge, which must aim session.send
+// only at agent panes.
+func ClaudeLike(p PaneActivity, names []string) bool { return claudeLike(p, names) }
+
 // claudeLike: is this pane's foreground program Claude Code? By name
 // when the name is honest ("claude", "node"), by path when it is not —
 // the versioned install runs a binary literally named "2.1.220", and

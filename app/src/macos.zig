@@ -5793,6 +5793,7 @@ pub const App = struct {
         const self: *App = @ptrCast(@alignCast(ctx));
         if (std.mem.eql(u8, op, plugpkg.op_raise)) return self.raiseAttention(from, params);
         if (std.mem.eql(u8, op, plugpkg.op_spawn)) return self.spawnSession(params);
+        if (std.mem.eql(u8, op, plugpkg.op_send)) return self.sessionSend(params);
         if (std.mem.eql(u8, op, plugpkg.op_clipboard)) return self.clipboardSet(params);
         if (std.mem.eql(u8, op, "panes.activity")) {
             self.activityReport(result, true);
@@ -5913,6 +5914,59 @@ pub const App = struct {
     /// command runs WHERE THE HUMAN CAN SEE IT — in a pane, with scrollback
     /// and a cwd — instead of invisibly inside the plugin. The grant is
     /// what keeps it from being a surprise.
+    /// session.send — the membrane's hands (docs/agent/VISION.md, rung
+    /// three): type a human-authored reply into an agent's pane the way
+    /// the human would, per ADR 0004's TUI-only rule. Two gates, both
+    /// non-negotiable:
+    ///
+    ///   - The pane's foreground must BE an agent TUI (claude by name,
+    ///     or a path that says claude — the versioned install runs a
+    ///     binary named `2.1.220`). Text typed into a shell EXECUTES,
+    ///     so a wrong target is not a wrong paste, it is arbitrary
+    ///     command injection. `node` is deliberately NOT enough here,
+    ///     though the watcher counts it for display: a REPL eats typed
+    ///     text as code too.
+    ///   - A human who typed in that pane in the last 5 seconds wins.
+    ///     A plugin may put text into a prompt; it does not get to
+    ///     fight the keyboard for it mid-sentence.
+    ///
+    /// The text rides a bracketed paste (multi-line arrives as one
+    /// block) and a CR submits it.
+    fn sessionSend(self: *App, params: []const u8) ?[]const u8 {
+        const Wire = struct { pane: u32 = 0, text: []const u8 = "" };
+        const parsed = std.json.parseFromSlice(Wire, self.gpa, if (params.len > 0) params else "{}", .{
+            .ignore_unknown_fields = true,
+        }) catch return "params did not parse";
+        defer parsed.deinit();
+        const text = parsed.value.text;
+        if (text.len == 0) return "session.send needs text";
+        if (text.len > 8192) return "text too long to type";
+
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        var target: ?*panespkg.Pane = null;
+        for (self.spaces.items) |s| for (s.tabs.items) |t| for (t.panes.items) |p| {
+            if (p.id == parsed.value.pane) target = p;
+        };
+        const p = target orelse return "no such pane";
+        const tm = p.term() orelse return "that pane is not a terminal";
+
+        var fgbuf: [1024]u8 = undefined;
+        const fg_path = tm.session.fgPath(&fgbuf) orelse "";
+        const fg = std.fs.path.basename(fg_path);
+        if (!std.mem.eql(u8, fg, "claude") and std.mem.indexOf(u8, fg_path, "claude") == null)
+            return "target is not an agent TUI — typed text would execute";
+        const now = sessionpkg.clockMs();
+        const in_ms = tm.session.last_in_ms.load(.monotonic);
+        if (in_ms != 0 and now - in_ms < 5000)
+            return "a human is typing there";
+
+        var buf: [8192 + 16]u8 = undefined;
+        const framed = std.fmt.bufPrint(&buf, "\x1b[200~{s}\x1b[201~\r", .{text}) catch return "text too long to type";
+        self.paneInput(p, framed);
+        return null;
+    }
+
     /// clipboard.set: a plugin hands the human text to paste — the
     /// agent's drafted reply riding to the Claude pane through the
     /// human's own ⌘V. Grant-gated like every inbound verb, and the

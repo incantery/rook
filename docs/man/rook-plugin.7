@@ -251,6 +251,19 @@ Params:
 .Ql where
 .Pq Ql tab No for a new tab; default a split .
 Opens without stealing focus.
+.It Cm session.send
+Params:
+.Ql pane
+.Pq an id from Cm panes.activity
+and
+.Ql text
+.Pq required, up to 8 KiB .
+Types the text into that pane's pty as a bracketed paste plus Enter \(em
+the ask round trip's last hop.
+Two gates, both refusals by name: the pane's foreground must be an
+agent TUI
+.Pq claude by name or path; text typed into a shell EXECUTES ,
+and a human who typed there in the last 5 seconds wins.
 .It Cm clipboard.set
 Params:
 .Ql text
@@ -474,6 +487,16 @@ a revoked token names the fix and a re-minted token in the same file
 resurrects the bridge without a restart.
 .Ql push now
 is the one action.
+The bridge also carries the ask round trip's device half: each
+needs-input agent reports an
+.Ql askId ,
+answers queued on the fleet page come back on the heartbeat, and a
+valid answer is typed into the agent's pane via
+.Cm session.send
+\(em an ask that moved on
+.Pq answered at the desk, or a new turn
+is acked away with a note, never typed, and no answer is ever typed
+twice.
 .Bd -literal -offset indent
 rook.Plugin{Name: "cloud",
     Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-cloud"},

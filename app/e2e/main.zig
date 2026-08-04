@@ -2142,7 +2142,7 @@ fn configDir(gpa: std.mem.Allocator, bin: []const u8) !void {
 /// waiting for the RESPONSE to items.act, in the same read.
 const sh_plugin =
     \\n=0
-    \\acts='[{"id":"poke","label":"Poke"},{"id":"burn","label":"Burn it","confirm":true},{"id":"say","label":"Say","input":"INPUT_TEXT"},{"id":"clip","label":"Clip"}]'
+    \\acts='[{"id":"poke","label":"Poke"},{"id":"burn","label":"Burn it","confirm":true},{"id":"say","label":"Say","input":"INPUT_TEXT"},{"id":"clip","label":"Clip"},{"id":"send","label":"Send"}]'
     \\while IFS= read -r line; do
     \\  id=`expr "$line" : '.*"id":\([0-9]*\)'`
     \\  case "$line" in
@@ -2174,6 +2174,10 @@ const sh_plugin =
     \\          said=`expr "$line" : '.*"input":"\([^"]*\)"'`
     \\          printf '{"v":1,"id":%s,"ok":true,"result":{"message":"ran say [%s]"}}\n' "$id" "$said"
     \\          continue ;;
+    \\        send)
+    \\          printf '{"v":1,"id":%s,"op":"session.send","params":{"pane":1,"text":"echo INJECTED-BY-PLUGIN"}}\n' "$rid"
+    \\          IFS= read -r rep
+    \\          case "$rep" in *'"ok":true'*) extra=" send:ok" ;; *) extra=" send:no" ;; esac ;;
     \\      esac
     \\      printf '{"v":1,"id":%s,"ok":true,"result":{"message":"ran %s%s","item":{"id":"a","title":"alpha","state":"done","fields":[{"key":"n","kind":"NUMBER","value":"8"}],"actions":%s}}}\n' "$id" "$act" "$extra" "$acts" ;;
     \\    *)
@@ -2205,7 +2209,7 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     const graph = try std.fmt.bufPrint(&json_buf,
         \\{{"rookEnvironment":1,"nodes":[
         \\{{"id":"plugin:shplug","kind":"plugin","scope":"app","name":"shplug","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list"]}},
-        \\{{"id":"plugin:acty","kind":"plugin","scope":"app","name":"acty","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act","attention.raise","session.spawn","clipboard.set"]}},
+        \\{{"id":"plugin:acty","kind":"plugin","scope":"app","name":"acty","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act","attention.raise","session.spawn","session.send","clipboard.set"]}},
         \\{{"id":"plugin:norais","kind":"plugin","scope":"app","name":"norais","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act"]}},
         \\{{"id":"plugin:nogrant","kind":"plugin","scope":"app","name":"nogrant","command":["/bin/sh","{s}"],"load":"lazy","grants":[]}},
         \\{{"id":"plugin:missing","kind":"plugin","scope":"app","name":"missing","command":["/nope/not-a-binary"],"load":"lazy","grants":["items.list"]}}
@@ -2498,6 +2502,17 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("key 0d");
     const poked = try app.waitCtl("sidepane", "ran poke", 5_000);
     try h.expectContains(poked, "raise:ok", "the plugin was told its raise was allowed");
+
+    // session.send: THE safety property, asserted from both ends. The
+    // fixture aims typed text at pane 1 — a shell, where text EXECUTES —
+    // and the host must refuse: the foreground is not an agent TUI. The
+    // dump then proves the injection never reached the pty, which is the
+    // half a status code cannot prove.
+    const sent = try app.ctl("plugin acty items.act {\"itemId\":\"a\",\"actionId\":\"send\"}");
+    try h.expectContains(sent, "send:no", "typing into a shell is refused");
+    try h.expectNotContains(try app.ctl("dump@1"), "INJECTED-BY-PLUGIN", "the text never reached the shell");
+    const unsent = try app.ctl("plugin norais items.act {\"itemId\":\"a\",\"actionId\":\"send\"}");
+    try h.expectContains(unsent, "send:no", "no grant, no keystrokes");
 
     // clipboard.set: the drafted-reply exit path. The REAL pasteboard is
     // read back, so this proves the bytes reached the system — and the

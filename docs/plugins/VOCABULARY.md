@@ -157,9 +157,20 @@ that were only ever schema. What building them cost, and what that says:
 - **`session.spawn` does not steal focus.** A plugin may put something on
   your screen; it does not get to take your keystrokes mid-sentence.
 
-`session.send` and `notify` are still schema. `notify` looks like a
-special case of `attention.raise` with a level, and until something wants
-the distinction it should not have one.
+**Landed, 2026-08-04: `session.send`** — the membrane's hands, built for
+the ask round trip (a phone-authored answer typed into the agent's
+pane). Two gates, both non-negotiable: the target pane's foreground
+must BE an agent TUI (claude by name or path — text typed into a shell
+EXECUTES, and `node` is deliberately not enough, a REPL eats text as
+code too), and a human who typed there in the last 5 seconds wins. The
+text rides a bracketed paste and a CR submits it. Params are
+`{pane, text}` — the pane id from `panes.activity`, so the caller
+names a target the host re-verifies rather than a session the host
+would have to resolve.
+
+`notify` is still schema: it looks like a special case of
+`attention.raise` with a level, and until something wants the
+distinction it should not have one.
 
 The Go SDK in rook-demos speaks them too, as of the same day. It needed
 the same demux on the plugin side — a handler calling `Host.Raise` and

@@ -125,7 +125,15 @@ type bridge struct {
 	machineID   string
 	lastPush    time.Time
 	lastErr     string
-	agents      int // agents in the last snapshot, for the panel row
+	agents      int    // agents in the last snapshot, for the panel row
+	lastNote    string // the last delivery's story, for the panel row
+
+	// Delivery bookkeeping: an answer types into a pane AT MOST once
+	// (delivered survives a failed ack), and one that cannot land gets
+	// a bounded number of tries before it is dropped with a note —
+	// at-least-once from the cloud, at-most-once at the keyboard.
+	delivered map[string]bool
+	attempts  map[string]int
 }
 
 // loop is the heartbeat: whoami until it answers, then a status push
@@ -138,7 +146,8 @@ func (br *bridge) loop(c *conn, interval time.Duration) {
 			br.whoami()
 		}
 		if br.machineIDLocked() != "" {
-			br.push(c, samples)
+			sessions, panes := br.push(c, samples)
+			br.collect(c, sessions, panes)
 		}
 		select {
 		case <-time.After(interval):
@@ -191,7 +200,7 @@ func (br *bridge) whoami() {
 	br.mu.Unlock()
 }
 
-func (br *bridge) push(c *conn, samples map[int]transcript.PaneSample) {
+func (br *bridge) push(c *conn, samples map[int]transcript.PaneSample) ([]transcript.Session, []transcript.PaneActivity) {
 	now := time.Now()
 	sessions := br.sc.Scan(now)
 	// No conn means no substrate (tests, and any future headless use):
@@ -206,18 +215,18 @@ func (br *bridge) push(c *conn, samples map[int]transcript.PaneSample) {
 	st := statusFrom(sessions, br.rookVer)
 	body, err := json.Marshal(st)
 	if err != nil {
-		return
+		return sessions, panes
 	}
 	req, err := http.NewRequest("POST", br.api+"/v1/status", bytes.NewReader(body))
 	if err != nil {
-		return
+		return sessions, panes
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+br.getToken())
 	resp, err := br.client.Do(req)
 	if err != nil {
 		br.fail("push: " + err.Error())
-		return
+		return sessions, panes
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
@@ -235,13 +244,13 @@ func (br *bridge) push(c *conn, samples map[int]transcript.PaneSample) {
 			br.token = t
 		}
 		br.mu.Unlock()
-		return
+		return sessions, panes
 	}
 	// The server answers 204 on a stored snapshot — accept the whole
 	// success class; insisting on 200 called every good push an error.
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		br.fail(fmt.Sprintf("push: HTTP %d", resp.StatusCode))
-		return
+		return sessions, panes
 	}
 	agents := 0
 	for _, w := range st.Workspaces {
@@ -252,6 +261,7 @@ func (br *bridge) push(c *conn, samples map[int]transcript.PaneSample) {
 	br.lastErr = ""
 	br.agents = agents
 	br.mu.Unlock()
+	return sessions, panes
 }
 
 func (br *bridge) fail(msg string) {
@@ -281,6 +291,7 @@ type wireAgent struct {
 	State     string    `json:"state"` // working | needs_input | quiet
 	Title     string    `json:"title,omitempty"`
 	Ask       string    `json:"ask,omitempty"`
+	AskID     string    `json:"askId,omitempty"`
 	Model     string    `json:"model,omitempty"`
 	LastEvent time.Time `json:"lastEvent,omitzero"`
 }
@@ -323,6 +334,12 @@ func statusFrom(sessions []transcript.Session, rookVer string) wireStatus {
 		default:
 			a.State = "quiet"
 		}
+		// The ask's stable handle: an answer from the phone names this,
+		// and delivery re-derives it — a changed ask (the session moved
+		// on) makes the old answer STALE by construction.
+		if a.State == "needs_input" {
+			a.AskID = askID(s)
+		}
 		if a.State == "needs_input" {
 			w.Attention++
 		}
@@ -333,6 +350,149 @@ func statusFrom(sessions []transcript.Session, rookVer string) wireStatus {
 		st.Workspaces = append(st.Workspaces, *byWS[name])
 	}
 	return st
+}
+
+// collect drains the cloud outbox: for each phone-authored answer,
+// verify the ask is STILL the session's current one, deliver it into
+// the agent's pane via session.send, and ack. The verify step is the
+// both-settle rule: an ask answered at the desk (or superseded by a
+// new turn) makes the phone's answer stale, and stale answers are
+// acked away with a note, never typed.
+func (br *bridge) collect(c *conn, sessions []transcript.Session, panes []transcript.PaneActivity) {
+	answers := br.fetchAnswers()
+	if len(answers) == 0 {
+		return
+	}
+	if br.delivered == nil {
+		br.delivered = map[string]bool{}
+		br.attempts = map[string]int{}
+	}
+	for _, ans := range answers {
+		if br.delivered[ans.AskID] {
+			// Typed already; a previous ack must have been lost. Ack
+			// again — never type twice.
+			br.ack(ans.AskID)
+			continue
+		}
+		var target *transcript.Session
+		for i := range sessions {
+			if askID(sessions[i]) == ans.AskID {
+				target = &sessions[i]
+				break
+			}
+		}
+		if target == nil {
+			// The session moved on, or was answered at the desk: the
+			// desk won. Both settle; the phone's answer is dropped
+			// with its reason on the record.
+			br.ack(ans.AskID)
+			br.note("dropped a stale answer — the ask moved on")
+			continue
+		}
+		var pane *transcript.PaneActivity
+		for i := range panes {
+			if panes[i].Cwd == target.Cwd && transcript.ClaudeLike(panes[i], br.names) {
+				pane = &panes[i]
+				break
+			}
+		}
+		if pane == nil {
+			// The session runs outside rook, or its pane is gone. A
+			// bounded number of retries, then drop with the reason —
+			// an answer that can never land must not pend forever.
+			br.attempts[ans.AskID]++
+			if br.attempts[ans.AskID] > 5 {
+				br.ack(ans.AskID)
+				br.note("dropped an answer — no agent pane for " + transcript.Snip(target.Title, 40))
+			}
+			continue
+		}
+		if c == nil {
+			continue
+		}
+		_, err := c.call("session.send",
+			map[string]any{"pane": pane.ID, "text": ans.Text}, 5*time.Second)
+		if err != nil {
+			br.attempts[ans.AskID]++
+			if br.attempts[ans.AskID] > 5 {
+				br.ack(ans.AskID)
+				br.note("could not deliver an answer: " + err.Error())
+			} else {
+				br.note("delivery refused, retrying: " + err.Error())
+			}
+			continue
+		}
+		// Typed. Mark BEFORE the ack: a lost ack must re-ack, never
+		// re-type.
+		br.delivered[ans.AskID] = true
+		br.ack(ans.AskID)
+		br.note("answered " + transcript.Snip(target.Title, 40) + " from the phone")
+	}
+}
+
+type cloudAnswer struct {
+	AskID string `json:"askId"`
+	Text  string `json:"text"`
+}
+
+func (br *bridge) fetchAnswers() []cloudAnswer {
+	req, err := http.NewRequest("GET", br.api+"/v1/answers", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+br.getToken())
+	resp, err := br.client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != 200 {
+		return nil
+	}
+	var rep struct {
+		Answers []cloudAnswer `json:"answers"`
+	}
+	if json.Unmarshal(raw, &rep) != nil {
+		return nil
+	}
+	return rep.Answers
+}
+
+func (br *bridge) ack(askID string) {
+	body, _ := json.Marshal(map[string]string{"askId": askID})
+	req, err := http.NewRequest("POST", br.api+"/v1/answers/ack", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+br.getToken())
+	if resp, err := br.client.Do(req); err == nil {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
+		resp.Body.Close()
+	}
+}
+
+func (br *bridge) note(msg string) {
+	br.mu.Lock()
+	br.lastNote = msg
+	br.mu.Unlock()
+}
+
+// askID is the stable handle for one session's current ask: the
+// session plus a hash of what it is waiting on. FNV-1a, an identity
+// not a defense — same as the digest ids next door.
+func askID(s transcript.Session) string {
+	basis := s.LastText
+	if s.State == transcript.StateBlocked {
+		basis = "approval:" + s.Prompt
+	}
+	var h uint64 = 14695981039346656037
+	for i := range len(basis) {
+		h ^= uint64(basis[i])
+		h *= 1099511628211
+	}
+	return fmt.Sprintf("%s:%08x", s.ID, uint32(h^(h>>32)))
 }
 
 // fetchActivity asks rook who is redrawing and who is typing — the
@@ -460,7 +620,7 @@ func serve(c *conn, br *bridge) {
 			c.send(reply{1, req.ID, true, map[string]any{
 				"name":         "cloud",
 				"version":      version,
-				"capabilities": []string{"items.list", "items.act", "panes.activity"},
+				"capabilities": []string{"items.list", "items.act", "panes.activity", "session.send"},
 				"surfaces":     []string{"LIST"},
 			}, ""})
 		case "items.list":
@@ -502,6 +662,7 @@ func items(br *bridge, now time.Time) []wireItem {
 	br.mu.Lock()
 	name, id, token := br.machineName, br.machineID, br.token
 	lastPush, lastErr, agents := br.lastPush, br.lastErr, br.agents
+	lastNote := br.lastNote
 	br.mu.Unlock()
 
 	if token == "" {
@@ -534,7 +695,14 @@ func items(br *bridge, now time.Time) []wireItem {
 			it.Fields = append(it.Fields, wireField{"pushed", "TEXT", transcript.RelAge(now.Sub(lastPush)) + " ago"})
 		}
 	}
-	return []wireItem{it}
+	out := []wireItem{it}
+	// The last delivery's story: "answered X from the phone", a stale
+	// drop, a refused send. One row, newest wins — the round trip's
+	// visible receipt on this side.
+	if lastNote != "" {
+		out = append(out, wireItem{ID: "cloud:note", Title: lastNote})
+	}
+	return out
 }
 
 func act(br *bridge, id uint64, params json.RawMessage) reply {
