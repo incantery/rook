@@ -1340,13 +1340,13 @@ pub const Acted = struct {
 
 /// Invoke an action on an item.
 ///
-/// No payload parameter: an action that wants input is refused before it
-/// gets here, because rook has nowhere to type one yet and sending an empty
-/// payload would make the plugin act on nothing. When the Form surface
-/// exists this grows a parameter; until then the absence is the honest
-/// shape. (`ctl plugin <name> items.act <json>` reaches the raw wire for
-/// anyone who needs it today.)
-pub fn act(p: *Plugin, gpa: std.mem.Allocator, item_id: []const u8, action_id: []const u8) Acted {
+/// `input` is the human's payload for an action that declared
+/// `INPUT_TEXT` — VOCABULARY.md's open question 3, answered by the demo
+/// that needed it: the payload belongs to the ACTION, typed on one line
+/// in the panel, not to a Form. Empty means the action took none; the
+/// panel still never sends an input-wanting action without text, because
+/// acting on nothing is the thing the old refusal existed to prevent.
+pub fn act(p: *Plugin, gpa: std.mem.Allocator, item_id: []const u8, action_id: []const u8, input: []const u8) Acted {
     var out = Acted{};
 
     // The ids came from the plugin and go back out inside a JSON string.
@@ -1354,11 +1354,12 @@ pub fn act(p: *Plugin, gpa: std.mem.Allocator, item_id: []const u8, action_id: [
     // branch named `it's "fine"` — a quote in an id would otherwise emit a
     // frame that does not parse, and the failure would read as a protocol
     // bug rather than as a name.
-    // Sized for the worst case: an id whose every byte escapes to six.
-    var params: [1024]u8 = undefined;
+    // Sized for the worst case: every byte of the ids and the typed
+    // payload escaping to six.
+    var params: [4096]u8 = undefined;
     var w: std.Io.Writer = .fixed(&params);
-    actParams(&w, item_id, action_id) catch {
-        out.msg.set("ids too long to send");
+    actParams(&w, item_id, action_id, input) catch {
+        out.msg.set("too long to send");
         return out;
     };
 
@@ -1405,11 +1406,15 @@ fn listParams(w: *std.Io.Writer, root: []const u8, limit: usize) !void {
     try w.print(",\"limit\":{d}}}", .{limit});
 }
 
-fn actParams(w: *std.Io.Writer, item_id: []const u8, action_id: []const u8) !void {
+fn actParams(w: *std.Io.Writer, item_id: []const u8, action_id: []const u8, input: []const u8) !void {
     try w.writeAll("{\"itemId\":");
     try jsonString(w, item_id);
     try w.writeAll(",\"actionId\":");
     try jsonString(w, action_id);
+    if (input.len > 0) {
+        try w.writeAll(",\"input\":");
+        try jsonString(w, input);
+    }
     try w.writeAll("}");
 }
 
@@ -1705,13 +1710,21 @@ test "an id with a quote in it still produces a frame that parses" {
     // not parse, and the failure would read as a protocol bug.
     var buf: [1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try actParams(&w, "it's \"fine\"\n", "burn\\it");
+    try actParams(&w, "it's \"fine\"\n", "burn\\it", "a \"quoted\" answer");
 
-    const Wire = struct { itemId: []const u8, actionId: []const u8 };
+    const Wire = struct { itemId: []const u8, actionId: []const u8, input: []const u8 };
     const parsed = try std.json.parseFromSlice(Wire, testing.allocator, buf[0..w.end], .{});
     defer parsed.deinit();
     try testing.expectEqualStrings("it's \"fine\"\n", parsed.value.itemId);
     try testing.expectEqualStrings("burn\\it", parsed.value.actionId);
+    try testing.expectEqualStrings("a \"quoted\" answer", parsed.value.input);
+}
+
+test "no payload means no input key — an absent answer is not an empty one" {
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try actParams(&w, "i", "a", "");
+    try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "input") == null);
 }
 
 test "actParams refuses rather than truncating when the ids will not fit" {
@@ -1719,7 +1732,7 @@ test "actParams refuses rather than truncating when the ids will not fit" {
     // the only safe answer.
     var small: [16]u8 = undefined;
     var w: std.Io.Writer = .fixed(&small);
-    try testing.expectError(error.WriteFailed, actParams(&w, "a-rather-long-item-id", "act"));
+    try testing.expectError(error.WriteFailed, actParams(&w, "a-rather-long-item-id", "act", ""));
 }
 
 test "an action with no id is dropped, and a label defaults to the id" {

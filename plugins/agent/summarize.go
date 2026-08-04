@@ -213,14 +213,20 @@ func (z *Summarizer) complete(msgs []chatMsg) (content string, cost float64, err
 
 const draftPrompt = `You draft the user's next reply to their AI coding agent. From the agent's last message and the user's earlier prompt, write the reply the user most plausibly wants to send: answer the agent's questions, pick among options it offered when one is clearly better (and say why in a clause), approve good plans, flag real risks. First person, direct, specific, at most 120 words, plain text only — no greeting, no signature, no markdown.`
 
-// Draft writes the reply the human would probably send back. It works
-// from the FULL turn, not the digest — drafting from a summary would
-// compound its lossiness — and it is only ever called on demand: a
-// draft nobody asked for is a bill nobody wanted.
-func (z *Summarizer) Draft(d Digest) (text string, cost float64, err error) {
+// Draft writes the reply the human would probably send back — or, when
+// `guidance` carries the human's rough words, the polished version of
+// the reply they MEANT. It works from the FULL turn, not the digest —
+// drafting from a summary would compound its lossiness — and it is only
+// ever called on demand: a draft nobody asked for is a bill nobody
+// wanted.
+func (z *Summarizer) Draft(d Digest, guidance string) (text string, cost float64, err error) {
+	ask := "Draft the user's reply."
+	if guidance != "" {
+		ask = "The user wants to reply, roughly:\n" + guidance + "\n\nWrite the polished reply they mean: keep their decisions and intent EXACTLY — expand and sharpen with specifics from the agent's message, never override them."
+	}
 	msgs := []chatMsg{
 		{"system", draftPrompt},
-		{"user", "The user had asked:\n" + transcript.Snip(d.Prompt, 600) + "\n\nThe agent replied:\n" + d.FullText + "\n\nDraft the user's reply."},
+		{"user", "The user had asked:\n" + transcript.Snip(d.Prompt, 600) + "\n\nThe agent replied:\n" + d.FullText + "\n\n" + ask},
 	}
 	content, c, cerr := z.complete(msgs)
 	if cerr != nil {

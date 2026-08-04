@@ -199,11 +199,19 @@ An action with
 true gets a real y/n confirm in the panel before
 .Cm items.act
 is sent.
+An action with
+.Cm input
+.Ql INPUT_TEXT
+opens a one-line editor under the menu \(em every printable key is
+text there, ESC drops the draft, and an empty Enter refuses: a plugin
+never acts on nothing.
 .It Cm items.act
 Params:
-.Ql itemId
+.Ql itemId ,
+.Ql actionId ,
 and
-.Ql actionId .
+.Ql input
+when the action declared it wants text.
 Reply
 .Ql result.message
 .Pq shown in the panel
@@ -407,6 +415,19 @@ rook.Plugin{Name: "agent",
     Load:    rook.Eager,
     Grants:  []string{rook.OpItemsList, rook.OpItemsAct}}
 .Ed
+.Pp
+Each digest carries the reply loop:
+.Ql draft a reply
+spends one call writing the reply you would probably send,
+.Ql expand my reply\(u2026
+takes the rough words you type
+.Pq Dq yeah, but keep the test
+and writes the reply you meant, and
+.Ql copy reply
+hands the result to the pasteboard via
+.Cm clipboard.set
+\(em your \(u2318V into the session is the last hop, on purpose.
+Drafts work from the FULL turn, never the digest.
 .Pp
 The API key comes from
 .Ev OPENAI_API_KEY

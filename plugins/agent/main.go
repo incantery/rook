@@ -349,6 +349,7 @@ type wireField struct {
 type wireAction struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
+	Input string `json:"input,omitempty"`
 }
 
 type wireChild struct {
@@ -396,12 +397,15 @@ func items(st *store, now time.Time) []wireItem {
 			State:    d.ReplyState,
 		}
 		// The action order is the menu order: the likeliest next act
-		// first. A drafted reply's next act is copying it.
+		// first. A drafted reply's next act is copying it; expand takes
+		// the rough reply you type and writes the one you mean.
 		if d.Reply != "" {
 			it.Actions = append(it.Actions, wireAction{ID: "copy", Label: "copy reply"})
+			it.Actions = append(it.Actions, wireAction{ID: "expand", Label: "expand my reply…", Input: "INPUT_TEXT"})
 			it.Actions = append(it.Actions, wireAction{ID: "draft", Label: "redraft"})
 		} else if d.ReplyState != "drafting" {
 			it.Actions = append(it.Actions, wireAction{ID: "draft", Label: "draft a reply"})
+			it.Actions = append(it.Actions, wireAction{ID: "expand", Label: "expand my reply…", Input: "INPUT_TEXT"})
 		}
 		it.Actions = append(it.Actions, wireAction{ID: "dismiss", Label: "dismiss"})
 		for i, b := range d.Bullets {
@@ -445,6 +449,7 @@ func act(c *conn, st *store, sum *Summarizer, id uint64, params json.RawMessage)
 	var p struct {
 		ItemID   string `json:"itemId"`
 		ActionID string `json:"actionId"`
+		Input    string `json:"input"`
 	}
 	if json.Unmarshal(params, &p) != nil {
 		return reply{1, id, false, nil, "params did not parse"}
@@ -466,9 +471,12 @@ func act(c *conn, st *store, sum *Summarizer, id uint64, params json.RawMessage)
 		}
 		return reply{1, id, true, map[string]string{"message": "dismissed"}, ""}
 
-	case "draft":
+	case "draft", "expand":
 		if sum == nil {
 			return reply{1, id, false, nil, "no OpenAI key, nothing to draft with"}
+		}
+		if p.ActionID == "expand" && strings.TrimSpace(p.Input) == "" {
+			return reply{1, id, false, nil, "say roughly what you want to reply"}
 		}
 		var seed Digest
 		if !st.update(itemID, func(d *Digest) {
@@ -481,8 +489,9 @@ func act(c *conn, st *store, sum *Summarizer, id uint64, params json.RawMessage)
 		// draft lands via the store and the panel's own refresh — the
 		// answer here is only "started". A dismissal mid-draft wins:
 		// update() on a gone digest is a no-op, not a resurrection.
+		guidance := strings.TrimSpace(p.Input)
 		go func() {
-			text, cost, err := sum.Draft(seed)
+			text, cost, err := sum.Draft(seed, guidance)
 			st.update(itemID, func(d *Digest) {
 				d.CostUSD += cost
 				if err != nil {

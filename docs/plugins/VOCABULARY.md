@@ -243,12 +243,18 @@ too much.
    text" is an id plus a payload the human edited. Does that fold into
    Form, or is it a third thing?
 
-   *Where it stands:* actions landed without it. The panel runs an action
-   by id, gates a `confirm` one behind y/n, and **refuses one that declares
-   `INPUT_TEXT` by name** — sending an empty payload would make the plugin
-   act on nothing, and a greyed-out row would leave the human guessing why.
-   So the question is now visible in the product rather than only on this
-   page, which is the point at which it gets answered.
+   **Answered, 2026-08-03, by the demo that needed it.** The agent
+   plugin's "expand my reply" — type a rough answer, get back the
+   polished one — forced the choice, and the answer is: **the payload
+   belongs to the action, not to a Form.** Choosing an `INPUT_TEXT`
+   action opens a one-line editor under the menu; the text rides
+   `items.act` as an `input` param; ESC drops it and an empty Enter
+   still refuses, because the refusal this replaced existed so a plugin
+   never acts on nothing. Form stays reserved for what it was predicted
+   for — asks, question trees, multi-field — and did not have to exist
+   for a one-line payload. The interesting part: the payload's editor is
+   MODAL text (`j` is a letter there, not a direction), which is the
+   panel's first mode where typing beats navigation.
 4. **Table vs List.** Is Table a distinct surface, or a List with a
    column projection? Cheaper if it's a projection.
 

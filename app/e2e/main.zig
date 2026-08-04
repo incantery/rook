@@ -2170,6 +2170,10 @@ const sh_plugin =
     \\          printf '{"v":1,"id":%s,"op":"clipboard.set","params":{"text":"from-the-plugin-pasteboard"}}\n' "$rid"
     \\          IFS= read -r rep
     \\          case "$rep" in *'"ok":true'*) extra=" clip:ok" ;; *) extra=" clip:no" ;; esac ;;
+    \\        say)
+    \\          said=`expr "$line" : '.*"input":"\([^"]*\)"'`
+    \\          printf '{"v":1,"id":%s,"ok":true,"result":{"message":"ran say [%s]"}}\n' "$id" "$said"
+    \\          continue ;;
     \\      esac
     \\      printf '{"v":1,"id":%s,"ok":true,"result":{"message":"ran %s%s","item":{"id":"a","title":"alpha","state":"done","fields":[{"key":"n","kind":"NUMBER","value":"8"}],"actions":%s}}}\n' "$id" "$act" "$extra" "$acts" ;;
     \\    *)
@@ -2399,17 +2403,37 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("key 0d");
     try h.expectContains(try app.ctl("sidepane"), "mode:actions", "ESC must not have yielded the keys");
 
-    // An action that needs input is refused BY NAME. Open question 3 in
-    // VOCABULARY.md — until it is settled, sending an empty payload would
-    // make the plugin act on nothing.
+    // An action that wants input opens the one-line editor — VOCABULARY
+    // question 3, answered: the payload is the ACTION's. In the editor,
+    // j is a letter (typing beats navigation), ESC backs out to the
+    // menu, and an empty Enter still refuses: the refusal this mode
+    // replaced lives on at the last moment, a plugin never acts on
+    // nothing.
     _ = try app.ctl("key 6a"); // j
     _ = try app.ctl("key 6a"); // j — onto "Say", which wants text
     _ = try app.ctl("key 0d");
-    const wants = try app.waitCtl("sidepane", "needs input", 5_000);
-    try h.expectContains(wants, "mode:actions", "and does not run, or leave the menu");
+    try h.expectContains(try app.ctl("sidepane"), "mode:input", "Enter on Say opens the editor");
+    _ = try app.ctl("key 0d");
+    const still = try app.waitCtl("sidepane", "type something", 5_000);
+    try h.expectContains(still, "mode:input", "an empty payload does not run");
+    _ = try app.ctl("type jj-first-try");
+    _ = try app.waitCtl("sidepane", "input:jj-first-try", 5_000);
+    _ = try app.ctl("key 1b");
+    try h.expectContains(try app.ctl("sidepane"), "mode:actions", "ESC backs out to the menu, dropping the draft");
+    // Round two, sent for real: the typed text rides items.act and the
+    // fixture quotes it back.
+    _ = try app.ctl("key 0d");
+    _ = try app.ctl("type approved-by-e2e");
+    _ = try app.waitCtl("sidepane", "input:approved-by-e2e", 5_000);
+    _ = try app.ctl("key 0d");
+    const said = try app.waitCtl("sidepane", "ran say", 5_000);
+    try h.expectContains(said, "[approved-by-e2e]", "the typed payload reached the plugin");
+    try h.expectContains(said, "mode:rows", "a completed action returns to the list");
 
     // The confirm gate, and the half of it that matters: n means no.
-    _ = try app.ctl("key 6b"); // k, back onto "Burn it"
+    _ = try app.ctl("key 0d"); // back into the menu, on Poke
+    _ = try app.waitCtl("sidepane", "mode:actions", 5_000);
+    _ = try app.ctl("key 6a"); // j — onto "Burn it"
     _ = try app.ctl("key 0d");
     const asking = try app.waitCtl("sidepane", "mode:confirm", 5_000);
     try h.expectContains(asking, "confirm? y/n", "the panel asks before a confirm action");
@@ -2418,8 +2442,10 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(declined, "mode:actions", "declining returns to the menu");
     // THE ASSERTION: nothing ran. The row is untouched — same state, same
     // field. A confirm that does not actually gate the call is decoration.
-    try h.expectContains(declined, "*ok\talpha", "the row must be untouched");
-    try h.expectContains(declined, "n=7", "and its field too");
+    // (Waited for, not just read: say ran a moment ago with a message-only
+    // answer, and its stale-list refetch may still be landing.)
+    const untouched = try app.waitCtl("sidepane", "n=7", 5_000);
+    try h.expectContains(untouched, "*ok\talpha", "the row must be untouched");
 
     // y runs it, and the plugin's answer lands.
     //

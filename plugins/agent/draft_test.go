@@ -188,3 +188,46 @@ func TestChunkTextLosesNoWords(t *testing.T) {
 		t.Fatalf("unbreakable run: %d chunks", len(hard))
 	}
 }
+
+func TestExpandCarriesTheRoughReplyIntoThePrompt(t *testing.T) {
+	var sentUser string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []chatMsg `json:"messages"`
+		}
+		raw, _ := io.ReadAll(r.Body)
+		json.Unmarshal(raw, &body)
+		sentUser = body.Messages[1].Content
+		io.WriteString(w, completion("Sounds good — tag now, and keep the regression test in.", 200, 40))
+	}))
+	defer srv.Close()
+	z := &Summarizer{Client: srv.Client(), Base: srv.URL, Key: "k", Model: "gpt-5-mini"}
+	st := &store{keep: 10}
+	st.add(draftedDigest())
+
+	rep := act(nil, st, z, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"expand","input":"yeah sounds good but keep the test"}`))
+	if !rep.OK {
+		t.Fatalf("expand refused: %+v", rep)
+	}
+	d := waitState(t, st, "s1:aa", "ready")
+	if d.Reply == "" {
+		t.Fatalf("no reply: %+v", d)
+	}
+	// The rough words AND the full turn both reached the model — the
+	// polish must come from what the agent actually said.
+	if !strings.Contains(sentUser, "yeah sounds good but keep the test") {
+		t.Fatalf("guidance missing from prompt: %q", sentUser)
+	}
+	if !strings.Contains(sentUser, "tag now or wait?") {
+		t.Fatalf("full turn missing from prompt: %q", sentUser)
+	}
+}
+
+func TestExpandOnNothingRefusesBeforeSpendingAnything(t *testing.T) {
+	st := &store{keep: 10}
+	st.add(draftedDigest())
+	rep := act(nil, st, &Summarizer{}, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"expand","input":"   "}`))
+	if rep.OK {
+		t.Fatal("expanded whitespace into a bill")
+	}
+}

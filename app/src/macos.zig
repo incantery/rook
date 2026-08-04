@@ -509,8 +509,12 @@ pub const App = struct {
     /// actions, and an action the plugin marked `confirm` descends once
     /// more — a plugin action can delete a branch, and the confirm is the
     /// plugin's to ask for rather than the host's to guess at.
-    plug_mode: enum { rows, actions, confirm } = .rows,
+    plug_mode: enum { rows, actions, confirm, input } = .rows,
     plug_act_sel: usize = 0,
+    /// One line of typed payload for an action that declared INPUT_TEXT —
+    /// the vague reply the agent expands, the text a plugin asked for.
+    plug_input: [512]u8 = @splat(0),
+    plug_input_len: usize = 0,
     /// What the last action said. A human pressed a key; something has to
     /// answer, including when the answer is a refusal.
     plug_msg: [160]u8 = @splat(0),
@@ -5999,6 +6003,8 @@ pub const App = struct {
             item_len: usize,
             action: [32]u8,
             action_len: usize,
+            input: [512]u8,
+            input_len: usize,
             row: usize,
         };
         const a = self.gpa.create(Args) catch return;
@@ -6021,6 +6027,10 @@ pub const App = struct {
             @memcpy(a.item[0..a.item_len], it.id.get());
             a.action_len = act.id.get().len;
             @memcpy(a.action[0..a.action_len], act.id.get());
+            if (self.plug_mode == .input) {
+                a.input_len = self.plug_input_len;
+                @memcpy(a.input[0..a.input_len], self.plug_input[0..a.input_len]);
+            }
             a.row = self.plug_sel;
             self.plugSay("running…");
             self.scene_dirty = true;
@@ -6031,7 +6041,7 @@ pub const App = struct {
             fn go(args: *Args) void {
                 const app = args.app;
                 const done = if (app.plugins.find(args.name[0..args.name_len])) |p|
-                    plugpkg.act(p, app.gpa, args.item[0..args.item_len], args.action[0..args.action_len])
+                    plugpkg.act(p, app.gpa, args.item[0..args.item_len], args.action[0..args.action_len], args.input[0..args.input_len])
                 else
                     plugpkg.Acted{};
 
@@ -6163,6 +6173,27 @@ pub const App = struct {
                     // dismisses is not a confirm.
                     else => {},
                 },
+                // The one-line payload editor. Every printable byte is
+                // TEXT here — j is a letter, not a direction.
+                .input => switch (b) {
+                    0x1b => self.plug_mode = .actions,
+                    0x0d => if (self.plug_input_len == 0) {
+                        // The refusal this mode replaced lives on at the
+                        // last moment: a plugin never acts on nothing.
+                        self.plugSay("type something, or ESC");
+                    } else {
+                        self.plug_run = true; // drained after the lock
+                    },
+                    0x7f, 0x08 => while (self.plug_input_len > 0) {
+                        // Back to the previous rune start, not byte.
+                        self.plug_input_len -= 1;
+                        if (self.plug_input[self.plug_input_len] & 0xC0 != 0x80) break;
+                    },
+                    else => if (b >= 0x20 and self.plug_input_len < self.plug_input.len) {
+                        self.plug_input[self.plug_input_len] = b;
+                        self.plug_input_len += 1;
+                    },
+                },
             }
             i += 1;
         }
@@ -6180,8 +6211,9 @@ pub const App = struct {
                 if (down) self.plug_act_sel = @min(self.plug_act_sel + 1, it.actions_n -| 1) else self.plug_act_sel -|= 1;
             },
             // A confirm is a question with two answers, and the arrow keys
-            // are not either of them.
-            .confirm => {},
+            // are not either of them. The input line is TEXT — arrows do
+            // not move a selection that typing is busy filling.
+            .confirm, .input => {},
         }
     }
 
@@ -6191,11 +6223,14 @@ pub const App = struct {
         if (self.plug_act_sel >= it.actions_n) return;
         const a = &it.actions[self.plug_act_sel];
         if (a.wantsInput()) {
-            // Open question 3 in docs/plugins/VOCABULARY.md: is "reply with
-            // this text" an action with a payload or a Form? Until that is
-            // settled, refusing BY NAME is the honest answer — sending an
-            // empty payload would make the plugin act on nothing.
-            self.plugSay("this action needs input; rook has no form yet");
+            // VOCABULARY.md's open question 3, answered by the demo that
+            // needed it: the payload belongs to the ACTION — one line,
+            // typed right here under the menu. The old refusal existed so
+            // a plugin never acts on nothing; the Enter in input mode
+            // still enforces exactly that.
+            self.plug_mode = .input;
+            self.plug_input_len = 0;
+            self.plug_msg_len = 0;
             return;
         }
         if (a.confirm) {
@@ -6461,6 +6496,21 @@ pub const App = struct {
                 if (on and self.plug_mode == .confirm) {
                     ax += cw;
                     _ = ui.text(ax, y + (row_h - ch) / 2, "confirm? y/n", th.ed_err, bg);
+                }
+                if (on and self.plug_mode == .input) {
+                    // The one-line payload, tail-first: however long the
+                    // typing runs, the caret stays on screen.
+                    ax += cw;
+                    const typed = self.plug_input[0..self.plug_input_len];
+                    const room: usize = @intFromFloat(@max(4, (right - ax) / cw - 1));
+                    var show = typed;
+                    if (typed.len > room) {
+                        var cutb = typed.len - room;
+                        while (cutb < typed.len and typed[cutb] & 0xC0 == 0x80) cutb += 1;
+                        show = typed[cutb..];
+                    }
+                    ax += ui.text(ax, y + (row_h - ch) / 2, show, th.bar_value, bg);
+                    ui.rect(ax, y + (row_h - ch) / 2, cw / 4, ch, th.accent);
                 }
                 y += row_h;
             }

@@ -767,6 +767,8 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                         @tagName(app.plug_mode),
                         @as([]const u8, if (app.plug_acting.load(.acquire)) " acting" else ""),
                     }) catch {};
+                    if (app.plug_mode == .input)
+                        w.print("input:{s}\n", .{app.plug_input[0..app.plug_input_len]}) catch {};
                     if (app.plug_msg_len > 0)
                         w.print("msg: {s}\n", .{app.plug_msg[0..app.plug_msg_len]}) catch {};
                 },
