@@ -420,6 +420,9 @@ pub const WkItem = struct {
     click: bool,
 };
 
+/// What produced the list in the results panel.
+const PanelKind = enum { grep, references };
+
 /// A queued "open this path outside the asking editor" — the tree's
 /// beside-open and :sp/:vsp. Queued because the ask fires on the key
 /// path under draw_lock and pane surgery takes it again.
@@ -709,6 +712,13 @@ pub const App = struct {
     /// Root + query handed to the worker; published back under the
     /// draw_lock when it finishes.
     sr_pending: ?searchpkg.Results = null,
+    /// Which question the list is answering, and which one is on its way.
+    /// The panel has two producers now, and they differ in what the BOX
+    /// means: a grep is what you typed, a reference list is what a
+    /// server said about a symbol. A panel that showed the stale query
+    /// over somebody else's list would be claiming you searched for it.
+    sr_kind: PanelKind = .grep,
+    sr_pending_kind: PanelKind = .grep,
     /// Columns, not pixels: the pane beside it is a character grid, and
     /// a width in px makes the split land mid-cell at some font sizes.
     side_cols: f32 = 34,
@@ -3006,6 +3016,17 @@ pub const App = struct {
         }
     }
 
+    /// The absolute path behind a result row.
+    ///
+    /// A grep only ever produces paths inside the root, but a reference
+    /// list reaches the standard library and the module cache — those
+    /// are stored absolute, and joining one onto the root would build a
+    /// path that resolves to nothing.
+    fn hitPath(self: *App, buf: []u8, shown: []const u8) ?[]const u8 {
+        if (shown.len > 0 and shown[0] == '/') return shown;
+        return std.fmt.bufPrint(buf, "{s}/{s}", .{ self.sr.root, shown }) catch null;
+    }
+
     /// Run the query on a worker: a repo-wide scan is milliseconds but
     /// not microseconds, and the frame must never wait on a
     /// filesystem. The result is published through `sr_pending`, which
@@ -3033,6 +3054,7 @@ pub const App = struct {
                     o.deinit(app.gpa);
                 }
                 app.sr_pending = res;
+                app.sr_pending_kind = .grep;
                 app.scene_dirty = true;
                 app.draw_lock.unlock();
                 app.sr_running.store(false, .release);
@@ -3054,6 +3076,7 @@ pub const App = struct {
         self.sr_pending = null;
         self.sr.deinit(self.gpa);
         self.sr = done;
+        self.sr_kind = self.sr_pending_kind;
         self.sr_sel = 0;
         self.sr_top = 0;
         // The box hands the keys to the list the moment there is a
@@ -3121,14 +3144,21 @@ pub const App = struct {
                     // second hit a re-search.
                     if (self.sr_sel < self.sr.hits.len) {
                         const hit = self.sr.hits[self.sr_sel];
-                        const rel = self.sr.files[hit.file];
                         var abs: [1024]u8 = undefined;
-                        const full = std.fmt.bufPrint(&abs, "{s}/{s}", .{ self.sr.root, rel }) catch return;
+                        const full = self.hitPath(&abs, self.sr.files[hit.file]) orelse return;
                         if (full.len <= self.pending_open_path.len) {
                             @memcpy(self.pending_open_path[0..full.len], full);
                             self.pending_open = .{
                                 .len = full.len,
                                 .line = hit.line -| 1,
+                                // A grep hit's column is where the text
+                                // matched; a reference's is the symbol.
+                                // Either way it is the thing you came to
+                                // look at, so land on it — and it is
+                                // the FILE's column, not the shown
+                                // text's, or a jump into indented code
+                                // lands inside the indent.
+                                .col = hit.file_col,
                                 .how = .here,
                                 .from = self.activeTab().focused.id,
                             };
@@ -3212,6 +3242,7 @@ pub const App = struct {
         ed.lsp_ctx = self;
         ed.lsp_hover = &lspHoverHook;
         ed.lsp_definition = &lspDefinitionHook;
+        ed.lsp_references = &lspReferencesHook;
         // The sign column appears now rather than when the first error
         // does, so the document never shifts sideways under your cursor.
         ed.diag_gutter = true;
@@ -3366,11 +3397,16 @@ pub const App = struct {
                         };
                     }
                 },
+                .references => |r| self.startRefsLocked(r.sites, r.symbol),
                 .none => |n| {
                     const ed = self.editorShowingLocked(n.path) orelse continue;
                     switch (n.kind) {
                         .hover => ed.setStatus("nothing to show here", .{}, false),
                         .definition => ed.setStatus("no definition found", .{}, false),
+                        // Not an error, and worth saying plainly: a
+                        // symbol nobody uses is a real answer, and one
+                        // you often went looking for on purpose.
+                        .references => ed.setStatus("no references found", .{}, false),
                     }
                     ed.render_dirty = true;
                 },
@@ -3425,6 +3461,139 @@ pub const App = struct {
             // still a better answer than nothing.
             ed.gotoDefinitionFallback();
         }
+    }
+
+    fn lspReferencesHook(ctx: *anyopaque, ed: *editorpkg.Editor) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const path = ed.buf.path orelse return;
+        self.lspSyncLocked(ed);
+        // The word is a LABEL — the server answers from the position.
+        // Taking it now rather than when the reply lands is what keeps
+        // the list titled with what you asked about.
+        const word = if (ed.wordUnder()) |w| w.text else "";
+        if (!self.lsp.references(path, lspPos(ed), word)) {
+            ed.setStatus("no language server for this file", .{}, false);
+            return;
+        }
+        // A repo-wide question takes a visible moment. Saying so beats a
+        // key that looks like it did nothing for half a second.
+        if (word.len > 0) {
+            ed.setStatus("finding references to {s}…", .{word}, false);
+        } else ed.setStatus("finding references…", .{}, false);
+        ed.render_dirty = true;
+    }
+
+    /// Read an answered references list into the panel, off the frame.
+    ///
+    /// The sites arrive as positions with no text, and the panel shows
+    /// text — so somebody opens every file named. That is a filesystem
+    /// walk, which never happens on the frame; it goes to a worker and
+    /// comes back through `sr_pending`, exactly as a grep does.
+    const RefJob = struct {
+        app: *App,
+        root: []u8,
+        label: []u8,
+        marks: []searchpkg.Mark,
+        /// The absolute paths `marks` borrow, owned here.
+        paths: [][]u8,
+
+        fn deinit(job: *RefJob, gpa: std.mem.Allocator) void {
+            for (job.paths) |p| gpa.free(p);
+            gpa.free(job.paths);
+            gpa.free(job.marks);
+            gpa.free(job.root);
+            gpa.free(job.label);
+            gpa.destroy(job);
+        }
+    };
+
+    fn startRefsLocked(self: *App, sites: []const lspmgrpkg.Site, symbol: []const u8) void {
+        var rootbuf: [1024]u8 = undefined;
+        // "" is a legal root: relativeTo then shows absolute paths,
+        // which is the right answer for a pane with no repo under it.
+        const root = self.paneRootLocked(self.activeTab().focused, &rootbuf) orelse "";
+
+        const job = self.gpa.create(RefJob) catch return;
+        job.* = .{
+            .app = self,
+            .root = self.gpa.dupe(u8, root) catch {
+                self.gpa.destroy(job);
+                return;
+            },
+            .label = self.gpa.dupe(u8, symbol) catch {
+                self.gpa.free(job.root);
+                self.gpa.destroy(job);
+                return;
+            },
+            .marks = self.gpa.alloc(searchpkg.Mark, sites.len) catch {
+                self.gpa.free(job.root);
+                self.gpa.free(job.label);
+                self.gpa.destroy(job);
+                return;
+            },
+            .paths = self.gpa.alloc([]u8, sites.len) catch {
+                self.gpa.free(job.marks);
+                self.gpa.free(job.root);
+                self.gpa.free(job.label);
+                self.gpa.destroy(job);
+                return;
+            },
+        };
+        // Copied rather than borrowed: the Answer these came from is
+        // freed the moment this frame's drain loop moves on, and the
+        // worker outlives it.
+        var n: usize = 0;
+        for (sites) |s| {
+            const p = self.gpa.dupe(u8, s.path) catch continue;
+            job.paths[n] = p;
+            job.marks[n] = .{ .path = p, .line = s.line, .col = s.col };
+            n += 1;
+        }
+        job.paths = self.gpa.realloc(job.paths, n) catch job.paths[0..n];
+        job.marks = self.gpa.realloc(job.marks, n) catch job.marks[0..n];
+
+        self.sr_running.store(true, .release);
+        const T = struct {
+            fn go(j: *RefJob) void {
+                const app = j.app;
+                const res = searchpkg.atMarks(app.gpa, j.root, j.label, j.marks);
+                app.draw_lock.lock();
+                if (app.sr_pending) |*old| {
+                    var o = old.*;
+                    o.deinit(app.gpa);
+                }
+                app.sr_pending = res;
+                app.sr_pending_kind = .references;
+                app.scene_dirty = true;
+                app.draw_lock.unlock();
+                app.sr_running.store(false, .release);
+                j.deinit(app.gpa);
+            }
+        };
+        if (std.Thread.spawn(.{}, T.go, .{job})) |t| {
+            t.detach();
+        } else |_| {
+            self.sr_running.store(false, .release);
+            job.deinit(self.gpa);
+        }
+
+        // Show the panel now, holding "searching…", rather than when the
+        // list is ready: a key whose whole effect arrives late reads as
+        // a key that did nothing.
+        const was = self.side_open and self.side_panel == .search;
+        self.side_panel = .search;
+        self.side_open = true;
+        self.sr_kind = .references;
+        // The LIST takes the keys, and the box does not — you asked a
+        // question, and the answer is something to walk. Taking focus is
+        // right here and wrong for diagnostics, and the difference is
+        // that this one is a key you pressed: `gr` means "show me", and
+        // a panel you then had to ⌃L into would make it two gestures.
+        // ESC hands the keys straight back.
+        self.sr_typing = false;
+        self.side_focus = true;
+        if (!was) self.relayoutLocked();
+        self.scene_dirty = true;
     }
 
     /// Put rendered text into an editor pane, under a display name.
@@ -6620,13 +6789,21 @@ pub const App = struct {
         }
 
         // A count line, because "is this all of them" is the first
-        // question a result list raises.
-        var cbuf: [96]u8 = undefined;
-        const summary = std.fmt.bufPrint(&cbuf, "{d} in {d} files{s}", .{
-            self.sr.hits.len,
-            self.sr.files.len,
-            @as([]const u8, if (self.sr.truncated) " (capped)" else ""),
-        }) catch "";
+        // question a result list raises — and, for a list nobody typed,
+        // what it is a list OF, since the box above says something else.
+        var cbuf: [160]u8 = undefined;
+        const summary = switch (self.sr_kind) {
+            .grep => std.fmt.bufPrint(&cbuf, "{d} in {d} files{s}", .{
+                self.sr.hits.len,
+                self.sr.files.len,
+                @as([]const u8, if (self.sr.truncated) " (capped)" else ""),
+            }) catch "",
+            .references => std.fmt.bufPrint(&cbuf, "{d} references to {s}{s}", .{
+                self.sr.hits.len,
+                self.sr.query,
+                @as([]const u8, if (self.sr.truncated) " (capped)" else ""),
+            }) catch "",
+        };
         _ = ui.text(tx, y + (row_h - ch) / 2, summary, th.bar_fg, bg);
         y += row_h;
 

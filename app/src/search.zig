@@ -18,6 +18,10 @@
 
 const std = @import("std");
 const filelist = @import("filelist.zig");
+// For the UTF-16 → byte column conversion only. lsp.zig is a leaf that
+// imports nothing but std, and a second copy of that conversion is
+// exactly the kind of subtlety that drifts.
+const lsp = @import("lsp.zig");
 
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn read(fd: c_int, buf: [*]u8, n: usize) isize;
@@ -41,6 +45,14 @@ pub const Hit = struct {
     line: u32,
     /// Byte column of the match within the (possibly clipped) text.
     col: u32,
+    /// Byte column of the match in the FILE's line — what a JUMP needs.
+    ///
+    /// It differs from `col` by exactly the indentation that was trimmed
+    /// off for display, and the difference is the whole reason both
+    /// exist: `col` points into `text` and is where a highlight goes,
+    /// while a cursor placed at `col` in the real buffer would land in
+    /// the middle of the indent of a deeply nested hit.
+    file_col: u32,
     /// The matched line, trimmed of leading blanks and clipped.
     text: []const u8,
 };
@@ -159,11 +171,154 @@ fn scanFile(
             .file = this_file.?,
             .line = lineno,
             .col = @intCast(s.col),
+            .file_col = @intCast(at),
             .text = text,
         });
         if (hits.items.len >= max_hits) return true;
     }
     return false;
+}
+
+// ------------------------------------------------- a list somebody else made
+
+/// One place to show, named from outside. A language server's answer
+/// arrives as positions with no text attached, and the panel shows text
+/// — so somebody has to open the file, and it may as well be the module
+/// that already knows how to read one and how to clip a line.
+///
+/// Coordinates are the PROTOCOL's: 0-based line, UTF-16 column. They are
+/// converted here because the conversion needs the line, and the line is
+/// what this function goes and gets.
+pub const Mark = struct {
+    /// Absolute.
+    path: []const u8,
+    line: u32 = 0,
+    col: u32 = 0,
+};
+
+fn markLess(_: void, a: Mark, b: Mark) bool {
+    const c = std.mem.order(u8, a.path, b.path);
+    if (c != .eq) return c == .lt;
+    if (a.line != b.line) return a.line < b.line;
+    return a.col < b.col;
+}
+
+/// Turn marks into the same Results the panel gets from a grep, reading
+/// each distinct file once. `label` is what the panel calls the list —
+/// the symbol, not a query, since nothing here was searched for.
+///
+/// `marks` is SORTED IN PLACE: grouping by file is what makes this one
+/// read per file rather than one per hit, and the panel groups by file
+/// anyway. Caller keeps ownership of the marks and their paths.
+///
+/// Same threading rule as run(): no locks, no frame — it opens files.
+pub fn atMarks(gpa: std.mem.Allocator, root: []const u8, label: []const u8, marks: []Mark) Results {
+    var res: Results = .{};
+    std.mem.sort(Mark, marks, {}, markLess);
+
+    var files: std.ArrayListUnmanaged([]const u8) = .empty;
+    var hits: std.ArrayListUnmanaged(Hit) = .empty;
+
+    var i: usize = 0;
+    while (i < marks.len) {
+        // One file's run of marks.
+        var j = i + 1;
+        while (j < marks.len and std.mem.eql(u8, marks[j].path, marks[i].path)) j += 1;
+        defer i = j;
+        if (files.items.len >= max_files_with_hits or hits.items.len >= max_hits) {
+            res.truncated = true;
+            break;
+        }
+
+        // A reference can land OUTSIDE the workspace — the standard
+        // library, a module cache, a vendored dependency. Showing the
+        // absolute path is the honest answer there; trimming it to a
+        // relative one would produce a path that resolves to nothing.
+        const rel = relativeTo(root, marks[i].path);
+        const owned = gpa.dupe(u8, rel) catch break;
+        files.append(gpa, owned) catch {
+            gpa.free(owned);
+            break;
+        };
+        const file_idx: u32 = @intCast(files.items.len - 1);
+        res.scanned += 1;
+
+        const data = readWhole(gpa, marks[i].path);
+        defer if (data) |d| gpa.free(d);
+
+        for (marks[i..j]) |m| {
+            if (hits.items.len >= max_hits) {
+                res.truncated = true;
+                break;
+            }
+            // A file we could not read still shows its locations: the
+            // reference is real whether or not we can quote it, and a
+            // silently shorter list is the worse failure.
+            const raw = if (data) |d| lineAt(d, m.line) else "";
+            const byte_col = lsp.byteColFromUtf16(raw, m.col);
+            const s = shownLine(raw, byte_col);
+            const text = gpa.dupe(u8, s.text) catch break;
+            hits.append(gpa, .{
+                .file = file_idx,
+                .line = m.line + 1,
+                .col = @intCast(s.col),
+                .file_col = @intCast(byte_col),
+                .text = text,
+            }) catch {
+                gpa.free(text);
+                break;
+            };
+        }
+    }
+
+    res.files = files.toOwnedSlice(gpa) catch &.{};
+    res.hits = hits.toOwnedSlice(gpa) catch &.{};
+    res.root = gpa.dupe(u8, root) catch "";
+    res.query = gpa.dupe(u8, label) catch "";
+    return res;
+}
+
+/// `abs` shown against `root`: root-relative when it is inside, and the
+/// absolute path untouched when it is not. The leading `/` is what the
+/// panel and its jump both read to tell the two apart.
+fn relativeTo(root: []const u8, abs: []const u8) []const u8 {
+    if (root.len == 0 or abs.len <= root.len) return abs;
+    if (!std.mem.startsWith(u8, abs, root)) return abs;
+    if (abs[root.len] != '/') return abs;
+    return abs[root.len + 1 ..];
+}
+
+/// Line `n` (0-based) of `data`, without its newline; "" past the end.
+fn lineAt(data: []const u8, n: u32) []const u8 {
+    var it = std.mem.splitScalar(u8, data, '\n');
+    var i: u32 = 0;
+    while (it.next()) |line| : (i += 1) {
+        if (i == n) return std.mem.trimEnd(u8, line, "\r");
+    }
+    return "";
+}
+
+/// The whole file, capped, or null. Same read path scanFile uses.
+fn readWhole(gpa: std.mem.Allocator, abs: []const u8) ?[]u8 {
+    var zbuf: [1024]u8 = undefined;
+    if (abs.len >= zbuf.len) return null;
+    @memcpy(zbuf[0..abs.len], abs);
+    zbuf[abs.len] = 0;
+    const fd = open(zbuf[0..abs.len :0], 0);
+    if (fd < 0) return null;
+    defer _ = close(fd);
+    var buf = gpa.alloc(u8, max_file_bytes) catch return null;
+    var len: usize = 0;
+    while (len < buf.len) {
+        const n = read(fd, buf[len..].ptr, buf.len - len);
+        if (n <= 0) break;
+        len += @intCast(n);
+    }
+    if (looksBinary(buf[0..@min(len, 8192)])) {
+        gpa.free(buf);
+        return null;
+    }
+    return gpa.realloc(buf, len) catch buf[0..len];
 }
 
 /// Search `root` for `query`. Caller owns the result.
@@ -246,4 +401,87 @@ test "shownLine never clips past the match it is showing" {
     const s = shownLine(&long, 3);
     try t.expectEqual(@as(usize, max_line_shown), s.text.len);
     try t.expectEqual(@as(usize, 3), s.col);
+}
+
+test "relativeTo shows the workspace path inside, the whole path outside" {
+    const t = std.testing;
+    try t.expectEqualStrings("src/a.go", relativeTo("/w", "/w/src/a.go"));
+    // Outside the root the absolute path is the only one that resolves.
+    try t.expectEqualStrings("/usr/lib/go/fmt.go", relativeTo("/w", "/usr/lib/go/fmt.go"));
+    // A sibling whose name merely STARTS with the root is not inside it.
+    try t.expectEqualStrings("/workspace/a.go", relativeTo("/w", "/workspace/a.go"));
+    try t.expectEqualStrings("/w/a.go", relativeTo("", "/w/a.go"));
+}
+
+test "lineAt counts from zero and runs off the end quietly" {
+    const t = std.testing;
+    const data = "one\ntwo\r\nthree\n";
+    try t.expectEqualStrings("one", lineAt(data, 0));
+    // The \r goes with the newline, or every hit on a CRLF file would
+    // show a stray control byte at the end of its text.
+    try t.expectEqualStrings("two", lineAt(data, 1));
+    try t.expectEqualStrings("three", lineAt(data, 2));
+    try t.expectEqualStrings("", lineAt(data, 9));
+}
+
+test "atMarks reads each file once and keeps what it cannot read" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    const io = t.io;
+    const cwd = std.Io.Dir.cwd();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var root_buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    var a_buf: [160]u8 = undefined;
+    const a = try std.fmt.bufPrint(&a_buf, "{s}/a.txt", .{root});
+    var b_buf: [160]u8 = undefined;
+    const b = try std.fmt.bufPrint(&b_buf, "{s}/b.txt", .{root});
+    try cwd.writeFile(io, .{ .sub_path = a, .data = "alpha\nbeta ref\ngamma ref\n" });
+    // The é is two bytes and ONE utf-16 unit, so a column passed
+    // through unconverted lands one byte early — which is the whole
+    // reason this conversion happens where the line is.
+    try cwd.writeFile(io, .{ .sub_path = b, .data = "  héllo ref\n" });
+
+    var marks = [_]Mark{
+        // Deliberately out of order, and with the two a.txt marks split
+        // apart: grouping is what makes this one read per file.
+        .{ .path = b, .line = 0, .col = 8 },
+        .{ .path = a, .line = 2, .col = 6 },
+        .{ .path = "/nonexistent/gone.txt", .line = 4, .col = 0 },
+        .{ .path = a, .line = 1, .col = 5 },
+    };
+    var res = atMarks(gpa, root, "ref", &marks);
+    defer res.deinit(gpa);
+
+    try t.expectEqualStrings("ref", res.query);
+    try t.expectEqual(@as(usize, 3), res.files.len);
+    try t.expectEqual(@as(usize, 4), res.hits.len);
+
+    // Sorted by path, so a.txt's two hits are adjacent and in line order.
+    try t.expectEqualStrings("a.txt", res.files[res.hits[0].file]);
+    try t.expectEqual(@as(u32, 2), res.hits[0].line); // 0-based 1 → shown 2
+    try t.expectEqualStrings("beta ref", res.hits[0].text);
+    try t.expectEqual(@as(u32, 5), res.hits[0].col);
+    // Nothing was trimmed off this line, so the two agree.
+    try t.expectEqual(@as(u32, 5), res.hits[0].file_col);
+    try t.expectEqual(res.hits[0].file, res.hits[1].file);
+    try t.expectEqual(@as(u32, 3), res.hits[1].line);
+
+    // b.txt: indentation trimmed, and the column converted THEN moved.
+    const bh = res.hits[2];
+    try t.expectEqualStrings("b.txt", res.files[bh.file]);
+    try t.expectEqualStrings("héllo ref", bh.text);
+    try t.expectEqual(@as(u32, 7), bh.col);
+    try t.expectEqualStrings("ref", bh.text[bh.col..][0..3]);
+    // Two spaces of indent were trimmed for display; a cursor placed at
+    // 7 in the real line would land inside "héllo".
+    try t.expectEqual(@as(u32, 9), bh.file_col);
+
+    // The file we could not open is still a location you can see.
+    const gone = res.hits[3];
+    try t.expectEqualStrings("/nonexistent/gone.txt", res.files[gone.file]);
+    try t.expectEqual(@as(u32, 5), gone.line);
+    try t.expectEqualStrings("", gone.text);
 }

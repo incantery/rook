@@ -76,8 +76,10 @@ two panes is one document. `:w` refuses a file an agent changed underneath
 it.
 
 **LSP**: diagnostics in the gutter, `]d` to walk them, go-to-definition,
-hover. Go, Python and TypeScript/TSX in the catalog; adding a language is
-data, not code.
+hover, and `gr` for every use of a symbol — which lands in the same side
+panel find-in-files uses, grouped by file and walkable with `j`/`k`/⏎.
+Go, Python and TypeScript/TSX in the catalog; adding a language is data,
+not code.
 
 **Navigation and chrome**: a command registry with a ⌘K palette and `:Ex`
 commands from the editor, which-key on an unanswered leader, ⌘P file

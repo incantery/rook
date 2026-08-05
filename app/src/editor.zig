@@ -182,6 +182,10 @@ pub const BufHit = struct { a: usize, b: usize, close: usize, idx: usize };
 /// `beside` reuses or splits off the neighbour (the tree sidebar's).
 pub const OpenHow = enum { here, beside, split_right, split_down };
 
+/// A word and where on its line it starts. Borrowed from the buffer, so
+/// it is only good until the next edit.
+pub const Word = struct { text: []const u8, col: usize };
+
 /// What shape a register holds. `block` is a rectangle, stored one row
 /// per line — it is the shape, not the text, that makes `p` put it back
 /// as a rectangle.
@@ -506,6 +510,12 @@ pub const Editor = struct {
     /// later — so these return nothing.
     lsp_hover: ?*const fn (*anyopaque, *Editor) void = null,
     lsp_definition: ?*const fn (*anyopaque, *Editor) void = null,
+    /// `gr` — every use of the symbol, which lands in a LIST rather than
+    /// as a jump. There is no buffer-only fallback the way `gd` has one:
+    /// a first-occurrence search can guess where something is defined,
+    /// but "everywhere it is used" across a repo is a question only the
+    /// server can answer, and a wrong list reads as a right one.
+    lsp_references: ?*const fn (*anyopaque, *Editor) void = null,
     /// Debounce state: the version last OBSERVED changing, and when.
     /// Sync fires when typing stops, not on every keystroke — a
     /// full-text didChange per character is a lot of pipe for an
@@ -3529,6 +3539,18 @@ pub const Editor = struct {
                         f(self.lsp_ctx.?, self);
                     } else self.gotoDefinition();
                 },
+                // vim spells `gr{char}` "replace one character in virtual
+                // replace mode" — a key nobody presses, attached to a
+                // mode rook does not have. Every LSP-shaped editor since
+                // has spent it on references, and that is the habit
+                // arriving here.
+                'r' => {
+                    self.count = 0;
+                    self.op = 0;
+                    if (self.lsp_references) |f| {
+                        f(self.lsp_ctx.?, self);
+                    } else self.setStatus("no language server for this file", .{}, false);
+                },
                 'u', 'U', '~' => {
                     if (self.inVisual()) {
                         self.visualOp(ch);
@@ -5061,24 +5083,36 @@ pub const Editor = struct {
     /// pattern. Literal, like everything `/` does: `*` on `foo` also
     /// finds `foobar`, because this engine has no word boundaries to
     /// anchor with yet.
-    fn searchWord(self: *Editor, fwd: bool) void {
-        self.count = 0;
-        self.op = 0;
+    /// The word under (or next after) the cursor, borrowed from its line.
+    ///
+    /// vim's rule, which `*` has always used: from the cursor, skip to
+    /// the next word character on THIS line, then take the whole run.
+    /// Standing on a space finds the word to your right rather than
+    /// nothing, which is why `*` works in the middle of an indent.
+    pub fn wordUnder(self: *Editor) ?Word {
         const s = self.lineText(self.cline);
         var a = self.ccol;
         while (a < s.len and charClass(s[a]) != 1) a += 1;
-        if (a >= s.len) {
-            self.setStatus("no word under the cursor", .{}, true);
-            return;
-        }
+        if (a >= s.len) return null;
         while (a > 0 and charClass(s[a - 1]) == 1) a -= 1;
         var b = a;
         while (b < s.len and charClass(s[b]) == 1) b += 1;
+        return .{ .text = s[a..b], .col = a };
+    }
+
+    fn searchWord(self: *Editor, fwd: bool) void {
+        self.count = 0;
+        self.op = 0;
+        const word = self.wordUnder() orelse {
+            self.setStatus("no word under the cursor", .{}, true);
+            return;
+        };
+        const a = word.col;
         // Anchored, which is what `*` has always meant: `*` on `foo`
         // must not stop on `foobar`. The word is alphanumeric plus `_`
         // by construction, so nothing in it needs escaping.
         var pbuf: [max_indent]u8 = undefined;
-        const pat = std.fmt.bufPrint(&pbuf, "\\<{s}\\>", .{s[a..b]}) catch return;
+        const pat = std.fmt.bufPrint(&pbuf, "\\<{s}\\>", .{word.text}) catch return;
         if (!self.setSearch(pat, false)) return;
         self.search_fwd = fwd;
         // Start from the word's first byte so a forward search leaves

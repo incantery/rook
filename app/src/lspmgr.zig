@@ -152,7 +152,7 @@ const Entry = struct {
     srv: *lsp.Server,
 };
 
-const AskKind = enum { hover, definition };
+const AskKind = enum { hover, definition, references };
 
 const Ask = struct {
     id: u32,
@@ -160,6 +160,13 @@ const Ask = struct {
     /// The file the question was asked about, owned. The answer goes to
     /// whichever pane is showing this path when it lands — or nowhere.
     path: []const u8,
+    /// The word the question was asked ABOUT, owned; "" when the caller
+    /// had nothing to name. Carried so a list can title itself with the
+    /// symbol you asked about rather than with whatever is under the
+    /// cursor by the time the server answers — the cursor moves while a
+    /// round trip is in flight, and a list labelled with the wrong
+    /// symbol is worse than one labelled with none.
+    symbol: []const u8 = "",
 };
 
 /// The one line of a hover worth putting in a status row.
@@ -209,11 +216,26 @@ const FileDiags = struct {
     items: []lsp.Diagnostic,
 };
 
+/// One place a symbol is used.
+///
+/// Still in the PROTOCOL's coordinates — 0-based lines, UTF-16 columns —
+/// because converting a column needs the line it sits on, and these name
+/// files that may not be open in any pane. Whoever reads the text does
+/// the conversion, the same rule diagnostics follow.
+pub const Site = struct {
+    /// Absolute, owned.
+    path: []const u8,
+    line: u32 = 0,
+    col: u32 = 0,
+};
+
 pub const Answer = union(enum) {
     /// Hover text for `path`. Owned by the caller.
     hover: struct { path: []const u8, text: []const u8 },
     /// Where the definition is. Owned by the caller.
     definition: struct { path: []const u8, target: []const u8, line: u32, col: u32 },
+    /// Every use of a symbol. Owned by the caller, sites and all.
+    references: struct { path: []const u8, symbol: []const u8, sites: []Site },
     /// The question was answered with nothing. Still delivered, because
     /// the pane that asked said "asking…" and has to be told.
     none: struct { path: []const u8, kind: AskKind },
@@ -227,6 +249,12 @@ pub const Answer = union(enum) {
             .definition => |d| {
                 gpa.free(d.path);
                 gpa.free(d.target);
+            },
+            .references => |r| {
+                gpa.free(r.path);
+                gpa.free(r.symbol);
+                for (r.sites) |s| gpa.free(s.path);
+                gpa.free(r.sites);
             },
             .none => |n| gpa.free(n.path),
         }
@@ -258,7 +286,10 @@ pub const Manager = struct {
             self.gpa.free(e.root);
         }
         self.servers.deinit(self.gpa);
-        for (self.asks.items) |a| self.gpa.free(a.path);
+        for (self.asks.items) |a| {
+            self.gpa.free(a.path);
+            self.gpa.free(a.symbol);
+        }
         self.asks.deinit(self.gpa);
         for (self.diags.items) |d| {
             self.gpa.free(d.path);
@@ -488,26 +519,43 @@ pub const Manager = struct {
 
     // ---------------------------------------------------------- asking
 
-    fn recordAsk(self: *Manager, id: u32, kind: AskKind, path: []const u8) void {
+    fn recordAsk(self: *Manager, id: u32, kind: AskKind, path: []const u8, symbol: []const u8) void {
         if (self.asks.items.len >= max_asks) {
             const old = self.asks.orderedRemove(0);
             self.gpa.free(old.path);
+            self.gpa.free(old.symbol);
         }
         const owned = self.gpa.dupe(u8, path) catch return;
-        self.asks.append(self.gpa, .{ .id = id, .kind = kind, .path = owned }) catch self.gpa.free(owned);
+        const sym = self.gpa.dupe(u8, symbol) catch {
+            self.gpa.free(owned);
+            return;
+        };
+        self.asks.append(self.gpa, .{ .id = id, .kind = kind, .path = owned, .symbol = sym }) catch {
+            self.gpa.free(owned);
+            self.gpa.free(sym);
+        };
     }
 
     pub fn hover(self: *Manager, path: []const u8, pos: lsp.Position) bool {
         const srv = self.ensure(path) orelse return false;
         const id = srv.hover(path, pos) orelse return false;
-        self.recordAsk(id, .hover, path);
+        self.recordAsk(id, .hover, path, "");
         return true;
     }
 
     pub fn definition(self: *Manager, path: []const u8, pos: lsp.Position) bool {
         const srv = self.ensure(path) orelse return false;
         const id = srv.definition(path, pos) orelse return false;
-        self.recordAsk(id, .definition, path);
+        self.recordAsk(id, .definition, path, "");
+        return true;
+    }
+
+    /// `symbol` is only ever a label — the server answers from the
+    /// POSITION, so a caller with nothing to name may pass "".
+    pub fn references(self: *Manager, path: []const u8, pos: lsp.Position, symbol: []const u8) bool {
+        const srv = self.ensure(path) orelse return false;
+        const id = srv.references(path, pos, true) orelse return false;
+        self.recordAsk(id, .references, path, symbol);
         return true;
     }
 
@@ -516,6 +564,12 @@ pub const Manager = struct {
             if (a.id == id) return self.asks.orderedRemove(i);
         }
         return null;
+    }
+
+    /// An Ask owns two strings, and the arm that took it owns both.
+    fn freeAsk(self: *Manager, a: Ask) void {
+        self.gpa.free(a.path);
+        self.gpa.free(a.symbol);
     }
 
     // --------------------------------------------------------- draining
@@ -536,7 +590,7 @@ pub const Manager = struct {
                     },
                     .hover => |h| {
                         const ask = self.takeAsk(h.id) orelse continue;
-                        defer self.gpa.free(ask.path);
+                        defer self.freeAsk(ask);
                         const text = self.gpa.dupe(u8, h.text) catch continue;
                         const p = self.gpa.dupe(u8, ask.path) catch {
                             self.gpa.free(text);
@@ -547,7 +601,7 @@ pub const Manager = struct {
                     },
                     .definition => |d| {
                         const ask = self.takeAsk(d.id) orelse continue;
-                        defer self.gpa.free(ask.path);
+                        defer self.freeAsk(ask);
                         if (d.locs.len == 0) continue;
                         // The first location. A symbol with several
                         // definitions wants a picker, and that is the
@@ -565,9 +619,39 @@ pub const Manager = struct {
                         } });
                         changed = true;
                     },
+                    .references => |r| {
+                        const ask = self.takeAsk(r.id) orelse continue;
+                        defer self.freeAsk(ask);
+                        // An empty list is "nobody uses this", which is
+                        // an ANSWER — but the caller is released by the
+                        // .empty the session pushes instead, so there is
+                        // nothing here to deliver.
+                        if (r.locs.len == 0) continue;
+                        const sites = self.gpa.alloc(Site, r.locs.len) catch continue;
+                        var n: usize = 0;
+                        for (r.locs) |l| {
+                            const p = self.gpa.dupe(u8, l.path) catch continue;
+                            sites[n] = .{ .path = p, .line = l.range.start.line, .col = l.range.start.col };
+                            n += 1;
+                        }
+                        const kept = self.gpa.realloc(sites, n) catch sites[0..n];
+                        const p = self.gpa.dupe(u8, ask.path) catch {
+                            for (kept) |s| self.gpa.free(s.path);
+                            self.gpa.free(kept);
+                            continue;
+                        };
+                        const sym = self.gpa.dupe(u8, ask.symbol) catch {
+                            for (kept) |s| self.gpa.free(s.path);
+                            self.gpa.free(kept);
+                            self.gpa.free(p);
+                            continue;
+                        };
+                        self.pushAnswer(.{ .references = .{ .path = p, .symbol = sym, .sites = kept } });
+                        changed = true;
+                    },
                     .empty => |x| {
                         const ask = self.takeAsk(x.id) orelse continue;
-                        defer self.gpa.free(ask.path);
+                        defer self.freeAsk(ask);
                         const p = self.gpa.dupe(u8, ask.path) catch continue;
                         self.pushAnswer(.{ .none = .{ .path = p, .kind = ask.kind } });
                         changed = true;

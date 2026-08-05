@@ -61,7 +61,7 @@ const scenarios = [_]Scenario{
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
     .{ .name = "explorerauto", .what = "explorer-auto: the sidebar opens at launch inside a repo, and never takes the keys", .run = explorerAuto },
-    .{ .name = "lsp", .what = "language server: diagnostics reach the gutter, ]d walks them, an edit re-diagnoses", .run = lspScenario },
+    .{ .name = "lsp", .what = "language server: diagnostics reach the gutter, ]d walks them, gr lists every use", .run = lspScenario },
     .{ .name = "lsppython", .what = "a second language is data: python roots at pyproject.toml and lands the same way", .run = lspPython },
     .{ .name = "lspts", .what = "ts and tsx share one server, root at the tsconfig, and split only on the grammar", .run = lspTs },
     .{ .name = "docshare", .what = "one file in two panes is ONE document: edits, dirty flag and :w are shared", .run = docShare },
@@ -3263,7 +3263,10 @@ fn findInFiles(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.waitCtl("panes", "edit:b.zig", 5000);
     try h.expectEq("no pane was split", 1, try app.paneCount());
     var buf: [16 * 1024]u8 = undefined;
-    try h.expectContains(try app.screen(&buf), "2:1", "the cursor landed on the hit's line");
+    // 2:5, not 2:1 — the line is `    needle indented`, and the jump
+    // lands on the MATCH. The shown text has its indent trimmed off,
+    // so the column that travels is the file's, not the row's.
+    try h.expectContains(try app.screen(&buf), "2:5", "the cursor landed on the hit itself");
 
     // ⌘⇧F again FOCUSES the box — it must never toggle away results
     // you are reading (the other tenants toggle; this one does not).
@@ -3364,6 +3367,11 @@ fn lspScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
     // real tab so the column under test is the one a Go file actually
     // has, and Zig's \\ literals refuse tabs.
     try h.writeFile(main_go, "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(nope())\n}\n");
+    // A second file, never opened in a pane. `gr` reaches it, and the
+    // only way its text can appear in the results panel is off disk.
+    var other_buf: [288]u8 = undefined;
+    const other_go = try std.fmt.bufPrint(&other_buf, "{s}/other.go", .{proj});
+    try h.writeFile(other_go, "package main\n\nfunc nope() int {\n\treturn 1\n}\n");
 
     // The fake server is THIS BINARY, re-exec'd. See fakeLsp below.
     var envval_buf: [640]u8 = undefined;
@@ -3433,6 +3441,46 @@ fn lspScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
     // protocol's 0-based line 4), which is where the cursor must land.
     _ = try app.ctl("type gd");
     _ = try app.waitCtl("dump", "5:6", 5_000);
+
+    // `gr` — every use, which is a LIST rather than a jump. Put the
+    // cursor back on `nope` first: the list is titled with the word you
+    // asked about, and `gd` left it on `main`.
+    _ = try app.ctl("type ]d");
+    _ = try app.ctl("type gr");
+    {
+        const panel = try app.waitCtl("sidepane", "kind:references", 8_000);
+        try h.expectContains(panel, "label:nope", "the list is titled with the symbol, not the last thing typed");
+        try h.expectContains(panel, "results:3 files:2", "three uses across two files");
+        // Sorted and grouped by file, then by line, whatever order the
+        // server answered in — and 1-based, like every line number a
+        // human reads.
+        try h.expectContains(panel, "main.go:5: func main() {", "the declaration, from the file in the pane");
+        // The leading tab is trimmed off the shown text, and the line
+        // number is still line 6.
+        try h.expectContains(panel, "main.go:6: fmt.Println(nope())", "and the call below it");
+        try h.expectContains(panel, "other.go:3: func nope() int {", "including a file no pane ever opened");
+        // The list has the keys, not the box: you asked a question, and
+        // the answer is something to walk.
+        try h.expectContains(panel, "typing:no", "the list takes the keys, not the search box");
+        try h.expectContains(panel, "focus:panel", "and the panel has the keyboard");
+        // The selection starts at the top.
+        try h.expectContains(panel, "*main.go:5", "the first row is selected");
+    }
+
+    // Walk to the third row and go there. That row is other.go — a file
+    // no pane had open — so Enter has to OPEN a document, not just move
+    // a cursor inside one.
+    _ = try app.ctl("type jj");
+    try h.expectContains(try app.ctl("sidepane"), "*other.go:3", "j walks the list");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("panes", "edit:other.go", 5_000);
+    {
+        var buf: [16 * 1024]u8 = undefined;
+        // Line 3, and the column of `nope` within `func nope() int {` —
+        // landing in column one and making you hunt for the symbol is
+        // the whole reason the column travels with the row.
+        try h.expectContains(try app.screen(&buf), "3:6", "landing on the symbol, not at the start of its line");
+    }
 }
 
 
@@ -3539,6 +3587,28 @@ fn fakeHandle(gpa: std.mem.Allocator, body: []const u8, target: []const u8) !voi
                 "\"targetRange\":{{\"start\":{{\"line\":4,\"character\":0}},\"end\":{{\"line\":6,\"character\":1}}}}," ++
                 "\"targetSelectionRange\":{{\"start\":{{\"line\":4,\"character\":5}},\"end\":{{\"line\":4,\"character\":9}}}}}}]}}",
             .{ id orelse 0, target },
+        );
+        try fakeSend(gpa, w.written());
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/references")) {
+        // Three uses in two files, and deliberately NOT in sorted
+        // order: grouping and ordering are the client's job, and a
+        // server that handed them over already sorted would hide it.
+        //
+        // The sibling is never opened in a pane — its line text can only
+        // reach the panel by being read off disk, which is the half of
+        // this that a unit test cannot reach.
+        const dir = std.fs.path.dirname(target) orelse "/";
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[" ++
+                "{{\"uri\":\"file://{s}/other.go\",\"range\":{{\"start\":{{\"line\":2,\"character\":5}}," ++
+                "\"end\":{{\"line\":2,\"character\":9}}}}}}," ++
+                "{{\"uri\":\"file://{s}\",\"range\":{{\"start\":{{\"line\":5,\"character\":13}}," ++
+                "\"end\":{{\"line\":5,\"character\":17}}}}}}," ++
+                "{{\"uri\":\"file://{s}\",\"range\":{{\"start\":{{\"line\":4,\"character\":5}}," ++
+                "\"end\":{{\"line\":4,\"character\":9}}}}}}]}}",
+            .{ id orelse 0, dir, target, target },
         );
         try fakeSend(gpa, w.written());
         return;

@@ -260,7 +260,12 @@ pub const Event = union(enum) {
     ready,
     diagnostics: Diagnostics,
     hover: Hover,
-    definition: Definition,
+    definition: Locations,
+    /// Every use of the symbol. Same payload as a definition — a list of
+    /// places — and deliberately a SEPARATE tag: "go here" and "here is
+    /// where they all are" are different answers, and a caller that
+    /// could not tell them apart would jump on a references reply.
+    references: Locations,
     /// A request we sent is answered and has nothing to show: a null
     /// result, an error reply, or a server that died holding it. The
     /// caller MUST be released either way, or whatever it put on screen
@@ -288,7 +293,7 @@ pub const Event = union(enum) {
         range: ?Range = null,
     };
 
-    pub const Definition = struct {
+    pub const Locations = struct {
         id: u32,
         /// Owned, with every path inside it.
         locs: []Location,
@@ -305,7 +310,7 @@ pub const Event = union(enum) {
                 gpa.free(d.items);
             },
             .hover => |*h| gpa.free(h.text),
-            .definition => |*d| {
+            .definition, .references => |*d| {
                 for (d.locs) |l| gpa.free(l.path);
                 gpa.free(d.locs);
             },
@@ -328,7 +333,7 @@ pub const State = enum {
     failed,
 };
 
-const Kind = enum { initialize, hover, definition, shutdown };
+const Kind = enum { initialize, hover, definition, references, shutdown };
 
 const Pending = struct { id: u32, kind: Kind };
 
@@ -347,6 +352,10 @@ const max_pending = 64;
 /// oldest DIAGNOSTIC is dropped (never a reply — replies release
 /// callers).
 const max_events = 256;
+/// Locations kept from one reply. references on a popular symbol is the
+/// only request whose answer is naturally this big; search.zig caps its
+/// own hits at the same order for the same reason.
+const max_locations = 2000;
 
 // ---------------------------------------------------------------- Session
 
@@ -755,7 +764,13 @@ pub const Session = struct {
 
     // --------------------------------------------------------- requests
 
-    fn posParams(self: *Session, path: []const u8, pos: Position) ?[]u8 {
+    /// TextDocumentPositionParams, plus whatever the method adds.
+    ///
+    /// `extra` is spliced in before the closing brace and must start
+    /// with its own comma (`,\"context\":{…}`) — every position request
+    /// in the protocol is this object with fields bolted on, and a
+    /// second builder per method would drift from this one.
+    fn posParamsExtra(self: *Session, path: []const u8, pos: Position, extra: []const u8) ?[]u8 {
         const uri = uriFromPath(self.gpa, path) orelse return null;
         defer self.gpa.free(uri);
         var a: std.Io.Writer.Allocating = .init(self.gpa);
@@ -763,8 +778,14 @@ pub const Session = struct {
         const w = &a.writer;
         w.writeAll("{\"textDocument\":{\"uri\":") catch return null;
         writeJsonString(w, uri);
-        w.print("}},\"position\":{{\"line\":{d},\"character\":{d}}}}}", .{ pos.line, pos.col }) catch return null;
+        w.print("}},\"position\":{{\"line\":{d},\"character\":{d}}}", .{ pos.line, pos.col }) catch return null;
+        w.writeAll(extra) catch return null;
+        w.writeByte('}') catch return null;
         return a.toOwnedSlice() catch null;
+    }
+
+    fn posParams(self: *Session, path: []const u8, pos: Position) ?[]u8 {
+        return self.posParamsExtra(path, pos, "");
     }
 
     /// Returns the request id; the answer arrives as a `.hover` or an
@@ -780,6 +801,22 @@ pub const Session = struct {
         const params = self.posParams(path, pos) orelse return null;
         defer self.gpa.free(params);
         return self.request(.definition, "textDocument/definition", params);
+    }
+
+    /// Every use of the symbol under `pos`, answered as a `.references`
+    /// event carrying the same id.
+    ///
+    /// `include_decl` is in the protocol because some callers want only
+    /// the uses. rook always says true: "where is this used" asked from
+    /// the declaration itself would otherwise answer nothing, which
+    /// reads as a broken key rather than as a precise one.
+    pub fn references(self: *Session, path: []const u8, pos: Position, include_decl: bool) ?u32 {
+        const params = self.posParamsExtra(path, pos, if (include_decl)
+            ",\"context\":{\"includeDeclaration\":true}"
+        else
+            ",\"context\":{\"includeDeclaration\":false}") orelse return null;
+        defer self.gpa.free(params);
+        return self.request(.references, "textDocument/references", params);
     }
 
     // ---------------------------------------------------------- inbound
@@ -1008,7 +1045,8 @@ pub const Session = struct {
             .initialize => self.onInitialized(result),
             .shutdown => {},
             .hover => self.onHover(id, result),
-            .definition => self.onDefinition(id, result),
+            .definition => self.onLocations(id, result, false),
+            .references => self.onLocations(id, result, true),
         }
     }
 
@@ -1034,7 +1072,10 @@ pub const Session = struct {
         } });
     }
 
-    fn onDefinition(self: *Session, id: u32, result: std.json.Value) void {
+    /// definition and references answer the same shape — a Location, an
+    /// array of them, or null — so they read the same. `many` picks the
+    /// tag the caller is waiting on.
+    fn onLocations(self: *Session, id: u32, result: std.json.Value, many: bool) void {
         var locs: std.ArrayListUnmanaged(Location) = .empty;
         defer locs.deinit(self.gpa);
 
@@ -1048,6 +1089,12 @@ pub const Session = struct {
             // ours does, so BOTH shapes have to be read or "go to
             // definition does nothing" is the symptom.
             .array => |arr| for (arr.items) |item| {
+                // References to a common symbol run to thousands, and
+                // the list is the SERVER's to decide. Past the cap the
+                // rest are dropped rather than allocated — nobody reads
+                // hit 2001, and an unbounded reply is the one input this
+                // client cannot refuse.
+                if (locs.items.len >= max_locations) break;
                 if (self.readLocation(item)) |l| locs.append(self.gpa, l) catch {};
             },
             else => {},
@@ -1061,7 +1108,8 @@ pub const Session = struct {
             for (locs.items) |l| self.gpa.free(l.path);
             return;
         };
-        self.push(.{ .definition = .{ .id = id, .locs = owned } });
+        const payload: Event.Locations = .{ .id = id, .locs = owned };
+        self.push(if (many) .{ .references = payload } else .{ .definition = payload });
     }
 
     fn readLocation(self: *Session, v: std.json.Value) ?Location {
@@ -1460,6 +1508,14 @@ pub const Server = struct {
     pub fn definition(self: *Server, path: []const u8, pos: Position) ?u32 {
         self.mu.lock();
         const id = self.sess.definition(path, pos);
+        self.mu.unlock();
+        self.poke();
+        return id;
+    }
+
+    pub fn references(self: *Server, path: []const u8, pos: Position, include_decl: bool) ?u32 {
+        self.mu.lock();
+        const id = self.sess.references(path, pos, include_decl);
         self.mu.unlock();
         self.poke();
         return id;
@@ -1878,6 +1934,88 @@ test "definition reads Location, Location[] and gopls's LocationLink[]" {
     var e3 = sess.nextEvent().?;
     defer e3.deinit(gpa);
     try testing.expect(e3 == .empty);
+}
+
+test "references asks with a context and answers as its own tag" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    try readySession(&sess, false);
+    var ready = sess.nextEvent().?;
+    ready.deinit(gpa);
+    sess.didOpen("/tmp/work/a.go", "package main\n");
+    sess.consumeOutbound(sess.outbound().len);
+
+    const id1 = sess.references("/tmp/work/a.go", .{ .line = 3, .col = 7 }, true).?;
+    // The CONTEXT is the whole difference between this request and
+    // definition's, and a server given params without one answers an
+    // error — so the bytes are asserted, not just the reply handling.
+    const sent = sess.outbound();
+    try testing.expect(std.mem.indexOf(u8, sent, "\"method\":\"textDocument/references\"") != null);
+    try testing.expect(std.mem.indexOf(u8, sent, "\"context\":{\"includeDeclaration\":true}") != null);
+    try testing.expect(std.mem.indexOf(u8, sent, "\"line\":3,\"character\":7") != null);
+
+    const r1 = try std.fmt.allocPrint(gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[" ++
+        "{{\"uri\":\"file:///tmp/work/a.go\",\"range\":{{\"start\":{{\"line\":3,\"character\":7}}," ++
+        "\"end\":{{\"line\":3,\"character\":10}}}}}}," ++
+        "{{\"uri\":\"file:///tmp/work/b.go\",\"range\":{{\"start\":{{\"line\":9,\"character\":2}}," ++
+        "\"end\":{{\"line\":9,\"character\":5}}}}}}]}}", .{id1});
+    defer gpa.free(r1);
+    const f1 = try framed(gpa, r1);
+    defer gpa.free(f1);
+    sess.feed(f1);
+    var e1 = sess.nextEvent().?;
+    defer e1.deinit(gpa);
+    // A `.definition` here would make the wiring JUMP to the first use
+    // instead of listing them, which is the failure this tag prevents.
+    try testing.expect(e1 == .references);
+    try testing.expectEqual(@as(usize, 2), e1.references.locs.len);
+    try testing.expectEqualStrings("/tmp/work/b.go", e1.references.locs[1].path);
+    try testing.expectEqual(@as(u32, 9), e1.references.locs[1].range.start.line);
+
+    // A symbol nobody uses answers null, and the caller still has to be
+    // released or the panel says "asking…" forever.
+    const id2 = sess.references("/tmp/work/a.go", .{}, false).?;
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(), "\"includeDeclaration\":false") != null);
+    const r2 = try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":null}}", .{id2});
+    defer gpa.free(r2);
+    const f2 = try framed(gpa, r2);
+    defer gpa.free(f2);
+    sess.feed(f2);
+    var e2 = sess.nextEvent().?;
+    defer e2.deinit(gpa);
+    try testing.expect(e2 == .empty);
+}
+
+test "a reply longer than the cap is truncated, not allocated whole" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    try readySession(&sess, false);
+    var ready = sess.nextEvent().?;
+    ready.deinit(gpa);
+    sess.didOpen("/tmp/work/a.go", "package main\n");
+
+    const id = sess.references("/tmp/work/a.go", .{}, true).?;
+    var body: std.Io.Writer.Allocating = .init(gpa);
+    defer body.deinit();
+    const w = &body.writer;
+    try w.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[", .{id});
+    var i: usize = 0;
+    while (i < max_locations + 100) : (i += 1) {
+        if (i > 0) try w.writeByte(',');
+        try w.print(
+            "{{\"uri\":\"file:///tmp/work/b.go\",\"range\":{{\"start\":{{\"line\":{d},\"character\":0}}," ++
+            "\"end\":{{\"line\":{d},\"character\":1}}}}}}", .{ i, i });
+    }
+    try w.writeAll("]}");
+    const f = try framed(gpa, body.written());
+    defer gpa.free(f);
+    sess.feed(f);
+    var e = sess.nextEvent().?;
+    defer e.deinit(gpa);
+    try testing.expectEqual(@as(usize, max_locations), e.references.locs.len);
 }
 
 test "an error reply releases the caller instead of stranding it" {

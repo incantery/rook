@@ -135,6 +135,20 @@ or
 A focused panel eats plain typing; ^H
 .Pq away from a right-edge panel
 hands the keys back, ^L from the edge pane walks in.
+.Pp
+The search tenant has two producers, so it reports
+.Ql kind:grep
+or
+.Ql kind:references
+alongside
+.Ql label: ,
+which is the query for the first and the symbol for the second.
+The box and the list can disagree \(em
+.Ql gr
+leaves whatever you last typed in the box \(em so read
+.Ql kind:
+rather than
+.Ql query: .
 .It Cm welcome
 The onboarding screen, if open, and its choices.
 A FRESH instance

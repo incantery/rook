@@ -802,10 +802,17 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     // The query, what it scanned, and every hit — the
                     // panel's whole state, so find-in-files is
                     // drivable and assertable without pixels.
-                    w.print("query:{s} typing:{s}{s}\nresults:{d} files:{d} scanned:{d}{s}\n", .{
+                    w.print("query:{s} typing:{s}{s} kind:{s} label:{s}\nresults:{d} files:{d} scanned:{d}{s}\n", .{
                         app.sr_query[0..app.sr_query_len],
                         @as([]const u8, if (app.sr_typing) "yes" else "no"),
                         @as([]const u8, if (app.sr_running.load(.acquire)) " running" else ""),
+                        // Which producer filled the list, and what the
+                        // list is OF. The box and the list can disagree
+                        // — `gr` leaves whatever you last typed in the
+                        // box — so a caller reading only `query:` would
+                        // misread the panel.
+                        @tagName(app.sr_kind),
+                        app.sr.query,
                         app.sr.hits.len,
                         app.sr.files.len,
                         app.sr.scanned,
