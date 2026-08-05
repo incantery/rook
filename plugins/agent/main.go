@@ -19,6 +19,12 @@
 // Studio, llama.cpp all speak the same wire — and a non-default base
 // needs no key. Costs are only reported for models the price table
 // knows; a local model shows no cost rather than a made-up one.
+//
+// Digests are journaled to --log (default: rook's state home) and the
+// ring is restored from there at launch — a digest that dies with a
+// relaunch cannot follow you anywhere, and other plugins (the cloud
+// bridge) read the journal to put headlines on the phone. The journal
+// stays on the machine; what leaves is its readers' decision.
 package main
 
 import (
@@ -36,6 +42,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/incantery/rook/plugins/internal/digestlog"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
 
@@ -52,6 +59,7 @@ func main() {
 	keyFile := flag.String("key-file", "", "API key file (default ~/.config/rook/openai_key)")
 	keep := flag.Int("keep", 100, "digests remembered")
 	maxChars := flag.Int("max-chars", 16000, "input cap per reply, in bytes")
+	logPath := flag.String("log", digestlog.DefaultPath(), "digest journal, jsonl (empty disables persistence)")
 	flag.Parse()
 
 	home, _ := os.UserHomeDir()
@@ -79,7 +87,7 @@ func main() {
 		Quiet:  60 * time.Second,
 		Max:    20,
 	}
-	st := &store{keep: *keep}
+	st := newStore(*keep, expandHome(*logPath, home), *window, time.Now())
 	key := apiKey(*keyFile, explicitKeyFile)
 	var sum *Summarizer
 	if notice := nokeyNotice(key, *apiBase, *keyFile); notice != "" {
@@ -171,7 +179,7 @@ func watch(sc *transcript.Scanner, st *store, sum *Summarizer, poll time.Duratio
 				continue
 			}
 			h := shortHash(s.LastText)
-			if done[s.ID] == h {
+			if spent(done, st, s.ID, h) {
 				continue
 			}
 			// Marked spent BEFORE the call: a call that fails lands as an
@@ -185,6 +193,14 @@ func watch(sc *transcript.Scanner, st *store, sum *Summarizer, poll time.Duratio
 	}
 }
 
+// spent reports whether this exact reply was already paid for: the
+// in-memory map covers this run, the restored store covers prior runs
+// — a relaunch must not re-bill a turn the journal already holds. A
+// digest id is sessionID:hash, which is why the store can answer.
+func spent(done map[string]string, st *store, sessionID, h string) bool {
+	return done[sessionID] == h || st.has(sessionID+":"+h)
+}
+
 // shouldSummarize is the trigger edge, alone so a test can walk it.
 func shouldSummarize(baseline bool, old, cur transcript.State, words, minWords int) bool {
 	if baseline || cur != transcript.StateNeedsYou {
@@ -196,14 +212,46 @@ func shouldSummarize(baseline bool, old, cur transcript.State, words, minWords i
 	return words >= minWords
 }
 
-// store is the digest ring: newest first, bounded, in memory only — a
-// digest is a reading aid, and a reading aid that needs a database has
-// misunderstood its job.
+// store is the digest ring: newest first, bounded, in memory — with a
+// journal underneath so the ring survives a relaunch and other plugins
+// can read it. Still not a database: the log is replayed, never
+// queried, and losing it costs history, not correctness.
 type store struct {
 	mu    sync.Mutex
 	ds    []Digest
 	keep  int
-	nokey string // standing notice when there is no API key
+	nokey string        // standing notice when there is no API key
+	log   *digestlog.Log // nil when persistence is off
+}
+
+// newStore restores the ring from the journal — a digest that dies
+// with a relaunch cannot follow anyone anywhere. A log that cannot
+// open degrades to the old in-memory-only behavior; persistence is
+// comfort, not correctness.
+func newStore(keep int, logPath string, window time.Duration, now time.Time) *store {
+	st := &store{keep: keep}
+	if logPath == "" {
+		return st
+	}
+	l, err := digestlog.Open(logPath, window, now)
+	if err != nil {
+		return st
+	}
+	st.log = l
+	st.ds = digestlog.Load(logPath, window, now)
+	if keep > 0 && len(st.ds) > keep {
+		st.ds = st.ds[:keep]
+	}
+	return st
+}
+
+// persist journals one state under the store lock, so log order is the
+// order the panel saw. Failures are dropped: the ring is the truth for
+// this run, the journal only for the next one.
+func (st *store) persist(d Digest) {
+	if st.log != nil {
+		st.log.Append(d)
+	}
 }
 
 func (st *store) add(d Digest) {
@@ -213,6 +261,7 @@ func (st *store) add(d Digest) {
 	if st.keep > 0 && len(st.ds) > st.keep {
 		st.ds = st.ds[:st.keep]
 	}
+	st.persist(d)
 }
 
 func (st *store) has(id string) bool {
@@ -235,6 +284,7 @@ func (st *store) update(id string, f func(*Digest)) bool {
 	for i := range st.ds {
 		if st.ds[i].ID == id {
 			f(&st.ds[i])
+			st.persist(st.ds[i])
 			return true
 		}
 	}
@@ -247,6 +297,9 @@ func (st *store) dismiss(id string) bool {
 	for i, d := range st.ds {
 		if d.ID == id {
 			st.ds = slices.Delete(st.ds, i, i+1)
+			// The tombstone is stamped for the record; the Dismissed
+			// flag alone is what drops it from every reader.
+			st.persist(Digest{ID: id, Dismissed: true, At: time.Now()})
 			return true
 		}
 	}

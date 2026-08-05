@@ -36,6 +36,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/incantery/rook/plugins/internal/digestlog"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
 
@@ -55,6 +56,7 @@ func main() {
 	rookVersion := flag.String("rook-version", "", "reported rook version")
 	busyRate := flag.Float64("busy-rate", 200, "pane output above this (bytes/sec) proves an agent is working")
 	names := flag.String("claude-names", "claude,node", "foreground program names that count as Claude Code")
+	digests := flag.String("digest-log", digestlog.DefaultPath(), "the agent plugin's digest journal (empty sends no digests)")
 	flag.Parse()
 
 	home, _ := os.UserHomeDir()
@@ -84,6 +86,7 @@ func main() {
 		},
 		names:      strings.Split(*names, ","),
 		busyRate:   *busyRate,
+		digestLog:  *digests,
 		kick:       make(chan struct{}, 1),
 		spawnTries: 6,
 		spawnWait:  2 * time.Second,
@@ -116,10 +119,11 @@ type bridge struct {
 	nofile  string // where the token was looked for, for the notice row
 	rookVer string
 
-	sc       *transcript.Scanner
-	names    []string
-	busyRate float64
-	kick     chan struct{} // the "push now" action's doorbell
+	sc        *transcript.Scanner
+	names     []string
+	busyRate  float64
+	digestLog string        // the agent plugin's journal; "" sends no digests
+	kick      chan struct{} // the "push now" action's doorbell
 
 	// How long a spawn waits for its new claude pane to be ready for
 	// the prompt: spawnTries polls of the pane list, spawnWait apart.
@@ -220,7 +224,14 @@ func (br *bridge) push(c *conn, samples map[int]transcript.PaneSample) ([]transc
 	transcript.ComputeRates(samples, panes, now)
 	transcript.Fuse(sessions, panes, br.names, br.busyRate, 45*time.Second)
 
-	st := statusFrom(sessions, br.rookVer)
+	// The journal is re-read every push: the agent plugin owns it, this
+	// process only ever looks. A missing file is a machine without the
+	// agent plugin, which is a machine without digests — not an error.
+	var digests map[string]digestlog.Digest
+	if br.digestLog != "" {
+		digests = digestlog.Latest(digestlog.Load(br.digestLog, br.sc.Window, now))
+	}
+	st := statusFrom(sessions, digests, br.rookVer)
 	body, err := json.Marshal(st)
 	if err != nil {
 		return sessions, panes
@@ -296,14 +307,25 @@ type wireWorkspace struct {
 }
 
 type wireAgent struct {
-	ID        string    `json:"id,omitempty"` // session id — what a phone-issued command names
-	State     string    `json:"state"`        // working | needs_input | quiet
-	Title     string    `json:"title,omitempty"`
-	Ask       string    `json:"ask,omitempty"`
-	AskID     string    `json:"askId,omitempty"`
-	Model     string    `json:"model,omitempty"`
-	CtxPct    int       `json:"ctxPct,omitempty"` // context occupancy, percent of the model's window
-	LastEvent time.Time `json:"lastEvent,omitzero"`
+	ID        string      `json:"id,omitempty"` // session id — what a phone-issued command names
+	State     string      `json:"state"`        // working | needs_input | quiet
+	Title     string      `json:"title,omitempty"`
+	Ask       string      `json:"ask,omitempty"`
+	AskID     string      `json:"askId,omitempty"`
+	Model     string      `json:"model,omitempty"`
+	CtxPct    int         `json:"ctxPct,omitempty"` // context occupancy, percent of the model's window
+	Digest    *wireDigest `json:"digest,omitempty"`
+	LastEvent time.Time   `json:"lastEvent,omitzero"`
+}
+
+// wireDigest is the membrane's artifact, exported: the agent plugin's
+// STE compression of the session's last finished turn. This is the
+// deliberate line of what leaves the machine — headline and bullets
+// travel, the raw turn they compress stays home in the journal.
+type wireDigest struct {
+	Headline string    `json:"headline"`
+	Bullets  []string  `json:"bullets,omitempty"`
+	At       time.Time `json:"at,omitzero"`
 }
 
 // maxCloudAsk is what rook-cloud stores for an ask, whose own comment
@@ -338,7 +360,11 @@ func askText(s string) string {
 // is deliberately conservative in one place: `blocked?` becomes
 // needs_input, because a session that may be sitting on an approval is
 // exactly what you left the room and want to know about.
-func statusFrom(sessions []transcript.Session, rookVer string) wireStatus {
+//
+// digests is the agent plugin's journal, latest per session: this
+// bridge does no language work of its own — it carries the membrane's
+// artifacts, it does not make them.
+func statusFrom(sessions []transcript.Session, digests map[string]digestlog.Digest, rookVer string) wireStatus {
 	host, _ := os.Hostname()
 	st := wireStatus{Hostname: host, RookVersion: rookVer}
 
@@ -363,6 +389,9 @@ func statusFrom(sessions []transcript.Session, rookVer string) wireStatus {
 		}
 		if p := transcript.CtxPct(s.CtxTokens, s.Model); p > 0 {
 			a.CtxPct = p
+		}
+		if d, ok := digests[s.ID]; ok {
+			a.Digest = &wireDigest{Headline: d.Headline, Bullets: d.Bullets, At: d.At}
 		}
 		switch s.State {
 		case transcript.StateNeedsYou:

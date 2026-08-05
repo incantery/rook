@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/incantery/rook/plugins/internal/digestlog"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
 
@@ -30,7 +31,7 @@ func fixtureSessions() []transcript.Session {
 }
 
 func TestStatusFromSpeaksTheCloudsVocabulary(t *testing.T) {
-	st := statusFrom(fixtureSessions(), "v0.42.0")
+	st := statusFrom(fixtureSessions(), nil, "v0.42.0")
 	if st.RookVersion != "v0.42.0" || st.Hostname == "" {
 		t.Fatalf("header: %+v", st)
 	}
@@ -419,8 +420,39 @@ func TestNoAgentPaneRetriesThenDrops(t *testing.T) {
 	}
 }
 
+// The membrane's artifact rides the status: an agent whose session has
+// a journaled digest carries headline and bullets to the phone; one
+// without stays bare. What does NOT travel is the point of the shape —
+// wireDigest has no field for the raw turn, so exporting it would have
+// to be done on purpose, in review, not by accident.
+func TestDigestRidesTheStatusForSessionsThatHaveOne(t *testing.T) {
+	digests := map[string]digestlog.Digest{
+		"a": {SessionID: "a", Headline: "the fix landed, tests green",
+			Bullets: []string{"ship it or hold for docs", "one flake remains"}, At: t0},
+	}
+	st := statusFrom(fixtureSessions(), digests, "")
+	rook := st.Workspaces[1]
+	got := rook.Agents[0].Digest
+	if got == nil || got.Headline != "the fix landed, tests green" || len(got.Bullets) != 2 {
+		t.Fatalf("digest lost in the fold: %+v", got)
+	}
+	if rook.Agents[1].Digest != nil {
+		t.Fatalf("a session without a digest grew one: %+v", rook.Agents[1].Digest)
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"digest":{"headline":"the fix landed, tests green"`) {
+		t.Fatalf("wire shape moved: %s", raw)
+	}
+	if strings.Contains(string(raw), "fullText") {
+		t.Fatalf("raw material leaked onto the wire: %s", raw)
+	}
+}
+
 func TestAskIDRidesTheStatusForNeedsInputOnly(t *testing.T) {
-	st := statusFrom(fixtureSessions(), "")
+	st := statusFrom(fixtureSessions(), nil, "")
 	var withID, withoutID int
 	for _, w := range st.Workspaces {
 		for _, a := range w.Agents {

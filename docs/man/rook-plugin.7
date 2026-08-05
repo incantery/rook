@@ -464,9 +464,18 @@ server works via
 .Pq ollama, LM Studio, llama.cpp all speak the same wire ,
 a non-default base needs no key, and a model the price table does not
 know shows no cost rather than a made-up one.
-Digests live in memory only and each reply is billed at most once,
-retries included; a reply that breaks the shape gets one correction and
-is then taken as it came.
+Each reply is billed at most once, retries and relaunches included; a
+reply that breaks the shape gets one correction and is then taken as it
+came.
+.Pp
+Digests are journaled to
+.Fl -log
+.Pq default Pa ~/.local/state/rook/digests.jsonl , honoring Ev XDG_STATE_HOME ; empty disables
+and the ring \(em drafts included \(em is restored from there at
+launch, so a digest survives a relaunch.
+The journal is also the seam other plugins read digests through
+.Pq the cloud bridge lifts headlines from it ;
+it never leaves the machine itself.
 Flags:
 .Fl -model
 .Pq default Ql gpt-5-mini ,
@@ -476,7 +485,7 @@ Flags:
 .Pq input cap per reply ,
 .Fl -api-base
 .Pq point it at a stub and no real money moves ,
-.Fl -key-file , Fl -dir .
+.Fl -key-file , Fl -dir , Fl -log .
 .Ss The cloud bridge
 The third shipped plugin,
 .Pa rook-plugin-cloud ,
@@ -511,6 +520,12 @@ valid answer is typed into the agent's pane via
 .Pq answered at the desk, or a new turn
 is acked away with a note, never typed, and no answer is ever typed
 twice.
+.Pp
+Each agent also carries the membrane's artifact when there is one: the
+summarizer's digest
+.Pq headline and bullets, read from the journal at Fl -digest-log
+rides the status so the phone triages by headline instead of raw text.
+Headline and bullets travel; the full turn they compress stays home.
 .Pp
 Beside the answers runs the command rail: every agent reports its
 session id and its context occupancy

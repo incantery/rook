@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/incantery/rook/plugins/internal/digestlog"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
 
@@ -43,32 +44,11 @@ Nothing else: no headings, no blank lines, no closing remark.`
 // Digest is one summarized turn — or one failure to summarize, which is
 // also worth a row: "the panel is empty" and "the call failed" look
 // identical from outside and are not the same problem.
-type Digest struct {
-	ID           string
-	SessionID    string
-	SessionTitle string
-	Cwd          string
-	Headline     string
-	Bullets      []string
-	InWords      int // the reply it compressed
-	OutWords     int // the digest
-	CostUSD      float64
-	Model        string
-	At           time.Time
-	Err          string
-
-	// The raw material a draft works from — the digest is a reading
-	// aid, and drafting from a summary would compound its lossiness.
-	Prompt   string
-	FullText string
-
-	// The suggested-reply lifecycle: Reply once drafted; ReplyState is
-	// the row's chip ("drafting", "ready", "copied", "draft failed",
-	// "clip refused"); ReplyErr carries the reason when one failed.
-	Reply      string
-	ReplyState string
-	ReplyErr   string
-}
+//
+// The struct itself lives in digestlog: the journal is its wire shape,
+// and other plugins (the cloud bridge) read digests from there rather
+// than from this process.
+type Digest = digestlog.Digest
 
 type Summarizer struct {
 	Client   *http.Client
