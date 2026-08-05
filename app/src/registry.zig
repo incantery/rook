@@ -52,6 +52,8 @@ pub const Action = enum {
     config_setup,
     /// Find in files — the search panel, a side-pane tenant.
     panel_search,
+    /// Lay the focused editor's file out, through its language server.
+    editor_format,
     app_fullscreen,
     /// The workspace's threads.
     /// The review: the changes list and the gate.
@@ -131,6 +133,10 @@ pub const commands = [_]Command{
     .{ .id = "config.edit", .title = "Edit Config", .category = "Config", .action = .config_edit },
     .{ .id = "config.setup", .title = "Set Up Config", .category = "Config", .action = .config_setup },
     .{ .id = "panel.search", .title = "Find in Files", .category = "App", .action = .panel_search, .keys = "⌘⇧F" },
+    // `:Format` inside the editor, and a palette entry outside it. No
+    // default key: which chord a formatter deserves is a matter of
+    // taste, and format-on-save is the answer for most people anyway.
+    .{ .id = "editor.format", .title = "Format Document", .category = "Editor", .action = .editor_format },
     .{ .id = "app.fullscreen", .title = "Toggle Fullscreen", .category = "App", .action = .app_fullscreen },
     .{ .id = "panel.flip", .title = "Move Side Pane to Other Edge", .category = "Panel", .action = .panel_flip },
     .{ .id = "panel.close", .title = "Close Side Pane", .category = "Panel", .action = .panel_close },

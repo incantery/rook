@@ -366,6 +366,13 @@ pub const Config = struct {
     /// lands in $HOME, and a sidebar listing your home directory is
     /// noise, not orientation.
     explorer_auto: bool = false,
+    /// `editor-format-on-save`: `:w` asks the language server to lay
+    /// the file out and writes what comes back. OFF by default — it
+    /// makes a write depend on a subprocess, and that is a trade to opt
+    /// into rather than to inherit. A save is never lost either way:
+    /// if the server does not answer in time the file goes out
+    /// unformatted and the status row says so.
+    format_on_save: bool = false,
 
     /// Run language servers at all. On by default and lazy: nothing
     /// spawns until a file of a known language opens, so the cost of
@@ -687,6 +694,13 @@ fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
             } else if (std.mem.eql(u8, stripped, "false")) {
                 cfg.lsp = false;
             } else std.debug.print("rook config: unknown editor-lsp '{s}' (true, false)\n", .{stripped});
+        } else if (std.mem.eql(u8, key, "editor_format_on_save") or std.mem.eql(u8, key, "format_on_save")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            if (std.mem.eql(u8, stripped, "true")) {
+                cfg.format_on_save = true;
+            } else if (std.mem.eql(u8, stripped, "false")) {
+                cfg.format_on_save = false;
+            } else std.debug.print("rook config: unknown editor-format-on-save '{s}' (true, false)\n", .{stripped});
         } else if (std.mem.eql(u8, key, "explorer_auto")) {
             const stripped = std.mem.trim(u8, val, "\"");
             if (std.mem.eql(u8, stripped, "true")) {

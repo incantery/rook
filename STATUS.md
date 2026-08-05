@@ -82,8 +82,11 @@ and `gR` to rename one everywhere. A rename validates every file before
 touching any: open documents get one undoable group and stay unsaved,
 files no pane has open are written. `ctrl-n` completion is served by the
 buffer's own words on the keystroke and by the server a few frames
-later, in one ring with a menu. Go, Python and TypeScript/TSX in the
-catalog; adding a language is data, not code.
+later, in one ring with a menu. `:Format`, and `editor-format-on-save`
+for `:w` — off by default, and a save is never lost to it: a formatter
+that does not answer inside 1.5s gets the file written unformatted and
+says so. Go, Python and TypeScript/TSX in the catalog; adding a language
+is data, not code.
 
 **Navigation and chrome**: a command registry with a ⌘K palette and `:Ex`
 commands from the editor, which-key on an unanswered leader, ⌘P file

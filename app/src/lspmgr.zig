@@ -152,7 +152,7 @@ const Entry = struct {
     srv: *lsp.Server,
 };
 
-const AskKind = enum { hover, definition, references, rename, completion };
+const AskKind = enum { hover, definition, references, rename, completion, formatting };
 
 const Ask = struct {
     id: u32,
@@ -264,6 +264,12 @@ pub const Answer = union(enum) {
     /// one to what you were typing two keystrokes ago — the round trip
     /// is long enough for that to be a different question.
     completion: struct { path: []const u8, prefix: []const u8, items: []lsp.Completion },
+    /// How the file should be laid out. Owned by the caller.
+    ///
+    /// Delivered even when it is EMPTY — a caller that asked in order
+    /// to save afterwards is waiting on this, and "already formatted"
+    /// is an answer it has to hear.
+    formatting: struct { path: []const u8, edits: []lsp.TextEdit },
     /// The question was answered with nothing. Still delivered, because
     /// the pane that asked said "asking…" and has to be told.
     none: struct { path: []const u8, kind: AskKind },
@@ -293,6 +299,11 @@ pub const Answer = union(enum) {
                 gpa.free(c.path);
                 gpa.free(c.prefix);
                 lsp.freeCompletions(gpa, c.items);
+            },
+            .formatting => |f| {
+                gpa.free(f.path);
+                for (f.edits) |e| gpa.free(e.text);
+                gpa.free(f.edits);
             },
             .none => |n| gpa.free(n.path),
         }
@@ -597,6 +608,13 @@ pub const Manager = struct {
         return true;
     }
 
+    pub fn formatting(self: *Manager, path: []const u8, tab_size: u32, spaces: bool) bool {
+        const srv = self.ensure(path) orelse return false;
+        const id = srv.formatting(path, tab_size, spaces) orelse return false;
+        self.recordAsk(id, .formatting, path, "");
+        return true;
+    }
+
     /// `prefix` is the partial word being completed; it comes back on
     /// the answer, unused by anything in between.
     pub fn completion(self: *Manager, path: []const u8, pos: lsp.Position, prefix: []const u8) bool {
@@ -747,6 +765,38 @@ pub const Manager = struct {
                             continue;
                         };
                         self.pushAnswer(.{ .completion = .{ .path = p, .prefix = pre, .items = items } });
+                        changed = true;
+                    },
+                    .formatting => |fe| {
+                        const ask = self.takeAsk(fe.id) orelse continue;
+                        defer self.freeAsk(ask);
+                        // The reply names no file — a formatting result
+                        // is a bare TextEdit[]. The ASK knows which
+                        // file it was about, and it is the only thing
+                        // that does.
+                        const src: []const lsp.TextEdit = if (fe.files.len > 0) fe.files[0].edits else &.{};
+                        const edits = self.gpa.alloc(lsp.TextEdit, src.len) catch continue;
+                        var n: usize = 0;
+                        for (src) |te| {
+                            edits[n] = .{
+                                .range = te.range,
+                                .text = self.gpa.dupe(u8, te.text) catch break,
+                            };
+                            n += 1;
+                        }
+                        if (n != src.len) {
+                            // All or nothing: half a format is a file
+                            // laid out two ways.
+                            for (edits[0..n]) |te| self.gpa.free(te.text);
+                            self.gpa.free(edits);
+                            continue;
+                        }
+                        const p = self.gpa.dupe(u8, ask.path) catch {
+                            for (edits) |te| self.gpa.free(te.text);
+                            self.gpa.free(edits);
+                            continue;
+                        };
+                        self.pushAnswer(.{ .formatting = .{ .path = p, .edits = edits } });
                         changed = true;
                     },
                     .empty => |x| {

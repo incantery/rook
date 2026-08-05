@@ -220,7 +220,7 @@ type store struct {
 	mu    sync.Mutex
 	ds    []Digest
 	keep  int
-	nokey string        // standing notice when there is no API key
+	nokey string         // standing notice when there is no API key
 	log   *digestlog.Log // nil when persistence is off
 }
 

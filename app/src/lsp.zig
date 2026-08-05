@@ -408,6 +408,10 @@ pub const Event = union(enum) {
     workspace_edit: WorkspaceEdit,
     /// What could be typed here.
     completion: Completions,
+    /// How the whole file should be laid out. One file's edits, so it
+    /// borrows the WorkspaceEdit's payload rather than inventing a
+    /// second shape for the same thing.
+    formatting: WorkspaceEdit,
     /// A request we sent is answered and has nothing to show: a null
     /// result, an error reply, or a server that died holding it. The
     /// caller MUST be released either way, or whatever it put on screen
@@ -483,7 +487,7 @@ pub const Event = union(enum) {
                 for (d.locs) |l| gpa.free(l.path);
                 gpa.free(d.locs);
             },
-            .workspace_edit => |*we| freeFileEdits(gpa, we.files),
+            .workspace_edit, .formatting => |*we| freeFileEdits(gpa, we.files),
             .completion => |*c| freeCompletions(gpa, c.items),
             .failed => |*f| gpa.free(f.reason),
             .ready, .empty => {},
@@ -526,7 +530,7 @@ pub const State = enum {
     failed,
 };
 
-const Kind = enum { initialize, hover, definition, references, rename, completion, shutdown };
+const Kind = enum { initialize, hover, definition, references, rename, completion, formatting, shutdown };
 
 const Pending = struct { id: u32, kind: Kind };
 
@@ -745,7 +749,7 @@ pub const Session = struct {
         writeJsonString(w, std.fs.path.basename(self.root));
         w.writeAll("}],\"capabilities\":{\"textDocument\":{" ++
             "\"definition\":{\"linkSupport\":true}," ++
-            "\"references\":{},\"rename\":{}," ++
+            "\"references\":{},\"rename\":{},\"formatting\":{}," ++
             // snippetSupport is FALSE and that is the feature. Declare
             // it and gopls answers `Println(${1:a})` — a template rook
             // has no engine to expand, which would land in the buffer
@@ -1030,6 +1034,30 @@ pub const Session = struct {
         return self.request(.references, "textDocument/references", params);
     }
 
+    /// Lay the whole file out. The answer is a `.formatting` carrying
+    /// the same id and one file's worth of edits.
+    ///
+    /// FormattingOptions is required by the protocol and every server
+    /// reads it, but a real formatter has its own opinion — gofmt uses
+    /// tabs whatever we say here. Sending the editor's own settings is
+    /// right for the servers that DO defer to the client, and harmless
+    /// for the ones that do not.
+    pub fn formatting(self: *Session, path: []const u8, tab_size: u32, spaces: bool) ?u32 {
+        const uri = uriFromPath(self.gpa, path) orelse return null;
+        defer self.gpa.free(uri);
+        var a: std.Io.Writer.Allocating = .init(self.gpa);
+        defer a.deinit();
+        const w = &a.writer;
+        w.writeAll("{\"textDocument\":{\"uri\":") catch return null;
+        writeJsonString(w, uri);
+        w.print("}},\"options\":{{\"tabSize\":{d},\"insertSpaces\":{s}," ++
+            "\"trimTrailingWhitespace\":true,\"insertFinalNewline\":true}}}}", .{
+            tab_size,
+            @as([]const u8, if (spaces) "true" else "false"),
+        }) catch return null;
+        return self.request(.formatting, "textDocument/formatting", a.written());
+    }
+
     /// What could be typed at `pos`. The answer is a `.completion`
     /// carrying the same id.
     pub fn completion(self: *Session, path: []const u8, pos: Position) ?u32 {
@@ -1289,6 +1317,7 @@ pub const Session = struct {
             .references => self.onLocations(id, result, true),
             .rename => self.onWorkspaceEdit(id, result),
             .completion => self.onCompletion(id, result),
+            .formatting => self.onFormatting(id, result),
         }
     }
 
@@ -1352,6 +1381,31 @@ pub const Session = struct {
         };
         const payload: Event.Locations = .{ .id = id, .locs = owned };
         self.push(if (many) .{ .references = payload } else .{ .definition = payload });
+    }
+
+    /// A TextEdit[] for the file we asked about. No uri comes back, so
+    /// the path is the ASK's — which is why the wiring keeps one.
+    ///
+    /// An empty array means "already formatted", and it is pushed as an
+    /// edit with no edits rather than as `.empty`: a caller waiting to
+    /// write the file needs to hear that the answer arrived, and
+    /// "nothing to change" is an answer.
+    fn onFormatting(self: *Session, id: u32, result: std.json.Value) void {
+        if (result != .array) {
+            self.push(.{ .empty = .{ .id = id } });
+            return;
+        }
+        const edits = self.readTextEdits(result);
+        const files = self.gpa.alloc(FileEdits, 1) catch {
+            for (edits) |e| self.gpa.free(e.text);
+            self.gpa.free(edits);
+            return;
+        };
+        // The path is filled in by the wiring, which knows what it
+        // asked about; leaving it empty here is honest rather than a
+        // guess this layer has no way to make.
+        files[0] = .{ .path = self.gpa.dupe(u8, "") catch "", .edits = edits };
+        self.push(.{ .formatting = .{ .id = id, .files = files } });
     }
 
     /// CompletionItem[] or CompletionList — both shapes, same as
@@ -1948,6 +2002,14 @@ pub const Server = struct {
     pub fn references(self: *Server, path: []const u8, pos: Position, include_decl: bool) ?u32 {
         self.mu.lock();
         const id = self.sess.references(path, pos, include_decl);
+        self.mu.unlock();
+        self.poke();
+        return id;
+    }
+
+    pub fn formatting(self: *Server, path: []const u8, tab_size: u32, spaces: bool) ?u32 {
+        self.mu.lock();
+        const id = self.sess.formatting(path, tab_size, spaces);
         self.mu.unlock();
         self.poke();
         return id;
@@ -2932,4 +2994,52 @@ test "Server: a command that does not exist fails open" {
         _ = usleep(2000);
     }
     try testing.expect(failed);
+}
+
+test "formatting asks with options and answers even when nothing changes" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    try readySession(&sess, false);
+    var ready = sess.nextEvent().?;
+    ready.deinit(gpa);
+    sess.didOpen("/tmp/work/a.go", "package main\n");
+    sess.consumeOutbound(sess.outbound().len);
+
+    const id1 = sess.formatting("/tmp/work/a.go", 4, false).?;
+    const sent = sess.outbound();
+    try testing.expect(std.mem.indexOf(u8, sent, "\"method\":\"textDocument/formatting\"") != null);
+    // The protocol REQUIRES options; a server handed params without
+    // them errors rather than guessing.
+    try testing.expect(std.mem.indexOf(u8, sent, "\"tabSize\":4") != null);
+    try testing.expect(std.mem.indexOf(u8, sent, "\"insertSpaces\":false") != null);
+
+    const r1 = try std.fmt.allocPrint(gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[{{\"range\":{{" ++
+        "\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":7}}}}," ++
+        "\"newText\":\"package\"}}]}}", .{id1});
+    defer gpa.free(r1);
+    const f1 = try framed(gpa, r1);
+    defer gpa.free(f1);
+    sess.feed(f1);
+    var e1 = sess.nextEvent().?;
+    defer e1.deinit(gpa);
+    try testing.expectEqual(@as(usize, 1), e1.formatting.files.len);
+    try testing.expectEqualStrings("package", e1.formatting.files[0].edits[0].text);
+    // The reply names no file — the wiring's ask is what knows which.
+    try testing.expectEqualStrings("", e1.formatting.files[0].path);
+
+    // ALREADY FORMATTED is an empty array, and it must arrive as an
+    // answer rather than as `.empty`: a `:w` is waiting on it, and a
+    // caller that only hears about non-empty results never writes.
+    const id2 = sess.formatting("/tmp/work/a.go", 8, true).?;
+    const r2 = try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[]}}", .{id2});
+    defer gpa.free(r2);
+    const f2 = try framed(gpa, r2);
+    defer gpa.free(f2);
+    sess.feed(f2);
+    var e2 = sess.nextEvent().?;
+    defer e2.deinit(gpa);
+    try testing.expect(e2 == .formatting);
+    try testing.expectEqual(@as(usize, 0), e2.formatting.files[0].edits.len);
 }

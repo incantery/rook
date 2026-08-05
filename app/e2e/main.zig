@@ -62,6 +62,7 @@ const scenarios = [_]Scenario{
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
     .{ .name = "explorerauto", .what = "explorer-auto: the sidebar opens at launch inside a repo, and never takes the keys", .run = explorerAuto },
     .{ .name = "lsp", .what = "language server: diagnostics, gr lists uses, gR renames, ctrl-n completes", .run = lspScenario },
+    .{ .name = "lspformat", .what = "format-on-save: :w formats then writes, and writes anyway when nothing answers", .run = lspFormat },
     .{ .name = "lsppython", .what = "a second language is data: python roots at pyproject.toml and lands the same way", .run = lspPython },
     .{ .name = "lspts", .what = "ts and tsx share one server, root at the tsconfig, and split only on the grammar", .run = lspTs },
     .{ .name = "docshare", .what = "one file in two panes is ONE document: edits, dirty flag and :w are shared", .run = docShare },
@@ -3596,6 +3597,107 @@ fn lspScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
 }
 
 
+
+// ------------------------------------------------------------ lspformat
+
+/// `editor-format-on-save`: the whole point, and the whole risk.
+///
+/// `:w` stops being synchronous when this is on — it asks a subprocess
+/// how the file should look and writes what comes back. So the two
+/// things worth proving are that the formatted text is what lands, and
+/// that a formatter which never answers costs you a pause rather than
+/// your work.
+fn lspFormat(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lspfmt-{d}", .{h.runPid()});
+    var proj_buf: [256]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{scratch});
+    try h.mkdirP(proj);
+    var f_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/go.mod", .{proj}), "module fmtsmoke\n\ngo 1.21\n");
+
+    // Line 9 (the protocol's 0-based 8) carries the double space the
+    // fake formatter collapses.
+    const body = "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(1)\n}\n\nvar x  = 1\n";
+    var main_buf: [288]u8 = undefined;
+    const main_go = try std.fmt.bufPrint(&main_buf, "{s}/main.go", .{proj});
+    try h.writeFile(main_go, body);
+
+    var envval_buf: [640]u8 = undefined;
+    const envval = try std.fmt.bufPrint(&envval_buf, "{s} --fake-lsp {s}", .{ self_exe, main_go });
+
+    const app = try h.Instance.start(gpa, bin, .{
+        .cwd = proj,
+        .env = &.{.{ "ROOK_LSP_GO", envval }},
+        .config_extra = "editor-format-on-save = true\n",
+    });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var cmd_buf: [320]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{main_go}));
+    try app.waitText("var x", 5_000);
+
+    // Make a change of our own, so the write has something to write and
+    // the formatter has something to fix beside it.
+    _ = try app.ctl("type GoZZ");
+    _ = try app.ctl("press ESC");
+    _ = try app.ctl("type :w");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("dump", "wrote main.go", 8_000);
+
+    {
+        var disk: [512]u8 = undefined;
+        const got = try h.readFile(main_go, &disk);
+        // The formatter's edit landed…
+        try h.expectContains(got, "var x = 1", "the formatter's edit is in the file that was written");
+        try h.expectNotContains(got, "var x  = 1", "and the text it replaced is not");
+        // …and so did ours. A format that threw away the edit you were
+        // saving would be worse than no format at all.
+        try h.expectContains(got, "ZZ", "along with the edit you actually made");
+    }
+    try h.expectContains(try app.ctl("docs"), "modified:no", "the buffer is clean — the write really happened");
+
+    // ---- and now a formatter that never answers ----
+    var slow_buf: [288]u8 = undefined;
+    const slow_go = try std.fmt.bufPrint(&slow_buf, "{s}/slow.go", .{proj});
+    try h.writeFile(slow_go, "package main\n\nvar y  = 2\n");
+    var slowenv_buf: [640]u8 = undefined;
+    const slowenv = try std.fmt.bufPrint(&slowenv_buf, "{s} --fake-lsp {s}", .{ self_exe, slow_go });
+
+    const app2 = try h.Instance.start(gpa, bin, .{
+        .cwd = proj,
+        .env = &.{.{ "ROOK_LSP_GO", slowenv }},
+        .config_extra = "editor-format-on-save = true\n",
+    });
+    defer {
+        app2.stop();
+        app2.deinit();
+    }
+    _ = try app2.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{slow_go}));
+    try app2.waitText("var y", 5_000);
+    _ = try app2.ctl("type GoQQ");
+    _ = try app2.ctl("press ESC");
+    _ = try app2.ctl("type :w");
+    _ = try app2.ctl("enter");
+
+    // The deadline is 1.5s, so this waits past it. What must NOT happen
+    // is the save quietly never arriving.
+    const said = try app2.waitCtl("dump", "wrote slow.go", 8_000);
+    try h.expectContains(said, "timed out", "and it says why it went out unformatted");
+    {
+        var disk: [512]u8 = undefined;
+        const got = try h.readFile(slow_go, &disk);
+        try h.expectContains(got, "QQ", "the edit was written even though nothing formatted it");
+        // Unformatted, and that is the correct outcome: rook does not
+        // have an answer, so it does not invent one.
+        try h.expectContains(got, "var y  = 2", "with the layout untouched");
+    }
+    try h.expectContains(try app2.ctl("docs"), "modified:no", "and the buffer is clean, not left dirty forever");
+}
+
 // ------------------------------------------------------- the fake server
 
 /// This binary's own path, for scenarios that re-exec it.
@@ -3721,6 +3823,24 @@ fn fakeHandle(gpa: std.mem.Allocator, body: []const u8, target: []const u8) !voi
                 "{{\"uri\":\"file://{s}\",\"range\":{{\"start\":{{\"line\":4,\"character\":5}}," ++
                 "\"end\":{{\"line\":4,\"character\":9}}}}}}]}}",
             .{ id orelse 0, dir, target, target },
+        );
+        try fakeSend(gpa, w.written());
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/formatting")) {
+        // Collapse the double space on line 8 of the scenario's file.
+        // A real formatter rewrites more, but one edit is enough to
+        // prove the round trip, the apply and the write that follows.
+        //
+        // A file whose name ends `slow.go` is never answered at all —
+        // which is how the scenario reaches the deadline, and the only
+        // way to test that a save survives a formatter that does not.
+        if (std.mem.endsWith(u8, target, "slow.go")) return;
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[{{\"range\":{{" ++
+                "\"start\":{{\"line\":8,\"character\":5}},\"end\":{{\"line\":8,\"character\":7}}}}," ++
+                "\"newText\":\" \"}}]}}",
+            .{id orelse 0},
         );
         try fakeSend(gpa, w.written());
         return;

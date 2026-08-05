@@ -874,6 +874,8 @@ pub const App = struct {
     cfg_activity_bar: bool = false,
     /// config explorer-auto: the tree sidebar opens at launch.
     cfg_explorer_auto: bool = false,
+    /// config editor-format-on-save: `:w` formats before it writes.
+    cfg_fmt_on_save: bool = false,
     /// Icon rail hit zones (y extents), rebuilt each frame it draws.
     rail_y: [8][2]f32 = undefined,
     rail_n: usize = 0,
@@ -1143,6 +1145,7 @@ pub const App = struct {
             .cfg_ed_insert = cfg.editor_insert,
             .cfg_activity_bar = cfg.activity_bar,
             .cfg_explorer_auto = cfg.explorer_auto,
+            .cfg_fmt_on_save = cfg.format_on_save,
             .cursor_blink = cfg.cursor_blink,
             .pane_dim = @floatCast(cfg.pane_dim),
             .cfg_scrollback = cfg.scrollback,
@@ -2750,6 +2753,7 @@ pub const App = struct {
             .config_edit => self.editConfig(),
             .config_setup => self.openSetupPalette(),
             .panel_search => self.openSearchPanel(),
+            .editor_format => self.formatFocused(),
             .app_fullscreen => self.requestFullscreen(),
             .panel_flip => self.flipSidePane(),
             .panel_close => self.closeSidePane(),
@@ -3245,6 +3249,8 @@ pub const App = struct {
         ed.lsp_references = &lspReferencesHook;
         ed.lsp_rename = &lspRenameHook;
         ed.lsp_completion = &lspCompletionHook;
+        ed.lsp_format = &lspFormatHook;
+        ed.fmt_on_save = self.cfg_fmt_on_save;
         // The sign column appears now rather than when the first error
         // does, so the document never shifts sideways under your cursor.
         ed.diag_gutter = true;
@@ -3323,6 +3329,14 @@ pub const App = struct {
         for (self.spaces.items) |space| for (space.tabs.items) |tab| {
             for (tab.panes.items) |p| {
                 const ed = p.editor() orelse continue;
+                // A write waiting on a formatter that is not coming.
+                // Checked before the lsp_ctx guard, because a server
+                // that DIED still leaves a save owed — and this is the
+                // only thing that will ever notice.
+                if (ed.formatOverdue(now)) {
+                    ed.finishPendingWrite("formatter timed out");
+                    self.scene_dirty = true;
+                }
                 if (ed.lsp_ctx == null) continue;
                 if (ed.buf.version == ed.buf.lsp_version) continue;
                 if (ed.buf.version != ed.lsp_seen_version) {
@@ -3401,6 +3415,26 @@ pub const App = struct {
                 },
                 .references => |r| self.startRefsLocked(r.sites, r.symbol),
                 .rename => |r| self.applyRenameLocked(r),
+                .formatting => |f| {
+                    const ed = self.editorShowingLocked(f.path) orelse continue;
+                    // Resolve here, where the conversion from the
+                    // protocol's line/UTF-16 coordinates to the rope's
+                    // bytes belongs — the same place a rename does it.
+                    const text = ed.buf.rope.dupeRange(self.gpa, 0, ed.buf.rope.byteLen()) catch continue;
+                    defer self.gpa.free(text);
+                    const sp = lsppkg.resolveEdits(self.gpa, text, f.edits) orelse {
+                        // Overlapping edits: the same refusal a rename
+                        // makes, and here it must still release the
+                        // write that was waiting.
+                        ed.finishPendingWrite("formatter's edits overlapped");
+                        continue;
+                    };
+                    defer self.gpa.free(sp);
+                    var out = self.gpa.alloc(editorpkg.Editor.Splice, sp.len) catch continue;
+                    defer self.gpa.free(out);
+                    for (sp, 0..) |s, i| out[i] = .{ .start = s.start, .end = s.end, .text = s.text };
+                    ed.takeFormat(out);
+                },
                 .completion => |c| {
                     const ed = self.editorShowingLocked(c.path) orelse continue;
                     const items = self.gpa.alloc(editorpkg.Editor.CplItem, c.items.len) catch continue;
@@ -3435,6 +3469,9 @@ pub const App = struct {
                         // menu, and a message over a working ring
                         // would read as a failure of the ring.
                         .completion => ed.takeCompletions(&.{}, ed.cplPrefix()),
+                        // A server that will not format this file. The
+                        // `:w` behind it must still happen.
+                        .formatting => ed.finishPendingWrite("no formatter for this file"),
                     }
                     ed.render_dirty = true;
                 },
@@ -3509,6 +3546,44 @@ pub const App = struct {
             ed.setStatus("finding references to {s}…", .{word}, false);
         } else ed.setStatus("finding references…", .{}, false);
         ed.render_dirty = true;
+    }
+
+    /// How long a `:w` waits for a formatter before writing anyway.
+    ///
+    /// Generous, because gofmt on a big file through a busy gopls is
+    /// not instant, and short enough that a dead server costs you a
+    /// pause rather than a hang. What it is NOT is a way to lose a
+    /// save: when it expires the file is written unformatted and the
+    /// status row says so.
+    const fmt_deadline_s: f64 = 1.5;
+
+    fn lspFormatHook(ctx: *anyopaque, ed: *editorpkg.Editor) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const path = ed.buf.path orelse return;
+        self.lspSyncLocked(ed);
+        if (!self.lsp.formatting(path, editorpkg.tab_width, true)) {
+            // No server for this file. Not an error and not a wait —
+            // whatever `:w` was going to do, it does now.
+            ed.finishPendingWrite(null);
+            return;
+        }
+        ed.fmt_deadline = CACurrentMediaTime() + fmt_deadline_s;
+    }
+
+    /// `:Format` / the palette entry. Same request as format-on-save,
+    /// with no write waiting behind it.
+    pub fn formatFocused(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const ed = self.activeTab().focused.editor() orelse return;
+        if (ed.buf.path == null) {
+            ed.setStatus("nothing to format — no file behind this buffer", .{}, true);
+            return;
+        }
+        lspFormatHook(self, ed);
+        ed.setStatus("formatting…", .{}, false);
+        ed.render_dirty = true;
+        self.scene_dirty = true;
     }
 
     fn lspCompletionHook(ctx: *anyopaque, ed: *editorpkg.Editor) void {
@@ -4874,6 +4949,7 @@ pub const App = struct {
         self.cfg_tab_style = cfg.tab_style;
         self.cfg_activity_bar = cfg.activity_bar;
         self.cfg_ed_insert = cfg.editor_insert;
+        self.cfg_fmt_on_save = cfg.format_on_save;
         if (chrome_changed) {
             self.tab_h = if (self.cfg_top_bar.n == 0) 0 else self.bar_h;
             self.relayoutLocked();
@@ -4908,6 +4984,11 @@ pub const App = struct {
                     // The default applies to the NEXT open; a live
                     // editor's current mode is the user's, not ours.
                     ed.default_insert = self.cfg_ed_insert;
+                    // This one DOES apply live: it is about what the
+                    // next `:w` does, and waiting for a reopen to
+                    // honour a setting you just changed is the kind of
+                    // thing that makes people distrust a reload.
+                    ed.fmt_on_save = self.cfg_fmt_on_save;
                 }
             }
         };

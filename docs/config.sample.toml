@@ -112,6 +112,20 @@
 # is still read, with a notice.
 # editor-lsp = true
 #
+# `:w` asks the language server to lay the file out, and writes what
+# comes back — gofmt on save, without a file watcher. OFF by default,
+# because it makes a write depend on a subprocess and that is a trade
+# to opt into rather than to inherit.
+#
+# It cannot cost you a save. If the server does not answer within a
+# second and a half the file is written UNFORMATTED and the status row
+# says so; the same happens if no server covers the file at all. The
+# worst case is an unformatted save you were told about.
+#
+# `:Format` (or the palette's Format Document) does it on demand, with
+# no write behind it, whatever this is set to.
+# editor-format-on-save = false
+#
 # Known today:
 #   Go          gopls
 #   Python      basedpyright, pyright, pylsp, jedi-language-server

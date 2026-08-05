@@ -340,6 +340,20 @@ pub const Editor = struct {
     /// Ask a language server what could be typed here. Answered
     /// asynchronously, through takeCompletions.
     lsp_completion: ?*const fn (*anyopaque, *Editor) void = null,
+    /// Ask for the file's layout. Answered through takeFormat.
+    lsp_format: ?*const fn (*anyopaque, *Editor) void = null,
+    /// Config: `:w` lays the file out before writing it.
+    fmt_on_save: bool = false,
+    /// A write waiting on a formatter. Set by `:w`, cleared by the
+    /// write — whichever of the answer and the deadline gets there
+    /// first. Its existence is what makes the save recoverable: as long
+    /// as this is set, somebody still owes you a write.
+    fmt_save: ?struct { force: bool, close: bool } = null,
+    /// When to stop waiting, in the app's clock. Zero when nothing is
+    /// pending. The app's frame tick is what enforces it, because the
+    /// editor has no clock of its own and a save must not depend on a
+    /// keystroke arriving to notice that a server died.
+    fmt_deadline: f64 = 0,
 
     /// `/` preview: where the cursor was when the prompt opened, and
     /// the pattern that was current before it — both put back on ESC,
@@ -2442,6 +2456,69 @@ pub const Editor = struct {
     /// what goes in the buffer, which is not always what a menu shows.
     pub const CplItem = struct { text: []const u8, detail: []const u8 = "" };
 
+    // -------------------------------------------------------- formatting
+
+    /// `:Format`, and the reply to a format-on-save `:w`.
+    ///
+    /// `splices` are already resolved against this buffer's text and
+    /// ordered last-first — the app does that, because it owns the
+    /// conversion from the protocol's coordinates.
+    ///
+    /// The cursor is put back by LINE AND COLUMN rather than by offset.
+    /// A reformat moves nearly every byte in the file, so an offset
+    /// means nothing afterwards; the line you were on is the thing you
+    /// were actually looking at, and gofmt does not move lines around.
+    pub fn takeFormat(self: *Editor, splices: []const Splice) void {
+        const want_line = self.cline;
+        const want_col = self.ccol;
+        if (splices.len > 0 and !self.buf.readonly) {
+            self.buf.newUndoGroup();
+            self.buf.group_pinned = true;
+            for (splices) |s| {
+                if (s.end > self.buf.rope.byteLen()) continue;
+                self.buf.deleteRange(self.gpa, s.start, s.end) catch {};
+                self.buf.insert(self.gpa, s.start, s.text) catch {};
+            }
+            self.buf.group_pinned = false;
+            self.cline = @min(want_line, self.lineCountB() - 1);
+            self.ccol = @min(want_col, self.lineCap(self.cline));
+            self.goal = renderCol(self.lineText(self.cline), self.ccol);
+            self.render_dirty = true;
+        }
+        // Whatever the format did or did not do, the write that was
+        // waiting on it happens now.
+        self.finishPendingWrite(null);
+    }
+
+    /// One resolved edit — the same shape lsp.Splice has, restated here
+    /// so the editor does not import the protocol to be handed offsets.
+    pub const Splice = struct { start: usize, end: usize, text: []const u8 };
+
+    /// Do the write a format was holding, if there is one. `note` is
+    /// prepended to the report when the format did not happen.
+    pub fn finishPendingWrite(self: *Editor, note: ?[]const u8) void {
+        const pending = self.fmt_save orelse return;
+        self.fmt_save = null;
+        self.fmt_deadline = 0;
+        self.writeNow(pending.force, pending.close);
+        if (note) |n| {
+            // Appended AFTER the write, so the reason rides along with
+            // the outcome instead of replacing it — you still need to
+            // know the file was written.
+            var buf: [2 * @typeInfo(@FieldType(Editor, "status_buf")).array.len]u8 = undefined;
+            const combined = std.fmt.bufPrint(&buf, "{s} ({s})", .{ self.status_buf[0..self.status_len], n }) catch return;
+            const k = @min(combined.len, self.status_buf.len);
+            @memcpy(self.status_buf[0..k], combined[0..k]);
+            self.status_len = k;
+        }
+    }
+
+    /// True when a write is waiting on a formatter that has run out of
+    /// time. The app asks on the frame tick.
+    pub fn formatOverdue(self: *const Editor, now: f64) bool {
+        return self.fmt_save != null and self.fmt_deadline > 0 and now >= self.fmt_deadline;
+    }
+
     /// Backspace (and ctrl-w) in column zero: take the newline above.
     fn joinBack(self: *Editor) void {
         if (self.cline == 0) return;
@@ -3168,17 +3245,23 @@ pub const Editor = struct {
                 // the write for a reason that makes no sense.
                 self.buf.disk = null;
             }
-            self.buf.save(gpa, self.io, bang) catch |err| {
-                if (err == error.ChangedOnDisk) {
-                    // Naming both ways out matters: one of them keeps
-                    // your edit and one of them keeps theirs, and which
-                    // you want is not something the editor can know.
-                    self.setStatus("changed on disk since you opened it (:w! overwrites, :e! reloads)", .{}, true);
-                } else self.setStatus("write failed: {s}", .{@errorName(err)}, true);
-                return;
-            };
-            self.setStatus("wrote {s}", .{self.displayName()}, false);
-            if (!is(u8, wverb, "w")) self.closed = true;
+            const close = !is(u8, wverb, "w");
+            // Lay the file out first, when that is configured and a
+            // server can do it. The write happens when the edits land —
+            // or when the deadline says the server is not going to
+            // answer. See writeNow: the save is never LOST, only
+            // delayed, and at worst it goes out unformatted.
+            if (self.fmt_on_save) {
+                if (self.lsp_format) |f| {
+                    if (self.buf.path != null) {
+                        self.fmt_save = .{ .force = bang, .close = close };
+                        self.setStatus("formatting…", .{}, false);
+                        f(self.lsp_ctx.?, self);
+                        return;
+                    }
+                }
+            }
+            self.writeNow(bang, close);
         } else if (isAll(wverb)) {
             // vim's -all family. The editor is a TENANT here, not the
             // application: `:qa` closes every editor pane and leaves the
@@ -3285,6 +3368,22 @@ pub const Editor = struct {
         const names = [_][]const u8{ "qa", "qall", "wa", "wall", "wqa", "wqall", "xa", "xall" };
         for (names) |n| if (std.mem.eql(u8, wverb, n)) return true;
         return false;
+    }
+
+    /// Write the buffer and report it. The tail of `:w`, named because
+    /// format-on-save reaches it a round trip later.
+    fn writeNow(self: *Editor, force: bool, close: bool) void {
+        self.buf.save(self.gpa, self.io, force) catch |err| {
+            if (err == error.ChangedOnDisk) {
+                // Naming both ways out matters: one of them keeps your
+                // edit and one of them keeps theirs, and which you want
+                // is not something the editor can know.
+                self.setStatus("changed on disk since you opened it (:w! overwrites, :e! reloads)", .{}, true);
+            } else self.setStatus("write failed: {s}", .{@errorName(err)}, true);
+            return;
+        };
+        self.setStatus("wrote {s}", .{self.displayName()}, false);
+        if (close) self.closed = true;
     }
 
     /// Run one ex verb programmatically.
@@ -11220,4 +11319,167 @@ test "no completions is only said once the server has answered too" {
     e.takeCompletions(&.{}, "zq");
     try testing.expect(std.mem.indexOf(u8, e.status_buf[0..e.status_len], "no completions") != null);
     try testing.expect(!e.cpl_live);
+}
+
+// -------------------------------------------------------- formatting
+
+/// Records that a format was asked for, and answers only when told —
+/// the gap is where every interesting case lives.
+const FmtProbe = struct {
+    asked: usize = 0,
+    fn hook(ctx: *anyopaque, ed: *Editor) void {
+        const self: *FmtProbe = @ptrCast(@alignCast(ctx));
+        self.asked += 1;
+        _ = ed;
+    }
+};
+
+test "a format keeps the cursor on its line, not on its offset" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ifunc  main( )  {\nreturn\n}");
+    e.key("\x1b");
+    // Second line, third column — on `turn` of `return`.
+    keys(e, "gg0jll");
+    try testing.expectEqual(@as(usize, 1), e.cline);
+    try testing.expectEqual(@as(usize, 2), e.ccol);
+
+    // gofmt's shape: the whole first line replaced with a shorter one,
+    // which moves every byte after it.
+    e.takeFormat(&.{.{ .start = 0, .end = 16, .text = "func main() {" }});
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        try testing.expectEqualStrings("func main() {\nreturn\n}", s);
+    }
+    // Still line 1, column 2. Restoring by OFFSET would have put the
+    // cursor four bytes earlier — inside a different word.
+    try testing.expectEqual(@as(usize, 1), e.cline);
+    try testing.expectEqual(@as(usize, 2), e.ccol);
+}
+
+test "a format is one undo group" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia  b  c");
+    e.key("\x1b");
+    // Last-first, as resolveEdits hands them over: "a  b  c" has its
+    // second gap at [4,6) and its first at [1,3).
+    e.takeFormat(&.{
+        .{ .start = 4, .end = 6, .text = " " },
+        .{ .start = 1, .end = 3, .text = " " },
+    });
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        try testing.expectEqualStrings("a b c", s);
+    }
+    keys(e, "u");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    // One `u`, not four. A format you have to undo edit by edit is a
+    // format you cannot undo.
+    try testing.expectEqualStrings("a  b  c", s);
+}
+
+test "format-on-save writes when the answer lands" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pathbuf: [128]u8 = undefined;
+    const p = try std.fmt.bufPrint(&pathbuf, ".zig-cache/tmp/{s}/f.txt", .{&tmp.sub_path});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = "x\n" });
+
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    try e.open(p, false);
+    var probe: FmtProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_format = &FmtProbe.hook;
+    e.fmt_on_save = true;
+
+    keys(e, "ggIhello  ");
+    e.key("\x1b");
+    e.runEx("w");
+    // Asked, and NOT yet written: the file on disk is still the old one.
+    try testing.expectEqual(@as(usize, 1), probe.asked);
+    try testing.expect(e.buf.isModified());
+    {
+        var rb: [64]u8 = undefined;
+        try testing.expectEqualStrings("x\n", try std.Io.Dir.cwd().readFile(io, p, &rb));
+    }
+
+    e.takeFormat(&.{.{ .start = 5, .end = 7, .text = "" }});
+    // The format landed AND the write followed it.
+    try testing.expect(!e.buf.isModified());
+    var rb: [64]u8 = undefined;
+    try testing.expectEqualStrings("hellox\n", try std.Io.Dir.cwd().readFile(io, p, &rb));
+}
+
+test "a formatter that never answers still gets the file written" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pathbuf: [128]u8 = undefined;
+    const p = try std.fmt.bufPrint(&pathbuf, ".zig-cache/tmp/{s}/g.txt", .{&tmp.sub_path});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = "old\n" });
+
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    try e.open(p, false);
+    var probe: FmtProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_format = &FmtProbe.hook;
+    e.fmt_on_save = true;
+
+    keys(e, "ggIneu");
+    e.key("\x1b");
+    e.runEx("w");
+    // The app sets this when it fires the request; here it is set by
+    // hand because the probe is standing in for the app.
+    e.fmt_deadline = 100;
+    try testing.expect(!e.formatOverdue(99));
+    try testing.expect(e.formatOverdue(101));
+
+    // Nothing ever answers. The deadline is the only thing that will
+    // notice, and losing the save is not one of its options.
+    e.finishPendingWrite("formatter timed out");
+    try testing.expect(!e.buf.isModified());
+    var rb: [64]u8 = undefined;
+    try testing.expectEqualStrings("neuold\n", try std.Io.Dir.cwd().readFile(io, p, &rb));
+    // And it says why, without hiding that the write happened.
+    const st = e.status_buf[0..e.status_len];
+    try testing.expect(std.mem.indexOf(u8, st, "wrote") != null);
+    try testing.expect(std.mem.indexOf(u8, st, "timed out") != null);
+}
+
+test "format-on-save off writes immediately, as it always did" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pathbuf: [128]u8 = undefined;
+    const p = try std.fmt.bufPrint(&pathbuf, ".zig-cache/tmp/{s}/h.txt", .{&tmp.sub_path});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = "a\n" });
+
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    try e.open(p, false);
+    var probe: FmtProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_format = &FmtProbe.hook;
+    // fmt_on_save stays false — the default, and the whole point of it
+    // being a default is that `:w` is not asynchronous for anyone who
+    // did not ask for that.
+    keys(e, "ggIz");
+    e.key("\x1b");
+    e.runEx("w");
+    try testing.expectEqual(@as(usize, 0), probe.asked);
+    try testing.expect(!e.buf.isModified());
+    var rb: [64]u8 = undefined;
+    try testing.expectEqualStrings("za\n", try std.Io.Dir.cwd().readFile(io, p, &rb));
 }
