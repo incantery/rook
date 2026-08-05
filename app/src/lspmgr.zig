@@ -152,7 +152,7 @@ const Entry = struct {
     srv: *lsp.Server,
 };
 
-const AskKind = enum { hover, definition, references };
+const AskKind = enum { hover, definition, references, rename };
 
 const Ask = struct {
     id: u32,
@@ -229,6 +229,23 @@ pub const Site = struct {
     col: u32 = 0,
 };
 
+/// A rename the server has worked out but nobody has performed.
+///
+/// Named rather than anonymous because the code that carries it out is
+/// the only thing in this file's blast radius that WRITES to a repo —
+/// and a mutation that big should not be reached through `anytype`.
+pub const RenameEdit = struct {
+    /// The file the question was asked from, owned. Where the report
+    /// goes; it is not necessarily one of the files being edited.
+    path: []const u8,
+    /// The new name, owned; for the report.
+    symbol: []const u8,
+    files: []lsp.FileEdits,
+    /// The server also wants to create, rename or delete a file. See
+    /// lsp.Event.WorkspaceEdit — the app refuses the whole edit on this.
+    file_ops: bool,
+};
+
 pub const Answer = union(enum) {
     /// Hover text for `path`. Owned by the caller.
     hover: struct { path: []const u8, text: []const u8 },
@@ -236,6 +253,10 @@ pub const Answer = union(enum) {
     definition: struct { path: []const u8, target: []const u8, line: u32, col: u32 },
     /// Every use of a symbol. Owned by the caller, sites and all.
     references: struct { path: []const u8, symbol: []const u8, sites: []Site },
+    /// The edits a rename needs, across every file it touches. Owned by
+    /// the caller, and NOT yet applied — this is the server's proposal,
+    /// and whether it can be carried out is the app's question.
+    rename: RenameEdit,
     /// The question was answered with nothing. Still delivered, because
     /// the pane that asked said "asking…" and has to be told.
     none: struct { path: []const u8, kind: AskKind },
@@ -255,6 +276,11 @@ pub const Answer = union(enum) {
                 gpa.free(r.symbol);
                 for (r.sites) |s| gpa.free(s.path);
                 gpa.free(r.sites);
+            },
+            .rename => |r| {
+                gpa.free(r.path);
+                gpa.free(r.symbol);
+                lsp.freeFileEdits(gpa, r.files);
             },
             .none => |n| gpa.free(n.path),
         }
@@ -559,6 +585,16 @@ pub const Manager = struct {
         return true;
     }
 
+    /// Here `symbol` is not decoration: it is the NEW name, and it comes
+    /// back on the answer so the report can say what was renamed to what
+    /// without the app holding state across the round trip.
+    pub fn rename(self: *Manager, path: []const u8, pos: lsp.Position, new_name: []const u8) bool {
+        const srv = self.ensure(path) orelse return false;
+        const id = srv.rename(path, pos, new_name) orelse return false;
+        self.recordAsk(id, .rename, path, new_name);
+        return true;
+    }
+
     fn takeAsk(self: *Manager, id: u32) ?Ask {
         for (self.asks.items, 0..) |a, i| {
             if (a.id == id) return self.asks.orderedRemove(i);
@@ -649,6 +685,27 @@ pub const Manager = struct {
                         self.pushAnswer(.{ .references = .{ .path = p, .symbol = sym, .sites = kept } });
                         changed = true;
                     },
+                    .workspace_edit => |we| {
+                        const ask = self.takeAsk(we.id) orelse continue;
+                        defer self.freeAsk(ask);
+                        const files = dupeFileEdits(self.gpa, we.files) orelse continue;
+                        const p = self.gpa.dupe(u8, ask.path) catch {
+                            lsp.freeFileEdits(self.gpa, files);
+                            continue;
+                        };
+                        const sym = self.gpa.dupe(u8, ask.symbol) catch {
+                            lsp.freeFileEdits(self.gpa, files);
+                            self.gpa.free(p);
+                            continue;
+                        };
+                        self.pushAnswer(.{ .rename = .{
+                            .path = p,
+                            .symbol = sym,
+                            .files = files,
+                            .file_ops = we.file_ops,
+                        } });
+                        changed = true;
+                    },
                     .empty => |x| {
                         const ask = self.takeAsk(x.id) orelse continue;
                         defer self.freeAsk(ask);
@@ -665,6 +722,37 @@ pub const Manager = struct {
             }
         }
         return changed;
+    }
+
+    /// Deep-copy a WorkspaceEdit out of the event that owns it. All or
+    /// nothing: a partially copied edit is a partial rename, and there
+    /// is no way for the caller to tell that it got one.
+    fn dupeFileEdits(gpa: Allocator, src: []const lsp.FileEdits) ?[]lsp.FileEdits {
+        const out = gpa.alloc(lsp.FileEdits, src.len) catch return null;
+        var n: usize = 0;
+        errdefer lsp.freeFileEdits(gpa, out[0..n]);
+        for (src) |f| {
+            const path = gpa.dupe(u8, f.path) catch return null;
+            const edits = gpa.alloc(lsp.TextEdit, f.edits.len) catch {
+                gpa.free(path);
+                return null;
+            };
+            var m: usize = 0;
+            while (m < f.edits.len) : (m += 1) {
+                edits[m] = .{
+                    .range = f.edits[m].range,
+                    .text = gpa.dupe(u8, f.edits[m].text) catch {
+                        for (edits[0..m]) |e| gpa.free(e.text);
+                        gpa.free(edits);
+                        gpa.free(path);
+                        return null;
+                    },
+                };
+            }
+            out[n] = .{ .path = path, .edits = edits };
+            n += 1;
+        }
+        return out;
     }
 
     fn pushAnswer(self: *Manager, a: Answer) void {

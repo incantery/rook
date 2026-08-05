@@ -3243,6 +3243,7 @@ pub const App = struct {
         ed.lsp_hover = &lspHoverHook;
         ed.lsp_definition = &lspDefinitionHook;
         ed.lsp_references = &lspReferencesHook;
+        ed.lsp_rename = &lspRenameHook;
         // The sign column appears now rather than when the first error
         // does, so the document never shifts sideways under your cursor.
         ed.diag_gutter = true;
@@ -3398,6 +3399,7 @@ pub const App = struct {
                     }
                 },
                 .references => |r| self.startRefsLocked(r.sites, r.symbol),
+                .rename => |r| self.applyRenameLocked(r),
                 .none => |n| {
                     const ed = self.editorShowingLocked(n.path) orelse continue;
                     switch (n.kind) {
@@ -3407,6 +3409,11 @@ pub const App = struct {
                         // symbol nobody uses is a real answer, and one
                         // you often went looking for on purpose.
                         .references => ed.setStatus("no references found", .{}, false),
+                        // A null or an error reply to rename. Servers
+                        // refuse positions that are not renameable — a
+                        // keyword, a literal, a symbol from a dependency
+                        // — and that refusal is the answer.
+                        .rename => ed.setStatus("cannot rename here", .{}, false),
                     }
                     ed.render_dirty = true;
                 },
@@ -3481,6 +3488,223 @@ pub const App = struct {
             ed.setStatus("finding references to {s}…", .{word}, false);
         } else ed.setStatus("finding references…", .{}, false);
         ed.render_dirty = true;
+    }
+
+    fn lspRenameHook(ctx: *anyopaque, ed: *editorpkg.Editor, new_name: []const u8) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const path = ed.buf.path orelse return;
+        // EVERY open buffer, not just this one. A rename's edits come
+        // back addressed to files this pane has never touched, and an
+        // offset computed against a version of some other pane's buffer
+        // that the server never saw would land in the wrong place. The
+        // asking editor is synced by the same loop.
+        self.lspSyncAllLocked();
+        if (!self.lsp.rename(path, lspPos(ed), new_name)) {
+            ed.setStatus("no language server for this file", .{}, false);
+            return;
+        }
+        ed.setStatus("renaming to {s}…", .{new_name}, false);
+        ed.render_dirty = true;
+    }
+
+    /// Push every editor whose buffer the server has not seen yet.
+    ///
+    /// The debounce exists so typing does not flood the pipe. A rename
+    /// is not typing: it is one deliberate question whose answer is
+    /// applied to files by offset, so every buffer has to be the one
+    /// the server measured against.
+    fn lspSyncAllLocked(self: *App) void {
+        for (self.spaces.items) |space| for (space.tabs.items) |tab| {
+            for (tab.panes.items) |p| {
+                const ed = p.editor() orelse continue;
+                self.lspSyncLocked(ed);
+            }
+        };
+    }
+
+    /// One file a rename touches, resolved and ready to edit.
+    const RenameTarget = struct {
+        path: []const u8,
+        buf: *bufferpkg.Buffer,
+        /// We loaded this one ourselves because no pane had it open —
+        /// so we also save it and put it down. A document some pane is
+        /// showing is neither ours to save nor ours to free.
+        own: bool,
+        /// Byte offsets, ordered last-first. See lsp.resolveEdits.
+        splices: []lsppkg.Splice,
+    };
+
+    /// Carry out a rename the server has described.
+    ///
+    /// TWO PHASES, and the split is the whole design. Phase one resolves
+    /// every file — opens it, measures every edit against the text the
+    /// server actually saw, and refuses on anything it does not like.
+    /// Nothing is mutated until every file has passed. A rename that
+    /// edited four files and then discovered the fifth was unreadable
+    /// would leave a repo that compiles nowhere and an undo you have to
+    /// perform in four places.
+    ///
+    /// What it will not do is refuse quietly. Every abort names the file
+    /// and the reason, because "nothing happened" and "nothing happened
+    /// because the server wants to move a file" are different facts.
+    fn applyRenameLocked(self: *App, r: lspmgrpkg.RenameEdit) void {
+        const asking = self.editorShowingLocked(r.path);
+        const say = struct {
+            fn f(ed: ?*editorpkg.Editor, comptime fmt: []const u8, args: anytype, bad: bool) void {
+                const e = ed orelse return;
+                e.setStatus(fmt, args, bad);
+                e.render_dirty = true;
+            }
+        }.f;
+
+        if (r.file_ops) {
+            // gopls asks for this when the symbol owns its file. Doing
+            // the text half alone would leave a repo that references a
+            // name in a file still called the old thing.
+            say(asking, "that rename also moves files, which rook cannot do yet — nothing changed", .{}, true);
+            return;
+        }
+        if (r.files.len == 0) {
+            say(asking, "no references to rename", .{}, false);
+            return;
+        }
+
+        var targets: std.ArrayListUnmanaged(RenameTarget) = .empty;
+        defer targets.deinit(self.gpa);
+        // Unwinds a phase-one abort: whatever we loaded is put back
+        // down, and nothing has been edited yet, so there is nothing to
+        // undo.
+        var ok = true;
+        defer if (!ok) {
+            for (targets.items) |t| {
+                self.gpa.free(t.splices);
+                if (!t.own) continue;
+                t.buf.deinit(self.gpa);
+                self.gpa.destroy(t.buf);
+            }
+        };
+
+        for (r.files) |f| {
+            // The two WorkspaceEdit shapes can both name one file, and
+            // applying its edits twice would rename `foo` to `barbar`.
+            var seen = false;
+            for (targets.items) |t| {
+                if (lspmgrpkg.samePath(t.path, f.path)) seen = true;
+            }
+            if (seen) continue;
+
+            var target: RenameTarget = .{ .path = f.path, .buf = undefined, .own = false, .splices = &.{} };
+            if (self.editorShowingLocked(f.path)) |ed| {
+                target.buf = ed.buf;
+                // The server answered about the text we sent it. If the
+                // buffer has moved on since, every offset in this reply
+                // is measured against a document that no longer exists.
+                if (ed.buf.version != ed.buf.lsp_version) {
+                    say(asking, "{s} changed while the server was answering — nothing renamed", .{ed.displayName()}, true);
+                    ok = false;
+                    return;
+                }
+            } else {
+                const owned = self.gpa.create(bufferpkg.Buffer) catch {
+                    ok = false;
+                    return;
+                };
+                owned.* = bufferpkg.Buffer.initFromFile(self.gpa, self.io, f.path) catch {
+                    self.gpa.destroy(owned);
+                    say(asking, "cannot read {s} — nothing renamed", .{std.fs.path.basename(f.path)}, true);
+                    ok = false;
+                    return;
+                };
+                target.buf = owned;
+                target.own = true;
+            }
+            if (target.buf.readonly) {
+                say(asking, "{s} is not editable — nothing renamed", .{std.fs.path.basename(f.path)}, true);
+                ok = false;
+                if (target.own) {
+                    target.buf.deinit(self.gpa);
+                    self.gpa.destroy(target.buf);
+                }
+                return;
+            }
+
+            const text = target.buf.rope.dupeRange(self.gpa, 0, target.buf.rope.byteLen()) catch {
+                ok = false;
+                if (target.own) {
+                    target.buf.deinit(self.gpa);
+                    self.gpa.destroy(target.buf);
+                }
+                return;
+            };
+            defer self.gpa.free(text);
+            target.splices = lsppkg.resolveEdits(self.gpa, text, f.edits) orelse {
+                say(asking, "the server's edits for {s} overlap — nothing renamed", .{std.fs.path.basename(f.path)}, true);
+                ok = false;
+                if (target.own) {
+                    target.buf.deinit(self.gpa);
+                    self.gpa.destroy(target.buf);
+                }
+                return;
+            };
+            targets.append(self.gpa, target) catch {
+                self.gpa.free(target.splices);
+                ok = false;
+                if (target.own) {
+                    target.buf.deinit(self.gpa);
+                    self.gpa.destroy(target.buf);
+                }
+                return;
+            };
+        }
+
+        // Phase two. Everything below here succeeds or is reported; the
+        // validation that could refuse has already happened.
+        var open_n: usize = 0;
+        var written_n: usize = 0;
+        var failed_n: usize = 0;
+        for (targets.items) |t| {
+            // ONE undo group per file, so `u` in a pane takes back that
+            // pane's whole share of the rename rather than one
+            // occurrence of it.
+            t.buf.newUndoGroup();
+            t.buf.group_pinned = true;
+            for (t.splices) |s| {
+                t.buf.deleteRange(self.gpa, s.start, s.end) catch {};
+                t.buf.insert(self.gpa, s.start, s.text) catch {};
+            }
+            t.buf.group_pinned = false;
+            self.gpa.free(t.splices);
+
+            if (!t.own) {
+                open_n += 1;
+                continue;
+            }
+            // A file nobody is looking at has nowhere to show a dirty
+            // flag and nobody to press `:w`, so it is written now —
+            // through save(), which keeps the atomic replace, the
+            // permissions and the clobber guard.
+            if (t.buf.save(self.gpa, self.io, false)) {
+                written_n += 1;
+            } else |_| failed_n += 1;
+            t.buf.deinit(self.gpa);
+            self.gpa.destroy(t.buf);
+        }
+
+        self.scene_dirty = true;
+        // Open buffers are left UNSAVED on purpose: the change is in
+        // front of you, `u` takes it back, and `:wa` commits it. Files
+        // you cannot see got no such review, which is why they are
+        // written — the asymmetry is the honest one, and saying which
+        // is which is why this line is as long as it is.
+        if (failed_n > 0) {
+            say(asking, "renamed to {s} — {d} written, {d} unsaved, {d} FAILED to write", .{ r.symbol, written_n, open_n, failed_n }, true);
+        } else if (open_n > 0 and written_n > 0) {
+            say(asking, "renamed to {s} in {d} files — {d} written, {d} open and unsaved (:wa)", .{ r.symbol, open_n + written_n, written_n, open_n }, false);
+        } else if (written_n > 0) {
+            say(asking, "renamed to {s} in {d} files, all written", .{ r.symbol, written_n }, false);
+        } else {
+            say(asking, "renamed to {s} in {d} open {s} — unsaved (:wa writes them)", .{ r.symbol, open_n, @as([]const u8, if (open_n == 1) "file" else "files") }, false);
+        }
     }
 
     /// Read an answered references list into the panel, off the frame.

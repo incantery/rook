@@ -254,6 +254,117 @@ pub const Location = struct {
     range: Range = .{},
 };
 
+/// Replace `range` with `text`. The unit a WorkspaceEdit is made of.
+pub const TextEdit = struct {
+    range: Range = .{},
+    /// Owned; "" is a pure deletion.
+    text: []const u8 = "",
+};
+
+/// One file's worth of edits, as the server grouped them.
+pub const FileEdits = struct {
+    /// Absolute path, owned.
+    path: []const u8 = "",
+    /// Owned, with every text inside it.
+    edits: []TextEdit = &.{},
+};
+
+/// A resolved edit, in the coordinates the caller actually edits in.
+///
+/// The conversion is the point: the protocol names a Range in lines and
+/// UTF-16 columns, and a rope is addressed in bytes. See resolveEdits.
+pub const Splice = struct {
+    start: usize = 0,
+    end: usize = 0,
+    /// Borrowed from the TextEdit it came from.
+    text: []const u8 = "",
+};
+
+/// Byte offset of `pos` within `text`.
+///
+/// Clamped at both ends — a line past the end of the document resolves
+/// to the end of the document, the same fail-open rule byteColFromUtf16
+/// follows for a column past the end of a line. A server naming a
+/// position we no longer have is a stale answer, not a reason to crash.
+pub fn offsetOf(text: []const u8, pos: Position) usize {
+    var line: u32 = 0;
+    var i: usize = 0;
+    while (line < pos.line) : (line += 1) {
+        const nl = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse return text.len;
+        i = nl + 1;
+    }
+    const end = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+    return i + byteColFromUtf16(text[i..end], pos.col);
+}
+
+fn spliceLast(_: void, a: Splice, b: Splice) bool {
+    if (a.start != b.start) return a.start > b.start;
+    return a.end > b.end;
+}
+
+/// Resolve `edits` against `text`, ordered LAST FIRST.
+///
+/// Last first is what lets a caller apply them one after another without
+/// re-measuring: an edit near the end of the file cannot move the offset
+/// of one nearer the start, so every splice stays valid as the ones
+/// after it land. Applying in the server's order instead would need
+/// every remaining offset shifted by each edit's delta, which is the
+/// same computation done once per edit rather than once.
+///
+/// Null when two edits OVERLAP. The protocol forbids it, and a server
+/// that sent them is describing a document we cannot produce — the two
+/// orders give two different files, so there is no right answer to pick.
+/// Refusing the whole rename is the only honest outcome.
+pub fn resolveEdits(gpa: Allocator, text: []const u8, edits: []const TextEdit) ?[]Splice {
+    const out = gpa.alloc(Splice, edits.len) catch return null;
+    for (edits, 0..) |e, i| {
+        const start = offsetOf(text, e.range.start);
+        const end = offsetOf(text, e.range.end);
+        // A reversed range is malformed. Taking it as empty would
+        // silently turn a replacement into an insertion.
+        if (end < start) {
+            gpa.free(out);
+            return null;
+        }
+        out[i] = .{ .start = start, .end = end, .text = e.text };
+    }
+    std.mem.sort(Splice, out, {}, spliceLast);
+    // Sorted last-first, so each splice must end at or before the one
+    // before it starts. Two insertions at the SAME point are allowed —
+    // they have nothing to disagree about.
+    var i: usize = 1;
+    while (i < out.len) : (i += 1) {
+        if (out[i].end > out[i - 1].start) {
+            gpa.free(out);
+            return null;
+        }
+    }
+    return out;
+}
+
+/// `text` with `splices` applied. Caller owns the result.
+///
+/// For a file nobody has open — an editor with a rope applies the
+/// splices to it directly instead, so the edit stays undoable.
+pub fn applySplices(gpa: Allocator, text: []const u8, splices: []const Splice) ?[]u8 {
+    var a: std.Io.Writer.Allocating = .init(gpa);
+    errdefer a.deinit();
+    const w = &a.writer;
+    // Splices are last-first; writing a file is first-last.
+    var i: usize = splices.len;
+    var at: usize = 0;
+    while (i > 0) {
+        i -= 1;
+        const s = splices[i];
+        if (s.start < at or s.end > text.len) return null;
+        w.writeAll(text[at..s.start]) catch return null;
+        w.writeAll(s.text) catch return null;
+        at = s.end;
+    }
+    w.writeAll(text[at..]) catch return null;
+    return a.toOwnedSlice() catch null;
+}
+
 pub const Event = union(enum) {
     /// initialize came back; the session is usable and the legend (if
     /// any) is readable.
@@ -266,6 +377,8 @@ pub const Event = union(enum) {
     /// where they all are" are different answers, and a caller that
     /// could not tell them apart would jump on a references reply.
     references: Locations,
+    /// A set of edits across a set of files, from rename.
+    workspace_edit: WorkspaceEdit,
     /// A request we sent is answered and has nothing to show: a null
     /// result, an error reply, or a server that died holding it. The
     /// caller MUST be released either way, or whatever it put on screen
@@ -299,6 +412,22 @@ pub const Event = union(enum) {
         locs: []Location,
     };
 
+    pub const WorkspaceEdit = struct {
+        id: u32,
+        /// Owned, all the way down.
+        files: []FileEdits,
+        /// The server asked to CREATE, RENAME or DELETE a file as part
+        /// of this edit — gopls does when the symbol owns its file.
+        ///
+        /// Reported rather than performed, and reported rather than
+        /// dropped: rook does not do resource operations yet, and an
+        /// edit applied without its file moves is a rename that
+        /// half-happened. The caller refuses the whole thing and says
+        /// why. Silently applying the text half is the failure this
+        /// flag exists to prevent.
+        file_ops: bool = false,
+    };
+
     pub fn deinit(self: *Event, gpa: Allocator) void {
         switch (self.*) {
             .diagnostics => |*d| {
@@ -314,12 +443,24 @@ pub const Event = union(enum) {
                 for (d.locs) |l| gpa.free(l.path);
                 gpa.free(d.locs);
             },
+            .workspace_edit => |*we| freeFileEdits(gpa, we.files),
             .failed => |*f| gpa.free(f.reason),
             .ready, .empty => {},
         }
         self.* = .{ .empty = .{ .id = 0 } };
     }
 };
+
+/// Free a FileEdits list and everything hanging off it. Public because
+/// whoever takes ownership of one has to be able to put it down.
+pub fn freeFileEdits(gpa: Allocator, files: []FileEdits) void {
+    for (files) |f| {
+        gpa.free(f.path);
+        for (f.edits) |e| gpa.free(e.text);
+        gpa.free(f.edits);
+    }
+    gpa.free(files);
+}
 
 pub const State = enum {
     /// Constructed; initialize not sent.
@@ -333,7 +474,7 @@ pub const State = enum {
     failed,
 };
 
-const Kind = enum { initialize, hover, definition, references, shutdown };
+const Kind = enum { initialize, hover, definition, references, rename, shutdown };
 
 const Pending = struct { id: u32, kind: Kind };
 
@@ -356,6 +497,12 @@ const max_events = 256;
 /// only request whose answer is naturally this big; search.zig caps its
 /// own hits at the same order for the same reason.
 const max_locations = 2000;
+/// A rename touching more files than this is one nobody is reviewing,
+/// and the reply is still the server's to size. Same reasoning as the
+/// location cap; the numbers differ because renaming 400 files at once
+/// is already further than anyone means to go.
+const max_edit_files = 400;
+const max_edits_per_file = 4000;
 
 // ---------------------------------------------------------------- Session
 
@@ -541,7 +688,7 @@ pub const Session = struct {
         writeJsonString(w, std.fs.path.basename(self.root));
         w.writeAll("}],\"capabilities\":{\"textDocument\":{" ++
             "\"definition\":{\"linkSupport\":true}," ++
-            "\"references\":{}," ++
+            "\"references\":{},\"rename\":{}," ++
             "\"hover\":{\"contentFormat\":[\"markdown\",\"plaintext\"]}," ++
             "\"publishDiagnostics\":{\"versionSupport\":true}," ++
             "\"synchronization\":{\"didSave\":true}," ++
@@ -819,6 +966,24 @@ pub const Session = struct {
         return self.request(.references, "textDocument/references", params);
     }
 
+    /// Rename the symbol under `pos` to `new_name`. The answer is a
+    /// `.workspace_edit` carrying the same id.
+    ///
+    /// No prepareRename first. It exists to tell you a position is not
+    /// renameable BEFORE you type a name, and it costs a round trip on
+    /// every rename to save typing on the few that were never going to
+    /// work. A server that cannot rename here answers this request with
+    /// an error, which releases the caller with a message either way.
+    pub fn rename(self: *Session, path: []const u8, pos: Position, new_name: []const u8) ?u32 {
+        var extra: std.Io.Writer.Allocating = .init(self.gpa);
+        defer extra.deinit();
+        extra.writer.writeAll(",\"newName\":") catch return null;
+        writeJsonString(&extra.writer, new_name);
+        const params = self.posParamsExtra(path, pos, extra.written()) orelse return null;
+        defer self.gpa.free(params);
+        return self.request(.rename, "textDocument/rename", params);
+    }
+
     // ---------------------------------------------------------- inbound
 
     /// Feed bytes read off the server. Complete frames are dispatched;
@@ -1047,6 +1212,7 @@ pub const Session = struct {
             .hover => self.onHover(id, result),
             .definition => self.onLocations(id, result, false),
             .references => self.onLocations(id, result, true),
+            .rename => self.onWorkspaceEdit(id, result),
         }
     }
 
@@ -1110,6 +1276,100 @@ pub const Session = struct {
         };
         const payload: Event.Locations = .{ .id = id, .locs = owned };
         self.push(if (many) .{ .references = payload } else .{ .definition = payload });
+    }
+
+    /// A WorkspaceEdit, in either of the two shapes the protocol has.
+    ///
+    /// `changes` is a map of uri → edits. `documentChanges` is an array
+    /// that can hold TextDocumentEdits AND resource operations, and it
+    /// is what a client which declared documentChanges support gets —
+    /// gopls answers with it. Reading only one shape would make rename
+    /// work against half the catalog and silently do nothing against
+    /// the other half, which is why both are here.
+    fn onWorkspaceEdit(self: *Session, id: u32, result: std.json.Value) void {
+        var files: std.ArrayListUnmanaged(FileEdits) = .empty;
+        defer files.deinit(self.gpa);
+        var file_ops = false;
+
+        const changes = jGet(result, "changes");
+        if (changes == .object) {
+            var it = changes.object.iterator();
+            while (it.next()) |kv| {
+                if (files.items.len >= max_edit_files) break;
+                const path = pathFromUri(self.gpa, kv.key_ptr.*) orelse continue;
+                const edits = self.readTextEdits(kv.value_ptr.*);
+                if (edits.len == 0) {
+                    self.gpa.free(path);
+                    continue;
+                }
+                files.append(self.gpa, .{ .path = path, .edits = edits }) catch {
+                    self.gpa.free(path);
+                    for (edits) |e| self.gpa.free(e.text);
+                    self.gpa.free(edits);
+                };
+            }
+        }
+
+        const doc_changes = jGet(result, "documentChanges");
+        if (doc_changes == .array) {
+            for (doc_changes.array.items) |item| {
+                if (files.items.len >= max_edit_files) break;
+                // A resource operation is tagged with `kind`; a
+                // TextDocumentEdit has none and carries `textDocument`.
+                if (jStr(jGet(item, "kind")) != null) {
+                    file_ops = true;
+                    continue;
+                }
+                const uri = jStr(jGet(jGet(item, "textDocument"), "uri")) orelse continue;
+                const path = pathFromUri(self.gpa, uri) orelse continue;
+                const edits = self.readTextEdits(jGet(item, "edits"));
+                if (edits.len == 0) {
+                    self.gpa.free(path);
+                    continue;
+                }
+                files.append(self.gpa, .{ .path = path, .edits = edits }) catch {
+                    self.gpa.free(path);
+                    for (edits) |e| self.gpa.free(e.text);
+                    self.gpa.free(edits);
+                };
+            }
+        }
+
+        // Nothing to do AND nothing to warn about is a null answer: the
+        // caller is released and told there was no edit. A reply that
+        // was ONLY resource operations still has to reach the caller,
+        // or refusing it would look like the server said nothing.
+        if (files.items.len == 0 and !file_ops) {
+            self.push(.{ .empty = .{ .id = id } });
+            return;
+        }
+        const owned = files.toOwnedSlice(self.gpa) catch {
+            freeFileEdits(self.gpa, files.items);
+            files.items = &.{};
+            return;
+        };
+        self.push(.{ .workspace_edit = .{ .id = id, .files = owned, .file_ops = file_ops } });
+    }
+
+    /// A TextEdit[]. AnnotatedTextEdit adds a field and is otherwise the
+    /// same shape, so it reads here without a special case.
+    fn readTextEdits(self: *Session, v: std.json.Value) []TextEdit {
+        if (v != .array) return &.{};
+        var out: std.ArrayListUnmanaged(TextEdit) = .empty;
+        for (v.array.items) |item| {
+            if (out.items.len >= max_edits_per_file) break;
+            const rng = jGet(item, "range");
+            if (rng == .null) continue;
+            // An absent newText is a DELETION, which is a legal edit —
+            // defaulting it to "" is right, and defaulting the range to
+            // 0,0 would not be, which is why only one of them defaults.
+            const text = self.gpa.dupe(u8, jStr(jGet(item, "newText")) orelse "") catch continue;
+            out.append(self.gpa, .{ .range = jRange(rng), .text = text }) catch {
+                self.gpa.free(text);
+                break;
+            };
+        }
+        return out.toOwnedSlice(self.gpa) catch &.{};
     }
 
     fn readLocation(self: *Session, v: std.json.Value) ?Location {
@@ -1516,6 +1776,14 @@ pub const Server = struct {
     pub fn references(self: *Server, path: []const u8, pos: Position, include_decl: bool) ?u32 {
         self.mu.lock();
         const id = self.sess.references(path, pos, include_decl);
+        self.mu.unlock();
+        self.poke();
+        return id;
+    }
+
+    pub fn rename(self: *Server, path: []const u8, pos: Position, new_name: []const u8) ?u32 {
+        self.mu.lock();
+        const id = self.sess.rename(path, pos, new_name);
         self.mu.unlock();
         self.poke();
         return id;
@@ -2016,6 +2284,133 @@ test "a reply longer than the cap is truncated, not allocated whole" {
     var e = sess.nextEvent().?;
     defer e.deinit(gpa);
     try testing.expectEqual(@as(usize, max_locations), e.references.locs.len);
+}
+
+test "offsetOf walks lines and utf-16 columns, clamping past both ends" {
+    const text = "one\ntwö\nthree\n";
+    try testing.expectEqual(@as(usize, 0), offsetOf(text, .{ .line = 0, .col = 0 }));
+    try testing.expectEqual(@as(usize, 4), offsetOf(text, .{ .line = 1, .col = 0 }));
+    // ö is two bytes and one utf-16 unit: column 3 is byte 4 on that
+    // line, so offset 8 — a byte-counting client would say 7.
+    try testing.expectEqual(@as(usize, 8), offsetOf(text, .{ .line = 1, .col = 3 }));
+    try testing.expectEqual(@as(usize, 9), offsetOf(text, .{ .line = 2, .col = 0 }));
+    // Past the end of a line is the end of that line, not the next one.
+    try testing.expectEqual(@as(usize, 3), offsetOf(text, .{ .line = 0, .col = 99 }));
+    // Past the end of the document is the end of the document.
+    try testing.expectEqual(text.len, offsetOf(text, .{ .line = 99, .col = 0 }));
+}
+
+test "resolveEdits orders last-first and refuses an overlap" {
+    const gpa = testing.allocator;
+    const text = "alpha bravo charlie\n";
+
+    // Given first-to-last, handed back last-to-first.
+    const ok = [_]TextEdit{
+        .{ .range = .{ .start = .{ .col = 0 }, .end = .{ .col = 5 } }, .text = "ONE" },
+        .{ .range = .{ .start = .{ .col = 12 }, .end = .{ .col = 19 } }, .text = "THREE" },
+        .{ .range = .{ .start = .{ .col = 6 }, .end = .{ .col = 11 } }, .text = "TWO" },
+    };
+    const sp = resolveEdits(gpa, text, &ok).?;
+    defer gpa.free(sp);
+    try testing.expectEqual(@as(usize, 12), sp[0].start);
+    try testing.expectEqual(@as(usize, 6), sp[1].start);
+    try testing.expectEqual(@as(usize, 0), sp[2].start);
+
+    const applied = applySplices(gpa, text, sp).?;
+    defer gpa.free(applied);
+    try testing.expectEqualStrings("ONE TWO THREE\n", applied);
+
+    // Two edits over the same bytes give two different files depending
+    // on which lands first, so there is no answer to pick.
+    const clash = [_]TextEdit{
+        .{ .range = .{ .start = .{ .col = 0 }, .end = .{ .col = 7 } }, .text = "x" },
+        .{ .range = .{ .start = .{ .col = 6 }, .end = .{ .col = 11 } }, .text = "y" },
+    };
+    try testing.expect(resolveEdits(gpa, text, &clash) == null);
+
+    // A reversed range is malformed; treating it as empty would turn a
+    // replacement into an insertion.
+    const backwards = [_]TextEdit{
+        .{ .range = .{ .start = .{ .col = 9 }, .end = .{ .col = 2 } }, .text = "x" },
+    };
+    try testing.expect(resolveEdits(gpa, text, &backwards) == null);
+
+    // Two INSERTIONS at one point have nothing to disagree about.
+    const both = [_]TextEdit{
+        .{ .range = .{ .start = .{ .col = 5 }, .end = .{ .col = 5 } }, .text = "!" },
+        .{ .range = .{ .start = .{ .col = 5 }, .end = .{ .col = 5 } }, .text = "?" },
+    };
+    const sp2 = resolveEdits(gpa, text, &both).?;
+    defer gpa.free(sp2);
+    const applied2 = applySplices(gpa, text, sp2).?;
+    defer gpa.free(applied2);
+    try testing.expectEqualStrings("alpha?! bravo charlie\n", applied2);
+}
+
+test "rename reads both WorkspaceEdit shapes and reports file operations" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    try readySession(&sess, false);
+    var ready = sess.nextEvent().?;
+    ready.deinit(gpa);
+    sess.didOpen("/tmp/work/a.go", "package main\n");
+    sess.consumeOutbound(sess.outbound().len);
+
+    // `changes`: a map of uri → edits, which is what a server that
+    // ignores our documentChanges support answers with.
+    const id1 = sess.rename("/tmp/work/a.go", .{ .line = 2, .col = 4 }, "renamed").?;
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(), "\"newName\":\"renamed\"") != null);
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(), "\"method\":\"textDocument/rename\"") != null);
+    const r1 = try std.fmt.allocPrint(gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"changes\":{{" ++
+        "\"file:///tmp/work/a.go\":[{{\"range\":{{\"start\":{{\"line\":2,\"character\":4}}," ++
+        "\"end\":{{\"line\":2,\"character\":7}}}},\"newText\":\"renamed\"}}]}}}}}}", .{id1});
+    defer gpa.free(r1);
+    const f1 = try framed(gpa, r1);
+    defer gpa.free(f1);
+    sess.feed(f1);
+    var e1 = sess.nextEvent().?;
+    defer e1.deinit(gpa);
+    try testing.expect(e1 == .workspace_edit);
+    try testing.expectEqual(@as(usize, 1), e1.workspace_edit.files.len);
+    try testing.expectEqualStrings("/tmp/work/a.go", e1.workspace_edit.files[0].path);
+    try testing.expectEqualStrings("renamed", e1.workspace_edit.files[0].edits[0].text);
+    try testing.expect(!e1.workspace_edit.file_ops);
+
+    // `documentChanges`: what gopls answers, and it can carry resource
+    // operations beside the text edits.
+    const id2 = sess.rename("/tmp/work/a.go", .{}, "x").?;
+    const r2 = try std.fmt.allocPrint(gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"documentChanges\":[" ++
+        "{{\"textDocument\":{{\"uri\":\"file:///tmp/work/b.go\",\"version\":3}}," ++
+        "\"edits\":[{{\"range\":{{\"start\":{{\"line\":1,\"character\":0}}," ++
+        "\"end\":{{\"line\":1,\"character\":3}}}},\"newText\":\"x\"}}]}}," ++
+        "{{\"kind\":\"rename\",\"oldUri\":\"file:///tmp/work/b.go\"," ++
+        "\"newUri\":\"file:///tmp/work/c.go\"}}]}}}}", .{id2});
+    defer gpa.free(r2);
+    const f2 = try framed(gpa, r2);
+    defer gpa.free(f2);
+    sess.feed(f2);
+    var e2 = sess.nextEvent().?;
+    defer e2.deinit(gpa);
+    try testing.expectEqual(@as(usize, 1), e2.workspace_edit.files.len);
+    try testing.expectEqualStrings("/tmp/work/b.go", e2.workspace_edit.files[0].path);
+    // The text half parsed AND the file move was reported. Applying one
+    // without the other is the half-rename this flag prevents.
+    try testing.expect(e2.workspace_edit.file_ops);
+
+    // A server that cannot rename here answers null, and the caller has
+    // to be released or the prompt never comes back.
+    const id3 = sess.rename("/tmp/work/a.go", .{}, "x").?;
+    const r3 = try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":null}}", .{id3});
+    defer gpa.free(r3);
+    const f3 = try framed(gpa, r3);
+    defer gpa.free(f3);
+    sess.feed(f3);
+    var e3 = sess.nextEvent().?;
+    defer e3.deinit(gpa);
+    try testing.expect(e3 == .empty);
 }
 
 test "an error reply releases the caller instead of stranding it" {

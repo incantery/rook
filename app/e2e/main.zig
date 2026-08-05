@@ -61,7 +61,7 @@ const scenarios = [_]Scenario{
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
     .{ .name = "explorerauto", .what = "explorer-auto: the sidebar opens at launch inside a repo, and never takes the keys", .run = explorerAuto },
-    .{ .name = "lsp", .what = "language server: diagnostics reach the gutter, ]d walks them, gr lists every use", .run = lspScenario },
+    .{ .name = "lsp", .what = "language server: diagnostics, ]d, gr lists every use, gR renames across files", .run = lspScenario },
     .{ .name = "lsppython", .what = "a second language is data: python roots at pyproject.toml and lands the same way", .run = lspPython },
     .{ .name = "lspts", .what = "ts and tsx share one server, root at the tsconfig, and split only on the grammar", .run = lspTs },
     .{ .name = "docshare", .what = "one file in two panes is ONE document: edits, dirty flag and :w are shared", .run = docShare },
@@ -3481,6 +3481,85 @@ fn lspScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
         // the whole reason the column travels with the row.
         try h.expectContains(try app.screen(&buf), "3:6", "landing on the symbol, not at the start of its line");
     }
+
+    // `gR` — rename across files, one of which nobody has open.
+    //
+    // Back to main.go first, which also closes other.go: the two halves
+    // of the apply (an open document edited in place, a closed file
+    // written to disk) are only distinguishable if exactly one of them
+    // is on screen.
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{main_go}));
+    _ = try app.waitCtl("panes", "edit:main.go", 5_000);
+    _ = try app.ctl("type ]d");
+    _ = try app.ctl("type gR");
+    {
+        var buf: [16 * 1024]u8 = undefined;
+        // Prefilled with the current name — a rename is usually a small
+        // edit to a name you can already see.
+        try h.expectContains(try app.screen(&buf), "rename to: nope", "the prompt opens on the word under the cursor");
+    }
+    // Four backspaces clear the prefill without closing the prompt —
+    // the fifth would have, which is how you back out of a rename you
+    // opened by mistake.
+    for (0..4) |_| _ = try app.ctl("key 7f");
+    _ = try app.ctl("type wibble");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("dump", "renamed to wibble", 8_000);
+
+    {
+        var buf: [16 * 1024]u8 = undefined;
+        const screen = try app.screen(&buf);
+        try h.expectContains(screen, "wibble", "the open buffer holds the new name");
+        try h.expectNotContains(screen, "nope()", "and not the old one");
+    }
+    // The open document is left UNSAVED — the change is in front of you
+    // and `u` takes it back. The closed one had nowhere to show a dirty
+    // flag, so it was written.
+    try h.expectContains(try app.ctl("docs"), "modified:yes", "the file you can see is dirty, not written behind your back");
+    {
+        var disk: [512]u8 = undefined;
+        const got = try h.readFile(other_go, &disk);
+        try h.expectContains(got, "func wibble() int", "the file no pane had open was written to disk");
+    }
+    {
+        // Still the file on disk, untouched: the open half of a rename
+        // is exactly as reviewable as any other edit.
+        var disk: [512]u8 = undefined;
+        const got = try h.readFile(main_go, &disk);
+        try h.expectContains(got, "nope()", "the open file is not written until you say so");
+    }
+
+    // One undo group per file: `u` takes back this pane's whole share
+    // of the rename, not one occurrence of it.
+    _ = try app.ctl("type u");
+    {
+        var buf: [16 * 1024]u8 = undefined;
+        try h.expectContains(try app.screen(&buf), "nope()", "u takes the whole rename back in one step");
+    }
+    try h.expectContains(try app.ctl("docs"), "modified:no", "and undoing all of it leaves the buffer clean again");
+
+    // A rename the server wants to carry out by MOVING a file. rook
+    // cannot, and the failure mode to avoid is doing the text half
+    // anyway — a repo naming a file that never moved.
+    _ = try app.ctl("type ]d");
+    _ = try app.ctl("type gR");
+    for (0..4) |_| _ = try app.ctl("key 7f");
+    _ = try app.ctl("type movefile");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("dump", "moves files", 8_000);
+    {
+        var buf: [16 * 1024]u8 = undefined;
+        try h.expectContains(try app.screen(&buf), "nope()", "the refused rename left the buffer alone");
+    }
+    try h.expectContains(try app.ctl("docs"), "modified:no", "not even a little bit of it was applied");
+    {
+        // The file it WOULD have written is untouched too — a refusal
+        // that still edited the half it could reach is the whole thing
+        // this guard exists to prevent.
+        var disk: [512]u8 = undefined;
+        const got = try h.readFile(other_go, &disk);
+        try h.expectContains(got, "func wibble() int", "and the closed file still holds only the earlier rename");
+    }
 }
 
 
@@ -3610,6 +3689,46 @@ fn fakeHandle(gpa: std.mem.Allocator, body: []const u8, target: []const u8) !voi
                 "\"end\":{{\"line\":4,\"character\":9}}}}}}]}}",
             .{ id orelse 0, dir, target, target },
         );
+        try fakeSend(gpa, w.written());
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/rename")) {
+        // Echo the name the client asked for, so the scenario can
+        // assert on the text that actually lands rather than on a
+        // constant this file chose.
+        const new_name = switch (obj.get("params") orelse .null) {
+            .object => |po| switch (po.get("newName") orelse .null) {
+                .string => |s| s,
+                else => "RENAMED",
+            },
+            else => "RENAMED",
+        };
+        // documentChanges, which is what a client declaring support for
+        // it gets from gopls — and the shape that can also carry file
+        // operations. Renaming to `movefile` asks for one, which is how
+        // the scenario reaches the refusal: gopls really does answer
+        // this way when the symbol owns its file, and applying the text
+        // half alone would leave a repo naming a file that never moved.
+        const dir = std.fs.path.dirname(target) orelse "/";
+        const file_op = std.mem.eql(u8, new_name, "movefile");
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"documentChanges\":[" ++
+                "{{\"textDocument\":{{\"uri\":\"file://{s}\",\"version\":1}},\"edits\":[" ++
+                "{{\"range\":{{\"start\":{{\"line\":5,\"character\":13}}," ++
+                "\"end\":{{\"line\":5,\"character\":17}}}},\"newText\":\"{s}\"}}]}}," ++
+                "{{\"textDocument\":{{\"uri\":\"file://{s}/other.go\",\"version\":1}},\"edits\":[" ++
+                "{{\"range\":{{\"start\":{{\"line\":2,\"character\":5}}," ++
+                "\"end\":{{\"line\":2,\"character\":9}}}},\"newText\":\"{s}\"}}]}}",
+            .{ id orelse 0, target, new_name, dir, new_name },
+        );
+        if (file_op) {
+            try w.writer.print(
+                ",{{\"kind\":\"rename\",\"oldUri\":\"file://{s}/other.go\"," ++
+                    "\"newUri\":\"file://{s}/moved.go\"}}",
+                .{ dir, dir },
+            );
+        }
+        try w.writer.writeAll("]}}");
         try fakeSend(gpa, w.written());
         return;
     }

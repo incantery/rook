@@ -352,7 +352,13 @@ pub const Editor = struct {
     cmd: std.ArrayListUnmanaged(u8) = .empty,
     /// What the command line is collecting: an ex command (:) or a
     /// search pattern (/).
-    cmd_kind: enum { ex, search } = .ex,
+    cmd_kind: enum { ex, search, rename } = .ex,
+    /// The word `gR` was pressed on, owned. Kept for the whole life of
+    /// the prompt so Enter can tell a real rename from a name you
+    /// backspaced and retyped identically — comparing against the word
+    /// under the cursor instead would compare against a cursor that has
+    /// not moved but a buffer that a watcher may have shifted.
+    rename_from: std.ArrayListUnmanaged(u8) = .empty,
     /// Which way the pending `/` or `?` runs, and which way `n` walks.
     /// `N` is the other one — not "backwards", which is what makes `N`
     /// after a `?` go forward.
@@ -516,6 +522,11 @@ pub const Editor = struct {
     /// but "everywhere it is used" across a repo is a question only the
     /// server can answer, and a wrong list reads as a right one.
     lsp_references: ?*const fn (*anyopaque, *Editor) void = null,
+    /// `gR` — rename the symbol everywhere, once you have typed what to.
+    /// The only one of these that MUTATES, and the only one that takes
+    /// an argument, so it is the only one asked twice: the key opens a
+    /// prompt, and the prompt calls this.
+    lsp_rename: ?*const fn (*anyopaque, *Editor, []const u8) void = null,
     /// Debounce state: the version last OBSERVED changing, and when.
     /// Sync fires when typing stops, not on every keystroke — a
     /// full-text didChange per character is a lot of pipe for an
@@ -1166,6 +1177,7 @@ pub const Editor = struct {
         self.rec.deinit(gpa);
         self.last_search.deinit(gpa);
         self.inc_prev.deinit(gpa);
+        self.rename_from.deinit(gpa);
         self.cpl_blob.deinit(gpa);
         self.cpl_at.deinit(gpa);
         if (self.last_re) |*r| r.deinit(gpa);
@@ -2360,6 +2372,7 @@ pub const Editor = struct {
             self.mode = .normal;
             switch (self.cmd_kind) {
                 .ex => self.execCommand(),
+                .rename => self.finishRename(),
                 .search => {
                     // Back to where the prompt opened, so the jump is
                     // measured from there and not from wherever the
@@ -2389,6 +2402,55 @@ pub const Editor = struct {
             self.cmd.appendSlice(self.gpa, bytes) catch {};
             self.incPreview();
         }
+    }
+
+    /// `gR` — open the rename prompt over the word under the cursor.
+    ///
+    /// Prefilled with the current name, the way every editor's rename
+    /// box is: a rename is usually a small change to a name you can
+    /// already see, and retyping `handleInboundRequest` to fix its verb
+    /// is not editing, it is transcription.
+    fn startRename(self: *Editor) void {
+        self.count = 0;
+        self.op = 0;
+        if (self.lsp_rename == null) {
+            self.setStatus("no language server for this file", .{}, false);
+            return;
+        }
+        const word = self.wordUnder() orelse {
+            self.setStatus("no symbol under the cursor", .{}, true);
+            return;
+        };
+        self.rename_from.clearRetainingCapacity();
+        self.rename_from.appendSlice(self.gpa, word.text) catch return;
+        self.cmd.clearRetainingCapacity();
+        self.cmd.appendSlice(self.gpa, word.text) catch return;
+        self.mode = .command;
+        self.cmd_kind = .rename;
+    }
+
+    /// Enter in the rename prompt.
+    fn finishRename(self: *Editor) void {
+        const to = std.mem.trim(u8, self.cmd.items, " ");
+        if (to.len == 0) {
+            self.setStatus("rename needs a name", .{}, true);
+            return;
+        }
+        // Both refusals are local on purpose: a round trip that could
+        // only ever come back "nothing to do" is a round trip that
+        // makes a no-op feel like work.
+        if (std.mem.eql(u8, to, self.rename_from.items)) {
+            self.setStatus("already called {s}", .{to}, false);
+            return;
+        }
+        for (to) |c| {
+            if (c == ' ' or c == '\t') {
+                self.setStatus("a name cannot contain spaces", .{}, true);
+                return;
+            }
+        }
+        const f = self.lsp_rename orelse return;
+        f(self.lsp_ctx.?, self, to);
     }
 
     fn cursorTo(self: *Editor, p: Pos) void {
@@ -3551,6 +3613,10 @@ pub const Editor = struct {
                         f(self.lsp_ctx.?, self);
                     } else self.setStatus("no language server for this file", .{}, false);
                 },
+                // `gR` is vim's virtual REPLACE mode, next door to `gr`
+                // and unimplemented here for the same reason. Rename is
+                // the replace you actually want across a repo.
+                'R' => self.startRename(),
                 'u', 'U', '~' => {
                     if (self.inVisual()) {
                         self.visualOp(ch);
@@ -6364,7 +6430,14 @@ pub const Editor = struct {
 
         var x: usize = 0;
         if (self.mode == .command) {
-            putStr(out, &x, if (self.cmd_kind == .search) "/" else ":", .status);
+            // The prompt names itself: `:` and `/` are known by their
+            // punctuation, but a box prefilled with a word you are
+            // about to overwrite has to say what overwriting it does.
+            putStr(out, &x, switch (self.cmd_kind) {
+                .search => "/",
+                .ex => ":",
+                .rename => "rename to: ",
+            }, .status);
             for (self.cmd.items) |c| {
                 if (x >= out.len) break;
                 out[x] = .{ .cp = c, .st = .status };
