@@ -3244,6 +3244,7 @@ pub const App = struct {
         ed.lsp_definition = &lspDefinitionHook;
         ed.lsp_references = &lspReferencesHook;
         ed.lsp_rename = &lspRenameHook;
+        ed.lsp_completion = &lspCompletionHook;
         // The sign column appears now rather than when the first error
         // does, so the document never shifts sideways under your cursor.
         ed.diag_gutter = true;
@@ -3400,6 +3401,21 @@ pub const App = struct {
                 },
                 .references => |r| self.startRefsLocked(r.sites, r.symbol),
                 .rename => |r| self.applyRenameLocked(r),
+                .completion => |c| {
+                    const ed = self.editorShowingLocked(c.path) orelse continue;
+                    const items = self.gpa.alloc(editorpkg.Editor.CplItem, c.items.len) catch continue;
+                    defer self.gpa.free(items);
+                    for (c.items, 0..) |it, i| {
+                        items[i] = .{ .text = it.insert, .detail = it.detail };
+                    }
+                    // The PREFIX the request was made for travels with
+                    // the answer, so the editor can tell an answer to
+                    // what you are typing now from an answer to what
+                    // you were typing two keystrokes ago. Reading the
+                    // editor's current prefix here instead would make
+                    // that check compare a value with itself.
+                    ed.takeCompletions(items, c.prefix);
+                },
                 .none => |n| {
                     const ed = self.editorShowingLocked(n.path) orelse continue;
                     switch (n.kind) {
@@ -3414,6 +3430,11 @@ pub const App = struct {
                         // keyword, a literal, a symbol from a dependency
                         // — and that refusal is the answer.
                         .rename => ed.setStatus("cannot rename here", .{}, false),
+                        // The server had nothing to offer. Silent: the
+                        // buffer's own words may still be filling the
+                        // menu, and a message over a working ring
+                        // would read as a failure of the ring.
+                        .completion => ed.takeCompletions(&.{}, ed.cplPrefix()),
                     }
                     ed.render_dirty = true;
                 },
@@ -3488,6 +3509,17 @@ pub const App = struct {
             ed.setStatus("finding references to {s}…", .{word}, false);
         } else ed.setStatus("finding references…", .{}, false);
         ed.render_dirty = true;
+    }
+
+    fn lspCompletionHook(ctx: *anyopaque, ed: *editorpkg.Editor) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const path = ed.buf.path orelse return;
+        // On the KEYSTROKE path, and a full-text didChange with it —
+        // the one place the 150ms debounce is deliberately skipped,
+        // because a completion computed against the text before the
+        // word you are typing offers the wrong words.
+        self.lspSyncLocked(ed);
+        _ = self.lsp.completion(path, lspPos(ed), ed.cplPrefix());
     }
 
     fn lspRenameHook(ctx: *anyopaque, ed: *editorpkg.Editor, new_name: []const u8) void {
@@ -7703,6 +7735,12 @@ pub const App = struct {
                 .diag_err => th.ed_err,
                 .diag_warn => th.syn_number,
                 .diag_info => th.ed_dim,
+                // The menu borrows the chip vocabulary the buffer line
+                // already uses, so a floating list reads as chrome
+                // rather than as text somebody highlighted.
+                .cpl_item => th.bar_fg,
+                .cpl_sel => th.bar_value,
+                .cpl_detail => th.ed_dim,
             };
             switch (st) {
                 .sel => bg = th.ed_sel_bg,
@@ -7720,6 +7758,8 @@ pub const App = struct {
                 // one scale down.
                 .buftab_on => bg = th.chip_active_bg,
                 .buftab_off => bg = th.bar_bg,
+                .cpl_item, .cpl_detail => bg = th.bar_bg,
+                .cpl_sel => bg = th.chip_active_bg,
                 else => {},
             }
 

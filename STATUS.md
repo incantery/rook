@@ -80,7 +80,9 @@ hover, `gr` for every use of a symbol — which lands in the same side
 panel find-in-files uses, grouped by file and walkable with `j`/`k`/⏎ —
 and `gR` to rename one everywhere. A rename validates every file before
 touching any: open documents get one undoable group and stay unsaved,
-files no pane has open are written. Go, Python and TypeScript/TSX in the
+files no pane has open are written. `ctrl-n` completion is served by the
+buffer's own words on the keystroke and by the server a few frames
+later, in one ring with a menu. Go, Python and TypeScript/TSX in the
 catalog; adding a language is data, not code.
 
 **Navigation and chrome**: a command registry with a ⌘K palette and `:Ex`

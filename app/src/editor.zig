@@ -95,6 +95,14 @@ pub const Style = enum(u8) {
     diag_err,
     diag_warn,
     diag_info,
+    // The completion menu: a row, the selected row, and the dim
+    // signature beside a label. Their own buckets because the menu
+    // floats OVER the document — it needs a fill of its own, and
+    // borrowing the selection's would make it look like text you had
+    // highlighted rather than a thing offering to change it.
+    cpl_item,
+    cpl_sel,
+    cpl_detail,
 };
 
 /// One highlight span in absolute byte offsets; later spans override.
@@ -309,6 +317,29 @@ pub const Editor = struct {
     cpl_base: usize = 0,
     cpl_idx: usize = 0,
     cpl_live: bool = false,
+    /// Whether the selected candidate has actually been written into
+    /// the buffer. False for a ring that opened with nothing but a
+    /// request in flight — there is a selection, but no text to move.
+    cpl_placed: bool = false,
+    /// The detail beside each candidate — a signature or a type, from a
+    /// language server. Parallel to the ring, packed the same way, and
+    /// empty for a word scraped out of the buffer, which has no meaning
+    /// to report beyond being spelled that way somewhere.
+    cpl_detail: std.ArrayListUnmanaged(u8) = .empty,
+    cpl_detail_at: std.ArrayListUnmanaged(u32) = .empty,
+    /// The prefix the live ring was built for, owned. A late reply that
+    /// answers a different prefix is answering a question you have
+    /// stopped asking.
+    cpl_prefix: std.ArrayListUnmanaged(u8) = .empty,
+    /// True once a server's answer has been folded in, so the menu can
+    /// stop saying it is still waiting.
+    cpl_semantic: bool = false,
+    /// A request is out. The menu says so rather than looking like a
+    /// list that has already finished being short.
+    cpl_asking: bool = false,
+    /// Ask a language server what could be typed here. Answered
+    /// asynchronously, through takeCompletions.
+    lsp_completion: ?*const fn (*anyopaque, *Editor) void = null,
 
     /// `/` preview: where the cursor was when the prompt opened, and
     /// the pattern that was current before it — both put back on ESC,
@@ -1180,6 +1211,9 @@ pub const Editor = struct {
         self.rename_from.deinit(gpa);
         self.cpl_blob.deinit(gpa);
         self.cpl_at.deinit(gpa);
+        self.cpl_detail.deinit(gpa);
+        self.cpl_detail_at.deinit(gpa);
+        self.cpl_prefix.deinit(gpa);
         if (self.last_re) |*r| r.deinit(gpa);
         self.reg.deinit(gpa);
         for (&self.regs) |*r| r.text.deinit(gpa);
@@ -2134,8 +2168,7 @@ pub const Editor = struct {
     /// stranding you on a word you rejected.
     fn buildCompletions(self: *Editor, prefix: []const u8, at: usize, fwd: bool) void {
         const gpa = self.gpa;
-        self.cpl_blob.clearRetainingCapacity();
-        self.cpl_at.clearRetainingCapacity();
+        self.cplReset();
 
         const Cand = struct { off: u32, start: u32, len: u32 };
         var cands: std.ArrayListUnmanaged(Cand) = .empty;
@@ -2186,38 +2219,92 @@ pub const Editor = struct {
         }
         for (order.items) |idx| {
             const c = cands.items[idx];
-            const w = blob.items[c.start..][0..c.len];
-            var dup = false;
-            var q: usize = 0;
-            while (q < self.cpl_at.items.len) : (q += 1) {
-                const a = self.cpl_at.items[q];
-                // The last entry has no start after it yet — the blob's
-                // own length is its end.
-                const b = if (q + 1 < self.cpl_at.items.len)
-                    self.cpl_at.items[q + 1]
-                else
-                    @as(u32, @intCast(self.cpl_blob.items.len));
-                if (std.mem.eql(u8, self.cpl_blob.items[a..b], w)) {
-                    dup = true;
-                    break;
-                }
-            }
-            if (dup) continue;
-            self.cpl_at.append(gpa, @intCast(self.cpl_blob.items.len)) catch return;
-            self.cpl_blob.appendSlice(gpa, w) catch return;
+            self.cplPush(blob.items[c.start..][0..c.len], "");
         }
         // The typed text, as the last stop in the ring.
-        self.cpl_at.append(gpa, @intCast(self.cpl_blob.items.len)) catch return;
-        self.cpl_blob.appendSlice(gpa, prefix) catch return;
-        self.cpl_at.append(gpa, @intCast(self.cpl_blob.items.len)) catch return;
+        self.cplPush(prefix, "");
+        self.cplSeal();
     }
 
-    fn cplCount(self: *const Editor) usize {
+    /// Empty the ring's packed store, ready to be filled.
+    fn cplReset(self: *Editor) void {
+        self.cpl_blob.clearRetainingCapacity();
+        self.cpl_at.clearRetainingCapacity();
+        self.cpl_detail.clearRetainingCapacity();
+        self.cpl_detail_at.clearRetainingCapacity();
+    }
+
+    /// Append one candidate, skipping a word already in the ring.
+    ///
+    /// Dropping the duplicate rather than the original is what makes a
+    /// server's answer win over the buffer word that spells the same
+    /// thing: the semantic items are pushed first, so the scraped copy
+    /// of `Println` — which knows no signature — is the one that goes.
+    fn cplPush(self: *Editor, word: []const u8, detail: []const u8) void {
+        const gpa = self.gpa;
+        for (0..self.cplCountRaw()) |q| {
+            if (std.mem.eql(u8, self.cplWordRaw(q), word)) return;
+        }
+        self.cpl_at.append(gpa, @intCast(self.cpl_blob.items.len)) catch return;
+        self.cpl_blob.appendSlice(gpa, word) catch return;
+        self.cpl_detail_at.append(gpa, @intCast(self.cpl_detail.items.len)) catch return;
+        self.cpl_detail.appendSlice(gpa, detail) catch return;
+    }
+
+    /// Close the ring: both packed stores need one trailing offset so
+    /// the last entry has an end.
+    fn cplSeal(self: *Editor) void {
+        self.cpl_at.append(self.gpa, @intCast(self.cpl_blob.items.len)) catch return;
+        self.cpl_detail_at.append(self.gpa, @intCast(self.cpl_detail.items.len)) catch return;
+    }
+
+    /// Entries pushed so far, DURING a build — before cplSeal there is
+    /// no trailing offset, so every start is an entry.
+    fn cplCountRaw(self: *const Editor) usize {
+        return self.cpl_at.items.len;
+    }
+
+    fn cplWordRaw(self: *const Editor, i: usize) []const u8 {
+        const a = self.cpl_at.items[i];
+        const b = if (i + 1 < self.cpl_at.items.len)
+            self.cpl_at.items[i + 1]
+        else
+            @as(u32, @intCast(self.cpl_blob.items.len));
+        return self.cpl_blob.items[a..b];
+    }
+
+    pub fn cplCount(self: *const Editor) usize {
         return self.cpl_at.items.len -| 1;
     }
 
-    fn cplWord(self: *const Editor, i: usize) []const u8 {
+    pub fn cplWord(self: *const Editor, i: usize) []const u8 {
         return self.cpl_blob.items[self.cpl_at.items[i]..self.cpl_at.items[i + 1]];
+    }
+
+    /// The word the live ring is completing. Borrowed.
+    pub fn cplPrefix(self: *const Editor) []const u8 {
+        return self.cpl_prefix.items;
+    }
+
+    // The ring, for the renderer and for `ctl lsp`. Read-only views of
+    // state that is otherwise nobody's business.
+    pub fn cplLive(self: *const Editor) bool {
+        return self.cpl_live;
+    }
+    pub fn cplSelected(self: *const Editor) usize {
+        return self.cpl_idx;
+    }
+    pub fn cplSemantic(self: *const Editor) bool {
+        return self.cpl_semantic;
+    }
+    pub fn cplAsking(self: *const Editor) bool {
+        return self.cpl_asking;
+    }
+
+    /// The signature or type beside candidate `i`; "" for a buffer word.
+    pub fn cplDetail(self: *const Editor, i: usize) []const u8 {
+        if (i + 1 >= self.cpl_detail_at.items.len) return "";
+        return self.cpl_detail.items[self.cpl_detail_at.items[i]..self.cpl_detail_at.items[i + 1]];
     }
 
     /// ctrl-n / ctrl-p in insert mode.
@@ -2233,23 +2320,127 @@ pub const Editor = struct {
             @memcpy(pbuf[0..plen], s[a..][0..plen]);
             self.cpl_base = self.buf.rope.lineStart(self.cline) + a;
             self.buildCompletions(pbuf[0..plen], self.cpl_base, fwd);
-            if (self.cplCount() <= 1) { // only the typed text came back
+            self.cpl_prefix.clearRetainingCapacity();
+            self.cpl_prefix.appendSlice(gpa, pbuf[0..plen]) catch {};
+            self.cpl_semantic = false;
+            self.cpl_asking = false;
+            // Ask the server too, and do not WAIT for it. The buffer's
+            // own words are in hand right now, so ctrl-n stays as fast
+            // as it has always been; the semantic answer folds in a few
+            // frames later, or never, and either way the ring works.
+            if (self.lsp_completion) |f| {
+                self.cpl_asking = true;
+                f(self.lsp_ctx.?, self);
+            }
+            if (self.cplCount() <= 1 and !self.cpl_asking) {
                 self.setStatus("no completions", .{}, false);
                 return;
             }
             self.cpl_live = true;
-            self.cpl_idx = if (fwd) 0 else 0;
-        } else {
+            self.cpl_idx = 0;
+            self.cpl_placed = false;
+            // Nothing but the typed text yet, and a server still to
+            // answer: hold the ring open with the menu saying it is
+            // waiting, rather than inserting the prefix over itself.
+            // The next ctrl-n takes candidate zero of whatever arrived,
+            // which is what cpl_placed is for.
+            if (self.cplCount() <= 1) return;
+        } else if (self.cpl_placed) {
+            // Only ADVANCE once something has been put in the buffer.
+            // A ring opened empty and filled by a late answer is sitting
+            // on candidate zero without having written it, and stepping
+            // off it here would skip the item at the top of the menu.
             const n = self.cplCount();
             self.cpl_idx = if (fwd) (self.cpl_idx + 1) % n else (self.cpl_idx + n - 1) % n;
         }
+        if (self.cplCount() == 0) return;
+        self.cplPlace();
+    }
+
+    /// Write the selected candidate over whatever is between `cpl_base`
+    /// and the cursor.
+    fn cplPlace(self: *Editor) void {
+        const gpa = self.gpa;
         const word = self.cplWord(self.cpl_idx);
         const end = self.absOff();
         if (end > self.cpl_base) self.buf.deleteRange(gpa, self.cpl_base, end) catch return;
         self.buf.insert(gpa, self.cpl_base, word) catch return;
         self.ccol = self.cpl_base + word.len - self.buf.rope.lineStart(self.cline);
+        self.cpl_placed = true;
         self.ai_line = null;
     }
+
+    /// A language server has answered the completion request the live
+    /// ring fired. Items are already in the server's own order.
+    ///
+    /// The rule for a LATE answer is the whole of this function: it is
+    /// taken only if you have not moved. If the ring has closed, or the
+    /// prefix has changed, or you have already cycled off the first
+    /// candidate, the answer is DROPPED. Folding it in then would
+    /// renumber the list under a selection you are steering with your
+    /// fingers, and text would change under you for a reason that
+    /// happened a hundred milliseconds ago.
+    pub fn takeCompletions(self: *Editor, items: []const CplItem, prefix: []const u8) void {
+        self.cpl_asking = false;
+        if (!self.cpl_live) return;
+        if (!std.mem.eql(u8, prefix, self.cpl_prefix.items)) return;
+        if (self.cpl_idx != 0) return;
+        if (items.len == 0) {
+            // The server had nothing. Whatever the buffer offered is
+            // still the answer, and if that was nothing either then now
+            // is when "no completions" is finally true.
+            if (self.cplCount() <= 1) {
+                self.cpl_live = false;
+                self.setStatus("no completions", .{}, false);
+            }
+            return;
+        }
+
+        // Rebuild with the semantic items FIRST — they know what the
+        // cursor is inside of, and a buffer word that spells the same
+        // thing is dropped as the duplicate rather than kept as one.
+        // The buffer's own words stay underneath them, because a
+        // half-typed local that the server has not indexed yet is
+        // exactly what ctrl-n was always good at.
+        var keep_words: std.ArrayListUnmanaged(u8) = .empty;
+        defer keep_words.deinit(self.gpa);
+        var keep_at: std.ArrayListUnmanaged(u32) = .empty;
+        defer keep_at.deinit(self.gpa);
+        for (0..self.cplCount()) |i| {
+            keep_at.append(self.gpa, @intCast(keep_words.items.len)) catch break;
+            keep_words.appendSlice(self.gpa, self.cplWord(i)) catch break;
+        }
+        keep_at.append(self.gpa, @intCast(keep_words.items.len)) catch {};
+
+        self.cplReset();
+        for (items) |it| {
+            if (it.text.len == 0) continue;
+            self.cplPush(it.text, it.detail);
+        }
+        var k: usize = 0;
+        while (k + 1 < keep_at.items.len) : (k += 1) {
+            const w = keep_words.items[keep_at.items[k]..keep_at.items[k + 1]];
+            // The typed text is re-added at the END by cplSeal's caller
+            // below, so skipping it here keeps it last in the ring.
+            if (std.mem.eql(u8, w, prefix)) continue;
+            self.cplPush(w, "");
+        }
+        self.cplPush(prefix, "");
+        self.cplSeal();
+        self.cpl_semantic = true;
+        self.cpl_idx = 0;
+        // If a buffer word was already sitting in the document, replace
+        // it with the semantic candidate that now heads the list — the
+        // one case where a late answer IS allowed to move text, because
+        // it is moving text this same ring wrote a few frames ago and
+        // you have not touched since.
+        if (self.cpl_placed and self.cplCount() > 0) self.cplPlace();
+        self.render_dirty = true;
+    }
+
+    /// One offer from a server, in the editor's own terms. `text` is
+    /// what goes in the buffer, which is not always what a menu shows.
+    pub const CplItem = struct { text: []const u8, detail: []const u8 = "" };
 
     /// Backspace (and ctrl-w) in column zero: take the newline above.
     fn joinBack(self: *Editor) void {
@@ -6262,8 +6453,110 @@ pub const Editor = struct {
         }
 
         if (top_rows > 0) self.fillBufferLine(g[0..cols]);
+        // Over the text, under the chrome: the menu covers the document
+        // it is offering to change and nothing else.
+        self.fillCompletionMenu(g, cols, rows, top_rows, gw);
         self.fillStatusRow(g[(rows - 1) * cols ..][0..cols]);
         return g;
+    }
+
+    /// Rows the completion menu will use at most. Ten is what fits
+    /// under a cursor near the middle of a screen without the menu
+    /// becoming the thing you are looking at.
+    const cpl_menu_rows = 10;
+
+    /// Draw the live ring as a menu under the cursor.
+    ///
+    /// PAINTED OVER the finished grid rather than laid out with it, so
+    /// nothing about the document's own rendering has to know this
+    /// exists — the same trick the cursor and the search tint use one
+    /// loop up.
+    fn fillCompletionMenu(self: *Editor, g: []RCell, cols: usize, rows: usize, top_rows: usize, gw: usize) void {
+        if (!self.cpl_live) return;
+        // The typed text is the ring's last stop, not an offer. A menu
+        // is worth drawing from the first REAL candidate.
+        const n = self.cplCount();
+        if (n == 0) return;
+        const offers = n - 1;
+        if (offers == 0 and !self.cpl_asking) return;
+
+        const text_rows = rows - 1 - top_rows;
+        if (text_rows < 2) return;
+        const cur_row = (self.cline -| self.top) + top_rows;
+
+        // Width: the longest label, plus its detail, clamped to what is
+        // left of the screen.
+        var want: usize = 0;
+        for (0..offers) |i| {
+            const d = self.cplDetail(i);
+            want = @max(want, self.cplWord(i).len + if (d.len > 0) d.len + 2 else 0);
+        }
+        if (self.cpl_asking) want = @max(want, 12);
+        const menu_w = @min(@max(want + 2, 10), cols -| 2);
+
+        // Under the cursor when there is room, over it when there is
+        // not — a menu that ran off the bottom would show you its first
+        // two rows and hide the rest.
+        const least: usize = if (self.cpl_asking) 1 else 0;
+        const shown = @min(@max(offers, least), cpl_menu_rows);
+        const below = cur_row + 1;
+        const room_below = (top_rows + text_rows) -| below;
+        const start_row = if (room_below >= shown)
+            below
+        else if (cur_row >= shown + top_rows)
+            cur_row - shown
+        else
+            below;
+        // A cursor with no room either side gets whatever fits below.
+        const draw = @min(shown, (top_rows + text_rows) -| start_row);
+        if (draw == 0) return;
+
+        // Left edge at the word being completed, so the menu hangs off
+        // what it is completing rather than off the screen.
+        const base_col = self.cpl_base -| self.buf.rope.lineStart(self.cline);
+        const at_rc = renderColAt: {
+            const s = self.lineText(self.cline);
+            break :renderColAt renderCol(s, @min(base_col, s.len));
+        };
+        const left = @min(gw + (at_rc -| self.left), cols -| menu_w);
+
+        // Scroll the window so the selection is always in it.
+        var top: usize = 0;
+        if (self.cpl_idx < offers) {
+            if (self.cpl_idx >= draw) top = self.cpl_idx - draw + 1;
+        }
+
+        for (0..draw) |r| {
+            const row = start_row + r;
+            if (row >= top_rows + text_rows) break;
+            const out = g[row * cols ..][0..cols];
+            const idx = top + r;
+            const sel = idx == self.cpl_idx;
+            const st: Style = if (sel) .cpl_sel else .cpl_item;
+            for (0..menu_w) |c| {
+                if (left + c >= cols) break;
+                out[left + c] = .{ .cp = ' ', .st = st };
+            }
+            var x = left + 1;
+            if (idx >= offers) {
+                // The waiting row, when a server has been asked and the
+                // buffer had nothing to say meanwhile.
+                putStr(out, &x, "asking…", .cpl_item);
+                continue;
+            }
+            putStr(out, &x, self.cplWord(idx), st);
+            const d = self.cplDetail(idx);
+            if (d.len > 0 and x + 1 < left + menu_w) {
+                x += 1;
+                // Detail is never highlighted with the row: it is
+                // context, and a whole row of reversed text is harder
+                // to read than the one word you are choosing.
+                var dx = x;
+                while (dx < left + menu_w and dx < cols and dx - x < d.len) : (dx += 1) {
+                    out[dx] = .{ .cp = d[dx - x], .st = .cpl_detail };
+                }
+            }
+        }
     }
 
     /// The buffer line: one chip per document this pane has held, the
@@ -10786,4 +11079,145 @@ test "clusters do not disturb the cells around them" {
     defer gpa.free(dump);
     var it = std.mem.splitScalar(u8, dump, '\n');
     try testing.expectEqualStrings("1 e\u{301}|\u{1F1EF}\u{1F1F5}|end", it.next().?);
+}
+
+// ------------------------------------------ language-server completion
+
+/// A headless editor with a completion hook that records the ask and
+/// answers only when the test says to — which is the whole point, since
+/// the thing under test is what happens in the gap.
+const CplProbe = struct {
+    asked: usize = 0,
+
+    fn hook(ctx: *anyopaque, ed: *Editor) void {
+        const self: *CplProbe = @ptrCast(@alignCast(ctx));
+        self.asked += 1;
+        _ = ed;
+    }
+};
+
+test "a server's answer folds in ahead of the buffer's own words" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+
+    keys(e, "iPrintln\nPri");
+    e.key("\x0e"); // ctrl-n: the buffer offers "Println", and asks
+    try testing.expectEqual(@as(usize, 1), probe.asked);
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        try testing.expectEqualStrings("Println\nPrintln", s);
+    }
+
+    // The server answers with two, one of which the buffer already had.
+    e.takeCompletions(&.{
+        .{ .text = "Printf", .detail = "func(format string, a ...any)" },
+        .{ .text = "Println", .detail = "func(a ...any)" },
+    }, "Pri");
+
+    // Semantic items lead, and the buffer's own copy of Println is
+    // dropped as the duplicate — so the surviving one has a signature.
+    try testing.expectEqualStrings("Printf", e.cplWord(0));
+    try testing.expectEqualStrings("func(format string, a ...any)", e.cplDetail(0));
+    try testing.expectEqualStrings("Println", e.cplWord(1));
+    try testing.expectEqualStrings("func(a ...any)", e.cplDetail(1));
+    // The typed text stays the last stop in the ring.
+    try testing.expectEqualStrings("Pri", e.cplWord(e.cplCount() - 1));
+    // The word already in the buffer was replaced by the new leader.
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        try testing.expectEqualStrings("Println\nPrintf", s);
+    }
+}
+
+test "a late answer is dropped once you have started steering" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+
+    keys(e, "ialpha\nalpine\nal");
+    e.key("\x0e"); // alpha
+    e.key("\x0e"); // alpine — you have moved
+    e.takeCompletions(&.{.{ .text = "allocate" }}, "al");
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        // Still what the ring had you on. An answer that renumbered the
+        // list here would have moved text under your fingers for a
+        // reason that happened before you pressed the key.
+        try testing.expectEqualStrings("alpha\nalpine\nalpine", s);
+    }
+    try testing.expectEqualStrings("allocate", "allocate");
+    for (0..e.cplCount()) |i| try testing.expect(!std.mem.eql(u8, e.cplWord(i), "allocate"));
+}
+
+test "an answer to a prefix you have stopped typing is not taken" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+
+    keys(e, "ialpha\nal");
+    e.key("\x0e");
+    // The answer to a request fired for "xy" — a prefix this ring was
+    // never built for, from a keystroke two ago.
+    e.takeCompletions(&.{.{ .text = "xylophone" }}, "xy");
+    for (0..e.cplCount()) |i| try testing.expect(!std.mem.eql(u8, e.cplWord(i), "xylophone"));
+}
+
+test "a ring with nothing but a pending request still starts at the top" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+
+    // Nothing in the buffer starts with "zq", so the ring opens holding
+    // only the typed text — and stays open, because a server was asked.
+    keys(e, "izq");
+    e.key("\x0e");
+    try testing.expect(e.cpl_live);
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        try testing.expectEqualStrings("zq", s); // nothing written yet
+    }
+
+    e.takeCompletions(&.{ .{ .text = "zqFirst" }, .{ .text = "zqSecond" } }, "zq");
+    // Nothing was in the buffer to replace, so the answer only fills
+    // the menu. The next ctrl-n must take candidate ZERO — stepping
+    // straight to the second item would hide the top of the list.
+    e.key("\x0e");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("zqFirst", s);
+}
+
+test "no completions is only said once the server has answered too" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+
+    keys(e, "izq");
+    e.key("\x0e");
+    // Still waiting: saying "no completions" here would be a lie that
+    // the very next frame contradicts.
+    try testing.expect(std.mem.indexOf(u8, e.status_buf[0..e.status_len], "no completions") == null);
+    e.takeCompletions(&.{}, "zq");
+    try testing.expect(std.mem.indexOf(u8, e.status_buf[0..e.status_len], "no completions") != null);
+    try testing.expect(!e.cpl_live);
 }

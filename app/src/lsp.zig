@@ -254,6 +254,33 @@ pub const Location = struct {
     range: Range = .{},
 };
 
+/// One thing you could type here, as the server proposes it.
+pub const Completion = struct {
+    /// What the menu shows, owned. Never empty — an item without one is
+    /// dropped, since a row you cannot read is a row you cannot pick.
+    label: []const u8 = "",
+    /// The type or signature beside it, owned; "" when the server said
+    /// nothing.
+    detail: []const u8 = "",
+    /// What actually goes in the buffer, owned. Usually the label, but
+    /// a server may propose text that differs from what it displays.
+    insert: []const u8 = "",
+    /// The range the insert REPLACES, when the server named one. A
+    /// server knows better than we do how much of what you typed is
+    /// part of the thing being completed — `foo.ba` completing to
+    /// `foo.bar` replaces from `ba`, but a path or a URL completion may
+    /// reach back further than a word boundary would guess.
+    range: ?Range = null,
+    /// The server's own ordering key, owned. Servers sort by relevance
+    /// and encode it here; sorting by label instead throws away the
+    /// only ranking that knows what your cursor is inside of.
+    sort: []const u8 = "",
+    /// CompletionItemKind, straight off the wire — 1 is Text, 3 is
+    /// Function, and so on. Kept as the number because the menu only
+    /// needs to letter it, and the protocol adds new ones.
+    kind: u8 = 0,
+};
+
 /// Replace `range` with `text`. The unit a WorkspaceEdit is made of.
 pub const TextEdit = struct {
     range: Range = .{},
@@ -379,6 +406,8 @@ pub const Event = union(enum) {
     references: Locations,
     /// A set of edits across a set of files, from rename.
     workspace_edit: WorkspaceEdit,
+    /// What could be typed here.
+    completion: Completions,
     /// A request we sent is answered and has nothing to show: a null
     /// result, an error reply, or a server that died holding it. The
     /// caller MUST be released either way, or whatever it put on screen
@@ -410,6 +439,17 @@ pub const Event = union(enum) {
         id: u32,
         /// Owned, with every path inside it.
         locs: []Location,
+    };
+
+    pub const Completions = struct {
+        id: u32,
+        /// Owned, with every string inside them.
+        items: []Completion,
+        /// The server says this list is not the whole answer — it was
+        /// computed for the prefix as it stood and should be asked again
+        /// when you type more. Recorded rather than acted on: rook asks
+        /// again on the next request either way.
+        incomplete: bool = false,
     };
 
     pub const WorkspaceEdit = struct {
@@ -444,12 +484,24 @@ pub const Event = union(enum) {
                 gpa.free(d.locs);
             },
             .workspace_edit => |*we| freeFileEdits(gpa, we.files),
+            .completion => |*c| freeCompletions(gpa, c.items),
             .failed => |*f| gpa.free(f.reason),
             .ready, .empty => {},
         }
         self.* = .{ .empty = .{ .id = 0 } };
     }
 };
+
+/// Free a Completion list and everything hanging off it.
+pub fn freeCompletions(gpa: Allocator, items: []Completion) void {
+    for (items) |c| {
+        gpa.free(c.label);
+        gpa.free(c.detail);
+        gpa.free(c.insert);
+        gpa.free(c.sort);
+    }
+    gpa.free(items);
+}
 
 /// Free a FileEdits list and everything hanging off it. Public because
 /// whoever takes ownership of one has to be able to put it down.
@@ -474,7 +526,7 @@ pub const State = enum {
     failed,
 };
 
-const Kind = enum { initialize, hover, definition, references, rename, shutdown };
+const Kind = enum { initialize, hover, definition, references, rename, completion, shutdown };
 
 const Pending = struct { id: u32, kind: Kind };
 
@@ -503,6 +555,11 @@ const max_locations = 2000;
 /// is already further than anyone means to go.
 const max_edit_files = 400;
 const max_edits_per_file = 4000;
+/// Completions kept from one reply. gopls answers `.` on a big package
+/// with thousands, and a menu is read ten rows at a time — but the cap
+/// has to be well past what a filter would narrow to, or the item you
+/// wanted is the one that was dropped.
+const max_completions = 1000;
 
 // ---------------------------------------------------------------- Session
 
@@ -689,6 +746,13 @@ pub const Session = struct {
         w.writeAll("}],\"capabilities\":{\"textDocument\":{" ++
             "\"definition\":{\"linkSupport\":true}," ++
             "\"references\":{},\"rename\":{}," ++
+            // snippetSupport is FALSE and that is the feature. Declare
+            // it and gopls answers `Println(${1:a})` — a template rook
+            // has no engine to expand, which would land in the buffer
+            // as those literal characters. Saying no gets plain text
+            // from every server instead of a placeholder nobody fills.
+            "\"completion\":{\"completionItem\":{\"snippetSupport\":false," ++
+            "\"documentationFormat\":[\"plaintext\"]},\"contextSupport\":true}," ++
             "\"hover\":{\"contentFormat\":[\"markdown\",\"plaintext\"]}," ++
             "\"publishDiagnostics\":{\"versionSupport\":true}," ++
             "\"synchronization\":{\"didSave\":true}," ++
@@ -966,6 +1030,17 @@ pub const Session = struct {
         return self.request(.references, "textDocument/references", params);
     }
 
+    /// What could be typed at `pos`. The answer is a `.completion`
+    /// carrying the same id.
+    pub fn completion(self: *Session, path: []const u8, pos: Position) ?u32 {
+        // triggerKind 1 is "invoked" — a person asked, rather than a
+        // trigger character having been typed. rook only asks on a
+        // keystroke that means "complete this", so it is always 1.
+        const params = self.posParamsExtra(path, pos, ",\"context\":{\"triggerKind\":1}") orelse return null;
+        defer self.gpa.free(params);
+        return self.request(.completion, "textDocument/completion", params);
+    }
+
     /// Rename the symbol under `pos` to `new_name`. The answer is a
     /// `.workspace_edit` carrying the same id.
     ///
@@ -1213,6 +1288,7 @@ pub const Session = struct {
             .definition => self.onLocations(id, result, false),
             .references => self.onLocations(id, result, true),
             .rename => self.onWorkspaceEdit(id, result),
+            .completion => self.onCompletion(id, result),
         }
     }
 
@@ -1276,6 +1352,102 @@ pub const Session = struct {
         };
         const payload: Event.Locations = .{ .id = id, .locs = owned };
         self.push(if (many) .{ .references = payload } else .{ .definition = payload });
+    }
+
+    /// CompletionItem[] or CompletionList — both shapes, same as
+    /// definition's two. A server picks whichever it likes and a client
+    /// reading one gets nothing from half the catalog.
+    fn onCompletion(self: *Session, id: u32, result: std.json.Value) void {
+        const list = switch (result) {
+            .array => result,
+            .object => jGet(result, "items"),
+            else => .null,
+        };
+        if (list != .array) {
+            self.push(.{ .empty = .{ .id = id } });
+            return;
+        }
+        const incomplete = switch (jGet(result, "isIncomplete")) {
+            .bool => |b| b,
+            else => false,
+        };
+
+        var out: std.ArrayListUnmanaged(Completion) = .empty;
+        defer out.deinit(self.gpa);
+        for (list.array.items) |item| {
+            if (out.items.len >= max_completions) break;
+            const label = jStr(jGet(item, "label")) orelse continue;
+            if (label.len == 0) continue;
+
+            // What goes in the buffer, most specific first. A textEdit
+            // also says WHAT IT REPLACES, which is why it outranks the
+            // others rather than merely differing from them.
+            var range: ?Range = null;
+            var insert: []const u8 = label;
+            const te = jGet(item, "textEdit");
+            if (te != .null) {
+                if (jStr(jGet(te, "newText"))) |nt| insert = nt;
+                // InsertReplaceEdit has `insert` and `replace` instead
+                // of `range`. Take `replace` — completing over an
+                // existing identifier should consume it, which is what
+                // you meant by putting the cursor there.
+                const rng = jGet(te, "range");
+                if (rng != .null) {
+                    range = jRange(rng);
+                } else {
+                    const rep = jGet(te, "replace");
+                    if (rep != .null) range = jRange(rep);
+                }
+            } else if (jStr(jGet(item, "insertText"))) |it| {
+                insert = it;
+            }
+
+            const l = self.gpa.dupe(u8, label) catch break;
+            const d = self.gpa.dupe(u8, jStr(jGet(item, "detail")) orelse "") catch {
+                self.gpa.free(l);
+                break;
+            };
+            const ins = self.gpa.dupe(u8, insert) catch {
+                self.gpa.free(l);
+                self.gpa.free(d);
+                break;
+            };
+            // Falling back to the label keeps the sort TOTAL: an item
+            // with no sortText would otherwise rank ahead of every item
+            // that has one, which is the opposite of what its absence
+            // means.
+            const s = self.gpa.dupe(u8, jStr(jGet(item, "sortText")) orelse label) catch {
+                self.gpa.free(l);
+                self.gpa.free(d);
+                self.gpa.free(ins);
+                break;
+            };
+            out.append(self.gpa, .{
+                .label = l,
+                .detail = d,
+                .insert = ins,
+                .range = range,
+                .sort = s,
+                .kind = @intCast(@min(jU32(jGet(item, "kind")), 255)),
+            }) catch {
+                self.gpa.free(l);
+                self.gpa.free(d);
+                self.gpa.free(ins);
+                self.gpa.free(s);
+                break;
+            };
+        }
+
+        if (out.items.len == 0) {
+            self.push(.{ .empty = .{ .id = id } });
+            return;
+        }
+        const owned = out.toOwnedSlice(self.gpa) catch {
+            freeCompletions(self.gpa, out.items);
+            out.items = &.{};
+            return;
+        };
+        self.push(.{ .completion = .{ .id = id, .items = owned, .incomplete = incomplete } });
     }
 
     /// A WorkspaceEdit, in either of the two shapes the protocol has.
@@ -1776,6 +1948,14 @@ pub const Server = struct {
     pub fn references(self: *Server, path: []const u8, pos: Position, include_decl: bool) ?u32 {
         self.mu.lock();
         const id = self.sess.references(path, pos, include_decl);
+        self.mu.unlock();
+        self.poke();
+        return id;
+    }
+
+    pub fn completion(self: *Server, path: []const u8, pos: Position) ?u32 {
+        self.mu.lock();
+        const id = self.sess.completion(path, pos);
         self.mu.unlock();
         self.poke();
         return id;
@@ -2404,6 +2584,82 @@ test "rename reads both WorkspaceEdit shapes and reports file operations" {
     // to be released or the prompt never comes back.
     const id3 = sess.rename("/tmp/work/a.go", .{}, "x").?;
     const r3 = try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":null}}", .{id3});
+    defer gpa.free(r3);
+    const f3 = try framed(gpa, r3);
+    defer gpa.free(f3);
+    sess.feed(f3);
+    var e3 = sess.nextEvent().?;
+    defer e3.deinit(gpa);
+    try testing.expect(e3 == .empty);
+}
+
+test "completion reads both reply shapes and every way to say what to insert" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    try readySession(&sess, false);
+    var ready = sess.nextEvent().?;
+    ready.deinit(gpa);
+    sess.didOpen("/tmp/work/a.go", "package main\n");
+    sess.consumeOutbound(sess.outbound().len);
+
+    // A bare CompletionItem[], and the three ways an item names what
+    // goes in the buffer: the label alone, an insertText that differs
+    // from it, and a textEdit that also says what it replaces.
+    const id1 = sess.completion("/tmp/work/a.go", .{ .line = 1, .col = 2 }).?;
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(), "\"method\":\"textDocument/completion\"") != null);
+    const r1 = try std.fmt.allocPrint(gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[" ++
+        "{{\"label\":\"Println\",\"kind\":3,\"detail\":\"func(a ...any)\",\"sortText\":\"00\"}}," ++
+        "{{\"label\":\"Printf\",\"kind\":3,\"insertText\":\"Printf\"}}," ++
+        "{{\"label\":\"Print\",\"kind\":3,\"textEdit\":{{\"range\":{{" ++
+        "\"start\":{{\"line\":1,\"character\":0}},\"end\":{{\"line\":1,\"character\":2}}}}," ++
+        "\"newText\":\"Print\"}}}}]}}", .{id1});
+    defer gpa.free(r1);
+    const f1 = try framed(gpa, r1);
+    defer gpa.free(f1);
+    sess.feed(f1);
+    var e1 = sess.nextEvent().?;
+    defer e1.deinit(gpa);
+    try testing.expectEqual(@as(usize, 3), e1.completion.items.len);
+    try testing.expectEqualStrings("Println", e1.completion.items[0].label);
+    try testing.expectEqualStrings("func(a ...any)", e1.completion.items[0].detail);
+    // No insertText and no textEdit: the label is what you type.
+    try testing.expectEqualStrings("Println", e1.completion.items[0].insert);
+    try testing.expect(e1.completion.items[0].range == null);
+    try testing.expectEqual(@as(u8, 3), e1.completion.items[0].kind);
+    // An absent sortText falls back to the label, so the ordering stays
+    // total rather than putting this item ahead of every ranked one.
+    try testing.expectEqualStrings("Printf", e1.completion.items[1].sort);
+    // A textEdit says what to replace as well as what to write.
+    try testing.expectEqualStrings("Print", e1.completion.items[2].insert);
+    try testing.expectEqual(@as(u32, 0), e1.completion.items[2].range.?.start.col);
+    try testing.expectEqual(@as(u32, 2), e1.completion.items[2].range.?.end.col);
+
+    // A CompletionList, which is the other legal shape, carrying an
+    // InsertReplaceEdit rather than a plain one.
+    const id2 = sess.completion("/tmp/work/a.go", .{}).?;
+    const r2 = try std.fmt.allocPrint(gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"isIncomplete\":true,\"items\":[" ++
+        "{{\"label\":\"Fprintln\",\"textEdit\":{{" ++
+        "\"insert\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":1}}}}," ++
+        "\"replace\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":4}}}}," ++
+        "\"newText\":\"Fprintln\"}}}}]}}}}", .{id2});
+    defer gpa.free(r2);
+    const f2 = try framed(gpa, r2);
+    defer gpa.free(f2);
+    sess.feed(f2);
+    var e2 = sess.nextEvent().?;
+    defer e2.deinit(gpa);
+    try testing.expect(e2.completion.incomplete);
+    try testing.expectEqual(@as(usize, 1), e2.completion.items.len);
+    // `replace`, not `insert`: completing with the cursor inside an
+    // identifier should consume the whole of it.
+    try testing.expectEqual(@as(u32, 4), e2.completion.items[0].range.?.end.col);
+
+    // Nothing to offer still has to release the caller.
+    const id3 = sess.completion("/tmp/work/a.go", .{}).?;
+    const r3 = try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[]}}", .{id3});
     defer gpa.free(r3);
     const f3 = try framed(gpa, r3);
     defer gpa.free(f3);

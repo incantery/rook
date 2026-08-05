@@ -983,6 +983,27 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     @tagName(d.severity), d.line + 1, d.col, d.message,
                 }) catch return;
             }
+            // The completion ring as the menu is drawing it. `semantic`
+            // says a server's answer has been folded in — which is the
+            // difference between a menu of the buffer's own words and
+            // one that knows what the cursor is inside of, and no
+            // amount of reading the words tells you which you have.
+            if (ed.cplLive()) {
+                a.writer.print("cpl on prefix:{s} sel:{d} semantic:{s}{s}\n", .{
+                    ed.cplPrefix(),
+                    ed.cplSelected(),
+                    if (ed.cplSemantic()) "yes" else "no",
+                    @as([]const u8, if (ed.cplAsking()) " asking" else ""),
+                }) catch return;
+                // The typed text is the ring's last stop, not an offer.
+                for (0..ed.cplCount() -| 1) |i| {
+                    a.writer.print("{s}cpl {s}\t{s}\n", .{
+                        @as([]const u8, if (i == ed.cplSelected()) "*" else " "),
+                        ed.cplWord(i),
+                        ed.cplDetail(i),
+                    }) catch return;
+                }
+            } else a.writer.print("cpl off\n", .{}) catch return;
         }
         reply(fd, a.written());
     } else if (std.mem.eql(u8, verb, "notify")) {

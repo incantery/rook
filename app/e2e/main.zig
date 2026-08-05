@@ -61,7 +61,7 @@ const scenarios = [_]Scenario{
     .{ .name = "presetparity", .what = "a TOML preset and the SDK's expanded graph land the identical chrome", .run = presetParity },
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
     .{ .name = "explorerauto", .what = "explorer-auto: the sidebar opens at launch inside a repo, and never takes the keys", .run = explorerAuto },
-    .{ .name = "lsp", .what = "language server: diagnostics, ]d, gr lists every use, gR renames across files", .run = lspScenario },
+    .{ .name = "lsp", .what = "language server: diagnostics, gr lists uses, gR renames, ctrl-n completes", .run = lspScenario },
     .{ .name = "lsppython", .what = "a second language is data: python roots at pyproject.toml and lands the same way", .run = lspPython },
     .{ .name = "lspts", .what = "ts and tsx share one server, root at the tsconfig, and split only on the grammar", .run = lspTs },
     .{ .name = "docshare", .what = "one file in two panes is ONE document: edits, dirty flag and :w are shared", .run = docShare },
@@ -3552,6 +3552,39 @@ fn lspScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
         try h.expectContains(try app.screen(&buf), "nope()", "the refused rename left the buffer alone");
     }
     try h.expectContains(try app.ctl("docs"), "modified:no", "not even a little bit of it was applied");
+
+    // ctrl-n — the buffer's own words instantly, the server's a few
+    // frames later, in one ring.
+    _ = try app.ctl("type Go");   // a line to type on, away from the code
+    _ = try app.ctl("type Pri");
+    _ = try app.ctl("key 0e");
+    {
+        // The ring answers from the BUFFER without waiting: `Println`
+        // is in this file, so it is in hand on the keystroke.
+        const now = try app.ctl("lsp");
+        try h.expectContains(now, "cpl on prefix:Pri", "the ring opened on what was typed");
+        try h.expectContains(now, "cpl Println", "with the buffer's own word, on the keystroke");
+    }
+    {
+        // …and the server's answer folds in behind it.
+        const done = try app.waitCtl("lsp", "semantic:yes", 8_000);
+        // sortText 10 beats 20, so Println leads even though Printf
+        // sorts first alphabetically.
+        try h.expectContains(done, "*cpl Println\tfunc(...any)", "the server's order, and its signature");
+        try h.expectContains(done, " cpl Printf\tfunc(string, ...any)", "with the rest of its answer under it");
+        // The buffer's own bare `Println` was dropped as the duplicate,
+        // so exactly one row carries that word — the one with a type.
+        try h.expectNotContains(done, "cpl Println\t\n", "the scraped copy went, not the described one");
+    }
+    {
+        var buf: [16 * 1024]u8 = undefined;
+        try h.expectContains(try app.screen(&buf), "func(...any)", "and the menu is on screen with it");
+    }
+    // Cycling takes the next one, and typing ends the ring.
+    _ = try app.ctl("key 0e");
+    try h.expectContains(try app.ctl("lsp"), "*cpl Printf", "ctrl-n walks the menu");
+    _ = try app.ctl("type x");
+    try h.expectContains(try app.ctl("lsp"), "cpl off", "typing closes it");
     {
         // The file it WOULD have written is untouched too — a refusal
         // that still edited the half it could reach is the whole thing
@@ -3688,6 +3721,24 @@ fn fakeHandle(gpa: std.mem.Allocator, body: []const u8, target: []const u8) !voi
                 "{{\"uri\":\"file://{s}\",\"range\":{{\"start\":{{\"line\":4,\"character\":5}}," ++
                 "\"end\":{{\"line\":4,\"character\":9}}}}}}]}}",
             .{ id orelse 0, dir, target, target },
+        );
+        try fakeSend(gpa, w.written());
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/completion")) {
+        // A CompletionList, deliberately out of relevance order and
+        // with sortText disagreeing with the alphabet: the client sorts
+        // by what the SERVER said, and a client that sorted by label
+        // would pass this test by accident.
+        //
+        // `Println` is also a word already in the scenario's buffer, so
+        // it is the one that proves the semantic item wins the
+        // duplicate and brings its signature with it.
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"isIncomplete\":false,\"items\":[" ++
+                "{{\"label\":\"Printf\",\"kind\":3,\"detail\":\"func(string, ...any)\",\"sortText\":\"20\"}}," ++
+                "{{\"label\":\"Println\",\"kind\":3,\"detail\":\"func(...any)\",\"sortText\":\"10\"}}]}}}}",
+            .{id orelse 0},
         );
         try fakeSend(gpa, w.written());
         return;

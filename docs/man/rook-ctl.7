@@ -106,6 +106,15 @@ document.
 Language-server state: enabled or not, per-server status, and the focused
 editor's diagnostics
 .Pq gutter counts and each message .
+Then its completion ring:
+.Ql cpl off ,
+or
+.Ql cpl on
+with the prefix, the selected row, and
+.Ql semantic:yes
+once a server's answer has been folded in \(em which is what
+distinguishes a menu of the buffer's own words from one that knows what
+the cursor is inside of.
 .It Cm statusbar
 The chrome, with hit-test coordinates: workspace/branch/cwd segments,
 top-bar and status-bar layouts, tab style, activity-bar rail entries.

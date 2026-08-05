@@ -152,7 +152,7 @@ const Entry = struct {
     srv: *lsp.Server,
 };
 
-const AskKind = enum { hover, definition, references, rename };
+const AskKind = enum { hover, definition, references, rename, completion };
 
 const Ask = struct {
     id: u32,
@@ -257,6 +257,13 @@ pub const Answer = union(enum) {
     /// the caller, and NOT yet applied — this is the server's proposal,
     /// and whether it can be carried out is the app's question.
     rename: RenameEdit,
+    /// What could be typed at the cursor. Owned by the caller.
+    ///
+    /// `prefix` is the word the request was made for, carried back so
+    /// the editor can tell an answer to what you are typing NOW from
+    /// one to what you were typing two keystrokes ago — the round trip
+    /// is long enough for that to be a different question.
+    completion: struct { path: []const u8, prefix: []const u8, items: []lsp.Completion },
     /// The question was answered with nothing. Still delivered, because
     /// the pane that asked said "asking…" and has to be told.
     none: struct { path: []const u8, kind: AskKind },
@@ -281,6 +288,11 @@ pub const Answer = union(enum) {
                 gpa.free(r.path);
                 gpa.free(r.symbol);
                 lsp.freeFileEdits(gpa, r.files);
+            },
+            .completion => |c| {
+                gpa.free(c.path);
+                gpa.free(c.prefix);
+                lsp.freeCompletions(gpa, c.items);
             },
             .none => |n| gpa.free(n.path),
         }
@@ -585,6 +597,15 @@ pub const Manager = struct {
         return true;
     }
 
+    /// `prefix` is the partial word being completed; it comes back on
+    /// the answer, unused by anything in between.
+    pub fn completion(self: *Manager, path: []const u8, pos: lsp.Position, prefix: []const u8) bool {
+        const srv = self.ensure(path) orelse return false;
+        const id = srv.completion(path, pos) orelse return false;
+        self.recordAsk(id, .completion, path, prefix);
+        return true;
+    }
+
     /// Here `symbol` is not decoration: it is the NEW name, and it comes
     /// back on the answer so the report can say what was renamed to what
     /// without the app holding state across the round trip.
@@ -706,6 +727,28 @@ pub const Manager = struct {
                         } });
                         changed = true;
                     },
+                    .completion => |c| {
+                        const ask = self.takeAsk(c.id) orelse continue;
+                        defer self.freeAsk(ask);
+                        const items = dupeCompletions(self.gpa, c.items) orelse continue;
+                        // The SERVER's ranking, applied here so every
+                        // consumer gets it. sortText is the only signal
+                        // that knows what the cursor is inside of; a
+                        // menu sorted alphabetically instead puts
+                        // `Abs` above the field you were reaching for.
+                        std.mem.sort(lsp.Completion, items, {}, completionLess);
+                        const p = self.gpa.dupe(u8, ask.path) catch {
+                            lsp.freeCompletions(self.gpa, items);
+                            continue;
+                        };
+                        const pre = self.gpa.dupe(u8, ask.symbol) catch {
+                            lsp.freeCompletions(self.gpa, items);
+                            self.gpa.free(p);
+                            continue;
+                        };
+                        self.pushAnswer(.{ .completion = .{ .path = p, .prefix = pre, .items = items } });
+                        changed = true;
+                    },
                     .empty => |x| {
                         const ask = self.takeAsk(x.id) orelse continue;
                         defer self.freeAsk(ask);
@@ -722,6 +765,53 @@ pub const Manager = struct {
             }
         }
         return changed;
+    }
+
+    /// sortText, then label to break a tie — servers hand out equal
+    /// keys freely, and an unstable order makes the same completion
+    /// land in a different row each time you ask.
+    fn completionLess(_: void, a: lsp.Completion, b: lsp.Completion) bool {
+        const c = std.mem.order(u8, a.sort, b.sort);
+        if (c != .eq) return c == .lt;
+        return std.mem.order(u8, a.label, b.label) == .lt;
+    }
+
+    /// Deep-copy a Completion list out of the event that owns it.
+    fn dupeCompletions(gpa: Allocator, src: []const lsp.Completion) ?[]lsp.Completion {
+        const out = gpa.alloc(lsp.Completion, src.len) catch return null;
+        var n: usize = 0;
+        for (src) |c| {
+            const label = gpa.dupe(u8, c.label) catch break;
+            const detail = gpa.dupe(u8, c.detail) catch {
+                gpa.free(label);
+                break;
+            };
+            const insert = gpa.dupe(u8, c.insert) catch {
+                gpa.free(label);
+                gpa.free(detail);
+                break;
+            };
+            const sort = gpa.dupe(u8, c.sort) catch {
+                gpa.free(label);
+                gpa.free(detail);
+                gpa.free(insert);
+                break;
+            };
+            out[n] = .{
+                .label = label,
+                .detail = detail,
+                .insert = insert,
+                .range = c.range,
+                .sort = sort,
+                .kind = c.kind,
+            };
+            n += 1;
+        }
+        // A SHORT list is fine here, unlike a workspace edit's: missing
+        // a completion offers you less, where missing an edit corrupts
+        // a repo. Nothing is lost that the next keystroke cannot ask
+        // for again.
+        return gpa.realloc(out, n) catch out[0..n];
     }
 
     /// Deep-copy a WorkspaceEdit out of the event that owns it. All or
