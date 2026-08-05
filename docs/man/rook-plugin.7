@@ -521,6 +521,20 @@ valid answer is typed into the agent's pane via
 is acked away with a note, never typed, and no answer is ever typed
 twice.
 .Pp
+That last promise is kept across crashes, not just retries.
+Both return rails are at-least-once by design \(em a lost ack means the
+cloud sends again, which is correct \(em so the effect is journaled to
+.Fl -delivery-log
+.Pq default Pa ~/.local/state/rook/cloud-deliveries.jsonl
+before it is acked.
+A process that dies in that gap costs a redundant ack on relaunch,
+never a second thing typed into your editor.
+One jsonl file, last line per delivery wins, shared by the answer and
+command rails because they make the same promise at the same keyboard.
+An empty value, or a state directory that cannot be written, degrades
+to remembering only while the process lives \(em and says so on the
+panel row.
+.Pp
 Each agent also carries the membrane's artifact when there is one: the
 summarizer's digest
 .Pq headline and bullets, read from the journal at Fl -digest-log

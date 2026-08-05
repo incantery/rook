@@ -6,8 +6,16 @@
 // /v1/whoami proves the provisioning, and POST /v1/status pushes a
 // snapshot — workspaces, each with its agents and their honest states —
 // that the fleet pages at cloud.rookide.com render. The ingest is
-// last-write-wins by design, so a retry after a network blip is
-// harmless and this plugin never needs a journal.
+// last-write-wins by design, so a retry after a network blip costs
+// nothing.
+//
+// The rails that come BACK are a different matter. Answers and commands
+// are delivered at-least-once and take effect at a keyboard, where a
+// second delivery is a second thing typed into somebody's editor. What
+// makes that at-most-once is the delivery journal
+// (plugins/internal/cmdjournal): the effect is recorded before the ack,
+// on disk, so a process that dies in that gap costs a redundant ack and
+// never a duplicate. Both rails share the one log.
 //
 // The snapshot is derived, never stored: the same transcript scanner
 // the watcher and the summarizer stand on, fused with panes.activity
@@ -36,6 +44,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/incantery/rook/plugins/internal/cmdjournal"
 	"github.com/incantery/rook/plugins/internal/digestlog"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
@@ -57,6 +66,7 @@ func main() {
 	busyRate := flag.Float64("busy-rate", 200, "pane output above this (bytes/sec) proves an agent is working")
 	names := flag.String("claude-names", "claude,node", "foreground program names that count as Claude Code")
 	digests := flag.String("digest-log", digestlog.DefaultPath(), "the agent plugin's digest journal (empty sends no digests)")
+	deliveries := flag.String("delivery-log", cmdjournal.DefaultPath(), "where deliveries are journaled (empty = remember only while running)")
 	flag.Parse()
 
 	home, _ := os.UserHomeDir()
@@ -71,7 +81,16 @@ func main() {
 		*tokenFile = filepath.Join(home, ".config", "rook", "cloud_token")
 	}
 
+	// The delivery journal, replayed before the first poll: whatever the
+	// last process typed is already known here, so a crash between the
+	// keyboard and the ack costs a redundant ack rather than a second
+	// round of typing. A window well past any ask's life, because the
+	// cost of remembering too long is a few bytes and the cost of
+	// forgetting too soon lands in somebody's editor.
+	journal, jerr := cmdjournal.Open(*deliveries, 30*24*time.Hour, time.Now())
+
 	br := &bridge{
+		journal: journal,
 		client:  &http.Client{Timeout: 15 * time.Second},
 		api:     strings.TrimRight(*api, "/"),
 		token:   readToken(*tokenFile),
@@ -91,6 +110,13 @@ func main() {
 		spawnTries: 6,
 		spawnWait:  2 * time.Second,
 	}
+	// A journal that could not be opened is a degradation worth saying
+	// out loud rather than a reason to refuse to run: the bridge still
+	// works, it just forgets across restarts the way it always used to.
+	if jerr != nil {
+		br.note("deliveries are not journaled (" + jerr.Error() + ") — a crash could retype an answer")
+	}
+
 	c := &conn{out: os.Stdout}
 	if br.token != "" {
 		go br.loop(c, *interval)
@@ -143,8 +169,12 @@ type bridge struct {
 	// (delivered survives a failed ack), and one that cannot land gets
 	// a bounded number of tries before it is dropped with a note —
 	// at-least-once from the cloud, at-most-once at the keyboard.
-	delivered map[string]bool
-	attempts  map[string]int
+	//
+	// Journaled rather than held in memory, because that promise is
+	// about crashes too: the gap between typing and acking is exactly
+	// where a dying process used to cost a second round of typing.
+	// Both rails share the one log — plugins/internal/cmdjournal.
+	journal *cmdjournal.Log
 }
 
 // loop is the heartbeat: whoami until it answers, then a status push
@@ -434,12 +464,8 @@ func (br *bridge) collect(c *conn, sessions []transcript.Session, panes []transc
 	if len(answers) == 0 {
 		return
 	}
-	if br.delivered == nil {
-		br.delivered = map[string]bool{}
-		br.attempts = map[string]int{}
-	}
 	for _, ans := range answers {
-		if br.delivered[ans.AskID] {
+		if br.journal.Delivered(ans.AskID) {
 			// Typed already; a previous ack must have been lost. Ack
 			// again — never type twice.
 			br.ack(ans.AskID)
@@ -471,8 +497,7 @@ func (br *bridge) collect(c *conn, sessions []transcript.Session, panes []transc
 			// The session runs outside rook, or its pane is gone. A
 			// bounded number of retries, then drop with the reason —
 			// an answer that can never land must not pend forever.
-			br.attempts[ans.AskID]++
-			if br.attempts[ans.AskID] > 5 {
+			if br.journal.Failed(ans.AskID) > 5 {
 				br.ack(ans.AskID)
 				br.note("dropped an answer — no agent pane for " + transcript.Snip(target.Title, 40))
 			}
@@ -484,8 +509,7 @@ func (br *bridge) collect(c *conn, sessions []transcript.Session, panes []transc
 		_, err := c.call("session.send",
 			map[string]any{"pane": pane.ID, "text": ans.Text}, 5*time.Second)
 		if err != nil {
-			br.attempts[ans.AskID]++
-			if br.attempts[ans.AskID] > 5 {
+			if br.journal.Failed(ans.AskID) > 5 {
 				br.ack(ans.AskID)
 				br.note("could not deliver an answer: " + err.Error())
 			} else {
@@ -494,8 +518,9 @@ func (br *bridge) collect(c *conn, sessions []transcript.Session, panes []transc
 			continue
 		}
 		// Typed. Mark BEFORE the ack: a lost ack must re-ack, never
-		// re-type.
-		br.delivered[ans.AskID] = true
+		// re-type — and the mark is on disk before this returns, so a
+		// crash in the gap cannot cost a second round of typing either.
+		br.journal.MarkDelivered(ans.AskID)
 		br.ack(ans.AskID)
 		br.note("answered " + transcript.Snip(target.Title, 40) + " from the phone")
 	}
@@ -516,13 +541,9 @@ func (br *bridge) executeCommands(c *conn, sessions []transcript.Session, panes 
 	if len(cmds) == 0 {
 		return
 	}
-	if br.delivered == nil {
-		br.delivered = map[string]bool{}
-		br.attempts = map[string]int{}
-	}
 	for _, cmd := range cmds {
 		key := "cmd:" + cmd.ID
-		if br.delivered[key] {
+		if br.journal.Delivered(key) {
 			br.ackCommand(cmd.ID)
 			continue
 		}
@@ -559,8 +580,7 @@ func (br *bridge) runCompact(c *conn, cmd cloudCommand, key string, sessions []t
 		return
 	}
 	if target.State == transcript.StateWorking {
-		br.attempts[key]++
-		if br.attempts[key] > 5 {
+		if br.journal.Failed(key) > 5 {
 			br.ackCommand(cmd.ID)
 			br.note("dropped a compact — " + transcript.Snip(target.Title, 40) + " stayed mid-turn")
 		}
@@ -574,8 +594,7 @@ func (br *bridge) runCompact(c *conn, cmd cloudCommand, key string, sessions []t
 		}
 	}
 	if pane == nil {
-		br.attempts[key]++
-		if br.attempts[key] > 5 {
+		if br.journal.Failed(key) > 5 {
 			br.ackCommand(cmd.ID)
 			br.note("dropped a compact — no agent pane for " + transcript.Snip(target.Title, 40))
 		}
@@ -587,8 +606,7 @@ func (br *bridge) runCompact(c *conn, cmd cloudCommand, key string, sessions []t
 	_, err := c.call("session.send",
 		map[string]any{"pane": pane.ID, "text": "/compact"}, 5*time.Second)
 	if err != nil {
-		br.attempts[key]++
-		if br.attempts[key] > 5 {
+		if br.journal.Failed(key) > 5 {
 			br.ackCommand(cmd.ID)
 			br.note("could not deliver a compact: " + err.Error())
 		} else {
@@ -597,7 +615,7 @@ func (br *bridge) runCompact(c *conn, cmd cloudCommand, key string, sessions []t
 		return
 	}
 
-	br.delivered[key] = true
+	br.journal.MarkDelivered(key)
 	br.ackCommand(cmd.ID)
 	br.note("compacted " + transcript.Snip(target.Title, 40) + " from the phone")
 }
@@ -638,8 +656,7 @@ func (br *bridge) runResume(c *conn, cmd cloudCommand, key string, sessions []tr
 	_, err := c.call("session.spawn",
 		map[string]any{"command": "claude --resume " + target.ID, "cwd": target.Cwd}, 5*time.Second)
 	if err != nil {
-		br.attempts[key]++
-		if br.attempts[key] > 5 {
+		if br.journal.Failed(key) > 5 {
 			br.ackCommand(cmd.ID)
 			br.note("could not resume: " + err.Error())
 		} else {
@@ -647,7 +664,7 @@ func (br *bridge) runResume(c *conn, cmd cloudCommand, key string, sessions []tr
 		}
 		return
 	}
-	br.delivered[key] = true
+	br.journal.MarkDelivered(key)
 	br.ackCommand(cmd.ID)
 	br.note("resumed " + transcript.Snip(target.Title, 40) + " from the phone")
 }
@@ -682,8 +699,7 @@ func (br *bridge) runSpawn(c *conn, cmd cloudCommand, key string, sessions []tra
 	}
 	_, err := c.call("session.spawn", map[string]any{"command": "claude", "cwd": cwd}, 5*time.Second)
 	if err != nil {
-		br.attempts[key]++
-		if br.attempts[key] > 5 {
+		if br.journal.Failed(key) > 5 {
 			br.ackCommand(cmd.ID)
 			br.note("could not spawn: " + err.Error())
 		} else {
@@ -694,7 +710,7 @@ func (br *bridge) runSpawn(c *conn, cmd cloudCommand, key string, sessions []tra
 	// Spawned exactly once — marked and acked BEFORE the prompt hop,
 	// because a redelivered spawn must never open a second pane. A
 	// prompt that then fails to land costs a note, not a duplicate.
-	br.delivered[key] = true
+	br.journal.MarkDelivered(key)
 	br.ackCommand(cmd.ID)
 	if cmd.Prompt == "" {
 		br.note("started a session in " + cmd.Workspace + " from the phone")

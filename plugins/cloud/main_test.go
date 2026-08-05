@@ -5,11 +5,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/incantery/rook/plugins/internal/cmdjournal"
 	"github.com/incantery/rook/plugins/internal/digestlog"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
@@ -164,14 +166,27 @@ func (f *fakeCloud) pushed() int {
 
 func testBridge(t *testing.T, api, token string) *bridge {
 	t.Helper()
+	return testBridgeAt(t, api, token, filepath.Join(t.TempDir(), "deliveries.jsonl"))
+}
+
+// testBridgeAt pins the delivery journal's path, so a test can build a
+// SECOND bridge over the same file and play out the restart the journal
+// exists for.
+func testBridgeAt(t *testing.T, api, token, journalPath string) *bridge {
+	t.Helper()
+	journal, err := cmdjournal.Open(journalPath, time.Hour, time.Now())
+	if err != nil {
+		t.Fatalf("delivery journal: %v", err)
+	}
 	return &bridge{
-		client: &http.Client{Timeout: 5 * time.Second},
-		api:    api,
-		token:  token,
-		nofile: "/nonexistent/cloud_token",
-		sc:     &transcript.Scanner{Dir: t.TempDir(), Window: time.Hour, Idle: 10 * time.Minute, Quiet: time.Minute, Max: 20},
-		names:  []string{"claude"},
-		kick:   make(chan struct{}, 1),
+		journal: journal,
+		client:  &http.Client{Timeout: 5 * time.Second},
+		api:     api,
+		token:   token,
+		nofile:  "/nonexistent/cloud_token",
+		sc:      &transcript.Scanner{Dir: t.TempDir(), Window: time.Hour, Idle: 10 * time.Minute, Quiet: time.Minute, Max: 20},
+		names:   []string{"claude"},
+		kick:    make(chan struct{}, 1),
 		// The spawn->prompt poll, at test speed.
 		spawnTries: 3,
 		spawnWait:  time.Millisecond,
@@ -371,6 +386,92 @@ func TestAnswerRoundTripTypesOnceAndAcks(t *testing.T) {
 	}
 	if len(f.acked()) != 2 {
 		t.Fatalf("the redelivery was not re-acked: %v", f.acked())
+	}
+}
+
+// The crash the journal exists for. A bridge types an answer into a
+// pane and dies before the cloud records the ack; the cloud, correctly,
+// redelivers. The NEXT process must know the effect already happened —
+// held in memory that knowledge died with the old one, and the answer
+// landed in the editor twice.
+func TestDeliveryIsRememberedAcrossARestart(t *testing.T) {
+	sess := needsInputSession()
+	f := &fakeCloud{token: "tok"}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	journal := filepath.Join(t.TempDir(), "deliveries.jsonl")
+	first := testBridgeAt(t, srv.URL, "tok", journal)
+	withOutbox(f, cloudAnswer{AskID: askID(sess), Text: "yes — ship it"})
+
+	frames := make(chan string, 4)
+	c := &conn{out: chanWriter{frames}}
+	done := make(chan struct{})
+	go func() {
+		first.collect(c, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
+		close(done)
+	}()
+	frame := <-frames
+	if !strings.Contains(frame, `"op":"session.send"`) {
+		t.Fatalf("first delivery did not type: %s", frame)
+	}
+	var req struct {
+		ID uint64 `json:"id"`
+	}
+	json.Unmarshal([]byte(frame), &req)
+	c.deliver(req.ID, true, "", nil)
+	<-done
+
+	// The process dies here. A brand-new bridge, same machine, same
+	// journal file — and the cloud redelivers because it never heard.
+	second := testBridgeAt(t, srv.URL, "tok", journal)
+	withOutbox(f, cloudAnswer{AskID: askID(sess), Text: "yes — ship it"})
+	second.collect(c, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
+	select {
+	case fr := <-frames:
+		t.Fatalf("typed twice across a restart: %s", fr)
+	default:
+	}
+	if len(f.acked()) < 2 {
+		t.Fatalf("the redelivery was not re-acked: %v", f.acked())
+	}
+}
+
+// The same promise on the command rail: a spawn that survived a crash
+// must not open a second pane when the cloud redelivers it.
+func TestCommandIsRememberedAcrossARestart(t *testing.T) {
+	sess := needsInputSession()
+	f := &fakeCloud{token: "tok"}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	journal := filepath.Join(t.TempDir(), "deliveries.jsonl")
+	cmd := cloudCommand{ID: "cmd_1", Kind: "compact", SessionID: sess.ID}
+
+	first := testBridgeAt(t, srv.URL, "tok", journal)
+	withCommands(f, cmd)
+	frames := make(chan string, 4)
+	c := &conn{out: chanWriter{frames}}
+	done := make(chan struct{})
+	go func() {
+		first.executeCommands(c, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
+		close(done)
+	}()
+	frame := <-frames
+	var req struct {
+		ID uint64 `json:"id"`
+	}
+	json.Unmarshal([]byte(frame), &req)
+	c.deliver(req.ID, true, "", nil)
+	<-done
+
+	second := testBridgeAt(t, srv.URL, "tok", journal)
+	withCommands(f, cmd)
+	second.executeCommands(c, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
+	select {
+	case fr := <-frames:
+		t.Fatalf("a redelivered command ran twice across a restart: %s", fr)
+	default:
 	}
 }
 
