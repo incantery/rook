@@ -1087,6 +1087,17 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     // word already written into the buffer.
                     @as([]const u8, if (ed.cplAuto()) " auto" else ""),
                 }) catch return;
+                // Where the card behind the menu is, in scene pixels.
+                // The box is a rounded rect drawn UNDER the grid, which
+                // is the one part of it a text dump cannot show — and a
+                // corner is only checkable from a screenshot if
+                // something says which pixel to look at.
+                if (app.completionCardRect(app.activeTab().focused)) |r| {
+                    a.writer.print("cpl card {d} {d} {d} {d}\n", .{
+                        @as(i64, @intFromFloat(r.x)), @as(i64, @intFromFloat(r.y)),
+                        @as(i64, @intFromFloat(r.w)), @as(i64, @intFromFloat(r.h)),
+                    }) catch return;
+                }
                 // The typed text is the ring's last stop, not an offer.
                 for (0..ed.cplCount() -| 1) |i| {
                     a.writer.print("{s}cpl {s}\t{s}\n", .{

@@ -63,7 +63,7 @@ pub const MTLRegion = extern struct { x: u64, y: u64, z: u64, w: u64, h: u64, d:
 pub const MTLRegionPub = MTLRegion;
 
 /// Per-cell GPU data; must match the MSL CellData layout (stride 16).
-/// uv is the glyph's texel origin in the atlas; flags bit0 = has glyph.
+/// uv is the glyph's texel origin in the atlas; see the flag bits below.
 pub const CellData = extern struct {
     bg: [4]u8,
     fg: [4]u8,
@@ -72,6 +72,21 @@ pub const CellData = extern struct {
     flags: u16,
     pad: u16 = 0,
 };
+
+/// `flags` bits, shared by the two cell pipelines.
+pub const flag_glyph: u16 = 1;
+/// The glyph is a colour one (emoji): sample the colour atlas.
+pub const flag_color: u16 = 2;
+/// Draw NO background for this cell — keep whatever was painted under
+/// it. The one thing a character grid otherwise cannot do is SIT ON a
+/// shape: the bg pass does not blend, so a cell squares off any card
+/// behind it and, at alpha 0, punches a hole clean through. Marking
+/// the cells of a floating box no-bg is what lets a rounded rect be
+/// the box's background while the glyphs stay ordinary grid citizens
+/// — visible to `ctl dump`, laid out by the editor, indexable by row
+/// and column. `╭` at a cell's size is a two-pixel curve that the font
+/// rounds off to a corner; a signed-distance field is not.
+pub const flag_no_bg: u16 = 4;
 
 /// Must match the MSL Uni layout.
 const Uniforms = extern struct {
@@ -95,13 +110,18 @@ const shader_src =
     \\vertex VOut bg_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
     \\                  constant Uni& u [[buffer(0)]],
     \\                  const device CellData* cells [[buffer(1)]]) {
+    \\  VOut o;
+    \\  // Bit 2: no background. Degenerate the quad rather than writing a
+    \\  // transparent one — this pass does not blend, so alpha 0 would
+    \\  // punch a hole instead of leaving what is underneath.
+    \\  if ((cells[iid].flags & 4) != 0) { o.pos = float4(-2.0, -2.0, 0.0, 1.0); o.color = float4(0.0); o.uv = float2(0.0); o.sel = 0.0; return o; }
     \\  uint col = iid % u.cols; uint row = iid / u.cols;
     \\  float2 corner = float2(vid & 1, vid >> 1);
     \\  float2 px = u.origin + (float2(col, row) + corner) * u.cell;
-    \\  VOut o;
     \\  o.pos = float4(px.x / u.vp.x * 2.0 - 1.0, 1.0 - px.y / u.vp.y * 2.0, 0.0, 1.0);
     \\  o.color = float4(cells[iid].bg) / 255.0;
     \\  o.uv = float2(0.0);
+    \\  o.sel = 0.0;
     \\  return o;
     \\}
     \\fragment float4 bg_fs(VOut in [[stage_in]]) { return in.color; }

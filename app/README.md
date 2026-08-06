@@ -920,6 +920,43 @@ Two gotchas that cost real time here:
   corners off — and at alpha 0 it punches a hole. Anything sitting on a
   painted shape uses `ui.textOver`, which runs the glyph pass alone.
 
+### Draw-under: a card behind the character grid
+
+The encoder is immediate-mode, so call order IS z-order, and the chrome
+draws AFTER the grids. That is the right layer for a modal — the palette
+carries its own text with `textOver` — and the wrong one for anything
+the grid has to sit on top of.
+
+The completion menu is the case that needed the other direction. It
+wanted Zed's rounded card, but moving it into the chrome would have cost
+it its place in `ctl dump` and every assertion that reads it. So there
+is one draw-under pass, between the pane background rects and the pane
+grids, and the menu's cells carry `flag_no_bg` — bit 2, which
+degenerates the quad in `bg_vs` rather than writing a transparent one
+(this pass does not blend; alpha 0 is a hole, not a pass-through). The
+editor publishes `cpl_geom` in CELLS and `completionCardRect` turns it
+into pixels, once, for both the drawer and `ctl lsp`.
+
+Three constraints fall out of the ordering, and they are not
+negotiable:
+
+- **The card cannot overhang its cells.** The buffer cells around it
+  draw afterwards and paint their own backgrounds, so a halo is simply
+  erased. Padding goes INSIDE the box — its blank first and last row and
+  column — which is why they are in the box at all.
+- **No shadow.** Same reason: elevation paints outside the rect.
+- **A dump must not republish render geometry.** `dumpText` runs a fill
+  at whatever size the caller asked for, and rook draws zero idle
+  frames, so the stale coordinates would stand until the next keystroke.
+  It saves and restores `cpl_geom` around the fill.
+
+The border this replaced was box-drawing arcs, `╭─╮│╰╯`. They are the
+right box in a text file and the wrong one on a screen: at a cell's size
+an arc is a two-pixel curve, and the font squares it off into the exact
+corner it was drawn to avoid. `drawBoxLines` maps them to sharp corners
+on purpose, and that is honest — a rounded corner is not a glyph
+problem.
+
 `ui.clip` fits a string to N cells with an ellipsis. Text that simply
 stops reads as a rendering fault; "…" reads as "there is more", which
 in a 34-column side pane is the truth most of the time. It counts

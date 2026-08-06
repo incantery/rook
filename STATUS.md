@@ -89,8 +89,9 @@ few frames later, in one ring with a menu. An automatic menu never
 writes to the buffer: `Tab` takes the highlighted candidate, `ctrl-n` /
 `ctrl-p` walk it (and place, as vim's always have), typing narrows it
 rather than dismissing it, and a backspace widens it rather than closing
-it. The menu is drawn on Zed's model: a bordered panel anchored to the
-word, labels coloured by the protocol's `CompletionItemKind` (functions,
+it. The menu is drawn on Zed's model: a **rounded card** — fill, border
+and corners from a signed-distance field, with a pill under the
+highlighted row — labels coloured by the protocol's `CompletionItemKind` (functions,
 types, keywords, constants — the buffer's own syntax colours, so a
 function in the menu is the colour a function is two lines up), the
 characters you have typed picked out bright against the rest, and the
@@ -100,8 +101,16 @@ latched so it cannot flip mid-word. It follows the cursor sideways, one
 column per character, so the list stays attached to the caret rather
 than parked beside it. It never scrolls the document to
 make room — stopping the box from moving by moving every line instead is
-the larger jolt of the two. Still owed against Zed: the documentation
-panel beside the list, and fuzzy matching rather than prefix. `editor-suggest = false` turns the
+the larger jolt of the two. The card is the frame's only **draw-under**
+layer, between a pane's background and its text: the menu's cells are
+marked no-bg (one flag, one degenerate quad in the bg shader) so the
+card is what shows through them, which is how the list keeps its place
+in `ctl dump` and in every assertion that reads it. Box-drawing arcs
+were the old border and they cannot be this — at a cell's size `╭` is a
+two-pixel curve the font squares off. The one part of Zed's popover the
+arrangement gives up is the drop shadow: it paints outside the box, and
+the buffer cells around it draw after. Still owed against Zed: the
+documentation panel beside the list, and fuzzy matching rather than prefix. `editor-suggest = false` turns the
 automatic half off and leaves `ctrl-n` exactly as it was. `:Format`, and `editor-format-on-save`
 for `:w` — off by default, and a save is never lost to it: a formatter
 that does not answer inside 1.5s gets the file written unformatted and

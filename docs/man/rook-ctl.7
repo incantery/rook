@@ -129,6 +129,12 @@ the cursor is inside of.
 marks a menu that opened BY ITSELF as you typed, which is the difference
 between a list being offered and a word already written into the buffer:
 an auto menu has changed nothing until you take it with Tab.
+.Ql cpl card <x> <y> <w> <h>
+gives the menu's box in scene pixels.
+The box is a rounded card drawn UNDER the character grid, which is the
+one part of the menu a text dump cannot show \(em so this is what a
+screenshot assertion aims at, and it is computed by the same code that
+draws it rather than by a second copy of the arithmetic.
 Then every declared language that has no server running, and why:
 .Ql language zig declared zls
 (declared, nothing started yet),

@@ -119,9 +119,6 @@ pub const Style = enum(u8) {
     /// bolds them; a character grid has no bold, so they take the
     /// accent instead.
     cpl_match,
-    /// The box's edge. Recedes: it is there to say where the list stops,
-    /// not to be looked at.
-    cpl_border,
     // The hover float: a bordered document over the buffer. Its own
     // buckets for the same reason the menu has its own — it FLOATS, so
     // every cell it covers needs a fill of its own, including the ones
@@ -213,6 +210,30 @@ pub const Diag = struct {
     };
 };
 
+/// The completion menu's box, in GRID CELLS, as the last fill placed it.
+///
+/// The editor lays the menu out in cells and says where it landed; the
+/// app turns that into pixels and paints a rounded card there, under
+/// the grid. Cells, not pixels, because the editor has no idea how big
+/// a cell is — and because everything that INSPECTS the menu (`ctl
+/// dump`, the e2e assertions, the layout tests) works in cells too.
+///
+/// The rect is exact: the card covers these cells and not one pixel
+/// more. Padding is the box's own blank first/last row and column,
+/// which is why they are in the box at all. An overhanging card would
+/// be painted over by the buffer cells around it — they draw after it,
+/// and they draw their own backgrounds.
+pub const CplBox = struct {
+    col: usize,
+    row: usize,
+    w: usize,
+    h: usize,
+    /// Row within the box holding the highlighted candidate, when one is
+    /// on screen. The selection is a pill inside the card, so it is
+    /// geometry now rather than a per-cell background.
+    sel: ?usize = null,
+};
+
 pub const RCell = struct {
     cp: u21 = ' ',
     st: Style = .text,
@@ -220,14 +241,18 @@ pub const RCell = struct {
     /// the cell to the LEFT and this one draws the other half, the same
     /// arrangement the terminal grid uses for a wide cell's spacer.
     tail: bool = false,
-    /// This cell is inside the completion menu's SELECTED row.
+    /// This cell paints no background of its own: something drawn
+    /// UNDER the grid shows through it.
     ///
-    /// A flag rather than another Style, because the row decides the
-    /// BACKGROUND and the token decides the FOREGROUND, and Style
-    /// couples the two. Without it every kind colour would need a
-    /// second variant for "on the selected row" — and the detail column
-    /// already punched a hole in the selection for exactly that reason.
-    cpl_row: bool = false,
+    /// The completion menu is the tenant. Its box is a real rounded
+    /// rect — fill, border and corners from a signed-distance field —
+    /// drawn before the grids, and its cells stay ordinary grid
+    /// citizens on top: laid out by the editor, visible to `ctl dump`,
+    /// addressable by row and column. A cell that painted its own
+    /// square background would crop the corners off the card it is
+    /// sitting inside, which is exactly what `textOver` exists to avoid
+    /// in the chrome.
+    no_bg: bool = false,
     /// Non-zero when this cell holds a grapheme cluster of more than one
     /// codepoint: `(offset << 8) | len` into the frame's cluster bytes,
     /// read back with `Editor.clusterText`. `cp` still holds the base,
@@ -452,6 +477,9 @@ pub const Editor = struct {
     cpl_box_w: usize = 0,
     cpl_box_above: bool = false,
     cpl_box_set: bool = false,
+    /// Where the last fill actually put the box, for whoever paints the
+    /// card behind it. Null when no menu is up.
+    cpl_geom: ?CplBox = null,
     /// The hover float. `K` asks; the answer arrives frames later and
     /// is laid out ONCE, at the width the pane had when it landed —
     /// re-wrapping every frame would be work the float does not need,
@@ -7264,6 +7292,10 @@ pub const Editor = struct {
     /// exists — the same trick the cursor and the search tint use one
     /// loop up.
     fn fillCompletionMenu(self: *Editor, g: []RCell, cols: usize, rows: usize, top_rows: usize, gw: usize) void {
+        // Cleared on EVERY entry, including each early return below: the
+        // card is painted from this, so a stale one outlives its menu as
+        // a rectangle floating over the buffer.
+        self.cpl_geom = null;
         if (!self.cpl_live) return;
         // The typed text is the ring's last stop, not an offer. A menu
         // is worth drawing from the first REAL candidate.
@@ -7309,13 +7341,24 @@ pub const Editor = struct {
 
         const least: usize = if (self.cpl_asking) 1 else 0;
         const shown = @min(@max(offers, least), cpl_menu_rows);
-        // The box is the list plus its two border rows.
+        // The box is the list plus a blank row above and below. Those two
+        // rows ARE the card's vertical padding — a list flush with its
+        // own edge reads as a list that got cut off, and a cell grid can
+        // only pad in whole cells.
         const box_h = shown + 2;
+        const above_room = cur_row -| top_rows;
         const start_row = if (self.cpl_box_above)
-            cur_row -| @min(box_h, cur_row -| top_rows)
+            cur_row -| @min(box_h, above_room)
         else
             below;
-        const room = (top_rows + text_rows) -| start_row;
+        // Above the cursor the room is what is BETWEEN the box's top and
+        // the cursor; below it is what is left of the text area. Measuring
+        // both the same way let a tall list placed above run down over the
+        // line being typed into.
+        const room = if (self.cpl_box_above)
+            @min(above_room, box_h)
+        else
+            (top_rows + text_rows) -| start_row;
         if (room < 3) return;
         const draw = @min(shown, room - 2);
         if (draw == 0) return;
@@ -7339,39 +7382,47 @@ pub const Editor = struct {
             if (self.cpl_idx >= draw) top = self.cpl_idx - draw + 1;
         }
 
+        // Say where the box is BEFORE painting it: the app reads this to
+        // draw the card, and the row/column arithmetic below is the only
+        // place that knows the answer.
+        self.cpl_geom = .{
+            .col = left,
+            .row = start_row,
+            .w = menu_w,
+            .h = draw + 2,
+            .sel = if (self.cpl_idx >= top and self.cpl_idx < top + draw)
+                self.cpl_idx - top + 1
+            else
+                null,
+        };
+
         for (0..draw + 2) |r| {
             const row = start_row + r;
             if (row >= top_rows + text_rows) break;
             const out = g[row * cols ..][0..cols];
-            const border_row = r == 0 or r == draw + 1;
 
-            // A BORDER, like Zed's and like the hover float's. Without
-            // one the menu is a differently-shaded rectangle of text
-            // over text, and the eye has to work out where the list
-            // stops. Rounded, because it is a panel and not a hole.
-            if (border_row) {
-                if (left + menu_w > cols) break;
-                out[left] = .{ .cp = if (r == 0) '╭' else '╰', .st = .cpl_border };
-                for (left + 1..left + menu_w - 1) |c| out[c] = .{ .cp = '─', .st = .cpl_border };
-                out[left + menu_w - 1] = .{ .cp = if (r == 0) '╮' else '╯', .st = .cpl_border };
-                continue;
+            // Every cell of the box, blanked and marked no-bg. What shows
+            // through is the card: fill, border and rounded corners from
+            // one signed-distance field, drawn under the grid.
+            //
+            // There used to be a glyph border here — `╭─╮│╰╯`. It is the
+            // right box in a text file and the wrong one on a screen: at
+            // a cell's size an arc is a two-pixel curve, and the font
+            // squares it off into the corner it was drawn to avoid. The
+            // first and last row and column are blank on purpose; they
+            // are the card's padding.
+            for (0..menu_w) |c| {
+                if (left + c >= cols) break;
+                out[left + c] = .{ .cp = ' ', .st = .cpl_item, .no_bg = true };
             }
+            if (r == 0 or r == draw + 1) continue;
 
             const idx = top + r - 1;
             const sel = idx == self.cpl_idx;
-            for (0..menu_w) |c| {
-                if (left + c >= cols) break;
-                out[left + c] = .{ .cp = ' ', .st = .cpl_item, .cpl_row = sel };
-            }
-            out[left] = .{ .cp = '│', .st = .cpl_border, .cpl_row = sel };
-            if (left + menu_w - 1 < cols) {
-                out[left + menu_w - 1] = .{ .cp = '│', .st = .cpl_border, .cpl_row = sel };
-            }
-
             var x = left + 2;
             const limit = left + menu_w - 2;
             if (idx >= offers) {
-                putRow(out, &x, limit, "asking…", .cpl_detail, sel);
+                putRow(out, &x, limit, "asking…", .cpl_detail);
                 continue;
             }
 
@@ -7386,28 +7437,31 @@ pub const Editor = struct {
             const hit = pre.len > 0 and pre.len <= word.len and
                 std.ascii.startsWithIgnoreCase(word, pre);
             if (hit) {
-                putRow(out, &x, limit, word[0..pre.len], .cpl_match, sel);
-                putRow(out, &x, limit, word[pre.len..], base, sel);
-            } else putRow(out, &x, limit, word, base, sel);
+                putRow(out, &x, limit, word[0..pre.len], .cpl_match);
+                putRow(out, &x, limit, word[pre.len..], base);
+            } else putRow(out, &x, limit, word, base);
 
             const d = self.cplDetail(idx);
             if (d.len > 0 and x + 1 < limit) {
                 x += 1;
-                putRow(out, &x, limit, d, .cpl_detail, sel);
+                putRow(out, &x, limit, d, .cpl_detail);
             }
         }
     }
 
-    /// Put a run into a menu row, stopping at `limit`. `sel` rides on
-    /// every cell so the row's fill survives whatever colour the token
-    /// chose for itself.
-    fn putRow(out: []RCell, x: *usize, limit: usize, sr: []const u8, st: Style, sel: bool) void {
+    /// Put a run into a menu row, stopping at `limit`. Every cell is
+    /// no-bg: the card behind the box owns the background, and the
+    /// selected row owns a pill drawn on it — so a token here chooses a
+    /// foreground and nothing else. It used to carry the row's fill on
+    /// each cell, because a Style couples the two and the detail column
+    /// kept punching a hole in the selection.
+    fn putRow(out: []RCell, x: *usize, limit: usize, sr: []const u8, st: Style) void {
         var i: usize = 0;
         while (i < sr.len and x.* < limit) {
             const cl = clusterAt(sr, i);
             if (x.* + cl.width > limit) break;
-            out[x.*] = .{ .cp = decodeAt(sr, i), .st = st, .cpl_row = sel };
-            if (cl.width == 2) out[x.* + 1] = .{ .cp = ' ', .st = st, .tail = true, .cpl_row = sel };
+            out[x.*] = .{ .cp = decodeAt(sr, i), .st = st, .no_bg = true };
+            if (cl.width == 2) out[x.* + 1] = .{ .cp = ' ', .st = st, .tail = true, .no_bg = true };
             x.* += cl.width;
             i += cl.len;
         }
@@ -7679,6 +7733,14 @@ pub const Editor = struct {
     /// The grid as plain text — ctl dump's editor answer, and what the
     /// tests assert on.
     pub fn dumpText(self: *Editor, gpa: Allocator, cols: usize, rows: usize) ![]u8 {
+        // A dump is an INSPECTION, at whatever size the caller asked
+        // for, and nobody is drawing at that size. The fill it runs
+        // would otherwise republish the completion box's geometry —
+        // which the renderer reads to place a card on screen — as
+        // coordinates from an imaginary grid. rook draws zero idle
+        // frames, so nothing would correct it until the next keystroke.
+        const geom = self.cpl_geom;
+        defer self.cpl_geom = geom;
         const g = self.fillGrid(cols, rows);
         var outl: std.ArrayListUnmanaged(u8) = .empty;
         errdefer outl.deinit(gpa);
@@ -12723,6 +12785,34 @@ test "the menu's box holds still while one word is completed" {
     try testing.expect(e.cpl_box_w != wide or e.cplCount() > 2);
 }
 
+test "a box placed above the cursor never covers the line being typed" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    // A full menu's worth of candidates, so the list wants more rows
+    // than the space above a cursor near the bottom can give it.
+    keys(e, "i");
+    var b: [32]u8 = undefined;
+    for (0..14) |i| keys(e, try std.fmt.bufPrint(&b, "alpha_{d}\n", .{i}));
+    for (0..60) |_| keys(e, "filler\n");
+    keys(e, "al");
+
+    // Every pane height, because the flip lands on a different row in
+    // each and the overrun only showed at the one where the list is
+    // taller than the room above it. The tell is the CURSOR: the menu
+    // fills after the text, so a box that runs over the cursor's row
+    // erases the cursor cell.
+    for (8..26) |rows| {
+        const g = e.fillGrid(70, rows);
+        if (e.cpl_geom == null) continue;
+        var cursor = false;
+        for (g) |c| {
+            if (c.st == .cursor) cursor = true;
+        }
+        try testing.expect(cursor);
+    }
+}
+
 test "the document does not move when the menu opens" {
     const gpa = testing.allocator;
     var e = try mkEditor(gpa);
@@ -12775,26 +12865,47 @@ test "a candidate's label is coloured by what it is" {
     try testing.expect(cplKindStyle(0) == null);
 }
 
-test "the menu draws a border and marks the typed characters" {
+test "the menu marks the typed characters, and every cell of it is no-bg" {
     const gpa = testing.allocator;
     var e = try mkEditor(gpa);
     defer e.destroy();
     keys(e, "ialphabet\nalpine\n");
     keys(e, "alp");
-    const g = e.fillGrid(60, 16);
+    const cols = 60;
+    const g = e.fillGrid(cols, 16);
 
-    var border = false;
     var matched: usize = 0;
-    var kinded_rows: usize = 0;
     for (g) |c| {
-        if (c.cp == '╭' or c.cp == '╰' or c.cp == '│') border = true;
         if (c.st == .cpl_match) matched += 1;
-        if (c.cpl_row) kinded_rows += 1;
     }
-    try testing.expect(border);
     // Three characters of prefix, picked out on each of the two rows.
     try testing.expectEqual(@as(usize, 6), matched);
-    // And the selected row carries its fill as a ROW flag, so the
-    // detail column no longer punches a hole in it.
-    try testing.expect(kinded_rows > 0);
+
+    // The box says where it is, and EVERY cell inside it declines to
+    // paint a background — that is what lets the card behind it keep
+    // its rounded corners instead of being squared off cell by cell.
+    const box = e.cpl_geom orelse return error.NoMenu;
+    try testing.expect(box.w > 0 and box.h > 0);
+    for (0..box.h) |r| {
+        for (0..box.w) |c| {
+            const cell = g[(box.row + r) * cols + box.col + c];
+            try testing.expect(cell.no_bg);
+        }
+    }
+    // ...and nothing OUTSIDE it is no-bg, or the buffer would show the
+    // pane's bare background through its own text.
+    var outside: usize = 0;
+    for (g, 0..) |c, i| {
+        const r = i / cols;
+        const col = i % cols;
+        const inside = r >= box.row and r < box.row + box.h and
+            col >= box.col and col < box.col + box.w;
+        if (c.no_bg and !inside) outside += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), outside);
+
+    // The selection is geometry now, not a per-cell fill: the app draws
+    // it as a pill inside the card.
+    try testing.expect(box.sel != null);
+    try testing.expect(box.sel.? >= 1 and box.sel.? < box.h - 1);
 }

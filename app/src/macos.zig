@@ -5269,6 +5269,13 @@ pub const App = struct {
             };
             self.renderer.drawRect(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.rect.w, p.rect.h, .{ bg.r, bg.g, bg.b, self.bg_alpha });
         }
+        // Floating cards, UNDER the grids that sit on them. The only
+        // layer in the frame that draws between a pane's background and
+        // its text, and the completion menu is its one tenant.
+        for (atab.panes.items) |p| {
+            if (p.drawn_cols == 0) continue;
+            self.drawCompletionCard(enc, vp_w, vp_h, p);
+        }
         for (atab.panes.items) |p| {
             if (p.drawn_cols == 0) continue;
             const o = self.gridOrigin(p);
@@ -8638,6 +8645,81 @@ pub const App = struct {
         self.fillCellGrid(m.fillGrid(cols, rows), null, focused, cells, cols, rows);
     }
 
+    /// The completion menu's card rect in scene pixels, or null when no
+    /// menu is up.
+    ///
+    /// Shared with `ctl lsp`, which reports it: a rounded corner is only
+    /// checkable from a screenshot if something says where to look, and
+    /// a second copy of this arithmetic would be a second thing to keep
+    /// in step with the fill.
+    pub fn completionCardRect(self: *App, p: *panespkg.Pane) ?struct { x: f32, y: f32, w: f32, h: f32, sel: ?f32 } {
+        const ed = switch (p.content) {
+            .edit => |e| e,
+            else => return null,
+        };
+        const box = ed.cpl_geom orelse return null;
+        const o = self.gridOrigin(p);
+        const cw = self.renderer.cell_w;
+        const ch = self.renderer.cell_h;
+        return .{
+            .x = o.x + @as(f32, @floatFromInt(box.col)) * cw,
+            .y = o.y + @as(f32, @floatFromInt(box.row)) * ch,
+            .w = @as(f32, @floatFromInt(box.w)) * cw,
+            .h = @as(f32, @floatFromInt(box.h)) * ch,
+            .sel = if (box.sel) |s| @as(f32, @floatFromInt(s)) * ch else null,
+        };
+    }
+
+    /// The completion menu's background: a rounded card with a border,
+    /// and a pill under the highlighted row.
+    ///
+    /// Drawn BEFORE the grid, not after — the menu's text is ordinary
+    /// grid cells and has to land on top of this. That ordering is the
+    /// whole reason the card can exist: the chrome's cards (the palette,
+    /// the which-key sheet) draw over everything and carry their own
+    /// text with `textOver`, which would cost the menu its place in `ctl
+    /// dump` and every assertion that reads it.
+    ///
+    /// The rect is the box's cells exactly. It cannot overhang: the
+    /// buffer cells around the box draw after this and paint their own
+    /// backgrounds, so a halo would simply be erased. The padding is
+    /// inside the box instead — its blank first and last row and column.
+    /// A shadow is the one part of Zed's popover this arrangement gives
+    /// up, for the same reason.
+    fn drawCompletionCard(self: *App, enc: objc.Object, vp_w: f32, vp_h: f32, p: *panespkg.Pane) void {
+        const r = self.completionCardRect(p) orelse return;
+        const x = r.x;
+        const y = r.y;
+        const w = r.w;
+        const h = r.h;
+
+        // A quiet border, like the palette's: the accent belongs to the
+        // selected row and to the characters you typed, and a container
+        // wearing it too gives the eye two things to find in a list you
+        // opened to pick one thing from.
+        self.renderer.drawRoundRect(enc, vp_w, vp_h, x, y, w, h, th.bar_bg, .{
+            .radius = self.m.radius,
+            .border = self.sep,
+            .border_color = th.sep,
+        });
+        if (r.sel) |dy| {
+            // Inset into the box's blank columns, so the highlight reads
+            // as a row IN the card rather than a band across it.
+            const inset = @round(self.renderer.cell_w / 2);
+            self.renderer.drawRoundRect(
+                enc,
+                vp_w,
+                vp_h,
+                x + inset,
+                y + dy,
+                w - inset * 2,
+                self.renderer.cell_h,
+                th.chip_active_bg,
+                .{ .radius = @round(self.m.radius * 0.6) },
+            );
+        }
+    }
+
     /// Paint a styled cell grid into the renderer's buffer.
     ///
     /// `ed` is only for grapheme-cluster lookup and is null for tenants
@@ -8710,7 +8792,6 @@ pub const App = struct {
                 .cpl_kw => th.syn_keyword,
                 .cpl_const => th.syn_number,
                 .cpl_match => th.accent,
-                .cpl_border => th.ed_dim,
                 // The float. Its border recedes, its prose sits at the
                 // chrome's ordinary weight, and the signature — the one
                 // line you actually came for — is the brightest thing
@@ -8739,8 +8820,9 @@ pub const App = struct {
                 // one scale down.
                 .buftab_on => bg = th.chip_active_bg,
                 .buftab_off => bg = th.bar_bg,
-                .cpl_item, .cpl_detail, .cpl_fn, .cpl_type, .cpl_kw, .cpl_const, .cpl_match, .cpl_border => bg = th.bar_bg,
-                .cpl_sel => bg = th.chip_active_bg,
+                // No `cpl_*` case here on purpose: every cell of the menu
+                // is no-bg, and its background is the card drawn under
+                // the grid — see drawCompletionCard.
                 // The float lifts off the buffer on the chrome's fill,
                 // and a fenced block lifts once more off that — the
                 // same two-step the buffer line uses for the tab you
@@ -8749,12 +8831,6 @@ pub const App = struct {
                 .hov_code => bg = th.chip_active_bg,
                 else => {},
             }
-
-            // The selected row's fill, applied AFTER the token has
-            // chosen its own colour: the row owns the background and
-            // the token owns the foreground, and coupling them is what
-            // made the detail column punch a hole in the selection.
-            if (rc.cpl_row) bg = th.chip_active_bg;
 
             var uvx: u16 = 0;
             var uvy: u16 = 0;
@@ -8809,6 +8885,9 @@ pub const App = struct {
                     bg[c] = dimTo(bg[c], th.ed_bg[c], dim);
                 }
             }
+            // Let the card under the grid show through instead of
+            // squaring its corners off with a cell-sized rectangle.
+            if (rc.no_bg) flags |= renderpkg.flag_no_bg;
             cells[i] = .{
                 .bg = bg,
                 .fg = fg,

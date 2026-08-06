@@ -4568,7 +4568,54 @@ fn suggestScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
     // Back to the state the rest of this scenario expects. Backspace
     // widens the menu rather than closing it, so it is still up.
     for (0..3) |_| _ = try app.ctl("key 7f");
-    try h.expectContains(try app.ctl("lsp"), "cpl on prefix:alp", "backspace widened rather than closed");
+    const lsp_out = try app.ctl("lsp");
+    try h.expectContains(lsp_out, "cpl on prefix:alp", "backspace widened rather than closed");
+
+    // The box is a real rounded card drawn UNDER the grid — the one
+    // thing about it a text dump cannot show, and the reason it stopped
+    // drawing `╭─╮` with box-drawing glyphs (at a cell's size an arc is
+    // a two-pixel curve the font squares off).
+    //
+    // ONE comparison, because it fails on all three ways this breaks.
+    // The card's extreme corner is outside the arc, so it must show the
+    // buffer behind it; the middle of its top edge is on the border. If
+    // the radius went to zero both are the border. If the card stopped
+    // drawing both are the editor's background. If the menu's cells
+    // went back to painting their own backgrounds they would square the
+    // corner off and both are the fill. Only a drawn, rounded card
+    // makes those two pixels differ.
+    {
+        // The shot FIRST, and the geometry from the frame it captured:
+        // `cpl_geom` is written by the fill, so asking before the frame
+        // is asking about the previous one.
+        var shot_buf: [288]u8 = undefined;
+        var s = try app.shot(try std.fmt.bufPrint(&shot_buf, "{s}/card.png", .{scratch}));
+        defer s.deinit();
+
+        var cx: usize = 0;
+        var cy: usize = 0;
+        var cw: usize = 0;
+        var found = false;
+        var it = std.mem.splitScalar(u8, try app.ctl("lsp"), '\n');
+        while (it.next()) |line| {
+            if (!std.mem.startsWith(u8, line, "cpl card ")) continue;
+            var f = std.mem.tokenizeScalar(u8, line["cpl card ".len..], ' ');
+            cx = try std.fmt.parseInt(usize, f.next() orelse break, 10);
+            cy = try std.fmt.parseInt(usize, f.next() orelse break, 10);
+            cw = try std.fmt.parseInt(usize, f.next() orelse break, 10);
+            found = true;
+            break;
+        }
+        try h.expect(found, "ctl lsp did not say where the card is", .{});
+
+        const corner = s.pixel(cx, cy);
+        const edge = s.pixel(cx + cw / 2, cy);
+        try h.expect(
+            corner != edge,
+            "the card's corner is not rounded: corner {x} == top edge {x} at ({d},{d})",
+            .{ corner, edge, cx, cy },
+        );
+    }
 
     // Tab takes the highlighted one. This is the first thing written.
     _ = try app.ctl("press TAB");
