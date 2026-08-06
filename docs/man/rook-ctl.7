@@ -115,6 +115,26 @@ with the prefix, the selected row, and
 once a server's answer has been folded in \(em which is what
 distinguishes a menu of the buffer's own words from one that knows what
 the cursor is inside of.
+Then every declared language that has no server running, and why:
+.Ql language zig declared zls
+(declared, nothing started yet),
+.Ql language python resolving <root>
+(a resolver plugin was asked and has not answered),
+or
+.Ql language python refused <root> \(em <the resolver's words> .
+With no catalog compiled in, "which languages does this rook know about"
+is a question about the CONFIG, and this is where it is answered.
+.Pp
+Then the hover float:
+.Ql hover off ,
+or
+.Ql hover on
+with the laid-out row count, the first visible row and the language its
+fence claimed.
+The float's text is in
+.Cm dump
+already; this is the part the grid cannot say, which is how much of the
+document is below the fold.
 .It Cm statusbar
 The chrome, with hit-test coordinates: workspace/branch/cwd segments,
 top-bar and status-bar layouts, tab style, activity-bar rail entries.
@@ -204,6 +224,49 @@ Plugins get the same answer as JSON through the
 .Ql panes.activity
 grant \(em see
 .Xr rook-plugin 7 .
+.It Cm monitor Op Cm live | disk
+Open the resource monitor in the focused pane, optionally selecting a
+section.
+Opening is idempotent \(em unlike the
+.Ql <leader>r
+chord, which toggles \(em so a scripted
+.Ql monitor disk
+on an already-open monitor selects the tab instead of closing it.
+The pane's contents are readable through
+.Cm dump
+like any other, and come from the same fill the window draws.
+.It Cm disk
+The reclaim table, one line per classified directory:
+.Ql bytes<TAB>class<TAB>category<TAB>path .
+Preceded by a
+.Ql volume
+line and, once a scan has finished, a
+.Ql reclaimable
+line totalling each class.
+.Pp
+The class is the column that matters, not the size.
+.Cm regenerable
+is tool output that rebuilds,
+.Cm refetchable
+is a cache that re-downloads, and
+.Cm keep
+is data \(em agent transcripts, downloads, VM images \(em which the
+monitor will report and never offer to delete.
+Directories the classifier has no opinion about \(em
+.Ql build ,
+.Ql dist ,
+.Ql out
+\(em are deliberately absent: they are hand-authored often enough that a
+delete button on them would be a data-loss bug waiting for the right
+repository.
+.Pp
+Sizes are on-disk blocks with hardlinks counted once, matching
+.Xr du 1 Ns 's
+.Fl s Fl x
+exactly.
+A scan is started from the monitor with
+.Ql s
+and walks the focused pane's shell working directory.
 .It Cm hud
 The performance HUD line.
 .It Cm stats

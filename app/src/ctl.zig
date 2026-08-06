@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const macos = @import("macos.zig");
+const diskscan = @import("diskscan.zig");
 const panespkg = @import("panes.zig");
 const stats = @import("stats.zig");
 
@@ -202,6 +203,10 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                 break :blk tm.session.term.plainString(app.gpa) catch null;
             },
             .edit => |ed| ed.dumpText(app.gpa, p.cols, p.rows) catch null,
+            // The dump comes from the same fill the window draws, so a
+            // headless assertion cannot pass while the visible pane is
+            // wrong.
+            .monitor => |m| m.dumpText(app.gpa, p.cols, p.rows) catch null,
         } orelse {
             app.draw_lock.unlock();
             reply(fd, "err dump\n");
@@ -465,7 +470,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             _ = w.write("closed\n") catch 0;
         } else {
             w.print("armed {s}\n", .{@as([]const u8, if (app.wk_visible) "visible" else "pending")}) catch {};
-            var items: [33]macos.WkItem = undefined;
+            var items: [40]macos.WkItem = undefined;
             const n = app.wkItemsLocked(&items);
             for (items[0..n], 0..) |it, i| {
                 var kb: [1]u8 = undefined;
@@ -953,6 +958,54 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         var w: std.Io.Writer = .fixed(&buf);
         app.activityText(&w);
         reply(fd, buf[0..w.end]);
+    } else if (std.mem.eql(u8, verb, "monitor")) {
+        // `monitor` opens it; `monitor live|disk` also selects a tab.
+        // The blind reader of the same screen the window draws — an
+        // e2e scenario asserts on `dump`, and this is how it gets a
+        // monitor to dump.
+        app.showMonitor(false);
+        if (rest.len > 0) {
+            app.draw_lock.lock();
+            defer app.draw_lock.unlock();
+            if (app.activeTab().focused.monitor()) |m| {
+                if (std.mem.eql(u8, rest, "disk")) m.section = .disk;
+                if (std.mem.eql(u8, rest, "live")) m.section = .live;
+                m.render_dirty = true;
+                app.scene_dirty = true;
+            }
+        }
+        reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "disk") and rest.len == 0) {
+        // The reclaim table as text: one line per classified directory,
+        // `bytes\tclass\tcategory\tpath`. Machine-readable on purpose —
+        // this is the verb an agent calls to answer "what can I clean
+        // up" without a window, and the class column is the part that
+        // matters more than the size.
+        app.draw_lock.lock();
+        defer app.draw_lock.unlock();
+        var a: std.Io.Writer.Allocating = .init(app.gpa);
+        defer a.deinit();
+        if (diskscan.volumeFor("/")) |v| {
+            a.writer.print("volume\ttotal={d}\tavail={d}\n", .{ v.total, v.avail }) catch {};
+        }
+        if (app.scan) |sc| {
+            const t = diskscan.reclaimable(sc);
+            a.writer.print("reclaimable\tregenerable={d}\trefetchable={d}\tkeep={d}\n", .{
+                t[0], t[1], t[2],
+            }) catch {};
+            for (sc.nodes.items) |*n| {
+                const c = n.cat orelse continue;
+                a.writer.print("{d}\t{s}\t{s}\t{s}\n", .{
+                    n.bytes, @tagName(c.reclaim), c.id, n.path,
+                }) catch {};
+            }
+        } else if (app.scanning.load(.acquire)) {
+            a.writer.print("scanning\tbytes={d}\tfiles={d}\n", .{
+                app.scan_prog.bytes.load(.monotonic),
+                app.scan_prog.files.load(.monotonic),
+            }) catch {};
+        } else a.writer.print("no scan\n", .{}) catch {};
+        reply(fd, a.written());
     } else if (std.mem.eql(u8, verb, "boottime") and rest.len == 0) {
         // Startup phase timings (µs), stamped in create() and at the
         // ctl bind above. No lock: written once before any client can
@@ -1023,6 +1076,36 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     }) catch return;
                 }
             } else a.writer.print("cpl off\n", .{}) catch return;
+            // The hover float. Its TEXT is in the grid dump already —
+            // this is the part the grid cannot say, which is how much
+            // of the document is below the fold and therefore whether a
+            // second `K` would do anything.
+            if (ed.hoverLive()) {
+                a.writer.print("hover on rows:{d} top:{d} lang:{s}\n", .{
+                    ed.hoverRows(), ed.hoverTop(), ed.hoverLang(),
+                }) catch return;
+            } else a.writer.print("hover off\n", .{}) catch return;
+        }
+        reply(fd, a.written());
+    } else if (std.mem.eql(u8, verb, "syntax") and std.mem.eql(u8, rest, "reload")) {
+        // Grammars built while rook was running are invisible until
+        // something re-stats the directories, and "relaunch it" is a
+        // poor answer to "I just installed the grammar".
+        app.reloadGrammars();
+        reply(fd, "ok\n");
+    } else if (std.mem.eql(u8, verb, "syntax") and rest.len == 0) {
+        // The search path as searched, every grammar asked for, and
+        // whether the focused pane is actually highlighted. All three
+        // matter: a file with no colour could be a missing dylib, a
+        // grammar rook's query does not fit, or a language nobody has
+        // taught it — and they look identical on screen.
+        app.draw_lock.lock();
+        defer app.draw_lock.unlock();
+        var a: std.Io.Writer.Allocating = .init(app.gpa);
+        defer a.deinit();
+        app.grammars.describe(&a.writer);
+        if (app.activeTab().focused.editor()) |ed| {
+            a.writer.print("pane {s}\n", .{app.syntaxStateLocked(ed)}) catch {};
         }
         reply(fd, a.written());
     } else if (std.mem.eql(u8, verb, "notify")) {

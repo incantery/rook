@@ -1184,6 +1184,130 @@ pub const Snapshot = struct {
     }
 };
 
+/// A resolver's answer: what to run for a project, or why not.
+///
+/// Owned — it crosses back from a worker thread to the draw lock, and
+/// the plugin's response buffer is long gone by then.
+pub const Resolved = struct {
+    args: std.ArrayListUnmanaged([]const u8) = .empty,
+    set: []const u8 = "",
+    err: [256]u8 = @splat(0),
+    err_len: usize = 0,
+
+    pub fn argv(self: *const Resolved) []const []const u8 {
+        return self.args.items;
+    }
+    pub fn settings(self: *const Resolved) []const u8 {
+        return self.set;
+    }
+    pub fn errStr(self: *const Resolved) []const u8 {
+        return self.err[0..self.err_len];
+    }
+
+    fn setErr(self: *Resolved, msg: []const u8) void {
+        self.err_len = @min(msg.len, self.err.len);
+        @memcpy(self.err[0..self.err_len], msg[0..self.err_len]);
+    }
+
+    pub fn deinit(self: *Resolved, gpa: std.mem.Allocator) void {
+        for (self.args.items) |a| gpa.free(a);
+        self.args.deinit(gpa);
+        if (self.set.len > 0) gpa.free(self.set);
+        self.* = .{};
+    }
+};
+
+/// Ask a plugin what language server to run for a project.
+///
+/// The seam that let rook stop carrying a catalog. rook knows which
+/// files are Python from a declaration; which of pyright, basedpyright,
+/// pylsp or jedi to run, and which of six ways this project names an
+/// interpreter, is a question with no static answer — and a terminal
+/// emulator is the wrong process to be answering it.
+///
+/// Never fails loudly: a plugin that is missing, ungranted, slow or
+/// wrong produces an empty answer with a reason in it, and the caller
+/// reports that reason instead of a server.
+pub fn resolveLanguage(
+    plugin: ?*Plugin,
+    gpa: std.mem.Allocator,
+    lang: []const u8,
+    root: []const u8,
+) Resolved {
+    var out = Resolved{};
+    const p = plugin orelse {
+        out.setErr("no resolver plugin declared for this language");
+        return out;
+    };
+
+    // Escaped, like every other string this file puts on the wire: a
+    // project path is not a safe JSON literal, and a directory named
+    // `it's "fine"` would emit a frame the plugin cannot parse.
+    var params: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&params);
+    w.writeAll("{\"language\":") catch {};
+    jsonStringTo(&w, lang) catch {};
+    w.writeAll(",\"root\":") catch {};
+    jsonStringTo(&w, root) catch {
+        out.setErr("project path too long");
+        return out;
+    };
+    w.writeAll("}") catch {};
+
+    const buf = gpa.alloc(u8, 64 * 1024) catch {
+        out.setErr("out of memory");
+        return out;
+    };
+    defer gpa.free(buf);
+
+    const frame = p.call(gpa, "lsp.resolve", params[0..w.end], buf) orelse {
+        out.setErr(if (p.errStr().len > 0) p.errStr() else "lsp.resolve is not granted");
+        return out;
+    };
+
+    const Wire = struct {
+        ok: bool = false,
+        @"error": []const u8 = "",
+        result: struct {
+            command: []const []const u8 = &.{},
+            settings: std.json.Value = .null,
+            /// The plugin's own account of why there is no server. The
+            /// whole point of the seam: "no interpreter — run `uv sync`"
+            /// is a sentence somebody can act on.
+            @"error": []const u8 = "",
+        } = .{},
+    };
+    const parsed = std.json.parseFromSlice(Wire, gpa, frame, .{ .ignore_unknown_fields = true }) catch {
+        out.setErr("resolver's answer did not parse");
+        return out;
+    };
+    defer parsed.deinit();
+    const v = parsed.value;
+    if (!v.ok) {
+        out.setErr(if (v.@"error".len > 0) v.@"error" else "the resolver refused");
+        return out;
+    }
+    if (v.result.@"error".len > 0) {
+        out.setErr(v.result.@"error");
+        return out;
+    }
+    if (v.result.command.len == 0) {
+        out.setErr("the resolver named no server");
+        return out;
+    }
+    for (v.result.command) |arg| {
+        const owned = gpa.dupe(u8, arg) catch break;
+        out.args.append(gpa, owned) catch {
+            gpa.free(owned);
+            break;
+        };
+    }
+    if (v.result.settings != .null) {
+        out.set = std.json.Stringify.valueAlloc(gpa, v.result.settings, .{}) catch "";
+    }
+    return out;
+}
+
 /// Call items.list and shape the answer for the panel.
 ///
 /// Children are FLATTENED with a depth, not dropped: children are the only

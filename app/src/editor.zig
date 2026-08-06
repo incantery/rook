@@ -45,6 +45,7 @@ const Allocator = std.mem.Allocator;
 const bufferpkg = @import("buffer.zig");
 const regex = @import("regex.zig");
 const unicase = @import("unicase.zig");
+const hoverdoc = @import("hoverdoc.zig");
 const vt = @import("ghostty-vt");
 
 pub const tab_width = 4;
@@ -103,7 +104,34 @@ pub const Style = enum(u8) {
     cpl_item,
     cpl_sel,
     cpl_detail,
+    // The hover float: a bordered document over the buffer. Its own
+    // buckets for the same reason the menu has its own — it FLOATS, so
+    // every cell it covers needs a fill of its own, including the ones
+    // the text does not reach. Inside it, prose, a signature and a
+    // heading want to read differently: a hover that is all one colour
+    // is a wall, and the signature is what you came for.
+    hov_border,
+    hov_prose,
+    hov_emph,
+    hov_code,
+    hov_head,
+    hov_link,
 };
+
+/// A hover's ink, in the editor's vocabulary. hoverdoc.zig has no
+/// opinion about the theme; this is where it acquires one.
+fn hoverStyle(ink: hoverdoc.Ink) Style {
+    return switch (ink) {
+        .prose => .hov_prose,
+        .emph => .hov_emph,
+        // Inline code reads as code, not as a third thing. A backticked
+        // identifier mid-sentence IS the fenced signature's material.
+        .code, .icode => .hov_code,
+        .head => .hov_head,
+        .link => .hov_link,
+        .rule => .hov_border,
+    };
+}
 
 /// One highlight span in absolute byte offsets; later spans override.
 pub const HlSpan = struct { start: u32, end: u32, st: Style };
@@ -337,6 +365,19 @@ pub const Editor = struct {
     /// A request is out. The menu says so rather than looking like a
     /// list that has already finished being short.
     cpl_asking: bool = false,
+    /// The hover float. `K` asks; the answer arrives frames later and
+    /// is laid out ONCE, at the width the pane had when it landed —
+    /// re-wrapping every frame would be work the float does not need,
+    /// and a pane that resizes under an open hover is a hover you are
+    /// about to dismiss anyway.
+    hov: hoverdoc.Doc = .{},
+    hov_live: bool = false,
+    /// First visible row. `K` again pages down through a long doc.
+    hov_top: usize = 0,
+    /// Rows the last paint could show — what a page is worth. Written
+    /// by the paint, read by the key, which is the only order these two
+    /// can happen in.
+    hov_page: usize = 1,
     /// Ask a language server what could be typed here. Answered
     /// asynchronously, through takeCompletions.
     lsp_completion: ?*const fn (*anyopaque, *Editor) void = null,
@@ -448,7 +489,10 @@ pub const Editor = struct {
     last_cols: usize = 80,
     last_rows: usize = 24,
 
-    status_buf: [96]u8 = undefined,
+    /// The status row's text. Big enough for a sentence that names a
+    /// fix — a language server's refusal carries the command that
+    /// installs it, and those run well past a terminal's width.
+    status_buf: [256]u8 = undefined,
     status_len: usize = 0,
     status_err: bool = false,
 
@@ -528,6 +572,24 @@ pub const Editor = struct {
     hl_set_path: ?*const fn (*anyopaque, ?[]const u8) void = null,
     hl_destroy: ?*const fn (*anyopaque) void = null,
     hl_version: u64 = std.math.maxInt(u64),
+
+    /// This pane now holds a different document. Set once, by whoever
+    /// created the editor, and never cleared — the point of it is to
+    /// fire on retargets the app did not initiate, so an attach that
+    /// depends on the path (a language server) can be redone.
+    ///
+    /// Separate from the hl_ seam even though they fire together: the
+    /// highlighter is handed the new path and takes it from there,
+    /// while this one hands back the WHOLE editor, because attaching a
+    /// server means rewriting a dozen fields the highlighter has no
+    /// business seeing.
+    retarget_ctx: ?*anyopaque = null,
+    on_retarget: ?*const fn (*anyopaque, *Editor) void = null,
+    /// Say why this document has no language server. Set alongside
+    /// on_retarget and never cleared, because it has to work in exactly
+    /// the case where every other lsp_ hook is null — which is the case
+    /// the user most wants explained.
+    lsp_explain: ?*const fn (*anyopaque, *Editor) void = null,
     hl_spans_buf: std.ArrayListUnmanaged(HlSpan) = .empty,
     hl_styles: std.ArrayListUnmanaged(Style) = .empty,
     hl_vstart: usize = 0,
@@ -1231,6 +1293,7 @@ pub const Editor = struct {
         self.cpl_detail.deinit(gpa);
         self.cpl_detail_at.deinit(gpa);
         self.cpl_prefix.deinit(gpa);
+        self.hov.deinit(gpa);
         if (self.last_re) |*r| r.deinit(gpa);
         self.reg.deinit(gpa);
         for (&self.regs) |*r| r.text.deinit(gpa);
@@ -1342,7 +1405,7 @@ pub const Editor = struct {
     /// same way. A sequence that runs off the end of the line counts as
     /// one byte too — otherwise the advance overshoots and the column
     /// arithmetic disagrees with what was drawn.
-    fn cpLenAt(s: []const u8, i: usize) usize {
+    pub fn cpLenAt(s: []const u8, i: usize) usize {
         if (i >= s.len) return 1;
         const n = std.unicode.utf8ByteSequenceLength(s[i]) catch return 1;
         return if (i + n <= s.len) n else 1;
@@ -1356,7 +1419,7 @@ pub const Editor = struct {
     /// undecodable byte becomes one replacement character, which keeps
     /// a binary file rendering as garbage of the RIGHT WIDTH rather
     /// than resynchronising somewhere the cursor math cannot follow.
-    fn decodeAt(s: []const u8, i: usize) u21 {
+    pub fn decodeAt(s: []const u8, i: usize) u21 {
         const n = cpLenAt(s, i);
         if (n == 1 and s[i] >= 0x80) return 0xFFFD;
         return std.unicode.utf8Decode(s[i .. i + n]) catch 0xFFFD;
@@ -1400,9 +1463,9 @@ pub const Editor = struct {
     /// terminal panes already lay out with. Neovim does the same
     /// (UAX #29) — plain vim does NOT, and stops at combining marks, so
     /// it is not the oracle for this one.
-    const Cluster = struct { len: usize, width: u2 };
+    pub const Cluster = struct { len: usize, width: u2 };
 
-    fn clusterAt(s: []const u8, i: usize) Cluster {
+    pub fn clusterAt(s: []const u8, i: usize) Cluster {
         if (i >= s.len) return .{ .len = 1, .width = 1 };
         // Control bytes are their own cell and never join anything.
         // Ghostty's segmenter is explicitly not defined over them, and
@@ -1617,8 +1680,24 @@ pub const Editor = struct {
     }
 
     pub fn setStatus(self: *Editor, comptime fmt: []const u8, args: anytype, is_err: bool) void {
-        const s = std.fmt.bufPrint(&self.status_buf, fmt, args) catch return;
-        self.status_len = s.len;
+        if (std.fmt.bufPrint(&self.status_buf, fmt, args)) |s| {
+            self.status_len = s.len;
+            self.status_err = is_err;
+            return;
+        } else |_| {}
+        // Too long. TRUNCATE rather than drop it: `catch return` left
+        // the PREVIOUS message standing, so an over-long message read
+        // as no message at all — and the ones most worth reading are
+        // the long ones. A server refusing with the command that fixes
+        // it went missing this way, and looked like a dead keystroke.
+        const ell = "\u{2026}";
+        var scratch: [2048]u8 = undefined;
+        const full = std.fmt.bufPrint(&scratch, fmt, args) catch &scratch;
+        const room = self.status_buf.len - ell.len;
+        const keep = @min(full.len, room);
+        @memcpy(self.status_buf[0..keep], full[0..keep]);
+        @memcpy(self.status_buf[keep .. keep + ell.len], ell);
+        self.status_len = keep + ell.len;
         self.status_err = is_err;
     }
 
@@ -2318,6 +2397,87 @@ pub const Editor = struct {
         return self.cpl_asking;
     }
 
+    /// There is no server here — and the app knows which of several
+    /// different reasons that is.
+    ///
+    /// A language nobody declared, a declared one whose binary is not
+    /// installed, a resolver still thinking, and a resolver that
+    /// refused with a fix in hand are four different problems. They
+    /// shared one sentence for as long as the editor answered this
+    /// itself, and only the app can tell them apart.
+    fn noServer(self: *Editor) void {
+        if (self.lsp_explain) |f| {
+            f(self.retarget_ctx.?, self);
+        } else self.noServer();
+    }
+
+    // ------------------------------------------------------------ hover
+
+    /// The widest the float's TEXT may be. Not the pane, and not the
+    /// document: a hover as wide as the screen is a hover you read by
+    /// moving your eyes across the whole window, and prose stops being
+    /// readable somewhere around here — which is why every book and
+    /// every man page settled on about the same measure.
+    const hov_measure = 72;
+    /// The tallest the float may be, before the pane's own limit. Past
+    /// this it stops being a peek at a doc comment and becomes a
+    /// document, which is what `gd` is for.
+    const hov_max_rows = 20;
+
+    /// Show a server's markdown as a float. False when there is no room
+    /// for one or nothing to put in it — the caller falls back to the
+    /// status row, which is the whole reason this reports rather than
+    /// silently drawing nothing.
+    ///
+    /// Laid out here rather than at paint time so the cost lands on the
+    /// keystroke that asked for it, once, instead of on every frame the
+    /// float is open.
+    pub fn showHover(self: *Editor, md: []const u8) bool {
+        // Two rows of border, one of text, the status row, and a
+        // cursor row to hang off: under that there is no float, only a
+        // box where the buffer used to be.
+        if (self.last_rows < 6 or self.last_cols < 24) return false;
+        self.hov.deinit(self.gpa);
+        self.hov = hoverdoc.layout(self.gpa, md, @min(hov_measure, self.last_cols -| 6));
+        if (self.hov.rowCount() == 0) return false;
+        self.hov_live = true;
+        self.hov_top = 0;
+        self.render_dirty = true;
+        return true;
+    }
+
+    /// Page down through an open float, wrapping at the end. `K` again
+    /// is the gesture: you already have that finger there, and a float
+    /// that cannot show you its second half is a float that lied about
+    /// having one.
+    fn hoverPageDown(self: *Editor) void {
+        const n = self.hov.rowCount();
+        const page = @max(self.hov_page, 1);
+        if (n <= page) {
+            // Nothing hidden. A second `K` on a doc that fits is the
+            // same gesture as ESC, and closing beats doing nothing.
+            self.hov_live = false;
+            return;
+        }
+        self.hov_top += page;
+        if (self.hov_top >= n) self.hov_top = 0;
+    }
+
+    // The float, for `ctl lsp` and the tests. The grid shows it, but the
+    // grid cannot say how much of it is off the bottom.
+    pub fn hoverLive(self: *const Editor) bool {
+        return self.hov_live;
+    }
+    pub fn hoverRows(self: *const Editor) usize {
+        return self.hov.rowCount();
+    }
+    pub fn hoverTop(self: *const Editor) usize {
+        return self.hov_top;
+    }
+    pub fn hoverLang(self: *const Editor) []const u8 {
+        return self.hov.lang();
+    }
+
     /// The signature or type beside candidate `i`; "" for a buffer word.
     pub fn cplDetail(self: *const Editor, i: usize) []const u8 {
         if (i + 1 >= self.cpl_detail_at.items.len) return "";
@@ -2685,7 +2845,7 @@ pub const Editor = struct {
         self.count = 0;
         self.op = 0;
         if (self.lsp_rename == null) {
-            self.setStatus("no language server for this file", .{}, false);
+            self.noServer();
             return;
         }
         const word = self.wordUnder() orelse {
@@ -3573,13 +3733,59 @@ pub const Editor = struct {
         self.setStatus("reloaded — changed on disk", .{}, false);
     }
 
+    /// Lexically clean an absolute path: `//` collapses, `/./`
+    /// disappears, `/x/..` cancels, and a trailing slash goes unless
+    /// the whole path is one.
+    ///
+    /// Lexical, NOT realpath: the file may not exist yet (`:e new.go`),
+    /// and a symlink's target is neither the name that was typed nor
+    /// the name anything downstream should be handed.
+    ///
+    /// This matters because the path IS the document's identity — one
+    /// file open in two panes has to be one Buffer, and two spellings
+    /// of it are two documents — and because it is the URI a language
+    /// server receives. `re .` anchors a tree at `<cwd>/.`, whose rows
+    /// join to `<cwd>/./main.go`, and gopls answers that spelling with
+    /// "No packages found for open file".
+    pub fn normalizePath(buf: []u8, path: []const u8) []const u8 {
+        // Relative paths are somebody else's to anchor; by the time one
+        // reaches here it has already been joined onto a directory.
+        if (path.len == 0 or path[0] != '/' or buf.len < 2) return path;
+        buf[0] = '/';
+        var n: usize = 1;
+        var it = std.mem.splitScalar(u8, path, '/');
+        while (it.next()) |seg| {
+            if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+            if (std.mem.eql(u8, seg, "..")) {
+                while (n > 1 and buf[n - 1] != '/') n -= 1;
+                if (n > 1) n -= 1; // the separator itself
+                continue;
+            }
+            if (n > 1) {
+                if (n >= buf.len) return path;
+                buf[n] = '/';
+                n += 1;
+            }
+            if (n + seg.len > buf.len) return path;
+            @memcpy(buf[n..][0..seg.len], seg);
+            n += seg.len;
+        }
+        return buf[0..n];
+    }
+
     /// Retarget this pane at another file (:e / ctl edit — the
     /// rook-buffers model: panes retarget in place).
-    pub fn open(self: *Editor, path: []const u8, force: bool) !void {
+    pub fn open(self: *Editor, path_in: []const u8, force: bool) !void {
         if (self.buf.isModified() and !force) {
             self.setStatus("unsaved changes (:w first, or :e! to discard)", .{}, true);
             return;
         }
+        // Cleaned HERE rather than at each caller: every way a document
+        // reaches a pane comes through this function, and a spelling
+        // that only one entry point fixes is a spelling the other
+        // entry points still open a second document with.
+        var norm: [max_path]u8 = undefined;
+        const path = normalizePath(&norm, path_in);
         var is_dir = false;
         const nb = try self.loadPath(path, &is_dir);
         // The buffer list: remember where the OLD document's cursor
@@ -3628,6 +3834,18 @@ pub const Editor = struct {
         // than no errors at all. The server republishes for whatever we
         // open next; until then the gutter says nothing.
         self.clearDiagnostics();
+        // The float belonged to the old document.
+        self.hov_live = false;
+        // And the app has to hear about it. Attaching a language server
+        // is the app's job — it owns the manager, and the editor is not
+        // allowed to know one exists — so a pane that retargets ITSELF
+        // has to say so, or it silently loses the server it had.
+        //
+        // The same seam hl_set_path is, one line up, and for the same
+        // reason: `:e` and Enter on a file-tree row go through here and
+        // nowhere near the app's own open path. Missing it meant the
+        // whole file tree opened documents no server ever heard of.
+        if (self.on_retarget) |f| f(self.retarget_ctx.?, self);
     }
 
     /// Run one ex command as if typed at `:` — the app's ⌘S (and any
@@ -3692,6 +3910,21 @@ pub const Editor = struct {
 
     fn normalKey(self: *Editor, ch: u8) void {
         const gpa = self.gpa;
+
+        // An open hover float is a reading surface, not a mode: `K`
+        // pages through it and every other key closes it and then does
+        // exactly what it was going to do. Nothing is swallowed, so the
+        // float never costs you a keystroke — the failure that makes
+        // popups in other editors something you learn to dread.
+        if (self.hov_live) {
+            if (ch == 'K') {
+                self.hoverPageDown();
+                self.render_dirty = true;
+                return;
+            }
+            self.hov_live = false;
+            self.render_dirty = true;
+        }
 
         if (self.pend_r) {
             self.pend_r = false;
@@ -3904,7 +4137,7 @@ pub const Editor = struct {
                     self.op = 0;
                     if (self.lsp_references) |f| {
                         f(self.lsp_ctx.?, self);
-                    } else self.setStatus("no language server for this file", .{}, false);
+                    } else self.noServer();
                 },
                 // `gR` is vim's virtual REPLACE mode, next door to `gr`
                 // and unimplemented here for the same reason. Rename is
@@ -3919,7 +4152,7 @@ pub const Editor = struct {
                     self.op = 0;
                     if (self.lsp_code_action) |f| {
                         f(self.lsp_ctx.?, self);
-                    } else self.setStatus("no language server for this file", .{}, false);
+                    } else self.noServer();
                 },
                 'u', 'U', '~' => {
                     if (self.inVisual()) {
@@ -3997,7 +4230,7 @@ pub const Editor = struct {
             'K' => if (self.lsp_hover) |f| {
                 self.count = 0;
                 f(self.lsp_ctx.?, self);
-            } else self.setStatus("no language server for this file", .{}, false),
+            } else self.noServer(),
             'H', 'M', 'L' => {
                 const rows = @max(1, self.last_rows -| 1);
                 const bot = @min(self.top + rows - 1, self.lineCountB() - 1);
@@ -6569,8 +6802,148 @@ pub const Editor = struct {
         // Over the text, under the chrome: the menu covers the document
         // it is offering to change and nothing else.
         self.fillCompletionMenu(g, cols, rows, top_rows, gw);
+        self.fillHoverFloat(g, cols, rows, top_rows, gw);
         self.fillStatusRow(g[(rows - 1) * cols ..][0..cols]);
         return g;
+    }
+
+    /// Draw the hover float: the server's documentation, in a box over
+    /// the buffer.
+    ///
+    /// PAINTED OVER the finished grid, the same way the completion menu
+    /// and the cursor are — nothing about the document's own rendering
+    /// has to know a float can exist.
+    ///
+    /// vim's `K` ran `man` and gave you a whole screen. A status row
+    /// gives you a line. Neither is the shape of the answer: a hover is
+    /// a signature and a paragraph, and it wants to sit next to the
+    /// thing it is about while you keep looking at that thing.
+    fn fillHoverFloat(self: *Editor, g: []RCell, cols: usize, rows: usize, top_rows: usize, gw: usize) void {
+        if (!self.hov_live) return;
+        const n = self.hov.rowCount();
+        if (n == 0) return;
+        const text_rows = rows - 1 - top_rows;
+        if (text_rows < 3 or cols < 12) return;
+
+        // As wide as its widest row and no wider: a two-word hover in a
+        // box the width of the pane reads as a bug.
+        const inner = @max(@min(self.hov.width, cols -| 4), 4);
+        const box_w = inner + 4;
+
+        // A fixed body height, not one that shrinks on the last page —
+        // a box that changes size while you page through it is a box
+        // you have to re-find every time you press the key.
+        const body = @min(@min(n, hov_max_rows), text_rows -| 2);
+        if (body == 0) return;
+        self.hov_page = body;
+        const box_h = body + 2;
+
+        const cur_row = (self.cline -| self.top) + top_rows;
+        // Above the cursor when it fits. The line you asked about stays
+        // visible, which is the difference between reading a doc about
+        // this call and reading a doc about a call you can no longer
+        // see. Below when there is no room above, and pinned to the top
+        // when there is room neither side.
+        const start_row = if (cur_row >= top_rows + box_h)
+            cur_row - box_h
+        else if (cur_row + 1 + box_h <= top_rows + text_rows)
+            cur_row + 1
+        else
+            top_rows;
+
+        // Hung off the cursor's column, shoved left only as far as it
+        // must be to fit.
+        const cur_rc = self.renderColAt(self.cline, self.ccol);
+        const left = @min(gw + (cur_rc -| self.left), cols -| box_w);
+        const last = left + box_w - 1;
+
+        // Top border.
+        {
+            const out = g[start_row * cols ..][0..cols];
+            out[left] = .{ .cp = '╭', .st = .hov_border };
+            for (left + 1..last) |c| out[c] = .{ .cp = '─', .st = .hov_border };
+            out[last] = .{ .cp = '╮', .st = .hov_border };
+        }
+
+        for (0..body) |r| {
+            const out = g[(start_row + 1 + r) * cols ..][0..cols];
+            const idx = self.hov_top + r;
+            const has = idx < n;
+            // A fenced block gets a fill of its own, edge to edge
+            // inside the border, so it reads as a block rather than as
+            // some brighter words that happen to be next to each other.
+            const bg: Style = if (has and self.hov.rowIsCode(idx)) .hov_code else .hov_prose;
+            out[left] = .{ .cp = '│', .st = .hov_border };
+            for (left + 1..last) |c| out[c] = .{ .cp = ' ', .st = bg };
+            out[last] = .{ .cp = '│', .st = .hov_border };
+            if (!has) continue;
+
+            const limit = left + 2 + inner;
+            if (self.hov.rowIsRule(idx)) {
+                for (left + 2..limit) |c| out[c] = .{ .cp = '─', .st = .hov_border };
+                continue;
+            }
+            var x = left + 2;
+            for (self.hov.row(idx)) |run| {
+                const s = self.hov.text(run);
+                const st = hoverStyle(run.ink);
+                var i: usize = 0;
+                while (i < s.len and x < limit) {
+                    const cl = clusterAt(s, i);
+                    if (x + cl.width > limit) break;
+                    // No cluster attachment here: a doc comment with an
+                    // emoji in it draws the base character. The float is
+                    // a peek, and this is the one place the editor is
+                    // allowed to be less than exact about a grapheme.
+                    out[x] = .{ .cp = decodeAt(s, i), .st = st };
+                    if (cl.width == 2) out[x + 1] = .{ .cp = ' ', .st = st, .tail = true };
+                    x += cl.width;
+                    i += cl.len;
+                }
+            }
+        }
+
+        // Bottom border, carrying what the box cannot show: which
+        // language the fence claimed, and how much of the document is
+        // below the fold. The scroll counter is the only thing telling
+        // you a second `K` would do anything.
+        {
+            const out = g[(start_row + box_h - 1) * cols ..][0..cols];
+            out[left] = .{ .cp = '╰', .st = .hov_border };
+            for (left + 1..last) |c| out[c] = .{ .cp = '─', .st = .hov_border };
+            out[last] = .{ .cp = '╯', .st = .hov_border };
+
+            var fbuf: [64]u8 = undefined;
+            const lang = self.hov.lang();
+            const more = n > body;
+            const shown = @min(self.hov_top + body, n);
+            const foot: []const u8 = if (lang.len > 0 and more)
+                std.fmt.bufPrint(&fbuf, " {s} · {d}/{d} K▾ ", .{ lang, shown, n }) catch ""
+            else if (more)
+                std.fmt.bufPrint(&fbuf, " {d}/{d} K▾ ", .{ shown, n }) catch ""
+            else if (lang.len > 0)
+                std.fmt.bufPrint(&fbuf, " {s} ", .{lang}) catch ""
+            else
+                "";
+            var fw: usize = 0;
+            var fi: usize = 0;
+            while (fi < foot.len) {
+                const cl = clusterAt(foot, fi);
+                fw += cl.width;
+                fi += cl.len;
+            }
+            if (fw > 0 and fw + 4 <= box_w) {
+                var x = last - 2 - fw;
+                fi = 0;
+                while (fi < foot.len) {
+                    const cl = clusterAt(foot, fi);
+                    out[x] = .{ .cp = decodeAt(foot, fi), .st = .hov_border };
+                    if (cl.width == 2) out[x + 1] = .{ .cp = ' ', .st = .hov_border, .tail = true };
+                    x += cl.width;
+                    fi += cl.len;
+                }
+            }
+        }
     }
 
     /// Rows the completion menu will use at most. Ten is what fits
@@ -11496,4 +11869,196 @@ test "format-on-save off writes immediately, as it always did" {
     try testing.expect(!e.buf.isModified());
     var rb: [64]u8 = undefined;
     try testing.expectEqualStrings("za\n", try std.Io.Dir.cwd().readFile(io, p, &rb));
+}
+
+// ------------------------------------------------------------ hover float
+
+test "the hover float is a box over the buffer, above the line it is about" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione\ntwo\nthree\nfour\nfive\nsix\nseven");
+    e.key("\x1b");
+
+    // The pane's size is learned by drawing: showHover has to know
+    // whether there is room for a float before it lays one out.
+    {
+        const d = try e.dumpText(gpa, 40, 12);
+        gpa.free(d);
+    }
+    try testing.expect(e.showHover("```go\nfunc Greet(name string) string\n```\n\nSays hi."));
+
+    const dump = try e.dumpText(gpa, 40, 12);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "╭") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "╰") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "func Greet(name string) string") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "Says hi.") != null);
+    // The fence's language rides in the bottom border.
+    try testing.expect(std.mem.indexOf(u8, dump, "go") != null);
+    // Above the cursor, so the line you asked about is still on screen:
+    // the cursor is on `seven`, and the box came out ahead of it in the
+    // grid rather than after.
+    const box = std.mem.indexOf(u8, dump, "╭").?;
+    const seven = std.mem.indexOf(u8, dump, "seven").?;
+    try testing.expect(box < seven);
+    try testing.expect(std.mem.indexOf(u8, dump, "╰").? < seven);
+}
+
+test "any key but K closes the float, and still does what it was for" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ihello world");
+    e.key("\x1b");
+    {
+        const d = try e.dumpText(gpa, 40, 10);
+        gpa.free(d);
+    }
+    try testing.expect(e.showHover("some documentation"));
+    try testing.expect(e.hoverLive());
+
+    // `0` is a motion. The float goes AND the cursor moves: a float
+    // that ate the keystroke would leave the cursor where it was.
+    try testing.expect(e.ccol > 0);
+    e.key("0");
+    try testing.expect(!e.hoverLive());
+    try testing.expectEqual(@as(usize, 0), e.ccol);
+}
+
+test "K pages a long float and wraps at the end" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ix");
+    e.key("\x1b");
+    {
+        const d = try e.dumpText(gpa, 40, 10);
+        gpa.free(d);
+    }
+    // Eight rows of prose into a float that can show at most a few:
+    // rows(10) - status(1) - borders(2) leaves seven at the outside,
+    // and the paint records what it could actually fit.
+    try testing.expect(e.showHover("a\n\nb\n\nc\n\nd\n\ne\n\nf\n\ng\n\nh\n\ni\n\nj\n\nk\n\nl"));
+    {
+        const d = try e.dumpText(gpa, 40, 10);
+        gpa.free(d);
+    }
+    const page = e.hov_page;
+    try testing.expect(page > 0);
+    try testing.expect(e.hoverRows() > page);
+    try testing.expectEqual(@as(usize, 0), e.hoverTop());
+
+    e.key("K");
+    try testing.expect(e.hoverLive());
+    try testing.expectEqual(page, e.hoverTop());
+
+    // Round the end and back to the top rather than stopping dead —
+    // the counter in the border says how many pages there were.
+    while (e.hoverTop() != 0) e.key("K");
+    try testing.expect(e.hoverLive());
+}
+
+test "a second K on a float that fits closes it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ix");
+    e.key("\x1b");
+    {
+        const d = try e.dumpText(gpa, 40, 20);
+        gpa.free(d);
+    }
+    try testing.expect(e.showHover("one line"));
+    {
+        const d = try e.dumpText(gpa, 40, 20);
+        gpa.free(d);
+    }
+    e.key("K");
+    try testing.expect(!e.hoverLive());
+}
+
+test "a pane with no room for a float says so rather than drawing one" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ix");
+    e.key("\x1b");
+    {
+        const d = try e.dumpText(gpa, 40, 4);
+        gpa.free(d);
+    }
+    // False, so the caller can fall back to the status row. Silence
+    // here would read as "the server did not answer".
+    try testing.expect(!e.showHover("plenty of documentation"));
+    try testing.expect(!e.hoverLive());
+}
+
+test "a hover with nothing in it does not open an empty box" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ix");
+    e.key("\x1b");
+    {
+        const d = try e.dumpText(gpa, 40, 12);
+        gpa.free(d);
+    }
+    try testing.expect(!e.showHover(""));
+    try testing.expect(!e.showHover("\n\n  \n"));
+    try testing.expect(!e.hoverLive());
+}
+
+test "a path is cleaned to one spelling before it becomes a document" {
+    var buf: [256]u8 = undefined;
+    const norm = Editor.normalizePath;
+    // The one that started this: `re .` anchors a tree at `<cwd>/.`,
+    // and every row it opens is joined through that dot. gopls answers
+    // that spelling with "No packages found for open file".
+    try testing.expectEqualStrings("/a/b/main.go", norm(&buf, "/a/b/./main.go"));
+    try testing.expectEqualStrings("/a/b", norm(&buf, "/a/b/."));
+    try testing.expectEqualStrings("/a/b", norm(&buf, "/a//b"));
+    try testing.expectEqualStrings("/a/b", norm(&buf, "/a/b/"));
+    try testing.expectEqualStrings("/a/c", norm(&buf, "/a/b/../c"));
+    try testing.expectEqualStrings("/a", norm(&buf, "/a/b/.."));
+    // `..` off the top is the root, not a path that climbs out of it.
+    try testing.expectEqualStrings("/", norm(&buf, "/.."));
+    try testing.expectEqualStrings("/", norm(&buf, "/a/../.."));
+    try testing.expectEqualStrings("/", norm(&buf, "/"));
+    // Already clean, and left alone.
+    try testing.expectEqualStrings("/a/b/main.go", norm(&buf, "/a/b/main.go"));
+    // A dot inside a NAME is a name, not a directory.
+    try testing.expectEqualStrings("/a/.hidden/x..y", norm(&buf, "/a/.hidden/x..y"));
+    // Relative paths belong to whoever anchors them; untouched.
+    try testing.expectEqualStrings("./b", norm(&buf, "./b"));
+    try testing.expectEqualStrings("", norm(&buf, ""));
+    // No room to work in: hand back what came in rather than a truncated
+    // path, which would name a different file.
+    var tiny: [4]u8 = undefined;
+    try testing.expectEqualStrings("/aaaa/bbbb", norm(&tiny, "/aaaa/bbbb"));
+}
+
+test "a status message too long to fit is truncated, never dropped" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+
+    e.setStatus("first", .{}, false);
+    try testing.expectEqualStrings("first", e.status_buf[0..e.status_len]);
+
+    // A language server's refusal carries the command that fixes it,
+    // and those run long. `catch return` left "first" standing here,
+    // which read as a keystroke that did nothing.
+    const long = "x" ** 400;
+    e.setStatus("{s}", .{long}, false);
+    try testing.expect(e.status_len > 5);
+    try testing.expect(e.status_len <= e.status_buf.len);
+    try testing.expect(std.mem.startsWith(u8, e.status_buf[0..e.status_len], "xxxx"));
+    // Ending in an ellipsis, so a truncated message says it is one.
+    try testing.expect(std.mem.endsWith(u8, e.status_buf[0..e.status_len], "…"));
+
+    // A real one: 120-odd characters, which the old 96-byte buffer
+    // silently refused.
+    e.setStatus("no Python language server — `uv tool install basedpyright`, `pipx install pyright`, or `pip install python-lsp-server`", .{}, false);
+    try testing.expect(std.mem.indexOf(u8, e.status_buf[0..e.status_len], "basedpyright") != null);
 }

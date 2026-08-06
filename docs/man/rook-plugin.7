@@ -218,6 +218,31 @@ Reply
 and optionally
 .Ql result.item ,
 the updated item; omit it and rook refetches the list instead.
+.It Cm lsp.resolve
+What language server should rook run for this project?
+Params are
+.Ql {"language":"python","root":"/path/to/project"} ;
+the answer is
+.Ql result.command ,
+an argv, with optional
+.Ql result.settings ,
+a JSON object sent as the server's initialization options.
+.Pp
+Asked once per project root, not per file \(em and never on a keystroke
+path, so it may take its time.
+A plugin that cannot find a server answers
+.Ql result.error
+with its own account of why:
+.Ql "no interpreter \(em run `uv sync`" .
+That sentence reaches the status row verbatim, which is the whole reason
+the op exists.
+rook knows which files are Python from a
+.Cm language
+declaration
+.Pq Xr rook-config 5 ;
+which of pyright, basedpyright, pylsp or jedi to run, and which of six
+ways a project can name an interpreter, has no static answer, and a
+terminal emulator is the wrong process to be guessing at it.
 .It Ar anything else
 .Ql ctl plugin <name> <op> [params-json]
 calls any op directly, still grant-gated \(em the escape hatch for ops the

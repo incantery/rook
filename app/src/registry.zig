@@ -79,6 +79,10 @@ pub const Action = enum {
     /// The tree opened ON the focused pane's current file: ancestors
     /// unfolded, cursor on it.
     tree_reveal,
+    /// The resource monitor, in the focused pane. A takeover like the
+    /// tree's, not a panel: it is a TABLE, and the side panes are for
+    /// lists.
+    monitor_open,
 };
 
 pub const Spec = struct { action: Action, arg: u8 = 0 };
@@ -142,6 +146,7 @@ pub const commands = [_]Command{
     .{ .id = "panel.close", .title = "Close Side Pane", .category = "Panel", .action = .panel_close },
     .{ .id = "tree.toggle", .title = "File Tree", .category = "Pane", .action = .tree_toggle, .keys = "<leader>⇥" },
     .{ .id = "tree.reveal", .title = "File Tree: Reveal File", .category = "Pane", .action = .tree_reveal, .keys = "<leader>o" },
+    .{ .id = "monitor.open", .title = "Resource Monitor: CPU, memory and disk", .category = "Pane", .action = .monitor_open },
 };
 
 /// Alternate spellings that resolve to a command. Kept apart from the

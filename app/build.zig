@@ -49,19 +49,20 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption([]const u8, "version", b.option([]const u8, "version", "release version (e.g. v0.38.0)") orelse "dev");
     exe_mod.addOptions("build_options", build_opts);
 
-    // Syntax highlighting used to live here: the tree-sitter runtime plus
-    // five vendored grammars, compiled straight into the binary. That was
-    // 4.6MB of generated parse table in a 7.1MB rook — 940k lines of C
-    // nobody reads — and it is not how anyone else does it. neovim, helix,
-    // emacs and zed all LOAD grammars (dylibs, or wasm in zed's case);
-    // vscode does not even have parse tables, it interprets TextMate
-    // grammars as data.
+    // The tree-sitter RUNTIME, and deliberately nothing else. The strip
+    // took this out along with five vendored grammars, and the grammars
+    // were the whole cost: 4.6MB of generated parse table against 872KB
+    // of runtime. What comes back is the part that is actual code —
+    // parser, lexer, query engine — while every table stays out and
+    // arrives at runtime through dlopen, which is how neovim, helix and
+    // emacs have always done it (zed uses wasm; vscode has no tables at
+    // all and interprets TextMate grammars as data).
     //
-    // So it is out, and highlighting is gone with it until the loader
-    // lands. The seam survives: editor.Editor's hl_* hooks are nullable
-    // function pointers and an editor with none set renders plain text,
-    // which is exactly what headless tests have always exercised.
-    // docs/OWED.md carries what comes back and in what shape.
+    // lib.c is the amalgamation and it includes wasm_store.c, which
+    // compiles to nothing without TREE_SITTER_FEATURE_WASM.
+    exe_mod.addIncludePath(b.path("vendor/tree-sitter/include"));
+    exe_mod.addIncludePath(b.path("vendor/tree-sitter/src"));
+    exe_mod.addCSourceFile(.{ .file = b.path("vendor/tree-sitter/src/lib.c"), .flags = &.{"-std=c11"} });
     exe_mod.linkFramework("AppKit", .{});
     exe_mod.linkFramework("Metal", .{});
     exe_mod.linkFramework("QuartzCore", .{});
@@ -115,6 +116,36 @@ pub fn build(b: *std.Build) void {
     }
     const editor_tests = b.addTest(.{ .root_module = editor_mod });
     test_step.dependOn(&b.addRunArtifact(editor_tests).step);
+
+    // Declared languages: the routing half of the LSP, and the file
+    // that replaced a compiled-in catalog. Its own root because these
+    // are pure data rules over a graph — extension to language, the
+    // marker walk, the binary search — and every one of them fails as
+    // "no server, no reason given" if it is only ever exercised through
+    // a window.
+    const language_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/language.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(language_tests).step);
+
+    // The hover float's layout pass. It rides in under editor.zig's
+    // root too, but it earns a name: it is the one place rook parses
+    // somebody else's markdown, every server writes a different dialect
+    // of it, and each dialect is a test case whose failure otherwise
+    // reads as "the editor is broken". It takes ghostty-vt through
+    // editor.zig, for the same one Unicode table.
+    const hoverdoc_mod = b.createModule(.{
+        .root_source_file = b.path("src/hoverdoc.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (b.lazyDependency("ghostty", ghostty_args)) |dep| {
+        hoverdoc_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    }
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hoverdoc_mod })).step);
 
     // The regex engine. It rides in under editor.zig's root already,
     // but it gets its own too: it is pure data rules with a step budget
@@ -178,6 +209,49 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     }) });
     test_step.dependOn(&b.addRunArtifact(filelist_tests).step);
+
+    // The monitor's view model. Every assertion in it is about a NUMBER
+    // reaching the right cell — which needs a grid, not a window, and is
+    // exactly what a headless root is for. The safety properties (a
+    // `keep` category can never be armed; the confirm acts on the path
+    // it named) live here too.
+    // Takes ghostty-vt transitively: it borrows the editor's cell and
+    // style types so the app's existing fill path can draw it, and that
+    // pulls in the same Unicode tables the editor roots on.
+    const monitor_mod = b.createModule(.{
+        .root_source_file = b.path("src/monitor.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    if (b.lazyDependency("ghostty", ghostty_args)) |dep| {
+        monitor_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    }
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = monitor_mod })).step);
+
+    // The disk walker and its classifier. Validated byte-exact against
+    // `du -skx` on real trees up to 18GB / 584k files during
+    // development; what is pinned here is the behaviour du shares
+    // (hardlinks once, symlinks never) plus the reclaim classes.
+    const diskscan_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/diskscan.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(diskscan_tests).step);
+
+    // The sampler. Earns a headless root twice over: the mach-tick
+    // conversion is a 42x error that reads as plausible if you get it
+    // wrong, and the only proof a rate works is two samples with real
+    // work between them — which needs a process, not a window.
+    const procmon_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/procmon.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(procmon_tests).step);
 
     // Search's matching rules: smartcase, the binary probe, and the
     // line-trim that has to keep the match visible. Pure data logic

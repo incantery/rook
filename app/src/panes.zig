@@ -7,6 +7,7 @@ const std = @import("std");
 const vt = @import("ghostty-vt");
 const sessionpkg = @import("session.zig");
 const editorpkg = @import("editor.zig");
+const monitorpkg = @import("monitor.zig");
 
 pub const Rect = struct {
     x: f32 = 0,
@@ -43,6 +44,15 @@ pub const Term = struct {
 pub const Content = union(enum) {
     term: Term,
     edit: *editorpkg.Editor,
+    /// The resource monitor. A third content kind rather than a side
+    /// panel because both its halves are TABLES — numeric columns that
+    /// only mean anything side by side — and a 30-column panel turns a
+    /// table into a list of truncated titles.
+    ///
+    /// It fills its grid through the same `fillGrid(cols, rows)`
+    /// contract the editor uses, so the pane draws through the editor
+    /// fill path and no new render code exists for it.
+    monitor: *monitorpkg.Monitor,
 };
 
 pub const Pane = struct {
@@ -71,14 +81,21 @@ pub const Pane = struct {
     pub fn term(self: *Pane) ?*Term {
         return switch (self.content) {
             .term => |*t| t,
-            .edit => null,
+            .edit, .monitor => null,
         };
     }
 
     pub fn editor(self: *Pane) ?*editorpkg.Editor {
         return switch (self.content) {
-            .term => null,
             .edit => |e| e,
+            .term, .monitor => null,
+        };
+    }
+
+    pub fn monitor(self: *Pane) ?*monitorpkg.Monitor {
+        return switch (self.content) {
+            .monitor => |m| m,
+            .term, .edit => null,
         };
     }
 };

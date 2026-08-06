@@ -76,7 +76,10 @@ two panes is one document. `:w` refuses a file an agent changed underneath
 it.
 
 **LSP**: diagnostics in the gutter, `]d` to walk them, go-to-definition,
-hover, `gr` for every use of a symbol — which lands in the same side
+`K` for hover — the server's markdown taken apart and drawn as a float
+over the buffer, signature block, reflowed prose, headings and links,
+paged by pressing `K` again and closed by any other key, which still
+does what it was for — `gr` for every use of a symbol, landing in the same side
 panel find-in-files uses, grouped by file and walkable with `j`/`k`/⏎ —
 and `gR` to rename one everywhere. A rename validates every file before
 touching any: open documents get one undoable group and stay unsaved,
@@ -87,8 +90,18 @@ for `:w` — off by default, and a save is never lost to it: a formatter
 that does not answer inside 1.5s gets the file written unformatted and
 says so. `ga` lists what the server offers to do about a line — quick
 fixes, `source.organizeImports` — in the ⌘K palette, applying the edit
-or resolving it first. Go, Python and TypeScript/TSX in the catalog;
-adding a language is data, not code.
+or resolving it first. **There is no built-in catalog**: a language is a
+declaration in the config graph — extensions, root markers, and either a
+command or a resolver plugin — so adding one is a config edit, never a
+rook release. The official bundles (`rook.GoLang{}`, `rook.Zig{}`,
+`rook.Python{}`, `rook.TypeScript{}`) each lower to a grammar node and a
+language node, and the two are independent: highlighting with no server,
+or a server with no highlighting, are both one line. Where a project's
+answer is genuinely dynamic — which of four Python servers, which of six
+ways to name an interpreter — a resolver plugin answers instead, once per
+project root, and its refusal reaches the status row in its own words
+(`no Python language server — \`uv tool install basedpyright\`…`) rather
+than as a sentence nobody can act on.
 
 **Navigation and chrome**: a command registry with a ⌘K palette and `:Ex`
 commands from the editor, which-key on an unanswered leader, ⌘P file

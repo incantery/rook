@@ -15,6 +15,9 @@ const vt = @import("ghostty-vt");
 const sessionpkg = @import("session.zig");
 const renderpkg = @import("render.zig");
 const panespkg = @import("panes.zig");
+const monitorpkg = @import("monitor.zig");
+const procmon = @import("procmon.zig");
+const diskscan = @import("diskscan.zig");
 const editorpkg = @import("editor.zig");
 const workspacespkg = @import("workspaces.zig");
 const registrypkg = @import("registry.zig");
@@ -27,6 +30,9 @@ const lsppkg = @import("lsp.zig");
 const plugpkg = @import("plugins.zig");
 const envpkg = @import("envapply.zig");
 const lspmgrpkg = @import("lspmgr.zig");
+const grammarpkg = @import("grammar.zig");
+const langpkg = @import("language.zig");
+const syntaxpkg = @import("syntax.zig");
 const docspkg = @import("docs.zig");
 const bufferpkg = @import("buffer.zig");
 const uipkg = @import("ui.zig");
@@ -702,6 +708,25 @@ pub const App = struct {
     side_open: bool = false,
     side: Side = .right,
     side_panel: Panel = .search,
+
+    // --- the resource monitor ------------------------------------
+    /// Sampling state, owned by the sampler thread once it starts.
+    /// One sampler for the whole app rather than one per pane: the
+    /// process table is a property of the MACHINE, and two panes
+    /// sampling it independently would differ by their phase and disagree.
+    procs: procmon.Sampler = undefined,
+    procs_ready: bool = false,
+    /// The sampler runs only while a monitor pane is visible. An
+    /// always-on 1Hz walk of 1800 processes is 0.3% of a core spent on
+    /// a screen nobody is looking at, and rook's whole pitch is that it
+    /// costs nothing when idle.
+    sampling: std.atomic.Value(bool) = .init(false),
+    /// The live disk scan, if any. One at a time — a second scan would
+    /// double the IO for a tree the first is already walking.
+    scan: ?*diskscan.Scan = null,
+    scan_prog: diskscan.Progress = .{},
+    scanning: std.atomic.Value(bool) = .init(false),
+    reclaiming: std.atomic.Value(bool) = .init(false),
     // ---- find in files (⌘⇧F) ----
     /// The query box and the results it produced. Two states, because
     /// a search panel is two things: a box you type in, then a list
@@ -738,6 +763,13 @@ pub const App = struct {
     /// Owns every running server, their roots, and the diagnostics they
     /// publish. Nothing spawns until a file of a known language opens.
     lsp: lspmgrpkg.Manager = undefined,
+    /// The grammar loader — one for the whole app, since a dylib opened
+    /// per pane is the same image mapped once per split.
+    grammars: grammarpkg.Registry = undefined,
+    /// Declared languages — the routing half of the LSP. Owned here
+    /// because the manager borrows it and every server entry's name
+    /// points into its arena.
+    langs: langpkg.Registry = undefined,
     /// Set when an answer is queued, so the poster posts it now.
     /// The side pane takes the key path. Needed the moment a tenant is
     /// INTERACTIVE. Modal like the palette, but it owns a region rather
@@ -1188,7 +1220,16 @@ pub const App = struct {
         // known language opens. That is deliberate — a language server
         // costs ~1s and ~100MB, and launch owes it nothing.
         self.docs = docspkg.Registry.init(gpa);
-        self.lsp = lspmgrpkg.Manager.init(gpa, init.io);
+        // The registry BEFORE the manager: the manager holds a pointer
+        // to it, and its languages have to be declared before the first
+        // file can route to one.
+        self.langs = langpkg.Registry.init(gpa);
+        self.langs.loadGraph(init.io);
+        self.lsp = lspmgrpkg.Manager.init(gpa, init.io, &self.langs);
+        self.lsp.resolve_ctx = self;
+        self.lsp.resolve = &lspResolveHook;
+        self.grammars = grammarpkg.Registry.init(gpa);
+        self.grammars.loadGraph(init.io);
         self.lsp.enabled = cfg.lsp;
 
         // Both halves of the plugin wire, in this order: the host has to be
@@ -1747,6 +1788,10 @@ pub const App = struct {
                 if (ed.reg.items.len == 0) break :blk null;
                 break :blk self.gpa.dupeZ(u8, ed.reg.items) catch null;
             },
+            // The monitor has no selection model yet. Copying the
+            // selected row's path is the obvious next thing and is
+            // deliberately not guessed at here.
+            .monitor => null,
         };
         self.draw_lock.unlock();
         const t = text orelse return null;
@@ -1804,6 +1849,8 @@ pub const App = struct {
         const p = self.activeTab().focused;
         switch (p.content) {
             .edit => |ed| ed.pasteText(text),
+            // Nothing on the monitor takes text.
+            .monitor => {},
             .term => |*t| {
                 // Copy mode is a viewport, not an input mode — pasting
                 // means you're done reading history, same as typing.
@@ -1845,6 +1892,9 @@ pub const App = struct {
                 col = @floatFromInt(c.col);
                 row = @floatFromInt(c.row);
             },
+            // No text cursor: selection is a highlighted ROW, so there
+            // is no caret for an IME box to sit under.
+            .monitor => {},
         }
         const o = self.gridOrigin(p);
         return .{ .x = o.x + col * cw, .y = o.y + row * ch };
@@ -1895,6 +1945,10 @@ pub const App = struct {
             switch (p.content) {
                 .edit => |ed| {
                     ed.scroll(-lines);
+                    self.scene_dirty = true;
+                },
+                .monitor => |m| {
+                    m.scrollBy(lines);
                     self.scene_dirty = true;
                 },
                 .term => |*tm| {
@@ -2005,10 +2059,11 @@ pub const App = struct {
         const t = self.activeTab();
         const p = t.focused;
         if (p.editor()) |ed| {
-            ed.open(path, false) catch return false;
             // Retarget is an open as far as the server is concerned:
-            // new path, new document, new diagnostics.
-            self.lspAttachLocked(ed);
+            // new path, new document, new diagnostics. `open` says so
+            // itself now, through on_retarget — attaching here as well
+            // would didOpen the document twice.
+            ed.open(path, false) catch return false;
             self.scene_dirty = true;
             return true;
         }
@@ -2043,6 +2098,9 @@ pub const App = struct {
             switch (p.content) {
                 .term => |*tm| tm.session.resize(cols, rows, @intCast(self.renderer.cellw_px), @intCast(self.renderer.cellh_px)),
                 .edit => |ed| ed.render_dirty = true,
+                // The grid is rebuilt from the sample on every fill, so
+                // a resize needs nothing but a repaint.
+                .monitor => |m| m.render_dirty = true,
             }
             // A parked shell must track pane dims too, or a resize
             // during takeover restores a mis-sized grid.
@@ -2200,7 +2258,7 @@ pub const App = struct {
         if (self.side_focus) return null;
         const tm = switch (self.activeTab().focused.content) {
             .term => |*t| t,
-            .edit => return null,
+            .edit, .monitor => return null,
         };
         // Read without the session mutex, like the alt-screen check in
         // the event monitor: both screens outlive any single keystroke,
@@ -2235,7 +2293,53 @@ pub const App = struct {
                 t.session.scrollTo(.active);
             },
             .edit => |ed| ed.key(bytes),
+            .monitor => |m| {
+                // One byte at a time: the view model's key table is
+                // single-char, and a paste or a multi-byte escape must
+                // not be replayed as a run of commands.
+                for (bytes) |b| self.monitorActLocked(p, m, m.key(b));
+            },
         }
+    }
+
+    /// Perform what the monitor's key table asked for.
+    ///
+    /// The split is deliberate: `monitor.zig` decides WHAT should happen
+    /// and cannot do any of it — it has no threads, no allocator for
+    /// subprocesses and no filesystem. Everything that touches the
+    /// machine is here, which is also what keeps the destructive path
+    /// down to one reviewable function. Caller holds draw_lock.
+    fn monitorActLocked(self: *App, p: *panespkg.Pane, m: *monitorpkg.Monitor, act: monitorpkg.Monitor.Act) void {
+        switch (act) {
+            .none => {},
+            .redraw => self.scene_dirty = true,
+            .close => {
+                m.closed = true;
+                self.scene_dirty = true;
+            },
+            .drill => {
+                const sc = m.scan orelse return;
+                const parent = &sc.nodes.items[m.disk_root];
+                if (m.sel >= parent.children.items.len) return;
+                const into = parent.children.items[m.sel];
+                // A leaf is not a dead end you bounce off silently — say
+                // so, or the key reads as broken.
+                if (sc.nodes.items[into].children.items.len == 0) {
+                    m.setMsg("nothing under this one at the scanned depth — s rescans deeper");
+                    self.scene_dirty = true;
+                    return;
+                }
+                m.disk_stack.append(self.gpa, m.disk_root) catch return;
+                m.disk_root = into;
+                m.sel = 0;
+                m.scroll = 0;
+                diskscan.sortChildren(sc, into);
+                self.scene_dirty = true;
+            },
+            .rescan => self.startDiskScan(m),
+            .reclaim => self.startReclaim(m),
+        }
+        _ = p;
     }
 
     /// Close the focused pane (⌘W): a terminal gets SIGHUP (the
@@ -2252,6 +2356,11 @@ pub const App = struct {
                     ed.setStatusUnsaved();
                 } else ed.closed = true;
                 ed.render_dirty = true;
+            },
+            // Nothing unsaved can exist here, so ⌘W just goes.
+            .monitor => |m| {
+                m.closed = true;
+                m.render_dirty = true;
             },
         }
         self.scene_dirty = true;
@@ -2812,6 +2921,7 @@ pub const App = struct {
             .panel_close => self.closeSidePane(),
             .tree_toggle => self.treeCommand(false),
             .tree_reveal => self.treeCommand(true),
+            .monitor_open => self.showMonitor(true),
         }
     }
 
@@ -3248,8 +3358,71 @@ pub const App = struct {
                 return null;
             };
         }
+        // AFTER the open: attach() picks the language from the path,
+        // and an editor that has not opened its file yet has none. The
+        // editor calls hl_set_path itself on every later retarget, so
+        // this is the only place that needs to think about it.
+        self.attachSyntaxLocked(ed);
         self.lspAttachLocked(ed);
+        // Installed AFTER the first attach, so this open does not fire
+        // it and didOpen the same document twice. Every LATER open on
+        // this editor — and there is no other way for one to happen —
+        // goes through the hook.
+        ed.retarget_ctx = self;
+        ed.on_retarget = &lspRetargetHook;
+        ed.lsp_explain = &lspExplainHook;
         return ed;
+    }
+
+    /// Re-scan the grammar search path and re-attach every editor, so
+    /// a grammar installed a moment ago takes effect now.
+    pub fn reloadGrammars(self: *App) void {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        // Re-read the graph too: `rook syntax reload` after editing
+        // config should mean the same thing as a relaunch, and the
+        // declarations are half of what it is reloading.
+        self.grammars.loadGraph(self.io);
+        self.grammars.forget();
+        // Languages ride along: `rook syntax reload` is the developer's
+        // "pick up my config edit", and a declaration reload that took
+        // half the graph would be a trap.
+        self.langs.loadGraph(self.io);
+        self.lsp.forgetResolutions();
+        self.lspRetryAttachLocked();
+        for (self.spaces.items) |space| for (space.tabs.items) |tab| {
+            for (tab.panes.items) |p| {
+                const ed = p.editor() orelse continue;
+                // setPath again through the seam the editor already
+                // owns: it drops the old tree and query and asks the
+                // loader afresh, which is exactly the reload.
+                if (ed.hl_set_path) |f| f(ed.hl_ctx.?, ed.buf.path);
+                ed.render_dirty = true;
+            }
+        };
+        self.scene_dirty = true;
+    }
+
+    /// How the focused pane's highlighting is going, in one line.
+    ///
+    /// `off` and `plain` are different answers and the difference is
+    /// the point: one means rook has no grammar for this file, the
+    /// other means it is not a language rook knows about at all.
+    pub fn syntaxStateLocked(self: *App, ed: *editorpkg.Editor) []const u8 {
+        _ = self;
+        if (ed.hl_ctx == null) return "off\tno highlighter attached";
+        const hl: *syntaxpkg.Highlighter = @ptrCast(@alignCast(ed.hl_ctx.?));
+        if (hl.fault.len > 0) return hl.fault;
+        const p = ed.buf.path orelse return "plain\tno file";
+        if (syntaxpkg.langForPath(p) == null) return "plain\tno grammar maps to this extension";
+        return if (hl.highlighting()) "on" else "plain\tnothing parsed yet";
+    }
+
+    /// Give a new editor a highlighter. Cheap when no grammar is
+    /// available — the loader answers from its cache and the editor
+    /// renders plain text, which is the path headless tests take.
+    fn attachSyntaxLocked(self: *App, ed: *editorpkg.Editor) void {
+        syntaxpkg.attach(ed, self.gpa, &self.grammars);
     }
 
     fn attachDocsLocked(self: *App, ed: *editorpkg.Editor) void {
@@ -3317,6 +3490,163 @@ pub const App = struct {
         // still needs its diagnostics on screen — they were published
         // while no pane was showing them.
         self.applyDiagsLocked(ed, path);
+    }
+
+    /// Say WHY this file has no server, in the words that fit the
+    /// reason.
+    ///
+    /// Four different problems used to share one sentence. "No language
+    /// server for this file" is true of a `.md` file, of a Zig repo on a
+    /// machine with no zls, of a project whose resolver is still
+    /// thinking, and of one whose resolver refused with a fix in hand —
+    /// and only the last of those is a sentence anybody can act on.
+    fn lspExplainHook(ctx: *anyopaque, ed: *editorpkg.Editor) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.lspExplainLocked(ed);
+    }
+
+    fn lspExplainLocked(self: *App, ed: *editorpkg.Editor) void {
+        const path = ed.buf.path orelse return;
+        // Ask again, so `why` describes THIS file rather than whatever
+        // was routed last. ensure() returns a running server or null
+        // without doing work, so this costs a lookup.
+        _ = self.lsp.ensure(path);
+        switch (self.lsp.why) {
+            .undeclared => {
+                const ext = std.fs.path.extension(path);
+                if (ext.len > 1) {
+                    ed.setStatus("no language declared for {s} files", .{ext}, false);
+                } else ed.setStatus("no language declared for this file", .{}, false);
+            },
+            .no_binary => {
+                if (self.langs.forPath(path)) |spec| {
+                    const bin = if (spec.argv.len > 0) spec.argv[0] else spec.name;
+                    ed.setStatus("{s} is declared but {s} is not installed", .{ spec.name, bin }, false);
+                } else ed.setStatus("the declared server is not installed", .{}, false);
+            },
+            .resolving => ed.setStatus("working out which server this project wants…", .{}, false),
+            // The resolver's own words, which is the whole reason it was
+            // asked rather than guessed at.
+            .refused => {
+                const why = self.lsp.refusal(path);
+                if (why.len > 0) {
+                    ed.setStatus("{s}", .{why}, false);
+                } else ed.setStatus("no server for this project", .{}, false);
+            },
+        }
+    }
+
+    /// Ask a plugin what to run for a project.
+    ///
+    /// On a WORKER, always. A plugin call is a round trip to another
+    /// process with a deadline measured in seconds, and this is reached
+    /// from `ensure` under the draw lock — doing it inline would freeze
+    /// the window for as long as the plugin took to think. The answer
+    /// lands through `Manager.resolved`, and the frame loop's re-attach
+    /// pass picks the server up on a later tick.
+    fn lspResolveHook(ctx: *anyopaque, plugin: []const u8, lang: []const u8, root: []const u8) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const Args = struct {
+            app: *App,
+            plugin: [64]u8,
+            plugin_len: usize,
+            lang: [64]u8,
+            lang_len: usize,
+            root: [1024]u8,
+            root_len: usize,
+        };
+        const a = self.gpa.create(Args) catch return;
+        a.* = .{
+            .app = self,
+            .plugin = undefined,
+            .plugin_len = @min(plugin.len, 64),
+            .lang = undefined,
+            .lang_len = @min(lang.len, 64),
+            .root = undefined,
+            .root_len = @min(root.len, 1024),
+        };
+        @memcpy(a.plugin[0..a.plugin_len], plugin[0..a.plugin_len]);
+        @memcpy(a.lang[0..a.lang_len], lang[0..a.lang_len]);
+        @memcpy(a.root[0..a.root_len], root[0..a.root_len]);
+
+        const T = struct {
+            fn go(args: *Args) void {
+                const app = args.app;
+                const pl = @import("plugins.zig");
+                defer app.gpa.destroy(args);
+                const lang_s = args.lang[0..args.lang_len];
+                const root_s = args.root[0..args.root_len];
+
+                var res = pl.resolveLanguage(
+                    app.plugins.find(args.plugin[0..args.plugin_len]),
+                    app.gpa,
+                    lang_s,
+                    root_s,
+                );
+                defer res.deinit(app.gpa);
+
+                app.draw_lock.lock();
+                defer app.draw_lock.unlock();
+                app.lsp.resolved(lang_s, root_s, res.argv(), res.settings(), res.errStr());
+                // Whatever the answer, panes waiting on it need another
+                // look: a server that just started has to be attached,
+                // and a refusal has a message to show.
+                app.lspRetryAttachLocked();
+                app.scene_dirty = true;
+            }
+        };
+        if (std.Thread.spawn(.{}, T.go, .{a})) |t| t.detach() else |_| self.gpa.destroy(a);
+    }
+
+    /// Re-attach any editor holding a document with no server.
+    ///
+    /// Cheap and idempotent: `lspAttachLocked` starts with `ensure`,
+    /// which returns the running server or null without doing work. It
+    /// exists because attaching is normally driven by an OPEN, and a
+    /// server can arrive long after the file did — a resolver answering,
+    /// or a config apply declaring the language that was missing.
+    fn lspRetryAttachLocked(self: *App) void {
+        for (self.spaces.items) |space| for (space.tabs.items) |tab| {
+            for (tab.panes.items) |p| {
+                const ed = p.editor() orelse continue;
+                if (ed.lsp_ctx != null) continue;
+                self.lspAttachLocked(ed);
+            }
+        };
+    }
+
+    /// Take the language-server seams back off an editor.
+    ///
+    /// Needed because a retarget can land on a file no server serves:
+    /// go to a `.zig` file from a `.go` one and the hooks left behind
+    /// would point at a manager that is about to answer questions about
+    /// a document it was never told exists. The gutter goes too — a
+    /// reserved sign column on a file with no server is a column that
+    /// will never hold anything.
+    fn lspDetachLocked(_: *App, ed: *editorpkg.Editor) void {
+        ed.lsp_ctx = null;
+        ed.lsp_hover = null;
+        ed.lsp_definition = null;
+        ed.lsp_references = null;
+        ed.lsp_rename = null;
+        ed.lsp_completion = null;
+        ed.lsp_format = null;
+        ed.lsp_code_action = null;
+        ed.fmt_on_save = false;
+        ed.diag_gutter = false;
+    }
+
+    /// The pane retargeted itself — `:e`, or Enter on a row of an
+    /// in-pane file tree. Neither goes anywhere near the app's own open
+    /// path, so without this the document arrives with the PREVIOUS
+    /// file's server attached, or with none at all.
+    fn lspRetargetHook(ctx: *anyopaque, ed: *editorpkg.Editor) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        // Detach first, unconditionally: attach returns early when
+        // there is no server for the new path, and "early" must not
+        // mean "keeps the old one".
+        self.lspDetachLocked(ed);
+        self.lspAttachLocked(ed);
     }
 
     /// Push whatever this buffer has become to its server. Called from
@@ -3431,15 +3761,21 @@ pub const App = struct {
             switch (a) {
                 .hover => |h| {
                     const ed = self.editorShowingLocked(h.path) orelse continue;
-                    // One line, in the status row. Hover is often a
-                    // paragraph of markdown and a float is the right
-                    // home for it — but the signature is the answer
-                    // ninety per cent of the time. Which line that is
-                    // differs per server; see hoverSummary.
-                    const first = lspmgrpkg.hoverSummary(h.text);
-                    if (first.len == 0) {
-                        ed.setStatus("nothing to show here", .{}, false);
-                    } else ed.setStatus("{s}", .{first}, false);
+                    // A float: hover is markdown, usually a signature
+                    // and a paragraph, and a status row can only ever
+                    // show you the first line of it.
+                    //
+                    // A pane too small to host one still gets that
+                    // first line rather than nothing — which is the
+                    // whole reason showHover reports instead of quietly
+                    // drawing off the edge. Which line it is differs
+                    // per server; see hoverSummary.
+                    if (!ed.showHover(h.text)) {
+                        const first = lspmgrpkg.hoverSummary(h.text);
+                        if (first.len == 0) {
+                            ed.setStatus("nothing to show here", .{}, false);
+                        } else ed.setStatus("{s}", .{first}, false);
+                    }
                     ed.render_dirty = true;
                 },
                 .definition => |d| {
@@ -3573,7 +3909,7 @@ pub const App = struct {
         // at, or the position means something else.
         self.lspSyncLocked(ed);
         if (!self.lsp.hover(path, lspPos(ed))) {
-            ed.setStatus("no language server for this file", .{}, false);
+            self.lspExplainLocked(ed);
         }
     }
 
@@ -3597,7 +3933,7 @@ pub const App = struct {
         // the list titled with what you asked about.
         const word = if (ed.wordUnder()) |w| w.text else "";
         if (!self.lsp.references(path, lspPos(ed), word)) {
-            ed.setStatus("no language server for this file", .{}, false);
+            self.lspExplainLocked(ed);
             return;
         }
         // A repo-wide question takes a visible moment. Saying so beats a
@@ -3660,7 +3996,7 @@ pub const App = struct {
             .start = .{ .line = line, .col = 0 },
             .end = .{ .line = line, .col = eol },
         })) {
-            ed.setStatus("no language server for this file", .{}, false);
+            self.lspExplainLocked(ed);
             return;
         }
         ed.setStatus("asking what can be done here…", .{}, false);
@@ -3742,7 +4078,7 @@ pub const App = struct {
         // asking editor is synced by the same loop.
         self.lspSyncAllLocked();
         if (!self.lsp.rename(path, lspPos(ed), new_name)) {
-            ed.setStatus("no language server for this file", .{}, false);
+            self.lspExplainLocked(ed);
             return;
         }
         ed.setStatus("renaming to {s}…", .{new_name}, false);
@@ -4219,11 +4555,11 @@ pub const App = struct {
             if (panespkg.navigate(t.panes.items, src_pane, .right)) |nb| {
                 if (nb.editor()) |ned| {
                     if (!ned.is_dir) {
+                        // `open` re-attaches through on_retarget.
                         ned.open(path, false) catch {
                             self.draw_lock.unlock();
                             return;
                         };
-                        self.lspAttachLocked(ned);
                         if (req.line > 0) ned.cline = @min(req.line, ned.lineCountB() -| 1);
                         self.setFocusLocked(nb);
                         self.scene_dirty = true;
@@ -4477,7 +4813,9 @@ pub const App = struct {
         self.draw_lock.lock();
         const session = switch (self.activeTab().focused.content) {
             .term => |*tm| tm.session,
-            .edit => {
+            // rook's own panes keep ctrl+hjkl: there is no foreground
+            // program to hand it to.
+            .edit, .monitor => {
                 self.draw_lock.unlock();
                 return false;
             },
@@ -4609,6 +4947,21 @@ pub const App = struct {
                         changed = true;
                         break :blk false;
                     },
+                    .monitor => |m| blk: {
+                        if (!m.closed) break :blk false;
+                        const ut = p.under orelse break :blk true;
+                        // Same handshake the takeover editor gets: the
+                        // monitor was opened OVER a shell, so closing it
+                        // puts the shell back rather than collapsing the
+                        // pane out from under a running command.
+                        m.deinit();
+                        self.gpa.destroy(m);
+                        p.under = null;
+                        p.content = .{ .term = ut };
+                        p.drawn_cursor = 0xffff_ffff;
+                        changed = true;
+                        break :blk false;
+                    },
                 };
                 if (!done) {
                     i += 1;
@@ -4629,6 +4982,10 @@ pub const App = struct {
                         tm.rs.deinit(self.gpa);
                     },
                     .edit => |ed| ed.destroy(),
+                    .monitor => |m| {
+                        m.deinit();
+                        self.gpa.destroy(m);
+                    },
                 }
                 self.gpa.destroy(p);
                 if (t.panes.items.len > 0 and was_focused) t.focused = t.panes.items[0];
@@ -4683,6 +5040,10 @@ pub const App = struct {
         switch (atab.focused.content) {
             .term => |*tm| if (tm.rs.cursor.visible and tm.rs.cursor.viewport != null) return true,
             .edit => return true,
+            // Row selection is drawn solid; there is nothing to blink,
+            // so the monitor must not keep the blink timer alive (that
+            // would cost a frame every 550ms for no visible change).
+            .monitor => return false,
         }
         for (atab.panes.items) |p| {
             if (p.rect.w == 0) continue;
@@ -4767,6 +5128,13 @@ pub const App = struct {
                 continue;
             }
             switch (p.content) {
+                .monitor => |m| {
+                    // Polled, not evented: a new sample arrives with no
+                    // keystroke, so the sampler sets render_dirty and
+                    // this is where it turns into a frame.
+                    p.dirty = m.render_dirty;
+                    m.render_dirty = false;
+                },
                 .term => |*tm| {
                     tm.session.lockForSnapshot();
                     tm.rs.update(self.gpa, &tm.session.term) catch {
@@ -4819,11 +5187,11 @@ pub const App = struct {
             if (p.rect.w == 0) continue;
             const cols: usize = switch (p.content) {
                 .term => |*tm| tm.rs.cols,
-                .edit => p.cols,
+                .edit, .monitor => p.cols,
             };
             var rows: usize = switch (p.content) {
                 .term => |*tm| tm.rs.rows,
-                .edit => p.rows,
+                .edit, .monitor => p.rows,
             };
             if (cols == 0 or rows == 0) continue;
             if (off + cols * rows > self.renderer.cells_cap) {
@@ -4836,6 +5204,7 @@ pub const App = struct {
                     p.drawn_cursor = cursorKey(tm);
                 },
                 .edit => |ed| self.fillEditorPane(ed, p == atab.focused, cells[off .. off + cols * rows], cols, rows),
+                .monitor => |m| self.fillMonitorPane(m, p == atab.focused, cells[off .. off + cols * rows], cols, rows),
             }
             p.buf_off = off;
             p.drawn_cols = @intCast(cols);
@@ -4861,7 +5230,7 @@ pub const App = struct {
 
         const clear_bg = switch (atab.focused.content) {
             .term => |*tm| tm.rs.colors.background,
-            .edit => rgb4(th.ed_bg),
+            .edit, .monitor => rgb4(th.ed_bg),
         };
 
         const desc = objc.getClass("MTLRenderPassDescriptor").?
@@ -4890,7 +5259,7 @@ pub const App = struct {
         for (atab.panes.items) |p| {
             const bg = switch (p.content) {
                 .term => |*tm| tm.rs.colors.background,
-                .edit => rgb4(th.ed_bg),
+                .edit, .monitor => rgb4(th.ed_bg),
             };
             self.renderer.drawRect(enc, vp_w, vp_h, p.rect.x, p.rect.y, p.rect.w, p.rect.h, .{ bg.r, bg.g, bg.b, self.bg_alpha });
         }
@@ -5015,7 +5384,7 @@ pub const App = struct {
                 for (t.panes.items) |p| {
                     const ed = switch (p.content) {
                         .edit => |e| e,
-                        .term => continue,
+                        .term, .monitor => continue,
                     };
                     if (ed.synthetic or ed.is_dir) continue;
                     if (!ed.buf.changedOnDisk(self.io)) {
@@ -5415,6 +5784,7 @@ pub const App = struct {
                     tm.session.mutex.unlock();
                 },
                 .edit => |ed| tw.print("{s};", .{ed.displayName()}) catch {},
+                .monitor => tw.print("monitor;", .{}) catch {},
             }
         }
         const td = tabs_buf[0..tw.end];
@@ -5769,7 +6139,7 @@ pub const App = struct {
         self.wk_rect = .{ 0, 0, 0, 0 };
         if (!self.wk_visible or !self.leader_pending.load(.acquire)) return;
         const ld = self.keybinds.leader orelse return;
-        var items: [33]WkItem = undefined;
+        var items: [40]WkItem = undefined;
         const n = self.wkItemsLocked(&items);
         if (n == 0) return;
 
@@ -5836,6 +6206,7 @@ pub const App = struct {
     /// segment — one tab, one name, wherever it renders.
     fn tabTitle(t: *panespkg.Tab, buf: []u8) []const u8 {
         var title: []const u8 = "shell";
+        if (t.focused.content == .monitor) return "monitor";
         switch (t.focused.content) {
             .term => |*tm| {
                 tm.session.mutex.lock();
@@ -5846,6 +6217,7 @@ pub const App = struct {
                 }
                 tm.session.mutex.unlock();
             },
+            .monitor => {},
             .edit => |ed| {
                 const dn = ed.displayName();
                 const n = @min(dn.len, buf.len);
@@ -6053,6 +6425,326 @@ pub const App = struct {
     /// Find in files: the query box, then the hits GROUPED BY FILE —
     /// a path header, then its lines indented under it. A flat list of
     /// 200 hits is a list you scroll; grouped, it is a list you read.
+    // -----------------------------------------------------------------
+    // The resource monitor
+    // -----------------------------------------------------------------
+
+    /// Open the monitor in the focused pane, parking whatever is there.
+    ///
+    /// A takeover rather than a split, matching `rook edit`: the monitor
+    /// is something you glance at and dismiss, and a split would make
+    /// "close it again" a layout decision instead of one keystroke.
+    /// `toggle` is what separates the keybinding from ctl. Pressing the
+    /// chord again should dismiss the monitor; `ctl monitor disk`
+    /// selecting a tab on an open monitor must NOT close it, which is
+    /// exactly the bug an e2e run caught the first time these shared
+    /// one entry point.
+    pub fn showMonitor(self: *App, toggle: bool) void {
+        self.draw_lock.lock();
+        const p = self.activeTab().focused;
+        if (p.monitor()) |m| {
+            if (toggle) m.closed = true;
+            self.scene_dirty = true;
+            self.draw_lock.unlock();
+            return;
+        }
+
+        const m = self.gpa.create(monitorpkg.Monitor) catch {
+            self.draw_lock.unlock();
+            return;
+        };
+        m.* = monitorpkg.Monitor.init(self.gpa);
+        m.vol = diskscan.volumeFor(".");
+        // Park a terminal the way the takeover editor does, so closing
+        // the monitor puts a running shell back rather than killing it.
+        switch (p.content) {
+            .term => |*tm| {
+                p.under = tm.*;
+                p.content = .{ .monitor = m };
+            },
+            .edit => |ed| {
+                ed.destroy();
+                p.content = .{ .monitor = m };
+            },
+            .monitor => unreachable, // handled above
+        }
+        p.drawn_cursor = 0xffff_ffff;
+        self.scene_dirty = true;
+        self.draw_lock.unlock();
+
+        self.startSampler();
+    }
+
+    /// Whether any visible pane is a monitor. Drives the sampler's
+    /// lifetime — see the `sampling` field.
+    fn monitorVisibleLocked(self: *App) bool {
+        for (self.activeTab().panes.items) |p| {
+            if (p.rect.w == 0) continue;
+            if (p.content == .monitor) return true;
+        }
+        return false;
+    }
+
+    /// Start the sampling thread if it is not already running.
+    ///
+    /// One sample is ~4ms for 1800 processes, which is far too much for
+    /// the frame path and nothing at all for a worker at 1Hz. The thread
+    /// exits on its own once no monitor pane is visible, so a closed
+    /// monitor leaves no residual cost.
+    fn startSampler(self: *App) void {
+        if (self.sampling.swap(true, .acq_rel)) return;
+        const T = struct {
+            fn go(app: *App) void {
+                if (!app.procs_ready) {
+                    app.procs = procmon.Sampler.init(app.gpa);
+                    app.procs_ready = true;
+                }
+                var panes_buf: [64]procmon.PaneProc = undefined;
+                var labels_buf: [64]monitorpkg.Monitor.PaneLabel = undefined;
+                var label_text: [64][24]u8 = undefined;
+
+                while (true) {
+                    // Collect the pane→pid map under the lock, then do
+                    // the syscalls outside it: 4ms of libproc calls
+                    // holding the draw lock is 4ms of dropped frames.
+                    var n: usize = 0;
+                    var nl: usize = 0;
+                    var sort: procmon.SortKey = .cpu;
+                    {
+                        app.draw_lock.lock();
+                        defer app.draw_lock.unlock();
+                        if (!app.monitorVisibleLocked()) break;
+                        for (app.activeTab().panes.items) |p| {
+                            if (n >= panes_buf.len) break;
+                            const tm = p.term() orelse (if (p.under) |*u| u else continue);
+                            panes_buf[n] = .{ .pane_id = p.id, .pid = tm.session.pid };
+                            n += 1;
+                            const txt = std.fmt.bufPrint(&label_text[nl], "▸{d}", .{p.id}) catch continue;
+                            labels_buf[nl] = .{ .id = p.id, .text = txt };
+                            nl += 1;
+                        }
+                        for (app.activeTab().panes.items) |p| {
+                            if (p.monitor()) |m| sort = m.sort;
+                        }
+                    }
+
+                    var snap = app.procs.sample(panes_buf[0..n], sort) catch {
+                        _ = usleep(1_000_000);
+                        continue;
+                    };
+
+                    {
+                        app.draw_lock.lock();
+                        defer app.draw_lock.unlock();
+                        var handed = false;
+                        for (app.activeTab().panes.items) |p| {
+                            const m = p.monitor() orelse continue;
+                            // One snapshot, one owner. A second monitor
+                            // pane borrows nothing — it would double-free
+                            // on close — so only the first takes it.
+                            if (handed) continue;
+                            m.snap.deinit(app.gpa);
+                            m.snap = snap;
+                            m.pane_labels = labels_buf[0..nl];
+                            m.render_dirty = true;
+                            handed = true;
+                        }
+                        if (!handed) snap.deinit(app.gpa);
+                        app.scene_dirty = true;
+                    }
+                    _ = usleep(1_000_000);
+                }
+                app.sampling.store(false, .release);
+            }
+        };
+        if (std.Thread.spawn(.{}, T.go, .{self})) |t| t.detach() else |_| {
+            self.sampling.store(false, .release);
+        }
+    }
+
+    /// Walk the pane's repo root (or home) on a worker.
+    fn startDiskScan(self: *App, m: *monitorpkg.Monitor) void {
+        if (self.scanning.swap(true, .acq_rel)) {
+            // A second scan would double the IO on a tree the first is
+            // already walking, so say so rather than queue it.
+            m.setMsg("a scan is already running");
+            self.scene_dirty = true;
+            return;
+        }
+        var root_buf: [1024]u8 = undefined;
+        var root_len: usize = 0;
+        {
+            var scratch: [1024]u8 = undefined;
+            if (self.paneRootLocked(self.activeTab().focused, &scratch)) |r| {
+                root_len = @min(root_buf.len, r.len);
+                @memcpy(root_buf[0..root_len], r[0..root_len]);
+            }
+        }
+        if (root_len == 0) {
+            const home = std.c.getenv("HOME") orelse {
+                self.scanning.store(false, .release);
+                m.setMsg("no HOME to scan");
+                return;
+            };
+            const h = std.mem.sliceTo(home, 0);
+            root_len = @min(root_buf.len, h.len);
+            @memcpy(root_buf[0..root_len], h[0..root_len]);
+        }
+
+        // Drop the previous tree only after the new walk is under way?
+        // No — the monitor points into it, so it has to be detached
+        // here, under the lock the drawing thread also takes.
+        m.scan = null;
+        m.disk_root = 0;
+        m.disk_stack.clearRetainingCapacity();
+        m.sel = 0;
+        m.scroll = 0;
+        if (self.scan) |old| {
+            old.deinit(self.gpa);
+            self.gpa.destroy(old);
+            self.scan = null;
+        }
+        self.scan_prog = .{};
+        m.prog = &self.scan_prog;
+        m.render_dirty = true;
+        self.scene_dirty = true;
+
+        const Job = struct {
+            app: *App,
+            mon: *monitorpkg.Monitor,
+            path: [1024]u8,
+            path_len: usize,
+            fn go(j: *@This()) void {
+                const app = j.app;
+                const sc = app.gpa.create(diskscan.Scan) catch {
+                    app.scanning.store(false, .release);
+                    app.gpa.destroy(j);
+                    return;
+                };
+                sc.* = diskscan.Scan.init(app.gpa);
+                diskscan.walk(app.gpa, sc, j.path[0..j.path_len], &app.scan_prog) catch {};
+                diskscan.sortChildren(sc, 0);
+
+                app.draw_lock.lock();
+                app.scan = sc;
+                // The pane may have closed while we walked. Publishing
+                // into a freed Monitor is the crash this check exists
+                // for, so the pointer is re-derived from the live tree
+                // rather than trusted from before the walk.
+                for (app.activeTab().panes.items) |p| {
+                    const mm = p.monitor() orelse continue;
+                    if (mm != j.mon) continue;
+                    mm.scan = sc;
+                    mm.prog = null;
+                    mm.sel = 0;
+                    mm.scroll = 0;
+                    mm.render_dirty = true;
+                }
+                app.scene_dirty = true;
+                app.draw_lock.unlock();
+                app.scanning.store(false, .release);
+                app.gpa.destroy(j);
+            }
+        };
+        const job = self.gpa.create(Job) catch {
+            self.scanning.store(false, .release);
+            return;
+        };
+        job.* = .{ .app = self, .mon = m, .path = root_buf, .path_len = root_len };
+        if (std.Thread.spawn(.{}, Job.go, .{job})) |t| t.detach() else |_| {
+            self.scanning.store(false, .release);
+            self.gpa.destroy(job);
+        }
+    }
+
+    /// Carry out a confirmed reclaim.
+    ///
+    /// Everything destructive in this feature funnels through here, and
+    /// it re-checks every guarantee rather than trusting that the view
+    /// already did: the path must still classify, and it must still
+    /// classify as something deletable. `monitor.zig` cannot delete
+    /// anything, so this function is the entire blast radius.
+    fn startReclaim(self: *App, m: *monitorpkg.Monitor) void {
+        const pend = m.pending orelse return;
+        m.pending = null;
+        const path = pend.pathStr();
+
+        // Re-derive the class from the PATH, not from what was staged.
+        // A stale category on a re-scanned tree is exactly how a `keep`
+        // directory would end up deleted.
+        const cat = diskscan.classify(path, true) orelse {
+            m.setMsg("refused: that path no longer classifies as reclaimable");
+            self.scene_dirty = true;
+            return;
+        };
+        if (!cat.reclaim.deletable()) {
+            m.setMsg("refused: that category is not deletable");
+            self.scene_dirty = true;
+            return;
+        }
+        if (self.reclaiming.swap(true, .acq_rel)) {
+            m.setMsg("a reclaim is already running");
+            return;
+        }
+
+        const Job = struct {
+            app: *App,
+            mon: *monitorpkg.Monitor,
+            path: [1024]u8,
+            path_len: usize,
+            tool: [64]u8,
+            tool_len: usize,
+            fn go(j: *@This()) void {
+                const app = j.app;
+                const p = j.path[0..j.path_len];
+                var ok = false;
+                if (j.tool_len > 0) {
+                    // The tool's own cleanup, where the category named
+                    // one: `go clean -modcache` handles the read-only
+                    // bits the module cache sets, which a recursive
+                    // unlink trips over halfway and leaves in pieces.
+                    ok = runTool(j.tool[0..j.tool_len]);
+                } else {
+                    std.Io.Dir.cwd().deleteTree(app.io, p) catch {
+                        ok = false;
+                    };
+                    ok = true;
+                }
+                app.draw_lock.lock();
+                for (app.activeTab().panes.items) |pane| {
+                    const mm = pane.monitor() orelse continue;
+                    if (mm != j.mon) continue;
+                    var buf: [256]u8 = undefined;
+                    mm.setMsg(std.fmt.bufPrint(&buf, "{s} {s} — rescan (s) to see the new totals", .{
+                        if (ok) "reclaimed" else "FAILED to reclaim",
+                        p,
+                    }) catch "done");
+                    mm.render_dirty = true;
+                }
+                app.scene_dirty = true;
+                app.draw_lock.unlock();
+                app.reclaiming.store(false, .release);
+                app.gpa.destroy(j);
+            }
+        };
+        const job = self.gpa.create(Job) catch {
+            self.reclaiming.store(false, .release);
+            return;
+        };
+        job.* = .{
+            .app = self,
+            .mon = m,
+            .path = pend.path,
+            .path_len = pend.path_len,
+            .tool = pend.tool,
+            .tool_len = pend.tool_len,
+        };
+        if (std.Thread.spawn(.{}, Job.go, .{job})) |t| t.detach() else |_| {
+            self.reclaiming.store(false, .release);
+            self.gpa.destroy(job);
+        }
+    }
+
     /// Open the side pane on a plugin and queue a fetch.
     pub fn showPlugin(self: *App, name: []const u8) bool {
         if (self.plugins.find(name) == null) return false;
@@ -6421,6 +7113,14 @@ pub const App = struct {
         self.env_diff = .{};
         if (self.env_candidate.len > 0) self.gpa.free(self.env_candidate);
         self.env_candidate = &.{};
+        // The graph just changed, so what routes to a server may have
+        // too. Re-read the declarations, forget every resolution made
+        // against the old ones, and give panes with no server another
+        // look — declaring a language you were missing should take
+        // effect on apply, not on relaunch.
+        self.langs.loadGraph(self.io);
+        self.lsp.forgetResolutions();
+        self.lspRetryAttachLocked();
         // The panel was opened to show a diff that no longer exists.
         if (self.side_open and self.side_panel == .config) {
             self.side_open = false;
@@ -7919,7 +8619,22 @@ pub const App = struct {
     /// grid (pure text — the tested surface); this maps styles to
     /// colors and atlas glyphs. Last row is the editor's status line.
     fn fillEditorPane(self: *App, ed: *editorpkg.Editor, focused: bool, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
-        const g = ed.fillGrid(cols, rows);
+        self.fillCellGrid(ed.fillGrid(cols, rows), ed, focused, cells, cols, rows);
+    }
+
+    /// The monitor draws through the editor's cell path, which is the
+    /// point of it borrowing the editor's cell and style types: a new
+    /// pane kind should not mean a new render path, a new theme mapping
+    /// and a second place for a wide-glyph bug to live.
+    fn fillMonitorPane(self: *App, m: *monitorpkg.Monitor, focused: bool, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
+        self.fillCellGrid(m.fillGrid(cols, rows), null, focused, cells, cols, rows);
+    }
+
+    /// Paint a styled cell grid into the renderer's buffer.
+    ///
+    /// `ed` is only for grapheme-cluster lookup and is null for tenants
+    /// that never emit one (the monitor writes plain codepoints).
+    fn fillCellGrid(self: *App, g: []const editorpkg.RCell, ed: ?*editorpkg.Editor, focused: bool, cells: []renderpkg.CellData, cols: usize, rows: usize) void {
         const cellw_px: u16 = @intCast(self.renderer.cellw_px);
         // config `pane-dim`, the editor's half: everything slides
         // toward ed_bg, status row included.
@@ -7980,6 +8695,17 @@ pub const App = struct {
                 .cpl_item => th.bar_fg,
                 .cpl_sel => th.bar_value,
                 .cpl_detail => th.ed_dim,
+                // The float. Its border recedes, its prose sits at the
+                // chrome's ordinary weight, and the signature — the one
+                // line you actually came for — is the brightest thing
+                // in the box. A heading takes the accent, a link the
+                // string colour, both of which every theme already
+                // tunes to stand out from body text without shouting.
+                .hov_border => th.ed_dim,
+                .hov_prose => th.bar_fg,
+                .hov_emph, .hov_code => th.bar_value,
+                .hov_head => th.accent,
+                .hov_link => th.syn_string,
             };
             switch (st) {
                 .sel => bg = th.ed_sel_bg,
@@ -7999,6 +8725,12 @@ pub const App = struct {
                 .buftab_off => bg = th.bar_bg,
                 .cpl_item, .cpl_detail => bg = th.bar_bg,
                 .cpl_sel => bg = th.chip_active_bg,
+                // The float lifts off the buffer on the chrome's fill,
+                // and a fenced block lifts once more off that — the
+                // same two-step the buffer line uses for the tab you
+                // are on.
+                .hov_border, .hov_prose, .hov_emph, .hov_head, .hov_link => bg = th.bar_bg,
+                .hov_code => bg = th.chip_active_bg,
                 else => {},
             }
 
@@ -8026,7 +8758,8 @@ pub const App = struct {
                 // editor already decided, and said so by putting a tail
                 // in the next cell.
                 const w = (i + 1) % cols != 0 and i + 1 < g.len and g[i + 1].tail;
-                if (self.renderer.glyphCluster(ed.clusterText(rc), w)) |loc| {
+                const ctext = if (ed) |e| e.clusterText(rc) else "";
+                if (self.renderer.glyphCluster(ctext, w)) |loc| {
                     uvx = loc.uvx;
                     uvy = loc.uvy;
                     flags = 1 | (@as(u16, @intFromBool(loc.color)) << 1);
@@ -8446,6 +9179,37 @@ fn authCallback(_: *const AuthBlock.Context, granted: bool, err: objc.c.id) call
 /// while its panel is open, and dirties the scene only on a digest
 /// change, so idle frames stay 0.
 extern "c" fn usleep(us: u32) c_int;
+
+extern "c" fn fork() c_int;
+extern "c" fn execl(path: [*:0]const u8, arg0: [*:0]const u8, ...) c_int;
+extern "c" fn waitpid(pid: c_int, status: *c_int, opts: c_int) c_int;
+
+/// Run a category's own cleanup command through the shell.
+///
+/// Through `sh -c` because the commands come from `diskscan.categories`
+/// — a compiled-in table, not user input and not anything a plugin can
+/// reach — and they are written the way their documentation writes them
+/// ("go clean -modcache", "brew cleanup --prune=all"). Nothing here
+/// interpolates a scanned path into the string; a reclaim that needs a
+/// path uses the delete branch instead, which never goes near a shell.
+fn runTool(cmd: []const u8) bool {
+    var buf: [128]u8 = undefined;
+    if (cmd.len >= buf.len) return false;
+    @memcpy(buf[0..cmd.len], cmd);
+    buf[cmd.len] = 0;
+    const z: [*:0]const u8 = @ptrCast(&buf);
+
+    const pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        _ = execl("/bin/sh", "sh", "-c", z, @as(?[*:0]const u8, null));
+        _exit(127);
+    }
+    var status: c_int = 0;
+    if (waitpid(pid, &status, 0) < 0) return false;
+    // WIFEXITED && WEXITSTATUS == 0
+    return (status & 0x7f) == 0 and ((status >> 8) & 0xff) == 0;
+}
 
 fn inputKick(ctx: *anyopaque, sess: *sessionpkg.Session) void {
     const self: *App = @ptrCast(@alignCast(ctx));

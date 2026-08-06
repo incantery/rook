@@ -3,12 +3,12 @@
 //! lsp.zig speaks the protocol; this decides there should be a
 //! conversation at all. Three jobs:
 //!
-//!   CATALOG — language → a command line. One entry today (Go/gopls),
-//!   deliberately: the plan is that adding a language is DATA, and a
-//!   catalog with one entry is the honest way to find out whether that
-//!   is true when the second one arrives. When packages land this table
-//!   is what they populate; it is not meant to grow by hand much past
-//!   here.
+//!   ROUTING BY DECLARATION — there is no catalog. Which languages
+//!   exist, which files are one, and what to run for a project all come
+//!   out of the environment graph (language.zig). rook used to carry an
+//!   enum of three with a switch per question; adding a fourth meant
+//!   editing this file and shipping a binary, and Python's knowledge of
+//!   its own toolchains lived in a terminal emulator. Both were wrong.
 //!
 //!   ROOTS — a server is per (language, root), not per file. gopls
 //!   wants the module; opening a second file in the same module must
@@ -28,6 +28,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const lsp = @import("lsp.zig");
+const langpkg = @import("language.zig");
 const gitpkg = @import("git.zig");
 
 extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
@@ -42,111 +43,11 @@ const max_servers = 8;
 /// many questions, and the oldest is dropped rather than accumulating.
 const max_asks = 32;
 
-pub const Lang = enum {
-    go,
-    python,
-    /// One server for the whole family. TypeScript's tooling has always
-    /// served JavaScript too — tsserver type-checks a .js file from
-    /// JSDoc — so splitting them would mean two servers indexing the
-    /// same project twice.
-    typescript,
-
-    pub fn fromPath(path: []const u8) ?Lang {
-        if (std.mem.endsWith(u8, path, ".go")) return .go;
-        if (std.mem.endsWith(u8, path, ".py") or std.mem.endsWith(u8, path, ".pyi")) return .python;
-        const ts = [_][]const u8{ ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs" };
-        for (ts) |e| {
-            if (std.mem.endsWith(u8, path, e)) return .typescript;
-        }
-        return null;
-    }
-
-    /// Files that mark the root of a project in this language. Ordered:
-    /// the first one found walking up wins.
-    fn rootMarkers(self: Lang) []const []const u8 {
-        return switch (self) {
-            .go => &.{"go.mod"},
-            // pyproject first — a repo with both a pyproject and a
-            // stray setup.py is a modern project carrying a shim, and
-            // rooting at the shim finds the wrong package.
-            .python => &.{ "pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "requirements.txt" },
-            // tsconfig before package.json: a monorepo has one
-            // package.json per workspace, and the tsconfig is what says
-            // which files the compiler considers one program. Rooting at
-            // the wrong one gets a server that cannot resolve half your
-            // imports.
-            .typescript => &.{ "tsconfig.json", "jsconfig.json", "deno.json", "package.json" },
-        };
-    }
-
-    /// The environment override, checked before the catalog. A raw
-    /// command line, split on spaces. This is the seam the e2e suite
-    /// drives a fake server through, and it is also the honest answer
-    /// to "I want my own server" until config packages exist.
-    fn envKey(self: Lang) [*:0]const u8 {
-        return switch (self) {
-            .go => "ROOK_LSP_GO",
-            .python => "ROOK_LSP_PYTHON",
-            .typescript => "ROOK_LSP_TYPESCRIPT",
-        };
-    }
-
-    /// What to run, in preference order. A LIST rather than one name,
-    /// because Python has no single answer the way Go has gopls: people
-    /// run basedpyright, pyright, pylsp or jedi, and which one is
-    /// installed is not something rook gets to decide for them. First
-    /// one found wins; ROOK_LSP_PYTHON overrides the lot.
-    fn candidates(self: Lang) []const Candidate {
-        return switch (self) {
-            .go => &.{.{ .bin = "gopls" }},
-            .python => &.{
-                .{ .bin = "basedpyright-langserver", .args = &.{"--stdio"} },
-                .{ .bin = "pyright-langserver", .args = &.{"--stdio"} },
-                .{ .bin = "pylsp" },
-                .{ .bin = "jedi-language-server" },
-            },
-            // tsgo first, and only ever found project-locally: it ships
-            // with @typescript/native-preview, so having it means the
-            // project chose TypeScript 7 — whose lib has no tsserver.js
-            // at all and which the older servers cannot drive.
-            .typescript => &.{
-                .{ .bin = "tsgo", .args = &.{ "--lsp", "--stdio" } },
-                .{ .bin = "vtsls", .args = &.{"--stdio"} },
-                .{ .bin = "typescript-language-server", .args = &.{"--stdio"} },
-            },
-        };
-    }
-};
-
-/// One way to run a language's server: a binary to find, and the flags
-/// it needs to speak stdio. The flags are part of the catalog entry
-/// because they are not optional — `pyright-langserver` with no
-/// `--stdio` starts a server nobody can talk to.
-const Candidate = struct {
-    bin: []const u8,
-    args: []const []const u8 = &.{},
-};
-
-/// Where to look for a server binary, in order. The ROOT-relative
-/// entries come first and they are the whole reason this is a list:
-/// Python's server usually lives in the project's own virtualenv, and a
-/// Node-based one in its node_modules — a PATH-only search finds the
-/// wrong interpreter's tooling, or nothing at all. Go never needed this
-/// because `go install` puts one binary in one place.
-fn searchDir(i: usize, root: []const u8, home: []const u8, buf: *[512]u8) ?[]const u8 {
-    return switch (i) {
-        0 => std.fmt.bufPrint(buf, "{s}/.venv/bin", .{root}) catch null,
-        1 => std.fmt.bufPrint(buf, "{s}/venv/bin", .{root}) catch null,
-        2 => std.fmt.bufPrint(buf, "{s}/node_modules/.bin", .{root}) catch null,
-        3 => if (home.len == 0) null else std.fmt.bufPrint(buf, "{s}/.local/bin", .{home}) catch null,
-        4 => if (home.len == 0) null else std.fmt.bufPrint(buf, "{s}/go/bin", .{home}) catch null,
-        else => null,
-    };
-}
-const search_dirs = 5;
-
 const Entry = struct {
-    lang: Lang,
+    /// The declared language's name, borrowed from the registry's
+    /// arena — which outlives every server, and is replaced wholesale
+    /// only on a config reload.
+    lang: []const u8,
     /// Absolute, owned.
     root: []const u8,
     srv: *lsp.Server,
@@ -321,6 +222,32 @@ pub const Answer = union(enum) {
     }
 };
 
+/// A resolution in flight, or one that came back refused.
+///
+/// Keyed by (language, root) rather than by file: a resolver is asked
+/// what to run for a PROJECT, and every file in that project gets the
+/// same answer. Asking again per file would spawn a plugin round trip
+/// per keystroke.
+const Pending = struct {
+    lang: []const u8,
+    /// Absolute, owned.
+    root: []const u8,
+    /// Set when the resolver refused, with its own words — which is the
+    /// whole reason this seam exists. "no venv found — run `uv sync`"
+    /// is an answer a user can act on; "no language server for this
+    /// file" is not.
+    err: []const u8 = "",
+    /// True once the plugin has been asked, so a second `ensure` on the
+    /// same project does not ask again while the first is in flight.
+    asked: bool = false,
+
+    fn deinit(self: *Pending, gpa: Allocator) void {
+        gpa.free(self.lang);
+        gpa.free(self.root);
+        if (self.err.len > 0) gpa.free(self.err);
+    }
+};
+
 pub const Manager = struct {
     gpa: Allocator,
     io: std.Io,
@@ -334,9 +261,23 @@ pub const Manager = struct {
     changed: std.ArrayListUnmanaged([]const u8) = .empty,
     /// Set false by config; nothing spawns when off.
     enabled: bool = true,
+    /// The declared languages. Borrowed — the app owns the registry and
+    /// reloads it on a config apply, and every `lang` string a server
+    /// entry holds points into its arena.
+    langs: *const langpkg.Registry,
+    /// Why the last `ensure` produced nothing. Read by `ctl lsp` and by
+    /// the editor's message, so a silence can say which silence it is.
+    why: langpkg.Fault = .undeclared,
+    /// Resolutions in flight, and the ones that came back refused.
+    pending: std.ArrayListUnmanaged(Pending) = .empty,
+    /// Ask a plugin what to run for a project. Set by the app, which
+    /// owns the plugin host; null in a headless manager, where a
+    /// resolver-backed language simply never resolves.
+    resolve_ctx: ?*anyopaque = null,
+    resolve: ?*const fn (*anyopaque, plugin: []const u8, lang: []const u8, root: []const u8) void = null,
 
-    pub fn init(gpa: Allocator, io: std.Io) Manager {
-        return .{ .gpa = gpa, .io = io };
+    pub fn init(gpa: Allocator, io: std.Io, langs: *const langpkg.Registry) Manager {
+        return .{ .gpa = gpa, .io = io, .langs = langs };
     }
 
     pub fn deinit(self: *Manager) void {
@@ -359,6 +300,8 @@ pub const Manager = struct {
         self.answers.deinit(self.gpa);
         for (self.changed.items) |c| self.gpa.free(c);
         self.changed.deinit(self.gpa);
+        for (self.pending.items) |*pd| pd.deinit(self.gpa);
+        self.pending.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -372,160 +315,168 @@ pub const Manager = struct {
 
     // ------------------------------------------------------- discovery
 
-    /// The command line for a language at a root, or null when there is
-    /// nothing to run. Written into `store`; the returned slices point
-    /// into it.
-    fn command(self: *Manager, lang: Lang, root: []const u8, store: *[1024]u8, out: *[8][]const u8) ?[][]const u8 {
-        _ = self;
-        if (getenv(lang.envKey())) |raw| {
-            const line = std.mem.span(raw);
-            if (line.len == 0 or line.len >= store.len) return null;
-            @memcpy(store[0..line.len], line);
-            var n: usize = 0;
-            var it = std.mem.tokenizeScalar(u8, store[0..line.len], ' ');
-            while (it.next()) |tok| {
-                if (n >= out.len) break;
-                out[n] = tok;
-                n += 1;
-            }
-            return if (n == 0) null else out[0..n];
-        }
+    /// Why the last `ensure` for a path produced no server. Set on
+    /// every call, so `ctl lsp` and the editor's message can say which
+    /// of several very different silences this is.
+    pub const Why = langpkg.Fault;
 
-        const home = if (getenv("HOME")) |h| std.mem.span(h) else "";
-        for (lang.candidates()) |cand| {
-            var found: ?[]const u8 = null;
-            // Project-local first, then PATH, then the per-user installs.
-            var i: usize = 0;
-            while (i < search_dirs and found == null) : (i += 1) {
-                var db: [512]u8 = undefined;
-                const dir = searchDir(i, root, home, &db) orelse continue;
-                var pb: [1024]u8 = undefined;
-                const full = std.fmt.bufPrintZ(&pb, "{s}/{s}", .{ dir, cand.bin }) catch continue;
-                if (access(full.ptr, X_OK) != 0) continue;
-                if (full.len >= store.len) continue;
-                @memcpy(store[0..full.len], full);
-                found = store[0..full.len];
+    /// The live server for this file, starting one if a declared
+    /// language claims it and nothing is running for its root yet.
+    ///
+    /// null means "carry on without a server", which is always a valid
+    /// outcome and is the ordinary one for most files on most machines.
+    /// `self.why` says which kind of null it was.
+    pub fn ensure(self: *Manager, path: []const u8) ?*lsp.Server {
+        self.why = .undeclared;
+        if (!self.enabled) return null;
+        const spec = self.langs.forPath(path) orelse return null;
+
+        // No marker found is not a failure: a scratch file outside any
+        // project still deserves a server, rooted at the repository if
+        // there is one and at its own directory if there is not.
+        var rbuf: [1024]u8 = undefined;
+        const root = langpkg.rootFor(spec, path, &rbuf) orelse self.fallbackRoot(path, &rbuf) orelse return null;
+
+        for (self.servers.items) |e| {
+            if (std.mem.eql(u8, e.lang, spec.name) and std.mem.eql(u8, e.root, root)) {
+                // A server that died is not reused, and not restarted
+                // here either: a crash loop that respawns on every
+                // keystroke is worse than a dead server.
+                if (e.srv.state() == .failed) {
+                    self.why = .no_binary;
+                    return null;
+                }
+                return e.srv;
             }
-            if (found == null) {
-                if (getenv("PATH")) |praw| {
-                    var it = std.mem.tokenizeScalar(u8, std.mem.span(praw), ':');
-                    while (it.next()) |dir| {
-                        var pb: [1024]u8 = undefined;
-                        const full = std.fmt.bufPrintZ(&pb, "{s}/{s}", .{ dir, cand.bin }) catch continue;
-                        if (access(full.ptr, X_OK) != 0) continue;
-                        if (full.len >= store.len) continue;
-                        @memcpy(store[0..full.len], full);
-                        found = store[0..full.len];
-                        break;
-                    }
+        }
+        if (self.servers.items.len >= max_servers) return null;
+
+        // A resolver answers out of band. The first call kicks it off
+        // and reports `resolving`; the answer arrives frames later and
+        // starts the server, and whatever asks next finds it running.
+        // ensure() runs under the draw lock, so it may not wait here.
+        if (spec.resolver.len > 0) return self.viaResolver(spec, root);
+
+        var store: [1024]u8 = undefined;
+        var parts: [8][]const u8 = undefined;
+        const argv = langpkg.resolveArgv(spec.argv, root, &store, &parts) orelse {
+            self.why = .no_binary;
+            return null;
+        };
+        return self.startLocked(spec.name, root, argv, spec.settings);
+    }
+
+    /// Start, or wait on, a plugin-resolved server for this project.
+    ///
+    /// Always returns null: resolution is a round trip to another
+    /// process and `ensure` is called under the draw lock, so the
+    /// answer cannot be waited for here. The frame loop re-attaches
+    /// when it lands, which is the same path a server that took a
+    /// second to start already takes.
+    fn viaResolver(self: *Manager, spec: *const langpkg.Spec, root: []const u8) ?*lsp.Server {
+        for (self.pending.items) |pd| {
+            if (!std.mem.eql(u8, pd.lang, spec.name)) continue;
+            if (!std.mem.eql(u8, pd.root, root)) continue;
+            // Already refused. Reported as the refusal rather than as a
+            // fresh attempt: a plugin that said "no interpreter here"
+            // will say it again, and asking on every keystroke turns a
+            // clear message into a spawn loop.
+            self.why = if (pd.err.len > 0) .refused else .resolving;
+            return null;
+        }
+        const lang = self.gpa.dupe(u8, spec.name) catch return null;
+        const owned = self.gpa.dupe(u8, root) catch {
+            self.gpa.free(lang);
+            return null;
+        };
+        self.pending.append(self.gpa, .{ .lang = lang, .root = owned, .asked = true }) catch {
+            self.gpa.free(lang);
+            self.gpa.free(owned);
+            return null;
+        };
+        self.why = .resolving;
+        if (self.resolve) |f| f(self.resolve_ctx.?, spec.resolver, spec.name, root);
+        return null;
+    }
+
+    /// A resolver answered: start the server it named.
+    ///
+    /// `argv` empty with an `err` is a refusal, and it is kept — the
+    /// message is the answer, and the next ask reports it rather than
+    /// spawning the plugin again.
+    pub fn resolved(
+        self: *Manager,
+        lang: []const u8,
+        root: []const u8,
+        argv: []const []const u8,
+        settings: []const u8,
+        err: []const u8,
+    ) void {
+        var slot: ?*Pending = null;
+        for (self.pending.items) |*pd| {
+            if (std.mem.eql(u8, pd.lang, lang) and std.mem.eql(u8, pd.root, root)) {
+                slot = pd;
+                break;
+            }
+        }
+        // An answer to a question nobody asked — a plugin volunteering,
+        // or a config reload having dropped the language underneath it.
+        const pd = slot orelse return;
+
+        if (argv.len == 0) {
+            if (pd.err.len > 0) self.gpa.free(pd.err);
+            pd.err = self.gpa.dupe(u8, if (err.len > 0) err else "the resolver named no server") catch "";
+            return;
+        }
+        // The declaration is still the authority on the NAME: a
+        // resolver says what to run, not what language this is.
+        const spec = self.langs.byName(lang) orelse return;
+        var store: [1024]u8 = undefined;
+        var parts: [8][]const u8 = undefined;
+        const resolved_argv = langpkg.resolveArgv(argv, root, &store, &parts) orelse {
+            if (pd.err.len > 0) self.gpa.free(pd.err);
+            pd.err = std.fmt.allocPrint(self.gpa, "{s} is not installed", .{argv[0]}) catch "";
+            return;
+        };
+        if (self.startLocked(spec.name, root, resolved_argv, settings) != null) {
+            // The question has been answered and the server is running.
+            // Leaving the entry behind would have `ctl lsp` reporting a
+            // resolution in flight for a project that already has one.
+            for (self.pending.items, 0..) |*e, i| {
+                if (e == pd) {
+                    var gone = self.pending.orderedRemove(i);
+                    gone.deinit(self.gpa);
+                    break;
                 }
             }
-            const bin = found orelse continue;
-            out[0] = bin;
-            var n: usize = 1;
-            for (cand.args) |a| {
-                if (n >= out.len) break;
-                out[n] = a;
-                n += 1;
-            }
-            return out[0..n];
-        }
-        return null;
-    }
-
-    /// Server settings for a language at a root, as a JSON object; ""
-    /// for none. Sent on `initialized` and handed back whenever the
-    /// server asks with workspace/configuration.
-    ///
-    /// This is the part of adding Python that was NOT data. gopls needs
-    /// nothing — it reads go.mod and it is done. A Python server cannot
-    /// find your interpreter on its own: point pyright at a project
-    /// whose dependencies live in `.venv` without telling it so, and it
-    /// reports every third-party import as missing. Which is a diagnostic
-    /// panel full of errors that are not errors, and worse than silence.
-    fn settingsFor(self: *Manager, lang: Lang, root: []const u8, buf: *[1024]u8) []const u8 {
-        _ = self;
-        switch (lang) {
-            .go => return "",
-            .python => {
-                const py = pythonFor(root) orelse return "";
-                return std.fmt.bufPrint(buf, "{{\"python\":{{\"pythonPath\":\"{s}\"}}}}", .{py}) catch "";
-            },
-            .typescript => {
-                // The project's OWN typescript, when it has one. A
-                // server running its bundled compiler against a project
-                // pinned to a different version reports errors that
-                // version does not have — and the fix it suggests is for
-                // a compiler you are not using. With none installed the
-                // server's bundled one IS right, so say nothing.
-                const tsdk = tsdkFor(root) orelse return "";
-                return std.fmt.bufPrint(buf, "{{\"typescript\":{{\"tsdk\":\"{s}\"}}}}", .{tsdk}) catch "";
-            },
         }
     }
 
-    /// `<root>/node_modules/typescript/lib`, if the project installed
-    /// its own compiler. Static buffer, consumed immediately — the same
-    /// contract as pythonFor.
-    fn tsdkFor(root: []const u8) ?[]const u8 {
-        const S = struct {
-            var buf: [1024]u8 = undefined;
-        };
-        // Probed through tsserver.js rather than through the directory,
-        // which buys two things. A half-removed node_modules can leave
-        // an empty typescript/lib behind, and pointing a server at one
-        // is worse than not configuring it. And TypeScript 7 has no
-        // tsserver.js — it is a native binary — so the probe answers
-        // "no tsdk" for exactly the projects where a tsdk would mean
-        // nothing, without this function having to know a version.
-        var probe: [1100]u8 = undefined;
-        const lib = std.fmt.bufPrint(&S.buf, "{s}/node_modules/typescript/lib", .{root}) catch return null;
-        const file = std.fmt.bufPrintZ(&probe, "{s}/tsserver.js", .{lib}) catch return null;
-        if (access(file.ptr, 0) != 0) return null; // F_OK
-        return lib;
+    /// Forget every resolution. Called on a config reload, because the
+    /// declarations a refusal was made against may be gone.
+    pub fn forgetResolutions(self: *Manager) void {
+        for (self.pending.items) |*pd| pd.deinit(self.gpa);
+        self.pending.clearRetainingCapacity();
     }
 
-    /// The interpreter a project means. Project virtualenv first, then
-    /// an activated one from the environment — in that order, because a
-    /// shell that happens to have another project's venv active must not
-    /// win over the venv sitting in this project's own directory.
-    ///
-    /// Returned in a static buffer: it is consumed immediately by
-    /// settingsFor and never outlives the call.
-    fn pythonFor(root: []const u8) ?[]const u8 {
-        const S = struct {
-            var buf: [1024]u8 = undefined;
-        };
-        const local = [_][]const u8{ ".venv", "venv", ".virtualenv" };
-        for (local) |d| {
-            const cand = std.fmt.bufPrintZ(&S.buf, "{s}/{s}/bin/python", .{ root, d }) catch continue;
-            if (access(cand.ptr, X_OK) == 0) return cand;
+    /// The resolver's own words about why this project has no server,
+    /// or "" — what an editor puts in the status row instead of the
+    /// generic sentence.
+    pub fn refusal(self: *const Manager, path: []const u8) []const u8 {
+        const spec = self.langs.forPath(path) orelse return "";
+        var rbuf: [1024]u8 = undefined;
+        const root = langpkg.rootFor(spec, path, &rbuf) orelse return "";
+        for (self.pending.items) |pd| {
+            if (std.mem.eql(u8, pd.lang, spec.name) and std.mem.eql(u8, pd.root, root)) return pd.err;
         }
-        if (getenv("VIRTUAL_ENV")) |ve| {
-            const cand = std.fmt.bufPrintZ(&S.buf, "{s}/bin/python", .{std.mem.span(ve)}) catch return null;
-            if (access(cand.ptr, X_OK) == 0) return cand;
-        }
-        return null;
+        return "";
     }
 
-    /// The project root for a file: nearest ancestor holding one of the
-    /// language's markers, else the repository, else the file's own
-    /// directory. Written into `buf`.
-    fn rootFor(self: *Manager, lang: Lang, path: []const u8, buf: *[1024]u8) ?[]const u8 {
+    /// Where a file's project is when no marker says. The repository,
+    /// else the file's own directory — never the filesystem root, which
+    /// would index a home directory.
+    fn fallbackRoot(self: *Manager, path: []const u8, buf: *[1024]u8) ?[]const u8 {
         const dir = std.fs.path.dirname(path) orelse return null;
-        var probe: [1024]u8 = undefined;
-        var cur = dir;
-        while (cur.len > 1) {
-            for (lang.rootMarkers()) |marker| {
-                const cand = std.fmt.bufPrintZ(&probe, "{s}/{s}", .{ cur, marker }) catch continue;
-                if (access(cand.ptr, 0) == 0) { // F_OK
-                    if (cur.len >= buf.len) return null;
-                    @memcpy(buf[0..cur.len], cur);
-                    return buf[0..cur.len];
-                }
-            }
-            cur = std.fs.path.dirname(cur) orelse break;
-        }
         var rbuf: [1024]u8 = undefined;
         if (gitpkg.repoRootFs(self.io, self.gpa, dir, &rbuf)) |repo| {
             if (repo.len >= buf.len) return null;
@@ -537,35 +488,19 @@ pub const Manager = struct {
         return buf[0..dir.len];
     }
 
-    /// The live server for this file, starting one if the language is
-    /// known and nothing is running for its root yet. null means "carry
-    /// on without a server", which is always a valid outcome.
-    pub fn ensure(self: *Manager, path: []const u8) ?*lsp.Server {
-        if (!self.enabled) return null;
-        const lang = Lang.fromPath(path) orelse return null;
-        var rbuf: [1024]u8 = undefined;
-        const root = self.rootFor(lang, path, &rbuf) orelse return null;
-
-        for (self.servers.items) |e| {
-            if (e.lang == lang and std.mem.eql(u8, e.root, root)) {
-                // A server that died is not reused, and not restarted
-                // here either: a crash loop that respawns on every
-                // keystroke is worse than a dead server.
-                if (e.srv.state() == .failed) return null;
-                return e.srv;
-            }
-        }
-        if (self.servers.items.len >= max_servers) return null;
-
-        var store: [1024]u8 = undefined;
-        var parts: [8][]const u8 = undefined;
-        const argv = self.command(lang, root, &store, &parts) orelse return null;
-        var setbuf: [1024]u8 = undefined;
-        const settings = self.settingsFor(lang, root, &setbuf);
-
+    /// Spawn and record. `argv` and `settings` are borrowed and used
+    /// before this returns.
+    fn startLocked(
+        self: *Manager,
+        lang: []const u8,
+        root: []const u8,
+        argv: []const []const u8,
+        settings: []const u8,
+    ) ?*lsp.Server {
         const owned_root = self.gpa.dupe(u8, root) catch return null;
         const srv = lsp.Server.start(self.gpa, argv, root, settings) orelse {
             self.gpa.free(owned_root);
+            self.why = .no_binary;
             return null;
         };
         self.servers.append(self.gpa, .{ .lang = lang, .root = owned_root, .srv = srv }) catch {
@@ -1091,8 +1026,32 @@ pub const Manager = struct {
     pub fn describe(self: *Manager, w: *std.Io.Writer) void {
         for (self.servers.items) |e| {
             w.print("server {s} {s} {s}\n", .{
-                @tagName(e.lang), @tagName(e.srv.state()), e.root,
+                e.lang, @tagName(e.srv.state()), e.root,
             }) catch return;
+        }
+        // Declared languages that have not produced a server, and why.
+        // "nothing happened" is the one answer a user cannot act on,
+        // and with no built-in catalog the commonest reason for silence
+        // is now a language nobody declared.
+        for (self.pending.items) |pd| {
+            if (pd.err.len > 0) {
+                w.print("language {s} refused {s} — {s}\n", .{ pd.lang, pd.root, pd.err }) catch return;
+            } else w.print("language {s} resolving {s}\n", .{ pd.lang, pd.root }) catch return;
+        }
+        for (self.langs.specs) |spec| {
+            var running = false;
+            for (self.servers.items) |e| {
+                if (std.mem.eql(u8, e.lang, spec.name)) running = true;
+            }
+            if (running) continue;
+            var waiting = false;
+            for (self.pending.items) |pd| {
+                if (std.mem.eql(u8, pd.lang, spec.name)) waiting = true;
+            }
+            if (waiting) continue;
+            if (spec.resolver.len > 0) {
+                w.print("language {s} declared resolver:{s}\n", .{ spec.name, spec.resolver }) catch return;
+            } else w.print("language {s} declared {s}\n", .{ spec.name, spec.argv[0] }) catch return;
         }
         for (self.diags.items) |f| {
             var errs: usize = 0;
@@ -1118,74 +1077,155 @@ pub const Manager = struct {
 
 const testing = std.testing;
 
-test "a path picks its language, and unknown ones stay unknown" {
-    try testing.expectEqual(Lang.go, Lang.fromPath("/x/main.go").?);
-    try testing.expectEqual(Lang.python, Lang.fromPath("/x/main.py").?);
-    try testing.expectEqual(Lang.python, Lang.fromPath("/x/stubs.pyi").?);
-    // One entry for the whole JS/TS family: tsserver has always served
-    // JavaScript too, and two servers would index the same project
-    // twice.
-    for ([_][]const u8{ "/x/a.ts", "/x/a.tsx", "/x/a.mts", "/x/a.cts", "/x/a.js", "/x/a.jsx", "/x/a.mjs", "/x/a.cjs" }) |p| {
-        try testing.expectEqual(Lang.typescript, Lang.fromPath(p).?);
+// The routing that used to live here is language.zig's now, and so are
+// its tests: extension to language, the marker walk, the binary search.
+// What is left to test in THIS file is what the manager does with the
+// answers — which is mostly about declining to do anything.
+
+/// A manager over a registry loaded from one graph. The registry has to
+/// outlive the manager, which is why these come in pairs.
+const Rig = struct {
+    langs: langpkg.Registry,
+    mgr: Manager,
+
+    fn init(gpa: Allocator, graph: []const u8) *Rig {
+        const r = gpa.create(Rig) catch unreachable;
+        r.* = .{ .langs = langpkg.Registry.init(gpa), .mgr = undefined };
+        r.langs.loadFromJson(graph);
+        r.mgr = Manager.init(gpa, testing.io, &r.langs);
+        return r;
     }
-    try testing.expect(Lang.fromPath("/x/README") == null);
-    try testing.expect(Lang.fromPath("/x/main.rs") == null);
-}
 
-test "root markers are ordered, and pyproject wins over a setup.py shim" {
-    try testing.expectEqualStrings("go.mod", Lang.go.rootMarkers()[0]);
-    const py = Lang.python.rootMarkers();
-    try testing.expectEqualStrings("pyproject.toml", py[0]);
-    // requirements.txt last: it turns up in subdirectories of projects
-    // that are rooted somewhere else entirely.
-    try testing.expectEqualStrings("requirements.txt", py[py.len - 1]);
-}
-
-test "candidates carry the flags that are not optional" {
-    // `pyright-langserver` with no --stdio starts a server nobody can
-    // talk to, so the flag belongs to the catalog entry, not to a
-    // caller who might forget it.
-    for (Lang.python.candidates()) |c| {
-        if (std.mem.indexOf(u8, c.bin, "pyright") != null) {
-            try testing.expectEqual(@as(usize, 1), c.args.len);
-            try testing.expectEqualStrings("--stdio", c.args[0]);
-        }
+    fn deinit(self: *Rig, gpa: Allocator) void {
+        self.mgr.deinit();
+        self.langs.deinit();
+        gpa.destroy(self);
     }
-    try testing.expectEqualStrings("gopls", Lang.go.candidates()[0].bin);
-    try testing.expectEqual(@as(usize, 0), Lang.go.candidates()[0].args.len);
+};
+
+test "with nothing declared, nothing is a language" {
+    const gpa = testing.allocator;
+    // The default state of a rook with no config, and the whole point
+    // of there being no built-ins: rook has no opinion about which
+    // languages exist until something says so.
+    const r = Rig.init(gpa, "{\"nodes\":[]}");
+    defer r.deinit(gpa);
+    try testing.expect(r.mgr.ensure("/tmp/x.go") == null);
+    try testing.expectEqual(langpkg.Fault.undeclared, r.mgr.why);
+    try testing.expect(!r.mgr.hover("/tmp/x.go", .{}));
 }
 
-test "the project's own virtualenv is what a Python server is told about" {
-    // The part of adding Python that was not data. gopls needs nothing;
-    // pyright pointed at a project without its interpreter reports every
-    // third-party import as missing — a panel full of errors that aren't.
-    const t = testing.allocator;
-    const io = testing.io;
-    var root_buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&root_buf, "/tmp/rook-venv-{d}", .{@intFromPtr(&root_buf)});
-    var bin_buf: [192]u8 = undefined;
-    const bindir = try std.fmt.bufPrint(&bin_buf, "{s}/.venv/bin", .{root});
-    try std.Io.Dir.cwd().createDirPath(io, bindir);
-    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+test "a declared language whose server is not installed says so" {
+    const gpa = testing.allocator;
+    const r = Rig.init(gpa,
+        \\{"nodes":[{"id":"language:go","kind":"language","scope":"app","name":"go",
+        \\"ext":[".go"],"roots":["go.mod"],"command":["rook-not-a-real-server"]}]}
+    );
+    defer r.deinit(gpa);
+    try testing.expect(r.mgr.ensure("/tmp/x.go") == null);
+    // NOT `undeclared`. The two are different problems with different
+    // fixes — one is a config edit, the other is an install — and the
+    // whole reason `why` exists is that they used to be one silence.
+    try testing.expectEqual(langpkg.Fault.no_binary, r.mgr.why);
+}
 
-    var m = Manager.init(t, io);
-    defer m.deinit();
-    var sbuf: [1024]u8 = undefined;
-    // No interpreter yet: no settings, rather than a path that lies.
-    try testing.expectEqualStrings("", m.settingsFor(.python, root, &sbuf));
+const ResolveProbe = struct {
+    asked: usize = 0,
+    last_plugin: [64]u8 = undefined,
+    last_len: usize = 0,
 
-    var py_buf: [256]u8 = undefined;
-    const py = try std.fmt.bufPrint(&py_buf, "{s}/python", .{bindir});
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = py, .data = "#!/bin/sh\n" });
-    var pz: [256]u8 = undefined;
-    _ = try std.fmt.bufPrintZ(&pz, "{s}", .{py});
-    _ = chmod(@ptrCast(&pz), 0o755);
+    fn hook(ctx: *anyopaque, plugin: []const u8, lang: []const u8, root: []const u8) void {
+        const self: *ResolveProbe = @ptrCast(@alignCast(ctx));
+        _ = lang;
+        _ = root;
+        self.asked += 1;
+        self.last_len = @min(plugin.len, self.last_plugin.len);
+        @memcpy(self.last_plugin[0..self.last_len], plugin[0..self.last_len]);
+    }
 
-    const settings = m.settingsFor(.python, root, &sbuf);
-    try testing.expect(std.mem.indexOf(u8, settings, "pythonPath") != null);
-    try testing.expect(std.mem.indexOf(u8, settings, ".venv/bin/python") != null);
-    // Go is told nothing, and that is not an oversight.
-    try testing.expectEqualStrings("", m.settingsFor(.go, root, &sbuf));
+    fn pluginName(self: *const ResolveProbe) []const u8 {
+        return self.last_plugin[0..self.last_len];
+    }
+};
+
+test "a resolver is asked once per project, not once per keystroke" {
+    const gpa = testing.allocator;
+    const r = Rig.init(gpa,
+        \\{"nodes":[{"id":"language:python","kind":"language","scope":"app","name":"python",
+        \\"ext":[".py"],"resolver":"lang-python"}]}
+    );
+    defer r.deinit(gpa);
+    var probe: ResolveProbe = .{};
+    r.mgr.resolve_ctx = &probe;
+    r.mgr.resolve = &ResolveProbe.hook;
+
+    try testing.expect(r.mgr.ensure("/tmp/proj/a.py") == null);
+    try testing.expectEqual(langpkg.Fault.resolving, r.mgr.why);
+    try testing.expectEqual(@as(usize, 1), probe.asked);
+    try testing.expectEqualStrings("lang-python", probe.pluginName());
+
+    // Every later ask for the same project waits on the answer in
+    // flight. Asking again per file would spawn a round trip per
+    // keystroke, which is how a resolver becomes a fork bomb.
+    try testing.expect(r.mgr.ensure("/tmp/proj/a.py") == null);
+    try testing.expect(r.mgr.ensure("/tmp/proj/b.py") == null);
+    try testing.expectEqual(@as(usize, 1), probe.asked);
+    try testing.expectEqual(langpkg.Fault.resolving, r.mgr.why);
+}
+
+test "a refusal is kept, and reported in the resolver's own words" {
+    const gpa = testing.allocator;
+    const r = Rig.init(gpa,
+        \\{"nodes":[{"id":"language:python","kind":"language","scope":"app","name":"python",
+        \\"ext":[".py"],"resolver":"lang-python"}]}
+    );
+    defer r.deinit(gpa);
+    var probe: ResolveProbe = .{};
+    r.mgr.resolve_ctx = &probe;
+    r.mgr.resolve = &ResolveProbe.hook;
+
+    _ = r.mgr.ensure("/tmp/proj/a.py");
+    r.mgr.resolved("python", "/tmp/proj", &.{}, "", "no interpreter — run `uv sync`");
+
+    try testing.expect(r.mgr.ensure("/tmp/proj/a.py") == null);
+    try testing.expectEqual(langpkg.Fault.refused, r.mgr.why);
+    // The message is the answer. "no language server for this file" is
+    // a sentence nobody can act on; this one names the fix.
+    try testing.expectEqualStrings("no interpreter — run `uv sync`", r.mgr.refusal("/tmp/proj/a.py"));
+    // And it is NOT retried: a plugin that said no will say no again,
+    // and asking on every keystroke turns a message into a spawn loop.
+    try testing.expectEqual(@as(usize, 1), probe.asked);
+}
+
+test "a resolver naming a binary that is not there refuses with its name" {
+    const gpa = testing.allocator;
+    const r = Rig.init(gpa,
+        \\{"nodes":[{"id":"language:python","kind":"language","scope":"app","name":"python",
+        \\"ext":[".py"],"resolver":"lang-python"}]}
+    );
+    defer r.deinit(gpa);
+    var probe: ResolveProbe = .{};
+    r.mgr.resolve_ctx = &probe;
+    r.mgr.resolve = &ResolveProbe.hook;
+
+    _ = r.mgr.ensure("/tmp/proj/a.py");
+    r.mgr.resolved("python", "/tmp/proj", &.{"rook-no-such-pyright"}, "", "");
+    try testing.expect(r.mgr.ensure("/tmp/proj/a.py") == null);
+    try testing.expectEqual(langpkg.Fault.refused, r.mgr.why);
+    try testing.expect(std.mem.indexOf(u8, r.mgr.refusal("/tmp/proj/a.py"), "rook-no-such-pyright") != null);
+}
+
+test "an answer nobody asked for is dropped" {
+    const gpa = testing.allocator;
+    const r = Rig.init(gpa,
+        \\{"nodes":[{"id":"language:python","kind":"language","scope":"app","name":"python",
+        \\"ext":[".py"],"resolver":"lang-python"}]}
+    );
+    defer r.deinit(gpa);
+    // A plugin volunteering, or a config reload having dropped the
+    // project underneath one in flight. Neither may start a server.
+    r.mgr.resolved("python", "/tmp/never-asked", &.{"/bin/sh"}, "", "");
+    try testing.expectEqual(@as(usize, 0), r.mgr.servers.items.len);
 }
 
 test "hover summary survives every server's markdown habits" {
@@ -1231,12 +1271,16 @@ test "a multi-line server message becomes one line" {
     try testing.expectEqualStrings("already indented", lead);
 }
 
-test "a manager with nothing to run stays silent" {
-    var m = Manager.init(testing.allocator, testing.io);
-    defer m.deinit();
-    m.enabled = false;
-    try testing.expect(m.ensure("/tmp/x.go") == null);
-    try testing.expect(!m.hover("/tmp/x.go", .{}));
-    try testing.expect(!m.drain());
-    try testing.expectEqual(@as(usize, 0), m.diagsFor("/tmp/x.go").len);
+test "a manager turned off stays silent even with a language declared" {
+    const gpa = testing.allocator;
+    const r = Rig.init(gpa,
+        \\{"nodes":[{"id":"language:go","kind":"language","scope":"app","name":"go",
+        \\"ext":[".go"],"command":["/bin/sh"]}]}
+    );
+    defer r.deinit(gpa);
+    r.mgr.enabled = false;
+    try testing.expect(r.mgr.ensure("/tmp/x.go") == null);
+    try testing.expect(!r.mgr.hover("/tmp/x.go", .{}));
+    try testing.expect(!r.mgr.drain());
+    try testing.expectEqual(@as(usize, 0), r.mgr.diagsFor("/tmp/x.go").len);
 }

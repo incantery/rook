@@ -860,6 +860,13 @@ fn applyEnvOption(cfg: *Config, gpa: std.mem.Allocator, key_raw: []const u8, val
         cfg.activity_bar = jBool(value) orelse cfg.activity_bar;
     } else if (std.mem.eql(u8, key, "explorer_auto")) {
         cfg.explorer_auto = jBool(value) orelse cfg.explorer_auto;
+    } else if (std.mem.eql(u8, key, "editor_format_on_save") or std.mem.eql(u8, key, "format_on_save")) {
+        // Missing here until 2026-08-06, which meant `:w` formatting
+        // could be declared in the graph and was then silently ignored
+        // — a knob that reads as broken rather than as unset. Every
+        // option the TOML parser knows needs a case here too; a graph
+        // SUPERSEDES config.toml, so a gap is not a fallback.
+        cfg.format_on_save = jBool(value) orelse cfg.format_on_save;
     } else if (std.mem.eql(u8, key, "editor_lsp") or std.mem.eql(u8, key, "lsp")) {
         // Both spellings, no notice: the graph is machine-written, so
         // there is no line for a human to go and fix.
@@ -1158,6 +1165,10 @@ fn defaultBinds(kb: *Keybinds) void {
     // ...and opened on the current file (vim-vinegar's `-` energy, but
     // the whole tree, unfolded down to where you are).
     kb.bind('o', .{ .action = .tree_reveal });
+    // The resource monitor. On the APP leader for the tree's reason:
+    // "why is the fan spinning" gets asked from a terminal pane, and a
+    // chord only the editor could fire would be the wrong half.
+    kb.bind('r', .{ .action = .monitor_open });
 
     // The EDITOR leader's defaults — the two chords that were welded
     // into editor.zig until 2026-08-03. Same rule as everything above:

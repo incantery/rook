@@ -43,6 +43,7 @@
 package rook
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -402,6 +403,342 @@ func (p Plugin) appendTo(e *env) {
 	})
 }
 
+// ---- grammars ----
+
+// Grammar is a tree-sitter grammar, which is how rook highlights a
+// language. It is declared here for the same reason a plugin is:
+// rook loads code it did not compile, and where that code came from
+// should be a thing you wrote down rather than a thing rook guessed
+// by looking around the filesystem for another editor's parsers.
+//
+// Two ways to say where it comes from, and Source wins when both are
+// given:
+//
+//   Source  a prebuilt dylib, fetched and checked against SHA256 —
+//           the same path a sourced Plugin takes, pin and all.
+//   Repo    a grammar repository, cloned at Rev and compiled with cc
+//           on first use. No publisher needed, and the cost is that a
+//           machine with no compiler gets plain text.
+//
+// A grammar is fetched LAZILY: declaring one costs nothing until you
+// open a file in that language.
+type Grammar struct {
+	// Name is tree-sitter's own name for it — the dylib's basename and
+	// the exported symbol's suffix. "go", "tsx", "typescript".
+	Name   string
+	Source string
+	SHA256 string
+	Repo   string
+	Rev    string
+	// Dir is the subdirectory holding src/parser.c, for a repository
+	// that carries more than one grammar. tree-sitter-typescript ships
+	// "typescript" and "tsx" — genuinely different tables, because
+	// `<T>x` is a type assertion in one and a JSX element in the other.
+	Dir string
+}
+
+func (g Grammar) appendTo(e *env) {
+	if g.Name == "" {
+		fmt.Fprintln(os.Stderr, "rook env: a grammar needs a Name")
+		os.Exit(1)
+	}
+	if g.Source == "" && g.Repo == "" {
+		fmt.Fprintf(os.Stderr, "rook env: grammar %q needs a Source or a Repo\n", g.Name)
+		os.Exit(1)
+	}
+	e.put(node{
+		id: "grammar:" + g.Name, kind: "grammar", scope: "app",
+		name: g.Name, source: g.Source, sha256: g.SHA256,
+		repo: g.Repo, rev: g.Rev, dir: g.Dir,
+	})
+}
+
+// Grammars declares the well-known ones by name alone:
+//
+//	rook.Grammars{"go", "zig", "typescript", "tsx"}
+//
+// Each lowers to a plain Grammar with the upstream repository filled
+// in, so the graph records the exact repo it chose and `rook env`
+// diffs the same truth either way — a preset's rule: expand where
+// provenance can see. Pin one, or point it somewhere else, by writing
+// the Grammar out longhand instead.
+//
+// An unknown name is a compile-time impossibility and a runtime
+// error: rook cannot invent a repository for a language it has never
+// heard of, and guessing a GitHub URL from a name is how you end up
+// compiling somebody else's code.
+type Grammars []string
+
+func (g Grammars) appendTo(e *env) {
+	for _, name := range g {
+		k, ok := knownGrammars[name]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "rook env: no known repository for grammar %q — declare it as rook.Grammar{Name: %q, Repo: ...}\n", name, name)
+			os.Exit(1)
+		}
+		Grammar{Name: name, Repo: k.repo, Dir: k.dir}.appendTo(e)
+	}
+}
+
+// Language is a language server: which files are this language, where
+// its projects begin, and what to run for one.
+//
+// rook has NO built-in catalog. There is no list of languages compiled
+// into the binary, and adding one has never required a rook release —
+// it is a declaration, like a grammar or a plugin, for the same reason
+// all three are: rook runs code it did not write, and which code that
+// is should be a thing you wrote down.
+//
+// Two ways to say what to run, and Resolver wins when both are given:
+//
+//	Command   an argv, run as-is. Right for every language whose
+//	          answer is a binary and a marker file — Go is gopls plus
+//	          go.mod, Zig is zls plus build.zig, and neither needs a
+//	          line of code to work that out.
+//	Resolver  the name of a plugin rook asks, once per project root,
+//	          what to run and how to configure it. Right for the
+//	          languages where that question has no static answer:
+//	          Python has at least three primary toolchains and the
+//	          interpreter depends on the project, not the language.
+//
+// A bare Command[0] with no slash in it is searched for: the
+// project's own tool directories first (.venv/bin, node_modules/.bin),
+// then $PATH. A project's tooling beats the machine's.
+type Language struct {
+	// Name is what this language is called, in messages and in
+	// `rook lsp`. It need not match a grammar's name, though it
+	// usually does.
+	Name string
+	// Ext are the file extensions that ARE this language, leading dot
+	// included: {".ts", ".tsx"}. One server may own several.
+	Ext []string
+	// Roots are the filenames that mark where a project begins,
+	// nearest-ancestor-first. A server runs per project, not per file,
+	// so this is what decides how many of them you get. With none
+	// declared, the repository root is used, then the file's own
+	// directory.
+	Roots []string
+	// Command is the argv to run. Ignored when Resolver is set.
+	Command []string
+	// Resolver names a plugin holding OpLspResolve.
+	Resolver string
+	// Settings is initialization options, as a JSON object, sent on
+	// `initialized` and whenever the server asks with
+	// workspace/configuration. Static: anything that has to be
+	// discovered belongs in a Resolver.
+	Settings string
+}
+
+func (l Language) appendTo(e *env) {
+	if l.Name == "" {
+		fmt.Fprintln(os.Stderr, "rook env: a language needs a Name")
+		os.Exit(1)
+	}
+	if len(l.Ext) == 0 {
+		fmt.Fprintf(os.Stderr, "rook env: language %q needs at least one Ext — nothing routes to it otherwise\n", l.Name)
+		os.Exit(1)
+	}
+	if len(l.Command) == 0 && l.Resolver == "" {
+		fmt.Fprintf(os.Stderr, "rook env: language %q needs a Command or a Resolver\n", l.Name)
+		os.Exit(1)
+	}
+	if l.Settings != "" && !json.Valid([]byte(l.Settings)) {
+		fmt.Fprintf(os.Stderr, "rook env: language %q has Settings that are not JSON\n", l.Name)
+		os.Exit(1)
+	}
+	e.put(node{
+		id: "language:" + l.Name, kind: "language", scope: "app",
+		name: l.Name, ext: l.Ext, roots: l.Roots,
+		argv: l.Command, resolver: l.Resolver, settings: l.Settings,
+	})
+}
+
+// GrammarPath adds a directory of prebuilt grammars to look in —
+// nvim-treesitter's `parser/`, helix's `grammars/`, a shared checkout.
+//
+// rook does NOT go looking for these on its own, and that is
+// deliberate: a highlighter that works because another editor happens
+// to be installed is one that stops working when it is not, and
+// nothing else rook loads arrives that way. Naming the directory makes
+// it a declaration, so it previews, diffs and applies like the rest of
+// the graph.
+//
+//	rook.GrammarPath{"/Users/me/.local/share/nvim/site/parser"}
+//
+// A declared Grammar still wins: the graph's own answer for a language
+// is not shadowed by whatever a borrowed directory happens to hold.
+type GrammarPath []string
+
+func (g GrammarPath) appendTo(e *env) {
+	for _, p := range g {
+		e.put(node{id: "grammar-path:" + p, kind: "grammar-path", scope: "app", key: p})
+	}
+}
+
+// ---- official languages: one declaration, two nodes ----
+//
+// A language is a grammar (how it is coloured) and a server (what
+// understands it). They are separate nodes on purpose — plenty of
+// people want one without the other, and a grammar that only loads
+// when a server exists would be a grammar you cannot have on a machine
+// with no toolchain. These bundles declare both, so "I write Go" is
+// one line, and writing the two nodes out longhand stays the way to
+// mix and match.
+//
+// None of this is built into rook. Take these out of your config and
+// rook highlights nothing and serves nothing, which is the point: the
+// binary has no opinion about which languages exist.
+
+// GoLang is Go: gopls, rooted at go.mod, plus the grammar.
+//
+// Named GoLang and not Go because `rook.Go{}` would read as "rook,
+// go" at every call site and because Go is not a type name anybody
+// scanning a config would parse as a language.
+type GoLang struct {
+	// Server overrides the argv. Empty means gopls off $PATH.
+	Server []string
+	// NoGrammar declares the server without the highlighting, for a
+	// machine that already has the grammar from somewhere else.
+	NoGrammar bool
+}
+
+func (g GoLang) appendTo(e *env) {
+	if !g.NoGrammar {
+		Grammars{"go"}.appendTo(e)
+	}
+	Language{
+		Name:    "go",
+		Ext:     []string{".go"},
+		Roots:   []string{"go.mod"},
+		Command: argvOr(g.Server, []string{"gopls"}),
+	}.appendTo(e)
+}
+
+// Zig is Zig: zls, rooted at build.zig, plus the grammar.
+type Zig struct {
+	Server    []string
+	NoGrammar bool
+}
+
+func (z Zig) appendTo(e *env) {
+	if !z.NoGrammar {
+		Grammars{"zig"}.appendTo(e)
+	}
+	Language{
+		Name: "zig",
+		Ext:  []string{".zig", ".zon"},
+		// build.zig.zon first: a package has both, and its zon is the
+		// manifest — rooting at build.zig in a workspace with several
+		// packages gets a server that cannot see the dependency graph.
+		Roots:   []string{"build.zig.zon", "build.zig"},
+		Command: argvOr(z.Server, []string{"zls"}),
+	}.appendTo(e)
+}
+
+// Python is Python, through the resolver plugin.
+//
+// The one language whose answer is not static. Which server (pyright,
+// basedpyright, pylsp, jedi) and which interpreter (.venv, poetry, uv,
+// conda, an activated shell) are project questions, not language
+// questions, and rook is the wrong process to be answering them. The
+// plugin is asked once per project root.
+//
+// Declare it with a Server to skip the plugin entirely — a fixed
+// toolchain does not need anything discovered.
+type Python struct {
+	// Server, when set, replaces the resolver with a plain argv.
+	Server []string
+	// Settings ride along with a fixed Server: a JSON object of
+	// initialization options, e.g. `{"python":{"pythonPath":"..."}}`.
+	Settings  string
+	Grants    []string
+	NoGrammar bool
+}
+
+func (p Python) appendTo(e *env) {
+	if !p.NoGrammar {
+		Grammars{"python"}.appendTo(e)
+	}
+	l := Language{
+		Name:  "python",
+		Ext:   []string{".py", ".pyi"},
+		Roots: []string{"pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "requirements.txt"},
+	}
+	if len(p.Server) > 0 {
+		l.Command = p.Server
+		l.Settings = p.Settings
+		l.appendTo(e)
+		return
+	}
+	Plugin{
+		Name:    "lang-python",
+		Command: []string{bundleBin + "rook-plugin-lang-python"},
+		Load:    Lazy,
+		Grants:  grantsOr(p.Grants, []string{OpLspResolve}),
+	}.appendTo(e)
+	l.Resolver = "lang-python"
+	l.appendTo(e)
+}
+
+// TypeScript is TypeScript and JavaScript — one server for the family,
+// because tsserver has always type-checked .js from JSDoc and splitting
+// them would index the same project twice.
+//
+// Resolved by plugin for the same reason Python is: which server
+// (tsgo, vtsls, typescript-language-server) depends on the project's
+// own TypeScript, and pointing a server at the wrong compiler reports
+// errors that compiler does not have.
+type TypeScript struct {
+	Server    []string
+	Settings  string
+	Grants    []string
+	NoGrammar bool
+}
+
+func (t TypeScript) appendTo(e *env) {
+	if !t.NoGrammar {
+		Grammars{"typescript", "tsx"}.appendTo(e)
+	}
+	l := Language{
+		Name:  "typescript",
+		Ext:   []string{".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"},
+		Roots: []string{"tsconfig.json", "jsconfig.json", "deno.json", "package.json"},
+	}
+	if len(t.Server) > 0 {
+		l.Command = t.Server
+		l.Settings = t.Settings
+		l.appendTo(e)
+		return
+	}
+	Plugin{
+		Name:    "lang-typescript",
+		Command: []string{bundleBin + "rook-plugin-lang-typescript"},
+		Load:    Lazy,
+		Grants:  grantsOr(t.Grants, []string{OpLspResolve}),
+	}.appendTo(e)
+	l.Resolver = "lang-typescript"
+	l.appendTo(e)
+}
+
+func argvOr(given, def []string) []string {
+	if len(given) > 0 {
+		return given
+	}
+	return def
+}
+
+// The upstream repository for each grammar rook maps to a file
+// extension. Unpinned on purpose: a Rev here would be a version this
+// SDK has to keep current for everyone, and someone who wants a pin
+// wants their OWN pin — which is what the longhand Grammar is for.
+var knownGrammars = map[string]struct{ repo, dir string }{
+	"zig":        {"https://github.com/tree-sitter-grammars/tree-sitter-zig", ""},
+	"go":         {"https://github.com/tree-sitter/tree-sitter-go", ""},
+	"python":     {"https://github.com/tree-sitter/tree-sitter-python", ""},
+	"typescript": {"https://github.com/tree-sitter/tree-sitter-typescript", "typescript"},
+	"tsx":        {"https://github.com/tree-sitter/tree-sitter-typescript", "tsx"},
+}
+
 // Load is when a plugin spawns.
 type Load string
 
@@ -421,6 +758,7 @@ const (
 	OpSessionSend    = "session.send"   // type into an agent pane; the ask round trip's last hop
 	OpClipboardSet   = "clipboard.set"  // plugin → pasteboard; the human's ⌘V is the last hop
 	OpPanesActivity  = "panes.activity" // read pane output rates and last-input ages
+	OpLspResolve     = "lsp.resolve"    // answer "what server do I run for this project"
 )
 
 // ---- first-party plugins: typed declarations ----
@@ -644,13 +982,22 @@ type node struct {
 	value   any    // option
 	chord   string // keybind
 	command string // keybind
-	name    string // plugin, workspace
+	name    string // plugin, workspace, grammar
 	// plugin
 	argv   []string
 	load   string
 	grants []string
 	// workspace
 	root string
+	// grammar
+	repo string
+	rev  string
+	dir  string
+	// language
+	ext      []string
+	roots    []string
+	resolver string
+	settings string
 }
 
 // put appends, or replaces in place when the id already exists — the
@@ -707,6 +1054,62 @@ func (e *env) json() []byte {
 			writeString(&b, n.name)
 			b.WriteString(`,"root":`)
 			writeString(&b, n.root)
+		case "grammar-path":
+			b.WriteString(`,"path":`)
+			writeString(&b, n.key)
+		case "grammar":
+			b.WriteString(`,"name":`)
+			writeString(&b, n.name)
+			// Source wins when both are given, and the graph records
+			// only the one that will be used: two answers to "where
+			// does this come from" is the thing provenance exists to
+			// prevent.
+			if n.source != "" {
+				b.WriteString(`,"source":`)
+				writeString(&b, n.source)
+				if n.sha256 != "" {
+					b.WriteString(`,"sha256":`)
+					writeString(&b, n.sha256)
+				}
+			} else {
+				b.WriteString(`,"repo":`)
+				writeString(&b, n.repo)
+				if n.rev != "" {
+					b.WriteString(`,"rev":`)
+					writeString(&b, n.rev)
+				}
+				if n.dir != "" {
+					b.WriteString(`,"dir":`)
+					writeString(&b, n.dir)
+				}
+			}
+		case "language":
+			b.WriteString(`,"name":`)
+			writeString(&b, n.name)
+			b.WriteString(`,"ext":`)
+			writeStrings(&b, n.ext)
+			if len(n.roots) > 0 {
+				b.WriteString(`,"roots":`)
+				writeStrings(&b, n.roots)
+			}
+			// One of the two, never both — the same rule a plugin's
+			// source-or-command follows, and for the same reason: two
+			// answers to "what runs here" is what provenance exists to
+			// prevent. A resolver supersedes a command.
+			if n.resolver != "" {
+				b.WriteString(`,"resolver":`)
+				writeString(&b, n.resolver)
+			} else {
+				b.WriteString(`,"command":`)
+				writeStrings(&b, n.argv)
+			}
+			if n.settings != "" {
+				// Verbatim, not re-encoded: it was validated as JSON at
+				// declaration time, and re-encoding would reorder its
+				// keys and break canonical bytes across SDKs.
+				b.WriteString(`,"settings":`)
+				b.WriteString(n.settings)
+			}
 		case "plugin":
 			b.WriteString(`,"name":`)
 			writeString(&b, n.name)

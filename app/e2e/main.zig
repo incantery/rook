@@ -47,6 +47,7 @@ const scenarios = [_]Scenario{
     .{ .name = "cli", .what = "the binary is its own ctl client: rook <verb> answers, err exits 1, a file opens", .run = cli },
     .{ .name = "filetree", .what = "the tree takes over a pane, folds in place, reveals the current file, toggles back", .run = filetree },
     .{ .name = "bufline", .what = "the buffer line: documents chip up, :b/:bn switch, a chip click lands blind", .run = bufline },
+    .{ .name = "monitor", .what = "the resource monitor: live rows, disk classifies, keep refuses deletion", .run = monitor },
     .{ .name = "excmd", .what = "the editor's : reaches the registry (:PaneSplitRight)", .run = excmd },
     .{ .name = "sidepane", .what = "side pane retiles the grid and flips edges", .run = sidepane },
     .{ .name = "quitall", .what = ":qa reaches every editor pane and leaves the terminals alone", .run = quitAll },
@@ -66,6 +67,8 @@ const scenarios = [_]Scenario{
     .{ .name = "lspformat", .what = "format-on-save: :w formats then writes, and writes anyway when nothing answers", .run = lspFormat },
     .{ .name = "lsppython", .what = "a second language is data: python roots at pyproject.toml and lands the same way", .run = lspPython },
     .{ .name = "lspts", .what = "ts and tsx share one server, root at the tsconfig, and split only on the grammar", .run = lspTs },
+    .{ .name = "lsplang", .what = "no built-in catalog: a language is a declaration, and each way of having no server says which one it is", .run = lspLang },
+    .{ .name = "lspretarget", .what = "a pane that retargets ITSELF — file tree, :e — still gets its server, and drops it when there is none", .run = lspRetarget },
     .{ .name = "docshare", .what = "one file in two panes is ONE document: edits, dirty flag and :w are shared", .run = docShare },
     .{ .name = "findfiles", .what = "⌘⇧F: scan honours the ignore rules, results group by file, Enter jumps to the line", .run = findInFiles },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
@@ -3352,6 +3355,43 @@ fn explorerAuto(gpa: std.mem.Allocator, bin: []const u8) !void {
 /// src/lsp.zig's own tests. What this proves is the wiring: that the
 /// app finds a root, spawns for it, opens the document, routes the
 /// publish to the pane showing that file, and converts the columns.
+/// The graph a fake-server scenario runs on: one declared language
+/// whose command re-execs THIS binary as a language server.
+///
+/// Written out rather than overridden by an environment variable —
+/// which is what these scenarios used to do, back when rook carried a
+/// catalog and `ROOK_LSP_GO` was the only way to point one of its three
+/// languages somewhere else. There is no catalog now, so the fake
+/// arrives the same way a real server does: as a declaration. The suite
+/// exercises the real path instead of an escape hatch beside it.
+fn langGraph(buf: []u8, name: []const u8, exts: []const u8, roots: []const u8, serves: []const u8) ![]const u8 {
+    return langGraphWith(buf, name, exts, roots, serves, "");
+}
+
+/// The same, plus more nodes.
+///
+/// Needed because a graph SUPERSEDES config.toml rather than merging
+/// with it: a scenario that declares a language and then sets an option
+/// in `config_extra` silently loses the option. That cost an afternoon
+/// once — format-on-save read as broken when it was simply never
+/// configured.
+fn langGraphWith(
+    buf: []u8,
+    name: []const u8,
+    exts: []const u8,
+    roots: []const u8,
+    serves: []const u8,
+    extra: []const u8,
+) ![]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "{{\"rookEnvironment\":1,\"nodes\":[{{\"id\":\"language:{s}\",\"kind\":\"language\"," ++
+            "\"scope\":\"app\",\"name\":\"{s}\",\"ext\":[{s}],\"roots\":[{s}]," ++
+            "\"command\":[\"{s}\",\"--fake-lsp\",\"{s}\"]}}{s}{s}]}}",
+        .{ name, name, exts, roots, self_exe, serves, if (extra.len > 0) "," else "", extra },
+    );
+}
+
 fn lspScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
     var scratch_buf: [192]u8 = undefined;
     const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lsp-{d}", .{h.runPid()});
@@ -3376,12 +3416,12 @@ fn lspScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.writeFile(other_go, "package main\n\nfunc nope() int {\n\treturn 1\n}\n");
 
     // The fake server is THIS BINARY, re-exec'd. See fakeLsp below.
-    var envval_buf: [640]u8 = undefined;
-    const envval = try std.fmt.bufPrint(&envval_buf, "{s} --fake-lsp {s}", .{ self_exe, main_go });
+    var graph_buf: [1024]u8 = undefined;
+    const graph = try langGraph(&graph_buf, "go", "\".go\"", "\"go.mod\"", main_go);
 
     const app = try h.Instance.start(gpa, bin, .{
         .cwd = proj,
-        .env = &.{.{ "ROOK_LSP_GO", envval }},
+        .env_json = graph,
     });
     defer {
         app.stop();
@@ -3432,10 +3472,40 @@ fn lspScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
     // assuming a timing.
     _ = try app.ctl("type K");
     {
-        const dump = try app.waitCtl("dump", "func main()", 5_000);
-        // The markdown fence is noise in a one-line status; the
-        // signature is the answer.
-        try h.expectNotContains(dump, "```", "hover shows the signature, not the fence");
+        // Waited for on `lsp`, not on the grid: `func main()` is on
+        // line 5 of the buffer, so waiting for THAT in the dump is a
+        // wait that returns before the server has said anything. It
+        // did, for as long as hover was a status line.
+        const lsp2 = try app.waitCtl("lsp", "hover on", 5_000);
+        try h.expectContains(lsp2, "lang:go", "wearing the language the fence claimed");
+        const dump = try app.ctl("dump");
+        // The markdown is taken apart, not printed. A fence, a backtick
+        // and a pair of asterisks reaching the screen would each mean
+        // the float is showing you the source of the answer.
+        try h.expectNotContains(dump, "```", "the fence is markup, not content");
+        try h.expectNotContains(dump, "**", "and so is the emphasis");
+        try h.expectNotContains(dump, "https://pkg.go.dev", "a link keeps its label, not its URL");
+        try h.expectContains(dump, "deliberate", "the emphasised word survives its markers");
+        try h.expectContains(dump, "main on pkg.go.dev", "the link's label survives its URL");
+        // A box, not a status line. The border is the whole difference
+        // between a float over the buffer and a message under it.
+        try h.expectContains(dump, "╭", "the float has a border");
+        try h.expectContains(dump, "╰", "on both ends");
+        // The author hard-wrapped their doc comment; the float rewraps
+        // it to its own measure, so the source's line break is gone.
+        try h.expectContains(dump, "which does not exist", "the doc comment reflowed rather than keeping the server's breaks");
+    }
+
+
+    // Any other key closes the float AND does what it was going to do —
+    // nothing is swallowed. `0` is a motion, so the proof is that the
+    // float is gone and the cursor moved in the same keystroke.
+    _ = try app.ctl("type 0");
+    {
+        _ = try app.waitCtl("lsp", "hover off", 3_000);
+        const dump = try app.ctl("dump");
+        try h.expectNotContains(dump, "╭", "one keystroke closes it");
+        try h.expectContains(dump, "6:1", "and the keystroke still moved the cursor");
     }
 
     // `gd` — a LocationLink, which is what a linkSupport client gets.
@@ -3624,13 +3694,13 @@ fn lspFormat(gpa: std.mem.Allocator, bin: []const u8) !void {
     const main_go = try std.fmt.bufPrint(&main_buf, "{s}/main.go", .{proj});
     try h.writeFile(main_go, body);
 
-    var envval_buf: [640]u8 = undefined;
-    const envval = try std.fmt.bufPrint(&envval_buf, "{s} --fake-lsp {s}", .{ self_exe, main_go });
+    var graph_buf: [1024]u8 = undefined;
+    const graph = try langGraphWith(&graph_buf, "go", "\".go\"", "\"go.mod\"", main_go,
+        "{\"id\":\"option:app:editor-format-on-save\",\"kind\":\"option\",\"scope\":\"app\",\"key\":\"editor-format-on-save\",\"value\":true}");
 
     const app = try h.Instance.start(gpa, bin, .{
         .cwd = proj,
-        .env = &.{.{ "ROOK_LSP_GO", envval }},
-        .config_extra = "editor-format-on-save = true\n",
+        .env_json = graph,
     });
     defer {
         app.stop();
@@ -3665,13 +3735,13 @@ fn lspFormat(gpa: std.mem.Allocator, bin: []const u8) !void {
     var slow_buf: [288]u8 = undefined;
     const slow_go = try std.fmt.bufPrint(&slow_buf, "{s}/slow.go", .{proj});
     try h.writeFile(slow_go, "package main\n\nvar y  = 2\n");
-    var slowenv_buf: [640]u8 = undefined;
-    const slowenv = try std.fmt.bufPrint(&slowenv_buf, "{s} --fake-lsp {s}", .{ self_exe, slow_go });
+    var slowgraph_buf: [1024]u8 = undefined;
+    const slowgraph = try langGraphWith(&slowgraph_buf, "go", "\".go\"", "\"go.mod\"", slow_go,
+        "{\"id\":\"option:app:editor-format-on-save\",\"kind\":\"option\",\"scope\":\"app\",\"key\":\"editor-format-on-save\",\"value\":true}");
 
     const app2 = try h.Instance.start(gpa, bin, .{
         .cwd = proj,
-        .env = &.{.{ "ROOK_LSP_GO", slowenv }},
-        .config_extra = "editor-format-on-save = true\n",
+        .env_json = slowgraph,
     });
     defer {
         app2.stop();
@@ -3722,11 +3792,11 @@ fn lspAction(gpa: std.mem.Allocator, bin: []const u8) !void {
     const main_go = try std.fmt.bufPrint(&main_buf, "{s}/main.go", .{proj});
     try h.writeFile(main_go, "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(nope())\n}\n");
 
-    var envval_buf: [640]u8 = undefined;
-    const envval = try std.fmt.bufPrint(&envval_buf, "{s} --fake-lsp {s}", .{ self_exe, main_go });
+    var graph_buf: [1024]u8 = undefined;
+    const graph = try langGraph(&graph_buf, "go", "\".go\"", "\"go.mod\"", main_go);
     const app = try h.Instance.start(gpa, bin, .{
         .cwd = proj,
-        .env = &.{.{ "ROOK_LSP_GO", envval }},
+        .env_json = graph,
     });
     defer {
         app.stop();
@@ -3872,9 +3942,15 @@ fn fakeHandle(gpa: std.mem.Allocator, body: []const u8, target: []const u8) !voi
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/hover")) {
+        // Shaped like gopls: a fenced signature, a doc comment the
+        // author hard-wrapped at their own margin, inline markup, and a
+        // pkg.go.dev link on the end. Everything the float has to take
+        // apart is in here on purpose.
         try w.writer.print(
             "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"contents\":{{\"kind\":\"markdown\"," ++
-                "\"value\":\"```go\\nfunc main()\\n```\"}}}}}}",
+                "\"value\":\"```go\\nfunc main()\\n```\\n\\nmain is the entry point. It calls `nope`,\\n" ++
+                "which does not exist, and that is **deliberate**.\\n\\n" ++
+                "[`main` on pkg.go.dev](https://pkg.go.dev/main)\"}}}}}}",
             .{id orelse 0},
         );
         try fakeSend(gpa, w.written());
@@ -4075,12 +4151,12 @@ fn lspPython(gpa: std.mem.Allocator, bin: []const u8) !void {
     // diagnostic clamped to the last line would prove less.
     try h.writeFile(app_py, "import json\n\n\ndef main() -> None:\n    \"\"\"Doc.\"\"\"\n    print(nope())\n");
 
-    var envval_buf: [640]u8 = undefined;
-    const envval = try std.fmt.bufPrint(&envval_buf, "{s} --fake-lsp {s}", .{ self_exe, app_py });
+    var graph_buf: [1024]u8 = undefined;
+    const graph = try langGraph(&graph_buf, "python", "\".py\",\".pyi\"", "\"pyproject.toml\",\"setup.py\"", app_py);
 
     const app = try h.Instance.start(gpa, bin, .{
         .cwd = proj,
-        .env = &.{.{ "ROOK_LSP_PYTHON", envval }},
+        .env_json = graph,
     });
     defer {
         app.stop();
@@ -4119,6 +4195,212 @@ fn lspPython(gpa: std.mem.Allocator, bin: []const u8) !void {
 /// while taking different GRAMMARS: the split is about `<T>x` being a
 /// type assertion in one and a JSX element in the other, which is a
 /// parser's problem and never a server's.
+/// A pane that retargets ITSELF still gets its language server.
+///
+/// The app attaches a server when IT opens a document. But a pane can
+/// change what it holds without the app doing anything: Enter on a row
+/// of an in-pane file tree, or `:e` typed into the editor. Both go
+/// through Editor.open and nowhere near the app's open path, so for as
+/// long as there was no seam there, every file opened from the tree
+/// arrived with no server at all and every `:e` arrived still wired to
+/// the PREVIOUS file's.
+///
+/// The other half is the path. `re .` anchors a tree at `<cwd>/.`, and
+/// its rows join through that dot — a spelling that is a second
+/// document as far as the doc registry is concerned, and one gopls
+/// answers with "No packages found for open file".
+fn lspRetarget(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lspre-{d}", .{h.runPid()});
+    var proj_buf: [256]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{scratch});
+    try h.mkdirP(proj);
+
+    var f_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/go.mod", .{proj}), "module smoke\n\ngo 1.21\n");
+    var main_buf: [288]u8 = undefined;
+    const main_go = try std.fmt.bufPrint(&main_buf, "{s}/main.go", .{proj});
+    try h.writeFile(main_go, "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(nope())\n}\n");
+    var other_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&other_buf, "{s}/other.go", .{proj}), "package main\n\nfunc nope() int {\n\treturn 1\n}\n");
+    // A file of no known language, to retarget ONTO. Its job is to
+    // prove the seams come back off.
+    var note_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&note_buf, "{s}/notes.txt", .{proj}), "just words\n");
+
+    var graph_buf: [1024]u8 = undefined;
+    const graph = try langGraph(&graph_buf, "go", "\".go\"", "\"go.mod\"", main_go);
+
+    const app = try h.Instance.start(gpa, bin, .{
+        .cwd = proj,
+        .env_json = graph,
+    });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // Open the DIRECTORY as an in-pane tree, spelled with the trailing
+    // dot `re .` produces. Nothing about a tree needs a server; what is
+    // being set up is a pane that is about to retarget itself.
+    var cmd_buf: [320]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}/.", .{proj}));
+    _ = try app.waitCtl("dump", "main.go", 8_000);
+    try h.expectContains(try app.ctl("lsp"), "pane gutter:no", "a tree has no server, and reserves no sign column");
+
+    // Down to main.go and Enter. Rows are `../`, go.mod, main.go,
+    // other.go, notes.txt — sorted, with the climb row first.
+    _ = try app.ctl("type jj");
+    _ = try app.ctl("enter");
+
+    // THE regression. Before the seam existed this stayed `gutter:no`
+    // forever: the document opened, the app never heard, and hover said
+    // "no language server for this file" in a module with a server
+    // already running in it.
+    _ = try app.waitCtl("lsp", "pane gutter:yes", 8_000);
+    {
+        // The gutter is the seam; readiness is the handshake behind it,
+        // and it lands a frame or two later.
+        // The diagnostic is the proof the server holds this document,
+        // not merely that a process started: it is published unprompted
+        // after initialize, and it lands on the pane only if the pane's
+        // path is the one the server was given.
+        const out = try app.waitCtl("lsp", "pane gutter:yes errors:1", 8_000);
+        try h.expectContains(out, "server go ready", "the tree's Enter started the server");
+        try h.expectContains(out, "main.go", "and the server was told about the file");
+        // Spelled clean. `proj/./main.go` would be a second document
+        // and a URI gopls rejects.
+        try h.expectNotContains(out, "/./", "the tree's anchor dot never reaches the server");
+        const docs = try app.ctl("docs");
+        try h.expectNotContains(docs, "/./", "nor the document registry, where the path IS the identity");
+        try h.expectContains(docs, "proj/main.go", "one file, spelled the one way");
+    }
+
+    // Hover proves the server holds this as a real document rather than
+    // merely knowing its name.
+    _ = try app.ctl("type 5G");
+    _ = try app.ctl("type w");
+    _ = try app.ctl("type K");
+    {
+        const out = try app.waitCtl("lsp", "hover on", 8_000);
+        try h.expectContains(out, "lang:go", "and answers about it");
+    }
+    _ = try app.ctl("press ESC");
+
+    // `:e` is the same seam from the other direction: this pane already
+    // has a server, and the file it moves to has to be opened in it.
+    _ = try app.ctl("type :e other.go");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("docs", "proj/other.go", 8_000);
+    {
+        const out = try app.ctl("lsp");
+        try h.expectContains(out, "pane gutter:yes", "`:e` keeps the sign column");
+        try h.expectContains(out, "server go ready", "and the server it came in with");
+    }
+    // The server ANSWERING about the new file is the proof — the
+    // manager's own listing only names files it has diagnostics for,
+    // and a clean file has none.
+    _ = try app.ctl("type 3G");
+    _ = try app.ctl("type w");
+    _ = try app.ctl("type K");
+    _ = try app.waitCtl("lsp", "hover on", 8_000);
+    _ = try app.ctl("press ESC");
+
+    // And onto a file no server serves. The seams have to come OFF:
+    // hooks pointing at a manager that was never told about this
+    // document are worse than no hooks, and a sign column that will
+    // never hold a sign is a column of wasted width.
+    _ = try app.ctl("type :e notes.txt");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("lsp", "pane gutter:no", 8_000);
+    _ = try app.ctl("type K");
+    {
+        const dump = try app.ctl("dump");
+        // And says WHICH silence this is: `.txt` is a language nobody
+        // declared, which is a config edit rather than an install.
+        try h.expectContains(dump, "no language declared for .txt files", "and it says so plainly");
+        try h.expectNotContains(dump, "╭", "rather than floating the last file's documentation");
+    }
+}
+
+/// rook has no catalog of languages, and each way of having no server
+/// says which way it is.
+///
+/// Both halves are the point of the declaration model. Before it, three
+/// languages were compiled into the binary and adding a fourth meant
+/// shipping a rook; a `.zig` file in a Zig repo got the same sentence as
+/// a `.md` file, and a project whose toolchain was simply not installed
+/// got it too. One sentence for four problems, only one of which the
+/// reader could act on.
+fn lspLang(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lsplang-{d}", .{h.runPid()});
+    var proj_buf: [256]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{scratch});
+    try h.mkdirP(proj);
+
+    var f_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/build.zig", .{proj}), "// marker\n");
+    var zig_buf: [288]u8 = undefined;
+    const zig_file = try std.fmt.bufPrint(&zig_buf, "{s}/main.zig", .{proj});
+    try h.writeFile(zig_file, "const std = @import(\"std\");\n");
+    var md_buf: [288]u8 = undefined;
+    const md_file = try std.fmt.bufPrint(&md_buf, "{s}/README.md", .{proj});
+    try h.writeFile(md_file, "# hi\n");
+
+    // A language declared against a server that is not on this machine.
+    // Nothing here is built in: take this node out and rook has never
+    // heard of Zig.
+    var graph_buf: [1024]u8 = undefined;
+    const graph = try std.fmt.bufPrint(&graph_buf,
+        "{{\"rookEnvironment\":1,\"nodes\":[{{\"id\":\"language:zig\",\"kind\":\"language\"," ++
+            "\"scope\":\"app\",\"name\":\"zig\",\"ext\":[\".zig\"],\"roots\":[\"build.zig\"]," ++
+            "\"command\":[\"rook-no-such-language-server\"]}}]}}", .{});
+
+    const app = try h.Instance.start(gpa, bin, .{ .cwd = proj, .env_json = graph });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // Declared, and reported as declared even with nothing running —
+    // "which languages does this rook know about" is a question with an
+    // answer now, and it is the config's answer.
+    {
+        const out = try app.ctl("lsp");
+        try h.expectContains(out, "language zig declared", "the declaration is what rook knows");
+        try h.expectContains(out, "rook-no-such-language-server", "naming the binary it was told to run");
+    }
+
+    var cmd_buf: [320]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{zig_file}));
+    try app.waitText("const std", 5_000);
+    _ = try app.ctl("type K");
+    {
+        // DECLARED but not installed. The fix is an install, and the
+        // message says which one — it used to say "no language server
+        // for this file", which is true of a .md file too.
+        const dump = try app.waitCtl("dump", "not installed", 5_000);
+        try h.expectContains(dump, "zig is declared", "the language was found");
+        try h.expectContains(dump, "rook-no-such-language-server is not installed", "and the binary named");
+    }
+
+    // No sign column: one reserved for diagnostics that can never
+    // arrive is a column of wasted width.
+    try h.expectContains(try app.ctl("lsp"), "pane gutter:no", "and nothing is reserved for it");
+
+    // A file of a language nobody declared. A DIFFERENT problem with a
+    // different fix — a config edit, not an install.
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{md_file}));
+    try app.waitText("hi", 5_000);
+    _ = try app.ctl("type K");
+    {
+        const dump = try app.waitCtl("dump", "no language declared", 5_000);
+        try h.expectContains(dump, ".md", "naming the extension nothing claims");
+        try h.expectNotContains(dump, "not installed", "which is not the same problem as a missing binary");
+    }
+}
+
 fn lspTs(gpa: std.mem.Allocator, bin: []const u8) !void {
     var scratch_buf: [192]u8 = undefined;
     const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lspts-{d}", .{h.runPid()});
@@ -4144,12 +4426,12 @@ fn lspTs(gpa: std.mem.Allocator, bin: []const u8) !void {
     const tsx_file = try std.fmt.bufPrint(&tsx_buf, "{s}/view.tsx", .{src});
     try h.writeFile(tsx_file, "export const V = () => <span>hi</span>;\n");
 
-    var envval_buf: [640]u8 = undefined;
-    const envval = try std.fmt.bufPrint(&envval_buf, "{s} --fake-lsp {s}", .{ self_exe, ts_file });
+    var graph_buf: [1024]u8 = undefined;
+    const graph = try langGraph(&graph_buf, "typescript", "\".ts\",\".tsx\"", "\"tsconfig.json\",\"package.json\"", ts_file);
 
     const app = try h.Instance.start(gpa, bin, .{
         .cwd = appdir,
-        .env = &.{.{ "ROOK_LSP_TYPESCRIPT", envval }},
+        .env_json = graph,
     });
     defer {
         app.stop();
@@ -4549,4 +4831,117 @@ fn panelFold(gpa: std.mem.Allocator, bin: []const u8) !void {
     // A second click on the selected row is the Enter: the action menu.
     _ = try app.ctl(try std.fmt.bufPrint(&cbuf, "click {d} {d}", .{ g.x + @divTrunc(g.w, 2), top + 5 }));
     try h.expectContains(try app.ctl("sidepane"), "mode:actions", "clicking the selected row opens its menu");
+}
+
+/// The resource monitor, both halves.
+///
+/// The assertions that matter are the SAFETY ones: a `keep` category
+/// must refuse to arm, and an unclassified directory must refuse with a
+/// reason. Those are the two ways this feature could destroy something,
+/// and neither is provable from a unit test of the view model alone —
+/// the classifier, the fill and the key path all have to agree.
+fn monitor(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // One of each: unambiguous build output, irreplaceable agent
+    // history, and something the classifier has no opinion about.
+    var pb: [224]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&pb, "{s}/proj", .{app.dirPath()});
+    var db: [280]u8 = undefined;
+    try h.mkdirP(try std.fmt.bufPrint(&db, "{s}/node_modules/dep", .{proj}));
+    try h.mkdirP(try std.fmt.bufPrint(&db, "{s}/.claude/projects", .{proj}));
+    try h.mkdirP(try std.fmt.bufPrint(&db, "{s}/build", .{proj}));
+
+    // Distinct sizes so the rows sort in a KNOWN order: the tree ranks
+    // biggest-first, and a test that walked it blind could not say
+    // which category it had just refused.
+    var fb: [280]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&fb, "{s}/node_modules/dep/big.js", .{proj}), "x" ** 200000);
+    try h.writeFile(try std.fmt.bufPrint(&fb, "{s}/.claude/projects/a.jsonl", .{proj}), "y" ** 90000);
+    try h.writeFile(try std.fmt.bufPrint(&fb, "{s}/build/out.o", .{proj}), "z" ** 8000);
+
+    // The scan root follows the pane's shell cwd — through the PARKED
+    // shell once the monitor takes the pane over — so put the shell in
+    // the fixture first.
+    _ = try app.ctlFmt("type cd {s}", .{proj});
+    _ = try app.ctl("enter");
+    _ = try app.ctl("type PS1='rdy$ '");
+    _ = try app.ctl("enter");
+    try app.waitText("rdy$", 5000);
+
+    _ = try app.ctl("monitor");
+
+    // --- LIVE ---------------------------------------------------------
+    var buf: [32 * 1024]u8 = undefined;
+    var scr = try app.screen(&buf);
+    try h.expectContains(scr, "LIVE", "the section tabs render");
+    try h.expectContains(scr, "DISK", "both sections are offered");
+
+    // A rate needs two samples, so the first frame says so rather than
+    // drawing a column of zeroes — a working monitor and a broken one
+    // must not look the same. Then the real totals arrive.
+    try app.waitText("CPU", 8000);
+    scr = try app.screen(&buf);
+    try h.expectContains(scr, "MEM", "the memory line is up");
+    try h.expectContains(scr, "COMMAND", "the process table header is up");
+
+    // --- DISK ---------------------------------------------------------
+    _ = try app.ctl("monitor disk");
+    _ = try app.ctl("type s");
+    try app.waitText("rebuilds", 30000);
+
+    scr = try app.screen(&buf);
+    try h.expectContains(scr, "node_modules", "unambiguous build output is listed");
+
+    // The classifier's opinions read blind, which is the form an agent
+    // would use to answer "what can I clean up".
+    const disk = try app.ctl("disk");
+    try h.expectContains(disk, "regenerable\tnode-modules", "node_modules classifies as regenerable");
+    try h.expectContains(disk, "keep\tagent-transcripts", "agent history classifies as keep");
+
+    // --- the safety properties ---------------------------------------
+    // Row 0, node_modules: regenerable, so it MUST arm — and the
+    // confirm must name the path it is about to remove.
+    _ = try app.ctl("type g");
+    _ = try app.ctl("type x");
+    scr = try app.screen(&buf);
+    try h.expectContains(scr, "[y] confirm", "a regenerable row arms a confirm");
+    try h.expectContains(scr, "node_modules", "the confirm names the path it will remove");
+
+    // Any key but y cancels: the destructive path needs explicit intent.
+    _ = try app.ctl("type n");
+    scr = try app.screen(&buf);
+    try h.expect(std.mem.indexOf(u8, scr, "[y] confirm") == null, "any key but y cancels", .{});
+
+    // Row 1 is `.claude`, which is NOT itself a category — only
+    // `.claude/projects` under it is, and that distinction is the
+    // classifier being precise rather than greedy. So drill in, which
+    // exercises the drill-down path on the way to the real assertion.
+    _ = try app.ctl("type j");
+    _ = try app.ctl("type l");
+    scr = try app.screen(&buf);
+    try h.expectContains(scr, "projects", "drilling into .claude lists its children");
+
+    // The transcripts themselves: irreplaceable. Must refuse, name the
+    // category, and stage NOTHING. The assertion the classifier exists
+    // for.
+    _ = try app.ctl("type g");
+    _ = try app.ctl("type x");
+    scr = try app.screen(&buf);
+    try h.expect(std.mem.indexOf(u8, scr, "[y] confirm") == null, "a keep category must never arm a confirm", .{});
+    try h.expectContains(scr, "agent-transcripts", "the refusal names the category");
+
+    // Back out, then `build`: deliberately unclassified. It must refuse
+    // too, and SAY SO — a delete key that silently does nothing reads
+    // as broken.
+    _ = try app.ctl("type h");
+    _ = try app.ctl("type G");
+    _ = try app.ctl("type x");
+    scr = try app.screen(&buf);
+    try h.expect(std.mem.indexOf(u8, scr, "[y] confirm") == null, "an unclassified dir must not arm", .{});
+    try h.expectContains(scr, "no opinion", "the refusal explains itself");
 }
