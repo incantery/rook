@@ -46,6 +46,7 @@ const bufferpkg = @import("buffer.zig");
 const regex = @import("regex.zig");
 const unicase = @import("unicase.zig");
 const hoverdoc = @import("hoverdoc.zig");
+const fuzzy = @import("fuzzy.zig");
 const vt = @import("ghostty-vt");
 const stats = @import("stats.zig");
 
@@ -103,7 +104,6 @@ pub const Style = enum(u8) {
     // borrowing the selection's would make it look like text you had
     // highlighted rather than a thing offering to change it.
     cpl_item,
-    cpl_sel,
     cpl_detail,
     // A candidate's label, coloured by WHAT IT IS — the protocol sends
     // a CompletionItemKind and every other editor uses it. Borrowing
@@ -2480,7 +2480,14 @@ pub const Editor = struct {
                 var j = i;
                 while (j < s.len and charClass(s[j]) == 1) j += 1;
                 const w = s[i..j];
-                if (w.len > prefix.len and std.mem.startsWith(u8, w, prefix)) {
+                // FUZZY, like the server's half of the list: `pln` finds
+                // `Println` here too, or the buffer's own words would be
+                // the one place in the menu that still demanded a
+                // prefix. Only the FILTER changes — the order below is
+                // still vim's, forward from the cursor and then
+                // wrapping, which is a different promise from ranking by
+                // match quality and the one ctrl-n has always kept.
+                if (w.len > prefix.len and fuzzy.matches(w, prefix)) {
                     if (cands.items.len >= max_cpl or blob.items.len + w.len > max_cpl_bytes) break :outer;
                     const start: u32 = @intCast(blob.items.len);
                     blob.appendSlice(gpa, w) catch break :outer;
@@ -2984,12 +2991,32 @@ pub const Editor = struct {
         // editor's job. Nobody noticed while the only way in was one
         // ctrl-n; a menu that opens as you type shows the whole thing.
         //
-        // Case-insensitive prefix, not fuzzy: it is what the buffer's
-        // own words already do, and a list you can predict beats one
-        // that is occasionally cleverer.
-        for (items) |it| {
+        // FUZZY, and ranked by how well each candidate matches — which
+        // is the only ordering that makes fuzzy filtering usable. A
+        // prefix filter could keep the server's order because everything
+        // that survived it started the same way; a subsequence filter
+        // admits `parallelResearchIndex` for `pri`, and leaving that in
+        // the server's position would bury `print` under it.
+        //
+        // The server's own ranking is the TIEBREAK, not the loser: it is
+        // the only signal that knows what the cursor is inside of, and
+        // between two equally good matches it is still the better guide.
+        const Scored = struct { i: u32, score: i32 };
+        var scored: std.ArrayListUnmanaged(Scored) = .empty;
+        defer scored.deinit(self.gpa);
+        for (items, 0..) |it, i| {
             if (it.text.len == 0) continue;
-            if (prefix.len > 0 and !std.ascii.startsWithIgnoreCase(it.text, prefix)) continue;
+            const m = fuzzy.match(it.text, prefix, fuzzy.ident) orelse continue;
+            scored.append(self.gpa, .{ .i = @intCast(i), .score = m.score }) catch break;
+        }
+        std.mem.sort(Scored, scored.items, {}, struct {
+            fn less(_: void, a: Scored, b: Scored) bool {
+                if (a.score != b.score) return a.score > b.score;
+                return a.i < b.i;
+            }
+        }.less);
+        for (scored.items) |s| {
+            const it = items[s.i];
             self.cplPushFull(it.text, it.detail, it.kind, it.doc, it.raw);
         }
         var k: usize = 0;
@@ -7619,7 +7646,6 @@ pub const Editor = struct {
             if (r == 0 or r == draw + 1) continue;
 
             const idx = top + r - 1;
-            const sel = idx == self.cpl_idx;
             var x = left + 2;
             const limit = left + menu_w - 2;
             if (idx >= offers) {
@@ -7628,18 +7654,37 @@ pub const Editor = struct {
             }
 
             // The label, coloured by WHAT IT IS, with the characters
-            // you actually typed picked out. Zed bolds those; a
-            // character grid has no bold, so they take the accent —
-            // same job, which is showing you why this row is here.
+            // you actually typed picked out brighter. Zed bolds those; a
+            // character grid has no bold, so brighter is the closest
+            // thing — same job, which is showing you why this row is
+            // here.
+            //
+            // The MATCHED characters, not a prefix run. With fuzzy
+            // matching those are scattered: type `pln` and what belongs
+            // lit up in `Println` is p, l and n. Highlighting the first
+            // three characters instead would be pointing at `Pri`,
+            // which is not why the row is in the list.
+            //
+            // No brighter ink for the selected row any more. It used to
+            // take one, and now the pill under it says which row is
+            // selected — while sharing the emphasis colour would have
+            // made the typed characters vanish on exactly one row.
             const word = self.cplWord(idx);
-            const base: Style = cplKindStyle(self.cplKind(idx)) orelse
-                (if (sel) .cpl_sel else .cpl_item);
+            const base: Style = cplKindStyle(self.cplKind(idx)) orelse .cpl_item;
             const pre = self.cplPrefix();
-            const hit = pre.len > 0 and pre.len <= word.len and
-                std.ascii.startsWithIgnoreCase(word, pre);
-            if (hit) {
-                putRow(out, &x, limit, word[0..pre.len], .cpl_match);
-                putRow(out, &x, limit, word[pre.len..], base);
+            const hits: ?fuzzy.Match = if (pre.len > 0)
+                fuzzy.match(word, pre, fuzzy.ident)
+            else
+                null;
+            if (hits) |m| {
+                // Byte at a time so a matched position lands on the
+                // cell it belongs to; runs would need the same walk.
+                var b: usize = 0;
+                while (b < word.len and x < limit) {
+                    const cl = clusterAt(word, b);
+                    putRow(out, &x, limit, word[b..][0..cl.len], if (m.hit(b)) .cpl_match else base);
+                    b += cl.len;
+                }
             } else putRow(out, &x, limit, word, base);
 
             const d = self.cplDetail(idx);
@@ -13102,6 +13147,136 @@ fn mkDocMenu(gpa: Allocator, probe: *CplProbe, doc: []const u8) !*Editor {
         .{ .text = "Printf", .detail = "func(format string)", .kind = 3 },
     }, "Pr");
     return e;
+}
+
+test "the menu matches a subsequence, not just a prefix" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+    keys(e, "ipln");
+    e.takeCompletions(&.{
+        .{ .text = "Println", .detail = "fn", .kind = 3 },
+        .{ .text = "Printf", .detail = "fn", .kind = 3 },
+        .{ .text = "Sprintln", .detail = "fn", .kind = 3 },
+    }, "pln");
+    // `pln` is in none of these as a prefix, and in two as a
+    // subsequence. A prefix filter answered "no completions" here.
+    try testing.expectEqual(@as(usize, 2), e.cplCount() -| 1);
+    try testing.expectEqualStrings("Println", e.cplWord(0));
+    try testing.expectEqualStrings("Sprintln", e.cplWord(1));
+}
+
+test "the menu ranks by match quality, with the server's order as the tiebreak" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+    keys(e, "ipri");
+    // The server's order is the order they arrive in; lspmgr has already
+    // sorted by sortText. A fuzzy filter admits the scattered one, so
+    // leaving it where the server put it would bury `print` under it.
+    e.takeCompletions(&.{
+        .{ .text = "parallelResearchIndex", .detail = "fn", .kind = 3 },
+        .{ .text = "print", .detail = "fn", .kind = 3 },
+    }, "pri");
+    try testing.expectEqualStrings("print", e.cplWord(0));
+
+    // ...and where the match is equally good, the server still decides:
+    // it is the only ranking that knows what the cursor is inside of.
+    const e2 = try mkEditor(gpa);
+    defer e2.destroy();
+    var probe2: CplProbe = .{};
+    e2.lsp_ctx = &probe2;
+    e2.lsp_completion = &CplProbe.hook;
+    keys(e2, "ipr");
+    e2.takeCompletions(&.{
+        .{ .text = "print", .detail = "fn", .kind = 3 },
+        .{ .text = "probe", .detail = "fn", .kind = 3 },
+    }, "pr");
+    try testing.expectEqualStrings("print", e2.cplWord(0));
+}
+
+test "the menu lights the characters that matched, wherever they landed" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+    keys(e, "ipln");
+    e.takeCompletions(&.{.{ .text = "Println", .detail = "fn", .kind = 3 }}, "pln");
+
+    const cols = 60;
+    const g = e.fillGrid(cols, 16);
+    // Collect the row's characters and which of them took the accent.
+    var lit: [32]u8 = undefined;
+    var n: usize = 0;
+    for (g) |c| {
+        if (c.st == .cpl_match and n < lit.len and c.cp < 128) {
+            lit[n] = @intCast(c.cp);
+            n += 1;
+        }
+    }
+    // p, l, n — NOT the first three characters, which would be `Pri`
+    // and would be pointing at something that is not why this row is
+    // in the list.
+    try testing.expectEqualStrings("Pln", lit[0..n]);
+}
+
+test "the emphasis survives on every kind of row, selected included" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+    keys(e, "ipln");
+    // A kinded row and an unkinded one, so both colour paths are drawn.
+    e.takeCompletions(&.{
+        .{ .text = "Println", .detail = "fn", .kind = 3 },
+        .{ .text = "Sprintln", .detail = "", .kind = 0 },
+    }, "pln");
+
+    const cols = 60;
+    const g = e.fillGrid(cols, 16);
+    // Three matched characters on each of the two rows. The selected
+    // row used to take the emphasis colour for its WHOLE label, which
+    // made the typed characters vanish on exactly the row you were
+    // looking at — invisible in a screenshot, and the reason this
+    // counts rows rather than eyeballing one.
+    var matched: usize = 0;
+    for (g) |c| {
+        if (c.st == .cpl_match) matched += 1;
+    }
+    try testing.expectEqual(@as(usize, 6), matched);
+}
+
+test "buffer words are fuzzy too, and stay in proximity order" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    // No server: this is the ctrl-n path over the buffer's own words.
+    keys(e, "iPrintln\nSprintln\n");
+    keys(e, "pln");
+    try testing.expect(e.cplLive());
+    // Both found by subsequence; neither starts with `pln`.
+    var found: usize = 0;
+    for (0..e.cplCount() -| 1) |i| {
+        const w = e.cplWord(i);
+        if (std.mem.eql(u8, w, "Println") or std.mem.eql(u8, w, "Sprintln")) found += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), found);
+    // Buffer order, not match quality: `Sprintln` is the better fuzzy
+    // match (the run is contiguous) and still comes second, because
+    // ctrl-n walks forward from the cursor and then wraps. Ranking
+    // these would break the one ordering vim users already know.
+    try testing.expectEqualStrings("Println", e.cplWord(0));
+    try testing.expectEqualStrings("Sprintln", e.cplWord(1));
 }
 
 test "the panel sits beside the list, and every cell of it is no-bg" {

@@ -19,6 +19,7 @@ const monitorpkg = @import("monitor.zig");
 const procmon = @import("procmon.zig");
 const diskscan = @import("diskscan.zig");
 const editorpkg = @import("editor.zig");
+const fuzzy = @import("fuzzy.zig");
 const workspacespkg = @import("workspaces.zig");
 const registrypkg = @import("registry.zig");
 const pastepkg = @import("paste.zig");
@@ -2584,14 +2585,7 @@ pub const App = struct {
     /// Case-insensitive subsequence match — the telescope basic. Items
     /// keep db order (already ranked by last_used).
     fn fuzzyMatch(hay: []const u8, needle: []const u8) bool {
-        var hi: usize = 0;
-        for (needle) |nc| {
-            const n = std.ascii.toLower(nc);
-            while (hi < hay.len and std.ascii.toLower(hay[hi]) != n) hi += 1;
-            if (hi == hay.len) return false;
-            hi += 1;
-        }
-        return true;
+        return fuzzy.matches(hay, needle);
     }
 
     /// Subsequence match with a SCORE, for the one list long enough to
@@ -2599,36 +2593,13 @@ pub const App = struct {
     /// is a file picker you scroll, which is the thing ⌘P exists not
     /// to do. Higher is better; null is no match.
     ///
-    /// What it rewards, in the order it matters: matching in the
-    /// BASENAME (you type "main" for main.zig, not for
-    /// src/domain/x.zig), CONTIGUOUS runs, a match at a word boundary
-    /// (start, or after / _ - .), and a short path. These four are
-    /// what separate "the file I meant is first" from "it is somewhere
-    /// in the list".
+    /// The weights, and the reasoning behind them, live in fuzzy.zig
+    /// with the completion menu's — one matcher, two profiles, because
+    /// the walk and the traceback are the same and only the table of
+    /// bonuses differs.
     fn fuzzyScore(hay: []const u8, needle: []const u8) ?i32 {
-        if (needle.len == 0) return 0;
-        const base_at = if (std.mem.lastIndexOfScalar(u8, hay, '/')) |i| i + 1 else 0;
-        var score: i32 = 0;
-        var hi: usize = 0;
-        var prev_end: usize = std.math.maxInt(usize);
-        for (needle) |nc| {
-            const n = std.ascii.toLower(nc);
-            while (hi < hay.len and std.ascii.toLower(hay[hi]) != n) hi += 1;
-            if (hi == hay.len) return null;
-            if (hi >= base_at) score += 12;
-            if (prev_end == hi) score += 10; // contiguous with the last hit
-            if (hi == 0 or hi == base_at) {
-                score += 8;
-            } else switch (hay[hi - 1]) {
-                '/', '_', '-', '.' => score += 6,
-                else => {},
-            }
-            prev_end = hi + 1;
-            hi += 1;
-        }
-        // Shorter paths win ties: "src/x.zig" over "a/b/c/d/src/x.zig".
-        score -= @intCast(@min(hay.len / 4, 40));
-        return score;
+        const m = fuzzy.match(hay, needle, fuzzy.path) orelse return null;
+        return m.score;
     }
 
     /// Keep the best `pal_filtered.len` by score, insertion-sorted —
@@ -8838,7 +8809,6 @@ pub const App = struct {
                 // already uses, so a floating list reads as chrome
                 // rather than as text somebody highlighted.
                 .cpl_item => th.bar_fg,
-                .cpl_sel => th.bar_value,
                 .cpl_detail => th.ed_dim,
                 // The buffer's own syntax colours, so a function in the
                 // menu is the colour a function is two lines up.
@@ -8846,7 +8816,19 @@ pub const App = struct {
                 .cpl_type => th.syn_type,
                 .cpl_kw => th.syn_keyword,
                 .cpl_const => th.syn_number,
-                .cpl_match => th.accent,
+                // The BRIGHTEST ink the chrome has, not the accent.
+                //
+                // These are the characters you typed, and with fuzzy
+                // matching they are scattered through the label rather
+                // than being its first few — which makes them the only
+                // thing saying why the row is in the list at all. The
+                // accent collides: in the default theme it is the same
+                // value as `syn_func`, so on a function candidate — the
+                // commonest kind there is — the emphasis was invisible.
+                // A near-white cannot collide with a syntax hue in any
+                // theme, and brighter-than-its-neighbours is the closest
+                // a character grid gets to Zed's bold.
+                .cpl_match => th.bar_value,
                 // The float. Its border recedes, its prose sits at the
                 // chrome's ordinary weight, and the signature — the one
                 // line you actually came for — is the brightest thing

@@ -970,7 +970,47 @@ card. Two things about it are worth keeping:
   the ring is rebuilt by every narrowing keystroke and an index would
   name a stranger.
 
-The border this replaced was box-drawing arcs, `╭─╮│╰╯`. They are the
+### Ranking (`src/fuzzy.zig`)
+
+One matcher for the two lists worth ranking — ⌘P's paths and the
+completion menu's identifiers. The walk, the scoring shape and the
+traceback are the same; only a table of weights differs, because a file
+picker rewards basenames and short paths while a completion menu rewards
+camelCase humps.
+
+Three things are worth knowing:
+
+- **It returns POSITIONS, not just a score.** A menu that ranks fuzzily
+  and then underlines a prefix is lying about why a row is there: type
+  `pln` and the thing to pick out of `Println` is p, l and n. `Pln` does
+  not occur in it.
+- **It is a DP, not a greedy scan.** Greedy takes the first occurrence of
+  each character, which finds *a* match but often not the best one:
+  `all` against `readAll` greedily takes the `a` of `read`, breaking the
+  run and highlighting the wrong letters. Bounded — past `max_hay` or
+  `max_needle` it falls back to the greedy walk, which still matches and
+  still scores, and a candidate that long is not the one being picked.
+- **A gap penalty is what makes it usable.** Boundaries are worth more
+  than adjacency one character at a time, so without it three scattered
+  word-boundary hits in `parallelResearchIndex` outscore the contiguous
+  `print` for `pri`. How scattered a match is, is its own signal. The
+  path profile sets it to zero: a path match is scattered across
+  directories by nature.
+
+Ranking is the one thing in the app whose bugs read as taste rather than
+as failures — a list in the wrong order looks like an opinion. It has a
+test root of its own so the orderings are asserted rather than eyeballed.
+
+Two collisions to know about, both found by looking at a screenshot
+rather than at the code. The emphasis colour cannot be `accent`: in the
+default theme that is the same value as `syn_func`, so on a function
+candidate — the commonest kind there is — the matched characters were
+invisible. And the selected row must not take a brighter ink for its
+whole label, because the pill under it already says which row is
+selected and sharing the emphasis colour made the typed characters
+vanish on exactly the row being looked at.
+
+The border the menu's card replaced was box-drawing arcs, `╭─╮│╰╯`. They are the
 right box in a text file and the wrong one on a screen: at a cell's size
 an arc is a two-pixel curve, and the font squares it off into the exact
 corner it was drawn to avoid. `drawBoxLines` maps them to sharp corners
@@ -1270,6 +1310,8 @@ chords remain alongside; config overriding them comes later.
 - `src/ui.zig` — the UI layer seed: the metrics, rects, rounded rects,
   shadows and text runs (mono v1; CTLine shaping is the upgrade path
   when tabs/finder need proportional)
+- `src/fuzzy.zig` — one matcher for every list rook ranks: score,
+  matched positions, two tables of weights
 - `src/macos.zig` — AppKit window, CAMetalLayer, CVDisplayLink loop, keys,
   the scene (draw_lock serializes; lock order draw_lock → session mutex)
 - `src/render.zig` — CoreText ASCII atlas + two instanced Metal passes

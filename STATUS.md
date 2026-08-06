@@ -125,8 +125,18 @@ keystroke, and an index would name a stranger. The panel is a constant
 width so it cannot jump sideways as you step through rows, it flips to
 the left of the list when there is no room right, it declines entirely
 rather than crowd the list in a narrow pane, and prose past its ceiling
-is counted (`+7 more`) rather than cut off mid-sentence. Still owed
-against Zed: fuzzy matching rather than prefix. `editor-suggest = false` turns the
+is counted (`+7 more`) rather than cut off mid-sentence. Matching is
+**fuzzy**: `pln` finds `Println` and `fpr` finds `fmt.Fprintf`, ranked by
+how good the match is with the server's own ordering as the tiebreak —
+the one signal that knows what the cursor is inside of. This was not
+only a missing convenience: gopls already does fuzzy matching and
+answers `pln` with `Println`, and a prefix filter was throwing that
+answer away. The characters that matched are picked out brighter,
+wherever in the label they landed, because with a subsequence they are
+the only thing saying why a row is in the list. One matcher does this
+and ⌘P (`src/fuzzy.zig`): a bounded dynamic program, two tables of
+weights — a file picker rewards basenames and short paths, a completion
+menu rewards camelCase humps and contiguous runs. `editor-suggest = false` turns the
 automatic half off and leaves `ctrl-n` exactly as it was. `:Format`, and `editor-format-on-save`
 for `:w` — off by default, and a save is never lost to it: a formatter
 that does not answer inside 1.5s gets the file written unformatted and
