@@ -217,6 +217,17 @@ const (
 	EditorInsert EditorMode = "insert" // VS Code's hand; Esc still reaches vim
 )
 
+// Suggest turns the as-you-type completion menu on or off — a
+// declaration: `rook.Suggest(false),` is a complete line of config.
+//
+// On by default. The menu never writes to the buffer on its own — vim's
+// ctrl-n does that, and still does — so the cost of leaving it on is a
+// list you ignore, while the cost of leaving it off is a feature nobody
+// discovers. ctrl-n, Tab to take the highlighted candidate.
+type Suggest bool
+
+func (s Suggest) appendTo(e *env) { opt{"editor-suggest", bool(s)}.appendTo(e) }
+
 // BufferLine is the per-pane buffer strip's mode — a declaration.
 type BufferLine string
 

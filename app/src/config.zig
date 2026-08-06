@@ -379,6 +379,11 @@ pub const Config = struct {
     /// leaving it on is zero for anyone who never opens one. Off is for
     /// people who want the editor and nothing behind it.
     lsp: bool = true,
+    /// `editor-suggest`: the completion menu appears as you type rather
+    /// than waiting for ctrl-n. On by default — it never writes to the
+    /// buffer, so the cost of being wrong about it is a list you ignore,
+    /// and a menu nobody knows to ask for is a menu nobody uses.
+    suggest: bool = true,
 
     /// Programs that own ⌃HJKL for themselves, by argv[0] name.
     ///
@@ -694,6 +699,13 @@ fn loadToml(io: std.Io, gpa: std.mem.Allocator) Config {
             } else if (std.mem.eql(u8, stripped, "false")) {
                 cfg.lsp = false;
             } else std.debug.print("rook config: unknown editor-lsp '{s}' (true, false)\n", .{stripped});
+        } else if (std.mem.eql(u8, key, "editor_suggest") or std.mem.eql(u8, key, "suggest")) {
+            const stripped = std.mem.trim(u8, val, "\"");
+            if (std.mem.eql(u8, stripped, "true")) {
+                cfg.suggest = true;
+            } else if (std.mem.eql(u8, stripped, "false")) {
+                cfg.suggest = false;
+            } else std.debug.print("rook config: unknown editor-suggest '{s}' (true, false)\n", .{stripped});
         } else if (std.mem.eql(u8, key, "editor_format_on_save") or std.mem.eql(u8, key, "format_on_save")) {
             const stripped = std.mem.trim(u8, val, "\"");
             if (std.mem.eql(u8, stripped, "true")) {
@@ -860,6 +872,8 @@ fn applyEnvOption(cfg: *Config, gpa: std.mem.Allocator, key_raw: []const u8, val
         cfg.activity_bar = jBool(value) orelse cfg.activity_bar;
     } else if (std.mem.eql(u8, key, "explorer_auto")) {
         cfg.explorer_auto = jBool(value) orelse cfg.explorer_auto;
+    } else if (std.mem.eql(u8, key, "editor_suggest") or std.mem.eql(u8, key, "suggest")) {
+        cfg.suggest = jBool(value) orelse cfg.suggest;
     } else if (std.mem.eql(u8, key, "editor_format_on_save") or std.mem.eql(u8, key, "format_on_save")) {
         // Missing here until 2026-08-06, which meant `:w` formatting
         // could be declared in the graph and was then silently ignored

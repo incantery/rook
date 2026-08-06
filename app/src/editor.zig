@@ -365,6 +365,27 @@ pub const Editor = struct {
     /// A request is out. The menu says so rather than looking like a
     /// list that has already finished being short.
     cpl_asking: bool = false,
+    /// The ring was opened by TYPING, not by ctrl-n.
+    ///
+    /// The difference is whether anything may be written to the buffer.
+    /// vim's ctrl-n puts the candidate in as you cycle, which is right
+    /// for a key you pressed on purpose and wrong for a menu that
+    /// appeared by itself — text arriving under your fingers because
+    /// you typed two characters is the behaviour that makes people turn
+    /// completion off. An auto ring only ever DRAWS until you engage
+    /// with it.
+    cpl_auto: bool = false,
+    /// The prefix the last server request was made for, owned.
+    ///
+    /// The throttle, and it is a comparison rather than a "one in
+    /// flight" flag on purpose: a flag stays set forever if an answer
+    /// never comes — a server that died, or an ask the manager dropped
+    /// at its cap — and semantic completion then goes quietly missing
+    /// for the rest of the session. A prefix cannot get stuck.
+    cpl_asked: std.ArrayListUnmanaged(u8) = .empty,
+    /// Config: the menu appears as you type, rather than waiting for
+    /// ctrl-n.
+    suggest_on: bool = true,
     /// The hover float. `K` asks; the answer arrives frames later and
     /// is laid out ONCE, at the width the pane had when it landed —
     /// re-wrapping every frame would be work the float does not need,
@@ -1293,6 +1314,7 @@ pub const Editor = struct {
         self.cpl_detail.deinit(gpa);
         self.cpl_detail_at.deinit(gpa);
         self.cpl_prefix.deinit(gpa);
+        self.cpl_asked.deinit(gpa);
         self.hov.deinit(gpa);
         if (self.last_re) |*r| r.deinit(gpa);
         self.reg.deinit(gpa);
@@ -2101,7 +2123,17 @@ pub const Editor = struct {
         const b0 = bytes[0];
         // Any key that is not another ctrl-n/ctrl-p ends the ring —
         // the candidates were built against text that has now moved.
-        if (b0 != 0x0e and b0 != 0x10) self.cpl_live = false;
+        // Any key that is not another ctrl-n/ctrl-p ends the ring — the
+        // candidates were built against text that has now moved. An
+        // ordinary character reopens it a few lines down through
+        // autoSuggest, against the word it just made longer.
+        // Tab is in this list because it ACCEPTS from the menu: killing
+        // the ring one line above the branch that reads it is how Tab
+        // came out as a literal tab with a list on screen.
+        if (b0 != 0x0e and b0 != 0x10 and b0 != '\t') {
+            self.cpl_live = false;
+            self.cpl_auto = false;
+        }
 
         // ctrl-r took the next key as a register name.
         if (self.pend_ins_reg) {
@@ -2151,6 +2183,14 @@ pub const Editor = struct {
             0x0e, 0x10 => { // ctrl-n / ctrl-p — keyword completion
                 self.complete(b0 == 0x0e);
                 return;
+            },
+            '\t' => {
+                // Tab takes the highlighted candidate when the menu is
+                // up, and is an ordinary tab when it is not. Falls
+                // through rather than being swallowed: a Tab that does
+                // nothing because a menu you were not looking at had no
+                // selection is the worst of both.
+                if (self.cplAccept()) return;
             },
             0x0f => { // ctrl-o — one normal command, then back
                 self.ins_oneshot = 2;
@@ -2245,6 +2285,11 @@ pub const Editor = struct {
             self.buf.insert(gpa, self.absOff(), bytes) catch return;
             self.ccol += bytes.len;
             self.ai_line = null; // typed on it — it is yours now
+            // AFTER the insert, so the menu is built against the word
+            // that is now there. The ring was cleared at the top of this
+            // function; rebuilding it here is what makes typing narrow
+            // the list rather than close it.
+            self.autoSuggest(bytes);
         }
     }
 
@@ -2262,7 +2307,16 @@ pub const Editor = struct {
     /// The typed prefix goes on the END, so cycling past the last
     /// candidate gives you back what you actually typed instead of
     /// stranding you on a word you rejected.
-    fn buildCompletions(self: *Editor, prefix: []const u8, at: usize, fwd: bool) void {
+    /// `window` bounds the scan to that many lines either side of the
+    /// cursor; 0 scans the whole buffer.
+    ///
+    /// It exists for the as-you-type menu, which rebuilds on every
+    /// keystroke. A full pass over a twenty-thousand-line file is
+    /// nothing once, on a ctrl-n you asked for, and is several
+    /// milliseconds of every character you type. The words you want are
+    /// near the cursor anyway — that is the whole premise of vim's
+    /// nearest-first ordering.
+    fn buildCompletions(self: *Editor, prefix: []const u8, at: usize, fwd: bool, window: usize) void {
         const gpa = self.gpa;
         self.cplReset();
 
@@ -2272,8 +2326,10 @@ pub const Editor = struct {
         var blob: std.ArrayListUnmanaged(u8) = .empty;
         defer blob.deinit(gpa);
 
-        const scan = @min(self.lineCountB(), 20_000);
-        outer: for (0..scan) |l| {
+        const total = self.lineCountB();
+        const from = if (window == 0) 0 else self.cline -| window;
+        const to = if (window == 0) @min(total, 20_000) else @min(total, self.cline + window + 1);
+        outer: for (from..to) |l| {
             const s = self.lineText(l);
             const base = self.buf.rope.lineStart(l);
             var i: usize = 0;
@@ -2396,6 +2452,11 @@ pub const Editor = struct {
     pub fn cplAsking(self: *const Editor) bool {
         return self.cpl_asking;
     }
+    /// The menu appeared by itself. Nothing has been written to the
+    /// buffer and nothing will be until you engage with it.
+    pub fn cplAuto(self: *const Editor) bool {
+        return self.cpl_auto;
+    }
 
     /// There is no server here — and the app knows which of several
     /// different reasons that is.
@@ -2484,9 +2545,124 @@ pub const Editor = struct {
         return self.cpl_detail.items[self.cpl_detail_at.items[i]..self.cpl_detail_at.items[i + 1]];
     }
 
+    /// Lines either side of the cursor the as-you-type menu draws its
+    /// buffer words from. Enough to cover the function you are in and
+    /// its neighbours, cheap enough to redo on every keystroke.
+    const suggest_window = 1500;
+    /// Word characters before the menu appears on its own. One is every
+    /// identifier in the file; two is a list you can read.
+    const suggest_min = 2;
+
+    /// The menu, offered rather than asked for.
+    ///
+    /// Called after an ordinary character goes in. Rebuilds the ring for
+    /// the word now under the cursor, so typing NARROWS the list instead
+    /// of dismissing it and starting again — and never writes anything:
+    /// see cpl_auto.
+    fn autoSuggest(self: *Editor, typed: []const u8) void {
+        if (!self.suggest_on or self.replacing) return;
+        const gpa = self.gpa;
+        const s = self.lineText(self.cline);
+        if (self.ccol > s.len) return;
+
+        // A trigger character opens the menu with NO prefix, and with no
+        // buffer words in it. After a dot the useful answer is entirely
+        // the server's — every word in the file would be noise, and the
+        // one thing you know is that you are asking about a member.
+        // The LAST byte of the run, not a one-byte key. Text arrives
+        // here in runs — a multi-byte character, a paste, and anything
+        // driving the editor over ctl — and testing for a lone '.'
+        // meant the trigger fired for a human and not for anything
+        // else typing the identical characters.
+        const dot = typed.len > 0 and typed[typed.len - 1] == '.' and self.lsp_completion != null;
+
+        var a = self.ccol;
+        while (a > 0 and charClass(s[a - 1]) == 1) a -= 1;
+        // COPIED off the line, because `lineText` hands out a slice of
+        // ONE shared buffer and buildCompletions calls it again on its
+        // first line. Reading the prefix straight from `s` left the
+        // scan matching against text that had already been overwritten,
+        // and the menu stopped narrowing as you typed.
+        var pbuf: [max_indent]u8 = undefined;
+        const plen = @min(self.ccol - a, pbuf.len);
+        @memcpy(pbuf[0..plen], s[a..][0..plen]);
+        const prefix = pbuf[0..plen];
+        if (!dot and prefix.len < suggest_min) return;
+        // Mid-word: the cursor sitting inside an identifier means you
+        // are editing it, not extending it, and a menu there offers to
+        // replace text you can see. Read before buildCompletions, which
+        // invalidates `s`.
+        if (self.ccol < s.len and charClass(s[self.ccol]) == 1) return;
+
+        self.cpl_base = self.buf.rope.lineStart(self.cline) + (if (dot) self.ccol else a);
+        if (dot) {
+            self.cplReset();
+            self.cplPush("", "");
+            self.cplSeal();
+        } else {
+            self.buildCompletions(prefix, self.cpl_base, true, suggest_window);
+        }
+        self.cpl_prefix.clearRetainingCapacity();
+        self.cpl_prefix.appendSlice(gpa, if (dot) "" else prefix) catch {};
+        self.cpl_semantic = false;
+
+        // One request in flight at a time. Typing at speed would
+        // otherwise put a completion request on the wire per keystroke,
+        // and the answers to all but the last are dropped anyway — the
+        // prefix check in takeCompletions sees to that.
+        // Once per distinct prefix. Typing a word asks a few times,
+        // which is what every other editor does and what servers
+        // expect; the answers to all but the last are dropped by the
+        // prefix check in takeCompletions.
+        if (self.lsp_completion) |f| {
+            if (!std.mem.eql(u8, self.cpl_asked.items, prefix)) {
+                self.cpl_asked.clearRetainingCapacity();
+                self.cpl_asked.appendSlice(gpa, prefix) catch {};
+                self.cpl_asking = true;
+                f(self.lsp_ctx.?, self);
+            }
+        }
+        if (self.cplCount() <= 1 and !self.cpl_asking) return;
+        self.cpl_live = true;
+        self.cpl_auto = true;
+        self.cpl_idx = 0;
+        self.cpl_placed = false;
+        self.render_dirty = true;
+    }
+
+    /// Take the highlighted candidate — Tab, with the menu open.
+    ///
+    /// True when it did something, so the caller can fall through to
+    /// inserting a real tab when there was nothing to accept. A Tab that
+    /// silently does nothing because a menu you were not looking at had
+    /// no selection is worse than either outcome.
+    fn cplAccept(self: *Editor) bool {
+        if (!self.cpl_live or self.cplCount() <= 1) return false;
+        if (self.cpl_idx >= self.cplCount() -| 1) return false;
+        self.cplPlace();
+        self.cpl_live = false;
+        self.cpl_auto = false;
+        self.render_dirty = true;
+        return true;
+    }
+
     /// ctrl-n / ctrl-p in insert mode.
     fn complete(self: *Editor, fwd: bool) void {
         const gpa = self.gpa;
+        // An auto menu is already showing the right candidates; ctrl-n
+        // is you reaching for it. Take the one under the highlight
+        // rather than rebuilding the ring and losing your place.
+        if (self.cpl_live and self.cpl_auto) {
+            self.cpl_auto = false;
+            // Nothing real in it yet: a server was asked and has not
+            // answered. HOLD, exactly as an empty ring opened by ctrl-n
+            // does. Placing the prefix over itself here would count as
+            // "placed", and the next ctrl-n would step off candidate
+            // zero and hide the top of the list.
+            if (self.cplCount() <= 1) return;
+            self.cplPlace();
+            return;
+        }
         if (!self.cpl_live) {
             const s = self.lineText(self.cline);
             var a = self.ccol;
@@ -2496,7 +2672,7 @@ pub const Editor = struct {
             const plen = @min(self.ccol - a, pbuf.len);
             @memcpy(pbuf[0..plen], s[a..][0..plen]);
             self.cpl_base = self.buf.rope.lineStart(self.cline) + a;
-            self.buildCompletions(pbuf[0..plen], self.cpl_base, fwd);
+            self.buildCompletions(pbuf[0..plen], self.cpl_base, fwd, 0);
             self.cpl_prefix.clearRetainingCapacity();
             self.cpl_prefix.appendSlice(gpa, pbuf[0..plen]) catch {};
             self.cpl_semantic = false;
@@ -2590,8 +2766,19 @@ pub const Editor = struct {
         keep_at.append(self.gpa, @intCast(keep_words.items.len)) catch {};
 
         self.cplReset();
+        // FILTERED by what has been typed, which is the client's half of
+        // the protocol and not the server's. Ask zls about `std.mem.eq`
+        // and it answers with every member of std.mem — several hundred
+        // — because narrowing a list to what the user is typing is the
+        // editor's job. Nobody noticed while the only way in was one
+        // ctrl-n; a menu that opens as you type shows the whole thing.
+        //
+        // Case-insensitive prefix, not fuzzy: it is what the buffer's
+        // own words already do, and a list you can predict beats one
+        // that is occasionally cleverer.
         for (items) |it| {
             if (it.text.len == 0) continue;
+            if (prefix.len > 0 and !std.ascii.startsWithIgnoreCase(it.text, prefix)) continue;
             self.cplPush(it.text, it.detail);
         }
         var k: usize = 0;
@@ -6950,6 +7137,13 @@ pub const Editor = struct {
     /// under a cursor near the middle of a screen without the menu
     /// becoming the thing you are looking at.
     const cpl_menu_rows = 10;
+    /// And the widest it may be. A Zig or Rust signature runs well past
+    /// a hundred columns, and a menu as wide as the window — appearing
+    /// by itself, two characters into a word — is the thing that makes
+    /// people turn completion off. The label is what you are choosing
+    /// between; the detail is context, and context that does not fit
+    /// gets cut.
+    const cpl_menu_cols = 72;
 
     /// Draw the live ring as a menu under the cursor.
     ///
@@ -6978,7 +7172,7 @@ pub const Editor = struct {
             want = @max(want, self.cplWord(i).len + if (d.len > 0) d.len + 2 else 0);
         }
         if (self.cpl_asking) want = @max(want, 12);
-        const menu_w = @min(@max(want + 2, 10), cols -| 2);
+        const menu_w = @min(@min(@max(want + 2, 10), cpl_menu_cols), cols -| 2);
 
         // Under the cursor when there is room, over it when there is
         // not — a menu that ran off the bottom would show you its first
@@ -11591,8 +11785,12 @@ test "a server's answer folds in ahead of the buffer's own words" {
     e.lsp_completion = &CplProbe.hook;
 
     keys(e, "iPrintln\nPri");
-    e.key("\x0e"); // ctrl-n: the buffer offers "Println", and asks
-    try testing.expectEqual(@as(usize, 1), probe.asked);
+    // Typing the corpus opened the menu by itself along the way, so
+    // measure what ctrl-n adds rather than the total. It adds nothing:
+    // "Pri" was already asked about a keystroke ago.
+    const before = probe.asked;
+    e.key("\x0e"); // ctrl-n takes the buffer's own "Println"
+    try testing.expectEqual(before, probe.asked);
     {
         const s = try bufText(gpa, e);
         defer gpa.free(s);
@@ -12061,4 +12259,216 @@ test "a status message too long to fit is truncated, never dropped" {
     // silently refused.
     e.setStatus("no Python language server — `uv tool install basedpyright`, `pipx install pyright`, or `pip install python-lsp-server`", .{}, false);
     try testing.expect(std.mem.indexOf(u8, e.status_buf[0..e.status_len], "basedpyright") != null);
+}
+
+// -------------------------------------------------- suggestions as you type
+
+test "the menu appears by itself after two characters" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialphabet beta\n");
+    // One character is every identifier in the file; two is a list.
+    keys(e, "a");
+    try testing.expect(!e.cplLive());
+    keys(e, "l");
+    try testing.expect(e.cplLive());
+    try testing.expect(e.cplAuto());
+    try testing.expectEqualStrings("al", e.cplPrefix());
+}
+
+test "an auto menu never writes to the buffer" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialphabet\n");
+    keys(e, "alp");
+    try testing.expect(e.cplLive());
+    // THE rule. Text arriving under your fingers because you typed
+    // three characters is the behaviour that makes people turn
+    // completion off for good.
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("alphabet\nalp", s);
+}
+
+test "typing narrows the menu rather than dismissing it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialphabet\nalpine\naltitude\n");
+    keys(e, "al");
+    try testing.expect(e.cplLive());
+    const wide = e.cplCount();
+    keys(e, "p");
+    try testing.expect(e.cplLive());
+    try testing.expectEqualStrings("alp", e.cplPrefix());
+    // alphabet and alpine survive; altitude does not.
+    try testing.expect(e.cplCount() < wide);
+    try testing.expectEqual(@as(usize, 3), e.cplCount()); // two, plus the typed text
+}
+
+test "Tab takes the highlighted candidate, and is a tab when there is none" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialphabet\n");
+    keys(e, "alp");
+    e.key("\t");
+    {
+        const s = try bufText(gpa, e);
+        defer gpa.free(s);
+        try testing.expectEqualStrings("alphabet\nalphabet", s);
+    }
+    try testing.expect(!e.cplLive());
+
+    // No menu: an ordinary tab. A Tab that silently does nothing
+    // because a menu you were not looking at had no selection is the
+    // worst of both worlds.
+    e.key("\t");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expect(std.mem.endsWith(u8, s, "\t"));
+}
+
+test "ctrl-n on an open auto menu takes what is under the highlight" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialphabet\n");
+    keys(e, "alp");
+    try testing.expect(e.cplAuto());
+    // Reaching for the menu that is already there. Rebuilding the ring
+    // here would lose your place in a list you are looking at.
+    e.key("\x0e");
+    try testing.expect(!e.cplAuto());
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("alphabet\nalphabet", s);
+}
+
+test "no menu in the middle of a word" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialphabet\n");
+    keys(e, "xyz");
+    e.key("\x1b");
+    keys(e, "0i");
+    // The cursor is inside `xyz` now: typing here is editing a word,
+    // not extending one, and a menu would offer to replace text that
+    // is right there on screen.
+    keys(e, "al");
+    try testing.expect(!e.cplLive());
+}
+
+test "a dot opens the menu with no prefix and no buffer words" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+
+    keys(e, "ialphabet\nfmt.");
+    // After a dot the useful answer is entirely the server's: every
+    // word in the file would be noise, and what you know is that you
+    // are asking about a member.
+    try testing.expect(e.cplLive());
+    try testing.expectEqualStrings("", e.cplPrefix());
+    try testing.expectEqual(@as(usize, 1), e.cplCount()); // the empty prefix alone
+    try testing.expect(e.cplAsking());
+    try testing.expect(probe.asked > 0);
+}
+
+test "a dot with no language server opens nothing" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    // Nobody to ask, so the menu would be permanently empty. Plain
+    // text files do not get a popup for typing a full stop.
+    keys(e, "ihello. ");
+    try testing.expect(!e.cplLive());
+}
+
+test "suggestions can be turned off, and ctrl-n still works" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    e.suggest_on = false;
+    keys(e, "ialphabet\n");
+    keys(e, "alp");
+    try testing.expect(!e.cplLive());
+    // The explicit request is untouched: this is vim's ctrl-n, and it
+    // predates the menu appearing on its own.
+    e.key("\x0e");
+    const s = try bufText(gpa, e);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("alphabet\nalphabet", s);
+}
+
+test "the server is asked once per distinct prefix, not once per keystroke" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+    keys(e, "ialphabetical\n");
+    const before = probe.asked;
+    // "al", "alp", "alph" — three distinct questions. The first
+    // character asks nothing, because the menu does not open on one.
+    keys(e, "alph");
+    try testing.expectEqual(before + 3, probe.asked);
+    // Retyping a prefix already asked about does not ask again.
+    const after = probe.asked;
+    e.key("\x7f");
+    keys(e, "h");
+    try testing.expectEqual(after, probe.asked);
+}
+
+test "a server's answer is filtered by what has been typed" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+
+    keys(e, "ieq");
+    e.key("\x0e");
+    // What zls actually answers for `std.mem.eq`: every member of the
+    // namespace, several hundred of them. Narrowing to what is typed is
+    // the CLIENT's half of the protocol.
+    e.takeCompletions(&.{
+        .{ .text = "eql", .detail = "fn" },
+        .{ .text = "absorbSentinel", .detail = "fn" },
+        .{ .text = "eqlIgnoreCase", .detail = "fn" },
+        .{ .text = "alignForward", .detail = "fn" },
+    }, "eq");
+    var got: usize = 0;
+    for (0..e.cplCount() -| 1) |i| {
+        const w = e.cplWord(i);
+        try testing.expect(std.ascii.startsWithIgnoreCase(w, "eq"));
+        got += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), got);
+}
+
+test "a dot takes the server's whole answer, because nothing is typed yet" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+
+    keys(e, "ifmt.");
+    try testing.expect(e.cplLive());
+    e.takeCompletions(&.{
+        .{ .text = "Println", .detail = "fn" },
+        .{ .text = "Printf", .detail = "fn" },
+    }, "");
+    // An empty prefix filters nothing: the members ARE the answer.
+    try testing.expectEqual(@as(usize, 3), e.cplCount()); // two, plus the empty prefix
 }

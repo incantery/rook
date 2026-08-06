@@ -914,6 +914,7 @@ pub const App = struct {
     cfg_explorer_auto: bool = false,
     /// config editor-format-on-save: `:w` formats before it writes.
     cfg_fmt_on_save: bool = false,
+    cfg_suggest: bool = true,
     /// Icon rail hit zones (y extents), rebuilt each frame it draws.
     rail_y: [8][2]f32 = undefined,
     rail_n: usize = 0,
@@ -1184,6 +1185,7 @@ pub const App = struct {
             .cfg_activity_bar = cfg.activity_bar,
             .cfg_explorer_auto = cfg.explorer_auto,
             .cfg_fmt_on_save = cfg.format_on_save,
+            .cfg_suggest = cfg.suggest,
             .cursor_blink = cfg.cursor_blink,
             .pane_dim = @floatCast(cfg.pane_dim),
             .cfg_scrollback = cfg.scrollback,
@@ -4482,6 +4484,7 @@ pub const App = struct {
             .always => .always,
         };
         ed.default_insert = self.cfg_ed_insert;
+        ed.suggest_on = self.cfg_suggest;
         // create() opened the file before this ran; the default mode
         // applies now that the editor knows what it is.
         ed.applyDefaultMode();
@@ -5471,6 +5474,7 @@ pub const App = struct {
         self.cfg_activity_bar = cfg.activity_bar;
         self.cfg_ed_insert = cfg.editor_insert;
         self.cfg_fmt_on_save = cfg.format_on_save;
+        self.cfg_suggest = cfg.suggest;
         if (chrome_changed) {
             self.tab_h = if (self.cfg_top_bar.n == 0) 0 else self.bar_h;
             self.relayoutLocked();
@@ -5505,6 +5509,7 @@ pub const App = struct {
                     // The default applies to the NEXT open; a live
                     // editor's current mode is the user's, not ours.
                     ed.default_insert = self.cfg_ed_insert;
+                    ed.suggest_on = self.cfg_suggest;
                     // This one DOES apply live: it is about what the
                     // next `:w` does, and waiting for a reopen to
                     // honour a setting you just changed is the kind of

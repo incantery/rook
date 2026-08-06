@@ -53,7 +53,7 @@ One process, and two kinds of thing beside it:
 |---|---|
 | **rook** | the app and the CLI. Zig, Metal, owns its ptys in-process; workspaces are `workspace` nodes in the environment graph. `re` is `rook edit`. |
 | **providers** | separate processes reaching one external system each, speaking newline-JSON over stdio ([`sdk/provider`](sdk/provider)). Go, and deliberately so. |
-| **LSP servers** | separate processes rook spawns from a catalog (`app/src/lspmgr.zig`). |
+| **LSP servers** | separate processes rook spawns from a `language` DECLARATION in the environment graph — no catalog is compiled in. Which server a project wants can itself be a plugin's answer (`lsp.resolve`). |
 
 Everything rook does that touches something outside itself is meant to be
 one of the bottom two rows. That is the architectural bet.
@@ -83,9 +83,13 @@ does what it was for — `gr` for every use of a symbol, landing in the same sid
 panel find-in-files uses, grouped by file and walkable with `j`/`k`/⏎ —
 and `gR` to rename one everywhere. A rename validates every file before
 touching any: open documents get one undoable group and stay unsaved,
-files no pane has open are written. `ctrl-n` completion is served by the
-buffer's own words on the keystroke and by the server a few frames
-later, in one ring with a menu. `:Format`, and `editor-format-on-save`
+files no pane has open are written. Completion appears **as you type** — two word characters, or a `.` —
+served by the buffer's own words on the keystroke and by the server a
+few frames later, in one ring with a menu. An automatic menu never
+writes to the buffer: `Tab` takes the highlighted candidate, `ctrl-n` /
+`ctrl-p` walk it (and place, as vim's always have), and typing narrows
+it rather than dismissing it. `editor-suggest = false` turns the
+automatic half off and leaves `ctrl-n` exactly as it was. `:Format`, and `editor-format-on-save`
 for `:w` — off by default, and a save is never lost to it: a formatter
 that does not answer inside 1.5s gets the file written unformatted and
 says so. `ga` lists what the server offers to do about a line — quick
@@ -121,11 +125,7 @@ presets.
 
 ## What does not work
 
-1. **Syntax highlighting.** The five tree-sitter grammars were 4.6MB of
-   generated parse table in a 7.1MB binary. They are out, and the way back
-   is how every other editor already does it — load a grammar rather than
-   link it. `docs/OWED.md` §5.
-2. **The agent layer.** No asks, no threads, no review. This was the
+1. **The agent layer.** No asks, no threads, no review. This was the
    product thesis and it is mostly still absent by choice: it comes back
    as plugins over the item model, not as more endpoints. The first piece
    returned 2026-08-03: `plugins/claude`, a first-party plugin that
@@ -136,14 +136,14 @@ presets.
    children, the bill as a MONEY field); both stand on the shared scanner
    in `plugins/internal/transcript` — see `man 7 rook-plugin`,
    "THE SHIPPED PLUGINS".
-3. **Providers ship but nothing calls them.** `rook-provider-github` and
+2. **Providers ship but nothing calls them.** `rook-provider-github` and
    `rook-provider-linear` are built, bundled and tested; the thing that
    spawned them was `rookctl issues`, which left with the Go. The caller
    is the first real plugin surface — `docs/OWED.md` §1.
-4. **Self-update and the keychain writer** — both `docs/OWED.md`.
+3. **Self-update and the keychain writer** — both `docs/OWED.md`.
    (Worktree creation came back 2026-08-03 as `ctl worktree add|remove`,
    with worktrees derived live from git rather than registered.)
-5. **Signing and notarization.** Ad-hoc signed today.
+4. **Signing and notarization.** Ad-hoc signed today.
 
 ## Accepted regressions
 

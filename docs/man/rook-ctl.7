@@ -125,6 +125,10 @@ with the prefix, the selected row, and
 once a server's answer has been folded in \(em which is what
 distinguishes a menu of the buffer's own words from one that knows what
 the cursor is inside of.
+.Ql auto
+marks a menu that opened BY ITSELF as you typed, which is the difference
+between a list being offered and a word already written into the buffer:
+an auto menu has changed nothing until you take it with Tab.
 Then every declared language that has no server running, and why:
 .Ql language zig declared zls
 (declared, nothing started yet),

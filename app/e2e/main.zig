@@ -67,6 +67,7 @@ const scenarios = [_]Scenario{
     .{ .name = "lspformat", .what = "format-on-save: :w formats then writes, and writes anyway when nothing answers", .run = lspFormat },
     .{ .name = "lsppython", .what = "a second language is data: python roots at pyproject.toml and lands the same way", .run = lspPython },
     .{ .name = "lspts", .what = "ts and tsx share one server, root at the tsconfig, and split only on the grammar", .run = lspTs },
+    .{ .name = "suggest", .what = "the menu appears as you type, narrows, never writes, and Tab takes it", .run = suggestScenario },
     .{ .name = "lsplang", .what = "no built-in catalog: a language is a declaration, and each way of having no server says which one it is", .run = lspLang },
     .{ .name = "lspretarget", .what = "a pane that retargets ITSELF — file tree, :e — still gets its server, and drops it when there is none", .run = lspRetarget },
     .{ .name = "docshare", .what = "one file in two panes is ONE document: edits, dirty flag and :w are shared", .run = docShare },
@@ -3652,11 +3653,37 @@ fn lspScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
         var buf: [16 * 1024]u8 = undefined;
         try h.expectContains(try app.screen(&buf), "func(...any)", "and the menu is on screen with it");
     }
-    // Cycling takes the next one, and typing ends the ring.
+    // Cycling takes the next one.
     _ = try app.ctl("key 0e");
     try h.expectContains(try app.ctl("lsp"), "*cpl Printf", "ctrl-n walks the menu");
+    // Typing ends THAT ring — the candidates were built against text
+    // that has moved — and opens a fresh one for the longer word, which
+    // is what makes the menu narrow as you type rather than vanish.
+    // `auto` marks the difference: nothing has been written.
     _ = try app.ctl("type x");
-    try h.expectContains(try app.ctl("lsp"), "cpl off", "typing closes it");
+    {
+        const after = try app.ctl("lsp");
+        try h.expectContains(after, "cpl on prefix:Printfx", "typing reopens on the longer word");
+        try h.expectContains(after, "auto", "as an offer, not as an edit");
+    }
+    // A character that cannot start an identifier closes it for good.
+    _ = try app.ctl("type ,");
+    try h.expectContains(try app.ctl("lsp"), "cpl off", "and punctuation closes it");
+
+    // A dot is the other way in. It opens the menu with NO prefix and
+    // no buffer words: after a dot the useful answer is entirely the
+    // server's, and every word in the file would be noise.
+    _ = try app.ctl("type fmt.");
+    {
+        // Waited on the MEMBERS: the ring opens instantly saying
+        // `asking`, and the answer is a round trip behind it.
+        const dot = try app.waitCtl("lsp", "cpl Println", 5_000);
+        try h.expectContains(dot, "cpl on prefix: ", "the dot opened it with no prefix");
+        try h.expectContains(dot, "auto", "and having written nothing");
+        // And the buffer's own words stayed out of it: `nope` is on the
+        // line above and would be in any keyword-scrape.
+        try h.expectNotContains(dot, "cpl nope", "and none of the buffer's own");
+    }
     {
         // The file it WOULD have written is untouched too — a refusal
         // that still edited the half it could reach is the whole thing
@@ -4399,6 +4426,76 @@ fn lspLang(gpa: std.mem.Allocator, bin: []const u8) !void {
         try h.expectContains(dump, ".md", "naming the extension nothing claims");
         try h.expectNotContains(dump, "not installed", "which is not the same problem as a missing binary");
     }
+}
+
+/// Suggestions as you type.
+///
+/// The rule the whole feature turns on is that an AUTO menu never
+/// writes to the buffer. vim's ctrl-n puts the candidate in as you
+/// cycle, which is right for a key you pressed on purpose and wrong for
+/// a list that appeared by itself — text arriving under your fingers
+/// because you typed two characters is the behaviour that makes people
+/// switch completion off and never turn it back on.
+fn suggestScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-suggest-{d}", .{h.runPid()});
+    try h.mkdirP(scratch);
+    var f_buf: [288]u8 = undefined;
+    const file = try std.fmt.bufPrint(&f_buf, "{s}/notes.txt", .{scratch});
+    // Plain text and no language server: what is under test is the
+    // menu, not the LSP behind it.
+    try h.writeFile(file, "alphabet\nalpine\naltitude\n\n");
+
+    const app = try h.Instance.start(gpa, bin, .{ .cwd = scratch });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    var cmd_buf: [320]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{file}));
+    try app.waitText("alphabet", 5_000);
+
+    _ = try app.ctl("type G");
+    _ = try app.ctl("type i");
+    _ = try app.ctl("type a");
+    // One character is every identifier in the file; two is a list you
+    // can read.
+    try h.expectContains(try app.ctl("lsp"), "cpl off", "one character is not enough");
+
+    _ = try app.ctl("type l");
+    {
+        const out = try app.waitCtl("lsp", "cpl on", 3_000);
+        try h.expectContains(out, "prefix:al", "the menu opened on what was typed");
+        try h.expectContains(out, "auto", "by itself");
+        try h.expectContains(out, "cpl alphabet", "with the buffer's own words");
+        try h.expectContains(out, "cpl altitude", "all of them");
+    }
+    // NOTHING was written. The dump is the buffer, and it still ends in
+    // the two characters that were typed.
+    {
+        // The gutter is one column wide in a five-line file, so match on
+        // what is NOT there: the candidate has not been written.
+        const d = try app.ctl("dump");
+        try h.expectNotContains(d, "5 alphabet", "and put nothing in the buffer");
+        try h.expectContains(d, "5 al", "leaving exactly what was typed");
+    }
+
+    _ = try app.ctl("type p");
+    {
+        const out = try app.ctl("lsp");
+        try h.expectContains(out, "prefix:alp", "typing narrows it");
+        try h.expectContains(out, "cpl alphabet", "keeping what still matches");
+        try h.expectNotContains(out, "cpl altitude", "and dropping what does not");
+    }
+
+    // Tab takes the highlighted one. This is the first thing written.
+    _ = try app.ctl("press TAB");
+    {
+        _ = try app.waitCtl("lsp", "cpl off", 3_000);
+        try h.expectContains(try app.ctl("dump"), "5 alphabet", "the candidate landed");
+    }
+    // Still in insert mode: accepting a completion is not a mode change.
+    try h.expectContains(try app.ctl("dump"), "INSERT", "without leaving insert");
 }
 
 fn lspTs(gpa: std.mem.Allocator, bin: []const u8) !void {

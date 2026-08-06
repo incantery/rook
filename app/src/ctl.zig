@@ -1077,11 +1077,15 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             // one that knows what the cursor is inside of, and no
             // amount of reading the words tells you which you have.
             if (ed.cplLive()) {
-                a.writer.print("cpl on prefix:{s} sel:{d} semantic:{s}{s}\n", .{
+                a.writer.print("cpl on prefix:{s} sel:{d} semantic:{s}{s}{s}\n", .{
                     ed.cplPrefix(),
                     ed.cplSelected(),
                     if (ed.cplSemantic()) "yes" else "no",
                     @as([]const u8, if (ed.cplAsking()) " asking" else ""),
+                    // `auto` says the menu opened by itself, which is
+                    // the difference between a list being offered and a
+                    // word already written into the buffer.
+                    @as([]const u8, if (ed.cplAuto()) " auto" else ""),
                 }) catch return;
                 // The typed text is the ring's last stop, not an offer.
                 for (0..ed.cplCount() -| 1) |i| {
