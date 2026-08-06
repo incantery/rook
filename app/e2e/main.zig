@@ -4444,7 +4444,17 @@ fn suggestScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
     const file = try std.fmt.bufPrint(&f_buf, "{s}/notes.txt", .{scratch});
     // Plain text and no language server: what is under test is the
     // menu, not the LSP behind it.
-    try h.writeFile(file, "alphabet\nalpine\naltitude\n\n");
+    // LONG, and typed into at the very END, which is where the box was
+    // flipping above the cursor and jumping on every keystroke.
+    // `alpine_meadow_traverse` makes the candidate list's own width move
+    // as it is filtered out.
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(gpa);
+    try body.appendSlice(gpa, "alphabet\nalpine\naltitude\nalpine_meadow_traverse\n");
+    var fbuf: [64]u8 = undefined;
+    for (0..120) |i| try body.appendSlice(gpa, try std.fmt.bufPrint(&fbuf, "filler line {d}\n", .{i}));
+    try body.appendSlice(gpa, "\n");
+    try h.writeFile(file, body.items);
 
     const app = try h.Instance.start(gpa, bin, .{ .cwd = scratch });
     defer {
@@ -4476,8 +4486,8 @@ fn suggestScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
         // The gutter is one column wide in a five-line file, so match on
         // what is NOT there: the candidate has not been written.
         const d = try app.ctl("dump");
-        try h.expectNotContains(d, "5 alphabet", "and put nothing in the buffer");
-        try h.expectContains(d, "5 al", "leaving exactly what was typed");
+        try h.expectNotContains(d, "126 alphabet", "and put nothing in the buffer");
+        try h.expectContains(d, "126 al", "leaving exactly what was typed");
     }
 
     _ = try app.ctl("type p");
@@ -4488,11 +4498,59 @@ fn suggestScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
         try h.expectNotContains(out, "cpl altitude", "and dropping what does not");
     }
 
+    // THE geometry rule. Type through a word and the box must not move
+    // — same left edge, same side of the cursor, every keystroke. It
+    // recomputes from whatever candidates exist at that instant, and
+    // there are two sets of those per character (the buffer's words on
+    // the key, a server's answer behind them), so a box deriving its
+    // side and width from the count flips and resizes twice per
+    // character. That is what reads as flicker.
+    {
+        var left_at: ?usize = null;
+        var top_at: ?usize = null;
+        var right_at: usize = 0;
+        // "" samples the state already reached (`alp`), before the long
+        // candidate is filtered out.
+        for ([_][]const u8{ "", "h", "a", "b" }) |ch| {
+            if (ch.len > 0) _ = try app.ctlFmt("type {s}", .{ch});
+            const d = try app.ctl("dump");
+            // The menu's rows are the ones carrying a candidate; find
+            // the first, and where it starts.
+            var it = std.mem.splitScalar(u8, d, '\n');
+            var row: usize = 0;
+            var found = false;
+            while (it.next()) |line| : (row += 1) {
+                const at = std.mem.indexOf(u8, line, "alphabet") orelse continue;
+                // Skip the document's own line 1.
+                if (std.mem.indexOf(u8, line, " 1 ") != null) continue;
+                // The row's own right edge: the fill runs the box's
+                // full width, so the last non-space column is it.
+                if (left_at) |l| {
+                    try h.expect(l == at, "the menu moved sideways while typing ({d} then {d})", .{ l, at });
+                    // THE one. Above the cursor this row walked down the
+                    // screen every time the candidate count changed.
+                    try h.expect(top_at.? == row, "the menu's top edge moved ({d} then {d})", .{ top_at.?, row });
+                } else {
+                    left_at = at;
+                    top_at = row;
+                }
+                _ = &right_at;
+                found = true;
+                break;
+            }
+            try h.expect(found, "the menu vanished while typing `{s}`", .{ch});
+        }
+    }
+    // Back to the state the rest of this scenario expects. Backspace
+    // widens the menu rather than closing it, so it is still up.
+    for (0..3) |_| _ = try app.ctl("key 7f");
+    try h.expectContains(try app.ctl("lsp"), "cpl on prefix:alp", "backspace widened rather than closed");
+
     // Tab takes the highlighted one. This is the first thing written.
     _ = try app.ctl("press TAB");
     {
         _ = try app.waitCtl("lsp", "cpl off", 3_000);
-        try h.expectContains(try app.ctl("dump"), "5 alphabet", "the candidate landed");
+        try h.expectContains(try app.ctl("dump"), "126 alphabet", "the candidate landed");
     }
     // Still in insert mode: accepting a completion is not a mode change.
     try h.expectContains(try app.ctl("dump"), "INSERT", "without leaving insert");

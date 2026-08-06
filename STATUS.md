@@ -87,8 +87,13 @@ files no pane has open are written. Completion appears **as you type** — two w
 served by the buffer's own words on the keystroke and by the server a
 few frames later, in one ring with a menu. An automatic menu never
 writes to the buffer: `Tab` takes the highlighted candidate, `ctrl-n` /
-`ctrl-p` walk it (and place, as vim's always have), and typing narrows
-it rather than dismissing it. `editor-suggest = false` turns the
+`ctrl-p` walk it (and place, as vim's always have), typing narrows it
+rather than dismissing it, and a backspace widens it rather than closing
+it. The box holds still while one word is being completed — side and
+width latched, and the view scrolled to make room below the cursor
+rather than the menu flipping above it, because above the cursor its top
+edge moves every time the candidate count changes and that reads as
+flicker. `editor-suggest = false` turns the
 automatic half off and leaves `ctrl-n` exactly as it was. `:Format`, and `editor-format-on-save`
 for `:w` — off by default, and a save is never lost to it: a formatter
 that does not answer inside 1.5s gets the file written unformatted and

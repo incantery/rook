@@ -386,6 +386,25 @@ pub const Editor = struct {
     /// Config: the menu appears as you type, rather than waiting for
     /// ctrl-n.
     suggest_on: bool = true,
+    /// The box's geometry, LATCHED for as long as one word is being
+    /// completed.
+    ///
+    /// It is recomputed every frame from whatever candidates exist at
+    /// that instant, and there are two of those per keystroke: the
+    /// buffer's own words land on the key, the server's answer lands a
+    /// few frames behind. Deriving the side and the width from the
+    /// count each time made the box flip above/below the cursor and
+    /// change width twice per character, which reads as flicker rather
+    /// than as a list narrowing.
+    ///
+    /// So: side chosen once, width that only ever grows, both keyed on
+    /// the word being completed. Height still follows the list, because
+    /// a list getting shorter as you type is the one movement that
+    /// means something.
+    cpl_box_base: usize = 0,
+    cpl_box_w: usize = 0,
+    cpl_box_above: bool = false,
+    cpl_box_set: bool = false,
     /// The hover float. `K` asks; the answer arrives frames later and
     /// is laid out ONCE, at the width the pane had when it landed —
     /// re-wrapping every frame would be work the float does not need,
@@ -2257,6 +2276,12 @@ pub const Editor = struct {
                 const start = self.buf.rope.lineStart(self.cline);
                 self.buf.deleteRange(gpa, start + p, start + self.ccol) catch return;
                 self.ccol = p;
+                // Deleting a character WIDENS the menu's question; it
+                // does not end it. Closing here meant one backspace over
+                // a typo dismissed the list you were reading, and it did
+                // not come back until you had typed two more characters.
+                // Empty `typed`, so nothing is mistaken for a trigger.
+                self.autoSuggest("");
             } else {
                 self.joinBack();
             }
@@ -2628,6 +2653,16 @@ pub const Editor = struct {
         self.cpl_idx = 0;
         self.cpl_placed = false;
         self.render_dirty = true;
+    }
+
+    /// The word the box is anchored to, as a line-and-column pair.
+    ///
+    /// NOT the absolute offset: that shifts whenever text is inserted
+    /// anywhere above, so a box anchored on it would re-latch — and
+    /// possibly jump sides — because a completely different line
+    /// changed length.
+    fn cpl_box_base_of(self: *const Editor) usize {
+        return self.cline *% 1_000_003 +% (self.cpl_base -| self.buf.rope.lineStart(self.cline));
     }
 
     /// Take the highlighted candidate — Tab, with the menu open.
@@ -6813,6 +6848,7 @@ pub const Editor = struct {
         const top_rows: usize = if (self.buflineActive()) 1 else 0;
         const text_rows = rows - 1 - top_rows;
         self.ensureVisible(text_cols, text_rows);
+        self.makeRoomForMenu(text_rows);
         self.refreshHighlights(text_rows);
 
         // renderCol only ever walks as far as the column it is asked
@@ -7133,6 +7169,42 @@ pub const Editor = struct {
         }
     }
 
+    /// Scroll the document so the completion menu has room BELOW the
+    /// cursor.
+    ///
+    /// The alternative is flipping the box above, and that is what made
+    /// this feel like flicker: above the cursor the box's bottom edge is
+    /// pinned to the line you are typing on, so its TOP edge moves every
+    /// time the number of candidates changes — which is twice per
+    /// keystroke, once for the buffer's words and once for the server's
+    /// answer landing behind them.
+    ///
+    /// Below the cursor the top edge is pinned instead, and only the
+    /// bottom moves as the list narrows. That reads as a list getting
+    /// shorter, which is what it is.
+    ///
+    /// Against a CONSTANT number of rows, not against the candidates
+    /// that happen to exist: scrolling by however long the list is right
+    /// now would move the document on every keystroke. And it only ever
+    /// scrolls FORWARD, so the view does not snap back when the list
+    /// shrinks or the menu closes.
+    ///
+    /// It is also what a person does by hand when a popup is in the way.
+    fn makeRoomForMenu(self: *Editor, text_rows: usize) void {
+        if (!self.cpl_live) return;
+        const want = cpl_menu_rows + 1;
+        // Too short to hold the cursor and a menu both: the box goes
+        // above and takes what it can get.
+        if (text_rows <= want) return;
+        const cur = self.cline -| self.top;
+        const below = text_rows -| cur -| 1;
+        if (below >= want) return;
+        self.top += want - below;
+        // The cursor's own line is the floor — past it the line being
+        // typed on would scroll off the top.
+        if (self.top > self.cline) self.top = self.cline;
+    }
+
     /// Rows the completion menu will use at most. Ten is what fits
     /// under a cursor near the middle of a screen without the menu
     /// becoming the thing you are looking at.
@@ -7144,6 +7216,11 @@ pub const Editor = struct {
     /// between; the detail is context, and context that does not fit
     /// gets cut.
     const cpl_menu_cols = 72;
+    /// Rows that have to fit below the cursor for the menu to go there.
+    /// The side is chosen against THIS rather than against however many
+    /// candidates exist at the instant of asking, so it cannot change
+    /// under a list that is still arriving.
+    const cpl_menu_min_rows = 4;
 
     /// Draw the live ring as a menu under the cursor.
     ///
@@ -7172,19 +7249,32 @@ pub const Editor = struct {
             want = @max(want, self.cplWord(i).len + if (d.len > 0) d.len + 2 else 0);
         }
         if (self.cpl_asking) want = @max(want, 12);
-        const menu_w = @min(@min(@max(want + 2, 10), cpl_menu_cols), cols -| 2);
+        const need_w = @min(@min(@max(want + 2, 10), cpl_menu_cols), cols -| 2);
 
-        // Under the cursor when there is room, over it when there is
-        // not — a menu that ran off the bottom would show you its first
-        // two rows and hide the rest.
-        const least: usize = if (self.cpl_asking) 1 else 0;
-        const shown = @min(@max(offers, least), cpl_menu_rows);
+        // Latch, or re-latch for a new word.
         const below = cur_row + 1;
         const room_below = (top_rows + text_rows) -| below;
-        const start_row = if (room_below >= shown)
-            below
-        else if (cur_row >= shown + top_rows)
-            cur_row - shown
+        if (!self.cpl_box_set or self.cpl_box_base != self.cpl_box_base_of()) {
+            self.cpl_box_set = true;
+            self.cpl_box_base = self.cpl_box_base_of();
+            self.cpl_box_w = 0;
+            // Decided against a FIXED number of rows, not against the
+            // candidates that happen to exist right now: the buffer
+            // offers three words and the server twenty a moment later,
+            // and a side chosen from the first would flip on the
+            // second.
+            self.cpl_box_above = room_below < cpl_menu_min_rows and cur_row >= top_rows + cpl_menu_min_rows;
+        }
+        // Grows, never shrinks, while one word is being completed. A
+        // box that narrows as the longest candidate is filtered out
+        // draws the eye to the edge instead of to the list.
+        self.cpl_box_w = @max(self.cpl_box_w, need_w);
+        const menu_w = @min(self.cpl_box_w, cols -| 2);
+
+        const least: usize = if (self.cpl_asking) 1 else 0;
+        const shown = @min(@max(offers, least), cpl_menu_rows);
+        const start_row = if (self.cpl_box_above)
+            cur_row -| @min(shown, cur_row -| top_rows)
         else
             below;
         // A cursor with no room either side gets whatever fits below.
@@ -12420,11 +12510,16 @@ test "the server is asked once per distinct prefix, not once per keystroke" {
     // character asks nothing, because the menu does not open on one.
     keys(e, "alph");
     try testing.expectEqual(before + 3, probe.asked);
-    // Retyping a prefix already asked about does not ask again.
+    // A backspace is a different question, not the end of one: the
+    // prefix got shorter, so the menu widens and the server is asked
+    // about the shorter word. Then the retype asks about the longer one
+    // again. Two keystrokes, two distinct prefixes, two asks.
     const after = probe.asked;
     e.key("\x7f");
     keys(e, "h");
-    try testing.expectEqual(after, probe.asked);
+    try testing.expectEqual(after + 2, probe.asked);
+    // The menu survived the backspace, which is the point of it.
+    try testing.expect(e.cplLive());
 }
 
 test "a server's answer is filtered by what has been typed" {
@@ -12471,4 +12566,81 @@ test "a dot takes the server's whole answer, because nothing is typed yet" {
     }, "");
     // An empty prefix filters nothing: the members ARE the answer.
     try testing.expectEqual(@as(usize, 3), e.cplCount()); // two, plus the empty prefix
+}
+
+test "a backspace widens the menu rather than closing it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialphabet\nalpine\naltitude\n");
+    keys(e, "alp");
+    const narrow = e.cplCount();
+    // One backspace over a typo used to dismiss the list you were
+    // reading, and it did not come back until you had typed two more
+    // characters.
+    e.key("\x7f");
+    try testing.expect(e.cplLive());
+    try testing.expectEqualStrings("al", e.cplPrefix());
+    try testing.expect(e.cplCount() > narrow);
+    // And back under the minimum, it closes.
+    e.key("\x7f");
+    try testing.expect(!e.cplLive());
+}
+
+test "the menu's box holds still while one word is completed" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    // A long candidate that survives `alp` and is filtered out by
+    // `alph`: sized from whatever exists right now, the box would lose
+    // fourteen columns on one keystroke.
+    keys(e, "ialphabet\nalpine_meadow_traverse\n");
+    keys(e, "alp");
+    {
+        const d = try e.dumpText(gpa, 100, 24);
+        gpa.free(d);
+    }
+    const wide = e.cpl_box_w;
+    try testing.expect(wide > 20);
+
+    keys(e, "h");
+    {
+        const d = try e.dumpText(gpa, 100, 24);
+        gpa.free(d);
+    }
+    // Narrower content, same box. A width that tracked the content
+    // would pull the right edge in and draw the eye to it rather than
+    // to the list.
+    try testing.expectEqual(wide, e.cpl_box_w);
+
+    // A DIFFERENT word re-latches: the box belongs to the word, not to
+    // the session.
+    e.key("\x1b");
+    keys(e, "oal");
+    {
+        const d = try e.dumpText(gpa, 100, 24);
+        gpa.free(d);
+    }
+    try testing.expect(e.cpl_box_w != wide or e.cplCount() > 2);
+}
+
+test "the view scrolls to make room rather than flipping the menu above" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialphabet\nalpine\naltitude\n");
+    for (0..40) |_| keys(e, "filler\n");
+    // Typing at the very bottom, which is where the box used to flip
+    // above the cursor and walk about as the list changed.
+    keys(e, "alp");
+    const before_top = e.top;
+    {
+        const d = try e.dumpText(gpa, 80, 20);
+        gpa.free(d);
+    }
+    try testing.expect(e.top > before_top);
+    // The cursor now has a menu's worth of room under it.
+    const text_rows = 20 - 1;
+    const cur = e.cline - e.top;
+    try testing.expect(text_rows - cur - 1 >= Editor.cpl_menu_rows);
 }
