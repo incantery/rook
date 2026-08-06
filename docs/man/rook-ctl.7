@@ -130,7 +130,16 @@ marks a menu that opened BY ITSELF as you typed, which is the difference
 between a list being offered and a word already written into the buffer:
 an auto menu has changed nothing until you take it with Tab.
 .Ql cpl card <x> <y> <w> <h>
-gives the menu's box in scene pixels.
+gives the menu's box in scene pixels, and
+.Ql cpl doc card <x> <y> <w> <h> rows:<n>
+the documentation panel beside it \(em
+.Ar n
+being the rows the markdown laid out to, which is the only way to tell a
+panel that is showing everything from one that is showing the top of it.
+Each candidate line ends in
+.Ql doc
+when that row has prose to show, which is what distinguishes "no
+documentation" from "no room to draw it".
 The box is a rounded card drawn UNDER the character grid, which is the
 one part of the menu a text dump cannot show \(em so this is what a
 screenshot assertion aims at, and it is computed by the same code that

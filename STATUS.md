@@ -109,8 +109,24 @@ in `ctl dump` and in every assertion that reads it. Box-drawing arcs
 were the old border and they cannot be this — at a cell's size `╭` is a
 two-pixel curve the font squares off. The one part of Zed's popover the
 arrangement gives up is the drop shadow: it paints outside the box, and
-the buffer cells around it draw after. Still owed against Zed: the
-documentation panel beside the list, and fuzzy matching rather than prefix. `editor-suggest = false` turns the
+the buffer cells around it draw after. Beside the list, on a second
+card, is the **documentation panel**: the selected candidate's prose,
+taken apart as markdown by the same code the hover float uses. A
+completion menu tells you a name and a type, and the question you
+actually have about an unfamiliar one is what it DOES — answering it by
+accepting the candidate, hovering and undoing is three steps for a
+question you had before you typed anything. Where the prose comes from
+is the server's choice and both ways are handled: zls sends it with the
+list, gopls and rust-analyzer send an opaque handle and expect a
+`completionItem/resolve` for the one row you are resting on. That
+resolve is asked once per row, never from a paint, and matched back by
+WORD rather than by index — the ring is rebuilt by every narrowing
+keystroke, and an index would name a stranger. The panel is a constant
+width so it cannot jump sideways as you step through rows, it flips to
+the left of the list when there is no room right, it declines entirely
+rather than crowd the list in a narrow pane, and prose past its ceiling
+is counted (`+7 more`) rather than cut off mid-sentence. Still owed
+against Zed: fuzzy matching rather than prefix. `editor-suggest = false` turns the
 automatic half off and leaves `ctrl-n` exactly as it was. `:Format`, and `editor-format-on-save`
 for `:w` — off by default, and a save is never lost to it: a formatter
 that does not answer inside 1.5s gets the file written unformatted and

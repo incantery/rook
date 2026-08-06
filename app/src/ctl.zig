@@ -1098,12 +1098,27 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                         @as(i64, @intFromFloat(r.w)), @as(i64, @intFromFloat(r.h)),
                     }) catch return;
                 }
+                // The panel beside the list, when the selected row has
+                // prose and there is room. Its rect, and how many rows
+                // the markdown laid out to — the grid shows the text,
+                // and cannot say how much of it did not fit.
+                if (app.completionDocCardRect(app.activeTab().focused)) |r| {
+                    a.writer.print("cpl doc card {d} {d} {d} {d} rows:{d}\n", .{
+                        @as(i64, @intFromFloat(r.x)),   @as(i64, @intFromFloat(r.y)),
+                        @as(i64, @intFromFloat(r.w)),   @as(i64, @intFromFloat(r.h)),
+                        ed.cplDocRows(),
+                    }) catch return;
+                }
                 // The typed text is the ring's last stop, not an offer.
                 for (0..ed.cplCount() -| 1) |i| {
-                    a.writer.print("{s}cpl {s}\t{s}\n", .{
+                    // `doc` marks a row the panel has something to show
+                    // for. It is the only way to tell "no documentation"
+                    // from "no room to draw it".
+                    a.writer.print("{s}cpl {s}\t{s}{s}\n", .{
                         @as([]const u8, if (i == ed.cplSelected()) "*" else " "),
                         ed.cplWord(i),
                         ed.cplDetail(i),
+                        @as([]const u8, if (ed.cplDoc(i).len > 0) "\tdoc" else ""),
                     }) catch return;
                 }
             } else a.writer.print("cpl off\n", .{}) catch return;

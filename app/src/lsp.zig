@@ -321,6 +321,23 @@ pub const Completion = struct {
     /// Function, and so on. Kept as the number because the menu only
     /// needs to letter it, and the protocol adds new ones.
     kind: u8 = 0,
+    /// The prose about this candidate, owned; "" when the server sent
+    /// none. Markdown, in the same dialects hover arrives in and taken
+    /// apart by the same code — `documentation` is a MarkupContent or a
+    /// bare string, exactly like `hover.contents`.
+    ///
+    /// Servers differ on WHEN they send it. Some put it in the
+    /// completion list; most defer it and expect a
+    /// `completionItem/resolve` for the one row you are looking at,
+    /// which is what `raw` is for.
+    doc: []const u8 = "",
+    /// This item as it arrived, owned; "" when it could not be kept.
+    ///
+    /// The protocol resolves an ITEM, not an id — the server keys on the
+    /// opaque `data` field it attached, so anything reconstructed from
+    /// the fields above would come back unresolved. Same arrangement as
+    /// CodeAction.raw, and for the same reason.
+    raw: []const u8 = "",
 };
 
 /// Replace `range` with `text`. The unit a WorkspaceEdit is made of.
@@ -551,13 +568,17 @@ pub const Event = union(enum) {
 };
 
 /// Free a Completion list and everything hanging off it.
+pub fn freeCompletion(gpa: Allocator, c: Completion) void {
+    gpa.free(c.label);
+    gpa.free(c.detail);
+    gpa.free(c.insert);
+    gpa.free(c.sort);
+    gpa.free(c.doc);
+    gpa.free(c.raw);
+}
+
 pub fn freeCompletions(gpa: Allocator, items: []Completion) void {
-    for (items) |c| {
-        gpa.free(c.label);
-        gpa.free(c.detail);
-        gpa.free(c.insert);
-        gpa.free(c.sort);
-    }
+    for (items) |c| freeCompletion(gpa, c);
     gpa.free(items);
 }
 
@@ -627,7 +648,7 @@ pub const State = enum {
     failed,
 };
 
-const Kind = enum { initialize, hover, definition, references, rename, completion, formatting, code_action, code_action_resolve, shutdown };
+const Kind = enum { initialize, hover, definition, references, rename, completion, completion_resolve, formatting, code_action, code_action_resolve, shutdown };
 
 const Pending = struct { id: u32, kind: Kind };
 
@@ -693,6 +714,9 @@ pub const Session = struct {
     /// these, so without the legend there is nothing to read.
     legend_types: [][]const u8 = &.{},
     legend_mods: [][]const u8 = &.{},
+    /// The server answers `completionItem/resolve`, so its items are
+    /// worth keeping whole and worth asking about one at a time.
+    completion_resolve: bool = false,
 
     /// Verbatim JSON object of server settings, owned; "" for none. Sent
     /// on initialized and handed back for workspace/configuration, which
@@ -861,8 +885,14 @@ pub const Session = struct {
             // has no engine to expand, which would land in the buffer
             // as those literal characters. Saying no gets plain text
             // from every server instead of a placeholder nobody fills.
+            // Markdown FIRST now that there is a panel that renders it:
+            // the doc beside the list goes through hoverdoc.zig, which
+            // is the same layout hover already uses. Asking for
+            // plaintext got prose with the code fences and the headings
+            // flattened out of it.
             "\"completion\":{\"completionItem\":{\"snippetSupport\":false," ++
-            "\"documentationFormat\":[\"plaintext\"]},\"contextSupport\":true}," ++
+            "\"resolveSupport\":{\"properties\":[\"documentation\",\"detail\"]}," ++
+            "\"documentationFormat\":[\"markdown\",\"plaintext\"]},\"contextSupport\":true}," ++
             "\"hover\":{\"contentFormat\":[\"markdown\",\"plaintext\"]}," ++
             "\"publishDiagnostics\":{\"versionSupport\":true}," ++
             "\"synchronization\":{\"didSave\":true}," ++
@@ -897,6 +927,15 @@ pub const Session = struct {
             self.legend_types = dupStrings(self.gpa, jGet(legend, "tokenTypes"));
             self.legend_mods = dupStrings(self.gpa, jGet(legend, "tokenModifiers"));
         }
+        // Whether asking about ONE candidate is worth doing. Most
+        // servers leave `documentation` out of the list — computing it
+        // for two hundred rows to show one is work nobody wants — and
+        // expect a resolve for the row being looked at. A server that
+        // said no here gets no resolve and no re-serialized items.
+        self.completion_resolve = switch (jGet(jGet(caps, "completionProvider"), "resolveProvider")) {
+            .bool => |b| b,
+            else => false,
+        };
         self.state = .ready;
         self.notify("initialized", "{}");
         if (self.settings.len > 0) {
@@ -1222,6 +1261,21 @@ pub const Session = struct {
         return self.request(.completion, "textDocument/completion", params);
     }
 
+    /// Ask for the prose a server left out of the list.
+    ///
+    /// `raw` is the item exactly as it arrived, for the same reason
+    /// codeActionResolve takes one: the protocol resolves an ITEM, and
+    /// the server keys on the opaque `data` it attached. The answer is a
+    /// `.completion` carrying the same id and exactly one item.
+    ///
+    /// Null when the server never said it resolves — the caller does not
+    /// have to ask first, and a request nobody answers is a spinner that
+    /// never clears.
+    pub fn completionResolve(self: *Session, raw: []const u8) ?u32 {
+        if (raw.len == 0 or !self.completion_resolve) return null;
+        return self.request(.completion_resolve, "completionItem/resolve", raw);
+    }
+
     /// Rename the symbol under `pos` to `new_name`. The answer is a
     /// `.workspace_edit` carrying the same id.
     ///
@@ -1470,6 +1524,8 @@ pub const Session = struct {
             .references => self.onLocations(id, result, true),
             .rename => self.onWorkspaceEdit(id, result),
             .completion => self.onCompletion(id, result),
+            // One item, not a list — onCompletion takes both shapes.
+            .completion_resolve => self.onCompletion(id, result),
             .formatting => self.onFormatting(id, result),
             .code_action => self.onCodeActions(id, result, false),
             .code_action_resolve => self.onCodeActions(id, result, true),
@@ -1641,12 +1697,24 @@ pub const Session = struct {
     /// definition's two. A server picks whichever it likes and a client
     /// reading one gets nothing from half the catalog.
     fn onCompletion(self: *Session, id: u32, result: std.json.Value) void {
-        const list = switch (result) {
-            .array => result,
-            .object => jGet(result, "items"),
-            else => .null,
+        // Three shapes: a bare array, a CompletionList with `items`, and
+        // — from a resolve — ONE CompletionItem. The loop below reads
+        // all three the same way, so the odd one becomes a one-element
+        // slice rather than a second parser. `one` is declared out here
+        // because the slice points into it.
+        var one: [1]std.json.Value = undefined;
+        const items: []const std.json.Value = switch (result) {
+            .array => |arr| arr.items,
+            .object => blk: {
+                const l = jGet(result, "items");
+                if (l == .array) break :blk l.array.items;
+                if (jStr(jGet(result, "label")) == null) break :blk &.{};
+                one[0] = result;
+                break :blk one[0..1];
+            },
+            else => &.{},
         };
-        if (list != .array) {
+        if (items.len == 0) {
             self.push(.{ .empty = .{ .id = id } });
             return;
         }
@@ -1657,7 +1725,7 @@ pub const Session = struct {
 
         var out: std.ArrayListUnmanaged(Completion) = .empty;
         defer out.deinit(self.gpa);
-        for (list.array.items) |item| {
+        for (items) |item| {
             if (out.items.len >= max_completions) break;
             const label = jStr(jGet(item, "label")) orelse continue;
             if (label.len == 0) continue;
@@ -1685,38 +1753,58 @@ pub const Session = struct {
                 insert = it;
             }
 
-            const l = self.gpa.dupe(u8, label) catch break;
-            const d = self.gpa.dupe(u8, jStr(jGet(item, "detail")) orelse "") catch {
-                self.gpa.free(l);
-                break;
+            // Six owned strings now, so the cascade of hand-written
+            // frees became a `c` that is freed as a UNIT. Every field is
+            // "" until it succeeds, and freeing "" is free.
+            var c: Completion = .{
+                .range = range,
+                .kind = @intCast(@min(jU32(jGet(item, "kind")), 255)),
             };
-            const ins = self.gpa.dupe(u8, insert) catch {
-                self.gpa.free(l);
-                self.gpa.free(d);
-                break;
+            var ok = true;
+            c.label = self.gpa.dupe(u8, label) catch blk: {
+                ok = false;
+                break :blk "";
+            };
+            c.detail = self.gpa.dupe(u8, jStr(jGet(item, "detail")) orelse "") catch blk: {
+                ok = false;
+                break :blk "";
+            };
+            c.insert = self.gpa.dupe(u8, insert) catch blk: {
+                ok = false;
+                break :blk "";
             };
             // Falling back to the label keeps the sort TOTAL: an item
             // with no sortText would otherwise rank ahead of every item
             // that has one, which is the opposite of what its absence
             // means.
-            const s = self.gpa.dupe(u8, jStr(jGet(item, "sortText")) orelse label) catch {
-                self.gpa.free(l);
-                self.gpa.free(d);
-                self.gpa.free(ins);
-                break;
+            c.sort = self.gpa.dupe(u8, jStr(jGet(item, "sortText")) orelse label) catch blk: {
+                ok = false;
+                break :blk "";
             };
-            out.append(self.gpa, .{
-                .label = l,
-                .detail = d,
-                .insert = ins,
-                .range = range,
-                .sort = s,
-                .kind = @intCast(@min(jU32(jGet(item, "kind")), 255)),
-            }) catch {
-                self.gpa.free(l);
-                self.gpa.free(d);
-                self.gpa.free(ins);
-                self.gpa.free(s);
+            // Documentation arrives in the same shapes hover's contents
+            // do, so it is taken apart by the same function. Most
+            // servers send none here and wait to be asked — see `raw`.
+            const docv = jGet(item, "documentation");
+            if (docv != .null) {
+                var da: std.Io.Writer.Allocating = .init(self.gpa);
+                appendHoverText(&da.writer, docv);
+                c.doc = da.toOwnedSlice() catch blk: {
+                    da.deinit();
+                    break :blk "";
+                };
+            }
+            // Kept ONLY when the server said it resolves items. It is
+            // the whole item re-serialized, which is not free, and a
+            // server that cannot resolve will never be handed it.
+            if (self.completion_resolve) {
+                c.raw = std.json.Stringify.valueAlloc(self.gpa, item, .{}) catch "";
+            }
+            if (!ok) {
+                freeCompletion(self.gpa, c);
+                break;
+            }
+            out.append(self.gpa, c) catch {
+                freeCompletion(self.gpa, c);
                 break;
             };
         }
@@ -2273,6 +2361,14 @@ pub const Server = struct {
     pub fn completion(self: *Server, path: []const u8, pos: Position) ?u32 {
         self.mu.lock();
         const id = self.sess.completion(path, pos);
+        self.mu.unlock();
+        self.poke();
+        return id;
+    }
+
+    pub fn completionResolve(self: *Server, raw: []const u8) ?u32 {
+        self.mu.lock();
+        const id = self.sess.completionResolve(raw);
         self.mu.unlock();
         self.poke();
         return id;
@@ -2908,6 +3004,96 @@ test "rename reads both WorkspaceEdit shapes and reports file operations" {
     var e3 = sess.nextEvent().?;
     defer e3.deinit(gpa);
     try testing.expect(e3 == .empty);
+}
+
+test "documentation arrives in both shapes, and a resolve fills in the rest" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    sess.start();
+    // A server that says it resolves items. Everything below turns on
+    // that: without it the raw item is not kept and no resolve is sent.
+    const init_reply = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capabilities\":" ++
+        "{\"completionProvider\":{\"resolveProvider\":true}}}}";
+    const fi = try framed(gpa, init_reply);
+    defer gpa.free(fi);
+    sess.feed(fi);
+    var ready = sess.nextEvent().?;
+    ready.deinit(gpa);
+    try testing.expect(sess.completion_resolve);
+    sess.didOpen("/tmp/work/a.go", "package main\n");
+    sess.consumeOutbound(sess.outbound().len);
+
+    // MarkupContent on one, a bare string on the next — the same two
+    // shapes hover's contents come in — and nothing at all on the third,
+    // which is the case the resolve exists for.
+    const id1 = sess.completion("/tmp/work/a.go", .{ .line = 1, .col = 2 }).?;
+    const r1 = try std.fmt.allocPrint(gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[" ++
+        "{{\"label\":\"Println\",\"kind\":3,\"documentation\":" ++
+        "{{\"kind\":\"markdown\",\"value\":\"Println **formats** using...\"}}}}," ++
+        "{{\"label\":\"Printf\",\"kind\":3,\"documentation\":\"plain prose\"}}," ++
+        "{{\"label\":\"Print\",\"kind\":3,\"data\":{{\"tok\":7}}}}]}}", .{id1});
+    defer gpa.free(r1);
+    const f1 = try framed(gpa, r1);
+    defer gpa.free(f1);
+    sess.feed(f1);
+    var e1 = sess.nextEvent().?;
+    defer e1.deinit(gpa);
+    try testing.expectEqual(@as(usize, 3), e1.completion.items.len);
+    try testing.expectEqualStrings("Println **formats** using...", e1.completion.items[0].doc);
+    try testing.expectEqualStrings("plain prose", e1.completion.items[1].doc);
+    try testing.expectEqualStrings("", e1.completion.items[2].doc);
+    // The opaque `data` the server keys its resolve on survives, which
+    // is the whole reason the item is kept whole rather than rebuilt.
+    try testing.expect(std.mem.indexOf(u8, e1.completion.items[2].raw, "\"tok\":7") != null);
+
+    // Resolving that third one answers with ONE item, not a list.
+    sess.consumeOutbound(sess.outbound().len);
+    const id2 = sess.completionResolve(e1.completion.items[2].raw).?;
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(), "\"method\":\"completionItem/resolve\"") != null);
+    const r2 = try std.fmt.allocPrint(gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"label\":\"Print\",\"kind\":3," ++
+        "\"detail\":\"func(a ...any)\",\"documentation\":\"Print formats using...\"}}}}", .{id2});
+    defer gpa.free(r2);
+    const f2 = try framed(gpa, r2);
+    defer gpa.free(f2);
+    sess.feed(f2);
+    var e2 = sess.nextEvent().?;
+    defer e2.deinit(gpa);
+    try testing.expectEqual(@as(usize, 1), e2.completion.items.len);
+    try testing.expectEqualStrings("Print formats using...", e2.completion.items[0].doc);
+    try testing.expectEqualStrings("func(a ...any)", e2.completion.items[0].detail);
+}
+
+test "a server that does not resolve is never asked, and its items are not kept whole" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    // readySession's reply has no completionProvider at all.
+    try readySession(&sess, false);
+    var ready = sess.nextEvent().?;
+    ready.deinit(gpa);
+    try testing.expect(!sess.completion_resolve);
+    sess.didOpen("/tmp/work/a.go", "package main\n");
+    sess.consumeOutbound(sess.outbound().len);
+
+    const id1 = sess.completion("/tmp/work/a.go", .{}).?;
+    const r1 = try std.fmt.allocPrint(gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[{{\"label\":\"Print\",\"kind\":3}}]}}", .{id1});
+    defer gpa.free(r1);
+    const f1 = try framed(gpa, r1);
+    defer gpa.free(f1);
+    sess.feed(f1);
+    var e1 = sess.nextEvent().?;
+    defer e1.deinit(gpa);
+    // Re-serializing every item of a two-hundred-row list to resolve
+    // none of them is work with no reader.
+    try testing.expectEqualStrings("", e1.completion.items[0].raw);
+    // And the request is refused rather than sent into silence: a
+    // spinner waiting on a method the server never implemented is the
+    // one failure nobody can clear.
+    try testing.expect(sess.completionResolve("{\"label\":\"Print\"}") == null);
 }
 
 test "completion reads both reply shapes and every way to say what to insert" {

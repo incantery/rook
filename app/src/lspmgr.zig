@@ -57,7 +57,7 @@ const Entry = struct {
     note: []const u8 = "",
 };
 
-const AskKind = enum { hover, definition, references, rename, completion, formatting, code_action, code_action_resolve };
+const AskKind = enum { hover, definition, references, rename, completion, completion_resolve, formatting, code_action, code_action_resolve };
 
 const Ask = struct {
     id: u32,
@@ -169,6 +169,12 @@ pub const Answer = union(enum) {
     /// one to what you were typing two keystrokes ago — the round trip
     /// is long enough for that to be a different question.
     completion: struct { path: []const u8, prefix: []const u8, items: []lsp.Completion },
+    /// The prose about ONE candidate, arriving after the list did.
+    /// Owned by the caller.
+    ///
+    /// `word` names the row rather than an index, because the ring is
+    /// rebuilt by every narrowing keystroke — see Manager.completionResolve.
+    completion_doc: struct { path: []const u8, word: []const u8, doc: []const u8, detail: []const u8 },
     /// How the file should be laid out. Owned by the caller.
     ///
     /// Delivered even when it is EMPTY — a caller that asked in order
@@ -210,6 +216,12 @@ pub const Answer = union(enum) {
                 gpa.free(c.path);
                 gpa.free(c.prefix);
                 lsp.freeCompletions(gpa, c.items);
+            },
+            .completion_doc => |d| {
+                gpa.free(d.path);
+                gpa.free(d.word);
+                gpa.free(d.doc);
+                gpa.free(d.detail);
             },
             .formatting => |f| {
                 gpa.free(f.path);
@@ -610,6 +622,17 @@ pub const Manager = struct {
         return true;
     }
 
+    /// The prose for one candidate. `word` rides along and comes back on
+    /// the answer, so the editor can find the row it belongs to without
+    /// holding an index across the round trip — the ring is rebuilt by
+    /// every narrowing keystroke, and an index would name a stranger.
+    pub fn completionResolve(self: *Manager, path: []const u8, raw: []const u8, word: []const u8) bool {
+        const srv = self.ensure(path) orelse return false;
+        const id = srv.completionResolve(raw) orelse return false;
+        self.recordAsk(id, .completion_resolve, path, word);
+        return true;
+    }
+
     /// Here `symbol` is not decoration: it is the NEW name, and it comes
     /// back on the answer so the report can say what was renamed to what
     /// without the app holding state across the round trip.
@@ -734,6 +757,38 @@ pub const Manager = struct {
                     .completion => |c| {
                         const ask = self.takeAsk(c.id) orelse continue;
                         defer self.freeAsk(ask);
+                        // A resolve comes back through the same event —
+                        // it IS a completion item — but it answers a
+                        // different question: one row's prose, not a
+                        // list. The ASK is what knows which was asked.
+                        if (ask.kind == .completion_resolve) {
+                            if (c.items.len == 0) continue;
+                            const it = c.items[0];
+                            const p = self.gpa.dupe(u8, ask.path) catch continue;
+                            const wd = self.gpa.dupe(u8, ask.symbol) catch {
+                                self.gpa.free(p);
+                                continue;
+                            };
+                            const doc = self.gpa.dupe(u8, it.doc) catch {
+                                self.gpa.free(p);
+                                self.gpa.free(wd);
+                                continue;
+                            };
+                            const det = self.gpa.dupe(u8, it.detail) catch {
+                                self.gpa.free(p);
+                                self.gpa.free(wd);
+                                self.gpa.free(doc);
+                                continue;
+                            };
+                            self.pushAnswer(.{ .completion_doc = .{
+                                .path = p,
+                                .word = wd,
+                                .doc = doc,
+                                .detail = det,
+                            } });
+                            changed = true;
+                            continue;
+                        }
                         const items = dupeCompletions(self.gpa, c.items) orelse continue;
                         // The SERVER's ranking, applied here so every
                         // consumer gets it. sortText is the only signal
@@ -832,30 +887,22 @@ pub const Manager = struct {
         const out = gpa.alloc(lsp.Completion, src.len) catch return null;
         var n: usize = 0;
         for (src) |c| {
-            const label = gpa.dupe(u8, c.label) catch break;
-            const detail = gpa.dupe(u8, c.detail) catch {
-                gpa.free(label);
+            // Six owned strings, freed as a UNIT: every field is "" until
+            // its dupe succeeds, and freeing "" is free. The hand-written
+            // cascade this replaces was already four levels deep.
+            var d: lsp.Completion = .{ .range = c.range, .kind = c.kind };
+            var ok = true;
+            inline for (.{ "label", "detail", "insert", "sort", "doc", "raw" }) |f| {
+                @field(d, f) = gpa.dupe(u8, @field(c, f)) catch blk: {
+                    ok = false;
+                    break :blk "";
+                };
+            }
+            if (!ok) {
+                lsp.freeCompletion(gpa, d);
                 break;
-            };
-            const insert = gpa.dupe(u8, c.insert) catch {
-                gpa.free(label);
-                gpa.free(detail);
-                break;
-            };
-            const sort = gpa.dupe(u8, c.sort) catch {
-                gpa.free(label);
-                gpa.free(detail);
-                gpa.free(insert);
-                break;
-            };
-            out[n] = .{
-                .label = label,
-                .detail = detail,
-                .insert = insert,
-                .range = c.range,
-                .sort = sort,
-                .kind = c.kind,
-            };
+            }
+            out[n] = d;
             n += 1;
         }
         // A SHORT list is fine here, unlike a workspace edit's: missing

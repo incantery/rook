@@ -3477,6 +3477,7 @@ pub const App = struct {
         ed.lsp_references = &lspReferencesHook;
         ed.lsp_rename = &lspRenameHook;
         ed.lsp_completion = &lspCompletionHook;
+        ed.lsp_completion_resolve = &lspCompletionResolveHook;
         ed.lsp_format = &lspFormatHook;
         ed.lsp_code_action = &lspCodeActionHook;
         ed.fmt_on_save = self.cfg_fmt_on_save;
@@ -3635,6 +3636,7 @@ pub const App = struct {
         ed.lsp_references = null;
         ed.lsp_rename = null;
         ed.lsp_completion = null;
+        ed.lsp_completion_resolve = null;
         ed.lsp_format = null;
         ed.lsp_code_action = null;
         ed.fmt_on_save = false;
@@ -3836,7 +3838,13 @@ pub const App = struct {
                     const items = self.gpa.alloc(editorpkg.Editor.CplItem, c.items.len) catch continue;
                     defer self.gpa.free(items);
                     for (c.items, 0..) |it, i| {
-                        items[i] = .{ .text = it.insert, .detail = it.detail, .kind = it.kind };
+                        items[i] = .{
+                            .text = it.insert,
+                            .detail = it.detail,
+                            .kind = it.kind,
+                            .doc = it.doc,
+                            .raw = it.raw,
+                        };
                     }
                     // The PREFIX the request was made for travels with
                     // the answer, so the editor can tell an answer to
@@ -3845,6 +3853,10 @@ pub const App = struct {
                     // editor's current prefix here instead would make
                     // that check compare a value with itself.
                     ed.takeCompletions(items, c.prefix);
+                },
+                .completion_doc => |d| {
+                    const ed = self.editorShowingLocked(d.path) orelse continue;
+                    ed.takeCompletionDoc(d.word, d.doc, d.detail);
                 },
                 .none => |n| {
                     const ed = self.editorShowingLocked(n.path) orelse continue;
@@ -3865,6 +3877,12 @@ pub const App = struct {
                         // menu, and a message over a working ring
                         // would read as a failure of the ring.
                         .completion => ed.takeCompletions(&.{}, ed.cplPrefix()),
+                        // A resolve that came back with nothing. Silent
+                        // on purpose: the row is fine, it simply has no
+                        // prose, and the panel beside it stays shut.
+                        // The editor still has to hear it, or the "one
+                        // in flight" latch would hold that word forever.
+                        .completion_resolve => ed.forgetCompletionResolve(),
                         // A server that will not format this file. The
                         // `:w` behind it must still happen.
                         .formatting => ed.finishPendingWrite("no formatter for this file"),
@@ -4071,6 +4089,17 @@ pub const App = struct {
         // word you are typing offers the wrong words.
         self.lspSyncLocked(ed);
         _ = self.lsp.completion(path, lspPos(ed), ed.cplPrefix());
+    }
+
+    /// Ask about ONE candidate — the row the selection is resting on.
+    ///
+    /// No didChange first, unlike the completion hook: the document has
+    /// not moved since the list was computed, and a resolve is about an
+    /// item the server already handed us rather than about a position.
+    fn lspCompletionResolveHook(ctx: *anyopaque, ed: *editorpkg.Editor, raw: []const u8, word: []const u8) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const path = ed.buf.path orelse return;
+        _ = self.lsp.completionResolve(path, raw, word);
     }
 
     fn lspRenameHook(ctx: *anyopaque, ed: *editorpkg.Editor, new_name: []const u8) void {
@@ -8652,12 +8681,28 @@ pub const App = struct {
     /// checkable from a screenshot if something says where to look, and
     /// a second copy of this arithmetic would be a second thing to keep
     /// in step with the fill.
-    pub fn completionCardRect(self: *App, p: *panespkg.Pane) ?struct { x: f32, y: f32, w: f32, h: f32, sel: ?f32 } {
+    pub fn completionCardRect(self: *App, p: *panespkg.Pane) ?CardRect {
         const ed = switch (p.content) {
             .edit => |e| e,
             else => return null,
         };
-        const box = ed.cpl_geom orelse return null;
+        return self.cardRect(p, ed.cpl_geom orelse return null);
+    }
+
+    /// The documentation panel's card, beside the list.
+    pub fn completionDocCardRect(self: *App, p: *panespkg.Pane) ?CardRect {
+        const ed = switch (p.content) {
+            .edit => |e| e,
+            else => return null,
+        };
+        return self.cardRect(p, ed.cpl_doc_geom orelse return null);
+    }
+
+    /// A floating box's rect in scene pixels. `sel` is the pill's
+    /// offset from the top, when the box has a highlighted row.
+    pub const CardRect = struct { x: f32, y: f32, w: f32, h: f32, sel: ?f32 };
+
+    fn cardRect(self: *App, p: *panespkg.Pane, box: editorpkg.CplBox) CardRect {
         const o = self.gridOrigin(p);
         const cw = self.renderer.cell_w;
         const ch = self.renderer.cell_h;
@@ -8687,6 +8732,16 @@ pub const App = struct {
     /// A shadow is the one part of Zed's popover this arrangement gives
     /// up, for the same reason.
     fn drawCompletionCard(self: *App, enc: objc.Object, vp_w: f32, vp_h: f32, p: *panespkg.Pane) void {
+        // The documentation panel first, so that where the two touch it
+        // is the LIST's edge you see — the list is what you are picking
+        // from, and the panel is what it is telling you about.
+        if (self.completionDocCardRect(p)) |d| {
+            self.renderer.drawRoundRect(enc, vp_w, vp_h, d.x, d.y, d.w, d.h, th.bar_bg, .{
+                .radius = self.m.radius,
+                .border = self.sep,
+                .border_color = th.sep,
+            });
+        }
         const r = self.completionCardRect(p) orelse return;
         const x = r.x;
         const y = r.y;

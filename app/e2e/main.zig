@@ -3653,9 +3653,54 @@ fn lspScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
         var buf: [16 * 1024]u8 = undefined;
         try h.expectContains(try app.screen(&buf), "func(...any)", "and the menu is on screen with it");
     }
+    // WIDER, on purpose. The sandbox window is 56 columns and the list
+    // alone is 40 of them, so there is genuinely no room for a panel
+    // beside it — which is the behaviour a unit test already pins. What
+    // needs a real app is the panel actually DRAWING, and that needs a
+    // window somebody would plausibly edit in.
+    //
+    // Fullscreen rather than `winsize`: that verb reports ok and does
+    // nothing in this build (docs/man/rook-ctl.7 documents it, and it is
+    // its own bug). Toggled back below, so nothing after this cares.
+    _ = try app.ctl("fullscreen");
+    _ = try app.waitCtl("panes", "grid 1", 8_000);
+    // The panel beside the list. `Println` carried its prose IN the
+    // list, the way zls does, so it is up as soon as the answer is.
+    {
+        const panel = try app.ctl("lsp");
+        try h.expectContains(panel, "cpl doc card ", "the panel opened beside the list");
+        var buf: [16 * 1024]u8 = undefined;
+        try h.expectContains(
+            try app.screen(&buf),
+            // One ROW's worth: the panel wraps at its own width, and
+            // `screen` joins rows, so a phrase that straddles the fold
+            // is never contiguous in it.
+            "formats using the default formats",
+            "with the prose the server sent, laid out as markdown",
+        );
+    }
     // Cycling takes the next one.
     _ = try app.ctl("key 0e");
     try h.expectContains(try app.ctl("lsp"), "*cpl Printf", "ctrl-n walks the menu");
+    // ...and `Printf` had NO prose in the list — only the opaque `data`
+    // its server keys a resolve on. This is the gopls case, and it is
+    // the one that proves the item was handed back WHOLE: the fake
+    // refuses to resolve anything that arrives without its `data`.
+    {
+        const resolved = try app.waitCtl("lsp", "cpl Printf\tfunc(string, ...any)\tdoc", 5_000);
+        try h.expectContains(resolved, "cpl doc card ", "and the panel followed the selection");
+        var buf: [16 * 1024]u8 = undefined;
+        try h.expectContains(
+            try app.screen(&buf),
+            "format specifier",
+            "showing prose that only a resolve could have fetched",
+        );
+    }
+    // Back out of fullscreen. Not waited on and not asserted: AppKit
+    // restores to a frame of its own choosing, and nothing below this
+    // line reads the screen — every assertion left is `ctl lsp` or a
+    // file on disk.
+    _ = try app.ctl("fullscreen");
     // Typing ends THAT ring — the candidates were built against text
     // that has moved — and opens a fresh one for the longer word, which
     // is what makes the menu narrow as you type rather than vanish.
@@ -3950,8 +3995,11 @@ fn fakeHandle(gpa: std.mem.Allocator, body: []const u8, target: []const u8) !voi
     defer w.deinit();
 
     if (std.mem.eql(u8, method, "initialize")) {
+        // resolveProvider is what tells the client an item's prose is
+        // worth asking about one row at a time.
         try w.writer.print(
-            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"capabilities\":{{}}}}}}",
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"capabilities\":" ++
+                "{{\"completionProvider\":{{\"resolveProvider\":true}}}}}}}}",
             .{id orelse 1},
         );
         try fakeSend(gpa, w.written());
@@ -4084,10 +4132,43 @@ fn fakeHandle(gpa: std.mem.Allocator, body: []const u8, target: []const u8) !voi
         // `Println` is also a word already in the scenario's buffer, so
         // it is the one that proves the semantic item wins the
         // duplicate and brings its signature with it.
+        //
+        // The two rows differ in WHERE their prose comes from, which is
+        // the whole of the documentation panel's protocol story.
+        // `Println` carries its documentation in the list, the way zls
+        // does. `Printf` carries none and an opaque `data` instead, the
+        // way gopls and rust-analyzer do — its prose costs a resolve.
         try w.writer.print(
             "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"isIncomplete\":false,\"items\":[" ++
-                "{{\"label\":\"Printf\",\"kind\":3,\"detail\":\"func(string, ...any)\",\"sortText\":\"20\"}}," ++
-                "{{\"label\":\"Println\",\"kind\":3,\"detail\":\"func(...any)\",\"sortText\":\"10\"}}]}}}}",
+                "{{\"label\":\"Printf\",\"kind\":3,\"detail\":\"func(string, ...any)\"," ++
+                "\"sortText\":\"20\",\"data\":{{\"tok\":7}}}}," ++
+                "{{\"label\":\"Println\",\"kind\":3,\"detail\":\"func(...any)\",\"sortText\":\"10\"," ++
+                "\"documentation\":{{\"kind\":\"markdown\"," ++
+                "\"value\":\"Println formats using the default formats and writes to standard output.\"}}}}]}}}}",
+            .{id orelse 0},
+        );
+        try fakeSend(gpa, w.written());
+        return;
+    }
+    if (std.mem.eql(u8, method, "completionItem/resolve")) {
+        // The prose the list left out. A server keys this on the `data`
+        // it attached, so the client must hand the item back whole —
+        // refusing anything without it is how this scenario proves the
+        // raw item survived the round trip rather than being rebuilt.
+        const params = obj.get("params") orelse .null;
+        const data = switch (params) {
+            .object => |o| o.get("data") orelse .null,
+            else => .null,
+        };
+        if (data == .null) {
+            try w.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":null}}", .{id orelse 0});
+            try fakeSend(gpa, w.written());
+            return;
+        }
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"label\":\"Printf\",\"kind\":3," ++
+                "\"detail\":\"func(string, ...any)\",\"documentation\":{{\"kind\":\"markdown\"," ++
+                "\"value\":\"Printf formats according to a format specifier.\"}}}}}}",
             .{id orelse 0},
         );
         try fakeSend(gpa, w.written());

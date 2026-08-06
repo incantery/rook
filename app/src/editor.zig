@@ -427,6 +427,18 @@ pub const Editor = struct {
     /// CompletionItemKind per candidate; 0 for a buffer word, which is
     /// an identifier and nothing more specific.
     cpl_kind: std.ArrayListUnmanaged(u8) = .empty,
+    /// The prose about each candidate — markdown, in the dialects hover
+    /// arrives in. Packed like the details. Usually "" at first: most
+    /// servers leave documentation out of a two-hundred-row list and
+    /// expect to be asked about the one row you are looking at.
+    cpl_doc: std.ArrayListUnmanaged(u8) = .empty,
+    cpl_doc_at: std.ArrayListUnmanaged(u32) = .empty,
+    /// Each candidate as it arrived from the server, packed the same
+    /// way, for asking about it later. "" when the server said it does
+    /// not resolve items, in which case what came with the list is all
+    /// there will ever be.
+    cpl_raw: std.ArrayListUnmanaged(u8) = .empty,
+    cpl_raw_at: std.ArrayListUnmanaged(u32) = .empty,
     /// The prefix the live ring was built for, owned. A late reply that
     /// answers a different prefix is answering a question you have
     /// stopped asking.
@@ -480,6 +492,26 @@ pub const Editor = struct {
     /// Where the last fill actually put the box, for whoever paints the
     /// card behind it. Null when no menu is up.
     cpl_geom: ?CplBox = null,
+    /// The same, for the documentation panel beside the list. Null when
+    /// the selected candidate has no prose, or there is no room for it.
+    cpl_doc_geom: ?CplBox = null,
+    /// The selected candidate's documentation, laid out.
+    ///
+    /// Cached against the candidate and the width it was wrapped for,
+    /// because a markdown re-layout on every frame is work the panel
+    /// does not need — Zed keeps this cache for the same reason, and
+    /// names flicker while typing as what it is for.
+    cpl_docview: hoverdoc.Doc = .{},
+    cpl_docview_for: usize = std.math.maxInt(usize),
+    cpl_docview_w: usize = 0,
+    /// The candidate a resolve is out for, by word, owned. One request
+    /// per row rather than one per frame: `ensure()` runs under the
+    /// draw lock and the answer lands frames later.
+    cpl_resolve_for: std.ArrayListUnmanaged(u8) = .empty,
+    /// Ask a server for the prose about one candidate. `raw` is the
+    /// item as it arrived; `word` names the row the answer belongs to.
+    /// Answered through takeCompletionDoc.
+    lsp_completion_resolve: ?*const fn (*anyopaque, *Editor, raw: []const u8, word: []const u8) void = null,
     /// The hover float. `K` asks; the answer arrives frames later and
     /// is laid out ONCE, at the width the pane had when it landed —
     /// re-wrapping every frame would be work the float does not need,
@@ -1408,8 +1440,14 @@ pub const Editor = struct {
         self.cpl_detail.deinit(gpa);
         self.cpl_detail_at.deinit(gpa);
         self.cpl_kind.deinit(gpa);
+        self.cpl_doc.deinit(gpa);
+        self.cpl_doc_at.deinit(gpa);
+        self.cpl_raw.deinit(gpa);
+        self.cpl_raw_at.deinit(gpa);
         self.cpl_prefix.deinit(gpa);
         self.cpl_asked.deinit(gpa);
+        self.cpl_resolve_for.deinit(gpa);
+        self.cpl_docview.deinit(gpa);
         self.hov.deinit(gpa);
         if (self.last_re) |*r| r.deinit(gpa);
         self.reg.deinit(gpa);
@@ -2486,6 +2524,21 @@ pub const Editor = struct {
         self.cpl_detail.clearRetainingCapacity();
         self.cpl_detail_at.clearRetainingCapacity();
         self.cpl_kind.clearRetainingCapacity();
+        self.cpl_doc.clearRetainingCapacity();
+        self.cpl_doc_at.clearRetainingCapacity();
+        self.cpl_raw.clearRetainingCapacity();
+        self.cpl_raw_at.clearRetainingCapacity();
+        // The laid-out panel belonged to a row in the ring that is
+        // about to stop existing.
+        self.cplDocInvalidate();
+    }
+
+    /// Drop the cached layout, so the next fill rebuilds it.
+    fn cplDocInvalidate(self: *Editor) void {
+        self.cpl_docview.deinit(self.gpa);
+        self.cpl_docview = .{};
+        self.cpl_docview_for = std.math.maxInt(usize);
+        self.cpl_docview_w = 0;
     }
 
     /// Append one candidate, skipping a word already in the ring.
@@ -2495,6 +2548,10 @@ pub const Editor = struct {
     /// thing: the semantic items are pushed first, so the scraped copy
     /// of `Println` — which knows no signature — is the one that goes.
     fn cplPush(self: *Editor, word: []const u8, detail: []const u8, kind: u8) void {
+        self.cplPushFull(word, detail, kind, "", "");
+    }
+
+    fn cplPushFull(self: *Editor, word: []const u8, detail: []const u8, kind: u8, doc: []const u8, raw: []const u8) void {
         const gpa = self.gpa;
         for (0..self.cplCountRaw()) |q| {
             if (std.mem.eql(u8, self.cplWordRaw(q), word)) return;
@@ -2504,13 +2561,19 @@ pub const Editor = struct {
         self.cpl_detail_at.append(gpa, @intCast(self.cpl_detail.items.len)) catch return;
         self.cpl_detail.appendSlice(gpa, detail) catch return;
         self.cpl_kind.append(gpa, kind) catch return;
+        self.cpl_doc_at.append(gpa, @intCast(self.cpl_doc.items.len)) catch return;
+        self.cpl_doc.appendSlice(gpa, doc) catch return;
+        self.cpl_raw_at.append(gpa, @intCast(self.cpl_raw.items.len)) catch return;
+        self.cpl_raw.appendSlice(gpa, raw) catch return;
     }
 
-    /// Close the ring: both packed stores need one trailing offset so
+    /// Close the ring: every packed store needs one trailing offset so
     /// the last entry has an end.
     fn cplSeal(self: *Editor) void {
         self.cpl_at.append(self.gpa, @intCast(self.cpl_blob.items.len)) catch return;
         self.cpl_detail_at.append(self.gpa, @intCast(self.cpl_detail.items.len)) catch return;
+        self.cpl_doc_at.append(self.gpa, @intCast(self.cpl_doc.items.len)) catch return;
+        self.cpl_raw_at.append(self.gpa, @intCast(self.cpl_raw.items.len)) catch return;
     }
 
     /// Entries pushed so far, DURING a build — before cplSeal there is
@@ -2653,6 +2716,26 @@ pub const Editor = struct {
     pub fn cplDetail(self: *const Editor, i: usize) []const u8 {
         if (i + 1 >= self.cpl_detail_at.items.len) return "";
         return self.cpl_detail.items[self.cpl_detail_at.items[i]..self.cpl_detail_at.items[i + 1]];
+    }
+
+    /// The prose about candidate `i` as markdown; "" when there is none
+    /// — a buffer word, or a server that has not been asked yet.
+    pub fn cplDoc(self: *const Editor, i: usize) []const u8 {
+        if (i + 1 >= self.cpl_doc_at.items.len) return "";
+        return self.cpl_doc.items[self.cpl_doc_at.items[i]..self.cpl_doc_at.items[i + 1]];
+    }
+
+    /// Rows the selected candidate's documentation laid out to, as the
+    /// panel last wrapped it. 0 when there is no panel.
+    pub fn cplDocRows(self: *const Editor) usize {
+        return self.cpl_docview.rowCount();
+    }
+
+    /// Candidate `i` as the server sent it, for resolving; "" when there
+    /// is nothing to resolve with.
+    pub fn cplRaw(self: *const Editor, i: usize) []const u8 {
+        if (i + 1 >= self.cpl_raw_at.items.len) return "";
+        return self.cpl_raw.items[self.cpl_raw_at.items[i]..self.cpl_raw_at.items[i + 1]];
     }
 
     /// Lines either side of the cursor the as-you-type menu draws its
@@ -2835,6 +2918,7 @@ pub const Editor = struct {
         }
         if (self.cplCount() == 0) return;
         self.cplPlace();
+        self.cplWantDoc();
     }
 
     /// Write the selected candidate over whatever is between `cpl_base`
@@ -2906,7 +2990,7 @@ pub const Editor = struct {
         for (items) |it| {
             if (it.text.len == 0) continue;
             if (prefix.len > 0 and !std.ascii.startsWithIgnoreCase(it.text, prefix)) continue;
-            self.cplPush(it.text, it.detail, it.kind);
+            self.cplPushFull(it.text, it.detail, it.kind, it.doc, it.raw);
         }
         var k: usize = 0;
         while (k + 1 < keep_at.items.len) : (k += 1) {
@@ -2926,12 +3010,114 @@ pub const Editor = struct {
         // it is moving text this same ring wrote a few frames ago and
         // you have not touched since.
         if (self.cpl_placed and self.cplCount() > 0) self.cplPlace();
+        // Row zero is selected the moment the list lands, so the panel
+        // beside it is owed prose before anyone touches a key.
+        self.cplWantDoc();
         self.render_dirty = true;
     }
 
     /// One offer from a server, in the editor's own terms. `text` is
     /// what goes in the buffer, which is not always what a menu shows.
-    pub const CplItem = struct { text: []const u8, detail: []const u8 = "", kind: u8 = 0 };
+    pub const CplItem = struct {
+        text: []const u8,
+        detail: []const u8 = "",
+        kind: u8 = 0,
+        /// Markdown for the panel beside the list; usually "" until a
+        /// resolve fills it in.
+        doc: []const u8 = "",
+        /// The item as the server sent it, for that resolve.
+        raw: []const u8 = "",
+    };
+
+    /// Ask about the selected candidate, if it has prose to fetch.
+    ///
+    /// Called when the SELECTION changes, never from a fill: a fill runs
+    /// under the draw lock and is also what `ctl dump` runs, so asking
+    /// there would put a request behind an inspection.
+    ///
+    /// One in flight, keyed on the word rather than a bool, so a dropped
+    /// answer cannot wedge it — the next row you land on has a different
+    /// word and asks for itself.
+    fn cplWantDoc(self: *Editor) void {
+        const f = self.lsp_completion_resolve orelse return;
+        if (!self.cpl_live) return;
+        const offers = self.cplCount() -| 1;
+        if (self.cpl_idx >= offers) return;
+        // Already have it, or nothing to ask with.
+        if (self.cplDoc(self.cpl_idx).len > 0) return;
+        const raw = self.cplRaw(self.cpl_idx);
+        if (raw.len == 0) return;
+        const word = self.cplWord(self.cpl_idx);
+        if (std.mem.eql(u8, self.cpl_resolve_for.items, word)) return;
+        self.cpl_resolve_for.clearRetainingCapacity();
+        self.cpl_resolve_for.appendSlice(self.gpa, word) catch return;
+        f(self.lsp_ctx.?, self, raw, word);
+    }
+
+    /// Release the one-in-flight latch without an answer.
+    ///
+    /// For a resolve that came back empty. Only one is ever out, so
+    /// clearing unconditionally is right — and a latch that could be
+    /// left set by a server's silence is a row that never asks again.
+    pub fn forgetCompletionResolve(self: *Editor) void {
+        self.cpl_resolve_for.clearRetainingCapacity();
+    }
+
+    /// The prose for ONE candidate, arriving after the list did.
+    ///
+    /// Matched by WORD rather than by index, because the ring can be
+    /// rebuilt while the request is out — a narrowing keystroke does
+    /// exactly that — and an index would then name a different row. A
+    /// word that is no longer in the ring is simply dropped.
+    ///
+    /// `detail` too: a server that defers documentation often defers the
+    /// signature with it, and the row beside the label is the one place
+    /// that shows.
+    pub fn takeCompletionDoc(self: *Editor, word: []const u8, doc: []const u8, detail: []const u8) void {
+        if (self.cpl_resolve_for.items.len > 0 and std.mem.eql(u8, self.cpl_resolve_for.items, word)) {
+            self.cpl_resolve_for.clearRetainingCapacity();
+        }
+        if (!self.cpl_live or doc.len == 0) return;
+        const n = self.cplCount() -| 1;
+        for (0..n) |i| {
+            if (!std.mem.eql(u8, self.cplWord(i), word)) continue;
+            // Rewriting a packed store in place is not worth a second
+            // representation: the ring is at most a few hundred short
+            // strings, and this happens once per row you rest on.
+            self.cplSetDoc(i, doc, detail);
+            self.cplDocInvalidate();
+            self.render_dirty = true;
+            return;
+        }
+    }
+
+    /// Replace candidate `i`'s doc and detail, rebuilding both packed
+    /// stores around it.
+    fn cplSetDoc(self: *Editor, i: usize, doc: []const u8, detail: []const u8) void {
+        const gpa = self.gpa;
+        const n = self.cplCount();
+        var blob: std.ArrayListUnmanaged(u8) = .empty;
+        defer blob.deinit(gpa);
+        var at: std.ArrayListUnmanaged(u32) = .empty;
+        defer at.deinit(gpa);
+        var dblob: std.ArrayListUnmanaged(u8) = .empty;
+        defer dblob.deinit(gpa);
+        var dat: std.ArrayListUnmanaged(u32) = .empty;
+        defer dat.deinit(gpa);
+        for (0..n) |k| {
+            at.append(gpa, @intCast(blob.items.len)) catch return;
+            blob.appendSlice(gpa, if (k == i) doc else self.cplDoc(k)) catch return;
+            dat.append(gpa, @intCast(dblob.items.len)) catch return;
+            const d = if (k == i and detail.len > 0) detail else self.cplDetail(k);
+            dblob.appendSlice(gpa, d) catch return;
+        }
+        at.append(gpa, @intCast(blob.items.len)) catch return;
+        dat.append(gpa, @intCast(dblob.items.len)) catch return;
+        std.mem.swap(std.ArrayListUnmanaged(u8), &self.cpl_doc, &blob);
+        std.mem.swap(std.ArrayListUnmanaged(u32), &self.cpl_doc_at, &at);
+        std.mem.swap(std.ArrayListUnmanaged(u8), &self.cpl_detail, &dblob);
+        std.mem.swap(std.ArrayListUnmanaged(u32), &self.cpl_detail_at, &dat);
+    }
 
     // -------------------------------------------------------- formatting
 
@@ -7116,6 +7302,7 @@ pub const Editor = struct {
         // Over the text, under the chrome: the menu covers the document
         // it is offering to change and nothing else.
         self.fillCompletionMenu(g, cols, rows, top_rows, gw);
+        self.fillCompletionDoc(g, cols, rows, top_rows);
         self.fillHoverFloat(g, cols, rows, top_rows, gw);
         self.fillStatusRow(g[(rows - 1) * cols ..][0..cols]);
         return g;
@@ -7284,6 +7471,20 @@ pub const Editor = struct {
     /// candidates exist at the instant of asking, so it cannot change
     /// under a list that is still arriving.
     const cpl_menu_min_rows = 4;
+    /// The documentation panel's width. A constant rather than a fit:
+    /// the panel changes CONTENT on every row you step through, and a
+    /// width that changed with it would make the pair jump sideways
+    /// while you are reading one of them.
+    const cpl_doc_cols = 54;
+    /// Narrower than this and the prose wraps to two words a line,
+    /// which is worse than not showing it — the list is what you came
+    /// for, and the panel is not allowed to crowd it.
+    const cpl_doc_min_cols = 28;
+    /// Rows of prose the panel will show. The same ceiling the list
+    /// has, so neither box can grow to fill the pane — a completion
+    /// menu that covers the file you are editing is a modal nobody
+    /// asked for. What does not fit is counted on the bottom row.
+    const cpl_doc_rows = 10;
 
     /// Draw the live ring as a menu under the cursor.
     ///
@@ -7445,6 +7646,107 @@ pub const Editor = struct {
             if (d.len > 0 and x + 1 < limit) {
                 x += 1;
                 putRow(out, &x, limit, d, .cpl_detail);
+            }
+        }
+    }
+
+    /// The documentation panel beside the list.
+    ///
+    /// Zed's shape, and the reason it is worth having: a completion menu
+    /// tells you a name and a type, and the question you actually have
+    /// about an unfamiliar one is what it DOES. Putting that in the
+    /// hover float instead means accepting a candidate, reading about
+    /// it, and undoing — which is three steps to answer a question you
+    /// had before you typed anything.
+    ///
+    /// Beside rather than below on purpose: below is where the list
+    /// already goes, and a panel there would push the list off the
+    /// cursor it is anchored to.
+    fn fillCompletionDoc(self: *Editor, g: []RCell, cols: usize, rows: usize, top_rows: usize) void {
+        self.cpl_doc_geom = null;
+        const box = self.cpl_geom orelse return;
+        const offers = self.cplCount() -| 1;
+        if (self.cpl_idx >= offers) return;
+        const md = self.cplDoc(self.cpl_idx);
+        if (md.len == 0) return;
+
+        // A CONSTANT width, clamped to the room there is. Sizing it to
+        // the prose would resize the panel on every row you step
+        // through, which is the flicker the list itself was already
+        // taught not to do.
+        const gap = 1;
+        const right_room = cols -| (box.col + box.w + gap);
+        const left_room = box.col -| gap;
+        const w = @min(cpl_doc_cols, @max(right_room, left_room));
+        if (w < cpl_doc_min_cols) return;
+        // Right unless it does not fit, then left. If right_room is
+        // short of `w` then `w` came from left_room, so the subtraction
+        // below cannot go under.
+        const on_right = right_room >= w;
+        const col = if (on_right) box.col + box.w + gap else box.col - gap - w;
+
+        // Laid out once per (row, width) rather than per frame.
+        if (self.cpl_docview_for != self.cpl_idx or self.cpl_docview_w != w) {
+            self.cpl_docview.deinit(self.gpa);
+            self.cpl_docview = hoverdoc.layout(self.gpa, md, w -| 2);
+            self.cpl_docview_for = self.cpl_idx;
+            self.cpl_docview_w = w;
+        }
+        const n = self.cpl_docview.rowCount();
+        if (n == 0) return;
+
+        // Top-aligned with the list, and sized to its OWN content — not
+        // to the list's height. Three candidates with a paragraph each
+        // is the ordinary case, and clipping the paragraph to the
+        // three-row list cut gopls off mid-sentence: the panel exists to
+        // answer a question, and half an answer is not one.
+        const text_rows = rows - 1 - top_rows;
+        const room = (top_rows + text_rows) -| box.row;
+        const h = @min(@min(n + 2, cpl_doc_rows + 2), room);
+        if (h < 3) return;
+
+        self.cpl_doc_geom = .{ .col = col, .row = box.row, .w = w, .h = h };
+
+        const body = h - 2;
+        const limit = col + w - 1;
+        for (0..h) |r| {
+            const out = g[(box.row + r) * cols ..][0..cols];
+            for (0..w) |c| {
+                if (col + c >= cols) break;
+                out[col + c] = .{ .cp = ' ', .st = .cpl_item, .no_bg = true };
+            }
+            // The bottom padding row carries the one thing the panel
+            // cannot otherwise say: that it is showing you part of a
+            // document. Prose that simply stops mid-sentence reads as a
+            // bug, and this is the row already reserved for nothing.
+            if (r == h - 1) {
+                if (n <= body) continue;
+                var mbuf: [24]u8 = undefined;
+                const m = std.fmt.bufPrint(&mbuf, "+{d} more ", .{n - body}) catch continue;
+                var mw: usize = 0;
+                var mi: usize = 0;
+                while (mi < m.len) {
+                    const cl = clusterAt(m, mi);
+                    mw += cl.width;
+                    mi += cl.len;
+                }
+                if (mw + 2 > w) continue;
+                var mx = limit - mw;
+                putRow(out, &mx, limit, m, .cpl_detail);
+                continue;
+            }
+            if (r == 0) continue;
+
+            const idx = r - 1;
+            if (idx >= n) continue;
+            var x = col + 1;
+            if (self.cpl_docview.rowIsRule(idx)) {
+                while (x < limit) : (x += 1) out[x] = .{ .cp = '─', .st = .cpl_detail, .no_bg = true };
+                continue;
+            }
+            for (self.cpl_docview.row(idx)) |run| {
+                const s = self.cpl_docview.text(run);
+                putRow(out, &x, limit, s, hoverStyle(run.ink));
             }
         }
     }
@@ -12783,6 +13085,248 @@ test "the menu's box holds still while one word is completed" {
         gpa.free(d);
     }
     try testing.expect(e.cpl_box_w != wide or e.cplCount() > 2);
+}
+
+/// A ring with one documented candidate, at a width that fits a panel.
+///
+/// The probe matters: without a server hook `autoSuggest` finds no
+/// candidates in an empty buffer and never opens the ring, so
+/// takeCompletions would have nothing to fold into.
+fn mkDocMenu(gpa: Allocator, probe: *CplProbe, doc: []const u8) !*Editor {
+    const e = try mkEditor(gpa);
+    e.lsp_ctx = probe;
+    e.lsp_completion = &CplProbe.hook;
+    keys(e, "iPr");
+    e.takeCompletions(&.{
+        .{ .text = "Println", .detail = "func(a ...any)", .kind = 3, .doc = doc },
+        .{ .text = "Printf", .detail = "func(format string)", .kind = 3 },
+    }, "Pr");
+    return e;
+}
+
+test "the panel sits beside the list, and every cell of it is no-bg" {
+    const gpa = testing.allocator;
+    var probe: CplProbe = .{};
+    const e = try mkDocMenu(gpa, &probe, "Println formats using the default formats.");
+    defer e.destroy();
+
+    const cols = 140;
+    const g = e.fillGrid(cols, 24);
+    const list = e.cpl_geom orelse return error.NoMenu;
+    const doc = e.cpl_doc_geom orelse return error.NoDocPanel;
+
+    // BESIDE, not below: below is where the list already goes, and a
+    // panel there would push the list off the cursor it is anchored to.
+    try testing.expect(doc.col >= list.col + list.w);
+    try testing.expectEqual(list.row, doc.row);
+
+    // Same rule as the list: the card behind it owns the background.
+    for (0..doc.h) |r| {
+        for (0..doc.w) |c| {
+            try testing.expect(g[(doc.row + r) * cols + doc.col + c].no_bg);
+        }
+    }
+    // And it actually drew the prose.
+    var found = false;
+    for (0..doc.h) |r| {
+        const row = g[(doc.row + r) * cols ..][0..cols];
+        var buf: [256]u8 = undefined;
+        var n: usize = 0;
+        for (row[doc.col..][0..doc.w]) |c| {
+            if (n < buf.len and c.cp < 128) {
+                buf[n] = @intCast(c.cp);
+                n += 1;
+            }
+        }
+        if (std.mem.indexOf(u8, buf[0..n], "formats") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "the panel goes left when there is no room to its right" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+    // Typing far to the RIGHT: the list is anchored at the cursor, so
+    // this is what puts it against the edge with nothing beyond it.
+    keys(e, "i");
+    for (0..60) |_| keys(e, " ");
+    keys(e, "Pr");
+    e.takeCompletions(&.{
+        .{ .text = "Println", .detail = "fn", .kind = 3, .doc = "Some prose about this candidate." },
+    }, "Pr");
+
+    const cols = 120;
+    _ = e.fillGrid(cols, 24);
+    const list = e.cpl_geom orelse return error.NoMenu;
+    const doc = e.cpl_doc_geom orelse return error.NoDocPanel;
+    try testing.expect(doc.col + doc.w <= list.col);
+    // ...and it stays on the screen, which is the arithmetic that can
+    // go under zero if the side is chosen before the width is.
+    try testing.expect(doc.col < cols);
+}
+
+test "no panel rather than a cramped one" {
+    const gpa = testing.allocator;
+    var probe: CplProbe = .{};
+    const e = try mkDocMenu(gpa, &probe, "Some prose about this candidate.");
+    defer e.destroy();
+    // The list alone is 40 columns; nothing useful fits either side.
+    _ = e.fillGrid(50, 24);
+    try testing.expect(e.cpl_geom != null);
+    try testing.expect(e.cpl_doc_geom == null);
+}
+
+test "no panel for a candidate nobody documented" {
+    const gpa = testing.allocator;
+    var probe: CplProbe = .{};
+    const e = try mkDocMenu(gpa, &probe, "");
+    defer e.destroy();
+    _ = e.fillGrid(140, 24);
+    try testing.expect(e.cpl_geom != null);
+    try testing.expect(e.cpl_doc_geom == null);
+}
+
+test "prose that does not fit is counted, not silently cut" {
+    const gpa = testing.allocator;
+    var long: std.ArrayListUnmanaged(u8) = .empty;
+    defer long.deinit(gpa);
+    // Paragraphs, so hoverdoc lays out well past the panel's ceiling.
+    for (0..12) |i| {
+        var b: [96]u8 = undefined;
+        try long.appendSlice(gpa, try std.fmt.bufPrint(&b, "Paragraph {d} of prose about the candidate.\n\n", .{i}));
+    }
+    var probe: CplProbe = .{};
+    const e = try mkDocMenu(gpa, &probe, long.items);
+    defer e.destroy();
+
+    const cols = 140;
+    const g = e.fillGrid(cols, 24);
+    const doc = e.cpl_doc_geom orelse return error.NoDocPanel;
+    const body = doc.h - 2;
+    try testing.expect(e.cplDocRows() > body);
+
+    // The marker lands on the bottom row — the one already blank for
+    // padding, so it costs no prose.
+    var buf: [256]u8 = undefined;
+    var n: usize = 0;
+    const last = g[(doc.row + doc.h - 1) * cols ..][0..cols];
+    for (last[doc.col..][0..doc.w]) |c| {
+        if (n < buf.len and c.cp < 128) {
+            buf[n] = @intCast(c.cp);
+            n += 1;
+        }
+    }
+    var mbuf: [32]u8 = undefined;
+    const want = try std.fmt.bufPrint(&mbuf, "+{d} more", .{e.cplDocRows() - body});
+    try testing.expect(std.mem.indexOf(u8, buf[0..n], want) != null);
+}
+
+test "the panel follows the selection" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+    keys(e, "iPr");
+    e.takeCompletions(&.{
+        .{ .text = "Println", .detail = "fn", .kind = 3, .doc = "about println" },
+        .{ .text = "Printf", .detail = "fn", .kind = 3, .doc = "about printf" },
+    }, "Pr");
+
+    const cols = 140;
+    _ = e.fillGrid(cols, 24);
+    try testing.expectEqual(@as(usize, 0), e.cpl_docview_for);
+
+    // ctrl-n twice: the first takes candidate zero, the second steps.
+    e.key("\x0e");
+    e.key("\x0e");
+    _ = e.fillGrid(cols, 24);
+    try testing.expectEqual(@as(usize, 1), e.cpl_docview_for);
+}
+
+/// Records what a resolve was asked about.
+///
+/// It answers the COMPLETION hook too, because `lsp_ctx` is one pointer
+/// for both and because without a server the ring never opens: an empty
+/// buffer has no words to suggest.
+const ResolveProbe = struct {
+    asks: usize = 0,
+    last: [64]u8 = undefined,
+    last_len: usize = 0,
+
+    fn completion(_: *anyopaque, _: *Editor) void {}
+
+    fn hook(ctx: *anyopaque, _: *Editor, raw: []const u8, word: []const u8) void {
+        const self: *ResolveProbe = @ptrCast(@alignCast(ctx));
+        _ = raw;
+        self.asks += 1;
+        self.last_len = @min(word.len, self.last.len);
+        @memcpy(self.last[0..self.last_len], word[0..self.last_len]);
+    }
+};
+
+test "a row whose prose the server kept back is asked about once" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: ResolveProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &ResolveProbe.completion;
+    e.lsp_completion_resolve = &ResolveProbe.hook;
+
+    keys(e, "iPr");
+    // No doc, but something to resolve WITH. This is what gopls and
+    // rust-analyzer do for most items: the list is cheap, the prose is
+    // computed for the row you rest on.
+    e.takeCompletions(&.{
+        .{ .text = "Println", .detail = "fn", .kind = 3, .raw = "{\"label\":\"Println\"}" },
+    }, "Pr");
+    try testing.expectEqual(@as(usize, 1), probe.asks);
+    try testing.expectEqualStrings("Println", probe.last[0..probe.last_len]);
+
+    // Filling the grid must not ask again — a paint is not a request,
+    // and `ctl dump` runs this same fill.
+    _ = e.fillGrid(140, 24);
+    _ = e.fillGrid(140, 24);
+    try testing.expectEqual(@as(usize, 1), probe.asks);
+
+    // Nor may landing on the same row twice. ctrl-n calls this on every
+    // press and does not always move the selection, so without the
+    // latch one row would be asked about as fast as it is pressed.
+    e.cplWantDoc();
+    e.cplWantDoc();
+    try testing.expectEqual(@as(usize, 1), probe.asks);
+
+    // The answer lands on the row it was asked for, and opens the panel.
+    e.takeCompletionDoc("Println", "Println formats using the default formats.", "func(a ...any)");
+    try testing.expectEqualStrings("Println formats using the default formats.", e.cplDoc(0));
+    try testing.expectEqualStrings("func(a ...any)", e.cplDetail(0));
+    _ = e.fillGrid(140, 24);
+    try testing.expect(e.cpl_doc_geom != null);
+}
+
+test "an answer for a row that is no longer there is dropped" {
+    const gpa = testing.allocator;
+    const e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+    keys(e, "iPr");
+    e.takeCompletions(&.{
+        .{ .text = "Println", .detail = "fn", .kind = 3 },
+    }, "Pr");
+    // The ring is rebuilt by every narrowing keystroke, which is why the
+    // answer is matched by WORD: an index would name a stranger.
+    e.takeCompletionDoc("SomethingElse", "prose about a word that is not here", "");
+    try testing.expectEqualStrings("", e.cplDoc(0));
+    _ = e.fillGrid(140, 24);
+    try testing.expect(e.cpl_doc_geom == null);
 }
 
 test "a box placed above the cursor never covers the line being typed" {

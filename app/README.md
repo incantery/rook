@@ -950,6 +950,26 @@ negotiable:
   frames, so the stale coordinates would stand until the next keystroke.
   It saves and restores `cpl_geom` around the fill.
 
+The documentation panel beside the list is the second tenant, on its own
+card. Two things about it are worth keeping:
+
+- **Where the prose comes from is the server's choice.** zls puts
+  `documentation` in the completion list; gopls and rust-analyzer leave
+  it out — computing prose for two hundred rows to show one is work
+  nobody wants — and attach an opaque `data` for a
+  `completionItem/resolve`. Both paths land in the same place. The item
+  is kept WHOLE for that resolve (`Completion.raw`), because the
+  protocol resolves an item and the server keys on its own `data`;
+  anything reconstructed from the parsed fields comes back unresolved.
+  It is kept only when the server advertised `resolveProvider`.
+- **The resolve is asked from the SELECTION, never from a fill.** A fill
+  runs under the draw lock and is also what `ctl dump` runs, so asking
+  there would put a request behind an inspection. One is in flight at a
+  time, latched on the WORD rather than a bool, so a dropped answer
+  cannot wedge it — and the answer is matched back by word too, since
+  the ring is rebuilt by every narrowing keystroke and an index would
+  name a stranger.
+
 The border this replaced was box-drawing arcs, `╭─╮│╰╯`. They are the
 right box in a text file and the wrong one on a screen: at a cell's size
 an arc is a two-pixel curve, and the font squares it off into the exact
