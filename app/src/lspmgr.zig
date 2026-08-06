@@ -51,6 +51,10 @@ const Entry = struct {
     /// Absolute, owned.
     root: []const u8,
     srv: *lsp.Server,
+    /// What a resolver said it chose, owned; "" for a static command.
+    /// Reported by `ctl lsp`, because with the choice made in another
+    /// process this is the only place it is recorded.
+    note: []const u8 = "",
 };
 
 const AskKind = enum { hover, definition, references, rename, completion, formatting, code_action, code_action_resolve };
@@ -284,6 +288,7 @@ pub const Manager = struct {
         for (self.servers.items) |e| {
             e.srv.deinit();
             self.gpa.free(e.root);
+            if (e.note.len > 0) self.gpa.free(e.note);
         }
         self.servers.deinit(self.gpa);
         for (self.asks.items) |a| {
@@ -363,7 +368,7 @@ pub const Manager = struct {
             self.why = .no_binary;
             return null;
         };
-        return self.startLocked(spec.name, root, argv, spec.settings);
+        return self.startLocked(spec.name, root, argv, spec.settings, "");
     }
 
     /// Start, or wait on, a plugin-resolved server for this project.
@@ -411,6 +416,7 @@ pub const Manager = struct {
         argv: []const []const u8,
         settings: []const u8,
         err: []const u8,
+        note: []const u8,
     ) void {
         var slot: ?*Pending = null;
         for (self.pending.items) |*pd| {
@@ -438,7 +444,7 @@ pub const Manager = struct {
             pd.err = std.fmt.allocPrint(self.gpa, "{s} is not installed", .{argv[0]}) catch "";
             return;
         };
-        if (self.startLocked(spec.name, root, resolved_argv, settings) != null) {
+        if (self.startLocked(spec.name, root, resolved_argv, settings, note) != null) {
             // The question has been answered and the server is running.
             // Leaving the entry behind would have `ctl lsp` reporting a
             // resolution in flight for a project that already has one.
@@ -496,14 +502,16 @@ pub const Manager = struct {
         root: []const u8,
         argv: []const []const u8,
         settings: []const u8,
+        note: []const u8,
     ) ?*lsp.Server {
         const owned_root = self.gpa.dupe(u8, root) catch return null;
+        const owned_note = if (note.len > 0) (self.gpa.dupe(u8, note) catch "") else "";
         const srv = lsp.Server.start(self.gpa, argv, root, settings) orelse {
             self.gpa.free(owned_root);
             self.why = .no_binary;
             return null;
         };
-        self.servers.append(self.gpa, .{ .lang = lang, .root = owned_root, .srv = srv }) catch {
+        self.servers.append(self.gpa, .{ .lang = lang, .root = owned_root, .srv = srv, .note = owned_note }) catch {
             srv.deinit();
             self.gpa.free(owned_root);
             return null;
@@ -1025,8 +1033,9 @@ pub const Manager = struct {
     /// One line per running server, for `rookctl` and the e2e suite.
     pub fn describe(self: *Manager, w: *std.Io.Writer) void {
         for (self.servers.items) |e| {
-            w.print("server {s} {s} {s}\n", .{
+            w.print("server {s} {s} {s}{s}{s}\n", .{
                 e.lang, @tagName(e.srv.state()), e.root,
+                @as([]const u8, if (e.note.len > 0) " — " else ""), e.note,
             }) catch return;
         }
         // Declared languages that have not produced a server, and why.
@@ -1185,7 +1194,7 @@ test "a refusal is kept, and reported in the resolver's own words" {
     r.mgr.resolve = &ResolveProbe.hook;
 
     _ = r.mgr.ensure("/tmp/proj/a.py");
-    r.mgr.resolved("python", "/tmp/proj", &.{}, "", "no interpreter — run `uv sync`");
+    r.mgr.resolved("python", "/tmp/proj", &.{}, "", "no interpreter — run `uv sync`", "");
 
     try testing.expect(r.mgr.ensure("/tmp/proj/a.py") == null);
     try testing.expectEqual(langpkg.Fault.refused, r.mgr.why);
@@ -1209,7 +1218,7 @@ test "a resolver naming a binary that is not there refuses with its name" {
     r.mgr.resolve = &ResolveProbe.hook;
 
     _ = r.mgr.ensure("/tmp/proj/a.py");
-    r.mgr.resolved("python", "/tmp/proj", &.{"rook-no-such-pyright"}, "", "");
+    r.mgr.resolved("python", "/tmp/proj", &.{"rook-no-such-pyright"}, "", "", "");
     try testing.expect(r.mgr.ensure("/tmp/proj/a.py") == null);
     try testing.expectEqual(langpkg.Fault.refused, r.mgr.why);
     try testing.expect(std.mem.indexOf(u8, r.mgr.refusal("/tmp/proj/a.py"), "rook-no-such-pyright") != null);
@@ -1224,7 +1233,7 @@ test "an answer nobody asked for is dropped" {
     defer r.deinit(gpa);
     // A plugin volunteering, or a config reload having dropped the
     // project underneath one in flight. Neither may start a server.
-    r.mgr.resolved("python", "/tmp/never-asked", &.{"/bin/sh"}, "", "");
+    r.mgr.resolved("python", "/tmp/never-asked", &.{"/bin/sh"}, "", "", "");
     try testing.expectEqual(@as(usize, 0), r.mgr.servers.items.len);
 }
 

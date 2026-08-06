@@ -1191,6 +1191,12 @@ pub const Snapshot = struct {
 pub const Resolved = struct {
     args: std.ArrayListUnmanaged([]const u8) = .empty,
     set: []const u8 = "",
+    /// The resolver's one-line account of what it chose and why —
+    /// "zig 0.16.0 (on PATH), fetched zls 0.16.0". Optional, and worth
+    /// carrying: with the answer computed in another process, "why is
+    /// my server this one" is otherwise unanswerable from inside rook.
+    why: [160]u8 = @splat(0),
+    why_len: usize = 0,
     err: [256]u8 = @splat(0),
     err_len: usize = 0,
 
@@ -1202,6 +1208,9 @@ pub const Resolved = struct {
     }
     pub fn errStr(self: *const Resolved) []const u8 {
         return self.err[0..self.err_len];
+    }
+    pub fn note(self: *const Resolved) []const u8 {
+        return self.why[0..self.why_len];
     }
 
     fn setErr(self: *Resolved, msg: []const u8) void {
@@ -1233,6 +1242,7 @@ pub fn resolveLanguage(
     gpa: std.mem.Allocator,
     lang: []const u8,
     root: []const u8,
+    dir: []const u8,
 ) Resolved {
     var out = Resolved{};
     const p = plugin orelse {
@@ -1252,6 +1262,10 @@ pub fn resolveLanguage(
         out.setErr("project path too long");
         return out;
     };
+    // The prefix rook offers for anything the plugin has to install.
+    // Named by rook, filled by the plugin — see language.serversDir.
+    w.writeAll(",\"dir\":") catch {};
+    jsonStringTo(&w, dir) catch {};
     w.writeAll("}") catch {};
 
     const buf = gpa.alloc(u8, 64 * 1024) catch {
@@ -1275,6 +1289,8 @@ pub fn resolveLanguage(
             /// whole point of the seam: "no interpreter — run `uv sync`"
             /// is a sentence somebody can act on.
             @"error": []const u8 = "",
+            /// And of what it DID choose, when it chose something.
+            note: []const u8 = "",
         } = .{},
     };
     const parsed = std.json.parseFromSlice(Wire, gpa, frame, .{ .ignore_unknown_fields = true }) catch {
@@ -1305,6 +1321,8 @@ pub fn resolveLanguage(
     if (v.result.settings != .null) {
         out.set = std.json.Stringify.valueAlloc(gpa, v.result.settings, .{}) catch "";
     }
+    out.why_len = @min(v.result.note.len, out.why.len);
+    @memcpy(out.why[0..out.why_len], v.result.note[0..out.why_len]);
     return out;
 }
 

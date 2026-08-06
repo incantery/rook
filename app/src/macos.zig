@@ -3577,17 +3577,20 @@ pub const App = struct {
                 const lang_s = args.lang[0..args.lang_len];
                 const root_s = args.root[0..args.root_len];
 
+                var dir_buf: [1024]u8 = undefined;
+                const dir = langpkg.serversDir(&dir_buf, lang_s) orelse "";
                 var res = pl.resolveLanguage(
                     app.plugins.find(args.plugin[0..args.plugin_len]),
                     app.gpa,
                     lang_s,
                     root_s,
+                    dir,
                 );
                 defer res.deinit(app.gpa);
 
                 app.draw_lock.lock();
                 defer app.draw_lock.unlock();
-                app.lsp.resolved(lang_s, root_s, res.argv(), res.settings(), res.errStr());
+                app.lsp.resolved(lang_s, root_s, res.argv(), res.settings(), res.errStr(), res.note());
                 // Whatever the answer, panes waiting on it need another
                 // look: a server that just started has to be attached,
                 // and a refusal has a message to show.

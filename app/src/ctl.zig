@@ -570,8 +570,24 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             reply(fd, if (app.applyEnv()) "ok\n" else "err nothing to apply\n");
             return;
         }
+        // `env recheck` runs the config program again unconditionally.
+        //
+        // Normally the program is re-run when its SOURCE changes, and a
+        // touched file with identical bytes is correctly not a change.
+        // But a config that imports the SDK through a `replace`
+        // directive — which is how anyone developing rook itself has
+        // one — can emit a completely different graph without a byte of
+        // its own moving. rook cannot see that, and the diff silently
+        // reads "no pending changes" while the truth is elsewhere.
+        if (std.mem.eql(u8, rest, "recheck")) {
+            app.draw_lock.lock();
+            app.env_check_wanted = true;
+            app.draw_lock.unlock();
+            reply(fd, "ok\n");
+            return;
+        }
         if (rest.len > 0) {
-            reply(fd, "err usage: env | env apply\n");
+            reply(fd, "err usage: env | env recheck | env apply\n");
             return;
         }
         var buf: [8192]u8 = undefined;

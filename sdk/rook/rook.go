@@ -614,9 +614,28 @@ func (g GoLang) appendTo(e *env) {
 	}.appendTo(e)
 }
 
-// Zig is Zig: zls, rooted at build.zig, plus the grammar.
+// Zig is Zig, through the resolver plugin — and it is the reason
+// resolvers exist at all.
+//
+// zls is version-LOCKED to the compiler: one built for 0.15 cannot
+// parse a 0.16 project, and it fails by reporting errors on valid code
+// rather than by refusing to start. Which zls is right therefore
+// depends on the project, changes when you cd, and cannot be written
+// down once in a config file.
+//
+// So the plugin reads the Zig this directory gets — respecting mise,
+// asdf and anything else that works through $PATH, because it runs the
+// real `zig version` in the real place — and either uses a matching zls
+// you already have or fetches the pinned one into
+// ~/.local/share/rook/servers/zls/<version>/. Two projects on two
+// compilers get two binaries and neither clobbers the other.
+//
+// Declare it with a Server to skip all of that: a fixed toolchain does
+// not need anything worked out.
 type Zig struct {
+	// Server, when set, replaces the resolver with a plain argv.
 	Server    []string
+	Grants    []string
 	NoGrammar bool
 }
 
@@ -624,15 +643,27 @@ func (z Zig) appendTo(e *env) {
 	if !z.NoGrammar {
 		Grammars{"zig"}.appendTo(e)
 	}
-	Language{
+	l := Language{
 		Name: "zig",
 		Ext:  []string{".zig", ".zon"},
 		// build.zig.zon first: a package has both, and its zon is the
 		// manifest — rooting at build.zig in a workspace with several
 		// packages gets a server that cannot see the dependency graph.
-		Roots:   []string{"build.zig.zon", "build.zig"},
-		Command: argvOr(z.Server, []string{"zls"}),
+		Roots: []string{"build.zig.zon", "build.zig"},
+	}
+	if len(z.Server) > 0 {
+		l.Command = z.Server
+		l.appendTo(e)
+		return
+	}
+	Plugin{
+		Name:    "lang-zig",
+		Command: []string{bundleBin + "rook-plugin-lang-zig"},
+		Load:    Lazy,
+		Grants:  grantsOr(z.Grants, []string{OpLspResolve}),
 	}.appendTo(e)
+	l.Resolver = "lang-zig"
+	l.appendTo(e)
 }
 
 // Python is Python, through the resolver plugin.

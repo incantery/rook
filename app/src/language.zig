@@ -210,6 +210,34 @@ pub fn rootFor(spec: *const Spec, path: []const u8, buf: *[1024]u8) ?[]const u8 
     return null;
 }
 
+/// The directory rook offers a resolver plugin to install into, for
+/// `lang`. Written into `buf`; not created here.
+///
+/// Beside `grammars/` and `plugins/`, which is the point: everything
+/// rook fetches lives under one directory, so `rook uninstall` is one
+/// `rm -rf` and a machine that has finished with rook has nothing of
+/// rook's left on it. mason.nvim and Zed both landed here too
+/// (`~/.local/share/nvim/mason`, `~/.local/share/zed/languages`) — it
+/// is the field's answer, not ours.
+///
+/// rook NAMES this directory and never writes to it. The plugin
+/// installs, because the plugin is the thing that knows whether that
+/// means a tarball, `go install`, or `npm install --prefix`. What rook
+/// contributes is the invariant: nothing any of them do lands outside
+/// here, and none of it ever needs root.
+pub fn serversDir(buf: []u8, lang: []const u8) ?[]const u8 {
+    const base = if (getenv("XDG_DATA_HOME")) |x|
+        std.fmt.bufPrint(buf, "{s}/rook/servers", .{std.mem.span(x)}) catch return null
+    else blk: {
+        const home = getenv("HOME") orelse return null;
+        break :blk std.fmt.bufPrint(buf, "{s}/.local/share/rook/servers", .{std.mem.span(home)}) catch return null;
+    };
+    var tmp: [1024]u8 = undefined;
+    if (base.len >= tmp.len) return null;
+    @memcpy(tmp[0..base.len], base);
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ tmp[0..base.len], lang }) catch null;
+}
+
 /// Where to look for a server binary, in order.
 ///
 /// The root-relative entries come first and they are the whole reason

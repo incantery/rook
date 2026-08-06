@@ -99,6 +99,16 @@ per line
 .Pq children as Ql parent/name ,
 or
 .Ql none .
+.It Cm env Op Cm recheck | apply
+The pending config diff, or apply it.
+.Cm recheck
+re-runs the config program unconditionally: it is normally re-run when
+its own source changes, which misses a config importing the SDK through
+a
+.Ql replace
+directive \(em that emits a different graph without a byte of its own
+moving, and the diff reads "no pending changes" while the truth is
+elsewhere.
 .It Cm docs
 Open documents and how many panes hold each \(em one file open twice is one
 document.
