@@ -331,7 +331,7 @@ const CompletedBlock = objc.Block(struct { app: *App }, .{objc.c.id}, void);
 
 /// What the palette is listing. The widget, filter, key handling and
 /// draw path are shared; only the row text and what Enter does differ.
-pub const PalMode = enum { workspaces, commands, files, plugins };
+pub const PalMode = enum { workspaces, commands, files, plugins, actions };
 
 /// The onboarding questions.
 ///
@@ -689,6 +689,12 @@ pub const App = struct {
     /// best 64 in `pal_filtered` (parallel `pal_scores`); the other
     /// modes keep source order, which is already meaningful for them.
     pal_files: filelistpkg.Index = .{},
+    /// The code actions a server offered, owned, and the file they were
+    /// offered about. Held rather than re-requested: the picker is a
+    /// list you scroll, and re-asking on every keystroke would make the
+    /// list move under the filter.
+    pal_actions: []lsppkg.CodeAction = &.{},
+    pal_actions_path: []u8 = &.{},
     pal_scores: [64]i32 = undefined,
     // ---- side pane: the container every §2 panel lands in ----
     /// Closed by default. An empty container costs nothing but a branch,
@@ -2566,6 +2572,16 @@ pub const App = struct {
                     self.pal_nfiltered += 1;
                 }
             },
+            // The action's title is all a human has; its KIND is what
+            // an agent (and a habit) knows it by — "source.organize"
+            // finds the one you meant without reading the list.
+            .actions => for (self.pal_actions, 0..) |a, i| {
+                if (self.pal_nfiltered >= self.pal_filtered.len) break;
+                if (fuzzyMatch(a.title, needle) or fuzzyMatch(a.kind, needle)) {
+                    self.pal_filtered[self.pal_nfiltered] = i;
+                    self.pal_nfiltered += 1;
+                }
+            },
             // Title AND id, so both "split right" and "pane.split" find
             // it: the title is what a human scans, the id is what an
             // agent and the config file already know it by.
@@ -2664,6 +2680,43 @@ pub const App = struct {
                     .how = .here,
                     .from = self.activeTab().focused.id,
                 };
+            }
+            return;
+        }
+        if (self.pal_mode == .actions) {
+            const a = self.pal_actions[self.pal_filtered[self.pal_sel]];
+            const path = self.pal_actions_path;
+            const ed = self.editorShowingLocked(path);
+            self.closePaletteLocked();
+            if (a.command_only) {
+                // Shown in the list rather than hidden, because an
+                // action you cannot see is indistinguishable from a
+                // server that never offered it — and then refused
+                // here, which is the only honest place to refuse.
+                if (ed) |e| {
+                    e.setStatus("\"{s}\" runs a server command, which rook cannot do yet", .{a.title}, true);
+                    e.render_dirty = true;
+                }
+                return;
+            }
+            if (a.edit.len > 0) {
+                self.applyWorkspaceEditLocked(path, a.edit, a.file_ops, "applied", a.title);
+                return;
+            }
+            if (a.deferred) {
+                // The server kept the edit back until it knew you
+                // wanted it. Asking now is the whole point of resolve.
+                if (self.lsp.codeActionResolve(path, a.raw)) {
+                    if (ed) |e| {
+                        e.setStatus("applying {s}…", .{a.title}, false);
+                        e.render_dirty = true;
+                    }
+                    return;
+                }
+            }
+            if (ed) |e| {
+                e.setStatus("\"{s}\" had nothing to apply", .{a.title}, true);
+                e.render_dirty = true;
             }
             return;
         }
@@ -3250,6 +3303,7 @@ pub const App = struct {
         ed.lsp_rename = &lspRenameHook;
         ed.lsp_completion = &lspCompletionHook;
         ed.lsp_format = &lspFormatHook;
+        ed.lsp_code_action = &lspCodeActionHook;
         ed.fmt_on_save = self.cfg_fmt_on_save;
         // The sign column appears now rather than when the first error
         // does, so the document never shifts sideways under your cursor.
@@ -3415,6 +3469,7 @@ pub const App = struct {
                 },
                 .references => |r| self.startRefsLocked(r.sites, r.symbol),
                 .rename => |r| self.applyRenameLocked(r),
+                .code_actions => |ca| self.takeCodeActionsLocked(ca.path, ca.items, ca.resolved),
                 .formatting => |f| {
                     const ed = self.editorShowingLocked(f.path) orelse continue;
                     // Resolve here, where the conversion from the
@@ -3472,6 +3527,11 @@ pub const App = struct {
                         // A server that will not format this file. The
                         // `:w` behind it must still happen.
                         .formatting => ed.finishPendingWrite("no formatter for this file"),
+                        .code_action => ed.setStatus("nothing to do here", .{}, false),
+                        // A resolve that came back empty. The action was
+                        // real and picking it did nothing, which is the
+                        // one outcome worth naming.
+                        .code_action_resolve => ed.setStatus("that action had no edit to apply", .{}, true),
                     }
                     ed.render_dirty = true;
                 },
@@ -3586,6 +3646,81 @@ pub const App = struct {
         self.scene_dirty = true;
     }
 
+    fn lspCodeActionHook(ctx: *anyopaque, ed: *editorpkg.Editor) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const path = ed.buf.path orelse return;
+        self.lspSyncLocked(ed);
+        // The cursor's line, start to end — not the cursor's exact
+        // column. A quick fix hangs off a diagnostic that spans some
+        // part of the line, and asking about a single point misses
+        // every fix whose diagnostic starts one character over.
+        const line: u32 = @intCast(ed.cline);
+        const eol = lsppkg.utf16FromByteCol(ed.lineText(ed.cline), ed.lineCap(ed.cline));
+        if (!self.lsp.codeAction(path, .{
+            .start = .{ .line = line, .col = 0 },
+            .end = .{ .line = line, .col = eol },
+        })) {
+            ed.setStatus("no language server for this file", .{}, false);
+            return;
+        }
+        ed.setStatus("asking what can be done here…", .{}, false);
+        ed.render_dirty = true;
+    }
+
+    /// A server has answered with what it can do here.
+    ///
+    /// Two arrivals reach this. The first is a LIST, and it opens the
+    /// picker. The second is a resolve — one action, now carrying the
+    /// edit it deferred — and that one is applied, because you already
+    /// chose it and being asked to choose it again would be absurd.
+    fn takeCodeActionsLocked(self: *App, path: []const u8, items: []const lsppkg.CodeAction, resolved: bool) void {
+        if (resolved) {
+            if (items.len == 0) return;
+            const a = items[0];
+            if (a.edit.len == 0) {
+                if (self.editorShowingLocked(path)) |ed| {
+                    ed.setStatus("\"{s}\" resolved to nothing to change", .{a.title}, true);
+                    ed.render_dirty = true;
+                }
+                return;
+            }
+            self.applyWorkspaceEditLocked(path, a.edit, a.file_ops, "applied", a.title);
+            return;
+        }
+
+        self.freeActionsLocked();
+        const owned = self.gpa.alloc(lsppkg.CodeAction, items.len) catch return;
+        var n: usize = 0;
+        for (items) |a| {
+            owned[n] = .{
+                .title = self.gpa.dupe(u8, a.title) catch break,
+                .kind = self.gpa.dupe(u8, a.kind) catch break,
+                .raw = self.gpa.dupe(u8, a.raw) catch break,
+                // The edit comes along. An action that already carries
+                // one applies straight from the picker — resolving it
+                // anyway would be a round trip to be told what we were
+                // already holding, and a server that does not implement
+                // resolve would answer nothing at all.
+                .edit = lsppkg.dupeFileEdits(self.gpa, a.edit) orelse &.{},
+                .file_ops = a.file_ops,
+                .deferred = a.deferred,
+                .command_only = a.command_only,
+            };
+            n += 1;
+        }
+        self.pal_actions = self.gpa.realloc(owned, n) catch owned[0..n];
+        self.pal_actions_path = self.gpa.dupe(u8, path) catch &.{};
+        self.pal_mode = .actions;
+        self.resetPaletteLocked();
+    }
+
+    fn freeActionsLocked(self: *App) void {
+        lsppkg.freeCodeActions(self.gpa, self.pal_actions);
+        self.pal_actions = &.{};
+        self.gpa.free(self.pal_actions_path);
+        self.pal_actions_path = &.{};
+    }
+
     fn lspCompletionHook(ctx: *anyopaque, ed: *editorpkg.Editor) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         const path = ed.buf.path orelse return;
@@ -3655,7 +3790,21 @@ pub const App = struct {
     /// and the reason, because "nothing happened" and "nothing happened
     /// because the server wants to move a file" are different facts.
     fn applyRenameLocked(self: *App, r: lspmgrpkg.RenameEdit) void {
-        const asking = self.editorShowingLocked(r.path);
+        self.applyWorkspaceEditLocked(r.path, r.files, r.file_ops, "renamed to", r.symbol);
+    }
+
+    /// Carry out a WorkspaceEdit. `verb`/`what` name it in the report —
+    /// "renamed to foo", "applied Organize imports" — because the two
+    /// callers differ in nothing else.
+    fn applyWorkspaceEditLocked(
+        self: *App,
+        from_path: []const u8,
+        files: []const lsppkg.FileEdits,
+        file_ops: bool,
+        verb: []const u8,
+        what: []const u8,
+    ) void {
+        const asking = self.editorShowingLocked(from_path);
         const say = struct {
             fn f(ed: ?*editorpkg.Editor, comptime fmt: []const u8, args: anytype, bad: bool) void {
                 const e = ed orelse return;
@@ -3664,15 +3813,15 @@ pub const App = struct {
             }
         }.f;
 
-        if (r.file_ops) {
+        if (file_ops) {
             // gopls asks for this when the symbol owns its file. Doing
             // the text half alone would leave a repo that references a
             // name in a file still called the old thing.
-            say(asking, "that rename also moves files, which rook cannot do yet — nothing changed", .{}, true);
+            say(asking, "that also moves files, which rook cannot do yet — nothing changed", .{}, true);
             return;
         }
-        if (r.files.len == 0) {
-            say(asking, "no references to rename", .{}, false);
+        if (files.len == 0) {
+            say(asking, "nothing to change", .{}, false);
             return;
         }
 
@@ -3691,7 +3840,7 @@ pub const App = struct {
             }
         };
 
-        for (r.files) |f| {
+        for (files) |f| {
             // The two WorkspaceEdit shapes can both name one file, and
             // applying its edits twice would rename `foo` to `barbar`.
             var seen = false;
@@ -3804,13 +3953,13 @@ pub const App = struct {
         // written — the asymmetry is the honest one, and saying which
         // is which is why this line is as long as it is.
         if (failed_n > 0) {
-            say(asking, "renamed to {s} — {d} written, {d} unsaved, {d} FAILED to write", .{ r.symbol, written_n, open_n, failed_n }, true);
+            say(asking, "{s} {s} — {d} written, {d} unsaved, {d} FAILED to write", .{ verb, what, written_n, open_n, failed_n }, true);
         } else if (open_n > 0 and written_n > 0) {
-            say(asking, "renamed to {s} in {d} files — {d} written, {d} open and unsaved (:wa)", .{ r.symbol, open_n + written_n, written_n, open_n }, false);
+            say(asking, "{s} {s} in {d} files — {d} written, {d} open and unsaved (:wa)", .{ verb, what, open_n + written_n, written_n, open_n }, false);
         } else if (written_n > 0) {
-            say(asking, "renamed to {s} in {d} files, all written", .{ r.symbol, written_n }, false);
+            say(asking, "{s} {s} in {d} files, all written", .{ verb, what, written_n }, false);
         } else {
-            say(asking, "renamed to {s} in {d} open {s} — unsaved (:wa writes them)", .{ r.symbol, open_n, @as([]const u8, if (open_n == 1) "file" else "files") }, false);
+            say(asking, "{s} {s} in {d} open {s} — unsaved (:wa writes them)", .{ verb, what, open_n, @as([]const u8, if (open_n == 1) "file" else "files") }, false);
         }
     }
 
@@ -7517,6 +7666,7 @@ pub const App = struct {
             // empty modal with no explanation. The prompt IS the empty
             // state; there is nowhere else on a palette to put one.
             .plugins => if (self.plugins.items.len == 0) "no plugins declared " else "plugin ",
+            .actions => "action ",
         }, th.bar_fg);
         tx += ui.textOver(tx, ty, self.pal_input[0..self.pal_input_len], th.bar_value);
         ui.rect(tx, ty, cw / 4, self.renderer.cell_h, th.accent); // caret
@@ -7555,6 +7705,14 @@ pub const App = struct {
                     const dir = if (cut) |c| rel[0..c] else "";
                     const l = std.fmt.bufPrint(&lbl, "{s}", .{base}) catch base;
                     break :blk .{ l, dir };
+                },
+                // The KIND is the quiet detail: it is how you tell a
+                // quick fix from a whole-file source action at a
+                // glance, and it is what the titles do not say.
+                .actions => blk: {
+                    const a = self.pal_actions[item_i];
+                    const l = std.fmt.bufPrint(&lbl, "{s}", .{a.title}) catch a.title;
+                    break :blk .{ l, a.kind };
                 },
                 .workspaces => blk: {
                     const e = self.pal_items[item_i];

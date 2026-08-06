@@ -62,6 +62,7 @@ const scenarios = [_]Scenario{
     .{ .name = "filefinder", .what = "⌘P: the repo's files ranked, nested .gitignores honoured, Enter opens here", .run = fileFinder },
     .{ .name = "explorerauto", .what = "explorer-auto: the sidebar opens at launch inside a repo, and never takes the keys", .run = explorerAuto },
     .{ .name = "lsp", .what = "language server: diagnostics, gr lists uses, gR renames, ctrl-n completes", .run = lspScenario },
+    .{ .name = "lspaction", .what = "ga: the server's offers in a picker — one applies, one resolves first, one is refused", .run = lspAction },
     .{ .name = "lspformat", .what = "format-on-save: :w formats then writes, and writes anyway when nothing answers", .run = lspFormat },
     .{ .name = "lsppython", .what = "a second language is data: python roots at pyproject.toml and lands the same way", .run = lspPython },
     .{ .name = "lspts", .what = "ts and tsx share one server, root at the tsconfig, and split only on the grammar", .run = lspTs },
@@ -3698,6 +3699,92 @@ fn lspFormat(gpa: std.mem.Allocator, bin: []const u8) !void {
     try h.expectContains(try app2.ctl("docs"), "modified:no", "and the buffer is clean, not left dirty forever");
 }
 
+
+// ------------------------------------------------------------ lspaction
+
+/// `ga` — what the server can do about this line.
+///
+/// Three rows, and the differences between them are the whole feature.
+/// One carries its edit and applies on Enter. One was DEFERRED — the
+/// server kept the edit back and handed over a token, so picking it
+/// costs a second round trip through codeAction/resolve. One is a
+/// legacy Command, which rook cannot run and says so rather than
+/// offering a row that quietly does nothing.
+fn lspAction(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lspact-{d}", .{h.runPid()});
+    var proj_buf: [256]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{scratch});
+    try h.mkdirP(proj);
+    var f_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&f_buf, "{s}/go.mod", .{proj}), "module actsmoke\n\ngo 1.21\n");
+    var main_buf: [288]u8 = undefined;
+    const main_go = try std.fmt.bufPrint(&main_buf, "{s}/main.go", .{proj});
+    try h.writeFile(main_go, "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(nope())\n}\n");
+
+    var envval_buf: [640]u8 = undefined;
+    const envval = try std.fmt.bufPrint(&envval_buf, "{s} --fake-lsp {s}", .{ self_exe, main_go });
+    const app = try h.Instance.start(gpa, bin, .{
+        .cwd = proj,
+        .env = &.{.{ "ROOK_LSP_GO", envval }},
+    });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var cmd_buf: [320]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{main_go}));
+    // Wait for the diagnostic: it is the CONTEXT a quick fix hangs off,
+    // and asking before it lands would ask a different question.
+    _ = try app.waitCtl("lsp", "pane gutter:yes errors:1", 8_000);
+    _ = try app.ctl("type ]d");
+
+    _ = try app.ctl("type ga");
+    {
+        const pal = try app.waitCtl("palette", "mode:actions", 8_000);
+        try h.expectContains(pal, "offered:3", "all three are offered, including the one rook cannot run");
+        try h.expectContains(pal, "*Replace nope with fixed\tquickfix", "the quick fix, selected");
+        // The flags are the point: they are what tell a row that costs
+        // a round trip from one that cannot be run at all.
+        try h.expectContains(pal, "Organize imports\tsource.organizeImports\tdeferred", "the deferred one is marked");
+        try h.expectContains(pal, "Run go mod tidy\t\tcommand", "and the legacy Command is marked unrunnable");
+    }
+
+    // Enter applies the one that carried its edit — no second round trip.
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("dump", "fixed()", 5_000);
+    {
+        var buf: [16 * 1024]u8 = undefined;
+        const screen = try app.screen(&buf);
+        try h.expectContains(screen, "applied Replace nope with fixed", "and says what it applied");
+        try h.expectNotContains(screen, "nope()", "the old text is gone");
+    }
+
+    // The DEFERRED one: filter to it, and picking it has to resolve
+    // before there is anything to apply.
+    _ = try app.ctl("type ga");
+    _ = try app.waitCtl("palette", "mode:actions", 8_000);
+    _ = try app.ctl("type organi");
+    try h.expectContains(try app.ctl("palette"), "*Organize imports", "the filter finds it by title");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("dump", "// tidied", 8_000);
+    try h.expectContains(try app.ctl("dump"), "// tidied", "the resolved edit landed");
+
+    // And the Command: offered, then honestly refused.
+    _ = try app.ctl("type ga");
+    _ = try app.waitCtl("palette", "mode:actions", 8_000);
+    _ = try app.ctl("type tidy");
+    _ = try app.ctl("enter");
+    {
+        var buf: [16 * 1024]u8 = undefined;
+        const screen = try app.screen(&buf);
+        try h.expectContains(screen, "rook cannot do yet", "a command rook cannot run says so");
+        // Nothing changed for it.
+        try h.expectContains(screen, "// tidied", "and the file is exactly as the last action left it");
+    }
+}
+
 // ------------------------------------------------------- the fake server
 
 /// This binary's own path, for scenarios that re-exec it.
@@ -3823,6 +3910,46 @@ fn fakeHandle(gpa: std.mem.Allocator, body: []const u8, target: []const u8) !voi
                 "{{\"uri\":\"file://{s}\",\"range\":{{\"start\":{{\"line\":4,\"character\":5}}," ++
                 "\"end\":{{\"line\":4,\"character\":9}}}}}}]}}",
             .{ id orelse 0, dir, target, target },
+        );
+        try fakeSend(gpa, w.written());
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/codeAction")) {
+        // Three shapes on purpose: one action that carries its edit,
+        // one the server DEFERRED (no edit, just `data` to resolve
+        // with), and one legacy Command — a title with a string
+        // `command` and nothing to apply. A client that read the third
+        // as an action would show a row that does nothing when picked.
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[" ++
+                "{{\"title\":\"Replace nope with fixed\",\"kind\":\"quickfix\",\"edit\":{{\"changes\":{{" ++
+                "\"file://{s}\":[{{\"range\":{{\"start\":{{\"line\":5,\"character\":13}}," ++
+                "\"end\":{{\"line\":5,\"character\":17}}}},\"newText\":\"fixed\"}}]}}}}}}," ++
+                "{{\"title\":\"Organize imports\",\"kind\":\"source.organizeImports\"," ++
+                "\"data\":{{\"tok\":\"deferred-42\"}}}}," ++
+                "{{\"title\":\"Run go mod tidy\",\"command\":\"gopls.tidy\",\"arguments\":[]}}]}}",
+            .{ id orelse 0, target },
+        );
+        try fakeSend(gpa, w.written());
+        return;
+    }
+    if (std.mem.eql(u8, method, "codeAction/resolve")) {
+        // The action comes BACK to be resolved, `data` and all — which
+        // is the only reason the client kept the raw bytes. Refuse to
+        // fill in an edit unless the token made the round trip.
+        const body_has_token = std.mem.indexOf(u8, body, "deferred-42") != null;
+        if (!body_has_token) {
+            try w.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":null}}", .{id orelse 0});
+            try fakeSend(gpa, w.written());
+            return;
+        }
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"title\":\"Organize imports\"," ++
+                "\"kind\":\"source.organizeImports\",\"edit\":{{\"documentChanges\":[" ++
+                "{{\"textDocument\":{{\"uri\":\"file://{s}\",\"version\":1}},\"edits\":[" ++
+                "{{\"range\":{{\"start\":{{\"line\":1,\"character\":0}}," ++
+                "\"end\":{{\"line\":1,\"character\":0}}}},\"newText\":\"// tidied\\n\"}}]}}]}}}}}}",
+            .{ id orelse 0, target },
         );
         try fakeSend(gpa, w.written());
         return;

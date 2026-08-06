@@ -342,6 +342,9 @@ pub const Editor = struct {
     lsp_completion: ?*const fn (*anyopaque, *Editor) void = null,
     /// Ask for the file's layout. Answered through takeFormat.
     lsp_format: ?*const fn (*anyopaque, *Editor) void = null,
+    /// `ga` — what the server offers to do about this line. The answer
+    /// is a PICKER rather than an edit, so nothing comes back here.
+    lsp_code_action: ?*const fn (*anyopaque, *Editor) void = null,
     /// Config: `:w` lays the file out before writing it.
     fmt_on_save: bool = false,
     /// A write waiting on a formatter. Set by `:w`, cleared by the
@@ -3907,6 +3910,17 @@ pub const Editor = struct {
                 // and unimplemented here for the same reason. Rename is
                 // the replace you actually want across a repo.
                 'R' => self.startRename(),
+                // vim's `ga` prints the character code of the byte under
+                // the cursor. Nobody has needed that since terminals
+                // stopped being a mystery; every LSP editor spends the
+                // key on "what can be done here" instead.
+                'a' => {
+                    self.count = 0;
+                    self.op = 0;
+                    if (self.lsp_code_action) |f| {
+                        f(self.lsp_ctx.?, self);
+                    } else self.setStatus("no language server for this file", .{}, false);
+                },
                 'u', 'U', '~' => {
                     if (self.inVisual()) {
                         self.visualOp(ch);

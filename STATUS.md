@@ -85,8 +85,10 @@ buffer's own words on the keystroke and by the server a few frames
 later, in one ring with a menu. `:Format`, and `editor-format-on-save`
 for `:w` — off by default, and a save is never lost to it: a formatter
 that does not answer inside 1.5s gets the file written unformatted and
-says so. Go, Python and TypeScript/TSX in the catalog; adding a language
-is data, not code.
+says so. `ga` lists what the server offers to do about a line — quick
+fixes, `source.organizeImports` — in the ⌘K palette, applying the edit
+or resolving it first. Go, Python and TypeScript/TSX in the catalog;
+adding a language is data, not code.
 
 **Navigation and chrome**: a command registry with a ⌘K palette and `:Ex`
 commands from the editor, which-key on an unanswered leader, ⌘P file

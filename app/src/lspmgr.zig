@@ -152,7 +152,7 @@ const Entry = struct {
     srv: *lsp.Server,
 };
 
-const AskKind = enum { hover, definition, references, rename, completion, formatting };
+const AskKind = enum { hover, definition, references, rename, completion, formatting, code_action, code_action_resolve };
 
 const Ask = struct {
     id: u32,
@@ -270,6 +270,12 @@ pub const Answer = union(enum) {
     /// to save afterwards is waiting on this, and "already formatted"
     /// is an answer it has to hear.
     formatting: struct { path: []const u8, edits: []lsp.TextEdit },
+    /// What the server offers to do here. Owned by the caller.
+    ///
+    /// `resolved` marks the answer to a resolve — one action, now with
+    /// the edit it was deferring. The caller applies that one rather
+    /// than putting it back in a picker it was already chosen from.
+    code_actions: struct { path: []const u8, items: []lsp.CodeAction, resolved: bool },
     /// The question was answered with nothing. Still delivered, because
     /// the pane that asked said "asking…" and has to be told.
     none: struct { path: []const u8, kind: AskKind },
@@ -304,6 +310,10 @@ pub const Answer = union(enum) {
                 gpa.free(f.path);
                 for (f.edits) |e| gpa.free(e.text);
                 gpa.free(f.edits);
+            },
+            .code_actions => |c| {
+                gpa.free(c.path);
+                lsp.freeCodeActions(gpa, c.items);
             },
             .none => |n| gpa.free(n.path),
         }
@@ -608,6 +618,39 @@ pub const Manager = struct {
         return true;
     }
 
+    /// Ask what can be done about `range` in `path`.
+    ///
+    /// The diagnostics context is built HERE, from what the server
+    /// itself published, rather than from the editor's converted copy:
+    /// these go back on the wire, so they have to be the server's own
+    /// UTF-16 columns, and round-tripping them through the buffer's
+    /// byte columns and back is a conversion that can only lose.
+    pub fn codeAction(self: *Manager, path: []const u8, range: lsp.Range) bool {
+        const srv = self.ensure(path) orelse return false;
+        // Only the diagnostics the range touches. A server handed every
+        // diagnostic in the file offers fixes for lines you are not
+        // looking at.
+        var overlapping: std.ArrayListUnmanaged(lsp.Diagnostic) = .empty;
+        defer overlapping.deinit(self.gpa);
+        for (self.diagsFor(path)) |d| {
+            if (d.range.end.line < range.start.line) continue;
+            if (d.range.start.line > range.end.line) continue;
+            overlapping.append(self.gpa, d) catch break;
+        }
+        const id = srv.codeAction(path, range, overlapping.items) orelse return false;
+        self.recordAsk(id, .code_action, path, "");
+        return true;
+    }
+
+    /// Ask for the edit an action deferred. `raw` is that action, as it
+    /// arrived — see lsp.Session.codeActionResolve.
+    pub fn codeActionResolve(self: *Manager, path: []const u8, raw: []const u8) bool {
+        const srv = self.ensure(path) orelse return false;
+        const id = srv.codeActionResolve(raw) orelse return false;
+        self.recordAsk(id, .code_action_resolve, path, "");
+        return true;
+    }
+
     pub fn formatting(self: *Manager, path: []const u8, tab_size: u32, spaces: bool) bool {
         const srv = self.ensure(path) orelse return false;
         const id = srv.formatting(path, tab_size, spaces) orelse return false;
@@ -799,6 +842,21 @@ pub const Manager = struct {
                         self.pushAnswer(.{ .formatting = .{ .path = p, .edits = edits } });
                         changed = true;
                     },
+                    .code_actions => |ca| {
+                        const ask = self.takeAsk(ca.id) orelse continue;
+                        defer self.freeAsk(ask);
+                        const items = dupeCodeActions(self.gpa, ca.items) orelse continue;
+                        const p = self.gpa.dupe(u8, ask.path) catch {
+                            lsp.freeCodeActions(self.gpa, items);
+                            continue;
+                        };
+                        self.pushAnswer(.{ .code_actions = .{
+                            .path = p,
+                            .items = items,
+                            .resolved = ca.resolved,
+                        } });
+                        changed = true;
+                    },
                     .empty => |x| {
                         const ask = self.takeAsk(x.id) orelse continue;
                         defer self.freeAsk(ask);
@@ -864,35 +922,63 @@ pub const Manager = struct {
         return gpa.realloc(out, n) catch out[0..n];
     }
 
-    /// Deep-copy a WorkspaceEdit out of the event that owns it. All or
-    /// nothing: a partially copied edit is a partial rename, and there
-    /// is no way for the caller to tell that it got one.
-    fn dupeFileEdits(gpa: Allocator, src: []const lsp.FileEdits) ?[]lsp.FileEdits {
-        const out = gpa.alloc(lsp.FileEdits, src.len) catch return null;
+    /// Deep-copy code actions out of the event that owns them. All or
+    /// nothing per action: one missing its edit is one that does
+    /// nothing when picked, which is worse than one not offered.
+    fn dupeCodeActions(gpa: Allocator, src: []const lsp.CodeAction) ?[]lsp.CodeAction {
+        const out = gpa.alloc(lsp.CodeAction, src.len) catch return null;
         var n: usize = 0;
-        errdefer lsp.freeFileEdits(gpa, out[0..n]);
-        for (src) |f| {
-            const path = gpa.dupe(u8, f.path) catch return null;
-            const edits = gpa.alloc(lsp.TextEdit, f.edits.len) catch {
-                gpa.free(path);
-                return null;
+        while (n < src.len) : (n += 1) {
+            const a = src[n];
+            const title = gpa.dupe(u8, a.title) catch break;
+            const kind = gpa.dupe(u8, a.kind) catch {
+                gpa.free(title);
+                break;
             };
-            var m: usize = 0;
-            while (m < f.edits.len) : (m += 1) {
-                edits[m] = .{
-                    .range = f.edits[m].range,
-                    .text = gpa.dupe(u8, f.edits[m].text) catch {
-                        for (edits[0..m]) |e| gpa.free(e.text);
-                        gpa.free(edits);
-                        gpa.free(path);
-                        return null;
-                    },
+            const raw = gpa.dupe(u8, a.raw) catch {
+                gpa.free(title);
+                gpa.free(kind);
+                break;
+            };
+            const edit = if (a.edit.len == 0)
+                @as([]lsp.FileEdits, &.{})
+            else
+                lsp.dupeFileEdits(gpa, a.edit) orelse {
+                    gpa.free(title);
+                    gpa.free(kind);
+                    gpa.free(raw);
+                    break;
                 };
+            out[n] = .{
+                .title = title,
+                .kind = kind,
+                .edit = edit,
+                .file_ops = a.file_ops,
+                .raw = raw,
+                .deferred = a.deferred,
+                .command_only = a.command_only,
+            };
+        }
+        if (n != src.len) {
+            for (out[0..n]) |a| {
+                gpa.free(a.title);
+                gpa.free(a.kind);
+                gpa.free(a.raw);
+                lsp.freeFileEdits(gpa, a.edit);
             }
-            out[n] = .{ .path = path, .edits = edits };
-            n += 1;
+            gpa.free(out);
+            return null;
         }
         return out;
+    }
+
+    /// Deep-copy a WorkspaceEdit out of the event that owns it.
+    ///
+    /// lsp.zig owns the logic — the palette needs the same copy, and a
+    /// second implementation of "all or nothing" is a second place a
+    /// partial edit can escape from.
+    fn dupeFileEdits(gpa: Allocator, src: []const lsp.FileEdits) ?[]lsp.FileEdits {
+        return lsp.dupeFileEdits(gpa, src);
     }
 
     fn pushAnswer(self: *Manager, a: Answer) void {

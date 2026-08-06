@@ -320,6 +320,25 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             // the workspace arm for a mode it had never heard of and
             // indexed a different array — a panic, from a dump verb, on a
             // new palette mode. A switch makes the compiler ask.
+            .actions => {
+                // Title, kind, and whether picking it would actually do
+                // anything — a row that resolves first and a row rook
+                // cannot run at all both look like ordinary rows.
+                w.print("mode:actions\nfilter:{s}\noffered:{d}\n", .{
+                    app.pal_input[0..app.pal_input_len],
+                    app.pal_actions.len,
+                }) catch {};
+                for (app.pal_filtered[0..app.pal_nfiltered], 0..) |idx, i| {
+                    const a = app.pal_actions[idx];
+                    w.print("{s}{s}\t{s}{s}{s}\n", .{
+                        @as([]const u8, if (i == app.pal_sel) "*" else " "),
+                        a.title,
+                        a.kind,
+                        @as([]const u8, if (a.deferred) "\tdeferred" else ""),
+                        @as([]const u8, if (a.command_only) "\tcommand" else ""),
+                    }) catch break;
+                }
+            },
             .plugins => {
             // The picker: name and state, so a scenario can prove the
             // GUI door to a plugin exists without a screenshot.

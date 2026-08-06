@@ -126,11 +126,18 @@ or armed state plus each visible chord hint with its screen position.
 The command palette:
 .Ql closed ,
 or its mode
-.Pq commands, files, workspaces, plugins ,
+.Pq commands, files, workspaces, plugins, actions ,
 current filter, and rows; a
 .Ql *
 marks the selection.
 Files mode adds the index root and count.
+Actions mode is the code-action picker: title and kind per row, plus
+.Ql deferred
+for one whose edit the server has not computed yet
+.Pq picking it costs a resolve round trip
+and
+.Ql command
+for one rook cannot run.
 .It Cm sidepane
 The side panel:
 .Ql closed ,

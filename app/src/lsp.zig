@@ -254,6 +254,48 @@ pub const Location = struct {
     range: Range = .{},
 };
 
+/// Something the server offers to DO about this spot in the file.
+///
+/// Two very different things wear this name. A quick fix is attached to
+/// a diagnostic — "add the missing import", "remove the unused
+/// variable". A source action applies to the file as a whole, and
+/// `source.organizeImports` is the one people reach for by hand.
+pub const CodeAction = struct {
+    /// What the picker shows, owned.
+    title: []const u8 = "",
+    /// `quickfix`, `refactor.extract`, `source.organizeImports`, …
+    /// Owned; "" when the server did not say.
+    kind: []const u8 = "",
+    /// The edit to apply. EMPTY is not the same as "does nothing": a
+    /// server may defer computing it until you pick the action, which
+    /// is what `resolve` is for. See `deferred`.
+    edit: []FileEdits = &.{},
+    /// The edit wants files created, renamed or deleted — refused, the
+    /// same as a rename's.
+    file_ops: bool = false,
+    /// The action as the server sent it, re-serialized. codeAction/
+    /// resolve takes the ACTION back, so keeping it is the only way to
+    /// ask for the edit that was deferred.
+    raw: []const u8 = "",
+    /// No edit yet, and the server left something to resolve with.
+    deferred: bool = false,
+    /// The action runs a server COMMAND rather than carrying an edit.
+    /// rook has no executeCommand path yet, so these are shown and
+    /// refused rather than hidden — an action you cannot see is
+    /// indistinguishable from a server that offered nothing.
+    command_only: bool = false,
+};
+
+pub fn freeCodeActions(gpa: Allocator, items: []CodeAction) void {
+    for (items) |a| {
+        gpa.free(a.title);
+        gpa.free(a.kind);
+        gpa.free(a.raw);
+        freeFileEdits(gpa, a.edit);
+    }
+    gpa.free(items);
+}
+
 /// One thing you could type here, as the server proposes it.
 pub const Completion = struct {
     /// What the menu shows, owned. Never empty — an item without one is
@@ -412,6 +454,9 @@ pub const Event = union(enum) {
     /// borrows the WorkspaceEdit's payload rather than inventing a
     /// second shape for the same thing.
     formatting: WorkspaceEdit,
+    /// What the server offers to do here. Answers both the initial
+    /// request and a resolve, which returns a single filled-in action.
+    code_actions: Actions,
     /// A request we sent is answered and has nothing to show: a null
     /// result, an error reply, or a server that died holding it. The
     /// caller MUST be released either way, or whatever it put on screen
@@ -456,6 +501,14 @@ pub const Event = union(enum) {
         incomplete: bool = false,
     };
 
+    pub const Actions = struct {
+        id: u32,
+        /// Owned, all the way down.
+        items: []CodeAction,
+        /// This is a resolve's answer — one action, now with its edit.
+        resolved: bool = false,
+    };
+
     pub const WorkspaceEdit = struct {
         id: u32,
         /// Owned, all the way down.
@@ -489,6 +542,7 @@ pub const Event = union(enum) {
             },
             .workspace_edit, .formatting => |*we| freeFileEdits(gpa, we.files),
             .completion => |*c| freeCompletions(gpa, c.items),
+            .code_actions => |*a| freeCodeActions(gpa, a.items),
             .failed => |*f| gpa.free(f.reason),
             .ready, .empty => {},
         }
@@ -505,6 +559,49 @@ pub fn freeCompletions(gpa: Allocator, items: []Completion) void {
         gpa.free(c.sort);
     }
     gpa.free(items);
+}
+
+/// Deep-copy a FileEdits list. Null on failure, having freed whatever
+/// it managed — all or nothing, because half a WorkspaceEdit applied is
+/// a repo in a state nobody described.
+pub fn dupeFileEdits(gpa: Allocator, src: []const FileEdits) ?[]FileEdits {
+    const out = gpa.alloc(FileEdits, src.len) catch return null;
+    var n: usize = 0;
+    while (n < src.len) : (n += 1) {
+        const f = src[n];
+        const path = gpa.dupe(u8, f.path) catch break;
+        const edits = gpa.alloc(TextEdit, f.edits.len) catch {
+            gpa.free(path);
+            break;
+        };
+        var m: usize = 0;
+        while (m < f.edits.len) : (m += 1) {
+            edits[m] = .{
+                .range = f.edits[m].range,
+                .text = gpa.dupe(u8, f.edits[m].text) catch break,
+            };
+        }
+        if (m != f.edits.len) {
+            for (edits[0..m]) |e| gpa.free(e.text);
+            gpa.free(edits);
+            gpa.free(path);
+            break;
+        }
+        out[n] = .{ .path = path, .edits = edits };
+    }
+    if (n != src.len) {
+        // Free what was built WITHOUT freeing the outer array twice:
+        // freeFileEdits would call gpa.free on a sub-slice, which is
+        // not the allocation the allocator handed out.
+        for (out[0..n]) |f| {
+            gpa.free(f.path);
+            for (f.edits) |e| gpa.free(e.text);
+            gpa.free(f.edits);
+        }
+        gpa.free(out);
+        return null;
+    }
+    return out;
 }
 
 /// Free a FileEdits list and everything hanging off it. Public because
@@ -530,7 +627,7 @@ pub const State = enum {
     failed,
 };
 
-const Kind = enum { initialize, hover, definition, references, rename, completion, formatting, shutdown };
+const Kind = enum { initialize, hover, definition, references, rename, completion, formatting, code_action, code_action_resolve, shutdown };
 
 const Pending = struct { id: u32, kind: Kind };
 
@@ -564,6 +661,10 @@ const max_edits_per_file = 4000;
 /// has to be well past what a filter would narrow to, or the item you
 /// wanted is the one that was dropped.
 const max_completions = 1000;
+/// Actions offered at one spot. A picker is read, not scrolled; past
+/// this the server is describing the file rather than answering about
+/// a position.
+const max_code_actions = 64;
 
 // ---------------------------------------------------------------- Session
 
@@ -750,6 +851,11 @@ pub const Session = struct {
         w.writeAll("}],\"capabilities\":{\"textDocument\":{" ++
             "\"definition\":{\"linkSupport\":true}," ++
             "\"references\":{},\"rename\":{},\"formatting\":{}," ++
+            // dataSupport is what lets a server DEFER the edit and hand
+            // us something to resolve with; without it a server that
+            // wanted to defer has to compute every edit up front, and
+            // most simply return actions that do nothing.
+            "\"codeAction\":{\"dataSupport\":true,\"resolveSupport\":{\"properties\":[\"edit\"]}}," ++
             // snippetSupport is FALSE and that is the feature. Declare
             // it and gopls answers `Println(${1:a})` — a template rook
             // has no engine to expand, which would land in the buffer
@@ -1032,6 +1138,53 @@ pub const Session = struct {
             ",\"context\":{\"includeDeclaration\":false}") orelse return null;
         defer self.gpa.free(params);
         return self.request(.references, "textDocument/references", params);
+    }
+
+    /// What the server offers to do about `range`.
+    ///
+    /// `diags` is the CONTEXT, and it is not optional in practice: a
+    /// quick fix is attached to a diagnostic, and a server handed an
+    /// empty context has nothing to attach one to. Passing the
+    /// diagnostics that overlap the range is the difference between
+    /// "add the missing import" and an empty list.
+    pub fn codeAction(self: *Session, path: []const u8, range: Range, diags: []const Diagnostic) ?u32 {
+        const uri = uriFromPath(self.gpa, path) orelse return null;
+        defer self.gpa.free(uri);
+        var a: std.Io.Writer.Allocating = .init(self.gpa);
+        defer a.deinit();
+        const w = &a.writer;
+        w.writeAll("{\"textDocument\":{\"uri\":") catch return null;
+        writeJsonString(w, uri);
+        w.print("}},\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}}," ++
+            "\"end\":{{\"line\":{d},\"character\":{d}}}}},\"context\":{{\"diagnostics\":[", .{
+            range.start.line, range.start.col, range.end.line, range.end.col,
+        }) catch return null;
+        for (diags, 0..) |d, i| {
+            if (i > 0) w.writeByte(',') catch return null;
+            w.print("{{\"range\":{{\"start\":{{\"line\":{d},\"character\":{d}}}," ++
+                "\"end\":{{\"line\":{d},\"character\":{d}}}}},\"severity\":{d},\"message\":", .{
+                d.range.start.line, d.range.start.col,
+                d.range.end.line,   d.range.end.col,
+                @intFromEnum(d.severity),
+            }) catch return null;
+            writeJsonString(w, d.message);
+            if (d.source.len > 0) {
+                w.writeAll(",\"source\":") catch return null;
+                writeJsonString(w, d.source);
+            }
+            w.writeByte('}') catch return null;
+        }
+        w.writeAll("]}}") catch return null;
+        return self.request(.code_action, "textDocument/codeAction", a.written());
+    }
+
+    /// Ask for the edit a server deferred. `raw` is the action exactly
+    /// as it arrived — the protocol resolves an ACTION, not an id, so
+    /// handing back anything we reconstructed would drop the `data`
+    /// field the server is actually keying on.
+    pub fn codeActionResolve(self: *Session, raw: []const u8) ?u32 {
+        if (raw.len == 0) return null;
+        return self.request(.code_action_resolve, "codeAction/resolve", raw);
     }
 
     /// Lay the whole file out. The answer is a `.formatting` carrying
@@ -1318,6 +1471,8 @@ pub const Session = struct {
             .rename => self.onWorkspaceEdit(id, result),
             .completion => self.onCompletion(id, result),
             .formatting => self.onFormatting(id, result),
+            .code_action => self.onCodeActions(id, result, false),
+            .code_action_resolve => self.onCodeActions(id, result, true),
         }
     }
 
@@ -1381,6 +1536,80 @@ pub const Session = struct {
         };
         const payload: Event.Locations = .{ .id = id, .locs = owned };
         self.push(if (many) .{ .references = payload } else .{ .definition = payload });
+    }
+
+    /// `(Command | CodeAction)[]`, or a single resolved CodeAction.
+    ///
+    /// The legacy Command entry is the trap: it has a `title` like a
+    /// CodeAction and nothing else in common, so reading one as an
+    /// action gives a row that looks fine and does nothing. They are
+    /// told apart by `command` being a STRING — on a real CodeAction
+    /// that field, when present, is an object.
+    fn onCodeActions(self: *Session, id: u32, result: std.json.Value, resolved: bool) void {
+        var items: std.ArrayListUnmanaged(CodeAction) = .empty;
+        defer items.deinit(self.gpa);
+
+        const list: []const std.json.Value = switch (result) {
+            .array => |arr| arr.items,
+            // A resolve answers with the action itself, not a list.
+            .object => &[_]std.json.Value{result},
+            else => &.{},
+        };
+        for (list) |item| {
+            if (items.items.len >= max_code_actions) break;
+            const title = jStr(jGet(item, "title")) orelse continue;
+            if (title.len == 0) continue;
+
+            const cmd = jGet(item, "command");
+            const legacy_command = cmd == .string;
+            const edit_v = jGet(item, "edit");
+            const we: ReadEdit = if (edit_v == .null)
+                .{ .files = &.{}, .file_ops = false }
+            else
+                self.readWorkspaceEdit(edit_v);
+
+            const t = self.gpa.dupe(u8, title) catch break;
+            const k = self.gpa.dupe(u8, jStr(jGet(item, "kind")) orelse "") catch {
+                self.gpa.free(t);
+                break;
+            };
+            // Re-serialized rather than borrowed: the parsed document
+            // dies with this dispatch, and resolve needs these bytes
+            // some frames later.
+            const raw = std.json.Stringify.valueAlloc(self.gpa, item, .{}) catch self.gpa.dupe(u8, "") catch {
+                self.gpa.free(t);
+                self.gpa.free(k);
+                break;
+            };
+            items.append(self.gpa, .{
+                .title = t,
+                .kind = k,
+                .edit = we.files,
+                .file_ops = we.file_ops,
+                .raw = raw,
+                // Only worth resolving if it has not already been, and
+                // only if there is nothing to apply as it stands.
+                .deferred = !resolved and we.files.len == 0 and cmd == .null,
+                .command_only = we.files.len == 0 and (legacy_command or cmd == .object),
+            }) catch {
+                self.gpa.free(t);
+                self.gpa.free(k);
+                self.gpa.free(raw);
+                freeFileEdits(self.gpa, we.files);
+                break;
+            };
+        }
+
+        if (items.items.len == 0) {
+            self.push(.{ .empty = .{ .id = id } });
+            return;
+        }
+        const owned = items.toOwnedSlice(self.gpa) catch {
+            freeCodeActions(self.gpa, items.items);
+            items.items = &.{};
+            return;
+        };
+        self.push(.{ .code_actions = .{ .id = id, .items = owned, .resolved = resolved } });
     }
 
     /// A TextEdit[] for the file we asked about. No uri comes back, so
@@ -1513,6 +1742,24 @@ pub const Session = struct {
     /// work against half the catalog and silently do nothing against
     /// the other half, which is why both are here.
     fn onWorkspaceEdit(self: *Session, id: u32, result: std.json.Value) void {
+        const we = self.readWorkspaceEdit(result);
+        // Nothing to do AND nothing to warn about is a null answer: the
+        // caller is released and told there was no edit. A reply that
+        // was ONLY resource operations still has to reach the caller,
+        // or refusing it would look like the server said nothing.
+        if (we.files.len == 0 and !we.file_ops) {
+            self.push(.{ .empty = .{ .id = id } });
+            return;
+        }
+        self.push(.{ .workspace_edit = .{ .id = id, .files = we.files, .file_ops = we.file_ops } });
+    }
+
+    /// A WorkspaceEdit's two shapes, read into ours. Shared by rename,
+    /// which gets one as its whole reply, and by a code action, which
+    /// carries one as a field.
+    const ReadEdit = struct { files: []FileEdits, file_ops: bool };
+
+    fn readWorkspaceEdit(self: *Session, result: std.json.Value) ReadEdit {
         var files: std.ArrayListUnmanaged(FileEdits) = .empty;
         defer files.deinit(self.gpa);
         var file_ops = false;
@@ -1561,20 +1808,12 @@ pub const Session = struct {
             }
         }
 
-        // Nothing to do AND nothing to warn about is a null answer: the
-        // caller is released and told there was no edit. A reply that
-        // was ONLY resource operations still has to reach the caller,
-        // or refusing it would look like the server said nothing.
-        if (files.items.len == 0 and !file_ops) {
-            self.push(.{ .empty = .{ .id = id } });
-            return;
-        }
         const owned = files.toOwnedSlice(self.gpa) catch {
             freeFileEdits(self.gpa, files.items);
             files.items = &.{};
-            return;
+            return .{ .files = &.{}, .file_ops = file_ops };
         };
-        self.push(.{ .workspace_edit = .{ .id = id, .files = owned, .file_ops = file_ops } });
+        return .{ .files = owned, .file_ops = file_ops };
     }
 
     /// A TextEdit[]. AnnotatedTextEdit adds a field and is otherwise the
@@ -2002,6 +2241,22 @@ pub const Server = struct {
     pub fn references(self: *Server, path: []const u8, pos: Position, include_decl: bool) ?u32 {
         self.mu.lock();
         const id = self.sess.references(path, pos, include_decl);
+        self.mu.unlock();
+        self.poke();
+        return id;
+    }
+
+    pub fn codeAction(self: *Server, path: []const u8, range: Range, diags: []const Diagnostic) ?u32 {
+        self.mu.lock();
+        const id = self.sess.codeAction(path, range, diags);
+        self.mu.unlock();
+        self.poke();
+        return id;
+    }
+
+    pub fn codeActionResolve(self: *Server, raw: []const u8) ?u32 {
+        self.mu.lock();
+        const id = self.sess.codeActionResolve(raw);
         self.mu.unlock();
         self.poke();
         return id;
@@ -3042,4 +3297,104 @@ test "formatting asks with options and answers even when nothing changes" {
     defer e2.deinit(gpa);
     try testing.expect(e2 == .formatting);
     try testing.expectEqual(@as(usize, 0), e2.formatting.files[0].edits.len);
+}
+
+test "code actions: the context carries diagnostics, and a Command is not an action" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    try readySession(&sess, false);
+    var ready = sess.nextEvent().?;
+    ready.deinit(gpa);
+    sess.didOpen("/tmp/work/a.go", "package main\n");
+    sess.consumeOutbound(sess.outbound().len);
+
+    const diags = [_]Diagnostic{.{
+        .range = .{ .start = .{ .line = 5, .col = 1 }, .end = .{ .line = 5, .col = 8 } },
+        .severity = .err,
+        .message = "undefined: fmt",
+        .source = "compiler",
+    }};
+    const id1 = sess.codeAction("/tmp/work/a.go", .{
+        .start = .{ .line = 5, .col = 1 },
+        .end = .{ .line = 5, .col = 8 },
+    }, &diags).?;
+    const sent = sess.outbound();
+    try testing.expect(std.mem.indexOf(u8, sent, "\"method\":\"textDocument/codeAction\"") != null);
+    // Without this a server has no diagnostic to hang a quick fix on,
+    // and answers an empty list that looks like "nothing is wrong".
+    try testing.expect(std.mem.indexOf(u8, sent, "\"message\":\"undefined: fmt\"") != null);
+    try testing.expect(std.mem.indexOf(u8, sent, "\"source\":\"compiler\"") != null);
+
+    const r1 = try std.fmt.allocPrint(gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[" ++
+        // A real CodeAction, edit included.
+        "{{\"title\":\"Add import fmt\",\"kind\":\"quickfix\",\"edit\":{{\"changes\":{{" ++
+        "\"file:///tmp/work/a.go\":[{{\"range\":{{\"start\":{{\"line\":1,\"character\":0}}," ++
+        "\"end\":{{\"line\":1,\"character\":0}}}},\"newText\":\"import \\\"fmt\\\"\\n\"}}]}}}}}}," ++
+        // One the server DEFERRED — no edit, but data to resolve with.
+        "{{\"title\":\"Organize imports\",\"kind\":\"source.organizeImports\",\"data\":{{\"tok\":7}}}}," ++
+        // A legacy Command: a title and a STRING `command`, nothing to
+        // apply. Reading this as an action gives a row that does
+        // nothing when picked.
+        "{{\"title\":\"Run go mod tidy\",\"command\":\"gopls.tidy\",\"arguments\":[]}}]}}", .{id1});
+    defer gpa.free(r1);
+    const f1 = try framed(gpa, r1);
+    defer gpa.free(f1);
+    sess.feed(f1);
+    var e1 = sess.nextEvent().?;
+    defer e1.deinit(gpa);
+    const items = e1.code_actions.items;
+    try testing.expectEqual(@as(usize, 3), items.len);
+
+    try testing.expectEqualStrings("Add import fmt", items[0].title);
+    try testing.expectEqualStrings("quickfix", items[0].kind);
+    try testing.expectEqual(@as(usize, 1), items[0].edit.len);
+    try testing.expect(!items[0].deferred);
+    try testing.expect(!items[0].command_only);
+
+    // Deferred: nothing to apply yet, and worth resolving.
+    try testing.expect(items[1].deferred);
+    try testing.expectEqual(@as(usize, 0), items[1].edit.len);
+    // The action is kept verbatim, because resolve takes the ACTION —
+    // and `data` is what the server is really keying on.
+    try testing.expect(std.mem.indexOf(u8, items[1].raw, "\"tok\":7") != null);
+
+    // The Command: shown, and known to be unrunnable.
+    try testing.expect(items[2].command_only);
+    try testing.expect(!items[2].deferred);
+
+    // Resolving hands the action back and gets it filled in.
+    const id2 = sess.codeActionResolve(items[1].raw).?;
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(), "\"method\":\"codeAction/resolve\"") != null);
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(), "\"tok\":7") != null);
+    const r2 = try std.fmt.allocPrint(gpa,
+        "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"title\":\"Organize imports\"," ++
+        "\"kind\":\"source.organizeImports\",\"edit\":{{\"documentChanges\":[" ++
+        "{{\"textDocument\":{{\"uri\":\"file:///tmp/work/a.go\",\"version\":1}},\"edits\":[" ++
+        "{{\"range\":{{\"start\":{{\"line\":0,\"character\":0}}," ++
+        "\"end\":{{\"line\":0,\"character\":0}}}},\"newText\":\"// tidy\\n\"}}]}}]}}}}}}", .{id2});
+    defer gpa.free(r2);
+    const f2 = try framed(gpa, r2);
+    defer gpa.free(f2);
+    sess.feed(f2);
+    var e2 = sess.nextEvent().?;
+    defer e2.deinit(gpa);
+    // A resolve answers with the ACTION, not a list of them.
+    try testing.expect(e2.code_actions.resolved);
+    try testing.expectEqual(@as(usize, 1), e2.code_actions.items.len);
+    try testing.expectEqual(@as(usize, 1), e2.code_actions.items[0].edit.len);
+    // And it is no longer deferred, or picking it would resolve forever.
+    try testing.expect(!e2.code_actions.items[0].deferred);
+
+    // Nothing on offer still releases the caller.
+    const id3 = sess.codeAction("/tmp/work/a.go", .{}, &.{}).?;
+    const r3 = try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":[]}}", .{id3});
+    defer gpa.free(r3);
+    const f3 = try framed(gpa, r3);
+    defer gpa.free(f3);
+    sess.feed(f3);
+    var e3 = sess.nextEvent().?;
+    defer e3.deinit(gpa);
+    try testing.expect(e3 == .empty);
 }
