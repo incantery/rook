@@ -21,3 +21,7 @@ TODO.md
 /test/
 /test-config/
 /cloud
+
+# Stray binaries from `go build ./plugins/<name>/`, which writes to CWD.
+# `make plugins` uses -o and never leaves these.
+/lang-*

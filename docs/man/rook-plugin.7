@@ -228,6 +228,21 @@ an argv, with optional
 .Ql result.settings ,
 a JSON object sent as the server's initialization options.
 .Pp
+Params also carry
+.Ql dir ,
+a per-language prefix under
+.Pa $XDG_DATA_HOME/rook/servers/
+that rook NAMES and never writes to.
+A plugin that has to install something installs it there \(em a release
+tarball, a
+.Ql go install ,
+an
+.Ql npm install --prefix
+\(em and never into the user's project or anywhere global.
+Everything rook can be responsible for then lives under one directory,
+which is what makes removing rook remove all of it.
+Nothing in this path ever needs elevated privileges.
+.Pp
 Asked once per project root, not per file \(em and never on a keystroke
 path, so it may take its time.
 A plugin that cannot find a server answers
