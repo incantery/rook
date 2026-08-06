@@ -105,6 +105,23 @@ pub const Style = enum(u8) {
     cpl_item,
     cpl_sel,
     cpl_detail,
+    // A candidate's label, coloured by WHAT IT IS — the protocol sends
+    // a CompletionItemKind and every other editor uses it. Borrowing
+    // the buffer's own syntax colours rather than inventing a palette:
+    // a function in the menu should be the colour a function is two
+    // lines up, which is what makes the list readable at a glance
+    // instead of a wall of one colour.
+    cpl_fn,
+    cpl_type,
+    cpl_kw,
+    cpl_const,
+    /// The characters you have actually typed, inside a candidate. Zed
+    /// bolds them; a character grid has no bold, so they take the
+    /// accent instead.
+    cpl_match,
+    /// The box's edge. Recedes: it is there to say where the list stops,
+    /// not to be looked at.
+    cpl_border,
     // The hover float: a bordered document over the buffer. Its own
     // buckets for the same reason the menu has its own — it FLOATS, so
     // every cell it covers needs a fill of its own, including the ones
@@ -118,6 +135,24 @@ pub const Style = enum(u8) {
     hov_head,
     hov_link,
 };
+
+/// The colour a completion label wears, from the protocol's
+/// CompletionItemKind.
+///
+/// The groupings are the ones a reader actually distinguishes: things
+/// you call, things you name a type with, words the language reserves,
+/// and values. Anything else is a plain identifier and gets the
+/// ordinary row colour — a palette with an entry per kind is a palette
+/// nobody can read.
+fn cplKindStyle(kind: u8) ?Style {
+    return switch (kind) {
+        2, 3, 4 => .cpl_fn, // Method, Function, Constructor
+        7, 8, 22, 25 => .cpl_type, // Class, Interface, Struct, TypeParameter
+        14 => .cpl_kw, // Keyword
+        13, 20, 21 => .cpl_const, // Enum, EnumMember, Constant
+        else => null,
+    };
+}
 
 /// A hover's ink, in the editor's vocabulary. hoverdoc.zig has no
 /// opinion about the theme; this is where it acquires one.
@@ -185,6 +220,14 @@ pub const RCell = struct {
     /// the cell to the LEFT and this one draws the other half, the same
     /// arrangement the terminal grid uses for a wide cell's spacer.
     tail: bool = false,
+    /// This cell is inside the completion menu's SELECTED row.
+    ///
+    /// A flag rather than another Style, because the row decides the
+    /// BACKGROUND and the token decides the FOREGROUND, and Style
+    /// couples the two. Without it every kind colour would need a
+    /// second variant for "on the selected row" — and the detail column
+    /// already punched a hole in the selection for exactly that reason.
+    cpl_row: bool = false,
     /// Non-zero when this cell holds a grapheme cluster of more than one
     /// codepoint: `(offset << 8) | len` into the frame's cluster bytes,
     /// read back with `Editor.clusterText`. `cp` still holds the base,
@@ -356,6 +399,9 @@ pub const Editor = struct {
     /// to report beyond being spelled that way somewhere.
     cpl_detail: std.ArrayListUnmanaged(u8) = .empty,
     cpl_detail_at: std.ArrayListUnmanaged(u32) = .empty,
+    /// CompletionItemKind per candidate; 0 for a buffer word, which is
+    /// an identifier and nothing more specific.
+    cpl_kind: std.ArrayListUnmanaged(u8) = .empty,
     /// The prefix the live ring was built for, owned. A late reply that
     /// answers a different prefix is answering a question you have
     /// stopped asking.
@@ -1333,6 +1379,7 @@ pub const Editor = struct {
         self.cpl_at.deinit(gpa);
         self.cpl_detail.deinit(gpa);
         self.cpl_detail_at.deinit(gpa);
+        self.cpl_kind.deinit(gpa);
         self.cpl_prefix.deinit(gpa);
         self.cpl_asked.deinit(gpa);
         self.hov.deinit(gpa);
@@ -2397,10 +2444,10 @@ pub const Editor = struct {
         }
         for (order.items) |idx| {
             const c = cands.items[idx];
-            self.cplPush(blob.items[c.start..][0..c.len], "");
+            self.cplPush(blob.items[c.start..][0..c.len], "", 0);
         }
         // The typed text, as the last stop in the ring.
-        self.cplPush(prefix, "");
+        self.cplPush(prefix, "", 0);
         self.cplSeal();
     }
 
@@ -2410,6 +2457,7 @@ pub const Editor = struct {
         self.cpl_at.clearRetainingCapacity();
         self.cpl_detail.clearRetainingCapacity();
         self.cpl_detail_at.clearRetainingCapacity();
+        self.cpl_kind.clearRetainingCapacity();
     }
 
     /// Append one candidate, skipping a word already in the ring.
@@ -2418,7 +2466,7 @@ pub const Editor = struct {
     /// server's answer win over the buffer word that spells the same
     /// thing: the semantic items are pushed first, so the scraped copy
     /// of `Println` — which knows no signature — is the one that goes.
-    fn cplPush(self: *Editor, word: []const u8, detail: []const u8) void {
+    fn cplPush(self: *Editor, word: []const u8, detail: []const u8, kind: u8) void {
         const gpa = self.gpa;
         for (0..self.cplCountRaw()) |q| {
             if (std.mem.eql(u8, self.cplWordRaw(q), word)) return;
@@ -2427,6 +2475,7 @@ pub const Editor = struct {
         self.cpl_blob.appendSlice(gpa, word) catch return;
         self.cpl_detail_at.append(gpa, @intCast(self.cpl_detail.items.len)) catch return;
         self.cpl_detail.appendSlice(gpa, detail) catch return;
+        self.cpl_kind.append(gpa, kind) catch return;
     }
 
     /// Close the ring: both packed stores need one trailing offset so
@@ -2565,6 +2614,13 @@ pub const Editor = struct {
         return self.hov.lang();
     }
 
+    /// What candidate `i` IS, as a CompletionItemKind; 0 when nobody
+    /// said — a buffer word, or a server that did not bother.
+    pub fn cplKind(self: *const Editor, i: usize) u8 {
+        if (i >= self.cpl_kind.items.len) return 0;
+        return self.cpl_kind.items[i];
+    }
+
     /// The signature or type beside candidate `i`; "" for a buffer word.
     pub fn cplDetail(self: *const Editor, i: usize) []const u8 {
         if (i + 1 >= self.cpl_detail_at.items.len) return "";
@@ -2575,9 +2631,14 @@ pub const Editor = struct {
     /// buffer words from. Enough to cover the function you are in and
     /// its neighbours, cheap enough to redo on every keystroke.
     const suggest_window = 1500;
-    /// Word characters before the menu appears on its own. One is every
-    /// identifier in the file; two is a list you can read.
-    const suggest_min = 2;
+    /// Word characters before the menu appears on its own.
+    ///
+    /// ONE. Two was a guess at keeping the list readable, and the
+    /// filtering does that job better: with the server's answer narrowed
+    /// by prefix and the matched characters picked out, a single letter
+    /// is a useful list rather than a wall — and every editor worth
+    /// comparing against opens on the first one.
+    const suggest_min = 1;
 
     /// The menu, offered rather than asked for.
     ///
@@ -2623,7 +2684,7 @@ pub const Editor = struct {
         self.cpl_base = self.buf.rope.lineStart(self.cline) + (if (dot) self.ccol else a);
         if (dot) {
             self.cplReset();
-            self.cplPush("", "");
+            self.cplPush("", "", 0);
             self.cplSeal();
         } else {
             const t0 = stats.nowSeconds();
@@ -2817,7 +2878,7 @@ pub const Editor = struct {
         for (items) |it| {
             if (it.text.len == 0) continue;
             if (prefix.len > 0 and !std.ascii.startsWithIgnoreCase(it.text, prefix)) continue;
-            self.cplPush(it.text, it.detail);
+            self.cplPush(it.text, it.detail, it.kind);
         }
         var k: usize = 0;
         while (k + 1 < keep_at.items.len) : (k += 1) {
@@ -2825,9 +2886,9 @@ pub const Editor = struct {
             // The typed text is re-added at the END by cplSeal's caller
             // below, so skipping it here keeps it last in the ring.
             if (std.mem.eql(u8, w, prefix)) continue;
-            self.cplPush(w, "");
+            self.cplPush(w, "", 0);
         }
-        self.cplPush(prefix, "");
+        self.cplPush(prefix, "", 0);
         self.cplSeal();
         self.cpl_semantic = true;
         self.cpl_idx = 0;
@@ -2842,7 +2903,7 @@ pub const Editor = struct {
 
     /// One offer from a server, in the editor's own terms. `text` is
     /// what goes in the buffer, which is not always what a menu shows.
-    pub const CplItem = struct { text: []const u8, detail: []const u8 = "" };
+    pub const CplItem = struct { text: []const u8, detail: []const u8 = "", kind: u8 = 0 };
 
     // -------------------------------------------------------- formatting
 
@@ -7211,8 +7272,9 @@ pub const Editor = struct {
         const offers = n - 1;
         if (offers == 0 and !self.cpl_asking) return;
 
+        // Two rows of border on top of the list, and two columns.
         const text_rows = rows - 1 - top_rows;
-        if (text_rows < 2) return;
+        if (text_rows < 4) return;
         const cur_row = (self.cline -| self.top) + top_rows;
 
         // Width: the longest label, plus its detail, clamped to what is
@@ -7223,7 +7285,7 @@ pub const Editor = struct {
             want = @max(want, self.cplWord(i).len + if (d.len > 0) d.len + 2 else 0);
         }
         if (self.cpl_asking) want = @max(want, 12);
-        const need_w = @min(@min(@max(want + 2, cpl_menu_min_cols), cpl_menu_cols), cols -| 2);
+        const need_w = @min(@min(@max(want + 4, cpl_menu_min_cols), cpl_menu_cols), cols -| 2);
 
         // Latch, or re-latch for a new word.
         const below = cur_row + 1;
@@ -7247,12 +7309,15 @@ pub const Editor = struct {
 
         const least: usize = if (self.cpl_asking) 1 else 0;
         const shown = @min(@max(offers, least), cpl_menu_rows);
+        // The box is the list plus its two border rows.
+        const box_h = shown + 2;
         const start_row = if (self.cpl_box_above)
-            cur_row -| @min(shown, cur_row -| top_rows)
+            cur_row -| @min(box_h, cur_row -| top_rows)
         else
             below;
-        // A cursor with no room either side gets whatever fits below.
-        const draw = @min(shown, (top_rows + text_rows) -| start_row);
+        const room = (top_rows + text_rows) -| start_row;
+        if (room < 3) return;
+        const draw = @min(shown, room - 2);
         if (draw == 0) return;
 
         // Left edge at the word being completed, so the menu hangs off
@@ -7270,36 +7335,77 @@ pub const Editor = struct {
             if (self.cpl_idx >= draw) top = self.cpl_idx - draw + 1;
         }
 
-        for (0..draw) |r| {
+        for (0..draw + 2) |r| {
             const row = start_row + r;
             if (row >= top_rows + text_rows) break;
             const out = g[row * cols ..][0..cols];
-            const idx = top + r;
-            const sel = idx == self.cpl_idx;
-            const st: Style = if (sel) .cpl_sel else .cpl_item;
-            for (0..menu_w) |c| {
-                if (left + c >= cols) break;
-                out[left + c] = .{ .cp = ' ', .st = st };
-            }
-            var x = left + 1;
-            if (idx >= offers) {
-                // The waiting row, when a server has been asked and the
-                // buffer had nothing to say meanwhile.
-                putStr(out, &x, "asking…", .cpl_item);
+            const border_row = r == 0 or r == draw + 1;
+
+            // A BORDER, like Zed's and like the hover float's. Without
+            // one the menu is a differently-shaded rectangle of text
+            // over text, and the eye has to work out where the list
+            // stops. Rounded, because it is a panel and not a hole.
+            if (border_row) {
+                if (left + menu_w > cols) break;
+                out[left] = .{ .cp = if (r == 0) '╭' else '╰', .st = .cpl_border };
+                for (left + 1..left + menu_w - 1) |c| out[c] = .{ .cp = '─', .st = .cpl_border };
+                out[left + menu_w - 1] = .{ .cp = if (r == 0) '╮' else '╯', .st = .cpl_border };
                 continue;
             }
-            putStr(out, &x, self.cplWord(idx), st);
-            const d = self.cplDetail(idx);
-            if (d.len > 0 and x + 1 < left + menu_w) {
-                x += 1;
-                // Detail is never highlighted with the row: it is
-                // context, and a whole row of reversed text is harder
-                // to read than the one word you are choosing.
-                var dx = x;
-                while (dx < left + menu_w and dx < cols and dx - x < d.len) : (dx += 1) {
-                    out[dx] = .{ .cp = d[dx - x], .st = .cpl_detail };
-                }
+
+            const idx = top + r - 1;
+            const sel = idx == self.cpl_idx;
+            for (0..menu_w) |c| {
+                if (left + c >= cols) break;
+                out[left + c] = .{ .cp = ' ', .st = .cpl_item, .cpl_row = sel };
             }
+            out[left] = .{ .cp = '│', .st = .cpl_border, .cpl_row = sel };
+            if (left + menu_w - 1 < cols) {
+                out[left + menu_w - 1] = .{ .cp = '│', .st = .cpl_border, .cpl_row = sel };
+            }
+
+            var x = left + 2;
+            const limit = left + menu_w - 2;
+            if (idx >= offers) {
+                putRow(out, &x, limit, "asking…", .cpl_detail, sel);
+                continue;
+            }
+
+            // The label, coloured by WHAT IT IS, with the characters
+            // you actually typed picked out. Zed bolds those; a
+            // character grid has no bold, so they take the accent —
+            // same job, which is showing you why this row is here.
+            const word = self.cplWord(idx);
+            const base: Style = cplKindStyle(self.cplKind(idx)) orelse
+                (if (sel) .cpl_sel else .cpl_item);
+            const pre = self.cplPrefix();
+            const hit = pre.len > 0 and pre.len <= word.len and
+                std.ascii.startsWithIgnoreCase(word, pre);
+            if (hit) {
+                putRow(out, &x, limit, word[0..pre.len], .cpl_match, sel);
+                putRow(out, &x, limit, word[pre.len..], base, sel);
+            } else putRow(out, &x, limit, word, base, sel);
+
+            const d = self.cplDetail(idx);
+            if (d.len > 0 and x + 1 < limit) {
+                x += 1;
+                putRow(out, &x, limit, d, .cpl_detail, sel);
+            }
+        }
+    }
+
+    /// Put a run into a menu row, stopping at `limit`. `sel` rides on
+    /// every cell so the row's fill survives whatever colour the token
+    /// chose for itself.
+    fn putRow(out: []RCell, x: *usize, limit: usize, sr: []const u8, st: Style, sel: bool) void {
+        var i: usize = 0;
+        while (i < sr.len and x.* < limit) {
+            const cl = clusterAt(sr, i);
+            if (x.* + cl.width > limit) break;
+            out[x.*] = .{ .cp = decodeAt(sr, i), .st = st, .cpl_row = sel };
+            if (cl.width == 2) out[x.* + 1] = .{ .cp = ' ', .st = st, .tail = true, .cpl_row = sel };
+            x.* += cl.width;
+            i += cl.len;
         }
     }
 
@@ -12341,18 +12447,18 @@ test "a status message too long to fit is truncated, never dropped" {
 
 // -------------------------------------------------- suggestions as you type
 
-test "the menu appears by itself after two characters" {
+test "the menu appears by itself on the first character" {
     const gpa = testing.allocator;
     var e = try mkEditor(gpa);
     defer e.destroy();
     keys(e, "ialphabet beta\n");
-    // One character is every identifier in the file; two is a list.
+    // One, not two. The filtering and the matched-prefix emphasis are
+    // what keep a short prefix readable; waiting for a second character
+    // just means the menu is late.
     keys(e, "a");
-    try testing.expect(!e.cplLive());
-    keys(e, "l");
     try testing.expect(e.cplLive());
     try testing.expect(e.cplAuto());
-    try testing.expectEqualStrings("al", e.cplPrefix());
+    try testing.expectEqualStrings("a", e.cplPrefix());
 }
 
 test "an auto menu never writes to the buffer" {
@@ -12494,10 +12600,9 @@ test "the server is asked once per distinct prefix, not once per keystroke" {
     e.lsp_completion = &CplProbe.hook;
     keys(e, "ialphabetical\n");
     const before = probe.asked;
-    // "al", "alp", "alph" — three distinct questions. The first
-    // character asks nothing, because the menu does not open on one.
+    // "a", "al", "alp", "alph" — four distinct questions, four asks.
     keys(e, "alph");
-    try testing.expectEqual(before + 3, probe.asked);
+    try testing.expectEqual(before + 4, probe.asked);
     // A backspace is a different question, not the end of one: the
     // prefix got shorter, so the menu widens and the server is asked
     // about the shorter word. Then the retype asks about the longer one
@@ -12570,7 +12675,9 @@ test "a backspace widens the menu rather than closing it" {
     try testing.expect(e.cplLive());
     try testing.expectEqualStrings("al", e.cplPrefix());
     try testing.expect(e.cplCount() > narrow);
-    // And back under the minimum, it closes.
+    // Still open on one character; it takes deleting the word entirely.
+    e.key("\x7f");
+    try testing.expect(e.cplLive());
     e.key("\x7f");
     try testing.expect(!e.cplLive());
 }
@@ -12636,4 +12743,54 @@ test "the document does not move when the menu opens" {
     }
     try testing.expect(e.cplLive());
     try testing.expectEqual(before, e.top);
+}
+
+test "a candidate's label is coloured by what it is" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+
+    keys(e, "iPr");
+    // The protocol says what each of these IS, and every editor worth
+    // comparing against uses it. rook dropped the kind at the boundary
+    // between lsp.Completion and the ring for months.
+    e.takeCompletions(&.{
+        .{ .text = "Println", .detail = "func(...any)", .kind = 3 }, // Function
+        .{ .text = "Printer", .detail = "struct{}", .kind = 22 }, // Struct
+    }, "Pr");
+    try testing.expectEqual(@as(u8, 3), e.cplKind(0));
+    try testing.expectEqual(@as(u8, 22), e.cplKind(1));
+    try testing.expectEqual(Style.cpl_fn, cplKindStyle(3).?);
+    try testing.expectEqual(Style.cpl_type, cplKindStyle(22).?);
+    try testing.expectEqual(Style.cpl_kw, cplKindStyle(14).?);
+    // A buffer word is an identifier and nothing more specific: no
+    // colour, rather than a wrong one.
+    try testing.expect(cplKindStyle(0) == null);
+}
+
+test "the menu draws a border and marks the typed characters" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ialphabet\nalpine\n");
+    keys(e, "alp");
+    const g = e.fillGrid(60, 16);
+
+    var border = false;
+    var matched: usize = 0;
+    var kinded_rows: usize = 0;
+    for (g) |c| {
+        if (c.cp == '╭' or c.cp == '╰' or c.cp == '│') border = true;
+        if (c.st == .cpl_match) matched += 1;
+        if (c.cpl_row) kinded_rows += 1;
+    }
+    try testing.expect(border);
+    // Three characters of prefix, picked out on each of the two rows.
+    try testing.expectEqual(@as(usize, 6), matched);
+    // And the selected row carries its fill as a ROW flag, so the
+    // detail column no longer punches a hole in it.
+    try testing.expect(kinded_rows > 0);
 }

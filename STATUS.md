@@ -83,17 +83,23 @@ does what it was for — `gr` for every use of a symbol, landing in the same sid
 panel find-in-files uses, grouped by file and walkable with `j`/`k`/⏎ —
 and `gR` to rename one everywhere. A rename validates every file before
 touching any: open documents get one undoable group and stay unsaved,
-files no pane has open are written. Completion appears **as you type** — two word characters, or a `.` —
+files no pane has open are written. Completion appears **as you type** — one word character, or a `.` —
 served by the buffer's own words on the keystroke and by the server a
 few frames later, in one ring with a menu. An automatic menu never
 writes to the buffer: `Tab` takes the highlighted candidate, `ctrl-n` /
 `ctrl-p` walk it (and place, as vim's always have), typing narrows it
 rather than dismissing it, and a backspace widens it rather than closing
-it. The box holds still while one word is being completed: a minimum
-width so it does not track content (Zed's answer to the same problem),
-and the side latched so it cannot flip mid-word. It never scrolls the
-document to make room — stopping the box from moving by moving every
-line instead is the larger jolt of the two. `editor-suggest = false` turns the
+it. The menu is drawn on Zed's model: a bordered panel anchored to the
+word, labels coloured by the protocol's `CompletionItemKind` (functions,
+types, keywords, constants — the buffer's own syntax colours, so a
+function in the menu is the colour a function is two lines up), the
+characters you have typed picked out bright against the rest, and the
+signature dim beside it. The box holds still while one word is being
+completed: a minimum width so it does not track content, and the side
+latched so it cannot flip mid-word. It never scrolls the document to
+make room — stopping the box from moving by moving every line instead is
+the larger jolt of the two. Still owed against Zed: the documentation
+panel beside the list, and fuzzy matching rather than prefix. `editor-suggest = false` turns the
 automatic half off and leaves `ctrl-n` exactly as it was. `:Format`, and `editor-format-on-save`
 for `:w` — off by default, and a save is never lost to it: a formatter
 that does not answer inside 1.5s gets the file written unformatted and

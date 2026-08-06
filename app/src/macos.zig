@@ -3836,7 +3836,7 @@ pub const App = struct {
                     const items = self.gpa.alloc(editorpkg.Editor.CplItem, c.items.len) catch continue;
                     defer self.gpa.free(items);
                     for (c.items, 0..) |it, i| {
-                        items[i] = .{ .text = it.insert, .detail = it.detail };
+                        items[i] = .{ .text = it.insert, .detail = it.detail, .kind = it.kind };
                     }
                     // The PREFIX the request was made for travels with
                     // the answer, so the editor can tell an answer to
@@ -8703,6 +8703,14 @@ pub const App = struct {
                 .cpl_item => th.bar_fg,
                 .cpl_sel => th.bar_value,
                 .cpl_detail => th.ed_dim,
+                // The buffer's own syntax colours, so a function in the
+                // menu is the colour a function is two lines up.
+                .cpl_fn => th.syn_func,
+                .cpl_type => th.syn_type,
+                .cpl_kw => th.syn_keyword,
+                .cpl_const => th.syn_number,
+                .cpl_match => th.accent,
+                .cpl_border => th.ed_dim,
                 // The float. Its border recedes, its prose sits at the
                 // chrome's ordinary weight, and the signature — the one
                 // line you actually came for — is the brightest thing
@@ -8731,7 +8739,7 @@ pub const App = struct {
                 // one scale down.
                 .buftab_on => bg = th.chip_active_bg,
                 .buftab_off => bg = th.bar_bg,
-                .cpl_item, .cpl_detail => bg = th.bar_bg,
+                .cpl_item, .cpl_detail, .cpl_fn, .cpl_type, .cpl_kw, .cpl_const, .cpl_match, .cpl_border => bg = th.bar_bg,
                 .cpl_sel => bg = th.chip_active_bg,
                 // The float lifts off the buffer on the chrome's fill,
                 // and a fenced block lifts once more off that — the
@@ -8741,6 +8749,12 @@ pub const App = struct {
                 .hov_code => bg = th.chip_active_bg,
                 else => {},
             }
+
+            // The selected row's fill, applied AFTER the token has
+            // chosen its own colour: the row owns the background and
+            // the token owns the foreground, and coupling them is what
+            // made the detail column punch a hole in the selection.
+            if (rc.cpl_row) bg = th.chip_active_bg;
 
             var uvx: u16 = 0;
             var uvy: u16 = 0;

@@ -4468,9 +4468,14 @@ fn suggestScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("type G");
     _ = try app.ctl("type i");
     _ = try app.ctl("type a");
-    // One character is every identifier in the file; two is a list you
-    // can read.
-    try h.expectContains(try app.ctl("lsp"), "cpl off", "one character is not enough");
+    // ONE character. The filtering and the matched-prefix emphasis keep
+    // a short prefix readable; waiting for a second just means the menu
+    // is late.
+    {
+        const out = try app.waitCtl("lsp", "cpl on", 3_000);
+        try h.expectContains(out, "prefix:a", "the menu opens on the first character");
+        try h.expectContains(out, "auto", "by itself");
+    }
 
     _ = try app.ctl("type l");
     {
@@ -4536,13 +4541,22 @@ fn suggestScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
                 break;
             }
             try h.expect(found, "the menu vanished while typing `{s}`", .{ch});
-            // A document line the menu never covers — it is drawn over
-            // the ten rows above the cursor, so anchoring on one of
-            // those measures the menu, not the scroll.
-            const anchor = std.mem.indexOf(u8, d, "filler line 90") orelse {
-                try h.expect(false, "the anchor line scrolled out of view entirely", .{});
-                unreachable;
-            };
+            // A document line the menu never covers, by ROW rather than
+            // by byte offset: the menu's own rows change width as the
+            // list narrows, which moves every offset after them without
+            // anything having scrolled.
+            var arow: usize = 0;
+            var ait = std.mem.splitScalar(u8, d, '\n');
+            var anchor: usize = 0;
+            var found_anchor = false;
+            while (ait.next()) |line| : (arow += 1) {
+                if (std.mem.indexOf(u8, line, "filler line 90") != null) {
+                    anchor = arow;
+                    found_anchor = true;
+                    break;
+                }
+            }
+            try h.expect(found_anchor, "the anchor line scrolled out of view entirely", .{});
             if (doc_at) |a2| {
                 try h.expect(a2 == anchor, "the document scrolled under the menu", .{});
             } else doc_at = anchor;
