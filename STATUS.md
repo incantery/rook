@@ -96,7 +96,9 @@ function in the menu is the colour a function is two lines up), the
 characters you have typed picked out bright against the rest, and the
 signature dim beside it. The box holds still while one word is being
 completed: a minimum width so it does not track content, and the side
-latched so it cannot flip mid-word. It never scrolls the document to
+latched so it cannot flip mid-word. It follows the cursor sideways, one
+column per character, so the list stays attached to the caret rather
+than parked beside it. It never scrolls the document to
 make room — stopping the box from moving by moving every line instead is
 the larger jolt of the two. Still owed against Zed: the documentation
 panel beside the list, and fuzzy matching rather than prefix. `editor-suggest = false` turns the

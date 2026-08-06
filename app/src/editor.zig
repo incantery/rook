@@ -7320,14 +7320,18 @@ pub const Editor = struct {
         const draw = @min(shown, room - 2);
         if (draw == 0) return;
 
-        // Left edge at the word being completed, so the menu hangs off
-        // what it is completing rather than off the screen.
-        const base_col = self.cpl_base -| self.buf.rope.lineStart(self.cline);
-        const at_rc = renderColAt: {
-            const s = self.lineText(self.cline);
-            break :renderColAt renderCol(s, @min(base_col, s.len));
-        };
-        const left = @min(gw + (at_rc -| self.left), cols -| menu_w);
+        // Left edge at the CURSOR, so the box walks right with you one
+        // column per character. Zed's does this and it is the reason
+        // theirs feels attached to what you are typing rather than
+        // parked beside it: the list is an extension of the caret, and
+        // the caret moves.
+        //
+        // Not the same thing as the box jittering — that came from
+        // deriving its SIZE from whatever candidates existed at the
+        // instant, and is still latched. Tracking the cursor is
+        // movement that means something.
+        const cur_rc = self.renderColAt(self.cline, self.ccol);
+        const left = @min(gw + (cur_rc -| self.left), cols -| menu_w);
 
         // Scroll the window so the selection is always in it.
         var top: usize = 0;

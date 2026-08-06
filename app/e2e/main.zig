@@ -4504,8 +4504,7 @@ fn suggestScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
     }
 
     // The geometry rules, at the BOTTOM of a long file where the box has
-    // to go above the cursor. It must not slide sideways as the list
-    // changes, and — the one rook got wrong for a while — the DOCUMENT
+    // to go above the cursor. It follows the cursor sideways, and — the one rook got wrong for a while — the DOCUMENT
     // must not move to make room for it. Scrolling the buffer stops the
     // box moving by moving every line instead, which is the larger jolt
     // of the two; Zed flips the popup and leaves the text alone.
@@ -4530,11 +4529,15 @@ fn suggestScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
                 if (std.mem.indexOf(u8, line, " 1 ") != null) continue;
                 // The row's own right edge: the fill runs the box's
                 // full width, so the last non-space column is it.
+                // The box TRACKS the cursor: one column right per
+                // character, so the list stays attached to the caret
+                // rather than parked beside it. Zed's does this, and it
+                // is the difference between a popup that belongs to
+                // what you are typing and one that merely appeared.
                 if (left_at) |l| {
-                    try h.expect(l == at, "the menu moved sideways while typing ({d} then {d})", .{ l, at });
-                } else {
-                    left_at = at;
+                    try h.expect(at == l + 1, "the menu did not follow the cursor ({d} then {d})", .{ l, at });
                 }
+                left_at = at;
                 _ = &right_at;
                 _ = &top_at;
                 found = true;
