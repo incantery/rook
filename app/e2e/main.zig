@@ -4498,17 +4498,17 @@ fn suggestScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
         try h.expectNotContains(out, "cpl altitude", "and dropping what does not");
     }
 
-    // THE geometry rule. Type through a word and the box must not move
-    // — same left edge, same side of the cursor, every keystroke. It
-    // recomputes from whatever candidates exist at that instant, and
-    // there are two sets of those per character (the buffer's words on
-    // the key, a server's answer behind them), so a box deriving its
-    // side and width from the count flips and resizes twice per
-    // character. That is what reads as flicker.
+    // The geometry rules, at the BOTTOM of a long file where the box has
+    // to go above the cursor. It must not slide sideways as the list
+    // changes, and — the one rook got wrong for a while — the DOCUMENT
+    // must not move to make room for it. Scrolling the buffer stops the
+    // box moving by moving every line instead, which is the larger jolt
+    // of the two; Zed flips the popup and leaves the text alone.
     {
         var left_at: ?usize = null;
         var top_at: ?usize = null;
         var right_at: usize = 0;
+        var doc_at: ?usize = null;
         // "" samples the state already reached (`alp`), before the long
         // candidate is filtered out.
         for ([_][]const u8{ "", "h", "a", "b" }) |ch| {
@@ -4527,18 +4527,25 @@ fn suggestScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
                 // full width, so the last non-space column is it.
                 if (left_at) |l| {
                     try h.expect(l == at, "the menu moved sideways while typing ({d} then {d})", .{ l, at });
-                    // THE one. Above the cursor this row walked down the
-                    // screen every time the candidate count changed.
-                    try h.expect(top_at.? == row, "the menu's top edge moved ({d} then {d})", .{ top_at.?, row });
                 } else {
                     left_at = at;
-                    top_at = row;
                 }
                 _ = &right_at;
+                _ = &top_at;
                 found = true;
                 break;
             }
             try h.expect(found, "the menu vanished while typing `{s}`", .{ch});
+            // A document line the menu never covers — it is drawn over
+            // the ten rows above the cursor, so anchoring on one of
+            // those measures the menu, not the scroll.
+            const anchor = std.mem.indexOf(u8, d, "filler line 90") orelse {
+                try h.expect(false, "the anchor line scrolled out of view entirely", .{});
+                unreachable;
+            };
+            if (doc_at) |a2| {
+                try h.expect(a2 == anchor, "the document scrolled under the menu", .{});
+            } else doc_at = anchor;
         }
     }
     // Back to the state the rest of this scenario expects. Backspace

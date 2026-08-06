@@ -149,6 +149,18 @@ The float's text is in
 .Cm dump
 already; this is the part the grid cannot say, which is how much of the
 document is below the fold.
+.It Cm stats
+Per-phase frame timings, and the two costs that are not the frame's:
+.Ql hl_reparse_us ,
+the editor's tree-sitter reparse, and
+.Ql cpl_build_us ,
+the completion menu's buffer-word scan.
+Both are per KEYSTROKE rather than per frame, and both were added after
+a full reparse of a twelve-thousand-line file turned out to be costing
+42ms of every character typed \(em which no frame-level number could
+have told apart from a slow fill.
+.Ql stats reset
+zeroes them, which is how you measure one keystroke.
 .It Cm statusbar
 The chrome, with hit-test coordinates: workspace/branch/cwd segments,
 top-bar and status-bar layouts, tab style, activity-bar rail entries.

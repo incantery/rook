@@ -47,6 +47,7 @@ const regex = @import("regex.zig");
 const unicase = @import("unicase.zig");
 const hoverdoc = @import("hoverdoc.zig");
 const vt = @import("ghostty-vt");
+const stats = @import("stats.zig");
 
 pub const tab_width = 4;
 /// The ceiling on a single line. Not a buffer size any more — the line
@@ -607,7 +608,7 @@ pub const Editor = struct {
     // the tree-sitter C (headless tests stay headless). syntax.zig
     // attaches; null = plain text.
     hl_ctx: ?*anyopaque = null,
-    hl_reparse: ?*const fn (*anyopaque, []const u8) void = null,
+    hl_reparse: ?*const fn (*anyopaque, []const u8, []const bufferpkg.Buffer.TreeEdit, bool) void = null,
     hl_spans: ?*const fn (*anyopaque, u32, u32, *std.ArrayListUnmanaged(HlSpan), Allocator) void = null,
     hl_set_path: ?*const fn (*anyopaque, ?[]const u8) void = null,
     hl_destroy: ?*const fn (*anyopaque) void = null,
@@ -2625,7 +2626,9 @@ pub const Editor = struct {
             self.cplPush("", "");
             self.cplSeal();
         } else {
+            const t0 = stats.nowSeconds();
             self.buildCompletions(prefix, self.cpl_base, true, suggest_window);
+            stats.global.cpl_build.recordSeconds(stats.nowSeconds() - t0);
         }
         self.cpl_prefix.clearRetainingCapacity();
         self.cpl_prefix.appendSlice(gpa, if (dot) "" else prefix) catch {};
@@ -6848,7 +6851,6 @@ pub const Editor = struct {
         const top_rows: usize = if (self.buflineActive()) 1 else 0;
         const text_rows = rows - 1 - top_rows;
         self.ensureVisible(text_cols, text_rows);
-        self.makeRoomForMenu(text_rows);
         self.refreshHighlights(text_rows);
 
         // renderCol only ever walks as far as the column it is asked
@@ -7169,42 +7171,6 @@ pub const Editor = struct {
         }
     }
 
-    /// Scroll the document so the completion menu has room BELOW the
-    /// cursor.
-    ///
-    /// The alternative is flipping the box above, and that is what made
-    /// this feel like flicker: above the cursor the box's bottom edge is
-    /// pinned to the line you are typing on, so its TOP edge moves every
-    /// time the number of candidates changes — which is twice per
-    /// keystroke, once for the buffer's words and once for the server's
-    /// answer landing behind them.
-    ///
-    /// Below the cursor the top edge is pinned instead, and only the
-    /// bottom moves as the list narrows. That reads as a list getting
-    /// shorter, which is what it is.
-    ///
-    /// Against a CONSTANT number of rows, not against the candidates
-    /// that happen to exist: scrolling by however long the list is right
-    /// now would move the document on every keystroke. And it only ever
-    /// scrolls FORWARD, so the view does not snap back when the list
-    /// shrinks or the menu closes.
-    ///
-    /// It is also what a person does by hand when a popup is in the way.
-    fn makeRoomForMenu(self: *Editor, text_rows: usize) void {
-        if (!self.cpl_live) return;
-        const want = cpl_menu_rows + 1;
-        // Too short to hold the cursor and a menu both: the box goes
-        // above and takes what it can get.
-        if (text_rows <= want) return;
-        const cur = self.cline -| self.top;
-        const below = text_rows -| cur -| 1;
-        if (below >= want) return;
-        self.top += want - below;
-        // The cursor's own line is the floor — past it the line being
-        // typed on would scroll off the top.
-        if (self.top > self.cline) self.top = self.cline;
-    }
-
     /// Rows the completion menu will use at most. Ten is what fits
     /// under a cursor near the middle of a screen without the menu
     /// becoming the thing you are looking at.
@@ -7216,6 +7182,14 @@ pub const Editor = struct {
     /// between; the detail is context, and context that does not fit
     /// gets cut.
     const cpl_menu_cols = 72;
+    /// And the narrowest. Zed's answer to the same problem, and a better
+    /// one than anything clever: its menu is a FIXED width by default
+    /// (`w(rems(34.))`), or a dynamic one clamped to 280–540px. A floor
+    /// means a list of short candidates sits at the floor and a list of
+    /// long ones sits at the ceiling, so the box is at a limit — and
+    /// therefore still — nearly all of the time, without anything
+    /// having to be remembered between frames.
+    const cpl_menu_min_cols = 40;
     /// Rows that have to fit below the cursor for the menu to go there.
     /// The side is chosen against THIS rather than against however many
     /// candidates exist at the instant of asking, so it cannot change
@@ -7249,7 +7223,7 @@ pub const Editor = struct {
             want = @max(want, self.cplWord(i).len + if (d.len > 0) d.len + 2 else 0);
         }
         if (self.cpl_asking) want = @max(want, 12);
-        const need_w = @min(@min(@max(want + 2, 10), cpl_menu_cols), cols -| 2);
+        const need_w = @min(@min(@max(want + 2, cpl_menu_min_cols), cpl_menu_cols), cols -| 2);
 
         // Latch, or re-latch for a new word.
         const below = cur_row + 1;
@@ -7457,7 +7431,21 @@ pub const Editor = struct {
             if (rope.byteLen() <= 4 << 20) {
                 if (rope.dupeRange(gpa, 0, rope.byteLen()) catch null) |flat| {
                     defer gpa.free(flat);
-                    reparse(self.hl_ctx.?, flat);
+                    // Every change since the tree was last built. A
+                    // parse told which bytes moved reuses the rest —
+                    // 42ms of full parse on a big file becomes a
+                    // fraction of a millisecond, and it is the whole
+                    // reason typing in a large document stopped feeling
+                    // free once highlighting existed.
+                    const rec = self.buf.takeEdits();
+                    // The tree can also be missing or stale for reasons
+                    // no edit list describes: a fresh document, a
+                    // reload, a grammar that has only just loaded.
+                    const full = rec.full or self.hl_version == std.math.maxInt(u64);
+                    const t0 = stats.nowSeconds();
+                    reparse(self.hl_ctx.?, flat, rec.edits, full);
+                    stats.global.hl_reparse.recordSeconds(stats.nowSeconds() - t0);
+                    self.buf.clearEdits();
                     self.hl_version = self.buf.version;
                 }
             } else return;
@@ -12624,23 +12612,28 @@ test "the menu's box holds still while one word is completed" {
     try testing.expect(e.cpl_box_w != wide or e.cplCount() > 2);
 }
 
-test "the view scrolls to make room rather than flipping the menu above" {
+test "the document does not move when the menu opens" {
     const gpa = testing.allocator;
     var e = try mkEditor(gpa);
     defer e.destroy();
     keys(e, "ialphabet\nalpine\naltitude\n");
     for (0..40) |_| keys(e, "filler\n");
-    // Typing at the very bottom, which is where the box used to flip
-    // above the cursor and walk about as the list changed.
-    keys(e, "alp");
-    const before_top = e.top;
     {
         const d = try e.dumpText(gpa, 80, 20);
         gpa.free(d);
     }
-    try testing.expect(e.top > before_top);
-    // The cursor now has a menu's worth of room under it.
-    const text_rows = 20 - 1;
-    const cur = e.cline - e.top;
-    try testing.expect(text_rows - cur - 1 >= Editor.cpl_menu_rows);
+    const before = e.top;
+
+    // Typing at the very bottom, where there is no room below and the
+    // box has to go above. rook briefly scrolled the buffer to make
+    // room instead — which stops the BOX moving by moving every line of
+    // the document instead, and is the larger jolt of the two. Zed does
+    // not do it, and neither does anything else: the popup flips.
+    keys(e, "alp");
+    {
+        const d = try e.dumpText(gpa, 80, 20);
+        gpa.free(d);
+    }
+    try testing.expect(e.cplLive());
+    try testing.expectEqual(before, e.top);
 }

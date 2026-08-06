@@ -23,6 +23,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const editorpkg = @import("editor.zig");
+const bufferpkg = @import("buffer.zig");
 const grammarpkg = @import("grammar.zig");
 
 /// The loader owns this type: a TSLanguage is whatever the dylib
@@ -58,6 +59,17 @@ extern fn ts_parser_new() *TSParser;
 extern fn ts_parser_delete(*TSParser) void;
 extern fn ts_parser_set_language(*TSParser, *const TSLanguage) bool;
 extern fn ts_parser_parse_string(*TSParser, ?*const TSTree, [*]const u8, u32) ?*TSTree;
+extern fn ts_tree_edit(*TSTree, *const TSInputEdit) void;
+
+const TSPoint = extern struct { row: u32, column: u32 };
+const TSInputEdit = extern struct {
+    start_byte: u32,
+    old_end_byte: u32,
+    new_end_byte: u32,
+    start_point: TSPoint,
+    old_end_point: TSPoint,
+    new_end_point: TSPoint,
+};
 extern fn ts_tree_delete(*TSTree) void;
 extern fn ts_tree_root_node(*const TSTree) TSNode;
 extern fn ts_query_new(*const TSLanguage, [*]const u8, u32, *u32, *u32) ?*TSQuery;
@@ -219,11 +231,38 @@ pub const Highlighter = struct {
         return self.query != null and self.tree != null;
     }
 
-    pub fn reparse(self: *Highlighter, text: []const u8) void {
+    /// Reparse, reusing the old tree where the document has not moved.
+    ///
+    /// This is the whole difference between typing feeling free and
+    /// typing costing a frame and a half. A full parse of a
+    /// twelve-thousand-line Zig file measured 42ms — on EVERY keystroke,
+    /// because the fill reparses whenever the buffer's version moves.
+    /// Told which bytes changed, tree-sitter reuses every subtree the
+    /// edit did not touch and the same parse is sub-millisecond.
+    ///
+    /// `edits` must be every change since the last successful parse, in
+    /// order, or the tree silently describes a document that does not
+    /// exist. `full` is the caller saying it cannot promise that.
+    pub fn reparse(self: *Highlighter, text: []const u8, edits: []const bufferpkg.Buffer.TreeEdit, full: bool) void {
         if (self.query == null) return;
-        // Full reparse: without ts_tree_edit bookkeeping the old tree
-        // must NOT be passed as a hint.
-        const new_tree = ts_parser_parse_string(self.parser, null, text.ptr, @intCast(text.len));
+        var old: ?*const TSTree = null;
+        if (!full) {
+            if (self.tree) |t| {
+                for (edits) |e| {
+                    const ie: TSInputEdit = .{
+                        .start_byte = e.start,
+                        .old_end_byte = e.old_end,
+                        .new_end_byte = e.new_end,
+                        .start_point = .{ .row = e.start_row, .column = e.start_col },
+                        .old_end_point = .{ .row = e.old_end_row, .column = e.old_end_col },
+                        .new_end_point = .{ .row = e.new_end_row, .column = e.new_end_col },
+                    };
+                    ts_tree_edit(t, &ie);
+                }
+                old = t;
+            }
+        }
+        const new_tree = ts_parser_parse_string(self.parser, old, text.ptr, @intCast(text.len));
         if (self.tree) |t| ts_tree_delete(t);
         self.tree = new_tree;
     }
@@ -264,9 +303,9 @@ pub fn attach(ed: *editorpkg.Editor, gpa: Allocator, grammars: *grammarpkg.Regis
     hl.setPath(ed.buf.path);
 }
 
-fn hookReparse(ctx: *anyopaque, text: []const u8) void {
+fn hookReparse(ctx: *anyopaque, text: []const u8, edits: []const bufferpkg.Buffer.TreeEdit, full: bool) void {
     const hl: *Highlighter = @ptrCast(@alignCast(ctx));
-    hl.reparse(text);
+    hl.reparse(text, edits, full);
 }
 
 fn hookSpans(ctx: *anyopaque, start: u32, end: u32, out: *std.ArrayListUnmanaged(editorpkg.HlSpan), gpa: Allocator) void {

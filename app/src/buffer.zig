@@ -57,6 +57,10 @@ pub const Buffer = struct {
     /// highlighter's reparse trigger. Monotonic, so it says "something
     /// happened", never "we are back where we were".
     version: u64 = 0,
+    /// Edits since the highlighter last parsed, and whether they are
+    /// still usable — see Edit and takeEdits.
+    edits: std.ArrayListUnmanaged(TreeEdit) = .empty,
+    edits_full: bool = true,
     /// While pinned, newUndoGroup does nothing. An ex command that
     /// edits many lines is ONE change to undo however many primitives
     /// it reaches for, and the primitives are the ones that open
@@ -207,6 +211,8 @@ pub const Buffer = struct {
     /// swapping the POINTER would leave the others holding a buffer
     /// nothing writes to any more. Watchers, and the undo history, are
     /// deliberately not carried over — the text they described is gone.
+    /// A wholesale replacement: every recorded edit is meaningless
+    /// against the new text, so the next parse starts over.
     pub fn replaceContents(self: *Buffer, gpa: Allocator, fresh: Buffer) void {
         const keep = self.watchers;
         var old = self.*;
@@ -251,6 +257,7 @@ pub const Buffer = struct {
         self.undo_stack.deinit(gpa);
         for (self.redo_stack.items) |e| gpa.free(e.deleted);
         self.redo_stack.deinit(gpa);
+        self.edits.deinit(gpa);
     }
 
     pub const SaveError = error{
@@ -321,10 +328,81 @@ pub const Buffer = struct {
         self.disk = if (cwd.statFile(io, target, .{})) |st| .of(st) else |_| null;
     }
 
+    /// Drain the edits recorded since the last call.
+    ///
+    /// `full` means "these are not usable" — too many to keep, or the
+    /// document was replaced wholesale — and whoever asked has to
+    /// reparse from scratch.
+    pub const Pending = struct { edits: []const TreeEdit, full: bool };
+
+    pub fn takeEdits(self: *Buffer) Pending {
+        return .{ .edits = self.edits.items, .full = self.edits_full };
+    }
+
+    /// Called once the edits have been consumed. Separate from taking
+    /// them so a parse that could not happen does not lose them.
+    pub fn clearEdits(self: *Buffer) void {
+        self.edits.clearRetainingCapacity();
+        self.edits_full = false;
+    }
+
+    fn recordEdit(self: *Buffer, gpa: Allocator, start: usize, old_end: usize, new_end: usize, before: PointPair) void {
+        if (self.edits_full) return;
+        if (self.edits.items.len >= max_edits) {
+            self.edits.clearRetainingCapacity();
+            self.edits_full = true;
+            return;
+        }
+        const ne_row = self.rope.lineOfOffset(new_end);
+        self.edits.append(gpa, .{
+            .start = @intCast(start),
+            .old_end = @intCast(old_end),
+            .new_end = @intCast(new_end),
+            .start_row = @intCast(before.start_row),
+            .start_col = @intCast(before.start_col),
+            .old_end_row = @intCast(before.end_row),
+            .old_end_col = @intCast(before.end_col),
+            .new_end_row = @intCast(ne_row),
+            .new_end_col = @intCast(new_end - self.rope.lineStart(ne_row)),
+        }) catch {
+            self.edits_full = true;
+        };
+    }
+
+    const PointPair = struct { start_row: usize, start_col: usize, end_row: usize, end_col: usize };
+
     pub fn newUndoGroup(self: *Buffer) void {
         if (self.group_pinned) return;
         self.group +%= 1;
     }
+
+/// One edit, in the shape tree-sitter's `ts_tree_edit` wants.
+///
+/// Named TreeEdit and not Edit because the undo stack's own Edit was
+/// here first and means something different: that one is reversible
+/// history, this one is a hint to a parser.
+///
+/// Recorded here because this is the only place that knows both the
+/// BEFORE and the AFTER of a change — the byte offsets and the
+/// row/column points either side of it. Reconstructing that downstream
+/// would mean diffing two copies of the document, which is the cost the
+/// whole exercise is trying to avoid.
+pub const TreeEdit = struct {
+    start: u32,
+    old_end: u32,
+    new_end: u32,
+    start_row: u32,
+    start_col: u32,
+    old_end_row: u32,
+    old_end_col: u32,
+    new_end_row: u32,
+    new_end_col: u32,
+};
+
+/// Edits since the highlighter last parsed. Small: a parse drains them,
+/// and anything that overruns this is a change big enough that a full
+/// parse is the honest answer anyway.
+pub const max_edits = 64;
 
     pub fn insert(self: *Buffer, gpa: Allocator, off: usize, text: []const u8) Allocator.Error!void {
         if (text.len == 0) return;
@@ -351,8 +429,22 @@ pub const Buffer = struct {
             .seq = self.seq_next,
         });
         self.seq_next += 1;
+        // The points BEFORE the rope moves: tree-sitter's edit wants
+        // where the change started and where it used to end, in the old
+        // document's coordinates.
+        const before: PointPair = blk: {
+            const sr = self.rope.lineOfOffset(start);
+            const er = self.rope.lineOfOffset(end);
+            break :blk .{
+                .start_row = sr,
+                .start_col = start - self.rope.lineStart(sr),
+                .end_row = er,
+                .end_col = end - self.rope.lineStart(er),
+            };
+        };
         try self.rope.delete(gpa, start, end);
         try self.rope.insert(gpa, start, text);
+        self.recordEdit(gpa, start, end, start + text.len, before);
         self.version +%= 1;
         self.notifyEdit(start, end - start, text.len);
         if (clear_redo) {
@@ -686,4 +778,92 @@ test "a file that did not exist when we opened it is not claimed" {
     try b.insert(gpa, 0, "hello\n");
     try b.save(gpa, io, false);
     try testing.expect(b.disk != null);
+}
+
+test "recorded tree edits describe exactly what changed" {
+    // The bookkeeping tree-sitter's incremental parse stands on. If
+    // these offsets or points are wrong the parser reuses subtrees that
+    // no longer belong where it puts them, and the result is not a
+    // crash — it is highlighting that is subtly, permanently wrong.
+    const gpa = testing.allocator;
+    var b = try Buffer.initEmpty(gpa);
+    defer b.deinit(gpa);
+    b.clearEdits(); // the initial state is not an edit
+
+    try b.insert(gpa, 0, "const a = 1;\nconst b = 2;\n");
+    {
+        const rec = b.takeEdits();
+        try testing.expect(!rec.full);
+        try testing.expectEqual(@as(usize, 1), rec.edits.len);
+        const e = rec.edits[0];
+        try testing.expectEqual(@as(u32, 0), e.start);
+        try testing.expectEqual(@as(u32, 0), e.old_end); // an insert removes nothing
+        try testing.expectEqual(@as(u32, 26), e.new_end);
+        try testing.expectEqual(@as(u32, 0), e.start_row);
+        try testing.expectEqual(@as(u32, 0), e.old_end_row);
+        // Two newlines went in, so the end point moved down two rows and
+        // back to column zero. Getting this wrong is the classic way to
+        // corrupt an incremental parse.
+        try testing.expectEqual(@as(u32, 2), e.new_end_row);
+        try testing.expectEqual(@as(u32, 0), e.new_end_col);
+    }
+    b.clearEdits();
+
+    // A delete spanning a line break: the OLD end is two rows on, the
+    // new end is where the cut lands.
+    try b.deleteRange(gpa, 10, 20);
+    {
+        const rec = b.takeEdits();
+        const e = rec.edits[0];
+        try testing.expectEqual(@as(u32, 10), e.start);
+        try testing.expectEqual(@as(u32, 20), e.old_end);
+        try testing.expectEqual(@as(u32, 10), e.new_end);
+        try testing.expectEqual(@as(u32, 0), e.start_row);
+        try testing.expectEqual(@as(u32, 10), e.start_col);
+        try testing.expectEqual(@as(u32, 1), e.old_end_row);
+        try testing.expectEqual(@as(u32, 7), e.old_end_col);
+        try testing.expectEqual(@as(u32, 0), e.new_end_row);
+        try testing.expectEqual(@as(u32, 10), e.new_end_col);
+    }
+    b.clearEdits();
+
+    // Applying the recorded edits to the old text must produce the new
+    // text. This is the property the parser actually depends on, and it
+    // is checkable without a grammar anywhere in sight.
+    const before = try b.rope.dupeRange(gpa, 0, b.rope.byteLen());
+    defer gpa.free(before);
+    try b.insert(gpa, 5, "XY");
+    const rec = b.takeEdits();
+    const e = rec.edits[0];
+    const after = try b.rope.dupeRange(gpa, 0, b.rope.byteLen());
+    defer gpa.free(after);
+    try testing.expectEqualStrings(before[0..e.start], after[0..e.start]);
+    try testing.expectEqualStrings(before[e.old_end..], after[e.new_end..]);
+}
+
+test "too many edits at once fall back to a full parse" {
+    const gpa = testing.allocator;
+    var b = try Buffer.initEmpty(gpa);
+    defer b.deinit(gpa);
+    b.clearEdits();
+    // A macro, a :g, a rename landing across a file. Past the cap the
+    // honest answer is to reparse from scratch rather than to keep a
+    // partial list that describes some of what happened.
+    for (0..Buffer.max_edits + 5) |_| try b.insert(gpa, 0, "x");
+    const rec = b.takeEdits();
+    try testing.expect(rec.full);
+    try testing.expectEqual(@as(usize, 0), rec.edits.len);
+}
+
+test "replacing the document invalidates the edit record" {
+    const gpa = testing.allocator;
+    var b = try Buffer.initEmpty(gpa);
+    defer b.deinit(gpa);
+    b.clearEdits();
+    try b.insert(gpa, 0, "hello");
+    try testing.expect(!b.takeEdits().full);
+    // A reload: every recorded offset refers to a document that is gone.
+    const fresh = try Buffer.initEmpty(gpa);
+    b.replaceContents(gpa, fresh);
+    try testing.expect(b.takeEdits().full);
 }

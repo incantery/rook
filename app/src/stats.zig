@@ -58,6 +58,15 @@ pub const Stats = struct {
     frame_update: Ring = .{},
     /// Per drawn frame: cell-buffer fill (incl. lazy glyph rasterization).
     frame_fill: Ring = .{},
+    /// The editor's tree-sitter reparse, inside frame_fill. A FULL
+    /// parse of the whole document on every edit — the one thing in the
+    /// fill whose cost is the file's size rather than the screen's, and
+    /// the first suspect whenever typing stops feeling free.
+    hl_reparse: Ring = .{},
+    /// The as-you-type completion menu's buffer-word scan, in the key
+    /// handler rather than the fill. Windowed, and this is the check
+    /// that the window is doing its job.
+    cpl_build: Ring = .{},
     /// Per drawn frame: encoder setup + draw calls + commit — measured
     /// from drawable ACQUISITION, so backpressure never reads as cost.
     frame_encode: Ring = .{},
@@ -85,6 +94,8 @@ pub const Stats = struct {
         self.key_commit.reset();
         self.frame_update.reset();
         self.frame_fill.reset();
+        self.hl_reparse.reset();
+        self.cpl_build.reset();
         self.frame_encode.reset();
         self.drawable_wait.reset();
         self.frame_gpu.reset();
@@ -108,6 +119,22 @@ const rusage = extern struct {
 extern "c" fn getrusage(who: c_int, usage: *rusage) c_int;
 
 /// Peak RSS in MB, for the HUD and the report.
+/// Seconds, for anything outside macos.zig that has to time itself.
+///
+/// NOT CACurrentMediaTime: the headless test roots (editor.zig and its
+/// neighbours) do not link QuartzCore, and a timer that costs them a
+/// framework is a timer that gets deleted the next time somebody wants
+/// a test to build.
+pub fn nowSeconds() f64 {
+    var ts: TimeSpec = .{ .sec = 0, .nsec = 0 };
+    if (clock_gettime(clock_monotonic, &ts) != 0) return 0;
+    return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1e9;
+}
+
+const TimeSpec = extern struct { sec: isize, nsec: isize };
+const clock_monotonic: u32 = 6; // Darwin's CLOCK_MONOTONIC
+extern "c" fn clock_gettime(clock_id: u32, ts: *TimeSpec) c_int;
+
 pub fn maxRssMb() u64 {
     var ru: rusage = undefined;
     if (getrusage(0, &ru) != 0) return 0;
@@ -121,6 +148,8 @@ pub fn writeReport(w: *std.Io.Writer) !void {
         .{ .name = "key_commit_us", .ring = &s.key_commit },
         .{ .name = "frame_update_us", .ring = &s.frame_update },
         .{ .name = "frame_fill_us", .ring = &s.frame_fill },
+        .{ .name = "hl_reparse_us", .ring = &s.hl_reparse },
+        .{ .name = "cpl_build_us", .ring = &s.cpl_build },
         .{ .name = "frame_encode_us", .ring = &s.frame_encode },
         .{ .name = "drawable_wait_us", .ring = &s.drawable_wait },
         .{ .name = "frame_gpu_us", .ring = &s.frame_gpu },

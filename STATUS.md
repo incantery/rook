@@ -89,11 +89,11 @@ few frames later, in one ring with a menu. An automatic menu never
 writes to the buffer: `Tab` takes the highlighted candidate, `ctrl-n` /
 `ctrl-p` walk it (and place, as vim's always have), typing narrows it
 rather than dismissing it, and a backspace widens it rather than closing
-it. The box holds still while one word is being completed — side and
-width latched, and the view scrolled to make room below the cursor
-rather than the menu flipping above it, because above the cursor its top
-edge moves every time the candidate count changes and that reads as
-flicker. `editor-suggest = false` turns the
+it. The box holds still while one word is being completed: a minimum
+width so it does not track content (Zed's answer to the same problem),
+and the side latched so it cannot flip mid-word. It never scrolls the
+document to make room — stopping the box from moving by moving every
+line instead is the larger jolt of the two. `editor-suggest = false` turns the
 automatic half off and leaves `ctrl-n` exactly as it was. `:Format`, and `editor-format-on-save`
 for `:w` — off by default, and a save is never lost to it: a formatter
 that does not answer inside 1.5s gets the file written unformatted and
@@ -124,6 +124,7 @@ presets.
 | metric | value |
 |---|---|
 | key → photon p50 | 15.5 ms windowed / **8.5 ms fullscreen** |
+| tree-sitter reparse, 12.6k-line file | **0.30 ms** (was 42 ms — full parse per keystroke) |
 | `time cat` 150MB ascii | **0.90–0.92 s** (Ghostty 1.3.1: 1.610 s, same machine and corpus) |
 | sustained parse→glass | 190 MB/s at a locked 120fps |
 | idle frames | **0** |
