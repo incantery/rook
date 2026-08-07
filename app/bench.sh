@@ -68,6 +68,22 @@ sleep 5
 c ctrlc >/dev/null
 sleep 0.3
 c stats
+# Off-glass tripwire (PERF.md 2026-08-07): a fully-occluded window —
+# behind a fullscreen Space, a locked screen — gets its presents
+# throttled to a hard 10Hz, and every latency number in this run is
+# garbage. Detected HERE because the firehose separates cleanly: on
+# glass it presents at a locked 8.3ms; throttled it quantizes to
+# ~100ms. The quiet-key phase cannot discriminate — its echo cadence
+# (~80ms) sits too close to the throttle clock.
+pi=$(c stats | grep -o 'present_interval_us n=[0-9]* p50=[0-9]*' | grep -o 'p50=[0-9]*' | cut -d= -f2)
+if [ -n "$pi" ] && [ "$pi" -ge 50000 ]; then
+  echo ""
+  echo "*** OFF-GLASS RUN: firehose present_interval p50=${pi}us — the"
+  echo "*** bench window is occluded (fullscreen Space in front? screen"
+  echo "*** locked?) and its presents are 10Hz-throttled. Nothing from"
+  echo "*** this run goes in the scoreboard. Re-run with the window"
+  echo "*** visibly on glass."
+fi
 
 echo ""
 echo "== cat 150MB ascii =="

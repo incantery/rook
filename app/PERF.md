@@ -301,3 +301,38 @@ at ~22ms. Which also makes OCCLUSION VARIANCE, not ProMotion, the
 stronger suspect for July's wobble — a bench window partially covered
 on some runs is a ~5ms p50 swing. Next time the wobble is chased:
 run once frontmost, once deliberately covered, and compare.
+
+## The occlusion experiment (2026-08-07)
+
+Ran as prescribed above — and the machine answered a better question.
+Quiet-key phase, 3 reps per condition, across two days:
+
+| condition | key→photon p50 | present_interval p50 |
+|---|---|---|
+| on glass, unobstructed (July record) | **15.5 ms** | ~8.3 ms |
+| on glass, behind other windows (08-06) | 22.5–23.9 ms | 8.3 ms capable* |
+| off glass entirely (08-07: covered, "frontmost", even fullscreen) | 26–30 ms | **100.005 ms** |
+
+*proven by the hold-ON runs presenting at a locked 120fps — a
+fully-occluded window cannot do that.
+
+The off-glass rows are the finding. The daily-driver rook was FULLSCREEN
+on the active Space; a background-launched bench instance cannot reach
+glass at all under macOS cooperative activation — `win` without
+--no-activate does not steal the Space, and even native fullscreen
+creates its new Space WITHOUT switching to it. Every such window is
+fully occluded, and the WindowServer throttles its presents to a hard
+10Hz — present_interval quantizes to exactly 100ms, the giveaway. The
+long quiet-key tails there (p99 60–75ms) are echo frames landing
+mid-throttle-window.
+
+So the July wobble reads as the middle band: 16.6/16.9 with the bench
+window peeking out, 21.4 when more of it sat behind the driving
+terminal. Occlusion, not ProMotion — consistent with the hold revert
+above.
+
+Standing rule, now enforced by bench.sh itself: a quiet-key run whose
+present_interval p50 reads ≥50ms was measured off-glass and is NOT a
+scoreboard number. The windowed 15.5ms row can only be reproduced with
+the bench window visibly on the active Space — check the glass, not
+just the process list.
