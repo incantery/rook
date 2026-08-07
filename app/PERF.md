@@ -268,3 +268,36 @@ frontmost test + a canBecomeKeyWindow override to be usable anyway.
   rate unless typical frame cost (max of CPU-side p50s and GPU p50)
   exceeds the vsync budget — dirty-skip demand pacing must never read
   as lag (Seth's rule). A dip on the bar means a user would feel it.
+
+## The ProMotion hold, tried and reverted (2026-08-06)
+
+Zed keeps presenting for ~1s after input so a ProMotion panel never
+downclocks between keystrokes — the leading theory for the quiet-key
+p50 wobble (16.6/16.9/21.4 across one day, above). Implemented, and
+A/B'd same-day, same build, 3 reps each, quiet-key phase only:
+
+| config | key→photon p50 (3 reps) | drawable_wait p50 | present_lag p50 |
+|---|---|---|---|
+| hold ON (frames for 1s after input) | **31.7 / 31.8 / 31.7 ms** | 5.3 ms | 23.5 ms |
+| hold OFF (same build) | 23.1 / 22.7 / 23.5 ms | ~60 µs | 21.5 ms |
+| baseline commit (2634edb), same day | 22.5 / 23.9 / 23.5 ms | ~58 µs | 21.9 ms |
+
+The hold is a pure regression: with maximumDrawableCount=2, continuous
+presenting saturates the swapchain and every echo frame QUEUES behind a
+hold frame — +8.6ms p50, and p95 worse too (37–38 vs 28–31). The
+dirty-skip is not a downclock liability, it is the latency strategy:
+a quiet pipeline means the echo frame gets a drawable in ~60µs.
+Reverted; the comment at drawFrame's skip branch carries the verdict so
+it does not come back without a pacing design that leaves a drawable
+free.
+
+Two side findings. The cells-buffer RING (3 slots, vs one shared
+buffer the GPU could still be reading) and the screen-change resync
+are FREE — hold-off matches the pre-change baseline to the rep. And
+all of today's runs read ~23ms p50 where July recorded 15.5: today's
+bench windows sat occluded behind the driving terminal, and the
+borderless probe above already measured occlusion-throttled presents
+at ~22ms. Which also makes OCCLUSION VARIANCE, not ProMotion, the
+stronger suspect for July's wobble — a bench window partially covered
+on some runs is a ~5ms p50 swing. Next time the wobble is chased:
+run once frontmost, once deliberately covered, and compare.

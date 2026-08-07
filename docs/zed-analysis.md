@@ -283,14 +283,14 @@ Zed renders through gpui: a retained-view scene graph (crates/gpui/src/scene.rs)
 Zed is ahead on multi-display correctness, frame-resource lifetime, and pacing — and rook has live exposure to three of its paid-for bugs:
 
 - **cells_buf lifetime race** — rook rewrites one shared MTLBuffer every frame with no completion fence (render.zig:356); frame N+1's CPU fill can race the GPU's read of frame N. Zed's pool exists for exactly this (commit 3d76ed96f5: "the GPU is actively reading from it"). Symptom: rare transient garbled cells under firehose/resize.
-- **ProMotion downclock** — rook's zero-idle-frames dirty-skip lets the panel drop refresh between keystrokes, inflating the next key's latency. Zed holds presentation ~1s after high-rate input (commit 15edc46827). PERF.md's unexplained quiet-key p50 wobble (16.6→21.4ms, p95 stable, 120Hz M3 Max) matches this diagnosis exactly.
+- **ProMotion downclock** — rook's zero-idle-frames dirty-skip lets the panel drop refresh between keystrokes, inflating the next key's latency. Zed holds presentation ~1s after high-rate input (commit 15edc46827). PERF.md's unexplained quiet-key p50 wobble (16.6→21.4ms, p95 stable, 120Hz M3 Max) matches this diagnosis exactly. **TESTED 2026-08-06, REJECTED**: the hold cost +8.6ms p50 — with two drawables, continuous presenting queues every echo frame behind a hold frame (PERF.md's dated entry has the table). Zed can afford it at drawable depth 3 with no photon instrument; rook cannot. The wobble's stronger suspect is now bench-window occlusion variance.
 - **Stale scale on screen change** — rook reads backingScaleFactor only in viewResized (macos.zig:1411), which fires on frame changes, not screen changes; and the one immortal display link paces off the main display forever (wrong cadence on a 60Hz external). Zed's #38269/#38524.
 
 One thing rook got right by accident: it never stops or releases its CVDisplayLink — Zed's display_link.rs header documents two segfault classes in link teardown (#32116, Sentry ZED-7XR). Keep the immortal link; gate with flags, never CVDisplayLinkStop.
 
 Patterns to steal:
 - Ring of 2–3 cell buffers recycled via addCompletedHandler [small] — zed metal_renderer.rs:57-110 → app/src/render.zig cells_buf + macos.zig drawFrame (CompletedBlock plumbing already exists at macos.zig:5336)
-- ProMotion hold: keep presenting ~1s after input_mark [small] — zed window.rs:1638-1643 → macos.zig drawFrame dirty-skip branch; then re-measure the quiet-key band
+- ~~ProMotion hold: keep presenting ~1s after input_mark~~ — tried and reverted (see above; PERF.md 2026-08-06). The dirty-skip IS the latency strategy at drawable depth 2.
 - windowDidChangeScreen handler: re-read scale + CVDisplayLinkSetCurrentCGDisplay, guard NSWindow.screen==nil [medium] — zed commit 46eb9e5223 → macos.zig next to the resize observer (~line 1318)
 - Occlusion gating: early-return in displayLinkCallback while hidden, one forced frame on reveal — do NOT stop the link [small] — zed window.rs:2552 → macos.zig:9286
 - Atlas: grow by adding a texture instead of resetting the world [medium] — rook's reset (render.zig:583-590) invalidates uvs already written into the cells buffer mid-frame; zed's list-of-textures never moves a uv (metal_atlas.rs:95-191; clamp 16384², bigger crashes validateWithDevice)

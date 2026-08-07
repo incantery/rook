@@ -76,14 +76,6 @@ extern "c" fn CVDisplayLinkStart(link: CVDisplayLinkRef) i32;
 extern "c" fn CVDisplayLinkGetActualOutputVideoRefreshPeriod(link: CVDisplayLinkRef) f64;
 extern "c" fn CVDisplayLinkSetCurrentCGDisplay(link: CVDisplayLinkRef, display: u32) i32;
 
-/// How long after input the frame loop keeps drawing even with a clean
-/// scene. A ProMotion panel that sees no frames downclocks, and the
-/// NEXT keystroke then pays the slower refresh — zed measured this and
-/// holds presentation for a second after high-rate input. One second of
-/// ~100µs frames after a keystroke; a rook nobody is typing into still
-/// draws nothing at all.
-const input_hold_s: f64 = 1.0;
-
 const NSEventMaskKeyDown: u64 = 1 << 10;
 const NSEventMaskLeftMouseDown: u64 = 1 << 1;
 const NSEventMaskLeftMouseUp: u64 = 1 << 2;
@@ -884,9 +876,6 @@ pub const App = struct {
     /// timestamps share it). Consumed by the presented handler of the
     /// first frame after the mark that carried the FOCUSED pane's echo.
     input_mark: std.atomic.Value(f64) = .init(0),
-    /// When input last happened, never cleared — the ProMotion hold's
-    /// clock (see drawFrame's skip branch).
-    last_input_at: std.atomic.Value(f64) = .init(0),
     last_presented: std.atomic.Value(f64) = .init(0),
 
     /// Serializes scene access across display link, input kick, keys,
@@ -978,10 +967,6 @@ pub const App = struct {
 
     pub fn markInput(self: *App, t: f64) void {
         self.input_mark.store(t, .release);
-        // Its own field, because input_mark is a one-shot the presented
-        // callback consumes — the ProMotion hold needs when input LAST
-        // happened, not whether a frame has answered it yet.
-        self.last_input_at.store(t, .release);
         // Typing keeps the cursor solid: every input restarts the blink
         // at phase zero (on). Every caller holds draw_lock, which is
         // what makes the two plain fields safe to touch here.
@@ -5336,17 +5321,16 @@ pub const App = struct {
         // latency number — the key mark is consumed only by a frame that
         // actually carried the focused pane's echo.
         //
-        // EXCEPT for a short hold after input: a ProMotion panel that
-        // sees no frames downclocks, and the next keystroke then waits
-        // on a slow refresh — zed measured this and holds presentation
-        // after high-rate input; PERF.md's unexplained quiet-key p50
-        // wobble matches the same downclock. The hold is keyed to input
-        // recency, so truly idle rook still draws nothing at all —
-        // the zero-idle-frames property survives intact.
+        // Zed keeps presenting for a second after input here, to stop a
+        // ProMotion panel downclocking between keystrokes. Tried, and
+        // REVERTED against measurement (PERF.md, 2026-08-06): with two
+        // drawables, continuous presenting saturates the swapchain and
+        // every echo frame queues behind a hold frame — quiet-key p50
+        // went 23.1 → 31.7ms, drawable_wait 60µs → 5.3ms. The skip IS
+        // the latency strategy; do not put the hold back without a
+        // pacing design that leaves a drawable free.
         const shot_wanted = self.shot_state.load(.acquire) == 2;
-        const last_input = self.last_input_at.load(.acquire);
-        const input_hold = last_input > 0 and t_start - last_input < input_hold_s;
-        if (!any_dirty and !shot_wanted and !input_hold) {
+        if (!any_dirty and !shot_wanted) {
             _ = stats.global.frames_skipped.fetchAdd(1, .monotonic);
             return;
         }
