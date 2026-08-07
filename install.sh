@@ -38,12 +38,35 @@ curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt"
 # ditto preserves permissions/xattrs/signature exactly as packaged
 ditto -x -k "$tmp/$zip" "$tmp/stage"
 [ -d "$tmp/stage/rook.app" ] || fail "release zip did not contain rook.app"
+[ -x "$tmp/stage/rook.app/Contents/MacOS/rook" ] \
+    || fail "release zip is missing the rook binary"
 
 echo "installing /Applications/rook.app…"
 was_running=""
 pgrep -qx rook 2>/dev/null && was_running=yes
-rm -rf /Applications/rook.app
-ditto "$tmp/stage/rook.app" /Applications/rook.app
+
+# Transactional swap: copy the new app beside the target first (same
+# filesystem, so the swap below is a pure rename), and only touch the
+# existing install once the new one is fully staged and verified. On any
+# failure before the swap the old install is untouched; if the swap
+# itself fails, the old install is moved back.
+new="/Applications/rook.app.new.$$"
+old="/Applications/rook.app.old.$$"
+trap 'rm -rf "$tmp" "$new"' EXIT
+ditto "$tmp/stage/rook.app" "$new"
+[ -x "$new/Contents/MacOS/rook" ] || fail "staged copy is missing the rook binary"
+if [ -e /Applications/rook.app ]; then
+    mv /Applications/rook.app "$old"
+fi
+if ! mv "$new" /Applications/rook.app; then
+    if [ -e "$old" ]; then
+        mv "$old" /Applications/rook.app \
+            || fail "could not install rook.app; your old install was left at $old"
+        fail "could not install rook.app — old install restored"
+    fi
+    fail "could not install rook.app"
+fi
+rm -rf "$old"
 # Register with LaunchServices — a bare copy is invisible to Spotlight.
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/rook.app
 mdimport /Applications/rook.app >/dev/null 2>&1 || true
