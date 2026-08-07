@@ -72,6 +72,12 @@ const Ask = struct {
     /// round trip is in flight, and a list labelled with the wrong
     /// symbol is worse than one labelled with none.
     symbol: []const u8 = "",
+    /// WHERE the question was asked, for askers that need the answer
+    /// refused anywhere else. A completion for prefix "a" at one spot
+    /// must not fold into a ring for prefix "a" at another — the
+    /// prefix alone cannot tell them apart, and the position is the
+    /// only thing that can. Zero for every ask that has no position.
+    base: usize = 0,
 };
 
 /// The one line of a hover worth putting in a status row.
@@ -164,11 +170,13 @@ pub const Answer = union(enum) {
     rename: RenameEdit,
     /// What could be typed at the cursor. Owned by the caller.
     ///
-    /// `prefix` is the word the request was made for, carried back so
-    /// the editor can tell an answer to what you are typing NOW from
-    /// one to what you were typing two keystrokes ago — the round trip
-    /// is long enough for that to be a different question.
-    completion: struct { path: []const u8, prefix: []const u8, items: []lsp.Completion },
+    /// `prefix` is the word the request was made for and `base` is
+    /// where that word starts, carried back so the editor can tell an
+    /// answer to what you are typing NOW from one to what you were
+    /// typing two keystrokes ago — the round trip is long enough for
+    /// that to be a different question, and the same prefix typed
+    /// somewhere else entirely is one the prefix alone cannot catch.
+    completion: struct { path: []const u8, prefix: []const u8, base: usize, items: []lsp.Completion },
     /// The prose about ONE candidate, arriving after the list did.
     /// Owned by the caller.
     ///
@@ -533,7 +541,7 @@ pub const Manager = struct {
 
     // ---------------------------------------------------------- asking
 
-    fn recordAsk(self: *Manager, id: u32, kind: AskKind, path: []const u8, symbol: []const u8) void {
+    fn recordAsk(self: *Manager, id: u32, kind: AskKind, path: []const u8, symbol: []const u8, base: usize) void {
         if (self.asks.items.len >= max_asks) {
             const old = self.asks.orderedRemove(0);
             self.gpa.free(old.path);
@@ -544,7 +552,7 @@ pub const Manager = struct {
             self.gpa.free(owned);
             return;
         };
-        self.asks.append(self.gpa, .{ .id = id, .kind = kind, .path = owned, .symbol = sym }) catch {
+        self.asks.append(self.gpa, .{ .id = id, .kind = kind, .path = owned, .symbol = sym, .base = base }) catch {
             self.gpa.free(owned);
             self.gpa.free(sym);
         };
@@ -553,14 +561,14 @@ pub const Manager = struct {
     pub fn hover(self: *Manager, path: []const u8, pos: lsp.Position) bool {
         const srv = self.ensure(path) orelse return false;
         const id = srv.hover(path, pos) orelse return false;
-        self.recordAsk(id, .hover, path, "");
+        self.recordAsk(id, .hover, path, "", 0);
         return true;
     }
 
     pub fn definition(self: *Manager, path: []const u8, pos: lsp.Position) bool {
         const srv = self.ensure(path) orelse return false;
         const id = srv.definition(path, pos) orelse return false;
-        self.recordAsk(id, .definition, path, "");
+        self.recordAsk(id, .definition, path, "", 0);
         return true;
     }
 
@@ -569,7 +577,7 @@ pub const Manager = struct {
     pub fn references(self: *Manager, path: []const u8, pos: lsp.Position, symbol: []const u8) bool {
         const srv = self.ensure(path) orelse return false;
         const id = srv.references(path, pos, true) orelse return false;
-        self.recordAsk(id, .references, path, symbol);
+        self.recordAsk(id, .references, path, symbol, 0);
         return true;
     }
 
@@ -593,7 +601,7 @@ pub const Manager = struct {
             overlapping.append(self.gpa, d) catch break;
         }
         const id = srv.codeAction(path, range, overlapping.items) orelse return false;
-        self.recordAsk(id, .code_action, path, "");
+        self.recordAsk(id, .code_action, path, "", 0);
         return true;
     }
 
@@ -602,23 +610,25 @@ pub const Manager = struct {
     pub fn codeActionResolve(self: *Manager, path: []const u8, raw: []const u8) bool {
         const srv = self.ensure(path) orelse return false;
         const id = srv.codeActionResolve(raw) orelse return false;
-        self.recordAsk(id, .code_action_resolve, path, "");
+        self.recordAsk(id, .code_action_resolve, path, "", 0);
         return true;
     }
 
     pub fn formatting(self: *Manager, path: []const u8, tab_size: u32, spaces: bool) bool {
         const srv = self.ensure(path) orelse return false;
         const id = srv.formatting(path, tab_size, spaces) orelse return false;
-        self.recordAsk(id, .formatting, path, "");
+        self.recordAsk(id, .formatting, path, "", 0);
         return true;
     }
 
-    /// `prefix` is the partial word being completed; it comes back on
-    /// the answer, unused by anything in between.
-    pub fn completion(self: *Manager, path: []const u8, pos: lsp.Position, prefix: []const u8) bool {
+    /// `prefix` is the partial word being completed and `base` is where
+    /// it starts; both come back on the answer, unused by anything in
+    /// between. Together they are the stale-answer check: the prefix
+    /// says WHAT was being typed, the base says WHERE.
+    pub fn completion(self: *Manager, path: []const u8, pos: lsp.Position, prefix: []const u8, base: usize) bool {
         const srv = self.ensure(path) orelse return false;
         const id = srv.completion(path, pos) orelse return false;
-        self.recordAsk(id, .completion, path, prefix);
+        self.recordAsk(id, .completion, path, prefix, base);
         return true;
     }
 
@@ -629,7 +639,7 @@ pub const Manager = struct {
     pub fn completionResolve(self: *Manager, path: []const u8, raw: []const u8, word: []const u8) bool {
         const srv = self.ensure(path) orelse return false;
         const id = srv.completionResolve(raw) orelse return false;
-        self.recordAsk(id, .completion_resolve, path, word);
+        self.recordAsk(id, .completion_resolve, path, word, 0);
         return true;
     }
 
@@ -639,7 +649,7 @@ pub const Manager = struct {
     pub fn rename(self: *Manager, path: []const u8, pos: lsp.Position, new_name: []const u8) bool {
         const srv = self.ensure(path) orelse return false;
         const id = srv.rename(path, pos, new_name) orelse return false;
-        self.recordAsk(id, .rename, path, new_name);
+        self.recordAsk(id, .rename, path, new_name, 0);
         return true;
     }
 
@@ -805,7 +815,7 @@ pub const Manager = struct {
                             self.gpa.free(p);
                             continue;
                         };
-                        self.pushAnswer(.{ .completion = .{ .path = p, .prefix = pre, .items = items } });
+                        self.pushAnswer(.{ .completion = .{ .path = p, .prefix = pre, .base = ask.base, .items = items } });
                         changed = true;
                     },
                     .formatting => |fe| {

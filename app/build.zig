@@ -187,6 +187,20 @@ pub fn build(b: *std.Build) void {
     }) });
     test_step.dependOn(&b.addRunArtifact(paste_tests).step);
 
+    // The pty's teardown escalation. Its own root because what it
+    // guards is invisible from inside the app: an orphaned process has
+    // no pane, no window, no trace but `ps`. The tests spawn real
+    // shells that trap SIGHUP/SIGTERM and prove the SIGKILL step is
+    // what actually ends them — including a foreground job that job
+    // control put in its own process group.
+    const pty_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/pty.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(pty_tests).step);
+
     // Config parsing, likewise — and this one is the sharpest of the
     // three, because sharing a file with rook-host means every failure
     // here is SILENT by design. A bad rule reads as "that keybind just

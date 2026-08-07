@@ -250,6 +250,12 @@ fn norm(c: [4]u8) [4]f32 {
     };
 }
 
+/// Cell-buffer ring depth. Three, against maximumDrawableCount=2: the
+/// slot a frame fills was last drawn from three frames ago, and with at
+/// most two frames in flight the GPU is provably done with it — the
+/// correctness argument that lets the ring skip completion handlers.
+const cell_ring = 3;
+
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
     device: objc.Object,
@@ -257,7 +263,17 @@ pub const Renderer = struct {
     fg_pso: objc.Object,
     rr_pso: objc.Object,
     atlas: objc.Object,
-    cells_buf: objc.Object,
+    /// A RING, not one buffer. The GPU reads a frame's cells while the
+    /// CPU is already filling the next — one shared buffer let the fill
+    /// of frame N+1 race the read of frame N, which is transient
+    /// garbled cells under sustained redraw (zed shipped exactly this
+    /// and moved to pooled buffers recycled on GPU completion). Three
+    /// buffers with maximumDrawableCount=2 needs no completion
+    /// handshake at all: the buffer being filled was last touched
+    /// three frames ago, and at most two frames are ever in flight.
+    cells_bufs: [cell_ring]objc.Object,
+    /// Which ring slot this frame fills and draws — see beginFrame.
+    cells_i: usize = 0,
     cells_cap: usize,
 
     /// Cell size in device pixels.
@@ -352,11 +368,14 @@ pub const Renderer = struct {
         // nothing but one.
         const rr_pso = try makePipeline(device, lib, "rr_vs", "rr_fs", true);
 
-        // --- Cell buffer (shared storage) ---
-        const cells_buf = device.msgSend(objc.Object, "newBufferWithLength:options:", .{
-            @as(u64, max_cells * @sizeOf(CellData)),
-            @as(u64, 0), // MTLResourceStorageModeShared
-        });
+        // --- Cell buffers (shared storage; see cells_bufs) ---
+        var cells_bufs: [cell_ring]objc.Object = undefined;
+        for (&cells_bufs) |*b| {
+            b.* = device.msgSend(objc.Object, "newBufferWithLength:options:", .{
+                @as(u64, max_cells * @sizeOf(CellData)),
+                @as(u64, 0), // MTLResourceStorageModeShared
+            });
+        }
 
         return .{
             .gpa = gpa,
@@ -365,7 +384,7 @@ pub const Renderer = struct {
             .fg_pso = fg_pso,
             .rr_pso = rr_pso,
             .atlas = atlas,
-            .cells_buf = cells_buf,
+            .cells_bufs = cells_bufs,
             .cells_cap = max_cells,
             .cell_w = @floatFromInt(cell_w),
             .cell_h = @floatFromInt(cell_h),
@@ -700,9 +719,18 @@ pub const Renderer = struct {
         return true;
     }
 
-    /// The CPU-visible cell array to fill before draw().
+    /// Step to the next ring slot. Called once at the top of every
+    /// DRAWN frame, before the first cells() — a skipped frame leaves
+    /// the ring where it was, so idle costs nothing.
+    pub fn beginFrame(self: *Renderer) void {
+        self.cells_i = (self.cells_i + 1) % cell_ring;
+    }
+
+    /// The CPU-visible cell array to fill before draw(). This frame's
+    /// ring slot: everything between one beginFrame and the next reads
+    /// and draws the same buffer.
     pub fn cells(self: *Renderer) []CellData {
-        const ptr = self.cells_buf.msgSend(?[*]CellData, "contents", .{}).?;
+        const ptr = self.cells_bufs[self.cells_i].msgSend(?[*]CellData, "contents", .{}).?;
         return ptr[0..self.cells_cap];
     }
 
@@ -722,13 +750,13 @@ pub const Renderer = struct {
 
         encoder.msgSend(void, "setRenderPipelineState:", .{self.bg_pso.value});
         encoder.msgSend(void, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &uni), @as(u64, @sizeOf(Uniforms)), @as(u64, 0) });
-        encoder.msgSend(void, "setVertexBuffer:offset:atIndex:", .{ self.cells_buf.value, byte_off, @as(u64, 1) });
+        encoder.msgSend(void, "setVertexBuffer:offset:atIndex:", .{ self.cells_bufs[self.cells_i].value, byte_off, @as(u64, 1) });
         // MTLPrimitiveTypeTriangleStrip = 4
         encoder.msgSend(void, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{ @as(u64, 4), @as(u64, 0), @as(u64, 4), n });
 
         encoder.msgSend(void, "setRenderPipelineState:", .{self.fg_pso.value});
         encoder.msgSend(void, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &uni), @as(u64, @sizeOf(Uniforms)), @as(u64, 0) });
-        encoder.msgSend(void, "setVertexBuffer:offset:atIndex:", .{ self.cells_buf.value, byte_off, @as(u64, 1) });
+        encoder.msgSend(void, "setVertexBuffer:offset:atIndex:", .{ self.cells_bufs[self.cells_i].value, byte_off, @as(u64, 1) });
         encoder.msgSend(void, "setFragmentTexture:atIndex:", .{ self.atlas.value, @as(u64, 0) });
         encoder.msgSend(void, "setFragmentTexture:atIndex:", .{ self.color_atlas.value, @as(u64, 1) });
         encoder.msgSend(void, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{ @as(u64, 4), @as(u64, 0), @as(u64, 4), n });
@@ -751,7 +779,7 @@ pub const Renderer = struct {
         const byte_off: u64 = cell_off * @sizeOf(CellData);
         encoder.msgSend(void, "setRenderPipelineState:", .{self.fg_pso.value});
         encoder.msgSend(void, "setVertexBytes:length:atIndex:", .{ @as(*const anyopaque, &uni), @as(u64, @sizeOf(Uniforms)), @as(u64, 0) });
-        encoder.msgSend(void, "setVertexBuffer:offset:atIndex:", .{ self.cells_buf.value, byte_off, @as(u64, 1) });
+        encoder.msgSend(void, "setVertexBuffer:offset:atIndex:", .{ self.cells_bufs[self.cells_i].value, byte_off, @as(u64, 1) });
         encoder.msgSend(void, "setFragmentTexture:atIndex:", .{ self.atlas.value, @as(u64, 0) });
         encoder.msgSend(void, "setFragmentTexture:atIndex:", .{ self.color_atlas.value, @as(u64, 1) });
         encoder.msgSend(void, "drawPrimitives:vertexStart:vertexCount:instanceCount:", .{ @as(u64, 4), @as(u64, 0), @as(u64, 4), n });

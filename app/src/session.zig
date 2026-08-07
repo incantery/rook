@@ -370,6 +370,24 @@ pub const Session = struct {
         return self;
     }
 
+    /// ⌘W teardown. SIGHUP stays first — it is the polite spelling, the
+    /// one a shell saves its history on — but it is not teardown on its
+    /// own: a foreground job under job control lives in a different
+    /// process group and never sees a signal to the shell's, and a job
+    /// that traps SIGHUP simply keeps running. So both group ids are
+    /// captured HERE, while the master is still open for tcgetpgrp (the
+    /// reap path closes it), both get the hangup, and a detached thread
+    /// escalates to SIGTERM and then SIGKILL for whatever survives.
+    /// The thread carries id VALUES, never `self`: the display-link
+    /// reap frees this Session the moment the shell exits, and the
+    /// escalation has to outlive that. If the spawn fails we've still
+    /// sent the SIGHUPs, which is the whole pre-escalation behaviour.
+    pub fn hangup(self: *Session) void {
+        const groups = ptypkg.ProcessGroups.capture(self.pty.master, self.pid);
+        groups.signal(ptypkg.SIGHUP);
+        if (std.Thread.spawn(.{}, ptypkg.ProcessGroups.escalate, .{groups})) |t| t.detach() else |_| {}
+    }
+
     /// Tear down after exited flips true. Joins the reader thread (which
     /// is past its loop by then), reaps the child, closes the pty, frees
     /// the terminal. NEVER call from the reader thread itself — collapse

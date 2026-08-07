@@ -13,6 +13,7 @@ const std = @import("std");
 const objc = @import("objc");
 const vt = @import("ghostty-vt");
 const sessionpkg = @import("session.zig");
+const ptypkg = @import("pty.zig");
 const renderpkg = @import("render.zig");
 const panespkg = @import("panes.zig");
 const monitorpkg = @import("monitor.zig");
@@ -51,7 +52,6 @@ const MTLClearColor = extern struct { r: f64, g: f64, b: f64, a: f64 };
 
 extern "c" fn MTLCreateSystemDefaultDevice() objc.c.id;
 extern "c" fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *anyopaque, buffersize: c_int) c_int;
-extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 const PROC_PIDVNODEPATHINFO: c_int = 9;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]const u8;
@@ -74,6 +74,15 @@ extern "c" fn CVDisplayLinkCreateWithActiveCGDisplays(out: *CVDisplayLinkRef) i3
 extern "c" fn CVDisplayLinkSetOutputCallback(link: CVDisplayLinkRef, cb: *const fn (CVDisplayLinkRef, ?*const anyopaque, ?*const anyopaque, u64, ?*u64, ?*anyopaque) callconv(.c) i32, ctx: ?*anyopaque) i32;
 extern "c" fn CVDisplayLinkStart(link: CVDisplayLinkRef) i32;
 extern "c" fn CVDisplayLinkGetActualOutputVideoRefreshPeriod(link: CVDisplayLinkRef) f64;
+extern "c" fn CVDisplayLinkSetCurrentCGDisplay(link: CVDisplayLinkRef, display: u32) i32;
+
+/// How long after input the frame loop keeps drawing even with a clean
+/// scene. A ProMotion panel that sees no frames downclocks, and the
+/// NEXT keystroke then pays the slower refresh — zed measured this and
+/// holds presentation for a second after high-rate input. One second of
+/// ~100µs frames after a keystroke; a rook nobody is typing into still
+/// draws nothing at all.
+const input_hold_s: f64 = 1.0;
 
 const NSEventMaskKeyDown: u64 = 1 << 10;
 const NSEventMaskLeftMouseDown: u64 = 1 << 1;
@@ -440,6 +449,12 @@ const PendingOpen = struct {
     /// a line — landing in column one and making you find the symbol is
     /// what `targetSelectionRange` exists to avoid.
     col: usize = 0,
+    /// Bytes of pending_open_find that name WHAT the jump is for. A
+    /// results panel records scan-time line numbers, and the buffer may
+    /// have moved on — an edit above the hit shifts every line below
+    /// it. Carrying the needle lets the landing re-anchor to the match
+    /// instead of trusting a number that stopped being true.
+    find_len: usize = 0,
     how: @import("editor.zig").OpenHow,
     from: u32,
 };
@@ -786,6 +801,8 @@ pub const App = struct {
     /// A queued open-outside-the-editor; see PendingOpen.
     pending_open: ?PendingOpen = null,
     pending_open_path: [1024]u8 = undefined,
+    /// The needle a queued jump re-anchors by; see PendingOpen.find_len.
+    pending_open_find: [256]u8 = undefined,
     /// A queued `:qa`-family request. See editorQuitAll for why it cannot
     /// run where it is asked for.
     pending_quit_all: ?struct { write: bool, quit: bool, force: bool } = null,
@@ -867,6 +884,9 @@ pub const App = struct {
     /// timestamps share it). Consumed by the presented handler of the
     /// first frame after the mark that carried the FOCUSED pane's echo.
     input_mark: std.atomic.Value(f64) = .init(0),
+    /// When input last happened, never cleared — the ProMotion hold's
+    /// clock (see drawFrame's skip branch).
+    last_input_at: std.atomic.Value(f64) = .init(0),
     last_presented: std.atomic.Value(f64) = .init(0),
 
     /// Serializes scene access across display link, input kick, keys,
@@ -958,6 +978,10 @@ pub const App = struct {
 
     pub fn markInput(self: *App, t: f64) void {
         self.input_mark.store(t, .release);
+        // Its own field, because input_mark is a one-shot the presented
+        // callback consumes — the ProMotion hold needs when input LAST
+        // happened, not whether a frame has answered it yet.
+        self.last_input_at.store(t, .release);
         // Typing keeps the cursor solid: every input restarts the blink
         // at phase zero (on). Every caller holds draw_lock, which is
         // what makes the two plain fields safe to touch here.
@@ -1326,6 +1350,22 @@ pub const App = struct {
             view.value,
             @as(objc.c.id, null),
             &resize_ctx,
+        });
+
+        // Screen changes: dragging to another monitor (or a monitor
+        // disconnect) can land the window on a display with a different
+        // scale WITHOUT a frame change, and the frame observer above
+        // never fires — the scale goes stale and everything renders at
+        // the wrong DPI until the next manual resize. Zed shipped that
+        // bug (#38269). The same hook re-paces the frame clock: the
+        // link was created against the default display, and a 60Hz
+        // external monitor deserves 60Hz ticks, not the main panel's.
+        var screen_ctx = ResizeBlock.init(.{ .app = self }, &screenChangedCallback);
+        _ = center.msgSend(objc.Object, "addObserverForName:object:queue:usingBlock:", .{
+            nsString("NSWindowDidChangeScreenNotification").value,
+            self.window.value,
+            @as(objc.c.id, null),
+            &screen_ctx,
         });
 
         // Frame clock off the main thread.
@@ -2056,6 +2096,62 @@ pub const App = struct {
         return true;
     }
 
+    /// …and verified against WHAT the jump was for. A results panel
+    /// records scan-time line numbers, and an edit above a hit shifts
+    /// every line below it — trusting the number after that lands you
+    /// on the wrong line with no sign anything is off. So the landing
+    /// checks: if the recorded spot still holds the match it stands,
+    /// and if not, the NEAREST line that does is where the hit went.
+    /// A match nowhere in the file falls back to the recorded numbers,
+    /// clamped — the least wrong place left.
+    pub fn openEditorAtMatch(self: *App, path: []const u8, line: i64, col: usize, needle: []const u8) bool {
+        if (!self.openEditor(path)) return false;
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const ed = self.activeTab().focused.editor() orelse return true;
+        const n = ed.lineCountB();
+        var want: usize = @min(@as(usize, @intCast(@max(line, 1))) - 1, n -| 1);
+        var wcol: usize = col;
+        if (needle.len > 0) relocate: {
+            const sensitive = searchpkg.caseSensitive(needle);
+            // The recorded spot still holds the match: done. Checked at
+            // the exact column, not anywhere-in-line — a second
+            // occurrence earlier in the line must not pass for the one
+            // the panel showed.
+            const text = ed.lineText(want);
+            if (wcol + needle.len <= text.len and
+                searchpkg.find(text[wcol .. wcol + needle.len], needle, sensitive) != null)
+            {
+                break :relocate;
+            }
+            // It moved. Walk outward from where it was — the nearest
+            // matching line is almost always the same hit, shifted.
+            var d: usize = 0;
+            while (d < n) : (d += 1) {
+                if (want >= d) {
+                    if (searchpkg.find(ed.lineText(want - d), needle, sensitive)) |at| {
+                        want -= d;
+                        wcol = at;
+                        break :relocate;
+                    }
+                }
+                if (d > 0 and want + d < n) {
+                    if (searchpkg.find(ed.lineText(want + d), needle, sensitive)) |at| {
+                        want += d;
+                        wcol = at;
+                        break :relocate;
+                    }
+                }
+                if (want < d and want + d >= n) break;
+            }
+        }
+        ed.cline = want;
+        ed.ccol = @min(wcol, ed.lineCap(ed.cline));
+        ed.goal = ed.renderColAt(ed.cline, ed.ccol);
+        self.scene_dirty = true;
+        return true;
+    }
+
     pub fn openEditor(self: *App, path: []const u8) bool {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
@@ -2345,15 +2441,17 @@ pub const App = struct {
         _ = p;
     }
 
-    /// Close the focused pane (⌘W): a terminal gets SIGHUP (the
-    /// shell exits and the normal reap collapses the pane); an editor
-    /// takes :q semantics — unsaved changes refuse with a status
+    /// Close the focused pane (⌘W): a terminal gets hung up — SIGHUP to
+    /// the shell's AND the foreground process group, with an off-thread
+    /// escalation to SIGTERM/SIGKILL for anything that traps it — and
+    /// the normal reap collapses the pane once the shell exits; an
+    /// editor takes :q semantics — unsaved changes refuse with a status
     /// message (:q! or :wq inside the editor to force).
     pub fn closeFocused(self: *App) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         switch (self.activeTab().focused.content) {
-            .term => |*tm| _ = kill(tm.session.pid, 1), // SIGHUP
+            .term => |*tm| tm.session.hangup(),
             .edit => |ed| {
                 if (ed.buf.isModified()) {
                     ed.setStatusUnsaved();
@@ -2367,6 +2465,34 @@ pub const App = struct {
             },
         }
         self.scene_dirty = true;
+    }
+
+    /// ⌘Q's half of the same teardown, for EVERY live session at once —
+    /// including shells parked under a takeover editor or monitor.
+    /// Relying on process exit is not enough: closing a master delivers
+    /// the kernel's SIGHUP only to the foreground group, and a job that
+    /// traps it survives the app. The group ids are captured under
+    /// draw_lock while every master is still open; the signalling and
+    /// its one grace period run OUTSIDE the lock, blocking this (main)
+    /// thread on purpose — quit is past the last frame, and a detached
+    /// thread would not outlive the process exit that follows.
+    pub fn hangupAllSessions(self: *App) void {
+        var groups: std.ArrayListUnmanaged(ptypkg.ProcessGroups) = .empty;
+        defer groups.deinit(self.gpa);
+        self.draw_lock.lock();
+        for (self.spaces.items) |space| {
+            for (space.tabs.items) |t| {
+                for (t.panes.items) |p| {
+                    switch (p.content) {
+                        .term => |*tm| groups.append(self.gpa, ptypkg.ProcessGroups.capture(tm.session.pty.master, tm.session.pid)) catch {},
+                        else => {},
+                    }
+                    if (p.under) |ut| groups.append(self.gpa, ptypkg.ProcessGroups.capture(ut.session.pty.master, ut.session.pid)) catch {};
+                }
+            }
+        }
+        self.draw_lock.unlock();
+        ptypkg.terminateAll(groups.items);
     }
 
     /// Enter tmux-style copy mode on the focused terminal pane.
@@ -2570,7 +2696,7 @@ pub const App = struct {
     /// the palette shows over registry's hand-written `keys` strings:
     /// those don't follow a rebind, and a hint that teaches yesterday's
     /// key is worse than none. Caller holds draw_lock.
-    fn liveChordHint(self: *App, action: registrypkg.Action, arg: u8, buf: []u8) ?[]const u8 {
+    pub fn liveChordHint(self: *App, action: registrypkg.Action, arg: u8, buf: []u8) ?[]const u8 {
         const ld = self.keybinds.leader orelse return null;
         for (self.keybinds.entries[0..self.keybinds.n]) |e| {
             if (e.action == action and e.arg == arg) {
@@ -3288,6 +3414,12 @@ pub const App = struct {
                         const full = self.hitPath(&abs, self.sr.files[hit.file]) orelse return;
                         if (full.len <= self.pending_open_path.len) {
                             @memcpy(self.pending_open_path[0..full.len], full);
+                            // The query rides along so the landing can
+                            // re-anchor: these line numbers were true
+                            // when the scan ran, and any edit since
+                            // has shifted them.
+                            const flen = @min(self.sr.query.len, self.pending_open_find.len);
+                            @memcpy(self.pending_open_find[0..flen], self.sr.query[0..flen]);
                             self.pending_open = .{
                                 .len = full.len,
                                 .line = hit.line -| 1,
@@ -3299,6 +3431,7 @@ pub const App = struct {
                                 // text's, or a jump into indented code
                                 // lands inside the indent.
                                 .col = hit.file_col,
+                                .find_len = flen,
                                 .how = .here,
                                 .from = self.activeTab().focused.id,
                             };
@@ -3786,6 +3919,23 @@ pub const App = struct {
                 .code_actions => |ca| self.takeCodeActionsLocked(ca.path, ca.items, ca.resolved),
                 .formatting => |f| {
                     const ed = self.editorShowingLocked(f.path) orelse continue;
+                    // The server formatted the text as it stood when the
+                    // request was made. A keystroke since then means
+                    // every offset in this reply is measured against a
+                    // document that no longer exists — the same refusal
+                    // a rename makes, and here it must still release the
+                    // write that was waiting. A bare :Format has no
+                    // write to release, so the refusal has to say
+                    // itself.
+                    if (ed.buf.version != ed.buf.fmt_req_version) {
+                        if (ed.fmt_save != null) {
+                            ed.finishPendingWrite("changed while formatting");
+                        } else {
+                            ed.setStatus("changed while the formatter was answering — nothing reformatted", .{}, true);
+                        }
+                        ed.render_dirty = true;
+                        continue;
+                    }
                     // Resolve here, where the conversion from the
                     // protocol's line/UTF-16 coordinates to the rope's
                     // bytes belongs — the same place a rename does it.
@@ -3817,13 +3967,14 @@ pub const App = struct {
                             .raw = it.raw,
                         };
                     }
-                    // The PREFIX the request was made for travels with
-                    // the answer, so the editor can tell an answer to
-                    // what you are typing now from an answer to what
-                    // you were typing two keystrokes ago. Reading the
-                    // editor's current prefix here instead would make
-                    // that check compare a value with itself.
-                    ed.takeCompletions(items, c.prefix);
+                    // The PREFIX and BASE the request was made for
+                    // travel with the answer, so the editor can tell an
+                    // answer to what you are typing now, where you are
+                    // typing it, from an answer to what you were typing
+                    // two keystrokes ago somewhere else. Reading the
+                    // editor's current state here instead would make
+                    // those checks compare a value with itself.
+                    ed.takeCompletions(items, c.prefix, c.base);
                 },
                 .completion_doc => |d| {
                     const ed = self.editorShowingLocked(d.path) orelse continue;
@@ -3847,7 +3998,7 @@ pub const App = struct {
                         // buffer's own words may still be filling the
                         // menu, and a message over a working ring
                         // would read as a failure of the ring.
-                        .completion => ed.takeCompletions(&.{}, ed.cplPrefix()),
+                        .completion => ed.takeCompletions(&.{}, ed.cplPrefix(), ed.cpl_base),
                         // A resolve that came back with nothing. Silent
                         // on purpose: the row is fine, it simply has no
                         // prose, and the panel beside it stays shut.
@@ -3957,6 +4108,9 @@ pub const App = struct {
             ed.finishPendingWrite(null);
             return;
         }
+        // What the server is formatting. The reply is only good against
+        // this exact text — see the .formatting arm.
+        ed.buf.fmt_req_version = ed.buf.version;
         ed.fmt_deadline = CACurrentMediaTime() + fmt_deadline_s;
     }
 
@@ -4059,7 +4213,7 @@ pub const App = struct {
         // because a completion computed against the text before the
         // word you are typing offers the wrong words.
         self.lspSyncLocked(ed);
-        _ = self.lsp.completion(path, lspPos(ed), ed.cplPrefix());
+        _ = self.lsp.completion(path, lspPos(ed), ed.cplPrefix(), ed.cpl_base);
     }
 
     /// Ask about ONE candidate — the row the selection is resting on.
@@ -4521,6 +4675,11 @@ pub const App = struct {
         var pbuf: [1024]u8 = undefined;
         @memcpy(pbuf[0..req.len], self.pending_open_path[0..req.len]);
         const path = pbuf[0..req.len];
+        // Copied under the lock for the same reason the path is: a new
+        // request queued between unlock and open would overwrite it.
+        var fbuf: [256]u8 = undefined;
+        @memcpy(fbuf[0..req.find_len], self.pending_open_find[0..req.find_len]);
+        const needle = fbuf[0..req.find_len];
 
         const t = self.activeTab();
         var src: ?*panespkg.Pane = null;
@@ -4549,7 +4708,9 @@ pub const App = struct {
                 self.setFocusLocked(src_pane);
                 self.draw_lock.unlock();
                 if (req.line > 0 or req.col > 0) {
-                    _ = self.openEditorAt(path, @intCast(req.line + 1), req.col);
+                    if (needle.len > 0) {
+                        _ = self.openEditorAtMatch(path, @intCast(req.line + 1), req.col, needle);
+                    } else _ = self.openEditorAt(path, @intCast(req.line + 1), req.col);
                 } else _ = self.openEditor(path);
                 return;
             }
@@ -5174,17 +5335,30 @@ pub const App = struct {
         // is both the honest idle number (zero work) and the honest
         // latency number — the key mark is consumed only by a frame that
         // actually carried the focused pane's echo.
+        //
+        // EXCEPT for a short hold after input: a ProMotion panel that
+        // sees no frames downclocks, and the next keystroke then waits
+        // on a slow refresh — zed measured this and holds presentation
+        // after high-rate input; PERF.md's unexplained quiet-key p50
+        // wobble matches the same downclock. The hold is keyed to input
+        // recency, so truly idle rook still draws nothing at all —
+        // the zero-idle-frames property survives intact.
         const shot_wanted = self.shot_state.load(.acquire) == 2;
-        if (!any_dirty and !shot_wanted) {
+        const last_input = self.last_input_at.load(.acquire);
+        const input_hold = last_input > 0 and t_start - last_input < input_hold_s;
+        if (!any_dirty and !shot_wanted and !input_hold) {
             _ = stats.global.frames_skipped.fetchAdd(1, .monotonic);
             return;
         }
         self.scene_dirty = false;
         stats.global.frame_update.recordSeconds(t_update - t_start);
 
-        // Fill the shared GPU cell buffer: each pane bump-allocates a
+        // Fill the frame's GPU cell buffer: each pane bump-allocates a
         // slot. The snapshot is the authority on grid dims; during a
         // resize it may briefly disagree with the rect, which is fine.
+        // beginFrame first: this frame writes a ring slot the GPU is
+        // done with, never the one it may still be reading.
+        self.renderer.beginFrame();
         const cells = self.renderer.cells();
         var off: usize = 0;
         for (atab.panes.items) |p| {
@@ -5400,27 +5574,47 @@ pub const App = struct {
                         .term, .monitor => continue,
                     };
                     if (ed.synthetic or ed.is_dir) continue;
-                    if (!ed.buf.changedOnDisk(self.io)) {
-                        if (ed.disk_changed) {
-                            ed.disk_changed = false;
-                            ed.render_dirty = true;
-                            self.scene_dirty = true;
-                        }
-                        continue;
+                    switch (ed.buf.onDisk(self.io)) {
+                        .same => {
+                            if (ed.disk_changed or ed.disk_gone) {
+                                ed.disk_changed = false;
+                                ed.disk_gone = false;
+                                ed.render_dirty = true;
+                                self.scene_dirty = true;
+                            }
+                        },
+                        .gone => {
+                            // Never reloaded: what the pane holds is now
+                            // the only copy, and replacing it with the
+                            // emptiness on disk would finish the
+                            // deletion. The badge says so; `:w` still
+                            // guards, and `:w!` recreates on purpose.
+                            if (!ed.disk_gone) {
+                                ed.disk_gone = true;
+                                ed.disk_changed = false;
+                                ed.setStatus("{s} was deleted on disk — the buffer is the only copy (:w! recreates it)", .{ed.displayName()}, true);
+                                ed.render_dirty = true;
+                                self.scene_dirty = true;
+                            }
+                        },
+                        .changed => {
+                            ed.disk_gone = false;
+                            if (ed.buf.isModified()) {
+                                if (!ed.disk_changed) {
+                                    ed.disk_changed = true;
+                                    ed.render_dirty = true;
+                                    self.scene_dirty = true;
+                                }
+                            } else {
+                                // A reload that fails leaves the buffer
+                                // exactly as it was, which is the right
+                                // outcome for a transient read error —
+                                // we try again next tick.
+                                ed.reload() catch continue;
+                                self.scene_dirty = true;
+                            }
+                        },
                     }
-                    if (ed.buf.isModified()) {
-                        if (!ed.disk_changed) {
-                            ed.disk_changed = true;
-                            ed.render_dirty = true;
-                            self.scene_dirty = true;
-                        }
-                        continue;
-                    }
-                    // A reload that fails leaves the buffer exactly as it
-                    // was, which is the right outcome for a transient
-                    // read error — we try again next tick.
-                    ed.reload() catch continue;
-                    self.scene_dirty = true;
                 }
             }
         }
@@ -8450,12 +8644,17 @@ pub const App = struct {
                     const c = registrypkg.commands[item_i];
                     const l = std.fmt.bufPrint(&lbl, "{s}: {s}", .{ c.category, c.title }) catch c.title;
                     // The LIVE chord first (config's truth), then the
-                    // hand-written hint (⌘ chords live outside the
-                    // binding table), then the id — an unbound command
-                    // still shows the name an agent or a config file
-                    // would call it by.
+                    // hand-written hint — but ONLY for chords the
+                    // binding table does not own: ⌘/⌃ chords live in
+                    // code and the string stays true. A "<leader>…"
+                    // hint with no live entry behind it names a chord
+                    // that a rebind has since given to something else,
+                    // and teaching it would send you to the wrong key.
+                    // Last, the id — an unbound command still shows the
+                    // name an agent or a config file would call it by.
                     const live = self.liveChordHint(c.action, c.arg, &kbuf);
-                    break :blk .{ l, live orelse if (c.keys.len > 0) c.keys else c.id };
+                    const static_ok = c.keys.len > 0 and !std.mem.startsWith(u8, c.keys, "<leader>");
+                    break :blk .{ l, live orelse if (static_ok) c.keys else c.id };
                 },
             };
             _ = ui.textOver(x + gut, rty, label, if (selected) th.bar_value else th.bar_fg);
@@ -9255,6 +9454,30 @@ fn resizeCallback(context: *const ResizeBlock.Context, notification: objc.c.id) 
     context.app.viewResized();
 }
 
+/// The window landed on a different display. Re-pace the frame clock
+/// to it, then run the resize path — viewResized re-reads the backing
+/// scale and the drawable size, which is exactly the state a screen
+/// change moves without touching the frame.
+fn screenChangedCallback(context: *const ResizeBlock.Context, notification: objc.c.id) callconv(.c) void {
+    _ = notification;
+    const self = context.app;
+    // AppKit can report no screen at all while displays are being
+    // reconfigured — the moment this notification is most likely to
+    // fire. Skip the retarget; the scale refresh below is still safe.
+    const screen = self.window.msgSend(objc.Object, "screen", .{});
+    if (screen.value != null) {
+        const desc = screen.msgSend(objc.Object, "deviceDescription", .{});
+        const num = desc.msgSend(objc.Object, "objectForKey:", .{nsString("NSScreenNumber").value});
+        if (num.value != null) {
+            _ = CVDisplayLinkSetCurrentCGDisplay(self.link, num.msgSend(u32, "unsignedIntValue", .{}));
+            // The cached refresh period belongs to the old display;
+            // zero it so the next link tick re-asks CoreVideo.
+            self.display_period_us.store(0, .monotonic);
+        }
+    }
+    self.viewResized();
+}
+
 fn completedCallback(context: *const CompletedBlock.Context, cmd_id: objc.c.id) callconv(.c) void {
     _ = context;
     const cmd = objc.Object.fromId(cmd_id);
@@ -9302,9 +9525,12 @@ fn displayLinkCallback(link: CVDisplayLinkRef, now: ?*const anyopaque, output: ?
 }
 
 /// ⌘Q and every other AppKit route out of the app. It used to take
-/// rook-host down here — the daemon left in the strip, and rook owns its
-/// ptys in-process, so there is nothing outliving the app to reap.
-fn terminateCallback(_: *const ResizeBlock.Context, _: objc.c.id) callconv(.c) void {}
+/// rook-host down here; now its job is making sure nothing outlives the
+/// app IN-process either — process exit alone leaves any SIGHUP-trapping
+/// job running (see hangupAllSessions).
+fn terminateCallback(ctx: *const ResizeBlock.Context, _: objc.c.id) callconv(.c) void {
+    ctx.app.hangupAllSessions();
+}
 
 /// Authorization result. Nothing to do but say so once: a denied
 /// notification is the user's decision, and retrying would be nagging.

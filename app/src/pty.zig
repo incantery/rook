@@ -38,6 +38,95 @@ const TIOCSCTTY = 0x20007461;
 const TIOCSWINSZ = 0x80087467;
 extern "c" var environ: [*:null]const ?[*:0]const u8;
 
+extern "c" fn killpg(pgrp: pid_t, sig: c_int) c_int;
+extern "c" fn tcgetpgrp(fd: fd_t) pid_t;
+extern "c" fn usleep(us: u32) c_int;
+
+pub const SIGHUP: c_int = 1;
+pub const SIGKILL: c_int = 9;
+pub const SIGTERM: c_int = 15;
+
+/// How long a hung-up process group gets to exit before the next,
+/// harder signal. Two of these bound the whole escalation at 200ms —
+/// long enough for a shell to save its history, short enough that ⌘Q
+/// waiting on it is imperceptible.
+pub const grace_us: u32 = 100_000;
+
+/// The process groups a closing pane must signal, captured while the
+/// pty master is still open — tcgetpgrp only answers on a live fd —
+/// and held as plain ids so the escalation can outlive the Session
+/// that owned them.
+///
+/// Two groups, not one: SIGHUP to the shell is not teardown on its
+/// own. Under job control the foreground job runs in its OWN process
+/// group, which a signal to the shell's group never reaches, and a
+/// job that traps SIGHUP shrugs off the kernel's hangup when the
+/// master closes. zed shipped that orphan twice (zed#47412, #61467);
+/// this is their eventual shape.
+pub const ProcessGroups = struct {
+    /// The shell leads its own session (spawnIn's child calls setsid
+    /// before exec), so its pid IS its process-group id.
+    shell: pid_t,
+    /// Whoever the tty says is foreground right now; -1 when nobody is.
+    fg: pid_t,
+
+    pub fn capture(master: fd_t, shell_pid: pid_t) ProcessGroups {
+        return .{ .shell = shell_pid, .fg = tcgetpgrp(master) };
+    }
+
+    /// Signal both groups. Ids that aren't real groups never get
+    /// through: killpg(0) signals ROOK's own process group — the whole
+    /// app — and tcgetpgrp's failure spelling is negative.
+    pub fn signal(self: ProcessGroups, sig: c_int) void {
+        if (self.shell > 0) _ = killpg(self.shell, sig);
+        if (self.fg > 0 and self.fg != self.shell) _ = killpg(self.fg, sig);
+    }
+
+    /// Signal 0 is the existence probe: nothing is delivered, but the
+    /// group lookup still happens. An unreaped zombie still counts as
+    /// alive here, which only costs a harmless extra signal later.
+    pub fn alive(self: ProcessGroups) bool {
+        if (self.shell > 0 and killpg(self.shell, 0) == 0) return true;
+        if (self.fg > 0 and self.fg != self.shell and killpg(self.fg, 0) == 0) return true;
+        return false;
+    }
+
+    /// The escalation tail after a SIGHUP already went out: grace, then
+    /// SIGTERM survivors, grace again, then SIGKILL what remains. Runs
+    /// on a detached thread (pane close) or blocking (app quit); by
+    /// value, because the Session that captured these ids is freed the
+    /// moment its shell exits. The alive() gates keep an id whose group
+    /// already died — and could in principle be reused — from being
+    /// signalled again.
+    pub fn escalate(self: ProcessGroups) void {
+        _ = usleep(grace_us);
+        if (!self.alive()) return;
+        self.signal(SIGTERM);
+        _ = usleep(grace_us);
+        if (!self.alive()) return;
+        self.signal(SIGKILL);
+    }
+};
+
+/// App-quit teardown for every session at once, BLOCKING: this runs on
+/// the last observable moment before the process exits, and a detached
+/// thread would not survive that exit. Process exit closes every
+/// master, but the kernel's hangup on a closing master reaches only
+/// the foreground group and does nothing to a job that traps SIGHUP —
+/// so quit sends SIGHUP and SIGTERM together (everything is going down
+/// now; there is no politer second chance coming), waits one grace,
+/// and SIGKILLs survivors. Nothing reaps during quit, so a dead shell
+/// reads as an alive zombie — signalling it anyway is harmless.
+pub fn terminateAll(groups: []const ProcessGroups) void {
+    if (groups.len == 0) return;
+    for (groups) |g| {
+        g.signal(SIGHUP);
+        g.signal(SIGTERM);
+    }
+    _ = usleep(grace_us);
+    for (groups) |g| if (g.alive()) g.signal(SIGKILL);
+}
+
 pub const Pty = struct {
     master: fd_t,
     slave: fd_t,
@@ -145,4 +234,104 @@ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int
 /// Set an environment variable in this process (inherited by spawned children).
 pub fn setEnv(name: [*:0]const u8, value: [*:0]const u8) void {
     _ = setenv(name, value, 1);
+}
+
+// ---- teardown escalation tests ----
+//
+// These spawn real shells on a real pty, in the lsp.zig tradition of
+// the two tests that DO spawn: the property under test is a kernel
+// behaviour (signal dispositions across process groups), and no mock
+// can fail the way the kernel does.
+
+/// Drain the master until `marker` shows up — the shell echoes it AFTER
+/// installing its traps, so seeing it proves the traps are in place and
+/// the test can't pass vacuously by signalling a shell that hadn't
+/// gotten around to ignoring the signal yet.
+fn readUntil(pty: *Pty, marker: []const u8) !void {
+    var seen: [4096]u8 = undefined;
+    var len: usize = 0;
+    while (len < seen.len) {
+        const n = pty.readMaster(seen[len..]);
+        if (n == 0) return error.ChildGone;
+        len += n;
+        if (std.mem.indexOf(u8, seen[0..len], marker) != null) return;
+    }
+    return error.MarkerNotSeen;
+}
+
+/// Reap the child within ~2s or fail — a blocking waitpid here would
+/// turn a regression (the child survived escalation) into a hung test
+/// run instead of a red one.
+fn reapWithin(pid: pid_t) !c_int {
+    const WNOHANG: c_int = 1;
+    var tries: u32 = 0;
+    while (tries < 200) : (tries += 1) {
+        var status: c_int = 0;
+        if (waitpid(pid, &status, WNOHANG) == pid) return status;
+        _ = usleep(10_000);
+    }
+    return error.ChildStillAlive;
+}
+
+/// Poll until the group probe says gone, up to ~2s — the inner job of
+/// the job-control test is a grandchild launchd reaps on its own
+/// schedule, so "dead" is eventually-consistent from out here.
+fn expectGroupGone(pgid: pid_t) !void {
+    var tries: u32 = 0;
+    while (tries < 200) : (tries += 1) {
+        if (killpg(pgid, 0) != 0) return;
+        _ = usleep(10_000);
+    }
+    return error.GroupStillAlive;
+}
+
+test "escalation kills a shell that traps SIGHUP and SIGTERM" {
+    var pty = try Pty.open(.{ .ws_row = 24, .ws_col = 80 });
+    defer pty.deinit();
+    // `trap ''` = ignore, and ignored dispositions are INHERITED, so
+    // the `sleep` children shrug off HUP and TERM exactly like the
+    // shell — only the SIGKILL step can end this group.
+    const argv = [_][*:0]const u8{ "/bin/sh", "-c", "trap '' HUP TERM; echo R34DY; while :; do sleep 1; done" };
+    const pid = try pty.spawnIn(&argv, null);
+    try readUntil(&pty, "R34DY");
+
+    const groups = ProcessGroups.capture(pty.master, pid);
+
+    // Vacuity guard: SIGHUP alone — the pre-fix teardown — must NOT
+    // kill this shell, or the escalation below proves nothing.
+    groups.signal(SIGHUP);
+    _ = usleep(grace_us + grace_us / 2);
+    try std.testing.expect(groups.alive());
+
+    groups.escalate();
+    // escalate's last word was SIGKILL; the shell must be reapable now,
+    // and by that signal — anything else means something ELSE killed it.
+    const status = try reapWithin(pid);
+    try std.testing.expectEqual(SIGKILL, status & 0x7f);
+    try expectGroupGone(pid);
+}
+
+test "escalation reaches a foreground job in its own process group" {
+    var pty = try Pty.open(.{ .ws_row = 24, .ws_col = 80 });
+    defer pty.deinit();
+    // `set -m` turns on job control: the inner sh runs as a foreground
+    // job in its OWN process group, which is the exact topology where
+    // signalling only the shell's group orphans the job (zed#47412).
+    const argv = [_][*:0]const u8{ "/bin/sh", "-c", "trap '' HUP TERM; set -m; sh -c 'trap \"\" HUP TERM; echo R34DY; while :; do sleep 1; done'" };
+    const pid = try pty.spawnIn(&argv, null);
+    try readUntil(&pty, "R34DY");
+
+    const groups = ProcessGroups.capture(pty.master, pid);
+    // The scenario must be real: a foreground group DISTINCT from the
+    // shell's, or this test collapses into the one above.
+    try std.testing.expect(groups.fg > 0);
+    try std.testing.expect(groups.fg != groups.shell);
+
+    groups.signal(SIGHUP);
+    groups.escalate();
+    _ = try reapWithin(pid);
+    // The inner job is a grandchild we cannot waitpid; the group probe
+    // going dark is what "not orphaned" means from the outside.
+    try expectGroupGone(groups.fg);
+    try expectGroupGone(groups.shell);
 }

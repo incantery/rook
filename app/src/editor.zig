@@ -351,6 +351,14 @@ pub const Editor = struct {
     /// normal — vim stays underneath, this only moves the front door.
     default_insert: bool = false,
     count: u32 = 0,
+    /// The count typed BEFORE an operator — the 3 in `3d2w`. Vim's
+    /// grammar is {count}operator{count}motion with the two counts
+    /// MULTIPLIED, so arming an operator stashes the digits typed so
+    /// far here and lets the motion's own digits start over in
+    /// `count`. One shared register would concatenate instead: 3d2w
+    /// would delete 32 words, not 6. Nonzero only while `op` is armed
+    /// — every path that drops the operator drops this with it.
+    pre_count: u32 = 0,
     op: u8 = 0, // pending operator: 'd','y','c' or 0
     pend_g: bool = false,
     pend_z: bool = false,
@@ -467,6 +475,12 @@ pub const Editor = struct {
     /// at its cap — and semantic completion then goes quietly missing
     /// for the rest of the session. A prefix cannot get stuck.
     cpl_asked: std.ArrayListUnmanaged(u8) = .empty,
+    /// …and WHERE it was made. Half of the throttle's key: the same
+    /// prefix at a different spot is a different question, and a
+    /// throttle that only compared prefixes silently never asked it —
+    /// a `.` after any earlier `.` completion, or a fresh single
+    /// letter that happened to repeat, got no server answer at all.
+    cpl_asked_base: usize = 0,
     /// Config: the menu appears as you type, rather than waiting for
     /// ctrl-n.
     suggest_on: bool = true,
@@ -709,6 +723,13 @@ pub const Editor = struct {
     /// putting it back). Purely a signal — nothing in the editor acts
     /// on it, because merging is the human's.
     disk_changed: bool = false,
+
+    /// The file was DELETED on disk. Also purely a signal, and the
+    /// contents deliberately stay: what the pane holds is now the only
+    /// copy, and `:w` still guards (`:w!` recreates the file, which is
+    /// then a choice rather than an accident). Clears itself if the
+    /// file comes back.
+    disk_gone: bool = false,
 
     // Highlighter seam — function pointers so the editor never links
     // the tree-sitter C (headless tests stay headless). syntax.zig
@@ -2789,7 +2810,13 @@ pub const Editor = struct {
         // scan matching against text that had already been overwritten,
         // and the menu stopped narrowing as you typed.
         var pbuf: [max_indent]u8 = undefined;
-        const plen = @min(self.ccol - a, pbuf.len);
+        var plen = @min(self.ccol - a, pbuf.len);
+        // A word longer than the buffer is cut — at a CHARACTER, not
+        // wherever the byte count landed. A cut mid-sequence hands the
+        // fuzzy matcher garbage bytes that match nothing.
+        if (plen < self.ccol - a) {
+            while (plen > 0 and (s[a + plen] & 0xC0) == 0x80) plen -= 1;
+        }
         @memcpy(pbuf[0..plen], s[a..][0..plen]);
         const prefix = pbuf[0..plen];
         if (!dot and prefix.len < suggest_min) return;
@@ -2813,18 +2840,18 @@ pub const Editor = struct {
         self.cpl_prefix.appendSlice(gpa, if (dot) "" else prefix) catch {};
         self.cpl_semantic = false;
 
-        // One request in flight at a time. Typing at speed would
-        // otherwise put a completion request on the wire per keystroke,
-        // and the answers to all but the last are dropped anyway — the
-        // prefix check in takeCompletions sees to that.
-        // Once per distinct prefix. Typing a word asks a few times,
-        // which is what every other editor does and what servers
-        // expect; the answers to all but the last are dropped by the
-        // prefix check in takeCompletions.
+        // Once per distinct (prefix, position). Typing a word asks a
+        // few times, which is what every other editor does and what
+        // servers expect; the answers to all but the last are dropped
+        // by the checks in takeCompletions. The position is half the
+        // key because the prefix alone repeats: every `.` trigger has
+        // prefix "", and a throttle that compared only prefixes asked
+        // for the first dot and then never again.
         if (self.lsp_completion) |f| {
-            if (!std.mem.eql(u8, self.cpl_asked.items, prefix)) {
+            if (!std.mem.eql(u8, self.cpl_asked.items, prefix) or self.cpl_asked_base != self.cpl_base) {
                 self.cpl_asked.clearRetainingCapacity();
                 self.cpl_asked.appendSlice(gpa, prefix) catch {};
+                self.cpl_asked_base = self.cpl_base;
                 self.cpl_asking = true;
                 f(self.lsp_ctx.?, self);
             }
@@ -2886,7 +2913,11 @@ pub const Editor = struct {
             while (a > 0 and charClass(s[a - 1]) == 1) a -= 1;
             if (a == self.ccol) return; // nothing to complete from
             var pbuf: [max_indent]u8 = undefined;
-            const plen = @min(self.ccol - a, pbuf.len);
+            var plen = @min(self.ccol - a, pbuf.len);
+            // Cut at a character, as autoSuggest does — see there.
+            if (plen < self.ccol - a) {
+                while (plen > 0 and (s[a + plen] & 0xC0) == 0x80) plen -= 1;
+            }
             @memcpy(pbuf[0..plen], s[a..][0..plen]);
             self.cpl_base = self.buf.rope.lineStart(self.cline) + a;
             self.buildCompletions(pbuf[0..plen], self.cpl_base, fwd, 0);
@@ -2946,15 +2977,23 @@ pub const Editor = struct {
     ///
     /// The rule for a LATE answer is the whole of this function: it is
     /// taken only if you have not moved. If the ring has closed, or the
-    /// prefix has changed, or you have already cycled off the first
-    /// candidate, the answer is DROPPED. Folding it in then would
-    /// renumber the list under a selection you are steering with your
-    /// fingers, and text would change under you for a reason that
-    /// happened a hundred milliseconds ago.
-    pub fn takeCompletions(self: *Editor, items: []const CplItem, prefix: []const u8) void {
+    /// prefix has changed, or the ring is anchored somewhere else, or
+    /// you have already cycled off the first candidate, the answer is
+    /// DROPPED. Folding it in then would renumber the list under a
+    /// selection you are steering with your fingers, and text would
+    /// change under you for a reason that happened a hundred
+    /// milliseconds ago.
+    ///
+    /// `base` is where the ask's word started. The prefix check alone
+    /// cannot tell two rings apart when they spell the same — a slow
+    /// answer for `a` on line 10 must not fold into a ring for `a` on
+    /// line 500, and after any `.` trigger EVERY in-flight prefix is
+    /// "".
+    pub fn takeCompletions(self: *Editor, items: []const CplItem, prefix: []const u8, base: usize) void {
         self.cpl_asking = false;
         if (!self.cpl_live) return;
         if (!std.mem.eql(u8, prefix, self.cpl_prefix.items)) return;
+        if (base != self.cpl_base) return;
         if (self.cpl_idx != 0) return;
         if (items.len == 0) {
             // The server had nothing. Whatever the buffer offered is
@@ -3370,6 +3409,7 @@ pub const Editor = struct {
     /// is not editing, it is transcription.
     fn startRename(self: *Editor) void {
         self.count = 0;
+        self.pre_count = 0;
         self.op = 0;
         if (self.lsp_rename == null) {
             self.noServer();
@@ -4399,9 +4439,15 @@ pub const Editor = struct {
     // ------------------------------------------------------------ normal/visual
 
     fn takeCount(self: *Editor) usize {
-        const c = self.count;
+        // Both halves of vim's {count}op{count}motion grammar, missing
+        // halves counting as 1 — so `d2w` is 2, `3dw` is 3, and `3d2w`
+        // is 6. Saturating: a hostile count wedges at the ceiling
+        // instead of wrapping.
+        const pre: usize = if (self.pre_count == 0) 1 else self.pre_count;
+        const post: usize = if (self.count == 0) 1 else self.count;
+        self.pre_count = 0;
         self.count = 0;
-        return if (c == 0) 1 else c;
+        return pre *| post;
     }
 
     fn enterInsert(self: *Editor) void {
@@ -4472,6 +4518,7 @@ pub const Editor = struct {
             if (ch == 0x1b or ch < 0x20) {
                 self.op = 0;
                 self.count = 0;
+                self.pre_count = 0;
                 return;
             }
             self.setFindTarget(cmd, &[1]u8{ch});
@@ -4487,6 +4534,7 @@ pub const Editor = struct {
             if (ch == 0x1b or ch < 0x20) {
                 self.op = 0;
                 self.count = 0;
+                self.pre_count = 0;
                 return;
             }
             self.sel_reg = ch;
@@ -4499,6 +4547,7 @@ pub const Editor = struct {
             if (ch == 0x1b or ch < 0x20) {
                 self.op = 0;
                 self.count = 0;
+                self.pre_count = 0;
                 return;
             }
             if (kind == 'q') self.startMacro(ch) else self.playMacro(ch);
@@ -4511,6 +4560,7 @@ pub const Editor = struct {
             if (ch == 0x1b or ch < 0x20) {
                 self.op = 0;
                 self.count = 0;
+                self.pre_count = 0;
                 return;
             }
             if (kind == 'm') {
@@ -4530,6 +4580,7 @@ pub const Editor = struct {
             if (ch == 0x1b or ch < 0x20) {
                 self.op = 0;
                 self.count = 0;
+                self.pre_count = 0;
                 return;
             }
             self.applyTextObject(around, ch);
@@ -4538,6 +4589,7 @@ pub const Editor = struct {
 
         if (ch == 0x1b) { // ESC: clear pending, leave visual
             self.count = 0;
+            self.pre_count = 0;
             self.op = 0;
             self.pend_leader = false;
             self.pend_g = false;
@@ -4661,6 +4713,7 @@ pub const Editor = struct {
                 // arriving here.
                 'r' => {
                     self.count = 0;
+                    self.pre_count = 0;
                     self.op = 0;
                     if (self.lsp_references) |f| {
                         f(self.lsp_ctx.?, self);
@@ -4676,6 +4729,7 @@ pub const Editor = struct {
                 // key on "what can be done here" instead.
                 'a' => {
                     self.count = 0;
+                    self.pre_count = 0;
                     self.op = 0;
                     if (self.lsp_code_action) |f| {
                         f(self.lsp_ctx.?, self);
@@ -4691,11 +4745,16 @@ pub const Editor = struct {
                         return;
                     }
                     self.op = ch;
+                    // Same count split as d/y/c: `3gu2w` upcases six
+                    // words, not thirty-two.
+                    self.pre_count = self.count;
+                    self.count = 0;
                 },
                 'J' => self.joinLines(self.takeCount(), false),
                 else => {
                     self.op = 0;
                     self.count = 0;
+                    self.pre_count = 0;
                 },
             }
             return;
@@ -4773,6 +4832,7 @@ pub const Editor = struct {
                 if (self.find_cmd == 0) {
                     self.op = 0;
                     self.count = 0;
+                    self.pre_count = 0;
                     return;
                 }
                 const cmd = if (ch == ';') self.find_cmd else switch (self.find_cmd) {
@@ -4841,6 +4901,11 @@ pub const Editor = struct {
                     return;
                 }
                 self.op = ch;
+                // The digits typed so far belong to the operator; the
+                // motion's own digits start from zero and the two
+                // multiply in takeCount.
+                self.pre_count = self.count;
+                self.count = 0;
             },
             '>', '<' => {
                 if (self.inVisual()) {
@@ -4972,6 +5037,7 @@ pub const Editor = struct {
                 }
                 self.op = 0;
                 self.count = 0;
+                self.pre_count = 0;
             },
             0x0f => self.jumpBack(), // ctrl-o
             '\t' => self.jumpForward(), // ctrl-i
@@ -5169,6 +5235,7 @@ pub const Editor = struct {
             else => {
                 self.op = 0;
                 self.count = 0;
+                self.pre_count = 0;
             },
         }
     }
@@ -5414,8 +5481,37 @@ pub const Editor = struct {
 
     fn motionCharwise(self: *Editor, m0: u8) void {
         var m = m0;
-        if (self.op == 'c' and m == 'w') m = 'e';
-        if (self.op == 'c' and m == 'W') m = 'E';
+        // `cw` is not one remap but vim's three special cases: on a
+        // non-blank it acts as `ce` — and when the cursor is already
+        // on the LAST character of a word that scan must not advance
+        // into the next word, so `cw` there changes just that
+        // character — while on white space it acts as plain `dw`.
+        // With a count only the first step gets the no-advance
+        // treatment: `c2w` from a word's last character changes
+        // through the end of the following word. All verified
+        // against vim.
+        var cw_hold = false;
+        if (self.op == 'c' and (m == 'w' or m == 'W')) {
+            const s0 = self.lineText(self.cline);
+            if (s0.len == 0) {
+                // On an empty line vim's `cw` deletes nothing — it
+                // just opens insert mode where you stand, where the
+                // `dw` fallback below would eat the newline and drag
+                // the next line up.
+                self.op = 0;
+                self.pre_count = 0;
+                self.count = 0;
+                self.enterInsert();
+                return;
+            }
+            const big = m == 'W';
+            if (self.ccol < s0.len and charClass(s0[self.ccol]) != 0) {
+                m = if (big) 'E' else 'e';
+                const n = self.ccol + clusterLenAt(s0, self.ccol);
+                if (n >= s0.len or wclass(s0[n], big) != wclass(s0[self.ccol], big))
+                    cw_hold = true;
+            }
+        }
         const cnt = self.takeCount();
         var line = self.cline;
         var col = self.ccol;
@@ -5449,6 +5545,13 @@ pub const Editor = struct {
                     col = r.col;
                 },
                 'e', 'E' => {
+                    if (cw_hold) {
+                        // The first counted step of a held `cw` is
+                        // the word end the cursor already sits on.
+                        cw_hold = false;
+                        inclusive = true;
+                        continue;
+                    }
                     const r = self.scanWordFwd(line, col, true, m == 'E');
                     line = r.line;
                     col = r.col;
@@ -5564,12 +5667,14 @@ pub const Editor = struct {
             if (fwd) {
                 if (col >= s.len) {
                     self.op = 0;
+                    self.pre_count = 0;
                     return;
                 }
                 col += clusterLenAt(s, col);
             } else {
                 if (col == 0) {
                     self.op = 0;
+                    self.pre_count = 0;
                     return;
                 }
                 col = prevClusterStart(s, col);
@@ -5581,6 +5686,7 @@ pub const Editor = struct {
                 // cancelled, so `dt;` on a line with no `;` is a no-op
                 // rather than a deletion to somewhere arbitrary.
                 self.op = 0;
+                self.pre_count = 0;
                 return;
             };
         }
@@ -5729,41 +5835,71 @@ pub const Editor = struct {
         return null;
     }
 
-    /// `iw` / `aw` — the run of one character class around the cursor.
-    /// `aw` extends over the whitespace after it, or before it when the
-    /// word ends the line.
-    fn objWord(self: *Editor, around: bool, big: bool) ?Range {
+    /// `iw` / `aw` — class runs around the cursor, `cnt` of them.
+    ///
+    /// `iw` counts EVERY run, white space included, so `2diw` takes a
+    /// word and the space after it. `aw` counts words: each one is a
+    /// word plus its trailing white space — or the white space plus
+    /// the word after it when standing on a blank — and when the last
+    /// word taken has no trailing white space, the white space BEFORE
+    /// the first is included instead. Verified against vim: `2daw` on
+    /// `one two three four five` leaves `three four five`, and `2daw`
+    /// on the last two words eats the space before them.
+    fn objWord(self: *Editor, around: bool, big: bool, cnt: usize) ?Range {
         const s = self.lineText(self.cline);
         if (s.len == 0) return null;
         const base = self.buf.rope.lineStart(self.cline);
         const cur = @min(self.ccol, s.len - 1);
-        const cls = if (big) @as(u8, if (charClass(s[cur]) == 0) 0 else 1) else charClass(s[cur]);
-        const sameClass = struct {
-            fn f(c: u8, want: u8, b: bool) bool {
-                const k = charClass(c);
-                return if (b) (if (want == 0) k == 0 else k != 0) else k == want;
+        // End of the maximal same-class run starting at `i`. White
+        // space is its own run in both word vocabularies.
+        const runEnd = struct {
+            fn f(str: []const u8, i: usize, b: bool) usize {
+                const want = wclass(str[i], b);
+                var j = i + 1;
+                while (j < str.len and wclass(str[j], b) == want) j += 1;
+                return j;
             }
         }.f;
 
         var a = cur;
-        while (a > 0 and sameClass(s[a - 1], cls, big)) a -= 1;
-        var b = cur + 1;
-        while (b < s.len and sameClass(s[b], cls, big)) b += 1;
-        if (!around) return .{ .a = base + a, .b = base + b };
+        while (a > 0 and wclass(s[a - 1], big) == wclass(s[cur], big)) a -= 1;
 
-        var e = b;
-        while (e < s.len and charClass(s[e]) == 0) e += 1;
-        if (e == b) while (a > 0 and charClass(s[a - 1]) == 0) {
+        var e = a;
+        var trailing = false;
+        for (0..cnt) |_| {
+            if (e >= s.len) break;
+            if (!around) {
+                e = runEnd(s, e, big);
+                continue;
+            }
+            trailing = false;
+            if (charClass(s[e]) == 0) {
+                // From a blank, the space and the word after it are
+                // one object.
+                e = runEnd(s, e, big);
+                if (e < s.len) e = runEnd(s, e, big);
+            } else {
+                e = runEnd(s, e, big);
+                if (e < s.len and charClass(s[e]) == 0) {
+                    e = runEnd(s, e, big);
+                    trailing = true;
+                }
+            }
+        }
+        if (around and !trailing) while (a > 0 and charClass(s[a - 1]) == 0) {
             a -= 1;
         };
         return .{ .a = base + a, .b = base + e };
     }
 
-    /// Resolve `iw`, `a(`, `i"` … to an absolute byte range.
-    fn textObject(self: *Editor, around: bool, kind: u8) ?Range {
+    /// Resolve `iw`, `a(`, `i"` … to an absolute byte range. Only the
+    /// word objects take a count today; on the others vim's count
+    /// means nesting levels, which these single-level resolvers do
+    /// not model, so it is dropped the way it always was.
+    fn textObject(self: *Editor, around: bool, kind: u8, cnt: usize) ?Range {
         return switch (kind) {
-            'w' => self.objWord(around, false),
-            'W' => self.objWord(around, true),
+            'w' => self.objWord(around, false, cnt),
+            'W' => self.objWord(around, true, cnt),
             '"', '\'', '`' => self.objQuote(around, kind),
             '(', ')', 'b' => self.objBracket(around, '(', ')'),
             '{', '}', 'B' => self.objBracket(around, '{', '}'),
@@ -5776,8 +5912,11 @@ pub const Editor = struct {
     /// `diw` / `ci(` / `va"` — apply the pending operator to an object,
     /// or select it in visual mode.
     fn applyTextObject(self: *Editor, around: bool, kind: u8) void {
-        self.count = 0;
-        const r = self.textObject(around, kind) orelse {
+        // The count reaches the object — `2daw` deletes two words —
+        // and both of vim's spellings multiply through takeCount:
+        // 2daw and d2aw are the same six keystrokes of intent.
+        const cnt = self.takeCount();
+        const r = self.textObject(around, kind, cnt) orelse {
             // No such object here: cancel, the way a failed find does.
             // An operator that falls back to "some other range" is how
             // you lose a paragraph to a typo.
@@ -5917,6 +6056,7 @@ pub const Editor = struct {
 
     fn gotoDefinition(self: *Editor) void {
         self.count = 0;
+        self.pre_count = 0;
         self.op = 0;
         const s = self.lineText(self.cline);
         var a = self.ccol;
@@ -5974,6 +6114,7 @@ pub const Editor = struct {
     /// running it against a position nobody chose.
     fn gotoMark(self: *Editor, letter: u8, exact: bool) void {
         self.count = 0;
+        self.pre_count = 0;
         const target = self.markPos(letter) orelse {
             self.op = 0;
             self.setStatus("mark not set: {c}", .{letter}, true);
@@ -6138,23 +6279,63 @@ pub const Editor = struct {
         return l;
     }
 
-    /// Exclusive and charwise, landing in column 0 — so `d}` from the
-    /// middle of a line takes the rest of the paragraph and stops at
-    /// the blank line rather than swallowing it.
+    /// Exclusive and charwise, landing in column 0 of the blank line.
+    ///
+    /// As an operator target, forward `}` follows vim's promotion
+    /// rules — all verified against vim:
+    ///
+    /// - Landing on a blank line, the exclusive end retreats to the
+    ///   end of the previous line and turns inclusive, so `d}` from
+    ///   mid-line takes the rest of the paragraph but neither the
+    ///   blank line nor the newline before it. When the cursor also
+    ///   sat at or before the first non-blank the whole motion turns
+    ///   LINEWISE — for every operator, which is why `y}` from
+    ///   column 0 stores a linewise register.
+    /// - Saturating at a last line that still has text on it, the
+    ///   motion runs to the TRUE end of the buffer — `d}` deletes the
+    ///   final paragraph fully instead of stopping at the start of
+    ///   its last line. That stays charwise, except vim's op_delete
+    ///   turns a multi-line charwise DELETE reaching end-of-line into
+    ///   a linewise one when the cursor started inside the indent —
+    ///   the rule that leaves an empty buffer rather than a husk of
+    ///   emptied lines.
     fn motionPara(self: *Editor, fwd: bool) void {
         const cnt = self.takeCount();
         var line = self.cline;
         for (0..cnt) |_| line = self.paraTarget(line, fwd);
         if (self.op != 0) {
             const a = self.absOff();
+            if (fwd and line > self.cline and self.lineLenB(line) == 0) {
+                if (self.ccol <= firstNonblank(self.lineText(self.cline))) {
+                    self.opLines(self.cline, line - 1);
+                } else {
+                    // lineStart(line) - 1 is the newline that ends
+                    // the paragraph's last line: the range keeps it.
+                    self.opRange(a, self.buf.rope.lineStart(line) - 1);
+                }
+                return;
+            }
+            if (fwd and self.lineLenB(line) != 0) {
+                if (self.op == 'd' and line > self.cline and
+                    self.ccol <= firstNonblank(self.lineText(self.cline)))
+                {
+                    self.opLines(self.cline, line);
+                } else {
+                    self.opRange(a, self.buf.rope.byteLen());
+                }
+                return;
+            }
             const b = self.buf.rope.lineStart(line);
             self.opRange(@min(a, b), @max(a, b));
             return;
         }
         self.setJump();
         self.cline = line;
-        self.ccol = 0;
-        self.goal = 0;
+        // `}` with nowhere further to go parks on the last line's
+        // final character, the way vim reaches end-of-buffer; on a
+        // blank line column 0 is the only column there is.
+        self.ccol = if (fwd and self.lineLenB(line) != 0) lastCpCol(self.lineText(line)) else 0;
+        self.goal = renderCol(self.lineText(line), self.ccol);
         self.clampNormal();
     }
 
@@ -6189,11 +6370,13 @@ pub const Editor = struct {
         }
         if (ob == 0) {
             self.op = 0;
+            self.pre_count = 0;
             return;
         }
         const from = self.buf.rope.lineStart(self.cline) + col;
         const dst = self.matchBracket(from, ob, cb, fwd) orelse {
             self.op = 0;
+            self.pre_count = 0;
             return;
         };
         if (self.op != 0) {
@@ -6232,6 +6415,7 @@ pub const Editor = struct {
 
     fn searchWord(self: *Editor, fwd: bool) void {
         self.count = 0;
+        self.pre_count = 0;
         self.op = 0;
         const word = self.wordUnder() orelse {
             self.setStatus("no word under the cursor", .{}, true);
@@ -6479,6 +6663,7 @@ pub const Editor = struct {
         const gpa = self.gpa;
         const op = self.op;
         self.op = 0;
+        self.pre_count = 0;
         if (start == end) return;
         if (isCaseOp(op)) {
             // Case operators leave the registers alone: nothing was
@@ -6496,10 +6681,21 @@ pub const Editor = struct {
         }
         self.buf.newUndoGroup();
         self.buf.deleteRange(gpa, start, end) catch return;
-        self.cursorToOffset(start);
         if (op == 'c') {
+            // Enter insert and place the cursor WITHOUT the normal-mode
+            // clamp: a change that ran to the end of the line resumes
+            // typing one past the last remaining character, where only
+            // insert mode may sit. cursorToOffset would clamp that one
+            // column left, and `cw` on the line's last character — or
+            // `C` anywhere — would type BEFORE its own remainder.
+            // Verified against vim: `$cwX` on `one two three` yields
+            // `one two threX`, not `one two thrXe`.
             self.mode = .insert;
+            self.cline = self.buf.rope.lineOfOffset(@min(start, self.buf.rope.byteLen()));
+            self.ccol = @min(start, self.buf.rope.byteLen()) - self.buf.rope.lineStart(self.cline);
+            return;
         }
+        self.cursorToOffset(start);
     }
 
     /// Linewise operator over lines [a, b] inclusive.
@@ -6507,6 +6703,7 @@ pub const Editor = struct {
         const gpa = self.gpa;
         const op = self.op;
         self.op = 0;
+        self.pre_count = 0;
         const rope = &self.buf.rope;
         var start = rope.lineStart(a);
         const end = if (b + 1 < self.lineCountB()) rope.lineStart(b + 1) else rope.byteLen();
@@ -7942,13 +8139,16 @@ pub const Editor = struct {
             if (rope.byteLen() <= 4 << 20) {
                 if (rope.dupeRange(gpa, 0, rope.byteLen()) catch null) |flat| {
                     defer gpa.free(flat);
-                    // Every change since the tree was last built. A
-                    // parse told which bytes moved reuses the rest —
-                    // 42ms of full parse on a big file becomes a
-                    // fraction of a millisecond, and it is the whole
-                    // reason typing in a large document stopped feeling
-                    // free once highlighting existed.
-                    const rec = self.buf.takeEdits();
+                    // Every change since THIS view's tree was built —
+                    // sliced by version, not drained, because another
+                    // pane on the same document has its own tree and
+                    // its own idea of "since". A parse told which
+                    // bytes moved reuses the rest — 42ms of full parse
+                    // on a big file becomes a fraction of a
+                    // millisecond, and it is the whole reason typing
+                    // in a large document stopped feeling free once
+                    // highlighting existed.
+                    const rec = self.buf.editsSince(self.hl_version);
                     // The tree can also be missing or stale for reasons
                     // no edit list describes: a fresh document, a
                     // reload, a grammar that has only just loaded.
@@ -7956,7 +8156,6 @@ pub const Editor = struct {
                     const t0 = stats.nowSeconds();
                     reparse(self.hl_ctx.?, flat, rec.edits, full);
                     stats.global.hl_reparse.recordSeconds(stats.nowSeconds() - t0);
-                    self.buf.clearEdits();
                     self.hl_version = self.buf.version;
                 }
             } else return;
@@ -8042,6 +8241,7 @@ pub const Editor = struct {
             // somebody else's, and seeing them together is exactly the
             // moment to decide which one survives.
             if (self.disk_changed) putStr(out, &x, " [!] changed on disk", .err);
+            if (self.disk_gone) putStr(out, &x, " [!] deleted on disk", .err);
         }
 
         // Right side: line:col.
@@ -9778,6 +9978,231 @@ test "d brace-close stops at the blank line without eating it" {
     const s = try bufText(gpa, e);
     defer gpa.free(s);
     try testing.expectEqualStrings("\nc\nd", s);
+    // From column 0 vim promotes the exclusive motion to LINEWISE
+    // (nvim ops.c: end in column 1, start at or before the first
+    // non-blank), which is what the register kind records.
+    try testing.expectEqual(RegKind.line, e.reg_kind);
+}
+
+test "counts multiply across an operator" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ia b c d e f g h i j k l");
+    e.key("\x1b");
+
+    // vim: 3d2w deletes SIX words — the count before the operator and
+    // the count after it multiply. One shared count register would
+    // concatenate the digits and delete 32.
+    keys(e, "gg03d2w");
+    var s = try bufText(gpa, e);
+    try testing.expectEqualStrings("g h i j k l", s);
+    gpa.free(s);
+
+    // The halves still work alone: d2w and 2dw are both two words.
+    keys(e, "ggdGia b c d e f g h");
+    e.key("\x1b");
+    keys(e, "gg0d2w");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("c d e f g h", s);
+    gpa.free(s);
+    keys(e, "ggdGia b c d e f g h");
+    e.key("\x1b");
+    keys(e, "gg02dw");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("c d e f g h", s);
+    gpa.free(s);
+
+    // And a count with no motion digits: doubled operators and plain
+    // count-verbs keep their meaning.
+    keys(e, "ggdGil1\nl2\nl3\nl4");
+    e.key("\x1b");
+    keys(e, "gg2dd");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("l3\nl4", s);
+    gpa.free(s);
+    keys(e, "ggdGiabcdef");
+    e.key("\x1b");
+    keys(e, "gg03x");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("def", s);
+    gpa.free(s);
+}
+
+test "a count reaches the word text objects" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione two three four five");
+    e.key("\x1b");
+
+    // vim: 2daw is two words, each with its trailing space.
+    keys(e, "gg02daw");
+    var s = try bufText(gpa, e);
+    try testing.expectEqualStrings("three four five", s);
+    gpa.free(s);
+
+    // The other spelling multiplies through the same seam.
+    keys(e, "ggdGione two three four five");
+    e.key("\x1b");
+    keys(e, "gg0d2aw");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("three four five", s);
+    gpa.free(s);
+
+    // The last words of the line have no trailing space, so the
+    // space BEFORE them goes instead — vim's daw rule, still honored
+    // under a count.
+    keys(e, "ggdGione two three");
+    e.key("\x1b");
+    keys(e, "gg0w2daw");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("one", s);
+    gpa.free(s);
+
+    // iw counts every run: a word and the space after it are two.
+    keys(e, "ggdGione two three");
+    e.key("\x1b");
+    keys(e, "gg02diw");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("two three", s);
+    gpa.free(s);
+}
+
+test "cw at the end of a word does not eat the next word" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ione two three");
+    e.key("\x1b");
+
+    // vim: with the cursor on a word's LAST character, cw acts as ce
+    // on the current word — it changes that character, never the
+    // word that follows.
+    keys(e, "gg0llcwX");
+    e.key("\x1b");
+    var s = try bufText(gpa, e);
+    try testing.expectEqualStrings("onX two three", s);
+    gpa.free(s);
+
+    // Same at the very end of the line.
+    keys(e, "ggdGione two three");
+    e.key("\x1b");
+    keys(e, "gg$cwX");
+    e.key("\x1b");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("one two threX", s);
+    gpa.free(s);
+
+    // On white space cw behaves as dw: only the blanks go.
+    keys(e, "ggdGione two three");
+    e.key("\x1b");
+    keys(e, "gg0f cwX");
+    e.key("\x1b");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("oneXtwo three", s);
+    gpa.free(s);
+
+    // With a count only the first step holds: c2w from the last
+    // character changes through the end of the FOLLOWING word.
+    keys(e, "ggdGione two three");
+    e.key("\x1b");
+    keys(e, "gg0llc2wX");
+    e.key("\x1b");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("onX three", s);
+    gpa.free(s);
+
+    // C at the end of a line types after what is left — the same
+    // insert-point rule, which the $cw oracle exposed as one column
+    // short. vim: `0lCXY` on `foo bar` yields `fXY`, not `XYf`.
+    keys(e, "ggdGifoo bar");
+    e.key("\x1b");
+    keys(e, "gg0lCXY");
+    e.key("\x1b");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("fXY", s);
+    gpa.free(s);
+
+    // On an empty line cw deletes nothing and opens insert there.
+    keys(e, "ggdGione\n\ntwo");
+    e.key("\x1b");
+    keys(e, "ggjcwX");
+    e.key("\x1b");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("one\nX\ntwo", s);
+    gpa.free(s);
+}
+
+test "d brace-close reaches the true end of the buffer" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+
+    // vim: when the paragraph is the last in the file, } runs to the
+    // end of the buffer, and a multi-line DELETE from inside the
+    // indent turns linewise — the buffer empties completely.
+    keys(e, "iHello!\nHello!");
+    e.key("\x1b");
+    keys(e, "ggd}");
+    var s = try bufText(gpa, e);
+    try testing.expectEqualStrings("", s);
+    gpa.free(s);
+
+    // From mid-line it stays charwise: the rest of the paragraph
+    // goes, the line the cursor is on keeps its head.
+    keys(e, "iHello world\nsecond line");
+    e.key("\x1b");
+    keys(e, "gg0llld}");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("Hel", s);
+    gpa.free(s);
+
+    // On the last line alone the delete is charwise even from column
+    // 0 — vim leaves the emptied line behind (its op_delete linewise
+    // rule needs more than one line).
+    keys(e, "ggdGione\ntwo");
+    e.key("\x1b");
+    keys(e, "G0d}");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("one\n", s);
+    gpa.free(s);
+
+    // Landing on a blank line from mid-column, the exclusive end
+    // retreats to the end of the paragraph: the newline before the
+    // blank line survives.
+    keys(e, "ggdGione\ntwo\n\nafter");
+    e.key("\x1b");
+    keys(e, "ggld}");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("o\n\nafter", s);
+    gpa.free(s);
+
+    // y} from column 0 to a blank line stores a LINEWISE register.
+    keys(e, "ggdGione\ntwo\n\nafter");
+    e.key("\x1b");
+    keys(e, "ggy}");
+    try testing.expectEqual(RegKind.line, e.reg_kind);
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("one\ntwo\n\nafter", s);
+    gpa.free(s);
+
+    // A count that saturates at the last paragraph still reaches the
+    // end, linewise from column 0 across several lines.
+    keys(e, "ggdGia\n\nb\n\nc\nd");
+    e.key("\x1b");
+    keys(e, "gg2jd2}");
+    s = try bufText(gpa, e);
+    try testing.expectEqualStrings("a\n", s);
+    gpa.free(s);
+
+    // The bare motion parks on the last line's final character when
+    // there is no blank line left to land on.
+    keys(e, "ggdGiaaa\nbbb");
+    e.key("\x1b");
+    keys(e, "gg}");
+    try testing.expectEqual(@as(usize, 1), e.cline);
+    try testing.expectEqual(@as(usize, 2), e.ccol);
 }
 
 test "star searches the word under the cursor" {
@@ -12398,7 +12823,7 @@ test "a server's answer folds in ahead of the buffer's own words" {
     e.takeCompletions(&.{
         .{ .text = "Printf", .detail = "func(format string, a ...any)" },
         .{ .text = "Println", .detail = "func(a ...any)" },
-    }, "Pri");
+    }, "Pri", e.cpl_base);
 
     // Semantic items lead, and the buffer's own copy of Println is
     // dropped as the duplicate — so the surviving one has a signature.
@@ -12427,7 +12852,7 @@ test "a late answer is dropped once you have started steering" {
     keys(e, "ialpha\nalpine\nal");
     e.key("\x0e"); // alpha
     e.key("\x0e"); // alpine — you have moved
-    e.takeCompletions(&.{.{ .text = "allocate" }}, "al");
+    e.takeCompletions(&.{.{ .text = "allocate" }}, "al", e.cpl_base);
     {
         const s = try bufText(gpa, e);
         defer gpa.free(s);
@@ -12452,8 +12877,44 @@ test "an answer to a prefix you have stopped typing is not taken" {
     e.key("\x0e");
     // The answer to a request fired for "xy" — a prefix this ring was
     // never built for, from a keystroke two ago.
-    e.takeCompletions(&.{.{ .text = "xylophone" }}, "xy");
+    e.takeCompletions(&.{.{ .text = "xylophone" }}, "xy", e.cpl_base);
     for (0..e.cplCount()) |i| try testing.expect(!std.mem.eql(u8, e.cplWord(i), "xylophone"));
+}
+
+test "an answer for the same prefix somewhere else is not taken" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+
+    keys(e, "ialpha\nal");
+    // The same spelling, asked from a ring anchored somewhere else —
+    // the prefix check alone cannot tell them apart, and folding this
+    // in would hand this ring another location's members.
+    e.takeCompletions(&.{.{ .text = "allocate" }}, "al", e.cpl_base + 7);
+    for (0..e.cplCount()) |i| try testing.expect(!std.mem.eql(u8, e.cplWord(i), "allocate"));
+}
+
+test "a dot trigger asks the server every time, not once ever" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var probe: CplProbe = .{};
+    e.lsp_ctx = &probe;
+    e.lsp_completion = &CplProbe.hook;
+
+    // First dot: asked about, with prefix "".
+    keys(e, "ifoo.");
+    const before = probe.asked;
+    e.key("\x1b");
+    // Another dot, another spot, and nothing but non-word characters
+    // between the two — so the in-flight prefix is "" both times. A
+    // throttle keyed on the prefix alone compared "" with "" and never
+    // asked again.
+    keys(e, "a .");
+    try testing.expect(probe.asked > before);
 }
 
 test "a ring with nothing but a pending request still starts at the top" {
@@ -12475,7 +12936,7 @@ test "a ring with nothing but a pending request still starts at the top" {
         try testing.expectEqualStrings("zq", s); // nothing written yet
     }
 
-    e.takeCompletions(&.{ .{ .text = "zqFirst" }, .{ .text = "zqSecond" } }, "zq");
+    e.takeCompletions(&.{ .{ .text = "zqFirst" }, .{ .text = "zqSecond" } }, "zq", e.cpl_base);
     // Nothing was in the buffer to replace, so the answer only fills
     // the menu. The next ctrl-n must take candidate ZERO — stepping
     // straight to the second item would hide the top of the list.
@@ -12498,7 +12959,7 @@ test "no completions is only said once the server has answered too" {
     // Still waiting: saying "no completions" here would be a lie that
     // the very next frame contradicts.
     try testing.expect(std.mem.indexOf(u8, e.status_buf[0..e.status_len], "no completions") == null);
-    e.takeCompletions(&.{}, "zq");
+    e.takeCompletions(&.{}, "zq", e.cpl_base);
     try testing.expect(std.mem.indexOf(u8, e.status_buf[0..e.status_len], "no completions") != null);
     try testing.expect(!e.cpl_live);
 }
@@ -13046,7 +13507,7 @@ test "a server's answer is filtered by what has been typed" {
         .{ .text = "absorbSentinel", .detail = "fn" },
         .{ .text = "eqlIgnoreCase", .detail = "fn" },
         .{ .text = "alignForward", .detail = "fn" },
-    }, "eq");
+    }, "eq", e.cpl_base);
     var got: usize = 0;
     for (0..e.cplCount() -| 1) |i| {
         const w = e.cplWord(i);
@@ -13069,7 +13530,7 @@ test "a dot takes the server's whole answer, because nothing is typed yet" {
     e.takeCompletions(&.{
         .{ .text = "Println", .detail = "fn" },
         .{ .text = "Printf", .detail = "fn" },
-    }, "");
+    }, "", e.cpl_base);
     // An empty prefix filters nothing: the members ARE the answer.
     try testing.expectEqual(@as(usize, 3), e.cplCount()); // two, plus the empty prefix
 }
@@ -13145,7 +13606,7 @@ fn mkDocMenu(gpa: Allocator, probe: *CplProbe, doc: []const u8) !*Editor {
     e.takeCompletions(&.{
         .{ .text = "Println", .detail = "func(a ...any)", .kind = 3, .doc = doc },
         .{ .text = "Printf", .detail = "func(format string)", .kind = 3 },
-    }, "Pr");
+    }, "Pr", e.cpl_base);
     return e;
 }
 
@@ -13161,7 +13622,7 @@ test "the menu matches a subsequence, not just a prefix" {
         .{ .text = "Println", .detail = "fn", .kind = 3 },
         .{ .text = "Printf", .detail = "fn", .kind = 3 },
         .{ .text = "Sprintln", .detail = "fn", .kind = 3 },
-    }, "pln");
+    }, "pln", e.cpl_base);
     // `pln` is in none of these as a prefix, and in two as a
     // subsequence. A prefix filter answered "no completions" here.
     try testing.expectEqual(@as(usize, 2), e.cplCount() -| 1);
@@ -13183,7 +13644,7 @@ test "the menu ranks by match quality, with the server's order as the tiebreak" 
     e.takeCompletions(&.{
         .{ .text = "parallelResearchIndex", .detail = "fn", .kind = 3 },
         .{ .text = "print", .detail = "fn", .kind = 3 },
-    }, "pri");
+    }, "pri", e.cpl_base);
     try testing.expectEqualStrings("print", e.cplWord(0));
 
     // ...and where the match is equally good, the server still decides:
@@ -13197,7 +13658,7 @@ test "the menu ranks by match quality, with the server's order as the tiebreak" 
     e2.takeCompletions(&.{
         .{ .text = "print", .detail = "fn", .kind = 3 },
         .{ .text = "probe", .detail = "fn", .kind = 3 },
-    }, "pr");
+    }, "pr", e2.cpl_base);
     try testing.expectEqualStrings("print", e2.cplWord(0));
 }
 
@@ -13209,7 +13670,7 @@ test "the menu lights the characters that matched, wherever they landed" {
     e.lsp_ctx = &probe;
     e.lsp_completion = &CplProbe.hook;
     keys(e, "ipln");
-    e.takeCompletions(&.{.{ .text = "Println", .detail = "fn", .kind = 3 }}, "pln");
+    e.takeCompletions(&.{.{ .text = "Println", .detail = "fn", .kind = 3 }}, "pln", e.cpl_base);
 
     const cols = 60;
     const g = e.fillGrid(cols, 16);
@@ -13240,7 +13701,7 @@ test "the emphasis survives on every kind of row, selected included" {
     e.takeCompletions(&.{
         .{ .text = "Println", .detail = "fn", .kind = 3 },
         .{ .text = "Sprintln", .detail = "", .kind = 0 },
-    }, "pln");
+    }, "pln", e.cpl_base);
 
     const cols = 60;
     const g = e.fillGrid(cols, 16);
@@ -13332,7 +13793,7 @@ test "the panel goes left when there is no room to its right" {
     keys(e, "Pr");
     e.takeCompletions(&.{
         .{ .text = "Println", .detail = "fn", .kind = 3, .doc = "Some prose about this candidate." },
-    }, "Pr");
+    }, "Pr", e.cpl_base);
 
     const cols = 120;
     _ = e.fillGrid(cols, 24);
@@ -13411,7 +13872,7 @@ test "the panel follows the selection" {
     e.takeCompletions(&.{
         .{ .text = "Println", .detail = "fn", .kind = 3, .doc = "about println" },
         .{ .text = "Printf", .detail = "fn", .kind = 3, .doc = "about printf" },
-    }, "Pr");
+    }, "Pr", e.cpl_base);
 
     const cols = 140;
     _ = e.fillGrid(cols, 24);
@@ -13460,7 +13921,7 @@ test "a row whose prose the server kept back is asked about once" {
     // computed for the row you rest on.
     e.takeCompletions(&.{
         .{ .text = "Println", .detail = "fn", .kind = 3, .raw = "{\"label\":\"Println\"}" },
-    }, "Pr");
+    }, "Pr", e.cpl_base);
     try testing.expectEqual(@as(usize, 1), probe.asks);
     try testing.expectEqualStrings("Println", probe.last[0..probe.last_len]);
 
@@ -13495,7 +13956,7 @@ test "an answer for a row that is no longer there is dropped" {
     keys(e, "iPr");
     e.takeCompletions(&.{
         .{ .text = "Println", .detail = "fn", .kind = 3 },
-    }, "Pr");
+    }, "Pr", e.cpl_base);
     // The ring is rebuilt by every narrowing keystroke, which is why the
     // answer is matched by WORD: an index would name a stranger.
     e.takeCompletionDoc("SomethingElse", "prose about a word that is not here", "");
@@ -13573,7 +14034,7 @@ test "a candidate's label is coloured by what it is" {
     e.takeCompletions(&.{
         .{ .text = "Println", .detail = "func(...any)", .kind = 3 }, // Function
         .{ .text = "Printer", .detail = "struct{}", .kind = 22 }, // Struct
-    }, "Pr");
+    }, "Pr", e.cpl_base);
     try testing.expectEqual(@as(u8, 3), e.cplKind(0));
     try testing.expectEqual(@as(u8, 22), e.cplKind(1));
     try testing.expectEqual(Style.cpl_fn, cplKindStyle(3).?);
@@ -13627,4 +14088,72 @@ test "the menu marks the typed characters, and every cell of it is no-bg" {
     // it as a pill inside the card.
     try testing.expect(box.sel != null);
     try testing.expect(box.sel.? >= 1 and box.sel.? < box.h - 1);
+}
+
+test "two panes on one document each get their own reparse delta" {
+    // The shared-buffer corruption: each pane keeps its own tree, so
+    // each needs every edit since ITS last parse. The drain-once edit
+    // log let whichever pane parsed first eat the edits the other one
+    // needed — the loser then handed tree-sitter a stale tree as
+    // current, and the highlighting it drew described a document that
+    // did not exist.
+    const gpa = testing.allocator;
+
+    const Probe = struct {
+        edits_seen: usize = 0,
+        full: bool = false,
+        calls: usize = 0,
+        fn reparse(ctx: *anyopaque, text: []const u8, edits: []const bufferpkg.Buffer.TreeEdit, full: bool) void {
+            _ = text;
+            const p: *@This() = @ptrCast(@alignCast(ctx));
+            p.edits_seen = edits.len;
+            p.full = full;
+            p.calls += 1;
+        }
+    };
+
+    const e1 = try mkEditor(gpa);
+    defer e1.destroy();
+    const e2 = try mkEditor(gpa);
+    // B gives up its own empty document and adopts A's, marked shared
+    // the way the registry would — B's destroy releases, A's frees.
+    e2.dropDoc();
+    e2.adoptDoc(e1.buf, true);
+    defer e2.destroy();
+
+    var p1: Probe = .{};
+    var p2: Probe = .{};
+    e1.hl_ctx = &p1;
+    e1.hl_reparse = &Probe.reparse;
+    e2.hl_ctx = &p2;
+    e2.hl_reparse = &Probe.reparse;
+
+    // First sight of the document: both panes parse from scratch.
+    keys(e1, "iabc");
+    e1.refreshHighlights(4);
+    e2.refreshHighlights(4);
+    try testing.expect(p1.full);
+    try testing.expect(p2.full);
+
+    // Three more keystrokes land through pane A. BOTH panes must hear
+    // about all three — pane A parsing first takes nothing from pane B.
+    keys(e1, "def");
+    e1.refreshHighlights(4);
+    e2.refreshHighlights(4);
+    try testing.expectEqual(@as(usize, 2), p1.calls);
+    try testing.expect(!p1.full);
+    try testing.expectEqual(@as(usize, 3), p1.edits_seen);
+    try testing.expectEqual(@as(usize, 2), p2.calls);
+    try testing.expect(!p2.full);
+    try testing.expectEqual(@as(usize, 3), p2.edits_seen);
+
+    // An undo through pane B is an edit too, and pane A must hear it.
+    e2.key("\x1b");
+    e2.key("u");
+    e2.refreshHighlights(4);
+    e1.refreshHighlights(4);
+    try testing.expect(!p1.full);
+    try testing.expect(p1.edits_seen >= 1);
+    try testing.expect(!p2.full);
+    try testing.expect(p2.edits_seen >= 1);
 }

@@ -518,16 +518,26 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         const reg = @import("registry.zig");
         var buf: [4096]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
+        app.draw_lock.lock();
         for (reg.commands) |c| {
             var ex: [64]u8 = undefined;
+            var kb: [16]u8 = undefined;
+            // The same truth rule the palette renders by: the live
+            // binding first, the static string only for chords the
+            // binding table does not own — a stale "<leader>…" printed
+            // here would teach an agent (or a person reading its
+            // output) a chord that now does something else.
+            const live = app.liveChordHint(c.action, c.arg, &kb);
+            const static_ok = c.keys.len > 0 and !std.mem.startsWith(u8, c.keys, "<leader>");
             w.print("{s}\t{s}: {s}\t{s}\t:{s}\n", .{
                 c.id,
                 c.category,
                 c.title,
-                if (c.keys.len > 0) c.keys else "-",
+                live orelse if (static_ok) c.keys else "-",
                 reg.exName(c.id, &ex),
             }) catch break;
         }
+        app.draw_lock.unlock();
         reply(fd, buf[0..w.end]);
     } else if (std.mem.eql(u8, verb, "run") and rest.len > 0) {
         // By NAME, so an agent never has to know rook's internals — and

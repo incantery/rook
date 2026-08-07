@@ -57,10 +57,18 @@ pub const Buffer = struct {
     /// highlighter's reparse trigger. Monotonic, so it says "something
     /// happened", never "we are back where we were".
     version: u64 = 0,
-    /// Edits since the highlighter last parsed, and whether they are
-    /// still usable — see Edit and takeEdits.
+    /// What changed, tagged with the version each edit produced — see
+    /// TreeEdit and editsSince. A capped FIFO that nobody drains: a
+    /// document shown in two panes has two parsers, and "edits since
+    /// YOUR last parse" is a different slice for each. The drain-once
+    /// API this replaces let whichever pane parsed first eat the edits
+    /// the other one needed, and the loser reparsed against a stale
+    /// tree — highlighting that is not wrong loudly, just wrong.
     edits: std.ArrayListUnmanaged(TreeEdit) = .empty,
-    edits_full: bool = true,
+    /// The newest version whose edit has been evicted from the log. A
+    /// parser whose tree is older than this cannot be told what
+    /// changed; its answer is a full parse.
+    edits_floor: u64 = 0,
     /// While pinned, newUndoGroup does nothing. An ex command that
     /// edits many lines is ONE change to undo however many primitives
     /// it reaches for, and the primitives are the ones that open
@@ -85,6 +93,16 @@ pub const Buffer = struct {
     /// two panes showing one file must not each sync it, and the one
     /// that syncs must not depend on which pane you typed in.
     lsp_version: u64 = std.math.maxInt(u64),
+
+    /// The version a formatting request was made against. The reply's
+    /// offsets are measured against THAT text, so applying them to any
+    /// other version garbles the file. Comparing against lsp_version
+    /// instead would not do: a keystroke plus one debounced didChange
+    /// during the round trip makes version == lsp_version again while
+    /// the reply still describes the old text. On the DOCUMENT for the
+    /// same reason lsp_version is — the reply may land on a different
+    /// pane than the one that asked.
+    fmt_req_version: u64 = std.math.maxInt(u64),
 
     /// Edits are numbered, and the number rides along through undo and
     /// redo. The number on top of the undo stack therefore identifies
@@ -158,17 +176,29 @@ pub const Buffer = struct {
         return top.seq;
     }
 
-    /// Has the file moved since we loaded or last wrote it?
+    /// Where the file stands relative to what we loaded or last wrote.
     ///
-    /// One stat, cheap enough to ask on a timer. False whenever we hold
-    /// no claim (a scratch or projected buffer, or a path that did not
-    /// exist when it was opened) — the same fail-open rule `save` uses,
-    /// so the two can never disagree about whose file this is.
-    pub fn changedOnDisk(self: *const Buffer, io: std.Io) bool {
-        const known = self.disk orelse return false;
-        const p = self.path orelse return false;
-        const st = std.Io.Dir.cwd().statFile(io, p, .{}) catch return true;
-        return !known.matches(st);
+    /// `gone` is its own state and not a kind of `changed`, because the
+    /// two demand opposite reactions: a changed file can be reloaded,
+    /// but reloading a deleted one replaces the pane's contents with an
+    /// empty buffer and nulls the disk claim — after which a `:w`
+    /// resurrects, without so much as a warning, a file somebody
+    /// deliberately removed. That was a shipped bug, not a hypothesis.
+    pub const OnDisk = enum { same, changed, gone };
+
+    /// One stat, cheap enough to ask on a timer. `same` whenever we
+    /// hold no claim (a scratch or projected buffer, or a path that did
+    /// not exist when it was opened) — the same fail-open rule `save`
+    /// uses, so the two can never disagree about whose file this is.
+    pub fn onDisk(self: *const Buffer, io: std.Io) OnDisk {
+        const known = self.disk orelse return .same;
+        const p = self.path orelse return .same;
+        const st = std.Io.Dir.cwd().statFile(io, p, .{}) catch |err| {
+            // Any stat failure OTHER than absence is indistinguishable
+            // from change, and treated as one.
+            return if (err == error.FileNotFound) .gone else .changed;
+        };
+        return if (known.matches(st)) .same else .changed;
     }
 
     /// Start telling `ctx` about edits. Idempotent: a view that
@@ -223,6 +253,10 @@ pub const Buffer = struct {
         // decide whether to re-clamp must not be fooled by a reload
         // resetting the count.
         self.version = old.version + 1;
+        // Every recorded edit described the text that just left. Any
+        // parser holding a tree of ANY older version — including one in
+        // a pane that is not the one reloading — must start over.
+        self.edits_floor = self.version;
         old.deinit(gpa);
     }
 
@@ -328,30 +362,31 @@ pub const Buffer = struct {
         self.disk = if (cwd.statFile(io, target, .{})) |st| .of(st) else |_| null;
     }
 
-    /// Drain the edits recorded since the last call.
-    ///
-    /// `full` means "these are not usable" — too many to keep, or the
-    /// document was replaced wholesale — and whoever asked has to
-    /// reparse from scratch.
+    /// `full` means "the log cannot say what changed" — edits that old
+    /// have been evicted, or the document was replaced wholesale — and
+    /// whoever asked has to reparse from scratch.
     pub const Pending = struct { edits: []const TreeEdit, full: bool };
 
-    pub fn takeEdits(self: *Buffer) Pending {
-        return .{ .edits = self.edits.items, .full = self.edits_full };
-    }
-
-    /// Called once the edits have been consumed. Separate from taking
-    /// them so a parse that could not happen does not lose them.
-    pub fn clearEdits(self: *Buffer) void {
-        self.edits.clearRetainingCapacity();
-        self.edits_full = false;
+    /// Every edit after version `v`, oldest first — the slice a parser
+    /// whose tree describes version `v` needs to catch up. Sliced, not
+    /// drained: each consumer asks with its own version and the log
+    /// stays put, which is what lets two panes on one document each
+    /// keep an honest tree.
+    pub fn editsSince(self: *const Buffer, v: u64) Pending {
+        if (v < self.edits_floor) return .{ .edits = &.{}, .full = true };
+        const items = self.edits.items;
+        var i = items.len;
+        while (i > 0 and items[i - 1].version > v) i -= 1;
+        return .{ .edits = items[i..], .full = false };
     }
 
     fn recordEdit(self: *Buffer, gpa: Allocator, start: usize, old_end: usize, new_end: usize, before: PointPair) void {
-        if (self.edits_full) return;
         if (self.edits.items.len >= max_edits) {
-            self.edits.clearRetainingCapacity();
-            self.edits_full = true;
-            return;
+            // FIFO: the oldest edit leaves, and with it the ability to
+            // serve any parser still behind it. The floor records what
+            // was lost so editsSince can refuse honestly.
+            const evicted = self.edits.orderedRemove(0);
+            self.edits_floor = evicted.version;
         }
         const ne_row = self.rope.lineOfOffset(new_end);
         self.edits.append(gpa, .{
@@ -364,8 +399,14 @@ pub const Buffer = struct {
             .old_end_col = @intCast(before.end_col),
             .new_end_row = @intCast(ne_row),
             .new_end_col = @intCast(new_end - self.rope.lineStart(ne_row)),
+            // The version this edit PRODUCES — the caller bumps right
+            // after recording.
+            .version = self.version +% 1,
         }) catch {
-            self.edits_full = true;
+            // A change that could not be recorded: nobody behind this
+            // point can be served any more.
+            self.edits.clearRetainingCapacity();
+            self.edits_floor = self.version +% 1;
         };
     }
 
@@ -397,11 +438,15 @@ pub const TreeEdit = struct {
     old_end_col: u32,
     new_end_row: u32,
     new_end_col: u32,
+    /// The buffer version this edit produced — what editsSince slices
+    /// the log by.
+    version: u64 = 0,
 };
 
-/// Edits since the highlighter last parsed. Small: a parse drains them,
-/// and anything that overruns this is a change big enough that a full
-/// parse is the honest answer anyway.
+/// Edits the log keeps. Small: parsers ask every frame so they are
+/// rarely more than one behind, and anything that overruns this in one
+/// gap is a change big enough that a full parse is the honest answer
+/// anyway.
 pub const max_edits = 64;
 
     pub fn insert(self: *Buffer, gpa: Allocator, off: usize, text: []const u8) Allocator.Error!void {
@@ -487,8 +532,23 @@ pub const max_edits = 64;
                 // the undo stack restores the state it first produced.
                 .seq = e.seq,
             });
+            // The points BEFORE the rope moves, exactly as applyEdit
+            // takes them. An undo is an edit as far as a parser is
+            // concerned — skipping the record here meant a tree kept
+            // incrementally was silently wrong from the first `u`.
+            const before: PointPair = blk: {
+                const sr = self.rope.lineOfOffset(e.off);
+                const er = self.rope.lineOfOffset(e.off + e.inserted_len);
+                break :blk .{
+                    .start_row = sr,
+                    .start_col = e.off - self.rope.lineStart(sr),
+                    .end_row = er,
+                    .end_col = e.off + e.inserted_len - self.rope.lineStart(er),
+                };
+            };
             try self.rope.delete(gpa, e.off, e.off + e.inserted_len);
             try self.rope.insert(gpa, e.off, e.deleted);
+            self.recordEdit(gpa, e.off, e.off + e.inserted_len, e.off + e.deleted.len, before);
             self.notifyEdit(e.off, e.inserted_len, e.deleted.len);
             target = e.off;
             gpa.free(e.deleted);
@@ -763,6 +823,36 @@ test "a file deleted underneath us counts as changed" {
     try b.save(gpa, io, true);
 }
 
+test "a deleted file reads as gone, never as changed" {
+    // The poll must be able to tell the two apart: `changed` is
+    // reloadable, `gone` must NOT be — reloading what is not there
+    // empties the pane and drops the disk claim, after which `:w`
+    // quietly resurrects a file somebody deliberately removed.
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const cwd = std.Io.Dir.cwd();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pathbuf: [128]u8 = undefined;
+    const p = try tmpPath(&pathbuf, &tmp.sub_path, "vanishing.txt");
+
+    try cwd.writeFile(io, .{ .sub_path = p, .data = "here\n" });
+    var b = try Buffer.initFromFile(gpa, io, p);
+    defer b.deinit(gpa);
+    try testing.expectEqual(Buffer.OnDisk.same, b.onDisk(io));
+
+    try cwd.deleteFile(io, p);
+    try testing.expectEqual(Buffer.OnDisk.gone, b.onDisk(io));
+    // Unmodified or not, the write still guards: recreating the file
+    // must be `:w!`, a choice.
+    try testing.expectError(error.ChangedOnDisk, b.save(gpa, io, false));
+
+    // The file coming back (a branch switched home) is a new identity:
+    // that IS `changed`, and the poll may reload it.
+    try cwd.writeFile(io, .{ .sub_path = p, .data = "back\n" });
+    try testing.expectEqual(Buffer.OnDisk.changed, b.onDisk(io));
+}
+
 test "a file that did not exist when we opened it is not claimed" {
     // No claim, no refusal: `:e newfile` then `:w` must just work.
     const gpa = testing.allocator;
@@ -788,11 +878,11 @@ test "recorded tree edits describe exactly what changed" {
     const gpa = testing.allocator;
     var b = try Buffer.initEmpty(gpa);
     defer b.deinit(gpa);
-    b.clearEdits(); // the initial state is not an edit
+    var v = b.version; // the parse-cursor a consumer would hold
 
     try b.insert(gpa, 0, "const a = 1;\nconst b = 2;\n");
     {
-        const rec = b.takeEdits();
+        const rec = b.editsSince(v);
         try testing.expect(!rec.full);
         try testing.expectEqual(@as(usize, 1), rec.edits.len);
         const e = rec.edits[0];
@@ -807,13 +897,14 @@ test "recorded tree edits describe exactly what changed" {
         try testing.expectEqual(@as(u32, 2), e.new_end_row);
         try testing.expectEqual(@as(u32, 0), e.new_end_col);
     }
-    b.clearEdits();
+    v = b.version;
 
     // A delete spanning a line break: the OLD end is two rows on, the
     // new end is where the cut lands.
     try b.deleteRange(gpa, 10, 20);
     {
-        const rec = b.takeEdits();
+        const rec = b.editsSince(v);
+        try testing.expectEqual(@as(usize, 1), rec.edits.len);
         const e = rec.edits[0];
         try testing.expectEqual(@as(u32, 10), e.start);
         try testing.expectEqual(@as(u32, 20), e.old_end);
@@ -825,7 +916,7 @@ test "recorded tree edits describe exactly what changed" {
         try testing.expectEqual(@as(u32, 0), e.new_end_row);
         try testing.expectEqual(@as(u32, 10), e.new_end_col);
     }
-    b.clearEdits();
+    v = b.version;
 
     // Applying the recorded edits to the old text must produce the new
     // text. This is the property the parser actually depends on, and it
@@ -833,7 +924,7 @@ test "recorded tree edits describe exactly what changed" {
     const before = try b.rope.dupeRange(gpa, 0, b.rope.byteLen());
     defer gpa.free(before);
     try b.insert(gpa, 5, "XY");
-    const rec = b.takeEdits();
+    const rec = b.editsSince(v);
     const e = rec.edits[0];
     const after = try b.rope.dupeRange(gpa, 0, b.rope.byteLen());
     defer gpa.free(after);
@@ -845,25 +936,97 @@ test "too many edits at once fall back to a full parse" {
     const gpa = testing.allocator;
     var b = try Buffer.initEmpty(gpa);
     defer b.deinit(gpa);
-    b.clearEdits();
+    const v = b.version;
     // A macro, a :g, a rename landing across a file. Past the cap the
     // honest answer is to reparse from scratch rather than to keep a
     // partial list that describes some of what happened.
     for (0..Buffer.max_edits + 5) |_| try b.insert(gpa, 0, "x");
-    const rec = b.takeEdits();
+    const rec = b.editsSince(v);
     try testing.expect(rec.full);
     try testing.expectEqual(@as(usize, 0), rec.edits.len);
+    // A parser that kept up through the burst is still served: the log
+    // holds the newest max_edits, and only whoever fell behind the
+    // eviction floor is sent back to a full parse.
+    const caught_up = b.editsSince(b.version -| 3);
+    try testing.expect(!caught_up.full);
+    try testing.expectEqual(@as(usize, 3), caught_up.edits.len);
 }
 
 test "replacing the document invalidates the edit record" {
     const gpa = testing.allocator;
     var b = try Buffer.initEmpty(gpa);
     defer b.deinit(gpa);
-    b.clearEdits();
+    const v0 = b.version;
     try b.insert(gpa, 0, "hello");
-    try testing.expect(!b.takeEdits().full);
-    // A reload: every recorded offset refers to a document that is gone.
+    try testing.expect(!b.editsSince(v0).full);
+    const parsed_at = b.version;
+    // A reload: every recorded offset refers to a document that is gone
+    // — including for a parser that was fully caught up.
     const fresh = try Buffer.initEmpty(gpa);
     b.replaceContents(gpa, fresh);
-    try testing.expect(b.takeEdits().full);
+    try testing.expect(b.editsSince(v0).full);
+    try testing.expect(b.editsSince(parsed_at).full);
+}
+
+test "two parsers each get their own slice of the edit log" {
+    // The two-panes-one-file bug: the old drain-once API let pane A's
+    // parse eat the edits pane B needed, and pane B then fed
+    // tree-sitter a stale tree as if it were current. Each consumer
+    // must be able to ask for exactly its delta, in either order,
+    // without taking anything from the other.
+    const gpa = testing.allocator;
+    var b = try Buffer.initEmpty(gpa);
+    defer b.deinit(gpa);
+
+    try b.insert(gpa, 0, "one\n");
+    const pane_a = b.version; // A parses here
+    try b.insert(gpa, 4, "two\n");
+    const pane_b = b.version; // B parses here
+    try b.insert(gpa, 8, "three\n");
+
+    const ra = b.editsSince(pane_a);
+    try testing.expect(!ra.full);
+    try testing.expectEqual(@as(usize, 2), ra.edits.len);
+
+    const rb = b.editsSince(pane_b);
+    try testing.expect(!rb.full);
+    try testing.expectEqual(@as(usize, 1), rb.edits.len);
+
+    // Asking is not draining: the same questions answer the same way.
+    try testing.expectEqual(@as(usize, 2), b.editsSince(pane_a).edits.len);
+    try testing.expectEqual(@as(usize, 1), b.editsSince(pane_b).edits.len);
+}
+
+test "undo and redo are edits as far as a parser is concerned" {
+    const gpa = testing.allocator;
+    var b = try Buffer.initEmpty(gpa);
+    defer b.deinit(gpa);
+
+    b.newUndoGroup();
+    try b.insert(gpa, 0, "hello world");
+    const v = b.version;
+
+    _ = try b.undo(gpa);
+    {
+        // The undo must be in the log — a version bump with no
+        // recorded edit is exactly the stale-tree corruption the log
+        // exists to prevent.
+        const rec = b.editsSince(v);
+        try testing.expect(!rec.full);
+        try testing.expectEqual(@as(usize, 1), rec.edits.len);
+        const e = rec.edits[0];
+        try testing.expectEqual(@as(u32, 0), e.start);
+        try testing.expectEqual(@as(u32, 11), e.old_end); // the insert leaves
+        try testing.expectEqual(@as(u32, 0), e.new_end);
+    }
+
+    _ = try b.redo(gpa);
+    {
+        const rec = b.editsSince(v);
+        try testing.expectEqual(@as(usize, 2), rec.edits.len);
+        const e = rec.edits[1];
+        try testing.expectEqual(@as(u32, 0), e.start);
+        try testing.expectEqual(@as(u32, 0), e.old_end);
+        try testing.expectEqual(@as(u32, 11), e.new_end); // and comes back
+    }
 }
