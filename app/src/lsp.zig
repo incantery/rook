@@ -642,7 +642,7 @@ pub const State = enum {
     /// initialize sent, reply outstanding. Requests queue here.
     initializing,
     ready,
-    /// shutdown sent.
+    /// shutdown sent; exit held for the reply.
     stopping,
     /// The server is gone, expectedly or not. Terminal.
     failed,
@@ -694,6 +694,9 @@ pub const Session = struct {
     /// Absolute workspace root, owned.
     root: []const u8,
     state: State = .new,
+    /// exit has gone out. Guards a second exit when the shutdown reply
+    /// and the caller's deadline race each other.
+    exit_sent: bool = false,
 
     /// Bytes read off the server, awaiting a complete frame.
     in: std.ArrayListUnmanaged(u8) = .empty,
@@ -950,12 +953,32 @@ pub const Session = struct {
         self.push(.ready);
     }
 
-    /// Ask the server to stop. The caller still has to reap the process
-    /// — a server that ignores shutdown is a server you kill.
+    /// Ask the server to stop. Only the shutdown request goes out here;
+    /// exit is HELD until the reply arrives (or the caller's deadline
+    /// forces it with sendExit). Sending both in one flush is a race zed
+    /// shipped and fixed twice: servers that persist caches on graceful
+    /// shutdown — gopls, rust-analyzer, clangd — do that work between
+    /// the two messages, and an exit already in the pipe cuts it off.
+    /// The caller still has to reap the process — a server that ignores
+    /// shutdown is a server you kill.
     pub fn shutdown(self: *Session) void {
         if (self.state != .ready) return;
         self.state = .stopping;
         _ = self.request(.shutdown, "shutdown", "null");
+    }
+
+    /// True while the shutdown reply is still owed. The caller must keep
+    /// pumping — and keep stdin open — until this clears or its deadline
+    /// passes.
+    pub fn awaitingShutdown(self: *const Session) bool {
+        return self.state == .stopping and !self.exit_sent;
+    }
+
+    /// Send exit, reply or no reply. The deadline half of shutdown: a
+    /// server that never answers still has to be told to go.
+    pub fn sendExit(self: *Session) void {
+        if (self.state != .stopping or self.exit_sent) return;
+        self.exit_sent = true;
         self.notify("exit", "null");
     }
 
@@ -1510,7 +1533,11 @@ pub const Session = struct {
             // understand all the time.
             if (kind == .initialize) {
                 self.fail(jStr(jGet(err, "message")) orelse "the server refused to initialize");
-            } else if (kind != .shutdown) {
+            } else if (kind == .shutdown) {
+                // An error is still a reply — the server has said its
+                // piece, and holding exit any longer buys nothing.
+                self.sendExit();
+            } else {
                 self.push(.{ .empty = .{ .id = id } });
             }
             return;
@@ -1518,7 +1545,7 @@ pub const Session = struct {
 
         switch (kind) {
             .initialize => self.onInitialized(result),
-            .shutdown => {},
+            .shutdown => self.sendExit(),
             .hover => self.onHover(id, result),
             .definition => self.onLocations(id, result, false),
             .references => self.onLocations(id, result, true),
@@ -2082,6 +2109,12 @@ const O_WRONLY = 1;
 const SIGTERM = 15;
 const SIGKILL = 9;
 
+/// How long stop() keeps pumping for the shutdown reply before exit
+/// goes out anyway. Long enough for a server flushing its caches to
+/// disk, short enough that a hung server doesn't make quitting rook
+/// feel broken.
+const shutdown_grace_ms: u32 = 2000;
+
 /// A live language server: the process, the pump thread, and the Session
 /// they share. Every method locks — callers on the frame loop should
 /// treat all of them as cheap and none of them as blocking on the
@@ -2106,6 +2139,10 @@ pub const Server = struct {
     wake_r: c_int = -1,
     wake_w: c_int = -1,
     quit: std.atomic.Value(bool) = .init(false),
+    /// stop() has begun. Separate from quit because quit ends the pump,
+    /// and the pump has to stay alive through the shutdown grace window
+    /// or nobody reads the reply exit is waiting on.
+    stop_started: std.atomic.Value(bool) = .init(false),
 
     /// Spawn `argv` with `root` as its working directory. null when the
     /// process could not be started at all — the caller carries on
@@ -2391,11 +2428,30 @@ pub const Server = struct {
 
     /// Ask the server to stop, then make sure it did. Idempotent.
     pub fn stop(self: *Server) void {
-        if (self.quit.swap(true, .acq_rel)) return;
+        if (self.stop_started.swap(true, .acq_rel)) return;
         self.mu.lock();
         self.sess.shutdown();
         self.mu.unlock();
         self.flush();
+        // exit waits for the shutdown reply. The pump is still reading —
+        // quit is not set yet — so the reply can land; when it does, the
+        // session releases exit and the pump's own flush writes it. The
+        // deadline covers a server that never answers, and a session
+        // that never sent shutdown (not ready, already failed) is never
+        // awaiting, so this costs nothing on those paths.
+        var waited_ms: u32 = 0;
+        while (waited_ms < shutdown_grace_ms) : (waited_ms += 10) {
+            self.mu.lock();
+            const waiting = self.sess.awaitingShutdown();
+            self.mu.unlock();
+            if (!waiting) break;
+            _ = usleep(10 * 1000);
+        }
+        self.mu.lock();
+        self.sess.sendExit();
+        self.mu.unlock();
+        self.flush();
+        self.quit.store(true, .release);
         // Closing stdin is what most servers actually exit on; SIGTERM
         // covers the ones that don't. Neither is trusted to be enough —
         // waitpid below is, because the pump has stopped reading.
@@ -3260,6 +3316,70 @@ test "workspace/configuration answers a DOTTED section, not just a key" {
     try testing.expect(std.mem.indexOf(u8, out, "/tmp/work/.venv/bin/python") != null);
     // A path that goes nowhere is null, not an error.
     try testing.expect(std.mem.indexOf(u8, out, "null") != null);
+}
+
+test "exit is held until the shutdown reply, then released" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    try readySession(&sess, false);
+    sess.consumeOutbound(sess.outbound().len);
+
+    sess.shutdown();
+    try testing.expectEqual(State.stopping, sess.state);
+    const out = sess.outbound();
+    try testing.expect(std.mem.indexOf(u8, out, "\"method\":\"shutdown\"") != null);
+    // exit in the same flush is the race: the server does its
+    // persist-on-shutdown work between the two messages, and an exit
+    // already in the pipe cuts it off.
+    try testing.expect(std.mem.indexOf(u8, out, "\"method\":\"exit\"") == null);
+    try testing.expect(sess.awaitingShutdown());
+    sess.consumeOutbound(out.len);
+
+    // initialize was id 1, so shutdown is id 2.
+    const reply = try framed(gpa, "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}");
+    defer gpa.free(reply);
+    sess.feed(reply);
+    try testing.expect(!sess.awaitingShutdown());
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(), "\"method\":\"exit\"") != null);
+}
+
+test "a server that never answers shutdown gets exit on the deadline, once" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    try readySession(&sess, false);
+    sess.consumeOutbound(sess.outbound().len);
+
+    sess.shutdown();
+    sess.consumeOutbound(sess.outbound().len);
+    sess.sendExit();
+    try testing.expect(!sess.awaitingShutdown());
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(), "\"method\":\"exit\"") != null);
+    sess.consumeOutbound(sess.outbound().len);
+
+    // A reply straggling in after the deadline must not send a second
+    // exit.
+    const reply = try framed(gpa, "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}");
+    defer gpa.free(reply);
+    sess.feed(reply);
+    try testing.expectEqual(@as(usize, 0), sess.outbound().len);
+}
+
+test "an error reply to shutdown still releases exit" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    try readySession(&sess, false);
+    sess.consumeOutbound(sess.outbound().len);
+
+    sess.shutdown();
+    sess.consumeOutbound(sess.outbound().len);
+    const reply = try framed(gpa, "{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32603,\"message\":\"no\"}}");
+    defer gpa.free(reply);
+    sess.feed(reply);
+    try testing.expect(!sess.awaitingShutdown());
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(), "\"method\":\"exit\"") != null);
 }
 
 test "a dying server releases everyone waiting on it" {
