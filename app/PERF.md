@@ -336,3 +336,14 @@ present_interval p50 reads ≥50ms was measured off-glass and is NOT a
 scoreboard number. The windowed 15.5ms row can only be reproduced with
 the bench window visibly on the active Space — check the glass, not
 just the process list.
+
+Addendum, same day: the first on-glass run after the tripwire landed
+(Seth's, from the daily driver) surfaced the axis the scoreboard was
+missing — the DISPLAY. It ran on a 60Hz external monitor: presents
+locked at 16667µs (tripwire silent, a valid run), cat 0.971s at a much
+wider grid (fill p50 100µs — roughly twice the record's cells), and
+present_lag p50 23.9ms, which is the same ~1.4-frame compositor ratio
+July measured at 120Hz. Every headline latency row above is a 120Hz
+built-in-panel number; on 60Hz glass the vsync floor alone is 16.7ms
+and quiet-key p50 cannot reach 15.5. Scoreboard rows need the display
+stated next to the geometry — a number without both is not comparable.
