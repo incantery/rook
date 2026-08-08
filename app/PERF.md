@@ -337,13 +337,25 @@ scoreboard number. The windowed 15.5ms row can only be reproduced with
 the bench window visibly on the active Space — check the glass, not
 just the process list.
 
-Addendum, same day: the first on-glass run after the tripwire landed
-(Seth's, from the daily driver) surfaced the axis the scoreboard was
-missing — the DISPLAY. It ran on a 60Hz external monitor: presents
-locked at 16667µs (tripwire silent, a valid run), cat 0.971s at a much
-wider grid (fill p50 100µs — roughly twice the record's cells), and
-present_lag p50 23.9ms, which is the same ~1.4-frame compositor ratio
-July measured at 120Hz. Every headline latency row above is a 120Hz
-built-in-panel number; on 60Hz glass the vsync floor alone is 16.7ms
-and quiet-key p50 cannot reach 15.5. Scoreboard rows need the display
-stated next to the geometry — a number without both is not comparable.
+Addendum, same day: the first real-world run after the tripwire landed
+(Seth's, from the daily driver) surfaced two things at once. First, the
+axis the scoreboard was missing — the DISPLAY: it ran on a 60Hz
+external monitor, where the cat phase (on glass, presents locked at
+16667µs) read 0.971s at roughly twice the record grid's cells (fill
+p50 100µs), and present_lag p50 23.9ms is the same ~1.4-frame
+compositor ratio July measured at 120Hz. Every headline latency row
+above is a 120Hz built-in-panel number; on 60Hz glass the vsync floor
+alone is 16.7ms and quiet-key p50 cannot reach 15.5. Scoreboard rows
+state their display next to their geometry, or they are not
+comparable.
+
+Second: visibility changed MID-RUN. The quiet-key phase ran throttled
+(present_interval pinned to 100.005ms — the window was still on the
+invisible Space) while the firehose and cat ran on glass after the
+operator switched over to watch. The firehose tripwire was correct
+about its own phase and silent about the bad one, so bench.sh now
+checks each latency phase separately; the quiet-key check keys on the
+throttle clock's exact ~100ms quantization, which the ~80ms key
+cadence cannot produce. There is still no on-glass quiet-key row for
+the 60Hz external — the first run where that phase passes its own
+tripwire supplies it.

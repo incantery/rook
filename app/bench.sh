@@ -57,6 +57,21 @@ done
 sleep 0.3
 c ctrlc >/dev/null
 c stats
+# Per-phase off-glass check. The window's visibility can CHANGE mid-run
+# (the first real-world run had a throttled quiet-key phase and an
+# on-glass cat — the operator switched Spaces to watch), so each latency
+# phase vouches for itself. Here the discriminator is the throttle
+# clock's quantization: on glass, intervals follow the ~80ms key
+# cadence; occluded, they pin to exactly ~100ms. The 95ms threshold
+# splits those two — it is NOT a generic slow-frame test, and it breaks
+# if the key cadence above is ever raised to ~100ms.
+pi=$(c stats | grep -o 'present_interval_us n=[0-9]* p50=[0-9]*' | grep -o 'p50=[0-9]*' | cut -d= -f2)
+if [ -n "$pi" ] && [ "$pi" -ge 95000 ]; then
+  echo ""
+  echo "*** OFF-GLASS PHASE: present_interval p50=${pi}us pins to the 10Hz"
+  echo "*** throttle clock — the window was occluded during the keystroke"
+  echo "*** phase and its latency numbers are NOT scoreboard numbers."
+fi
 
 echo ""
 echo "== firehose: full-width yes, 5s =="
