@@ -359,3 +359,22 @@ throttle clock's exact ~100ms quantization, which the ~80ms key
 cadence cannot produce. There is still no on-glass quiet-key row for
 the 60Hz external — the first run where that phase passes its own
 tripwire supplies it.
+
+The valid run arrived the same day (window visible from launch, 66x38,
+120Hz glass, 60Hz external also attached): quiet-key key→photon
+**p50 23.0 / p95 29.0ms**, phase proven on-glass by its intervals
+sitting on the vsync grid (11-12 × 8333µs — the ~80ms cadence plus nc
+overhead, NOT the 100.005ms throttle clock), tripwire silent. Both
+per-phase checks have now been exercised in both directions on real
+runs.
+
+Two corrections against the rows above, with the conditions stated:
+present_lag p50 reads 21.6ms where July recorded 13.8 — the whole
+quiet-key delta (key_commit is BETTER, 0.9ms vs 2.3) — and cat reads
+0.971-0.980s across a 113x61 AND a 66x38 grid, retiring the
+twice-the-cells explanation: cat is parse-bound and grid-insensitive.
+Both gaps arrived together with a second display attached and a loaded
+session (Chrome, Xcode, zoom resident). WATCH: rerun single-display on
+an idle machine before treating either as a regression; if present_lag
+still reads ~21ms with the external unplugged, something in the
+compositing path changed and the July rows need re-earning.
