@@ -33,14 +33,100 @@ extern "c" fn write(fd: fd_t, buf: [*]const u8, n: usize) isize;
 // Values from macOS headers.
 const F_GETFD = 1;
 const F_SETFD = 2;
+const F_GETFL = 3;
+const F_SETFL = 4;
 const FD_CLOEXEC = 1;
+const O_NONBLOCK = 0x0004;
 const TIOCSCTTY = 0x20007461;
 const TIOCSWINSZ = 0x80087467;
 extern "c" var environ: [*:null]const ?[*:0]const u8;
 
+pub const Pollfd = extern struct {
+    fd: fd_t,
+    events: i16,
+    revents: i16 = 0,
+};
+pub const POLLIN: i16 = 0x0001;
+pub const POLLOUT: i16 = 0x0004;
+pub const POLLERR: i16 = 0x0008;
+pub const POLLHUP: i16 = 0x0010;
+extern "c" fn poll(fds: [*]Pollfd, nfds: u32, timeout_ms: c_int) c_int;
+
+/// One poll on one fd — the shape both the gather loop's waits and
+/// writeMaster's backpressure need. Returns the revents, 0 on timeout,
+/// and folds a poll error into POLLERR so callers have one channel.
+pub fn pollOne(fd: fd_t, events: i16, timeout_ms: c_int) i16 {
+    var fds = [1]Pollfd{.{ .fd = fd, .events = events }};
+    const r = poll(&fds, 1, timeout_ms);
+    if (r < 0) return POLLERR;
+    if (r == 0) return 0;
+    return fds[0].revents;
+}
+
+/// The many-fd spelling, for the bridge poll's pty+idle-pipe pair.
+pub fn pollMany(fds: [*]Pollfd, n: u32, timeout_ms: c_int) c_int {
+    return poll(fds, n, timeout_ms);
+}
+
+extern "c" fn pipe(fds: *[2]fd_t) c_int;
+
+/// A non-blocking, cloexec self-pipe — the parse stage's way to
+/// interrupt a gather-stage bridge poll. Null when the OS refuses;
+/// the pipeline still runs, bridge polls just ride out their timeout.
+pub fn makePipeNb() ?[2]fd_t {
+    var fds: [2]fd_t = undefined;
+    if (pipe(&fds) < 0) return null;
+    for (fds) |fd| {
+        _ = fcntl(fd, F_SETFD, @as(c_int, FD_CLOEXEC));
+        _ = setNonblock(fd);
+    }
+    return fds;
+}
+
+pub fn writeByte(fd: fd_t, b: u8) bool {
+    return write(fd, &[1]u8{b}, 1) == 1;
+}
+
+/// Empty a non-blocking fd (the idle pipe, after its wake fired).
+pub fn drainFd(fd: fd_t) void {
+    var t: [16]u8 = undefined;
+    while (read(fd, &t, t.len) > 0) {}
+}
+
+pub fn closeFd(fd: fd_t) void {
+    _ = close(fd);
+}
+
+/// Put the fd in non-blocking mode. The gather loop cannot run on a
+/// blocking master — a blocking read would park it on a quiet pty
+/// with no way to notice the parse stage. True on success.
+pub fn setNonblock(fd: fd_t) bool {
+    const flags = fcntl(fd, F_GETFL, @as(c_int, 0));
+    if (flags < 0) return false;
+    return fcntl(fd, F_SETFL, @as(c_int, flags | O_NONBLOCK)) >= 0;
+}
+
 extern "c" fn killpg(pgrp: pid_t, sig: c_int) c_int;
 extern "c" fn tcgetpgrp(fd: fd_t) pid_t;
 extern "c" fn usleep(us: u32) c_int;
+extern "c" fn __error() *c_int;
+const EAGAIN = 35; // macOS EAGAIN == EWOULDBLOCK
+
+fn errno() c_int {
+    return __error().*;
+}
+
+extern "c" fn pthread_set_qos_class_self_np(qos: c_uint, rel: c_int) c_int;
+const QOS_CLASS_USER_INITIATED: c_uint = 0x19;
+
+/// Raise the calling thread to user-initiated QoS. Both halves of the
+/// read pipeline feed content the user is watching, and at default QoS
+/// the scheduler parks them on efficiency cores whose wakeup latency
+/// is large against the ~10µs producer/consumer cadence — ghostty
+/// measured 15% throughput on this alone (their termio setQosClass).
+pub fn setQosUserInitiated() void {
+    _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+}
 
 pub const SIGHUP: c_int = 1;
 pub const SIGKILL: c_int = 9;
@@ -166,11 +252,36 @@ pub const Pty = struct {
         return @intCast(n);
     }
 
+    /// The non-blocking spelling, for the gather loop: it has to tell
+    /// "queue momentarily dry" (bridgeable) apart from "child gone"
+    /// (the stream is over), which the blocking read folds together.
+    pub const ReadNb = union(enum) { got: usize, dry, gone };
+    pub fn readMasterNb(self: *Pty, buf: []u8) ReadNb {
+        const n = read(self.master, buf.ptr, buf.len);
+        if (n > 0) return .{ .got = @intCast(n) };
+        // n == 0 is EOF; a negative with EAGAIN is an empty queue and
+        // anything else (EIO, EBADF) is the child going away.
+        if (n < 0 and errno() == EAGAIN) return .dry;
+        return .gone;
+    }
+
     /// Write input bytes to the master (keystrokes for the child).
+    ///
+    /// The master runs non-blocking once a session's read pipeline is
+    /// up (O_NONBLOCK is a property of the file description, so the
+    /// read side's choice binds this side too). A full input queue —
+    /// a large paste into a slow reader — then answers EAGAIN, and
+    /// dropping the rest of the paste on the floor is not an option:
+    /// wait for writability and continue.
     pub fn writeMaster(self: *Pty, bytes: []const u8) !void {
         var off: usize = 0;
         while (off < bytes.len) {
             const n = write(self.master, bytes.ptr + off, bytes.len - off);
+            if (n < 0 and errno() == EAGAIN) {
+                const ev = pollOne(self.master, POLLOUT, 1000);
+                if (ev & (POLLERR | POLLHUP) != 0) return error.WriteFailed;
+                continue;
+            }
             if (n <= 0) return error.WriteFailed;
             off += @intCast(n);
         }

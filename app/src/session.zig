@@ -16,6 +16,16 @@ const Effects = Handler.Effects;
 
 extern "c" fn os_unfair_lock_lock(l: *u32) void;
 extern "c" fn os_unfair_lock_unlock(l: *u32) void;
+
+// GCD semaphores, for the read pipeline's ring. Zig 0.16 retired
+// std.Thread's Mutex/Condition; these are the mac-native primitive the
+// app already stands on elsewhere (dispatch_async_f in macos.zig), and
+// a bounded SPSC ring wants counting semaphores anyway.
+extern "c" fn dispatch_semaphore_create(value: isize) ?*anyopaque;
+extern "c" fn dispatch_semaphore_wait(sem: *anyopaque, timeout: u64) isize;
+extern "c" fn dispatch_semaphore_signal(sem: *anyopaque) isize;
+extern "c" fn dispatch_release(obj: *anyopaque) void;
+const dispatch_time_forever: u64 = ~@as(u64, 0);
 extern "c" fn usleep(us: u32) c_int;
 
 /// Who is reading this pty right now — see fgName. tcgetpgrp works on
@@ -69,6 +79,128 @@ fn EffectArg(comptime name: []const u8, comptime i: usize) type {
 /// only cap in the path — and ours is the copy that outlives the
 /// sequence, waiting for the main thread to drain it.
 const max_clipboard = 8 * 1024 * 1024;
+
+/// The state shared between the read pipeline's two stages: a fixed
+/// ring of buffers plus the metadata that rotates ownership between
+/// the gather thread (fills) and the parse thread (consumes). A buffer
+/// belongs to exactly one stage at a time, so buffer CONTENTS need no
+/// lock — only the ring metadata does. Ported from ghostty's termio
+/// pipeline (#13209 and the bb0ac4c72 idle-wake fix, MIT); the
+/// constants are theirs, each one measured, and none of the reasoning
+/// behind them is machine-specific enough to re-derive.
+const Pipeline = struct {
+    /// Ring depth: how many batches the gather stage may run ahead of
+    /// the parse stage before it blocks — which, via the kernel pty
+    /// queue, is also what keeps flow control on the child. Ghostty
+    /// measured: below 4 minor slowdowns, above 4 nothing.
+    const buffer_count = 4;
+    /// One batch is also the unit of work per terminal-lock hold, so
+    /// this bounds both gather latency and lock hold time.
+    const buffer_capacity = 64 * 1024;
+    /// Gathering a full kernel queue's worth (~1KiB on macOS) means
+    /// the writer is saturated and worth briefly waiting on; anything
+    /// smaller is an interactive trickle that must deliver at once.
+    const bridge_threshold = 1024;
+    /// Nonblocking re-read retries before sleeping in poll: the
+    /// writer's refill usually lands within microseconds, and a spin
+    /// bridges most gaps for the cost of a ~0.5µs syscall each.
+    const bridge_spin_max = 16;
+    /// One bridge poll's wait for the writer's next refill.
+    const bridge_poll_timeout_ms = 1;
+    /// The most one batch may spend bridging before it delivers
+    /// regardless — well under a display frame, so batching is
+    /// invisible on screen.
+    const gather_budget_s: f64 = 0.003;
+
+    /// Ghostty guards the ring with a mutex + two condvars; Zig 0.16
+    /// retired std.Thread's, so rook's port leans on the shape of the
+    /// problem instead: single producer, single consumer. Each stage
+    /// OWNS its ring index (head is the gather's, tail is the
+    /// parser's — never shared), two GCD semaphores carry the
+    /// blocking and the ordering, and one atomic counter answers the
+    /// only cross-stage question the idle rule needs ("is the parser
+    /// out of work?").
+    ///
+    /// Counts free slots; the gather waits on it when the ring is
+    /// full, which is the backpressure that lets the kernel queue
+    /// push back on the child.
+    sem_free: ?*anyopaque = null,
+    /// Counts published batches, plus one final signal for done.
+    sem_ready: ?*anyopaque = null,
+    /// Valid bytes per slot, set at publish time; the semaphore
+    /// signal orders the write against the parser's read.
+    lens: [buffer_count]usize = @splat(0),
+    /// Published, unconsumed batches. The idle test: the parser
+    /// dropping this to zero while `bridging` is set fires the wake.
+    outstanding: std.atomic.Value(i32) = .init(0),
+    /// Set while the gather stage sleeps in a bridge poll. The parser
+    /// writes the idle pipe only while this is set, so an interactive
+    /// terminal never pays the syscalls.
+    bridging: std.atomic.Value(bool) = .init(false),
+    /// The stream is over; the parser drains the ring and exits.
+    done: std.atomic.Value(bool) = .init(false),
+    /// The self-pipe that lets the parser interrupt a bridge poll the
+    /// moment it runs out of batches — bridging is only free while
+    /// the parser is busy. -1 when unavailable; polls then simply
+    /// ride out their 1ms timeout.
+    idle_read: ptypkg.fd_t = -1,
+    idle_write: ptypkg.fd_t = -1,
+    bufs: [buffer_count][buffer_capacity]u8 = undefined,
+
+    /// False when the OS refused a semaphore — the caller falls back
+    /// to the serial loop.
+    fn open(self: *Pipeline) bool {
+        self.sem_free = dispatch_semaphore_create(buffer_count);
+        self.sem_ready = dispatch_semaphore_create(0);
+        if (self.sem_free == null or self.sem_ready == null) {
+            self.close();
+            return false;
+        }
+        if (ptypkg.makePipeNb()) |fds| {
+            self.idle_read = fds[0];
+            self.idle_write = fds[1];
+        }
+        return true;
+    }
+
+    fn close(self: *Pipeline) void {
+        // A dispatch semaphore released below its creation value
+        // traps (a slot the gather claimed and never published leaves
+        // sem_free one short). Both stages are joined by now, so top
+        // the count back up — extra signals with no waiter are
+        // harmless, a short release is an abort.
+        if (self.sem_free) |sem| {
+            for (0..buffer_count) |_| _ = dispatch_semaphore_signal(sem);
+            dispatch_release(sem);
+        }
+        if (self.sem_ready) |sem| dispatch_release(sem);
+        if (self.idle_read >= 0) {
+            ptypkg.closeFd(self.idle_read);
+            ptypkg.closeFd(self.idle_write);
+        }
+    }
+
+    const BridgeEv = enum { data, idle, quiet };
+
+    /// One bridge wait: the pty for the writer's refill, the idle
+    /// pipe for the parser running dry. `quiet` means the full
+    /// timeout passed (the burst is over) — a poll error reads the
+    /// same, deliver and let the read path classify the fd.
+    fn bridgePoll(self: *Pipeline, master: ptypkg.fd_t) BridgeEv {
+        var fds = [2]ptypkg.Pollfd{
+            .{ .fd = master, .events = ptypkg.POLLIN },
+            .{ .fd = self.idle_read, .events = ptypkg.POLLIN },
+        };
+        const n: u32 = if (self.idle_read >= 0) 2 else 1;
+        const r = ptypkg.pollMany(&fds, n, bridge_poll_timeout_ms);
+        if (r <= 0) return .quiet;
+        if (n == 2 and fds[1].revents & ptypkg.POLLIN != 0) {
+            ptypkg.drainFd(self.idle_read);
+            return .idle;
+        }
+        return .data;
+    }
+};
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -406,7 +538,19 @@ pub const Session = struct {
         self.gpa.destroy(self);
     }
 
+    /// The parse half of the read pipeline. The old loop here did
+    /// blocking_read → lock → parse per read, which on macOS means per
+    /// KILOBYTE: the kernel tty queue caps every master read at ~1KiB
+    /// no matter the buffer, so every lock, wake and kick was paid 64
+    /// times per 64KB — and worse, the child sat blocked on a full
+    /// 1KiB queue whenever we were parsing instead of reading. Ghostty
+    /// found and fixed the same 2023-vintage loop (#13209); this is
+    /// their two-stage shape on rook's session: a gather thread drains
+    /// the pty into a ring of large buffers while this thread parses
+    /// the previous batch, so the child runs ahead and the per-batch
+    /// costs are paid per 64KB instead of per 1KiB.
     fn readLoop(self: *Session) void {
+        ptypkg.setQosUserInitiated();
         var handler = self.term.vtHandler();
         handler.effects = .{
             .write_pty = &effectWritePty,
@@ -432,24 +576,217 @@ pub const Session = struct {
         var stream: vt.TerminalStream = .init(.{ .handler = handler, .allocator = self.gpa });
         defer stream.deinit();
 
-        var buf: [64 * 1024]u8 = undefined;
+        // The pipeline cannot run on a blocking fd — a blocking read
+        // would park the gather thread on a quiet pty. If the fd
+        // refuses (it cannot, on a real master), fall back to the old
+        // serial loop rather than dying: slower is not broken.
+        if (!ptypkg.setNonblock(self.pty.master)) {
+            self.readLoopSerial(&stream);
+            return;
+        }
+
+        var pipeline: Pipeline = .{};
+        if (!pipeline.open()) {
+            self.readLoopSerial(&stream);
+            return;
+        }
+        defer pipeline.close();
+        const gather = std.Thread.spawn(.{}, gatherLoop, .{ self, &pipeline }) catch {
+            // No thread, no pipeline (the deferred close handles it).
+            // The fd is already non-blocking, so the serial fallback
+            // polls instead of blocking.
+            self.readLoopSerial(&stream);
+            return;
+        };
+        defer gather.join();
+
+        // The parser's own ring index — single consumer, never shared.
+        var tail: usize = 0;
         while (true) {
-            const n = self.pty.readMaster(&buf);
-            if (n == 0) break;
-            _ = @import("stats.zig").global.bytes_in.fetchAdd(n, .monotonic);
+            _ = dispatch_semaphore_wait(pipeline.sem_ready.?, dispatch_time_forever);
+            if (pipeline.outstanding.load(.acquire) == 0) {
+                // A ready-signal with nothing published is the done
+                // signal (the gather sends exactly one on its way out,
+                // after any final batch). The ORDER matters: done is
+                // checked only with the ring empty, so a done that
+                // lands while batches are still queued cannot drop
+                // the tail of the stream.
+                if (pipeline.done.load(.acquire)) break;
+                continue;
+            }
+            const batch = pipeline.bufs[tail][0..pipeline.lens[tail]];
+            tail = (tail + 1) % Pipeline.buffer_count;
+
+            _ = @import("stats.zig").global.bytes_in.fetchAdd(batch.len, .monotonic);
             self.last_out_ms.store(clockMs(), .monotonic);
-            _ = self.out_bytes.fetchAdd(n, .monotonic);
-            // Yield to a waiting renderer before re-acquiring.
+            _ = self.out_bytes.fetchAdd(batch.len, .monotonic);
+            // Yield to a waiting renderer before re-acquiring. The
+            // batch buffer is ours until the slot is released below,
+            // so parsing happens with no pipeline state held.
             while (self.snapshot_wanted.load(.acquire)) _ = usleep(50);
             self.mutex.lock();
-            stream.nextSlice(buf[0..n]);
+            stream.nextSlice(batch);
             self.mutex.unlock();
+
+            // Release the slot — and if that emptied the ring while
+            // the gather is sitting in a bridge poll, wake it:
+            // bridging is only free while this thread is busy, and
+            // every microsecond a batch is held past our going idle
+            // is added straight to output latency (ghostty's
+            // bb0ac4c72, the fps-fire regression).
+            const was = pipeline.outstanding.fetchSub(1, .acq_rel);
+            _ = dispatch_semaphore_signal(pipeline.sem_free.?);
+            if (was == 1 and pipeline.bridging.load(.acquire) and pipeline.idle_write >= 0) {
+                _ = ptypkg.writeByte(pipeline.idle_write, 'i');
+            }
+
             if (self.kick) |k| k(self.kick_ctx, self);
         }
         // Child gone. No kick here: the display link ticks at 120fps and
         // collapses the pane on its next pass — kicking from this thread
         // would let collapse (and our own join) run on the dying thread.
         self.exited.store(true, .release);
+    }
+
+    /// The pre-pipeline loop, kept as the fallback for a pty that
+    /// cannot go non-blocking or a machine that cannot spare a thread.
+    /// Handles both fd modes: a dry non-blocking read polls and
+    /// retries, a blocking read never says dry.
+    fn readLoopSerial(self: *Session, stream: *vt.TerminalStream) void {
+        var buf: [64 * 1024]u8 = undefined;
+        while (true) {
+            const n = switch (self.pty.readMasterNb(&buf)) {
+                .got => |n| n,
+                .dry => {
+                    _ = ptypkg.pollOne(self.pty.master, ptypkg.POLLIN, -1);
+                    continue;
+                },
+                .gone => break,
+            };
+            _ = @import("stats.zig").global.bytes_in.fetchAdd(n, .monotonic);
+            self.last_out_ms.store(clockMs(), .monotonic);
+            _ = self.out_bytes.fetchAdd(n, .monotonic);
+            while (self.snapshot_wanted.load(.acquire)) _ = usleep(50);
+            self.mutex.lock();
+            stream.nextSlice(buf[0..n]);
+            self.mutex.unlock();
+            if (self.kick) |k| k(self.kick_ctx, self);
+        }
+        self.exited.store(true, .release);
+    }
+
+    /// The gather half: drain the kernel's ~1KiB-capped pty queue into
+    /// the current ring buffer, bridge the writer's microsecond refill
+    /// gaps when the stream is saturated, publish, repeat. Owns all fd
+    /// waiting; exits when the child goes away, which tells the parse
+    /// half through `done`. Ported from ghostty #13209 + bb0ac4c72,
+    /// constants and all — each one was measured there, and none of
+    /// the reasoning is machine-specific enough to re-derive.
+    fn gatherLoop(self: *Session, pipeline: *Pipeline) void {
+        ptypkg.setQosUserInitiated();
+        // However we exit, the parser has to hear the stream is over:
+        // exactly one ready-signal with nothing published, after any
+        // final batch.
+        defer {
+            pipeline.done.store(true, .release);
+            _ = dispatch_semaphore_signal(pipeline.sem_ready.?);
+        }
+
+        // The gather's own ring index — single producer, never shared.
+        var head: usize = 0;
+        while (true) {
+            // Claim the next free buffer. Blocking here means the
+            // parse stage is a full ring behind — exactly when reading
+            // should stop and the kernel queue should push back on
+            // the child.
+            _ = dispatch_semaphore_wait(pipeline.sem_free.?, dispatch_time_forever);
+            const buf: *[Pipeline.buffer_capacity]u8 = &pipeline.bufs[head];
+
+            var total: usize = 0;
+            var spins: usize = 0;
+            var bridge_began: ?f64 = null;
+            var gone = false;
+
+            gather: while (total < Pipeline.buffer_capacity) {
+                switch (self.pty.readMasterNb(buf[total..])) {
+                    .got => |n| {
+                        total += n;
+                        // Each refill gap gets a fresh spin budget.
+                        spins = 0;
+                    },
+                    .gone => {
+                        gone = true;
+                        break :gather;
+                    },
+                    .dry => {
+                        // Below the threshold this is an interactive
+                        // trickle — a keystroke echo, a prompt — and
+                        // it must deliver with no added latency. At or
+                        // past it the writer filled the kernel queue:
+                        // a bulk stream worth briefly waiting on.
+                        if (total < Pipeline.bridge_threshold) break :gather;
+
+                        // The refill usually lands within microseconds;
+                        // a bounded burst of retries bridges most gaps
+                        // without paying a sleep+wake.
+                        if (spins < Pipeline.bridge_spin_max) {
+                            spins += 1;
+                            continue :gather;
+                        }
+
+                        // Still dry — sleep in poll for the refill,
+                        // inside a total budget that keeps batching
+                        // invisible on screen. The frame loop's own
+                        // clock; ns-grade precision is not needed to
+                        // bound a millisecond budget.
+                        const now = CACurrentMediaTime();
+                        if (bridge_began) |began| {
+                            if (now - began >= Pipeline.gather_budget_s) break :gather;
+                        } else bridge_began = now;
+
+                        // Bridging is only free while the parser is
+                        // busy. If it is already idle, deliver now —
+                        // and a request/response writer (frame then
+                        // cursor query) is BLOCKED on a reply to data
+                        // sitting in this very buffer, so a poll here
+                        // would always sleep its full timeout.
+                        if (pipeline.outstanding.load(.acquire) == 0) break :gather;
+                        pipeline.bridging.store(true, .release);
+                        const ev = pipeline.bridgePoll(self.pty.master);
+                        pipeline.bridging.store(false, .release);
+                        // Woken by the parser going idle: deliver what
+                        // we have; the pty's data waits for the next
+                        // batch. Quiet for the whole timeout: the
+                        // burst is over. Otherwise there is data (or
+                        // HUP, which the next read maps to gone).
+                        if (ev == .idle or ev == .quiet) break :gather;
+                        continue :gather;
+                    },
+                }
+            }
+
+            if (total > 0) {
+                pipeline.lens[head] = total;
+                head = (head + 1) % Pipeline.buffer_count;
+                _ = pipeline.outstanding.fetchAdd(1, .release);
+                _ = dispatch_semaphore_signal(pipeline.sem_ready.?);
+            } else if (!gone) {
+                // Nothing gathered and the stream lives: the claimed
+                // slot goes back unused, or the free count drifts down
+                // by one per empty wake and the ring slowly wedges.
+                _ = dispatch_semaphore_signal(pipeline.sem_free.?);
+            }
+            if (gone) return;
+
+            // A full buffer means the stream is hot: claim the next
+            // slot with no intervening wait. Otherwise park until the
+            // pty has data again. HUP with no data pending is the
+            // child gone; with data pending, drain first and let the
+            // read report it.
+            if (total == Pipeline.buffer_capacity) continue;
+            const ev = ptypkg.pollOne(self.pty.master, ptypkg.POLLIN, -1);
+            if (ev & ptypkg.POLLIN == 0 and ev & (ptypkg.POLLHUP | ptypkg.POLLERR) != 0) return;
+        }
     }
 
     fn fromHandler(h: *Handler) *Session {
@@ -614,3 +951,107 @@ pub const Session = struct {
         self.pty.setSize(.{ .ws_row = rows, .ws_col = cols }) catch {};
     }
 };
+
+// ---------------------------------------------------------------- tests
+
+const testing = std.testing;
+
+test "the pipeline delivers every batch, in order, under backpressure" {
+    // The ring's contract, exercised without a pty: a producer
+    // publishes more batches than the ring holds (so the free-slot
+    // wait must engage), a consumer verifies content and order, and
+    // the done signal ends the stream exactly once.
+    var pipeline: Pipeline = .{};
+    try testing.expect(pipeline.open());
+    defer pipeline.close();
+
+    const rounds = Pipeline.buffer_count * 5;
+    const Producer = struct {
+        fn run(p: *Pipeline) void {
+            var head: usize = 0;
+            for (0..rounds) |i| {
+                _ = dispatch_semaphore_wait(p.sem_free.?, dispatch_time_forever);
+                const buf = &p.bufs[head];
+                // A patterned batch whose length and bytes both encode
+                // its sequence number.
+                const len = 128 + i;
+                @memset(buf[0..len], @intCast(i % 251));
+                p.lens[head] = len;
+                head = (head + 1) % Pipeline.buffer_count;
+                _ = p.outstanding.fetchAdd(1, .release);
+                _ = dispatch_semaphore_signal(p.sem_ready.?);
+            }
+            p.done.store(true, .release);
+            _ = dispatch_semaphore_signal(p.sem_ready.?);
+        }
+    };
+    const t = try std.Thread.spawn(.{}, Producer.run, .{&pipeline});
+    defer t.join();
+
+    var tail: usize = 0;
+    var seen: usize = 0;
+    while (true) {
+        _ = dispatch_semaphore_wait(pipeline.sem_ready.?, dispatch_time_forever);
+        if (pipeline.outstanding.load(.acquire) == 0) {
+            if (pipeline.done.load(.acquire)) break;
+            continue;
+        }
+        const batch = pipeline.bufs[tail][0..pipeline.lens[tail]];
+        tail = (tail + 1) % Pipeline.buffer_count;
+        try testing.expectEqual(@as(usize, 128 + seen), batch.len);
+        for (batch) |b| try testing.expectEqual(@as(u8, @intCast(seen % 251)), b);
+        seen += 1;
+        _ = pipeline.outstanding.fetchSub(1, .acq_rel);
+        _ = dispatch_semaphore_signal(pipeline.sem_free.?);
+    }
+    try testing.expectEqual(rounds, seen);
+}
+
+test "a real shell's stream survives the pipeline end to end" {
+    // The smoke test the ring test cannot be: a genuine pty, megabytes
+    // of bulk output saturating the gather's bridge path, then EOF —
+    // the whole two-thread lifecycle including the orderly shutdown.
+    const gpa = testing.allocator;
+    const s = try Session.start(
+        gpa,
+        testing.io,
+        "/bin/sh",
+        null,
+        // 2MB of x then a marker: bulk enough to rotate the ring many
+        // times over, and the marker's arrival proves the tail of the
+        // stream was not lost in the teardown race.
+        "dd if=/dev/zero bs=1024 count=2048 2>/dev/null | tr '\\0' 'x'; printf DONEMARK",
+        .default,
+        80,
+        24,
+        8,
+        16,
+        64 * 1024,
+    );
+    defer s.deinit();
+
+    // Park the parser briefly the way a renderer snapshot would: the
+    // gather then runs AHEAD — ring filling, backpressure engaging,
+    // the paths a keeping-up parser never visits.
+    s.snapshot_wanted.store(true, .release);
+    _ = usleep(200_000);
+    s.snapshot_wanted.store(false, .release);
+
+    // The command exits on its own; exited flips when the gather sees
+    // EOF and the parser drains. Bounded wait, honest failure.
+    var waited_ms: usize = 0;
+    while (!s.exited.load(.acquire) and waited_ms < 30_000) {
+        _ = usleep(10_000);
+        waited_ms += 10;
+    }
+    try testing.expect(s.exited.load(.acquire));
+    // Every byte reached the PARSER (out_bytes counts what was handed
+    // to the stream, not what was read off the fd).
+    try testing.expect(s.out_bytes.load(.monotonic) >= 2 * 1024 * 1024);
+
+    // And the marker made it through to the terminal itself, asked
+    // the way copy-mode's `/` asks.
+    const hits = s.searchBegin("DONEMARK");
+    s.searchEnd();
+    try testing.expect(hits > 0);
+}

@@ -378,3 +378,32 @@ session (Chrome, Xcode, zoom resident). WATCH: rerun single-display on
 an idle machine before treating either as a regression; if present_lag
 still reads ~21ms with the external unplugged, something in the
 compositing path changed and the July rows need re-earning.
+
+## The IO pipeline lands (2026-08-07, same day as the bump)
+
+Ghostty's #13209 discovery, adopted: macOS hands a pty master at most
+~1KiB per read no matter the buffer, so the old read→lock→parse loop
+paid its per-cycle costs per kilobyte AND left the child blocked on a
+full kernel queue whenever rook was parsing instead of reading. Now a
+gather thread drains the pty into a 4×64KB ring while the parse thread
+consumes the previous batch — plus their bb0ac4c72 idle rule (bridging
+refill gaps is only free while the parser is busy; an idle parser gets
+the batch immediately, via a self-pipe poke) and user-initiated QoS on
+both threads. Zig 0.16 has no std mutex/condvar, so the ring runs
+SPSC on two GCD semaphores and one atomic — each stage owns its own
+index.
+
+Same-day A/B, same machine, same off-glass conditions (cat is
+parse-bound and today's on-glass run read within 1% of off-glass):
+
+| metric | serial loop (morning) | pipeline | change |
+|---|---|---|---|
+| `time cat` 150MB | 0.971 s | **0.517–0.557 s** | −45% |
+| quiet-key key_commit p50 | 948–1048 µs | **758–847 µs** | −15% |
+| idle frames / 5s | 9–10 (the 2Hz HUD tick) | 9–10 | none |
+
+~280 MB/s parse→terminal, past nightly Ghostty's published 0.575s M4
+Max cat on this M3 Max. The −15% on key_commit is likely the QoS
+class (ghostty measured the same shape). The official scoreboard rows
+above still want an on-glass single-display re-run per the display
+rule — these numbers are the A/B, stated with their conditions.
