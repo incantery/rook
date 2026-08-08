@@ -343,7 +343,10 @@ pub const Session = struct {
                 .cols = cols,
                 .rows = rows,
                 .colors = colors,
-                .max_scrollback = scrollback,
+                // Upstream split the cap into bytes and lines; rook's
+                // config knob was always bytes, so it stays bytes and
+                // the line cap stays at the library's default.
+                .max_scrollback_bytes = scrollback,
             }),
             .pty = try ptypkg.Pty.open(.{ .ws_row = rows, .ws_col = cols }),
             .pid = undefined,
@@ -417,8 +420,16 @@ pub const Session = struct {
             .clipboard_write = &effectClipboardWrite,
             .title_changed = null,
             .pwd_changed = null,
+            // OSC 9;4 — the ConEmu progress protocol Claude Code
+            // emits. Arrived with the 08-07 bump; null until the
+            // chrome has somewhere to put it (TODO.md, the roadmap's
+            // progress slice — a per-pane progress state the status
+            // row and the claude plugin both want).
+            .progress_report = null,
         };
-        var stream: vt.TerminalStream = .initAlloc(self.gpa, handler);
+        // With an allocator, or OSC 52 clipboard ops are silently
+        // dropped — the old initAlloc spelling, now an Options field.
+        var stream: vt.TerminalStream = .init(.{ .handler = handler, .allocator = self.gpa });
         defer stream.deinit();
 
         var buf: [64 * 1024]u8 = undefined;
@@ -455,13 +466,17 @@ pub const Session = struct {
 
     /// OSC 9 / OSC 777. Same thread and same rule as the bell: copy what
     /// we need (the slices die with the call) and let the main thread
-    /// decide what a notification means.
-    fn effectNotify(h: *Handler, title: []const u8, body: []const u8) void {
+    /// decide what a notification means. The struct argument is
+    /// upstream's spelling of what began as rook's fork patch — the
+    /// bump that deleted the fork traded two slices for one struct,
+    /// named through EffectArg because the Action type has no public
+    /// spelling through lib_vt (same story as clipboard.Write).
+    fn effectNotify(h: *Handler, n: EffectArg("desktop_notification", 1)) void {
         const self = fromHandler(h);
-        self.notify_title_len = @min(title.len, self.notify_title.len);
-        @memcpy(self.notify_title[0..self.notify_title_len], title[0..self.notify_title_len]);
-        self.notify_body_len = @min(body.len, self.notify_body.len);
-        @memcpy(self.notify_body[0..self.notify_body_len], body[0..self.notify_body_len]);
+        self.notify_title_len = @min(n.title.len, self.notify_title.len);
+        @memcpy(self.notify_title[0..self.notify_title_len], n.title[0..self.notify_title_len]);
+        self.notify_body_len = @min(n.body.len, self.notify_body.len);
+        @memcpy(self.notify_body[0..self.notify_body_len], n.body[0..self.notify_body_len]);
         self.notify_pending = true;
     }
 
