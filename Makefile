@@ -104,10 +104,17 @@ providers:
 	  go build -o app/zig-out/bin/rook-provider-$$(basename $$d) ./$$d || exit 1; \
 	done
 
+# A plugin with its own go.mod (plugins/link, which carries rook-host
+# and a QR dependency the stdlib-only root module refuses) builds from
+# inside its directory; the rest build from the root as always.
 plugins:
 	@for d in $(PLUGIN_DIRS); do \
 	  echo "  plugin $$(basename $$d)"; \
-	  go build -o app/zig-out/bin/rook-plugin-$$(basename $$d) ./$$d || exit 1; \
+	  if [ -f $$d/go.mod ]; then \
+	    (cd $$d && go build -o $(CURDIR)/app/zig-out/bin/rook-plugin-$$(basename $$d) .) || exit 1; \
+	  else \
+	    go build -o app/zig-out/bin/rook-plugin-$$(basename $$d) ./$$d || exit 1; \
+	  fi; \
 	done
 
 # The daily driver: the ZIG app as /Applications/rook.app. ReleaseFast,
@@ -247,7 +254,11 @@ release-stage:
 	  $(GO_RELEASE) -o app/zig-out/bin/rook-provider-$$(basename $$d) ./$$d || exit 1; \
 	done
 	@for d in $(PLUGIN_DIRS); do \
-	  $(GO_RELEASE) -o app/zig-out/bin/rook-plugin-$$(basename $$d) ./$$d || exit 1; \
+	  if [ -f $$d/go.mod ]; then \
+	    (cd $$d && $(GO_RELEASE) -o $(CURDIR)/app/zig-out/bin/rook-plugin-$$(basename $$d) .) || exit 1; \
+	  else \
+	    $(GO_RELEASE) -o app/zig-out/bin/rook-plugin-$$(basename $$d) ./$$d || exit 1; \
+	  fi; \
 	done
 	mkdir -p $(STAGED_APP)/Contents/MacOS
 	sed 's/__VERSION__/$(VERSION:v%=%)/g' app/bundle/Info.plist > $(STAGED_APP)/Contents/Info.plist
