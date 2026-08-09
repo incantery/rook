@@ -56,6 +56,7 @@ const scenarios = [_]Scenario{
     .{ .name = "configdir", .what = "--config=DIR: one directory is the whole config, and the XDG one is not read", .run = configDir },
     .{ .name = "apply", .what = "config is a program: rook runs it, shows the diff, and applies nothing until told", .run = applyScenario },
     .{ .name = "setup", .what = "a rook with nothing configured asks, writes a starter, and opens it in the editor", .run = setupScenario },
+    .{ .name = "crash", .what = "a crash writes its record, and the next launch says so", .run = crashScenario },
     .{ .name = "pluginfetch", .what = "a plugin declared by source downloads itself on first use — no path in config", .run = pluginFetch },
     .{ .name = "claudewatch", .what = "the claude watcher: sessions are items with honest states, and a finished turn raises attention", .run = claudeWatch },
     .{ .name = "chrome", .what = "the personas: preset arrangements drive both bars, tabs live in the status bar and click", .run = chrome },
@@ -1866,6 +1867,87 @@ fn setMtime(path_z: [:0]const u8, sec: i64) !void {
 }
 
 // ---------------------------------------------------------------- setup
+
+/// Crash capture, end to end: a process that dies of SIGSEGV leaves a
+/// record, and the NEXT launch sweeps it, lists it, and says so.
+///
+/// The crashing launch is bare (runCmd, not the harness): the crash
+/// fires in crash.install, before AppKit or the ctl socket exist, so
+/// there is nothing to wait for — and if the crash test hook ever
+/// silently broke, the --config sandbox keeps the accidental live app
+/// off the developer's socket.
+fn crashScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var dir_buf: [128]u8 = undefined;
+    const dirz = try std.fmt.bufPrintZ(&dir_buf, "/tmp/rook-e2e-crash-{d}", .{getpid()});
+    const dir: []const u8 = dirz;
+    _ = h.runCmd("/tmp", &.{ "/bin/rm", "-rf", dirz.ptr }) catch {};
+    var mk_buf: [256]u8 = undefined;
+    const mk = try std.fmt.bufPrintZ(&mk_buf, "mkdir -p {s}/config {s}/state", .{ dir, dir });
+    _ = try h.runCmd("/tmp", &.{ "/bin/sh", "-c", mk.ptr });
+
+    // ABSOLUTE, for the same reason harness.spawn resolves it: runCmd
+    // chdirs its child, and build.zig hands the artifact by relative
+    // path.
+    var binz_buf: [640]u8 = undefined;
+    const binz = if (bin.len > 0 and bin[0] == '/')
+        try std.fmt.bufPrintZ(&binz_buf, "{s}", .{bin})
+    else blk: {
+        var cwd_buf: [512]u8 = undefined;
+        const cwd = getcwd(&cwd_buf, cwd_buf.len) orelse return error.AssertFailed;
+        break :blk try std.fmt.bufPrintZ(&binz_buf, "{s}/{s}", .{ std.mem.span(cwd), bin });
+    };
+    var state_env_buf: [192]u8 = undefined;
+    const state_env = try std.fmt.bufPrintZ(&state_env_buf, "XDG_STATE_HOME={s}/state", .{dir});
+    var cfg_arg_buf: [192]u8 = undefined;
+    const cfg_arg = try std.fmt.bufPrintZ(&cfg_arg_buf, "--config={s}/config", .{dir});
+
+    // Phase 1: die. SIGSEGV means a nonzero (signal) status — the
+    // interesting outcome is the sidecar, not the exit code.
+    _ = h.runCmd("/tmp", &.{
+        "/usr/bin/env",        state_env.ptr,
+        "ROOK_CRASH_CAPTURE=1", "ROOK_CRASH_TEST=segv",
+        binz.ptr,              "win",
+        cfg_arg.ptr,           "--no-activate",
+    }) catch {};
+
+    // …and again through the panic path — the other half of capture,
+    // the root-module override rather than a signal handler.
+    _ = h.runCmd("/tmp", &.{
+        "/usr/bin/env",        state_env.ptr,
+        "ROOK_CRASH_CAPTURE=1", "ROOK_CRASH_TEST=panic",
+        binz.ptr,              "win",
+        cfg_arg.ptr,           "--no-activate",
+    }) catch {};
+
+    // The records exist, are non-empty, and say what happened. The
+    // filenames carry pid+timestamp, so glob through a shell.
+    var cat_buf: [256]u8 = undefined;
+    const cat = try std.fmt.bufPrintZ(&cat_buf, "cat {s}/state/rook/crashes/crash-*.json > {s}/record.txt", .{ dir, dir });
+    _ = try h.runCmd("/tmp", &.{ "/bin/sh", "-c", cat.ptr });
+    var rec_buf: [8192]u8 = undefined;
+    var path_buf: [160]u8 = undefined;
+    const rec = try h.readFile(try std.fmt.bufPrint(&path_buf, "{s}/record.txt", .{dir}), &rec_buf);
+    try h.expectContains(rec, "signal: SIGSEGV", "the segv record names its signal");
+    try h.expectContains(rec, "panic: crash test", "the panic record carries its message");
+    try h.expectContains(rec, "\"addrs\":[\"0x", "the record carries a stack");
+    try h.expectContains(rec, "\"slide\":", "the record carries the ASLR slide");
+
+    // Phase 2: the next launch, same state home, through the harness.
+    // It sweeps, finds the record, and raises attention about it.
+    var state_val_buf: [160]u8 = undefined;
+    const app = try h.Instance.start(gpa, bin, .{
+        .env = &.{.{ "XDG_STATE_HOME", try std.fmt.bufPrint(&state_val_buf, "{s}/state", .{dir}) }},
+    });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    try h.expectContains(try app.ctl("crashes"), "signal: SIGSEGV", "ctl crashes lists the segv record");
+    try h.expectContains(try app.ctl("crashes"), "panic: crash test", "ctl crashes lists the panic record");
+    try h.expectContains(try app.ctl("notify"), "crashed last session", "the launch raised attention");
+    try h.expectContains(try app.ctl("crashes clear"), "cleared 2", "clear counts what it removed");
+    try h.expectContains(try app.ctl("crashes"), "no crashes", "cleared means cleared");
+}
 
 /// First run: rook asks rather than assuming.
 ///

@@ -232,7 +232,7 @@ release:
 	$(MAKE) release-stage VERSION=$(VERSION)
 	git tag -a $(VERSION) -m "rook $(VERSION)"
 	git push origin main $(VERSION)
-	gh release create $(VERSION) $(DIST)/$(RELEASE_ZIP) $(DIST)/checksums.txt --title "rook $(VERSION)" --generate-notes
+	gh release create $(VERSION) $(DIST)/$(RELEASE_ZIP) $(DIST)/checksums.txt $(DIST)/rook-$(VERSION)-unstripped.gz --title "rook $(VERSION)" --generate-notes
 
 # Everything up to the zip, with nothing irreversible in it — so the
 # packaging can be exercised without tagging or publishing:
@@ -265,6 +265,12 @@ release-stage:
 	@# install.sh points it at the app binary inside the bundle.
 	@# ditto -c -k, not zip: preserves xattrs and the ad-hoc signature exactly
 	ditto -c -k $(STAGE) $(DIST)/$(RELEASE_ZIP)
+	@# The unstripped binary rides the release as its own artifact: a
+	@# crash sidecar (crash.zig) is raw addresses plus a slide, readable
+	@# only against the exact binary that made them —
+	@#   atos -o rook-$(VERSION)-unstripped -s <slide> <addr ...>
+	@# — and this is the one release step that cannot be done later.
+	gzip -c app/zig-out/bin/rook > $(DIST)/rook-$(VERSION)-unstripped.gz
 	cd $(DIST) && shasum -a 256 $(RELEASE_ZIP) > checksums.txt
 	@# No backticks in this message: the shell would run what is in them.
 	@echo "staged $(DIST)/$(RELEASE_ZIP) — 'make release VERSION=$(VERSION)' tags and publishes"

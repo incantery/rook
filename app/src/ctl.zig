@@ -975,6 +975,24 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             @import("build_options").id,
         }) catch return;
         reply(fd, s);
+    } else if (std.mem.eql(u8, verb, "crashes")) {
+        // The crash sidecars crash.zig captured — the solo-dev QA loop:
+        // every crash rook (or an agent driving it) ever hits, listed.
+        // `crashes clear` deletes the records once they've been read.
+        const crashpkg = @import("crash.zig");
+        var dbuf: [1024]u8 = undefined;
+        const dir = crashpkg.dirPath(&dbuf) orelse {
+            reply(fd, "err no state dir\n");
+            return;
+        };
+        if (std.mem.eql(u8, rest, "clear")) {
+            const n = crashpkg.clearAll(dir);
+            var buf: [64]u8 = undefined;
+            reply(fd, std.fmt.bufPrint(&buf, "cleared {d}\n", .{n}) catch "cleared\n");
+            return;
+        }
+        var out: [8192]u8 = undefined;
+        reply(fd, crashpkg.list(dir, &out));
     } else if (std.mem.eql(u8, verb, "activity") and rest.len == 0) {
         // Per-pane pty liveness: `id\tout_ms\tin_ms\tfg\tcwd` — ms since
         // the child last wrote and the human last typed (-1 = never),

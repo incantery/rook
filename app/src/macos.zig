@@ -1360,6 +1360,15 @@ pub const App = struct {
         _ = CVDisplayLinkStart(link);
         self.link = link;
 
+        // The last session ended in a crash (crash.zig swept before
+        // AppKit came up): say so through the same ring, banner and
+        // dock bounce a plugin's attention.raise gets. The record is
+        // useless if nobody hears it exists.
+        if (@import("crash.zig").unread > 0) {
+            var body: [120]u8 = undefined;
+            self.raiseDirect("rook", "crashed last session", std.fmt.bufPrint(&body, "{d} record(s) — rook crashes | rook crashes clear", .{@import("crash.zig").unread}) catch "rook crashes");
+        }
+
         self.app.msgSend(void, "run", .{});
     }
 
@@ -7413,11 +7422,19 @@ pub const App = struct {
         }) catch return "params did not parse";
         defer parsed.deinit();
         if (parsed.value.title.len == 0) return "attention.raise needs a title";
+        self.raiseDirect(from, parsed.value.title, parsed.value.body);
+        return null;
+    }
 
+    /// The raise itself, callable from inside the app too — the crash
+    /// notice rides the same ring, banner and dock bounce a plugin's
+    /// raise does, because attention is attention and rook already
+    /// decided what that looks like.
+    pub fn raiseDirect(self: *App, from: []const u8, title: []const u8, body: []const u8) void {
         var r = Raise{};
         copyStr(&r.from, &r.from_len, from);
-        copyStr(&r.title, &r.title_len, parsed.value.title);
-        copyStr(&r.body, &r.body_len, parsed.value.body);
+        copyStr(&r.title, &r.title_len, title);
+        copyStr(&r.body, &r.body_len, body);
 
         self.draw_lock.lock();
         self.att_seq += 1;
@@ -7448,11 +7465,10 @@ pub const App = struct {
         // like. postNotification is main-thread-only work in AppKit terms,
         // but it is also what the OSC 9 reader threads already do.
         var titled: [128]u8 = undefined;
-        const title = std.fmt.bufPrint(&titled, "{s}: {s}", .{ r.fromStr(), r.titleStr() }) catch r.titleStr();
-        self.postNotification(title, r.bodyStr());
+        const banner_title = std.fmt.bufPrint(&titled, "{s}: {s}", .{ r.fromStr(), r.titleStr() }) catch r.titleStr();
+        self.postNotification(banner_title, r.bodyStr());
         if (!self.app.msgSend(bool, "isActive", .{}))
             _ = self.app.msgSend(c_long, "requestUserAttention:", .{@as(c_long, 10)});
-        return null;
     }
 
     /// `session.spawn` — a plugin asks for a pane running something.

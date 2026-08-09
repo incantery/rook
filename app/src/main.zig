@@ -28,6 +28,14 @@
 const std = @import("std");
 const vt = @import("ghostty-vt");
 const ptypkg = @import("pty.zig");
+const crashpkg = @import("crash.zig");
+
+/// Every panic in the process routes through crash.zig's recorder
+/// before the default handler — the record half of crash capture v1.
+/// Root-module decl because that is the only place Zig looks for it;
+/// with capture not armed (every CLI verb, dev builds) the recorder
+/// is a no-op and this IS the default panic.
+pub const panic = std.debug.FullPanic(crashpkg.panicHandler);
 
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]const u8;
 extern "c" fn chdir(path: [*:0]const u8) c_int;
@@ -168,6 +176,13 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         adoptLoginPath();
+        // Crash capture, before AppKit: an init crash is still a
+        // record. The APP only — a CLI verb crashing is on glass in
+        // front of whoever typed it.
+        {
+            const bo = @import("build_options");
+            crashpkg.install(bo.version, bo.id);
+        }
         const app = try @import("macos.zig").App.create(init);
         for (argv[1..]) |arg| {
             if (std.mem.eql(u8, std.mem.span(arg), "--no-activate")) app.activate = false;
