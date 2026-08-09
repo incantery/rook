@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -214,11 +215,27 @@ func (h *lk) open(stateDir string, port int, advertise bool) {
 		Executor: h,
 		HostName: h.hostName,
 	})
+	// The port must survive relaunches: a phone caches host:port from
+	// its pairing, and Bonjour rediscovery is a convenience that TCC
+	// can silently take away — a fresh ephemeral port on every launch
+	// would orphan every paired device that can't browse. First launch
+	// picks one ephemeral port; every launch after rebinds it, falling
+	// back to ephemeral (and re-persisting) only if something else
+	// holds it.
+	portFile := filepath.Join(stateDir, "port")
+	if port == 0 {
+		port = readPort(portFile)
+	}
 	ln, err := transport.Listen(fmt.Sprintf(":%d", port), id, srv.Handler())
+	if err != nil && port != 0 {
+		h.note(fmt.Sprintf("port %d is taken — moving to an ephemeral one; phones re-find it by Bonjour or a fresh QR", port))
+		ln, err = transport.Listen(":0", id, srv.Handler())
+	}
 	if err != nil {
 		h.fail("cannot listen: " + err.Error())
 		return
 	}
+	writePort(portFile, ln.Port())
 	h.srv, h.ln = srv, ln
 	if advertise {
 		adv, err := bonjour.Advertise(context.Background(), bonjour.Info{
@@ -236,6 +253,27 @@ func (h *lk) open(stateDir string, port int, advertise bool) {
 			h.adv = adv
 		}
 	}
+}
+
+// readPort recalls the previously bound port, 0 when there is nothing
+// worth recalling.
+func readPort(path string) int {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	p, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || p <= 0 || p > 65535 {
+		return 0
+	}
+	return p
+}
+
+// writePort persists the bound port for the next launch. Best effort:
+// a failure costs the next launch a fresh port, which is where we
+// started.
+func writePort(path string, port int) {
+	_ = os.WriteFile(path, []byte(strconv.Itoa(port)+"\n"), 0o600)
 }
 
 func (h *lk) fail(msg string) {
