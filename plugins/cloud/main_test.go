@@ -349,6 +349,40 @@ func agentPane() transcript.PaneActivity {
 	return transcript.PaneActivity{ID: 7, Fg: "claude", Path: "/usr/local/bin/claude", Cwd: "/Users/u/src/rook"}
 }
 
+// drainDelivery consumes the two frames typeAndSubmit emits — the
+// bracketed paste held open, then the bare submit — replying success
+// to each, and returns the paste frame (the one carrying the text; the
+// submit frame carries "submit_only" and nothing to read). A delivery
+// that lands is exactly this pair, and "typed once" means one paste.
+func drainDelivery(t *testing.T, frames chan string, c *conn) string {
+	t.Helper()
+	paste := readAndReply(t, frames, c)
+	if !strings.Contains(paste, `"no_submit":true`) {
+		t.Fatalf("first frame was not the held paste: %s", paste)
+	}
+	submit := readAndReply(t, frames, c)
+	if !strings.Contains(submit, `"submit_only":true`) {
+		t.Fatalf("second frame was not the submit: %s", submit)
+	}
+	return paste
+}
+
+func readAndReply(t *testing.T, frames chan string, c *conn) string {
+	t.Helper()
+	select {
+	case frame := <-frames:
+		var req struct {
+			ID uint64 `json:"id"`
+		}
+		json.Unmarshal([]byte(frame), &req)
+		c.deliver(req.ID, true, "", nil)
+		return frame
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected a frame, got none")
+		return ""
+	}
+}
+
 func TestAnswerRoundTripTypesOnceAndAcks(t *testing.T) {
 	sess := needsInputSession()
 	f := &fakeCloud{token: "tok"}
@@ -364,15 +398,11 @@ func TestAnswerRoundTripTypesOnceAndAcks(t *testing.T) {
 		br.collect(c, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
 		close(done)
 	}()
-	frame := <-frames
-	if !strings.Contains(frame, `"op":"session.send"`) || !strings.Contains(frame, `"pane":7`) || !strings.Contains(frame, "keep the test") {
+	// Delivery is paste-then-submit; the paste carries the text.
+	frame := drainDelivery(t, frames, c)
+	if !strings.Contains(frame, `"pane":7`) || !strings.Contains(frame, "keep the test") {
 		t.Fatalf("frame: %s", frame)
 	}
-	var req struct {
-		ID uint64 `json:"id"`
-	}
-	json.Unmarshal([]byte(frame), &req)
-	c.deliver(req.ID, true, "", nil)
 	<-done
 	if got := f.acked(); len(got) != 1 || got[0] != askID(sess) {
 		t.Fatalf("acks: %v", got)
@@ -413,15 +443,10 @@ func TestDeliveryIsRememberedAcrossARestart(t *testing.T) {
 		first.collect(c, []transcript.Session{sess}, []transcript.PaneActivity{agentPane()})
 		close(done)
 	}()
-	frame := <-frames
+	frame := drainDelivery(t, frames, c)
 	if !strings.Contains(frame, `"op":"session.send"`) {
 		t.Fatalf("first delivery did not type: %s", frame)
 	}
-	var req struct {
-		ID uint64 `json:"id"`
-	}
-	json.Unmarshal([]byte(frame), &req)
-	c.deliver(req.ID, true, "", nil)
 	<-done
 
 	// The process dies here. A brand-new bridge, same machine, same
@@ -820,11 +845,11 @@ func TestSpawnStartsClaudeThenTypesThePrompt(t *testing.T) {
 		t.Fatalf("activity frame: %s", actFrame)
 	}
 	reply(actFrame, `{"panes":[{"id":7,"fg":"claude","path":"/usr/local/bin/claude","cwd":"/Users/u/src/rook"},{"id":9,"fg":"claude","path":"/usr/local/bin/claude","cwd":"/Users/u/src/rook"}]}`)
-	sendFrame := <-frames
-	if !strings.Contains(sendFrame, `"op":"session.send"`) || !strings.Contains(sendFrame, `"pane":9`) || !strings.Contains(sendFrame, "flaky test") {
+	// The prompt rides paste-then-submit, to pane 9.
+	sendFrame := drainDelivery(t, frames, c)
+	if !strings.Contains(sendFrame, `"pane":9`) || !strings.Contains(sendFrame, "flaky test") {
 		t.Fatalf("send frame: %s", sendFrame)
 	}
-	reply(sendFrame, "null")
 	<-done
 	if got := f.cmdAcked(); len(got) != 1 || got[0] != "spawn:rook:abc" {
 		t.Fatalf("acks: %v", got)

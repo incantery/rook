@@ -31,6 +31,27 @@ func dropped(note string) link.Outcome {
 	return link.Outcome{Disposition: link.Dropped, Note: note}
 }
 
+// submitSettle is how long the paste is left to settle before the CR
+// that submits it. An agent TUI that collapses a large paste into a
+// placeholder draft eats a CR glued to the same burst — so type,
+// let the TUI's event loop finish ingesting, then submit. Short
+// enough to feel instant to the person watching their phone.
+const submitSettle = 150 * time.Millisecond
+
+// typeAndSubmit types text into a pane and submits it as two steps:
+// the bracketed paste held open (no CR), a settle, then the CR alone.
+// Both steps pass session.send's gates; the second is a bare submit.
+func (h *lk) typeAndSubmit(pane int, text string) error {
+	if _, err := h.c.call("session.send",
+		map[string]any{"pane": pane, "text": text, "no_submit": true}, 5*time.Second); err != nil {
+		return err
+	}
+	time.Sleep(submitSettle)
+	_, err := h.c.call("session.send",
+		map[string]any{"pane": pane, "submit_only": true}, 5*time.Second)
+	return err
+}
+
 // findPane names the pane an answer types into: a Claude-looking
 // foreground in the session's own directory — the same heuristic Fuse
 // stands on, and the cloud bridge delivers by.
@@ -69,8 +90,7 @@ func (h *lk) Answer(ctx context.Context, a projection.Answer) link.Outcome {
 		return dropped(fmt.Sprintf("no agent pane for %s (try %d) — is the session on a screen?",
 			transcript.Snip(target.Title, 40), n))
 	}
-	if _, err := h.c.call("session.send",
-		map[string]any{"pane": pane.ID, "text": a.Text}, 5*time.Second); err != nil {
+	if err := h.typeAndSubmit(pane.ID, a.Text); err != nil {
 		h.journal.Failed(a.AskID)
 		return dropped("the keyboard's gates refused: " + err.Error())
 	}
@@ -215,8 +235,7 @@ func (h *lk) execSpawn(ctx context.Context, c projection.Command, key string, se
 			if before[p.ID] || p.Cwd != cwd || !transcript.ClaudeLike(p, h.names) {
 				continue
 			}
-			if _, err := h.c.call("session.send",
-				map[string]any{"pane": p.ID, "text": c.Prompt}, 5*time.Second); err == nil {
+			if err := h.typeAndSubmit(p.ID, c.Prompt); err == nil {
 				h.note("started a session in " + c.Workspace + " and handed it the prompt")
 				return delivered()
 			}

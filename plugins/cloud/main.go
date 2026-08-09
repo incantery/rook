@@ -383,6 +383,29 @@ type wireDigest struct {
 // calls it "the one field worth reading in full".
 const maxCloudAsk = 2000
 
+// submitSettle is how long a paste is left to settle before the CR
+// that submits it. An agent TUI collapses a large or multi-line paste
+// into a placeholder draft, and a CR glued to the same burst is eaten
+// by that collapse instead of submitting — so type, let the TUI's
+// event loop finish, then submit.
+const submitSettle = 150 * time.Millisecond
+
+// typeAndSubmit types text into a pane and submits it in two steps: the
+// bracketed paste held open (no CR), a settle, then the CR alone. Both
+// steps pass session.send's gates; the second is a bare submit. This
+// is what makes a long or multi-line answer actually send, not just
+// draft.
+func typeAndSubmit(c *conn, pane int, text string) error {
+	if _, err := c.call("session.send",
+		map[string]any{"pane": pane, "text": text, "no_submit": true}, 5*time.Second); err != nil {
+		return err
+	}
+	time.Sleep(submitSettle)
+	_, err := c.call("session.send",
+		map[string]any{"pane": pane, "submit_only": true}, 5*time.Second)
+	return err
+}
+
 // linkHostID is who this machine is on the direct rail, read from the
 // link plugin's identity file so both rails carry one id and a phone
 // can collapse them. Best effort at every push: no file, no id, no
@@ -512,8 +535,7 @@ func (br *bridge) collect(c *conn, sessions []transcript.Session, panes []transc
 		if c == nil {
 			continue
 		}
-		_, err := c.call("session.send",
-			map[string]any{"pane": pane.ID, "text": ans.Text}, 5*time.Second)
+		err := typeAndSubmit(c, pane.ID, ans.Text)
 		if err != nil {
 			if br.journal.Failed(ans.AskID) > 5 {
 				br.ack(ans.AskID)
@@ -728,8 +750,7 @@ func (br *bridge) runSpawn(c *conn, cmd cloudCommand, key string, sessions []tra
 			if before[p.ID] || p.Cwd != cwd || !transcript.ClaudeLike(p, br.names) {
 				continue
 			}
-			if _, err := c.call("session.send",
-				map[string]any{"pane": p.ID, "text": cmd.Prompt}, 5*time.Second); err == nil {
+			if err := typeAndSubmit(c, p.ID, cmd.Prompt); err == nil {
 				br.note("started a session in " + cmd.Workspace + " and handed it the prompt")
 				return
 			}

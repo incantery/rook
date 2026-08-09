@@ -7534,14 +7534,28 @@ pub const App = struct {
     ///
     /// The text rides a bracketed paste (multi-line arrives as one
     /// block) and a CR submits it.
+    ///
+    /// The paste and its submitting CR can be SPLIT across two calls —
+    /// `no_submit` types the text and holds the CR; `submit_only` sends
+    /// the CR alone, later. An agent TUI that collapses a large paste
+    /// into a placeholder draft eats a CR glued to the same burst, so
+    /// the caller pastes, lets the TUI settle, then submits. The
+    /// default (neither flag) is the old atomic behavior, byte for
+    /// byte, which is what short single-call answers rely on.
     fn sessionSend(self: *App, params: []const u8) ?[]const u8 {
-        const Wire = struct { pane: u32 = 0, text: []const u8 = "" };
+        const Wire = struct {
+            pane: u32 = 0,
+            text: []const u8 = "",
+            no_submit: bool = false,
+            submit_only: bool = false,
+        };
         const parsed = std.json.parseFromSlice(Wire, self.gpa, if (params.len > 0) params else "{}", .{
             .ignore_unknown_fields = true,
         }) catch return "params did not parse";
         defer parsed.deinit();
         const text = parsed.value.text;
-        if (text.len == 0) return "session.send needs text";
+        const submit_only = parsed.value.submit_only;
+        if (!submit_only and text.len == 0) return "session.send needs text";
         if (text.len > 8192) return "text too long to type";
 
         self.draw_lock.lock();
@@ -7563,8 +7577,17 @@ pub const App = struct {
         if (in_ms != 0 and now - in_ms < 5000)
             return "a human is typing there";
 
+        // submit_only: the CR that completes a held paste, nothing typed.
+        if (submit_only) {
+            self.paneInput(p, "\r");
+            return null;
+        }
+
         var buf: [8192 + 16]u8 = undefined;
-        const framed = std.fmt.bufPrint(&buf, "\x1b[200~{s}\x1b[201~\r", .{text}) catch return "text too long to type";
+        const framed = if (parsed.value.no_submit)
+            std.fmt.bufPrint(&buf, "\x1b[200~{s}\x1b[201~", .{text}) catch return "text too long to type"
+        else
+            std.fmt.bufPrint(&buf, "\x1b[200~{s}\x1b[201~\r", .{text}) catch return "text too long to type";
         self.paneInput(p, framed);
         return null;
     }
