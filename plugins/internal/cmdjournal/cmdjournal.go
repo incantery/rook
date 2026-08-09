@@ -13,10 +13,20 @@
 //
 // The file is the interface, the same as digestlog beside it: a line is
 // a full snapshot of one key's state, the last line for a key wins, and
-// a torn tail is skipped rather than fatal. Both cloud rails share one
-// log — answers keyed by ask id, commands by "cmd:<id>" — because they
-// make the same promise at the same keyboard, and two bookkeepers would
-// be two chances to break it.
+// a torn tail is skipped rather than fatal. ALL rails share one log —
+// answers keyed by ask id, commands by "cmd:<id>" — because they make
+// the same promise at the same keyboard, and two bookkeepers would be
+// two chances to break it.
+//
+// Since the link plugin, "all rails" means two PROCESSES, not two
+// goroutines: the cloud bridge and the link server both hold this file
+// open at once, and a command can arrive over both rails. So the file
+// is guarded by an exclusive flock on a sidecar (the sidecar because
+// compaction renames the journal itself, and a lock must outlive the
+// rename), held around every append and compaction — and every read
+// answers from the file's CURRENT truth: a cheap stat under the lock,
+// a re-read when it changed. A marks delivered, B sees delivered, no
+// reopen required.
 //
 // A journal that cannot be opened degrades to memory rather than
 // refusing to run: that is exactly today's behavior, and a bridge that
@@ -30,6 +40,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -71,23 +82,34 @@ func DefaultPath() string {
 // tens of thousands of deliveries.
 const maxBytes = 1 << 20
 
-// Log is the bridge's handle: the live state in memory, appended
-// through to disk. One process writes it; the mutex serializes that
-// process's own goroutines.
+// Log is a rail's handle: the live state in memory, appended through
+// to disk. The mutex serializes this process's goroutines; the flock
+// serializes processes.
 type Log struct {
-	mu    sync.Mutex
-	path  string // "" = memory only, which is a working degraded mode
-	state map[string]Entry
-	now   func() time.Time
+	mu     sync.Mutex
+	path   string   // "" = memory only, which is a working degraded mode
+	lock   *os.File // the flock sidecar; nil when memory-only
+	window time.Duration
+	state  map[string]Entry
+	// forgot remembers deliberate Forgets so a reload from the shared
+	// file (whose lines outlive a Forget until compaction) does not
+	// resurrect them in this process.
+	forgot map[string]bool
+	now    func() time.Time
+
+	// The file's shape at last read/write, for reload-if-changed: a
+	// matching stat under the lock means our memory IS the file.
+	lastSize  int64
+	lastMtime time.Time
 }
 
 // Open replays the journal and prepares it for appending. A file grown
 // past maxBytes is compacted to the live window first. Every failure
-// here — no path, unmakeable directory, unopenable file — yields a
+// here — no path, unmakeable directory, unopenable lock — yields a
 // working memory-only Log and a non-nil error, so a caller may report
 // the degradation on its panel without having to handle a nil log.
 func Open(path string, window time.Duration, now time.Time) (*Log, error) {
-	l := &Log{path: path, state: map[string]Entry{}, now: time.Now}
+	l := &Log{path: path, window: window, state: map[string]Entry{}, forgot: map[string]bool{}, now: time.Now}
 	if path == "" {
 		return l, nil
 	}
@@ -95,19 +117,107 @@ func Open(path string, window time.Duration, now time.Time) (*Log, error) {
 		l.path = ""
 		return l, err
 	}
+	// The sidecar carries the flock. Locking the journal itself would
+	// not survive compaction's rename — the fd would keep guarding the
+	// unlinked old file while another process appends to the new one.
+	lf, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		l.path = ""
+		return l, err
+	}
+	l.lock = lf
+
+	l.flock()
 	for _, e := range load(path, window, now) {
 		l.state[e.Key] = e
 	}
-	if fi, err := os.Stat(path); err == nil && fi.Size() > maxBytes {
+	l.restatLocked()
+	size := l.lastSize
+	l.funlock()
+
+	if size > maxBytes {
 		l.compact()
 	}
 	return l, nil
 }
 
-// Delivered reports whether this key's effect has already happened.
+// flock takes the cross-process lock; funlock releases it. Blocking
+// and exclusive: appends are rare and tiny, and a reader that answers
+// from a half-merged view is exactly the bug this exists to prevent.
+// No-ops in memory-only mode.
+func (l *Log) flock() {
+	if l.lock != nil {
+		_ = syscall.Flock(int(l.lock.Fd()), syscall.LOCK_EX)
+	}
+}
+
+func (l *Log) funlock() {
+	if l.lock != nil {
+		_ = syscall.Flock(int(l.lock.Fd()), syscall.LOCK_UN)
+	}
+}
+
+// restatLocked records the file's current shape. Call with the flock
+// held, after reading or writing.
+func (l *Log) restatLocked() {
+	if fi, err := os.Stat(l.path); err == nil {
+		l.lastSize, l.lastMtime = fi.Size(), fi.ModTime()
+	} else {
+		l.lastSize, l.lastMtime = -1, time.Time{}
+	}
+}
+
+// reloadLocked re-reads the file if it changed since we last looked —
+// the other process's writes, folded in. Call with the flock held.
+//
+// The merge direction matters: the file is the shared truth, but this
+// process's own memory may hold a guarantee the file missed (an append
+// that failed on a full disk still protects for as long as we live).
+// So a Delivered we remember is never forgotten, and attempts take the
+// larger count — both errors fall on the side of not typing twice.
+func (l *Log) reloadLocked() {
+	if l.path == "" {
+		return
+	}
+	fi, err := os.Stat(l.path)
+	if err == nil && fi.Size() == l.lastSize && fi.ModTime().Equal(l.lastMtime) {
+		return
+	}
+	fresh := map[string]Entry{}
+	for _, e := range load(l.path, l.window, l.now()) {
+		if l.forgot[e.Key] {
+			continue
+		}
+		fresh[e.Key] = e
+	}
+	for k, mine := range l.state {
+		e, ok := fresh[k]
+		if !ok {
+			fresh[k] = mine
+			continue
+		}
+		if mine.Delivered && !e.Delivered {
+			e.Delivered = true
+		}
+		if mine.Attempts > e.Attempts {
+			e.Attempts = mine.Attempts
+		}
+		fresh[k] = e
+	}
+	l.state = fresh
+	l.restatLocked()
+}
+
+// Delivered reports whether this key's effect has already happened —
+// by ANY process on this journal, not just this one. The answer is
+// read against the file's current truth under the lock, so the other
+// rail's mark made a moment ago counts.
 func (l *Log) Delivered(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.flock()
+	l.reloadLocked()
+	l.funlock()
 	return l.state[key].Delivered
 }
 
@@ -116,38 +226,53 @@ func (l *Log) Delivered(key string) bool {
 func (l *Log) MarkDelivered(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.flock()
+	l.reloadLocked()
+	delete(l.forgot, key)
 	e := l.state[key]
 	e.Key, e.Delivered, e.At = key, true, l.now()
 	l.state[key] = e
-	l.append(e)
+	l.appendLocked(e)
+	l.funlock()
 }
 
 // Failed counts one failure to land and returns the running total, so
 // the caller's bound reads as one expression rather than a load, an
-// increment and a compare that could drift apart.
+// increment and a compare that could drift apart. The total is shared
+// across processes: both rails burning tries at the same dead pane
+// spend one budget, not two.
 func (l *Log) Failed(key string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.flock()
+	l.reloadLocked()
 	e := l.state[key]
 	e.Key, e.Attempts, e.At = key, e.Attempts+1, l.now()
 	l.state[key] = e
-	l.append(e)
+	l.appendLocked(e)
+	l.funlock()
 	return e.Attempts
 }
 
-// Forget drops a key from memory and writes nothing. Used when a
-// delivery is abandoned for good and the record has served its purpose;
-// the window sweeps the line itself on the next compaction.
+// Forget drops a key from this process's memory and writes nothing.
+// Used when a delivery is abandoned for good and the record has served
+// its purpose; the window sweeps the line itself on the next
+// compaction. Local by design — the other rail keeps its own counsel.
 func (l *Log) Forget(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.flock()
 	delete(l.state, key)
+	l.forgot[key] = true
+	l.funlock()
 }
 
-// append writes one snapshot line. A write that fails costs durability
-// for that entry and nothing else — the in-memory state is already
-// updated, so the process keeps its guarantee for as long as it lives.
-func (l *Log) append(e Entry) {
+// appendLocked writes one snapshot line. Call with the flock held. A
+// write that fails costs durability for that entry and nothing else —
+// the in-memory state is already updated, so the process keeps its
+// guarantee for as long as it lives (and reloadLocked's merge keeps
+// protecting it against the file).
+func (l *Log) appendLocked(e Entry) {
 	if l.path == "" {
 		return
 	}
@@ -159,12 +284,16 @@ func (l *Log) append(e Entry) {
 	if line, err := json.Marshal(e); err == nil {
 		_, _ = f.Write(append(line, '\n'))
 	}
+	l.restatLocked()
 }
 
 // compact rewrites the file to one line per live key, through a temp
-// file and a rename — a reader mid-scan sees the old file or the new
-// one, never half of either.
+// file and a rename under the flock — another process is either before
+// the whole rewrite or after it, never inside.
 func (l *Log) compact() {
+	l.flock()
+	defer l.funlock()
+	l.reloadLocked()
 	tmp := l.path + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -182,7 +311,9 @@ func (l *Log) compact() {
 	}
 	if os.Rename(tmp, l.path) != nil {
 		_ = os.Remove(tmp)
+		return
 	}
+	l.restatLocked()
 }
 
 // load replays the file, last line per key winning. Entries older than
