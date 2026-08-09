@@ -167,7 +167,7 @@ func TestGeneratedCmds(t *testing.T) {
 // with before these types existed — so adopting them shows "no
 // pending changes" in rook env, not a diff.
 func TestFirstPartyPluginsLowerToTheHandWrittenBytes(t *testing.T) {
-	got := string(JSON(Claude{}, Agent{}, Cloud{}))
+	got := string(JSON(Claude{}, Agent{}, Cloud{}, Link{}))
 	want := string(JSON(
 		Plugin{
 			Name:    "claude",
@@ -189,6 +189,12 @@ func TestFirstPartyPluginsLowerToTheHandWrittenBytes(t *testing.T) {
 			Load:    Eager,
 			Grants:  []string{OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend, OpSessionSpawn},
 		},
+		Plugin{
+			Name:    "link",
+			Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-link"},
+			Load:    Eager,
+			Grants:  []string{OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend, OpSessionSpawn, OpClipboardSet},
+		},
 	))
 	if got != want {
 		t.Errorf("typed forms are not pure sugar.\n got: %s\nwant: %s", got, want)
@@ -208,6 +214,12 @@ func TestAgentOptionsBecomeFlags(t *testing.T) {
 	got = string(JSON(Cloud{API: "http://192.168.4.22:8080"}))
 	if !strings.Contains(got, `"command":["/Applications/rook.app/Contents/MacOS/rook-plugin-cloud","--api","http://192.168.4.22:8080"]`) {
 		t.Errorf("cloud API target lost: %s", got)
+	}
+
+	got = string(JSON(Link{Name: "work-mac", Port: 7773, NoAdvertise: true}))
+	if !strings.Contains(got, `"command":["/Applications/rook.app/Contents/MacOS/rook-plugin-link",`+
+		`"--name","work-mac","--port","7773","--advertise=false"]`) {
+		t.Errorf("link options lost in lowering: %s", got)
 	}
 }
 

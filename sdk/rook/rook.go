@@ -425,11 +425,11 @@ func (p Plugin) appendTo(e *env) {
 // Two ways to say where it comes from, and Source wins when both are
 // given:
 //
-//   Source  a prebuilt dylib, fetched and checked against SHA256 —
-//           the same path a sourced Plugin takes, pin and all.
-//   Repo    a grammar repository, cloned at Rev and compiled with cc
-//           on first use. No publisher needed, and the cost is that a
-//           machine with no compiler gets plain text.
+//	Source  a prebuilt dylib, fetched and checked against SHA256 —
+//	        the same path a sourced Plugin takes, pin and all.
+//	Repo    a grammar repository, cloned at Rev and compiled with cc
+//	        on first use. No publisher needed, and the cost is that a
+//	        machine with no compiler gets plain text.
 //
 // A grammar is fetched LAZILY: declaring one costs nothing until you
 // open a file in that language.
@@ -944,6 +944,52 @@ func (c Cloud) appendTo(e *env) {
 		Command: cmd,
 		Load:    eagerUnless(c.Load),
 		Grants:  grantsOr(c.Grants, []string{OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend, OpSessionSpawn}),
+	}.appendTo(e)
+}
+
+// Link is the direct rail to Rook Mobile: this machine advertises
+// itself on the local network, a phone pairs once over a QR code from
+// the panel, and needs-input sessions become answerable with no cloud
+// in the path. Identity and the paired-device book live under
+// ~/.local/state/rook/link; revoking a phone is a panel action.
+//
+// Cloud and Link are the same vocabulary on two rails — running both
+// is the intended shape (phone nearby: direct; phone away: cloud),
+// and the shared delivery journal keeps a reply that arrives over
+// both a single keystroke.
+type Link struct {
+	// Name is what the phone sees — the Bonjour instance name and the
+	// pairing screen's title. Empty means this machine's hostname.
+	Name string
+	// Port pins the listener. 0 keeps an ephemeral port, which is the
+	// right default: the phone learns the port from Bonjour and the
+	// QR, never from convention.
+	Port int
+	// NoAdvertise keeps the listener off Bonjour. Pairing and
+	// reconnection then ride the QR's direct address hints alone.
+	NoAdvertise bool
+	Grants      []string // default: list/act, panes.activity, session.send, session.spawn, clipboard.set
+	Load        Load     // default Eager
+}
+
+func (l Link) appendTo(e *env) {
+	cmd := []string{bundleBin + "rook-plugin-link"}
+	if l.Name != "" {
+		cmd = append(cmd, "--name", l.Name)
+	}
+	if l.Port > 0 {
+		cmd = append(cmd, "--port", strconv.Itoa(l.Port))
+	}
+	if l.NoAdvertise {
+		cmd = append(cmd, "--advertise=false")
+	}
+	Plugin{
+		Name:    "link",
+		Command: cmd,
+		Load:    eagerUnless(l.Load),
+		Grants: grantsOr(l.Grants, []string{
+			OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend, OpSessionSpawn, OpClipboardSet,
+		}),
 	}.appendTo(e)
 }
 
