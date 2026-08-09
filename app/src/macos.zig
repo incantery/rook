@@ -5756,6 +5756,30 @@ pub const App = struct {
         if (!frontmost) _ = self.app.msgSend(c_long, "requestUserAttention:", .{@as(c_long, 10)});
     }
 
+    /// Aggregate OSC 9;4 progress onto each tab for the chip. 2Hz is
+    /// the right cadence for a percentage — it changes at build speed,
+    /// not frame speed. A number beats indeterminate beats none;
+    /// between numbers the largest wins, which for two agents in one
+    /// tab reads as "the furthest along" and is at least stable.
+    fn drainProgressLocked(self: *App) void {
+        for (self.spaces.items) |space| {
+            for (space.tabs.items) |tab| {
+                var agg: i8 = -1;
+                for (tab.panes.items) |p| {
+                    const tm = p.term() orelse continue;
+                    if (tm.session.progress_state.load(.acquire) == 0) continue;
+                    const pct = tm.session.progress_pct.load(.acquire);
+                    const v: i8 = if (pct >= 0) pct else -2;
+                    agg = if (agg >= 0 and v >= 0) @max(agg, v) else if (v >= 0) v else if (agg >= 0) agg else -2;
+                }
+                if (tab.progress != agg) {
+                    tab.progress = agg;
+                    self.scene_dirty = true;
+                }
+            }
+        }
+    }
+
     /// Post an OSC 9 / OSC 777 notification through UNUserNotificationCenter.
     ///
     /// GUARDED ON THE BUNDLE. currentNotificationCenter raises an
@@ -5907,6 +5931,7 @@ pub const App = struct {
         // an objc round-trip spent answering the same thing.
         self.app_active = self.app.msgSend(bool, "isActive", .{});
         self.drainBellsLocked();
+        self.drainProgressLocked();
         self.drainNotificationsLocked();
         if (self.hud_calls % 2 == 0) self.pollConfigLocked();
         // Onboarding opens ITSELF only over a window you are looking at.
@@ -6272,12 +6297,14 @@ pub const App = struct {
         for (space.tabs.items, 0..) |t, i| {
             var tbuf: [24]u8 = undefined;
             const title = tabTitle(t, &tbuf);
-            var chip: [44]u8 = undefined;
+            var chip: [56]u8 = undefined;
+            var pgbuf: [8]u8 = undefined;
+            const pg = progressSuffix(t.progress, &pgbuf);
             const z: []const u8 = if (t.zoomed != null) "Z" else "";
             const label = if (t.bell)
-                std.fmt.bufPrint(&chip, " •{d}:{s}{s} ", .{ i + 1, title, z }) catch continue
+                std.fmt.bufPrint(&chip, " •{d}:{s}{s}{s} ", .{ i + 1, title, z, pg }) catch continue
             else
-                std.fmt.bufPrint(&chip, " {d}:{s}{s} ", .{ i + 1, title, z }) catch continue;
+                std.fmt.bufPrint(&chip, " {d}:{s}{s}{s} ", .{ i + 1, title, z, pg }) catch continue;
             const w = @as(f32, @floatFromInt(std.unicode.utf8CountCodepoints(label) catch label.len)) * cw;
             if (ui) |u| {
                 const is_active = i == space.active_tab;
@@ -6406,6 +6433,15 @@ pub const App = struct {
     /// from the emulator under its lock) or the editor's file name.
     /// Shared by the top strip's chips and the status bar's tabs
     /// segment — one tab, one name, wherever it renders.
+    /// The chip's spelling of a tab's progress: " 42%", " …" for
+    /// running-without-a-number, nothing when nothing runs. Error and
+    /// pause keep their percentage — a stalled 80% is still an 80%.
+    fn progressSuffix(progress: i8, buf: []u8) []const u8 {
+        if (progress >= 0) return std.fmt.bufPrint(buf, " {d}%", .{progress}) catch "";
+        if (progress == -2) return " …";
+        return "";
+    }
+
     fn tabTitle(t: *panespkg.Tab, buf: []u8) []const u8 {
         var title: []const u8 = "shell";
         if (t.focused.content == .monitor) return "monitor";
@@ -6538,12 +6574,14 @@ pub const App = struct {
             // is indistinguishable from a tab that only ever had one
             // pane — and the way out is a keystroke you'd have no
             // reason to reach for.
-            var chip: [44]u8 = undefined;
+            var chip: [56]u8 = undefined;
+            var pgbuf: [8]u8 = undefined;
+            const pg = progressSuffix(t.progress, &pgbuf);
             const z: []const u8 = if (t.zoomed != null) " Z" else "";
             const label = if (t.bell)
-                std.fmt.bufPrint(&chip, " • {d} {s}{s} ", .{ i + 1, title, z }) catch continue
+                std.fmt.bufPrint(&chip, " • {d} {s}{s}{s} ", .{ i + 1, title, z, pg }) catch continue
             else
-                std.fmt.bufPrint(&chip, " {d} {s}{s} ", .{ i + 1, title, z }) catch continue;
+                std.fmt.bufPrint(&chip, " {d} {s}{s}{s} ", .{ i + 1, title, z, pg }) catch continue;
 
             const fg = if (is_active) th.bar_value else if (t.bell) th.accent else th.bar_fg;
             // A chip is a SHAPE, not a run of coloured cells. Painting

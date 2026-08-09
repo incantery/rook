@@ -72,6 +72,7 @@ const scenarios = [_]Scenario{
     .{ .name = "lsplang", .what = "no built-in catalog: a language is a declaration, and each way of having no server says which one it is", .run = lspLang },
     .{ .name = "lspretarget", .what = "a pane that retargets ITSELF — file tree, :e — still gets its server, and drops it when there is none", .run = lspRetarget },
     .{ .name = "lspwatch", .what = "the server registers file watchers, and a write rook never made is heard — filtered by glob and by kind", .run = lspWatch },
+    .{ .name = "progress", .what = "OSC 9;4: a program's progress reaches the pane list and the tab's chip, and remove clears it", .run = progressScenario },
     .{ .name = "docshare", .what = "one file in two panes is ONE document: edits, dirty flag and :w are shared", .run = docShare },
     .{ .name = "findfiles", .what = "⌘⇧F: scan honours the ignore rules, results group by file, Enter jumps to the line", .run = findInFiles },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
@@ -4439,6 +4440,58 @@ fn lspPython(gpa: std.mem.Allocator, bin: []const u8) !void {
 /// its rows join through that dot — a spelling that is a second
 /// document as far as the doc registry is concerned, and one gopls
 /// answers with "No packages found for open file".
+/// OSC 9;4 — the ConEmu progress protocol Claude Code emits. The
+/// sequence is typed INTO the shell as a printf, which is exactly how
+/// a real program raises it; the assertions read the two text mirrors
+/// of the chrome: `panes` (raw per-session state) and `tabs` (the
+/// 2Hz-drained aggregate the chip actually draws). Set with a number,
+/// error keeping its number, indeterminate as ~, then remove — and
+/// remove must CLEAR, which is the half a stuck progress bar gets
+/// wrong.
+fn progressScenario(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+    var buf: [8 * 1024]u8 = undefined;
+    _ = try app.ctl("type echo ready");
+    _ = try app.ctl("enter");
+    try app.waitText("ready", 5_000);
+
+    // set 42
+    _ = try app.ctl("type printf '\\033]9;4;1;42\\007'");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("panes", "prog:42", 5_000);
+    _ = try app.waitCtl("tabs", "prog:42", 5_000);
+
+    // error keeps its number — a stalled 80% is still an 80%.
+    _ = try app.ctl("type printf '\\033]9;4;2;80\\007'");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("panes", "prog:80", 5_000);
+
+    // indeterminate: running, no number.
+    _ = try app.ctl("type printf '\\033]9;4;3\\007'");
+    _ = try app.ctl("enter");
+    _ = try app.waitCtl("panes", "prog:~", 5_000);
+
+    // remove — and the mirrors must actually clear, tabs included.
+    _ = try app.ctl("type printf '\\033]9;4;0\\007'");
+    _ = try app.ctl("enter");
+    var waited: u32 = 0;
+    while (waited < 5_000) : (waited += 100) {
+        const pane_list = try app.ctl("panes");
+        if (std.mem.indexOf(u8, pane_list, "prog:") == null) {
+            const tab_list = try app.ctl("tabs");
+            if (std.mem.indexOf(u8, tab_list, "prog:") == null) break;
+        }
+        h.sleepMs(100);
+    }
+    try h.expect(std.mem.indexOf(u8, try app.ctl("panes"), "prog:") == null, "remove cleared the pane's progress", .{});
+    try h.expect(std.mem.indexOf(u8, try app.ctl("tabs"), "prog:") == null, "remove cleared the tab's progress", .{});
+    _ = try app.screen(&buf);
+}
+
 /// Poll a receipt file for a substring. The fake server rewrites it
 /// whole on every notification, so a read that misses just tries again.
 fn waitReceipt(path: []const u8, needle: []const u8, timeout_ms: u32) !void {

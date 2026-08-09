@@ -119,6 +119,11 @@ pub const Tab = struct {
     /// the point is to say WHERE attention is owed, which a dock bounce
     /// alone can't.
     bell: bool = false,
+    /// OSC 9;4 progress, aggregated from this tab's panes on the HUD
+    /// tick: -1 none, 0..100 a percentage, -2 running without a number
+    /// (indeterminate). Worn on the chip beside the title — the point
+    /// is an agent's progress in a tab you are NOT on.
+    progress: i8 = -1,
     /// tmux zoom: this pane temporarily owns the whole tab area. The
     /// TREE IS UNTOUCHED — zoom is a display state, not a layout, so
     /// unzooming is exact by construction rather than by remembering

@@ -240,7 +240,21 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                         std.fmt.bufPrint(&whatbuf, " edit:{s}", .{ed.displayName()}) catch " edit"
                     else
                         " term";
-                    w.print("{s}{s} t{d} {s}{d} rect {d}x{d}+{d}+{d} grid {d}x{d}{s}{s}\n", .{
+                    // OSC 9;4, straight off the session's atomics —
+                    // appended last, same fail-open contract as `what`.
+                    // `prog:~` is running-without-a-number.
+                    var progbuf: [12]u8 = undefined;
+                    var prog: []const u8 = "";
+                    if (p.term()) |tm| {
+                        if (tm.session.progress_state.load(.acquire) != 0) {
+                            const pct = tm.session.progress_pct.load(.acquire);
+                            prog = if (pct >= 0)
+                                std.fmt.bufPrint(&progbuf, " prog:{d}", .{pct}) catch ""
+                            else
+                                " prog:~";
+                        }
+                    }
+                    w.print("{s}{s} t{d} {s}{d} rect {d}x{d}+{d}+{d} grid {d}x{d}{s}{s}{s}\n", .{
                         @as([]const u8, if (si == app.active_space and ti == s.active_tab) "*" else " "),
                         s.label(),
                         ti + 1,
@@ -254,6 +268,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                         p.rows,
                         @as([]const u8, if (t.zoomed == p) " zoomed" else ""),
                         what,
+                        prog,
                     }) catch break;
                 }
             }
@@ -266,7 +281,17 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         app.draw_lock.lock();
         for (app.spaces.items, 0..) |s, si| {
             for (s.tabs.items, 0..) |t, ti| {
-                w.print("{s}[{s}] {d} ({d} pane{s}){s}\n", .{
+                // The chip's progress, in text — this is the DRAINED
+                // per-tab aggregate the chip draws, where `panes` shows
+                // the raw per-session value.
+                var progbuf: [12]u8 = undefined;
+                const prog: []const u8 = if (t.progress >= 0)
+                    std.fmt.bufPrint(&progbuf, " prog:{d}", .{t.progress}) catch ""
+                else if (t.progress == -2)
+                    " prog:~"
+                else
+                    "";
+                w.print("{s}[{s}] {d} ({d} pane{s}){s}{s}\n", .{
                     @as([]const u8, if (si == app.active_space and ti == s.active_tab) "*" else " "),
                     s.label(),
                     ti + 1,
@@ -275,6 +300,7 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
                     // The chip's bell dot, in text — `shot` can see the
                     // dot, but a blind test shouldn't have to.
                     @as([]const u8, if (t.bell) " bell" else ""),
+                    prog,
                 }) catch break;
             }
         }

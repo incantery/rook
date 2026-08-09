@@ -227,6 +227,15 @@ pub const Session = struct {
     /// exited). The app collapses the pane on its next frame.
     exited: std.atomic.Value(bool) = .init(false),
 
+    /// OSC 9;4 — the ConEmu progress protocol, what Claude Code emits
+    /// while it works. Reader thread stores, HUD tick reads; two
+    /// atomics can tear against each other for one tick, which is one
+    /// frame of a slightly stale number. state: 0 none, 1 set, 2
+    /// error, 3 indeterminate, 4 pause. pct is -1 when the state
+    /// carries no number.
+    progress_state: std.atomic.Value(u8) = .init(0),
+    progress_pct: std.atomic.Value(i8) = .init(-1),
+
     /// A desktop notification was requested (OSC 9 / OSC 777). Title
     /// and body are copied here because the effect's slices are borrowed
     /// for the call only. Guarded by `mutex`, like the terminal itself —
@@ -565,11 +574,9 @@ pub const Session = struct {
             .title_changed = null,
             .pwd_changed = null,
             // OSC 9;4 — the ConEmu progress protocol Claude Code
-            // emits. Arrived with the 08-07 bump; null until the
-            // chrome has somewhere to put it (TODO.md, the roadmap's
-            // progress slice — a per-pane progress state the status
-            // row and the claude plugin both want).
-            .progress_report = null,
+            // emits. Arrived with the 08-07 bump; lands on the tab
+            // chip and in `panes`/`tabs`.
+            .progress_report = &effectProgress,
         };
         // With an allocator, or OSC 52 clipboard ops are silently
         // dropped — the old initAlloc spelling, now an Options field.
@@ -815,6 +822,30 @@ pub const Session = struct {
         self.notify_body_len = @min(n.body.len, self.notify_body.len);
         @memcpy(self.notify_body[0..self.notify_body_len], n.body[0..self.notify_body_len]);
         self.notify_pending = true;
+    }
+
+    /// OSC 9;4. Same thread and same rule as the bell: store the raw
+    /// fact, let the main thread decide what a percentage means. The
+    /// states pass through by number — error and pause still carry
+    /// their pct, and the chrome decides how much of that vocabulary
+    /// to draw.
+    fn effectProgress(h: *Handler, p: EffectArg("progress_report", 1)) void {
+        const self = fromHandler(h);
+        const state: u8 = switch (p.state) {
+            .remove => 0,
+            .set => 1,
+            .@"error" => 2,
+            .indeterminate => 3,
+            .pause => 4,
+        };
+        const pct: i8 = if (state == 0)
+            -1
+        else if (p.progress) |v|
+            @intCast(@min(v, 100))
+        else
+            -1;
+        self.progress_state.store(state, .release);
+        self.progress_pct.store(pct, .release);
     }
 
     /// OSC 52. The library hands this over already base64-decoded and
