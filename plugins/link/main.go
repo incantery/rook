@@ -462,14 +462,20 @@ func (h *lk) pair() {
 		h.note("could not open a pairing window: " + err.Error())
 		return
 	}
+	// Minimal on purpose: every byte here is QR modules, and QR modules
+	// are pane columns. The phone learns the name from GetHostInfo and
+	// the trust domain from PairResponse — no n=, no td=, and at most
+	// two address hints.
+	addrs := transport.Addrs()
+	if len(addrs) > 2 {
+		addrs = addrs[:2]
+	}
 	url := pairing.QR{
-		HostID:        h.id.HostID(),
-		TrustDomainID: h.id.TrustDomainID,
-		HostName:      h.hostName,
-		SPKIPin:       h.spki,
-		Secret:        secret,
-		Port:          h.ln.Port(),
-		Addrs:         transport.Addrs(),
+		HostID:  h.id.HostID(),
+		SPKIPin: h.spki,
+		Secret:  secret,
+		Port:    h.ln.Port(),
+		Addrs:   addrs,
 	}.URL()
 	if strings.ContainsAny(url, `'"`) {
 		h.pairs.Close()
