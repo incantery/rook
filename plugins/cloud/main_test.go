@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -33,7 +35,7 @@ func fixtureSessions() []transcript.Session {
 }
 
 func TestStatusFromSpeaksTheCloudsVocabulary(t *testing.T) {
-	st := statusFrom(fixtureSessions(), nil, "v0.42.0")
+	st := statusFrom(fixtureSessions(), nil, "v0.42.0", "")
 	if st.RookVersion != "v0.42.0" || st.Hostname == "" {
 		t.Fatalf("header: %+v", st)
 	}
@@ -531,7 +533,7 @@ func TestDigestRidesTheStatusForSessionsThatHaveOne(t *testing.T) {
 		"a": {SessionID: "a", Headline: "the fix landed, tests green",
 			Bullets: []string{"ship it or hold for docs", "one flake remains"}, At: t0},
 	}
-	st := statusFrom(fixtureSessions(), digests, "")
+	st := statusFrom(fixtureSessions(), digests, "", "")
 	rook := st.Workspaces[1]
 	got := rook.Agents[0].Digest
 	if got == nil || got.Headline != "the fix landed, tests green" || len(got.Bullets) != 2 {
@@ -553,7 +555,7 @@ func TestDigestRidesTheStatusForSessionsThatHaveOne(t *testing.T) {
 }
 
 func TestAskIDRidesTheStatusForNeedsInputOnly(t *testing.T) {
-	st := statusFrom(fixtureSessions(), nil, "")
+	st := statusFrom(fixtureSessions(), nil, "", "")
 	var withID, withoutID int
 	for _, w := range st.Workspaces {
 		for _, a := range w.Agents {
@@ -876,5 +878,44 @@ func TestSpawnUnknownWorkspaceAndPromptless(t *testing.T) {
 	}
 	if note := items(br, t0); !strings.Contains(note[1].Title, "started a session in rook") {
 		t.Fatalf("receipt: %+v", note)
+	}
+}
+
+// The seed-derivation fallback must byte-match rook-host's identity
+// derivation — the golden below was computed by rook-host's own
+// identity.HostIDFor over a seed of 32×0x01. If these diverge, the
+// two rails stop naming the same machine and the phone shows it twice.
+func TestLinkHostIDDerivationMatchesRookHost(t *testing.T) {
+	seed := make([]byte, 32)
+	for i := range seed {
+		seed[i] = 0x01
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "identity.json")
+
+	// Denormalized id wins when present.
+	if err := os.WriteFile(path, []byte(`{"hostId":"stored-id","hostSeed":"`+
+		base64.StdEncoding.EncodeToString(seed)+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := linkHostID(path); got != "stored-id" {
+		t.Fatalf("stored id ignored: %q", got)
+	}
+
+	// Pre-v0.2.2 file: no hostId, derive from the seed.
+	if err := os.WriteFile(path, []byte(`{"hostSeed":"`+
+		base64.StdEncoding.EncodeToString(seed)+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := linkHostID(path); got != "gr2q7gf5lh6pzfdnurnkvputhm" {
+		t.Fatalf("derivation diverged from rook-host: %q", got)
+	}
+
+	// Absent file: no id, no error, no noise.
+	if got := linkHostID(filepath.Join(dir, "nope.json")); got != "" {
+		t.Fatalf("phantom id: %q", got)
+	}
+	if got := linkHostID(""); got != "" {
+		t.Fatalf("empty path yielded %q", got)
 	}
 }

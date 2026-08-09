@@ -31,6 +31,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base32"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -67,6 +71,7 @@ func main() {
 	names := flag.String("claude-names", "claude,node", "foreground program names that count as Claude Code")
 	digests := flag.String("digest-log", digestlog.DefaultPath(), "the agent plugin's digest journal (empty sends no digests)")
 	deliveries := flag.String("delivery-log", cmdjournal.DefaultPath(), "where deliveries are journaled (empty = remember only while running)")
+	linkIdentity := flag.String("link-identity", "", "the link plugin's identity file, read for the shared machine id (default $XDG_STATE_HOME/rook/link/identity.json)")
 	flag.Parse()
 
 	home, _ := os.UserHomeDir()
@@ -79,6 +84,15 @@ func main() {
 	}
 	if *tokenFile == "" && home != "" {
 		*tokenFile = filepath.Join(home, ".config", "rook", "cloud_token")
+	}
+	if *linkIdentity == "" {
+		state := os.Getenv("XDG_STATE_HOME")
+		if state == "" && home != "" {
+			state = filepath.Join(home, ".local", "state")
+		}
+		if state != "" {
+			*linkIdentity = filepath.Join(state, "rook", "link", "identity.json")
+		}
 	}
 
 	// The delivery journal, replayed before the first poll: whatever the
@@ -103,12 +117,13 @@ func main() {
 			Quiet:  60 * time.Second,
 			Max:    50,
 		},
-		names:      strings.Split(*names, ","),
-		busyRate:   *busyRate,
-		digestLog:  *digests,
-		kick:       make(chan struct{}, 1),
-		spawnTries: 6,
-		spawnWait:  2 * time.Second,
+		names:        strings.Split(*names, ","),
+		busyRate:     *busyRate,
+		digestLog:    *digests,
+		linkIdentity: *linkIdentity,
+		kick:         make(chan struct{}, 1),
+		spawnTries:   6,
+		spawnWait:    2 * time.Second,
 	}
 	// A journal that could not be opened is a degradation worth saying
 	// out loud rather than a reason to refuse to run: the bridge still
@@ -145,11 +160,12 @@ type bridge struct {
 	nofile  string // where the token was looked for, for the notice row
 	rookVer string
 
-	sc        *transcript.Scanner
-	names     []string
-	busyRate  float64
-	digestLog string        // the agent plugin's journal; "" sends no digests
-	kick      chan struct{} // the "push now" action's doorbell
+	sc           *transcript.Scanner
+	names        []string
+	busyRate     float64
+	digestLog    string        // the agent plugin's journal; "" sends no digests
+	linkIdentity string        // the link plugin's identity file; "" or absent sends no hostId
+	kick         chan struct{} // the "push now" action's doorbell
 
 	// How long a spawn waits for its new claude pane to be ready for
 	// the prompt: spawnTries polls of the pane list, spawnWait apart.
@@ -261,7 +277,7 @@ func (br *bridge) push(c *conn, samples map[int]transcript.PaneSample) ([]transc
 	if br.digestLog != "" {
 		digests = digestlog.Latest(digestlog.Load(br.digestLog, br.sc.Window, now))
 	}
-	st := statusFrom(sessions, digests, br.rookVer)
+	st := statusFrom(sessions, digests, br.rookVer, linkHostID(br.linkIdentity))
 	body, err := json.Marshal(st)
 	if err != nil {
 		return sessions, panes
@@ -324,9 +340,14 @@ func (br *bridge) fail(msg string) {
 // The wire shapes of rook-cloud's machine.Status, reproduced: the
 // server clamps and owns the schema; this side only has to speak it.
 type wireStatus struct {
-	Hostname    string          `json:"hostname,omitempty"`
-	RookVersion string          `json:"rookVersion,omitempty"`
-	Workspaces  []wireWorkspace `json:"workspaces,omitempty"`
+	Hostname    string `json:"hostname,omitempty"`
+	RookVersion string `json:"rookVersion,omitempty"`
+	// HostID is the machine's durable link identity, read from the
+	// link plugin's identity file — the same id the direct rail
+	// stamps on its snapshots, so a phone seeing this machine on both
+	// rails can prove they are one machine and collapse them.
+	HostID     string          `json:"hostId,omitempty"`
+	Workspaces []wireWorkspace `json:"workspaces,omitempty"`
 }
 
 type wireWorkspace struct {
@@ -362,6 +383,41 @@ type wireDigest struct {
 // calls it "the one field worth reading in full".
 const maxCloudAsk = 2000
 
+// linkHostID is who this machine is on the direct rail, read from the
+// link plugin's identity file so both rails carry one id and a phone
+// can collapse them. Best effort at every push: no file, no id, no
+// problem — the field simply stays home. Prefers the denormalized
+// hostId; derives it from the seed for identities minted before the
+// field existed (same derivation as rook-host's identity package:
+// lowercase unpadded base32 of sha256(pub)[:16]).
+func linkHostID(path string) string {
+	if path == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var f struct {
+		HostID   string `json:"hostId"`
+		HostSeed string `json:"hostSeed"`
+	}
+	if json.Unmarshal(raw, &f) != nil {
+		return ""
+	}
+	if f.HostID != "" {
+		return f.HostID
+	}
+	seed, err := base64.StdEncoding.DecodeString(f.HostSeed)
+	if err != nil || len(seed) != ed25519.SeedSize {
+		return ""
+	}
+	pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	sum := sha256.Sum256(pub)
+	enc := base32.StdEncoding.WithPadding(base32.NoPadding)
+	return strings.ToLower(enc.EncodeToString(sum[:16]))
+}
+
 // askText and askID moved to plugins/internal/statusfold, where the
 // link plugin shares them; these aliases keep this plugin's tests
 // pinned to the exact behavior its wire promised.
@@ -375,11 +431,11 @@ func askID(s transcript.Session) string { return statusfold.AskID(s) }
 // This side only renders the neutral struct as rook-cloud's wire JSON;
 // the field names and omitempty semantics above are the contract, and
 // the mapping here is deliberately 1:1.
-func statusFrom(sessions []transcript.Session, digests map[string]digestlog.Digest, rookVer string) wireStatus {
+func statusFrom(sessions []transcript.Session, digests map[string]digestlog.Digest, rookVer, linkHostID string) wireStatus {
 	host, _ := os.Hostname()
 	n := statusfold.Fold(sessions, digests, host, rookVer)
 
-	st := wireStatus{Hostname: n.Hostname, RookVersion: n.RookVersion}
+	st := wireStatus{Hostname: n.Hostname, RookVersion: n.RookVersion, HostID: linkHostID}
 	for _, w := range n.Workspaces {
 		ww := wireWorkspace{Name: w.Name, Branch: w.Branch, Attention: w.Attention}
 		for _, a := range w.Agents {
