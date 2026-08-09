@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const fswatch = @import("fswatch.zig");
 
 // ------------------------------------------------------------------ URIs
 
@@ -121,6 +122,180 @@ pub fn byteColFromUtf16(line: []const u8, u16_col: u32) usize {
         i += n;
     }
     return line.len;
+}
+
+// ------------------------------------------------------------ glob match
+
+/// LSP glob syntax ("glob pattern" in the spec): `*` and `?` stay
+/// inside one path segment, `**` crosses segments — matching zero of
+/// them — and `[0-9]` / `[!0-9]` class a single character. Braces
+/// (`{go,mod}`) are expanded at registration time by expandGlob, so
+/// matching here never allocates. Patterns and paths are both absolute
+/// by the time they meet.
+pub fn globMatch(pat: []const u8, s: []const u8) bool {
+    if (s.len == 0) return globMatchesEmpty(pat);
+    if (pat.len == 0) return false;
+    switch (pat[0]) {
+        '*' => {
+            if (pat.len > 1 and pat[1] == '*') {
+                const rest = pat[2..];
+                // `**/x` may match x having crossed zero segments —
+                // the spec's own example: `**/*.md` matches `readme.md`
+                // at the root.
+                const zero = if (rest.len > 0 and rest[0] == '/') rest[1..] else rest;
+                if (globMatch(zero, s)) return true;
+                // Or swallow one whole segment and try again.
+                const slash = std.mem.indexOfScalar(u8, s, '/') orelse return rest.len == 0;
+                return globMatch(pat, s[slash + 1 ..]);
+            }
+            var i: usize = 0;
+            while (true) : (i += 1) {
+                if (globMatch(pat[1..], s[i..])) return true;
+                if (i >= s.len or s[i] == '/') return false;
+            }
+        },
+        '?' => {
+            if (s[0] == '/') return false;
+            return globMatch(pat[1..], s[1..]);
+        },
+        '[' => {
+            if (s[0] == '/') return false;
+            const cl = globClass(pat, s[0]) orelse return false;
+            if (!cl.hit) return false;
+            return globMatch(pat[cl.end..], s[1..]);
+        },
+        else => {
+            if (pat[0] != s[0]) return false;
+            return globMatch(pat[1..], s[1..]);
+        },
+    }
+}
+
+/// Whether the rest of a pattern can match nothing at all. `*` and `**`
+/// can; a `/` can only when what follows it is `**` — which is what
+/// makes `a/**` match the directory `a` itself without `a/*` doing the
+/// same.
+fn globMatchesEmpty(pat: []const u8) bool {
+    var p: usize = 0;
+    while (p < pat.len) {
+        if (pat[p] == '*') {
+            p += 1;
+            continue;
+        }
+        if (pat[p] == '/' and p + 2 < pat.len and pat[p + 1] == '*' and pat[p + 2] == '*') {
+            p += 1;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+const GlobClass = struct { end: usize, hit: bool };
+
+/// `[abc]`, `[0-9]`, `[!a-z]` (and `^` for `!`, which minimatch also
+/// takes). Returns where the class ends and whether `c` is in it; null
+/// for an unterminated class, which fails the whole match rather than
+/// guessing.
+fn globClass(pat: []const u8, c: u8) ?GlobClass {
+    var i: usize = 1;
+    var neg = false;
+    if (i < pat.len and (pat[i] == '!' or pat[i] == '^')) {
+        neg = true;
+        i += 1;
+    }
+    var hit = false;
+    var first = true;
+    while (i < pat.len and (pat[i] != ']' or first)) {
+        first = false;
+        if (i + 2 < pat.len and pat[i + 1] == '-' and pat[i + 2] != ']') {
+            if (c >= pat[i] and c <= pat[i + 2]) hit = true;
+            i += 3;
+        } else {
+            if (pat[i] == c) hit = true;
+            i += 1;
+        }
+    }
+    if (i >= pat.len) return null;
+    return .{ .end = i + 1, .hit = hit != neg };
+}
+
+/// Alternatives one pattern expands to. Servers write `**/*.{go,mod}`,
+/// not brace bombs — past this the pattern is nobody's real watcher,
+/// and the whole expansion is discarded so it matches NOTHING. Matching
+/// wrongly would be quieter and worse.
+pub const max_glob_flat = 64;
+
+/// Expand every `{a,b}` group (nesting included) into flat patterns,
+/// appended to `out` as owned slices. An unbalanced brace or an
+/// oversized expansion contributes nothing.
+pub fn expandGlob(gpa: Allocator, pattern: []const u8, out: *std.ArrayListUnmanaged([]const u8)) void {
+    const start_len = out.items.len;
+    var work: std.ArrayListUnmanaged([]const u8) = .empty;
+    var overflow = false;
+    defer {
+        for (work.items) |it| gpa.free(it);
+        work.deinit(gpa);
+        if (overflow) {
+            for (out.items[start_len..]) |it| gpa.free(it);
+            out.shrinkRetainingCapacity(start_len);
+        }
+    }
+    {
+        const first = gpa.dupe(u8, pattern) catch return;
+        work.append(gpa, first) catch {
+            gpa.free(first);
+            return;
+        };
+    }
+    while (work.pop()) |cur| {
+        const brace = std.mem.indexOfScalar(u8, cur, '{') orelse {
+            if (out.items.len - start_len >= max_glob_flat) {
+                overflow = true;
+                gpa.free(cur);
+                return;
+            }
+            out.append(gpa, cur) catch gpa.free(cur);
+            continue;
+        };
+        defer gpa.free(cur);
+        // The matching close, minding nesting.
+        var close_at: ?usize = null;
+        {
+            var depth: usize = 0;
+            var i = brace;
+            while (i < cur.len) : (i += 1) {
+                if (cur[i] == '{') depth += 1;
+                if (cur[i] == '}') {
+                    depth -= 1;
+                    if (depth == 0) {
+                        close_at = i;
+                        break;
+                    }
+                }
+            }
+        }
+        const cl = close_at orelse continue; // unbalanced: contributes nothing
+        // Each top-level alternative, spliced back in, goes around again
+        // (an alternative may itself hold a nested group).
+        var alt_start = brace + 1;
+        var depth: usize = 0;
+        var i = brace + 1;
+        while (i <= cl) : (i += 1) {
+            const last = i == cl;
+            if (!last and cur[i] == '{') depth += 1;
+            if (!last and cur[i] == '}') depth -= 1;
+            if (!last and (cur[i] != ',' or depth != 0)) continue;
+            const cand = std.mem.concat(gpa, u8, &.{ cur[0..brace], cur[alt_start..i], cur[cl + 1 ..] }) catch continue;
+            alt_start = i + 1;
+            if (work.items.len + (out.items.len - start_len) >= max_glob_flat) {
+                overflow = true;
+                gpa.free(cand);
+                return;
+            }
+            work.append(gpa, cand) catch gpa.free(cand);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- framing
@@ -658,6 +833,26 @@ const Doc = struct {
     version: i32 = 1,
 };
 
+/// WatchKind bits, straight from the spec.
+const watch_create: u8 = 1;
+const watch_change: u8 = 2;
+const watch_delete: u8 = 4;
+
+/// One brace-expanded, absolute glob and what kinds it wants.
+const WatchGlob = struct {
+    /// Owned.
+    pattern: []const u8,
+    kind: u8,
+};
+
+/// One registration's worth of watchers, kept under the id that
+/// client/unregisterCapability will name.
+const WatchReg = struct {
+    /// Owned.
+    id: []const u8,
+    globs: []WatchGlob,
+};
+
 /// In flight at once. A UI can only be waiting on so many things, and
 /// past this the oldest is released as `.empty` rather than growing a
 /// list nobody drains.
@@ -726,6 +921,14 @@ pub const Session = struct {
     /// is how gopls and basedpyright pull their config.
     settings: []const u8 = "",
 
+    /// File-watch registrations, from client/registerCapability. The
+    /// session only FILTERS against these — the eyes are the caller's
+    /// (Server runs an fswatch stream when this is non-empty). rook IS
+    /// a terminal: `go get` runs in the next pane, and a server that
+    /// never hears go.mod changed answers from a module graph that no
+    /// longer exists.
+    watch_regs: std.ArrayListUnmanaged(WatchReg) = .empty,
+
     pub fn init(gpa: Allocator, root_abs: []const u8, settings_json: []const u8) ?Session {
         const root = gpa.dupe(u8, root_abs) catch return null;
         const set = gpa.dupe(u8, settings_json) catch {
@@ -746,9 +949,17 @@ pub const Session = struct {
         for (self.docs.items) |d| gpa.free(d.path);
         self.docs.deinit(gpa);
         self.freeLegend();
+        for (self.watch_regs.items) |*r| freeWatchReg(gpa, r);
+        self.watch_regs.deinit(gpa);
         gpa.free(self.root);
         gpa.free(self.settings);
         self.* = undefined;
+    }
+
+    fn freeWatchReg(gpa: Allocator, r: *WatchReg) void {
+        gpa.free(r.id);
+        for (r.globs) |g| gpa.free(g.pattern);
+        gpa.free(r.globs);
     }
 
     fn freeLegend(self: *Session) void {
@@ -904,7 +1115,12 @@ pub const Session = struct {
             // client, and the cost of getting it wrong is silence.
             "\"semanticTokens\":{\"requests\":{\"full\":true}," ++
             "\"tokenTypes\":[],\"tokenModifiers\":[],\"formats\":[\"relative\"]}}," ++
-            "\"workspace\":{\"configuration\":true,\"workspaceFolders\":true}}}") catch return;
+            // dynamicRegistration is the invitation: gopls only asks to
+            // watch go.mod/go.sum when the client says it CAN watch.
+            // Without this line the whole watched-files path is dark —
+            // the server never registers, and nothing below ever runs.
+            "\"workspace\":{\"configuration\":true,\"workspaceFolders\":true," ++
+            "\"didChangeWatchedFiles\":{\"dynamicRegistration\":true}}}}") catch return;
 
         // state is still .new, so post() would park it — initialize is
         // the one message that must go out now.
@@ -1434,12 +1650,22 @@ pub const Session = struct {
             self.respond(id_json, a.written());
             return;
         }
-        // Registration, progress and message requests: acknowledged with
-        // null. We don't act on dynamic registration — we asked for what
-        // we want statically — but refusing it makes gopls noisy.
-        if (std.mem.eql(u8, method, "client/registerCapability") or
-            std.mem.eql(u8, method, "client/unregisterCapability") or
-            std.mem.eql(u8, method, "window/workDoneProgress/create") or
+        // Registration: file watchers are PARSED and honoured (the
+        // Server side runs the fswatch stream); everything else is
+        // acknowledged and ignored — we asked for what we want
+        // statically, but refusing the request makes gopls noisy.
+        if (std.mem.eql(u8, method, "client/registerCapability")) {
+            self.addWatchRegs(params);
+            self.respond(id_json, "null");
+            return;
+        }
+        if (std.mem.eql(u8, method, "client/unregisterCapability")) {
+            self.removeWatchRegs(params);
+            self.respond(id_json, "null");
+            return;
+        }
+        // Progress and message requests: acknowledged with null.
+        if (std.mem.eql(u8, method, "window/workDoneProgress/create") or
             std.mem.eql(u8, method, "window/showMessageRequest") or
             std.mem.eql(u8, method, "workspace/applyEdit"))
         {
@@ -1469,6 +1695,169 @@ pub const Session = struct {
             if (v == .null) return null;
         }
         return std.json.Stringify.valueAlloc(self.gpa, v, .{}) catch null;
+    }
+
+    // ---------------------------------------------------- watched files
+
+    /// Every registration for workspace/didChangeWatchedFiles in a
+    /// client/registerCapability request. Patterns land ABSOLUTE: a
+    /// RelativePattern joins its baseUri, a bare string joins the
+    /// workspace root, and an already-absolute string stays. Braces are
+    /// expanded here so match time never allocates.
+    fn addWatchRegs(self: *Session, params: std.json.Value) void {
+        const gpa = self.gpa;
+        const regs = jGet(params, "registrations");
+        if (regs != .array) return;
+        for (regs.array.items) |reg| {
+            const method = jStr(jGet(reg, "method")) orelse continue;
+            if (!std.mem.eql(u8, method, "workspace/didChangeWatchedFiles")) continue;
+            const rid = jStr(jGet(reg, "id")) orelse continue;
+            const watchers = jGet(jGet(reg, "registerOptions"), "watchers");
+            if (watchers != .array) continue;
+
+            var globs: std.ArrayListUnmanaged(WatchGlob) = .empty;
+            for (watchers.array.items) |wt| {
+                const kind: u8 = switch (jGet(wt, "kind")) {
+                    .integer => |k| @intCast(@as(u64, @bitCast(k)) & 7),
+                    else => watch_create | watch_change | watch_delete,
+                };
+                const abs = self.absPattern(jGet(wt, "globPattern")) orelse continue;
+                defer gpa.free(abs);
+                var flats: std.ArrayListUnmanaged([]const u8) = .empty;
+                defer flats.deinit(gpa);
+                expandGlob(gpa, abs, &flats);
+                for (flats.items) |flat| {
+                    globs.append(gpa, .{ .pattern = flat, .kind = kind }) catch gpa.free(flat);
+                }
+            }
+
+            // Nothing usable in it — starting eyes for a registration
+            // with no working glob would be all cost.
+            if (globs.items.len == 0) {
+                globs.deinit(gpa);
+                continue;
+            }
+            // Same id again is a replace — ids are the server's, and
+            // unique is its promise, not our assumption.
+            self.dropWatchReg(rid);
+            const id_owned = gpa.dupe(u8, rid) catch {
+                for (globs.items) |g| gpa.free(g.pattern);
+                globs.deinit(gpa);
+                continue;
+            };
+            const owned = globs.toOwnedSlice(gpa) catch {
+                gpa.free(id_owned);
+                for (globs.items) |g| gpa.free(g.pattern);
+                globs.deinit(gpa);
+                continue;
+            };
+            self.watch_regs.append(gpa, .{ .id = id_owned, .globs = owned }) catch {
+                gpa.free(id_owned);
+                for (owned) |g| gpa.free(g.pattern);
+                gpa.free(owned);
+            };
+        }
+    }
+
+    /// A GlobPattern rendered absolute, owned. String or RelativePattern
+    /// — and a RelativePattern's baseUri may itself be a WorkspaceFolder
+    /// object rather than a bare URI string.
+    fn absPattern(self: *Session, gp: std.json.Value) ?[]u8 {
+        const gpa = self.gpa;
+        switch (gp) {
+            .string => |p| {
+                if (p.len == 0) return null;
+                if (p[0] == '/') return gpa.dupe(u8, p) catch null;
+                return std.mem.concat(gpa, u8, &.{ self.root, "/", p }) catch null;
+            },
+            .object => {
+                const base_v = jGet(gp, "baseUri");
+                const base_uri = jStr(base_v) orelse jStr(jGet(base_v, "uri")) orelse return null;
+                const pat = jStr(jGet(gp, "pattern")) orelse return null;
+                const base = pathFromUri(gpa, base_uri) orelse return null;
+                defer gpa.free(base);
+                const trimmed = std.mem.trimEnd(u8, base, "/");
+                return std.mem.concat(gpa, u8, &.{ trimmed, "/", pat }) catch null;
+            },
+            else => return null,
+        }
+    }
+
+    fn removeWatchRegs(self: *Session, params: std.json.Value) void {
+        // The spec spells the field "unregisterations", typo and all —
+        // and clients that quietly fixed the spelling exist on both
+        // sides, so read either.
+        var list = jGet(params, "unregisterations");
+        if (list != .array) list = jGet(params, "unregistrations");
+        if (list != .array) return;
+        for (list.array.items) |u| {
+            const method = jStr(jGet(u, "method")) orelse continue;
+            if (!std.mem.eql(u8, method, "workspace/didChangeWatchedFiles")) continue;
+            const rid = jStr(jGet(u, "id")) orelse continue;
+            self.dropWatchReg(rid);
+        }
+    }
+
+    fn dropWatchReg(self: *Session, rid: []const u8) void {
+        var i: usize = 0;
+        while (i < self.watch_regs.items.len) {
+            if (std.mem.eql(u8, self.watch_regs.items[i].id, rid)) {
+                var r = self.watch_regs.orderedRemove(i);
+                freeWatchReg(self.gpa, &r);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    /// Whether anyone upstairs should be running eyes on the tree.
+    pub fn wantsWatch(self: *const Session) bool {
+        return self.watch_regs.items.len > 0;
+    }
+
+    pub const FileChange = struct { path: []const u8, kind: fswatch.Kind };
+
+    /// Filter a batch of filesystem changes through the registrations
+    /// and send ONE workspace/didChangeWatchedFiles for whatever
+    /// survives. Returns whether anything went out — the caller's cue
+    /// to wake its writer.
+    pub fn watchedChanged(self: *Session, changes: []const FileChange) bool {
+        if (self.state != .ready) return false;
+        if (self.watch_regs.items.len == 0) return false;
+        var a: std.Io.Writer.Allocating = .init(self.gpa);
+        defer a.deinit();
+        const w = &a.writer;
+        w.writeAll("{\"changes\":[") catch return false;
+        var n: usize = 0;
+        for (changes) |ch| {
+            const bit: u8 = switch (ch.kind) {
+                .created => watch_create,
+                .changed => watch_change,
+                .deleted => watch_delete,
+            };
+            if (!self.watchMatch(ch.path, bit)) continue;
+            const uri = uriFromPath(self.gpa, ch.path) orelse continue;
+            defer self.gpa.free(uri);
+            if (n > 0) w.writeByte(',') catch return false;
+            n += 1;
+            w.writeAll("{\"uri\":") catch return false;
+            writeJsonString(w, uri);
+            w.print(",\"type\":{d}}}", .{@intFromEnum(ch.kind)}) catch return false;
+        }
+        if (n == 0) return false;
+        w.writeAll("]}") catch return false;
+        self.notify("workspace/didChangeWatchedFiles", a.written());
+        return true;
+    }
+
+    fn watchMatch(self: *const Session, path: []const u8, kind_bit: u8) bool {
+        for (self.watch_regs.items) |r| {
+            for (r.globs) |g| {
+                if (g.kind & kind_bit == 0) continue;
+                if (globMatch(g.pattern, path)) return true;
+            }
+        }
+        return false;
     }
 
     fn serverNotify(self: *Session, method: []const u8, params: std.json.Value) void {
@@ -2130,6 +2519,11 @@ pub const Server = struct {
     sess: Session,
     mu: Lock = .{},
     thread: ?std.Thread = null,
+    /// The eyes behind the session's watch registrations. Owned by the
+    /// PUMP thread (created and dropped in reconcileWatch); stop()
+    /// tears down the leftover only after the pump has joined, so the
+    /// field is never raced.
+    watcher: ?*fswatch.Stream = null,
 
     pid: c_int = -1,
     to_child: c_int = -1,
@@ -2267,6 +2661,8 @@ pub const Server = struct {
                 // server→client requests, and the queue flushed by the
                 // initialize reply.
                 self.flush();
+                // feed() is also where a watch registration lands.
+                self.reconcileWatch();
             }
             // revents may report the far end closed without POLLIN.
             if (fds[0].revents != 0 and fds[0].revents & POLLIN == 0) {
@@ -2276,6 +2672,38 @@ pub const Server = struct {
                 return;
             }
         }
+    }
+
+    /// Start or stop the fswatch stream to match what the session's
+    /// registrations want. Pump thread only.
+    fn reconcileWatch(self: *Server) void {
+        self.mu.lock();
+        const want = self.sess.state == .ready and self.sess.wantsWatch();
+        self.mu.unlock();
+        if (want and self.watcher == null) {
+            // root is set at init and never moves, so reading it
+            // unlocked is fine; the stream borrows it only for the
+            // duration of start.
+            self.watcher = fswatch.Stream.start(self.gpa, self.sess.root, self, onFsChanges);
+        } else if (!want and self.watcher != null) {
+            self.watcher.?.stop();
+            self.watcher = null;
+        }
+    }
+
+    /// fswatch callback — ITS dispatch queue, not the pump. The same
+    /// lock-and-poke contract every other cross-thread caller follows.
+    fn onFsChanges(ctx: *anyopaque, changes: []const fswatch.Change) void {
+        const self: *Server = @ptrCast(@alignCast(ctx));
+        var list: [fswatch.max_batch]Session.FileChange = undefined;
+        const n = @min(changes.len, list.len);
+        for (changes[0..n], 0..) |ch, i| {
+            list[i] = .{ .path = ch.path, .kind = ch.kind };
+        }
+        self.mu.lock();
+        const sent = self.sess.watchedChanged(list[0..n]);
+        self.mu.unlock();
+        if (sent) self.poke();
     }
 
     /// Copy pending outbound out from under the lock, then write it
@@ -2464,6 +2892,13 @@ pub const Server = struct {
         if (self.thread) |t| {
             t.join();
             self.thread = null;
+        }
+        // After the join: the pump cannot recreate it, and stop()'s
+        // queue fence must not wait behind a lock we hold — we don't
+        // hold any here.
+        if (self.watcher) |ws| {
+            ws.stop();
+            self.watcher = null;
         }
         if (self.pid > 0) {
             var status: c_int = 0;
@@ -3703,4 +4138,176 @@ test "code actions: the context carries diagnostics, and a Command is not an act
     var e3 = sess.nextEvent().?;
     defer e3.deinit(gpa);
     try testing.expect(e3 == .empty);
+}
+
+// --------------------------------------------------------- watched files
+
+test "globMatch — the spec's syntax, segment rules included" {
+    // ** crosses segments, including zero of them.
+    try testing.expect(globMatch("/r/**/*.go", "/r/a.go"));
+    try testing.expect(globMatch("/r/**/*.go", "/r/x/y/a.go"));
+    try testing.expect(!globMatch("/r/**/*.go", "/r/a.gox"));
+    try testing.expect(!globMatch("/r/**/*.go", "/r/a.txt"));
+    // * stays inside a segment.
+    try testing.expect(globMatch("/r/*.go", "/r/a.go"));
+    try testing.expect(!globMatch("/r/*.go", "/r/x/a.go"));
+    // * matches nothing at all.
+    try testing.expect(globMatch("/r/a*", "/r/a"));
+    // ? is one character, never a slash.
+    try testing.expect(globMatch("/r/a?c", "/r/abc"));
+    try testing.expect(!globMatch("/r/a?c", "/r/a/c"));
+    // Classes, ranges, negation.
+    try testing.expect(globMatch("/r/v[0-9].go", "/r/v1.go"));
+    try testing.expect(!globMatch("/r/v[0-9].go", "/r/vx.go"));
+    try testing.expect(globMatch("/r/v[!0-9].go", "/r/vx.go"));
+    try testing.expect(!globMatch("/r/v[!0-9].go", "/r/v1.go"));
+    // An unterminated class fails the match rather than guessing.
+    try testing.expect(!globMatch("/r/v[0-9.go", "/r/v1.go"));
+    // a/** matches the directory itself; a/* does not.
+    try testing.expect(globMatch("/r/pkg/**", "/r/pkg"));
+    try testing.expect(globMatch("/r/pkg/**", "/r/pkg/x/y"));
+    try testing.expect(!globMatch("/r/pkg/*", "/r/pkg"));
+    // A trailing slash in the pattern is a directory nobody named.
+    try testing.expect(!globMatch("/r/a/", "/r/a"));
+}
+
+test "expandGlob — braces flatten, nesting included, bombs refused" {
+    const gpa = testing.allocator;
+    {
+        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer {
+            for (out.items) |p| gpa.free(p);
+            out.deinit(gpa);
+        }
+        expandGlob(gpa, "/r/**/*.{go,mod,sum}", &out);
+        try testing.expectEqual(@as(usize, 3), out.items.len);
+        var seen_go = false;
+        for (out.items) |p| {
+            if (std.mem.eql(u8, p, "/r/**/*.go")) seen_go = true;
+        }
+        try testing.expect(seen_go);
+    }
+    {
+        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer {
+            for (out.items) |p| gpa.free(p);
+            out.deinit(gpa);
+        }
+        expandGlob(gpa, "/r/{a,{b,c}}/x", &out);
+        try testing.expectEqual(@as(usize, 3), out.items.len);
+    }
+    {
+        // No braces: the pattern passes through whole.
+        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer {
+            for (out.items) |p| gpa.free(p);
+            out.deinit(gpa);
+        }
+        expandGlob(gpa, "/r/**/*.go", &out);
+        try testing.expectEqual(@as(usize, 1), out.items.len);
+        try testing.expectEqualStrings("/r/**/*.go", out.items[0]);
+    }
+    {
+        // A brace bomb past max_glob_flat contributes NOTHING — matching
+        // nothing beats matching wrongly.
+        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer out.deinit(gpa);
+        expandGlob(gpa, "/{a,b,c,d}{a,b,c,d}{a,b,c,d}{a,b,c,d}", &out);
+        try testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+    {
+        // Unbalanced braces likewise.
+        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer out.deinit(gpa);
+        expandGlob(gpa, "/r/{a,b/x", &out);
+        try testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+}
+
+test "watch registrations: parsed, filtered by kind and glob, unregistered" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    try readySession(&sess, false);
+    sess.consumeOutbound(sess.outbound().len);
+
+    // Before any registration, a change goes nowhere.
+    try testing.expect(!sess.watchedChanged(&.{
+        .{ .path = "/tmp/work/a.go", .kind = .created },
+    }));
+    try testing.expect(!sess.wantsWatch());
+
+    // gopls-shaped: one string glob with braces, one RelativePattern
+    // with a kind mask (create|delete — no change events).
+    const reg = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"client/registerCapability\",\"params\":{" ++
+        "\"registrations\":[{\"id\":\"w-src\",\"method\":\"workspace/didChangeWatchedFiles\"," ++
+        "\"registerOptions\":{\"watchers\":[{\"globPattern\":\"**/*.{go,sum}\"}]}}," ++
+        "{\"id\":\"w-mod\",\"method\":\"workspace/didChangeWatchedFiles\"," ++
+        "\"registerOptions\":{\"watchers\":[{\"globPattern\":{\"baseUri\":\"file:///tmp/work\"," ++
+        "\"pattern\":\"*.mod\"},\"kind\":5}]}}]}}";
+    const f = try framed(gpa, reg);
+    defer gpa.free(f);
+    sess.feed(f);
+    // The request is still acknowledged — gopls waits on the reply.
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(), "\"id\":9,\"result\":null") != null);
+    sess.consumeOutbound(sess.outbound().len);
+    try testing.expect(sess.wantsWatch());
+
+    // One batch: a matching create, a .txt nobody watches, a masked
+    // change on go.mod, an allowed delete on go.mod.
+    try testing.expect(sess.watchedChanged(&.{
+        .{ .path = "/tmp/work/x/a.go", .kind = .created },
+        .{ .path = "/tmp/work/noise.txt", .kind = .created },
+        .{ .path = "/tmp/work/go.mod", .kind = .changed },
+        .{ .path = "/tmp/work/go.mod", .kind = .deleted },
+    }));
+    const out = sess.outbound();
+    try testing.expect(std.mem.indexOf(u8, out, "workspace/didChangeWatchedFiles") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "a.go\",\"type\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "go.mod\",\"type\":3") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "noise.txt") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "go.mod\",\"type\":2") == null);
+    sess.consumeOutbound(out.len);
+
+    // A batch where nothing survives sends nothing at all — an empty
+    // changes array would still wake the server for no reason.
+    try testing.expect(!sess.watchedChanged(&.{
+        .{ .path = "/tmp/work/README.md", .kind = .changed },
+    }));
+    try testing.expectEqual(@as(usize, 0), sess.outbound().len);
+
+    // Unregister — with the spec's own spelling of the field.
+    const unreg = "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"client/unregisterCapability\",\"params\":{" ++
+        "\"unregisterations\":[{\"id\":\"w-src\",\"method\":\"workspace/didChangeWatchedFiles\"}]}}";
+    const f2 = try framed(gpa, unreg);
+    defer gpa.free(f2);
+    sess.feed(f2);
+    sess.consumeOutbound(sess.outbound().len);
+    // The .go watcher is gone; the .mod one remains.
+    try testing.expect(!sess.watchedChanged(&.{
+        .{ .path = "/tmp/work/x/a.go", .kind = .created },
+    }));
+    try testing.expect(sess.wantsWatch());
+    try testing.expect(sess.watchedChanged(&.{
+        .{ .path = "/tmp/work/go.mod", .kind = .created },
+    }));
+    sess.consumeOutbound(sess.outbound().len);
+
+    const unreg2 = "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"client/unregisterCapability\",\"params\":{" ++
+        "\"unregisterations\":[{\"id\":\"w-mod\",\"method\":\"workspace/didChangeWatchedFiles\"}]}}";
+    const f3 = try framed(gpa, unreg2);
+    defer gpa.free(f3);
+    sess.feed(f3);
+    try testing.expect(!sess.wantsWatch());
+}
+
+test "initialize declares didChangeWatchedFiles dynamicRegistration" {
+    // The invitation itself: without this line in capabilities, gopls
+    // never registers a watcher and every test above tests dead code.
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp/work", "").?;
+    defer sess.deinit();
+    sess.start();
+    try testing.expect(std.mem.indexOf(u8, sess.outbound(),
+        "\"didChangeWatchedFiles\":{\"dynamicRegistration\":true}") != null);
 }

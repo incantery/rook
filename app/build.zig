@@ -64,6 +64,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.addIncludePath(b.path("vendor/tree-sitter/src"));
     exe_mod.addCSourceFile(.{ .file = b.path("vendor/tree-sitter/src/lib.c"), .flags = &.{"-std=c11"} });
     exe_mod.linkFramework("AppKit", .{});
+    // FSEvents — the file watching behind workspace/didChangeWatchedFiles.
+    exe_mod.linkFramework("CoreServices", .{});
     exe_mod.linkFramework("Metal", .{});
     exe_mod.linkFramework("QuartzCore", .{});
     exe_mod.linkFramework("CoreVideo", .{});
@@ -281,12 +283,16 @@ pub fn build(b: *std.Build) void {
     // Search's matching rules: smartcase, the binary probe, and the
     // line-trim that has to keep the match visible. Pure data logic
     // behind a panel, which is the shape that earns a headless root.
-    const search_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const search_mod = b.createModule(.{
         .root_source_file = b.path("src/search.zig"),
         .target = b.graph.host,
         .optimize = .Debug,
         .link_libc = true,
-    }) });
+    });
+    // search imports lsp for its types, and lsp's Server owns an
+    // FSEvents watcher now.
+    search_mod.linkFramework("CoreServices", .{});
+    const search_tests = b.addTest(.{ .root_module = search_mod });
     test_step.dependOn(&b.addRunArtifact(search_tests).step);
 
     // Key encoding. The strongest case in the tree for a headless root:
@@ -323,13 +329,28 @@ pub fn build(b: *std.Build) void {
     // dropped (a spinner nobody can clear). Sans-IO exists so those are
     // testable without spawning gopls, and libc is here for the two
     // tests that DO spawn, which prove the pipe and the teardown.
-    const lsp_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const lsp_mod = b.createModule(.{
         .root_source_file = b.path("src/lsp.zig"),
         .target = b.graph.host,
         .optimize = .Debug,
         .link_libc = true,
-    }) });
+    });
+    // The spawn tests instantiate Server, which owns an FSEvents watcher.
+    lsp_mod.linkFramework("CoreServices", .{});
+    const lsp_tests = b.addTest(.{ .root_module = lsp_mod });
     test_step.dependOn(&b.addRunArtifact(lsp_tests).step);
+
+    // The FSEvents wrapper. Its own root because its one test watches a
+    // REAL directory: the classification rule (stat beats flags) is a
+    // contract with kernel coalescing behavior that no mock exhibits.
+    const fswatch_mod = b.createModule(.{
+        .root_source_file = b.path("src/fswatch.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    });
+    fswatch_mod.linkFramework("CoreServices", .{});
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fswatch_mod })).step);
 
     // Running git, and the repo-path guard. Its own root because both
     // halves fail silently when wrong: `git diff --no-index` exits 1 for

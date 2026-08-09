@@ -71,6 +71,7 @@ const scenarios = [_]Scenario{
     .{ .name = "suggest", .what = "the menu appears as you type, narrows, never writes, and Tab takes it", .run = suggestScenario },
     .{ .name = "lsplang", .what = "no built-in catalog: a language is a declaration, and each way of having no server says which one it is", .run = lspLang },
     .{ .name = "lspretarget", .what = "a pane that retargets ITSELF — file tree, :e — still gets its server, and drops it when there is none", .run = lspRetarget },
+    .{ .name = "lspwatch", .what = "the server registers file watchers, and a write rook never made is heard — filtered by glob and by kind", .run = lspWatch },
     .{ .name = "docshare", .what = "one file in two panes is ONE document: edits, dirty flag and :w are shared", .run = docShare },
     .{ .name = "findfiles", .what = "⌘⇧F: scan honours the ignore rules, results group by file, Enter jumps to the line", .run = findInFiles },
     .{ .name = "vscodefeel", .what = "the vscode persona feels right: insert on open, cmd-s saves, the rail's explorer opens the tree", .run = vscodeFeel },
@@ -4049,6 +4050,12 @@ fn fakeLsp(gpa: std.mem.Allocator, target: []const u8) !void {
     }
 }
 
+/// What the fake server has heard on workspace/didChangeWatchedFiles.
+/// Process-global is fine: in --fake-lsp mode this process IS one
+/// server, serving one session.
+var fake_watched_log: [32 * 1024]u8 = undefined;
+var fake_watched_len: usize = 0;
+
 fn fakeSend(gpa: std.mem.Allocator, body: []const u8) !void {
     var hdr: [64]u8 = undefined;
     const head = try std.fmt.bufPrint(&hdr, "Content-Length: {d}\r\n\r\n", .{body.len});
@@ -4096,6 +4103,39 @@ fn fakeHandle(gpa: std.mem.Allocator, body: []const u8, target: []const u8) !voi
             .{target},
         );
         try fakeSend(gpa, w.written());
+        return;
+    }
+    if (std.mem.eql(u8, method, "initialized")) {
+        // The watcher registrations, the moment the spec allows them.
+        // Two on purpose: a bare glob that wants everything, and a
+        // RelativePattern masked to create|delete (kind 5) — the two
+        // shapes gopls actually sends, and the mask is the half a
+        // client gets wrong silently.
+        const dir = std.fs.path.dirname(target) orelse "/";
+        try w.writer.print(
+            "{{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"client/registerCapability\",\"params\":{{" ++
+                "\"registrations\":[{{\"id\":\"w-go\",\"method\":\"workspace/didChangeWatchedFiles\"," ++
+                "\"registerOptions\":{{\"watchers\":[{{\"globPattern\":\"**/*.go\"}}]}}}}," ++
+                "{{\"id\":\"w-mod\",\"method\":\"workspace/didChangeWatchedFiles\"," ++
+                "\"registerOptions\":{{\"watchers\":[{{\"globPattern\":{{\"baseUri\":\"file://{s}\"," ++
+                "\"pattern\":\"*.mod\"}},\"kind\":5}}]}}}}]}}}}",
+            .{dir},
+        );
+        try fakeSend(gpa, w.written());
+        return;
+    }
+    if (std.mem.eql(u8, method, "workspace/didChangeWatchedFiles")) {
+        // The receipt: everything heard, rewritten WHOLE each time, so
+        // a scenario can assert absences as well as arrivals.
+        const room = fake_watched_log.len - fake_watched_len;
+        if (body.len + 1 <= room) {
+            @memcpy(fake_watched_log[fake_watched_len..][0..body.len], body);
+            fake_watched_log[fake_watched_len + body.len] = '\n';
+            fake_watched_len += body.len + 1;
+        }
+        var pbuf: [320]u8 = undefined;
+        const p = std.fmt.bufPrint(&pbuf, "{s}.watched", .{target}) catch return;
+        h.writeFile(p, fake_watched_log[0..fake_watched_len]) catch {};
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/hover")) {
@@ -4399,6 +4439,111 @@ fn lspPython(gpa: std.mem.Allocator, bin: []const u8) !void {
 /// its rows join through that dot — a spelling that is a second
 /// document as far as the doc registry is concerned, and one gopls
 /// answers with "No packages found for open file".
+/// Poll a receipt file for a substring. The fake server rewrites it
+/// whole on every notification, so a read that misses just tries again.
+fn waitReceipt(path: []const u8, needle: []const u8, timeout_ms: u32) !void {
+    var buf: [32 * 1024]u8 = undefined;
+    var waited: u32 = 0;
+    while (waited < timeout_ms) : (waited += 100) {
+        if (h.readFile(path, &buf)) |txt| {
+            if (std.mem.indexOf(u8, txt, needle) != null) return;
+        } else |_| {}
+        h.sleepMs(100);
+    }
+    std.debug.print("    receipt never showed: {s}\n", .{needle});
+    return error.AssertFailed;
+}
+
+/// workspace/didChangeWatchedFiles, end to end. The fake server
+/// registers two watchers on `initialized` — `**/*.go` wanting every
+/// kind, and a RelativePattern `*.mod` masked to create|delete — and
+/// writes every notification it hears into `<target>.watched`. The
+/// filesystem is then driven from OUTSIDE the editor, which is the
+/// whole point: rook IS a terminal, and `go get` in the next pane is
+/// exactly a write rook never made. Before this landed, that write was
+/// silence and the server answered from a module graph that no longer
+/// existed.
+///
+/// FSEvents flags are cumulative near a create, so the positive
+/// change-event proof uses a file that PREDATES the stream (util.go);
+/// fresh.go proves create and delete, where the stat tiebreaker holds
+/// regardless of flag history.
+fn lspWatch(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lspwatch-{d}", .{h.runPid()});
+    var proj_buf: [256]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{scratch});
+    try h.mkdirP(proj);
+
+    var mod_buf: [288]u8 = undefined;
+    const go_mod = try std.fmt.bufPrintZ(&mod_buf, "{s}/go.mod", .{proj});
+    try h.writeFile(go_mod, "module smoke\n\ngo 1.21\n");
+    var main_buf: [288]u8 = undefined;
+    const main_go = try std.fmt.bufPrint(&main_buf, "{s}/main.go", .{proj});
+    try h.writeFile(main_go, "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(nope())\n}\n");
+    var util_buf: [288]u8 = undefined;
+    const util_go = try std.fmt.bufPrint(&util_buf, "{s}/util.go", .{proj});
+    try h.writeFile(util_go, "package main\n\nfunc nope() int {\n\treturn 1\n}\n");
+
+    var graph_buf: [1024]u8 = undefined;
+    const graph = try langGraph(&graph_buf, "go", "\".go\"", "\"go.mod\"", main_go);
+
+    const app = try h.Instance.start(gpa, bin, .{ .cwd = proj, .env_json = graph });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    _ = try app.ctlFmt("edit {s}", .{main_go});
+    // The diagnostic reaching the gutter proves the server is up and
+    // PAST initialized — which is when the registration went out.
+    _ = try app.waitCtl("lsp", "errors:1", 8_000);
+
+    var receipt_buf: [320]u8 = undefined;
+    const receipt = try std.fmt.bufPrint(&receipt_buf, "{s}.watched", .{main_go});
+
+    // Noise first: a file nobody registered a glob for. Its absence at
+    // the end MEANS something because events that follow it do arrive.
+    var noise_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&noise_buf, "{s}/noise.txt", .{proj}), "x\n");
+
+    // Create.
+    var fresh_buf: [288]u8 = undefined;
+    const fresh = try std.fmt.bufPrintZ(&fresh_buf, "{s}/fresh.go", .{proj});
+    try h.writeFile(fresh, "package main\n");
+    try waitReceipt(receipt, "fresh.go\",\"type\":1", 8_000);
+
+    // Change, on the file older than the stream.
+    try h.writeFile(util_go, "package main\n\nfunc nope() int {\n\treturn 2\n}\n");
+    try waitReceipt(receipt, "util.go\",\"type\":2", 8_000);
+
+    // Delete — stat beats whatever history the flags still carry.
+    try h.expectEq("rm fresh.go", 0, try h.runCmd(proj, &.{ "/bin/rm", fresh.ptr }));
+    try waitReceipt(receipt, "fresh.go\",\"type\":3", 8_000);
+
+    // The kind mask. Modify go.mod, then land a sentinel .go create
+    // AFTER it: when the sentinel shows in the receipt, the go.mod
+    // change had every chance to arrive — and must not have.
+    try h.writeFile(go_mod, "module smoke\n\ngo 1.22\n");
+    var done_buf: [288]u8 = undefined;
+    try h.writeFile(try std.fmt.bufPrint(&done_buf, "{s}/done.go", .{proj}), "package main\n");
+    try waitReceipt(receipt, "done.go\",\"type\":1", 8_000);
+    {
+        var buf: [32 * 1024]u8 = undefined;
+        const txt = try h.readFile(receipt, &buf);
+        try h.expect(std.mem.indexOf(u8, txt, "go.mod\",\"type\":2") == null,
+            "the kind mask held: a change event for go.mod got through", .{});
+        try h.expect(std.mem.indexOf(u8, txt, "noise.txt") == null,
+            "the glob filter held: noise.txt reached the server", .{});
+    }
+
+    // And the mask's other half, so the absence above is not vacuous:
+    // a go.mod DELETE is allowed through — which is also the proof the
+    // RelativePattern watcher parsed at all.
+    try h.expectEq("rm go.mod", 0, try h.runCmd(proj, &.{ "/bin/rm", go_mod.ptr }));
+    try waitReceipt(receipt, "go.mod\",\"type\":3", 8_000);
+}
+
 fn lspRetarget(gpa: std.mem.Allocator, bin: []const u8) !void {
     var scratch_buf: [192]u8 = undefined;
     const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lspre-{d}", .{h.runPid()});
