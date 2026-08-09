@@ -39,13 +39,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/incantery/rook/plugins/internal/cmdjournal"
 	"github.com/incantery/rook/plugins/internal/digestlog"
+	"github.com/incantery/rook/plugins/internal/statusfold"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
 
@@ -362,93 +362,43 @@ type wireDigest struct {
 // calls it "the one field worth reading in full".
 const maxCloudAsk = 2000
 
-// askText is the question as the phone will read and answer it.
-//
-// Snip is right for the panel: cell rows are one line, so it flattens
-// whitespace and cuts hard. It is wrong here. We were sending 200 bytes,
-// a tenth of what the wire allows, so every ask longer than a sentence
-// reached the phone already ending in an ellipsis — and a reply written
-// against a tenth of a question is a reply to a different question.
-//
-// Line structure survives for the same reason. The asks that are hardest
-// to answer away from the keyboard are the ones offering numbered
-// choices, and flattening them to one line is exactly what makes them
-// unreadable on the surface that most needs them readable.
-func askText(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= maxCloudAsk {
-		return s
-	}
-	cut := maxCloudAsk - len("…")
-	for cut > 0 && s[cut]&0xC0 == 0x80 { // land on a rune boundary
-		cut--
-	}
-	return s[:cut] + "…"
-}
+// askText and askID moved to plugins/internal/statusfold, where the
+// link plugin shares them; these aliases keep this plugin's tests
+// pinned to the exact behavior its wire promised.
+func askText(s string) string { return statusfold.AskText(s) }
 
-// statusFrom folds sessions into the cloud's vocabulary. The mapping
-// is deliberately conservative in one place: `blocked?` becomes
-// needs_input, because a session that may be sitting on an approval is
-// exactly what you left the room and want to know about.
-//
-// digests is the agent plugin's journal, latest per session: this
-// bridge does no language work of its own — it carries the membrane's
-// artifacts, it does not make them.
+func askID(s transcript.Session) string { return statusfold.AskID(s) }
+
+// statusFrom folds sessions into the cloud's vocabulary — the fold
+// itself lives in plugins/internal/statusfold now, shared with the
+// link plugin so both rails say the same thing about this machine.
+// This side only renders the neutral struct as rook-cloud's wire JSON;
+// the field names and omitempty semantics above are the contract, and
+// the mapping here is deliberately 1:1.
 func statusFrom(sessions []transcript.Session, digests map[string]digestlog.Digest, rookVer string) wireStatus {
 	host, _ := os.Hostname()
-	st := wireStatus{Hostname: host, RookVersion: rookVer}
+	n := statusfold.Fold(sessions, digests, host, rookVer)
 
-	byWS := map[string]*wireWorkspace{}
-	var order []string
-	for _, s := range sessions {
-		name := filepath.Base(s.Cwd)
-		if name == "" || name == "." || name == "/" {
-			name = "?"
+	st := wireStatus{Hostname: n.Hostname, RookVersion: n.RookVersion}
+	for _, w := range n.Workspaces {
+		ww := wireWorkspace{Name: w.Name, Branch: w.Branch, Attention: w.Attention}
+		for _, a := range w.Agents {
+			wa := wireAgent{
+				ID:        a.ID,
+				State:     a.State,
+				Title:     a.Title,
+				Ask:       a.Ask,
+				AskID:     a.AskID,
+				Model:     a.Model,
+				CtxPct:    a.CtxPct,
+				LastEvent: a.LastEvent,
+			}
+			if a.Digest != nil {
+				wa.Digest = &wireDigest{Headline: a.Digest.Headline, Bullets: a.Digest.Bullets, At: a.Digest.At}
+			}
+			ww.Agents = append(ww.Agents, wa)
 		}
-		w, ok := byWS[name]
-		if !ok {
-			w = &wireWorkspace{Name: name, Branch: s.Branch}
-			byWS[name] = w
-			order = append(order, name)
-		}
-		a := wireAgent{
-			ID:        s.ID,
-			Title:     transcript.Snip(s.Title, 80),
-			Model:     "claude",
-			LastEvent: s.Mtime,
-		}
-		if p := transcript.CtxPct(s.CtxTokens, s.Model); p > 0 {
-			a.CtxPct = p
-		}
-		if d, ok := digests[s.ID]; ok {
-			a.Digest = &wireDigest{Headline: d.Headline, Bullets: d.Bullets, At: d.At}
-		}
-		switch s.State {
-		case transcript.StateNeedsYou:
-			a.State = "needs_input"
-			a.Ask = askText(s.LastText)
-		case transcript.StateBlocked:
-			a.State = "needs_input"
-			a.Ask = askText("approval? " + s.Prompt)
-		case transcript.StateWorking:
-			a.State = "working"
-		default:
-			a.State = "quiet"
-		}
-		// The ask's stable handle: an answer from the phone names this,
-		// and delivery re-derives it — a changed ask (the session moved
-		// on) makes the old answer STALE by construction.
-		if a.State == "needs_input" {
-			a.AskID = askID(s)
-		}
-		if a.State == "needs_input" {
-			w.Attention++
-		}
-		w.Agents = append(w.Agents, a)
-	}
-	sort.Strings(order)
-	for _, name := range order {
-		st.Workspaces = append(st.Workspaces, *byWS[name])
+		st.Workspaces = append(st.Workspaces, ww)
 	}
 	return st
 }
@@ -857,22 +807,6 @@ func (br *bridge) note(msg string) {
 	br.mu.Lock()
 	br.lastNote = msg
 	br.mu.Unlock()
-}
-
-// askID is the stable handle for one session's current ask: the
-// session plus a hash of what it is waiting on. FNV-1a, an identity
-// not a defense — same as the digest ids next door.
-func askID(s transcript.Session) string {
-	basis := s.LastText
-	if s.State == transcript.StateBlocked {
-		basis = "approval:" + s.Prompt
-	}
-	var h uint64 = 14695981039346656037
-	for i := range len(basis) {
-		h ^= uint64(basis[i])
-		h *= 1099511628211
-	}
-	return fmt.Sprintf("%s:%08x", s.ID, uint32(h^(h>>32)))
 }
 
 // fetchActivity asks rook who is redrawing and who is typing — the
