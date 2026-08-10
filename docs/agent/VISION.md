@@ -95,6 +95,15 @@ We built the phone's payload format first and happened to render it in
 a side panel. The panel is one renderer of the membrane. The phone is
 the second. Voice is the third.
 
+One amendment, decided with rook-host ADR 0004: on the **direct link**
+— the QR-paired, pinned-TLS rail, phone and machine on the same
+network — the phone may also watch a session's live pane, streamed as
+rook's own styled cell grid (`pane.read` → `WatchPane`). That is not
+the membrane changing its mind about terminals; it is the one rail
+where "what travels" never leaves your own network, gated by its own
+capability (`session.read`) and revocable per device. The cloud rail's
+line stands untouched: terminal contents never ride it.
+
 ## Three distances, one gradient
 
 "Away from the keyboard" is not one state. The rook agent should model

@@ -121,7 +121,7 @@ func serve(c *conn, h *lk) {
 				"name":    "link",
 				"version": version,
 				"capabilities": []string{
-					"items.list", "items.act", "panes.activity",
+					"items.list", "items.act", "panes.activity", "pane.read",
 					"session.send", "session.spawn", "clipboard.set",
 				},
 				"surfaces": []string{"LIST"},

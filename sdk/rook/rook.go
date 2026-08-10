@@ -800,6 +800,7 @@ const (
 	OpSessionSend    = "session.send"   // type into an agent pane; the ask round trip's last hop
 	OpClipboardSet   = "clipboard.set"  // plugin → pasteboard; the human's ⌘V is the last hop
 	OpPanesActivity  = "panes.activity" // read pane output rates and last-input ages
+	OpPaneRead       = "pane.read"      // read a pane's styled cell grid; the phone's live terminal view
 	OpLspResolve     = "lsp.resolve"    // answer "what server do I run for this project"
 )
 
@@ -968,7 +969,7 @@ type Link struct {
 	// NoAdvertise keeps the listener off Bonjour. Pairing and
 	// reconnection then ride the QR's direct address hints alone.
 	NoAdvertise bool
-	Grants      []string // default: list/act, panes.activity, session.send, session.spawn, clipboard.set
+	Grants      []string // default: list/act, panes.activity, pane.read, session.send, session.spawn, clipboard.set
 	Load        Load     // default Eager
 }
 
@@ -988,7 +989,7 @@ func (l Link) appendTo(e *env) {
 		Command: cmd,
 		Load:    eagerUnless(l.Load),
 		Grants: grantsOr(l.Grants, []string{
-			OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend, OpSessionSpawn, OpClipboardSet,
+			OpItemsList, OpItemsAct, OpPanesActivity, OpPaneRead, OpSessionSend, OpSessionSpawn, OpClipboardSet,
 		}),
 	}.appendTo(e)
 }

@@ -193,7 +193,7 @@ func TestFirstPartyPluginsLowerToTheHandWrittenBytes(t *testing.T) {
 			Name:    "link",
 			Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-link"},
 			Load:    Eager,
-			Grants:  []string{OpItemsList, OpItemsAct, OpPanesActivity, OpSessionSend, OpSessionSpawn, OpClipboardSet},
+			Grants:  []string{OpItemsList, OpItemsAct, OpPanesActivity, OpPaneRead, OpSessionSend, OpSessionSpawn, OpClipboardSet},
 		},
 	))
 	if got != want {

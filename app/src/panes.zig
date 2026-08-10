@@ -20,6 +20,12 @@ pub const Rect = struct {
 pub const Term = struct {
     session: *sessionpkg.Session,
     rs: vt.RenderState = .empty,
+    /// The pane-streaming verb's own snapshot (`pane.read`), apart from
+    /// `rs` on purpose: the renderer consumes dirty state per frame and
+    /// only snapshots active-tab panes, while this one updates on the
+    /// plugin's cadence and must work for background panes too. Lazily
+    /// created on the first read; freed with the session.
+    stream_rs: ?*vt.RenderState = null,
     /// tmux-style copy mode (<leader>[): keys scroll the viewport
     /// instead of reaching the pty.
     copy_mode: bool = false,

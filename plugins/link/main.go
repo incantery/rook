@@ -172,6 +172,14 @@ type lk struct {
 	lastPub  time.Time
 	agents   int
 	world    world // the freshest scan, for the executor
+
+	// The pane streamers, one per watched session (panes.go). Its own
+	// mutex: Open/Close arrive under the link server's hub lock, and
+	// h.mu is taken by paths a streamer itself calls into. pubPane is
+	// srv.PublishPane in life and a recorder in tests.
+	paneMu    sync.Mutex
+	paneWatch map[string]context.CancelFunc
+	pubPane   func(sessionID string, f projection.PaneFrame)
 }
 
 // world is the publish loop's latest view — what the executor delivers
@@ -213,6 +221,7 @@ func (h *lk) open(stateDir string, port int, advertise bool) {
 		Registry: reg,
 		Pairing:  h.pairs,
 		Executor: h,
+		Panes:    h,
 		HostName: h.hostName,
 	})
 	// The port must survive relaunches: a phone caches host:port from
@@ -237,6 +246,7 @@ func (h *lk) open(stateDir string, port int, advertise bool) {
 	}
 	writePort(portFile, ln.Port())
 	h.srv, h.ln = srv, ln
+	h.pubPane = srv.PublishPane
 	if advertise {
 		adv, err := bonjour.Advertise(context.Background(), bonjour.Info{
 			Name:            h.hostName,

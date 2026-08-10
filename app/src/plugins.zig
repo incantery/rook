@@ -135,6 +135,7 @@ pub const op_raise = "attention.raise";
 pub const op_spawn = "session.spawn";
 pub const op_send = "session.send";
 pub const op_clipboard = "clipboard.set";
+pub const op_pane_read = "pane.read";
 
 pub const Load = enum { lazy, eager };
 
@@ -434,7 +435,7 @@ pub const Plugin = struct {
                 return;
             }
             fr.feed(chunk[0..@intCast(n)]);
-            while (fr.next()) |frame| self.route(frame);
+            while (fr.next()) |frame| self.route(gpa, frame);
         }
     }
 
@@ -444,9 +445,9 @@ pub const Plugin = struct {
     /// bookkeeping about which ids are outstanding — which matters,
     /// because a request arriving mid-call is the normal case, not an edge
     /// one.
-    fn route(self: *Plugin, frame: []const u8) void {
+    fn route(self: *Plugin, gpa: std.mem.Allocator, frame: []const u8) void {
         if (frameHas(frame, "\"op\"")) {
-            self.inbound(frame);
+            self.inbound(gpa, frame);
             return;
         }
         self.mu.lock();
@@ -486,10 +487,10 @@ pub const Plugin = struct {
     /// A verb the plugin called. Grant-checked here, in the one place that
     /// already knows what was granted — the direction differs but the
     /// question does not.
-    fn inbound(self: *Plugin, frame: []const u8) void {
+    fn inbound(self: *Plugin, gpa: std.mem.Allocator, frame: []const u8) void {
         const id = frameId(frame) orelse return;
         const op = frameOp(frame) orelse {
-            self.answer(id, false, "no op", "");
+            self.answer(gpa, id, false, "no op", "");
             return;
         };
         if (!self.spec.granted(op)) {
@@ -497,34 +498,38 @@ pub const Plugin = struct {
             // session.spawn" knows to ask the human for it; "refused"
             // sends them into their own code looking for a bug.
             var b: [96]u8 = undefined;
-            self.answer(id, false, std.fmt.bufPrint(&b, "not granted: {s}", .{op}) catch "not granted", "");
+            self.answer(gpa, id, false, std.fmt.bufPrint(&b, "not granted: {s}", .{op}) catch "not granted", "");
             return;
         }
         const h = self.host orelse {
-            self.answer(id, false, "rook cannot do that here", "");
+            self.answer(gpa, id, false, "rook cannot do that here", "");
             return;
         };
         // Verbatim: the host parses its own params, because only it knows
         // what session.spawn's look like. The host may also write a JSON
-        // answer — sized for panes.activity's worst honest day, and a
-        // host that overflows it truncates its own reply, not rook.
-        var rbuf: [8192]u8 = undefined;
-        var rw: std.Io.Writer = .fixed(&rbuf);
+        // answer — heap-grown, because the bulk verbs (pane.read's whole
+        // styled grid) dwarf any honest stack buffer; small verbs write a
+        // few hundred bytes into the same writer and never notice.
+        var a: std.Io.Writer.Allocating = .init(gpa);
+        defer a.deinit();
         const params = frameParams(frame);
-        if (h.call(h.ctx, self.spec.name, op, params, &rw)) |why| {
-            self.answer(id, false, why, "");
+        if (h.call(h.ctx, self.spec.name, op, params, &a.writer)) |why| {
+            self.answer(gpa, id, false, why, "");
         } else {
-            self.answer(id, true, "", rbuf[0..rw.end]);
+            self.answer(gpa, id, true, "", a.written());
         }
     }
 
-    fn answer(self: *Plugin, id: u64, ok: bool, why: []const u8, result: []const u8) void {
-        var buf: [9216]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&buf);
+    fn answer(self: *Plugin, gpa: std.mem.Allocator, id: u64, ok: bool, why: []const u8, result: []const u8) void {
+        // Heap like the result path: the frame wraps whatever the host
+        // wrote, so it has the same worst case.
+        var a: std.Io.Writer.Allocating = .init(gpa);
+        defer a.deinit();
+        const w = &a.writer;
         w.print("{{\"v\":{d},\"id\":{d},\"ok\":{s}", .{ version, id, if (ok) "true" else "false" }) catch return;
         if (!ok) {
             w.writeAll(",\"error\":") catch return;
-            jsonString(&w, why) catch return;
+            jsonString(w, why) catch return;
         }
         if (ok and result.len > 0) {
             w.writeAll(",\"result\":") catch return;
@@ -533,7 +538,7 @@ pub const Plugin = struct {
         w.writeAll("}\n") catch return;
         self.write_mu.lock();
         defer self.write_mu.unlock();
-        _ = writeAll(self.to_child, buf[0..w.end]);
+        _ = writeAll(self.to_child, a.written());
     }
 
     fn spawn(self: *Plugin, gpa: std.mem.Allocator) bool {

@@ -9,8 +9,9 @@ replace github.com/incantery/rook => ../..
 
 require (
 	github.com/incantery/rook v0.0.0-00010101000000-000000000000
-	github.com/incantery/rook-host v0.2.4
+	github.com/incantery/rook-host v0.3.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+	golang.org/x/term v0.45.0
 )
 
 require (
@@ -23,7 +24,6 @@ require (
 	golang.org/x/net v0.26.0 // indirect
 	golang.org/x/sync v0.7.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/tools v0.22.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )

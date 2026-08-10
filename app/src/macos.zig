@@ -5141,6 +5141,10 @@ pub const App = struct {
                     .term => |*tm| {
                         tm.session.deinit();
                         tm.rs.deinit(self.gpa);
+                        if (tm.stream_rs) |srs| {
+                            srs.deinit(self.gpa);
+                            self.gpa.destroy(srs);
+                        }
                     },
                     .edit => |ed| ed.destroy(),
                     .monitor => |m| {
@@ -7394,6 +7398,7 @@ pub const App = struct {
             self.activityReport(result, true);
             return null;
         }
+        if (std.mem.eql(u8, op, plugpkg.op_pane_read)) return self.paneReadReport(params, result);
         // Granted, but not something rook knows how to do — which is a
         // config naming a verb from a newer rook, not a plugin misbehaving.
         return "rook does not know that verb";
@@ -7447,6 +7452,186 @@ pub const App = struct {
     /// The ctl face of the same report.
     pub fn activityText(self: *App, w: *std.Io.Writer) void {
         self.activityReport(w, false);
+    }
+
+    /// `pane.read` — one display-ready snapshot of a pane's viewport,
+    /// for the link plugin to stream to a paired phone. The colors are
+    /// RESOLVED here (palette, inverse, faint — the same rules fillPane
+    /// applies, minus selection and cursor, which stay host-side): the
+    /// remote surface is a dumb grid view with no palette table and no
+    /// VT parser, per rook-host ADR 0004. `gen` echoes the session's
+    /// out_bytes so the caller can skip polls where nothing moved.
+    ///
+    /// Runs on the plugin's pump thread under draw_lock, like every
+    /// inbound verb. The pane keeps its own RenderState (stream_rs) —
+    /// the renderer's consumes dirty state per frame and only covers
+    /// the active tab. beginUpdate CONSUMES the emulator's shared dirty
+    /// flags, so this forces a full rebuild on both sides of the fence:
+    /// once before (this state may have missed rows the renderer's
+    /// update consumed) and once after (the renderer must not trust
+    /// flags this update just consumed).
+    fn paneReadReport(self: *App, params: []const u8, w: *std.Io.Writer) ?[]const u8 {
+        const Wire = struct { pane: u32 = 0 };
+        const parsed = std.json.parseFromSlice(Wire, self.gpa, if (params.len > 0) params else "{}", .{
+            .ignore_unknown_fields = true,
+        }) catch return "params did not parse";
+        defer parsed.deinit();
+
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        var target: ?*panespkg.Pane = null;
+        for (self.spaces.items) |s| for (s.tabs.items) |t| for (t.panes.items) |p| {
+            if (p.id == parsed.value.pane) target = p;
+        };
+        const p = target orelse return "no such pane";
+        // A takeover editor's parked shell still streams — the session
+        // is alive under the overlay, same as panes.activity sees it.
+        const tm = p.term() orelse (if (p.under) |*ut| ut else return "that pane is not a terminal");
+
+        const srs = tm.stream_rs orelse blk: {
+            const n = self.gpa.create(vt.RenderState) catch return "out of memory";
+            n.* = .empty;
+            tm.stream_rs = n;
+            break :blk n;
+        };
+
+        tm.session.lockForSnapshot();
+        tm.session.term.flags.dirty.palette = true;
+        srs.beginUpdate(self.gpa, &tm.session.term) catch {
+            tm.session.unlockForSnapshot();
+            return "out of memory";
+        };
+        tm.session.term.flags.dirty.palette = true;
+        const gen = tm.session.out_bytes.load(.monotonic);
+        tm.session.unlockForSnapshot();
+        srs.endUpdate();
+        srs.dirty = .@"false";
+
+        const colors = &srs.colors;
+        const default_bg = colors.background;
+        const default_fg = colors.foreground;
+        const rows: usize = srs.rows;
+        const cols: usize = srs.cols;
+        var cx: u32 = 0;
+        var cy: u32 = 0;
+        var cvis = false;
+        if (srs.cursor.viewport) |cur| {
+            cx = cur.x;
+            cy = cur.y;
+            cvis = srs.cursor.visible;
+        }
+
+        w.print("{{\"pane\":{d},\"cols\":{d},\"rows\":{d},\"gen\":{d},\"cursor\":{{\"x\":{d},\"y\":{d},\"visible\":{s}}},\"lines\":[", .{
+            parsed.value.pane, cols, rows, gen, cx, cy, if (cvis) "true" else "false",
+        }) catch return "write failed";
+
+        const row_cells = srs.row_data.items(.cells);
+        for (0..rows) |y| {
+            if (y > 0) w.writeAll(",") catch return "write failed";
+            const raws = row_cells[y].items(.raw);
+            const styles = row_cells[y].items(.style);
+            const graphemes = row_cells[y].items(.grapheme);
+
+            // The row's text, ONE character per cell column: a wide
+            // glyph at its base column, a plain space for its spacer
+            // tail (the glyph spills over it) and for every empty cell —
+            // so a surface may index characters by column. Trailing
+            // blanks are trimmed; runs still say how those cells are
+            // painted.
+            var tbuf: [8192]u8 = undefined;
+            var tlen: usize = 0;
+            var tkeep: usize = 0;
+            for (0..cols) |x| {
+                const raw = &raws[x];
+                const cp: u21 = switch (raw.content_tag) {
+                    .codepoint, .codepoint_grapheme => raw.content.codepoint.data,
+                    else => 0,
+                };
+                var wrote = false;
+                switch (raw.wide) {
+                    .spacer_tail, .spacer_head => {},
+                    .narrow, .wide => if (cp > 32) {
+                        if (tlen + 4 <= tbuf.len) {
+                            tlen += std.unicode.utf8Encode(cp, tbuf[tlen..]) catch 0;
+                            wrote = true;
+                        }
+                        // The cluster's extra codepoints combine into the
+                        // base character — a flag or ZWJ sequence stays
+                        // one drawn cell, same as the renderer's atlas.
+                        if (raw.content_tag == .codepoint_grapheme) {
+                            for (graphemes[x]) |extra| {
+                                if (tlen + 4 > tbuf.len) break;
+                                tlen += std.unicode.utf8Encode(extra, tbuf[tlen..]) catch break;
+                            }
+                        }
+                    },
+                }
+                if (!wrote) {
+                    if (tlen < tbuf.len) {
+                        tbuf[tlen] = ' ';
+                        tlen += 1;
+                    }
+                } else tkeep = tlen;
+            }
+
+            w.writeAll("{\"t\":") catch return "write failed";
+            plugpkg.jsonStringTo(w, tbuf[0..tkeep]) catch return "write failed";
+            w.writeAll(",\"s\":[") catch return "write failed";
+
+            // Style runs over the full width, adjacent equal cells
+            // merged. fg/bg are final 0xRRGGBB; attrs: 1 bold, 2 italic,
+            // 4 underline, 16 strikethrough.
+            var run_start: usize = 0;
+            var run_fg: u32 = 0;
+            var run_bg: u32 = 0;
+            var run_attrs: u32 = 0;
+            var have_run = false;
+            var first_run = true;
+            for (0..cols) |x| {
+                const raw = &raws[x];
+                const styled = raw.style_id != 0;
+                const st: vt.Style = if (styled) styles[x] else .{};
+                const bg = st.bg(raw, &colors.palette) orelse default_bg;
+                var fg = st.fg(.{ .default = default_fg, .palette = &colors.palette });
+                if (styled and st.flags.faint) {
+                    fg = .{
+                        .r = @intCast((@as(u16, fg.r) + bg.r) / 2),
+                        .g = @intCast((@as(u16, fg.g) + bg.g) / 2),
+                        .b = @intCast((@as(u16, fg.b) + bg.b) / 2),
+                    };
+                }
+                const inv = styled and st.flags.inverse;
+                const eff_bg = if (inv) fg else bg;
+                const eff_fg = if (styled and st.flags.invisible) eff_bg else if (inv) bg else fg;
+                var attrs: u32 = 0;
+                if (styled) {
+                    if (st.flags.bold) attrs |= 1;
+                    if (st.flags.italic) attrs |= 2;
+                    if (st.flags.underline != .none) attrs |= 4;
+                    if (st.flags.strikethrough) attrs |= 16;
+                }
+                const fg32 = (@as(u32, eff_fg.r) << 16) | (@as(u32, eff_fg.g) << 8) | eff_fg.b;
+                const bg32 = (@as(u32, eff_bg.r) << 16) | (@as(u32, eff_bg.g) << 8) | eff_bg.b;
+                if (have_run and fg32 == run_fg and bg32 == run_bg and attrs == run_attrs) continue;
+                if (have_run) {
+                    if (!first_run) w.writeAll(",") catch return "write failed";
+                    w.print("[{d},{d},{d},{d},{d}]", .{ run_start, x - run_start, run_fg, run_bg, run_attrs }) catch return "write failed";
+                    first_run = false;
+                }
+                run_start = x;
+                run_fg = fg32;
+                run_bg = bg32;
+                run_attrs = attrs;
+                have_run = true;
+            }
+            if (have_run) {
+                if (!first_run) w.writeAll(",") catch return "write failed";
+                w.print("[{d},{d},{d},{d},{d}]", .{ run_start, cols - run_start, run_fg, run_bg, run_attrs }) catch return "write failed";
+            }
+            w.writeAll("]}") catch return "write failed";
+        }
+        w.writeAll("]}") catch return "write failed";
+        return null;
     }
 
     /// `attention.raise` — a plugin says a human is needed.
