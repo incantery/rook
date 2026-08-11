@@ -62,7 +62,9 @@ func TestStatusFromSpeaksTheCloudsVocabulary(t *testing.T) {
 	if rook.Agents[0].ID != "a" || rook.Agents[1].ID != "b" {
 		t.Fatalf("agents must carry session ids: %+v", rook.Agents)
 	}
-	if rook.Agents[0].CtxPct != 53 {
+	// 106073 tokens against fable's 1M window — the old 200k default
+	// here read this as 53%, which was the bug.
+	if rook.Agents[0].CtxPct != 10 {
 		t.Fatalf("ctx pct: %+v", rook.Agents[0])
 	}
 	if rook.Agents[1].CtxPct != 0 {

@@ -282,6 +282,7 @@ func (br *bridge) push(c *conn, samples map[int]transcript.PaneSample) ([]transc
 	// screen-watcher writes the now-file, this process only looks.
 	nows := nowfile.Read(nowfile.DefaultPath(), 90*time.Second, now)
 	st := statusFrom(sessions, digests, nows, br.rookVer, linkHostID(br.linkIdentity))
+	st.Usage = wireUsageFrom(statusfold.CollectUsage(now))
 	body, err := json.Marshal(st)
 	if err != nil {
 		return sessions, panes
@@ -351,7 +352,44 @@ type wireStatus struct {
 	// stamps on its snapshots, so a phone seeing this machine on both
 	// rails can prove they are one machine and collapse them.
 	HostID     string          `json:"hostId,omitempty"`
+	Usage      *wireUsage      `json:"usage,omitempty"`
 	Workspaces []wireWorkspace `json:"workspaces,omitempty"`
+}
+
+// wireUsage mirrors projection.Usage's json field names exactly — the
+// cloud server decodes into that type, and a renamed field here would
+// silently drop on the wire.
+type wireUsage struct {
+	Mode            string    `json:"mode"`
+	SessionPct      int       `json:"sessionPct,omitempty"`
+	SessionResets   string    `json:"sessionResets,omitempty"`
+	WeekAllPct      int       `json:"weekAllPct,omitempty"`
+	WeekAllResets   string    `json:"weekAllResets,omitempty"`
+	WeekModelName   string    `json:"weekModelName,omitempty"`
+	WeekModelPct    int       `json:"weekModelPct,omitempty"`
+	WeekModelResets string    `json:"weekModelResets,omitempty"`
+	At              time.Time `json:"at,omitzero"`
+	AgentTodayUSD   float64   `json:"agentTodayUsd,omitempty"`
+	AgentWeekUSD    float64   `json:"agentWeekUsd,omitempty"`
+}
+
+func wireUsageFrom(u *statusfold.Usage) *wireUsage {
+	if u == nil {
+		return nil
+	}
+	return &wireUsage{
+		Mode:            u.Mode,
+		SessionPct:      u.SessionPct,
+		SessionResets:   u.SessionResets,
+		WeekAllPct:      u.WeekAllPct,
+		WeekAllResets:   u.WeekAllResets,
+		WeekModelName:   u.WeekModelName,
+		WeekModelPct:    u.WeekModelPct,
+		WeekModelResets: u.WeekModelResets,
+		At:              u.At,
+		AgentTodayUSD:   u.AgentTodayUSD,
+		AgentWeekUSD:    u.AgentWeekUSD,
+	}
 }
 
 type wireWorkspace struct {
@@ -467,6 +505,7 @@ func statusFrom(sessions []transcript.Session, digests map[string]digestlog.Dige
 	n := statusfold.Fold(sessions, digests, nows, host, rookVer)
 
 	st := wireStatus{Hostname: n.Hostname, RookVersion: n.RookVersion, HostID: linkHostID}
+	st.Usage = wireUsageFrom(n.Usage)
 	for _, w := range n.Workspaces {
 		ww := wireWorkspace{Name: w.Name, Branch: w.Branch, Attention: w.Attention}
 		for _, a := range w.Agents {

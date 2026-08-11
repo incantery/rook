@@ -203,7 +203,9 @@ func watch(sc *transcript.Scanner, st *store, sum *Summarizer, poll time.Duratio
 			// Marked spent BEFORE the call: a call that fails lands as an
 			// error row, not as a bill that grows by one attempt per tick.
 			done[s.ID] = h
-			st.add(sum.Summarize(s, now))
+			d := sum.Summarize(s, now)
+			recordSpend(d.CostUSD)
+			st.add(d)
 		}
 		prev = cur
 		first = false
@@ -615,6 +617,7 @@ func act(c *conn, st *store, sum *Summarizer, id uint64, params json.RawMessage)
 		guidance := strings.TrimSpace(p.Input)
 		go func() {
 			text, cost, err := sum.Draft(seed, guidance)
+			recordSpend(cost)
 			st.update(itemID, func(d *Digest) {
 				d.CostUSD += cost
 				if err != nil {

@@ -25,14 +25,64 @@ import (
 
 	"github.com/incantery/rook/plugins/internal/digestlog"
 	"github.com/incantery/rook/plugins/internal/nowfile"
+	"github.com/incantery/rook/plugins/internal/spendfile"
 	"github.com/incantery/rook/plugins/internal/transcript"
+	"github.com/incantery/rook/plugins/internal/usagefile"
 )
 
 // Status is one machine's snapshot, rail-neutral.
 type Status struct {
 	Hostname    string
 	RookVersion string
+	Usage       *Usage
 	Workspaces  []Workspace
+}
+
+// Usage is the account's spend picture: the Claude subscription's
+// rate-limit windows exactly as the claude CLI reported them (the
+// claude plugin's collector writes the usage file), plus the rook
+// agent's own model bill (the spend ledger). Nil when neither file is
+// fresh.
+type Usage struct {
+	Mode            string
+	SessionPct      int
+	SessionResets   string
+	WeekAllPct      int
+	WeekAllResets   string
+	WeekModelName   string
+	WeekModelPct    int
+	WeekModelResets string
+	At              time.Time
+	AgentTodayUSD   float64
+	AgentWeekUSD    float64
+}
+
+// CollectUsage reads the shared files at their default paths — the
+// convenience both bridges call per snapshot. Freshness: the usage
+// collector refreshes every ~5 minutes, so 15 minutes stale means a
+// dead collector; the spend ledger has no staleness (it is a sum, not
+// a claim about the present).
+func CollectUsage(now time.Time) *Usage {
+	u := usagefile.Read(usagefile.DefaultPath(), 15*time.Minute, now)
+	today, week := spendfile.Totals(spendfile.DefaultPath(), now)
+	if u == nil && today == 0 && week == 0 {
+		return nil
+	}
+	out := &Usage{AgentTodayUSD: today, AgentWeekUSD: week}
+	if u != nil {
+		out.Mode = u.Mode
+		out.SessionPct = u.SessionPct
+		out.SessionResets = u.SessionResets
+		out.WeekAllPct = u.WeekAllPct
+		out.WeekAllResets = u.WeekAllResets
+		out.WeekModelName = u.WeekModelName
+		out.WeekModelPct = u.WeekModelPct
+		out.WeekModelResets = u.WeekModelResets
+		out.At = u.At
+	} else {
+		out.Mode = "agent-only"
+	}
+	return out
 }
 
 // Workspace groups the agents working in one directory.

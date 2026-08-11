@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/incantery/rook/plugins/internal/transcript"
+	"github.com/incantery/rook/plugins/internal/usagefile"
 )
 
 const version = "0.1.0"
@@ -45,6 +46,7 @@ func main() {
 	busyRate := flag.Float64("busy-rate", 200, "pane output above this (bytes/sec) proves the session is working")
 	present := flag.Duration("present", 45*time.Second, "keyboard input younger than this means the human is watching")
 	names := flag.String("claude-names", "claude,node", "foreground program names that count as Claude Code")
+	usageEvery := flag.Duration("usage-every", 5*time.Minute, "how often to collect `claude /usage` (0 disables)")
 	flag.Parse()
 
 	if *dir == "" {
@@ -69,6 +71,9 @@ func main() {
 	c := &conn{out: os.Stdout}
 	cache := &activityCache{}
 	go watch(c, sc, cache, *poll, *minTurn)
+	if *usageEvery > 0 {
+		go usageLoop(*usageEvery, usagefile.DefaultPath())
+	}
 	serve(c, sc, cache)
 }
 

@@ -409,14 +409,22 @@ func TestCtxPctAndWindow(t *testing.T) {
 	if p := CtxPct(0, "claude-fable-5"); p != -1 {
 		t.Fatalf("unknown must be -1, got %d", p)
 	}
-	if p := CtxPct(106073, "claude-fable-5"); p != 53 {
-		t.Fatalf("pct %d want 53", p)
+	// Current-generation models carry 1M windows — the old 200k default
+	// here was exactly the bug that read busy sessions as 150-260%.
+	if p := CtxPct(106073, "claude-fable-5"); p != 10 {
+		t.Fatalf("fable pct %d want 10", p)
 	}
-	if p := CtxPct(300_000, "claude-fable-5"); p != 150 {
-		t.Fatalf("uncapped pct %d want 150", p)
+	if p := CtxPct(500_000, "claude-fable-5"); p != 50 {
+		t.Fatalf("fable pct %d want 50", p)
 	}
 	if p := CtxPct(300_000, "claude-sonnet-4-5[1m]"); p != 30 {
 		t.Fatalf("1m window pct %d want 30", p)
+	}
+	if p := CtxPct(100_000, "claude-haiku-4-5"); p != 50 {
+		t.Fatalf("haiku pct %d want 50", p)
+	}
+	if p := CtxPct(100_000, "claude-3-5-sonnet-20241022"); p != 50 {
+		t.Fatalf("legacy-model pct %d want 50 (200k floor)", p)
 	}
 }
 

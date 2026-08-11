@@ -320,6 +320,7 @@ func (h *lk) loop(c *conn, interval time.Duration) {
 		// ownership story as the journal.
 		nows := nowfile.Read(nowfile.DefaultPath(), 90*time.Second, now)
 		st := statusfold.Fold(sessions, digests, nows, h.hostName, h.rookVer)
+		st.Usage = statusfold.CollectUsage(now)
 		h.srv.Publish(toProjection(st))
 
 		agents := 0
@@ -359,6 +360,21 @@ func (h *lk) snapshot() ([]transcript.Session, []transcript.PaneActivity) {
 // the 1:1 twin of the cloud bridge's wire conversion.
 func toProjection(n statusfold.Status) projection.Status {
 	st := projection.Status{Hostname: n.Hostname, RookVersion: n.RookVersion}
+	if u := n.Usage; u != nil {
+		st.Usage = &projection.Usage{
+			Mode:            u.Mode,
+			SessionPct:      u.SessionPct,
+			SessionResets:   u.SessionResets,
+			WeekAllPct:      u.WeekAllPct,
+			WeekAllResets:   u.WeekAllResets,
+			WeekModelName:   u.WeekModelName,
+			WeekModelPct:    u.WeekModelPct,
+			WeekModelResets: u.WeekModelResets,
+			At:              u.At,
+			AgentTodayUSD:   u.AgentTodayUSD,
+			AgentWeekUSD:    u.AgentWeekUSD,
+		}
+	}
 	for _, w := range n.Workspaces {
 		pw := projection.Workspace{Name: w.Name, Branch: w.Branch, Attention: w.Attention}
 		for _, a := range w.Agents {

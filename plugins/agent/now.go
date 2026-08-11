@@ -79,6 +79,7 @@ func nowLoop(c *conn, sc *transcript.Scanner, st *store, sum *Summarizer, every 
 				continue
 			}
 			line, cost, err := sum.NowLine(screen, st.headlineFor(id))
+			recordSpend(cost)
 			if err != nil {
 				continue // transient; the next tick retries
 			}

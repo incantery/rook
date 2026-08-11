@@ -96,11 +96,26 @@ func CtxPct(tokens int, model string) int {
 }
 
 // Window is the model's context length in tokens. The table is small
-// on purpose: today's Claude models are 200k unless the id says
-// otherwise, and a default beats a stale catalog.
+// on purpose, but its default was stale: current-generation Claude
+// models (Fable/Mythos 5, Opus 4.6+, Sonnet 4.6+) all carry 1M
+// windows — assuming 200k made every busy session read 150-260%.
+// Haiku and unrecognized older ids keep the 200k floor; an honest
+// overshoot on an ancient model beats a hidden undershoot on today's.
 func Window(model string) int {
 	if strings.Contains(model, "[1m]") {
 		return 1_000_000
+	}
+	if strings.Contains(model, "haiku") {
+		return 200_000
+	}
+	for _, m := range []string{
+		"fable", "mythos",
+		"opus-5", "opus-4-6", "opus-4-7", "opus-4-8",
+		"sonnet-5", "sonnet-4-6",
+	} {
+		if strings.Contains(model, m) {
+			return 1_000_000
+		}
 	}
 	return 200_000
 }
