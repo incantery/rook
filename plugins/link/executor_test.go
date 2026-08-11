@@ -136,3 +136,26 @@ func TestToProjectionIsOneToOne(t *testing.T) {
 		t.Errorf("digest: %+v", a.Digest)
 	}
 }
+
+// say refuses everything except an attached target — a detached or
+// bystander session is pointed at resume, before anything is typed.
+func TestExecuteSayNeedsAnAttachedPane(t *testing.T) {
+	old := transcript.Session{ID: "old", Cwd: "/w/a", State: transcript.StateIdle, Mtime: time.Now().Add(-2 * time.Hour)}
+	live := transcript.Session{ID: "live", Cwd: "/w/a", State: transcript.StateIdle, Mtime: time.Now()}
+	parked := transcript.Session{ID: "parked", Cwd: "/w/b", State: transcript.StateIdle, Mtime: time.Now()}
+	panes := []transcript.PaneActivity{{ID: 3, Cwd: "/w/a", Fg: "claude"}}
+	h := testLk(t, []transcript.Session{old, live, parked}, panes)
+
+	out := h.Execute(context.Background(), projection.Command{ID: "say:parked:x", Kind: "say", SessionID: "parked", Prompt: "hi"})
+	if out.Disposition != link.Dropped || !strings.Contains(out.Note, "resume") {
+		t.Errorf("say to a detached session: %v (%q), want Dropped pointing at resume", out.Disposition, out.Note)
+	}
+	out = h.Execute(context.Background(), projection.Command{ID: "say:old:x", Kind: "say", SessionID: "old", Prompt: "hi"})
+	if out.Disposition != link.Dropped || !strings.Contains(out.Note, "resume") {
+		t.Errorf("say to bystander history: %v (%q), want Dropped pointing at resume", out.Disposition, out.Note)
+	}
+	out = h.Execute(context.Background(), projection.Command{ID: "say:gone:x", Kind: "say", SessionID: "gone", Prompt: "hi"})
+	if out.Disposition != link.Dropped {
+		t.Errorf("say to a gone session: %v, want Dropped", out.Disposition)
+	}
+}

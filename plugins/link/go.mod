@@ -9,7 +9,7 @@ replace github.com/incantery/rook => ../..
 
 require (
 	github.com/incantery/rook v0.0.0-00010101000000-000000000000
-	github.com/incantery/rook-host v0.6.0
+	github.com/incantery/rook-host v0.7.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/term v0.45.0
 )

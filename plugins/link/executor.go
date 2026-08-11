@@ -118,6 +118,8 @@ func (h *lk) Execute(ctx context.Context, c projection.Command) link.Outcome {
 		return h.execResume(c, key, sessions)
 	case "spawn":
 		return h.execSpawn(ctx, c, key, sessions, panes)
+	case "say":
+		return h.execSay(c, key, sessions, panes)
 	}
 	// The server validated Kind against the allowlist, so this is a
 	// newer vocabulary than this binary: honestly refused, never
@@ -150,6 +152,34 @@ func (h *lk) execCompact(c projection.Command, key string, sessions []transcript
 	}
 	h.journal.MarkDelivered(key)
 	h.note("compacted " + transcript.Snip(target.Title, 40) + " from a paired device")
+	return delivered()
+}
+
+// execSay types a message into an ATTACHED session's pane — the verb a
+// quiet-but-open session offers instead of resume. The attachment rule
+// is the resume refusal inverted: the freshest transcript in a cwd
+// with a Claude-like pane IS that pane's session, anything else is
+// refused toward resume. The text reaches the pane as TYPED TEXT via
+// session.send — settle, then submit — the same path answers ride.
+func (h *lk) execSay(c projection.Command, key string, sessions []transcript.Session, panes []transcript.PaneActivity) link.Outcome {
+	target := findSession(sessions, c.SessionID)
+	if target == nil {
+		return dropped("that session is gone")
+	}
+	if target.ID != freshestInCwd(sessions, target.Cwd) {
+		return dropped("that session is history in its directory — resume it instead")
+	}
+	pane := findPane(panes, target.Cwd, h.names)
+	if pane == nil {
+		return dropped(transcript.Snip(target.Title, 40) + " is not on a pane — resume it instead")
+	}
+	if _, err := h.c.call("session.send",
+		map[string]any{"pane": pane.ID, "text": c.Prompt}, 8*time.Second); err != nil {
+		h.journal.Failed(key)
+		return dropped("the keyboard's gates refused: " + err.Error())
+	}
+	h.journal.MarkDelivered(key)
+	h.note("message sent to " + transcript.Snip(target.Title, 40) + " from a paired device")
 	return delivered()
 }
 

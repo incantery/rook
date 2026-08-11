@@ -593,6 +593,8 @@ func (br *bridge) executeCommands(c *conn, sessions []transcript.Session, panes 
 			br.runResume(c, cmd, key, sessions, panes)
 		case "spawn":
 			br.runSpawn(c, cmd, key, sessions, panes)
+		case "say":
+			br.runSay(c, cmd, key, sessions, panes)
 		default:
 			// A kind this rook does not speak: honestly refused, never
 			// guessed at. (An older bridge meeting a newer cloud.)
@@ -657,6 +659,55 @@ func (br *bridge) runCompact(c *conn, cmd cloudCommand, key string, sessions []t
 	br.journal.MarkDelivered(key)
 	br.ackCommand(cmd.ID)
 	br.note("compacted " + transcript.Snip(target.Title, 40) + " from the phone")
+}
+
+// runSay types a message into an ATTACHED session's pane — the verb a
+// quiet-but-open session offers instead of resume. Attachment is the
+// resume refusal inverted: the freshest transcript in a cwd with a
+// Claude-like pane IS that pane's session. The text reaches the pane
+// as TYPED TEXT via session.send, the same path answers ride.
+func (br *bridge) runSay(c *conn, cmd cloudCommand, key string, sessions []transcript.Session, panes []transcript.PaneActivity) {
+	target := findSession(sessions, cmd.SessionID)
+	if target == nil {
+		br.ackCommand(cmd.ID)
+		br.note("dropped a message — that session is gone")
+		return
+	}
+	if target.ID != freshestInCwd(sessions, target.Cwd) {
+		br.ackCommand(cmd.ID)
+		br.note("dropped a message — " + transcript.Snip(target.Title, 40) + " is history in its directory; resume it instead")
+		return
+	}
+	var pane *transcript.PaneActivity
+	for i := range panes {
+		if panes[i].Cwd == target.Cwd && transcript.ClaudeLike(panes[i], br.names) {
+			pane = &panes[i]
+			break
+		}
+	}
+	if pane == nil {
+		br.ackCommand(cmd.ID)
+		br.note("dropped a message — " + transcript.Snip(target.Title, 40) + " is not on a pane; resume it instead")
+		return
+	}
+	if c == nil {
+		return
+	}
+	_, err := c.call("session.send",
+		map[string]any{"pane": pane.ID, "text": cmd.Prompt}, 8*time.Second)
+	if err != nil {
+		if br.journal.Failed(key) > 5 {
+			br.ackCommand(cmd.ID)
+			br.note("could not deliver a message: " + err.Error())
+		} else {
+			br.note("message refused, retrying: " + err.Error())
+		}
+		return
+	}
+
+	br.journal.MarkDelivered(key)
+	br.ackCommand(cmd.ID)
+	br.note("typed a message into " + transcript.Snip(target.Title, 40) + " from the phone")
 }
 
 // runResume reopens a quiet session: a new pane running
