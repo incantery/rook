@@ -222,6 +222,7 @@ func (h *lk) open(stateDir string, port int, advertise bool) {
 		Pairing:  h.pairs,
 		Executor: h,
 		Panes:    h,
+		Digests:  h,
 		HostName: h.hostName,
 	})
 	// The port must survive relaunches: a phone caches host:port from
