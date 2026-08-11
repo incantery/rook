@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/incantery/rook/plugins/internal/digestlog"
+	"github.com/incantery/rook/plugins/internal/nowfile"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
 
@@ -45,15 +46,21 @@ type Workspace struct {
 // Agent is one session's row. State is the remote vocabulary:
 // working | needs_input | quiet.
 type Agent struct {
-	ID        string // session id — what a remote-issued command names
-	State     string
-	Title     string
-	Ask       string
-	AskID     string
-	Model     string
-	CostUSD   float64 // unreported today; carried so the shape matches the wire
-	CtxPct    int     // context occupancy percent; 0 = unreported
-	Digest    *Digest
+	ID      string // session id — what a remote-issued command names
+	State   string
+	Title   string
+	Ask     string
+	AskID   string
+	Model   string
+	CostUSD float64 // unreported today; carried so the shape matches the wire
+	CtxPct  int     // context occupancy percent; 0 = unreported
+	Digest  *Digest
+	// Now is the membrane's live line — what the screen says is
+	// happening at NowAt, from the agent plugin's screen-watcher. Set
+	// only while the session is working; a finished turn's story is the
+	// digest's job.
+	Now       string
+	NowAt     time.Time
 	LastEvent time.Time
 }
 
@@ -117,10 +124,12 @@ func AskID(s transcript.Session) string {
 // needs_input, because a session that may be sitting on an approval is
 // exactly what you left the room and want to know about.
 //
-// digests is the agent plugin's journal, latest per session: this fold
-// does no language work of its own — it carries the membrane's
-// artifacts, it does not make them.
-func Fold(sessions []transcript.Session, digests map[string]digestlog.Digest, hostname, rookVersion string) Status {
+// digests is the agent plugin's journal, latest per session; nows is
+// its ephemeral screen-watcher file (nil is fine — older machines and
+// idle fleets simply carry no live lines): this fold does no language
+// work of its own — it carries the membrane's artifacts, it does not
+// make them.
+func Fold(sessions []transcript.Session, digests map[string]digestlog.Digest, nows map[string]nowfile.Now, hostname, rookVersion string) Status {
 	st := Status{Hostname: hostname, RookVersion: rookVersion}
 
 	byWS := map[string]*Workspace{}
@@ -147,6 +156,13 @@ func Fold(sessions []transcript.Session, digests map[string]digestlog.Digest, ho
 		}
 		if d, ok := digests[s.ID]; ok {
 			a.Digest = &Digest{Headline: d.Headline, Bullets: d.Bullets, At: d.At}
+		}
+		// The live line rides only on a WORKING session: once the turn
+		// ends, the digest is the story and a leftover "now" would be a
+		// stale claim about the present.
+		if n, ok := nows[s.ID]; ok && s.State == transcript.StateWorking {
+			a.Now = transcript.Snip(n.Line, 200)
+			a.NowAt = n.At
 		}
 		switch s.State {
 		case transcript.StateNeedsYou:

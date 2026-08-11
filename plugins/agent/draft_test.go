@@ -135,14 +135,14 @@ func TestCopyAsksRookAndBelievesTheAnswer(t *testing.T) {
 	if json.Unmarshal([]byte(frame), &req) != nil {
 		t.Fatal("frame did not parse")
 	}
-	c.deliver(req.ID, true, "")
+	c.deliver(req.ID, true, "", nil)
 	waitState(t, st, "s1:aa", "copied")
 
 	// And the refusal path: rook says no, the chip says so too.
 	_ = act(c, st, nil, 2, json.RawMessage(`{"itemId":"s1:aa","actionId":"copy"}`))
 	frame = <-frames
 	json.Unmarshal([]byte(frame), &req)
-	c.deliver(req.ID, false, "not granted: clipboard.set")
+	c.deliver(req.ID, false, "not granted: clipboard.set", nil)
 	got := waitState(t, st, "s1:aa", "clip refused")
 	if !strings.Contains(got.ReplyErr, "not granted") {
 		t.Fatalf("refusal reason: %+v", got)

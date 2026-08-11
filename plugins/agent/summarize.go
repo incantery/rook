@@ -349,3 +349,34 @@ func shortHash(s string) string {
 	}
 	return fmt.Sprintf("%08x", uint32(h^(h>>32)))
 }
+
+const nowPrompt = `You watch a coding agent's terminal for its owner, who is away from the desk. You are given the screen as it looks RIGHT NOW and, when one exists, the summary of the agent's previous finished turn.
+
+Reply with ONE present-tense sentence, at most 18 words, saying what the agent is doing right now. Name the concrete thing on screen — the file, the test, the command, the error — over the generic activity. No preamble, no quotes, nothing but the sentence.`
+
+// NowLine compresses a live screen into one present-tense sentence —
+// the mid-turn counterpart of Summarize. The screen is already small
+// (one viewport); lastHeadline anchors the read so "still fixing the
+// migration test" beats a cold parse of forty ambiguous lines.
+func (z *Summarizer) NowLine(screen, lastHeadline string) (line string, cost float64, err error) {
+	user := ""
+	if lastHeadline != "" {
+		user = "The previous turn's summary: " + lastHeadline + "\n\n"
+	}
+	user += "The screen right now:\n" + screen
+	content, c, cerr := z.complete([]chatMsg{
+		{"system", nowPrompt},
+		{"user", user},
+	})
+	if cerr != nil {
+		return "", c, cerr
+	}
+	content = strings.TrimSpace(content)
+	if i := strings.IndexByte(content, '\n'); i >= 0 {
+		content = strings.TrimSpace(content[:i])
+	}
+	if content == "" {
+		return "", c, errors.New("the model sent nothing usable")
+	}
+	return content, c, nil
+}

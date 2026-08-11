@@ -46,6 +46,7 @@ import (
 
 	"github.com/incantery/rook/plugins/internal/cmdjournal"
 	"github.com/incantery/rook/plugins/internal/digestlog"
+	"github.com/incantery/rook/plugins/internal/nowfile"
 	"github.com/incantery/rook/plugins/internal/statusfold"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
@@ -315,7 +316,10 @@ func (h *lk) loop(c *conn, interval time.Duration) {
 		if h.digestLog != "" {
 			digests = digestlog.Latest(digestlog.Load(h.digestLog, h.sc.Window, now))
 		}
-		st := statusfold.Fold(sessions, digests, h.hostName, h.rookVer)
+		// The agent plugin's screen-watcher file; read-only here, same
+		// ownership story as the journal.
+		nows := nowfile.Read(nowfile.DefaultPath(), 90*time.Second, now)
+		st := statusfold.Fold(sessions, digests, nows, h.hostName, h.rookVer)
 		h.srv.Publish(toProjection(st))
 
 		agents := 0
@@ -367,6 +371,8 @@ func toProjection(n statusfold.Status) projection.Status {
 				Model:     a.Model,
 				CostUSD:   a.CostUSD,
 				CtxPct:    a.CtxPct,
+				Now:       a.Now,
+				NowAt:     a.NowAt,
 				LastEvent: a.LastEvent,
 			}
 			if a.Digest != nil {

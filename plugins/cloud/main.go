@@ -49,6 +49,7 @@ import (
 
 	"github.com/incantery/rook/plugins/internal/cmdjournal"
 	"github.com/incantery/rook/plugins/internal/digestlog"
+	"github.com/incantery/rook/plugins/internal/nowfile"
 	"github.com/incantery/rook/plugins/internal/statusfold"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
@@ -277,7 +278,10 @@ func (br *bridge) push(c *conn, samples map[int]transcript.PaneSample) ([]transc
 	if br.digestLog != "" {
 		digests = digestlog.Latest(digestlog.Load(br.digestLog, br.sc.Window, now))
 	}
-	st := statusFrom(sessions, digests, br.rookVer, linkHostID(br.linkIdentity))
+	// Same ownership story as the journal: the agent plugin's
+	// screen-watcher writes the now-file, this process only looks.
+	nows := nowfile.Read(nowfile.DefaultPath(), 90*time.Second, now)
+	st := statusFrom(sessions, digests, nows, br.rookVer, linkHostID(br.linkIdentity))
 	body, err := json.Marshal(st)
 	if err != nil {
 		return sessions, panes
@@ -358,15 +362,18 @@ type wireWorkspace struct {
 }
 
 type wireAgent struct {
-	ID        string      `json:"id,omitempty"` // session id — what a phone-issued command names
-	State     string      `json:"state"`        // working | needs_input | quiet
-	Title     string      `json:"title,omitempty"`
-	Ask       string      `json:"ask,omitempty"`
-	AskID     string      `json:"askId,omitempty"`
-	Model     string      `json:"model,omitempty"`
-	CtxPct    int         `json:"ctxPct,omitempty"` // context occupancy, percent of the model's window
-	Digest    *wireDigest `json:"digest,omitempty"`
-	LastEvent time.Time   `json:"lastEvent,omitzero"`
+	ID     string      `json:"id,omitempty"` // session id — what a phone-issued command names
+	State  string      `json:"state"`        // working | needs_input | quiet
+	Title  string      `json:"title,omitempty"`
+	Ask    string      `json:"ask,omitempty"`
+	AskID  string      `json:"askId,omitempty"`
+	Model  string      `json:"model,omitempty"`
+	CtxPct int         `json:"ctxPct,omitempty"` // context occupancy, percent of the model's window
+	Digest *wireDigest `json:"digest,omitempty"`
+	// The membrane's live line — see statusfold.Agent.Now.
+	Now       string    `json:"now,omitempty"`
+	NowAt     time.Time `json:"nowAt,omitzero"`
+	LastEvent time.Time `json:"lastEvent,omitzero"`
 }
 
 // wireDigest is the membrane's artifact, exported: the agent plugin's
@@ -454,9 +461,9 @@ func askID(s transcript.Session) string { return statusfold.AskID(s) }
 // This side only renders the neutral struct as rook-cloud's wire JSON;
 // the field names and omitempty semantics above are the contract, and
 // the mapping here is deliberately 1:1.
-func statusFrom(sessions []transcript.Session, digests map[string]digestlog.Digest, rookVer, linkHostID string) wireStatus {
+func statusFrom(sessions []transcript.Session, digests map[string]digestlog.Digest, nows map[string]nowfile.Now, rookVer, linkHostID string) wireStatus {
 	host, _ := os.Hostname()
-	n := statusfold.Fold(sessions, digests, host, rookVer)
+	n := statusfold.Fold(sessions, digests, nows, host, rookVer)
 
 	st := wireStatus{Hostname: n.Hostname, RookVersion: n.RookVersion, HostID: linkHostID}
 	for _, w := range n.Workspaces {
@@ -470,6 +477,8 @@ func statusFrom(sessions []transcript.Session, digests map[string]digestlog.Dige
 				AskID:     a.AskID,
 				Model:     a.Model,
 				CtxPct:    a.CtxPct,
+				Now:       a.Now,
+				NowAt:     a.NowAt,
 				LastEvent: a.LastEvent,
 			}
 			if a.Digest != nil {

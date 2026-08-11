@@ -181,7 +181,7 @@ func TestFirstPartyPluginsLowerToTheHandWrittenBytes(t *testing.T) {
 			Name:    "agent",
 			Command: []string{"/Applications/rook.app/Contents/MacOS/rook-plugin-agent", "--model", "gpt-5.6-luna"},
 			Load:    Eager,
-			Grants:  []string{OpItemsList, OpItemsAct, OpClipboardSet},
+			Grants:  []string{OpItemsList, OpItemsAct, OpClipboardSet, OpPanesActivity, OpPaneRead},
 		},
 		Plugin{
 			Name:    "cloud",

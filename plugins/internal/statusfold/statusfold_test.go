@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/incantery/rook/plugins/internal/digestlog"
+	"github.com/incantery/rook/plugins/internal/nowfile"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
 
@@ -27,7 +28,7 @@ func TestFoldMapsStatesAndGroupsWorkspaces(t *testing.T) {
 		"s2": {Headline: "built the thing", Bullets: []string{"a", "b"}, At: mt},
 	}
 
-	st := Fold(sessions, digests, "boxen", "1.2.3")
+	st := Fold(sessions, digests, nil, "boxen", "1.2.3")
 	if st.Hostname != "boxen" || st.RookVersion != "1.2.3" {
 		t.Errorf("identity fields: %q %q", st.Hostname, st.RookVersion)
 	}
@@ -71,7 +72,7 @@ func TestFoldMapsStatesAndGroupsWorkspaces(t *testing.T) {
 
 // A directory the scanner could not name still gets a row, under "?".
 func TestFoldNamelessCwd(t *testing.T) {
-	st := Fold([]transcript.Session{{ID: "x", Cwd: "/", State: transcript.StateIdle}}, nil, "h", "")
+	st := Fold([]transcript.Session{{ID: "x", Cwd: "/", State: transcript.StateIdle}}, nil, nil, "h", "")
 	if len(st.Workspaces) != 1 || st.Workspaces[0].Name != "?" {
 		t.Fatalf("got %+v", st.Workspaces)
 	}
@@ -116,5 +117,36 @@ func TestAskIDTracksTheAsk(t *testing.T) {
 	}
 	if !strings.HasPrefix(AskID(s), "s1:") {
 		t.Errorf("handle should name the session: %q", AskID(s))
+	}
+}
+
+// The live line rides only on working sessions: a needs-input session
+// keeps its ask, and a leftover now-line must not survive the turn's
+// end as a stale claim about the present.
+func TestNowLinesRideWorkingSessionsOnly(t *testing.T) {
+	at := time.Now()
+	nows := map[string]nowfile.Now{
+		"w": {SessionID: "w", Line: "running the migration tests", At: at},
+		"n": {SessionID: "n", Line: "stale line from before the ask", At: at},
+	}
+	st := Fold([]transcript.Session{
+		{ID: "w", Cwd: "/repo", State: transcript.StateWorking},
+		{ID: "n", Cwd: "/repo", State: transcript.StateNeedsYou, LastText: "which db?"},
+	}, nil, nows, "h", "")
+	var w, n *Agent
+	for i := range st.Workspaces[0].Agents {
+		a := &st.Workspaces[0].Agents[i]
+		switch a.ID {
+		case "w":
+			w = a
+		case "n":
+			n = a
+		}
+	}
+	if w == nil || w.Now != "running the migration tests" || !w.NowAt.Equal(at) {
+		t.Fatalf("working session lost its now-line: %+v", w)
+	}
+	if n == nil || n.Now != "" {
+		t.Fatalf("needs-input session kept a stale now-line: %+v", n)
 	}
 }

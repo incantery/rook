@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/incantery/rook/plugins/internal/digestlog"
+	"github.com/incantery/rook/plugins/internal/nowfile"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
 
@@ -60,6 +61,9 @@ func main() {
 	keep := flag.Int("keep", 100, "digests remembered")
 	maxChars := flag.Int("max-chars", 16000, "input cap per reply, in bytes")
 	logPath := flag.String("log", digestlog.DefaultPath(), "digest journal, jsonl (empty disables persistence)")
+	nowEvery := flag.Duration("now-every", 20*time.Second, "screen-watcher interval for live now-lines (0 disables)")
+	nowPath := flag.String("now-file", nowfile.DefaultPath(), "ephemeral now-line file (empty disables)")
+	nowNames := flag.String("claude-names", "claude,node", "foreground program names that count as Claude Code")
 	flag.Parse()
 
 	home, _ := os.UserHomeDir()
@@ -89,6 +93,7 @@ func main() {
 	}
 	st := newStore(*keep, expandHome(*logPath, home), *window, time.Now())
 	key := apiKey(*keyFile, explicitKeyFile)
+	c := &conn{out: os.Stdout}
 	var sum *Summarizer
 	if notice := nokeyNotice(key, *apiBase, *keyFile); notice != "" {
 		st.nokey = notice
@@ -102,8 +107,21 @@ func main() {
 			MaxChars: *maxChars,
 		}
 		go watch(sc, st, sum, *poll, *minWords)
+		if *nowEvery > 0 && *nowPath != "" {
+			// Its own scanner: Scanner keeps per-file state and the
+			// watch goroutine must not share one.
+			nsc := &transcript.Scanner{
+				Dir:    *dir,
+				Window: *window,
+				Idle:   10 * time.Minute,
+				Quiet:  60 * time.Second,
+				Max:    20,
+			}
+			go nowLoop(c, nsc, st, sum, *nowEvery,
+				strings.Split(*nowNames, ","), expandHome(*nowPath, home))
+		}
 	}
-	serve(&conn{out: os.Stdout}, st, sum)
+	serve(c, st, sum)
 }
 
 const defaultAPIBase = "https://api.openai.com/v1"
@@ -330,6 +348,7 @@ type conn struct {
 type callResult struct {
 	ok  bool
 	err string
+	raw json.RawMessage
 }
 
 func (c *conn) send(v any) {
@@ -360,7 +379,7 @@ type request struct {
 // call asks rook for something (clipboard.set) and waits for the
 // verdict. MUST NOT run on the serve goroutine: serve is what delivers
 // the reply, so a handler that called this inline would wait on itself.
-func (c *conn) call(op string, params any, timeout time.Duration) error {
+func (c *conn) call(op string, params any, timeout time.Duration) (json.RawMessage, error) {
 	ch := make(chan callResult, 1)
 	c.mu.Lock()
 	c.nextID++
@@ -374,26 +393,26 @@ func (c *conn) call(op string, params any, timeout time.Duration) error {
 	select {
 	case r := <-ch:
 		if !r.ok {
-			return errors.New(r.err)
+			return nil, errors.New(r.err)
 		}
-		return nil
+		return r.raw, nil
 	case <-time.After(timeout):
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
-		return errors.New("timeout: " + op)
+		return nil, errors.New("timeout: " + op)
 	}
 }
 
 // deliver hands rook's answer to whoever is waiting on it. Split out of
 // serve so a test can play rook's half of the conversation.
-func (c *conn) deliver(id uint64, ok bool, errText string) {
+func (c *conn) deliver(id uint64, ok bool, errText string, raw json.RawMessage) {
 	c.mu.Lock()
 	ch := c.pending[id]
 	delete(c.pending, id)
 	c.mu.Unlock()
 	if ch != nil {
-		ch <- callResult{ok, errText}
+		ch <- callResult{ok, errText, raw}
 	}
 }
 
@@ -413,12 +432,13 @@ func serve(c *conn, st *store, sum *Summarizer) {
 		if req.Op == "" {
 			// rook answering one of our requests.
 			var rep struct {
-				ID    uint64 `json:"id"`
-				OK    bool   `json:"ok"`
-				Error string `json:"error"`
+				ID     uint64          `json:"id"`
+				OK     bool            `json:"ok"`
+				Error  string          `json:"error"`
+				Result json.RawMessage `json:"result"`
 			}
 			if json.Unmarshal(in.Bytes(), &rep) == nil {
-				c.deliver(rep.ID, rep.OK, rep.Error)
+				c.deliver(rep.ID, rep.OK, rep.Error, rep.Result)
 			}
 			continue
 		}
@@ -427,7 +447,7 @@ func serve(c *conn, st *store, sum *Summarizer) {
 			c.send(reply{1, req.ID, true, map[string]any{
 				"name":         "agent",
 				"version":      version,
-				"capabilities": []string{"items.list", "items.act", "clipboard.set"},
+				"capabilities": []string{"items.list", "items.act", "clipboard.set", "panes.activity", "pane.read"},
 				"surfaces":     []string{"LIST"},
 			}, ""})
 		case "items.list":
@@ -622,7 +642,7 @@ func act(c *conn, st *store, sum *Summarizer, id uint64, params json.RawMessage)
 		// refusal is worth waiting for — "copied" on a missing grant
 		// would be the panel lying about the pasteboard.
 		go func() {
-			err := c.call("clipboard.set", map[string]string{"text": text}, 3*time.Second)
+			_, err := c.call("clipboard.set", map[string]string{"text": text}, 3*time.Second)
 			st.update(itemID, func(d *Digest) {
 				if err != nil {
 					d.ReplyState = "clip refused"
