@@ -68,6 +68,12 @@ type Session struct {
 	Mtime    time.Time
 	TurnDur  time.Duration // how long the just-finished turn ran; 0 if unknown
 	Present  bool          // the human typed in this session's pane moments ago
+	// Attached: a Claude-like pane is open in this session's directory
+	// and this is the freshest transcript there — the pane IS this
+	// session (the same one-pane-one-session heuristic the resume
+	// executors refuse duplicates with). Quiet-but-attached is idle at
+	// a keyboard, not parked.
+	Attached bool
 
 	// Context occupancy, from the LAST main-chain assistant message's
 	// usage: input + cache reads + cache writes + output is what the
@@ -186,8 +192,17 @@ func Fuse(sessions []Session, panes []PaneActivity, names []string, busyRate flo
 			freshest[s.Cwd] = i
 		}
 	}
+	// Which directories hold ANY Claude pane (busy or idle) — the
+	// attachment fact, distinct from the busy fact above.
+	openCwd := map[string]bool{}
+	for _, p := range panes {
+		if claudeLike(p, names) {
+			openCwd[p.Cwd] = true
+		}
+	}
 	for i := range sessions {
 		s := &sessions[i]
+		s.Attached = openCwd[s.Cwd] && freshest[s.Cwd] == i
 		if busyCwd[s.Cwd] && freshest[s.Cwd] == i && (s.State == StateBlocked || s.State == StateIdle) {
 			s.State = StateWorking
 		}

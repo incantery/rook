@@ -35,7 +35,7 @@ func fixtureSessions() []transcript.Session {
 }
 
 func TestStatusFromSpeaksTheCloudsVocabulary(t *testing.T) {
-	st := statusFrom(fixtureSessions(), nil, "v0.42.0", "")
+	st := statusFrom(fixtureSessions(), nil, nil, "v0.42.0", "")
 	if st.RookVersion != "v0.42.0" || st.Hostname == "" {
 		t.Fatalf("header: %+v", st)
 	}
@@ -558,7 +558,7 @@ func TestDigestRidesTheStatusForSessionsThatHaveOne(t *testing.T) {
 		"a": {SessionID: "a", Headline: "the fix landed, tests green",
 			Bullets: []string{"ship it or hold for docs", "one flake remains"}, At: t0},
 	}
-	st := statusFrom(fixtureSessions(), digests, "", "")
+	st := statusFrom(fixtureSessions(), digests, nil, "", "")
 	rook := st.Workspaces[1]
 	got := rook.Agents[0].Digest
 	if got == nil || got.Headline != "the fix landed, tests green" || len(got.Bullets) != 2 {
@@ -580,7 +580,7 @@ func TestDigestRidesTheStatusForSessionsThatHaveOne(t *testing.T) {
 }
 
 func TestAskIDRidesTheStatusForNeedsInputOnly(t *testing.T) {
-	st := statusFrom(fixtureSessions(), nil, "", "")
+	st := statusFrom(fixtureSessions(), nil, nil, "", "")
 	var withID, withoutID int
 	for _, w := range st.Workspaces {
 		for _, a := range w.Agents {

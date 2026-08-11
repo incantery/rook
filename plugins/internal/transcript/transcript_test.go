@@ -305,7 +305,7 @@ func TestFuseVersionedBinaryMatchesByPath(t *testing.T) {
 func TestFuseWrongProgramOrDirIsNoMatch(t *testing.T) {
 	ss := []Session{{ID: "a", Cwd: "/w", State: StateBlocked}}
 	panes := []PaneActivity{
-		{Cwd: "/w", Fg: "vim", RateBps: 900, InMs: 100},          // right dir, wrong program
+		{Cwd: "/w", Fg: "vim", RateBps: 900, InMs: 100},            // right dir, wrong program
 		{Cwd: "/elsewhere", Fg: "claude", RateBps: 900, InMs: 100}, // right program, wrong dir
 	}
 	Fuse(ss, panes, []string{"claude"}, 200, 45*time.Second)
@@ -417,5 +417,33 @@ func TestCtxPctAndWindow(t *testing.T) {
 	}
 	if p := CtxPct(300_000, "claude-sonnet-4-5[1m]"); p != 30 {
 		t.Fatalf("1m window pct %d want 30", p)
+	}
+}
+
+func TestFuseAttachmentIsTheFreshestTranscriptWithAnOpenPane(t *testing.T) {
+	// An IDLE claude pane still attaches its directory's freshest
+	// session — quiet-but-attached is "idle at a keyboard", and the
+	// resume button must know not to appear. Bystander history in the
+	// same cwd stays detached, and a cwd with no claude pane detaches
+	// entirely.
+	ss := []Session{
+		{ID: "old", Cwd: "/w", State: StateIdle, Mtime: t0.Add(-10 * time.Hour)},
+		{ID: "live", Cwd: "/w", State: StateIdle, Mtime: t0},
+		{ID: "parked", Cwd: "/gone", State: StateIdle, Mtime: t0},
+	}
+	panes := []PaneActivity{{Cwd: "/w", Fg: "claude", RateBps: 0, InMs: -1}}
+	Fuse(ss, panes, []string{"claude"}, 200, 45*time.Second)
+	byID := map[string]bool{}
+	for _, s := range ss {
+		byID[s.ID] = s.Attached
+	}
+	if !byID["live"] {
+		t.Error("freshest session with an open pane must be attached")
+	}
+	if byID["old"] {
+		t.Error("bystander history must not be attached")
+	}
+	if byID["parked"] {
+		t.Error("a session with no claude pane must not be attached")
 	}
 }

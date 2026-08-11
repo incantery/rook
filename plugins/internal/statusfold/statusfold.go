@@ -61,6 +61,7 @@ type Agent struct {
 	// digest's job.
 	Now       string
 	NowAt     time.Time
+	Attached  bool // open in a live pane right now — see transcript.Session.Attached
 	LastEvent time.Time
 }
 
@@ -149,6 +150,7 @@ func Fold(sessions []transcript.Session, digests map[string]digestlog.Digest, no
 			ID:        s.ID,
 			Title:     transcript.Snip(s.Title, 80),
 			Model:     "claude",
+			Attached:  s.Attached,
 			LastEvent: s.Mtime,
 		}
 		if p := transcript.CtxPct(s.CtxTokens, s.Model); p > 0 {

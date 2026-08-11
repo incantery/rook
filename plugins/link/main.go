@@ -373,6 +373,7 @@ func toProjection(n statusfold.Status) projection.Status {
 				CtxPct:    a.CtxPct,
 				Now:       a.Now,
 				NowAt:     a.NowAt,
+				Attached:  a.Attached,
 				LastEvent: a.LastEvent,
 			}
 			if a.Digest != nil {

@@ -4,8 +4,8 @@ github.com/brutella/dnssd v1.2.14 h1:qLpTnRTm5peo2jA30hqMIbCuWn8x3sFg3e9o9ODOobw
 github.com/brutella/dnssd v1.2.14/go.mod h1:tG4GE8orv6+irE5rdsNgb6MJSxm6cyMUKdC5jmD22gk=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
-github.com/incantery/rook-host v0.5.0 h1:MMW6HjqLT2yzryqDVyIxjZTNVj/hT+PF+bx050FtkdM=
-github.com/incantery/rook-host v0.5.0/go.mod h1:+0w0T84a+AwuEkv6Q886KVxNPRFHzHYVL7CIyp7Of3g=
+github.com/incantery/rook-host v0.6.0 h1:bpLI38sKQcbkv1s+rvuKdUOHXq0Pm2TG9Z2ImRuWNCE=
+github.com/incantery/rook-host v0.6.0/go.mod h1:+0w0T84a+AwuEkv6Q886KVxNPRFHzHYVL7CIyp7Of3g=
 github.com/miekg/dns v1.1.61 h1:nLxbwF3XxhwVSm8g9Dghm9MHPaUZuqhPiGL+675ZmEs=
 github.com/miekg/dns v1.1.61/go.mod h1:mnAarhS3nWaW+NVP2wTkYVIZyHNJ098SJZUki3eykwQ=
 github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e h1:MRM5ITcdelLK2j1vwZ3Je0FKVCfqOLp5zO6trqMLYs0=

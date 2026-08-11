@@ -373,6 +373,7 @@ type wireAgent struct {
 	// The membrane's live line — see statusfold.Agent.Now.
 	Now       string    `json:"now,omitempty"`
 	NowAt     time.Time `json:"nowAt,omitzero"`
+	Attached  bool      `json:"attached,omitempty"`
 	LastEvent time.Time `json:"lastEvent,omitzero"`
 }
 
@@ -479,6 +480,7 @@ func statusFrom(sessions []transcript.Session, digests map[string]digestlog.Dige
 				CtxPct:    a.CtxPct,
 				Now:       a.Now,
 				NowAt:     a.NowAt,
+				Attached:  a.Attached,
 				LastEvent: a.LastEvent,
 			}
 			if a.Digest != nil {
