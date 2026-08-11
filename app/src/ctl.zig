@@ -682,6 +682,22 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else {
             reply(fd, "err no such plugin (see `plugins`)\n");
         }
+    } else if (std.mem.eql(u8, verb, "plugin-restart") and rest.len > 0) {
+        // Stop one plugin and bring it back, its declaration re-read from
+        // the applied config. The recovery for a failed plugin and the
+        // apply step for changed grants — without restarting rook and
+        // every shell in it. Blocks through the respawn handshake, which
+        // is the same wait the passthrough below already imposes.
+        if (app.plugins.find(rest) == null) {
+            reply(fd, "err no such plugin (see `plugins`)\n");
+        } else if (app.plugins.restart(app.io, app.gpa, rest)) {
+            reply(fd, "ok\n");
+        } else {
+            const p = app.plugins.find(rest).?;
+            var ebuf: [256]u8 = undefined;
+            const e = std.fmt.bufPrint(&ebuf, "err {s}\n", .{p.errStr()}) catch "err restart failed\n";
+            reply(fd, e);
+        }
     } else if (std.mem.eql(u8, verb, "plugins") and rest.len == 0) {
         // Every declaration, and what became of it. DECLARED vs GRANTED vs
         // what the plugin ASKED FOR are three different things, and this

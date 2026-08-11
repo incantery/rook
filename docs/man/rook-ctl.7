@@ -436,6 +436,13 @@ Failures carry their reason.
 .It Cm plugin-show Ar name
 Open the plugin panel on
 .Ar name .
+.It Cm plugin-restart Ar name
+Stop that plugin and bring it back, its declaration re-read from the
+applied config.
+The recovery for a failed plugin and the apply step for changed grants
+\(em without restarting rook and every shell in it.
+A single unanswered call only complains; three consecutive timeouts are
+what fail a plugin.
 .It Cm worktree Cm add Ar workspace name
 Carve a git worktree of the declared
 .Ar workspace

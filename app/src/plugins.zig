@@ -267,6 +267,11 @@ pub const Describe = struct {
 pub const Plugin = struct {
     spec: Spec,
     state: State = .declared,
+    /// Consecutive unanswered calls. One timeout is a complaint — the op
+    /// may simply be one this plugin never answers, and killing a healthy
+    /// plugin over a stray ctl call took the whole link rail down once.
+    /// Three in a row is a hung process, and that fails it for real.
+    strikes: u8 = 0,
     /// Why it is not up. Shown by `ctl plugins`, because "the panel is
     /// empty" and "the plugin died" are different problems that look the
     /// same from outside.
@@ -330,9 +335,16 @@ pub const Plugin = struct {
         return self.err[0..self.err_len];
     }
 
-    fn fail(self: *Plugin, comptime fmt: []const u8, args: anytype) void {
+    /// Record a complaint without killing the plugin: the message shows
+    /// up in ctl replies and the panel, the process keeps running. For
+    /// the failures that ARE fatal, `fail` below.
+    fn complain(self: *Plugin, comptime fmt: []const u8, args: anytype) void {
         const s = std.fmt.bufPrint(&self.err, fmt, args) catch "failed";
         self.err_len = s.len;
+    }
+
+    fn fail(self: *Plugin, comptime fmt: []const u8, args: anytype) void {
+        self.complain(fmt, args);
         self.state = .failed;
         self.stop();
     }
@@ -622,7 +634,13 @@ pub const Plugin = struct {
 
     fn handshake(self: *Plugin, gpa: std.mem.Allocator) bool {
         var buf: [64 * 1024]u8 = undefined;
-        const reply = self.rpc(gpa, "describe", "", default_deadline_ms, &buf) orelse return false;
+        const reply = self.rpc(gpa, "describe", "", default_deadline_ms, &buf) orelse {
+            // Unanswered describe is fatal even below the strike limit:
+            // there is no working plugin behind a failed handshake, and
+            // leaving the process running half-adopted would be worse.
+            if (self.state != .failed) self.fail("did not answer describe", .{});
+            return false;
+        };
 
         const Wire = struct {
             v: i64 = 0,
@@ -769,7 +787,10 @@ pub const Plugin = struct {
             }
         }
 
-        var left = @max(deadline_ms, 1);
+        // Explicitly i32: `@max(x, 1)` lets the compiler refine the type
+        // to an unsigned range, and the subtraction below then PANICS the
+        // whole app when poll overshoots the deadline by a millisecond.
+        var left: i32 = @max(deadline_ms, 1);
         while (true) {
             self.mu.lock();
             const ready = self.waiting_ready;
@@ -787,14 +808,21 @@ pub const Plugin = struct {
             // of times round this loop — a stale wake byte would otherwise
             // buy the plugin another full deadline every time.
             const spent: i32 = @intCast(@min(@as(i64, std.math.maxInt(i32)), nowMs() - start));
-            left -= @max(spent, 0);
+            // Saturating: a poll that ran a hair past the deadline must
+            // read as "no time left", never as arithmetic overflow.
+            left -|= @max(spent, 0);
             if (r <= 0 or left <= 0) {
                 self.mu.lock();
                 const late = self.waiting_ready;
                 if (!late) self.waiting_id = 0;
                 self.mu.unlock();
                 if (late) break; // it landed in the gap; take it
-                self.fail("no answer in {d}ms", .{deadline_ms});
+                self.strikes += 1;
+                if (self.strikes >= 3) {
+                    self.fail("no answer in {d}ms (3 in a row)", .{deadline_ms});
+                } else {
+                    self.complain("no answer in {d}ms", .{deadline_ms});
+                }
                 return null;
             }
         }
@@ -816,6 +844,7 @@ pub const Plugin = struct {
             self.fail("answer larger than {d} bytes", .{buf.len});
             return null;
         }
+        self.strikes = 0;
         return buf[0..len];
     }
 
@@ -1620,7 +1649,53 @@ pub const Registry = struct {
             if (p.spec.load == .eager) _ = p.ensure(gpa);
         }
     }
+
+    /// Stop one plugin (up, failed, or wedged) and bring it back — with
+    /// its declaration re-read from the applied config, so grants changed
+    /// since launch take effect here instead of waiting on a full rook
+    /// restart. The recovery verb for a failed plugin, and the apply step
+    /// for a grant change; the registry slice never moves, so the
+    /// `*Plugin` every pump holds stays valid.
+    pub fn restart(self: *Registry, io: std.Io, gpa: std.mem.Allocator, name: []const u8) bool {
+        const p = self.find(name) orelse return false;
+        p.stop();
+        p.quit.store(false, .release);
+        p.state = .declared;
+        p.err_len = 0;
+        p.strikes = 0;
+        // The next handshake re-fills what describe said; without this it
+        // would append to the old answer instead.
+        p.desc.caps_n = 0;
+        // Freshest declaration wins. A plugin no longer in the config
+        // keeps its old spec and simply respawns with it — un-declaring
+        // is the config panel's business, not this verb's.
+        var fresh = load(io, gpa);
+        defer fresh.deinit();
+        if (fresh.find(name)) |latest| {
+            if (dupeSpec(self.arena.allocator(), latest.spec)) |spec| {
+                p.spec = spec;
+            } else |_| {}
+        }
+        return p.ensure(gpa);
+    }
 };
+
+/// Copy a Spec into `a` — the registry arena outlives the freshly parsed
+/// graph the new declaration was read from.
+fn dupeSpec(a: std.mem.Allocator, s: Spec) !Spec {
+    const argv = try a.alloc([]const u8, s.argv.len);
+    for (s.argv, 0..) |arg, i| argv[i] = try a.dupe(u8, arg);
+    const grants = try a.alloc([]const u8, s.grants.len);
+    for (s.grants, 0..) |g, i| grants[i] = try a.dupe(u8, g);
+    return .{
+        .name = try a.dupe(u8, s.name),
+        .argv = argv,
+        .load = s.load,
+        .grants = grants,
+        .source = try a.dupe(u8, s.source),
+        .sha256 = try a.dupe(u8, s.sha256),
+    };
+}
 
 /// Read the `plugin` nodes out of the environment graph.
 ///

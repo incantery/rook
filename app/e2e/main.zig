@@ -2270,6 +2270,8 @@ const sh_plugin =
     \\          case "$rep" in *'"ok":true'*) extra=" send:ok" ;; *) extra=" send:no" ;; esac ;;
     \\      esac
     \\      printf '{"v":1,"id":%s,"ok":true,"result":{"message":"ran %s%s","item":{"id":"a","title":"alpha","state":"done","fields":[{"key":"n","kind":"NUMBER","value":"8"}],"actions":%s}}}\n' "$id" "$act" "$extra" "$acts" ;;
+    \\    *'"op":"wedge.op"'*)
+    \\      ;;
     \\    *)
     \\      printf '{"v":1,"id":%s,"ok":false,"error":"unsupported op"}\n' "$id" ;;
     \\  esac
@@ -2298,7 +2300,7 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     var json_buf: [4096]u8 = undefined;
     const graph = try std.fmt.bufPrint(&json_buf,
         \\{{"rookEnvironment":1,"nodes":[
-        \\{{"id":"plugin:shplug","kind":"plugin","scope":"app","name":"shplug","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list"]}},
+        \\{{"id":"plugin:shplug","kind":"plugin","scope":"app","name":"shplug","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","wedge.op"]}},
         \\{{"id":"plugin:acty","kind":"plugin","scope":"app","name":"acty","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act","attention.raise","session.spawn","session.send","clipboard.set"]}},
         \\{{"id":"plugin:norais","kind":"plugin","scope":"app","name":"norais","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act"]}},
         \\{{"id":"plugin:nogrant","kind":"plugin","scope":"app","name":"nogrant","command":["/bin/sh","{s}"],"load":"lazy","grants":[]}},
@@ -2365,6 +2367,52 @@ fn plugins(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("type echo still-here");
     _ = try app.ctl("enter");
     try app.waitTextCount("still-here", 2, 5_000);
+
+    // ---- timeouts, strikes, and the way back ----
+    //
+    // `wedge.op` is granted, and the fixture reads it and says NOTHING —
+    // the shape of a wedged handler. One unanswered call must not kill a
+    // healthy plugin (a stray ctl call once took the whole link rail
+    // down); a plugin that stopped answering ALTOGETHER is hung, and
+    // three consecutive misses fail it for real.
+    const strike1 = try app.ctl("plugin shplug wedge.op");
+    try h.expectContains(strike1, "no answer", "an unanswered call reports itself");
+    try h.expectContains(try app.ctl("plugins"), "shplug\tlazy\tup", "one timeout is not a death");
+
+    // A real answer clears the strike count…
+    try h.expectContains(try app.ctl("plugin shplug items.list"), "\"ok\":true", "it still answers after a timeout");
+
+    // …so two MORE misses (three lifetime, two in a row) still leave it up…
+    _ = try app.ctl("plugin shplug wedge.op");
+    _ = try app.ctl("plugin shplug wedge.op");
+    try h.expectContains(try app.ctl("plugins"), "shplug\tlazy\tup", "strikes reset on success");
+
+    // …and the third consecutive miss is the hang verdict.
+    _ = try app.ctl("plugin shplug wedge.op");
+    try h.expectContains(try app.ctl("plugins"), "shplug\tlazy\tfailed", "three in a row fails it");
+
+    // The way back, without restarting rook and every shell in it.
+    try h.expectContains(try app.ctl("plugin-restart shplug"), "ok", "plugin-restart revives a failed plugin");
+    try h.expectContains(try app.ctl("plugin shplug items.list"), "\"ok\":true", "and it answers again");
+
+    // The restart re-reads the declaration from the applied config, so a
+    // grant added after launch takes effect HERE — the alternative was
+    // "config applied, nothing changed, restart rook to find out why".
+    var json2_buf: [4096]u8 = undefined;
+    const graph2 = try std.fmt.bufPrint(&json2_buf,
+        \\{{"rookEnvironment":1,"nodes":[
+        \\{{"id":"plugin:shplug","kind":"plugin","scope":"app","name":"shplug","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","wedge.op","extra.op"]}},
+        \\{{"id":"plugin:acty","kind":"plugin","scope":"app","name":"acty","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act","attention.raise","session.spawn","session.send","clipboard.set"]}},
+        \\{{"id":"plugin:norais","kind":"plugin","scope":"app","name":"norais","command":["/bin/sh","{s}"],"load":"lazy","grants":["items.list","items.act"]}},
+        \\{{"id":"plugin:nogrant","kind":"plugin","scope":"app","name":"nogrant","command":["/bin/sh","{s}"],"load":"lazy","grants":[]}},
+        \\{{"id":"plugin:missing","kind":"plugin","scope":"app","name":"missing","command":["/nope/not-a-binary"],"load":"lazy","grants":["items.list"]}}
+        \\]}}
+    , .{ script, script, script, script });
+    var envp_buf: [256]u8 = undefined;
+    const envp = try std.fmt.bufPrint(&envp_buf, "{s}/config/rook/environment.json", .{app.dirPath()});
+    try h.writeFile(envp, graph2);
+    try h.expectContains(try app.ctl("plugin-restart shplug"), "ok", "restart with a fresh declaration");
+    try h.expectContains(try app.ctl("plugins"), "grants=items.list,wedge.op,extra.op", "the new grant is live without a rook restart");
 
     // ---- the surface ----
     //
