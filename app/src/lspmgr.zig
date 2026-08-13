@@ -57,6 +57,19 @@ const Entry = struct {
     note: []const u8 = "",
 };
 
+/// One (lang, root)'s death toll. See Manager.graves.
+const Grave = struct {
+    lang: []const u8,
+    root: []const u8,
+    deaths: u8,
+};
+
+/// Respawns a (lang, root) is allowed before it stays dead. Two
+/// covers the honest flake — a server that lost a race once, an
+/// initialize that timed out on a cold cache — while a real crash
+/// loop burns both inside a minute and then stops burning anything.
+const max_respawns = 2;
+
 const AskKind = enum { hover, definition, references, rename, completion, completion_resolve, formatting, code_action, code_action_resolve };
 
 const Ask = struct {
@@ -294,6 +307,13 @@ pub const Manager = struct {
     why: langpkg.Fault = .undeclared,
     /// Resolutions in flight, and the ones that came back refused.
     pending: std.ArrayListUnmanaged(Pending) = .empty,
+    /// Death counts per (lang, root) — the retry budget's memory. It
+    /// outlives the entries it counts, because a retry EVICTS the dead
+    /// entry, and the count is the only thing standing between "a
+    /// fresh open deserves another try" and a crash loop with a
+    /// polite cadence. Strings owned (a config reload replaces the
+    /// registry arena the entries borrow from; this list must not).
+    graves: std.ArrayListUnmanaged(Grave) = .empty,
     /// Ask a plugin what to run for a project. Set by the app, which
     /// owns the plugin host; null in a headless manager, where a
     /// resolver-backed language simply never resolves.
@@ -327,6 +347,11 @@ pub const Manager = struct {
         self.changed.deinit(self.gpa);
         for (self.pending.items) |*pd| pd.deinit(self.gpa);
         self.pending.deinit(self.gpa);
+        for (self.graves.items) |g| {
+            self.gpa.free(g.lang);
+            self.gpa.free(g.root);
+        }
+        self.graves.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -365,10 +390,12 @@ pub const Manager = struct {
         for (self.servers.items) |e| {
             if (std.mem.eql(u8, e.lang, spec.name) and std.mem.eql(u8, e.root, root)) {
                 // A server that died is not reused, and not restarted
-                // here either: a crash loop that respawns on every
-                // keystroke is worse than a dead server.
+                // here either: ensure() runs on keystroke paths, and a
+                // crash loop that respawns on every keystroke is worse
+                // than a dead server. retryFailed() — the OPEN path's
+                // door — is where a corpse gets its second chance.
                 if (e.srv.state() == .failed) {
-                    self.why = .no_binary;
+                    self.why = .died;
                     return null;
                 }
                 return e.srv;
@@ -389,6 +416,83 @@ pub const Manager = struct {
             return null;
         };
         return self.startLocked(spec.name, root, argv, spec.settings, "");
+    }
+
+    /// A fresh OPEN's permission to try a dead server again.
+    ///
+    /// Called from the attach path — a human opening a file — and
+    /// never from ensure(), which runs on keystroke paths. It EVICTS
+    /// the failed entry rather than respawning in place, so the next
+    /// ensure() rebuilds through the front door: a static command
+    /// re-resolves its argv, a resolver language gets a fresh
+    /// resolution (its pending entry left with the successful start,
+    /// so the plugin genuinely gets asked again). The graves ledger
+    /// caps it at `max_respawns` per (lang, root); past that the
+    /// corpse stays, and keeps answering `why = .died` honestly.
+    pub fn retryFailed(self: *Manager, path: []const u8) void {
+        if (!self.enabled) return;
+        const spec = self.langs.forPath(path) orelse return;
+        var rbuf: [1024]u8 = undefined;
+        const root = langpkg.rootFor(spec, path, &rbuf) orelse self.fallbackRoot(path, &rbuf) orelse return;
+        for (self.servers.items, 0..) |e, i| {
+            if (!std.mem.eql(u8, e.lang, spec.name) or !std.mem.eql(u8, e.root, root)) continue;
+            if (e.srv.state() != .failed) return;
+            const g = self.graveFor(spec.name, root) orelse return;
+            if (g.deaths >= max_respawns) return;
+            g.deaths += 1;
+            var gone = self.servers.orderedRemove(i);
+            gone.srv.deinit();
+            self.gpa.free(gone.root);
+            if (gone.note.len > 0) self.gpa.free(gone.note);
+            return;
+        }
+    }
+
+    /// This (lang, root)'s grave, dug on first use.
+    fn graveFor(self: *Manager, lang: []const u8, root: []const u8) ?*Grave {
+        for (self.graves.items) |*g| {
+            if (std.mem.eql(u8, g.lang, lang) and std.mem.eql(u8, g.root, root)) return g;
+        }
+        const l = self.gpa.dupe(u8, lang) catch return null;
+        const r = self.gpa.dupe(u8, root) catch {
+            self.gpa.free(l);
+            return null;
+        };
+        self.graves.append(self.gpa, .{ .lang = l, .root = r, .deaths = 0 }) catch {
+            self.gpa.free(l);
+            self.gpa.free(r);
+            return null;
+        };
+        return &self.graves.items[self.graves.items.len - 1];
+    }
+
+    /// The dead server's own last words for this file, or "". What
+    /// the editor's message quotes when `why` says `died` — the line
+    /// that turns "it died" into something a person can act on.
+    pub fn deadReason(self: *Manager, path: []const u8) []const u8 {
+        const spec = self.langs.forPath(path) orelse return "";
+        var rbuf: [1024]u8 = undefined;
+        const root = langpkg.rootFor(spec, path, &rbuf) orelse self.fallbackRoot(path, &rbuf) orelse return "";
+        for (self.servers.items) |e| {
+            if (!std.mem.eql(u8, e.lang, spec.name) or !std.mem.eql(u8, e.root, root)) continue;
+            if (e.srv.state() != .failed) return "";
+            return e.srv.failReason();
+        }
+        return "";
+    }
+
+    /// Every server's captured stderr — `ctl lsp log`. The record a
+    /// death leaves behind, and the first place to look when a
+    /// server's answers stop making sense while it lives.
+    pub fn writeLogs(self: *Manager, w: *std.Io.Writer) void {
+        if (self.servers.items.len == 0) {
+            _ = w.write("no servers have run\n") catch {};
+            return;
+        }
+        for (self.servers.items) |e| {
+            w.print("== {s} {s} {s}\n", .{ e.lang, @tagName(e.srv.state()), e.root }) catch return;
+            e.srv.writeErrLog(w);
+        }
     }
 
     /// Start, or wait on, a plugin-resolved server for this project.
@@ -1090,9 +1194,14 @@ pub const Manager = struct {
     /// One line per running server, for `rookctl` and the e2e suite.
     pub fn describe(self: *Manager, w: *std.Io.Writer) void {
         for (self.servers.items) |e| {
-            w.print("server {s} {s} {s}{s}{s}\n", .{
+            // A failed server's line carries its last words — the
+            // difference between `ctl lsp` saying "failed" and saying
+            // what to fix.
+            const reason = if (e.srv.state() == .failed) e.srv.failReason() else "";
+            w.print("server {s} {s} {s}{s}{s}{s}{s}\n", .{
                 e.lang, @tagName(e.srv.state()), e.root,
                 @as([]const u8, if (e.note.len > 0) " — " else ""), e.note,
+                @as([]const u8, if (reason.len > 0) " — " else ""), reason,
             }) catch return;
         }
         // Declared languages that have not produced a server, and why.
@@ -1349,4 +1458,53 @@ test "a manager turned off stays silent even with a language declared" {
     try testing.expect(!r.mgr.hover("/tmp/x.go", .{}));
     try testing.expect(!r.mgr.drain());
     try testing.expectEqual(@as(usize, 0), r.mgr.diagsFor("/tmp/x.go").len);
+}
+
+extern "c" fn usleep(us: c_uint) c_int;
+
+test "a dead server says died, a fresh open retries it, and the budget holds" {
+    const gpa = testing.allocator;
+    // /usr/bin/true is a language server that exits immediately: the
+    // honest stand-in for the initialize-and-die failure the grafana
+    // audit hit.
+    const r = Rig.init(gpa,
+        \\{"nodes":[{"id":"language:qq","kind":"language","scope":"app","name":"qq",
+        \\"ext":[".qq"],"roots":[],"command":["/usr/bin/true"]}]}
+    );
+    defer r.deinit(gpa);
+
+    const waitDead = struct {
+        fn go(srv: *lsp.Server) !void {
+            var waited: usize = 0;
+            while (srv.state() != .failed and waited < 500) : (waited += 1) _ = usleep(10_000);
+            try testing.expectEqual(lsp.State.failed, srv.state());
+        }
+    }.go;
+
+    const first = r.mgr.ensure("/tmp/x.qq") orelse return error.NoServer;
+    try waitDead(first);
+
+    // Honest why, with the reason attached — NOT no_binary: the
+    // binary is right there, it just does not stay.
+    try testing.expect(r.mgr.ensure("/tmp/x.qq") == null);
+    try testing.expectEqual(langpkg.Fault.died, r.mgr.why);
+    try testing.expect(r.mgr.deadReason("/tmp/x.qq").len > 0);
+
+    // ensure() never revives — that is the keystroke path. The OPEN
+    // path's retryFailed evicts, and the next ensure spawns fresh.
+    try testing.expectEqual(@as(usize, 1), r.mgr.servers.items.len);
+    r.mgr.retryFailed("/tmp/x.qq");
+    try testing.expectEqual(@as(usize, 0), r.mgr.servers.items.len);
+    const second = r.mgr.ensure("/tmp/x.qq") orelse return error.NoRespawn;
+    try waitDead(second);
+
+    r.mgr.retryFailed("/tmp/x.qq");
+    const third = r.mgr.ensure("/tmp/x.qq") orelse return error.NoRespawn;
+    try waitDead(third);
+
+    // Two respawns spent: the third corpse stays, and keeps saying so.
+    r.mgr.retryFailed("/tmp/x.qq");
+    try testing.expectEqual(@as(usize, 1), r.mgr.servers.items.len);
+    try testing.expect(r.mgr.ensure("/tmp/x.qq") == null);
+    try testing.expectEqual(langpkg.Fault.died, r.mgr.why);
 }

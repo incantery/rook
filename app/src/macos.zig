@@ -3668,6 +3668,11 @@ pub const App = struct {
     fn lspAttachLocked(self: *App, ed: *editorpkg.Editor) void {
         const path = ed.buf.path orelse return;
         if (ed.is_dir or ed.buf.readonly) return;
+        // A human opening a file is what earns a dead server another
+        // try — this evicts a failed entry (within its budget) so the
+        // ensure() below rebuilds it. Keystroke paths never get here,
+        // which is what keeps a crash loop from acquiring a cadence.
+        self.lsp.retryFailed(path);
         const srv = self.lsp.ensure(path) orelse return;
 
         ed.lsp_ctx = self;
@@ -3734,6 +3739,16 @@ pub const App = struct {
                 if (why.len > 0) {
                     ed.setStatus("{s}", .{why}, false);
                 } else ed.setStatus("no server for this project", .{}, false);
+            },
+            // The server ran and died. Its last stderr line is the
+            // useful part; `rook lsp log` has the rest. This used to
+            // masquerade as no_binary — "not installed", about a
+            // binary that was — which taught exactly the wrong fix.
+            .died => {
+                const why = self.lsp.deadReason(path);
+                if (why.len > 0) {
+                    ed.setStatus("server died — {s} (rook lsp log)", .{why}, false);
+                } else ed.setStatus("server died — reopen retries; rook lsp log", .{}, false);
             },
         }
     }

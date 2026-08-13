@@ -72,6 +72,7 @@ const scenarios = [_]Scenario{
     .{ .name = "suggest", .what = "the menu appears as you type, narrows, never writes, and Tab takes it", .run = suggestScenario },
     .{ .name = "lsplang", .what = "no built-in catalog: a language is a declaration, and each way of having no server says which one it is", .run = lspLang },
     .{ .name = "lspretarget", .what = "a pane that retargets ITSELF — file tree, :e — still gets its server, and drops it when there is none", .run = lspRetarget },
+    .{ .name = "lspdied", .what = "a dead server keeps its last words, a fresh open retries it, and the budget stops the loop", .run = lspDied },
     .{ .name = "lspwatch", .what = "the server registers file watchers, and a write rook never made is heard — filtered by glob and by kind", .run = lspWatch },
     .{ .name = "progress", .what = "OSC 9;4: a program's progress reaches the pane list and the tab's chip, and remove clears it", .run = progressScenario },
     .{ .name = "docshare", .what = "one file in two panes is ONE document: edits, dirty flag and :w are shared", .run = docShare },
@@ -4707,6 +4708,61 @@ fn lspWatch(gpa: std.mem.Allocator, bin: []const u8) !void {
     // RelativePattern watcher parsed at all.
     try h.expectEq("rm go.mod", 0, try h.runCmd(proj, &.{ "/bin/rm", go_mod.ptr }));
     try waitReceipt(receipt, "go.mod\",\"type\":3", 8_000);
+}
+
+/// The grafana failure, reproduced: a server that runs and dies. What
+/// must hold — the death keeps its stderr (the reason and `lsp log`),
+/// a fresh open respawns it, and the budget (2 respawns) stops a
+/// crash loop from acquiring a cadence. The server is /bin/sh writing
+/// a spawn receipt, so the retry count is a line count on disk.
+fn lspDied(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var scratch_buf: [192]u8 = undefined;
+    const scratch = try std.fmt.bufPrint(&scratch_buf, "/tmp/rook-lspdied-{d}", .{h.runPid()});
+    var proj_buf: [256]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{scratch});
+    try h.mkdirP(proj);
+    var f_buf: [320]u8 = undefined;
+    const file = try std.fmt.bufPrint(&f_buf, "{s}/x.qq", .{proj});
+    try h.writeFile(file, "hello\n");
+    var count_buf: [320]u8 = undefined;
+    const count = try std.fmt.bufPrint(&count_buf, "{s}/spawns", .{scratch});
+
+    // A "language server" that logs a receipt, complains, and dies.
+    var graph_buf: [1024]u8 = undefined;
+    const graph = try std.fmt.bufPrint(&graph_buf,
+        \\{{"rookEnvironment":1,"nodes":[{{"id":"language:qq","kind":"language","scope":"app",
+        \\"name":"qq","ext":[".qq"],"roots":[],
+        \\"command":["/bin/sh","-c","echo x >> {s}; echo boom >&2; exit 3"]}}]}}
+    , .{count});
+
+    const app = try h.Instance.start(gpa, bin, .{ .cwd = proj, .env_json = graph });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    var cmd_buf: [400]u8 = undefined;
+    _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{file}));
+    // The death carries its last stderr line — the reason `no_binary`
+    // never could have named.
+    _ = try app.waitCtl("lsp", "server qq failed", 8_000);
+    const state = try app.ctl("lsp");
+    try h.expectContains(state, "exited: boom", "the reason quotes the server's last words");
+    // And the full record is a verb away.
+    try h.expectContains(try app.ctl("lsp log"), "boom", "lsp log holds the captured stderr");
+
+    // Opens retry: each one evicts the corpse and spawns fresh, until
+    // the budget (2 respawns) is spent. 4 opens → exactly 3 receipts.
+    var opens: usize = 0;
+    while (opens < 3) : (opens += 1) {
+        _ = try app.ctl(try std.fmt.bufPrint(&cmd_buf, "edit {s}", .{file}));
+        _ = try app.waitCtl("lsp", "server qq failed", 8_000);
+    }
+    var cbuf: [256]u8 = undefined;
+    const receipts = try h.readFile(count, &cbuf);
+    try h.expectEq("spawn receipts after the budget", 3, std.mem.count(u8, receipts, "x"));
+    // Dead for good, and still honest about it.
+    try h.expectContains(try app.ctl("lsp"), "server qq failed", "the final corpse stays on the books");
 }
 
 fn lspRetarget(gpa: std.mem.Allocator, bin: []const u8) !void {

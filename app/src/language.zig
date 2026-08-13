@@ -68,6 +68,13 @@ pub const Fault = enum {
     resolving,
     /// The resolver refused, with its own words.
     refused,
+    /// A server RAN for this root and died. Its own fault because the
+    /// old answer — reporting it as `no_binary` — told the user to
+    /// install a binary they had, when the truth was "it crashed, and
+    /// here is its last stderr line". A fresh open retries a dead
+    /// root; this is what the file shows in between, and forever once
+    /// the retry budget is spent.
+    died,
 };
 
 pub const Registry = struct {

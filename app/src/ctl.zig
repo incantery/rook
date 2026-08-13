@@ -1123,6 +1123,16 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         a.writer.print("open:{d}\n", .{app.docs.count()}) catch return;
         app.docs.describe(&a.writer);
         reply(fd, a.written());
+    } else if (std.mem.eql(u8, verb, "lsp") and std.mem.eql(u8, rest, "log")) {
+        // Every server's captured stderr — the record a death leaves
+        // behind. Until this existed, a dead server's why was
+        // unknowable by construction: its stderr went to /dev/null.
+        app.draw_lock.lock();
+        defer app.draw_lock.unlock();
+        var a: std.Io.Writer.Allocating = .init(app.gpa);
+        defer a.deinit();
+        app.lsp.writeLogs(&a.writer);
+        reply(fd, a.written());
     } else if (std.mem.eql(u8, verb, "lsp") and rest.len == 0) {
         // Every running server and every diagnostic it has published.
         // The e2e suite's whole window into a subsystem whose real

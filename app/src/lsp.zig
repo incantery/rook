@@ -889,6 +889,10 @@ pub const Session = struct {
     /// Absolute workspace root, owned.
     root: []const u8,
     state: State = .new,
+    /// Why `state` is .failed, owned; "" while alive or after a
+    /// shutdown rook asked for. Set once — the first reason is the
+    /// death, anything later is aftermath.
+    fail_reason: []const u8 = "",
     /// exit has gone out. Guards a second exit when the shutdown reply
     /// and the caller's deadline race each other.
     exit_sent: bool = false,
@@ -940,6 +944,7 @@ pub const Session = struct {
 
     pub fn deinit(self: *Session) void {
         const gpa = self.gpa;
+        if (self.fail_reason.len > 0) gpa.free(self.fail_reason);
         self.in.deinit(gpa);
         self.out.deinit(gpa);
         self.queued.deinit(gpa);
@@ -1215,6 +1220,13 @@ pub const Session = struct {
     fn fail(self: *Session, reason: []const u8) void {
         if (self.state == .failed) return;
         self.state = .failed;
+        // Kept on the session as well as pushed: the event is consumed
+        // once by whoever drains it, but "why is this server dead" gets
+        // asked again every time a file opens in its root — and the
+        // answer must not depend on who read the queue first.
+        if (self.fail_reason.len == 0) {
+            self.fail_reason = self.gpa.dupe(u8, reason) catch "";
+        }
         const owned = self.gpa.dupe(u8, reason) catch return;
         self.push(.{ .failed = .{ .reason = owned } });
     }
@@ -2504,6 +2516,11 @@ const SIGKILL = 9;
 /// feel broken.
 const shutdown_grace_ms: u32 = 2000;
 
+/// How much server stderr is kept, per server. 16KB of tail is a few
+/// hundred log lines — enough to hold a crash's stack trace and the
+/// complaint above it, small enough to sit in the struct.
+const err_log_cap = 16 * 1024;
+
 /// A live language server: the process, the pump thread, and the Session
 /// they share. Every method locks — callers on the frame loop should
 /// treat all of them as cheap and none of them as blocking on the
@@ -2528,6 +2545,15 @@ pub const Server = struct {
     pid: c_int = -1,
     to_child: c_int = -1,
     from_child: c_int = -1,
+    /// The server's stderr. It used to go to /dev/null, which meant a
+    /// dead server left no record of why — the one question that
+    /// matters about a dead server. Read by the pump into `errlog`.
+    err_r: c_int = -1,
+    /// The last `err_log_cap` bytes of stderr, a sliding tail. Guarded
+    /// by `mu`: the pump appends, `ctl lsp log` and the death reason
+    /// read.
+    errlog: [err_log_cap]u8 = undefined,
+    errlog_len: usize = 0,
     /// The pump sleeps in poll(); this is how a caller wakes it to say
     /// "there is outbound waiting" without ever writing to the pipe.
     wake_r: c_int = -1,
@@ -2557,6 +2583,7 @@ pub const Server = struct {
         var in_fds: [2]c_int = undefined;
         var out_fds: [2]c_int = undefined;
         var wake_fds: [2]c_int = undefined;
+        var err_fds: [2]c_int = undefined;
         if (pipe(&in_fds) != 0) return null;
         if (pipe(&out_fds) != 0) {
             _ = close(in_fds[0]);
@@ -2568,6 +2595,15 @@ pub const Server = struct {
             _ = close(in_fds[1]);
             _ = close(out_fds[0]);
             _ = close(out_fds[1]);
+            return null;
+        }
+        if (pipe(&err_fds) != 0) {
+            _ = close(in_fds[0]);
+            _ = close(in_fds[1]);
+            _ = close(out_fds[0]);
+            _ = close(out_fds[1]);
+            _ = close(wake_fds[0]);
+            _ = close(wake_fds[1]);
             return null;
         }
 
@@ -2590,15 +2626,19 @@ pub const Server = struct {
             _ = close(out_fds[1]);
             _ = close(wake_fds[0]);
             _ = close(wake_fds[1]);
+            _ = close(err_fds[0]);
+            _ = close(err_fds[1]);
             return null;
         }
         if (child == 0) {
             _ = dup2(in_fds[0], 0);
             _ = dup2(out_fds[1], 1);
             // Servers chatter on stderr — gopls logs, vtsls logs a lot.
-            // Inheriting ours would print it over rook's own window.
-            const devnull = open("/dev/null", O_WRONLY);
-            if (devnull >= 0) _ = dup2(devnull, 2);
+            // Inheriting ours would print it over rook's own window, so
+            // it goes to a pipe the pump tails into `errlog`. This used
+            // to be /dev/null, and the cost of that was a server whose
+            // death could not be diagnosed at all.
+            _ = dup2(err_fds[1], 2);
             // EVERYTHING above stdio dies here, not just our own pipes.
             // pty.zig learned this the hard way and its comment says it
             // best: a ctl CONNECTION held open by a child keeps the
@@ -2614,9 +2654,11 @@ pub const Server = struct {
 
         _ = close(in_fds[0]);
         _ = close(out_fds[1]);
+        _ = close(err_fds[1]);
         self.pid = child;
         self.to_child = in_fds[1];
         self.from_child = out_fds[0];
+        self.err_r = err_fds[0];
         self.wake_r = wake_fds[0];
         self.wake_w = wake_fds[1];
 
@@ -2635,12 +2677,28 @@ pub const Server = struct {
         // Anything the handshake already produced.
         self.flush();
         while (!self.quit.load(.acquire)) {
-            var fds = [_]PollFd{
-                .{ .fd = self.from_child, .events = POLLIN },
-                .{ .fd = self.wake_r, .events = POLLIN },
-            };
-            const n = poll(&fds, 2, 1000);
+            var fds: [3]PollFd = undefined;
+            fds[0] = .{ .fd = self.from_child, .events = POLLIN };
+            fds[1] = .{ .fd = self.wake_r, .events = POLLIN };
+            var nfds: c_uint = 2;
+            if (self.err_r >= 0) {
+                fds[2] = .{ .fd = self.err_r, .events = POLLIN };
+                nfds = 3;
+            }
+            const n = poll(&fds, nfds, 1000);
             if (n < 0) break;
+            // stderr FIRST: if the process died this tick, its dying
+            // words have to be in the ring before the stdout EOF below
+            // goes looking for them.
+            if (nfds == 3 and fds[2].revents != 0) {
+                const got = read(self.err_r, &buf, buf.len);
+                if (got <= 0) {
+                    _ = close(self.err_r);
+                    self.err_r = -1;
+                } else {
+                    self.appendErr(buf[0..@intCast(got)]);
+                }
+            }
             if (fds[1].revents & POLLIN != 0) {
                 var drain: [64]u8 = undefined;
                 _ = read(self.wake_r, &drain, drain.len);
@@ -2648,12 +2706,7 @@ pub const Server = struct {
             }
             if (fds[0].revents & POLLIN != 0) {
                 const got = read(self.from_child, &buf, buf.len);
-                if (got <= 0) {
-                    self.mu.lock();
-                    self.sess.serverGone("the language server exited");
-                    self.mu.unlock();
-                    return;
-                }
+                if (got <= 0) return self.dieWithLog();
                 self.mu.lock();
                 self.sess.feed(buf[0..@intCast(got)]);
                 self.mu.unlock();
@@ -2666,12 +2719,91 @@ pub const Server = struct {
             }
             // revents may report the far end closed without POLLIN.
             if (fds[0].revents != 0 and fds[0].revents & POLLIN == 0) {
-                self.mu.lock();
-                self.sess.serverGone("the language server exited");
-                self.mu.unlock();
-                return;
+                return self.dieWithLog();
             }
         }
+    }
+
+    /// Append server stderr to the sliding tail. Pump thread only;
+    /// takes `mu` because readers (the log dump, the death reason) run
+    /// on other threads.
+    fn appendErr(self: *Server, chunk: []const u8) void {
+        self.mu.lock();
+        defer self.mu.unlock();
+        if (chunk.len >= err_log_cap) {
+            @memcpy(&self.errlog, chunk[chunk.len - err_log_cap ..]);
+            self.errlog_len = err_log_cap;
+            return;
+        }
+        if (self.errlog_len + chunk.len > err_log_cap) {
+            const keep = err_log_cap - chunk.len;
+            std.mem.copyForwards(u8, self.errlog[0..keep], self.errlog[self.errlog_len - keep .. self.errlog_len]);
+            self.errlog_len = keep;
+        }
+        @memcpy(self.errlog[self.errlog_len..][0..chunk.len], chunk);
+        self.errlog_len += chunk.len;
+    }
+
+    /// The last non-blank line of captured stderr, clipped to fit a
+    /// status row. Caller holds `mu`.
+    fn lastErrLine(self: *Server) []const u8 {
+        var rest = self.errlog[0..self.errlog_len];
+        while (rest.len > 0) {
+            const nl = std.mem.lastIndexOfScalar(u8, rest, '\n');
+            const from = if (nl) |p| p + 1 else 0;
+            const line = std.mem.trim(u8, rest[from..], " \t\r");
+            if (line.len > 0) return line[0..@min(line.len, 160)];
+            rest = rest[0..from -| 1];
+        }
+        return "";
+    }
+
+    /// The pump's death rattle: give stderr one last drain, then fail
+    /// the session with the server's final words attached — this is
+    /// the only moment they can still become the reason.
+    fn dieWithLog(self: *Server) void {
+        if (self.err_r >= 0) {
+            var buf: [8 * 1024]u8 = undefined;
+            var grace: c_int = 50;
+            while (true) {
+                var fds = [_]PollFd{.{ .fd = self.err_r, .events = POLLIN }};
+                if (poll(&fds, 1, grace) <= 0 or fds[0].revents & POLLIN == 0) break;
+                grace = 0; // only the first wait is owed patience
+                const got = read(self.err_r, &buf, buf.len);
+                if (got <= 0) break;
+                self.appendErr(buf[0..@intCast(got)]);
+            }
+        }
+        self.mu.lock();
+        defer self.mu.unlock();
+        var rbuf: [200]u8 = undefined;
+        const last = self.lastErrLine();
+        const reason = if (last.len > 0)
+            std.fmt.bufPrint(&rbuf, "exited: {s}", .{last}) catch "the language server exited"
+        else
+            "the language server exited";
+        self.sess.serverGone(reason);
+    }
+
+    /// Why this server's session failed; "" while it is alive. The
+    /// slice is the session's own — a failure is terminal and the
+    /// reason is written once, so it is stable from the caller's side.
+    pub fn failReason(self: *Server) []const u8 {
+        self.mu.lock();
+        defer self.mu.unlock();
+        return self.sess.fail_reason;
+    }
+
+    /// Everything captured from the server's stderr, for `ctl lsp log`.
+    pub fn writeErrLog(self: *Server, w: *std.Io.Writer) void {
+        self.mu.lock();
+        defer self.mu.unlock();
+        if (self.errlog_len == 0) {
+            _ = w.write("(no stderr captured)\n") catch {};
+            return;
+        }
+        _ = w.write(self.errlog[0..self.errlog_len]) catch {};
+        if (self.errlog[self.errlog_len - 1] != '\n') _ = w.write("\n") catch {};
     }
 
     /// Start or stop the fswatch stream to match what the session's
@@ -2911,6 +3043,12 @@ pub const Server = struct {
         if (self.from_child >= 0) {
             _ = close(self.from_child);
             self.from_child = -1;
+        }
+        // After the join, like from_child: the pump may have closed it
+        // already (stderr EOFs when the process dies) and set it -1.
+        if (self.err_r >= 0) {
+            _ = close(self.err_r);
+            self.err_r = -1;
         }
         if (self.wake_r >= 0) {
             _ = close(self.wake_r);
@@ -4310,4 +4448,42 @@ test "initialize declares didChangeWatchedFiles dynamicRegistration" {
     sess.start();
     try testing.expect(std.mem.indexOf(u8, sess.outbound(),
         "\"didChangeWatchedFiles\":{\"dynamicRegistration\":true}") != null);
+}
+
+test "the stderr tail keeps the newest bytes and lastErrLine skips blanks" {
+    const gpa = testing.allocator;
+    const srv = try gpa.create(Server);
+    defer gpa.destroy(srv);
+    srv.* = .{ .gpa = gpa, .sess = undefined };
+
+    srv.appendErr("first complaint\n");
+    srv.mu.lock();
+    try testing.expectEqualStrings("first complaint", srv.lastErrLine());
+    srv.mu.unlock();
+
+    // Fill to exactly the cap, then append past it: the tail slides,
+    // the newest bytes survive, and the length never exceeds the cap.
+    var big: [err_log_cap]u8 = @splat('x');
+    big[err_log_cap - 1] = '\n';
+    srv.appendErr(&big);
+    srv.appendErr("dying words\n\n");
+    srv.mu.lock();
+    defer srv.mu.unlock();
+    try testing.expectEqual(@as(usize, err_log_cap), srv.errlog_len);
+    // Trailing blank line is not a last word; the real one is.
+    try testing.expectEqualStrings("dying words", srv.lastErrLine());
+    try testing.expect(std.mem.indexOf(u8, srv.errlog[0..srv.errlog_len], "first complaint") == null);
+}
+
+test "fail keeps its first reason for later askers" {
+    const gpa = testing.allocator;
+    var sess = Session.init(gpa, "/tmp", "").?;
+    defer sess.deinit();
+    sess.start();
+    sess.serverGone("exited: boom");
+    // A second failure does not rewrite history: the first reason IS
+    // the death, anything after is aftermath.
+    sess.serverGone("exited: later noise");
+    try testing.expectEqual(State.failed, sess.state);
+    try testing.expectEqualStrings("exited: boom", sess.fail_reason);
 }
