@@ -80,6 +80,12 @@ func (c *conn) call(op string, params any, timeout time.Duration) (json.RawMessa
 	}
 }
 
+// Call is call for packages outside this one — the drive seam
+// (plugins/internal/drive) takes its Caller by this method.
+func (c *conn) Call(op string, params any, timeout time.Duration) (json.RawMessage, error) {
+	return c.call(op, params, timeout)
+}
+
 func (c *conn) deliver(id uint64, ok bool, errText string, raw json.RawMessage) {
 	c.mu.Lock()
 	ch := c.pending[id]

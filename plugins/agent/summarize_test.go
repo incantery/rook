@@ -285,14 +285,14 @@ func TestItemsSayWhatFailedAndWhatIsMissing(t *testing.T) {
 func TestDismissActsOnTheParentFromAChildRow(t *testing.T) {
 	st := &store{keep: 10}
 	st.add(Digest{ID: "s1:cc", Headline: "H", Bullets: []string{"b"}, At: t0})
-	rep := act(nil, st, nil, 7, json.RawMessage(`{"itemId":"s1:cc:b0","actionId":"dismiss"}`))
+	rep := act(nil, st, nil, nil, 7, json.RawMessage(`{"itemId":"s1:cc:b0","actionId":"dismiss"}`))
 	if !rep.OK {
 		t.Fatalf("dismiss via child: %+v", rep)
 	}
 	if len(st.list()) != 0 {
 		t.Fatal("digest survived its dismissal")
 	}
-	rep = act(nil, st, nil, 8, json.RawMessage(`{"itemId":"s1:cc","actionId":"dismiss"}`))
+	rep = act(nil, st, nil, nil, 8, json.RawMessage(`{"itemId":"s1:cc","actionId":"dismiss"}`))
 	if rep.OK {
 		t.Fatal("dismissing the dismissed must refuse, not lie")
 	}

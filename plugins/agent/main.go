@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/incantery/rook/plugins/internal/digestlog"
+	"github.com/incantery/rook/plugins/internal/drive"
 	"github.com/incantery/rook/plugins/internal/nowfile"
 	"github.com/incantery/rook/plugins/internal/transcript"
 )
@@ -64,6 +65,7 @@ func main() {
 	nowEvery := flag.Duration("now-every", 20*time.Second, "screen-watcher interval for live now-lines (0 disables)")
 	nowPath := flag.String("now-file", nowfile.DefaultPath(), "ephemeral now-line file (empty disables)")
 	nowNames := flag.String("claude-names", "claude,node", "foreground program names that count as Claude Code")
+	driveTurns := flag.Int("drive-turns", 4, "prompts a drive may send before giving up")
 	flag.Parse()
 
 	home, _ := os.UserHomeDir()
@@ -94,6 +96,7 @@ func main() {
 	st := newStore(*keep, expandHome(*logPath, home), *window, time.Now())
 	key := apiKey(*keyFile, explicitKeyFile)
 	c := &conn{out: os.Stdout}
+	names := strings.Split(*nowNames, ",")
 	var sum *Summarizer
 	if notice := nokeyNotice(key, *apiBase, *keyFile); notice != "" {
 		st.nokey = notice
@@ -117,11 +120,34 @@ func main() {
 				Quiet:  60 * time.Second,
 				Max:    20,
 			}
-			go nowLoop(c, nsc, st, sum, *nowEvery,
-				strings.Split(*nowNames, ","), expandHome(*nowPath, home))
+			go nowLoop(c, nsc, st, sum, *nowEvery, names, expandHome(*nowPath, home))
 		}
 	}
-	serve(c, st, sum)
+	dv := &driveHost{
+		sum:      sum,
+		maxTurns: *driveTurns,
+		newScan: func() func(now time.Time) []transcript.Session {
+			// Its own scanner per drive, for the same reason the
+			// now-loop has one: goroutines must not share a Scanner.
+			dsc := &transcript.Scanner{
+				Dir:    *dir,
+				Window: *window,
+				Idle:   10 * time.Minute,
+				Quiet:  60 * time.Second,
+				Max:    50,
+			}
+			return dsc.Scan
+		},
+	}
+	dv.newDriver = func(scan func(now time.Time) []transcript.Session) drive.Driver {
+		return &drive.TUI{
+			C:     c,
+			Scan:  scan,
+			Panes: func() []transcript.PaneActivity { return nowPanes(c) },
+			Names: names,
+		}
+	}
+	serve(c, st, sum, dv)
 }
 
 const defaultAPIBase = "https://api.openai.com/v1"
@@ -406,6 +432,12 @@ func (c *conn) call(op string, params any, timeout time.Duration) (json.RawMessa
 	}
 }
 
+// Call is call for packages outside this one — the drive seam takes
+// its Caller by this method.
+func (c *conn) Call(op string, params any, timeout time.Duration) (json.RawMessage, error) {
+	return c.call(op, params, timeout)
+}
+
 // deliver hands rook's answer to whoever is waiting on it. Split out of
 // serve so a test can play rook's half of the conversation.
 func (c *conn) deliver(id uint64, ok bool, errText string, raw json.RawMessage) {
@@ -419,7 +451,7 @@ func (c *conn) deliver(id uint64, ok bool, errText string, raw json.RawMessage) 
 }
 
 // serve answers rook until stdin closes, which is how a plugin ends.
-func serve(c *conn, st *store, sum *Summarizer) {
+func serve(c *conn, st *store, sum *Summarizer, dv *driveHost) {
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	for in.Scan() {
@@ -449,16 +481,17 @@ func serve(c *conn, st *store, sum *Summarizer) {
 			c.send(reply{1, req.ID, true, map[string]any{
 				"name":         "agent",
 				"version":      version,
-				"capabilities": []string{"items.list", "items.act", "clipboard.set", "panes.activity", "pane.read"},
+				"capabilities": []string{"items.list", "items.act", "clipboard.set", "panes.activity", "pane.read", "session.send"},
 				"surfaces":     []string{"LIST"},
 			}, ""})
 		case "items.list":
+			// Drives first: running machinery outranks finished stories.
 			c.send(reply{1, req.ID, true, map[string]any{
-				"items":     items(st, time.Now()),
+				"items":     append(dv.book.items(time.Now()), items(st, time.Now())...),
 				"truncated": false,
 			}, ""})
 		case "items.act":
-			c.send(act(c, st, sum, req.ID, req.Params))
+			c.send(act(c, st, sum, dv, req.ID, req.Params))
 		default:
 			c.send(reply{1, req.ID, false, nil, "agent does not do " + req.Op})
 		}
@@ -532,6 +565,9 @@ func items(st *store, now time.Time) []wireItem {
 			it.Actions = append(it.Actions, wireAction{ID: "draft", Label: "draft a reply"})
 			it.Actions = append(it.Actions, wireAction{ID: "expand", Label: "expand my reply…", Input: "INPUT_TEXT"})
 		}
+		// The drive: hand the agent a goal instead of a reply, and it
+		// keeps the conversation going until the goal is met.
+		it.Actions = append(it.Actions, wireAction{ID: "drive", Label: "drive to a goal…", Input: "INPUT_TEXT"})
 		it.Actions = append(it.Actions, wireAction{ID: "dismiss", Label: "dismiss"})
 		for i, b := range d.Bullets {
 			it.Children = append(it.Children, wireChild{
@@ -570,14 +606,20 @@ func items(st *store, now time.Time) []wireItem {
 	return out
 }
 
-func act(c *conn, st *store, sum *Summarizer, id uint64, params json.RawMessage) reply {
-	var p struct {
-		ItemID   string `json:"itemId"`
-		ActionID string `json:"actionId"`
-		Input    string `json:"input"`
-	}
+type actParams struct {
+	ItemID   string `json:"itemId"`
+	ActionID string `json:"actionId"`
+	Input    string `json:"input"`
+}
+
+func act(c *conn, st *store, sum *Summarizer, dv *driveHost, id uint64, params json.RawMessage) reply {
+	var p actParams
 	if json.Unmarshal(params, &p) != nil {
 		return reply{1, id, false, nil, "params did not parse"}
+	}
+	// A drive row's actions live in the book, not the digest ring.
+	if strings.HasPrefix(p.ItemID, "drive:") {
+		return actDrive(dv, id, p)
 	}
 	// A child's id is its parent's plus one ":suffix" (bullets, reply
 	// chunks, the marker row); acting on any of them acts on the digest
@@ -632,6 +674,20 @@ func act(c *conn, st *store, sum *Summarizer, id uint64, params json.RawMessage)
 		}()
 		return reply{1, id, true, map[string]string{"message": "drafting…"}, ""}
 
+	case "drive":
+		var seed Digest
+		if !st.update(itemID, func(d *Digest) { seed = *d }) {
+			return reply{1, id, false, nil, "that digest is gone"}
+		}
+		// The digest names the session; the input is the goal. The
+		// answer is only "driving…" — the loop runs beside serve and
+		// lands its result through the book, the same shape draft takes.
+		msg, err := dv.start(seed.SessionID, seed.SessionTitle, strings.TrimSpace(p.Input))
+		if err != nil {
+			return reply{1, id, false, nil, err.Error()}
+		}
+		return reply{1, id, true, map[string]string{"message": msg}, ""}
+
 	case "copy":
 		var text string
 		if !st.update(itemID, func(d *Digest) { text = d.Reply }) {
@@ -657,6 +713,34 @@ func act(c *conn, st *store, sum *Summarizer, id uint64, params json.RawMessage)
 			})
 		}()
 		return reply{1, id, true, map[string]string{"message": "sending to the clipboard…"}, ""}
+	}
+	return reply{1, id, false, nil, "no such action: " + p.ActionID}
+}
+
+// actDrive acts on a drive row. Same child-id convention as digests:
+// exact match first, then one ":suffix" stripped — a run id carries a
+// colon of its own.
+func actDrive(dv *driveHost, id uint64, p actParams) reply {
+	if dv == nil {
+		return reply{1, id, false, nil, "drives are not set up"}
+	}
+	itemID := p.ItemID
+	if !dv.book.has(itemID) {
+		if i := strings.LastIndex(itemID, ":"); i > 0 {
+			itemID = itemID[:i]
+		}
+	}
+	switch p.ActionID {
+	case "stop":
+		if !dv.book.stop(itemID) {
+			return reply{1, id, false, nil, "that drive is not running"}
+		}
+		return reply{1, id, true, map[string]string{"message": "stopping…"}, ""}
+	case "dismiss":
+		if !dv.book.dismiss(itemID) {
+			return reply{1, id, false, nil, "that drive is still running — stop it first"}
+		}
+		return reply{1, id, true, map[string]string{"message": "dismissed"}, ""}
 	}
 	return reply{1, id, false, nil, "no such action: " + p.ActionID}
 }

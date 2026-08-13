@@ -49,6 +49,7 @@ import (
 
 	"github.com/incantery/rook/plugins/internal/cmdjournal"
 	"github.com/incantery/rook/plugins/internal/digestlog"
+	"github.com/incantery/rook/plugins/internal/drive"
 	"github.com/incantery/rook/plugins/internal/nowfile"
 	"github.com/incantery/rook/plugins/internal/statusfold"
 	"github.com/incantery/rook/plugins/internal/transcript"
@@ -429,27 +430,12 @@ type wireDigest struct {
 // calls it "the one field worth reading in full".
 const maxCloudAsk = 2000
 
-// submitSettle is how long a paste is left to settle before the CR
-// that submits it. An agent TUI collapses a large or multi-line paste
-// into a placeholder draft, and a CR glued to the same burst is eaten
-// by that collapse instead of submitting — so type, let the TUI's
-// event loop finish, then submit.
-const submitSettle = 150 * time.Millisecond
-
-// typeAndSubmit types text into a pane and submits it in two steps: the
-// bracketed paste held open (no CR), a settle, then the CR alone. Both
-// steps pass session.send's gates; the second is a bare submit. This
-// is what makes a long or multi-line answer actually send, not just
-// draft.
+// typeAndSubmit is the shared paste-settle-submit from the drive seam
+// (plugins/internal/drive) — one copy of the mechanics for every rail
+// that types. This is what makes a long or multi-line answer actually
+// send, not just draft.
 func typeAndSubmit(c *conn, pane int, text string) error {
-	if _, err := c.call("session.send",
-		map[string]any{"pane": pane, "text": text, "no_submit": true}, 5*time.Second); err != nil {
-		return err
-	}
-	time.Sleep(submitSettle)
-	_, err := c.call("session.send",
-		map[string]any{"pane": pane, "submit_only": true}, 5*time.Second)
-	return err
+	return drive.TypeAndSubmit(c, pane, text)
 }
 
 // linkHostID is who this machine is on the direct rail, read from the
@@ -1043,6 +1029,12 @@ type request struct {
 	ID     uint64 `json:"id"`
 	Op     string `json:"op"`
 	Params any    `json:"params"`
+}
+
+// Call is call for packages outside this one — the drive seam takes
+// its Caller by this method.
+func (c *conn) Call(op string, params any, timeout time.Duration) (json.RawMessage, error) {
+	return c.call(op, params, timeout)
 }
 
 // call asks rook and waits. MUST NOT run on the serve goroutine —

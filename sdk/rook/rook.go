@@ -865,9 +865,11 @@ type Agent struct {
 	// MinWords is the shortest reply worth compressing; 0 keeps the
 	// plugin's default (120).
 	MinWords int
-	// Grants defaults to list/act, clipboard.set, and the pane pair
+	// Grants defaults to list/act, clipboard.set, the pane pair
 	// (panes.activity + pane.read) the screen-watcher reads to write
-	// live now-lines for working sessions.
+	// live now-lines for working sessions, and session.send — the
+	// drive's delivery hop: "drive to a goal…" types its prompts into
+	// the session's own pane, the same path answers ride.
 	Grants []string
 	Load   Load // default Eager
 }
@@ -891,7 +893,7 @@ func (a Agent) appendTo(e *env) {
 		Name:    "agent",
 		Command: cmd,
 		Load:    eagerUnless(a.Load),
-		Grants:  grantsOr(a.Grants, []string{OpItemsList, OpItemsAct, OpClipboardSet, OpPanesActivity, OpPaneRead}),
+		Grants:  grantsOr(a.Grants, []string{OpItemsList, OpItemsAct, OpClipboardSet, OpPanesActivity, OpPaneRead, OpSessionSend}),
 	}.appendTo(e)
 }
 

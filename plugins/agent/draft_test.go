@@ -57,7 +57,7 @@ func TestDraftLifecycleFromActionToReadyRows(t *testing.T) {
 	st := &store{keep: 10}
 	st.add(draftedDigest())
 
-	rep := act(nil, st, z, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"draft"}`))
+	rep := act(nil, st, z, nil, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"draft"}`))
 	if !rep.OK {
 		t.Fatalf("draft refused: %+v", rep)
 	}
@@ -93,7 +93,7 @@ func TestDraftFailureIsAChipAndAReasonNotADeadRow(t *testing.T) {
 	z := &Summarizer{Client: srv.Client(), Base: srv.URL, Key: "k", Model: "gpt-5-mini"}
 	st := &store{keep: 10}
 	st.add(draftedDigest())
-	_ = act(nil, st, z, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"draft"}`))
+	_ = act(nil, st, z, nil, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"draft"}`))
 	waitState(t, st, "s1:aa", "draft failed")
 	it := items(st, t0)[0]
 	if it.State != "draft failed" {
@@ -121,7 +121,7 @@ func TestCopyAsksRookAndBelievesTheAnswer(t *testing.T) {
 	d.ReplyState = "ready"
 	st.add(d)
 
-	rep := act(c, st, nil, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"copy"}`))
+	rep := act(c, st, nil, nil, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"copy"}`))
 	if !rep.OK {
 		t.Fatalf("copy refused: %+v", rep)
 	}
@@ -139,7 +139,7 @@ func TestCopyAsksRookAndBelievesTheAnswer(t *testing.T) {
 	waitState(t, st, "s1:aa", "copied")
 
 	// And the refusal path: rook says no, the chip says so too.
-	_ = act(c, st, nil, 2, json.RawMessage(`{"itemId":"s1:aa","actionId":"copy"}`))
+	_ = act(c, st, nil, nil, 2, json.RawMessage(`{"itemId":"s1:aa","actionId":"copy"}`))
 	frame = <-frames
 	json.Unmarshal([]byte(frame), &req)
 	c.deliver(req.ID, false, "not granted: clipboard.set", nil)
@@ -152,7 +152,7 @@ func TestCopyAsksRookAndBelievesTheAnswer(t *testing.T) {
 func TestCopyWithNothingDraftedRefuses(t *testing.T) {
 	st := &store{keep: 10}
 	st.add(draftedDigest())
-	rep := act(nil, st, nil, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"copy"}`))
+	rep := act(nil, st, nil, nil, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"copy"}`))
 	if rep.OK {
 		t.Fatal("copied a reply that does not exist")
 	}
@@ -163,7 +163,7 @@ func TestActOnAReplyChunkActsOnItsDigest(t *testing.T) {
 	d := draftedDigest()
 	d.Reply = "Tag now."
 	st.add(d)
-	rep := act(nil, st, nil, 1, json.RawMessage(`{"itemId":"s1:aa:r0","actionId":"dismiss"}`))
+	rep := act(nil, st, nil, nil, 1, json.RawMessage(`{"itemId":"s1:aa:r0","actionId":"dismiss"}`))
 	if !rep.OK || len(st.list()) != 0 {
 		t.Fatalf("dismiss via reply chunk: %+v, left %d", rep, len(st.list()))
 	}
@@ -205,7 +205,7 @@ func TestExpandCarriesTheRoughReplyIntoThePrompt(t *testing.T) {
 	st := &store{keep: 10}
 	st.add(draftedDigest())
 
-	rep := act(nil, st, z, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"expand","input":"yeah sounds good but keep the test"}`))
+	rep := act(nil, st, z, nil, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"expand","input":"yeah sounds good but keep the test"}`))
 	if !rep.OK {
 		t.Fatalf("expand refused: %+v", rep)
 	}
@@ -226,7 +226,7 @@ func TestExpandCarriesTheRoughReplyIntoThePrompt(t *testing.T) {
 func TestExpandOnNothingRefusesBeforeSpendingAnything(t *testing.T) {
 	st := &store{keep: 10}
 	st.add(draftedDigest())
-	rep := act(nil, st, &Summarizer{}, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"expand","input":"   "}`))
+	rep := act(nil, st, &Summarizer{}, nil, 1, json.RawMessage(`{"itemId":"s1:aa","actionId":"expand","input":"   "}`))
 	if rep.OK {
 		t.Fatal("expanded whitespace into a bill")
 	}
