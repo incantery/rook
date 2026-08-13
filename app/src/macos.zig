@@ -2172,6 +2172,31 @@ pub const App = struct {
         return true;
     }
 
+    /// Bare `re` — vim launched empty: an editor pane over a fresh
+    /// unnamed scratch buffer, wearing the start screen until the
+    /// first keystroke. A focused editor already IS what was asked
+    /// for, so it stays untouched — retargeting it at nothing would
+    /// trade a document for a blank.
+    pub fn openScratch(self: *App) bool {
+        self.draw_lock.lock();
+        defer self.draw_lock.unlock();
+        const t = self.activeTab();
+        const p = t.focused;
+        if (p.editor() != null) return true;
+        const ed = self.newEditorLocked(null) orelse return false;
+        ed.show_intro = true;
+        ed.intro_version = @import("build_options").version;
+        var tm = p.content.term;
+        tm.copy_mode = false;
+        p.under = tm;
+        p.content = .{ .edit = ed };
+        p.drawn_cursor = 0xffff_ffff;
+        self.focused_session.store(self.focusedTermSession(), .release);
+        self.refreshHudLocked(CACurrentMediaTime());
+        self.scene_dirty = true;
+        return true;
+    }
+
     /// Recompute the ACTIVE tab's pane rects and resize changed grids.
     /// Background tabs relayout on activation. Caller holds draw_lock.
     fn relayoutLocked(self: *App) void {

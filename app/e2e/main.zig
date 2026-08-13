@@ -32,6 +32,7 @@ const scenarios = [_]Scenario{
     .{ .name = "splits", .what = "split right, focus moves, close returns", .run = splits },
     .{ .name = "tabs", .what = "new tab, cycle, pane counts stay separate", .run = tabs },
     .{ .name = "editor", .what = "edit a file, change it, :w reaches disk", .run = editor },
+    .{ .name = "intro", .what = "bare `re`: the start screen shows, a keystroke retires it, :w names the scratch", .run = intro },
     .{ .name = "indent", .what = "o inherits the indent, >> shifts, and neither leaves whitespace", .run = indent },
     .{ .name = "vim", .what = "regex :s, a macro, a block edit and `.` all reach disk", .run = vim },
     .{ .name = "wide", .what = "CJK text lays out two cells wide and motions still land", .run = wideText },
@@ -319,6 +320,63 @@ fn editor(gpa: std.mem.Allocator, bin: []const u8) !void {
     _ = try app.ctl("enter");
     try app.waitText("e2e$", 5_000);
     try h.expectEq("still one pane after :q", 1, try app.paneCount());
+}
+
+// --------------------------------------------------------- start screen
+
+/// Bare `re` — vim's own contract: no file means an empty scratch
+/// buffer wearing the start screen, not a usage error. The screen
+/// retires at the first keystroke, and the buffer under it is real
+/// enough that `:w <name>` turns it into a file on disk.
+fn intro(gpa: std.mem.Allocator, bin: []const u8) !void {
+    const app = try h.Instance.start(gpa, bin, .{});
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // Bare `edit` over the socket is exactly what a bare `re` sends.
+    _ = try app.ctl("edit");
+    // Takeover, not a split — the same contract as edit-with-a-file.
+    try h.expectEq("editor takes over the pane", 1, try app.paneCount());
+    try app.waitText("rook editor", 5_000);
+    try app.waitText("[scratch]", 5_000);
+
+    // The first keystroke retires the screen…
+    _ = try app.ctl("type i");
+    var waited: u32 = 0;
+    while (waited < 5000) : (waited += 100) {
+        var buf: [64 * 1024]u8 = undefined;
+        const s = try app.screen(&buf);
+        if (std.mem.indexOf(u8, s, "rook editor") == null) break;
+        h.sleepMs(100);
+    }
+    var buf: [64 * 1024]u8 = undefined;
+    const s = try app.screen(&buf);
+    try h.expect(
+        std.mem.indexOf(u8, s, "rook editor") == null,
+        "a keystroke should retire the start screen",
+        .{},
+    );
+
+    // …and what is under it is an ordinary unnamed buffer: type into
+    // it, then give it a file. The assertion that matters is on disk.
+    _ = try app.ctl("type hello from scratch");
+    _ = try app.ctl("key 1b");
+    try app.waitText("hello from scratch", 5_000);
+    var path_buf: [192]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/born-of-scratch.txt", .{app.dirPath()});
+    _ = try app.ctlFmt("type :w {s}", .{path});
+    _ = try app.ctl("enter");
+    var content: [256]u8 = undefined;
+    waited = 0;
+    while (waited < 5000) : (waited += 100) {
+        const got = h.readFile(path, &content) catch "";
+        if (std.mem.indexOf(u8, got, "hello from scratch") != null) break;
+        h.sleepMs(100);
+    }
+    const got = try h.readFile(path, &content);
+    try h.expectContains(got, "hello from scratch", ":w <name> should give the scratch a file");
 }
 
 // --------------------------------------------------------------- indent

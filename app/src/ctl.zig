@@ -936,11 +936,14 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
         } else if (std.fmt.parseInt(usize, rest, 10) catch null) |n| {
             reply(fd, if (n >= 1 and app.selectTab(n - 1)) "ok\n" else "err no tab\n");
         } else reply(fd, "err tab new|next|prev|<n>\n");
-    } else if (std.mem.eql(u8, verb, "edit") and rest.len > 0) {
+    } else if (std.mem.eql(u8, verb, "edit")) {
         // Open a file in an editor pane: a focused editor retargets in
         // place, else one splits off to the right. Paths resolve
         // against the APP's cwd — send absolute paths (rook edit does).
-        reply(fd, if (app.openEditor(rest)) "ok\n" else "err open\n");
+        // Bare `edit` is vim launched empty: a scratch buffer wearing
+        // the start screen (`re` with no args sends exactly this).
+        const ok = if (rest.len > 0) app.openEditor(rest) else app.openScratch();
+        reply(fd, if (ok) "ok\n" else "err open\n");
     } else if (std.mem.eql(u8, verb, "click")) {
         var it = std.mem.tokenizeScalar(u8, rest, ' ');
         const x = std.fmt.parseFloat(f32, it.next() orelse "") catch -1;

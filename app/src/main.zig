@@ -2,7 +2,8 @@
 //!
 //! Local subcommands:
 //!   win             the app (the default; a Dock launch gets here)
-//!   edit <file>     open a file in the running app's editor (`re`)
+//!   edit [file]     open a file in the running app's editor (`re`);
+//!                   bare = an empty scratch buffer and the start screen
 //!   demo            headless proof: bytes → vt → screen dump
 //!   exec <cmd...>   run a command under a real PTY, dump the final screen
 //!
@@ -490,20 +491,21 @@ extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 /// open the file in an editor pane of THIS instance (shells inherit
 /// ROOK_SOCK, so a dev instance's shells talk to the dev socket).
 fn edit(args: []const [*:0]const u8) !void {
-    if (args.len == 0) {
-        std.debug.print("usage: rook edit <file>\n", .{});
-        return error.MissingPath;
-    }
-    const path = std.mem.span(args[0]);
-
-    // The app resolves relative paths against ITS cwd — make ours
-    // absolute before sending.
+    // No file is not a usage error — it is how vi has always started.
+    // Bare `edit` asks the app for a scratch buffer wearing the start
+    // screen, so bare `re` behaves like bare `vim`.
+    var abs: []const u8 = "";
     var abs_buf: [1024 + 1200]u8 = undefined;
-    var abs: []const u8 = path;
-    if (path.len == 0 or path[0] != '/') {
-        var cwdbuf: [1024]u8 = undefined;
-        const cwd = getcwd(&cwdbuf, cwdbuf.len) orelse return error.NoCwd;
-        abs = try std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ std.mem.span(cwd), path });
+    if (args.len > 0) {
+        const path = std.mem.span(args[0]);
+        // The app resolves relative paths against ITS cwd — make ours
+        // absolute before sending.
+        abs = path;
+        if (path.len == 0 or path[0] != '/') {
+            var cwdbuf: [1024]u8 = undefined;
+            const cwd = getcwd(&cwdbuf, cwdbuf.len) orelse return error.NoCwd;
+            abs = try std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ std.mem.span(cwd), path });
+        }
     }
 
     const sock_env = getenv("ROOK_SOCK");
@@ -521,7 +523,10 @@ fn edit(args: []const [*:0]const u8) !void {
     }
 
     var msg_buf: [2400]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&msg_buf, "edit {s}\n", .{abs});
+    const msg: []const u8 = if (abs.len > 0)
+        try std.fmt.bufPrint(&msg_buf, "edit {s}\n", .{abs})
+    else
+        "edit\n";
     var off: usize = 0;
     while (off < msg.len) {
         const n = write(fd, msg.ptr + off, msg.len - off);

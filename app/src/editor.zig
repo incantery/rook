@@ -717,6 +717,17 @@ pub const Editor = struct {
     /// into a buffer rather than building a viewer.
     synthetic: bool = false,
 
+    /// The start screen — vim's `:intro`, rook's spelling. Set by the
+    /// app when a bare `re` asks for an editor with nothing to show in
+    /// it, gone at the first keystroke, exactly vim's contract. The
+    /// buffer underneath is an ordinary unnamed scratch: `i` types
+    /// into it, `:w name` gives it a file.
+    show_intro: bool = false,
+    /// The version line's text, injected by the app — this file is its
+    /// own test root and has no build_options to read it from. Static
+    /// string; the editor never frees it.
+    intro_version: []const u8 = "",
+
     /// The file moved on disk and we could NOT take it, because the
     /// buffer has edits. Refreshed by the app's poll, so it clears
     /// itself once the two agree again (a `:w`, or the other writer
@@ -2004,6 +2015,9 @@ pub const Editor = struct {
     pub fn key(self: *Editor, bytes: []const u8) void {
         if (bytes.len == 0) return;
         self.render_dirty = true;
+        // Any key retires the start screen — vim's rule, and the only
+        // one that never argues: even `j` means "I'm using this now".
+        self.show_intro = false;
         self.status_len = 0;
         // Any refusal from a previous batch has been reported; a stale
         // flag would blame this keystroke for the last one's edit.
@@ -4240,6 +4254,7 @@ pub const Editor = struct {
         self.is_dir = false;
         self.clearTreeRows();
         self.synthetic = true;
+        self.show_intro = false;
         self.cline = 0;
         self.ccol = 0;
         self.top = 0;
@@ -4380,6 +4395,7 @@ pub const Editor = struct {
         self.ai_line = null; // line numbers belonged to the old buffer
         self.clearDecor();
         self.is_dir = is_dir;
+        self.show_intro = false; // a retarget is the start screen's exit
         self.applyTreeDecor();
         if (!is_dir) {
             if (self.buf.path) |np| self.bufAdd(np);
@@ -7522,6 +7538,12 @@ pub const Editor = struct {
             }
         }
 
+        // The start screen, over the empty rows. Gated on the BUFFER
+        // being empty as well as the flag, so any way text gets in —
+        // a paste, an agent's edit — retires it without needing to
+        // know it was there.
+        if (self.show_intro and self.buf.rope.byteLen() == 0 and !self.is_dir)
+            self.fillIntro(g, cols, text_rows, top_rows, gw);
         if (top_rows > 0) self.fillBufferLine(g[0..cols]);
         // Over the text, under the chrome: the menu covers the document
         // it is offering to change and nothing else.
@@ -7530,6 +7552,50 @@ pub const Editor = struct {
         self.fillHoverFloat(g, cols, rows, top_rows, gw);
         self.fillStatusRow(g[(rows - 1) * cols ..][0..cols]);
         return g;
+    }
+
+    /// vim's `:intro`, in rook's hand: what a bare `re` shows over an
+    /// empty scratch buffer. Painted OVER the finished rows the way the
+    /// floats are, so the document rendering never knows it exists —
+    /// the `~` fringe and the cursor on line one stay exactly what an
+    /// empty buffer draws (nvim's arrangement, not vim's blanked one).
+    fn fillIntro(self: *Editor, g: []RCell, cols: usize, text_rows: usize, top_rows: usize, gw: usize) void {
+        const Line = struct { s: []const u8, st: Style };
+        var ver_buf: [64]u8 = undefined;
+        const ver: []const u8 = if (self.intro_version.len > 0)
+            std.fmt.bufPrint(&ver_buf, "version {s}", .{self.intro_version}) catch ""
+        else
+            "";
+        // The hint column is padded by hand so the "to …" halves line
+        // up — each line is centered independently, and equal widths
+        // are what turn that into one aligned block.
+        const lines = [_]Line{
+            .{ .s = "rook editor", .st = .text },
+            .{ .s = "", .st = .dim },
+            .{ .s = ver, .st = .dim },
+            .{ .s = "", .st = .dim },
+            .{ .s = "type  i                 to insert text     ", .st = .dim },
+            .{ .s = "type  :e <file><Enter>  to edit a file     ", .st = .dim },
+            .{ .s = "type  \u{2318}P                to find a file     ", .st = .dim },
+            .{ .s = "type  :q<Enter>         to close this pane ", .st = .dim },
+        };
+        // Row one stays the buffer's: the cursor sits there, and the
+        // screen should read as "empty buffer wearing a note", not as
+        // a document. Too small to hold the block = no block; the
+        // buffer is already telling the truth about being empty.
+        if (text_rows < lines.len + 2) return;
+        const start_row = top_rows + @max(1, (text_rows - lines.len) / 2);
+        const text_cols = cols - @min(gw, cols - 1);
+        for (lines, 0..) |ln, i| {
+            if (ln.s.len == 0) continue;
+            var w: usize = 0;
+            var bi: usize = 0;
+            while (bi < ln.s.len) : (bi += cpLenAt(ln.s, bi)) w += 1;
+            if (w > text_cols) continue; // clipped intro reads worse than none
+            const out = g[(start_row + i) * cols ..][0..cols];
+            var x = gw + (text_cols - w) / 2;
+            putStr(out, &x, ln.s, ln.st);
+        }
     }
 
     /// Draw the hover float: the server's documentation, in a box over
@@ -8046,6 +8112,8 @@ pub const Editor = struct {
     /// line. True when it acted (the app repaints); false lets the
     /// click keep meaning "focus the pane".
     pub fn mouseCell(self: *Editor, col: usize, row: usize) bool {
+        // A click is activity the same way a key is.
+        self.show_intro = false;
         const top_rows: usize = if (self.buflineActive()) 1 else 0;
         if (top_rows == 1 and row == 0) {
             for (self.bufline_hits.items) |hit| {
@@ -8535,6 +8603,55 @@ test "grid renders text gutter cursor and status" {
     // Cursor cell marked in the grid.
     const g = e.fillGrid(32, 5);
     try testing.expectEqual(Style.cursor, g[2].st); // row 0, after "1 " gutter
+}
+
+test "start screen shows on an empty scratch and a keystroke retires it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    e.show_intro = true;
+    e.intro_version = "v9.9.9";
+
+    var dump = try e.dumpText(gpa, 60, 16);
+    try testing.expect(std.mem.indexOf(u8, dump, "rook editor") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "version v9.9.9") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, ":q<Enter>") != null);
+    // The buffer underneath is still an empty buffer: `~` fringe, and
+    // the status row calls it what it is.
+    try testing.expect(std.mem.indexOf(u8, dump, "~") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "[scratch]") != null);
+    gpa.free(dump);
+
+    // Any key — even a motion that moves nothing — retires it.
+    e.key("j");
+    dump = try e.dumpText(gpa, 60, 16);
+    try testing.expect(std.mem.indexOf(u8, dump, "rook editor") == null);
+    gpa.free(dump);
+}
+
+test "start screen never draws over text" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    keys(e, "ihello");
+    e.key("\x1b");
+    // The flag alone is not enough: the gate is the buffer being
+    // empty, so text arriving any way at all suppresses the screen.
+    e.show_intro = true;
+    const dump = try e.dumpText(gpa, 60, 16);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "rook editor") == null);
+    try testing.expect(std.mem.indexOf(u8, dump, "hello") != null);
+}
+
+test "start screen bows out of a pane too small to hold it" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    e.show_intro = true;
+    const dump = try e.dumpText(gpa, 30, 6);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "rook editor") == null);
 }
 
 test "replace r and join J" {
