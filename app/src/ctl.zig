@@ -390,11 +390,15 @@ fn handleLine(app: *macos.App, fd: c_int, line: []const u8) void {
             // The index size comes along: "no matches" with 0 files
             // indexed is a walk that found nothing, which is a
             // different bug from a filter that matched nothing.
-            w.print("mode:files\nfilter:{s}\nroot:{s}\nindexed:{d}{s}\n", .{
+            w.print("mode:files\nfilter:{s}\nroot:{s}\nindexed:{d}{s}{s}\n", .{
                 app.pal_input[0..app.pal_input_len],
                 app.pal_files.root,
                 app.pal_files.paths.len,
                 @as([]const u8, if (app.pal_files.truncated) " truncated" else ""),
+                // The refresh in flight. With a warm cache the rows
+                // above are already the last walk's answer; on a first
+                // open this is why the list is briefly empty.
+                @as([]const u8, if (app.pal_indexing.load(.acquire)) " indexing" else ""),
             }) catch {};
             for (app.pal_filtered[0..app.pal_nfiltered], 0..) |ii, vi| {
                 w.print("{s}{s}\n", .{

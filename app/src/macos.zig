@@ -697,12 +697,22 @@ pub const App = struct {
     pal_items: []workspacespkg.Entry = &.{},
     pal_filtered: [64]usize = undefined,
     pal_nfiltered: usize = 0,
-    /// ⌘P's file index — walked at open, freed at the next open. A
-    /// repo's file list is thousands of entries where the other two
+    /// ⌘P's file index — CACHED between opens, refreshed on a worker.
+    /// A repo's file list is thousands of entries where the other two
     /// modes have tens, so this mode SCORES its matches and keeps the
     /// best 64 in `pal_filtered` (parallel `pal_scores`); the other
     /// modes keep source order, which is already meaningful for them.
     pal_files: filelistpkg.Index = .{},
+    /// A finished background walk, parked for the draw tick to swap in
+    /// (the search panel's own publish pattern). Never read outside
+    /// draw_lock.
+    pal_files_pending: ?filelistpkg.Index = null,
+    /// The root ⌘P currently wants, recorded at open — the drain
+    /// refuses a pending index built for somewhere else, which is what
+    /// keeps a fast root-hop from filing repo A's files under repo B.
+    pal_want_root: [1024]u8 = undefined,
+    pal_want_len: usize = 0,
+    pal_indexing: std.atomic.Value(bool) = .init(false),
     /// The code actions a server offered, owned, and the file they were
     /// offered about. Held rather than re-requested: the picker is a
     /// list you scroll, and re-asking on every keystroke would make the
@@ -2664,18 +2674,84 @@ pub const App = struct {
     ///
     /// The root is the focused pane's own context, not the space's:
     /// `cd` is sacred, so a shell that walked into a submodule finds
-    /// the submodule's files. Walked fresh at every open — a file
-    /// created by the agent you are watching has to be findable
-    /// without a restart, and a repo-sized walk is milliseconds.
+    /// the submodule's files.
+    ///
+    /// The cached index shows INSTANTLY and a refresh starts on a
+    /// worker — a file created by the agent you are watching is still
+    /// findable without a restart, it just arrives a frame after the
+    /// palette does. This used to walk synchronously right here, on
+    /// the draw lock, justified by "a repo-sized walk is milliseconds"
+    /// — on grafana, under the app's trace-capturing allocator, it was
+    /// seventeen SECONDS of frozen app per ⌘P. Never again: nothing
+    /// on this path may touch the filesystem.
     pub fn openFilePalette(self: *App) void {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
         var rootbuf: [1024]u8 = undefined;
         const root = self.paneRootLocked(self.activeTab().focused, &rootbuf) orelse "";
-        self.pal_files.deinit(self.gpa);
-        self.pal_files = filelistpkg.load(self.gpa, root);
+        // A cached list is only shown for the SAME root. Stale-by-one-
+        // refresh is fine; the wrong repo's files are not.
+        if (!std.mem.eql(u8, self.pal_files.root, root)) {
+            self.pal_files.deinit(self.gpa);
+            self.pal_files = .{};
+        }
+        self.pal_want_len = @min(root.len, self.pal_want_root.len);
+        @memcpy(self.pal_want_root[0..self.pal_want_len], root[0..self.pal_want_len]);
+        self.startFileIndexLocked(root);
         self.pal_mode = .files;
         self.resetPaletteLocked();
+    }
+
+    /// Kick a background walk of `root` for ⌘P. The result parks in
+    /// `pal_files_pending`; the draw tick swaps it in. One at a time —
+    /// a second open while one runs just keeps the first one's answer,
+    /// and the drain respawns if the root it wanted moved meanwhile.
+    fn startFileIndexLocked(self: *App, root: []const u8) void {
+        if (root.len == 0 or root.len > 1024) return;
+        if (self.pal_indexing.load(.acquire)) return;
+        const Args = struct { app: *App, root: [1024]u8, root_len: usize };
+        const a = self.gpa.create(Args) catch return;
+        a.* = .{ .app = self, .root = undefined, .root_len = root.len };
+        @memcpy(a.root[0..root.len], root);
+        self.pal_indexing.store(true, .release);
+        const T = struct {
+            fn go(args: *Args) void {
+                const app = args.app;
+                const idx = filelistpkg.load(app.gpa, args.root[0..args.root_len]);
+                app.draw_lock.lock();
+                if (app.pal_files_pending) |*old| old.deinit(app.gpa);
+                app.pal_files_pending = idx;
+                app.scene_dirty = true;
+                app.draw_lock.unlock();
+                app.pal_indexing.store(false, .release);
+                app.gpa.destroy(args);
+            }
+        };
+        if (std.Thread.spawn(.{}, T.go, .{a})) |t| {
+            t.detach();
+        } else |_| {
+            self.pal_indexing.store(false, .release);
+            self.gpa.destroy(a);
+        }
+    }
+
+    /// Swap in a finished file index. Caller holds draw_lock (the draw
+    /// tick does). An index built for a root ⌘P no longer wants is
+    /// dropped — and the walk the wanted root never got starts now.
+    fn drainFileIndexLocked(self: *App) void {
+        if (self.pal_files_pending == null) return;
+        var idx = self.pal_files_pending.?;
+        self.pal_files_pending = null;
+        const want = self.pal_want_root[0..self.pal_want_len];
+        if (!std.mem.eql(u8, idx.root, want)) {
+            idx.deinit(self.gpa);
+            self.startFileIndexLocked(want);
+            return;
+        }
+        self.pal_files.deinit(self.gpa);
+        self.pal_files = idx;
+        if (self.pal_open and self.pal_mode == .files) self.palRefilterLocked();
+        self.scene_dirty = true;
     }
 
     /// Open the PLUGIN picker (`<leader>p`).
@@ -5252,6 +5328,7 @@ pub const App = struct {
         self.reapExitedLocked();
         self.drainClipboardLocked();
         self.drainSearchLocked();
+        self.drainFileIndexLocked();
         self.reconcileViewsLocked();
         self.drainLspLocked();
         self.lspTickLocked(CACurrentMediaTime());
@@ -8856,7 +8933,15 @@ pub const App = struct {
         ui.rect(x, y + self.m.gap + row_h, w, self.sep, th.sep);
         var ry = y + self.m.gap + row_h + self.sep;
         if (self.pal_nfiltered == 0) {
-            _ = ui.textOver(x + gut, ry + (row_h - self.renderer.cell_h) / 2, "no matches", th.bar_fg);
+            // An empty FILES list while the first walk is still out is
+            // not "no matches" — saying so would teach the user that
+            // ⌘P is broken in big repos, when it is 150ms from ready.
+            const empty_msg: []const u8 = if (self.pal_mode == .files and
+                self.pal_files.paths.len == 0 and self.pal_indexing.load(.acquire))
+                "indexing files…"
+            else
+                "no matches";
+            _ = ui.textOver(x + gut, ry + (row_h - self.renderer.cell_h) / 2, empty_msg, th.bar_fg);
             return;
         }
         for (self.pal_filtered[0..shown], 0..) |item_i, vi| {

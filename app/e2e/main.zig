@@ -3366,11 +3366,13 @@ fn fileFinder(gpa: std.mem.Allocator, bin: []const u8) !void {
     // The index roots at the REPO (not the cwd) and skips both kinds
     // of ignored directory.
     _ = try app.ctl("run palette.files");
-    const listed = try app.waitCtl("palette", "mode:files", 5000);
+    // The index builds on a worker now (the 17-second-frozen-app
+    // lesson from grafana), so the open is instant and the count is
+    // what to wait FOR, not assert after.
     // Four: widget.zig, other.zig, keep.zig, README.md. NOT the
     // sub/.gitignore itself — dotfiles are skipped, which is also
     // what keeps .git out without an entry for it.
-    try h.expectContains(listed, "indexed:4\n", "exactly the four visible files");
+    const listed = try app.waitCtl("palette", "indexed:4\n", 5000);
     try h.expectContains(listed, "src/widget.zig", "the repo's files are there");
     try h.expectContains(listed, "sub/keep.zig", "a file beside a nested .gitignore survives");
     try h.expectNotContains(listed, "hidden.zig", "the NESTED .gitignore's directory is skipped");
@@ -3392,7 +3394,11 @@ fn fileFinder(gpa: std.mem.Allocator, bin: []const u8) !void {
 
     // VS Code's `>` prefix: ⌘P then ">" is the command palette.
     _ = try app.ctl("run palette.files");
-    _ = try app.waitCtl("palette", "mode:files", 3000);
+    // CACHED: the reopen shows the last walk's list immediately — no
+    // wait between open and count. (A refresh runs behind it; the
+    // assertion is that the rows are already there.)
+    const reopened = try app.ctl("palette");
+    try h.expectContains(reopened, "indexed:4", "the cached index shows without waiting");
     _ = try app.ctl("type >");
     _ = try app.waitCtl("palette", "mode:commands", 3000);
     _ = try app.ctl("key 1b");

@@ -1,4 +1,6 @@
-//! The file index behind ⌘P — a repo's files, walked once per open.
+//! The file index behind ⌘P — a repo's files, walked on a worker and
+//! cached between opens (the palette shows the last walk instantly
+//! and the refresh swaps in a frame later).
 //!
 //! Not `git ls-files`: rook does not fork for this (git.zig's rule —
 //! the branch segment reads .git/HEAD itself), and a fork per palette
@@ -55,21 +57,28 @@ const always_skip = [_][]const u8{
 };
 
 /// A cap, because a picker that hangs is worse than one that is
-/// incomplete — and 20k files is already past what a fuzzy list can
-/// usefully rank. `truncated` says so out loud rather than pretending.
-pub const max_files = 20_000;
+/// incomplete. 200k is chromium-sized — grafana is 22k, and the cap
+/// that used to sit at 20k silently hid a fifth of it (the sorted
+/// tail: the frontend). `truncated` says so out loud rather than
+/// pretending.
+pub const max_files = 200_000;
 
 pub const Index = struct {
-    /// Root-relative paths ("src/main.zig"), owned.
+    /// Root-relative paths ("src/main.zig"), arena-owned.
     paths: [][]const u8 = &.{},
-    /// The absolute root they hang off, owned.
+    /// The absolute root they hang off, arena-owned.
     root: []const u8 = "",
     truncated: bool = false,
+    /// Every byte above lives here, so teardown is one free — and so
+    /// building 20k paths costs the outer allocator a handful of chunk
+    /// allocations rather than 20k small ones. That ratio is the whole
+    /// story on an allocator that captures a stack trace per call,
+    /// which is what the app's gpa does even at ReleaseFast.
+    arena: ?std.heap.ArenaAllocator = null,
 
     pub fn deinit(self: *Index, gpa: std.mem.Allocator) void {
-        for (self.paths) |p| gpa.free(p);
-        gpa.free(self.paths);
-        if (self.root.len > 0) gpa.free(self.root);
+        _ = gpa; // everything is in the arena; kept for call-site compat
+        if (self.arena) |*a| a.deinit();
         self.* = .{};
     }
 };
@@ -78,6 +87,12 @@ pub const Index = struct {
 /// glob, a negation, or an interior slash is skipped — see the header.
 pub const IgnoreSet = struct {
     names: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// The enclosing directory's rules, CHAINED rather than copied.
+    /// The copy looked innocent and was the whole 17-second ⌘P open
+    /// on grafana: a 197-line root .gitignore duplicated into each of
+    /// 4,350 directories is half a million allocations, on an
+    /// allocator that unwinds a stack trace for every one of them.
+    parent: ?*const IgnoreSet = null,
 
     pub fn deinit(self: *IgnoreSet, gpa: std.mem.Allocator) void {
         for (self.names.items) |n| gpa.free(n);
@@ -85,8 +100,11 @@ pub const IgnoreSet = struct {
     }
 
     pub fn has(self: *const IgnoreSet, name: []const u8) bool {
-        for (self.names.items) |n| {
-            if (std.mem.eql(u8, n, name)) return true;
+        var cur: ?*const IgnoreSet = self;
+        while (cur) |c| : (cur = c.parent) {
+            for (c.names.items) |n| {
+                if (std.mem.eql(u8, n, name)) return true;
+            }
         }
         return false;
     }
@@ -171,13 +189,12 @@ const Walker = struct {
         const d = opendir(zbuf[0..dir_abs.len :0]) orelse return;
         defer _ = closedir(d);
 
+        // This directory's own rules; the inherited ones stay in force
+        // below it through the parent chain. No deinit — the walker's
+        // allocator is the index's arena, and a set's names total a few
+        // hundred bytes across a whole repo's .gitignores.
         var local = readIgnore(self.gpa, dir_abs);
-        defer local.deinit(self.gpa);
-        // The inherited rules stay in force below this directory too.
-        for (inherited.names.items) |n| {
-            const owned = self.gpa.dupe(u8, n) catch continue;
-            local.names.append(self.gpa, owned) catch self.gpa.free(owned);
-        }
+        local.parent = inherited;
 
         while (readdir(d)) |de| {
             if (self.truncated) return;
@@ -225,12 +242,21 @@ const Walker = struct {
 /// and as the order find-in-files lists its hits. Search results that
 /// come back in a different order on your colleague's laptop are
 /// results neither of you can talk about.
+///
+/// `gpa` only backs the index's arena — the walk itself never asks it
+/// for anything smaller than a chunk. grafana (22k files, 4.3k dirs):
+/// ~150 ms, where the pre-arena walk under the app's trace-capturing
+/// allocator took 17 s. Callers still should not hold draw_lock across
+/// this; the app caches one index and refreshes it on a worker.
 pub fn load(gpa: std.mem.Allocator, root: []const u8) Index {
     var idx: Index = .{};
     if (root.len == 0) return idx;
 
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    const arena = arena_state.allocator();
+
     var out: std.ArrayListUnmanaged([]const u8) = .empty;
-    var w = Walker{ .gpa = gpa, .root = root, .out = &out };
+    var w = Walker{ .gpa = arena, .root = root, .out = &out };
     const none: IgnoreSet = .{};
     w.walk(root, "", 0, &none);
 
@@ -240,9 +266,13 @@ pub fn load(gpa: std.mem.Allocator, root: []const u8) Index {
         }
     };
     std.mem.sort([]const u8, out.items, {}, S.lt);
-    idx.paths = out.toOwnedSlice(gpa) catch &.{};
-    idx.root = gpa.dupe(u8, root) catch "";
+    idx.paths = out.toOwnedSlice(arena) catch &.{};
+    idx.root = arena.dupe(u8, root) catch "";
     idx.truncated = w.truncated;
+    // Moved by value AFTER the last allocation through it: the
+    // interface above pointed at the stack copy, and from here on the
+    // only caller is deinit, which reads the state it carries.
+    idx.arena = arena_state;
     return idx;
 }
 
@@ -274,6 +304,24 @@ test "parseIgnore takes plain directory lines and refuses the rest" {
     try t.expect(!set.has("src/generated"));
     try t.expect(!set.has("# a comment"));
     try t.expectEqual(@as(usize, 4), set.names.items.len);
+}
+
+test "an ignore chain answers for every ancestor, and only reads, never copies" {
+    const t = std.testing;
+    var root_set = parseIgnore(t.allocator, "coverage\n");
+    defer root_set.deinit(t.allocator);
+    var mid = parseIgnore(t.allocator, "generated\n");
+    defer mid.deinit(t.allocator);
+    mid.parent = &root_set;
+    var leaf: IgnoreSet = .{ .parent = &mid };
+
+    // A leaf with no rules of its own still enforces every ancestor's.
+    try t.expect(leaf.has("coverage"));
+    try t.expect(leaf.has("generated"));
+    try t.expect(!leaf.has("src"));
+    // The chain is scoping, not accumulation: the root never sees a
+    // child's rule.
+    try t.expect(!root_set.has("generated"));
 }
 
 test "skipDir: dotfiles, the builtin list, and the repo's own additions" {
