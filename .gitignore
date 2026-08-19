@@ -1,27 +1,4 @@
-bin
+# built binary
+/rook
 # macOS Finder droppings
 .DS_Store
-# local one-off builds
-/rookctl
-# Claude Code's worktree isolation drops checkouts of this repo in here. They
-# are live git worktrees, so `git add -A` tries to commit an embedded repo and
-# `make release` refuses the dirty tree — which is how one blocked a release.
-.claude/worktrees/
-
-# spike build outputs
-/termcap
-/extract-vt
-spike/**/termcap
-spike/**/extract-vt
-
-TODO.md
-
-# --config=DIR sandboxes used to exercise a throwaway rook (each holds a
-# rook.sock, a config program, and whatever the shell inside dropped)
-/test/
-/test-config/
-/cloud
-
-# Stray binaries from `go build ./plugins/<name>/`, which writes to CWD.
-# `make plugins` uses -o and never leaves these.
-/lang-*
