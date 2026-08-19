@@ -3,15 +3,13 @@
 // terminal and running `rook` is the whole setup. The multiplexer, the
 // session manager and the jump list are dependencies, not rewrites.
 //
-// Nothing is implemented yet. This is the empty module.
+// Nothing is implemented yet beyond proving the binary builds and runs.
 package main
 
 import (
 	"fmt"
-	"os"
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "rook: nothing built yet")
-	os.Exit(1)
+	fmt.Println("rook: hello")
 }
