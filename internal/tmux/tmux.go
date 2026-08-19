@@ -151,15 +151,17 @@ func (s Settings) Render(confPath string) string {
 	p("set -g status-interval 5")
 	p("set -g status-justify left")
 	p("set -g status-style %q", "bg=default,fg="+t.Dim)
-	// ♜ names the server; reverse-video while the prefix is held so the
-	// modal state is always visible.
-	p("set -g status-left %q", "#[fg="+t.Accent+",bold]#{?client_prefix,#[reverse],} ♜ #S #[default]  ")
-	p("set -g status-left-length 40")
-	// Empty on purpose: the right side is reserved for the attention
-	// layer; until it exists, silence beats a hostname and a clock.
-	p("set -g status-right %q", "")
-	p("set -g window-status-format %q", "#[fg="+t.Dim+"] #I·#W ")
-	p("set -g window-status-current-format %q", "#[fg="+t.Accent+",bold] #I·#W#{?window_zoomed_flag, ⛶,} ")
+	// ♜ rook is the brand chip, not the session: reverse-video while
+	// the prefix is held so the modal state is always visible.
+	p("set -g status-left %q", "#[fg="+t.Accent+",bold]#{?client_prefix,#[reverse],} ♜ rook #[default] ")
+	p("set -g status-left-length 20")
+	// The session lives on the right, dim; the rest of that side stays
+	// reserved for the attention layer.
+	p("set -g status-right %q", "#[fg="+t.Dim+"]#S ")
+	// Tabs: generous padding, and the active window is a raised block —
+	// dim ground, accent label — instead of bare colored text.
+	p("set -g window-status-format %q", "#[fg="+t.Dim+"]  #I·#W  ")
+	p("set -g window-status-current-format %q", "#[fg="+t.Accent+",bg="+t.Dim+",bold]  #I·#W#{?window_zoomed_flag, ⛶,}  ")
 	p("set -g window-status-separator %q", "")
 	p("set -g pane-border-style %q", "fg="+t.Dim)
 	p("set -g pane-active-border-style %q", "fg="+t.Accent)
