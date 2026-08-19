@@ -105,6 +105,11 @@ func (s Settings) Render(confPath string) string {
 	// The glass shows where you are even when the bar is covered.
 	p("set -g set-titles on")
 	p("set -g set-titles-string %q", "#S · #W — rook")
+	// Claude Code's native install names its binary by version, so the
+	// honest pane_current_command is "2.1.236" — a window name with no
+	// information. Map version-string commands to their real identity.
+	p("set -g automatic-rename-format %q",
+		"#{?#{m/r:^[0-9.]+$,#{pane_current_command}},claude,#{pane_current_command}}")
 	// Closing a session's last window hops to another session instead of
 	// dumping the client back to a bare shell: rook is a place, not a run.
 	p("set -g detach-on-destroy off")
@@ -139,7 +144,10 @@ func (s Settings) Render(confPath string) string {
 	t := s.Theme
 	p("")
 	p("## theme — structure from rook, palette from the glass")
-	p("set -g status-position bottom")
+	// The bottom of a terminal is contested: prompts, Claude Code's
+	// footer, fzf, vim statuslines. The top is uncontested, so the bar
+	// lives there and never stacks against a tenant's own chrome.
+	p("set -g status-position top")
 	p("set -g status-interval 5")
 	p("set -g status-justify left")
 	p("set -g status-style %q", "bg=default,fg="+t.Dim)
