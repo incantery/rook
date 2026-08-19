@@ -42,6 +42,10 @@ type Settings struct {
 	ExtendedKeys     bool // extended-keys: modern key encodings survive the hop from ghostty
 
 	Theme Theme
+
+	// PluginScripts are absolute paths of plugin *.tmux scripts to
+	// run-shell at boot, as resolved by EnsurePlugins.
+	PluginScripts []string
 }
 
 // Defaults are rook's opinions. There is deliberately no way to load a
@@ -128,6 +132,9 @@ func (s Settings) Render(confPath string) string {
 	p("bind -T copy-mode-vi v send -X begin-selection")
 	p("bind -T copy-mode-vi y send -X copy-selection-and-cancel")
 	p("bind r source-file %q \\; display %q", confPath, "rook settings applied")
+	// Navigator-style plugins claim root-table C-l; prefix C-l always
+	// reaches the shell's clear-screen. Harmless when nothing claims it.
+	p("bind C-l send-keys C-l")
 
 	t := s.Theme
 	p("")
@@ -151,6 +158,14 @@ func (s Settings) Render(confPath string) string {
 	p("set -g message-style %q", "bg=default,fg="+t.Accent)
 	p("set -g mode-style %q", "fg=black,bg="+t.Accent)
 	p("set -g clock-mode-colour %s", t.Accent)
+
+	if len(s.PluginScripts) > 0 {
+		p("")
+		p("## plugins — cloned and wired by rook, no TPM")
+		for _, script := range s.PluginScripts {
+			p("run-shell %q", script)
+		}
+	}
 
 	return b.String()
 }

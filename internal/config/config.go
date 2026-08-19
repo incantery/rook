@@ -29,6 +29,11 @@ type Tmux struct {
 	// Prefix is the tmux prefix key in tmux key syntax: "C-b", "C-a",
 	// "`". Empty means rook's default.
 	Prefix string `toml:"prefix"`
+
+	// Plugins are tmux plugins as "owner/repo" GitHub specs, e.g.
+	// "christoomey/vim-tmux-navigator". Rook clones and wires them
+	// itself; there is no TPM.
+	Plugins []string `toml:"plugins"`
 }
 
 // Path returns where the config file lives, whether or not it exists.

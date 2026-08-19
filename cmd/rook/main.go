@@ -40,6 +40,12 @@ func run() error {
 		settings.Prefix = cfg.Tmux.Prefix
 	}
 
+	scripts, warnings := tmux.EnsurePlugins(cfg.Tmux.Plugins)
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "rook:", w)
+	}
+	settings.PluginScripts = scripts
+
 	confPath, err := tmux.WriteConf(settings)
 	if err != nil {
 		return fmt.Errorf("writing tmux conf: %w", err)
