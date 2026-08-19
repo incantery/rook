@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"syscall"
 
 	"github.com/incantery/rook/internal/config"
@@ -45,6 +46,14 @@ func run() error {
 		fmt.Fprintln(os.Stderr, "rook:", w)
 	}
 	settings.PluginScripts = scripts
+
+	// The prefix-s session picker rides on these; missing ones should
+	// say so at boot, not fail silently inside a popup.
+	for _, dep := range []string{"sesh", "zoxide", "fzf"} {
+		if _, err := exec.LookPath(dep); err != nil {
+			fmt.Fprintf(os.Stderr, "rook: %s not on PATH — the session picker (prefix s) needs it (`brew install %s`)\n", dep, dep)
+		}
+	}
 
 	confPath, err := tmux.WriteConf(settings)
 	if err != nil {
