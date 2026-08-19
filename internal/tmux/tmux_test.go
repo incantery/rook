@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRenderDeterministic(t *testing.T) {
@@ -25,15 +26,28 @@ func TestTmuxAcceptsRenderedConf(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not on PATH")
 	}
-	dir := t.TempDir()
-	conf := filepath.Join(dir, "tmux.conf")
-	if err := os.WriteFile(conf, []byte(Defaults().Render(conf)), 0o644); err != nil {
+	for name, mutate := range map[string]func(*Settings){
+		"defaults":        func(*Settings) {},
+		"backtick-prefix": func(s *Settings) { s.Prefix = "`" },
+		"ctrl-a-prefix":   func(s *Settings) { s.Prefix = "C-a" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := Defaults()
+			mutate(&s)
+			assertTmuxAccepts(t, s)
+		})
+	}
+}
+
+func assertTmuxAccepts(t *testing.T, s Settings) {
+	t.Helper()
+	conf := filepath.Join(t.TempDir(), "tmux.conf")
+	if err := os.WriteFile(conf, []byte(s.Render(conf)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	socket := fmt.Sprintf("rook-test-%d", os.Getpid())
-	kill := exec.Command("tmux", "-L", socket, "kill-server")
-	defer kill.Run()
+	socket := fmt.Sprintf("rook-test-%d-%d", os.Getpid(), time.Now().UnixNano())
+	defer exec.Command("tmux", "-L", socket, "kill-server").Run()
 
 	// -d needs no tty; config errors surface on stderr and via the
 	// server's message log.
@@ -54,6 +68,15 @@ func TestTmuxAcceptsRenderedConf(t *testing.T) {
 				t.Fatalf("config error in server message log: %s", line)
 			}
 		}
+	}
+
+	// The rendered prefix must be the one the live server reports.
+	got, err := exec.Command("tmux", "-L", socket, "show", "-gv", "prefix").Output()
+	if err != nil {
+		t.Fatalf("show prefix: %v", err)
+	}
+	if want := s.Prefix; strings.TrimSpace(string(got)) != want {
+		t.Fatalf("live prefix = %q, want %q", strings.TrimSpace(string(got)), want)
 	}
 }
 

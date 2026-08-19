@@ -32,7 +32,8 @@ type Theme struct {
 // proxies to one tmux option; nothing else from tmux's option space is
 // exposed until it earns a field here.
 type Settings struct {
-	EscapeTimeMS     int  // escape-time: ESC-key ambiguity delay
+	Prefix           string // prefix: the leader key, in tmux key syntax ("C-b", "`")
+	EscapeTimeMS     int    // escape-time: ESC-key ambiguity delay
 	HistoryLimit     int  // history-limit: scrollback lines per pane
 	Mouse            bool // mouse: click to select panes, wheel to scroll
 	FocusEvents      bool // focus-events: programs learn when their pane focuses
@@ -47,6 +48,7 @@ type Settings struct {
 // user tmux.conf; when users need knobs, they get rook settings.
 func Defaults() Settings {
 	return Settings{
+		Prefix:           "C-b",
 		EscapeTimeMS:     10,
 		HistoryLimit:     100000,
 		Mouse:            true,
@@ -107,6 +109,13 @@ func (s Settings) Render(confPath string) string {
 
 	p("")
 	p("## keys")
+	if s.Prefix != "C-b" {
+		p("set -g prefix %q", s.Prefix)
+		p("unbind C-b")
+	}
+	// Double-tapping the prefix types it literally — with a backtick
+	// prefix this is what keeps markdown fences typeable.
+	p("bind %q send-prefix", s.Prefix)
 	// Splits and new windows continue where you are, not where the
 	// session started.
 	p(`bind '|' split-window -h -c "#{pane_current_path}"`)

@@ -10,6 +10,7 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/tmux"
 )
 
@@ -25,7 +26,21 @@ func run() error {
 		return fmt.Errorf("already inside a tmux session; nesting comes later")
 	}
 
-	confPath, err := tmux.WriteConf(tmux.Defaults())
+	cfgPath, err := config.Path()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+
+	settings := tmux.Defaults()
+	if cfg.Tmux.Prefix != "" {
+		settings.Prefix = cfg.Tmux.Prefix
+	}
+
+	confPath, err := tmux.WriteConf(settings)
 	if err != nil {
 		return fmt.Errorf("writing tmux conf: %w", err)
 	}
