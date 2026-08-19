@@ -14,7 +14,13 @@ Everything else is a dependency and stays one.
 multiplexer. Ghostty and neovim are tenants. tmux is a `depends_on`, never
 vendored.
 
-**What is here.** An empty module and this file.
+**What is here.** `rook` boots a bare tmux: its own server socket (`-L
+rook`) under a config rook generates — the user's `~/.tmux.conf` is
+never read, their tmux is never touched. `internal/tmux.Settings` is the
+proxy: one field per tmux option, rendered atomically to
+`~/.local/state/rook/tmux.conf` at boot, reconciled live via
+`set-option` on the socket. Colours are ANSI names on purpose: the glass
+owns the palette, rook owns structure and emphasis.
 
 **Pulling things back.** History is intact one branch over — the Zig app, the
 plugin vocabulary, the environments graph, the providers:
