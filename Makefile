@@ -2,7 +2,12 @@
 
 BINDIR ?= $(HOME)/.local/bin
 
-.PHONY: build test install
+.PHONY: build test install sandbox
+
+# An isolated rook (own server/state/config/data) in a new Ghostty
+# window; prints the socket to drive it with `tmux -L <socket> …`.
+sandbox:
+	@scripts/sandbox.sh
 
 build:
 	go build -o rook ./cmd/rook

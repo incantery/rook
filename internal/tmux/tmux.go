@@ -16,8 +16,15 @@ import (
 	"strings"
 )
 
-// SocketName is the tmux -L socket every rook session lives on.
-const SocketName = "rook"
+// SocketName is the tmux -L socket rook talks to: $ROOK_SOCKET when
+// set — that's how sandboxes (scripts/sandbox.sh) get a server of
+// their own — "rook" otherwise.
+func SocketName() string {
+	if s := os.Getenv("ROOK_SOCKET"); s != "" {
+		return s
+	}
+	return "rook"
+}
 
 // Theme is rook's visual layer over tmux. Colours are tmux colour names,
 // and the defaults are ANSI names on purpose: the glass (ghostty) owns
@@ -246,7 +253,7 @@ func Argv(confPath string, cmd ...string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tmux not found on PATH: rook runs on tmux (`brew install tmux`)")
 	}
-	argv := []string{bin, "-L", SocketName, "-f", confPath}
+	argv := []string{bin, "-L", SocketName(), "-f", confPath}
 	return append(argv, cmd...), nil
 }
 
