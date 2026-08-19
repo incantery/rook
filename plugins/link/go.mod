@@ -17,6 +17,7 @@ require (
 require (
 	connectrpc.com/connect v1.20.0 // indirect
 	github.com/brutella/dnssd v1.2.14 // indirect
+	github.com/incantery/vera/drive v0.0.0-20260819221129-d21e4cba01cc // indirect
 	github.com/miekg/dns v1.1.61 // indirect
 	github.com/vishvananda/netlink v1.2.1-beta.2 // indirect
 	github.com/vishvananda/netns v0.0.0-20200728191858-db3c7e526aae // indirect

@@ -1,18 +1,22 @@
-// Package drive turns one goal into a supervised conversation with a
-// live Claude Code session: say something, wait for the turn to end,
-// judge the reply against the goal, and either stop or say the next
-// thing — a bounded number of times. It is the loop a human runs by
-// hand when an agent needs three nudges to actually answer the
-// question, made a verb.
+// Package drive delivers a supervised conversation to a live Claude
+// Code session by TYPING into its pane: the prompt reaches the session
+// as text through session.send's gates, so a human at the keyboard
+// always outranks the machine (ADR 0002's TUI-only rule, rook-host).
 //
-// The package is also the seam the mechanics hide behind. A Driver is
-// "one prompt reaches one session"; today's only implementation types
-// keystrokes into the session's pane — the same session.send path
-// answers ride, gates and all (the TUI-only rule, ADR 0002 in
-// rook-host). A future headless driver (`claude -p --resume`) would
-// implement the same interface and change nothing else: both
-// mechanisms land their turns in the same transcript, and the
-// transcript is the only witness the loop believes.
+// The LOOP is not here. Goal in, judged conversation out — the turn
+// budget, the judge's vocabulary, the circling guard, the spend cap —
+// lives once, in github.com/incantery/vera/drive, and this package is
+// one implementation of that loop's Turner: the mechanism, not the
+// supervision. rook and vera's engine now run the same loop over two
+// mechanisms (typed keystrokes here, `claude -p --resume` there), which
+// is what makes a drive mean one thing in both places.
+//
+// The seam is narrow on purpose. vera's Turner is "prompt in, reply
+// out"; typing into a live TUI yields no return value, so RunTurn
+// earns the reply the only way this mechanism can — wait for the
+// session to go quiet, type, then watch the transcript until that
+// turn ends. The transcript is the only witness either mechanism
+// believes.
 package drive
 
 import (
@@ -24,6 +28,7 @@ import (
 	"time"
 
 	"github.com/incantery/rook/plugins/internal/transcript"
+	veradrive "github.com/incantery/vera/drive"
 )
 
 // Caller is the sliver of the plugin wire a driver needs: ask rook for
@@ -56,23 +61,82 @@ func TypeAndSubmit(c Caller, pane int, text string) error {
 	return err
 }
 
-// A Driver delivers one prompt to one session, or says honestly why it
-// could not. It does not wait for the reply — the transcript answers
-// that for every driver alike.
-type Driver interface {
-	Deliver(ctx context.Context, sessionID, prompt string) error
-}
-
-// TUI is the typed-keystrokes driver: the prompt reaches the session
-// as text in its pane, under the same gates and the same
-// one-pane-one-session heuristic say delivers by.
+// TUI is the typed-keystrokes Turner: one turn is the prompt reaching
+// the session's own pane as text, under the same gates and the same
+// one-pane-one-session heuristic `say` delivers by, and then the turn
+// it starts running to its end.
 type TUI struct {
 	C     Caller
 	Scan  func(now time.Time) []transcript.Session
 	Panes func() []transcript.PaneActivity
 	Names []string // foreground names that count as Claude Code
+
+	Poll        time.Duration // how often the transcript is re-read (default 5s)
+	TurnTimeout time.Duration // how long one turn may run (default 15m)
+
+	// Progress reports what this mechanism is waiting on, between the
+	// loop's own "asking claude" and "judging the reply". Typing into
+	// somebody's terminal spends most of its time waiting, and a row
+	// that says only "asking claude" for eleven minutes reads as hung.
+	Progress func(line string)
 }
 
+func (t *TUI) poll() time.Duration {
+	if t.Poll > 0 {
+		return t.Poll
+	}
+	return 5 * time.Second
+}
+
+func (t *TUI) turnTimeout() time.Duration {
+	if t.TurnTimeout > 0 {
+		return t.TurnTimeout
+	}
+	return 15 * time.Minute
+}
+
+func (t *TUI) progress(line string) {
+	if t.Progress != nil {
+		t.Progress(line)
+	}
+}
+
+// RunTurn is veradrive.Turner: one prompt typed into one session, and
+// the reply it earns. The session id never changes — this mechanism
+// continues the conversation in place rather than forking it, which is
+// the whole difference between driving a terminal somebody is watching
+// and driving a headless fork.
+//
+// Turn.CostUSD stays zero: a typed prompt is billed to whatever
+// account the terminal is logged into, and rook is not told the
+// number. Reporting a cost it cannot meter would be a lie the loop's
+// spend cap would then act on.
+func (t *TUI) RunTurn(ctx context.Context, sessionID, prompt string) (veradrive.Turn, error) {
+	// The session must be quiet before anything is typed: text
+	// delivered mid-turn queues behind work this loop did not ask for,
+	// and the turn that then ends would be misread as the reply.
+	// Waiting is honest; interrupting is not ours to do.
+	t.progress("waiting for the session to go quiet")
+	base, err := t.awaitQuiet(ctx, sessionID)
+	if err != nil {
+		return veradrive.Turn{}, err
+	}
+	t.progress("delivering the prompt")
+	if err := t.Deliver(ctx, sessionID, prompt); err != nil {
+		return veradrive.Turn{}, errors.New("delivery refused: " + err.Error())
+	}
+	t.progress("waiting on the reply")
+	reply, err := t.awaitReply(ctx, sessionID, prompt, base)
+	if err != nil {
+		return veradrive.Turn{}, err
+	}
+	return veradrive.Turn{Reply: reply, SessionID: sessionID}, nil
+}
+
+// Deliver types one prompt into the session's pane. It does not wait
+// for the reply — RunTurn does that, and a caller who only wants to
+// say one thing (the cloud bridge, the link executor) wants exactly
+// this half.
 func (t *TUI) Deliver(ctx context.Context, sessionID, prompt string) error {
 	sessions := t.Scan(time.Now())
 	target := findSession(sessions, sessionID)
@@ -89,132 +153,14 @@ func (t *TUI) Deliver(ctx context.Context, sessionID, prompt string) error {
 	return TypeAndSubmit(t.C, pane.ID, prompt)
 }
 
-// A Judge reads the goal and the conversation so far and decides:
-// done, or here is the next thing to say.
-type Judge interface {
-	Judge(ctx context.Context, goal string, history []Exchange) (Verdict, error)
-}
-
-// Exchange is one round of the drive's own conversation: what was said
-// on the owner's behalf and what the session said back.
-type Exchange struct {
-	Prompt string
-	Reply  string
-}
-
-type Verdict struct {
-	Done   bool
-	Prompt string // when not done: the exact next message to send
-	Reason string // one line for the record
-}
-
-// Result is what a drive has to show for itself: every round it ran,
-// and the last honest word on whether the goal was met.
-type Result struct {
-	Done   bool
-	Reason string
-	Turns  []Exchange
-}
-
-// Loop is one drive's machinery. Driver, Judge and Scan are required;
-// the rest defaults to something sane.
-type Loop struct {
-	Driver Driver
-	Judge  Judge
-	Scan   func(now time.Time) []transcript.Session
-
-	Poll        time.Duration // how often the transcript is re-read (default 5s)
-	TurnTimeout time.Duration // how long one turn may run (default 15m)
-	MaxTurns    int           // prompts sent before giving up (default 4)
-
-	Progress func(line string) // optional: one live line for a panel row
-}
-
-func (l *Loop) poll() time.Duration {
-	if l.Poll > 0 {
-		return l.Poll
-	}
-	return 5 * time.Second
-}
-
-func (l *Loop) turnTimeout() time.Duration {
-	if l.TurnTimeout > 0 {
-		return l.TurnTimeout
-	}
-	return 15 * time.Minute
-}
-
-func (l *Loop) maxTurns() int {
-	if l.MaxTurns > 0 {
-		return l.MaxTurns
-	}
-	return 4
-}
-
-func (l *Loop) progress(format string, args ...any) {
-	if l.Progress != nil {
-		l.Progress(fmt.Sprintf(format, args...))
-	}
-}
-
-// Run drives one session toward one goal. The returned error is an
-// abnormal stop — session gone, delivery refused, a human taking over,
-// the judge breaking — and the Result still carries whatever rounds
-// ran. A goal honestly not met within the turn budget is not an error;
-// it is Done=false with the reason on the record.
-func (l *Loop) Run(ctx context.Context, sessionID, goal string) (Result, error) {
-	var res Result
-	prompt := goal
-	for turn := 1; turn <= l.maxTurns(); turn++ {
-		// The session must be quiet before anything is typed: text
-		// delivered mid-turn queues behind work this loop did not ask
-		// for, and the turn that then ends would be misread as the
-		// reply. Waiting is honest; interrupting is not ours to do.
-		l.progress("turn %d/%d: waiting for the session to go quiet", turn, l.maxTurns())
-		base, err := l.awaitQuiet(ctx, sessionID)
-		if err != nil {
-			return res, err
-		}
-		l.progress("turn %d/%d: delivering the prompt", turn, l.maxTurns())
-		if err := l.Driver.Deliver(ctx, sessionID, prompt); err != nil {
-			return res, errors.New("delivery refused: " + err.Error())
-		}
-		l.progress("turn %d/%d: waiting on the reply", turn, l.maxTurns())
-		reply, err := l.awaitReply(ctx, sessionID, prompt, base)
-		if err != nil {
-			return res, err
-		}
-		res.Turns = append(res.Turns, Exchange{Prompt: prompt, Reply: reply})
-		l.progress("turn %d/%d: judging the reply", turn, l.maxTurns())
-		v, err := l.Judge.Judge(ctx, goal, res.Turns)
-		if err != nil {
-			return res, errors.New("the judge failed: " + err.Error())
-		}
-		if v.Done {
-			res.Done = true
-			res.Reason = v.Reason
-			if res.Reason == "" {
-				res.Reason = "the goal is met"
-			}
-			return res, nil
-		}
-		if strings.TrimSpace(v.Prompt) == "" {
-			return res, errors.New("the judge wanted to continue but had nothing to say")
-		}
-		prompt = v.Prompt
-	}
-	res.Reason = fmt.Sprintf("the turn budget (%d) is spent and the goal is not met", l.maxTurns())
-	return res, nil
-}
-
 // awaitQuiet waits until the session is between turns and returns the
 // baseline the next reply must differ from. Blocked counts as not
 // quiet: a session sitting on an approval box needs a human's yes, not
 // another prompt on top of it.
-func (l *Loop) awaitQuiet(ctx context.Context, sessionID string) (baseline string, err error) {
-	deadline := time.Now().Add(l.turnTimeout())
+func (t *TUI) awaitQuiet(ctx context.Context, sessionID string) (baseline string, err error) {
+	deadline := time.Now().Add(t.turnTimeout())
 	for {
-		s := findSession(l.Scan(time.Now()), sessionID)
+		s := findSession(t.Scan(time.Now()), sessionID)
 		if s == nil {
 			return "", errors.New("that session is gone")
 		}
@@ -222,9 +168,12 @@ func (l *Loop) awaitQuiet(ctx context.Context, sessionID string) (baseline strin
 			return hash(s.LastText), nil
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("the session stayed %s past the turn timeout", s.State)
+			// The clock ran out, not the goal: the session is busy with
+			// somebody else's work and may well be free later. The mark
+			// is what tells a caller this one is worth retrying.
+			return "", veradrive.MarkTransient(fmt.Errorf("the session stayed %s past the turn timeout", s.State))
 		}
-		if err := sleep(ctx, l.poll()); err != nil {
+		if err := sleep(ctx, t.poll()); err != nil {
 			return "", err
 		}
 	}
@@ -235,10 +184,10 @@ func (l *Loop) awaitQuiet(ctx context.Context, sessionID string) (baseline strin
 // has changed — and returns that word. A turn ending on someone ELSE's
 // prompt means a human took the keyboard mid-drive; the desk wins and
 // the drive stops, the same both-settle rule every rail follows.
-func (l *Loop) awaitReply(ctx context.Context, sessionID, prompt, baseline string) (string, error) {
-	deadline := time.Now().Add(l.turnTimeout())
+func (t *TUI) awaitReply(ctx context.Context, sessionID, prompt, baseline string) (string, error) {
+	deadline := time.Now().Add(t.turnTimeout())
 	for {
-		s := findSession(l.Scan(time.Now()), sessionID)
+		s := findSession(t.Scan(time.Now()), sessionID)
 		if s == nil {
 			return "", errors.New("that session is gone mid-turn")
 		}
@@ -249,16 +198,18 @@ func (l *Loop) awaitReply(ctx context.Context, sessionID, prompt, baseline strin
 			return s.LastText, nil
 		}
 		if time.Now().After(deadline) {
-			return "", errors.New("no reply within the turn timeout")
+			return "", veradrive.MarkTransient(errors.New("no reply within the turn timeout"))
 		}
-		if err := sleep(ctx, l.poll()); err != nil {
+		if err := sleep(ctx, t.poll()); err != nil {
 			return "", err
 		}
 	}
 }
 
 // sleep is a cancelable time.Sleep: a stopped drive stops between
-// polls, not at the end of one.
+// polls, not at the end of one. A stop is a decision, never a
+// transient failure — retrying what a human halted is the one thing
+// this loop must not do.
 func sleep(ctx context.Context, d time.Duration) error {
 	select {
 	case <-ctx.Done():

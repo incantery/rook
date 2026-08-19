@@ -134,6 +134,13 @@ paste-ready config lines). What the db held that the graph does not —
 `last_used` recency, `worktree_of` children — is owed back as ephemeral
 UI state and as facts derived from `.git/worktrees/`, not as a database.
 
+**Half paid, 2026-08-17.** Recency came back as `app/src/oldfiles.zig`:
+one absolute path per line, newest first, in `$XDG_STATE_HOME/rook/oldfiles`
+— written by the app on every open, read by whatever wants an opinion
+about it (`plugins/start` is the first). A file, not a database, and the
+format is the contract because the reader is another process. Worktree
+children are still derived live and still owe nothing.
+
 The tmux-style split (ptys that survive the app) is still wanted, and
 when it is built it should be Zig, designed for that job, rather than the
 HTTP host that grew around a webview.

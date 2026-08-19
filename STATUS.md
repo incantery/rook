@@ -73,7 +73,11 @@ reload, color emoji and grapheme-correct wide text.
 **Editor** (`re`): a vim-shaped modal editor over a rope buffer — regex
 `:s`, macros, visual block, `.`, undo, marks, completion. One file open in
 two panes is one document. `:w` refuses a file an agent changed underneath
-it.
+it. Bare `re` opens a scratch buffer wearing a **start screen**: rook's
+own by default, and a plugin's when one is declared (`plugins/start` —
+header, the files you were last in, what git changed, live agent
+sessions, and a jump letter per row). The recency behind it is rook's
+own journal, `$XDG_STATE_HOME/rook/oldfiles`.
 
 **LSP**: diagnostics in the gutter, `]d` to walk them, go-to-definition,
 `K` for hover — the server's markdown taken apart and drawn as a float

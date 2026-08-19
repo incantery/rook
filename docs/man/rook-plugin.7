@@ -8,8 +8,9 @@
 A rook plugin is a separate process speaking newline-delimited JSON over
 its own stdin and stdout.
 rook spawns it, asks it questions
-.Pq Cm items.list , Cm items.act ,
-renders its answers in the side panel, and lets it ask two things back
+.Pq Cm items.list , Cm items.act , Cm intro.list ,
+renders its answers in the side panel and on the start screen, and lets
+it ask things back
 .Pq Cm attention.raise , Cm session.spawn .
 Every operation, in both directions, is gated by
 .Em grants
@@ -218,6 +219,62 @@ Reply
 and optionally
 .Ql result.item ,
 the updated item; omit it and rook refetches the list instead.
+.It Cm intro.list
+Fill the editor's start screen \(em what a bare
+.Ql re
+shows over an empty scratch buffer.
+Params are
+.Ql root
+and
+.Ql limit ,
+as for
+.Cm items.list .
+Reply
+.Ql result.rows ,
+a list of lines rather than of items:
+.Bd -literal -offset indent
+{"kind":"art","label":"\(ha\(ha\(ha ROOK \(ha\(ha\(ha"}
+{"kind":"blank"}
+{"kind":"heading","label":"recent in rook"}
+{"kind":"entry","key":"a","label":"src/editor.zig",
+ "detail":"2h","path":"/abs/path/src/editor.zig"}
+{"kind":"entry","key":"f","label":"find a file","cmd":"palette.files"}
+.Ed
+.Pp
+.Cm kind
+is
+.Ql art ,
+.Ql heading ,
+.Ql entry
+or
+.Ql blank ;
+anything else reads as
+.Ql entry .
+A row is pressable when it has a
+.Cm key
+\(em one printable byte \(em and either a
+.Cm path
+.Pq opened in that pane, as with Ql :e
+or a
+.Cm cmd
+.Pq a registry command id, run through the same seam the editor leader uses .
+A path retires the screen; a command leaves it up, because what a
+command opens
+.Pq a file finder, the config panel
+opens over the screen you launched it from.
+.Pp
+Keys are the plugin's to assign and its to keep unique: two rows on one
+letter is a collision only the supplier can see, and rook does not
+reassign them.
+Caps: 64 rows, 120-byte labels, 24-byte details, 512-byte paths.
+Rows too wide for the pane are dropped whole \(em a clipped path is a
+path you cannot recognise \(em and rows past the bottom are dropped from
+the end, so put the header and the freshest rows first.
+.Pp
+Asked when a start screen opens, on a worker, never on a keystroke path.
+Answer late and the built-in screen simply stays; answer with nothing and
+the same thing happens.
+Nothing about placement, width or colour belongs in the answer.
 .It Cm lsp.resolve
 What language server should rook run for this project?
 Params are
@@ -607,6 +664,32 @@ runs from its own local data, and the prompt is typed text \(em which
 is the whole reason the prompt hop exists.
 .Bd -literal -offset indent
 rook.Cloud{}
+.Ed
+.Pp
+.Pa rook-plugin-start
+is the start screen \(em the fourth, and the only one declared
+.Ql lazy :
+it is asked when a bare
+.Ql re
+opens a screen and has nothing to watch in between.
+It answers
+.Cm intro.list
+with a header, the files you were last in
+.Pq split into this repository and everywhere else ,
+read from
+.Pa $XDG_STATE_HOME/rook/oldfiles
+\(em the journal rook itself writes on every open \(em what
+.Xr git 1
+says changed, which agent sessions are alive, and five fixed gestures
+.Pq find a file, the palette, switch workspace, edit config, close this pane .
+Files and changes take jump letters from a pool that never touches
+those five, so a letter your hand has learned does not move when the
+journal does.
+With it undeclared rook still has a start screen \(em the built-in
+one, which this replaces rather than enables.
+.Bd -literal -offset indent
+rook.Start{}                       // rook's own header
+rook.Start{Art: "~/.config/rook/art.txt", Recent: 6}
 .Ed
 .Sh A MINIMAL PLUGIN
 The essence of

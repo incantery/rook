@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,30 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/incantery/rook/plugins/internal/drive"
 	"github.com/incantery/rook/plugins/internal/transcript"
+	veradrive "github.com/incantery/vera/drive"
 )
-
-func TestParseVerdictHoldsTheShape(t *testing.T) {
-	v, err := parseVerdict("DONE\nThe worker gave three hypotheses.")
-	if err != nil || !v.Done || v.Reason != "The worker gave three hypotheses." {
-		t.Fatalf("v=%+v err=%v", v, err)
-	}
-	// Case and trailing punctuation are the model's mood, not meaning.
-	if v, err = parseVerdict("done.\nmet"); err != nil || !v.Done {
-		t.Fatalf("v=%+v err=%v", v, err)
-	}
-	v, err = parseVerdict("CONTINUE\nYou do not need access — hypothesize anyway.")
-	if err != nil || v.Done || v.Prompt != "You do not need access — hypothesize anyway." {
-		t.Fatalf("v=%+v err=%v", v, err)
-	}
-	if _, err = parseVerdict("CONTINUE"); err == nil {
-		t.Fatal("CONTINUE with nothing to say must refuse")
-	}
-	if _, err = parseVerdict("The goal seems met, probably?"); err == nil {
-		t.Fatal("a broken shape must refuse, never guess")
-	}
-}
 
 func TestDriveJudgeShowsTheWholeConversation(t *testing.T) {
 	var sentUser string
@@ -53,7 +33,7 @@ func TestDriveJudgeShowsTheWholeConversation(t *testing.T) {
 		z:     &Summarizer{Client: srv.Client(), Base: srv.URL, Key: "k", Model: "gpt-5-mini"},
 		spend: func(c float64) { spent += c },
 	}
-	v, err := j.Judge(context.Background(), "get a hypothesis", []drive.Exchange{
+	v, err := j.Judge(context.Background(), "get a hypothesis", []veradrive.Exchange{
 		{Prompt: "hypothesize about the term", Reply: "I don't have access to that information"},
 	})
 	if err != nil || v.Done || v.Prompt != "Ask for the hypothesis directly." {
@@ -90,7 +70,18 @@ func (w *driveWorld) scan(time.Time) []transcript.Session {
 	return []transcript.Session{w.s}
 }
 
-func (w *driveWorld) Deliver(ctx context.Context, sessionID, prompt string) error {
+// RunTurn is the fake's half of veradrive.Turner. It waits for the
+// session to go quiet exactly as the real TUI turner does — a fake
+// that typed into a working session would make the stop test prove
+// nothing, since the whole point there is a drive parked on the wait.
+func (w *driveWorld) RunTurn(ctx context.Context, sessionID, prompt string) (veradrive.Turn, error) {
+	for w.working() {
+		select {
+		case <-ctx.Done():
+			return veradrive.Turn{}, errors.New("stopped")
+		case <-time.After(time.Millisecond):
+		}
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.sent = append(w.sent, prompt)
@@ -101,14 +92,20 @@ func (w *driveWorld) Deliver(ctx context.Context, sessionID, prompt string) erro
 	w.s.Prompt = prompt
 	w.s.LastText = reply
 	w.s.State = transcript.StateNeedsYou
-	return nil
+	return veradrive.Turn{Reply: reply, SessionID: sessionID}, nil
+}
+
+func (w *driveWorld) working() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.s.State == transcript.StateWorking
 }
 
 func (w *driveWorld) host(z *Summarizer, maxTurns int) *driveHost {
 	return &driveHost{
 		sum: z, maxTurns: maxTurns,
 		newScan:   func() func(time.Time) []transcript.Session { return w.scan },
-		newDriver: func(func(time.Time) []transcript.Session) drive.Driver { return w },
+		newDriver: func(func(time.Time) []transcript.Session, func(string)) veradrive.Turner { return w },
 	}
 }
 

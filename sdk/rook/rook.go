@@ -802,6 +802,7 @@ const (
 	OpPanesActivity  = "panes.activity" // read pane output rates and last-input ages
 	OpPaneRead       = "pane.read"      // read a pane's styled cell grid; the phone's live terminal view
 	OpLspResolve     = "lsp.resolve"    // answer "what server do I run for this project"
+	OpIntroList      = "intro.list"     // fill the editor's start screen
 )
 
 // ---- first-party plugins: typed declarations ----
@@ -996,6 +997,58 @@ func (l Link) appendTo(e *env) {
 		Grants: grantsOr(l.Grants, []string{
 			OpItemsList, OpItemsAct, OpPanesActivity, OpPaneRead, OpSessionSend, OpSessionSpawn, OpClipboardSet,
 		}),
+	}.appendTo(e)
+}
+
+// Start is the start screen: what a bare `re` shows over an empty
+// scratch buffer. A header, the files you were last in, what git says
+// changed, which agent sessions are alive, and the gestures worth a
+// letter — alpha-nvim's startify theme, in rook's vocabulary.
+//
+// Lazy, and the only first-party plugin that is: it is asked when a
+// start screen opens and has nothing to watch in between. With it
+// undeclared rook still has a start screen — the built-in one, which
+// this replaces rather than enables.
+type Start struct {
+	// Art names a file of header lines, one per row, replacing rook's
+	// own. A start screen you cannot put your own name on is somebody
+	// else's start screen.
+	Art string
+	// Recent is how many files each recency section lists (default 8),
+	// Changed how many of git's changed files (default 5), Sessions
+	// how many live agent sessions (default 4). Zero keeps the default.
+	Recent   int
+	Changed  int
+	Sessions int
+	// Grants defaults to intro.list alone — this plugin reads a
+	// journal, runs git, and answers; it asks rook for nothing.
+	Grants []string
+	Load   Load // default Lazy
+}
+
+func (s Start) appendTo(e *env) {
+	cmd := []string{bundleBin + "rook-plugin-start"}
+	if s.Art != "" {
+		cmd = append(cmd, "--art", s.Art)
+	}
+	if s.Recent > 0 {
+		cmd = append(cmd, "--recent", strconv.Itoa(s.Recent))
+	}
+	if s.Changed > 0 {
+		cmd = append(cmd, "--changed", strconv.Itoa(s.Changed))
+	}
+	if s.Sessions > 0 {
+		cmd = append(cmd, "--sessions", strconv.Itoa(s.Sessions))
+	}
+	load := s.Load
+	if load == "" {
+		load = Lazy
+	}
+	Plugin{
+		Name:    "start",
+		Command: cmd,
+		Load:    load,
+		Grants:  grantsOr(s.Grants, []string{OpIntroList}),
 	}.appendTo(e)
 }
 

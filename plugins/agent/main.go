@@ -46,6 +46,7 @@ import (
 	"github.com/incantery/rook/plugins/internal/drive"
 	"github.com/incantery/rook/plugins/internal/nowfile"
 	"github.com/incantery/rook/plugins/internal/transcript"
+	veradrive "github.com/incantery/vera/drive"
 )
 
 const version = "0.1.0"
@@ -139,12 +140,13 @@ func main() {
 			return dsc.Scan
 		},
 	}
-	dv.newDriver = func(scan func(now time.Time) []transcript.Session) drive.Driver {
+	dv.newDriver = func(scan func(now time.Time) []transcript.Session, progress func(string)) veradrive.Turner {
 		return &drive.TUI{
-			C:     c,
-			Scan:  scan,
-			Panes: func() []transcript.PaneActivity { return nowPanes(c) },
-			Names: names,
+			C:        c,
+			Scan:     scan,
+			Panes:    func() []transcript.PaneActivity { return nowPanes(c) },
+			Names:    names,
+			Progress: progress,
 		}
 	}
 	serve(c, st, sum, dv)

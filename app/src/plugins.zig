@@ -60,6 +60,7 @@
 
 const std = @import("std");
 const cfgpkg = @import("config.zig");
+const intro = @import("intro.zig");
 
 // ---- syscalls (the set lsp.zig proved) ----
 
@@ -129,6 +130,13 @@ pub const grace_ms: i32 = 250;
 /// this loses the frame and is told so — the alternative is a buffer that
 /// grows until the app dies, which is a plugin taking rook with it.
 pub const max_frame = 1 << 20;
+
+/// The outbound verb the start screen asks on. Its own grant rather
+/// than a flavour of `items.list`, because grants are the list a human
+/// reads to decide what a plugin may see: "may fill your start screen"
+/// is a different question from "may put rows in your side panel", and
+/// the answer to one is not the answer to the other.
+pub const op_intro = "intro.list";
 
 /// The inbound verbs: the ones a PLUGIN calls.
 pub const op_raise = "attention.raise";
@@ -1577,6 +1585,73 @@ pub fn act(p: *Plugin, gpa: std.mem.Allocator, item_id: []const u8, action_id: [
     return out;
 }
 
+/// Call `intro.list` and shape the answer into the start screen's model.
+///
+/// The one outbound verb that does NOT answer in items, and the reason
+/// is recorded in `docs/plugins/VOCABULARY.md`: a start screen is not a
+/// list of things with states — half its rows are a header, and the
+/// rest are pressable text whose whole payload is "open this" or "run
+/// that". Squeezing art into an item's title to get it drawn would have
+/// been the item vocabulary lying about what it holds.
+///
+/// What it still refuses to let a plugin do is DRAW. Rows say what they
+/// are; where they land, how wide the column is and what colour a jump
+/// letter wears stay the renderer's, exactly as for every other surface.
+pub fn fetchIntro(p: *Plugin, gpa: std.mem.Allocator, root: []const u8, out: *intro.Intro) void {
+    out.n = 0;
+
+    var params: [8192]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&params);
+    listParams(&w, root, intro.Intro.max_rows) catch return;
+
+    const buf = gpa.alloc(u8, 1 << 20) catch return;
+    defer gpa.free(buf);
+
+    const frame = p.call(gpa, op_intro, params[0..w.end], buf) orelse return;
+
+    const WireRow = struct {
+        kind: []const u8 = "",
+        key: []const u8 = "",
+        label: []const u8 = "",
+        detail: []const u8 = "",
+        path: []const u8 = "",
+        cmd: []const u8 = "",
+    };
+    const Wire = struct {
+        ok: bool = false,
+        @"error": []const u8 = "",
+        result: struct { rows: []WireRow = &.{} } = .{},
+    };
+
+    const parsed = std.json.parseFromSlice(Wire, gpa, frame, .{ .ignore_unknown_fields = true }) catch return;
+    defer parsed.deinit();
+    // A refusal leaves the model EMPTY, which is the built-in screen.
+    // There is nowhere on a start screen to report an error that would
+    // not be worse than the screen it replaced.
+    if (!parsed.value.ok) return;
+
+    for (parsed.value.result.rows) |wr| {
+        var row = intro.Intro.Row{};
+        row.kind = if (std.mem.eql(u8, wr.kind, "art"))
+            .art
+        else if (std.mem.eql(u8, wr.kind, "heading"))
+            .heading
+        else if (std.mem.eql(u8, wr.kind, "blank"))
+            .blank
+        else
+            .entry;
+        // One byte, and only a printable one: a jump letter is a thing a
+        // human presses, so a multi-byte "key" is a row nothing reaches
+        // rather than a row that eats an escape sequence.
+        if (wr.key.len == 1 and wr.key[0] > 0x20 and wr.key[0] < 0x7f) row.key = wr.key[0];
+        row.label.set(wr.label);
+        row.detail.set(wr.detail);
+        row.path.set(wr.path);
+        row.cmd.set(wr.cmd);
+        out.add(row);
+    }
+}
+
 fn listParams(w: *std.Io.Writer, root: []const u8, limit: usize) !void {
     try w.writeAll("{\"root\":");
     try jsonString(w, root);
@@ -1633,6 +1708,15 @@ pub const Registry = struct {
 
     pub fn find(self: *Registry, name: []const u8) ?*Plugin {
         for (self.items) |*p| if (std.mem.eql(u8, p.spec.name, name)) return p;
+        return null;
+    }
+
+    /// The first plugin config granted `op` — how a surface with ONE
+    /// tenant finds its supplier without a name in core. Declaration
+    /// order decides it, and two plugins granted the same single-tenant
+    /// verb is a config to fix rather than a merge to invent.
+    pub fn findGranted(self: *Registry, op: []const u8) ?*Plugin {
+        for (self.items) |*p| if (p.spec.granted(op)) return p;
         return null;
     }
 

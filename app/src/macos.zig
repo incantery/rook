@@ -20,6 +20,7 @@ const monitorpkg = @import("monitor.zig");
 const procmon = @import("procmon.zig");
 const diskscan = @import("diskscan.zig");
 const editorpkg = @import("editor.zig");
+const oldfiles = @import("oldfiles.zig");
 const fuzzy = @import("fuzzy.zig");
 const workspacespkg = @import("workspaces.zig");
 const registrypkg = @import("registry.zig");
@@ -2188,12 +2189,33 @@ pub const App = struct {
     /// for, so it stays untouched — retargeting it at nothing would
     /// trade a document for a blank.
     pub fn openScratch(self: *App) bool {
+        const fresh = blk: {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            break :blk self.openScratchLocked();
+        };
+        const ed = fresh orelse return self.scratchWasThere();
+        // OFF the lock and off this call: a start screen that waited on
+        // a subprocess would be a pane that takes a second to appear,
+        // and the built-in screen is already on the grid to wait under.
+        self.startIntroFetch(ed);
+        return true;
+    }
+
+    /// A focused editor already IS what a bare `re` asked for, so the
+    /// call succeeded without making anything. Split out so the failure
+    /// to CREATE one stays distinguishable from it.
+    fn scratchWasThere(self: *App) bool {
         self.draw_lock.lock();
         defer self.draw_lock.unlock();
+        return self.activeTab().focused.editor() != null;
+    }
+
+    fn openScratchLocked(self: *App) ?*editorpkg.Editor {
         const t = self.activeTab();
         const p = t.focused;
-        if (p.editor() != null) return true;
-        const ed = self.newEditorLocked(null) orelse return false;
+        if (p.editor() != null) return null;
+        const ed = self.newEditorLocked(null) orelse return null;
         ed.show_intro = true;
         ed.intro_version = @import("build_options").version;
         var tm = p.content.term;
@@ -2204,7 +2226,78 @@ pub const App = struct {
         self.focused_session.store(self.focusedTermSession(), .release);
         self.refreshHudLocked(CACurrentMediaTime());
         self.scene_dirty = true;
-        return true;
+        return ed;
+    }
+
+    /// Ask the start-screen plugin what this screen should say, on a
+    /// worker, and land it if the pane is still showing one.
+    ///
+    /// Same shape as the panel's fetch and for the same reasons: the
+    /// call has a deadline measured in seconds, so a frame must never
+    /// wait on it, and the answer crosses back under `draw_lock`.
+    ///
+    /// The editor is re-FOUND rather than trusted: the pane can close
+    /// while a plugin is thinking, and a pointer to a destroyed editor
+    /// is the one mistake this pattern makes. Walking the panes proves
+    /// it is alive at the moment the answer lands.
+    fn startIntroFetch(self: *App, ed: *editorpkg.Editor) void {
+        const pl = @import("plugins.zig");
+        if (self.plugins.findGranted(pl.op_intro) == null) return;
+
+        var root_buf: [1024]u8 = undefined;
+        var root_len: usize = 0;
+        {
+            self.draw_lock.lock();
+            defer self.draw_lock.unlock();
+            var scratch: [1024]u8 = undefined;
+            if (self.paneRootLocked(self.activeTab().focused, &scratch)) |r| {
+                root_len = @min(root_buf.len, r.len);
+                @memcpy(root_buf[0..root_len], r[0..root_len]);
+            }
+        }
+
+        const Args = struct {
+            app: *App,
+            ed: *editorpkg.Editor,
+            root: [1024]u8,
+            root_len: usize,
+        };
+        const a = self.gpa.create(Args) catch return;
+        a.* = .{ .app = self, .ed = ed, .root = root_buf, .root_len = root_len };
+        const T = struct {
+            fn go(args: *Args) void {
+                const app = args.app;
+                defer app.gpa.destroy(args);
+                const p = app.plugins.findGranted(pl.op_intro) orelse return;
+                const model = app.gpa.create(editorpkg.Intro) catch return;
+                model.* = .{};
+                pl.fetchIntro(p, app.gpa, args.root[0..args.root_len], model);
+
+                app.draw_lock.lock();
+                defer app.draw_lock.unlock();
+                // Nothing to say, or nothing to say it to: the built-in
+                // screen is already up and stays up.
+                if (model.n == 0 or !app.editorAliveLocked(args.ed) or !args.ed.show_intro) {
+                    app.gpa.destroy(model);
+                    return;
+                }
+                // Handing it over transfers ownership — the editor frees
+                // it when the screen retires.
+                if (args.ed.intro) |old| app.gpa.destroy(old);
+                args.ed.intro = model;
+                args.ed.render_dirty = true;
+                app.scene_dirty = true;
+            }
+        };
+        if (std.Thread.spawn(.{}, T.go, .{a})) |t| t.detach() else |_| self.gpa.destroy(a);
+    }
+
+    /// Is this editor still in a pane? Caller holds draw_lock.
+    fn editorAliveLocked(self: *App, ed: *editorpkg.Editor) bool {
+        for (self.spaces.items) |space| for (space.tabs.items) |tab| {
+            for (tab.panes.items) |p| if (p.editor() == ed) return true;
+        };
+        return false;
     }
 
     /// Recompute the ACTIVE tab's pane rects and resize changed grids.
@@ -3558,6 +3651,7 @@ pub const App = struct {
                 ed.destroy();
                 return null;
             };
+            self.recordOldfile(ed);
         }
         // AFTER the open: attach() picks the language from the path,
         // and an editor that has not opened its file yet has none. The
@@ -3861,8 +3955,26 @@ pub const App = struct {
     /// in-pane file tree. Neither goes anywhere near the app's own open
     /// path, so without this the document arrives with the PREVIOUS
     /// file's server attached, or with none at all.
+    /// Note this editor's file in the oldfiles journal — "what was I
+    /// working on", which nothing but the editor can answer (mtime knows
+    /// what changed, git knows what you committed; neither knows what
+    /// you OPENED). Read back by whatever fills the start screen.
+    ///
+    /// Directories and synthetic buffers are not files you were working
+    /// on, and a path that is already the head of the journal is not
+    /// news — an `:e` on the file you are in should not cost a rewrite.
+    fn recordOldfile(self: *App, ed: *editorpkg.Editor) void {
+        if (ed.is_dir or ed.synthetic) return;
+        const p = ed.buf.path orelse return;
+        oldfiles.record(self.gpa, self.io, p);
+    }
+
     fn lspRetargetHook(ctx: *anyopaque, ed: *editorpkg.Editor) void {
         const self: *App = @ptrCast(@alignCast(ctx));
+        // Every LATER open on an editor comes through here, which makes
+        // this the one place that sees them all: `:e`, ⌘P, the tree, a
+        // jump letter on the start screen.
+        self.recordOldfile(ed);
         // Detach first, unconditionally: attach returns early when
         // there is no server for the new path, and "early" must not
         // mean "keeps the old one".
@@ -9410,6 +9522,15 @@ pub const App = struct {
                 .hov_emph, .hov_code => th.bar_value,
                 .hov_head => th.accent,
                 .hov_link => th.syn_string,
+                // The start screen. The header takes the accent — it is
+                // rook's name on an otherwise empty pane, and every
+                // theme tunes that colour to be the one thing you see
+                // first. The jump letter takes the brightest ink the
+                // chrome has, for the completion menu's reason: it is
+                // the only pressable thing on the screen, and an accent
+                // beside an accent-coloured header says nothing.
+                .intro_art => th.accent,
+                .intro_key => th.bar_value,
             };
             switch (st) {
                 .sel => bg = th.ed_sel_bg,

@@ -213,6 +213,49 @@ Nothing in the ten needed a layout language. That is the result worth
 keeping: seven surfaces and a typed item covered every feature rook has,
 so plugins never need to describe pixels.
 
+### The eleventh, 2026-08-17: the start screen
+
+The first feature since the exercise that had to be tried against the
+model rather than predicted by it — and the first that refused the
+**item** outright.
+
+An item is *a thing with a state a human might act on*. A start screen
+is not a list of those. Half of it is a header nobody acts on, the
+sections are ordering rather than grouping, and the rows that ARE
+pressable carry no state at all: they are "open this path" and "run that
+command". Every way of forcing it into items was a lie about what the
+payload holds — art in a `title`, a path in a `field` whose value cap is
+32 bytes, a section as a parent item with a `state` of "".
+
+So `intro.list` answers in **rows**, not items:
+
+```
+row: { kind, key?, label, detail?, path?, cmd? }
+kind: art | heading | entry | blank
+```
+
+What did NOT change is the line that matters. A row says *what it is*
+and *what pressing it reaches*; where it lands, how wide the column is,
+what colour a jump letter wears, and what happens when the pane is too
+narrow all stay core's. The refusal was about the item's SHAPE, not
+about the boundary — which is the distinction that keeps "a new surface"
+from becoming "a plugin drawing frames".
+
+Two things it forced that are worth naming:
+
+- **`cmd` as a row's payload.** The first time a plugin's answer names a
+  core command instead of its own action id. It is not `items.act` in
+  disguise: nothing goes back to the plugin, and the plugin cannot run
+  the command — it can only put a name on a row for a human to press.
+  That is a strictly weaker thing than a verb, and it is what a start
+  screen needs.
+- **A journal core has to keep.** Recency of *files you opened* is not
+  derivable from outside: mtime knows what changed, git knows what you
+  committed, and neither knows what you looked at. So core writes
+  `$XDG_STATE_HOME/rook/oldfiles` and the plugin reads it — the same
+  division as everywhere else, with core owning the fact and the plugin
+  owning the opinion about it.
+
 ## The rule the strip follows
 
 Every feature below reduces to *a mechanism core keeps* and *an instance

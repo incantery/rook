@@ -131,6 +131,13 @@ pub const Style = enum(u8) {
     hov_code,
     hov_head,
     hov_link,
+    // The start screen. Its own two buckets because it is the one
+    // surface with no document under it: the header is decoration
+    // rather than content, and the jump letter is the only thing on
+    // the screen you are meant to press — which is exactly the
+    // distinction a reader has to make in the first second.
+    intro_art,
+    intro_key,
 };
 
 /// The colour a completion label wears, from the protocol's
@@ -286,6 +293,16 @@ pub const BufHit = struct { a: usize, b: usize, close: usize, idx: usize };
 /// it) — what ⌘P wants, and what a terminal pane turns into a takeover.
 /// `beside` reuses or splits off the neighbour (the tree sidebar's).
 pub const OpenHow = enum { here, beside, split_right, split_down };
+
+/// The start screen's model — its own file so both the renderer and
+/// the plugin client can name it without importing each other
+/// (`app/src/intro.zig` has no imports at all, which is why it can sit
+/// between them).
+pub const Intro = @import("intro.zig").Intro;
+
+/// One pressable start-screen row, as drawn: the grid row it took and
+/// the columns it spans.
+pub const IntroHit = struct { row: u16 = 0, x0: u16 = 0, x1: u16 = 0, idx: u8 = 0 };
 
 /// A word and where on its line it starts. Borrowed from the buffer, so
 /// it is only good until the next edit.
@@ -727,6 +744,21 @@ pub const Editor = struct {
     /// own test root and has no build_options to read it from. Static
     /// string; the editor never frees it.
     intro_version: []const u8 = "",
+    /// The start screen's rows, when something filled them in — a
+    /// plugin's answer, arriving on a worker some frames after the
+    /// pane opened. Null is not a failure: it is the built-in screen
+    /// below, which is what rook shows with no plugin declared and
+    /// what it keeps showing if one never answers.
+    ///
+    /// ALLOCATED WITH THIS EDITOR'S ALLOCATOR by whoever hands it over,
+    /// and owned by the editor from that moment — it is freed when the
+    /// screen retires, which is a thing the supplier cannot observe.
+    intro: ?*Intro = null,
+    /// Where the pressable rows landed on the grid in the last fill —
+    /// the pointer's half of the jump letters, the same shape the
+    /// buffer line's click ranges take.
+    intro_hits: [Intro.max_rows]IntroHit = @splat(.{}),
+    intro_hits_n: usize = 0,
 
     /// The file moved on disk and we could NOT take it, because the
     /// buffer has edits. Refreshed by the app's poll, so it clears
@@ -1440,6 +1472,7 @@ pub const Editor = struct {
 
     pub fn destroy(self: *Editor) void {
         const gpa = self.gpa;
+        self.retireIntro();
         gpa.free(self.line_buf);
         for (self.buffers.items) |e| gpa.free(e.path);
         self.buffers.deinit(gpa);
@@ -2015,9 +2048,15 @@ pub const Editor = struct {
     pub fn key(self: *Editor, bytes: []const u8) void {
         if (bytes.len == 0) return;
         self.render_dirty = true;
+        // The start screen's jump letters, read BEFORE the machine
+        // does: on this screen `a` is the first recent file, not the
+        // start of an append. A lone printable byte only — an escape
+        // sequence is never a jump, and a paste is text arriving,
+        // which is the one thing that always retires the screen.
+        if (self.show_intro and bytes.len == 1 and self.introJump(bytes[0])) return;
         // Any key retires the start screen — vim's rule, and the only
         // one that never argues: even `j` means "I'm using this now".
-        self.show_intro = false;
+        self.retireIntro();
         self.status_len = 0;
         // Any refusal from a previous batch has been reported; a stale
         // flag would blame this keystroke for the last one's edit.
@@ -4161,6 +4200,79 @@ pub const Editor = struct {
         return run(ctx, id);
     }
 
+    // ---------------------------------------------------- start screen
+
+    /// Take the screen down and give its rows back.
+    ///
+    /// One function rather than an assignment at five call sites,
+    /// because the flag and the allocation have to move together: a
+    /// screen that retired while its model stayed is a leak nobody
+    /// would see, and a model freed while the flag stood is a draw
+    /// through a dangling pointer.
+    fn retireIntro(self: *Editor) void {
+        self.show_intro = false;
+        self.intro_hits_n = 0;
+        if (self.intro) |m| {
+            self.gpa.destroy(m);
+            self.intro = null;
+        }
+    }
+
+    /// Press the row a jump letter names. False means "no such letter",
+    /// which is the caller's cue to let the keystroke through — an
+    /// unassigned key is an ordinary key, not a swallowed one.
+    fn introJump(self: *Editor, ch: u8) bool {
+        const model = self.intro orelse return false;
+        // The flag is not enough: text arriving any way at all retires
+        // the screen, and a jump on a screen nobody can see would open
+        // a file the human never asked for.
+        if (self.buf.rope.byteLen() != 0 or self.is_dir) return false;
+        for (model.slice(), 0..) |*r, i| {
+            if (r.kind != .entry or r.key == 0 or r.key != ch) continue;
+            return self.introActivate(@intCast(i));
+        }
+        return false;
+    }
+
+    /// Do what row `idx` says: open its path here, or run its command.
+    ///
+    /// The path is COPIED first. `open` retires the screen, which frees
+    /// the model the path is a slice into — reading it afterwards is a
+    /// use-after-free, and the shape of this bug is that it works on
+    /// every machine until it doesn't.
+    fn introActivate(self: *Editor, idx: u8) bool {
+        const model = self.intro orelse return false;
+        if (idx >= model.n) return false;
+        const row = &model.rows[idx];
+        if (row.kind != .entry) return false;
+
+        const path = row.path.get();
+        if (path.len > 0) {
+            var buf: [Intro.max_target]u8 = undefined;
+            @memcpy(buf[0..path.len], path);
+            const p = buf[0..path.len];
+            self.open(p, false) catch {
+                // The row outlived the file — a checkout, a rename, a
+                // `rm`. Saying so beats a pane that ate the keystroke,
+                // and the screen stays up so the next letter still works.
+                self.setStatus("can't open {s}", .{p}, true);
+            };
+            return true;
+        }
+
+        const cmd = row.cmd.get();
+        if (cmd.len > 0) {
+            var buf: [Intro.max_cmd]u8 = undefined;
+            @memcpy(buf[0..cmd.len], cmd);
+            // The screen STAYS UP. A command from here opens something
+            // over the start screen — a file finder, the config panel —
+            // and dismissing what you launched from would leave escape
+            // with nothing to come back to.
+            return self.appCommandById(buf[0..cmd.len]);
+        }
+        return false;
+    }
+
     /// Ask the app to open `path` outside this editor. False when the
     /// seam is unattached (headless) or the app declined.
     fn appOpen(self: *Editor, path: []const u8, line: usize, how: OpenHow) bool {
@@ -4254,7 +4366,7 @@ pub const Editor = struct {
         self.is_dir = false;
         self.clearTreeRows();
         self.synthetic = true;
-        self.show_intro = false;
+        self.retireIntro();
         self.cline = 0;
         self.ccol = 0;
         self.top = 0;
@@ -4395,7 +4507,7 @@ pub const Editor = struct {
         self.ai_line = null; // line numbers belonged to the old buffer
         self.clearDecor();
         self.is_dir = is_dir;
-        self.show_intro = false; // a retarget is the start screen's exit
+        self.retireIntro(); // a retarget is the start screen's exit
         self.applyTreeDecor();
         if (!is_dir) {
             if (self.buf.path) |np| self.bufAdd(np);
@@ -7559,7 +7671,164 @@ pub const Editor = struct {
     /// floats are, so the document rendering never knows it exists —
     /// the `~` fringe and the cursor on line one stay exactly what an
     /// empty buffer draws (nvim's arrangement, not vim's blanked one).
+    ///
+    /// A supplied model wins; the built-in screen below is what rook
+    /// shows with nothing declared, and what it keeps showing while a
+    /// plugin is still answering. The fallback is not a placeholder —
+    /// it is the floor, and it has to be worth landing on.
     fn fillIntro(self: *Editor, g: []RCell, cols: usize, text_rows: usize, top_rows: usize, gw: usize) void {
+        self.intro_hits_n = 0;
+        if (self.intro) |m| {
+            if (m.n > 0) return self.fillIntroModel(m, g, cols, text_rows, top_rows, gw);
+        }
+        self.fillIntroBuiltin(g, cols, text_rows, top_rows, gw);
+    }
+
+    /// Draw a supplied screen: art centred as one block, sections left-
+    /// aligned under it, details right-aligned against the same edge.
+    ///
+    /// The block's width is the WIDEST ROW, so every section shares one
+    /// left margin and one right one — which is what makes a list of
+    /// paths read as a column instead of as centred prose. Each row is
+    /// dropped whole if it will not fit; a clipped path is a path you
+    /// cannot recognise, and half a header is worse than none.
+    fn fillIntroModel(self: *Editor, m: *const Intro, g: []RCell, cols: usize, text_rows: usize, top_rows: usize, gw: usize) void {
+        const text_cols = cols - @min(gw, cols - 1);
+        if (text_cols < 8) return;
+
+        var block: usize = 0;
+        for (m.slice()) |*r| {
+            const w = rowWidth(r);
+            if (w <= text_cols) block = @max(block, w);
+        }
+        if (block == 0) return;
+
+        // A row of air at the top whatever the arithmetic says, so a
+        // screen taller than its pane starts below the edge rather than
+        // against it. What does not fit is dropped from the BOTTOM: the
+        // header and your freshest rows are the top of the model, and
+        // they are what a short pane should keep.
+        if (text_rows < 3) return;
+        const room = text_rows - 1;
+        const drawn = @min(m.n, room);
+        const start_row = top_rows + @max(1, (text_rows - drawn) / 2);
+        const base_x = gw + (text_cols - block) / 2;
+
+        // The document's furniture goes, for the length of the screen:
+        // the `~` fringe, the line number, and the cursor sitting on
+        // line one. The built-in screen keeps all three deliberately —
+        // it is vim's intro, a note worn by an ordinary empty buffer.
+        // A SUPPLIED screen is not that. It is a dashboard somebody
+        // arranged, and a column of tildes down the side of it is the
+        // editor talking over the thing it was asked to show. (Only
+        // reachable with an empty buffer, so nothing is being hidden:
+        // there is nothing under this to hide.)
+        for (g[top_rows * cols ..][0 .. text_rows * cols]) |*c| c.* = .{ .cp = ' ', .st = .text };
+
+        // Details right-align against their SECTION, not against the
+        // screen. One long path in one section would otherwise push
+        // every age column on the page out to meet it, and a column
+        // that far from what it describes stops being a column. The
+        // left margin stays shared — that is what makes the sections
+        // read as one page rather than as four.
+        var runw: [Intro.max_rows]usize = @splat(0);
+        {
+            var i: usize = 0;
+            while (i < drawn) {
+                if (m.rows[i].kind != .entry) {
+                    i += 1;
+                    continue;
+                }
+                var j = i;
+                var w: usize = 0;
+                while (j < drawn and m.rows[j].kind == .entry) : (j += 1) w = @max(w, rowWidth(&m.rows[j]));
+                while (i < j) : (i += 1) runw[i] = w;
+            }
+        }
+
+        for (m.rows[0..drawn], 0..) |*r, i| {
+            if (r.kind == .blank) continue;
+            const row = start_row + i;
+            if (row >= top_rows + text_rows) break;
+            const out = g[row * cols ..][0..cols];
+            const label = r.label.get();
+            const lw = strWidth(label);
+
+            switch (r.kind) {
+                .blank => {},
+                .art => {
+                    if (lw > text_cols) continue;
+                    // Centred inside the block, not against the pane:
+                    // the header belongs to the column under it.
+                    var x = base_x + (block -| lw) / 2;
+                    putStr(out, &x, label, .intro_art);
+                },
+                .heading => {
+                    if (lw > text_cols) continue;
+                    var x = base_x;
+                    putStr(out, &x, label, .dim);
+                },
+                .entry => {
+                    if (rowWidth(r) > text_cols) continue;
+                    var x = base_x;
+                    if (r.key != 0) {
+                        const k = [_]u8{r.key};
+                        putStr(out, &x, &k, .intro_key);
+                        x += 2;
+                    } else x += 3;
+                    const label_x = x;
+                    putStr(out, &x, label, .text);
+                    const detail = r.detail.get();
+                    if (detail.len > 0) {
+                        // Right-aligned against this section's widest
+                        // row — an age column that wanders is a column
+                        // nobody reads down.
+                        var dx = base_x + @max(runw[i], rowWidth(r)) - strWidth(detail);
+                        if (dx > x) putStr(out, &dx, detail, .dim);
+                    }
+                    // The click target is the letter and its label, not
+                    // the whole row: the empty space beside a file is
+                    // not the file.
+                    if (self.intro_hits_n < self.intro_hits.len and (r.path.n > 0 or r.cmd.n > 0)) {
+                        self.intro_hits[self.intro_hits_n] = .{
+                            .row = @intCast(row),
+                            .x0 = @intCast(base_x),
+                            .x1 = @intCast(label_x + lw),
+                            .idx = @intCast(i),
+                        };
+                        self.intro_hits_n += 1;
+                    }
+                },
+            }
+        }
+    }
+
+    /// A row's full drawn width, letter column and detail included.
+    fn rowWidth(r: *const Intro.Row) usize {
+        const lw = strWidth(r.label.get());
+        return switch (r.kind) {
+            .blank => 0,
+            .art, .heading => lw,
+            .entry => blk: {
+                const d = r.detail.get();
+                break :blk 3 + lw + (if (d.len > 0) 2 + strWidth(d) else 0);
+            },
+        };
+    }
+
+    /// Width in cells, counting codepoints — the same approximation the
+    /// rest of this screen makes, and honest for the box-drawing and
+    /// ASCII a start screen is written in.
+    fn strWidth(s: []const u8) usize {
+        var w: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) : (i += cpLenAt(s, i)) w += 1;
+        return w;
+    }
+
+    /// The built-in screen: rook's own name, its version, and the four
+    /// gestures that get you off it.
+    fn fillIntroBuiltin(self: *Editor, g: []RCell, cols: usize, text_rows: usize, top_rows: usize, gw: usize) void {
         const Line = struct { s: []const u8, st: Style };
         var ver_buf: [64]u8 = undefined;
         const ver: []const u8 = if (self.intro_version.len > 0)
@@ -8112,8 +8381,18 @@ pub const Editor = struct {
     /// line. True when it acted (the app repaints); false lets the
     /// click keep meaning "focus the pane".
     pub fn mouseCell(self: *Editor, col: usize, row: usize) bool {
+        // A pressable row on the start screen takes the click before
+        // anything else looks at it — the letter beside a file is a
+        // promise the pointer should keep too, and the pane under it
+        // is an empty buffer with nowhere for a cursor to go.
+        if (self.show_intro) {
+            for (self.intro_hits[0..self.intro_hits_n]) |h| {
+                if (h.row != row or col < h.x0 or col >= h.x1) continue;
+                if (self.introActivate(h.idx)) return true;
+            }
+        }
         // A click is activity the same way a key is.
-        self.show_intro = false;
+        self.retireIntro();
         const top_rows: usize = if (self.buflineActive()) 1 else 0;
         if (top_rows == 1 and row == 0) {
             for (self.bufline_hits.items) |hit| {
@@ -8652,6 +8931,170 @@ test "start screen bows out of a pane too small to hold it" {
     const dump = try e.dumpText(gpa, 30, 6);
     defer gpa.free(dump);
     try testing.expect(std.mem.indexOf(u8, dump, "rook editor") == null);
+}
+
+/// A supplied start screen: a header, a section, one file and one
+/// command — the shape the plugin sends, built by hand so the renderer
+/// is tested without a subprocess.
+fn mkIntro(e: *Editor, path: []const u8) !void {
+    const m = try e.gpa.create(Intro);
+    m.* = .{};
+    var art = Intro.Row{ .kind = .art };
+    art.label.set("R O O K");
+    m.add(art);
+    m.add(.{ .kind = .blank });
+    var head = Intro.Row{ .kind = .heading };
+    head.label.set("recent");
+    m.add(head);
+    var file = Intro.Row{ .kind = .entry, .key = 'a' };
+    file.label.set("src/editor.zig");
+    file.detail.set("2h");
+    file.path.set(path);
+    m.add(file);
+    var cmd = Intro.Row{ .kind = .entry, .key = 'f' };
+    cmd.label.set("find a file");
+    cmd.cmd.set("palette.files");
+    m.add(cmd);
+    e.show_intro = true;
+    e.intro = m;
+}
+
+test "a supplied start screen replaces the built-in one" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    try mkIntro(e, "/nowhere/x.zig");
+
+    const dump = try e.dumpText(gpa, 60, 20);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "R O O K") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "recent") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "a  src/editor.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "2h") != null);
+    // The built-in screen is REPLACED, not drawn under.
+    try testing.expect(std.mem.indexOf(u8, dump, "rook editor") == null);
+    // Still an empty buffer wearing a note.
+    try testing.expect(std.mem.indexOf(u8, dump, "[scratch]") != null);
+}
+
+test "a jump letter opens its file, and an unassigned key is an ordinary key" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}/jump.txt", .{&tmp.sub_path});
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = path, .data = "opened\n" });
+
+    try mkIntro(e, path);
+    // `j` is not a jump letter here, so it stays a motion — and, like
+    // any key, it retires the screen.
+    e.key("j");
+    try testing.expect(!e.show_intro);
+    try testing.expect(e.intro == null);
+    try testing.expect(e.buf.path == null);
+
+    try mkIntro(e, path);
+    e.key("a"); // NOT an append: on this screen it is the first file
+    try testing.expect(!e.show_intro);
+    try testing.expect(e.intro == null);
+    try testing.expectEqualStrings(path, e.buf.path.?);
+    try testing.expectEqual(Mode.normal, e.mode);
+    const text = try bufText(gpa, e);
+    defer gpa.free(text);
+    try testing.expectEqualStrings("opened\n", text);
+}
+
+test "a command row runs its command and leaves the screen up" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    const Probe = struct {
+        var last: [64]u8 = @splat(0);
+        var last_len: usize = 0;
+        fn hook(_: *anyopaque, id: []const u8) bool {
+            last_len = @min(last.len, id.len);
+            @memcpy(last[0..last_len], id[0..last_len]);
+            return true;
+        }
+    };
+    Probe.last_len = 0;
+    e.cmd_ctx = e;
+    e.app_command = &Probe.hook;
+    try mkIntro(e, "/nowhere/x.zig");
+
+    e.key("f");
+    try testing.expectEqualStrings("palette.files", Probe.last[0..Probe.last_len]);
+    // A picker opens OVER the start screen, so the screen stays.
+    try testing.expect(e.show_intro);
+    try testing.expect(e.intro != null);
+}
+
+test "a click on a jump row is the same press as its letter" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}/click.txt", .{&tmp.sub_path});
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = path, .data = "clicked\n" });
+
+    try mkIntro(e, path);
+    // The hit ranges are published by the fill, so the screen has to
+    // have been drawn before a click can find anything — which is
+    // exactly the app's order.
+    const dump = try e.dumpText(gpa, 60, 20);
+    gpa.free(dump);
+    try testing.expect(e.intro_hits_n == 2);
+    const hit = e.intro_hits[0];
+    try testing.expect(e.mouseCell(hit.x0, hit.row));
+    try testing.expectEqualStrings(path, e.buf.path.?);
+}
+
+test "a jump letter is exactly `:e` on its path, vanished file and all" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}/gone.txt", .{&tmp.sub_path});
+
+    try mkIntro(e, path);
+    e.key("a");
+    // A row can outlive its file — the supplier stats when it lists,
+    // and a checkout happens between then and the keystroke. What the
+    // editor does about it is not a special case: it is `:e` on a
+    // missing path, which is an empty buffer wearing that name.
+    try testing.expect(!e.show_intro);
+    try testing.expectEqualStrings(path, e.buf.path.?);
+    try testing.expectEqual(@as(usize, 0), e.buf.rope.byteLen());
+}
+
+test "a start screen taller than the pane keeps its head" {
+    const gpa = testing.allocator;
+    var e = try mkEditor(gpa);
+    defer e.destroy();
+    const m = try gpa.create(Intro);
+    m.* = .{};
+    var i: usize = 0;
+    while (i < Intro.max_rows) : (i += 1) {
+        var r = Intro.Row{ .kind = .entry, .key = @intCast('a' + (i % 26)) };
+        var lbuf: [32]u8 = undefined;
+        r.label.set(std.fmt.bufPrint(&lbuf, "row{d}", .{i}) catch unreachable);
+        m.add(r);
+    }
+    e.show_intro = true;
+    e.intro = m;
+
+    const dump = try e.dumpText(gpa, 40, 10);
+    defer gpa.free(dump);
+    try testing.expect(std.mem.indexOf(u8, dump, "row0") != null);
+    try testing.expect(std.mem.indexOf(u8, dump, "row63") == null);
 }
 
 test "replace r and join J" {

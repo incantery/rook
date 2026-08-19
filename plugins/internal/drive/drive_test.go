@@ -6,15 +6,24 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/incantery/rook/plugins/internal/transcript"
+	veradrive "github.com/incantery/vera/drive"
 )
 
-// world is the fake transcript: tests mutate the session and the loop
-// reads it back through Scan, the same one-way glass the real loop
-// looks through.
+// What is tested here is the MECHANISM: typing, and the two waits that
+// turn typing into a turn. The loop that spends the turns and judges
+// the replies is vera's and is tested there — what this file must not
+// let rot is that rook's half still keeps its promises to it, and the
+// last two tests run the real loop over this turner to prove the seam
+// is not just a compiling signature.
+
+// world is the fake transcript: tests mutate the session and the
+// turner reads it back through Scan, the same one-way glass the real
+// one looks through.
 type world struct {
 	mu sync.Mutex
 	s  transcript.Session
@@ -49,232 +58,101 @@ func (w *world) vanish() {
 	w.ok = false
 }
 
-// scriptDriver replies to a session on delivery: the prompt lands and,
-// a beat later, the scripted reply appears as a finished turn.
-type scriptDriver struct {
-	w       *world
-	replies []string
-	sent    []string
-	fail    error
+func (w *world) panes() []transcript.PaneActivity {
+	return []transcript.PaneActivity{{ID: 7, Cwd: "/repo", Fg: "claude"}}
 }
-
-func (d *scriptDriver) Deliver(ctx context.Context, sessionID, prompt string) error {
-	if d.fail != nil {
-		return d.fail
-	}
-	d.sent = append(d.sent, prompt)
-	reply := "reply " + prompt
-	if n := len(d.sent) - 1; n < len(d.replies) {
-		reply = d.replies[n]
-	}
-	d.w.set(func(s *transcript.Session) {
-		s.Prompt = prompt
-		s.LastText = reply
-		s.State = transcript.StateNeedsYou
-	})
-	return nil
-}
-
-// scriptJudge hands out verdicts in order and remembers what it saw.
-type scriptJudge struct {
-	verdicts []Verdict
-	err      error
-	seen     [][]Exchange
-}
-
-func (j *scriptJudge) Judge(ctx context.Context, goal string, history []Exchange) (Verdict, error) {
-	j.seen = append(j.seen, append([]Exchange(nil), history...))
-	if j.err != nil {
-		return Verdict{}, j.err
-	}
-	n := len(j.seen) - 1
-	if n >= len(j.verdicts) {
-		return Verdict{Done: true, Reason: "script ran out"}, nil
-	}
-	return j.verdicts[n], nil
-}
-
-func testLoop(w *world, d Driver, j Judge) *Loop {
-	return &Loop{
-		Driver: d, Judge: j, Scan: w.scan,
-		Poll: 2 * time.Millisecond, TurnTimeout: 500 * time.Millisecond, MaxTurns: 3,
-	}
-}
-
-func TestRunMeetsTheGoalFirstTurn(t *testing.T) {
-	w := newWorld(transcript.StateNeedsYou, "old turn")
-	d := &scriptDriver{w: w, replies: []string{"three hypotheses, as asked"}}
-	j := &scriptJudge{verdicts: []Verdict{{Done: true, Reason: "it hypothesized"}}}
-	res, err := testLoop(w, d, j).Run(context.Background(), "s1", "get a hypothesis")
-	if err != nil || !res.Done || res.Reason != "it hypothesized" {
-		t.Fatalf("res=%+v err=%v", res, err)
-	}
-	if len(res.Turns) != 1 || res.Turns[0].Prompt != "get a hypothesis" || res.Turns[0].Reply != "three hypotheses, as asked" {
-		t.Fatalf("turns: %+v", res.Turns)
-	}
-}
-
-func TestRunRepromptsUntilTheJudgeIsSatisfied(t *testing.T) {
-	w := newWorld(transcript.StateNeedsYou, "old turn")
-	d := &scriptDriver{w: w, replies: []string{"I don't have access to that", "fine: here are three hypotheses"}}
-	j := &scriptJudge{verdicts: []Verdict{
-		{Prompt: "You do not need access — give your best hypothesis anyway."},
-		{Done: true, Reason: "hypotheses delivered"},
-	}}
-	res, err := testLoop(w, d, j).Run(context.Background(), "s1", "get a hypothesis")
-	if err != nil || !res.Done {
-		t.Fatalf("res=%+v err=%v", res, err)
-	}
-	if len(res.Turns) != 2 || d.sent[1] != "You do not need access — give your best hypothesis anyway." {
-		t.Fatalf("turns=%+v sent=%v", res.Turns, d.sent)
-	}
-	// The judge saw the whole history on the second look, not just the
-	// latest round.
-	if len(j.seen[1]) != 2 {
-		t.Fatalf("judge saw %d rounds", len(j.seen[1]))
-	}
-}
-
-func TestRunSpendsTheBudgetAndSaysSo(t *testing.T) {
-	w := newWorld(transcript.StateNeedsYou, "old turn")
-	d := &scriptDriver{w: w}
-	j := &scriptJudge{verdicts: []Verdict{
-		{Prompt: "again, once"}, {Prompt: "again, twice"}, {Prompt: "again, thrice"},
-	}}
-	res, err := testLoop(w, d, j).Run(context.Background(), "s1", "goal")
-	if err != nil {
-		t.Fatalf("budget exhaustion is not an error: %v", err)
-	}
-	if res.Done || !strings.Contains(res.Reason, "turn budget") || len(res.Turns) != 3 {
-		t.Fatalf("res=%+v", res)
-	}
-}
-
-func TestRunWaitsForAWorkingSessionBeforeTyping(t *testing.T) {
-	w := newWorld(transcript.StateWorking, "mid-turn text")
-	d := &scriptDriver{w: w}
-	j := &scriptJudge{verdicts: []Verdict{{Done: true}}}
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		w.set(func(s *transcript.Session) { s.State = transcript.StateNeedsYou })
-	}()
-	res, err := testLoop(w, d, j).Run(context.Background(), "s1", "goal")
-	if err != nil || !res.Done {
-		t.Fatalf("res=%+v err=%v", res, err)
-	}
-}
-
-func TestRunStopsWhenTheDeskTakesOver(t *testing.T) {
-	w := newWorld(transcript.StateNeedsYou, "old turn")
-	// A driver whose delivery lands, but whose turn ends on somebody
-	// else's prompt: the human typed their own question first.
-	d := &scriptDriver{w: w}
-	j := &scriptJudge{}
-	loop := testLoop(w, d, j)
-	loop.Driver = deliverFunc(func(ctx context.Context, id, prompt string) error {
-		w.set(func(s *transcript.Session) {
-			s.Prompt = "something the human asked"
-			s.LastText = "an answer to the human"
-			s.State = transcript.StateNeedsYou
-		})
-		return nil
-	})
-	_, err := loop.Run(context.Background(), "s1", "goal")
-	if err == nil || !strings.Contains(err.Error(), "desk wins") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-type deliverFunc func(ctx context.Context, sessionID, prompt string) error
-
-func (f deliverFunc) Deliver(ctx context.Context, sessionID, prompt string) error {
-	return f(ctx, sessionID, prompt)
-}
-
-func TestRunReportsAVanishedSession(t *testing.T) {
-	w := newWorld(transcript.StateNeedsYou, "old")
-	w.vanish()
-	_, err := testLoop(w, &scriptDriver{w: w}, &scriptJudge{}).Run(context.Background(), "s1", "goal")
-	if err == nil || !strings.Contains(err.Error(), "gone") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestRunSurfacesARefusedDelivery(t *testing.T) {
-	w := newWorld(transcript.StateNeedsYou, "old")
-	d := &scriptDriver{w: w, fail: errors.New("the keyboard's gates refused")}
-	_, err := testLoop(w, d, &scriptJudge{}).Run(context.Background(), "s1", "goal")
-	if err == nil || !strings.Contains(err.Error(), "delivery refused") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestRunStopsOnCancel(t *testing.T) {
-	w := newWorld(transcript.StateWorking, "busy forever")
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() { time.Sleep(10 * time.Millisecond); cancel() }()
-	loop := testLoop(w, &scriptDriver{w: w}, &scriptJudge{})
-	loop.TurnTimeout = 10 * time.Second
-	_, err := loop.Run(ctx, "s1", "goal")
-	if err == nil || !strings.Contains(err.Error(), "stopped") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestRunTimesOutAReplyThatNeverComes(t *testing.T) {
-	w := newWorld(transcript.StateNeedsYou, "old")
-	// Delivery "lands" but the transcript never moves.
-	loop := testLoop(w, deliverFunc(func(context.Context, string, string) error { return nil }), &scriptJudge{})
-	loop.TurnTimeout = 20 * time.Millisecond
-	_, err := loop.Run(context.Background(), "s1", "goal")
-	if err == nil || !strings.Contains(err.Error(), "timeout") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-// ---- the TUI driver ----
 
 // fakeCaller plays rook's half of the wire: records every op, grants
-// everything (or refuses everything).
+// everything (or refuses everything). onSubmit is the session
+// answering — it fires on the submit frame, which is the moment a
+// prompt actually lands.
 type fakeCaller struct {
-	mu     sync.Mutex
-	ops    []string
-	params []map[string]any
-	refuse string
+	mu       sync.Mutex
+	ops      []string
+	params   []map[string]any
+	lastText string
+	refuse   string
+	onSubmit func(typed string)
 }
 
 func (f *fakeCaller) Call(op string, params any, _ time.Duration) (json.RawMessage, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	raw, _ := json.Marshal(params)
 	var p map[string]any
 	json.Unmarshal(raw, &p)
+
+	f.mu.Lock()
 	f.ops = append(f.ops, op)
 	f.params = append(f.params, p)
-	if f.refuse != "" {
-		return nil, errors.New(f.refuse)
+	if t, ok := p["text"].(string); ok {
+		f.lastText = t
+	}
+	typed, refuse, answer := f.lastText, f.refuse, f.onSubmit
+	f.mu.Unlock()
+
+	if refuse != "" {
+		return nil, errors.New(refuse)
+	}
+	if p["submit_only"] == true && answer != nil {
+		answer(typed)
 	}
 	return json.RawMessage(`{}`), nil
 }
 
-func tuiWorld() (func(time.Time) []transcript.Session, func() []transcript.PaneActivity) {
-	sessions := []transcript.Session{
-		{ID: "old", Cwd: "/repo", Title: "yesterday", Mtime: time.Now().Add(-time.Hour)},
-		{ID: "s1", Cwd: "/repo", Title: "today", Mtime: time.Now()},
-	}
-	panes := []transcript.PaneActivity{
-		{ID: 7, Cwd: "/repo", Fg: "claude"},
-		{ID: 8, Cwd: "/elsewhere", Fg: "zsh"},
-	}
-	return func(time.Time) []transcript.Session { return sessions },
-		func() []transcript.PaneActivity { return panes }
+func (f *fakeCaller) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.ops)
 }
 
-func TestTUIDeliversAsPasteThenSubmit(t *testing.T) {
-	scan, panes := tuiWorld()
+// typed lists, in order, the text of every paste frame — what actually
+// reached somebody's terminal.
+func (f *fakeCaller) typed() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, p := range f.params {
+		if t, ok := p["text"].(string); ok {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// answering wires a caller whose session replies to whatever is typed,
+// scripted in order, ending the turn the way a real one ends: needs
+// you, with the assistant's last word changed and the prompt on the
+// record as the one that was sent.
+func answering(w *world, replies ...string) *fakeCaller {
+	var n int
 	c := &fakeCaller{}
-	d := &TUI{C: c, Scan: scan, Panes: panes, Names: []string{"claude"}}
-	if err := d.Deliver(context.Background(), "s1", "the prompt"); err != nil {
+	c.onSubmit = func(typed string) {
+		reply := "reply to: " + typed
+		if n < len(replies) {
+			reply = replies[n]
+		}
+		n++
+		w.set(func(s *transcript.Session) {
+			s.Prompt = typed
+			s.LastText = reply
+			s.State = transcript.StateNeedsYou
+		})
+	}
+	return c
+}
+
+func tuiFor(w *world, c Caller) *TUI {
+	return &TUI{
+		C: c, Scan: w.scan, Panes: w.panes, Names: []string{"claude"},
+		Poll: 2 * time.Millisecond, TurnTimeout: 500 * time.Millisecond,
+	}
+}
+
+// ---- the mechanism: typing ----
+
+func TestTUIDeliversAsPasteThenSubmit(t *testing.T) {
+	w := newWorld(transcript.StateNeedsYou, "old turn")
+	c := &fakeCaller{}
+	if err := tuiFor(w, c).Deliver(context.Background(), "s1", "the prompt"); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	if len(c.ops) != 2 || c.ops[0] != "session.send" || c.ops[1] != "session.send" {
@@ -290,8 +168,15 @@ func TestTUIDeliversAsPasteThenSubmit(t *testing.T) {
 }
 
 func TestTUIRefusesAStaleSession(t *testing.T) {
-	scan, panes := tuiWorld()
-	d := &TUI{C: &fakeCaller{}, Scan: scan, Panes: panes, Names: []string{"claude"}}
+	// Two sessions in one directory: the pane there runs the newer one,
+	// so typing at the older one would put words in a stranger's mouth.
+	sessions := []transcript.Session{
+		{ID: "old", Cwd: "/repo", Title: "yesterday", Mtime: time.Now().Add(-time.Hour)},
+		{ID: "s1", Cwd: "/repo", Title: "today", Mtime: time.Now()},
+	}
+	w := newWorld(transcript.StateNeedsYou, "old turn")
+	d := &TUI{C: &fakeCaller{}, Names: []string{"claude"}, Panes: w.panes,
+		Scan: func(time.Time) []transcript.Session { return sessions }}
 	err := d.Deliver(context.Background(), "old", "the prompt")
 	if err == nil || !strings.Contains(err.Error(), "history in its directory") {
 		t.Fatalf("err=%v", err)
@@ -299,11 +184,185 @@ func TestTUIRefusesAStaleSession(t *testing.T) {
 }
 
 func TestTUIRefusesAPanelessSession(t *testing.T) {
-	scan, _ := tuiWorld()
-	d := &TUI{C: &fakeCaller{}, Scan: scan,
-		Panes: func() []transcript.PaneActivity { return nil }, Names: []string{"claude"}}
+	w := newWorld(transcript.StateNeedsYou, "old turn")
+	d := tuiFor(w, &fakeCaller{})
+	d.Panes = func() []transcript.PaneActivity { return nil }
 	err := d.Deliver(context.Background(), "s1", "the prompt")
 	if err == nil || !strings.Contains(err.Error(), "not on a pane") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+// ---- the mechanism: the two waits that make a turn ----
+
+func TestRunTurnWaitsForAWorkingSessionBeforeTyping(t *testing.T) {
+	w := newWorld(transcript.StateWorking, "mid-turn text")
+	c := answering(w, "the answer")
+	d := tuiFor(w, c)
+	var lines []string
+	var mu sync.Mutex
+	d.Progress = func(l string) { mu.Lock(); lines = append(lines, l); mu.Unlock() }
+
+	var typedEarly atomic.Bool
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		typedEarly.Store(c.count() > 0)
+		w.set(func(s *transcript.Session) { s.State = transcript.StateNeedsYou })
+	}()
+
+	turn, err := d.RunTurn(context.Background(), "s1", "the prompt")
+	if err != nil || turn.Reply != "the answer" {
+		t.Fatalf("turn=%+v err=%v", turn, err)
+	}
+	if typedEarly.Load() {
+		t.Fatal("typed into a session that was still working — the prompt would queue behind somebody else's turn")
+	}
+	// The conversation stays where it is: this mechanism does not fork.
+	if turn.SessionID != "s1" {
+		t.Fatalf("session id moved to %q", turn.SessionID)
+	}
+	// A typed drive spends its time waiting; a row that cannot say what
+	// it is waiting for reads as hung.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) < 3 || !strings.Contains(lines[0], "quiet") || !strings.Contains(lines[len(lines)-1], "reply") {
+		t.Fatalf("progress: %v", lines)
+	}
+}
+
+func TestRunTurnStopsWhenTheDeskTakesOver(t *testing.T) {
+	w := newWorld(transcript.StateNeedsYou, "old turn")
+	c := &fakeCaller{}
+	// The turn ends on somebody ELSE's prompt: the human typed their own
+	// question while the drive was waiting.
+	c.onSubmit = func(string) {
+		w.set(func(s *transcript.Session) {
+			s.Prompt = "something the human asked"
+			s.LastText = "an answer to the human"
+			s.State = transcript.StateNeedsYou
+		})
+	}
+	_, err := tuiFor(w, c).RunTurn(context.Background(), "s1", "the prompt")
+	if err == nil || !strings.Contains(err.Error(), "desk wins") {
+		t.Fatalf("err=%v", err)
+	}
+	// Losing to the desk is a ruling, not a hiccup: retrying it would
+	// type over the human who just took the keyboard.
+	if veradrive.IsTransient(err) {
+		t.Fatal("the desk winning must never be marked retryable")
+	}
+}
+
+func TestRunTurnTimesOutAReplyThatNeverComesAndSaysItIsWorthRetrying(t *testing.T) {
+	w := newWorld(transcript.StateNeedsYou, "old")
+	// Delivery lands but the transcript never moves.
+	d := tuiFor(w, &fakeCaller{})
+	d.TurnTimeout = 20 * time.Millisecond
+	_, err := d.RunTurn(context.Background(), "s1", "goal")
+	if err == nil || !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("err=%v", err)
+	}
+	if !veradrive.IsTransient(err) {
+		t.Fatal("a clock running out is the machinery's failure, not the goal's — it must carry the transient mark")
+	}
+}
+
+func TestRunTurnStopsOnCancelAndTheStopIsFinal(t *testing.T) {
+	w := newWorld(transcript.StateWorking, "busy forever")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(10 * time.Millisecond); cancel() }()
+	d := tuiFor(w, &fakeCaller{})
+	d.TurnTimeout = 10 * time.Second
+	_, err := d.RunTurn(ctx, "s1", "goal")
+	if err == nil || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("err=%v", err)
+	}
+	// A human pressed stop. Retrying what somebody halted is the one
+	// thing a drive must not do.
+	if veradrive.IsTransient(err) {
+		t.Fatal("a deliberate stop must not be marked retryable")
+	}
+}
+
+func TestRunTurnReportsAVanishedSession(t *testing.T) {
+	w := newWorld(transcript.StateNeedsYou, "old")
+	w.vanish()
+	_, err := tuiFor(w, &fakeCaller{}).RunTurn(context.Background(), "s1", "goal")
+	if err == nil || !strings.Contains(err.Error(), "gone") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRunTurnSurfacesARefusedDelivery(t *testing.T) {
+	w := newWorld(transcript.StateNeedsYou, "old")
+	_, err := tuiFor(w, &fakeCaller{refuse: "the keyboard's gates refused"}).
+		RunTurn(context.Background(), "s1", "goal")
+	if err == nil || !strings.Contains(err.Error(), "delivery refused") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// ---- the seam: vera's loop over rook's mechanism ----
+
+// scriptJudge hands out verdicts in order and remembers what it saw.
+type scriptJudge struct {
+	verdicts []veradrive.Verdict
+	seen     [][]veradrive.Exchange
+}
+
+func (j *scriptJudge) Judge(_ context.Context, _ string, history []veradrive.Exchange) (veradrive.Verdict, error) {
+	j.seen = append(j.seen, append([]veradrive.Exchange(nil), history...))
+	n := len(j.seen) - 1
+	if n >= len(j.verdicts) {
+		return veradrive.Verdict{Done: true, Reason: "script ran out"}, nil
+	}
+	return j.verdicts[n], nil
+}
+
+func TestTheLoopRepromptsThroughTheTurnerUntilTheJudgeIsSatisfied(t *testing.T) {
+	w := newWorld(transcript.StateNeedsYou, "old turn")
+	c := answering(w, "I don't have access to that", "fine: here are three hypotheses")
+	j := &scriptJudge{verdicts: []veradrive.Verdict{
+		{Prompt: "You do not need access — give your best hypothesis anyway."},
+		{Done: true, Reason: "hypotheses delivered"},
+	}}
+	loop := &veradrive.Loop{Turner: tuiFor(w, c), Judge: j, MaxTurns: 3}
+	res, err := loop.Run(context.Background(), "s1", "get a hypothesis")
+	if err != nil || !res.Done || res.Reason != "hypotheses delivered" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if len(res.Turns) != 2 {
+		t.Fatalf("turns: %+v", res.Turns)
+	}
+	// The judge's next message is what reached the terminal — the whole
+	// point of the mechanism being on the other side of the seam.
+	typed := c.typed()
+	if len(typed) != 2 || typed[0] != "get a hypothesis" || !strings.Contains(typed[1], "best hypothesis") {
+		t.Fatalf("typed: %v", typed)
+	}
+	// The judge sees the whole conversation, not just the latest round.
+	if len(j.seen[1]) != 2 {
+		t.Fatalf("the judge saw %d rounds on its second look", len(j.seen[1]))
+	}
+}
+
+func TestAnEscalationStopsTheDriveWithTheAskOnRecord(t *testing.T) {
+	w := newWorld(transcript.StateNeedsYou, "old turn")
+	c := answering(w, "I can do it but it means a force-push")
+	j := &scriptJudge{verdicts: []veradrive.Verdict{
+		{Escalate: true, Reason: "The worker wants to force-push; the goal grants no such thing. Allow it?"},
+	}}
+	loop := &veradrive.Loop{Turner: tuiFor(w, c), Judge: j, MaxTurns: 3}
+	res, err := loop.Run(context.Background(), "s1", "land the release")
+	if err != nil {
+		t.Fatalf("an escalation is not an error: %v", err)
+	}
+	if !res.Escalated || !strings.Contains(res.Ask, "force-push") {
+		t.Fatalf("res=%+v", res)
+	}
+	// Escalating means stopping. Nothing more may be typed at somebody
+	// whose next move the machine just admitted it cannot make.
+	if typed := c.typed(); len(typed) != 1 {
+		t.Fatalf("typed after escalating: %v", typed)
 	}
 }

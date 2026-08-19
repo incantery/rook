@@ -33,6 +33,7 @@ const scenarios = [_]Scenario{
     .{ .name = "tabs", .what = "new tab, cycle, pane counts stay separate", .run = tabs },
     .{ .name = "editor", .what = "edit a file, change it, :w reaches disk", .run = editor },
     .{ .name = "intro", .what = "bare `re`: the start screen shows, a keystroke retires it, :w names the scratch", .run = intro },
+    .{ .name = "startscreen", .what = "a plugin fills the start screen, and its jump letter opens the file", .run = startScreen },
     .{ .name = "indent", .what = "o inherits the indent, >> shifts, and neither leaves whitespace", .run = indent },
     .{ .name = "vim", .what = "regex :s, a macro, a block edit and `.` all reach disk", .run = vim },
     .{ .name = "wide", .what = "CJK text lays out two cells wide and motions still land", .run = wideText },
@@ -379,6 +380,96 @@ fn intro(gpa: std.mem.Allocator, bin: []const u8) !void {
     const got = try h.readFile(path, &content);
     try h.expectContains(got, "hello from scratch", ":w <name> should give the scratch a file");
 }
+
+/// The start screen a PLUGIN fills, end to end.
+///
+/// The unit tests cover the model and the renderer; what this catches is
+/// the layer between — a bare `re` asking a real subprocess over the real
+/// wire, off the key path, and the answer landing on a pane that has
+/// already drawn the built-in screen once. Then the assertion that makes
+/// the whole thing worth having: a letter opens the file, and `a` on this
+/// screen is not an append.
+fn startScreen(gpa: std.mem.Allocator, bin: []const u8) !void {
+    var target_buf: [128]u8 = undefined;
+    const target = try std.fmt.bufPrint(&target_buf, "/tmp/rook-e2e-start-{d}.txt", .{getpid()});
+    try h.writeFile(target, "opened-from-the-start-screen\n");
+
+    var script_buf: [128]u8 = undefined;
+    const script = try std.fmt.bufPrint(&script_buf, "/tmp/rook-e2e-start-{d}.sh", .{getpid()});
+    var body_buf: [2048]u8 = undefined;
+    const body = try std.fmt.bufPrint(&body_buf, sh_start_plugin, .{target});
+    try h.writeFile(script, body);
+
+    var json_buf: [1024]u8 = undefined;
+    const graph = try std.fmt.bufPrint(&json_buf,
+        \\{{"rookEnvironment":1,"nodes":[
+        \\{{"id":"plugin:start","kind":"plugin","scope":"app","name":"start","command":["/bin/sh","{s}"],"load":"lazy","grants":["intro.list"]}}
+        \\]}}
+    , .{script});
+
+    const app = try h.Instance.start(gpa, bin, .{ .env_json = graph });
+    defer {
+        app.stop();
+        app.deinit();
+    }
+
+    // LAZY, and asked anyway: the start screen is the thing that wakes it.
+    try h.expectContains(try app.ctl("plugins"), "start\tlazy\tdeclared", "nothing spawns before a screen asks");
+
+    _ = try app.ctl("edit");
+    try app.waitText("E2E-ART", 10_000);
+    try app.waitText("recent", 10_000);
+    try h.expectContains(try app.ctl("plugins"), "start\tlazy\tup", "the screen spawned it");
+
+    // The supplied screen REPLACES the built-in one rather than joining it.
+    var buf: [64 * 1024]u8 = undefined;
+    const screen = try app.screen(&buf);
+    try h.expect(
+        std.mem.indexOf(u8, screen, "rook editor") == null,
+        "a supplied screen replaces the built-in one",
+        .{},
+    );
+
+    // It DREW. `dump` cannot tell a header from a header nobody
+    // painted, and the accent the art wears is the one thing on this
+    // screen that has never been drawn before.
+    var shot_buf: [192]u8 = undefined;
+    const shot_path = try std.fmt.bufPrint(&shot_buf, "{s}/start.png", .{app.dirPath()});
+    var pic = try app.shot(shot_path);
+    defer pic.deinit();
+    try h.expect(pic.distinctColors(8) >= 3, "the start screen drew nothing", .{});
+
+    // `a` is the first row, not an append.
+    _ = try app.ctl("type a");
+    try app.waitText("opened-from-the-start-screen", 5_000);
+    const after = try app.screen(&buf);
+    try h.expect(
+        std.mem.indexOf(u8, after, "E2E-ART") == null,
+        "opening a row retires the screen",
+        .{},
+    );
+    try h.expect(
+        std.mem.indexOf(u8, after, "INSERT") == null,
+        "`a` on the start screen must not have inserted",
+        .{},
+    );
+}
+
+/// A start-screen plugin in ten lines of sh: one header row, one heading,
+/// and one entry pointing at the file the scenario wrote.
+const sh_start_plugin =
+    \\while IFS= read -r line; do
+    \\  id=`expr "$line" : '.*"id":\([0-9]*\)'`
+    \\  case "$line" in
+    \\    *'"op":"describe"'*)
+    \\      printf '{{"v":1,"id":%s,"ok":true,"result":{{"name":"start","version":"9.9","capabilities":["intro.list"]}}}}\n' "$id" ;;
+    \\    *'"op":"intro.list"'*)
+    \\      printf '{{"v":1,"id":%s,"ok":true,"result":{{"rows":[{{"kind":"art","label":"E2E-ART"}},{{"kind":"blank"}},{{"kind":"heading","label":"recent"}},{{"kind":"entry","key":"a","label":"the-file","detail":"now","path":"{s}"}}]}}}}\n' "$id" ;;
+    \\    *)
+    \\      printf '{{"v":1,"id":%s,"ok":false,"error":"unsupported op"}}\n' "$id" ;;
+    \\  esac
+    \\done
+;
 
 // --------------------------------------------------------------- indent
 
