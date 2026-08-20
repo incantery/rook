@@ -20,7 +20,21 @@ import (
 // Config is the whole user-facing configuration surface. Keys appear
 // here when they earn a knob, not before.
 type Config struct {
-	Tmux Tmux `toml:"tmux"`
+	Tmux      Tmux      `toml:"tmux"`
+	Companion Companion `toml:"companion"`
+}
+
+// Companion is the resident summoned by prefix+key from anywhere: a
+// popup over whatever you're doing, launched with rook context in its
+// environment (ROOK_SESSION, ROOK_DIR, ROOK_PANE). Rook ships the
+// slot; the config names the occupant — vera first.
+type Companion struct {
+	// Command runs inside the popup. Required for the slot to exist.
+	Command string `toml:"command"`
+	// Name labels the popup; defaults to the command's first word.
+	Name string `toml:"name"`
+	// Key is the prefix key that summons it; defaults to "v".
+	Key string `toml:"key"`
 }
 
 // Tmux is the [tmux] table: the slice of rook settings that proxy into

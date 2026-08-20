@@ -35,6 +35,16 @@ func TestLoadPrefix(t *testing.T) {
 	}
 }
 
+func TestLoadCompanion(t *testing.T) {
+	c, err := Load(write(t, "[companion]\ncommand = \"vera chat\"\nkey = \"g\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Companion.Command != "vera chat" || c.Companion.Key != "g" || c.Companion.Name != "" {
+		t.Fatalf("companion = %+v", c.Companion)
+	}
+}
+
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	if _, err := Load(write(t, "[tmux]\nprefx = \"C-a\"\n")); err == nil {
 		t.Fatal("a typoed key must refuse to boot, not silently default")

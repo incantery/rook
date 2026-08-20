@@ -30,6 +30,9 @@ func TestTmuxAcceptsRenderedConf(t *testing.T) {
 		"defaults":        func(*Settings) {},
 		"backtick-prefix": func(s *Settings) { s.Prefix = "`" },
 		"ctrl-a-prefix":   func(s *Settings) { s.Prefix = "C-a" },
+		"companion": func(s *Settings) {
+			s.Companion = Companion{Command: "true", Name: "vera", Key: "v"}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := Defaults()

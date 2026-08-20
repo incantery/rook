@@ -78,6 +78,23 @@ func run() error {
 	if cfg.Tmux.Prefix != "" {
 		settings.Prefix = cfg.Tmux.Prefix
 	}
+	if cfg.Companion.Command != "" {
+		settings.Companion = tmux.Companion{
+			Command: cfg.Companion.Command,
+			Name:    cfg.Companion.Name,
+			Key:     cfg.Companion.Key,
+		}
+		if settings.Companion.Name == "" {
+			settings.Companion.Name = strings.Fields(cfg.Companion.Command)[0]
+		}
+		if settings.Companion.Key == "" {
+			settings.Companion.Key = "v"
+		}
+		if _, err := exec.LookPath(strings.Fields(cfg.Companion.Command)[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "rook: companion %q: %s not on PATH — prefix %s will fail\n",
+				settings.Companion.Name, strings.Fields(cfg.Companion.Command)[0], settings.Companion.Key)
+		}
+	}
 
 	scripts, warnings := tmux.EnsurePlugins(cfg.Tmux.Plugins)
 	for _, w := range warnings {
