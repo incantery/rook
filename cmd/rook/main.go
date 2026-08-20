@@ -9,14 +9,34 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 
 	"github.com/incantery/rook/internal/config"
+	"github.com/incantery/rook/internal/sessions"
 	"github.com/incantery/rook/internal/tmux"
 )
 
 func main() {
-	if err := run(); err != nil {
+	args := os.Args[1:]
+	var err error
+	switch {
+	case len(args) == 0:
+		err = run()
+	case args[0] == "ls":
+		filter := ""
+		if len(args) > 1 {
+			filter = args[1]
+		}
+		err = sessions.List(filter)
+	case args[0] == "connect":
+		err = sessions.Connect(strings.Join(args[1:], " "))
+	case args[0] == "preview":
+		err = sessions.Preview(strings.Join(args[1:], " "))
+	default:
+		err = fmt.Errorf("unknown command %q (rook | rook ls [-t|-z] | rook connect <row> | rook preview <row>)", args[0])
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "rook:", err)
 		os.Exit(1)
 	}
@@ -49,7 +69,7 @@ func run() error {
 
 	// The prefix-s session picker rides on these; missing ones should
 	// say so at boot, not fail silently inside a popup.
-	for _, dep := range []string{"sesh", "zoxide", "fzf"} {
+	for _, dep := range []string{"zoxide", "fzf"} {
 		if _, err := exec.LookPath(dep); err != nil {
 			fmt.Fprintf(os.Stderr, "rook: %s not on PATH — the session picker (prefix s) needs it (`brew install %s`)\n", dep, dep)
 		}
