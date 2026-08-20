@@ -18,6 +18,10 @@ func TestParseSurvivesLineForms(t *testing.T) {
 		{"~/dev/rook", KindDir, "~/dev/rook"},
 		{"/tmp/x", KindDir, "/tmp/x"},
 		{"bare-name", KindSession, "bare-name"},
+		// rows carry state chips in the picker; Parse must shed them
+		{"● tmux  ✳ working", KindSession, "tmux"},
+		{"\x1b[33m●\x1b[0m rk  \x1b[33m\x1b[1m● waiting\x1b[0m", KindSession, "rk"},
+		{"● dev  · done", KindSession, "dev"},
 	}
 	for _, c := range cases {
 		got := Parse(c.line)

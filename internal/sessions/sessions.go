@@ -27,7 +27,11 @@ const (
 	reset  = "\x1b[0m"
 )
 
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+var (
+	ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	// state chips appended by List; Parse must give back the bare value
+	chipRe = regexp.MustCompile(`\s{2,}(● waiting|✳ working|· done)\s*$`)
+)
 
 // Kind says what a row points at.
 type Kind int
@@ -57,6 +61,7 @@ func (r Row) Line() string {
 // codes, missing marks (a query typed by hand), and tilde paths.
 func Parse(line string) Row {
 	s := strings.TrimSpace(ansiRe.ReplaceAllString(line, ""))
+	s = chipRe.ReplaceAllString(s, "")
 	switch {
 	case strings.HasPrefix(s, sessionMark+" "):
 		return Row{KindSession, strings.TrimSpace(strings.TrimPrefix(s, sessionMark+" "))}
@@ -97,9 +102,51 @@ func List(filter string) error {
 		dirs = zoxideDirs()
 	}
 	for _, r := range Merge(sessions, dirs) {
-		fmt.Println(r.Line())
+		line := r.Line()
+		if r.Kind == KindSession {
+			if state := sessionAgentState(r.Value); state != StateNone {
+				line += "  " + state.Chip()
+			}
+		}
+		fmt.Println(line)
 	}
 	return nil
+}
+
+// agentPanes returns pane-id → window-index for every agent pane in a
+// session.
+func agentPanes(session string) map[string]string {
+	out, err := rookTmux("list-panes", "-s", "-t", "="+session, "-F",
+		"#{pane_id}\t#{window_index}\t#{pane_current_command}\t#{pane_title}")
+	if err != nil {
+		return nil
+	}
+	panes := map[string]string{}
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) >= 4 && IsAgentPane(f[2], f[3]) {
+			panes[f[0]] = f[1]
+		}
+	}
+	return panes
+}
+
+func paneState(paneID string) AgentState {
+	content, err := rookTmux("capture-pane", "-p", "-t", paneID)
+	if err != nil {
+		return StateNone
+	}
+	return Classify(content)
+}
+
+// sessionAgentState folds every agent pane's state into the one that
+// most needs attention; StateNone means no agents at all.
+func sessionAgentState(session string) AgentState {
+	state := StateNone
+	for paneID := range agentPanes(session) {
+		state = state.merge(paneState(paneID))
+	}
+	return state
 }
 
 // Connect switches to the row's session, creating it first when the
@@ -154,6 +201,13 @@ func previewSession(name string) error {
 	if err != nil {
 		return fmt.Errorf("no such session: %s", name)
 	}
+
+	// window index → most attention-needing agent state in it
+	windowState := map[string]AgentState{}
+	for paneID, window := range agentPanes(name) {
+		windowState[window] = windowState[window].merge(paneState(paneID))
+	}
+
 	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		f := strings.Split(line, "\t")
 		if len(f) < 4 {
@@ -164,8 +218,8 @@ func previewSession(name string) error {
 			style, mark = accent, "▸ "
 		}
 		agent := ""
-		if f[1] == "claude" {
-			agent = "  " + accent + sessionMark + " agent" + reset
+		if state, ok := windowState[f[0]]; ok && state != StateNone {
+			agent = "  " + state.Chip()
 		}
 		panes := ""
 		if f[3] != "1" {
