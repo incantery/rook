@@ -147,6 +147,7 @@ func (s Settings) Render(confPath string) string {
 	// session started.
 	p(`bind '|' split-window -h -c "#{pane_current_path}"`)
 	p(`bind - split-window -v -c "#{pane_current_path}"`)
+	p(`bind v split-window -v -c "#{pane_current_path}"`)
 	p(`bind c new-window -c "#{pane_current_path}"`)
 	p("bind -r h select-pane -L")
 	p("bind -r j select-pane -D")

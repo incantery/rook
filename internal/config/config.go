@@ -33,7 +33,8 @@ type Companion struct {
 	Command string `toml:"command"`
 	// Name labels the popup; defaults to the command's first word.
 	Name string `toml:"name"`
-	// Key is the prefix key that summons it; defaults to "v".
+	// Key is the prefix key that summons it; defaults to "a" (agent).
+	// A key set here wins over rook's default bindings.
 	Key string `toml:"key"`
 }
 

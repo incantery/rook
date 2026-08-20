@@ -88,7 +88,7 @@ func run() error {
 			settings.Companion.Name = strings.Fields(cfg.Companion.Command)[0]
 		}
 		if settings.Companion.Key == "" {
-			settings.Companion.Key = "v"
+			settings.Companion.Key = "a"
 		}
 		if _, err := exec.LookPath(strings.Fields(cfg.Companion.Command)[0]); err != nil {
 			fmt.Fprintf(os.Stderr, "rook: companion %q: %s not on PATH — prefix %s will fail\n",
