@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/incantery/rook/internal/attention"
 	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/sessions"
 	"github.com/incantery/rook/internal/tmux"
@@ -24,11 +25,28 @@ func main() {
 	case len(args) == 0:
 		err = run()
 	case args[0] == "ls":
-		filter := ""
-		if len(args) > 1 {
-			filter = args[1]
+		filter, asJSON := "", false
+		for _, a := range args[1:] {
+			if a == "--json" {
+				asJSON = true
+			} else {
+				filter = a
+			}
 		}
-		err = sessions.List(filter)
+		if asJSON {
+			err = sessions.ListJSON(filter)
+		} else {
+			err = sessions.List(filter)
+		}
+	case args[0] == "attention":
+		items := attention.Load()
+		if len(args) > 1 && args[1] == "--bar" {
+			fmt.Print(attention.Bar(items))
+		} else {
+			for _, it := range items {
+				fmt.Printf("%-8s %-20s %s\n", it.Kind, it.Session+it.Dir, it.Headline)
+			}
+		}
 	case args[0] == "connect":
 		err = sessions.Connect(strings.Join(args[1:], " "))
 	case args[0] == "preview":

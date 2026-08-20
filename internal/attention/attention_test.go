@@ -1,0 +1,75 @@
+package attention
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func writeFeed(t *testing.T, lines ...string) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "rook"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "rook", "attention.jsonl"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func item(kind, session, headline string, at time.Time) string {
+	return fmt.Sprintf(`{"session":%q,"kind":%q,"headline":%q,"at":%q,"source":"test"}`,
+		session, kind, headline, at.Format(time.RFC3339))
+}
+
+func TestLoadSkipsStaleAndMalformed(t *testing.T) {
+	now := time.Now()
+	writeFeed(t,
+		item("waiting", "tmux", "fresh", now),
+		item("task", "tmux", "stale", now.Add(-25*time.Hour)),
+		`{"broken json`,
+		`{"session":"x","kind":"task","at":"2026-08-19T00:00:00Z"}`, // no headline
+	)
+	items := Load()
+	if len(items) != 1 || items[0].Headline != "fresh" {
+		t.Fatalf("Load = %+v, want only the fresh item", items)
+	}
+}
+
+func TestLoadMissingFeedIsEmpty(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if items := Load(); items != nil {
+		t.Fatalf("missing feed should be empty, got %v", items)
+	}
+}
+
+func TestForSessionMatchesNameAndDir(t *testing.T) {
+	items := []Item{
+		{Session: "rook", Kind: "waiting", Headline: "by name"},
+		{Dir: "/Users/x/dev/rook", Kind: "task", Headline: "by dir"},
+		{Session: "other", Kind: "task", Headline: "elsewhere"},
+	}
+	got := ForSession(items, "rook")
+	if len(got) != 2 {
+		t.Fatalf("ForSession = %+v, want name+dir matches", got)
+	}
+}
+
+func TestBarShowsOnlyWaiting(t *testing.T) {
+	if Bar([]Item{{Kind: "task", Headline: "x"}}) != "" {
+		t.Error("info items must not reach the bar")
+	}
+	bar := Bar([]Item{
+		{Kind: "waiting", Headline: "a"},
+		{Kind: "waiting", Headline: "b"},
+		{Kind: "task", Headline: "c"},
+	})
+	if !strings.Contains(bar, "2 waiting") {
+		t.Errorf("bar = %q, want 2 waiting", bar)
+	}
+}

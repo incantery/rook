@@ -6,6 +6,7 @@
 package sessions
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/incantery/rook/internal/attention"
 	"github.com/incantery/rook/internal/tmux"
 )
 
@@ -94,6 +96,47 @@ func Merge(sessions []string, rankedDirs []string) []Row {
 // List prints rows for the picker. filter: "" for all, "-t" sessions
 // only, "-z" dirs only.
 func List(filter string) error {
+	feed := attention.Load()
+	for _, r := range rows(filter) {
+		line := r.Line()
+		state := rowState(r, feed)
+		if state != StateNone {
+			line += "  " + state.Chip()
+		}
+		fmt.Println(line)
+	}
+	return nil
+}
+
+// ListJSON prints the same rows as machine-readable lines: rook's
+// surface for publishers like vera.
+func ListJSON(filter string) error {
+	feed := attention.Load()
+	enc := json.NewEncoder(os.Stdout)
+	for _, r := range rows(filter) {
+		out := struct {
+			Kind      string           `json:"kind"`
+			Name      string           `json:"name,omitempty"`
+			Path      string           `json:"path,omitempty"`
+			Agent     string           `json:"agent,omitempty"`
+			Attention []attention.Item `json:"attention,omitempty"`
+		}{}
+		if r.Kind == KindSession {
+			out.Kind, out.Name = "session", r.Value
+			out.Agent = sessionAgentState(r.Value).String()
+			out.Attention = attention.ForSession(feed, r.Value)
+		} else {
+			out.Kind, out.Path = "dir", expand(r.Value)
+			out.Attention = attention.ForDir(feed, out.Path)
+		}
+		if err := enc.Encode(out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rows(filter string) []Row {
 	var sessions, dirs []string
 	if filter != "-z" {
 		sessions = liveSessions()
@@ -101,16 +144,24 @@ func List(filter string) error {
 	if filter != "-t" {
 		dirs = zoxideDirs()
 	}
-	for _, r := range Merge(sessions, dirs) {
-		line := r.Line()
-		if r.Kind == KindSession {
-			if state := sessionAgentState(r.Value); state != StateNone {
-				line += "  " + state.Chip()
-			}
-		}
-		fmt.Println(line)
+	return Merge(sessions, dirs)
+}
+
+// rowState folds the built-in pane heuristics with the attention feed:
+// a feed item that needs a human makes the row wait, whoever wrote it.
+func rowState(r Row, feed []attention.Item) AgentState {
+	state := StateNone
+	var items []attention.Item
+	if r.Kind == KindSession {
+		state = sessionAgentState(r.Value)
+		items = attention.ForSession(feed, r.Value)
+	} else {
+		items = attention.ForDir(feed, expand(r.Value))
 	}
-	return nil
+	if attention.AnyWaiting(items) {
+		state = state.merge(StateWaiting)
+	}
+	return state
 }
 
 // agentPanes returns pane-id → window-index for every agent pane in a
@@ -185,13 +236,34 @@ func Connect(raw string) error {
 
 // Preview draws the detail card for a row: the right-hand pane of the
 // picker. Sessions get their window list with agent panes marked;
-// directories get git context and a listing.
+// directories get git context and a listing. Attention items pointing
+// at the row close the card.
 func Preview(raw string) error {
 	row := Parse(raw)
+	var err error
+	var items []attention.Item
 	if row.Kind == KindSession {
-		return previewSession(row.Value)
+		err = previewSession(row.Value)
+		items = attention.ForSession(attention.Load(), row.Value)
+	} else {
+		err = previewDir(expand(row.Value))
+		items = attention.ForDir(attention.Load(), expand(row.Value))
 	}
-	return previewDir(expand(row.Value))
+	if err == nil && len(items) > 0 {
+		fmt.Println()
+		for _, it := range items {
+			mark, style := "·", dim
+			if it.Waiting() {
+				mark, style = sessionMark, accent + bold
+			}
+			src := ""
+			if it.Source != "" {
+				src = dim + "  " + it.Source + reset
+			}
+			fmt.Printf("%s%s %s%s%s\n", style, mark, it.Headline, reset, src)
+		}
+	}
+	return err
 }
 
 func previewSession(name string) error {

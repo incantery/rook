@@ -165,9 +165,15 @@ func (s Settings) Render(confPath string) string {
 	// the prefix is held so the modal state is always visible.
 	p("set -g status-left %q", "#[fg="+t.Accent+",bold]#{?client_prefix,#[reverse],} ♜ rook #[default] ")
 	p("set -g status-left-length 20")
-	// The session lives on the right, dim; the rest of that side stays
-	// reserved for the attention layer.
-	p("set -g status-right %q", "#[fg="+t.Dim+"]#S ")
+	// The right side is the attention layer's: a #() segment polls the
+	// feed every status-interval, then the session name, dim. The
+	// generating binary's path is baked in, same as the picker.
+	rookBin, err := os.Executable()
+	if err != nil {
+		rookBin = "rook"
+	}
+	p("set -g status-right %q", "#("+rookBin+" attention --bar)#[fg="+t.Dim+"]#S ")
+	p("set -g status-right-length 60")
 	// Tabs: generous padding, and the active window is a raised block —
 	// dim ground, accent label — instead of bare colored text.
 	p("set -g window-status-format %q", "#[fg="+t.Dim+"]  #I·#W  ")

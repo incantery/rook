@@ -78,3 +78,16 @@ func (s AgentState) merge(o AgentState) AgentState {
 	}
 	return s
 }
+
+// String is the machine name used by `rook ls --json`.
+func (s AgentState) String() string {
+	switch s {
+	case StateDone:
+		return "done"
+	case StateWorking:
+		return "working"
+	case StateWaiting:
+		return "waiting"
+	}
+	return "none"
+}
