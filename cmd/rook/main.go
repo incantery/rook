@@ -38,6 +38,10 @@ func main() {
 		} else {
 			err = sessions.List(filter)
 		}
+	case args[0] == "sweep":
+		err = sessions.Sweep()
+	case args[0] == "claude-hook":
+		attention.HandleClaudeHook(os.Stdin)
 	case args[0] == "attention":
 		items := attention.Load()
 		if len(args) > 1 && args[1] == "--bar" {

@@ -60,6 +60,47 @@ func TestForSessionMatchesNameAndDir(t *testing.T) {
 	}
 }
 
+func TestLoadMergesAttentionDir(t *testing.T) {
+	now := time.Now()
+	writeFeed(t, item("waiting", "tmux", "from vera", now))
+	if err := Publish("claude-abc", []Item{{Dir: "/x", Kind: "waiting", Headline: "from a hook", At: now, Source: "claude"}}); err != nil {
+		t.Fatal(err)
+	}
+	items := Load()
+	if len(items) != 2 {
+		t.Fatalf("Load must merge feed + attention.d: %+v", items)
+	}
+	// An empty publish removes the publisher's file entirely.
+	if err := Publish("claude-abc", nil); err != nil {
+		t.Fatal(err)
+	}
+	if items := Load(); len(items) != 1 || items[0].Headline != "from vera" {
+		t.Fatalf("cleared publisher must vanish: %+v", items)
+	}
+	if err := Publish("claude-abc", nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHandleClaudeHookLifecycle(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	HandleClaudeHook(strings.NewReader(`{"hook_event_name":"Notification","session_id":"abcd1234efgh","cwd":"/Users/x/dev/rook","message":"Claude needs your permission to use Bash"}`))
+	items := Load()
+	if len(items) != 1 || !items[0].Waiting() || items[0].Dir != "/Users/x/dev/rook" || items[0].Source != "claude" {
+		t.Fatalf("notification must publish a waiting item: %+v", items)
+	}
+	HandleClaudeHook(strings.NewReader(`{"hook_event_name":"Stop","session_id":"abcd1234efgh"}`))
+	if items := Load(); len(items) != 0 {
+		t.Fatalf("stop must clear the session's item: %+v", items)
+	}
+	// Garbage input must be harmless — hooks run inside every turn.
+	HandleClaudeHook(strings.NewReader(`not json at all`))
+	HandleClaudeHook(strings.NewReader(`{"hook_event_name":"Notification"}`))
+	if items := Load(); len(items) != 0 {
+		t.Fatalf("garbage must publish nothing: %+v", items)
+	}
+}
+
 func TestBarShowsOnlyWaiting(t *testing.T) {
 	if Bar([]Item{{Kind: "task", Headline: "x"}}) != "" {
 		t.Error("info items must not reach the bar")

@@ -186,12 +186,23 @@ func (s Settings) Render(confPath string) string {
 	if err != nil {
 		rookBin = "rook"
 	}
-	p("set -g status-right %q", "#("+rookBin+" attention --bar)#[fg="+t.Dim+"]#S ")
+	// sweep prints the bar segment AND stamps each window's
+	// @rook_agent option, which the tab formats below render.
+	p("set -g status-right %q", "#("+rookBin+" sweep)#[fg="+t.Dim+"]#S ")
 	p("set -g status-right-length 60")
 	// Tabs: generous padding, and the active window is a raised block —
-	// dim ground, accent label — instead of bare colored text.
-	p("set -g window-status-format %q", "#[fg="+t.Dim+"]  #I·#W  ")
-	p("set -g window-status-current-format %q", "#[fg="+t.Accent+",bg="+t.Dim+",bold]  #I·#W#{?window_zoomed_flag, ⛶,}  ")
+	// dim ground, accent label — instead of bare colored text. Agent
+	// windows wear their live state: ● waiting (accent — it needs you),
+	// ✳ working, nothing when done.
+	// Styles inside a #{?,,} conditional must be space-separated:
+	// tmux splits the branches on commas, style commas included.
+	waitMark := "#{?#{==:#{@rook_agent},waiting},#[fg=" + t.Accent + " bold] ●#[nobold fg=" + t.Dim + "],}"
+	workMark := "#{?#{==:#{@rook_agent},working}, ✳,}"
+	p("set -g window-status-format %q",
+		"#[fg="+t.Dim+"]  #I·#W"+waitMark+workMark+"  ")
+	p("set -g window-status-current-format %q",
+		"#[fg="+t.Accent+",bg="+t.Dim+",bold]  #I·#W#{?window_zoomed_flag, ⛶,}"+
+			"#{?#{==:#{@rook_agent},waiting}, ●,}#{?#{==:#{@rook_agent},working}, ✳,}  ")
 	p("set -g window-status-separator %q", "")
 	p("set -g pane-border-style %q", "fg="+t.Dim)
 	p("set -g pane-active-border-style %q", "fg="+t.Accent)

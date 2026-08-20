@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/incantery/rook/internal/tmux"
@@ -45,7 +46,8 @@ func (i Item) Waiting() bool { return i.Kind == "waiting" }
 
 const maxAge = 24 * time.Hour
 
-// Path returns where the feed lives, whether or not it exists.
+// Path returns where the single-writer feed lives, whether or not it
+// exists.
 func Path() (string, error) {
 	dir := os.Getenv("XDG_STATE_HOME")
 	if dir == "" {
@@ -58,33 +60,94 @@ func Path() (string, error) {
 	return filepath.Join(dir, "rook", "attention.jsonl"), nil
 }
 
-// Load reads the current attention set. A missing feed is an empty
+// DirPath is the multi-publisher annex: every file in attention.d is
+// one publisher's current set, owned by whoever writes it, so
+// concurrent publishers never share a file. Claude Code's hooks write
+// one file per session here.
+func DirPath() (string, error) {
+	path, err := Path()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), "attention.d"), nil
+}
+
+// Load reads the current attention set: the single-writer feed plus
+// every publisher file in attention.d. A missing feed is an empty
 // one; so is an unreadable line or a stale item.
 func Load() []Item {
 	path, err := Path()
 	if err != nil {
 		return nil
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
+	files := []string{path}
+	if dir, err := DirPath(); err == nil {
+		if extra, err := filepath.Glob(filepath.Join(dir, "*.jsonl")); err == nil {
+			files = append(files, extra...)
+		}
 	}
-	defer f.Close()
-
 	var items []Item
 	cutoff := time.Now().Add(-maxAge)
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		var it Item
-		if err := json.Unmarshal(sc.Bytes(), &it); err != nil {
+	for _, file := range files {
+		f, err := os.Open(file)
+		if err != nil {
 			continue
 		}
-		if it.Headline == "" || it.At.Before(cutoff) {
-			continue
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			var it Item
+			if err := json.Unmarshal(sc.Bytes(), &it); err != nil {
+				continue
+			}
+			if it.Headline == "" || it.At.Before(cutoff) {
+				continue
+			}
+			items = append(items, it)
 		}
-		items = append(items, it)
+		f.Close()
 	}
 	return items
+}
+
+// Publish rewrites one publisher's file in attention.d atomically; an
+// empty set removes the file. The id is the publisher's own handle
+// (e.g. "claude-<session>"), sanitized to a filename.
+func Publish(id string, items []Item) error {
+	dir, err := DirPath()
+	if err != nil {
+		return err
+	}
+	name := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, id)
+	path := filepath.Join(dir, name+".jsonl")
+	if len(items) == 0 {
+		err := os.Remove(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	var b strings.Builder
+	for _, it := range items {
+		line, err := json.Marshal(it)
+		if err != nil {
+			return err
+		}
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // ForSession filters items pointing at a session, by name or by the

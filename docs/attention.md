@@ -8,10 +8,15 @@ wrote them. Vera is the first publisher; it must not be the last.
 ## The file
 
 `$XDG_STATE_HOME/rook/attention.jsonl` (default
-`~/.local/state/rook/attention.jsonl`). The file **is** the current
-attention set, not a log: a publisher rewrites the whole file
-atomically (write a temp file, `rename(2)` it into place). One JSON
-object per line:
+`~/.local/state/rook/attention.jsonl`), plus every `*.jsonl` in
+`attention.d/` beside it. Each file **is** one publisher's current
+set, not a log: that publisher rewrites its own file atomically
+(write a temp file, `rename(2)` it into place; an empty set removes
+the file). The single `attention.jsonl` is the original single-writer
+seat (vera holds it); every other publisher owns a file of its own in
+`attention.d/` — Claude Code's hooks write one per session
+(`claude-<id>.jsonl`), so concurrent publishers never share a file.
+One JSON object per line:
 
 ```json
 {"session":"tmux","kind":"waiting","headline":"T-136 needs an answer","at":"2026-08-19T13:40:47-04:00","source":"vera"}
@@ -37,6 +42,19 @@ feed.
   `● waiting`, merged with rook's own pane heuristics.
 - **preview card**: every matching item, accent for waiting, dim
   otherwise, with its source.
+- **window tabs**: independent of the feed, the same 5s sweep that
+  draws the bar classifies each window's agent panes and stamps
+  `@rook_agent` (waiting/working/done); tabs render ● (accent) for
+  waiting and ✳ for working.
+
+## Claude Code as a publisher
+
+`rook claude-hook` is wired in `~/.claude/settings.json` for
+Notification, UserPromptSubmit, Stop and SessionEnd. A Notification
+(permission ask, idle prompt) publishes a waiting item for that
+session under `attention.d/claude-<id>.jsonl`; the other events clear
+it. Event-driven and precise where the pane heuristics are a
+fallback.
 
 ## Reading rook (the other direction)
 
