@@ -147,7 +147,9 @@ func (s Settings) Render(confPath string) string {
 	// session started.
 	p(`bind '|' split-window -h -c "#{pane_current_path}"`)
 	p(`bind - split-window -v -c "#{pane_current_path}"`)
-	p(`bind v split-window -v -c "#{pane_current_path}"`)
+	// v is vim's vsplit: side-by-side. That is tmux's -h — the two
+	// tools name the axis oppositely, and vim fingers win here.
+	p(`bind v split-window -h -c "#{pane_current_path}"`)
 	p(`bind c new-window -c "#{pane_current_path}"`)
 	p("bind -r h select-pane -L")
 	p("bind -r j select-pane -D")
