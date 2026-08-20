@@ -206,6 +206,12 @@ func (s Settings) Render(confPath string) string {
 	p("set -g window-status-separator %q", "")
 	p("set -g pane-border-style %q", "fg="+t.Dim)
 	p("set -g pane-active-border-style %q", "fg="+t.Accent)
+	// The subdued bottom strip: every pane wears its own git place on
+	// its bottom border; the active pane adds global info (spend) from
+	// the attention feed. The top bar talks, this whispers.
+	p("set -g pane-border-status bottom")
+	p("set -g pane-border-format %q",
+		"#[fg="+t.Dim+"] #("+rookBin+" paneline '#{pane_current_path}' #{pane_active}) ")
 	p("set -g message-style %q", "bg=default,fg="+t.Accent)
 	p("set -g mode-style %q", "fg=black,bg="+t.Accent)
 	p("set -g clock-mode-colour %s", t.Accent)

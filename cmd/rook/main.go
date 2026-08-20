@@ -40,6 +40,15 @@ func main() {
 		}
 	case args[0] == "sweep":
 		err = sessions.Sweep()
+	case args[0] == "paneline":
+		dir, active := "", false
+		if len(args) > 1 {
+			dir = args[1]
+		}
+		if len(args) > 2 && args[2] == "1" {
+			active = true
+		}
+		err = sessions.PaneLine(dir, active)
 	case args[0] == "claude-hook":
 		attention.HandleClaudeHook(os.Stdin)
 	case args[0] == "attention":

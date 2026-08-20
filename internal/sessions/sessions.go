@@ -286,6 +286,30 @@ func Connect(raw string) error {
 	return syscall.Exec(argv[0], argv, os.Environ())
 }
 
+// PaneLine renders one pane's bottom border strip: the pane's own git
+// place, and — on the active pane only — global info items from the
+// attention feed (vera's spend, for one). Subdued by design: the
+// border strip whispers, the top bar talks.
+func PaneLine(dir string, active bool) error {
+	var parts []string
+	if repo, branch := gitInfo(dir); repo != "" {
+		place := "⎇ " + repo
+		if branch != "" && branch != "main" && branch != "master" {
+			place += " · " + branch
+		}
+		parts = append(parts, place)
+	}
+	if active {
+		for _, it := range attention.Load() {
+			if it.Kind == "spend" {
+				parts = append(parts, it.Headline)
+			}
+		}
+	}
+	fmt.Print(strings.Join(parts, "   "))
+	return nil
+}
+
 // Preview draws the detail card for a row: the right-hand pane of the
 // picker. Sessions get their window list with agent panes marked;
 // directories get git context and a listing. Attention items pointing
