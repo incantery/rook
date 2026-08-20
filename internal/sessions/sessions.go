@@ -31,8 +31,10 @@ const (
 
 var (
 	ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
-	// state chips appended by List; Parse must give back the bare value
+	// annotations appended by List — git context, then a state chip;
+	// Parse must give back the bare value
 	chipRe = regexp.MustCompile(`\s{2,}(● waiting|✳ working|· done)\s*$`)
+	gitRe  = regexp.MustCompile(`\s{2,}⎇ \S+\s*$`)
 )
 
 // Kind says what a row points at.
@@ -64,6 +66,7 @@ func (r Row) Line() string {
 func Parse(line string) Row {
 	s := strings.TrimSpace(ansiRe.ReplaceAllString(line, ""))
 	s = chipRe.ReplaceAllString(s, "")
+	s = gitRe.ReplaceAllString(s, "")
 	switch {
 	case strings.HasPrefix(s, sessionMark+" "):
 		return Row{KindSession, strings.TrimSpace(strings.TrimPrefix(s, sessionMark+" "))}
@@ -94,11 +97,19 @@ func Merge(sessions []string, rankedDirs []string) []Row {
 }
 
 // List prints rows for the picker. filter: "" for all, "-t" sessions
-// only, "-z" dirs only.
+// only, "-z" dirs only. A session row wears its repo when git knows
+// more than the name does — "tmux" alone hides that it is a rook
+// worktree.
 func List(filter string) error {
 	feed := attention.Load()
+	dirs := sessionDirs()
 	for _, r := range rows(filter) {
 		line := r.Line()
+		if r.Kind == KindSession {
+			if repo, _ := gitInfo(dirs[r.Value]); repo != "" && repo != r.Value {
+				line += "  " + dim + "⎇ " + repo + reset
+			}
+		}
 		state := rowState(r, feed)
 		if state != StateNone {
 			line += "  " + state.Chip()
@@ -106,6 +117,47 @@ func List(filter string) error {
 		fmt.Println(line)
 	}
 	return nil
+}
+
+// sessionDirs maps each session to its active pane's directory, one
+// tmux call for all of them.
+func sessionDirs() map[string]string {
+	out, err := rookTmux("list-panes", "-a", "-F",
+		"#{session_name}\t#{window_active}#{pane_active}\t#{pane_current_path}")
+	if err != nil {
+		return nil
+	}
+	dirs := map[string]string{}
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) == 3 && f[1] == "11" {
+			dirs[f[0]] = f[2]
+		}
+	}
+	return dirs
+}
+
+// gitInfo names the checkout a directory lives in: the repo (from the
+// common git dir, so worktrees answer with their true home) and the
+// branch. Empty when git has nothing to say.
+func gitInfo(dir string) (repo, branch string) {
+	if dir == "" {
+		return "", ""
+	}
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD", "--git-common-dir").Output()
+	if err != nil {
+		return "", ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 {
+		return "", ""
+	}
+	branch = lines[0]
+	common := lines[1]
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(dir, common)
+	}
+	return filepath.Base(filepath.Dir(common)), branch
 }
 
 // ListJSON prints the same rows as machine-readable lines: rook's
@@ -267,7 +319,14 @@ func Preview(raw string) error {
 }
 
 func previewSession(name string) error {
-	fmt.Printf("%s%s♜ %s%s\n\n", bold, accent, name, reset)
+	fmt.Printf("%s%s♜ %s%s\n", bold, accent, name, reset)
+	if dir := sessionDirs()[name]; dir != "" {
+		fmt.Printf("%s%s%s\n", dim, contract(dir), reset)
+		if repo, branch := gitInfo(dir); repo != "" {
+			fmt.Printf("%s⎇ %s · %s%s\n", accent, repo, branch, reset)
+		}
+	}
+	fmt.Println()
 	out, err := rookTmux("list-windows", "-t", "="+name, "-F",
 		"#{window_index}\t#{window_name}\t#{window_active}\t#{window_panes}")
 	if err != nil {

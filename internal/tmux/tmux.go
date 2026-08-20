@@ -259,7 +259,7 @@ selected="$("$ROOK" ls | fzf --ansi --no-sort --reverse \
   --bind "ctrl-a:change-prompt(%s )+reload($ROOK ls)" \
   --bind "ctrl-t:change-prompt(%s session )+reload($ROOK ls -t)" \
   --bind "ctrl-x:change-prompt(%s dir )+reload($ROOK ls -z)" \
-  --bind "ctrl-d:execute(tmux kill-session -t {2..})+reload($ROOK ls -t)")" || exit 0
+  --bind "ctrl-d:execute(tmux kill-session -t {2})+reload($ROOK ls -t)")" || exit 0
 [ -n "$selected" ] && exec "$ROOK" connect "$selected"
 `, rookBin, "♜", "♜", "♜", "♜")
 }
