@@ -1,4 +1,4 @@
-# rook — the tmux branch
+# rook
 
 A rebuild from an empty Go module, around open-source tooling instead of
 under it. `rook` is what you run after starting your terminal, in place of
@@ -24,11 +24,22 @@ proxy: one field per tmux option, rendered atomically to
 `set-option` on the socket. Colours are ANSI names on purpose: the glass
 owns the palette, rook owns structure and emphasis.
 
-**Pulling things back.** History is intact one branch over — the Zig app, the
-plugin vocabulary, the environments graph, the providers:
+**Run it.**
 
 ```sh
-git checkout main -- docs/plugins/VOCABULARY.md
+make install     # go build -o rook ./cmd/rook, then into ~/.local/bin
+rook             # attaches to a session named for the current directory
 ```
 
-Take a file when it earns its place, not by default.
+One binary, over a rook-owned tmux server. `rook ls / preview / connect`
+are the session manager; the bottom strip carries per-pane git and the
+active pane's spend; the attention feed routes what needs you across
+every session (vera is its first publisher).
+
+**Pulling things back.** The previous rook — the Zig app, the plugin
+vocabulary, the environments graph, the providers — is intact on the
+`pre-tmux` branch. Take a file when it earns its place, not by default:
+
+```sh
+git checkout pre-tmux -- docs/plugins/VOCABULARY.md
+```
