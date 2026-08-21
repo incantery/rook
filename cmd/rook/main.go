@@ -18,12 +18,40 @@ import (
 	"github.com/incantery/rook/internal/tmux"
 )
 
+// Build metadata, stamped by the linker at release time (see
+// .goreleaser.yaml and the Makefile). "dev" when built without them.
+var (
+	version = "dev"
+	commit  = ""
+	date    = ""
+)
+
+// versionLine renders "rook <version>", appending a short commit and date
+// when the linker stamped them.
+func versionLine() string {
+	s := "rook " + version
+	if commit != "" {
+		c := commit
+		if len(c) > 7 {
+			c = c[:7]
+		}
+		s += " (" + c
+		if date != "" {
+			s += ", " + date
+		}
+		s += ")"
+	}
+	return s
+}
+
 func main() {
 	args := os.Args[1:]
 	var err error
 	switch {
 	case len(args) == 0:
 		err = run()
+	case args[0] == "version", args[0] == "--version", args[0] == "-v":
+		fmt.Println(versionLine())
 	case args[0] == "ls":
 		filter, asJSON := "", false
 		for _, a := range args[1:] {
@@ -65,7 +93,7 @@ func main() {
 	case args[0] == "preview":
 		err = sessions.Preview(strings.Join(args[1:], " "))
 	default:
-		err = fmt.Errorf("unknown command %q (rook | rook ls [-t|-z] | rook connect <row> | rook preview <row>)", args[0])
+		err = fmt.Errorf("unknown command %q (rook | rook ls [-t|-z] | rook connect <row> | rook preview <row> | rook version)", args[0])
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "rook:", err)

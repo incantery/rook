@@ -1,0 +1,66 @@
+# GoReleaser builds cross-platform archives on a version tag, publishes a
+# GitHub Release, and updates the Homebrew formula in incantery/homebrew-tap.
+# Run locally with: goreleaser release --clean  (or --snapshot to dry-run)
+version: 2
+
+project_name: rook
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: rook
+    main: ./cmd/rook
+    binary: rook
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: rook
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+homebrew_casks:
+  - name: rook
+    repository:
+      owner: incantery
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/incantery/rook"
+    description: "Attention and session layer over tmux for many terminal-agent sessions"
+    dependencies:
+      - formula: tmux
+      - formula: zoxide
+      - formula: fzf
+    # Ad-hoc-signed binary: strip the quarantine flag so Gatekeeper does
+    # not block first run.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/rook"]
+          end
+
+release:
+  github:
+    owner: incantery
+    name: rook

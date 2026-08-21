@@ -2,3 +2,4 @@
 /rook
 # macOS Finder droppings
 .DS_Store
+dist/
