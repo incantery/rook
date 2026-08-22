@@ -5,7 +5,7 @@ outlives the terminal. This is the "own it all" line — tmux is no
 longer underneath, it is the reference implementation we benchmark
 against.
 
-    zig build
+    make                            # ReleaseSafe; a Debug build lags in vim
     ./zig-out/bin/rook-mux          # attach; boots the server if needed
     ./zig-out/bin/rook-mux server   # foreground server
 
