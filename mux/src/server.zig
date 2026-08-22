@@ -119,6 +119,9 @@ pub const Server = struct {
     glass_focus: bool = false,
     glass_title: [128]u8 = @splat(0),
     glass_title_len: usize = 0,
+    /// A floating pane over the current window: all input goes to it,
+    /// it closes when its process exits. One at a time.
+    popup: ?u32 = null,
 
     pub fn run(gpa: std.mem.Allocator, io: std.Io, sock_path: []const u8, shell: [:0]const u8, cwd: ?[:0]const u8) !void {
         const listener = ptypkg.unixListen(sock_path);
@@ -201,10 +204,43 @@ pub const Server = struct {
     fn startPane(self: *Server, cwd: ?[*:0]const u8) !*panepkg.Pane {
         const g = self.geometry();
         const dir: ?[*:0]const u8 = cwd orelse if (self.cwd) |c| c.ptr else null;
-        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, dir, g.cols, g.rows -| 1, self.wake_w, self.next_id);
+        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, dir, g.cols, g.rows -| 1, self.wake_w, self.next_id, null);
         try self.panes.append(self.gpa, p);
         self.next_id += 1;
         return p;
+    }
+
+    /// The popup's outer box, centered: 60% of the screen, clamped.
+    fn popupRect(self: *Server) layoutpkg.Rect {
+        const g = self.geometry();
+        const rows = g.rows -| 1;
+        const w: u16 = @max(@min(g.cols, 30), g.cols * 6 / 10);
+        const h: u16 = @max(@min(rows, 8), rows * 6 / 10);
+        return .{ .x = (g.cols -| w) / 2, .y = (rows -| h) / 2, .w = w, .h = h };
+    }
+
+    fn openPopup(self: *Server, cmd: []const u8) !void {
+        if (self.popup) |id| {
+            // one at a time: a second request replaces the first
+            if (self.pane(id)) |p| p.hangup();
+        }
+        var cwd_buf: [1024]u8 = undefined;
+        const cwd = self.focusedCwd(&cwd_buf);
+        const r = self.popupRect();
+        const cmd_z = try self.gpa.dupeZ(u8, cmd);
+        defer self.gpa.free(cmd_z);
+        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, cwd orelse (if (self.cwd) |c| c.ptr else null), r.w -| 2, r.h -| 2, self.wake_w, self.next_id, cmd_z.ptr);
+        try self.panes.append(self.gpa, p);
+        self.next_id += 1;
+        self.popup = p.id;
+        self.scrolling = false;
+        self.full = true;
+        self.pending = true;
+    }
+
+    fn popupPane(self: *Server) ?*panepkg.Pane {
+        const id = self.popup orelse return null;
+        return self.pane(id);
     }
 
     /// Where the focused pane's foreground process lives — new panes
@@ -262,6 +298,10 @@ pub const Server = struct {
             if (self.pane(pl.pane)) |p| {
                 if (p.cols != pl.rect.w or p.rows != pl.rect.h) p.resize(pl.rect.w, pl.rect.h);
             }
+        }
+        if (self.popupPane()) |p| {
+            const r = self.popupRect();
+            if (p.cols != r.w -| 2 or p.rows != r.h -| 2) p.resize(r.w -| 2, r.h -| 2);
         }
         self.full = true;
         self.pending = true;
@@ -442,6 +482,9 @@ pub const Server = struct {
                     }
                 },
                 @intFromEnum(proto.c2s.stdin) => self.input(c, msg.payload),
+                @intFromEnum(proto.c2s.popup) => {
+                    if (msg.payload.len > 0) self.openPopup(msg.payload) catch {};
+                },
                 @intFromEnum(proto.c2s.nav) => {
                     // vim hit a window edge and hands us the move; an
                     // explicit verb, so never forwarded anywhere.
@@ -515,7 +558,7 @@ pub const Server = struct {
             // edge move back via `rook-mux nav`); everywhere else the mux
             // moves focus, and the key falls through to the pane when
             // there is nowhere to go — C-l still clears a lone shell.
-            if (bytes.len == 1) {
+            if (bytes.len == 1 and self.popup == null) {
                 if (ctrlNavDir(rest[0])) |dir| {
                     if (!self.fgOwnsCtrlNav() and self.navigate(dir)) {
                         rest = rest[1..];
@@ -582,6 +625,29 @@ pub const Server = struct {
         // find the pane under the pointer (0-based cell coords)
         const cx = ev.x - 1;
         const cy = ev.y - 1;
+        if (self.popup != null) {
+            const r = self.popupRect();
+            const p = self.popupPane() orelse return;
+            if (cx > r.x and cx < r.x + r.w -| 1 and cy > r.y and cy < r.y + r.h -| 1) {
+                if (p.wantsMouse()) {
+                    var mb: [32]u8 = undefined;
+                    const ms = std.fmt.bufPrint(&mb, "\x1b[<{d};{d};{d}{c}", .{
+                        ev.btn,
+                        cx - r.x,
+                        cy - r.y,
+                        @as(u8, if (ev.release) 'm' else 'M'),
+                    }) catch return;
+                    p.write(ms);
+                } else if (ev.btn == 64) {
+                    p.scroll(-3);
+                    self.pending = true;
+                } else if (ev.btn == 65) {
+                    p.scroll(3);
+                    self.pending = true;
+                }
+            }
+            return;
+        }
         const w = self.window();
         var hit: ?layoutpkg.Placed = null;
         for (self.placed.items) |pl| {
@@ -659,6 +725,10 @@ pub const Server = struct {
     }
 
     fn toFocused(self: *Server, bytes: []const u8) void {
+        if (self.popupPane()) |p| {
+            p.write(bytes);
+            return;
+        }
         if (self.focusedPane()) |p| {
             // typing returns the view to now — a wheel-scrolled pane
             // must not eat keystrokes into an old screen silently
@@ -675,6 +745,20 @@ pub const Server = struct {
     }
 
     fn command(self: *Server, c: *Client, key: u8) void {
+        if (self.popup != null) {
+            switch (key) {
+                'x' => if (self.popupPane()) |p| p.hangup(),
+                'd' => {
+                    self.sendTo(c, @intFromEnum(proto.s2c.exit), "");
+                    c.attached = false;
+                },
+                else => {
+                    if (key == self.prefix_key) self.toFocused(&[_]u8{key});
+                },
+            }
+            self.pending = true;
+            return;
+        }
         switch (key) {
             'v', '|' => self.splitPane(true) catch {},
             '-' => self.splitPane(false) catch {},
@@ -695,6 +779,7 @@ pub const Server = struct {
                 self.relayout() catch {};
             },
             '[' => self.scrollStart(),
+            'o' => self.openPopup("exec $SHELL -l") catch {},
             'x' => if (self.focusedPane()) |p| p.hangup(),
             'd' => {
                 self.sendTo(c, @intFromEnum(proto.s2c.exit), "");
@@ -884,6 +969,14 @@ pub const Server = struct {
                 i += 1;
                 continue;
             }
+            if (self.popup == p.id) {
+                self.popup = null;
+                self.full = true;
+                p.deinit();
+                _ = self.panes.swapRemove(i);
+                removed = true;
+                continue;
+            }
             // remove from whichever window holds it
             var wi: usize = 0;
             while (wi < self.windows.items.len) : (wi += 1) {
@@ -909,11 +1002,16 @@ pub const Server = struct {
     }
 
     fn redraw(self: *Server) !void {
+        if (self.popup != null) self.full = true; // popups sit over dirty math
         var any_dirty = self.full;
         for (self.placed.items) |pl| {
             const p = self.pane(pl.pane) orelse continue;
             p.snapshot() catch continue;
             if (p.rs.dirty != .false) any_dirty = true;
+            p.rs.dirty = .false;
+        }
+        if (self.popupPane()) |p| {
+            p.snapshot() catch {};
             p.rs.dirty = .false;
         }
         // OSC 52 from any visible pane goes straight to the glass; the
@@ -938,7 +1036,7 @@ pub const Server = struct {
                 }
             }
         }
-        const bytes = self.frame.build(self.panes.items, self.placed.items, self.window().focused, g.cols, g.rows, status, self.full, if (cur_over) |co| .{ .x = co.x, .y = co.y } else null);
+        const bytes = self.frame.build(self.panes.items, self.placed.items, self.window().focused, g.cols, g.rows, status, self.full, if (cur_over) |co| .{ .x = co.x, .y = co.y } else null, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null);
         self.full = false;
         var shipped = false;
         for (self.clients.items) |c| {

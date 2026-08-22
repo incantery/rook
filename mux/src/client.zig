@@ -82,6 +82,15 @@ pub fn nav(sock_path: []const u8, dir: u8) !void {
     try proto.write(sock, @intFromEnum(proto.c2s.nav), &[_]u8{dir});
 }
 
+/// One-shot: open a popup running `cmd` (via $SHELL -c) over the
+/// current window. This is how rook's Go tools open their UIs.
+pub fn popup(sock_path: []const u8, cmd: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    try proto.write(sock, @intFromEnum(proto.c2s.popup), cmd);
+}
+
 /// Ask the server to shut down (HUPs every pane).
 pub fn kill(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     _ = gpa;

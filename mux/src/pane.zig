@@ -67,6 +67,7 @@ pub const Pane = struct {
         rows: u16,
         wake_fd: ptypkg.fd_t,
         id: u32,
+        cmd: ?[*:0]const u8,
     ) !*Pane {
         const self = try gpa.create(Pane);
         errdefer gpa.destroy(self);
@@ -94,8 +95,15 @@ pub const Pane = struct {
         ptypkg.unsetEnv("TMUX_PANE");
         ptypkg.unsetEnv("HERDR_PANE_ID");
         ptypkg.unsetEnv("HERDR_SESSION");
-        const argv = [_][*:0]const u8{ shell, "-l" };
-        self.pid = try self.pty.spawnIn(&argv, cwd);
+        // a command (popups) runs under the shell; panes get a login
+        // shell as before
+        if (cmd) |c| {
+            const argv = [_][*:0]const u8{ shell, "-c", c };
+            self.pid = try self.pty.spawnIn(&argv, cwd);
+        } else {
+            const argv = [_][*:0]const u8{ shell, "-l" };
+            self.pid = try self.pty.spawnIn(&argv, cwd);
+        }
         self.thread = try std.Thread.spawn(.{}, readLoop, .{self});
         return self;
     }

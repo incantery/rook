@@ -18,7 +18,10 @@ C-b when unset; double-tap types it literally. Then:
     HJKL       resize split                [        copy mode (hjkl, v, y, q)
     x          kill pane                   d        detach
 
-`rook-mux stats` prints input→frame p50/p99, frames, bytes. `rook-mux
+`rook-mux popup <cmd>` floats a command over the current window —
+all input goes to it, it closes when the process exits (fzf pickers,
+lazygit, rook's Go tools). `rook-mux stats` prints input→frame
+p50/p99, frames, bytes. `rook-mux
 kill` shuts the server down politely (HUPs every pane). `rook-mux nav
 h|j|k|l` moves pane focus from the command line — it exists for
 editors to call at their window edges.

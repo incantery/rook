@@ -43,6 +43,7 @@ pub const Frame = struct {
         status: []const u8,
         full: bool,
         cursor_override: ?struct { x: u16, y: u16 },
+        popup: ?struct { pane: u32, rect: layoutpkg.Rect },
     ) []const u8 {
         self.buf.clearRetainingCapacity();
         self.put(csi ++ "?2026h" ++ csi ++ "?25l");
@@ -81,6 +82,30 @@ pub const Frame = struct {
         while (pad > 0) : (pad -= 1) self.put(" ");
         self.put(csi ++ "0m");
 
+        if (popup) |po| {
+            if (findPane(panes, po.pane)) |pp| {
+                self.drawBox(po.rect);
+                self.drawPane(pp, .{
+                    .x = po.rect.x + 1,
+                    .y = po.rect.y + 1,
+                    .w = po.rect.w -| 2,
+                    .h = po.rect.h -| 2,
+                }, true);
+                // the popup owns the cursor while it is up
+                cursor = null;
+                const cur = pp.rs.cursor;
+                if (cur.visible) if (cur.viewport) |v| {
+                    if (v.x < po.rect.w -| 2 and v.y < po.rect.h -| 2)
+                        cursor = .{ .x = po.rect.x + 1 + v.x, .y = po.rect.y + 1 + v.y };
+                };
+                cursor_style = switch (cur.visual_style) {
+                    .block => csi ++ "2 q",
+                    .underline => csi ++ "4 q",
+                    .bar => csi ++ "6 q",
+                    else => csi ++ "0 q",
+                };
+            }
+        }
         if (cursor_override) |co| {
             // copy mode: the mux's cursor, always a visible block
             cursor = .{ .x = co.x, .y = co.y };
@@ -165,6 +190,30 @@ pub const Frame = struct {
             var pad: usize = rect.w;
             while (pad > 0) : (pad -= 1) self.put(" ");
         }
+    }
+
+    /// A full box border for the popup, accent-colored.
+    fn drawBox(self: *Frame, r: layoutpkg.Rect) void {
+        if (r.w < 2 or r.h < 2) return;
+        self.put(csi ++ "0;33m");
+        self.cup(r.x, r.y);
+        self.put("┌");
+        var x: u16 = 1;
+        while (x < r.w - 1) : (x += 1) self.put("─");
+        self.put("┐");
+        var y: u16 = r.y + 1;
+        while (y < r.y + r.h - 1) : (y += 1) {
+            self.cup(r.x, y);
+            self.put("│");
+            self.cup(r.x + r.w - 1, y);
+            self.put("│");
+        }
+        self.cup(r.x, r.y + r.h - 1);
+        self.put("└");
+        x = 1;
+        while (x < r.w - 1) : (x += 1) self.put("─");
+        self.put("┘");
+        self.put(csi ++ "0m");
     }
 
     /// Borders: the column/row gaps place() left between rects.

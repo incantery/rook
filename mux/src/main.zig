@@ -2,6 +2,7 @@
 //!   rook-mux            attach (starting the server if needed)
 //!   rook-mux server     run the server in the foreground
 //!   rook-mux nav <dir>  move focus h/j/k/l (vim plugins call this at edges)
+//!   rook-mux popup <cmd> float a command over the current window
 //!   rook-mux kill       stop the server
 const std = @import("std");
 const server = @import("server.zig");
@@ -58,6 +59,19 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "kill")) {
         try client.kill(gpa, path);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "popup")) {
+        if (argv.len < 3) {
+            std.debug.print("usage: rook-mux popup <command...>\n", .{});
+            return error.BadArgs;
+        }
+        var joined: std.ArrayList(u8) = .empty;
+        for (argv[2..], 0..) |a, i| {
+            if (i > 0) try joined.append(gpa, ' ');
+            try joined.appendSlice(gpa, std.mem.span(a));
+        }
+        try client.popup(path, joined.items);
         return;
     }
     if (std.mem.eql(u8, cmd, "nav")) {
