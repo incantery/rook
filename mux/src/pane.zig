@@ -206,6 +206,14 @@ pub const Pane = struct {
         try self.rs.update(self.gpa, &self.term);
     }
 
+    /// Does the program in this pane want mouse events?
+    pub fn wantsMouse(self: *Pane) bool {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        const m = &self.term.modes;
+        return m.get(.mouse_event_normal) or m.get(.mouse_event_button) or m.get(.mouse_event_any);
+    }
+
     /// Scroll the viewport by rows (negative = back in time).
     pub fn scroll(self: *Pane, delta: i32) void {
         os_unfair_lock_lock(&self.lock);

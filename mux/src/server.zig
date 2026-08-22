@@ -351,7 +351,8 @@ pub const Server = struct {
     }
 
     /// Route stdin: prefix commands here, scroll-mode keys in scroll
-    /// mode, everything else to the focused pane.
+    /// mode, mouse events by position, everything else to the focused
+    /// pane.
     fn input(self: *Server, c: *Client, bytes: []const u8) void {
         self.lat.note();
         var rest = bytes;
@@ -362,23 +363,123 @@ pub const Server = struct {
                 rest = rest[1..];
                 continue;
             }
+            // SGR mouse: ESC [ < btn ; x ; y (M|m)
+            if (rest.len >= 3 and rest[0] == 0x1b and rest[1] == '[' and rest[2] == '<') {
+                if (parseMouse(rest)) |ev| {
+                    self.mouse(ev);
+                    rest = rest[ev.len..];
+                    continue;
+                }
+            }
             if (self.scrolling) {
                 self.scrollKey(rest[0]);
                 rest = rest[1..];
                 continue;
             }
-            const idx = std.mem.indexOfScalar(u8, rest, self.prefix_key) orelse {
-                self.toFocused(rest);
-                return;
-            };
-            if (idx > 0) self.toFocused(rest[0..idx]);
-            c.prefix = true;
-            rest = rest[idx + 1 ..];
+            if (rest[0] == self.prefix_key) {
+                c.prefix = true;
+                rest = rest[1..];
+                continue;
+            }
+            // forward up to the next special byte
+            var end: usize = rest.len;
+            for (rest, 0..) |b, i| {
+                if (b == self.prefix_key or b == 0x1b) {
+                    if (b == 0x1b and i == 0) {
+                        // a lone ESC (or non-mouse CSI): forward it
+                        continue;
+                    }
+                    end = if (b == 0x1b) blk: {
+                        // only stop for a potential mouse sequence
+                        if (i + 2 < rest.len and rest[i + 1] == '[' and rest[i + 2] == '<') break :blk i;
+                        continue;
+                    } else i;
+                    break;
+                }
+            }
+            self.toFocused(rest[0..end]);
+            rest = rest[end..];
+        }
+    }
+
+    const Mouse = struct { btn: u32, x: u16, y: u16, release: bool, len: usize };
+
+    fn parseMouse(bytes: []const u8) ?Mouse {
+        // ESC [ < btn ; x ; y M|m
+        var i: usize = 3;
+        var nums = [3]u32{ 0, 0, 0 };
+        var ni: usize = 0;
+        while (i < bytes.len) : (i += 1) {
+            const b = bytes[i];
+            if (b >= '0' and b <= '9') {
+                nums[ni] = nums[ni] * 10 + (b - '0');
+            } else if (b == ';') {
+                ni += 1;
+                if (ni > 2) return null;
+            } else if (b == 'M' or b == 'm') {
+                if (ni != 2) return null;
+                return .{
+                    .btn = nums[0],
+                    .x = @intCast(@max(1, nums[1])),
+                    .y = @intCast(@max(1, nums[2])),
+                    .release = b == 'm',
+                    .len = i + 1,
+                };
+            } else return null;
+        }
+        return null; // incomplete: caller falls through, bytes flushed to pane
+    }
+
+    /// A mouse event: click focuses the pane under it; wheel scrolls
+    /// the pane (or the event is forwarded, pane-relative, when the
+    /// program asked for mouse).
+    fn mouse(self: *Server, ev: Mouse) void {
+        // find the pane under the pointer (0-based cell coords)
+        const cx = ev.x - 1;
+        const cy = ev.y - 1;
+        const w = self.window();
+        var hit: ?layoutpkg.Placed = null;
+        for (self.placed.items) |pl| {
+            if (cx >= pl.rect.x and cx < pl.rect.x + pl.rect.w and cy >= pl.rect.y and cy < pl.rect.y + pl.rect.h) hit = pl;
+        }
+        const pl = hit orelse return;
+        const is_press_click = ev.btn < 3 and !ev.release;
+        if (is_press_click and pl.pane != w.focused) {
+            w.focused = pl.pane;
+            self.full = true;
+            self.pending = true;
+        }
+        const p = self.pane(pl.pane) orelse return;
+        if (p.wantsMouse()) {
+            var buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{
+                ev.btn,
+                cx - pl.rect.x + 1,
+                cy - pl.rect.y + 1,
+                @as(u8, if (ev.release) 'm' else 'M'),
+            }) catch return;
+            p.write(s);
+            return;
+        }
+        // wheel on a mouse-less pane scrolls its viewport
+        if (ev.btn == 64) {
+            p.scroll(-3);
+            self.full = true;
+            self.pending = true;
+        } else if (ev.btn == 65) {
+            p.scroll(3);
+            self.full = true;
+            self.pending = true;
         }
     }
 
     fn toFocused(self: *Server, bytes: []const u8) void {
-        if (self.focusedPane()) |p| p.write(bytes);
+        if (self.focusedPane()) |p| {
+            // typing returns the view to now — a wheel-scrolled pane
+            // must not eat keystrokes into an old screen silently
+            p.scrollBottom();
+            p.write(bytes);
+        }
     }
 
     fn command(self: *Server, c: *Client, key: u8) void {

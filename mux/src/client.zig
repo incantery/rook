@@ -101,9 +101,9 @@ pub fn attach(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     _ = tcsetattr(0, TCSANOW, &raw);
     defer _ = tcsetattr(0, TCSANOW, &orig);
 
-    // alt screen on; restored on the way out
-    _ = ptypkg.writeAllFd(1, "\x1b[?1049h\x1b[2J");
-    defer _ = ptypkg.writeAllFd(1, "\x1b[?1049l\x1b[?25h\x1b[0m");
+    // alt screen + SGR mouse on; both restored on the way out
+    _ = ptypkg.writeAllFd(1, "\x1b[?1049h\x1b[2J\x1b[?1002;1006h");
+    defer _ = ptypkg.writeAllFd(1, "\x1b[?1002;1006l\x1b[?1049l\x1b[?25h\x1b[0m");
 
     _ = signal(SIGWINCH, &onWinch);
 
