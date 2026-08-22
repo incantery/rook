@@ -18,8 +18,10 @@ const (
 	sideWidth   = "42"
 )
 
-// Side toggles the pinned board in the window of pane (the caller's
-// own pane when empty).
+// Side toggles the sidebar from the window of pane (the caller's own
+// pane when empty). On: the global switch is set and the panel shown
+// here; hooks (see tmux.Render) then carry it to every window you
+// change to. Off: the switch is cleared and the panel parked.
 func Side(pane string) error {
 	if pane == "" {
 		pane = os.Getenv("TMUX_PANE")
@@ -31,22 +33,49 @@ func Side(pane string) error {
 	if err != nil {
 		return err
 	}
-	// Already showing here? Park it.
-	if pane := sidePaneIn(window); pane != "" {
-		return park(pane)
+	if on() {
+		tmux.Run("set-option", "-g", "@rook_sidebar", "0")
+		if p := sidePaneIn(""); p != "" {
+			return park(p)
+		}
+		return nil
 	}
-	// Parked somewhere? Bring it. (It may also be showing in another
-	// window; join-pane moves it from wherever it is.)
+	tmux.Run("set-option", "-g", "@rook_sidebar", "1")
+	return show(window)
+}
+
+// Sync is the hook: when the sidebar is on and not in this window,
+// bring it here. Cheap when nothing needs doing — one list-panes.
+func Sync(window string) error {
+	if !on() || sidePaneIn(window) != "" {
+		return nil
+	}
+	if window == "" || strings.HasPrefix(window, sideSession+":") {
+		return nil
+	}
+	return show(window)
+}
+
+func on() bool {
+	out, _ := tmux.Run("show-option", "-gqv", "@rook_sidebar")
+	return strings.TrimSpace(out) == "1"
+}
+
+// show puts the panel in a window: moving the existing one, or making
+// it the first time.
+func show(window string) error {
 	if pane := sidePaneIn(""); pane != "" {
-		_, err := tmux.Run("join-pane", "-h", "-b", "-l", sideWidth, "-s", pane, "-t", window)
-		return err
+		out, err := tmux.Run("join-pane", "-d", "-h", "-b", "-l", sideWidth, "-s", pane, "-t", window)
+		if err != nil {
+			return fmt.Errorf("moving panel: %s", strings.TrimSpace(out))
+		}
+		return nil
 	}
-	// First time: make it.
 	self, err := os.Executable()
 	if err != nil {
 		self = "rook"
 	}
-	out, err := tmux.Run("split-window", "-h", "-b", "-l", sideWidth, "-t", window, "-P", "-F", "#{pane_id}", self+" agents --side")
+	out, err := tmux.Run("split-window", "-d", "-h", "-b", "-l", sideWidth, "-t", window, "-P", "-F", "#{pane_id}", self+" agents --side")
 	if err != nil {
 		return fmt.Errorf("opening side panel: %s", strings.TrimSpace(out))
 	}
@@ -68,34 +97,12 @@ func park(pane string) error {
 	return nil
 }
 
-// follow is Enter in the pinned panel: go to the agent, and bring the
-// panel along so it stays on screen in the new window.
-func follow(a sessions.Agent) error {
-	self := os.Getenv("TMUX_PANE")
-	target := "=" + a.Session + ":" + a.Window
-	if self != "" {
-		here, _ := current(self, "#{session_name}:#{window_index}")
-		if strings.TrimPrefix(target, "=") != here {
-			if out, err := tmux.Run("join-pane", "-d", "-h", "-b", "-l", sideWidth, "-s", self, "-t", target); err != nil {
-				return fmt.Errorf("moving panel: %s", strings.TrimSpace(out))
-			}
-		}
-	}
-	return sessions.Goto(a)
-}
+// follow is Enter in the pinned panel: go to the agent. The window
+// change fires the sync hook, which brings the panel along.
+func follow(a sessions.Agent) error { return sessions.Goto(a) }
 
-// followSession is Enter on a space in the pinned panel: switch to the
-// session, panel in tow.
+// followSession is Enter on a space in the pinned panel.
 func followSession(name string) error {
-	self := os.Getenv("TMUX_PANE")
-	if self != "" {
-		here, _ := current(self, "#{session_name}")
-		if here != name {
-			if out, err := tmux.Run("join-pane", "-d", "-h", "-b", "-l", sideWidth, "-s", self, "-t", "="+name); err != nil {
-				return fmt.Errorf("moving panel: %s", strings.TrimSpace(out))
-			}
-		}
-	}
 	_, err := tmux.Run("switch-client", "-t", "="+name)
 	return err
 }

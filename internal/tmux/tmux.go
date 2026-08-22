@@ -183,6 +183,12 @@ func (s Settings) Render(confPath string) string {
 	// prefix-A pins the same board as a side panel of the current
 	// window, herdr-style; again to park it.
 	p("bind A run-shell -b %q", fmt.Sprintf("%q agents side '#{pane_id}'", rookBin))
+	// While the sidebar is on, it lives in whatever window you are in:
+	// every way of changing window hands it over.
+	sync := fmt.Sprintf("run-shell -b \"%s agents sync '#{session_name}:#{window_index}'\"", rookBin)
+	for _, hook := range []string{"session-window-changed", "client-session-changed", "after-new-window"} {
+		p("set-hook -g %s %q", hook, sync)
+	}
 
 	t := s.Theme
 	p("")
@@ -205,28 +211,34 @@ func (s Settings) Render(confPath string) string {
 	// @rook_agent option, which the tab formats below render.
 	p("set -g status-right %q", "#("+rookBin+" sweep)#[fg="+t.Dim+"]#S ")
 	p("set -g status-right-length 60")
-	// Tabs: generous padding, and the active window is a raised block —
-	// dim ground, accent label — instead of bare colored text. Agent
-	// windows wear their live state: ● waiting (accent — it needs you),
-	// ✳ working, nothing when done.
+	// Tabs: the window name alone, herdr-style; the active one is a
+	// raised block — dim ground, accent label. Agent windows wear their
+	// live state: ● waiting (accent — it needs you), ✳ working, nothing
+	// when done.
 	// Styles inside a #{?,,} conditional must be space-separated:
 	// tmux splits the branches on commas, style commas included.
 	waitMark := "#{?#{==:#{@rook_agent},waiting},#[fg=" + t.Accent + " bold] ●#[nobold fg=" + t.Dim + "],}"
 	workMark := "#{?#{==:#{@rook_agent},working}, ✳,}"
 	p("set -g window-status-format %q",
-		"#[fg="+t.Dim+"]  #I·#W"+waitMark+workMark+"  ")
+		"#[fg="+t.Dim+"]  #W"+waitMark+workMark+"  ")
 	p("set -g window-status-current-format %q",
-		"#[fg="+t.Accent+",bg="+t.Dim+",bold]  #I·#W#{?window_zoomed_flag, ⛶,}"+
+		"#[fg="+t.Accent+",bg="+t.Dim+",bold]  #W#{?window_zoomed_flag, ⛶,}"+
 			"#{?#{==:#{@rook_agent},waiting}, ●,}#{?#{==:#{@rook_agent},working}, ✳,}  ")
 	p("set -g window-status-separator %q", "")
 	p("set -g pane-border-style %q", "fg="+t.Dim)
 	p("set -g pane-active-border-style %q", "fg="+t.Accent)
-	// The subdued bottom strip: every pane wears its own git place on
-	// its bottom border; the active pane adds global info (spend) from
-	// the attention feed. The top bar talks, this whispers.
-	p("set -g pane-border-status bottom")
+	// Titled panes: every pane wears its name on its top border, the
+	// way a window manager labels a window — "claude", "zsh", "agents"
+	// for the sidebar — then, dim, its git place and (active pane only)
+	// global info from the attention feed. Rounded lines so the chrome
+	// reads as frames, not a grid.
+	p("set -g pane-border-lines rounded")
+	p("set -g pane-border-status top")
+	paneName := "#{?#{==:#{@rook_side},1},agents," +
+		"#{?#{m/r:^[0-9.]+$,#{pane_current_command}},claude,#{pane_current_command}}}"
 	p("set -g pane-border-format %q",
-		"#[fg="+t.Dim+"] #("+rookBin+" paneline '#{pane_current_path}' #{pane_active}) ")
+		"#{?pane_active,#[fg="+t.Accent+" bold],#[fg="+t.Dim+"]} "+paneName+" #[nobold fg="+t.Dim+"]"+
+			"#("+rookBin+" paneline '#{pane_current_path}' #{pane_active}) ")
 	p("set -g message-style %q", "bg=default,fg="+t.Accent)
 	p("set -g mode-style %q", "fg=black,bg="+t.Accent)
 	p("set -g clock-mode-colour %s", t.Accent)

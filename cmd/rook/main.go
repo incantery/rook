@@ -102,6 +102,8 @@ func main() {
 				pane = args[2]
 			}
 			err = agents.Side(pane)
+		case len(args) > 2 && args[1] == "sync":
+			err = agents.Sync(args[2])
 		case len(args) > 1 && args[1] == "--side":
 			err = agents.Run(true)
 		case len(args) > 1 && args[1] == "--json":

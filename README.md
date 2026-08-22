@@ -39,9 +39,16 @@ every session (vera is its first publisher).
 **Agents.** `prefix a` (or `rook agents`) is a sidebar: spaces (live
 sessions, with their branch) and agents (who is working where — waiting
 ● needs you, working ●, done), a dot and two lines each. Enter goes
-there; Esc closes. `prefix A` pins it as a side panel of the current
-window (again to park it), and jumping from the pinned panel takes it
-along. `rook agents --json` is the agent list for machines.
+there; Esc closes. `prefix A` turns it into a sidebar: a panel on the
+left that follows you to every window and session (tmux hooks hand it
+over) until `prefix A` parks it. `rook agents --json` is the agent list
+for machines.
+
+**The chrome is tmux.** Tabs are the status line (window names, the
+active one raised, agent state as ● / ✳); every pane wears its name on
+a rounded top border — claude, zsh, agents — with its git place beside
+it; the sidebar is a pane. Nothing is drawn by rook itself, so every
+terminal feature passes straight through.
 
 **Worktrees.** One agent, one branch, one checkout, one session — and a
 lifecycle that ends with all of them gone. `rook wt` is the manager — a
