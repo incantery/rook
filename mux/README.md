@@ -10,7 +10,10 @@ against.
     ./zig-out/bin/rook-mux server   # foreground server
 
 The prefix comes from `~/.config/rook/rook.toml` (`[tmux] prefix`),
-C-b when unset; double-tap types it literally. Then:
+C-b when unset; double-tap types it literally. A `[mux]` section adds
+`nav_owners = ["nvim", "fzf"]` (programs that keep bare Ctrl-hjkl),
+`scrollback_mb = 4`, and `accent = "cyan"` (border/popup color,
+`bright-` prefixes work). Then:
 
     v |        split side by side          c        new window
     -          split stacked               n p 1-9  switch window

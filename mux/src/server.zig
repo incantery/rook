@@ -103,6 +103,7 @@ pub const Server = struct {
     listener: ptypkg.fd_t,
     sock_path: []const u8,
     prefix_key: u8,
+    conf: config.Mux = .{},
     panes: std.ArrayList(*panepkg.Pane) = .empty,
     sessions: std.ArrayList(*Session) = .empty,
     cur_sess: usize = 0,
@@ -170,6 +171,7 @@ pub const Server = struct {
             .listener = listener,
             .sock_path = sock_path,
             .prefix_key = config.prefixKey(),
+            .conf = config.muxConfig(),
             .wake_r = pipefds[0],
             .wake_w = pipefds[1],
             .frame = renderpkg.Frame.init(gpa),
@@ -184,6 +186,7 @@ pub const Server = struct {
             _ = std.fmt.bufPrintZ(self.state_tmp[0 .. self.state_tmp.len - 1], "{s}.state.tmp", .{sock_path}) catch {};
         } else |_| {}
 
+        self.frame.accent = self.conf.accent;
         if (!try self.restoreState()) _ = try self.newSession("main");
         try self.loop();
     }
@@ -282,7 +285,7 @@ pub const Server = struct {
     fn startPane(self: *Server, cwd: ?[*:0]const u8) !*panepkg.Pane {
         const g = self.geometry();
         const dir: ?[*:0]const u8 = cwd orelse if (self.cwd) |c| c.ptr else null;
-        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, dir, g.cols, g.rows -| 1, self.wake_w, self.next_id, null);
+        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, dir, g.cols, g.rows -| 1, self.wake_w, self.next_id, null, self.conf.scrollback_bytes);
         try self.panes.append(self.gpa, p);
         self.next_id += 1;
         return p;
@@ -307,7 +310,7 @@ pub const Server = struct {
         const r = self.popupRect();
         const cmd_z = try self.gpa.dupeZ(u8, cmd);
         defer self.gpa.free(cmd_z);
-        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, cwd orelse (if (self.cwd) |c| c.ptr else null), r.w -| 2, r.h -| 2, self.wake_w, self.next_id, cmd_z.ptr);
+        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, cwd orelse (if (self.cwd) |c| c.ptr else null), r.w -| 2, r.h -| 2, self.wake_w, self.next_id, cmd_z.ptr, self.conf.scrollback_bytes);
         try self.panes.append(self.gpa, p);
         self.next_id += 1;
         self.popup = p.id;
@@ -1072,6 +1075,13 @@ pub const Server = struct {
         const p = self.focusedPane() orelse return false;
         var buf: [64]u8 = undefined;
         const name = p.fgName(&buf) orelse return false;
+        if (self.conf.owners_len > 0) {
+            var it = std.mem.splitScalar(u8, self.conf.ownersSlice(), '\n');
+            while (it.next()) |o| {
+                if (std.mem.eql(u8, name, o)) return true;
+            }
+            return false;
+        }
         const owners = [_][]const u8{ "nvim", "vim", "vi", "view", "gvim", "vimdiff", "nvimdiff", "fzf" };
         for (owners) |o| {
             if (std.mem.eql(u8, name, o)) return true;

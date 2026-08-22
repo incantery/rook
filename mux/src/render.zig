@@ -11,6 +11,8 @@ const csi = "\x1b[";
 pub const Frame = struct {
     buf: std.ArrayList(u8) = .empty,
     gpa: std.mem.Allocator,
+    /// SGR fg code for focused borders and the popup box.
+    accent: u8 = 33,
 
     pub fn init(gpa: std.mem.Allocator) Frame {
         return .{ .gpa = gpa };
@@ -195,7 +197,7 @@ pub const Frame = struct {
     /// A full box border for the popup, accent-colored.
     fn drawBox(self: *Frame, r: layoutpkg.Rect) void {
         if (r.w < 2 or r.h < 2) return;
-        self.put(csi ++ "0;33m");
+        self.print(csi ++ "0;{d}m", .{self.accent});
         self.cup(r.x, r.y);
         self.put("┌");
         var x: u16 = 1;
@@ -221,10 +223,11 @@ pub const Frame = struct {
         _ = cols;
         for (placed) |pl| {
             const r = pl.rect;
-            const acc = pl.pane == focused;
-            // right border, if there's a gap column to our right
-            if (hasNeighbor(placed, r.x + r.w + 1, r.y)) {
-                self.put(if (acc) csi ++ "0;33m" else csi ++ "0;90m");
+            // right border, if there's a gap column to our right; it
+            // lights up when either side of the gap is focused
+            if (neighborAt(placed, r.x + r.w + 1, r.y)) |nb| {
+                const acc = pl.pane == focused or nb == focused;
+                if (acc) self.print(csi ++ "0;{d}m", .{self.accent}) else self.put(csi ++ "0;90m");
                 var y: u16 = r.y;
                 while (y < r.y + r.h and y < rows - 1) : (y += 1) {
                     self.cup(r.x + r.w, y);
@@ -232,28 +235,31 @@ pub const Frame = struct {
                 }
             }
             // bottom border
-            if (r.y + r.h + 1 < rows and hasNeighborBelow(placed, r.x, r.y + r.h + 1)) {
-                self.put(if (acc) csi ++ "0;33m" else csi ++ "0;90m");
-                self.cup(r.x, r.y + r.h);
-                var x: u16 = 0;
-                while (x < r.w) : (x += 1) self.put("─");
+            if (r.y + r.h + 1 < rows) {
+                if (neighborBelowAt(placed, r.x, r.y + r.h + 1)) |nb| {
+                    const acc = pl.pane == focused or nb == focused;
+                    if (acc) self.print(csi ++ "0;{d}m", .{self.accent}) else self.put(csi ++ "0;90m");
+                    self.cup(r.x, r.y + r.h);
+                    var x: u16 = 0;
+                    while (x < r.w) : (x += 1) self.put("─");
+                }
             }
         }
         self.put(csi ++ "0m");
     }
 };
 
-fn hasNeighbor(placed: []const layoutpkg.Placed, x: u16, y: u16) bool {
+fn neighborAt(placed: []const layoutpkg.Placed, x: u16, y: u16) ?u32 {
     for (placed) |p| {
-        if (p.rect.x == x and y >= p.rect.y and y < p.rect.y + p.rect.h) return true;
+        if (p.rect.x == x and y >= p.rect.y and y < p.rect.y + p.rect.h) return p.pane;
     }
-    return false;
+    return null;
 }
-fn hasNeighborBelow(placed: []const layoutpkg.Placed, x: u16, y: u16) bool {
+fn neighborBelowAt(placed: []const layoutpkg.Placed, x: u16, y: u16) ?u32 {
     for (placed) |p| {
-        if (p.rect.y == y and x >= p.rect.x and x < p.rect.x + p.rect.w) return true;
+        if (p.rect.y == y and x >= p.rect.x and x < p.rect.x + p.rect.w) return p.pane;
     }
-    return false;
+    return null;
 }
 
 fn findPane(panes: []const *panepkg.Pane, id: u32) ?*panepkg.Pane {

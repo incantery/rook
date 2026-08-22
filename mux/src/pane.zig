@@ -68,6 +68,7 @@ pub const Pane = struct {
         wake_fd: ptypkg.fd_t,
         id: u32,
         cmd: ?[*:0]const u8,
+        max_scrollback: usize,
     ) !*Pane {
         const self = try gpa.create(Pane);
         errdefer gpa.destroy(self);
@@ -76,7 +77,7 @@ pub const Pane = struct {
             .term = try .init(io, gpa, .{
                 .cols = cols,
                 .rows = rows,
-                .max_scrollback_bytes = 4 * 1024 * 1024,
+                .max_scrollback_bytes = max_scrollback,
             }),
             .pty = try ptypkg.Pty.open(.{ .ws_row = rows, .ws_col = cols }),
             .pid = undefined,
