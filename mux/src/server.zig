@@ -98,6 +98,7 @@ pub const Server = struct {
     frames_sent: u64 = 0,
     bytes_sent: u64 = 0,
     started_ms: i64 = 0,
+    drag: ?Drag = null,
 
     pub fn run(gpa: std.mem.Allocator, io: std.Io, sock_path: []const u8, shell: [:0]const u8, cwd: ?[:0]const u8) !void {
         const listener = ptypkg.unixListen(sock_path);
@@ -404,6 +405,9 @@ pub const Server = struct {
 
     const Mouse = struct { btn: u32, x: u16, y: u16, release: bool, len: usize };
 
+    /// In-flight drag selection: pane id and anchor cell.
+    const Drag = struct { pane: u32, ax: u16, ay: u16, moved: bool };
+
     fn parseMouse(bytes: []const u8) ?Mouse {
         // ESC [ < btn ; x ; y M|m
         var i: usize = 3;
@@ -450,6 +454,45 @@ pub const Server = struct {
             self.pending = true;
         }
         const p = self.pane(pl.pane) orelse return;
+        if (!p.wantsMouse()) {
+            // Mux-side text selection, tmux-style: press anchors, drag
+            // extends, release copies to the glass (OSC 52) and keeps
+            // the highlight.
+            const px = cx - pl.rect.x;
+            const py = cy - pl.rect.y;
+            if (ev.btn == 0 and !ev.release) {
+                p.clearSelection();
+                self.drag = .{ .pane = pl.pane, .ax = px, .ay = py, .moved = false };
+                self.full = true;
+                self.pending = true;
+                return;
+            }
+            if (ev.btn == 32) { // motion with left button held
+                if (self.drag) |*d| {
+                    if (d.pane == pl.pane) {
+                        p.setSelection(d.ax, d.ay, px, py);
+                        d.moved = true;
+                        self.full = true;
+                        self.pending = true;
+                    }
+                }
+                return;
+            }
+            if (ev.btn == 0 and ev.release) {
+                if (self.drag) |d| {
+                    self.drag = null;
+                    if (d.moved) {
+                        if (p.selectionText()) |text| {
+                            defer self.gpa.free(text);
+                            self.shipClip(text);
+                        }
+                        return;
+                    }
+                }
+                // plain click: nothing more to do (focus already moved)
+                return;
+            }
+        }
         if (p.wantsMouse()) {
             var buf: [32]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{
@@ -479,6 +522,13 @@ pub const Server = struct {
             // must not eat keystrokes into an old screen silently
             p.scrollBottom();
             p.write(bytes);
+        }
+    }
+
+    fn clearDrag(self: *Server) void {
+        if (self.drag) |d| {
+            if (self.pane(d.pane)) |p| p.clearSelection();
+            self.drag = null;
         }
     }
 
@@ -645,17 +695,24 @@ pub const Server = struct {
         var text_buf: [64 * 1024]u8 = undefined;
         for (self.panes.items) |p| {
             const text = p.takeClip(&text_buf) orelse continue;
-            var b64_buf: [96 * 1024]u8 = undefined;
-            const b64 = std.base64.standard.Encoder.encode(&b64_buf, text);
-            var osc: std.ArrayList(u8) = .empty;
-            defer osc.deinit(self.gpa);
-            osc.appendSlice(self.gpa, "\x1b]52;c;") catch return;
-            osc.appendSlice(self.gpa, b64) catch return;
-            osc.appendSlice(self.gpa, "\x07") catch return;
-            for (self.clients.items) |c| {
-                if (!c.attached) continue;
-                proto.write(c.fd, @intFromEnum(proto.s2c.draw), osc.items) catch {};
-            }
+            self.shipClip(text);
+        }
+    }
+
+    /// Send text to every attached glass as OSC 52.
+    fn shipClip(self: *Server, text: []const u8) void {
+        const b64_len = std.base64.standard.Encoder.calcSize(text.len);
+        const b64_buf = self.gpa.alloc(u8, b64_len) catch return;
+        defer self.gpa.free(b64_buf);
+        const b64 = std.base64.standard.Encoder.encode(b64_buf, text);
+        var osc: std.ArrayList(u8) = .empty;
+        defer osc.deinit(self.gpa);
+        osc.appendSlice(self.gpa, "\x1b]52;c;") catch return;
+        osc.appendSlice(self.gpa, b64) catch return;
+        osc.appendSlice(self.gpa, "\x07") catch return;
+        for (self.clients.items) |c| {
+            if (!c.attached) continue;
+            proto.write(c.fd, @intFromEnum(proto.s2c.draw), osc.items) catch {};
         }
     }
 

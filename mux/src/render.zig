@@ -94,6 +94,7 @@ pub const Frame = struct {
         const colors = &rs.colors;
         const row_cells = rs.row_data.items(.cells);
         const row_dirty = rs.row_data.items(.dirty);
+        const row_sels = rs.row_data.items(.selection);
         const vrows: usize = @min(rect.h, rs.rows);
         for (0..vrows) |y| {
             if (!full and !row_dirty[y]) continue;
@@ -111,6 +112,9 @@ pub const Frame = struct {
                 const styled = raw.style_id != 0;
                 const st: vt.Style = if (styled) styles[x] else .{};
                 var sgr = Sgr.from(st, raw, colors);
+                if (row_sels[y]) |sr| {
+                    if (x >= sr[0] and x <= sr[1]) sgr.inverse = !sgr.inverse;
+                }
                 // A wide glyph's tail is covered by its head cell.
                 if (raw.wide == .spacer_tail) continue;
                 const cp: u21 = switch (raw.content_tag) {

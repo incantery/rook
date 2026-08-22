@@ -206,6 +206,33 @@ pub const Pane = struct {
         try self.rs.update(self.gpa, &self.term);
     }
 
+    /// Replace the selection with viewport-coord cells a→b (inclusive,
+    /// either order). Any thread. (pre-tmux setSelection.)
+    pub fn setSelection(self: *Pane, ax: u16, ay: u16, bx: u16, by: u16) void {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        const s = self.term.screens.active;
+        const pa = s.pages.pin(.{ .viewport = .{ .x = ax, .y = ay } }) orelse return;
+        const pb = s.pages.pin(.{ .viewport = .{ .x = bx, .y = by } }) orelse return;
+        s.select(.init(pa, pb, false)) catch {};
+    }
+
+    pub fn clearSelection(self: *Pane) void {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        self.term.screens.active.clearSelection();
+    }
+
+    /// The selected text, allocated with gpa; null when nothing is
+    /// selected. Caller frees.
+    pub fn selectionText(self: *Pane) ?[:0]const u8 {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        const s = self.term.screens.active;
+        const sel = s.selection orelse return null;
+        return s.selectionString(self.gpa, .{ .sel = sel }) catch null;
+    }
+
     /// Does the program in this pane want mouse events?
     pub fn wantsMouse(self: *Pane) bool {
         os_unfair_lock_lock(&self.lock);

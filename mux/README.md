@@ -24,9 +24,10 @@ kill` shuts the server down politely (HUPs every pane).
 Working today: dirty-row frames paced at 8ms, scrollback view, OSC 52
 copy out to the glass, cursor-shape passthrough (nvim beam in insert),
 tabs named live by each window's foreground program. Mouse: click
-focuses the pane under it; the wheel scrolls (or both forward
-pane-relative when the program asked for mouse — nvim, fzf). Typing
-snaps a scrolled pane back to live. Not yet: kitty keyboard
+focuses the pane under it; drag selects, and release copies the
+selection to the system clipboard (OSC 52); the wheel scrolls. All
+three forward pane-relative instead when the program asked for mouse
+(nvim, fzf). Typing snaps a scrolled pane back to live. Not yet: kitty keyboard
 passthrough, per-pane cwd inheritance, session persistence across
 server restart.
 
