@@ -23,6 +23,16 @@ fn EffectRet(comptime name: []const u8) type {
     return @typeInfo(Fn).@"fn".return_type.?;
 }
 
+/// Same recovery for a callback's Nth parameter (clipboard.Write has
+/// no public spelling in lib_vt).
+fn EffectArg(comptime name: []const u8, comptime i: usize) type {
+    const F = @FieldType(Effects, name);
+    const Fn = @typeInfo(@typeInfo(F).optional.child).pointer.child;
+    return @typeInfo(Fn).@"fn".params[i].type.?;
+}
+
+const max_clipboard = 8 * 1024 * 1024;
+
 pub const Pane = struct {
     gpa: std.mem.Allocator,
     pty: ptypkg.Pty,
@@ -38,6 +48,11 @@ pub const Pane = struct {
     /// the poll loop to snapshot and redraw.
     wake_fd: ptypkg.fd_t,
     id: u32,
+    /// OSC 52 landing zone: the reader thread copies a clipboard write
+    /// here (guarded by lock), the server forwards it to the glass.
+    clip_buf: []u8 = &.{},
+    clip_len: usize = 0,
+    clip_pending: std.atomic.Value(bool) = .init(false),
 
     pub fn start(
         gpa: std.mem.Allocator,
@@ -98,6 +113,39 @@ pub const Pane = struct {
         return .dark;
     }
 
+    /// OSC 52 write: stash the text for the server to forward to the
+    /// outer terminal as its own OSC 52 (pre-tmux shape). Fires on the
+    /// reader thread with the lock held.
+    fn effectClipboardWrite(h: *Handler, w: EffectArg("clipboard_write", 1)) EffectRet("clipboard_write") {
+        const self = fromHandler(h);
+        var data: []const u8 = "";
+        for (w.contents) |c| {
+            if (std.mem.eql(u8, c.mime, "text/plain")) {
+                data = c.data;
+                break;
+            }
+        }
+        if (data.len > max_clipboard) return .invalid_data;
+        if (self.clip_buf.len < data.len) {
+            self.clip_buf = self.gpa.realloc(self.clip_buf, data.len) catch return .io_error;
+        }
+        @memcpy(self.clip_buf[0..data.len], data);
+        self.clip_len = data.len;
+        self.clip_pending.store(true, .release);
+        return .success;
+    }
+
+    /// The server's side: take the pending clipboard text, or null.
+    /// Caller frees nothing; the buffer is reused.
+    pub fn takeClip(self: *Pane, out: []u8) ?[]const u8 {
+        if (!self.clip_pending.swap(false, .acq_rel)) return null;
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        const n = @min(self.clip_len, out.len);
+        @memcpy(out[0..n], self.clip_buf[0..n]);
+        return out[0..n];
+    }
+
     fn readLoop(self: *Pane) void {
         var handler = self.term.vtHandler();
         handler.effects = .{
@@ -109,7 +157,7 @@ pub const Pane = struct {
             .color_scheme = &effectColorScheme,
             .bell = null,
             .desktop_notification = null,
-            .clipboard_write = null,
+            .clipboard_write = &effectClipboardWrite,
             .title_changed = null,
             .pwd_changed = null,
             .progress_report = null,
@@ -200,6 +248,7 @@ pub const Pane = struct {
     pub fn deinit(self: *Pane) void {
         if (self.thread) |t| t.join();
         _ = ptypkg.Pty.wait(self.pid);
+        if (self.clip_buf.len > 0) self.gpa.free(self.clip_buf);
         self.pty.deinit();
         self.rs.deinit(self.gpa);
         self.term.deinit(self.gpa);

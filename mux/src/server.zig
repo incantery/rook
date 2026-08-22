@@ -90,6 +90,7 @@ pub const Server = struct {
     /// Something structural changed; the next frame repaints all.
     full: bool = true,
     pending: bool = false,
+    shutdown: bool = false,
     /// Scroll mode: viewport moved back in the focused pane's
     /// scrollback; plain keys navigate until q/Esc.
     scrolling: bool = false,
@@ -259,7 +260,7 @@ pub const Server = struct {
             }
 
             try self.reap();
-            if (self.windows.items.len == 0) return;
+            if (self.windows.items.len == 0 or self.shutdown) return;
 
             if (self.pending and nowMs() - last_frame >= frame_gap_ms) {
                 try self.redraw();
@@ -319,6 +320,11 @@ pub const Server = struct {
                 @intFromEnum(proto.c2s.stdin) => self.input(c, msg.payload),
                 @intFromEnum(proto.c2s.detach) => return false,
                 @intFromEnum(proto.c2s.stats) => self.sendStats(c),
+                @intFromEnum(proto.c2s.shutdown) => {
+                    // polite server exit: HUP everything and leave
+                    for (self.panes.items) |p| p.hangup();
+                    self.shutdown = true;
+                },
                 else => {},
             }
         }
@@ -498,6 +504,10 @@ pub const Server = struct {
             if (p.rs.dirty != .false) any_dirty = true;
             p.rs.dirty = .false;
         }
+        // OSC 52 from any visible pane goes straight to the glass; the
+        // client is dumb, so it rides the draw channel as raw bytes.
+        self.forwardClips();
+
         if (!any_dirty) return;
 
         const g = self.geometry();
@@ -516,6 +526,24 @@ pub const Server = struct {
         if (shipped) {
             self.frames_sent += 1;
             self.lat.frame();
+        }
+    }
+
+    fn forwardClips(self: *Server) void {
+        var text_buf: [64 * 1024]u8 = undefined;
+        for (self.panes.items) |p| {
+            const text = p.takeClip(&text_buf) orelse continue;
+            var b64_buf: [96 * 1024]u8 = undefined;
+            const b64 = std.base64.standard.Encoder.encode(&b64_buf, text);
+            var osc: std.ArrayList(u8) = .empty;
+            defer osc.deinit(self.gpa);
+            osc.appendSlice(self.gpa, "\x1b]52;c;") catch return;
+            osc.appendSlice(self.gpa, b64) catch return;
+            osc.appendSlice(self.gpa, "\x07") catch return;
+            for (self.clients.items) |c| {
+                if (!c.attached) continue;
+                proto.write(c.fd, @intFromEnum(proto.s2c.draw), osc.items) catch {};
+            }
         }
     }
 

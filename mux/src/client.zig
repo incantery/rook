@@ -73,6 +73,18 @@ pub fn stats(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     return error.Timeout;
 }
 
+/// Ask the server to shut down (HUPs every pane).
+pub fn kill(gpa: std.mem.Allocator, sock_path: []const u8) !void {
+    _ = gpa;
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    try proto.write(sock, @intFromEnum(proto.c2s.shutdown), "");
+    // give it a beat to act before we drop the connection
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    _ = ptypkg.pollMany(&fds, 1, 500);
+}
+
 pub fn attach(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     const sock = ptypkg.unixConnect(sock_path);
     if (sock < 0) return error.ConnectFailed;

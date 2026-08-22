@@ -54,11 +54,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, cmd, "kill")) {
-        // Connecting and immediately closing is not a kill; keep it
-        // honest: unlink + advise. Proper control verbs come with the
-        // real protocol.
-        ptypkg.unlinkPath(path);
-        std.debug.print("socket removed; kill the server process with pkill -f 'rook-mux server'\n", .{});
+        try client.kill(gpa, path);
+        return;
+    }
+
+    if (getenv("ROOK_MUX_PANE") != null) {
+        std.debug.print("already inside rook-mux; nesting comes later\n", .{});
         return;
     }
 
