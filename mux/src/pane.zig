@@ -53,6 +53,10 @@ pub const Pane = struct {
     clip_buf: []u8 = &.{},
     clip_len: usize = 0,
     clip_pending: std.atomic.Value(bool) = .init(false),
+    /// Stdin overflow queue (server thread only): what the pty would
+    /// not take without blocking.
+    in_buf: std.ArrayList(u8) = .empty,
+    in_off: usize = 0,
 
     pub fn start(
         gpa: std.mem.Allocator,
@@ -207,6 +211,15 @@ pub const Pane = struct {
     }
 
     /// Snapshot terminal state into rs for rendering. Server thread.
+    /// Does this pane's terminal have a DEC private mode set? The
+    /// server mirrors paste/focus modes of the focused pane onto the
+    /// glass, same as kitty flags.
+    pub fn modeSet(self: *Pane, m: vt.modes.Mode) bool {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        return self.term.modes.get(m);
+    }
+
     /// The pane's current kitty keyboard flags (0 = legacy). The
     /// server mirrors the focused pane's flags onto the glass.
     pub fn kittyFlags(self: *Pane) u8 {
@@ -273,8 +286,34 @@ pub const Pane = struct {
         self.term.screens.active.scroll(.active);
     }
 
+    /// Queue bytes for the pty. Never blocks the server: a program
+    /// that stopped reading its tty (Ctrl-S, stopped job) fills the
+    /// kernel buffer, and the overflow waits here until POLLOUT. A
+    /// pane more than 16MB behind is not coming back; drop input.
     pub fn write(self: *Pane, bytes: []const u8) void {
-        self.pty.writeMaster(bytes) catch {};
+        const backlog = self.in_buf.items.len - self.in_off;
+        if (backlog > 16 * 1024 * 1024) return;
+        self.in_buf.appendSlice(self.gpa, bytes) catch return;
+        self.flushIn();
+    }
+
+    /// Drain the stdin queue as far as the pty will take it.
+    pub fn flushIn(self: *Pane) void {
+        while (self.in_off < self.in_buf.items.len) {
+            const n = ptypkg.writeNbFd(self.pty.master, self.in_buf.items[self.in_off..]) catch {
+                self.in_buf.clearRetainingCapacity();
+                self.in_off = 0;
+                return;
+            };
+            if (n == 0) return; // pty full; server polls POLLOUT
+            self.in_off += n;
+        }
+        self.in_buf.clearRetainingCapacity();
+        self.in_off = 0;
+    }
+
+    pub fn pendingIn(self: *Pane) bool {
+        return self.in_off < self.in_buf.items.len;
     }
 
     pub fn resize(self: *Pane, cols: u16, rows: u16) void {
@@ -299,6 +338,7 @@ pub const Pane = struct {
         if (self.thread) |t| t.join();
         _ = ptypkg.Pty.wait(self.pid);
         if (self.clip_buf.len > 0) self.gpa.free(self.clip_buf);
+        self.in_buf.deinit(self.gpa);
         self.pty.deinit();
         self.rs.deinit(self.gpa);
         self.term.deinit(self.gpa);

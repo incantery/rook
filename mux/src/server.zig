@@ -32,7 +32,16 @@ const Client = struct {
     rows: u16 = 24,
     attached: bool = false,
     prefix: bool = false,
+    /// Outbound frames the socket would not take without blocking; the
+    /// loop drains it on POLLOUT. A stalled glass must never stall the
+    /// server (tmux relearned this one the hard way).
+    out: std.ArrayList(u8) = .empty,
+    out_off: usize = 0,
+    dead: bool = false,
 };
+
+/// A client more than 32MB behind is not consuming; cut it loose.
+const max_client_backlog = 32 * 1024 * 1024;
 
 /// One window: its own split tree, focus, and zoom state. Panes live
 /// on the server; the window only holds ids.
@@ -103,6 +112,8 @@ pub const Server = struct {
     /// focused pane so apps that pushed the protocol get real kitty
     /// input, and everything else gets legacy bytes.
     glass_kitty: u8 = 0,
+    glass_paste: bool = false,
+    glass_focus: bool = false,
 
     pub fn run(gpa: std.mem.Allocator, io: std.Io, sock_path: []const u8, shell: [:0]const u8, cwd: ?[:0]const u8) !void {
         const listener = ptypkg.unixListen(sock_path);
@@ -143,6 +154,7 @@ pub const Server = struct {
         for (self.clients.items) |c| {
             ptypkg.closeFd(c.fd);
             c.reader.deinit();
+            c.out.deinit(self.gpa);
             self.gpa.destroy(c);
         }
         self.clients.deinit(self.gpa);
@@ -169,6 +181,7 @@ pub const Server = struct {
         // inherit the cwd of whatever the user is looking at now
         var cwd_buf: [1024]u8 = undefined;
         const cwd = if (self.windows.items.len > 0) self.focusedCwd(&cwd_buf) else null;
+        const prev_focused: ?u32 = if (self.windows.items.len > 0) self.window().focused else null;
         const w = try self.gpa.create(Window);
         w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
         try self.windows.append(self.gpa, w);
@@ -176,6 +189,7 @@ pub const Server = struct {
         const p = try self.startPane(cwd);
         try w.layout.seed(p.id);
         w.focused = p.id;
+        if (prev_focused) |old_id| self.focusEvents(old_id, p.id);
         try self.relayout();
     }
 
@@ -203,6 +217,7 @@ pub const Server = struct {
         w.zoomed = false;
         const p = try self.startPane(cwd);
         try w.layout.split(w.focused, p.id, side_by_side);
+        self.focusEvents(w.focused, p.id);
         w.focused = p.id;
         try self.relayout();
     }
@@ -258,7 +273,13 @@ pub const Server = struct {
             try fds.append(self.gpa, .{ .fd = self.wake_r, .events = ptypkg.POLLIN });
             try fds.append(self.gpa, .{ .fd = self.listener, .events = ptypkg.POLLIN });
             for (self.clients.items) |c| {
-                try fds.append(self.gpa, .{ .fd = c.fd, .events = ptypkg.POLLIN });
+                const ev: i16 = if (c.out_off < c.out.items.len) ptypkg.POLLIN | ptypkg.POLLOUT else ptypkg.POLLIN;
+                try fds.append(self.gpa, .{ .fd = c.fd, .events = ev });
+            }
+            // panes with queued stdin: watch their ptys for room
+            const pane_fds_at = fds.items.len;
+            for (self.panes.items) |pn| {
+                if (pn.pendingIn()) try fds.append(self.gpa, .{ .fd = pn.pty.master, .events = ptypkg.POLLOUT });
             }
             const timeout: c_int = if (self.pending)
                 @intCast(@max(0, frame_gap_ms - (nowMs() - last_frame)))
@@ -275,17 +296,37 @@ pub const Server = struct {
 
             if (fds.items[1].revents & ptypkg.POLLIN != 0) self.accept();
 
-            for (fds.items[2..]) |pfd| {
+            for (fds.items[2..pane_fds_at]) |pfd| {
                 if (pfd.revents == 0) continue;
                 const idx = self.clientIndex(pfd.fd) orelse continue;
                 const c = self.clients.items[idx];
+                if (pfd.revents & ptypkg.POLLOUT != 0) self.flushClient(c);
                 // Serve before dropping: a one-shot client (nav) writes
                 // and closes, so POLLIN and POLLHUP arrive together and
                 // its bytes must still be drained.
-                const alive = self.serveClient(c);
-                if (!alive or pfd.revents & (ptypkg.POLLHUP | ptypkg.POLLERR) != 0) {
+                const alive = if (pfd.revents & ptypkg.POLLIN != 0) self.serveClient(c) else true;
+                if (!alive or c.dead or pfd.revents & (ptypkg.POLLHUP | ptypkg.POLLERR) != 0) {
                     self.dropClient(idx);
                 }
+            }
+
+            // drain pane stdin queues that got room
+            for (fds.items[pane_fds_at..]) |pfd| {
+                if (pfd.revents & ptypkg.POLLOUT == 0) continue;
+                for (self.panes.items) |pn| {
+                    if (pn.pty.master == pfd.fd) {
+                        pn.flushIn();
+                        break;
+                    }
+                }
+            }
+
+            // sweep clients marked dead outside the poll dispatch
+            // (backlog cap, failed writes from redraw/shipClip)
+            var ci: usize = self.clients.items.len;
+            while (ci > 0) {
+                ci -= 1;
+                if (self.clients.items[ci].dead) self.dropClient(ci);
             }
 
             try self.reap();
@@ -328,8 +369,45 @@ pub const Server = struct {
         const c = self.clients.items[i];
         ptypkg.closeFd(c.fd);
         c.reader.deinit();
+        c.out.deinit(self.gpa);
         self.gpa.destroy(c);
         _ = self.clients.swapRemove(i);
+    }
+
+    /// Frame a message onto the client's outbound queue and push what
+    /// the socket will take. Never blocks; POLLOUT drains the rest.
+    fn sendTo(self: *Server, c: *Client, kind: u8, payload: []const u8) void {
+        if (c.dead) return;
+        if (c.out.items.len - c.out_off > max_client_backlog) {
+            c.dead = true;
+            return;
+        }
+        var hdr: [5]u8 = undefined;
+        hdr[0] = kind;
+        std.mem.writeInt(u32, hdr[1..5], @intCast(payload.len), .little);
+        c.out.appendSlice(self.gpa, &hdr) catch {
+            c.dead = true;
+            return;
+        };
+        c.out.appendSlice(self.gpa, payload) catch {
+            c.dead = true;
+            return;
+        };
+        self.flushClient(c);
+    }
+
+    fn flushClient(self: *Server, c: *Client) void {
+        _ = self;
+        while (c.out_off < c.out.items.len) {
+            const n = ptypkg.writeNbFd(c.fd, c.out.items[c.out_off..]) catch {
+                c.dead = true;
+                return;
+            };
+            if (n == 0) return; // kernel buffer full
+            c.out_off += n;
+        }
+        c.out.clearRetainingCapacity();
+        c.out_off = 0;
     }
 
     /// Returns false when the client is gone. Buffered messages are
@@ -347,7 +425,7 @@ pub const Server = struct {
                         if (self.glass_kitty != 0) {
                             var kb: [16]u8 = undefined;
                             if (std.fmt.bufPrint(&kb, "\x1b[={d};1u", .{self.glass_kitty})) |seq| {
-                                proto.write(c.fd, @intFromEnum(proto.s2c.draw), seq) catch {};
+                                self.sendTo(c, @intFromEnum(proto.s2c.draw), seq);
                             } else |_| {}
                         }
                         self.relayout() catch {};
@@ -388,7 +466,7 @@ pub const Server = struct {
             self.lat.pct(0.99),
             self.lat.total,
         }) catch "stats: format error";
-        proto.write(c.fd, @intFromEnum(proto.s2c.stats_text), text) catch {};
+        self.sendTo(c, @intFromEnum(proto.s2c.stats_text), text);
     }
 
     /// Route stdin: prefix commands here, scroll-mode keys in scroll
@@ -502,6 +580,7 @@ pub const Server = struct {
         const pl = hit orelse return;
         const is_press_click = ev.btn < 3 and !ev.release;
         if (is_press_click and pl.pane != w.focused) {
+            self.focusEvents(w.focused, pl.pane);
             w.focused = pl.pane;
             self.full = true;
             self.pending = true;
@@ -608,7 +687,7 @@ pub const Server = struct {
             '[' => self.scrollStart(),
             'x' => if (self.focusedPane()) |p| p.hangup(),
             'd' => {
-                proto.write(c.fd, @intFromEnum(proto.s2c.exit), "") catch {};
+                self.sendTo(c, @intFromEnum(proto.s2c.exit), "");
                 c.attached = false;
             },
             else => {
@@ -658,8 +737,10 @@ pub const Server = struct {
 
     fn selectWindow(self: *Server, i: usize) void {
         if (i == self.cur) return;
+        const old_focused = self.window().focused;
         self.cur = i;
         self.scrolling = false;
+        self.focusEvents(old_focused, self.window().focused);
         self.relayout() catch {};
     }
 
@@ -681,6 +762,7 @@ pub const Server = struct {
         };
         if (layoutpkg.navigate(self.placed.items, w.focused, dx, dy)) |id| {
             if (id != w.focused) {
+                self.focusEvents(w.focused, id);
                 w.focused = id;
                 self.full = true; // border accents + cursor move
                 self.pending = true;
@@ -688,6 +770,18 @@ pub const Server = struct {
             }
         }
         return false;
+    }
+
+    /// Tell panes that asked for focus reporting (?1004) when mux
+    /// focus moves between them — nvim's FocusGained/autoread food.
+    fn focusEvents(self: *Server, old_id: u32, new_id: u32) void {
+        if (old_id == new_id) return;
+        if (self.pane(old_id)) |p| {
+            if (p.modeSet(.focus_event)) p.write("\x1b[O");
+        }
+        if (self.pane(new_id)) |p| {
+            if (p.modeSet(.focus_event)) p.write("\x1b[I");
+        }
     }
 
     /// Programs that own Ctrl-h/j/k/l themselves: vim navigates its own
@@ -761,7 +855,7 @@ pub const Server = struct {
         var shipped = false;
         for (self.clients.items) |c| {
             if (!c.attached) continue;
-            proto.write(c.fd, @intFromEnum(proto.s2c.draw), bytes) catch {};
+            self.sendTo(c, @intFromEnum(proto.s2c.draw), bytes);
             self.bytes_sent += bytes.len;
             shipped = true;
         }
@@ -785,14 +879,33 @@ pub const Server = struct {
     /// encode input the way that pane was promised. A terminal that
     /// doesn't know CSI = u ignores it.
     fn mirrorKitty(self: *Server) void {
-        const kf: u8 = if (self.focusedPane()) |p| p.kittyFlags() else 0;
-        if (kf == self.glass_kitty) return;
-        self.glass_kitty = kf;
-        var kb: [16]u8 = undefined;
-        const seq = std.fmt.bufPrint(&kb, "\x1b[={d};1u", .{kf}) catch return;
+        var buf: [64]u8 = undefined;
+        var out: std.ArrayList(u8) = .initBuffer(&buf);
+        const fp = self.focusedPane();
+        const kf: u8 = if (fp) |p| p.kittyFlags() else 0;
+        if (kf != self.glass_kitty) {
+            self.glass_kitty = kf;
+            var kb: [16]u8 = undefined;
+            if (std.fmt.bufPrint(&kb, "\x1b[={d};1u", .{kf})) |seq| {
+                out.appendSliceBounded(seq) catch {};
+            } else |_| {}
+        }
+        // bracketed paste and focus reporting ride along: the glass
+        // wraps pastes / sends focus in-out only if someone tells it
+        const paste = if (fp) |p| p.modeSet(.bracketed_paste) else false;
+        if (paste != self.glass_paste) {
+            self.glass_paste = paste;
+            out.appendSliceBounded(if (paste) "\x1b[?2004h" else "\x1b[?2004l") catch {};
+        }
+        const focus = if (fp) |p| p.modeSet(.focus_event) else false;
+        if (focus != self.glass_focus) {
+            self.glass_focus = focus;
+            out.appendSliceBounded(if (focus) "\x1b[?1004h" else "\x1b[?1004l") catch {};
+        }
+        if (out.items.len == 0) return;
         for (self.clients.items) |c| {
             if (!c.attached) continue;
-            proto.write(c.fd, @intFromEnum(proto.s2c.draw), seq) catch {};
+            self.sendTo(c, @intFromEnum(proto.s2c.draw), out.items);
         }
     }
 
@@ -809,7 +922,7 @@ pub const Server = struct {
         osc.appendSlice(self.gpa, "\x07") catch return;
         for (self.clients.items) |c| {
             if (!c.attached) continue;
-            proto.write(c.fd, @intFromEnum(proto.s2c.draw), osc.items) catch {};
+            self.sendTo(c, @intFromEnum(proto.s2c.draw), osc.items);
         }
     }
 

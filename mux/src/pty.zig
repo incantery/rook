@@ -465,6 +465,17 @@ pub fn readNb(fd: fd_t, buf: []u8) isize {
 }
 
 /// Blocking-ish write-all on any fd (spins on EAGAIN with a poll).
+/// One nonblocking write: bytes written, 0 when the kernel buffer is
+/// full (EAGAIN — poll for POLLOUT), error otherwise.
+pub fn writeNbFd(fd: fd_t, bytes: []const u8) !usize {
+    const n = write(fd, bytes.ptr, bytes.len);
+    if (n < 0) {
+        if (errno() == EAGAIN) return 0;
+        return error.WriteFailed;
+    }
+    return @intCast(n);
+}
+
 pub fn writeAllFd(fd: fd_t, bytes: []const u8) bool {
     var off: usize = 0;
     while (off < bytes.len) {

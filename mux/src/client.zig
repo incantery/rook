@@ -112,7 +112,7 @@ pub fn attach(gpa: std.mem.Allocator, sock_path: []const u8) !void {
 
     // alt screen + SGR mouse on; both restored on the way out
     _ = ptypkg.writeAllFd(1, "\x1b[?1049h\x1b[2J\x1b[?1002;1006h");
-    defer _ = ptypkg.writeAllFd(1, "\x1b[=0;1u\x1b[?1002;1006l\x1b[?1049l\x1b[?25h\x1b[0m");
+    defer _ = ptypkg.writeAllFd(1, "\x1b[=0;1u\x1b[?2004l\x1b[?1004l\x1b[?1002;1006l\x1b[?1049l\x1b[?25h\x1b[0m");
 
     _ = signal(SIGWINCH, &onWinch);
 
