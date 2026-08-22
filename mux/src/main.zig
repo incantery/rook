@@ -4,6 +4,7 @@
 //!   rook-mux nav <dir>  move focus h/j/k/l (vim plugins call this at edges)
 //!   rook-mux popup <cmd> float a command over the current window
 //!   rook-mux ls / switch <name> / new <name>   workspaces
+//!   rook-mux blocks / raw <id>   block table; raw single-block attach
 //!   rook-mux kill       stop the server
 const std = @import("std");
 const server = @import("server.zig");
@@ -60,6 +61,19 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "kill")) {
         try client.kill(gpa, path);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "blocks")) {
+        try client.blocks(gpa, path);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "raw")) {
+        if (argv.len < 3) {
+            std.debug.print("usage: rook-mux raw <block-id>\n", .{});
+            return error.BadArgs;
+        }
+        const id = try std.fmt.parseInt(u32, std.mem.span(argv[2]), 10);
+        try client.rawAttach(gpa, path, id);
         return;
     }
     if (std.mem.eql(u8, cmd, "ls")) {

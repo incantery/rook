@@ -194,6 +194,33 @@ pub const Frame = struct {
         }
     }
 
+    /// A block client's attach snapshot: clear, full repaint of the
+    /// pane at origin, cursor state. The client's own VT state machine
+    /// starts here and then follows the raw tee.
+    pub fn blockSnapshot(self: *Frame, pane: *panepkg.Pane) []const u8 {
+        self.buf.clearRetainingCapacity();
+        self.put(csi ++ "?2026h");
+        self.put(csi ++ "2J" ++ csi ++ "H" ++ csi ++ "0m");
+        self.drawPane(pane, .{ .x = 0, .y = 0, .w = pane.cols, .h = pane.rows }, true);
+        const cur = pane.rs.cursor;
+        if (cur.visible) {
+            if (cur.viewport) |v| {
+                self.cup(v.x, v.y);
+                self.put(switch (cur.visual_style) {
+                    .block => csi ++ "2 q",
+                    .underline => csi ++ "4 q",
+                    .bar => csi ++ "6 q",
+                    else => csi ++ "0 q",
+                });
+                self.put(csi ++ "?25h");
+            }
+        } else {
+            self.put(csi ++ "?25l");
+        }
+        self.put(csi ++ "?2026l");
+        return self.buf.items;
+    }
+
     /// A full box border for the popup, accent-colored.
     fn drawBox(self: *Frame, r: layoutpkg.Rect) void {
         if (r.w < 2 or r.h < 2) return;

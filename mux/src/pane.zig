@@ -57,6 +57,13 @@ pub const Pane = struct {
     /// not take without blocking.
     in_buf: std.ArrayList(u8) = .empty,
     in_off: usize = 0,
+    /// Raw-byte tee for block clients: the reader thread appends each
+    /// read batch here (guarded by lock) while tee_on; the server
+    /// drains and fans out. Overflow (a stalled drain) drops the
+    /// buffer and forces a fresh snapshot instead.
+    tee_on: std.atomic.Value(bool) = .init(false),
+    tee_buf: std.ArrayList(u8) = .empty,
+    tee_overflow: bool = false,
 
     pub fn start(
         gpa: std.mem.Allocator,
@@ -210,6 +217,17 @@ pub const Pane = struct {
             if (total > 0) {
                 os_unfair_lock_lock(&self.lock);
                 stream.nextSlice(buf[0..total]);
+                // tee the raw batch for block clients; 2MB behind
+                // means the drain stalled — drop and let the server
+                // resync that client with a fresh snapshot
+                if (self.tee_on.load(.acquire)) {
+                    if (self.tee_buf.items.len + total > 2 * 1024 * 1024) {
+                        self.tee_buf.clearRetainingCapacity();
+                        self.tee_overflow = true;
+                    } else {
+                        self.tee_buf.appendSlice(self.gpa, buf[0..total]) catch {};
+                    }
+                }
                 os_unfair_lock_unlock(&self.lock);
                 _ = ptypkg.writeByte(self.wake_fd, 'p');
             }
@@ -276,6 +294,20 @@ pub const Pane = struct {
         const n = @min(t.len, buf.len);
         @memcpy(buf[0..n], t[0..n]);
         return buf[0..n];
+    }
+
+    pub const Tee = struct { bytes: []u8, overflow: bool };
+
+    /// Drain the raw-byte tee. Caller frees bytes. Null when empty.
+    pub fn takeTee(self: *Pane, gpa: std.mem.Allocator) ?Tee {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        if (self.tee_buf.items.len == 0 and !self.tee_overflow) return null;
+        const bytes = gpa.dupe(u8, self.tee_buf.items) catch return null;
+        const ov = self.tee_overflow;
+        self.tee_buf.clearRetainingCapacity();
+        self.tee_overflow = false;
+        return .{ .bytes = bytes, .overflow = ov };
     }
 
     pub fn hasSelection(self: *Pane) bool {
@@ -382,6 +414,7 @@ pub const Pane = struct {
         _ = ptypkg.Pty.wait(self.pid);
         if (self.clip_buf.len > 0) self.gpa.free(self.clip_buf);
         self.in_buf.deinit(self.gpa);
+        self.tee_buf.deinit(self.gpa);
         self.pty.deinit();
         self.rs.deinit(self.gpa);
         self.term.deinit(self.gpa);

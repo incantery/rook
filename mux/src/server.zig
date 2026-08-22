@@ -38,6 +38,12 @@ const Client = struct {
     out: std.ArrayList(u8) = .empty,
     out_off: usize = 0,
     dead: bool = false,
+    /// Attached to a single block instead of the composed TUI: raw
+    /// pty bytes flow down, stdin routes straight to the pane.
+    block: ?u32 = null,
+    /// Holds this block's geometry: its resizes win, the TUI layout
+    /// stops resizing the pane, everyone else crops.
+    lease: bool = false,
 };
 
 /// A client more than 32MB behind is not consuming; cut it loose.
@@ -324,6 +330,13 @@ pub const Server = struct {
         return self.pane(id);
     }
 
+    fn leasedBy(self: *Server, pane_id: u32) ?*Client {
+        for (self.clients.items) |c| {
+            if (c.block == pane_id and c.lease and !c.dead) return c;
+        }
+        return null;
+    }
+
     /// Where the focused pane's foreground process lives — new panes
     /// open there, tmux -c '#{pane_current_path}' without the config.
     fn focusedCwd(self: *Server, buf: []u8) ?[*:0]const u8 {
@@ -376,6 +389,7 @@ pub const Server = struct {
             try w.layout.place(region, &self.placed);
         }
         for (self.placed.items) |pl| {
+            if (self.leasedBy(pl.pane) != null) continue; // a block client owns this geometry; the TUI crops
             if (self.pane(pl.pane)) |p| {
                 if (p.cols != pl.rect.w or p.rows != pl.rect.h) p.resize(pl.rect.w, pl.rect.h);
             }
@@ -457,6 +471,7 @@ pub const Server = struct {
             }
 
             try self.reap();
+            self.forwardTees();
             if (self.sessions.items.len == 0 or self.shutdown) return;
 
             if (self.pending and nowMs() - last_frame >= frame_gap_ms) {
@@ -503,11 +518,15 @@ pub const Server = struct {
 
     fn dropClient(self: *Server, i: usize) void {
         const c = self.clients.items[i];
+        const had_lease = c.lease and c.block != null;
         ptypkg.closeFd(c.fd);
         c.reader.deinit();
         c.out.deinit(self.gpa);
         self.gpa.destroy(c);
         _ = self.clients.swapRemove(i);
+        self.updateTees();
+        // a departing lease holder hands geometry back to the TUI
+        if (had_lease) self.relayout() catch {};
     }
 
     /// Frame a message onto the client's outbound queue and push what
@@ -559,6 +578,20 @@ pub const Server = struct {
             defer c.reader.consume();
             switch (msg.kind) {
                 @intFromEnum(proto.c2s.attach), @intFromEnum(proto.c2s.resize) => {
+                    if (c.block) |bid| {
+                        // resize from a block client: only the lease
+                        // holder moves the pty
+                        if (c.lease) {
+                            if (proto.Geometry.decode(msg.payload)) |g| {
+                                if (self.pane(bid)) |p| {
+                                    p.resize(g.cols, g.rows);
+                                    self.full = true;
+                                    self.pending = true;
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     if (proto.Geometry.decode(msg.payload)) |g| {
                         c.cols = g.cols;
                         c.rows = g.rows;
@@ -572,7 +605,15 @@ pub const Server = struct {
                         self.relayout() catch {};
                     }
                 },
-                @intFromEnum(proto.c2s.stdin) => self.input(c, msg.payload),
+                @intFromEnum(proto.c2s.stdin) => {
+                    if (c.block) |bid| {
+                        // block clients speak straight to the pane: no
+                        // prefix, no mouse routing, no viewport snap
+                        if (self.pane(bid)) |p| p.write(msg.payload);
+                    } else self.input(c, msg.payload);
+                },
+                @intFromEnum(proto.c2s.blocks) => self.sendBlocks(c),
+                @intFromEnum(proto.c2s.attach_block) => self.attachBlock(c, msg.payload),
                 @intFromEnum(proto.c2s.session) => {
                     if (msg.payload.len >= 1) {
                         const op = msg.payload[0];
@@ -617,6 +658,96 @@ pub const Server = struct {
             }
         }
         return alive;
+    }
+
+    /// One line per pane: id, session:window, fg program, cwd. The
+    /// web client's block list, and `rook-mux blocks`.
+    fn sendBlocks(self: *Server, c: *Client) void {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.gpa);
+        for (self.sessions.items) |sn| {
+            for (sn.windows.items, 0..) |w, wi| {
+                for (self.panes.items) |p| {
+                    if (!w.layout.contains(p.id)) continue;
+                    var nb: [64]u8 = undefined;
+                    var cb: [1024]u8 = undefined;
+                    const fg = p.fgName(&nb) orelse "shell";
+                    const cwd: []const u8 = if (p.fgCwd(&cb)) |cc| cc else "";
+                    var line: [1200]u8 = undefined;
+                    const l = std.fmt.bufPrint(&line, "{d}\t{s}:{d}\t{s}\t{d}x{d}\t{s}\n", .{ p.id, sn.label(), wi + 1, fg, p.cols, p.rows, cwd }) catch continue;
+                    out.appendSlice(self.gpa, l) catch return;
+                }
+            }
+        }
+        self.sendTo(c, @intFromEnum(proto.s2c.stats_text), out.items);
+    }
+
+    /// Attach this client to one block: [id u32][cols u16][rows u16]
+    /// [flags u8: 1 = take the resize lease]. Replies with a full
+    /// snapshot, then the raw tee follows.
+    fn attachBlock(self: *Server, c: *Client, payload: []const u8) void {
+        if (payload.len < 9) return;
+        const id = std.mem.readInt(u32, payload[0..4], .little);
+        const cols = std.mem.readInt(u16, payload[4..6], .little);
+        const rows = std.mem.readInt(u16, payload[6..8], .little);
+        const flags = payload[8];
+        const p = self.pane(id) orelse {
+            self.sendTo(c, @intFromEnum(proto.s2c.exit), "no such block");
+            return;
+        };
+        c.block = id;
+        c.attached = false; // never receives composed frames
+        if (flags & 1 != 0) {
+            for (self.clients.items) |other| {
+                if (other.block == id) other.lease = false;
+            }
+            c.lease = true;
+            if (cols > 0 and rows > 0) p.resize(cols, rows);
+            self.full = true;
+        }
+        self.updateTees();
+        self.sendSnapshot(c, p);
+        self.pending = true;
+    }
+
+    /// Keep each pane's tee flag equal to "someone is watching".
+    fn updateTees(self: *Server) void {
+        for (self.panes.items) |p| {
+            var on = false;
+            for (self.clients.items) |c| {
+                if (c.block == p.id and !c.dead) on = true;
+            }
+            p.tee_on.store(on, .release);
+        }
+    }
+
+    fn sendSnapshot(self: *Server, c: *Client, p: *panepkg.Pane) void {
+        p.snapshot() catch return;
+        var f = renderpkg.Frame.init(self.gpa);
+        defer f.deinit();
+        const bytes = f.blockSnapshot(p);
+        self.sendTo(c, @intFromEnum(proto.s2c.draw), bytes);
+        // blockSnapshot consumed dirty flags the TUI still needs
+        self.full = true;
+        self.pending = true;
+    }
+
+    /// Fan the raw tees out to block clients; an overflow becomes a
+    /// fresh snapshot instead of a gap.
+    fn forwardTees(self: *Server) void {
+        for (self.panes.items) |p| {
+            if (!p.tee_on.load(.acquire)) continue;
+            const tee = p.takeTee(self.gpa) orelse continue;
+            defer self.gpa.free(tee.bytes);
+            for (self.clients.items) |c| {
+                if (c.block != p.id or c.dead) continue;
+                if (tee.overflow) {
+                    self.sendSnapshot(c, p);
+                } else {
+                    self.sendTo(c, @intFromEnum(proto.s2c.draw), tee.bytes);
+                }
+            }
+        }
     }
 
     fn sendStats(self: *Server, c: *Client) void {
