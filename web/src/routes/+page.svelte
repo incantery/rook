@@ -10,6 +10,7 @@
   let status = $state<'connecting' | 'ready' | 'closed'>('connecting');
   let listOpen = $state(true);
   let takeLease = $state(true);
+  let token = $state('');
 
   let mux: Mux | null = null;
   let term: Terminal | null = null;
@@ -19,7 +20,6 @@
 
   function wsUrl(): string {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const token = new URLSearchParams(location.search).get('token') ?? '';
     return `${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`;
   }
 
@@ -33,8 +33,9 @@
     });
     mux.ready().then(() => {
       status = 'ready';
+      localStorage.setItem('rook-token', token);
       mux?.requestBlocks();
-    });
+    }).catch(() => (status = 'closed'));
   }
 
   function attach(b: Block) {
@@ -80,6 +81,14 @@
       mux?.resize(term.cols, term.rows);
     });
     resizeObs.observe(termEl);
+    const fromUrl = new URLSearchParams(location.search).get('token');
+    if (fromUrl) {
+      token = fromUrl;
+      // don't leave the secret sitting in the address bar / history
+      history.replaceState(null, '', location.pathname);
+    } else {
+      token = localStorage.getItem('rook-token') ?? '';
+    }
     connect();
   });
 
@@ -120,6 +129,23 @@
       {/if}
     </div>
 
+    {#if status === 'closed'}
+      <form
+        class="flex items-center gap-2 border-b border-zinc-800 px-3 py-2"
+        onsubmit={(e) => {
+          e.preventDefault();
+          connect();
+        }}
+      >
+        <input
+          type="password"
+          bind:value={token}
+          placeholder="token (printed by rook-web)"
+          class="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1 text-xs outline-none placeholder:text-zinc-600"
+        />
+        <button class="rounded bg-amber-700/70 px-2 py-1 text-xs hover:bg-amber-700">connect</button>
+      </form>
+    {/if}
     <label class="flex items-center gap-2 px-3 py-2 text-xs text-zinc-400">
       <input type="checkbox" bind:checked={takeLease} class="accent-amber-400" />
       take resize lease (drive the block at this size)
