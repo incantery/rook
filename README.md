@@ -46,7 +46,7 @@ for machines.
 
 **The chrome is tmux.** Tabs are the status line (window names, the
 active one raised, agent state as ● / ✳); every pane wears its name on
-a rounded top border — claude, zsh, agents — with its git place beside
+its top border — claude, zsh, agents — with its git place beside
 it; the sidebar is a pane. Nothing is drawn by rook itself, so every
 terminal feature passes straight through.
 

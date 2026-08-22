@@ -230,9 +230,8 @@ func (s Settings) Render(confPath string) string {
 	// Titled panes: every pane wears its name on its top border, the
 	// way a window manager labels a window — "claude", "zsh", "agents"
 	// for the sidebar — then, dim, its git place and (active pane only)
-	// global info from the attention feed. Rounded lines so the chrome
-	// reads as frames, not a grid.
-	p("set -g pane-border-lines rounded")
+	// global info from the attention feed. (Rounded lines are a popup-
+	// only option in tmux; pane borders stay single.)
 	p("set -g pane-border-status top")
 	paneName := "#{?#{==:#{@rook_side},1},agents," +
 		"#{?#{m/r:^[0-9.]+$,#{pane_current_command}},claude,#{pane_current_command}}}"
