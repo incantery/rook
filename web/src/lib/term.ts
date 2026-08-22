@@ -24,7 +24,10 @@ export function chosenKind(): TermKind {
 }
 
 const options = {
-  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  // canvas font resolution is per-OS: Menlo/SF Mono (mac+iOS),
+  // Consolas/Cascadia (windows) — a generic fallback gives mismatched
+  // advance widths and gappy box-drawing
+  fontFamily: "Menlo, Consolas, 'Cascadia Mono', 'SF Mono', ui-monospace, monospace",
   fontSize: 13,
   theme: { background: '#09090b' },
   scrollback: 5000,

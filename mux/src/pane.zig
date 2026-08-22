@@ -445,7 +445,16 @@ pub const Pane = struct {
         var path: [4096]u8 = undefined;
         const n = proc_pidpath(pgrp, &path, path.len);
         if (n <= 0) return null;
-        const base = std.fs.path.basename(path[0..@intCast(n)]);
+        const full = path[0..@intCast(n)];
+        var base = std.fs.path.basename(full);
+        // a versioned binary ("2.1.240", claude code's layout) tells
+        // you nothing; the directory above it is the product name
+        if (base.len > 0 and allVersionish(base)) {
+            if (std.fs.path.dirname(full)) |dir| {
+                const parent = std.fs.path.basename(dir);
+                if (parent.len > 0 and !allVersionish(parent)) base = parent;
+            }
+        }
         if (base.len == 0 or base.len > buf.len) return null;
         @memcpy(buf[0..base.len], base);
         return buf[0..base.len];
@@ -467,6 +476,13 @@ pub const Pane = struct {
         return buf[0..path.len :0];
     }
 };
+
+fn allVersionish(s2: []const u8) bool {
+    for (s2) |ch| {
+        if (!(ch >= '0' and ch <= '9') and ch != '.' and ch != '-') return false;
+    }
+    return true;
+}
 
 extern "c" fn tcgetpgrp(fd: ptypkg.fd_t) ptypkg.pid_t;
 extern "c" fn proc_pidpath(pid: ptypkg.pid_t, buf: [*]u8, len: u32) c_int;

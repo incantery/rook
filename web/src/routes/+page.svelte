@@ -329,7 +329,22 @@
           ctrl
         </button>
         <button class="kbar" onclick={() => key('\u0003')}>^c</button>
-        <button class="kbar" onclick={() => key('`')}>`</button>
+        <button
+          class="kbar {prefixArmed ? 'bg-amber-700 text-zinc-50' : ''}"
+          onclick={() => {
+            // arms the prefix like typing ` would; tap twice for a
+            // literal backtick
+            if (prefixArmed) {
+              prefixArmed = false;
+              key('`');
+            } else {
+              prefixArmed = true;
+              term.focus();
+            }
+          }}
+        >
+          `
+        </button>
         <button class="kbar" onclick={() => key('\u001b[A')}>↑</button>
         <button class="kbar" onclick={() => key('\u001b[B')}>↓</button>
         <button class="kbar" onclick={() => key('\u001b[D')}>←</button>
