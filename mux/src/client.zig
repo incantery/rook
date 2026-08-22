@@ -1,0 +1,109 @@
+//! The attach side: raw mode, alt screen, stdin → server, frames →
+//! stdout. Dumb on purpose — every decision lives in the server.
+const std = @import("std");
+const ptypkg = @import("pty.zig");
+const proto = @import("proto.zig");
+
+extern "c" fn tcgetattr(fd: c_int, t: *Termios) c_int;
+extern "c" fn tcsetattr(fd: c_int, opt: c_int, t: *const Termios) c_int;
+
+const Termios = extern struct {
+    iflag: c_ulong,
+    oflag: c_ulong,
+    cflag: c_ulong,
+    lflag: c_ulong,
+    cc: [20]u8,
+    ispeed: c_ulong,
+    ospeed: c_ulong,
+};
+
+const TCSANOW = 0;
+// lflag bits (macOS)
+const ECHO: c_ulong = 0x08;
+const ICANON: c_ulong = 0x100;
+const ISIG: c_ulong = 0x80;
+const IEXTEN: c_ulong = 0x400;
+// iflag bits
+const IXON: c_ulong = 0x200;
+const ICRNL: c_ulong = 0x100;
+const BRKINT: c_ulong = 0x02;
+const INPCK: c_ulong = 0x10;
+const ISTRIP: c_ulong = 0x20;
+// oflag
+const OPOST: c_ulong = 0x01;
+
+const TIOCGWINSZ = 0x40087468;
+extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+
+var winch = std.atomic.Value(bool).init(false);
+fn onWinch(_: c_int) callconv(.c) void {
+    winch.store(true, .release);
+}
+extern "c" fn signal(sig: c_int, f: ?*const fn (c_int) callconv(.c) void) ?*const fn (c_int) callconv(.c) void;
+const SIGWINCH = 28;
+
+fn winsize() proto.Geometry {
+    var ws: ptypkg.Winsize = .{ .ws_row = 24, .ws_col = 80 };
+    _ = ioctl(0, TIOCGWINSZ, &ws);
+    return .{ .cols = ws.ws_col, .rows = ws.ws_row };
+}
+
+pub fn attach(gpa: std.mem.Allocator, sock_path: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    _ = ptypkg.setNonblockFd(sock);
+
+    // raw mode
+    var orig: Termios = undefined;
+    if (tcgetattr(0, &orig) != 0) return error.NotATty;
+    var raw = orig;
+    raw.lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
+    raw.iflag &= ~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
+    raw.oflag &= ~OPOST;
+    _ = tcsetattr(0, TCSANOW, &raw);
+    defer _ = tcsetattr(0, TCSANOW, &orig);
+
+    // alt screen on; restored on the way out
+    _ = ptypkg.writeAllFd(1, "\x1b[?1049h\x1b[2J");
+    defer _ = ptypkg.writeAllFd(1, "\x1b[?1049l\x1b[?25h\x1b[0m");
+
+    _ = signal(SIGWINCH, &onWinch);
+
+    try proto.write(sock, @intFromEnum(proto.c2s.attach), &winsize().encode());
+
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    _ = ptypkg.setNonblockFd(0);
+
+    var fds = [2]ptypkg.Pollfd{
+        .{ .fd = 0, .events = ptypkg.POLLIN },
+        .{ .fd = sock, .events = ptypkg.POLLIN },
+    };
+    while (true) {
+        _ = ptypkg.pollMany(&fds, 2, 500);
+
+        if (winch.swap(false, .acq_rel)) {
+            proto.write(sock, @intFromEnum(proto.c2s.resize), &winsize().encode()) catch {};
+        }
+
+        if (fds[0].revents & ptypkg.POLLIN != 0) {
+            var buf: [4096]u8 = undefined;
+            const n = ptypkg.readNb(0, &buf);
+            if (n > 0) try proto.write(sock, @intFromEnum(proto.c2s.stdin), buf[0..@intCast(n)]);
+        }
+
+        if (fds[1].revents & (ptypkg.POLLHUP | ptypkg.POLLERR) != 0) return;
+        if (fds[1].revents & ptypkg.POLLIN != 0) {
+            if (!reader.fill(sock)) return;
+            while (reader.next()) |msg| {
+                defer reader.consume();
+                switch (msg.kind) {
+                    @intFromEnum(proto.s2c.draw) => _ = ptypkg.writeAllFd(1, msg.payload),
+                    @intFromEnum(proto.s2c.exit) => return,
+                    else => {},
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,15 @@
+.{
+    .name = .rookmux,
+    .version = "0.0.0",
+    .fingerprint = 0xa4e51fa3ff58357b,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // Same pin as the pre-tmux app (2026-08-07 bump, past the
+        // kitty-graphics hardening series).
+        .ghostty = .{
+            .url = "https://github.com/ghostty-org/ghostty/archive/2602886144c7e95099c9e2ba07f181c69e7276f3.tar.gz",
+            .hash = "ghostty-1.3.2-dev-5UdBC0giPQVg8EDdWy2XgrhwzBksNdUJ2TECs1iKy08o",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}
