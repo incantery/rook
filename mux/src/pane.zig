@@ -308,8 +308,12 @@ pub const Pane = struct {
             if (n == 0) return; // pty full; server polls POLLOUT
             self.in_off += n;
         }
-        self.in_buf.clearRetainingCapacity();
         self.in_off = 0;
+        if (self.in_buf.capacity > 256 * 1024) {
+            self.in_buf.clearAndFree(self.gpa);
+        } else {
+            self.in_buf.clearRetainingCapacity();
+        }
     }
 
     pub fn pendingIn(self: *Pane) bool {

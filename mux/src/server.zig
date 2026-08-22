@@ -397,7 +397,6 @@ pub const Server = struct {
     }
 
     fn flushClient(self: *Server, c: *Client) void {
-        _ = self;
         while (c.out_off < c.out.items.len) {
             const n = ptypkg.writeNbFd(c.fd, c.out.items[c.out_off..]) catch {
                 c.dead = true;
@@ -406,8 +405,14 @@ pub const Server = struct {
             if (n == 0) return; // kernel buffer full
             c.out_off += n;
         }
-        c.out.clearRetainingCapacity();
         c.out_off = 0;
+        // a burst can balloon this queue; don't keep the high-water
+        // mark as permanent RSS
+        if (c.out.capacity > 1024 * 1024) {
+            c.out.clearAndFree(self.gpa);
+        } else {
+            c.out.clearRetainingCapacity();
+        }
     }
 
     /// Returns false when the client is gone. Buffered messages are

@@ -34,9 +34,11 @@ fn shellPath(gpa: std.mem.Allocator) [:0]const u8 {
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]u8;
 
 pub fn main(init: std.process.Init) !void {
-    // Process-lifetime allocations (paths, argv copies) come from the
-    // arena so the debug allocator's leak check stays meaningful.
+    // Paths and argv copies are process-lifetime: arena. The server
+    // and client loops churn (frames, queues, clips) and run for days:
+    // they need a real allocator or the churn is permanent RSS.
     const gpa = init.arena.allocator();
+    const churn_gpa = init.gpa;
     const io = init.io;
     const argv = init.minimal.args.vector;
     const cmd: []const u8 = if (argv.len > 1) std.mem.span(argv[1]) else "";
@@ -47,11 +49,11 @@ pub fn main(init: std.process.Init) !void {
         const shell = shellPath(gpa);
         var cwd_buf: [1024]u8 = undefined;
         const cwd: ?[:0]const u8 = if (getcwd(&cwd_buf, cwd_buf.len)) |c| try gpa.dupeZ(u8, std.mem.span(c)) else null;
-        try server.Server.run(gpa, io, path, shell, cwd);
+        try server.Server.run(churn_gpa, io, path, shell, cwd);
         return;
     }
     if (std.mem.eql(u8, cmd, "stats")) {
-        try client.stats(gpa, path);
+        try client.stats(churn_gpa, path);
         return;
     }
     if (std.mem.eql(u8, cmd, "kill")) {
@@ -100,7 +102,7 @@ pub fn main(init: std.process.Init) !void {
             _ = usleep(20_000);
         }
     }
-    try client.attach(gpa, path);
+    try client.attach(churn_gpa, path);
 }
 
 /// Fork+exec ourselves as `rook-mux server`, detached from this tty.
