@@ -37,13 +37,15 @@ active pane's spend; the attention feed routes what needs you across
 every session (vera is its first publisher).
 
 **Worktrees.** One agent, one branch, one checkout, one session — and a
-lifecycle that ends with all of them gone. `prefix w` is the manager
-(Enter opens, `C-n` cuts a new one named by what you typed, `C-g` merges
-it home, `C-x` removes); the same verbs are plain commands from any
-checkout of the repo:
+lifecycle that ends with all of them gone. `rook wt` is the manager — a
+TUI that draws the repo's worktrees with branch, dirty, ±distance from
+main, ● live session and the agent's state in it, refreshed live.
+`prefix w` runs the same program in a popup. Enter opens, `n` cuts a
+new one, `m` merges it home, `d` removes (`D` to force). The same verbs
+are plain commands from any checkout of the repo:
 
 ```sh
-rook wt ls                # worktrees with branch, dirty, ±distance from main, ● live session
+rook wt ls                # the rows, once; --json for machines
 rook wt new agent-a       # ../<repo>--agent-a on branch agent-a, session opened, switched to
 rook wt merge agent-a     # merge into main, then remove worktree + session + branch
 rook wt rm agent-a        # refuses dirty or unmerged; --force to discard

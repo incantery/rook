@@ -6,20 +6,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/incantery/rook/internal/config"
+	"github.com/incantery/rook/internal/tmux"
 	"github.com/incantery/rook/internal/worktree"
+	"github.com/incantery/rook/internal/worktree/ui"
 )
 
-const worktreeUsage = "rook worktree ls [--json] | new <name> [--from <ref>] | merge <name> | rm <name> [--force]"
+const worktreeUsage = "rook worktree [ls [--json] | new <name> [--from <ref>] | open <name> | merge <name> | rm <name> [--force]]"
 
 // runWorktree is `rook worktree <verb>`: git worktrees as rook sessions.
 // The repo is whichever one the current directory is in — a worktree
 // answers with its true home, so these work from inside any checkout.
 func runWorktree(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: %s", worktreeUsage)
-	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -27,6 +27,23 @@ func runWorktree(args []string) error {
 	repo, err := worktree.Find(cwd)
 	if err != nil {
 		return err
+	}
+	if len(args) == 0 {
+		// no verb: the manager itself — standalone here, or in the
+		// prefix-w popup, which is the same program at popup size
+		opts, err := worktreeOptions()
+		if err != nil {
+			return err
+		}
+		attach, err := ui.Run(repo, opts)
+		if err != nil || attach == "" {
+			return err
+		}
+		argv, err := tmux.RunArgv("attach-session", "-t", "="+attach)
+		if err != nil {
+			return err
+		}
+		return syscall.Exec(argv[0], argv, os.Environ())
 	}
 	verb, rest := args[0], args[1:]
 	switch verb {
@@ -48,15 +65,11 @@ func runWorktree(args []string) error {
 		if name == "" {
 			return fmt.Errorf("usage: rook worktree new <name> [--from <ref>]")
 		}
-		cfgPath, err := config.Path()
+		opts, err := worktreeOptions()
 		if err != nil {
 			return err
 		}
-		cfg, err := config.Load(cfgPath)
-		if err != nil {
-			return err
-		}
-		wt, err := repo.New(name, from, worktree.Options{Copy: cfg.Worktree.Copy, Link: cfg.Worktree.Link})
+		wt, err := repo.New(name, from, opts)
 		if err != nil {
 			return err
 		}
@@ -105,6 +118,19 @@ func runWorktree(args []string) error {
 	default:
 		return fmt.Errorf("unknown worktree command %q (%s)", verb, worktreeUsage)
 	}
+}
+
+// worktreeOptions reads the [worktree] conventions from rook.toml.
+func worktreeOptions() (worktree.Options, error) {
+	cfgPath, err := config.Path()
+	if err != nil {
+		return worktree.Options{}, err
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return worktree.Options{}, err
+	}
+	return worktree.Options{Copy: cfg.Worktree.Copy, Link: cfg.Worktree.Link}, nil
 }
 
 func listWorktrees(repo worktree.Repo, asJSON bool) error {

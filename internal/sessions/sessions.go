@@ -216,6 +216,13 @@ func rowState(r Row, feed []attention.Item) AgentState {
 	return state
 }
 
+// StateOf is a session's agent state as the picker shows it: the pane
+// heuristics folded with the attention feed. StateNone when the session
+// doesn't exist or hosts no agent.
+func StateOf(session string) AgentState {
+	return rowState(Row{KindSession, session}, attention.Load())
+}
+
 // agentPanes returns pane-id → window-index for every agent pane in a
 // session.
 func agentPanes(session string) map[string]string {
@@ -330,7 +337,7 @@ func Preview(raw string) error {
 		for _, it := range items {
 			mark, style := "·", dim
 			if it.Waiting() {
-				mark, style = sessionMark, accent + bold
+				mark, style = sessionMark, accent+bold
 			}
 			src := ""
 			if it.Source != "" {
