@@ -16,17 +16,16 @@ import (
 
 	"github.com/incantery/rook/internal/sessions"
 	"github.com/incantery/rook/internal/tmux"
+	"github.com/incantery/rook/internal/tui"
 	"github.com/incantery/rook/internal/worktree"
 )
 
-// Palette: ANSI names on purpose, same rule as the tmux theme — the
-// glass owns the colours, rook owns emphasis.
 var (
-	accent   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	dim      = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	bold     = lipgloss.NewStyle().Bold(true)
-	selected = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Background(lipgloss.Color("8")).Bold(true)
-	errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	accent   = tui.Accent
+	dim      = tui.Dim
+	bold     = tui.Bold
+	selected = tui.Selected
+	errStyle = tui.Err
 )
 
 const refreshEvery = 2 * time.Second

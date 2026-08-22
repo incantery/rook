@@ -36,6 +36,11 @@ are the session manager; the bottom strip carries per-pane git and the
 active pane's spend; the attention feed routes what needs you across
 every session (vera is its first publisher).
 
+**Agents.** `prefix a` (or `rook agents`) is every agent on the server
+in one list, the ones that need you first: where it is, its state, the
+attention headline, and its screen underneath. Enter goes to its pane.
+`rook agents --json` is the same list for machines.
+
 **Worktrees.** One agent, one branch, one checkout, one session — and a
 lifecycle that ends with all of them gone. `rook wt` is the manager — a
 TUI that draws the repo's worktrees with branch, dirty, ±distance from

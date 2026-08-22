@@ -175,6 +175,11 @@ func (s Settings) Render(confPath string) string {
 	p("bind w run-shell -b %q", fmt.Sprintf(
 		`tmux display-popup -c '#{client_tty}' -d '#{pane_current_path}' -E -T ' ♜ worktrees ' -w 70%% -h 60%% %q wt`,
 		rookBin))
+	// prefix-a is the agents view: every agent on the server, the ones
+	// that need you first; Enter goes to its pane.
+	p("bind a run-shell -b %q", fmt.Sprintf(
+		`tmux display-popup -c '#{client_tty}' -E -T ' ♜ agents ' -w 80%% -h 70%% %q agents`,
+		rookBin))
 
 	t := s.Theme
 	p("")

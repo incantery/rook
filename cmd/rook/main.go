@@ -6,12 +6,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
 
+	"github.com/incantery/rook/internal/agents"
 	"github.com/incantery/rook/internal/attention"
 	"github.com/incantery/rook/internal/config"
 	"github.com/incantery/rook/internal/sessions"
@@ -92,10 +94,21 @@ func main() {
 		err = sessions.Connect(strings.Join(args[1:], " "))
 	case args[0] == "preview":
 		err = sessions.Preview(strings.Join(args[1:], " "))
+	case args[0] == "agents":
+		if len(args) > 1 && args[1] == "--json" {
+			enc := json.NewEncoder(os.Stdout)
+			for _, a := range sessions.Agents() {
+				if err = enc.Encode(a); err != nil {
+					break
+				}
+			}
+		} else {
+			err = agents.Run()
+		}
 	case args[0] == "worktree", args[0] == "wt":
 		err = runWorktree(args[1:])
 	default:
-		err = fmt.Errorf("unknown command %q (rook | rook ls [-t|-z] | rook connect <row> | rook preview <row> | rook worktree … | rook version)", args[0])
+		err = fmt.Errorf("unknown command %q (rook | rook ls [-t|-z] | rook connect <row> | rook preview <row> | rook worktree … | rook agents | rook version)", args[0])
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "rook:", err)
