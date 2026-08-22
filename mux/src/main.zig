@@ -10,6 +10,7 @@ const ptypkg = @import("pty.zig");
 test {
     _ = @import("layout.zig");
     _ = @import("proto.zig");
+    _ = @import("config.zig");
 }
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
@@ -46,6 +47,10 @@ pub fn main(init: std.process.Init) !void {
         var cwd_buf: [1024]u8 = undefined;
         const cwd: ?[:0]const u8 = if (getcwd(&cwd_buf, cwd_buf.len)) |c| try gpa.dupeZ(u8, std.mem.span(c)) else null;
         try server.Server.run(gpa, io, path, shell, cwd);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "stats")) {
+        try client.stats(gpa, path);
         return;
     }
     if (std.mem.eql(u8, cmd, "kill")) {

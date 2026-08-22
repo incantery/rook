@@ -1,7 +1,8 @@
-//! The rook-mux server: panes, layout, clients, one poll loop. Reader
-//! threads parse pty output into each pane's Terminal and poke the
-//! self-pipe; this loop snapshots dirty panes and pushes frames to
-//! every attached client.
+//! The rook-mux server: windows of panes, clients, one poll loop.
+//! Reader threads parse pty output into each pane's Terminal and poke
+//! the self-pipe; this loop snapshots dirty panes and ships frames —
+//! dirty rows only, unless something structural (attach, resize,
+//! layout, focus, window switch) forces a full repaint.
 const std = @import("std");
 const vt = @import("ghostty-vt");
 const ptypkg = @import("pty.zig");
@@ -9,18 +10,19 @@ const panepkg = @import("pane.zig");
 const layoutpkg = @import("layout.zig");
 const renderpkg = @import("render.zig");
 const proto = @import("proto.zig");
+const config = @import("config.zig");
 
-const prefix_key: u8 = 0x02; // C-b
-
-// CLOCK_UPTIME_RAW = 8 on macOS; libc-only monotonic clock (no
-// QuartzCore link needed).
+// CLOCK_UPTIME_RAW = 8 on macOS; libc-only monotonic clock.
 extern "c" fn clock_gettime_nsec_np(clock_id: c_int) u64;
+fn nowUs() i64 {
+    return @intCast(clock_gettime_nsec_np(8) / 1_000);
+}
 fn nowMs() i64 {
     return @intCast(clock_gettime_nsec_np(8) / 1_000_000);
 }
 
 /// Minimum gap between frames: coalesce a burst (telescope popup,
-/// build spew) into ~120fps of full frames instead of one per pty read.
+/// build spew) into ~120fps of frames instead of one per pty read.
 const frame_gap_ms: i64 = 8;
 
 const Client = struct {
@@ -32,14 +34,51 @@ const Client = struct {
     prefix: bool = false,
 };
 
+/// One window: its own split tree, focus, and zoom state. Panes live
+/// on the server; the window only holds ids.
+const Window = struct {
+    layout: layoutpkg.Layout,
+    focused: u32 = 0,
+    zoomed: bool = false,
+};
+
+/// input→frame latency samples, ring of 512.
+const Lat = struct {
+    samples: [512]i64 = @splat(0),
+    n: usize = 0,
+    total: u64 = 0,
+    mark: i64 = 0, // 0 = no input awaiting a frame
+
+    fn note(self: *Lat) void {
+        if (self.mark == 0) self.mark = nowUs();
+    }
+    fn frame(self: *Lat) void {
+        if (self.mark == 0) return;
+        self.samples[self.n % self.samples.len] = nowUs() - self.mark;
+        self.n += 1;
+        self.total += 1;
+        self.mark = 0;
+    }
+    fn pct(self: *Lat, p: f64) i64 {
+        const count = @min(self.n, self.samples.len);
+        if (count == 0) return 0;
+        var sorted: [512]i64 = undefined;
+        @memcpy(sorted[0..count], self.samples[0..count]);
+        std.mem.sort(i64, sorted[0..count], {}, std.sort.asc(i64));
+        const idx: usize = @intFromFloat(@as(f64, @floatFromInt(count - 1)) * p);
+        return sorted[idx];
+    }
+};
+
 pub const Server = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     listener: ptypkg.fd_t,
     sock_path: []const u8,
+    prefix_key: u8,
     panes: std.ArrayList(*panepkg.Pane) = .empty,
-    layout: layoutpkg.Layout,
-    focused: u32 = 0,
+    windows: std.ArrayList(*Window) = .empty,
+    cur: usize = 0,
     next_id: u32 = 1,
     clients: std.ArrayList(*Client) = .empty,
     wake_r: ptypkg.fd_t,
@@ -48,6 +87,16 @@ pub const Server = struct {
     placed: std.ArrayList(layoutpkg.Placed) = .empty,
     shell: [:0]const u8,
     cwd: ?[:0]const u8,
+    /// Something structural changed; the next frame repaints all.
+    full: bool = true,
+    pending: bool = false,
+    /// Scroll mode: viewport moved back in the focused pane's
+    /// scrollback; plain keys navigate until q/Esc.
+    scrolling: bool = false,
+    lat: Lat = .{},
+    frames_sent: u64 = 0,
+    bytes_sent: u64 = 0,
+    started_ms: i64 = 0,
 
     pub fn run(gpa: std.mem.Allocator, io: std.Io, sock_path: []const u8, shell: [:0]const u8, cwd: ?[:0]const u8) !void {
         const listener = ptypkg.unixListen(sock_path);
@@ -64,17 +113,17 @@ pub const Server = struct {
             .io = io,
             .listener = listener,
             .sock_path = sock_path,
-            .layout = layoutpkg.Layout.init(gpa),
+            .prefix_key = config.prefixKey(),
             .wake_r = pipefds[0],
             .wake_w = pipefds[1],
             .frame = renderpkg.Frame.init(gpa),
             .shell = shell,
             .cwd = cwd,
+            .started_ms = nowMs(),
         };
         defer self.deinitAll();
 
-        // First pane exists before the first client attaches.
-        try self.spawnPane(null, true);
+        try self.newWindow();
         try self.loop();
     }
 
@@ -85,63 +134,51 @@ pub const Server = struct {
             self.gpa.destroy(c);
         }
         self.clients.deinit(self.gpa);
-        for (self.panes.items) |p| {
-            p.hangup();
-        }
+        for (self.panes.items) |p| p.hangup();
         for (self.panes.items) |p| p.deinit();
         self.panes.deinit(self.gpa);
-        self.layout.deinit();
+        for (self.windows.items) |w| {
+            w.layout.deinit();
+            self.gpa.destroy(w);
+        }
+        self.windows.deinit(self.gpa);
         self.frame.deinit();
         self.placed.deinit(self.gpa);
         ptypkg.unlinkPath(self.sock_path);
     }
 
-    fn spawnPane(self: *Server, split_from: ?u32, side_by_side: bool) !void {
-        const geo = self.paneGeometryGuess();
-        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, if (self.cwd) |c| c.ptr else null, geo.cols, geo.rows, self.wake_w, self.next_id);
-        try self.panes.append(self.gpa, p);
-        if (split_from) |at| {
-            try self.layout.split(at, p.id, side_by_side);
-        } else {
-            try self.layout.seed(p.id);
-        }
-        self.focused = p.id;
-        self.next_id += 1;
+    // ---- windows and panes ----
+
+    fn window(self: *Server) *Window {
+        return self.windows.items[self.cur];
+    }
+
+    fn newWindow(self: *Server) !void {
+        const w = try self.gpa.create(Window);
+        w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
+        try self.windows.append(self.gpa, w);
+        self.cur = self.windows.items.len - 1;
+        const p = try self.startPane();
+        try w.layout.seed(p.id);
+        w.focused = p.id;
         try self.relayout();
     }
 
-    fn paneGeometryGuess(self: *Server) struct { cols: u16, rows: u16 } {
-        var cols: u16 = 80;
-        var rows: u16 = 24;
-        for (self.clients.items) |c| {
-            if (c.attached) {
-                cols = c.cols;
-                rows = c.rows -| 1;
-            }
-        }
-        return .{ .cols = cols, .rows = rows };
-    }
-
-    fn geometry(self: *Server) proto.Geometry {
-        var g: proto.Geometry = .{ .cols = 80, .rows = 24 };
-        for (self.clients.items) |c| {
-            if (c.attached) {
-                g = .{ .cols = c.cols, .rows = c.rows };
-            }
-        }
-        return g;
-    }
-
-    /// Recompute rects and push sizes into panes.
-    fn relayout(self: *Server) !void {
+    fn startPane(self: *Server) !*panepkg.Pane {
         const g = self.geometry();
-        self.placed.clearRetainingCapacity();
-        try self.layout.place(.{ .x = 0, .y = 0, .w = g.cols, .h = g.rows -| 1 }, &self.placed);
-        for (self.placed.items) |pl| {
-            if (self.pane(pl.pane)) |p| {
-                if (p.cols != pl.rect.w or p.rows != pl.rect.h) p.resize(pl.rect.w, pl.rect.h);
-            }
-        }
+        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, if (self.cwd) |c| c.ptr else null, g.cols, g.rows -| 1, self.wake_w, self.next_id);
+        try self.panes.append(self.gpa, p);
+        self.next_id += 1;
+        return p;
+    }
+
+    fn splitPane(self: *Server, side_by_side: bool) !void {
+        const w = self.window();
+        w.zoomed = false;
+        const p = try self.startPane();
+        try w.layout.split(w.focused, p.id, side_by_side);
+        w.focused = p.id;
+        try self.relayout();
     }
 
     fn pane(self: *Server, id: u32) ?*panepkg.Pane {
@@ -151,10 +188,44 @@ pub const Server = struct {
         return null;
     }
 
+    fn focusedPane(self: *Server) ?*panepkg.Pane {
+        return self.pane(self.window().focused);
+    }
+
+    fn geometry(self: *Server) proto.Geometry {
+        var g: proto.Geometry = .{ .cols = 80, .rows = 24 };
+        for (self.clients.items) |c| {
+            if (c.attached) g = .{ .cols = c.cols, .rows = c.rows };
+        }
+        return g;
+    }
+
+    /// Recompute the current window's rects; push sizes into its panes.
+    /// A zoomed window is one rect: the focused pane, full region.
+    fn relayout(self: *Server) !void {
+        const g = self.geometry();
+        const region: layoutpkg.Rect = .{ .x = 0, .y = 0, .w = g.cols, .h = g.rows -| 1 };
+        self.placed.clearRetainingCapacity();
+        const w = self.window();
+        if (w.zoomed) {
+            try self.placed.append(self.gpa, .{ .pane = w.focused, .rect = region });
+        } else {
+            try w.layout.place(region, &self.placed);
+        }
+        for (self.placed.items) |pl| {
+            if (self.pane(pl.pane)) |p| {
+                if (p.cols != pl.rect.w or p.rows != pl.rect.h) p.resize(pl.rect.w, pl.rect.h);
+            }
+        }
+        self.full = true;
+        self.pending = true;
+    }
+
+    // ---- the loop ----
+
     fn loop(self: *Server) !void {
         var fds: std.ArrayList(ptypkg.Pollfd) = .empty;
         defer fds.deinit(self.gpa);
-        var pending = false; // output arrived, frame not yet shipped
         var last_frame: i64 = 0;
         while (true) {
             fds.clearRetainingCapacity();
@@ -163,26 +234,21 @@ pub const Server = struct {
             for (self.clients.items) |c| {
                 try fds.append(self.gpa, .{ .fd = c.fd, .events = ptypkg.POLLIN });
             }
-            // With a frame owed, wake at its deadline; otherwise idle.
-            const timeout: c_int = if (pending)
+            const timeout: c_int = if (self.pending)
                 @intCast(@max(0, frame_gap_ms - (nowMs() - last_frame)))
             else
                 1000;
             const n = ptypkg.pollMany(fds.items.ptr, @intCast(fds.items.len), timeout);
             if (n < 0) continue;
 
-            // 1. wake pipe: pty output or a pane exit
             if (fds.items[0].revents & ptypkg.POLLIN != 0) {
                 var drain: [4096]u8 = undefined;
                 while (ptypkg.readNb(self.wake_r, &drain) > 0) {}
-                pending = true;
+                self.pending = true;
             }
 
-            // 2. new client (grows clients; fds was sized before, so
-            // client handling below matches by fd, never by index)
             if (fds.items[1].revents & ptypkg.POLLIN != 0) self.accept();
 
-            // 3. client input
             for (fds.items[2..]) |pfd| {
                 if (pfd.revents == 0) continue;
                 const idx = self.clientIndex(pfd.fd) orelse continue;
@@ -192,16 +258,13 @@ pub const Server = struct {
                 }
             }
 
-            // 4. reap exited panes
             try self.reap();
-            if (self.panes.items.len == 0) return;
+            if (self.windows.items.len == 0) return;
 
-            // 5. redraw — paced: a burst becomes one frame per gap.
-            if (force_redraw) pending = true;
-            if (pending and nowMs() - last_frame >= frame_gap_ms) {
+            if (self.pending and nowMs() - last_frame >= frame_gap_ms) {
                 try self.redraw();
                 last_frame = nowMs();
-                pending = false;
+                self.pending = false;
             }
         }
     }
@@ -245,39 +308,46 @@ pub const Server = struct {
         while (c.reader.next()) |msg| {
             defer c.reader.consume();
             switch (msg.kind) {
-                @intFromEnum(proto.c2s.attach) => {
+                @intFromEnum(proto.c2s.attach), @intFromEnum(proto.c2s.resize) => {
                     if (proto.Geometry.decode(msg.payload)) |g| {
                         c.cols = g.cols;
                         c.rows = g.rows;
                         c.attached = true;
                         self.relayout() catch {};
-                        self.forceRedraw();
-                    }
-                },
-                @intFromEnum(proto.c2s.resize) => {
-                    if (proto.Geometry.decode(msg.payload)) |g| {
-                        c.cols = g.cols;
-                        c.rows = g.rows;
-                        self.relayout() catch {};
-                        self.forceRedraw();
                     }
                 },
                 @intFromEnum(proto.c2s.stdin) => self.input(c, msg.payload),
                 @intFromEnum(proto.c2s.detach) => return false,
+                @intFromEnum(proto.c2s.stats) => self.sendStats(c),
                 else => {},
             }
         }
         return true;
     }
 
-    var force_redraw: bool = false;
-    fn forceRedraw(_: *Server) void {
-        force_redraw = true;
+    fn sendStats(self: *Server, c: *Client) void {
+        var buf: [512]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "rook-mux up {d}s · {d} window{s} · {d} pane{s} · {d} client{s}\nframes {d} · {d:.1} MB shipped\ninput→frame p50 {d}µs · p99 {d}µs · samples {d}\n", .{
+            @divTrunc(nowMs() - self.started_ms, 1000),
+            self.windows.items.len,
+            plural(self.windows.items.len),
+            self.panes.items.len,
+            plural(self.panes.items.len),
+            self.clients.items.len,
+            plural(self.clients.items.len),
+            self.frames_sent,
+            @as(f64, @floatFromInt(self.bytes_sent)) / (1024.0 * 1024.0),
+            self.lat.pct(0.5),
+            self.lat.pct(0.99),
+            self.lat.total,
+        }) catch "stats: format error";
+        proto.write(c.fd, @intFromEnum(proto.s2c.stats_text), text) catch {};
     }
 
-    /// Route stdin: prefix commands here, everything else to the
-    /// focused pane.
+    /// Route stdin: prefix commands here, scroll-mode keys in scroll
+    /// mode, everything else to the focused pane.
     fn input(self: *Server, c: *Client, bytes: []const u8) void {
+        self.lat.note();
         var rest = bytes;
         while (rest.len > 0) {
             if (c.prefix) {
@@ -286,7 +356,12 @@ pub const Server = struct {
                 rest = rest[1..];
                 continue;
             }
-            const idx = std.mem.indexOfScalar(u8, rest, prefix_key) orelse {
+            if (self.scrolling) {
+                self.scrollKey(rest[0]);
+                rest = rest[1..];
+                continue;
+            }
+            const idx = std.mem.indexOfScalar(u8, rest, self.prefix_key) orelse {
                 self.toFocused(rest);
                 return;
             };
@@ -297,30 +372,89 @@ pub const Server = struct {
     }
 
     fn toFocused(self: *Server, bytes: []const u8) void {
-        if (self.pane(self.focused)) |p| p.write(bytes);
+        if (self.focusedPane()) |p| p.write(bytes);
     }
 
     fn command(self: *Server, c: *Client, key: u8) void {
         switch (key) {
-            prefix_key => self.toFocused(&[_]u8{prefix_key}),
-            'v', '|' => self.spawnPane(self.focused, true) catch {},
-            '-' => self.spawnPane(self.focused, false) catch {},
+            'v', '|' => self.splitPane(true) catch {},
+            '-' => self.splitPane(false) catch {},
             'h' => self.move(-1, 0),
             'l' => self.move(1, 0),
             'j' => self.move(0, 1),
             'k' => self.move(0, -1),
-            'x' => if (self.pane(self.focused)) |p| p.hangup(),
+            'c' => self.newWindow() catch {},
+            'n' => self.selectWindow((self.cur + 1) % self.windows.items.len),
+            'p' => self.selectWindow((self.cur + self.windows.items.len - 1) % self.windows.items.len),
+            '1'...'9' => {
+                const i: usize = key - '1';
+                if (i < self.windows.items.len) self.selectWindow(i);
+            },
+            'z' => {
+                self.window().zoomed = !self.window().zoomed;
+                self.relayout() catch {};
+            },
+            '[' => self.scrollStart(),
+            'x' => if (self.focusedPane()) |p| p.hangup(),
             'd' => {
                 proto.write(c.fd, @intFromEnum(proto.s2c.exit), "") catch {};
                 c.attached = false;
             },
+            else => {
+                // the prefix key itself: double-tap types it literally
+                if (key == self.prefix_key) self.toFocused(&[_]u8{key});
+            },
+        }
+        self.pending = true;
+    }
+
+    // ---- scroll mode ----
+
+    fn scrollStart(self: *Server) void {
+        self.scrolling = true;
+        self.full = true;
+    }
+
+    fn scrollKey(self: *Server, key: u8) void {
+        const p = self.focusedPane() orelse {
+            self.scrolling = false;
+            return;
+        };
+        const page: i32 = @intCast(@max(1, p.rows / 2));
+        switch (key) {
+            'k' => p.scroll(-1),
+            'j' => p.scroll(1),
+            'u' => p.scroll(-page),
+            'd' => p.scroll(page),
+            'g' => p.scrollTop(),
+            'G' => p.scrollBottom(),
+            'q', 0x1b => {
+                p.scrollBottom();
+                self.scrolling = false;
+            },
             else => {},
         }
-        force_redraw = true;
+        self.full = true;
+        self.pending = true;
+    }
+
+    fn selectWindow(self: *Server, i: usize) void {
+        if (i == self.cur) return;
+        self.cur = i;
+        self.scrolling = false;
+        self.relayout() catch {};
     }
 
     fn move(self: *Server, dx: i32, dy: i32) void {
-        if (layoutpkg.navigate(self.placed.items, self.focused, dx, dy)) |id| self.focused = id;
+        const w = self.window();
+        if (w.zoomed) return;
+        if (layoutpkg.navigate(self.placed.items, w.focused, dx, dy)) |id| {
+            if (id != w.focused) {
+                w.focused = id;
+                self.full = true; // border accents + cursor move
+                self.pending = true;
+            }
+        }
     }
 
     fn reap(self: *Server) !void {
@@ -332,46 +466,82 @@ pub const Server = struct {
                 i += 1;
                 continue;
             }
-            _ = self.layout.remove(p.id);
-            if (self.focused == p.id and self.panes.items.len > 1) {
-                for (self.panes.items) |q| {
-                    if (q.id != p.id) {
-                        self.focused = q.id;
-                        break;
-                    }
+            // remove from whichever window holds it
+            var wi: usize = 0;
+            while (wi < self.windows.items.len) : (wi += 1) {
+                const w = self.windows.items[wi];
+                if (!w.layout.contains(p.id)) continue;
+                const still = w.layout.remove(p.id);
+                if (!still) {
+                    w.layout.deinit();
+                    self.gpa.destroy(w);
+                    _ = self.windows.orderedRemove(wi);
+                    if (self.cur >= self.windows.items.len and self.cur > 0) self.cur -= 1;
+                } else {
+                    w.zoomed = false;
+                    if (w.focused == p.id) w.focused = w.layout.firstLeaf() orelse 0;
                 }
+                break;
             }
             p.deinit();
             _ = self.panes.swapRemove(i);
             removed = true;
         }
-        if (removed) {
-            try self.relayout();
-            force_redraw = true;
-        }
+        if (removed and self.windows.items.len > 0) try self.relayout();
     }
 
     fn redraw(self: *Server) !void {
-        var any_dirty = force_redraw;
-        for (self.panes.items) |p| {
+        var any_dirty = self.full;
+        for (self.placed.items) |pl| {
+            const p = self.pane(pl.pane) orelse continue;
             p.snapshot() catch continue;
             if (p.rs.dirty != .false) any_dirty = true;
             p.rs.dirty = .false;
         }
         if (!any_dirty) return;
-        force_redraw = false;
 
         const g = self.geometry();
-        var status_buf: [128]u8 = undefined;
-        const status = std.fmt.bufPrint(&status_buf, "rook-mux · {d} pane{s} · C-b v/- split · hjkl move · x kill · d detach", .{
-            self.panes.items.len,
-            if (self.panes.items.len == 1) "" else "s",
-        }) catch "rook-mux";
+        var status_buf: [256]u8 = undefined;
+        const status = self.statusLine(&status_buf);
 
-        const bytes = self.frame.build(self.panes.items, self.placed.items, self.focused, g.cols, g.rows, status);
+        const bytes = self.frame.build(self.panes.items, self.placed.items, self.window().focused, g.cols, g.rows, status, self.full);
+        self.full = false;
+        var shipped = false;
         for (self.clients.items) |c| {
             if (!c.attached) continue;
             proto.write(c.fd, @intFromEnum(proto.s2c.draw), bytes) catch {};
+            self.bytes_sent += bytes.len;
+            shipped = true;
+        }
+        if (shipped) {
+            self.frames_sent += 1;
+            self.lat.frame();
         }
     }
+
+    /// The tab bar: ♜, then one chip per window named by its focused
+    /// pane's foreground program, the current one marked. Scroll and
+    /// zoom wear their state on the right.
+    fn statusLine(self: *Server, buf: []u8) []const u8 {
+        var w2: std.ArrayList(u8) = .initBuffer(buf);
+        w2.appendSliceBounded("♜") catch {};
+        for (self.windows.items, 0..) |w, i| {
+            var name_buf: [64]u8 = undefined;
+            var name: []const u8 = "shell";
+            if (self.pane(w.focused)) |p| {
+                if (p.fgName(&name_buf)) |fg| name = fg;
+            }
+            var chip: [96]u8 = undefined;
+            const mark: []const u8 = if (i == self.cur) "*" else " ";
+            const s = std.fmt.bufPrint(&chip, "  {d}:{s}{s}", .{ i + 1, name, mark }) catch continue;
+            w2.appendSliceBounded(s) catch break;
+        }
+        if (self.scrolling) w2.appendSliceBounded("  [scroll: j/k/u/d/g/G, q quits]") catch {};
+        if (self.window().zoomed) w2.appendSliceBounded("  [zoom]") catch {};
+        return w2.items;
+    }
 };
+
+fn plural(n: usize) []const u8 {
+    return if (n == 1) "" else "s";
+}

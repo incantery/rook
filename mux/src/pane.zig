@@ -158,6 +158,23 @@ pub const Pane = struct {
         try self.rs.update(self.gpa, &self.term);
     }
 
+    /// Scroll the viewport by rows (negative = back in time).
+    pub fn scroll(self: *Pane, delta: i32) void {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        self.term.screens.active.scroll(.{ .delta_row = delta });
+    }
+    pub fn scrollTop(self: *Pane) void {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        self.term.screens.active.scroll(.top);
+    }
+    pub fn scrollBottom(self: *Pane) void {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        self.term.screens.active.scroll(.active);
+    }
+
     pub fn write(self: *Pane, bytes: []const u8) void {
         self.pty.writeMaster(bytes) catch {};
     }
@@ -188,4 +205,21 @@ pub const Pane = struct {
         self.term.deinit(self.gpa);
         self.gpa.destroy(self);
     }
+
+    /// The program reading this pty right now — "nvim", or the shell
+    /// at its prompt. Two syscalls, no cache to go stale.
+    pub fn fgName(self: *Pane, buf: []u8) ?[]const u8 {
+        const pgrp = tcgetpgrp(self.pty.master);
+        if (pgrp <= 0) return null;
+        var path: [4096]u8 = undefined;
+        const n = proc_pidpath(pgrp, &path, path.len);
+        if (n <= 0) return null;
+        const base = std.fs.path.basename(path[0..@intCast(n)]);
+        if (base.len == 0 or base.len > buf.len) return null;
+        @memcpy(buf[0..base.len], base);
+        return buf[0..base.len];
+    }
 };
+
+extern "c" fn tcgetpgrp(fd: ptypkg.fd_t) ptypkg.pid_t;
+extern "c" fn proc_pidpath(pid: ptypkg.pid_t, buf: [*]u8, len: u32) c_int;

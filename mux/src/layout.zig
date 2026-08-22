@@ -64,6 +64,19 @@ pub const Layout = struct {
         }
     }
 
+    /// Does this tree hold the pane?
+    pub fn contains(self: *Layout, pane: u32) bool {
+        const r = self.root orelse return false;
+        return self.find(r, pane) != null;
+    }
+
+    /// Any leaf, for refocusing after a removal.
+    pub fn firstLeaf(self: *Layout) ?u32 {
+        var n = self.root orelse return null;
+        while (n.* == .split) n = n.split.a;
+        return n.leaf;
+    }
+
     /// Remove a pane; its sibling takes the whole split. Returns false
     /// when the tree is empty afterwards.
     pub fn remove(self: *Layout, pane: u32) bool {

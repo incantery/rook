@@ -29,7 +29,10 @@ pub const Frame = struct {
         self.print(csi ++ "{d};{d}H", .{ @as(u32, y) + 1, @as(u32, x) + 1 });
     }
 
-    /// Build a full-screen frame.
+    /// Build a frame. `full` repaints everything (attach, resize,
+    /// layout or focus change); otherwise only rows RenderState marked
+    /// dirty since the last frame are emitted — the poor man's cell
+    /// protocol, and the shape the real one will keep.
     pub fn build(
         self: *Frame,
         panes: []const *panepkg.Pane,
@@ -38,17 +41,16 @@ pub const Frame = struct {
         cols: u16,
         rows: u16,
         status: []const u8,
+        full: bool,
     ) []const u8 {
         self.buf.clearRetainingCapacity();
         self.put(csi ++ "?2026h" ++ csi ++ "?25l");
-
-        // Background fill: borders live on whatever the fill leaves.
         self.put(csi ++ "0m");
 
         var cursor: ?struct { x: u16, y: u16 } = null;
         for (placed) |pl| {
             const pane = findPane(panes, pl.pane) orelse continue;
-            self.drawPane(pane, pl.rect);
+            self.drawPane(pane, pl.rect, full);
             if (pl.pane == focused) {
                 const cur = pane.rs.cursor;
                 if (cur.visible) if (cur.viewport) |v| {
@@ -58,9 +60,9 @@ pub const Frame = struct {
             }
         }
 
-        self.drawBorders(placed, focused, cols, rows);
+        if (full) self.drawBorders(placed, focused, cols, rows);
 
-        // Status line: bottom row, inverse.
+        // Status line: bottom row, inverse. Cheap; always emitted.
         self.cup(0, rows - 1);
         self.put(csi ++ "0;7m ");
         const max: usize = if (cols > 2) cols - 2 else 0;
@@ -77,12 +79,15 @@ pub const Frame = struct {
         return self.buf.items;
     }
 
-    fn drawPane(self: *Frame, pane: *panepkg.Pane, rect: layoutpkg.Rect) void {
+    fn drawPane(self: *Frame, pane: *panepkg.Pane, rect: layoutpkg.Rect, full: bool) void {
         const rs = &pane.rs;
         const colors = &rs.colors;
         const row_cells = rs.row_data.items(.cells);
+        const row_dirty = rs.row_data.items(.dirty);
         const vrows: usize = @min(rect.h, rs.rows);
         for (0..vrows) |y| {
+            if (!full and !row_dirty[y]) continue;
+            row_dirty[y] = false;
             self.cup(rect.x, rect.y + @as(u16, @intCast(y)));
             self.put(csi ++ "0m");
             var last_sgr: Sgr = .{};
@@ -132,6 +137,7 @@ pub const Frame = struct {
             }
         }
         // pad missing rows (pane taller than grid, transiently)
+        if (!full) return;
         var y: usize = vrows;
         while (y < rect.h) : (y += 1) {
             self.cup(rect.x, rect.y + @as(u16, @intCast(y)));

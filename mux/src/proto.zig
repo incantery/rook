@@ -4,8 +4,8 @@
 const std = @import("std");
 const ptypkg = @import("pty.zig");
 
-pub const c2s = enum(u8) { attach = 1, stdin = 2, resize = 3, detach = 4 };
-pub const s2c = enum(u8) { draw = 1, exit = 2 };
+pub const c2s = enum(u8) { attach = 1, stdin = 2, resize = 3, detach = 4, stats = 5 };
+pub const s2c = enum(u8) { draw = 1, exit = 2, stats_text = 3 };
 
 pub fn write(fd: ptypkg.fd_t, kind: u8, payload: []const u8) !void {
     var hdr: [5]u8 = undefined;

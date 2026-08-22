@@ -48,6 +48,31 @@ fn winsize() proto.Geometry {
     return .{ .cols = ws.ws_col, .rows = ws.ws_row };
 }
 
+/// One-shot: ask the server for stats, print, exit.
+pub fn stats(gpa: std.mem.Allocator, sock_path: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    try proto.write(sock, @intFromEnum(proto.c2s.stats), "");
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (waited < 2000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!reader.fill(sock)) return error.ServerGone;
+        while (reader.next()) |msg| {
+            defer reader.consume();
+            if (msg.kind == @intFromEnum(proto.s2c.stats_text)) {
+                _ = ptypkg.writeAllFd(1, msg.payload);
+                return;
+            }
+        }
+    }
+    return error.Timeout;
+}
+
 pub fn attach(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     const sock = ptypkg.unixConnect(sock_path);
     if (sock < 0) return error.ConnectFailed;
