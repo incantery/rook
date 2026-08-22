@@ -73,6 +73,15 @@ pub fn stats(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     return error.Timeout;
 }
 
+/// One-shot: move focus one pane in `dir` ('h'/'j'/'k'/'l'). This is
+/// what nvim calls when Ctrl-h/j/k/l hits a window edge.
+pub fn nav(sock_path: []const u8, dir: u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    try proto.write(sock, @intFromEnum(proto.c2s.nav), &[_]u8{dir});
+}
+
 /// Ask the server to shut down (HUPs every pane).
 pub fn kill(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     _ = gpa;

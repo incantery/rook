@@ -347,6 +347,11 @@ pub fn setEnv(name: [*:0]const u8, value: [*:0]const u8) void {
     _ = setenv(name, value, 1);
 }
 
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+pub fn unsetEnv(name: [*:0]const u8) void {
+    _ = unsetenv(name);
+}
+
 // ---- teardown escalation tests ----
 //
 // These spawn real shells on a real pty, in the lsp.zig tradition of

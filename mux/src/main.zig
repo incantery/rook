@@ -1,6 +1,7 @@
 //! rook-mux: a terminal multiplexer with ghostty-vt in-process.
 //!   rook-mux            attach (starting the server if needed)
 //!   rook-mux server     run the server in the foreground
+//!   rook-mux nav <dir>  move focus h/j/k/l (vim plugins call this at edges)
 //!   rook-mux kill       stop the server
 const std = @import("std");
 const server = @import("server.zig");
@@ -55,6 +56,26 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "kill")) {
         try client.kill(gpa, path);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "nav")) {
+        // rook-mux nav h|j|k|l (or left/down/up/right)
+        const arg: []const u8 = if (argv.len > 2) std.mem.span(argv[2]) else "";
+        const dir: u8 = if (arg.len == 1 and (arg[0] == 'h' or arg[0] == 'j' or arg[0] == 'k' or arg[0] == 'l'))
+            arg[0]
+        else if (std.mem.eql(u8, arg, "left"))
+            'h'
+        else if (std.mem.eql(u8, arg, "down"))
+            'j'
+        else if (std.mem.eql(u8, arg, "up"))
+            'k'
+        else if (std.mem.eql(u8, arg, "right"))
+            'l'
+        else {
+            std.debug.print("usage: rook-mux nav h|j|k|l\n", .{});
+            return error.BadArgs;
+        };
+        try client.nav(path, dir);
         return;
     }
 

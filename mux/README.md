@@ -19,7 +19,21 @@ C-b when unset; double-tap types it literally. Then:
     x          kill pane                   d        detach
 
 `rook-mux stats` prints input→frame p50/p99, frames, bytes. `rook-mux
-kill` shuts the server down politely (HUPs every pane).
+kill` shuts the server down politely (HUPs every pane). `rook-mux nav
+h|j|k|l` moves pane focus from the command line — it exists for
+editors to call at their window edges.
+
+## Vim-native navigation
+
+A bare Ctrl-h/j/k/l (no prefix) moves pane focus, vim-tmux-navigator
+style. When the focused pane runs vim/nvim/fzf the key is forwarded —
+those programs own it — and `nvim/plugin/rook-mux-navigator.lua` (in
+this repo; point your plugin manager at `mux/nvim`, gated on
+`$ROOK_MUX_PANE`) makes nvim move between its own windows first and
+call `rook-mux nav <dir>` when a move hits its edge. When navigation
+has nowhere to go the key falls through to the pane, so Ctrl-l still
+clears a lone shell. Panes are scrubbed of outer-mux identity
+(`TMUX`, `HERDR_PANE_ID`) so editor plugins pick the right navigator.
 
 Working today: dirty-row frames paced at 8ms, scrollback view, OSC 52
 copy out to the glass, cursor-shape passthrough (nvim beam in insert),
@@ -28,7 +42,7 @@ focuses the pane under it; drag selects, and release copies the
 selection to the system clipboard (OSC 52); the wheel scrolls. All
 three forward pane-relative instead when the program asked for mouse
 (nvim, fzf). Typing snaps a scrolled pane back to live. Not yet: kitty keyboard
-passthrough, per-pane cwd inheritance, session persistence across
+passthrough, keyboard copy-mode selection, per-pane cwd inheritance, session persistence across
 server restart.
 
 ## Shape

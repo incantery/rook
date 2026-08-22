@@ -83,6 +83,13 @@ pub const Pane = struct {
         ptypkg.setEnv("TERM", "xterm-256color");
         ptypkg.setEnv("COLORTERM", "truecolor");
         ptypkg.setEnv("ROOK_MUX_PANE", "1");
+        // We are the mux now: scrub any outer multiplexer's identity so
+        // programs in the pane (nvim plugins especially) don't think
+        // they are living in tmux or herdr.
+        ptypkg.unsetEnv("TMUX");
+        ptypkg.unsetEnv("TMUX_PANE");
+        ptypkg.unsetEnv("HERDR_PANE_ID");
+        ptypkg.unsetEnv("HERDR_SESSION");
         const argv = [_][*:0]const u8{ shell, "-l" };
         self.pid = try self.pty.spawnIn(&argv, cwd);
         self.thread = try std.Thread.spawn(.{}, readLoop, .{self});

@@ -110,6 +110,12 @@ pub const Server = struct {
 
         const pipefds = ptypkg.makePipeNb() orelse return error.PipeFailed;
 
+        // Panes inherit the socket path so `rook-mux nav` (the nvim
+        // plugin's edge handoff) talks to the right server.
+        const sock_z = try gpa.dupeZ(u8, sock_path);
+        defer gpa.free(sock_z);
+        ptypkg.setEnv("ROOK_MUX_SOCK", sock_z.ptr);
+
         var self: Server = .{
             .gpa = gpa,
             .io = io,
@@ -255,7 +261,11 @@ pub const Server = struct {
                 if (pfd.revents == 0) continue;
                 const idx = self.clientIndex(pfd.fd) orelse continue;
                 const c = self.clients.items[idx];
-                if (pfd.revents & (ptypkg.POLLHUP | ptypkg.POLLERR) != 0 or !self.serveClient(c)) {
+                // Serve before dropping: a one-shot client (nav) writes
+                // and closes, so POLLIN and POLLHUP arrive together and
+                // its bytes must still be drained.
+                const alive = self.serveClient(c);
+                if (!alive or pfd.revents & (ptypkg.POLLHUP | ptypkg.POLLERR) != 0) {
                     self.dropClient(idx);
                 }
             }
@@ -304,9 +314,10 @@ pub const Server = struct {
         _ = self.clients.swapRemove(i);
     }
 
-    /// Returns false when the client is gone.
+    /// Returns false when the client is gone. Buffered messages are
+    /// processed even at EOF — a one-shot client's last words count.
     fn serveClient(self: *Server, c: *Client) bool {
-        if (!c.reader.fill(c.fd)) return false;
+        const alive = c.reader.fill(c.fd);
         while (c.reader.next()) |msg| {
             defer c.reader.consume();
             switch (msg.kind) {
@@ -319,6 +330,11 @@ pub const Server = struct {
                     }
                 },
                 @intFromEnum(proto.c2s.stdin) => self.input(c, msg.payload),
+                @intFromEnum(proto.c2s.nav) => {
+                    // vim hit a window edge and hands us the move; an
+                    // explicit verb, so never forwarded anywhere.
+                    if (msg.payload.len == 1) _ = self.navigate(msg.payload[0]);
+                },
                 @intFromEnum(proto.c2s.detach) => return false,
                 @intFromEnum(proto.c2s.stats) => self.sendStats(c),
                 @intFromEnum(proto.c2s.shutdown) => {
@@ -329,7 +345,7 @@ pub const Server = struct {
                 else => {},
             }
         }
-        return true;
+        return alive;
     }
 
     fn sendStats(self: *Server, c: *Client) void {
@@ -381,6 +397,19 @@ pub const Server = struct {
                 c.prefix = true;
                 rest = rest[1..];
                 continue;
+            }
+            // A lone Ctrl-h/j/k/l is pane navigation, vim-tmux-navigator
+            // style: vim and friends own the key (vim's plugin hands the
+            // edge move back via `rook-mux nav`); everywhere else the mux
+            // moves focus, and the key falls through to the pane when
+            // there is nowhere to go — C-l still clears a lone shell.
+            if (bytes.len == 1) {
+                if (ctrlNavDir(rest[0])) |dir| {
+                    if (!self.fgOwnsCtrlNav() and self.navigate(dir)) {
+                        rest = rest[1..];
+                        continue;
+                    }
+                }
             }
             // forward up to the next special byte
             var end: usize = rest.len;
@@ -536,10 +565,7 @@ pub const Server = struct {
         switch (key) {
             'v', '|' => self.splitPane(true) catch {},
             '-' => self.splitPane(false) catch {},
-            'h' => self.move(-1, 0),
-            'l' => self.move(1, 0),
-            'j' => self.move(0, 1),
-            'k' => self.move(0, -1),
+            'h', 'j', 'k', 'l' => _ = self.navigate(key),
             'c' => self.newWindow() catch {},
             'n' => self.selectWindow((self.cur + 1) % self.windows.items.len),
             'p' => self.selectWindow((self.cur + self.windows.items.len - 1) % self.windows.items.len),
@@ -613,16 +639,45 @@ pub const Server = struct {
         self.relayout() catch {};
     }
 
-    fn move(self: *Server, dx: i32, dy: i32) void {
+    /// 'h'/'j'/'k'/'l' → directional focus move. Returns true when
+    /// focus actually moved (false at an edge, or zoomed).
+    fn navigate(self: *Server, dir: u8) bool {
         const w = self.window();
-        if (w.zoomed) return;
+        if (w.zoomed) return false;
+        const dx: i32 = switch (dir) {
+            'h' => -1,
+            'l' => 1,
+            else => 0,
+        };
+        const dy: i32 = switch (dir) {
+            'k' => -1,
+            'j' => 1,
+            'h', 'l' => 0,
+            else => return false,
+        };
         if (layoutpkg.navigate(self.placed.items, w.focused, dx, dy)) |id| {
             if (id != w.focused) {
                 w.focused = id;
                 self.full = true; // border accents + cursor move
                 self.pending = true;
+                return true;
             }
         }
+        return false;
+    }
+
+    /// Programs that own Ctrl-h/j/k/l themselves: vim navigates its own
+    /// windows first (its plugin calls `rook-mux nav` at an edge), fzf
+    /// lives on C-j/C-k.
+    fn fgOwnsCtrlNav(self: *Server) bool {
+        const p = self.focusedPane() orelse return false;
+        var buf: [64]u8 = undefined;
+        const name = p.fgName(&buf) orelse return false;
+        const owners = [_][]const u8{ "nvim", "vim", "vi", "view", "gvim", "vimdiff", "nvimdiff", "fzf" };
+        for (owners) |o| {
+            if (std.mem.eql(u8, name, o)) return true;
+        }
+        return false;
     }
 
     fn reap(self: *Server) !void {
@@ -738,6 +793,17 @@ pub const Server = struct {
         return w2.items;
     }
 };
+
+/// The four vim-navigator control bytes → their direction letter.
+fn ctrlNavDir(b: u8) ?u8 {
+    return switch (b) {
+        0x08 => 'h', // C-h
+        0x0a => 'j', // C-j (Enter is 0x0d in raw mode, so this is safe)
+        0x0b => 'k', // C-k
+        0x0c => 'l', // C-l
+        else => null,
+    };
+}
 
 fn plural(n: usize) []const u8 {
     return if (n == 1) "" else "s";
