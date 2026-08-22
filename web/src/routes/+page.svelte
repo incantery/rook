@@ -43,6 +43,11 @@
     mux = new Mux(wsUrl(), {
       onDraw: (bytes) => term?.write(bytes),
       onBlocks: (b) => (blocks = b),
+      onBlockCreated: (id) => {
+        // our own ` c / ` v — hop onto the new block
+        const known = blocks.find((x) => x.id === id);
+        attach(known ?? { id, place: '', fg: 'shell', size: '', cwd: '' });
+      },
       onExit: () => detach(),
       onClose: () => (status = 'closed'),
     });
@@ -104,6 +109,14 @@
           cycle(d === 'n' ? 1 : -1);
         } else if (d === 's') {
           openPalette();
+        } else if (d === 'c' || d === 'v' || d === '-') {
+          // typed action, not keystroke emulation: the server creates
+          // the window/split and replies with the block id
+          mux?.blockCmd(d);
+        } else if (d === 'x') {
+          mux?.blockCmd('x'); // pane dies -> server sends exit -> detach
+        } else if (d === 'd') {
+          detach();
         }
         return;
       }

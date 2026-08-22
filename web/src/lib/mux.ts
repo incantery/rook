@@ -14,6 +14,7 @@ export const c2s = {
   session: 9,
   blocks: 10,
   attachBlock: 11,
+  blockCmd: 12,
 } as const;
 
 export const s2c = {
@@ -21,6 +22,7 @@ export const s2c = {
   exit: 2,
   statsText: 3,
   blocksText: 4,
+  blockCreated: 5,
 } as const;
 
 export interface Block {
@@ -34,6 +36,7 @@ export interface Block {
 export type MuxHandler = {
   onDraw: (bytes: Uint8Array) => void;
   onBlocks: (blocks: Block[]) => void;
+  onBlockCreated: (id: number) => void;
   onExit: () => void;
   onClose: () => void;
 };
@@ -90,6 +93,10 @@ export class Mux {
     this.send(c2s.attachBlock, p);
   }
 
+  blockCmd(op: string) {
+    this.send(c2s.blockCmd, this.enc.encode(op));
+  }
+
   input(data: string) {
     this.send(c2s.stdin, this.enc.encode(data));
   }
@@ -132,6 +139,13 @@ export class Mux {
           blocks.push({ id: Number(id), place, fg: fg ?? '', size: size ?? '', cwd: cwd ?? '' });
         }
         this.handler.onBlocks(blocks);
+        break;
+      }
+      case s2c.blockCreated: {
+        if (payload.length >= 4) {
+          const id = new DataView(payload.buffer, payload.byteOffset).getUint32(0, true);
+          this.handler.onBlockCreated(id);
+        }
         break;
       }
       case s2c.exit:

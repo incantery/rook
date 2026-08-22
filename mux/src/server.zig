@@ -636,6 +636,7 @@ pub const Server = struct {
                     } else self.input(c, msg.payload);
                 },
                 @intFromEnum(proto.c2s.blocks) => self.sendBlocks(c),
+                @intFromEnum(proto.c2s.block_cmd) => self.blockCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.attach_block) => self.attachBlock(c, msg.payload),
                 @intFromEnum(proto.c2s.session) => {
                     if (msg.payload.len >= 1) {
@@ -792,6 +793,66 @@ pub const Server = struct {
             }
             p.tee_on.store(on, .release);
         }
+    }
+
+    const BlockLoc = struct { sn: *Session, w: *Window };
+
+    fn findBlock(self: *Server, pane_id: u32) ?BlockLoc {
+        for (self.sessions.items) |sn| {
+            for (sn.windows.items) |w| {
+                if (w.layout.contains(pane_id)) return .{ .sn = sn, .w = w };
+            }
+        }
+        return null;
+    }
+
+    /// Typed actions for block clients — the browser's prefix keys.
+    /// [op]: 'c' new window in the block's session, 'v'/'-' split the
+    /// block's window, 'x' kill the block. Creations reply with the
+    /// new block id so the client can hop straight onto it. The
+    /// desktop view is never yanked: windows appear in the tab bar,
+    /// splits show up if that window is on screen, focus stays put.
+    fn blockCmd(self: *Server, c: *Client, payload: []const u8) void {
+        if (payload.len < 1) return;
+        const bid = c.block orelse return;
+        const loc = self.findBlock(bid) orelse return;
+        var cwd_buf: [1024]u8 = undefined;
+        var cwd: ?[*:0]const u8 = null;
+        if (self.pane(bid)) |bp| {
+            if (bp.fgCwd(&cwd_buf)) |cc| cwd = cc.ptr;
+        }
+        switch (payload[0]) {
+            'c' => {
+                const w = self.gpa.create(Window) catch return;
+                w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
+                loc.sn.windows.append(self.gpa, w) catch {
+                    self.gpa.destroy(w);
+                    return;
+                };
+                const p = self.startPane(cwd) catch return;
+                w.layout.seed(p.id) catch {};
+                w.focused = p.id;
+                self.replyCreated(c, p.id);
+            },
+            'v', '-' => {
+                const p = self.startPane(cwd) catch return;
+                loc.w.layout.split(bid, p.id, payload[0] == 'v') catch return;
+                loc.w.zoomed = false;
+                if (loc.w == self.window()) self.relayout() catch {};
+                self.replyCreated(c, p.id);
+            },
+            'x' => if (self.pane(bid)) |p| p.hangup(),
+            else => return,
+        }
+        self.state_dirty = true;
+        self.blocks_check_ms = 0; // push the new table promptly
+        self.pending = true;
+    }
+
+    fn replyCreated(self: *Server, c: *Client, id: u32) void {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, id, .little);
+        self.sendTo(c, @intFromEnum(proto.s2c.block_created), &b);
     }
 
     fn sendSnapshot(self: *Server, c: *Client, p: *panepkg.Pane) void {
@@ -1335,10 +1396,19 @@ pub const Server = struct {
                     break :outer;
                 }
             }
+            // block clients riding this pane get a clean goodbye
+            for (self.clients.items) |bc| {
+                if (bc.block == p.id) {
+                    self.sendTo(bc, @intFromEnum(proto.s2c.exit), "");
+                    bc.block = null;
+                    bc.lease = false;
+                }
+            }
             p.deinit();
             _ = self.panes.swapRemove(i);
             removed = true;
         }
+        if (removed) self.updateTees();
         if (removed and self.sessions.items.len > 0) try self.relayout();
     }
 
