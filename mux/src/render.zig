@@ -42,6 +42,7 @@ pub const Frame = struct {
         rows: u16,
         status: []const u8,
         full: bool,
+        cursor_override: ?struct { x: u16, y: u16 },
     ) []const u8 {
         self.buf.clearRetainingCapacity();
         self.put(csi ++ "?2026h" ++ csi ++ "?25l");
@@ -80,6 +81,11 @@ pub const Frame = struct {
         while (pad > 0) : (pad -= 1) self.put(" ");
         self.put(csi ++ "0m");
 
+        if (cursor_override) |co| {
+            // copy mode: the mux's cursor, always a visible block
+            cursor = .{ .x = co.x, .y = co.y };
+            cursor_style = csi ++ "2 q";
+        }
         if (cursor) |c| {
             self.cup(c.x, c.y);
             self.put(cursor_style);

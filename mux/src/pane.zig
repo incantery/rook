@@ -245,6 +245,25 @@ pub const Pane = struct {
         s.select(.init(pa, pb, false)) catch {};
     }
 
+    /// Extend the selection's end to a viewport cell, keeping its
+    /// anchor. The anchor pin is content-tracked by the screen, so it
+    /// stays put while copy mode scrolls. No selection yet: both ends
+    /// land here.
+    pub fn extendSelection(self: *Pane, x: u16, y: u16) void {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        const s = self.term.screens.active;
+        const pb = s.pages.pin(.{ .viewport = .{ .x = x, .y = y } }) orelse return;
+        const anchor = if (s.selection) |sel| sel.bounds.tracked.start.* else pb;
+        s.select(.init(anchor, pb, false)) catch {};
+    }
+
+    pub fn hasSelection(self: *Pane) bool {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        return self.term.screens.active.selection != null;
+    }
+
     pub fn clearSelection(self: *Pane) void {
         os_unfair_lock_lock(&self.lock);
         defer os_unfair_lock_unlock(&self.lock);

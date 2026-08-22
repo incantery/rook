@@ -100,9 +100,12 @@ pub const Server = struct {
     full: bool = true,
     pending: bool = false,
     shutdown: bool = false,
-    /// Scroll mode: viewport moved back in the focused pane's
-    /// scrollback; plain keys navigate until q/Esc.
+    /// Copy mode (prefix-[): a mux-owned cursor walks the focused
+    /// pane and its scrollback; v anchors a selection, y yanks it to
+    /// the clipboard. Plain keys navigate until q/Esc.
     scrolling: bool = false,
+    scur: struct { x: u16, y: u16 } = .{ .x = 0, .y = 0 },
+    selecting: bool = false,
     lat: Lat = .{},
     frames_sent: u64 = 0,
     bytes_sent: u64 = 0,
@@ -706,7 +709,13 @@ pub const Server = struct {
     // ---- scroll mode ----
 
     fn scrollStart(self: *Server) void {
+        const p = self.focusedPane() orelse return;
         self.scrolling = true;
+        self.selecting = false;
+        self.scur = .{ .x = 0, .y = p.rows -| 1 };
+        if (p.rs.cursor.visible) {
+            if (p.rs.cursor.viewport) |v| self.scur = .{ .x = v.x, .y = v.y };
+        }
         self.full = true;
     }
 
@@ -716,19 +725,79 @@ pub const Server = struct {
             return;
         };
         const page: i32 = @intCast(@max(1, p.rows / 2));
+        const max_y = p.rows -| 1;
+        const max_x = p.cols -| 1;
+        var moved = false;
         switch (key) {
-            'k' => p.scroll(-1),
-            'j' => p.scroll(1),
-            'u' => p.scroll(-page),
-            'd' => p.scroll(page),
-            'g' => p.scrollTop(),
-            'G' => p.scrollBottom(),
+            'h' => {
+                self.scur.x -|= 1;
+                moved = true;
+            },
+            'l' => {
+                if (self.scur.x < max_x) self.scur.x += 1;
+                moved = true;
+            },
+            'k' => {
+                if (self.scur.y > 0) self.scur.y -= 1 else p.scroll(-1);
+                moved = true;
+            },
+            'j' => {
+                if (self.scur.y < max_y) self.scur.y += 1 else p.scroll(1);
+                moved = true;
+            },
+            '0' => {
+                self.scur.x = 0;
+                moved = true;
+            },
+            '$' => {
+                self.scur.x = max_x;
+                moved = true;
+            },
+            'u' => {
+                p.scroll(-page);
+                moved = true;
+            },
+            'd' => {
+                p.scroll(page);
+                moved = true;
+            },
+            'g' => {
+                p.scrollTop();
+                self.scur.y = 0;
+                moved = true;
+            },
+            'G' => {
+                p.scrollBottom();
+                self.scur.y = max_y;
+                moved = true;
+            },
+            'v' => {
+                self.selecting = !self.selecting;
+                if (self.selecting) {
+                    p.setSelection(self.scur.x, self.scur.y, self.scur.x, self.scur.y);
+                } else {
+                    p.clearSelection();
+                }
+            },
+            'y' => {
+                if (p.selectionText()) |text| {
+                    defer self.gpa.free(text);
+                    self.shipClip(text);
+                }
+                p.clearSelection();
+                self.selecting = false;
+                p.scrollBottom();
+                self.scrolling = false;
+            },
             'q', 0x1b => {
+                p.clearSelection();
+                self.selecting = false;
                 p.scrollBottom();
                 self.scrolling = false;
             },
             else => {},
         }
+        if (moved and self.selecting) p.extendSelection(self.scur.x, self.scur.y);
         self.full = true;
         self.pending = true;
     }
@@ -745,6 +814,7 @@ pub const Server = struct {
         const old_focused = self.window().focused;
         self.cur = i;
         self.scrolling = false;
+        self.selecting = false;
         self.focusEvents(old_focused, self.window().focused);
         self.relayout() catch {};
     }
@@ -855,7 +925,18 @@ pub const Server = struct {
         var status_buf: [256]u8 = undefined;
         const status = self.statusLine(&status_buf);
 
-        const bytes = self.frame.build(self.panes.items, self.placed.items, self.window().focused, g.cols, g.rows, status, self.full);
+        var cur_over: ?struct { x: u16, y: u16 } = null;
+        if (self.scrolling) {
+            for (self.placed.items) |pl| {
+                if (pl.pane == self.window().focused) {
+                    cur_over = .{
+                        .x = pl.rect.x + @min(self.scur.x, pl.rect.w -| 1),
+                        .y = pl.rect.y + @min(self.scur.y, pl.rect.h -| 1),
+                    };
+                }
+            }
+        }
+        const bytes = self.frame.build(self.panes.items, self.placed.items, self.window().focused, g.cols, g.rows, status, self.full, if (cur_over) |co| .{ .x = co.x, .y = co.y } else null);
         self.full = false;
         var shipped = false;
         for (self.clients.items) |c| {
@@ -948,7 +1029,12 @@ pub const Server = struct {
             const s = std.fmt.bufPrint(&chip, "  {d}:{s}{s}", .{ i + 1, name, mark }) catch continue;
             w2.appendSliceBounded(s) catch break;
         }
-        if (self.scrolling) w2.appendSliceBounded("  [scroll: j/k/u/d/g/G, q quits]") catch {};
+        if (self.scrolling) {
+            w2.appendSliceBounded(if (self.selecting)
+                "  [copy · VISUAL: y yanks, v cancels]"
+            else
+                "  [copy: hjkl/u/d/g/G move, v selects, y yanks, q quits]") catch {};
+        }
         if (self.window().zoomed) w2.appendSliceBounded("  [zoom]") catch {};
         return w2.items;
     }

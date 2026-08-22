@@ -15,7 +15,7 @@ C-b when unset; double-tap types it literally. Then:
     v |        split side by side          c        new window
     -          split stacked               n p 1-9  switch window
     hjkl       focus pane                  z        zoom pane
-    HJKL       resize split                [        scroll mode (jkudgG, q)
+    HJKL       resize split                [        copy mode (hjkl, v, y, q)
     x          kill pane                   d        detach
 
 `rook-mux stats` prints input→frame p50/p99, frames, bytes. `rook-mux
@@ -45,8 +45,10 @@ three forward pane-relative instead when the program asked for mouse
 windows open in the focused pane's cwd. Kitty keyboard protocol is
 mirrored: ghostty-vt tracks each pane's flag stack, and the mux sets
 the focused pane's flags on the glass (CSI = u), so nvim gets real
-kitty input and plain shells get legacy bytes. Not yet: keyboard copy-mode selection, session
-persistence across server restart.
+kitty input and plain shells get legacy bytes. Copy mode (prefix-[) is vim-shaped: hjkl/0/$/u/d/g/G move a cursor
+through the pane and its scrollback, v anchors a selection (the
+anchor is content-tracked, so it survives scrolling), y yanks to the
+system clipboard. Not yet: session persistence across server restart.
 
 ## Shape
 
