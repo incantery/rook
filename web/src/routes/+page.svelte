@@ -12,6 +12,8 @@
   let takeLease = $state(true);
   let token = $state('');
 
+  let ctrlArmed = $state(false);
+
   let mux: Mux | null = null;
   let term: Terminal | null = null;
   let fit: FitAddon | null = null;
@@ -73,7 +75,18 @@
     term.loadAddon(fit);
     term.open(termEl);
     term.onData((d) => {
-      if (attached) mux?.input(d);
+      if (!attached) return;
+      // sticky Ctrl from the key bar: the next typed character is
+      // sent as its control code
+      if (ctrlArmed && d.length === 1) {
+        const c = d.toUpperCase().charCodeAt(0);
+        if (c >= 64 && c < 128) {
+          mux?.input(String.fromCharCode(c & 0x1f));
+          ctrlArmed = false;
+          return;
+        }
+      }
+      mux?.input(d);
     });
     resizeObs = new ResizeObserver(() => {
       if (!attached || !term || !fit) return;
@@ -91,6 +104,12 @@
     }
     connect();
   });
+
+  function key(seq: string) {
+    if (!attached) return;
+    mux?.input(seq);
+    term?.focus();
+  }
 
   onDestroy(() => {
     resizeObs?.disconnect();
@@ -174,8 +193,8 @@
   </aside>
 
   <!-- terminal -->
-  <main class="relative min-h-0 flex-1 {attached ? 'block' : 'hidden md:block'}">
-    <div class="flex h-9 items-center gap-2 border-b border-zinc-800 bg-zinc-900/60 px-2 md:hidden">
+  <main class="relative min-h-0 flex-1 flex-col {attached ? 'flex' : 'hidden md:flex'}">
+    <div class="flex h-9 shrink-0 items-center gap-2 border-b border-zinc-800 bg-zinc-900/60 px-2 md:hidden">
       <button class="rounded bg-zinc-800 px-2 py-1 text-xs" onclick={detach}>← blocks</button>
       {#if attached}
         <span class="truncate font-mono text-xs text-zinc-400">
@@ -183,7 +202,34 @@
         </span>
       {/if}
     </div>
-    <div class="h-[calc(100%-2.25rem)] p-1 md:h-full" bind:this={termEl}></div>
+    <div class="min-h-0 flex-1 p-1" bind:this={termEl}></div>
+    <!-- phone key bar: the keys a software keyboard doesn't have -->
+    {#if attached}
+      <div
+        class="flex shrink-0 items-center gap-1 overflow-x-auto border-t border-zinc-800 bg-zinc-900/80 px-1 py-1 md:hidden"
+        style="padding-bottom: max(0.25rem, env(safe-area-inset-bottom))"
+      >
+        <button class="kbar" onclick={() => key('\u001b')}>esc</button>
+        <button class="kbar" onclick={() => key('\t')}>tab</button>
+        <button
+          class="kbar {ctrlArmed ? 'bg-amber-700 text-zinc-50' : ''}"
+          onclick={() => {
+            ctrlArmed = !ctrlArmed;
+            term?.focus();
+          }}
+        >
+          ctrl
+        </button>
+        <button class="kbar" onclick={() => key('\u0003')}>^c</button>
+        <button class="kbar" onclick={() => key('`')}>`</button>
+        <button class="kbar" onclick={() => key('\u001b[A')}>↑</button>
+        <button class="kbar" onclick={() => key('\u001b[B')}>↓</button>
+        <button class="kbar" onclick={() => key('\u001b[D')}>←</button>
+        <button class="kbar" onclick={() => key('\u001b[C')}>→</button>
+        <button class="kbar" onclick={() => key('/')}>/</button>
+        <button class="kbar" onclick={() => key(':')}>:</button>
+      </div>
+    {/if}
     {#if !attached}
       <div
         class="pointer-events-none absolute inset-0 hidden items-center justify-center text-zinc-600 md:flex"

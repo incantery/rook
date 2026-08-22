@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -39,11 +40,22 @@ func main() {
 	flag.Parse()
 
 	if *token == "" {
-		b := make([]byte, 16)
-		if _, err := rand.Read(b); err != nil {
-			log.Fatal(err)
+		// a stable token beside the mux state: survives restarts and
+		// launchd, so devices that stored it keep working
+		tf := filepath.Join(filepath.Dir(*sock), "web-token")
+		if b, err := os.ReadFile(tf); err == nil && len(b) > 0 {
+			*token = string([]byte(strings.TrimSpace(string(b))))
+		} else {
+			b := make([]byte, 16)
+			if _, err := rand.Read(b); err != nil {
+				log.Fatal(err)
+			}
+			*token = hex.EncodeToString(b)
+			_ = os.MkdirAll(filepath.Dir(tf), 0o755)
+			if err := os.WriteFile(tf, []byte(*token+"\n"), 0o600); err != nil {
+				log.Printf("warning: could not persist token: %v", err)
+			}
 		}
-		*token = hex.EncodeToString(b)
 	}
 
 	staticDir := *dir

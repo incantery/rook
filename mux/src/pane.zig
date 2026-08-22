@@ -296,6 +296,22 @@ pub const Pane = struct {
         return buf[0..n];
     }
 
+    /// The scrollback above the visible screen as unwrapped logical
+    /// lines — a fresh client's backfill, reflowable at its width.
+    /// Null when there is no history (or the pane is on the alt
+    /// screen, which has none).
+    pub fn historyText(self: *Pane, gpa: std.mem.Allocator) ?[]const u8 {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        const s = self.term.screens.active;
+        const text = s.dumpStringAllocUnwrapped(gpa, .{ .history = .{ .x = 0, .y = 0 } }) catch return null;
+        if (text.len == 0) {
+            gpa.free(text);
+            return null;
+        }
+        return text;
+    }
+
     pub const Tee = struct { bytes: []u8, overflow: bool };
 
     /// Drain the raw-byte tee. Caller frees bytes. Null when empty.

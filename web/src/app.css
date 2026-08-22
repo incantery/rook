@@ -2,3 +2,10 @@
 @import '@xterm/xterm/css/xterm.css';
 
 html, body { height: 100%; overscroll-behavior: none; }
+
+.kbar {
+  @apply rounded bg-zinc-800 px-2.5 py-1.5 font-mono text-xs text-zinc-300 active:bg-zinc-700;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}

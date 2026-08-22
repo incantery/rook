@@ -5,7 +5,7 @@ const std = @import("std");
 const ptypkg = @import("pty.zig");
 
 pub const c2s = enum(u8) { attach = 1, stdin = 2, resize = 3, detach = 4, stats = 5, shutdown = 6, nav = 7, popup = 8, session = 9, blocks = 10, attach_block = 11 };
-pub const s2c = enum(u8) { draw = 1, exit = 2, stats_text = 3 };
+pub const s2c = enum(u8) { draw = 1, exit = 2, stats_text = 3, blocks_text = 4 };
 
 pub fn write(fd: ptypkg.fd_t, kind: u8, payload: []const u8) !void {
     var hdr: [5]u8 = undefined;

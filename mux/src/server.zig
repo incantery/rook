@@ -41,6 +41,8 @@ const Client = struct {
     /// Attached to a single block instead of the composed TUI: raw
     /// pty bytes flow down, stdin routes straight to the pane.
     block: ?u32 = null,
+    /// Asked for the block table once: gets pushes when it changes.
+    wants_blocks: bool = false,
     /// Holds this block's geometry: its resizes win, the TUI layout
     /// stops resizing the pane, everyone else crops.
     lease: bool = false,
@@ -154,8 +156,22 @@ pub const Server = struct {
     state_tmp: [1024]u8 = @splat(0),
     state_dirty: bool = false,
     state_saved_ms: i64 = 0,
+    /// Last block table sent to subscribers; pushes happen on change.
+    blocks_last: std.ArrayList(u8) = .empty,
+    blocks_check_ms: i64 = 0,
 
     pub fn run(gpa: std.mem.Allocator, io: std.Io, sock_path: []const u8, shell: [:0]const u8, cwd: ?[:0]const u8) !void {
+        // A socket file with a live server behind it means we must not
+        // start; one nobody answers is a stale leftover (crash,
+        // reboot) — clear it instead of failing to bind.
+        const probe = ptypkg.unixConnect(sock_path);
+        if (probe >= 0) {
+            ptypkg.closeFd(probe);
+            std.debug.print("rook-mux: a server already runs on {s}\n", .{sock_path});
+            return error.AlreadyRunning;
+        }
+        ptypkg.unlinkPath(sock_path);
+
         const listener = ptypkg.unixListen(sock_path);
         if (listener < 0) {
             std.debug.print("rook-mux: cannot listen on {s} (unix socket paths max ~100 bytes)\n", .{sock_path});
@@ -219,6 +235,7 @@ pub const Server = struct {
         self.sessions.deinit(self.gpa);
         self.frame.deinit();
         self.placed.deinit(self.gpa);
+        self.blocks_last.deinit(self.gpa);
         ptypkg.unlinkPath(self.sock_path);
     }
 
@@ -401,6 +418,7 @@ pub const Server = struct {
         self.full = true;
         self.pending = true;
         self.state_dirty = true;
+        self.blocks_check_ms = 0; // push the new table promptly
     }
 
     // ---- the loop ----
@@ -478,6 +496,11 @@ pub const Server = struct {
                 try self.redraw();
                 last_frame = nowMs();
                 self.pending = false;
+            }
+
+            if (nowMs() - self.blocks_check_ms > 2000) {
+                self.pushBlocks();
+                self.blocks_check_ms = nowMs();
             }
 
             // structural changes save after 1s; cwds drift without
@@ -661,10 +684,17 @@ pub const Server = struct {
     }
 
     /// One line per pane: id, session:window, fg program, cwd. The
-    /// web client's block list, and `rook-mux blocks`.
+    /// web client's block list, and `rook-mux blocks`. Asking once
+    /// subscribes the client to pushes when the table changes.
     fn sendBlocks(self: *Server, c: *Client) void {
+        c.wants_blocks = true;
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.gpa);
+        self.buildBlocks(&out);
+        self.sendTo(c, @intFromEnum(proto.s2c.blocks_text), out.items);
+    }
+
+    fn buildBlocks(self: *Server, out: *std.ArrayList(u8)) void {
         for (self.sessions.items) |sn| {
             for (sn.windows.items, 0..) |w, wi| {
                 for (self.panes.items) |p| {
@@ -679,7 +709,26 @@ pub const Server = struct {
                 }
             }
         }
-        self.sendTo(c, @intFromEnum(proto.s2c.stats_text), out.items);
+    }
+
+    /// Push the block table to subscribers when it changed. Checked
+    /// every couple of seconds (fg/cwd drift) and immediately after
+    /// structural changes.
+    fn pushBlocks(self: *Server) void {
+        var any = false;
+        for (self.clients.items) |c| {
+            if (c.wants_blocks and !c.dead) any = true;
+        }
+        if (!any) return;
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.gpa);
+        self.buildBlocks(&out);
+        if (std.mem.eql(u8, out.items, self.blocks_last.items)) return;
+        self.blocks_last.clearRetainingCapacity();
+        self.blocks_last.appendSlice(self.gpa, out.items) catch {};
+        for (self.clients.items) |c| {
+            if (c.wants_blocks and !c.dead) self.sendTo(c, @intFromEnum(proto.s2c.blocks_text), out.items);
+        }
     }
 
     /// Attach this client to one block: [id u32][cols u16][rows u16]
@@ -706,8 +755,32 @@ pub const Server = struct {
             self.full = true;
         }
         self.updateTees();
+        if (flags & 2 != 0) self.sendBackfill(c, p);
         self.sendSnapshot(c, p);
         self.pending = true;
+    }
+
+    /// Scrollback backfill: unwrapped history lines, written before
+    /// the snapshot so they land in the client's scrollback (the
+    /// snapshot's clear only wipes the viewport). Capped to the last
+    /// 256KB on a line boundary.
+    fn sendBackfill(self: *Server, c: *Client, p: *panepkg.Pane) void {
+        const text = p.historyText(self.gpa) orelse return;
+        defer self.gpa.free(@constCast(text));
+        var body = text;
+        if (body.len > 256 * 1024) {
+            body = body[body.len - 256 * 1024 ..];
+            if (std.mem.indexOfScalar(u8, body, '\n')) |nl| body = body[nl + 1 ..];
+        }
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.gpa);
+        out.appendSlice(self.gpa, "\x1b[0m") catch return;
+        var it = std.mem.splitScalar(u8, body, '\n');
+        while (it.next()) |line| {
+            out.appendSlice(self.gpa, line) catch return;
+            out.appendSlice(self.gpa, "\r\n") catch return;
+        }
+        self.sendTo(c, @intFromEnum(proto.s2c.draw), out.items);
     }
 
     /// Keep each pane's tee flag equal to "someone is watching".

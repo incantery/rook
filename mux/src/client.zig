@@ -107,7 +107,7 @@ pub fn blocks(gpa: std.mem.Allocator, sock_path: []const u8) !void {
         if (!reader.fill(sock)) return error.ServerGone;
         while (reader.next()) |msg| {
             defer reader.consume();
-            if (msg.kind == @intFromEnum(proto.s2c.stats_text)) {
+            if (msg.kind == @intFromEnum(proto.s2c.blocks_text)) {
                 _ = ptypkg.writeAllFd(1, msg.payload);
                 return;
             }

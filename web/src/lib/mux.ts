@@ -20,6 +20,7 @@ export const s2c = {
   draw: 1,
   exit: 2,
   statsText: 3,
+  blocksText: 4,
 } as const;
 
 export interface Block {
@@ -85,7 +86,7 @@ export class Mux {
     dv.setUint32(0, id, true);
     dv.setUint16(4, cols, true);
     dv.setUint16(6, rows, true);
-    p[8] = lease ? 1 : 0;
+    p[8] = (lease ? 1 : 0) | 2; // 2 = scrollback backfill
     this.send(c2s.attachBlock, p);
   }
 
@@ -122,7 +123,7 @@ export class Mux {
       case s2c.draw:
         this.handler.onDraw(payload);
         break;
-      case s2c.statsText: {
+      case s2c.blocksText: {
         const blocks: Block[] = [];
         for (const line of this.dec.decode(payload).split('\n')) {
           if (!line.trim()) continue;
