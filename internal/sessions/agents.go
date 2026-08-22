@@ -87,3 +87,30 @@ func Goto(a Agent) error {
 func fmtErr(format, what, out string) error {
 	return fmt.Errorf(format, what, strings.TrimSpace(out))
 }
+
+// Space is a live session as the board lists it: its name, the branch
+// its active pane is on, and the most attention-needing agent in it.
+type Space struct {
+	Name   string     `json:"name"`
+	Repo   string     `json:"repo,omitempty"`
+	Branch string     `json:"branch,omitempty"`
+	State  AgentState `json:"-"`
+}
+
+// Spaces lists live sessions in server order, states folded from
+// agents (pass the result of Agents so the panes are captured once).
+func Spaces(agents []Agent) []Space {
+	dirs := sessionDirs()
+	var spaces []Space
+	for _, name := range liveSessions() {
+		sp := Space{Name: name}
+		sp.Repo, sp.Branch = gitInfo(dirs[name])
+		for _, a := range agents {
+			if a.Session == name {
+				sp.State = sp.State.merge(a.State)
+			}
+		}
+		spaces = append(spaces, sp)
+	}
+	return spaces
+}

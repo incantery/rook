@@ -84,6 +84,22 @@ func follow(a sessions.Agent) error {
 	return sessions.Goto(a)
 }
 
+// followSession is Enter on a space in the pinned panel: switch to the
+// session, panel in tow.
+func followSession(name string) error {
+	self := os.Getenv("TMUX_PANE")
+	if self != "" {
+		here, _ := current(self, "#{session_name}")
+		if here != name {
+			if out, err := tmux.Run("join-pane", "-d", "-h", "-b", "-l", sideWidth, "-s", self, "-t", "="+name); err != nil {
+				return fmt.Errorf("moving panel: %s", strings.TrimSpace(out))
+			}
+		}
+	}
+	_, err := tmux.Run("switch-client", "-t", "="+name)
+	return err
+}
+
 // sidePaneIn finds the panel pane: in one window, or anywhere on the
 // server when window is "".
 func sidePaneIn(window string) string {
