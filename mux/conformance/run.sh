@@ -34,13 +34,13 @@ for name in $names; do
   tmux kill-session -t vtref 2>/dev/null
 
   # rook-mux: 80x25 outer (24 pane rows + status line)
-  sock="/tmp/rmvt-$name.sock"; rm -f "$sock"
+  sock="/tmp/rmvt-$name.sock"; rm -f "$sock" "$sock.state" "$sock.state.tmp"
   tmux kill-session -t vtmux 2>/dev/null
   tmux new-session -d -s vtmux -x 80 -y 25 \
     "env ROOK_MUX_SOCK=$sock SHELL=$PWD/replay-shell.sh RMVT_FILE=$f $MUX"
   stable_capture vtmux 24 "$OUT/$name.rook"
   ROOK_MUX_SOCK=$sock "$MUX" kill >/dev/null 2>&1
-  tmux kill-session -t vtmux 2>/dev/null; rm -f "$sock"
+  tmux kill-session -t vtmux 2>/dev/null; rm -f "$sock" "$sock.state" "$sock.state.tmp"
 
   # normalize trailing whitespace; diff
   sed 's/[[:space:]]*$//' "$OUT/$name.tmux" > "$OUT/$name.tmux.n"

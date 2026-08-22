@@ -66,6 +66,8 @@ def bench_rook():
     if pathlib.Path(sock).exists():
         sh(MUX, "kill", check=False); time.sleep(0.3)
         pathlib.Path(sock).unlink(missing_ok=True)
+    for suffix in (".state", ".state.tmp"):
+        pathlib.Path(sock + suffix).unlink(missing_ok=True)
     outer("rmb-rook", f"env ROOK_MUX_SOCK={sock} {MUX}")
     wait_for("rmb-rook", "♜")
     times = [drain("rmb-rook") for _ in range(RUNS)]
