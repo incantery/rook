@@ -39,9 +39,10 @@ every session (vera is its first publisher).
 **Agents.** `prefix a` (or `rook agents`) is the fleet on one board:
 every agent on the server as a card — where it is, its state, the
 attention headline, the tail of its screen — the ones that need you
-first. Basic answers happen from the board (`y` confirms, `1-9` picks
-an option, `esc` interrupts, `x` kills); Enter jumps to the agent.
-`rook agents --json` is the same list for machines.
+first. Enter jumps to the agent; Esc closes. `prefix A` pins the same
+board as a side panel of the current window (again to park it) — and
+when you jump from the pinned panel it comes along. `rook agents
+--json` is the same list for machines.
 
 **Worktrees.** One agent, one branch, one checkout, one session — and a
 lifecycle that ends with all of them gone. `rook wt` is the manager — a

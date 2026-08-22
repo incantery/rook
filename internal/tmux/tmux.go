@@ -180,6 +180,9 @@ func (s Settings) Render(confPath string) string {
 	p("bind a run-shell -b %q", fmt.Sprintf(
 		`tmux display-popup -c '#{client_tty}' -E -T ' ♜ agents ' -w 80%% -h 70%% %q agents`,
 		rookBin))
+	// prefix-A pins the same board as a side panel of the current
+	// window, herdr-style; again to park it.
+	p("bind A run-shell -b %q", fmt.Sprintf("%q agents side '#{pane_id}'", rookBin))
 
 	t := s.Theme
 	p("")

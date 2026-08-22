@@ -1,9 +1,9 @@
 // Package agents is the attention layer's face: the whole fleet on one
 // board — every agent on the rook server as a card with its state, its
 // place, what it asked for, and the tail of its screen — the ones that
-// need you first. Basic answers happen from the board; Enter jumps to
-// the agent in tmux. `rook agents` standalone or the prefix-a popup —
-// one program, any size.
+// need you first. Enter jumps to the agent in tmux. `rook agents`
+// standalone, the prefix-a popup, or pinned as a side panel (prefix A)
+// — one program, any size.
 package agents
 
 import (
@@ -38,18 +38,21 @@ type actMsg struct {
 }
 
 type model struct {
-	cards   []card
-	cursor  int
-	width   int
-	height  int
-	note    string
-	err     error
-	confirm bool // pending kill
+	cards  []card
+	cursor int
+	width  int
+	height int
+	note   string
+	err    error
+	// side means the board is a pinned pane: Enter takes the panel
+	// along to the agent's window instead of closing.
+	side bool
 }
 
-// Run shows the board and blocks until it exits.
-func Run() error {
-	_, err := tea.NewProgram(model{}, tea.WithAltScreen()).Run()
+// Run shows the board and blocks until it exits. side pins it: see
+// Side.
+func Run(side bool) error {
+	_, err := tea.NewProgram(model{side: side}, tea.WithAltScreen()).Run()
 	return err
 }
 
@@ -119,45 +122,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.err, m.note = nil, ""
-	c, ok := m.selected()
-	if m.confirm {
-		m.confirm = false
-		if ok && (msg.String() == "y" || msg.String() == "enter") {
-			return m, act("killed "+place(c.Agent), false, func() error { return sessions.Kill(c.PaneID) })
+	switch msg.String() {
+	case "q", "esc", "ctrl+c":
+		if m.side && msg.String() != "ctrl+c" {
+			return m, nil // a pinned panel doesn't close on esc; prefix A does
 		}
-		return m, nil
-	}
-	k := msg.String()
-	switch {
-	case k == "q" || k == "ctrl+c":
 		return m, tea.Quit
-	case k == "j" || k == "down":
+	case "j", "down":
 		if m.cursor < len(m.cards)-1 {
 			m.cursor++
 		}
-	case k == "k" || k == "up":
+	case "k", "up":
 		if m.cursor > 0 {
 			m.cursor--
 		}
-	case k == "g" || k == "home":
+	case "g", "home":
 		m.cursor = 0
-	case k == "G" || k == "end":
+	case "G", "end":
 		m.cursor = max(0, len(m.cards)-1)
-	case k == "r":
+	case "r":
 		return m, load()
-	case !ok:
-	case k == "enter":
-		return m, act("", true, func() error { return sessions.Goto(c.Agent) })
-	// Basic answers to a Claude Code dialog, from the board: y confirms
-	// whatever is highlighted, a digit picks that option, esc interrupts.
-	case k == "y":
-		return m, act("sent Enter to "+place(c.Agent), false, func() error { return sessions.Send(c.PaneID, "Enter") })
-	case len(k) == 1 && k[0] >= '1' && k[0] <= '9':
-		return m, act("sent "+k+" to "+place(c.Agent), false, func() error { return sessions.Send(c.PaneID, k) })
-	case k == "esc":
-		return m, act("interrupted "+place(c.Agent), false, func() error { return sessions.Send(c.PaneID, "Escape") })
-	case k == "x":
-		m.confirm = true
+	case "enter":
+		if c, ok := m.selected(); ok {
+			if m.side {
+				return m, act("", false, func() error { return follow(c.Agent) })
+			}
+			return m, act("", true, func() error { return sessions.Goto(c.Agent) })
+		}
 	}
 	return m, nil
 }
@@ -231,15 +222,14 @@ func (m model) View() string {
 	}
 
 	switch {
-	case m.confirm:
-		c, _ := m.selected()
-		b.WriteString(tui.Accent.Render("kill "+place(c.Agent)+"? ") + tui.Dim.Render("y/enter confirm · any key cancel"))
 	case m.err != nil:
 		b.WriteString(tui.Err.Render(m.err.Error()))
 	case m.note != "":
 		b.WriteString(tui.Accent.Render(m.note))
+	case m.side:
+		b.WriteString(tui.Dim.Render("enter go · j/k move"))
 	default:
-		b.WriteString(tui.Dim.Render("enter go · y confirm · 1-9 pick · esc interrupt · x kill · q quit"))
+		b.WriteString(tui.Dim.Render("enter go · j/k move · esc close"))
 	}
 	out := b.String()
 	if m.width > 0 {

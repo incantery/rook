@@ -95,15 +95,24 @@ func main() {
 	case args[0] == "preview":
 		err = sessions.Preview(strings.Join(args[1:], " "))
 	case args[0] == "agents":
-		if len(args) > 1 && args[1] == "--json" {
+		switch {
+		case len(args) > 1 && args[1] == "side":
+			pane := ""
+			if len(args) > 2 {
+				pane = args[2]
+			}
+			err = agents.Side(pane)
+		case len(args) > 1 && args[1] == "--side":
+			err = agents.Run(true)
+		case len(args) > 1 && args[1] == "--json":
 			enc := json.NewEncoder(os.Stdout)
 			for _, a := range sessions.Agents() {
 				if err = enc.Encode(a); err != nil {
 					break
 				}
 			}
-		} else {
-			err = agents.Run()
+		default:
+			err = agents.Run(false)
 		}
 	case args[0] == "worktree", args[0] == "wt":
 		err = runWorktree(args[1:])
