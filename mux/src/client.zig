@@ -91,6 +91,37 @@ pub fn popup(sock_path: []const u8, cmd: []const u8) !void {
     try proto.write(sock, @intFromEnum(proto.c2s.popup), cmd);
 }
 
+/// Session ops. op 'l' lists (prints the reply), 's' switches by
+/// name, 'n' creates (or switches to) a named session.
+pub fn session(gpa: std.mem.Allocator, sock_path: []const u8, op: u8, name: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(gpa);
+    try payload.append(gpa, op);
+    try payload.appendSlice(gpa, name);
+    try proto.write(sock, @intFromEnum(proto.c2s.session), payload.items);
+    if (op != 'l') return;
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (waited < 2000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!reader.fill(sock)) return error.ServerGone;
+        while (reader.next()) |msg| {
+            defer reader.consume();
+            if (msg.kind == @intFromEnum(proto.s2c.stats_text)) {
+                _ = ptypkg.writeAllFd(1, msg.payload);
+                return;
+            }
+        }
+    }
+    return error.Timeout;
+}
+
 /// Ask the server to shut down (HUPs every pane).
 pub fn kill(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     _ = gpa;

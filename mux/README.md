@@ -18,7 +18,10 @@ C-b when unset; double-tap types it literally. Then:
     HJKL       resize split                [        copy mode (hjkl, v, y, q)
     x          kill pane                   d        detach
 
-`rook-mux popup <cmd>` floats a command over the current window —
+Workspaces: `rook-mux ls`, `rook-mux new <name>`, `rook-mux switch
+<name>` — named sessions in one server, each with its own windows;
+prefix-s opens an fzf picker in a popup. The status line reads
+`♜ <workspace> (n)  1:nvim* ...`. `rook-mux popup <cmd>` floats a command over the current window —
 all input goes to it, it closes when the process exits (fzf pickers,
 lazygit, rook's Go tools). `rook-mux stats` prints input→frame
 p50/p99, frames, bytes. `rook-mux

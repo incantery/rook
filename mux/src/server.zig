@@ -51,6 +51,24 @@ const Window = struct {
     zoomed: bool = false,
 };
 
+/// A named workspace: its own windows and current-window index. All
+/// attached clients view the server's current session — the one-glass
+/// model; per-client views arrive with the structured cell protocol.
+const Session = struct {
+    name: [32]u8 = @splat(0),
+    name_len: usize = 0,
+    windows: std.ArrayList(*Window) = .empty,
+    cur: usize = 0,
+
+    fn label(self: *const Session) []const u8 {
+        return self.name[0..self.name_len];
+    }
+    fn setName(self: *Session, n: []const u8) void {
+        self.name_len = @min(n.len, self.name.len);
+        @memcpy(self.name[0..self.name_len], n[0..self.name_len]);
+    }
+};
+
 /// input→frame latency samples, ring of 512.
 const Lat = struct {
     samples: [512]i64 = @splat(0),
@@ -86,8 +104,8 @@ pub const Server = struct {
     sock_path: []const u8,
     prefix_key: u8,
     panes: std.ArrayList(*panepkg.Pane) = .empty,
-    windows: std.ArrayList(*Window) = .empty,
-    cur: usize = 0,
+    sessions: std.ArrayList(*Session) = .empty,
+    cur_sess: usize = 0,
     next_id: u32 = 1,
     clients: std.ArrayList(*Client) = .empty,
     wake_r: ptypkg.fd_t,
@@ -154,7 +172,7 @@ pub const Server = struct {
         };
         defer self.deinitAll();
 
-        try self.newWindow();
+        _ = try self.newSession("main");
         try self.loop();
     }
 
@@ -169,11 +187,15 @@ pub const Server = struct {
         for (self.panes.items) |p| p.hangup();
         for (self.panes.items) |p| p.deinit();
         self.panes.deinit(self.gpa);
-        for (self.windows.items) |w| {
-            w.layout.deinit();
-            self.gpa.destroy(w);
+        for (self.sessions.items) |sn| {
+            for (sn.windows.items) |w| {
+                w.layout.deinit();
+                self.gpa.destroy(w);
+            }
+            sn.windows.deinit(self.gpa);
+            self.gpa.destroy(sn);
         }
-        self.windows.deinit(self.gpa);
+        self.sessions.deinit(self.gpa);
         self.frame.deinit();
         self.placed.deinit(self.gpa);
         ptypkg.unlinkPath(self.sock_path);
@@ -181,19 +203,63 @@ pub const Server = struct {
 
     // ---- windows and panes ----
 
+    fn sess(self: *Server) *Session {
+        return self.sessions.items[self.cur_sess];
+    }
+
     fn window(self: *Server) *Window {
-        return self.windows.items[self.cur];
+        const sn = self.sess();
+        return sn.windows.items[sn.cur];
+    }
+
+    /// Create a session named `name` (deduped) and switch to it.
+    fn newSession(self: *Server, name: []const u8) !*Session {
+        for (self.sessions.items, 0..) |sn, i| {
+            if (std.mem.eql(u8, sn.label(), name)) {
+                self.switchSession(i);
+                return sn;
+            }
+        }
+        const sn = try self.gpa.create(Session);
+        sn.* = .{};
+        sn.setName(name);
+        try self.sessions.append(self.gpa, sn);
+        const old_focused: ?u32 = if (self.sessions.items.len > 1) self.window().focused else null;
+        self.cur_sess = self.sessions.items.len - 1;
+        try self.newWindow();
+        if (old_focused) |o| self.focusEvents(o, self.window().focused);
+        return sn;
+    }
+
+    fn switchSession(self: *Server, i: usize) void {
+        if (i == self.cur_sess or i >= self.sessions.items.len) return;
+        const old_focused = self.window().focused;
+        self.cur_sess = i;
+        self.scrolling = false;
+        self.selecting = false;
+        self.focusEvents(old_focused, self.window().focused);
+        self.relayout() catch {};
+    }
+
+    fn switchSessionNamed(self: *Server, name: []const u8) void {
+        for (self.sessions.items, 0..) |sn, i| {
+            if (std.mem.eql(u8, sn.label(), name)) {
+                self.switchSession(i);
+                return;
+            }
+        }
     }
 
     fn newWindow(self: *Server) !void {
+        const sn = self.sess();
         // inherit the cwd of whatever the user is looking at now
         var cwd_buf: [1024]u8 = undefined;
-        const cwd = if (self.windows.items.len > 0) self.focusedCwd(&cwd_buf) else null;
-        const prev_focused: ?u32 = if (self.windows.items.len > 0) self.window().focused else null;
+        const cwd = if (sn.windows.items.len > 0) self.focusedCwd(&cwd_buf) else null;
+        const prev_focused: ?u32 = if (sn.windows.items.len > 0) self.window().focused else null;
         const w = try self.gpa.create(Window);
         w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
-        try self.windows.append(self.gpa, w);
-        self.cur = self.windows.items.len - 1;
+        try sn.windows.append(self.gpa, w);
+        sn.cur = sn.windows.items.len - 1;
         const p = try self.startPane(cwd);
         try w.layout.seed(p.id);
         w.focused = p.id;
@@ -375,7 +441,7 @@ pub const Server = struct {
             }
 
             try self.reap();
-            if (self.windows.items.len == 0 or self.shutdown) return;
+            if (self.sessions.items.len == 0 or self.shutdown) return;
 
             if (self.pending and nowMs() - last_frame >= frame_gap_ms) {
                 try self.redraw();
@@ -482,6 +548,29 @@ pub const Server = struct {
                     }
                 },
                 @intFromEnum(proto.c2s.stdin) => self.input(c, msg.payload),
+                @intFromEnum(proto.c2s.session) => {
+                    if (msg.payload.len >= 1) {
+                        const op = msg.payload[0];
+                        const name = msg.payload[1..];
+                        switch (op) {
+                            'l' => {
+                                var lb: [1024]u8 = undefined;
+                                var lw: std.ArrayList(u8) = .initBuffer(&lb);
+                                for (self.sessions.items) |sn| {
+                                    lw.appendSliceBounded(sn.label()) catch break;
+                                    lw.appendSliceBounded("\n") catch break;
+                                }
+                                self.sendTo(c, @intFromEnum(proto.s2c.stats_text), lw.items);
+                            },
+                            's' => if (name.len > 0) self.switchSessionNamed(name),
+                            'n' => if (name.len > 0) {
+                                _ = self.newSession(name) catch {};
+                            },
+                            else => {},
+                        }
+                        self.pending = true;
+                    }
+                },
                 @intFromEnum(proto.c2s.popup) => {
                     if (msg.payload.len > 0) self.openPopup(msg.payload) catch {};
                 },
@@ -505,10 +594,14 @@ pub const Server = struct {
 
     fn sendStats(self: *Server, c: *Client) void {
         var buf: [512]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "rook-mux up {d}s · {d} window{s} · {d} pane{s} · {d} client{s}\nframes {d} · {d:.1} MB shipped\ninput→frame p50 {d}µs · p99 {d}µs · samples {d}\n", .{
+        var nwin: usize = 0;
+        for (self.sessions.items) |sn| nwin += sn.windows.items.len;
+        const text = std.fmt.bufPrint(&buf, "rook-mux up {d}s · {d} session{s} · {d} window{s} · {d} pane{s} · {d} client{s}\nframes {d} · {d:.1} MB shipped\ninput→frame p50 {d}µs · p99 {d}µs · samples {d}\n", .{
             @divTrunc(nowMs() - self.started_ms, 1000),
-            self.windows.items.len,
-            plural(self.windows.items.len),
+            self.sessions.items.len,
+            plural(self.sessions.items.len),
+            nwin,
+            plural(nwin),
             self.panes.items.len,
             plural(self.panes.items.len),
             self.clients.items.len,
@@ -764,12 +857,13 @@ pub const Server = struct {
             '-' => self.splitPane(false) catch {},
             'h', 'j', 'k', 'l' => _ = self.navigate(key),
             'c' => self.newWindow() catch {},
-            'n' => self.selectWindow((self.cur + 1) % self.windows.items.len),
-            'p' => self.selectWindow((self.cur + self.windows.items.len - 1) % self.windows.items.len),
+            'n' => self.selectWindow((self.sess().cur + 1) % self.sess().windows.items.len),
+            'p' => self.selectWindow((self.sess().cur + self.sess().windows.items.len - 1) % self.sess().windows.items.len),
             '1'...'9' => {
                 const i: usize = key - '1';
-                if (i < self.windows.items.len) self.selectWindow(i);
+                if (i < self.sess().windows.items.len) self.selectWindow(i);
             },
+            's' => self.openPopup("rook-mux ls | fzf --reverse --header='workspace' | xargs -r rook-mux switch") catch {},
             'H' => self.adjustSplit(.horizontal, -0.05),
             'L' => self.adjustSplit(.horizontal, 0.05),
             'K' => self.adjustSplit(.vertical, -0.05),
@@ -897,9 +991,10 @@ pub const Server = struct {
     }
 
     fn selectWindow(self: *Server, i: usize) void {
-        if (i == self.cur) return;
+        const sn = self.sess();
+        if (i == sn.cur) return;
         const old_focused = self.window().focused;
-        self.cur = i;
+        sn.cur = i;
         self.scrolling = false;
         self.selecting = false;
         self.focusEvents(old_focused, self.window().focused);
@@ -977,28 +1072,36 @@ pub const Server = struct {
                 removed = true;
                 continue;
             }
-            // remove from whichever window holds it
-            var wi: usize = 0;
-            while (wi < self.windows.items.len) : (wi += 1) {
-                const w = self.windows.items[wi];
-                if (!w.layout.contains(p.id)) continue;
-                const still = w.layout.remove(p.id);
-                if (!still) {
-                    w.layout.deinit();
-                    self.gpa.destroy(w);
-                    _ = self.windows.orderedRemove(wi);
-                    if (self.cur >= self.windows.items.len and self.cur > 0) self.cur -= 1;
-                } else {
-                    w.zoomed = false;
-                    if (w.focused == p.id) w.focused = w.layout.firstLeaf() orelse 0;
+            // remove from whichever session's window holds it
+            outer: for (self.sessions.items, 0..) |sn, si| {
+                var wi: usize = 0;
+                while (wi < sn.windows.items.len) : (wi += 1) {
+                    const w = sn.windows.items[wi];
+                    if (!w.layout.contains(p.id)) continue;
+                    const still = w.layout.remove(p.id);
+                    if (!still) {
+                        w.layout.deinit();
+                        self.gpa.destroy(w);
+                        _ = sn.windows.orderedRemove(wi);
+                        if (sn.cur >= sn.windows.items.len and sn.cur > 0) sn.cur -= 1;
+                        if (sn.windows.items.len == 0) {
+                            sn.windows.deinit(self.gpa);
+                            self.gpa.destroy(sn);
+                            _ = self.sessions.orderedRemove(si);
+                            if (self.cur_sess >= self.sessions.items.len and self.cur_sess > 0) self.cur_sess -= 1;
+                        }
+                    } else {
+                        w.zoomed = false;
+                        if (w.focused == p.id) w.focused = w.layout.firstLeaf() orelse 0;
+                    }
+                    break :outer;
                 }
-                break;
             }
             p.deinit();
             _ = self.panes.swapRemove(i);
             removed = true;
         }
-        if (removed and self.windows.items.len > 0) try self.relayout();
+        if (removed and self.sessions.items.len > 0) try self.relayout();
     }
 
     fn redraw(self: *Server) !void {
@@ -1128,8 +1231,15 @@ pub const Server = struct {
     /// zoom wear their state on the right.
     fn statusLine(self: *Server, buf: []u8) []const u8 {
         var w2: std.ArrayList(u8) = .initBuffer(buf);
-        w2.appendSliceBounded("♜") catch {};
-        for (self.windows.items, 0..) |w, i| {
+        w2.appendSliceBounded("♜ ") catch {};
+        w2.appendSliceBounded(self.sess().label()) catch {};
+        if (self.sessions.items.len > 1) {
+            var nb: [16]u8 = undefined;
+            if (std.fmt.bufPrint(&nb, " ({d})", .{self.sessions.items.len})) |chip| {
+                w2.appendSliceBounded(chip) catch {};
+            } else |_| {}
+        }
+        for (self.sess().windows.items, 0..) |w, i| {
             var name_buf: [64]u8 = undefined;
             var name: []const u8 = "shell";
             if (self.pane(w.focused)) |p| {
@@ -1140,7 +1250,7 @@ pub const Server = struct {
                 if (p.fgName(&name_buf)) |fg| name = fg;
             }
             var chip: [96]u8 = undefined;
-            const mark: []const u8 = if (i == self.cur) "*" else " ";
+            const mark: []const u8 = if (i == self.sess().cur) "*" else " ";
             const s = std.fmt.bufPrint(&chip, "  {d}:{s}{s}", .{ i + 1, name, mark }) catch continue;
             w2.appendSliceBounded(s) catch break;
         }
