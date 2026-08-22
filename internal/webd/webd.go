@@ -1,16 +1,15 @@
-// rook-web bridges browsers to the rook-mux socket and serves the web
-// client. It is deliberately a dumb pipe: websocket binary frames are
-// raw mux-protocol bytes in both directions, so the browser speaks the
-// same type/len/payload framing as every other client and the bridge
-// never needs to learn the protocol.
-package main
+// Package webd bridges browsers to the rook-mux socket and serves the
+// web client. It is deliberately a dumb pipe: websocket binary frames
+// are raw mux-protocol bytes in both directions, so the browser speaks
+// the same type/len/payload framing as every other client and the
+// bridge never needs to learn the protocol. rookd runs this in-process.
+package webd
 
 import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -24,7 +23,8 @@ import (
 	"github.com/coder/websocket"
 )
 
-func defaultSock() string {
+// DefaultSock is the mux server's default socket path.
+func DefaultSock() string {
 	if s := os.Getenv("ROOK_MUX_SOCK"); s != "" {
 		return s
 	}
@@ -32,12 +32,23 @@ func defaultSock() string {
 	return filepath.Join(home, ".local", "state", "rook", "mux.sock")
 }
 
-func main() {
-	addr := flag.String("addr", "127.0.0.1:7673", "listen address (use 0.0.0.0:7673 for LAN/phone testing)")
-	sock := flag.String("sock", defaultSock(), "rook-mux unix socket")
-	dir := flag.String("dir", "", "static web client dir (default: web/build beside the repo)")
-	token := flag.String("token", "", "bearer token (default: generated and printed)")
-	flag.Parse()
+// Options configure the bridge; zero values get sane defaults.
+type Options struct {
+	Addr  string // listen address
+	Sock  string // rook-mux unix socket
+	Dir   string // static web client dir
+	Token string // bearer token; empty = persisted beside the socket
+}
+
+// Serve runs the bridge until the listener fails.
+func Serve(o Options) error {
+	addr, sock, dir, token := &o.Addr, &o.Sock, &o.Dir, &o.Token
+	if *addr == "" {
+		*addr = "0.0.0.0:7673"
+	}
+	if *sock == "" {
+		*sock = DefaultSock()
+	}
 
 	if *token == "" {
 		// a stable token beside the mux state: survives restarts and
@@ -48,7 +59,7 @@ func main() {
 		} else {
 			b := make([]byte, 16)
 			if _, err := rand.Read(b); err != nil {
-				log.Fatal(err)
+				return err
 			}
 			*token = hex.EncodeToString(b)
 			_ = os.MkdirAll(filepath.Dir(tf), 0o755)
@@ -138,7 +149,7 @@ func main() {
 	})
 	mux.Handle("/", http.FileServer(http.Dir(staticDir)))
 
-	fmt.Printf("rook-web on http://%s/?token=%s\n", *addr, *token)
+	fmt.Printf("rook web on http://%s/?token=%s\n", *addr, *token)
 	fmt.Printf("  mux socket: %s\n  static dir: %s\n", *sock, staticDir)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	return http.ListenAndServe(*addr, mux)
 }

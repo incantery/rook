@@ -1,12 +1,11 @@
 # launchd
 
-Copies of the LaunchAgents that keep the mux server and web bridge
-alive across crashes and reboots (paths are user-specific — adjust
-$HOME references when installing elsewhere):
+One agent keeps rook alive across crashes and reboots: rookd
+supervises the mux server (adopting a live one — it never kills your
+panes) and runs the web bridge in-process.
 
-    cp *.plist ~/Library/LaunchAgents/
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.incantery.rook-mux.plist
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.incantery.rook-web.plist
+    cp com.incantery.rookd.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.incantery.rookd.plist
 
-rook-web persists its token at ~/.local/state/rook/web-token; logs in
-~/.local/state/rook/logs/.
+Adjust $HOME paths when installing elsewhere. The web token persists
+at ~/.local/state/rook/web-token; logs in ~/.local/state/rook/logs/.

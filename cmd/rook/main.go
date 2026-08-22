@@ -1,35 +1,27 @@
-// Command rook boots an opinionated tmux session: run it in place of
-// `tmux` and you are attached to a session named after the current
-// directory, on a rook-owned server that never loads the user's
-// tmux.conf. The multiplexer, the session manager and the jump list are
-// dependencies, not rewrites.
+// Command rook is the front door to the rook multiplexer. Bare `rook`
+// attaches (rookd keeps the server alive; attach boots one if needed).
+// Mux verbs pass straight through to the Zig engine (rook-mux), which
+// is an implementation detail users never type. Worktrees and the web
+// URL live here in the Go layer.
 package main
 
 import (
-	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
-
-	"github.com/incantery/rook/internal/agents"
-	"github.com/incantery/rook/internal/attention"
-	"github.com/incantery/rook/internal/config"
-	"github.com/incantery/rook/internal/sessions"
-	"github.com/incantery/rook/internal/tmux"
 )
 
-// Build metadata, stamped by the linker at release time (see
-// .goreleaser.yaml and the Makefile). "dev" when built without them.
+// Build metadata, stamped by the linker at release time.
 var (
 	version = "dev"
 	commit  = ""
 	date    = ""
 )
 
-// versionLine renders "rook <version>", appending a short commit and date
-// when the linker stamped them.
 func versionLine() string {
 	s := "rook " + version
 	if commit != "" {
@@ -46,80 +38,49 @@ func versionLine() string {
 	return s
 }
 
+const usage = `rook — the multiplexer, owned
+
+  rook                    attach (starts the server if rookd hasn't)
+  rook ls                 list workspaces
+  rook new <name>         create/switch workspace
+  rook switch <name>      switch workspace
+  rook blocks             the block table (stable ids)
+  rook raw <id>           this terminal becomes one block, no chrome
+  rook popup <cmd...>     float a command over the current window
+  rook nav h|j|k|l        move focus (vim plugins call this at edges)
+  rook stats | kill       server introspection / shutdown
+  rook url                the web client URL (token included)
+  rook worktree ...       git worktrees (ls|new|open|merge|rm)
+  rook version
+`
+
+// verbs the Zig engine owns; rook execs into it verbatim.
+var muxVerbs = map[string]bool{
+	"server": true, "stats": true, "kill": true, "nav": true,
+	"popup": true, "ls": true, "switch": true, "new": true,
+	"blocks": true, "raw": true,
+}
+
 func main() {
 	args := os.Args[1:]
+	if len(args) == 0 {
+		execMux(nil)
+	}
 	var err error
 	switch {
-	case len(args) == 0:
-		err = run()
 	case args[0] == "version", args[0] == "--version", args[0] == "-v":
 		fmt.Println(versionLine())
-	case args[0] == "ls":
-		filter, asJSON := "", false
-		for _, a := range args[1:] {
-			if a == "--json" {
-				asJSON = true
-			} else {
-				filter = a
-			}
-		}
-		if asJSON {
-			err = sessions.ListJSON(filter)
-		} else {
-			err = sessions.List(filter)
-		}
-	case args[0] == "sweep":
-		err = sessions.Sweep()
-	case args[0] == "paneline":
-		dir, active := "", false
-		if len(args) > 1 {
-			dir = args[1]
-		}
-		if len(args) > 2 && args[2] == "1" {
-			active = true
-		}
-		err = sessions.PaneLine(dir, active)
-	case args[0] == "claude-hook":
-		attention.HandleClaudeHook(os.Stdin)
-	case args[0] == "attention":
-		items := attention.Load()
-		if len(args) > 1 && args[1] == "--bar" {
-			fmt.Print(attention.Bar(items))
-		} else {
-			for _, it := range items {
-				fmt.Printf("%-8s %-20s %s\n", it.Kind, it.Session+it.Dir, it.Headline)
-			}
-		}
-	case args[0] == "connect":
-		err = sessions.Connect(strings.Join(args[1:], " "))
-	case args[0] == "preview":
-		err = sessions.Preview(strings.Join(args[1:], " "))
-	case args[0] == "agents":
-		switch {
-		case len(args) > 1 && args[1] == "side":
-			pane := ""
-			if len(args) > 2 {
-				pane = args[2]
-			}
-			err = agents.Side(pane)
-		case len(args) > 2 && args[1] == "sync":
-			err = agents.Sync(args[2])
-		case len(args) > 1 && args[1] == "--side":
-			err = agents.Run(true)
-		case len(args) > 1 && args[1] == "--json":
-			enc := json.NewEncoder(os.Stdout)
-			for _, a := range sessions.Agents() {
-				if err = enc.Encode(a); err != nil {
-					break
-				}
-			}
-		default:
-			err = agents.Run(false)
-		}
+	case args[0] == "help", args[0] == "--help", args[0] == "-h":
+		fmt.Print(usage)
 	case args[0] == "worktree", args[0] == "wt":
 		err = runWorktree(args[1:])
+	case args[0] == "url":
+		err = runURL()
+	case muxVerbs[args[0]]:
+		execMux(args)
 	default:
-		err = fmt.Errorf("unknown command %q (rook | rook ls [-t|-z] | rook connect <row> | rook preview <row> | rook worktree … | rook agents | rook version)", args[0])
+		fmt.Fprintf(os.Stderr, "rook: unknown command %q\n%s", args[0], usage)
+		os.Exit(1)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "rook:", err)
@@ -127,72 +88,37 @@ func main() {
 	}
 }
 
-func run() error {
-	if os.Getenv("TMUX") != "" {
-		return fmt.Errorf("already inside a tmux session; nesting comes later")
-	}
-
-	cfgPath, err := config.Path()
+// execMux replaces this process with the Zig engine.
+func execMux(args []string) {
+	bin, err := exec.LookPath("rook-mux")
 	if err != nil {
-		return err
+		home, _ := os.UserHomeDir()
+		bin = filepath.Join(home, ".local", "bin", "rook-mux")
 	}
-	cfg, err := config.Load(cfgPath)
+	argv := append([]string{"rook-mux"}, args...)
+	if err := syscall.Exec(bin, argv, os.Environ()); err != nil {
+		fmt.Fprintln(os.Stderr, "rook: cannot exec rook-mux:", err)
+		os.Exit(1)
+	}
+}
+
+// runURL prints the web client URL(s) with the persisted token — the
+// thing you type into a new device exactly once.
+func runURL() error {
+	home, _ := os.UserHomeDir()
+	tok, err := os.ReadFile(filepath.Join(home, ".local", "state", "rook", "web-token"))
 	if err != nil {
-		return err
+		return fmt.Errorf("no web token yet — is rookd running? (%w)", err)
 	}
-
-	settings := tmux.Defaults()
-	if cfg.Tmux.Prefix != "" {
-		settings.Prefix = cfg.Tmux.Prefix
-	}
-	if cfg.Companion.Command != "" {
-		settings.Companion = tmux.Companion{
-			Command: cfg.Companion.Command,
-			Name:    cfg.Companion.Name,
-			Key:     cfg.Companion.Key,
+	token := strings.TrimSpace(string(tok))
+	fmt.Printf("http://localhost:7673/?token=%s\n", token)
+	ifaces, _ := net.InterfaceAddrs()
+	for _, a := range ifaces {
+		ipn, ok := a.(*net.IPNet)
+		if !ok || ipn.IP.To4() == nil || ipn.IP.IsLoopback() {
+			continue
 		}
-		if settings.Companion.Name == "" {
-			settings.Companion.Name = strings.Fields(cfg.Companion.Command)[0]
-		}
-		if settings.Companion.Key == "" {
-			settings.Companion.Key = "a"
-		}
-		if _, err := exec.LookPath(strings.Fields(cfg.Companion.Command)[0]); err != nil {
-			fmt.Fprintf(os.Stderr, "rook: companion %q: %s not on PATH — prefix %s will fail\n",
-				settings.Companion.Name, strings.Fields(cfg.Companion.Command)[0], settings.Companion.Key)
-		}
+		fmt.Printf("http://%s:7673/?token=%s\n", ipn.IP, token)
 	}
-
-	scripts, warnings := tmux.EnsurePlugins(cfg.Tmux.Plugins)
-	for _, w := range warnings {
-		fmt.Fprintln(os.Stderr, "rook:", w)
-	}
-	settings.PluginScripts = scripts
-
-	// The prefix-s session picker rides on these; missing ones should
-	// say so at boot, not fail silently inside a popup.
-	for _, dep := range []string{"zoxide", "fzf"} {
-		if _, err := exec.LookPath(dep); err != nil {
-			fmt.Fprintf(os.Stderr, "rook: %s not on PATH — the session picker (prefix s) needs it (`brew install %s`)\n", dep, dep)
-		}
-	}
-
-	confPath, err := tmux.WriteConf(settings)
-	if err != nil {
-		return fmt.Errorf("writing tmux conf: %w", err)
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getwd: %w", err)
-	}
-
-	// new-session -A attaches when the session already exists.
-	argv, err := tmux.Argv(confPath, "new-session", "-A", "-s", tmux.SessionName(cwd), "-c", cwd)
-	if err != nil {
-		return err
-	}
-
-	// Replace this process: the terminal belongs to tmux now.
-	return syscall.Exec(argv[0], argv, os.Environ())
+	return nil
 }
