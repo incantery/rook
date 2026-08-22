@@ -92,8 +92,10 @@ func main() {
 		err = sessions.Connect(strings.Join(args[1:], " "))
 	case args[0] == "preview":
 		err = sessions.Preview(strings.Join(args[1:], " "))
+	case args[0] == "worktree", args[0] == "wt":
+		err = runWorktree(args[1:])
 	default:
-		err = fmt.Errorf("unknown command %q (rook | rook ls [-t|-z] | rook connect <row> | rook preview <row> | rook version)", args[0])
+		err = fmt.Errorf("unknown command %q (rook | rook ls [-t|-z] | rook connect <row> | rook preview <row> | rook worktree … | rook version)", args[0])
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "rook:", err)

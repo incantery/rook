@@ -22,6 +22,17 @@ import (
 type Config struct {
 	Tmux      Tmux      `toml:"tmux"`
 	Companion Companion `toml:"companion"`
+	Worktree  Worktree  `toml:"worktree"`
+}
+
+// Worktree is the [worktree] table: what a fresh worktree needs that git
+// doesn't carry. Paths are repo-relative and apply to every repo; a
+// path a repo doesn't have is skipped.
+type Worktree struct {
+	// Copy lists files copied from the main checkout (".env").
+	Copy []string `toml:"copy"`
+	// Link lists paths symlinked to the main checkout's ("node_modules").
+	Link []string `toml:"link"`
 }
 
 // Companion is the resident summoned by prefix+key from anywhere: a

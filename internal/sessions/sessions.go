@@ -273,7 +273,7 @@ func Connect(raw string) error {
 			}
 		}
 	}
-	if os.Getenv("TMUX") != "" {
+	if tmux.InsideRook() {
 		if out, err := rookTmux("switch-client", "-t", "="+name); err != nil {
 			return fmt.Errorf("switching to %s: %v\n%s", name, err, out)
 		}
@@ -438,37 +438,13 @@ func zoxideDirs() []string {
 	return dirs
 }
 
-func hasSession(name string) bool {
-	_, err := rookTmux("has-session", "-t", "="+name)
-	return err == nil
-}
+func hasSession(name string) bool { return tmux.HasSession(name) }
 
-// rookTmux runs a tmux command against the rook server, conf included
-// so a down server boots as rook, never as stock tmux.
-func rookTmux(cmd ...string) (string, error) {
-	argv, err := rookArgv(cmd...)
-	if err != nil {
-		return "", err
-	}
-	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
-	return string(out), err
-}
+// rookTmux runs a tmux command against the rook server.
+func rookTmux(cmd ...string) (string, error) { return tmux.Run(cmd...) }
 
 func attachArgv(name string) ([]string, error) {
-	return rookArgv("attach-session", "-t", "="+name)
-}
-
-func rookArgv(cmd ...string) ([]string, error) {
-	confPath, err := tmux.ConfPath()
-	if err != nil {
-		return nil, err
-	}
-	if _, err := os.Stat(confPath); err != nil {
-		if _, err := tmux.WriteConf(tmux.Defaults()); err != nil {
-			return nil, err
-		}
-	}
-	return tmux.Argv(confPath, cmd...)
+	return tmux.RunArgv("attach-session", "-t", "="+name)
 }
 
 func expand(path string) string {
