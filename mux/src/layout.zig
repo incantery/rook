@@ -70,6 +70,12 @@ pub const Layout = struct {
         return self.find(r, pane) != null;
     }
 
+    /// One pane and no splits?
+    pub fn isSingle(self: *Layout) bool {
+        const r = self.root orelse return false;
+        return r.* == .leaf;
+    }
+
     /// Any leaf, for refocusing after a removal.
     pub fn firstLeaf(self: *Layout) ?u32 {
         var n = self.root orelse return null;

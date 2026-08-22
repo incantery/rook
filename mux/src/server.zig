@@ -67,6 +67,15 @@ const Session = struct {
     name_len: usize = 0,
     windows: std.ArrayList(*Window) = .empty,
     cur: usize = 0,
+    /// Panes docked to the left rail of this workspace: visible in
+    /// every window, stacked vertically, one shared width.
+    pins: std.ArrayList(u32) = .empty,
+    rail_frac: f32 = 0.4,
+    /// Focus lives either on a pinned pane (here) or on the current
+    /// window's focused leaf.
+    focus_pin: ?u32 = null,
+    /// Where focus was before the last move — prefix-; goes back.
+    last_focus: ?u32 = null,
 
     fn label(self: *const Session) []const u8 {
         return self.name[0..self.name_len];
@@ -115,6 +124,10 @@ pub const Server = struct {
     panes: std.ArrayList(*panepkg.Pane) = .empty,
     sessions: std.ArrayList(*Session) = .empty,
     cur_sess: usize = 0,
+    /// Pins that follow you across workspaces (prefix-G on a pin).
+    global_pins: std.ArrayList(u32) = .empty,
+    /// Column of the rail/window seam in the current layout, if any.
+    dock_x: ?u16 = null,
     next_id: u32 = 1,
     clients: std.ArrayList(*Client) = .empty,
     wake_r: ptypkg.fd_t,
@@ -230,9 +243,11 @@ pub const Server = struct {
                 self.gpa.destroy(w);
             }
             sn.windows.deinit(self.gpa);
+            sn.pins.deinit(self.gpa);
             self.gpa.destroy(sn);
         }
         self.sessions.deinit(self.gpa);
+        self.global_pins.deinit(self.gpa);
         self.frame.deinit();
         self.placed.deinit(self.gpa);
         self.blocks_last.deinit(self.gpa);
@@ -287,11 +302,15 @@ pub const Server = struct {
 
     fn switchSession(self: *Server, i: usize) void {
         if (i == self.cur_sess or i >= self.sessions.items.len) return;
-        const old_focused = self.window().focused;
+        const old_focused = self.focusedId();
         self.cur_sess = i;
         self.scrolling = false;
         self.selecting = false;
-        self.focusEvents(old_focused, self.window().focused);
+        // a workspace pin that no longer exists can't hold focus
+        if (self.sess().focus_pin) |fp| {
+            if (self.pane(fp) == null) self.sess().focus_pin = null;
+        }
+        self.focusEvents(old_focused, self.focusedId());
         self.relayout() catch {};
     }
 
@@ -386,8 +405,7 @@ pub const Server = struct {
         w.zoomed = false;
         const p = try self.startPane(cwd);
         try w.layout.split(w.focused, p.id, side_by_side);
-        self.focusEvents(w.focused, p.id);
-        w.focused = p.id;
+        self.setFocus(p.id);
         try self.relayout();
     }
 
@@ -398,8 +416,39 @@ pub const Server = struct {
         return null;
     }
 
+    /// The pane input goes to: a focused rail pane, else the current
+    /// window's focused leaf.
+    fn focusedId(self: *Server) u32 {
+        const sn = self.sess();
+        return sn.focus_pin orelse self.window().focused;
+    }
+
     fn focusedPane(self: *Server) ?*panepkg.Pane {
-        return self.pane(self.window().focused);
+        return self.pane(self.focusedId());
+    }
+
+    fn isPin(self: *Server, id: u32) bool {
+        for (self.global_pins.items) |g| if (g == id) return true;
+        for (self.sess().pins.items) |g| if (g == id) return true;
+        return false;
+    }
+
+    /// Move focus to a pane — rail or window leaf — remembering where
+    /// it came from, telling both panes, and repainting.
+    fn setFocus(self: *Server, id: u32) void {
+        const sn = self.sess();
+        const old = self.focusedId();
+        if (old == id) return;
+        self.focusEvents(old, id);
+        sn.last_focus = old;
+        if (self.isPin(id)) {
+            sn.focus_pin = id;
+        } else {
+            sn.focus_pin = null;
+            self.window().focused = id;
+        }
+        self.full = true;
+        self.pending = true;
     }
 
     fn geometry(self: *Server) proto.Geometry {
@@ -417,10 +466,39 @@ pub const Server = struct {
         const region: layoutpkg.Rect = .{ .x = 0, .y = 0, .w = g.cols, .h = g.rows -| 1 };
         self.placed.clearRetainingCapacity();
         const w = self.window();
+        const sn = self.sess();
+        self.dock_x = null;
         if (w.zoomed) {
-            try self.placed.append(self.gpa, .{ .pane = w.focused, .rect = region });
+            try self.placed.append(self.gpa, .{ .pane = self.focusedId(), .rect = region });
         } else {
-            try w.layout.place(region, &self.placed);
+            // the rail: global pins then this workspace's, stacked
+            // down the left edge; hidden when the glass is too narrow
+            // to give the window a real column
+            const n_rails = self.global_pins.items.len + sn.pins.items.len;
+            var win_region = region;
+            if (n_rails > 0 and region.w >= 60) {
+                var rail_w: u16 = @intFromFloat(@as(f32, @floatFromInt(region.w)) * sn.rail_frac);
+                rail_w = @max(20, @min(rail_w, region.w -| 40));
+                const nr: u16 = @intCast(n_rails);
+                const each: u16 = (region.h -| (nr - 1)) / nr;
+                var y: u16 = region.y;
+                var i: u16 = 0;
+                for (self.global_pins.items) |id| {
+                    const h = if (i == nr - 1) region.h -| (y - region.y) else each;
+                    try self.placed.append(self.gpa, .{ .pane = id, .rect = .{ .x = 0, .y = y, .w = rail_w, .h = h } });
+                    y += h + 1;
+                    i += 1;
+                }
+                for (sn.pins.items) |id| {
+                    const h = if (i == nr - 1) region.h -| (y - region.y) else each;
+                    try self.placed.append(self.gpa, .{ .pane = id, .rect = .{ .x = 0, .y = y, .w = rail_w, .h = h } });
+                    y += h + 1;
+                    i += 1;
+                }
+                self.dock_x = rail_w;
+                win_region = .{ .x = rail_w + 1, .y = region.y, .w = region.w -| (rail_w + 1), .h = region.h };
+            }
+            try w.layout.place(win_region, &self.placed);
         }
         for (self.placed.items) |pl| {
             if (self.leasedBy(pl.pane) != null) continue; // a block client owns this geometry; the TUI crops
@@ -727,6 +805,10 @@ pub const Server = struct {
     }
 
     fn buildBlocks(self: *Server, out: *std.ArrayList(u8)) void {
+        for (self.global_pins.items) |id| self.blockLine(out, id, "global", "pin");
+        for (self.sessions.items) |sn| {
+            for (sn.pins.items) |id| self.blockLine(out, id, sn.label(), "pin");
+        }
         for (self.sessions.items) |sn| {
             for (sn.windows.items, 0..) |w, wi| {
                 for (self.panes.items) |p| {
@@ -741,6 +823,17 @@ pub const Server = struct {
                 }
             }
         }
+    }
+
+    fn blockLine(self: *Server, out: *std.ArrayList(u8), id: u32, place: []const u8, slot: []const u8) void {
+        const p = self.pane(id) orelse return;
+        var nb: [64]u8 = undefined;
+        var cb: [1024]u8 = undefined;
+        const fg = p.fgName(&nb) orelse "shell";
+        const cwd: []const u8 = if (p.fgCwd(&cb)) |cc| cc else "";
+        var line: [1200]u8 = undefined;
+        const l = std.fmt.bufPrint(&line, "{d}\t{s}:{s}\t{s}\t{d}x{d}\t{s}\n", .{ p.id, place, slot, fg, p.cols, p.rows, cwd }) catch return;
+        out.appendSlice(self.gpa, l) catch {};
     }
 
     /// Push the block table to subscribers when it changed. Checked
@@ -1064,19 +1157,13 @@ pub const Server = struct {
             }
             return;
         }
-        const w = self.window();
         var hit: ?layoutpkg.Placed = null;
         for (self.placed.items) |pl| {
             if (cx >= pl.rect.x and cx < pl.rect.x + pl.rect.w and cy >= pl.rect.y and cy < pl.rect.y + pl.rect.h) hit = pl;
         }
         const pl = hit orelse return;
         const is_press_click = ev.btn < 3 and !ev.release;
-        if (is_press_click and pl.pane != w.focused) {
-            self.focusEvents(w.focused, pl.pane);
-            w.focused = pl.pane;
-            self.full = true;
-            self.pending = true;
-        }
+        if (is_press_click and pl.pane != self.focusedId()) self.setFocus(pl.pane);
         const p = self.pane(pl.pane) orelse return;
         if (!p.wantsMouse()) {
             // Mux-side text selection, tmux-style: press anchors, drag
@@ -1188,6 +1275,13 @@ pub const Server = struct {
             },
             's' => self.openPopup("rook-mux ls | fzf --reverse --header='workspace' | xargs -r rook-mux switch") catch {},
             'w' => self.openPopup("rook worktree") catch {},
+            'P' => self.togglePin(),
+            'G' => self.toggleGlobalPin(),
+            ';' => {
+                if (self.sess().last_focus) |last| {
+                    if (self.pane(last) != null) self.setFocus(last);
+                }
+            },
             'H' => self.adjustSplit(.horizontal, -0.05),
             'L' => self.adjustSplit(.horizontal, 0.05),
             'K' => self.adjustSplit(.vertical, -0.05),
@@ -1310,26 +1404,31 @@ pub const Server = struct {
     fn adjustSplit(self: *Server, axis: layoutpkg.Axis, delta: f32) void {
         const w = self.window();
         if (w.zoomed) return;
-        layoutpkg.adjust(&w.layout, w.focused, axis, delta);
+        const sn = self.sess();
+        if (sn.focus_pin != null) {
+            // focused on the rail: H/L change its width
+            if (axis == .horizontal) sn.rail_frac = std.math.clamp(sn.rail_frac + delta, 0.15, 0.7);
+        } else {
+            layoutpkg.adjust(&w.layout, w.focused, axis, delta);
+        }
         self.relayout() catch {};
     }
 
     fn selectWindow(self: *Server, i: usize) void {
         const sn = self.sess();
         if (i == sn.cur) return;
-        const old_focused = self.window().focused;
+        const old_focused = self.focusedId();
         sn.cur = i;
         self.scrolling = false;
         self.selecting = false;
-        self.focusEvents(old_focused, self.window().focused);
+        self.focusEvents(old_focused, self.focusedId());
         self.relayout() catch {};
     }
 
     /// 'h'/'j'/'k'/'l' → directional focus move. Returns true when
     /// focus actually moved (false at an edge, or zoomed).
     fn navigate(self: *Server, dir: u8) bool {
-        const w = self.window();
-        if (w.zoomed) return false;
+        if (self.window().zoomed) return false;
         const dx: i32 = switch (dir) {
             'h' => -1,
             'l' => 1,
@@ -1341,12 +1440,10 @@ pub const Server = struct {
             'h', 'l' => 0,
             else => return false,
         };
-        if (layoutpkg.navigate(self.placed.items, w.focused, dx, dy)) |id| {
-            if (id != w.focused) {
-                self.focusEvents(w.focused, id);
-                w.focused = id;
-                self.full = true; // border accents + cursor move
-                self.pending = true;
+        const from = self.focusedId();
+        if (layoutpkg.navigate(self.placed.items, from, dx, dy)) |id| {
+            if (id != from) {
+                self.setFocus(id);
                 return true;
             }
         }
@@ -1363,6 +1460,46 @@ pub const Server = struct {
         if (self.pane(new_id)) |p| {
             if (p.modeSet(.focus_event)) p.write("\x1b[I");
         }
+    }
+
+    /// prefix-P: dock the focused pane to the workspace rail, or put a
+    /// docked one back into the current window as a split. A window's
+    /// last pane can't be pinned (the window would vanish).
+    fn togglePin(self: *Server) void {
+        const sn = self.sess();
+        const w = self.window();
+        const id = self.focusedId();
+        if (self.isPin(id)) {
+            // unpin: back into the current window beside its focus
+            removeId(&self.global_pins, id);
+            removeId(&sn.pins, id);
+            w.layout.split(w.focused, id, true) catch return;
+            sn.focus_pin = null;
+            w.focused = id;
+        } else {
+            if (w.layout.isSingle()) return; // a window's last pane stays
+            _ = w.layout.remove(id);
+            if (w.focused == id) w.focused = w.layout.firstLeaf() orelse 0;
+            sn.pins.append(self.gpa, id) catch return;
+            sn.focus_pin = id;
+        }
+        w.zoomed = false;
+        self.relayout() catch {};
+    }
+
+    /// prefix-G on a rail pane: toggle between workspace-scoped and
+    /// global (follows you across workspaces).
+    fn toggleGlobalPin(self: *Server) void {
+        const sn = self.sess();
+        const id = sn.focus_pin orelse return;
+        if (containsId(self.global_pins.items, id)) {
+            removeId(&self.global_pins, id);
+            sn.pins.append(self.gpa, id) catch return;
+        } else {
+            removeId(&sn.pins, id);
+            self.global_pins.append(self.gpa, id) catch return;
+        }
+        self.relayout() catch {};
     }
 
     /// Programs that own Ctrl-h/j/k/l themselves: vim navigates its own
@@ -1402,6 +1539,13 @@ pub const Server = struct {
                 _ = self.panes.swapRemove(i);
                 removed = true;
                 continue;
+            }
+            // a pinned pane: drop it from its rail
+            removeId(&self.global_pins, p.id);
+            for (self.sessions.items) |sn| {
+                removeId(&sn.pins, p.id);
+                if (sn.focus_pin == p.id) sn.focus_pin = null;
+                if (sn.last_focus == p.id) sn.last_focus = null;
             }
             // remove from whichever session's window holds it
             outer: for (self.sessions.items, 0..) |sn, si| {
@@ -1471,7 +1615,7 @@ pub const Server = struct {
         var cur_over: ?struct { x: u16, y: u16 } = null;
         if (self.scrolling) {
             for (self.placed.items) |pl| {
-                if (pl.pane == self.window().focused) {
+                if (pl.pane == self.focusedId()) {
                     cur_over = .{
                         .x = pl.rect.x + @min(self.scur.x, pl.rect.w -| 1),
                         .y = pl.rect.y + @min(self.scur.y, pl.rect.h -| 1),
@@ -1479,7 +1623,7 @@ pub const Server = struct {
                 }
             }
         }
-        const bytes = self.frame.build(self.panes.items, self.placed.items, self.window().focused, g.cols, g.rows, status, self.full, if (cur_over) |co| .{ .x = co.x, .y = co.y } else null, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null);
+        const bytes = self.frame.build(self.panes.items, self.placed.items, self.focusedId(), g.cols, g.rows, status, self.full, if (cur_over) |co| .{ .x = co.x, .y = co.y } else null, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null, self.dock_x);
         self.full = false;
         var shipped = false;
         for (self.clients.items) |c| {
@@ -1579,11 +1723,31 @@ pub const Server = struct {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.gpa);
         out.appendSlice(self.gpa, "v1\n") catch return;
+        for (self.global_pins.items) |id| {
+            var pb: [1024]u8 = undefined;
+            var pc: []const u8 = "";
+            if (self.pane(id)) |p| {
+                if (p.fgCwd(&pb)) |c| pc = c;
+            }
+            out.appendSlice(self.gpa, "gpin ") catch return;
+            out.appendSlice(self.gpa, pc) catch return;
+            out.append(self.gpa, '\n') catch return;
+        }
         for (self.sessions.items, 0..) |sn, si| {
             out.appendSlice(self.gpa, "session ") catch return;
             out.appendSlice(self.gpa, sn.label()) catch return;
             if (si == self.cur_sess) out.appendSlice(self.gpa, " *") catch return;
             out.append(self.gpa, '\n') catch return;
+            for (sn.pins.items) |id| {
+                var pb: [1024]u8 = undefined;
+                var pc: []const u8 = "";
+                if (self.pane(id)) |p| {
+                    if (p.fgCwd(&pb)) |c| pc = c;
+                }
+                out.appendSlice(self.gpa, "pin ") catch return;
+                out.appendSlice(self.gpa, pc) catch return;
+                out.append(self.gpa, '\n') catch return;
+            }
             for (sn.windows.items, 0..) |w, wi| {
                 var cwd_buf: [1024]u8 = undefined;
                 var cwd: []const u8 = "";
@@ -1625,6 +1789,22 @@ pub const Server = struct {
                 if (starred) want_sess = self.cur_sess;
                 sess_has_window = false;
                 made_any = true;
+            } else if (std.mem.startsWith(u8, line, "pin ") or std.mem.startsWith(u8, line, "gpin ")) {
+                const is_global = line[0] == 'g';
+                const dir = if (is_global) line["gpin ".len..] else line["pin ".len..];
+                if (!is_global and self.sessions.items.len == 0) continue;
+                var cwd_z: [1024]u8 = undefined;
+                const cwd_arg: ?[*:0]const u8 = if (dir.len > 0 and dir.len < cwd_z.len) blk: {
+                    @memcpy(cwd_z[0..dir.len], dir);
+                    cwd_z[dir.len] = 0;
+                    break :blk @ptrCast(&cwd_z);
+                } else null;
+                const p = try self.startPane(cwd_arg);
+                if (is_global) {
+                    try self.global_pins.append(self.gpa, p.id);
+                } else {
+                    try self.sess().pins.append(self.gpa, p.id);
+                }
             } else if (std.mem.startsWith(u8, line, "window ") and self.sessions.items.len > 0) {
                 var cwd = line["window ".len..];
                 const starred = std.mem.endsWith(u8, cwd, " *");
@@ -1707,6 +1887,21 @@ pub const Server = struct {
         return w2.items;
     }
 };
+
+fn containsId(list: []const u32, id: u32) bool {
+    for (list) |x| if (x == id) return true;
+    return false;
+}
+
+fn removeId(list: *std.ArrayList(u32), id: u32) void {
+    var i: usize = 0;
+    while (i < list.items.len) : (i += 1) {
+        if (list.items[i] == id) {
+            _ = list.orderedRemove(i);
+            return;
+        }
+    }
+}
 
 /// The four vim-navigator control bytes → their direction letter.
 fn ctrlNavDir(b: u8) ?u8 {

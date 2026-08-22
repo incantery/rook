@@ -54,7 +54,14 @@ three forward pane-relative instead when the program asked for mouse
 windows open in the focused pane's cwd. Kitty keyboard protocol is
 mirrored: ghostty-vt tracks each pane's flag stack, and the mux sets
 the focused pane's flags on the glass (CSI = u), so nvim gets real
-kitty input and plain shells get legacy bytes. Copy mode (prefix-[) is vim-shaped: hjkl/0/$/u/d/g/G move a cursor
+kitty input and plain shells get legacy bytes. Pins (prefix-P) dock the focused pane to a left rail owned by the
+workspace: visible in every window, stacked, one shared width
+(prefix-H/L while focused on it). prefix-G promotes a pin to global
+(follows you across workspaces) — the chrome-as-panes idea, so a
+Claude agent or a log tail lives in the rail. A window's last pane
+can't be pinned; the rail hides when the glass is too narrow; the
+rail/window seam is a heavier line than a split. prefix-; jumps to
+the last focused pane. Copy mode (prefix-[) is vim-shaped: hjkl/0/$/u/d/g/G move a cursor
 through the pane and its scrollback, v anchors a selection (the
 anchor is content-tracked, so it survives scrolling), y yanks to the
 system clipboard. Not yet: session persistence across server restart.

@@ -46,6 +46,7 @@ pub const Frame = struct {
         full: bool,
         cursor_override: ?struct { x: u16, y: u16 },
         popup: ?struct { pane: u32, rect: layoutpkg.Rect },
+        dock_x: ?u16,
     ) []const u8 {
         self.buf.clearRetainingCapacity();
         self.put(csi ++ "?2026h" ++ csi ++ "?25l");
@@ -73,7 +74,7 @@ pub const Frame = struct {
             }
         }
 
-        if (full) self.drawBorders(placed, focused, cols, rows);
+        if (full) self.drawBorders(placed, focused, cols, rows, dock_x);
 
         // Status line: bottom row, inverse. Cheap; always emitted.
         self.cup(0, rows - 1);
@@ -246,19 +247,21 @@ pub const Frame = struct {
     }
 
     /// Borders: the column/row gaps place() left between rects.
-    fn drawBorders(self: *Frame, placed: []const layoutpkg.Placed, focused: u32, cols: u16, rows: u16) void {
+    fn drawBorders(self: *Frame, placed: []const layoutpkg.Placed, focused: u32, cols: u16, rows: u16, dock_x: ?u16) void {
         _ = cols;
         for (placed) |pl| {
             const r = pl.rect;
             // right border, if there's a gap column to our right; it
-            // lights up when either side of the gap is focused
+            // lights up when either side of the gap is focused. The
+            // rail/window seam is heavier: a dock, not a split.
             if (neighborAt(placed, r.x + r.w + 1, r.y)) |nb| {
                 const acc = pl.pane == focused or nb == focused;
+                const seam = dock_x != null and dock_x.? == r.x + r.w;
                 if (acc) self.print(csi ++ "0;{d}m", .{self.accent}) else self.put(csi ++ "0;90m");
                 var y: u16 = r.y;
                 while (y < r.y + r.h and y < rows - 1) : (y += 1) {
                     self.cup(r.x + r.w, y);
-                    self.put("│");
+                    self.put(if (seam) "┃" else "│");
                 }
             }
             // bottom border
