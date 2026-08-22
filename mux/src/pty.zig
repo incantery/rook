@@ -343,6 +343,30 @@ pub const Pty = struct {
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
 /// Set an environment variable in this process (inherited by spawned children).
+// ---- small-file IO (C stdio; std.fs left with the std churn) ----
+extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+extern "c" fn fread(buf: [*]u8, size: usize, n: usize, f: *anyopaque) usize;
+extern "c" fn fwrite(buf: [*]const u8, size: usize, n: usize, f: *anyopaque) usize;
+extern "c" fn fclose(f: *anyopaque) c_int;
+extern "c" fn rename(from: [*:0]const u8, to: [*:0]const u8) c_int;
+
+/// Read up to buf.len bytes of a file; null when it doesn't exist.
+pub fn readFileSmall(path: [*:0]const u8, buf: []u8) ?[]const u8 {
+    const f = fopen(path, "rb") orelse return null;
+    defer _ = fclose(f);
+    const n = fread(buf.ptr, 1, buf.len, f);
+    return buf[0..n];
+}
+
+/// Write a file atomically (tmp + rename). Quietly best-effort.
+pub fn writeFileSmall(path: [*:0]const u8, tmp_path: [*:0]const u8, bytes: []const u8) void {
+    const f = fopen(tmp_path, "wb") orelse return;
+    const n = fwrite(bytes.ptr, 1, bytes.len, f);
+    _ = fclose(f);
+    if (n != bytes.len) return;
+    _ = rename(tmp_path, path);
+}
+
 pub fn setEnv(name: [*:0]const u8, value: [*:0]const u8) void {
     _ = setenv(name, value, 1);
 }

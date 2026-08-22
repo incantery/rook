@@ -140,6 +140,13 @@ pub const Server = struct {
     /// A floating pane over the current window: all input goes to it,
     /// it closes when its process exits. One at a time.
     popup: ?u32 = null,
+    /// Resurrect file: sessions/windows/cwds, saved on structural
+    /// change (debounced), restored on server boot. Scrollback is not
+    /// saved — that's the event log's job, later.
+    state_path: [1024]u8 = @splat(0),
+    state_tmp: [1024]u8 = @splat(0),
+    state_dirty: bool = false,
+    state_saved_ms: i64 = 0,
 
     pub fn run(gpa: std.mem.Allocator, io: std.Io, sock_path: []const u8, shell: [:0]const u8, cwd: ?[:0]const u8) !void {
         const listener = ptypkg.unixListen(sock_path);
@@ -172,7 +179,12 @@ pub const Server = struct {
         };
         defer self.deinitAll();
 
-        _ = try self.newSession("main");
+        // state file lives beside the socket
+        if (std.fmt.bufPrintZ(self.state_path[0 .. self.state_path.len - 1], "{s}.state", .{sock_path})) |_| {
+            _ = std.fmt.bufPrintZ(self.state_tmp[0 .. self.state_tmp.len - 1], "{s}.state.tmp", .{sock_path}) catch {};
+        } else |_| {}
+
+        if (!try self.restoreState()) _ = try self.newSession("main");
         try self.loop();
     }
 
@@ -371,6 +383,7 @@ pub const Server = struct {
         }
         self.full = true;
         self.pending = true;
+        self.state_dirty = true;
     }
 
     // ---- the loop ----
@@ -447,6 +460,15 @@ pub const Server = struct {
                 try self.redraw();
                 last_frame = nowMs();
                 self.pending = false;
+            }
+
+            // structural changes save after 1s; cwds drift without
+            // structural events, so refresh every 30s regardless
+            const since_save = nowMs() - self.state_saved_ms;
+            if ((self.state_dirty and since_save > 1000) or since_save > 30_000) {
+                self.saveState();
+                self.state_dirty = false;
+                self.state_saved_ms = nowMs();
             }
         }
     }
@@ -582,7 +604,9 @@ pub const Server = struct {
                 @intFromEnum(proto.c2s.detach) => return false,
                 @intFromEnum(proto.c2s.stats) => self.sendStats(c),
                 @intFromEnum(proto.c2s.shutdown) => {
-                    // polite server exit: HUP everything and leave
+                    // polite server exit: snapshot state while the
+                    // panes still breathe, HUP everything, leave
+                    self.saveState();
                     for (self.panes.items) |p| p.hangup();
                     self.shutdown = true;
                 },
@@ -1224,6 +1248,109 @@ pub const Server = struct {
             if (!c.attached) continue;
             self.sendTo(c, @intFromEnum(proto.s2c.draw), osc.items);
         }
+    }
+
+    // ---- resurrect: sessions/windows/cwds across server restarts ----
+
+    /// v1 format, line-oriented:
+    ///   v1
+    ///   session <name> [*]
+    ///   window <cwd> [*]
+    /// Windows come back as one pane in the saved cwd (splits are
+    /// cheap to remake; sessions and cwds are the tedium).
+    fn saveState(self: *Server) void {
+        if (self.state_path[0] == 0) return;
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.gpa);
+        out.appendSlice(self.gpa, "v1\n") catch return;
+        for (self.sessions.items, 0..) |sn, si| {
+            out.appendSlice(self.gpa, "session ") catch return;
+            out.appendSlice(self.gpa, sn.label()) catch return;
+            if (si == self.cur_sess) out.appendSlice(self.gpa, " *") catch return;
+            out.append(self.gpa, '\n') catch return;
+            for (sn.windows.items, 0..) |w, wi| {
+                var cwd_buf: [1024]u8 = undefined;
+                var cwd: []const u8 = "";
+                if (self.pane(w.focused)) |p| {
+                    if (p.fgCwd(&cwd_buf)) |c| cwd = c;
+                }
+                out.appendSlice(self.gpa, "window ") catch return;
+                out.appendSlice(self.gpa, cwd) catch return;
+                if (wi == sn.cur) out.appendSlice(self.gpa, " *") catch return;
+                out.append(self.gpa, '\n') catch return;
+            }
+        }
+        ptypkg.writeFileSmall(@ptrCast(&self.state_path), @ptrCast(&self.state_tmp), out.items);
+    }
+
+    /// Rebuild sessions from the state file. False when there is
+    /// nothing to restore (caller seeds the default session).
+    fn restoreState(self: *Server) !bool {
+        if (self.state_path[0] == 0) return false;
+        var buf: [64 * 1024]u8 = undefined;
+        const data = ptypkg.readFileSmall(@ptrCast(&self.state_path), &buf) orelse return false;
+        var lines = std.mem.splitScalar(u8, data, '\n');
+        const head = lines.next() orelse return false;
+        if (!std.mem.eql(u8, head, "v1")) return false;
+        var made_any = false;
+        var want_sess: usize = 0;
+        var sess_has_window = false;
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "session ")) {
+                var name = line["session ".len..];
+                const starred = std.mem.endsWith(u8, name, " *");
+                if (starred) name = name[0 .. name.len - 2];
+                if (name.len == 0) continue;
+                const sn = try self.gpa.create(Session);
+                sn.* = .{};
+                sn.setName(name);
+                try self.sessions.append(self.gpa, sn);
+                self.cur_sess = self.sessions.items.len - 1;
+                if (starred) want_sess = self.cur_sess;
+                sess_has_window = false;
+                made_any = true;
+            } else if (std.mem.startsWith(u8, line, "window ") and self.sessions.items.len > 0) {
+                var cwd = line["window ".len..];
+                const starred = std.mem.endsWith(u8, cwd, " *");
+                if (starred) cwd = cwd[0 .. cwd.len - 2];
+                var cwd_z: [1024]u8 = undefined;
+                const cwd_arg: ?[*:0]const u8 = if (cwd.len > 0 and cwd.len < cwd_z.len) blk: {
+                    @memcpy(cwd_z[0..cwd.len], cwd);
+                    cwd_z[cwd.len] = 0;
+                    break :blk @ptrCast(&cwd_z);
+                } else null;
+                const sn = self.sess();
+                const w = try self.gpa.create(Window);
+                w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
+                try sn.windows.append(self.gpa, w);
+                const p = try self.startPane(cwd_arg);
+                try w.layout.seed(p.id);
+                w.focused = p.id;
+                if (starred) sn.cur = sn.windows.items.len - 1;
+                sess_has_window = true;
+            }
+        }
+        // a session line with no windows would be an empty shell; give
+        // it one so the invariant (every session has a window) holds
+        if (made_any and !sess_has_window and self.sess().windows.items.len == 0) {
+            try self.newWindow();
+        }
+        if (!made_any) return false;
+        // drop any restored session that ended up windowless
+        var si: usize = self.sessions.items.len;
+        while (si > 0) {
+            si -= 1;
+            const sn = self.sessions.items[si];
+            if (sn.windows.items.len == 0) {
+                sn.windows.deinit(self.gpa);
+                self.gpa.destroy(sn);
+                _ = self.sessions.orderedRemove(si);
+            }
+        }
+        if (self.sessions.items.len == 0) return false;
+        self.cur_sess = @min(want_sess, self.sessions.items.len - 1);
+        try self.relayout();
+        return true;
     }
 
     /// The tab bar: ♜, then one chip per window named by its focused
