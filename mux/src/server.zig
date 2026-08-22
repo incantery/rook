@@ -99,6 +99,10 @@ pub const Server = struct {
     bytes_sent: u64 = 0,
     started_ms: i64 = 0,
     drag: ?Drag = null,
+    /// Kitty keyboard flags currently set on the glass; mirrors the
+    /// focused pane so apps that pushed the protocol get real kitty
+    /// input, and everything else gets legacy bytes.
+    glass_kitty: u8 = 0,
 
     pub fn run(gpa: std.mem.Allocator, io: std.Io, sock_path: []const u8, shell: [:0]const u8, cwd: ?[:0]const u8) !void {
         const listener = ptypkg.unixListen(sock_path);
@@ -162,28 +166,42 @@ pub const Server = struct {
     }
 
     fn newWindow(self: *Server) !void {
+        // inherit the cwd of whatever the user is looking at now
+        var cwd_buf: [1024]u8 = undefined;
+        const cwd = if (self.windows.items.len > 0) self.focusedCwd(&cwd_buf) else null;
         const w = try self.gpa.create(Window);
         w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
         try self.windows.append(self.gpa, w);
         self.cur = self.windows.items.len - 1;
-        const p = try self.startPane();
+        const p = try self.startPane(cwd);
         try w.layout.seed(p.id);
         w.focused = p.id;
         try self.relayout();
     }
 
-    fn startPane(self: *Server) !*panepkg.Pane {
+    fn startPane(self: *Server, cwd: ?[*:0]const u8) !*panepkg.Pane {
         const g = self.geometry();
-        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, if (self.cwd) |c| c.ptr else null, g.cols, g.rows -| 1, self.wake_w, self.next_id);
+        const dir: ?[*:0]const u8 = cwd orelse if (self.cwd) |c| c.ptr else null;
+        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, dir, g.cols, g.rows -| 1, self.wake_w, self.next_id);
         try self.panes.append(self.gpa, p);
         self.next_id += 1;
         return p;
     }
 
+    /// Where the focused pane's foreground process lives — new panes
+    /// open there, tmux -c '#{pane_current_path}' without the config.
+    fn focusedCwd(self: *Server, buf: []u8) ?[*:0]const u8 {
+        const p = self.focusedPane() orelse return null;
+        const c = p.fgCwd(buf) orelse return null;
+        return c.ptr;
+    }
+
     fn splitPane(self: *Server, side_by_side: bool) !void {
+        var cwd_buf: [1024]u8 = undefined;
+        const cwd = self.focusedCwd(&cwd_buf);
         const w = self.window();
         w.zoomed = false;
-        const p = try self.startPane();
+        const p = try self.startPane(cwd);
         try w.layout.split(w.focused, p.id, side_by_side);
         w.focused = p.id;
         try self.relayout();
@@ -326,6 +344,12 @@ pub const Server = struct {
                         c.cols = g.cols;
                         c.rows = g.rows;
                         c.attached = true;
+                        if (self.glass_kitty != 0) {
+                            var kb: [16]u8 = undefined;
+                            if (std.fmt.bufPrint(&kb, "\x1b[={d};1u", .{self.glass_kitty})) |seq| {
+                                proto.write(c.fd, @intFromEnum(proto.s2c.draw), seq) catch {};
+                            } else |_| {}
+                        }
                         self.relayout() catch {};
                     }
                 },
@@ -724,6 +748,7 @@ pub const Server = struct {
         // OSC 52 from any visible pane goes straight to the glass; the
         // client is dumb, so it rides the draw channel as raw bytes.
         self.forwardClips();
+        self.mirrorKitty();
 
         if (!any_dirty) return;
 
@@ -751,6 +776,23 @@ pub const Server = struct {
         for (self.panes.items) |p| {
             const text = p.takeClip(&text_buf) orelse continue;
             self.shipClip(text);
+        }
+    }
+
+    /// Keep the glass's kitty keyboard mode equal to the focused
+    /// pane's flags. ghostty-vt already tracks the stack and answers
+    /// the query per pane; this makes the outer terminal actually
+    /// encode input the way that pane was promised. A terminal that
+    /// doesn't know CSI = u ignores it.
+    fn mirrorKitty(self: *Server) void {
+        const kf: u8 = if (self.focusedPane()) |p| p.kittyFlags() else 0;
+        if (kf == self.glass_kitty) return;
+        self.glass_kitty = kf;
+        var kb: [16]u8 = undefined;
+        const seq = std.fmt.bufPrint(&kb, "\x1b[={d};1u", .{kf}) catch return;
+        for (self.clients.items) |c| {
+            if (!c.attached) continue;
+            proto.write(c.fd, @intFromEnum(proto.s2c.draw), seq) catch {};
         }
     }
 

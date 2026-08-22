@@ -207,6 +207,14 @@ pub const Pane = struct {
     }
 
     /// Snapshot terminal state into rs for rendering. Server thread.
+    /// The pane's current kitty keyboard flags (0 = legacy). The
+    /// server mirrors the focused pane's flags onto the glass.
+    pub fn kittyFlags(self: *Pane) u8 {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        return self.term.screens.active.kitty_keyboard.current().int();
+    }
+
     pub fn snapshot(self: *Pane) !void {
         os_unfair_lock_lock(&self.lock);
         defer os_unfair_lock_unlock(&self.lock);
@@ -310,7 +318,40 @@ pub const Pane = struct {
         @memcpy(buf[0..base.len], base);
         return buf[0..base.len];
     }
+
+    /// Working directory of the foreground process group leader —
+    /// where a split or new window should open. macOS libproc; the
+    /// struct layout is the frozen libproc ABI.
+    pub fn fgCwd(self: *Pane, buf: []u8) ?[:0]const u8 {
+        const pgrp = tcgetpgrp(self.pty.master);
+        if (pgrp <= 0) return null;
+        var info: VnodePathInfo = undefined;
+        const n = proc_pidinfo(pgrp, PROC_PIDVNODEPATHINFO, 0, &info, @sizeOf(VnodePathInfo));
+        if (n <= 0) return null;
+        const path = std.mem.sliceTo(&info.cdir.path, 0);
+        if (path.len == 0 or path.len + 1 > buf.len) return null;
+        @memcpy(buf[0..path.len], path);
+        buf[path.len] = 0;
+        return buf[0..path.len :0];
+    }
 };
 
 extern "c" fn tcgetpgrp(fd: ptypkg.fd_t) ptypkg.pid_t;
 extern "c" fn proc_pidpath(pid: ptypkg.pid_t, buf: [*]u8, len: u32) c_int;
+
+// ---- libproc cwd lookup ----
+extern "c" fn proc_pidinfo(pid: ptypkg.pid_t, flavor: c_int, arg: u64, buffer: ?*anyopaque, buffersize: c_int) c_int;
+const PROC_PIDVNODEPATHINFO: c_int = 9;
+/// struct vnode_info_path: vnode_info (vinfo_stat 136 + type/pad/fsid
+/// 16) then MAXPATHLEN of path.
+const VnodeInfoPath = extern struct {
+    vi: [152]u8,
+    path: [1024]u8,
+};
+const VnodePathInfo = extern struct {
+    cdir: VnodeInfoPath,
+    rdir: VnodeInfoPath,
+};
+comptime {
+    std.debug.assert(@sizeOf(VnodePathInfo) == 2352);
+}

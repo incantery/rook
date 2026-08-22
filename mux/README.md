@@ -41,9 +41,12 @@ tabs named live by each window's foreground program. Mouse: click
 focuses the pane under it; drag selects, and release copies the
 selection to the system clipboard (OSC 52); the wheel scrolls. All
 three forward pane-relative instead when the program asked for mouse
-(nvim, fzf). Typing snaps a scrolled pane back to live. Not yet: kitty keyboard
-passthrough, keyboard copy-mode selection, per-pane cwd inheritance, session persistence across
-server restart.
+(nvim, fzf). Typing snaps a scrolled pane back to live. Splits and new
+windows open in the focused pane's cwd. Kitty keyboard protocol is
+mirrored: ghostty-vt tracks each pane's flag stack, and the mux sets
+the focused pane's flags on the glass (CSI = u), so nvim gets real
+kitty input and plain shells get legacy bytes. Not yet: keyboard copy-mode selection, session
+persistence across server restart.
 
 ## Shape
 
