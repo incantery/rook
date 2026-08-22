@@ -118,20 +118,34 @@ pub const Pane = struct {
         defer stream.deinit();
         _ = ptypkg.setNonblock(self.pty.master);
 
-        var buf: [64 * 1024]u8 = undefined;
-        while (true) {
-            const n = switch (self.pty.readMasterNb(&buf)) {
-                .got => |n| n,
-                .dry => {
-                    _ = ptypkg.pollOne(self.pty.master, ptypkg.POLLIN, -1);
-                    continue;
-                },
-                .gone => break,
-            };
-            os_unfair_lock_lock(&self.lock);
-            stream.nextSlice(buf[0..n]);
-            os_unfair_lock_unlock(&self.lock);
-            _ = ptypkg.writeByte(self.wake_fd, 'p');
+        var buf: [256 * 1024]u8 = undefined;
+        outer: while (true) {
+            // Accumulate until the pty runs dry: the kernel hands out
+            // ~1KiB per read, and locking/parsing/waking per kilobyte
+            // is the churn the two-stage pipeline exists to kill. This
+            // is the poor man's version: batch, then parse once.
+            var total: usize = 0;
+            var gone = false;
+            while (total < buf.len) {
+                switch (self.pty.readMasterNb(buf[total..])) {
+                    .got => |n| total += n,
+                    .dry => {
+                        if (total > 0) break;
+                        _ = ptypkg.pollOne(self.pty.master, ptypkg.POLLIN, -1);
+                    },
+                    .gone => {
+                        gone = true;
+                        break;
+                    },
+                }
+            }
+            if (total > 0) {
+                os_unfair_lock_lock(&self.lock);
+                stream.nextSlice(buf[0..total]);
+                os_unfair_lock_unlock(&self.lock);
+                _ = ptypkg.writeByte(self.wake_fd, 'p');
+            }
+            if (gone) break :outer;
         }
         self.exited.store(true, .release);
         _ = ptypkg.writeByte(self.wake_fd, 'x');

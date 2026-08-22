@@ -12,6 +12,17 @@ const proto = @import("proto.zig");
 
 const prefix_key: u8 = 0x02; // C-b
 
+// CLOCK_UPTIME_RAW = 8 on macOS; libc-only monotonic clock (no
+// QuartzCore link needed).
+extern "c" fn clock_gettime_nsec_np(clock_id: c_int) u64;
+fn nowMs() i64 {
+    return @intCast(clock_gettime_nsec_np(8) / 1_000_000);
+}
+
+/// Minimum gap between frames: coalesce a burst (telescope popup,
+/// build spew) into ~120fps of full frames instead of one per pty read.
+const frame_gap_ms: i64 = 8;
+
 const Client = struct {
     fd: ptypkg.fd_t,
     reader: proto.Reader,
@@ -143,6 +154,8 @@ pub const Server = struct {
     fn loop(self: *Server) !void {
         var fds: std.ArrayList(ptypkg.Pollfd) = .empty;
         defer fds.deinit(self.gpa);
+        var pending = false; // output arrived, frame not yet shipped
+        var last_frame: i64 = 0;
         while (true) {
             fds.clearRetainingCapacity();
             try fds.append(self.gpa, .{ .fd = self.wake_r, .events = ptypkg.POLLIN });
@@ -150,13 +163,19 @@ pub const Server = struct {
             for (self.clients.items) |c| {
                 try fds.append(self.gpa, .{ .fd = c.fd, .events = ptypkg.POLLIN });
             }
-            const n = ptypkg.pollMany(fds.items.ptr, @intCast(fds.items.len), 1000);
+            // With a frame owed, wake at its deadline; otherwise idle.
+            const timeout: c_int = if (pending)
+                @intCast(@max(0, frame_gap_ms - (nowMs() - last_frame)))
+            else
+                1000;
+            const n = ptypkg.pollMany(fds.items.ptr, @intCast(fds.items.len), timeout);
             if (n < 0) continue;
 
             // 1. wake pipe: pty output or a pane exit
             if (fds.items[0].revents & ptypkg.POLLIN != 0) {
-                var drain: [256]u8 = undefined;
-                _ = ptypkg.readNb(self.wake_r, &drain);
+                var drain: [4096]u8 = undefined;
+                while (ptypkg.readNb(self.wake_r, &drain) > 0) {}
+                pending = true;
             }
 
             // 2. new client (grows clients; fds was sized before, so
@@ -177,8 +196,13 @@ pub const Server = struct {
             try self.reap();
             if (self.panes.items.len == 0) return;
 
-            // 5. redraw
-            try self.redraw();
+            // 5. redraw — paced: a burst becomes one frame per gap.
+            if (force_redraw) pending = true;
+            if (pending and nowMs() - last_frame >= frame_gap_ms) {
+                try self.redraw();
+                last_frame = nowMs();
+                pending = false;
+            }
         }
     }
 
