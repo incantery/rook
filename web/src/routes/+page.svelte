@@ -13,6 +13,19 @@
   let token = $state('');
 
   let ctrlArmed = $state(false);
+  let prefixArmed = $state(false);
+  let paletteOpen = $state(false);
+  let paletteQuery = $state('');
+  let paletteIndex = $state(0);
+  let paletteInput = $state<HTMLInputElement | null>(null);
+
+  const filtered = $derived(
+    blocks.filter((b) => {
+      const q = paletteQuery.toLowerCase();
+      if (!q) return true;
+      return `${b.id} ${b.fg} ${b.place} ${b.cwd}`.toLowerCase().includes(q);
+    })
+  );
 
   let mux: Mux | null = null;
   let term: Terminal | null = null;
@@ -76,6 +89,28 @@
     term.open(termEl);
     term.onData((d) => {
       if (!attached) return;
+      // backtick prefix, same muscle memory as the TUI: a lone ` arms;
+      // then 1-9 jumps to the nth block, n/p cycle, s opens the
+      // palette, `` types a literal backtick. Pastes (multi-char
+      // chunks) never arm.
+      if (prefixArmed) {
+        prefixArmed = false;
+        if (d === '`') {
+          mux?.input('`');
+        } else if (d >= '1' && d <= '9') {
+          const b = blocks[Number(d) - 1];
+          if (b) attach(b);
+        } else if (d === 'n' || d === 'p') {
+          cycle(d === 'n' ? 1 : -1);
+        } else if (d === 's') {
+          openPalette();
+        }
+        return;
+      }
+      if (d === '`') {
+        prefixArmed = true;
+        return;
+      }
       // sticky Ctrl from the key bar: the next typed character is
       // sent as its control code
       if (ctrlArmed && d.length === 1) {
@@ -105,6 +140,53 @@
     connect();
   });
 
+  function cycle(dir: 1 | -1) {
+    if (!blocks.length) return;
+    const i = blocks.findIndex((b) => b.id === attached?.id);
+    const next = blocks[(i + dir + blocks.length) % blocks.length];
+    if (next) attach(next);
+  }
+
+  function openPalette() {
+    paletteQuery = '';
+    paletteIndex = 0;
+    paletteOpen = true;
+    requestAnimationFrame(() => paletteInput?.focus());
+  }
+
+  function closePalette() {
+    paletteOpen = false;
+    term?.focus();
+  }
+
+  function paletteKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closePalette();
+    } else if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'j')) {
+      e.preventDefault();
+      paletteIndex = Math.min(paletteIndex + 1, filtered.length - 1);
+    } else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key === 'k')) {
+      e.preventDefault();
+      paletteIndex = Math.max(paletteIndex - 1, 0);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const b = filtered[paletteIndex];
+      if (b) {
+        closePalette();
+        attach(b);
+      }
+    }
+  }
+
+  function globalKey(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+      e.preventDefault();
+      if (paletteOpen) closePalette();
+      else openPalette();
+    }
+  }
+
   function key(seq: string) {
     if (!attached) return;
     mux?.input(seq);
@@ -117,6 +199,8 @@
     term?.dispose();
   });
 </script>
+
+<svelte:window onkeydown={globalKey} />
 
 <div class="flex h-dvh flex-col md:flex-row">
   <!-- block list: sidebar on desktop, sheet on mobile -->
@@ -234,8 +318,62 @@
       <div
         class="pointer-events-none absolute inset-0 hidden items-center justify-center text-zinc-600 md:flex"
       >
-        pick a block
+        pick a block — or ⌘K / ctrl+K
+      </div>
+    {/if}
+    {#if prefixArmed}
+      <div
+        class="pointer-events-none absolute top-2 right-3 rounded bg-amber-700/80 px-2 py-0.5 font-mono text-xs"
+      >
+        `
       </div>
     {/if}
   </main>
 </div>
+
+{#if paletteOpen}
+  <!-- quick-switch palette: ⌘K / ctrl+K or prefix-s -->
+  <div
+    class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-[12dvh]"
+    onclick={closePalette}
+    role="presentation"
+  >
+    <div
+      class="w-[min(90vw,32rem)] overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl"
+      onclick={(e) => e.stopPropagation()}
+      role="presentation"
+    >
+      <input
+        bind:this={paletteInput}
+        bind:value={paletteQuery}
+        oninput={() => (paletteIndex = 0)}
+        onkeydown={paletteKey}
+        placeholder="switch block…"
+        class="w-full border-b border-zinc-700 bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-zinc-600"
+      />
+      <ul class="max-h-[50dvh] overflow-y-auto">
+        {#each filtered as b, i (b.id)}
+          <li>
+            <button
+              class="flex w-full items-baseline gap-2 px-3 py-2 text-left text-sm
+                     {i === paletteIndex ? 'bg-zinc-700/60' : 'hover:bg-zinc-800'}"
+              onclick={() => {
+                closePalette();
+                attach(b);
+              }}
+            >
+              <span class="font-mono text-xs text-zinc-500">#{b.id}</span>
+              <span class="font-medium">{b.fg}</span>
+              <span class="truncate font-mono text-xs text-zinc-500">{b.place} · {b.cwd}</span>
+              {#if attached?.id === b.id}
+                <span class="ml-auto text-xs text-amber-400">current</span>
+              {/if}
+            </button>
+          </li>
+        {:else}
+          <li class="px-3 py-3 text-sm text-zinc-500">no match</li>
+        {/each}
+      </ul>
+    </div>
+  </div>
+{/if}
