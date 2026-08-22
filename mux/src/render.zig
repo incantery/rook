@@ -48,11 +48,20 @@ pub const Frame = struct {
         self.put(csi ++ "0m");
 
         var cursor: ?struct { x: u16, y: u16 } = null;
+        var cursor_style: []const u8 = csi ++ "0 q";
         for (placed) |pl| {
             const pane = findPane(panes, pl.pane) orelse continue;
             self.drawPane(pane, pl.rect, full);
             if (pl.pane == focused) {
                 const cur = pane.rs.cursor;
+                // DECSCUSR: the focused pane's cursor shape is the
+                // screen's (nvim beam-in-insert must read through).
+                cursor_style = switch (cur.visual_style) {
+                    .block => csi ++ "2 q",
+                    .underline => csi ++ "4 q",
+                    .bar => csi ++ "6 q",
+                    else => csi ++ "0 q",
+                };
                 if (cur.visible) if (cur.viewport) |v| {
                     if (v.x < pl.rect.w and v.y < pl.rect.h)
                         cursor = .{ .x = pl.rect.x + v.x, .y = pl.rect.y + v.y };
@@ -73,6 +82,7 @@ pub const Frame = struct {
 
         if (cursor) |c| {
             self.cup(c.x, c.y);
+            self.put(cursor_style);
             self.put(csi ++ "?25h");
         }
         self.put(csi ++ "?2026l");

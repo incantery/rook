@@ -396,6 +396,10 @@ pub const Server = struct {
                 const i: usize = key - '1';
                 if (i < self.windows.items.len) self.selectWindow(i);
             },
+            'H' => self.adjustSplit(.horizontal, -0.05),
+            'L' => self.adjustSplit(.horizontal, 0.05),
+            'K' => self.adjustSplit(.vertical, -0.05),
+            'J' => self.adjustSplit(.vertical, 0.05),
             'z' => {
                 self.window().zoomed = !self.window().zoomed;
                 self.relayout() catch {};
@@ -442,6 +446,13 @@ pub const Server = struct {
         }
         self.full = true;
         self.pending = true;
+    }
+
+    fn adjustSplit(self: *Server, axis: layoutpkg.Axis, delta: f32) void {
+        const w = self.window();
+        if (w.zoomed) return;
+        layoutpkg.adjust(&w.layout, w.focused, axis, delta);
+        self.relayout() catch {};
     }
 
     fn selectWindow(self: *Server, i: usize) void {

@@ -133,6 +133,43 @@ pub const Layout = struct {
     }
 };
 
+pub const Axis = enum { horizontal, vertical };
+
+/// Nudge the split that owns `pane` on `axis` by delta (grow the side
+/// the pane is on). Walks to the nearest ancestor split of that axis.
+pub fn adjust(l: *Layout, pane: u32, axis: Axis, delta: f32) void {
+    const root = l.root orelse return;
+    _ = adjustIn(root, pane, axis, delta);
+}
+
+fn adjustIn(n: *Node, pane: u32, axis: Axis, delta: f32) enum { missing, found, done } {
+    switch (n.*) {
+        .leaf => |p| return if (p == pane) .found else .missing,
+        .split => |*s| {
+            const want = (axis == .horizontal) == s.side_by_side;
+            const in_a = adjustIn(s.a, pane, axis, delta);
+            if (in_a == .done) return .done;
+            if (in_a == .found) {
+                if (want) {
+                    s.ratio = std.math.clamp(s.ratio + delta, 0.1, 0.9);
+                    return .done;
+                }
+                return .found;
+            }
+            const in_b = adjustIn(s.b, pane, axis, delta);
+            if (in_b == .done) return .done;
+            if (in_b == .found) {
+                if (want) {
+                    s.ratio = std.math.clamp(s.ratio - delta, 0.1, 0.9);
+                    return .done;
+                }
+                return .found;
+            }
+            return .missing;
+        },
+    }
+}
+
 /// Directional focus over resolved rects: the nearest pane whose edge
 /// faces the focused one's.
 pub fn navigate(placed: []const Placed, from: u32, dx: i32, dy: i32) ?u32 {

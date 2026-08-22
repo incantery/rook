@@ -9,9 +9,23 @@ against.
     ./zig-out/bin/rook-mux          # attach; boots the server if needed
     ./zig-out/bin/rook-mux server   # foreground server
 
-Prefix is C-b (config comes later): `v`/`|` split side-by-side, `-`
-stacked, `hjkl` focus, `x` kill, `d` detach. Reattach gets your panes
-back — the server owns them, clients are glass.
+The prefix comes from `~/.config/rook/rook.toml` (`[tmux] prefix`),
+C-b when unset; double-tap types it literally. Then:
+
+    v |        split side by side          c        new window
+    -          split stacked               n p 1-9  switch window
+    hjkl       focus pane                  z        zoom pane
+    HJKL       resize split                [        scroll mode (jkudgG, q)
+    x          kill pane                   d        detach
+
+`rook-mux stats` prints input→frame p50/p99, frames, bytes. `rook-mux
+kill` shuts the server down politely (HUPs every pane).
+
+Working today: dirty-row frames paced at 8ms, scrollback view, OSC 52
+copy out to the glass, cursor-shape passthrough (nvim beam in insert),
+tabs named live by each window's foreground program. Not yet: mouse
+reporting into panes, kitty keyboard passthrough, per-pane cwd
+inheritance, session persistence across server restart.
 
 ## Shape
 
