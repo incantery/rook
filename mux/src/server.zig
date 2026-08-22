@@ -209,7 +209,7 @@ pub const Server = struct {
         } else |_| {}
 
         self.frame.accent = self.conf.accent;
-        if (!try self.restoreState()) _ = try self.newSession("main");
+        if (!try self.restoreState()) _ = try self.newSession("main", null);
         try self.loop();
     }
 
@@ -250,8 +250,10 @@ pub const Server = struct {
         return sn.windows.items[sn.cur];
     }
 
-    /// Create a session named `name` (deduped) and switch to it.
-    fn newSession(self: *Server, name: []const u8) !*Session {
+    /// Create a session named `name` (deduped — an existing name is a
+    /// switch) and make it current. `cwd` seeds the first window; null
+    /// falls back to the server default.
+    fn newSession(self: *Server, name: []const u8, cwd: ?[*:0]const u8) !*Session {
         for (self.sessions.items, 0..) |sn, i| {
             if (std.mem.eql(u8, sn.label(), name)) {
                 self.switchSession(i);
@@ -264,9 +266,23 @@ pub const Server = struct {
         try self.sessions.append(self.gpa, sn);
         const old_focused: ?u32 = if (self.sessions.items.len > 1) self.window().focused else null;
         self.cur_sess = self.sessions.items.len - 1;
-        try self.newWindow();
+        try self.newWindow(cwd);
         if (old_focused) |o| self.focusEvents(o, self.window().focused);
         return sn;
+    }
+
+    /// Close the named session: hang up every pane in it; reap does
+    /// the accounting and the view falls back if it was current.
+    fn closeSession(self: *Server, name: []const u8) void {
+        for (self.sessions.items) |sn| {
+            if (!std.mem.eql(u8, sn.label(), name)) continue;
+            for (sn.windows.items) |w| {
+                for (self.panes.items) |p| {
+                    if (w.layout.contains(p.id)) p.hangup();
+                }
+            }
+            return;
+        }
     }
 
     fn switchSession(self: *Server, i: usize) void {
@@ -288,11 +304,12 @@ pub const Server = struct {
         }
     }
 
-    fn newWindow(self: *Server) !void {
+    fn newWindow(self: *Server, cwd_override: ?[*:0]const u8) !void {
         const sn = self.sess();
-        // inherit the cwd of whatever the user is looking at now
+        // an explicit cwd wins; otherwise inherit from what the user
+        // is looking at now
         var cwd_buf: [1024]u8 = undefined;
-        const cwd = if (sn.windows.items.len > 0) self.focusedCwd(&cwd_buf) else null;
+        const cwd = cwd_override orelse (if (sn.windows.items.len > 0) self.focusedCwd(&cwd_buf) else null);
         const prev_focused: ?u32 = if (sn.windows.items.len > 0) self.window().focused else null;
         const w = try self.gpa.create(Window);
         w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
@@ -654,8 +671,22 @@ pub const Server = struct {
                             },
                             's' => if (name.len > 0) self.switchSessionNamed(name),
                             'n' => if (name.len > 0) {
-                                _ = self.newSession(name) catch {};
+                                // payload: name[\tcwd]
+                                var nm = name;
+                                var cwd: ?[*:0]const u8 = null;
+                                var cwd_buf: [1024]u8 = undefined;
+                                if (std.mem.indexOfScalar(u8, name, '\t')) |tab| {
+                                    nm = name[0..tab];
+                                    const dir = name[tab + 1 ..];
+                                    if (dir.len > 0 and dir.len < cwd_buf.len) {
+                                        @memcpy(cwd_buf[0..dir.len], dir);
+                                        cwd_buf[dir.len] = 0;
+                                        cwd = @ptrCast(&cwd_buf);
+                                    }
+                                }
+                                if (nm.len > 0) _ = self.newSession(nm, cwd) catch {};
                             },
+                            'k' => if (name.len > 0) self.closeSession(name),
                             else => {},
                         }
                         self.pending = true;
@@ -1148,7 +1179,7 @@ pub const Server = struct {
             'v', '|' => self.splitPane(true) catch {},
             '-' => self.splitPane(false) catch {},
             'h', 'j', 'k', 'l' => _ = self.navigate(key),
-            'c' => self.newWindow() catch {},
+            'c' => self.newWindow(null) catch {},
             'n' => self.selectWindow((self.sess().cur + 1) % self.sess().windows.items.len),
             'p' => self.selectWindow((self.sess().cur + self.sess().windows.items.len - 1) % self.sess().windows.items.len),
             '1'...'9' => {
@@ -1156,6 +1187,7 @@ pub const Server = struct {
                 if (i < self.sess().windows.items.len) self.selectWindow(i);
             },
             's' => self.openPopup("rook-mux ls | fzf --reverse --header='workspace' | xargs -r rook-mux switch") catch {},
+            'w' => self.openPopup("rook worktree") catch {},
             'H' => self.adjustSplit(.horizontal, -0.05),
             'L' => self.adjustSplit(.horizontal, 0.05),
             'K' => self.adjustSplit(.vertical, -0.05),
@@ -1617,7 +1649,7 @@ pub const Server = struct {
         // a session line with no windows would be an empty shell; give
         // it one so the invariant (every session has a window) holds
         if (made_any and !sess_has_window and self.sess().windows.items.len == 0) {
-            try self.newWindow();
+            try self.newWindow(null);
         }
         if (!made_any) return false;
         // drop any restored session that ended up windowless

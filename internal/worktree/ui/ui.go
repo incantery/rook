@@ -14,8 +14,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/incantery/rook/internal/mux"
 	"github.com/incantery/rook/internal/sessions"
-	"github.com/incantery/rook/internal/tmux"
 	"github.com/incantery/rook/internal/tui"
 	"github.com/incantery/rook/internal/worktree"
 )
@@ -268,7 +268,7 @@ func open(wt worktree.Worktree) tea.Cmd {
 		if err := worktree.Open(wt); err != nil {
 			return doneMsg{err: err}
 		}
-		if tmux.InsideRook() {
+		if mux.Inside() {
 			return doneMsg{note: "opened"}
 		}
 		return doneMsg{note: "opened", attach: wt.Session}

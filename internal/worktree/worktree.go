@@ -19,7 +19,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/incantery/rook/internal/tmux"
+	"github.com/incantery/rook/internal/mux"
 )
 
 // Repo is the main checkout a set of worktrees hangs off.
@@ -137,7 +137,7 @@ func (r Repo) List() ([]Worktree, error) {
 		case strings.HasPrefix(line, "worktree "):
 			flush()
 			p := strings.TrimPrefix(line, "worktree ")
-			cur = &Worktree{Path: p, Name: r.nameOf(p), Session: tmux.SessionName(p)}
+			cur = &Worktree{Path: p, Name: r.nameOf(p), Session: mux.SessionName(p)}
 		case cur == nil:
 		case strings.HasPrefix(line, "HEAD "):
 			cur.Head = shortHash(strings.TrimPrefix(line, "HEAD "))
@@ -237,19 +237,12 @@ func (r Repo) New(name, from string, opts Options) (Worktree, error) {
 	return r.Get(name)
 }
 
-// Open makes sure a rook session exists on the worktree and, when the
-// caller is inside rook, switches to it. Outside tmux it just creates
-// the session: the caller prints the path and the user attaches.
+// Open makes sure a workspace exists for the worktree and makes it
+// current — the server dedupes by name, so create and switch are one
+// verb, with the first window rooted at the worktree.
 func Open(wt Worktree) error {
-	if !tmux.HasSession(wt.Session) {
-		if out, err := tmux.Run("new-session", "-d", "-s", wt.Session, "-c", wt.Path); err != nil {
-			return fmt.Errorf("creating session %s: %v\n%s", wt.Session, err, out)
-		}
-	}
-	if tmux.InsideRook() {
-		if out, err := tmux.Run("switch-client", "-t", "="+wt.Session); err != nil {
-			return fmt.Errorf("switching to %s: %v\n%s", wt.Session, err, out)
-		}
+	if err := mux.Open(wt.Session, wt.Path); err != nil {
+		return fmt.Errorf("opening workspace %s: %w", wt.Session, err)
 	}
 	return nil
 }
@@ -301,10 +294,8 @@ func (r Repo) Remove(wt Worktree, force bool) error {
 			return fmt.Errorf("%s has commits not on %s (merge it, or --force to drop them)", wt.Branch, r.DefaultBranch())
 		}
 	}
-	if tmux.HasSession(wt.Session) {
-		if out, err := tmux.Run("kill-session", "-t", "="+wt.Session); err != nil {
-			return fmt.Errorf("killing session %s: %s", wt.Session, strings.TrimSpace(out))
-		}
+	if err := mux.Close(wt.Session); err != nil {
+		return fmt.Errorf("closing workspace %s: %w", wt.Session, err)
 	}
 	args := []string{"worktree", "remove"}
 	if force {
@@ -341,12 +332,9 @@ func distance(dir, base, branch string) (ahead, behind int) {
 }
 
 func liveSessions() map[string]bool {
-	out, err := tmux.Run("list-sessions", "-F", "#{session_name}")
+	names, _ := mux.Sessions()
 	live := map[string]bool{}
-	if err != nil {
-		return live
-	}
-	for _, s := range strings.Fields(out) {
+	for _, s := range names {
 		live[s] = true
 	}
 	return live

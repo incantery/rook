@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/incantery/rook/internal/config"
-	"github.com/incantery/rook/internal/tmux"
 	"github.com/incantery/rook/internal/worktree"
 	"github.com/incantery/rook/internal/worktree/ui"
 )
@@ -39,11 +39,13 @@ func runWorktree(args []string) error {
 		if err != nil || attach == "" {
 			return err
 		}
-		argv, err := tmux.RunArgv("attach-session", "-t", "="+attach)
-		if err != nil {
-			return err
+		// the workspace is already current server-side; become a client
+		bin, lerr := exec.LookPath("rook-mux")
+		if lerr != nil {
+			home, _ := os.UserHomeDir()
+			bin = filepath.Join(home, ".local", "bin", "rook-mux")
 		}
-		return syscall.Exec(argv[0], argv, os.Environ())
+		return syscall.Exec(bin, []string{"rook-mux"}, os.Environ())
 	}
 	verb, rest := args[0], args[1:]
 	switch verb {
