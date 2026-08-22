@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { Terminal } from '@xterm/xterm';
-  import { FitAddon } from '@xterm/addon-fit';
   import { Mux, type Block } from '$lib/mux';
+  import { createTerm, chosenKind, type TermHandle } from '$lib/term';
   import '../app.css';
 
   let blocks = $state<Block[]>([]);
@@ -28,10 +27,20 @@
   );
 
   let mux: Mux | null = null;
-  let term: Terminal | null = null;
-  let fit: FitAddon | null = null;
+  let th: TermHandle | null = null;
   let termEl: HTMLDivElement;
   let resizeObs: ResizeObserver | null = null;
+  let vtKind = $state('');
+
+  // th.term, guarded — the page never touches an engine directly
+  const term = {
+    get cols() { return th?.term.cols ?? 80; },
+    get rows() { return th?.term.rows ?? 24; },
+    write: (d: Uint8Array) => th?.term.write(d),
+    reset: () => th?.term.reset(),
+    focus: () => th?.term.focus(),
+  };
+  const fitNow = () => th?.fit();
 
   function wsUrl(): string {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -41,7 +50,7 @@
   function connect() {
     status = 'connecting';
     mux = new Mux(wsUrl(), {
-      onDraw: (bytes) => term?.write(bytes),
+      onDraw: (bytes) => term.write(bytes),
       onBlocks: (b) => (blocks = b),
       onBlockCreated: (id) => {
         // our own ` c / ` v — hop onto the new block
@@ -59,15 +68,15 @@
   }
 
   function attach(b: Block) {
-    if (!mux || !term || !fit) return;
+    if (!mux || !th) return;
     term.reset();
     attached = b;
     listOpen = false;
     // let the layout settle so fit measures the visible pane
     requestAnimationFrame(() => {
-      fit!.fit();
-      mux!.attachBlock(b.id, term!.cols, term!.rows, takeLease);
-      term!.focus();
+      fitNow();
+      mux!.attachBlock(b.id, term.cols, term.rows, takeLease);
+      term.focus();
     });
   }
 
@@ -81,18 +90,17 @@
     mux?.requestBlocks();
   }
 
-  onMount(() => {
-    term = new Terminal({
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
-      theme: { background: '#09090b' },
-      scrollback: 5000,
-      allowProposedApi: true,
-    });
-    fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(termEl);
-    term.onData((d) => {
+  onMount(async () => {
+    const kind = chosenKind();
+    try {
+      th = await createTerm(termEl, kind);
+    } catch (e) {
+      // ghostty-web failed to boot (wasm load, old browser): fall back
+      console.error('vt engine failed, falling back to xterm.js', e);
+      th = await createTerm(termEl, 'xterm');
+    }
+    vtKind = th.kind;
+    th.term.onData((d) => {
       if (!attached) return;
       // backtick prefix, same muscle memory as the TUI: a lone ` arms;
       // then 1-9 jumps to the nth block, n/p cycle, s opens the
@@ -137,8 +145,8 @@
       mux?.input(d);
     });
     resizeObs = new ResizeObserver(() => {
-      if (!attached || !term || !fit) return;
-      fit.fit();
+      if (!attached || !th) return;
+      fitNow();
       mux?.resize(term.cols, term.rows);
     });
     resizeObs.observe(termEl);
@@ -169,7 +177,7 @@
 
   function closePalette() {
     paletteOpen = false;
-    term?.focus();
+    term.focus();
   }
 
   function paletteKey(e: KeyboardEvent) {
@@ -203,13 +211,13 @@
   function key(seq: string) {
     if (!attached) return;
     mux?.input(seq);
-    term?.focus();
+    term.focus();
   }
 
   onDestroy(() => {
     resizeObs?.disconnect();
     mux?.close();
-    term?.dispose();
+    th?.term.dispose();
   });
 </script>
 
@@ -224,6 +232,9 @@
     <div class="flex items-center gap-2 border-b border-zinc-800 px-3 py-2">
       <span class="text-lg">♜</span>
       <span class="font-semibold tracking-wide">rook</span>
+      {#if vtKind}
+        <span class="rounded bg-zinc-800 px-1 py-0.5 font-mono text-[10px] text-zinc-500">{vtKind}</span>
+      {/if}
       <span
         class="ml-auto rounded px-1.5 py-0.5 text-xs
                {status === 'ready'
@@ -312,7 +323,7 @@
           class="kbar {ctrlArmed ? 'bg-amber-700 text-zinc-50' : ''}"
           onclick={() => {
             ctrlArmed = !ctrlArmed;
-            term?.focus();
+            term.focus();
           }}
         >
           ctrl
