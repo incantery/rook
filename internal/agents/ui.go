@@ -1,7 +1,9 @@
-// Package agents is the attention layer's face: every agent on the rook
-// server in one list, the ones that need you first, with where each one
-// is, what it asked for, and its screen. Enter goes there. `rook agents`
-// standalone or the prefix-a popup — one program, any size.
+// Package agents is the attention layer's face: the whole fleet on one
+// board — every agent on the rook server as a card with its state, its
+// place, what it asked for, and the tail of its screen — the ones that
+// need you first. Basic answers happen from the board; Enter jumps to
+// the agent in tmux. `rook agents` standalone or the prefix-a popup —
+// one program, any size.
 package agents
 
 import (
@@ -16,68 +18,72 @@ import (
 	"github.com/incantery/rook/internal/tui"
 )
 
-const refreshEvery = 2 * time.Second
+const (
+	refreshEvery = 2 * time.Second
+	minTail      = 2 // screen lines per card at the tightest
+	maxTail      = 6
+)
 
-type loadedMsg struct {
-	agents []sessions.Agent
-	screen string // the selected agent's pane, captured in the same pass
+type card struct {
+	sessions.Agent
+	tail []string
 }
 
+type loadedMsg struct{ cards []card }
 type tickMsg struct{}
-
-type wentMsg struct{ err error }
+type actMsg struct {
+	note string
+	err  error
+	quit bool
+}
 
 type model struct {
-	agents  []sessions.Agent
-	screen  string
+	cards   []card
 	cursor  int
 	width   int
 	height  int
+	note    string
 	err     error
-	preview bool
+	confirm bool // pending kill
 }
 
-// Run shows the agents view and blocks until it exits.
+// Run shows the board and blocks until it exits.
 func Run() error {
-	_, err := tea.NewProgram(model{preview: true}, tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(model{}, tea.WithAltScreen()).Run()
 	return err
 }
 
-func (m model) Init() tea.Cmd { return tea.Batch(m.load(), tick()) }
+func (m model) Init() tea.Cmd { return tea.Batch(load(), tick()) }
 
 func tick() tea.Cmd {
 	return tea.Tick(refreshEvery, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
-func (m model) selected() (sessions.Agent, bool) {
-	if m.cursor < 0 || m.cursor >= len(m.agents) {
-		return sessions.Agent{}, false
-	}
-	return m.agents[m.cursor], true
-}
-
-// load lists agents and captures the selected pane, off the UI thread.
-// The selection is carried by pane id so it survives the re-sort.
-func (m model) load() tea.Cmd {
-	keep := ""
-	if a, ok := m.selected(); ok {
-		keep = a.PaneID
-	}
-	want := m.preview
+// load lists the fleet and captures every agent's screen, off the UI
+// thread: one list-panes, then one capture per agent.
+func load() tea.Cmd {
 	return func() tea.Msg {
 		agents := sessions.Agents()
-		msg := loadedMsg{agents: agents}
-		idx := 0
+		cards := make([]card, len(agents))
 		for i, a := range agents {
-			if a.PaneID == keep {
-				idx = i
+			lines := strings.Split(sessions.Screen(a.PaneID), "\n")
+			for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+				lines = lines[:len(lines)-1]
 			}
+			if len(lines) > maxTail {
+				lines = lines[len(lines)-maxTail:]
+			}
+			cards[i] = card{Agent: a, tail: lines}
 		}
-		if want && len(agents) > 0 {
-			msg.screen = sessions.Screen(agents[idx].PaneID)
-		}
-		return msg
+		return loadedMsg{cards}
 	}
+}
+
+func (m model) selected() (card, bool) {
+	if m.cursor < 0 || m.cursor >= len(m.cards) {
+		return card{}, false
+	}
+	return m.cards[m.cursor], true
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -85,58 +91,79 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tickMsg:
-		return m, tea.Batch(m.load(), tick())
+		return m, tea.Batch(load(), tick())
 	case loadedMsg:
+		// selection follows the pane id across the re-sort
 		keep := ""
-		if a, ok := m.selected(); ok {
-			keep = a.PaneID
+		if c, ok := m.selected(); ok {
+			keep = c.PaneID
 		}
-		m.agents, m.screen = msg.agents, msg.screen
+		m.cards = msg.cards
 		m.cursor = 0
-		for i, a := range m.agents {
-			if a.PaneID == keep {
+		for i, c := range m.cards {
+			if c.PaneID == keep {
 				m.cursor = i
 			}
 		}
-	case wentMsg:
-		if msg.err != nil {
-			m.err = msg.err
-			return m, nil
-		}
-		return m, tea.Quit
-	case tea.KeyMsg:
-		m.err = nil
-		switch msg.String() {
-		case "q", "esc", "ctrl+c":
+	case actMsg:
+		m.err, m.note = msg.err, msg.note
+		if msg.quit && msg.err == nil {
 			return m, tea.Quit
-		case "j", "down":
-			if m.cursor < len(m.agents)-1 {
-				m.cursor++
-			}
-			return m, m.load()
-		case "k", "up":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-			return m, m.load()
-		case "g", "home":
-			m.cursor = 0
-			return m, m.load()
-		case "G", "end":
-			m.cursor = max(0, len(m.agents)-1)
-			return m, m.load()
-		case "p":
-			m.preview = !m.preview
-			return m, m.load()
-		case "r":
-			return m, m.load()
-		case "enter":
-			if a, ok := m.selected(); ok {
-				return m, func() tea.Msg { return wentMsg{sessions.Goto(a)} }
-			}
 		}
+		return m, load()
+	case tea.KeyMsg:
+		return m.key(msg)
 	}
 	return m, nil
+}
+
+func (m model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.err, m.note = nil, ""
+	c, ok := m.selected()
+	if m.confirm {
+		m.confirm = false
+		if ok && (msg.String() == "y" || msg.String() == "enter") {
+			return m, act("killed "+place(c.Agent), false, func() error { return sessions.Kill(c.PaneID) })
+		}
+		return m, nil
+	}
+	k := msg.String()
+	switch {
+	case k == "q" || k == "ctrl+c":
+		return m, tea.Quit
+	case k == "j" || k == "down":
+		if m.cursor < len(m.cards)-1 {
+			m.cursor++
+		}
+	case k == "k" || k == "up":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case k == "g" || k == "home":
+		m.cursor = 0
+	case k == "G" || k == "end":
+		m.cursor = max(0, len(m.cards)-1)
+	case k == "r":
+		return m, load()
+	case !ok:
+	case k == "enter":
+		return m, act("", true, func() error { return sessions.Goto(c.Agent) })
+	// Basic answers to a Claude Code dialog, from the board: y confirms
+	// whatever is highlighted, a digit picks that option, esc interrupts.
+	case k == "y":
+		return m, act("sent Enter to "+place(c.Agent), false, func() error { return sessions.Send(c.PaneID, "Enter") })
+	case len(k) == 1 && k[0] >= '1' && k[0] <= '9':
+		return m, act("sent "+k+" to "+place(c.Agent), false, func() error { return sessions.Send(c.PaneID, k) })
+	case k == "esc":
+		return m, act("interrupted "+place(c.Agent), false, func() error { return sessions.Send(c.PaneID, "Escape") })
+	case k == "x":
+		m.confirm = true
+	}
+	return m, nil
+}
+
+func act(note string, quit bool, f func() error) tea.Cmd {
+	return func() tea.Msg { return actMsg{note: note, err: f(), quit: quit} }
 }
 
 func chip(s sessions.AgentState) string {
@@ -153,74 +180,66 @@ func chip(s sessions.AgentState) string {
 func (m model) View() string {
 	var b strings.Builder
 	waiting := 0
-	for _, a := range m.agents {
-		if a.State == sessions.StateWaiting {
+	for _, c := range m.cards {
+		if c.State == sessions.StateWaiting {
 			waiting++
 		}
 	}
 	title := tui.Bold.Render(tui.Accent.Render("♜ agents"))
 	if waiting > 0 {
-		title += "  " + tui.Accent.Render(fmt.Sprintf("%d waiting", waiting))
+		title += "  " + tui.Accent.Render(fmt.Sprintf("%d waiting", waiting)) + tui.Dim.Render(fmt.Sprintf(" · %d total", len(m.cards)))
 	} else {
-		title += "  " + tui.Dim.Render(fmt.Sprintf("%d running", len(m.agents)))
+		title += "  " + tui.Dim.Render(fmt.Sprintf("%d agents, none waiting", len(m.cards)))
 	}
 	b.WriteString(title + "\n\n")
-
-	if len(m.agents) == 0 {
+	if len(m.cards) == 0 {
 		b.WriteString(tui.Dim.Render("  no agents on the rook server") + "\n")
 	}
-	placeW := 14
-	for _, a := range m.agents {
-		placeW = max(placeW, len([]rune(place(a))))
+
+	// Share the height between cards: header + tail + blank each.
+	tail := maxTail
+	if m.height > 0 && len(m.cards) > 0 {
+		room := m.height - 4 // title, blank, blank, footer
+		tail = max(minTail, min(maxTail, room/len(m.cards)-2))
 	}
-	placeW = min(placeW, 30)
-	for i, a := range m.agents {
-		pl := place(a)
-		if rs := []rune(pl); len(rs) > placeW {
-			pl = string(rs[:placeW-1]) + "…"
-		}
-		pad := strings.Repeat(" ", placeW-len([]rune(pl)))
+
+	for i, c := range m.cards {
 		where := ""
-		if a.Repo != "" {
-			where = "⎇ " + a.Repo
-			if a.Branch != "" && a.Branch != "main" && a.Branch != "master" {
-				where += " · " + a.Branch
+		if c.Repo != "" {
+			where = "⎇ " + c.Repo
+			if c.Branch != "" && c.Branch != "main" && c.Branch != "master" {
+				where += " · " + c.Branch
 			}
 		}
-		rest := fmt.Sprintf("%s  %-11s %s", pad, chip(a.State), tui.Dim.Render(where))
-		if a.Headline != "" {
-			rest += "  " + a.Headline
+		head := fmt.Sprintf("  %-11s %s", chip(c.State), tui.Dim.Render(where))
+		if c.Headline != "" {
+			head += "  " + c.Headline
 		}
 		if i == m.cursor {
-			b.WriteString(tui.Selected.Render("▸ "+pl) + rest + "\n")
+			b.WriteString(tui.Selected.Render("▸ "+place(c.Agent)) + head + "\n")
 		} else {
-			b.WriteString("  " + pl + rest + "\n")
+			b.WriteString("  " + place(c.Agent) + head + "\n")
 		}
+		lines := c.tail
+		if len(lines) > tail {
+			lines = lines[len(lines)-tail:]
+		}
+		for _, l := range lines {
+			b.WriteString(tui.Dim.Render("    │ ") + l + "\n")
+		}
+		b.WriteString("\n")
 	}
 
-	// The selected agent's screen fills what's left, bottom-aligned
-	// like the pane itself: the last lines are where the question is.
-	if m.preview && m.screen != "" && m.height > 0 {
-		used := strings.Count(b.String(), "\n") + 3
-		room := m.height - used
-		if room > 3 {
-			lines := strings.Split(m.screen, "\n")
-			for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-				lines = lines[:len(lines)-1]
-			}
-			if len(lines) > room {
-				lines = lines[len(lines)-room:]
-			}
-			b.WriteString("\n" + tui.Dim.Render(strings.Repeat("─", max(0, m.width))) + "\n")
-			b.WriteString(strings.Join(lines, "\n") + "\n")
-		}
-	}
-
-	b.WriteString("\n")
-	if m.err != nil {
+	switch {
+	case m.confirm:
+		c, _ := m.selected()
+		b.WriteString(tui.Accent.Render("kill "+place(c.Agent)+"? ") + tui.Dim.Render("y/enter confirm · any key cancel"))
+	case m.err != nil:
 		b.WriteString(tui.Err.Render(m.err.Error()))
-	} else {
-		b.WriteString(tui.Dim.Render("enter go · j/k move · p preview · r refresh · q quit"))
+	case m.note != "":
+		b.WriteString(tui.Accent.Render(m.note))
+	default:
+		b.WriteString(tui.Dim.Render("enter go · y confirm · 1-9 pick · esc interrupt · x kill · q quit"))
 	}
 	out := b.String()
 	if m.width > 0 {

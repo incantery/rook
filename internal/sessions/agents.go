@@ -87,3 +87,21 @@ func Goto(a Agent) error {
 func fmtErr(format, what, out string) error {
 	return fmt.Errorf(format, what, strings.TrimSpace(out))
 }
+
+// Send types into an agent's pane exactly as send-keys would: key
+// names ("Enter", "Escape") or literal text.
+func Send(paneID string, keys ...string) error {
+	args := append([]string{"send-keys", "-t", paneID}, keys...)
+	if out, err := rookTmux(args...); err != nil {
+		return fmtErr("send to %s: %s", paneID, out)
+	}
+	return nil
+}
+
+// Kill closes an agent's pane.
+func Kill(paneID string) error {
+	if out, err := rookTmux("kill-pane", "-t", paneID); err != nil {
+		return fmtErr("kill %s: %s", paneID, out)
+	}
+	return nil
+}
