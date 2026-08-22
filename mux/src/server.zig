@@ -117,6 +117,8 @@ pub const Server = struct {
     glass_kitty: u8 = 0,
     glass_paste: bool = false,
     glass_focus: bool = false,
+    glass_title: [128]u8 = @splat(0),
+    glass_title_len: usize = 0,
 
     pub fn run(gpa: std.mem.Allocator, io: std.Io, sock_path: []const u8, shell: [:0]const u8, cwd: ?[:0]const u8) !void {
         const listener = ptypkg.unixListen(sock_path);
@@ -965,7 +967,7 @@ pub const Server = struct {
     /// encode input the way that pane was promised. A terminal that
     /// doesn't know CSI = u ignores it.
     fn mirrorKitty(self: *Server) void {
-        var buf: [64]u8 = undefined;
+        var buf: [256]u8 = undefined;
         var out: std.ArrayList(u8) = .initBuffer(&buf);
         const fp = self.focusedPane();
         const kf: u8 = if (fp) |p| p.kittyFlags() else 0;
@@ -987,6 +989,17 @@ pub const Server = struct {
         if (focus != self.glass_focus) {
             self.glass_focus = focus;
             out.appendSliceBounded(if (focus) "\x1b[?1004h" else "\x1b[?1004l") catch {};
+        }
+        // the outer window is titled by the focused pane (OSC 2)
+        var tb: [128]u8 = undefined;
+        const t = if (fp) |p| p.title(&tb) else "";
+        const shown = if (t.len > 0) t else "rook";
+        if (!std.mem.eql(u8, shown, self.glass_title[0..self.glass_title_len])) {
+            self.glass_title_len = @min(shown.len, self.glass_title.len);
+            @memcpy(self.glass_title[0..self.glass_title_len], shown[0..self.glass_title_len]);
+            out.appendSliceBounded("\x1b]2;") catch {};
+            out.appendSliceBounded(shown[0..self.glass_title_len]) catch {};
+            out.appendSliceBounded("\x07") catch {};
         }
         if (out.items.len == 0) return;
         for (self.clients.items) |c| {
@@ -1022,6 +1035,10 @@ pub const Server = struct {
             var name_buf: [64]u8 = undefined;
             var name: []const u8 = "shell";
             if (self.pane(w.focused)) |p| {
+                // fgName, not title: shell prompts stamp titles at
+                // every prompt and go stale while apps run — the
+                // foreground program is the truth. The title still
+                // reaches the outer window via mirrorKitty.
                 if (p.fgName(&name_buf)) |fg| name = fg;
             }
             var chip: [96]u8 = undefined;

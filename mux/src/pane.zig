@@ -258,6 +258,17 @@ pub const Pane = struct {
         s.select(.init(anchor, pb, false)) catch {};
     }
 
+    /// The pane's window title (OSC 0/2), copied out; empty when the
+    /// program never set one. The Terminal stores it; we just read.
+    pub fn title(self: *Pane, buf: []u8) []const u8 {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        const t = std.mem.sliceTo(self.term.title.items, 0);
+        const n = @min(t.len, buf.len);
+        @memcpy(buf[0..n], t[0..n]);
+        return buf[0..n];
+    }
+
     pub fn hasSelection(self: *Pane) bool {
         os_unfair_lock_lock(&self.lock);
         defer os_unfair_lock_unlock(&self.lock);
