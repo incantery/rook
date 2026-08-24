@@ -141,3 +141,33 @@ Each ask lands with a corresponding branch in that test.
 - No change to the `rook` CLI verbs. Everything here is socket-level.
 - Nothing that waits on a client: every reply is fire-and-forget from
   the server's side, per the "rook paints, plugins supply" rule.
+
+## Addendum (2026-08-24, after the reply): `program` for Claude Code
+
+`fgName` names a versioned binary by the directory above it, but
+Claude Code's layout is `~/.local/share/claude/versions/2.1.241`, so
+the answer is `versions`. One more step up when the parent is itself
+a bare `versions`/`bin`-style word would give `claude`. Vera treats
+`versions` as Claude Code in the meantime.
+
+## Addendum (2026-08-24, evening): there is one command, and it is `rook`
+
+Decided earlier today: the product is `rook` — one command people type,
+one daemon (`rookd`). The Zig engine is an implementation detail. Two
+places still say otherwise:
+
+1. **The engine binary is on `$PATH` as `rook-mux`.** `make install`
+   puts it in `~/.local/bin`, so it is typeable, and people (and
+   agents, and Vera's author today) type it. Ask: install it off the
+   path — `~/.local/libexec/rook/engine` or beside the `rook` binary
+   under a name nobody would type — and have `rook` (execMux) and
+   `rookd` (muxPath) find it there. `ROOK_MUX_SOCK` / `ROOK_MUX_PANE`
+   are env names on the wire and can stay.
+2. **`mux/README.md` and `docs/surfaces.md` call it `rook-mux`** in
+   prose and examples (`rook-mux side -`). The `vera-eac97655` branch
+   already moved the verbs to the umbrella (`rook side`, `rook state`,
+   `rook watch`, `rook capture`); the docs should follow — "the
+   engine" in prose, `rook <verb>` in examples.
+
+Vera has no mention of `rook-mux` in code or docs and speaks only to
+the socket, so nothing on its side changes.
