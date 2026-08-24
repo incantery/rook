@@ -146,6 +146,17 @@ pub const Server = struct {
     scrolling: bool = false,
     scur: struct { x: u16, y: u16 } = .{ .x = 0, .y = 0 },
     selecting: bool = false,
+    /// Where the composed cursor last landed on the glass. A bare
+    /// cursor move (backspace over trailing blanks emits a lone \b, so
+    /// no cell changes) must still ship a frame, or the cursor freezes
+    /// until the next content change. Row-dirty alone misses this.
+    last_cursor: ?struct { id: u32, x: u16, y: u16, vis: bool } = null,
+    /// After a resize the app repaints on SIGWINCH over the next few
+    /// ms; that repaint can land in a frame gap or dirty no new cells,
+    /// leaving the glass showing the pre-repaint reflow until the next
+    /// keypress. A deferred full repaint flushes the settled result.
+    /// 0 = none; else the ms deadline to force `full`.
+    refresh_at: i64 = 0,
     lat: Lat = .{},
     frames_sent: u64 = 0,
     bytes_sent: u64 = 0,
@@ -222,7 +233,11 @@ pub const Server = struct {
         } else |_| {}
 
         self.frame.accent = self.conf.accent;
-        if (!try self.restoreState()) _ = try self.newSession("main", null);
+        // Resurrect only when asked ([mux] restore = true); otherwise a
+        // fresh boot opens a clean workspace instead of last session's
+        // splits. The state file is still saved, so opting in restores.
+        const restored = self.conf.restore and try self.restoreState();
+        if (!restored) _ = try self.newSession("main", null);
         try self.loop();
     }
 
@@ -514,6 +529,9 @@ pub const Server = struct {
         self.pending = true;
         self.state_dirty = true;
         self.blocks_check_ms = 0; // push the new table promptly
+        // and a follow-up clean repaint once the apps' SIGWINCH redraws
+        // have landed, so a resize never leaves the glass half-updated
+        self.refresh_at = nowMs() + 120;
     }
 
     // ---- the loop ----
@@ -535,10 +553,15 @@ pub const Server = struct {
             for (self.panes.items) |pn| {
                 if (pn.pendingIn()) try fds.append(self.gpa, .{ .fd = pn.pty.master, .events = ptypkg.POLLOUT });
             }
-            const timeout: c_int = if (self.pending)
+            var timeout: c_int = if (self.pending)
                 @intCast(@max(0, frame_gap_ms - (nowMs() - last_frame)))
             else
                 1000;
+            // wake in time to fire a pending post-resize refresh
+            if (self.refresh_at != 0) {
+                const dt = self.refresh_at - nowMs();
+                timeout = @intCast(std.math.clamp(dt, 0, timeout));
+            }
             const n = ptypkg.pollMany(fds.items.ptr, @intCast(fds.items.len), timeout);
             if (n < 0) continue;
 
@@ -586,6 +609,14 @@ pub const Server = struct {
             try self.reap();
             self.forwardTees();
             if (self.sessions.items.len == 0 or self.shutdown) return;
+
+            // a resize's SIGWINCH repaint has had time to arrive: force
+            // one clean full frame so the settled result is always shown
+            if (self.refresh_at != 0 and nowMs() >= self.refresh_at) {
+                self.refresh_at = 0;
+                self.full = true;
+                self.pending = true;
+            }
 
             if (self.pending and nowMs() - last_frame >= frame_gap_ms) {
                 try self.redraw();
@@ -1063,10 +1094,14 @@ pub const Server = struct {
                 continue;
             }
             // A lone Ctrl-h/j/k/l is pane navigation, vim-tmux-navigator
-            // style: vim and friends own the key (vim's plugin hands the
-            // edge move back via `rook-mux nav`); everywhere else the mux
-            // moves focus, and the key falls through to the pane when
-            // there is nowhere to go — C-l still clears a lone shell.
+            // style: it moves focus (crossing the pin-rail seam too,
+            // since the rail is in `placed`), and falls through to the
+            // pane when there is nowhere to go — so C-l still clears a
+            // rightmost shell, C-j still accepts a line with no pane
+            // below. vim and friends own the keys (nav_owners): the
+            // plugin hands edge moves back via `rook-mux nav`. Real
+            // backspace is 0x7f, unaffected; only a literal Ctrl-H
+            // (0x08) is spent on navigation when a left neighbor exists.
             if (bytes.len == 1 and self.popup == null) {
                 if (ctrlNavDir(rest[0])) |dir| {
                     if (!self.fgOwnsCtrlNav() and self.navigate(dir)) {
@@ -1601,6 +1636,22 @@ pub const Server = struct {
             p.snapshot() catch {};
             p.rs.dirty = .false;
         }
+        // A bare cursor move dirties no cell (zsh emits a lone \b when
+        // backspacing over trailing blanks; a trailing space can land
+        // the same way), so row-dirty misses it and the cursor freezes
+        // on the glass until the next content change. Ship when the
+        // focused cursor moved, too.
+        var cur_now: @TypeOf(self.last_cursor) = null;
+        if (self.pane(self.focusedId())) |p| {
+            const vis = p.rs.cursor.visible;
+            if (p.rs.cursor.viewport) |v| {
+                cur_now = .{ .id = self.focusedId(), .x = v.x, .y = v.y, .vis = vis };
+            } else {
+                cur_now = .{ .id = self.focusedId(), .x = 0, .y = 0, .vis = vis };
+            }
+        }
+        if (!std.meta.eql(self.last_cursor, cur_now)) any_dirty = true;
+        self.last_cursor = cur_now;
         // OSC 52 from any visible pane goes straight to the glass; the
         // client is dumb, so it rides the draw channel as raw bytes.
         self.forwardClips();

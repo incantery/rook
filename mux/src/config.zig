@@ -4,6 +4,7 @@
 //!   nav_owners = ["nvim", "fzf"]   # programs that keep Ctrl-hjkl
 //!   scrollback_mb = 4
 //!   accent = "yellow"              # border/popup color
+//!   restore = true                 # resurrect last layout on boot (default off)
 const std = @import("std");
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
@@ -44,6 +45,9 @@ pub const Mux = struct {
     owners_len: usize = 0,
     scrollback_bytes: usize = 4 * 1024 * 1024,
     accent: u8 = 33, // SGR fg: yellow
+    /// Resurrect the last saved layout on server boot. Off by default:
+    /// a fresh `rook` opens a clean workspace, not last session's splits.
+    restore: bool = false,
 
     pub fn ownersSlice(self: *const Mux) []const u8 {
         return self.owners[0..self.owners_len];
@@ -83,6 +87,9 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
             out.scrollback_bytes = clamped * 1024 * 1024;
         } else if (std.mem.eql(u8, key, "accent")) {
             out.accent = accentCode(std.mem.trim(u8, val, "\"'")) orelse out.accent;
+        } else if (std.mem.eql(u8, key, "restore")) {
+            const v = std.mem.trim(u8, val, "\"'");
+            out.restore = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
         } else if (std.mem.eql(u8, key, "nav_owners")) {
             // ["a", "b"] → a\nb
             out.owners_len = 0;
@@ -130,6 +137,12 @@ test "parseMux" {
     try std.testing.expectEqual(@as(u8, 33), d.accent); // wrong section: ignored
     parseMux("[mux]\naccent = \"bright-blue\"\n", &d);
     try std.testing.expectEqual(@as(u8, 94), d.accent);
+    var r: Mux = .{};
+    try std.testing.expectEqual(false, r.restore); // default off
+    parseMux("[mux]\nrestore = true\n", &r);
+    try std.testing.expectEqual(true, r.restore);
+    parseMux("[mux]\nrestore = false\n", &r);
+    try std.testing.expectEqual(false, r.restore);
 }
 
 test "parsePrefix" {
