@@ -154,6 +154,94 @@ fn stateFeed(gpa: std.mem.Allocator, sock_path: []const u8, subscribe: bool) !vo
     return error.Timeout;
 }
 
+/// Push side-panel models: one `items.push` frame per line of stdin,
+/// each sent the moment its line completes. A producer is a program
+/// that keeps writing lines — `my-producer | rook-mux side -` is a
+/// live rail, not a one-shot — so nothing here waits for EOF before
+/// the first frame lands.
+///
+/// The server answers each frame with a serial, or with the reason it
+/// refused one: a producer that pushes into the void and is told
+/// nothing debugs by squinting at a rail. Read-your-writes on the last
+/// frame is printed at EOF, and only when stdout is not a terminal —
+/// the rule every other command follows.
+pub fn sidePush(gpa: std.mem.Allocator, sock_path: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    _ = ptypkg.setNonblockFd(sock); // writeAllFd still writes it all
+
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(gpa);
+
+    var sent: usize = 0;
+    var acked: usize = 0;
+    var serial: u64 = 0;
+
+    // Replies as they turn up. False means the server hung up.
+    const Sink = struct {
+        fn drain(rd: *proto.Reader, fd: ptypkg.fd_t, n_acked: *usize, last: *u64) !bool {
+            if (!rd.fill(fd)) return false;
+            while (rd.next()) |msg| {
+                defer rd.consume();
+                switch (msg.kind) {
+                    @intFromEnum(proto.s2c.ack) => {
+                        if (msg.payload.len >= 8) last.* = std.mem.readInt(u64, msg.payload[0..8], .little);
+                        n_acked.* += 1;
+                    },
+                    @intFromEnum(proto.s2c.text) => {
+                        _ = ptypkg.writeAllFd(2, "rook-mux: ");
+                        _ = ptypkg.writeAllFd(2, msg.payload);
+                        return error.PushRejected;
+                    },
+                    else => {},
+                }
+            }
+            return true;
+        }
+    };
+
+    var chunk: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = ptypkg.readNb(0, &chunk); // stdin is blocking: this waits
+        if (n <= 0) break; // EOF (or a read error, which reads the same here)
+        try pending.appendSlice(gpa, chunk[0..@intCast(n)]);
+        while (std.mem.indexOfScalar(u8, pending.items, '\n')) |nl| {
+            const line = std.mem.trim(u8, pending.items[0..nl], " \t\r");
+            if (line.len > 0) {
+                try proto.write(sock, @intFromEnum(proto.c2s.side), line);
+                sent += 1;
+            }
+            const rest = pending.items.len - (nl + 1);
+            std.mem.copyForwards(u8, pending.items[0..rest], pending.items[nl + 1 ..]);
+            pending.shrinkRetainingCapacity(rest);
+        }
+        if (!try Sink.drain(&reader, sock, &acked, &serial)) return error.ServerGone;
+    }
+    // a last line with no newline behind it
+    const tail = std.mem.trim(u8, pending.items, " \t\r");
+    if (tail.len > 0) {
+        try proto.write(sock, @intFromEnum(proto.c2s.side), tail);
+        sent += 1;
+    }
+    if (sent == 0) return error.NoFrames;
+
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (acked < sent and waited < 2000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!try Sink.drain(&reader, sock, &acked, &serial)) return error.ServerGone;
+    }
+    if (acked < sent) return error.Timeout;
+    if (isatty(1) == 0) {
+        var b: [64]u8 = undefined;
+        const line = std.fmt.bufPrint(&b, "{{\"ok\":true,\"serial\":{d}}}\n", .{serial}) catch return;
+        _ = ptypkg.writeAllFd(1, line);
+    }
+}
+
 /// One-shot: print a pane's viewport as plain text.
 pub fn capture(gpa: std.mem.Allocator, sock_path: []const u8, id: u32) !void {
     const sock = ptypkg.unixConnect(sock_path);

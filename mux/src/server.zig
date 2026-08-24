@@ -152,7 +152,9 @@ pub const Server = struct {
     /// the mux draws itself, so it costs no pty and survives every
     /// window and workspace switch. `side_w` is its width in the
     /// current layout, null when it is off or the glass is too narrow.
-    side: chromepkg.Model = chromepkg.placeholder,
+    /// What it *says* is pushed in from outside (`c2s.side`); the mux
+    /// holds the last model per surface and paints it.
+    side: chromepkg.Feed,
     side_on: bool = true,
     side_w: ?u16 = null,
     next_id: u32 = 1,
@@ -267,6 +269,7 @@ pub const Server = struct {
             .wake_r = pipefds[0],
             .wake_w = pipefds[1],
             .frame = renderpkg.Frame.init(gpa),
+            .side = chromepkg.Feed.init(gpa),
             .shell = shell,
             .cwd = cwd,
             .started_ms = nowMs(),
@@ -315,6 +318,7 @@ pub const Server = struct {
         self.sessions.deinit(self.gpa);
         self.global_pins.deinit(self.gpa);
         self.frame.deinit();
+        self.side.deinit();
         self.placed.deinit(self.gpa);
         self.blocks_last.deinit(self.gpa);
         self.state_json.deinit(self.gpa);
@@ -865,6 +869,7 @@ pub const Server = struct {
                 },
                 @intFromEnum(proto.c2s.blocks) => self.sendBlocks(c),
                 @intFromEnum(proto.c2s.state) => self.sendState(c, msg.payload),
+                @intFromEnum(proto.c2s.side) => self.sidePush(c, msg.payload),
                 @intFromEnum(proto.c2s.capture) => {
                     // [id u32] → the pane's viewport as plain text.
                     if (msg.payload.len >= 4) {
@@ -1036,6 +1041,32 @@ pub const Server = struct {
         var b: [8]u8 = undefined;
         std.mem.writeInt(u64, &b, self.serial, .little);
         self.sendTo(c, @intFromEnum(proto.s2c.ack), &b);
+    }
+
+    /// An `items.push` frame: one side-panel surface's model, pushed
+    /// in from outside. Rook paints what it is given and decides
+    /// nothing about what it says. A frame rook cannot use changes
+    /// nothing on the glass and is answered with the reason — a
+    /// producer with a typo should hear about it, not watch a rail go
+    /// quietly stale.
+    fn sidePush(self: *Server, c: *Client, payload: []const u8) void {
+        _ = self.side.push(payload) catch |e| {
+            var b: [96]u8 = undefined;
+            const why = std.fmt.bufPrint(&b, "side push rejected: {s}\n", .{@errorName(e)}) catch
+                "side push rejected\n";
+            self.sendTo(c, @intFromEnum(proto.s2c.text), why);
+            return;
+        };
+        _ = self.touch();
+        // Chrome only repaints on a full frame, and nothing else about
+        // this change dirties a row — but a rail that is folded away
+        // is not on the glass, and a producer pushing at its own
+        // cadence must not cost a full repaint each time.
+        if (self.side_w != null) {
+            self.full = true;
+            self.pending = true;
+        }
+        self.ack(c);
     }
 
     /// `state` request: [flags u8, 1 = subscribe]. Always replies with
@@ -1475,18 +1506,22 @@ pub const Server = struct {
         }
     }
 
-    /// A click in the side panel selects the row under it. Selection
-    /// is all it does today: nothing is wired behind the rows yet, and
-    /// a demo that cannot move its own highlight is not a demo.
+    /// A click in the side panel moves that panel's cursor. Motion is
+    /// rook's; what a row *means* belongs to whoever pushed it, and
+    /// the next push takes the highlight back — so this stays a
+    /// cursor, not rook holding a producer's selection state. The
+    /// click itself will be forwarded when there is a producer to
+    /// forward it to (docs/surfaces.md).
     fn clickSide(self: *Server, cy: u16) void {
         const g = self.geometry();
         const split = chromepkg.splitRow(g.rows);
         if (cy == split) return; // the seam between the panels
-        const panel = if (cy < split) &self.side.spaces else &self.side.agents;
+        const which: chromepkg.Surface = if (cy < split) .spaces else .agents;
+        const m = self.side.model();
+        const panel = if (cy < split) m.spaces else m.agents;
         const rel = if (cy < split) cy else cy - (split + 1);
-        const i = chromepkg.hit(panel.*, rel) orelse return;
-        if (panel.cur != null and panel.cur.? == i) return;
-        panel.cur = i;
+        const i = chromepkg.hit(panel, rel) orelse return;
+        if (!self.side.moveCursor(which, i)) return;
         self.full = true;
         self.pending = true;
     }
@@ -1910,7 +1945,7 @@ pub const Server = struct {
         const chrome: renderpkg.Chrome = .{
             .tabbar = tabbar,
             .tab_x = self.tab_x,
-            .side = if (self.side_w) |sw| .{ .model = self.side, .w = sw } else null,
+            .side = if (self.side_w) |sw| .{ .model = self.side.model(), .w = sw } else null,
             .dock_x = self.dock_x,
             .dock_top = self.dock_top,
         };

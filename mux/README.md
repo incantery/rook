@@ -112,15 +112,39 @@ nothing but columns. Clicking a row moves that panel's highlight;
 prefix-a folds the panel away, and it folds itself away on glass under
 100 columns rather than crowd the work.
 
-The model is `chrome.placeholder` today — the herdr design, cell for
-cell, so the thing can be demoed and dialed in before there is a feed
-behind it. Wiring real spaces and agents in means filling that model,
-not touching the painter.
+Nothing inside the mux decides what it says. The model is pushed in
+from outside, one JSON frame per line, in the list shape of the plugin
+protocol (`docs/surfaces.md`):
+
+    rook-mux side demo | rook-mux side -     # the herdr design, as frames
+    my-producer | rook-mux side -            # the real thing
+
+    {"v":1,"op":"items.push","params":{"surface":"spaces","items":[
+      {"id":"herdr","title":"herdr","subtitle":"master","state":"working"},
+      {"id":"web-dashboard","title":"web-dashboard","subtitle":"feat/usage-charts",
+       "state":"blocked","current":true}]}}
+
+`surface` is `spaces` or `agents`; a frame replaces that panel whole.
+An item is `title` (or `id`), `subtitle`, `state` and `current`. Rook
+owns the palette, so a model names a *state* and never a color:
+`working`, `idle`, `blocked`, `done`, `failed` pick the dot, its shape
+and the subtitle's color, and a name rook does not know draws a plain
+row rather than costing the frame. A panel-level `title` and `note`
+override the header. Unknown keys are ignored, an item without a name
+is dropped, and a frame rook cannot use changes nothing on the glass
+and answers with the reason — `rook-mux side -` prints
+`{"ok":true,"serial":N}` for a frame it took and the refusal on stderr
+for one it did not. Until something pushes, a panel says so.
+
+The last frame pushed to each surface comes back out of the state feed
+verbatim, under `surfaces[].model`, so a second glass can draw the same
+rail without talking to the producer.
 
 ## Shape
 
 - `chrome.zig` — the palette (Catppuccin Mocha) and the side panel:
-  every cell that is not a pane
+  every cell that is not a pane, plus `Feed`, which holds the last
+  model pushed to each surface and owns its bytes
 - `pane.zig` — pty + vt.Terminal + reader thread (pre-tmux Session,
   cut to the bone; the two-stage read pipeline returns when a
   benchmark asks for it)

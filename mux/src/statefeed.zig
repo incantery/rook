@@ -153,9 +153,32 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
     }
     out.appendSlice(gpa, "]") catch return;
 
+    // The side rail is two surfaces sharing one left dock. Each
+    // republishes the last model pushed to it *verbatim*: rook is
+    // already holding those bytes because it paints them, it never
+    // interprets them, and a second glass can render the rail without
+    // talking to whoever produced it.
     out.appendSlice(gpa, ",\"surfaces\":[") catch return;
-    if (sv.side_w) |w| {
-        out.print(gpa, "{{\"name\":\"side\",\"place\":\"dock:left\",\"size\":{d},\"shown\":true}}", .{w}) catch return;
+    const rail = [_]struct { name: []const u8, raw: []const u8 }{
+        .{ .name = "spaces", .raw = sv.side.spaces.raw },
+        .{ .name = "agents", .raw = sv.side.agents.raw },
+    };
+    for (rail, 0..) |sf, i| {
+        if (i > 0) out.append(gpa, ',') catch return;
+        out.appendSlice(gpa, "{\"name\":") catch return;
+        str(gpa, out, sf.name);
+        out.print(gpa, ",\"place\":\"dock:left\",\"size\":{d},\"shown\":{s},\"model\":", .{
+            sv.side_w orelse sv.conf.sidebar_width,
+            boolStr(sv.side_w != null),
+        }) catch return;
+        // A stored frame is one line of valid JSON — that is checked
+        // when it is taken — so it embeds as-is.
+        if (sf.raw.len > 0) {
+            out.appendSlice(gpa, sf.raw) catch return;
+        } else {
+            out.appendSlice(gpa, "null") catch return;
+        }
+        out.append(gpa, '}') catch return;
     }
     out.appendSlice(gpa, "]") catch return;
 

@@ -1,8 +1,11 @@
 # Surfaces and state — the plugin seam
 
 > Status: the **state feed (out) is built and shipping** — see the
-> section below and `statefeed.zig`. Surfaces and the plugin protocol
-> (in) are still design. What *does*
+> section below and `statefeed.zig`. Of the plugin protocol (in), one
+> frame is built: **`items.push`**, which is what feeds the side rail
+> — the mux no longer holds any opinion about what that rail says.
+> Declared surfaces, placement, focus and plugin *processes* are still
+> design. What *does*
 > exist is inventoried in [What is real today](#what-is-real-today),
 > and most of this document is the recovery of vocabulary that already
 > existed once — `docs/config.sample.toml`, `docs/man/rook-plugin.7`
@@ -214,13 +217,21 @@ specifies:
   `items.list` reply, unsolicited. Today rook asks and the plugin
   answers; a live rail needs the plugin to volunteer. This is the frame
   that makes the "rook never waits" rule cheap instead of merely
-  possible.
+  possible. **Built** — `chrome.Feed`, one frame per line into
+  `rook-mux side -`, answered with a serial or with the reason it was
+  refused. It arrives over the mux socket rather than a plugin's
+  stdout, because there are no plugin processes yet; the frame is the
+  same one either way, so growing a runner does not move the seam.
 - **Surface addressing.** A plugin serving two rails (`herdr#spaces`,
   `herdr#agents`) needs a `surface` field on `items.list` params and on
-  `items.push`.
+  `items.push`. **Built**, for the two the rail is made of: a frame
+  names `spaces` or `agents` and replaces that panel whole.
 - **Selection is the plugin's.** Rook moves a cursor; it holds no
   opinion about what is *selected*. The highlight arrives in the pushed
-  model. (This is a correction, not a refinement — see below.)
+  model. (This is a correction, not a refinement — see below.) **Built
+  halfway**: `current` on an item is the highlight, and the next push
+  takes it back from a click. The click itself is still not forwarded,
+  because there is nothing to forward it to.
 
 **One process per plugin, serving many surfaces.** `herdr#spaces` and
 `herdr#agents` are one `herdr` process; requests carry a `surface`
@@ -303,7 +314,12 @@ still exact. Deltas would force unbounded buffering or a disconnect.
   ],
 
   "pins": [{"pane": 12, "scope": "global"}],
-  "surfaces": [{"name": "side", "place": "dock:left", "size": 30, "shown": true}],
+  "surfaces": [
+    {"name": "spaces", "place": "dock:left", "size": 30, "shown": true,
+     "model": {"v": 1, "op": "items.push", "params": {"surface": "spaces", "items": [
+       {"id": "herdr", "title": "herdr", "subtitle": "master", "state": "working"}]}}},
+    {"name": "agents", "place": "dock:left", "size": 30, "shown": true, "model": null}
+  ],
   "clients": [{"cols": 180, "rows": 45, "attached": true, "block": 0}]
 }
 ```
@@ -332,12 +348,13 @@ leave out anything that would make the diff see itself:
 Structural change — anything a command did — still pushes on the next
 50 ms turn, and idle is silent.
 
-When surfaces land, each will publish the last model pushed to it,
-verbatim and opaque —
-never merged into rook's own state, never interpreted. Rook is already
-holding those items because it paints them, so this costs no storage,
-and it is what lets a second glass (the browser client, the phone)
-render the rail without talking to any plugin itself.
+Each surface publishes the last model pushed to it, verbatim and
+opaque — never merged into rook's own state, never interpreted. Rook is
+already holding those bytes because it paints them, so this costs no
+storage, and it is what lets a second glass (the browser client, the
+phone) render the rail without talking to any plugin itself. Built:
+`surfaces[]` carries one entry per rail surface, each with the frame it
+was last given under `model` (null until something pushes).
 
 `epoch` is a boot id and `serial` a monotonic counter. Both are
 load-bearing:
@@ -377,7 +394,7 @@ Honest inventory, so this document is not mistaken for a description.
 | piece | state |
 |---|---|
 | `chrome.zig` palette + list painter | real; the painter is roughly the `items` renderer |
-| `chrome.placeholder` | **content inside the multiplexer** — the thing this design exists to remove |
+| `chrome.Feed` + `c2s.side` / `rook-mux side` | **built** — the rail's content comes from outside; `chrome.placeholder` is gone, and its model survives as `demo_frames`, two `items.push` frames |
 | `tabBar()` | real, hardcoded: chips, order, the `+`, where hints ride |
 | pins | real; a `pty` surface with `place` hardcoded to `dock:left` |
 | `navigate()` over `self.placed` | real; the `focus = "nav"` mechanism, unused by surfaces |
@@ -385,8 +402,8 @@ Honest inventory, so this document is not mistaken for a description.
 | block table push | real; superseded by the state feed, kept for the web client |
 | `rook-mux state` / `watch` / `capture` | **built** |
 | `s2c.ack`, quiet `session 'N'`, `block_created` on new | **built** |
-| plugin protocol v1 | specified in `rook-plugin(7)` at `425c0f8^`, never implemented in the mux |
-| surfaces, `items.push`, state feed | none of it |
+| plugin protocol v1 | specified in `rook-plugin(7)` at `425c0f8^`; `items.push` implemented, the rest not |
+| surfaces (declared, placed, focusable), plugin processes | none of it |
 
 Two consequences worth naming:
 
@@ -395,11 +412,14 @@ Two consequences worth naming:
 workspace-local becomes a `scope` on the declaration. That deletes a
 concept rather than adding one.
 
-**`clickSide` is wrong** and should not be built on. It mutates
+**`clickSide` was wrong** and is now half-right. It moved
 `self.side.spaces.cur` — rook holding a plugin's selection state,
-exactly the merge this design forbids. The correct shape forwards the
-click and the plugin pushes back a model with the highlight already in
-it.
+exactly the merge this design forbids. It now moves a *cursor* over a
+pushed model, and the next push takes the highlight back, so the two
+never disagree for longer than one frame. The correct shape still
+forwards the click and lets the producer push back a model with the
+highlight already in it; that needs a back-channel to a producer, and
+there is no producer process yet.
 
 ## Decisions taken
 
