@@ -1,13 +1,23 @@
-# rook-mux
+# The engine
 
 The multiplexer, owned: ptys + ghostty-vt in-process + a server that
 outlives the terminal. This is the "own it all" line — tmux is no
 longer underneath, it is the reference implementation we benchmark
 against.
 
-    make                            # ReleaseSafe; a Debug build lags in vim
-    ./zig-out/bin/rook-mux          # attach; boots the server if needed
-    ./zig-out/bin/rook-mux server   # foreground server
+There is one command, and it is `rook`. This directory builds the Zig
+engine behind it — installed off `$PATH` at
+`~/.local/libexec/rook/engine`, found there by `rook` and `rookd`, and
+never typed. Every verb below is spelled the way a person types it,
+through the front door; the engine's own argv is identical.
+
+    make                       # ReleaseSafe; a Debug build lags in vim
+    make install               # → ~/.local/libexec/rook/engine
+    rook                       # attach; boots the server if needed
+    rook server                # foreground server
+
+    ./zig-out/bin/engine       # a build you have not installed…
+    ROOK_ENGINE=$PWD/zig-out/bin/engine rook ls   # …behind the front door
 
 The prefix comes from `~/.config/rook/rook.toml` (`[tmux] prefix`),
 C-b when unset; double-tap types it literally. A `[mux]` section adds
@@ -24,14 +34,14 @@ for the side panel. Then:
     x          kill pane                   d        detach
     a          toggle the side panel
 
-Workspaces: `rook-mux ls`, `rook-mux new <name>`, `rook-mux switch
-<name>` — named sessions in one server, each with its own windows;
-prefix-s opens an fzf picker in a popup. The status line reads
-`♜ <workspace> (n)  1:nvim* ...`. `rook-mux popup <cmd>` floats a command over the current window —
+Workspaces: `rook ls`, `rook new <name>`, `rook switch <name>` —
+named sessions in one server, each with its own windows; prefix-s
+opens an fzf picker in a popup. The status line reads
+`♜ <workspace> (n)  1:nvim* ...`. `rook popup <cmd>` floats a command over the current window —
 all input goes to it, it closes when the process exits (fzf pickers,
-lazygit, rook's Go tools). `rook-mux stats` prints input→frame
-p50/p99, frames, bytes. `rook-mux
-kill` shuts the server down politely (HUPs every pane). `rook-mux nav
+lazygit, rook's Go tools). `rook stats` prints input→frame
+p50/p99, frames, bytes. `rook
+kill` shuts the server down politely (HUPs every pane). `rook nav
 h|j|k|l` moves pane focus from the command line — it exists for
 editors to call at their window edges.
 
@@ -39,10 +49,11 @@ editors to call at their window edges.
 
 A bare Ctrl-h/j/k/l (no prefix) moves pane focus, vim-tmux-navigator
 style. When the focused pane runs vim/nvim/fzf the key is forwarded —
-those programs own it — and `nvim/plugin/rook-mux-navigator.lua` (in
+those programs own it — and `nvim/plugin/rook-navigator.lua` (in
 this repo; point your plugin manager at `mux/nvim`, gated on
-`$ROOK_MUX_PANE`) makes nvim move between its own windows first and
-call `rook-mux nav <dir>` when a move hits its edge. When navigation
+`$ROOK_MUX_PANE`, an env name on the wire that stays as it is) makes
+nvim move between its own windows first and call `rook nav <dir>` when
+a move hits its edge. When navigation
 has nowhere to go the key falls through to the pane, so Ctrl-l still
 clears a lone shell. Panes are scrubbed of outer-mux identity
 (`TMUX`, `HERDR_PANE_ID`) so editor plugins pick the right navigator.
@@ -71,12 +82,12 @@ system clipboard. Not yet: session persistence across server restart.
 
 ## The state feed
 
-rook-mux is the single writer of its own state and publishes it, so
+The engine is the single writer of its own state and publishes it, so
 anything else can hold an exact replica and never has to poll:
 
-    rook-mux state        # the snapshot, one line of JSON
-    rook-mux watch        # the snapshot, then one line per change
-    rook-mux capture <id> # one pane's viewport as plain text
+    rook state        # the snapshot, one line of JSON
+    rook watch        # the snapshot, then one line per change
+    rook capture <id> # one pane's viewport as plain text
 
 `watch` sends the full snapshot as its first line, so a consumer in any
 language is spawn-read-lines-parse — no polling, no file watching, no
@@ -86,9 +97,9 @@ an older snapshot for a newer one is always correct, which is how a
 slow reader can never stall the poll loop.
 
 `epoch` identifies the server across restarts (reconnect across a
-`rook-mux kill` and you must discard, not merge); `serial` orders
+`rook kill` and you must discard, not merge); `serial` orders
 changes, and mutating commands answer with the serial they produced —
-`rook-mux switch foo | cat` prints `{"ok":true,"serial":N}`. Wait for
+`rook switch foo | cat` prints `{"ok":true,"serial":N}`. Wait for
 `serial >= n`, never `== n`.
 
 Change is detected by diffing snapshots, on two cadences. Structural
@@ -97,7 +108,7 @@ the per-pane `lastOutputMs` — is looked at every 2 s, because a shell
 loop respawns its child faster than the poll floor and diffing on it
 pushed 118 snapshots in 6 s where the split pushes 5. Idle is silent.
 
-`rook-mux new -q <name>` creates a workspace **without** moving the
+`rook new -q <name>` creates a workspace **without** moving the
 person to it — starting work on your behalf must not pull the desk —
 and both forms answer with the block they made. Design and the rest of
 the plan: `docs/surfaces.md`.

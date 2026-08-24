@@ -1,18 +1,19 @@
 // Command rook is the front door to the rook multiplexer. Bare `rook`
 // attaches (rookd keeps the server alive; attach boots one if needed).
-// Mux verbs pass straight through to the Zig engine (rook-mux), which
-// is an implementation detail users never type. Worktrees and the web
-// URL live here in the Go layer.
+// Mux verbs pass straight through to the Zig engine, which lives off
+// $PATH and is an implementation detail users never type. Worktrees
+// and the web URL live here in the Go layer.
 package main
 
 import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/incantery/rook/internal/mux"
 )
 
 // Build metadata, stamped by the linker at release time.
@@ -95,14 +96,11 @@ func main() {
 
 // execMux replaces this process with the Zig engine.
 func execMux(args []string) {
-	bin, err := exec.LookPath("rook-mux")
-	if err != nil {
-		home, _ := os.UserHomeDir()
-		bin = filepath.Join(home, ".local", "bin", "rook-mux")
-	}
-	argv := append([]string{"rook-mux"}, args...)
+	bin := mux.EnginePath()
+	argv := append([]string{filepath.Base(bin)}, args...)
 	if err := syscall.Exec(bin, argv, os.Environ()); err != nil {
-		fmt.Fprintln(os.Stderr, "rook: cannot exec rook-mux:", err)
+		fmt.Fprintf(os.Stderr, "rook: cannot exec the engine at %s: %v\n"+
+			"    install it with `make -C mux install`, or point %s at a build\n", bin, err, mux.EngineEnv)
 		os.Exit(1)
 	}
 }

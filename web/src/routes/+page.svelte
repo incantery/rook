@@ -295,7 +295,7 @@
           </button>
         </li>
       {:else}
-        <li class="px-3 py-4 text-sm text-zinc-500">no blocks — is rook-mux running?</li>
+        <li class="px-3 py-4 text-sm text-zinc-500">no blocks — is rook running?</li>
       {/each}
     </ul>
   </aside>

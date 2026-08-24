@@ -8,22 +8,13 @@ import (
 	"flag"
 	"log"
 	"net"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/incantery/rook/internal/mux"
 	"github.com/incantery/rook/internal/webd"
 )
-
-func muxPath() string {
-	if p, err := exec.LookPath("rook-mux"); err == nil {
-		return p
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "bin", "rook-mux")
-}
 
 func sockAlive(sock string) bool {
 	c, err := net.DialTimeout("unix", sock, 500*time.Millisecond)
@@ -46,7 +37,7 @@ func superviseMux(sock string) {
 			continue
 		}
 		log.Printf("mux server not answering on %s; starting one", sock)
-		cmd := exec.Command(muxPath(), "server")
+		cmd := exec.Command(mux.EnginePath(), "server")
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		started := time.Now()
 		if err := cmd.Start(); err != nil {
@@ -70,7 +61,7 @@ func superviseMux(sock string) {
 
 func main() {
 	addr := flag.String("addr", "0.0.0.0:7673", "web bridge listen address")
-	sock := flag.String("sock", webd.DefaultSock(), "rook-mux unix socket")
+	sock := flag.String("sock", webd.DefaultSock(), "engine unix socket")
 	dir := flag.String("dir", "", "static web client dir")
 	token := flag.String("token", "", "bearer token (default: persisted beside the socket)")
 	flag.Parse()

@@ -156,7 +156,7 @@ fn stateFeed(gpa: std.mem.Allocator, sock_path: []const u8, subscribe: bool) !vo
 
 /// Push side-panel models: one `items.push` frame per line of stdin,
 /// each sent the moment its line completes. A producer is a program
-/// that keeps writing lines — `my-producer | rook-mux side -` is a
+/// that keeps writing lines — `my-producer | rook side -` is a
 /// live rail, not a one-shot — so nothing here waits for EOF before
 /// the first frame lands.
 ///
@@ -192,7 +192,7 @@ pub fn sidePush(gpa: std.mem.Allocator, sock_path: []const u8) !void {
                         n_acked.* += 1;
                     },
                     @intFromEnum(proto.s2c.text) => {
-                        _ = ptypkg.writeAllFd(2, "rook-mux: ");
+                        _ = ptypkg.writeAllFd(2, "rook: ");
                         _ = ptypkg.writeAllFd(2, msg.payload);
                         return error.PushRejected;
                     },

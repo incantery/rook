@@ -1,6 +1,6 @@
-// Package mux is the Go layer's client for the rook-mux engine. The
-// CLI verbs are the stable interface; these are thin wrappers. Go
-// never holds state the server doesn't.
+// Package mux is the Go layer's client for the Zig engine. The CLI
+// verbs are the stable interface; these are thin wrappers. Go never
+// holds state the server doesn't.
 package mux
 
 import (
@@ -11,23 +11,70 @@ import (
 	"strings"
 )
 
-func bin() string {
-	if p, err := exec.LookPath("rook-mux"); err == nil {
-		return p
+// EngineEnv names an explicit engine binary, for a dev build you have
+// not installed: ROOK_ENGINE=mux/zig-out/bin/engine rook ls.
+const EngineEnv = "ROOK_ENGINE"
+
+// engineRel is where the engine lives relative to the directory the
+// rook binary is installed in: ~/.local/bin/rook → ~/.local/libexec/
+// rook/engine. Deliberately off $PATH — there is one command, and it
+// is rook; the engine is an implementation detail nobody types.
+var engineRel = []string{"..", "libexec", "rook", "engine"}
+
+// EnginePath locates the engine binary: $ROOK_ENGINE first, then
+// libexec beside whichever rook/rookd is running (symlinks resolved),
+// then the default under ~/.local. The last is returned even when
+// nothing is there, so the caller's exec reports the path it wanted.
+func EnginePath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = ""
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "bin", "rook-mux")
+	return enginePath(os.Getenv(EngineEnv), exe, home)
+}
+
+// enginePath is EnginePath with its three inputs handed in.
+func enginePath(env, exe, home string) string {
+	if env != "" {
+		return env
+	}
+	var dirs []string
+	if exe != "" {
+		dirs = append(dirs, filepath.Dir(exe))
+		if real, err := filepath.EvalSymlinks(exe); err == nil {
+			if d := filepath.Dir(real); d != dirs[0] {
+				dirs = append(dirs, d)
+			}
+		}
+	}
+	for _, d := range dirs {
+		if cand := beside(d); exists(cand) {
+			return cand
+		}
+	}
+	return beside(filepath.Join(home, ".local", "bin"))
+}
+
+// beside maps a bin directory to the engine under its libexec sibling.
+func beside(bindir string) string {
+	return filepath.Clean(filepath.Join(append([]string{bindir}, engineRel...)...))
+}
+
+func exists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
 }
 
 func run(args ...string) (string, error) {
-	out, err := exec.Command(bin(), args...).CombinedOutput()
+	out, err := exec.Command(EnginePath(), args...).CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("rook-mux %s: %v\n%s", strings.Join(args, " "), err, out)
+		return "", fmt.Errorf("engine %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out), nil
 }
 
-// Inside reports whether this process runs in a rook-mux pane.
+// Inside reports whether this process runs in a rook pane.
 func Inside() bool {
 	return os.Getenv("ROOK_MUX_PANE") != ""
 }

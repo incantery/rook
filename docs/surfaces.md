@@ -69,7 +69,7 @@ into another.
 A dock subtracts from everything downstream — splits, rails, other
 docks — in declaration order, so two left docks nest left-to-right. A
 `popup` floats centred and takes all input while it is up (what
-`rook-mux popup` does today). An `overlay` floats without taking input.
+`rook popup` does today). An `overlay` floats without taking input.
 `inline` puts the surface in the window's own split tree, where it
 resizes with `prefix-HJKL` like anything else.
 
@@ -254,8 +254,8 @@ replica and never has to ask.
 Two doors onto one schema:
 
 ```
-rook-mux state          # the snapshot, JSON, on stdout
-rook-mux watch          # newline-delimited JSON: snapshot first, then one per change
+rook state          # the snapshot, JSON, on stdout
+rook watch          # newline-delimited JSON: snapshot first, then one per change
 ```
 
 `watch` emitting the full snapshot as its **first line** is what makes
@@ -368,11 +368,11 @@ load-bearing:
 
 Mutating commands answer with `s2c.ack`, an 8-byte serial. The CLI
 prints it as JSON **only when stdout is not a terminal**, so a script
-gets read-your-writes while an interactive `… | fzf | xargs rook-mux
+gets read-your-writes while an interactive `… | fzf | xargs rook
 switch` inside a popup stays silent:
 
 ```
-$ rook-mux switch web-dashboard | cat
+$ rook switch web-dashboard | cat
 {"ok":true,"serial":413}
 ```
 
@@ -394,13 +394,13 @@ Honest inventory, so this document is not mistaken for a description.
 | piece | state |
 |---|---|
 | `chrome.zig` palette + list painter | real; the painter is roughly the `items` renderer |
-| `chrome.Feed` + `c2s.side` / `rook-mux side` | **built** — the rail's content comes from outside; `chrome.placeholder` is gone, and its model survives as `demo_frames`, two `items.push` frames |
+| `chrome.Feed` + `c2s.side` / `rook side` | **built** — the rail's content comes from outside; `chrome.placeholder` is gone, and its model survives as `demo_frames`, two `items.push` frames |
 | `tabBar()` | real, hardcoded: chips, order, the `+`, where hints ride |
 | pins | real; a `pty` surface with `place` hardcoded to `dock:left` |
 | `navigate()` over `self.placed` | real; the `focus = "nav"` mechanism, unused by surfaces |
 | `saveState` → `<sock>.state` | real; restore format, still private |
 | block table push | real; superseded by the state feed, kept for the web client |
-| `rook-mux state` / `watch` / `capture` | **built** |
+| `rook state` / `watch` / `capture` | **built** |
 | `s2c.ack`, quiet `session 'N'`, `block_created` on new | **built** |
 | plugin protocol v1 | specified in `rook-plugin(7)` at `425c0f8^`; `items.push` implemented, the rest not |
 | surfaces (declared, placed, focusable), plugin processes | none of it |

@@ -23,12 +23,12 @@ pub fn build(b: *std.Build) void {
     }
     exe_mod.link_libc = true;
 
-    const exe = b.addExecutable(.{ .name = "rook-mux", .root_module = exe_mod });
+    const exe = b.addExecutable(.{ .name = "engine", .root_module = exe_mod });
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| run_cmd.addArgs(args);
-    b.step("run", "Run rook-mux").dependOn(&run_cmd.step);
+    b.step("run", "Run the engine").dependOn(&run_cmd.step);
 
     const tests = b.addTest(.{ .root_module = exe_mod });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);

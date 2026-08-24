@@ -476,7 +476,7 @@ test "escalation reaches a foreground job in its own process group" {
     try expectGroupGone(groups.shell);
 }
 
-// ---- rook-mux additions: raw-fd helpers the server/client loops use ----
+// ---- engine additions: raw-fd helpers the server/client loops use ----
 
 pub fn setNonblockFd(fd: fd_t) bool {
     return setNonblock(fd);

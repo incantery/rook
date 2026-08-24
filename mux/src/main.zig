@@ -1,15 +1,17 @@
-//! rook-mux: a terminal multiplexer with ghostty-vt in-process.
-//!   rook-mux            attach (starting the server if needed)
-//!   rook-mux server     run the server in the foreground
-//!   rook-mux nav <dir>  move focus h/j/k/l (vim plugins call this at edges)
-//!   rook-mux popup <cmd> float a command over the current window
-//!   rook-mux ls / switch / new <name> [cwd] / close <name>   workspaces
-//!   rook-mux state / watch       the state feed: snapshot, or subscribe
-//!   rook-mux side [-]            push side-panel models (JSON frames on stdin)
-//!   rook-mux side demo           print the demo models, to pipe into the above
-//!   rook-mux blocks / raw <id>   block table; raw single-block attach
-//!   rook-mux capture <id>        one pane's viewport as plain text
-//!   rook-mux kill       stop the server
+//! The engine: a terminal multiplexer with ghostty-vt in-process.
+//! It is not on $PATH and nobody types it — `rook` execs it, verb and
+//! all, so the verbs read as the front door spells them:
+//!   rook                attach (starting the server if needed)
+//!   rook server         run the server in the foreground
+//!   rook nav <dir>      move focus h/j/k/l (vim plugins call this at edges)
+//!   rook popup <cmd>    float a command over the current window
+//!   rook ls / switch / new <name> [cwd] / close <name>   workspaces
+//!   rook state / watch       the state feed: snapshot, or subscribe
+//!   rook side [-]            push side-panel models (JSON frames on stdin)
+//!   rook side demo           print the demo models, to pipe into the above
+//!   rook blocks / raw <id>   block table; raw single-block attach
+//!   rook capture <id>        one pane's viewport as plain text
+//!   rook kill           stop the server
 const std = @import("std");
 const server = @import("server.zig");
 const chrome = @import("chrome.zig");
@@ -81,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
         const arg: []const u8 = if (argv.len > 2) std.mem.span(argv[2]) else "-";
         // `side demo` prints frames rather than sending any, so the
         // wire has a worked example you can read, edit and pipe back:
-        //     rook-mux side demo | rook-mux side -
+        //     rook side demo | rook side -
         if (std.mem.eql(u8, arg, "demo")) {
             for (chrome.demo_frames) |frame| {
                 _ = ptypkg.writeAllFd(1, frame);
@@ -90,7 +92,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
         if (!std.mem.eql(u8, arg, "-")) {
-            std.debug.print("usage: rook-mux side [-|demo]   (frames on stdin)\n", .{});
+            std.debug.print("usage: rook side [-|demo]   (frames on stdin)\n", .{});
             return error.BadArgs;
         }
         try client.sidePush(churn_gpa, path);
@@ -102,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "capture")) {
         if (argv.len < 3) {
-            std.debug.print("usage: rook-mux capture <block-id>\n", .{});
+            std.debug.print("usage: rook capture <block-id>\n", .{});
             return error.BadArgs;
         }
         const id = try std.fmt.parseInt(u32, std.mem.span(argv[2]), 10);
@@ -111,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "raw")) {
         if (argv.len < 3) {
-            std.debug.print("usage: rook-mux raw <block-id>\n", .{});
+            std.debug.print("usage: rook raw <block-id>\n", .{});
             return error.BadArgs;
         }
         const id = try std.fmt.parseInt(u32, std.mem.span(argv[2]), 10);
@@ -151,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "popup")) {
         if (argv.len < 3) {
-            std.debug.print("usage: rook-mux popup <command...>\n", .{});
+            std.debug.print("usage: rook popup <command...>\n", .{});
             return error.BadArgs;
         }
         var joined: std.ArrayList(u8) = .empty;
@@ -163,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, cmd, "nav")) {
-        // rook-mux nav h|j|k|l (or left/down/up/right)
+        // rook nav h|j|k|l (or left/down/up/right)
         const arg: []const u8 = if (argv.len > 2) std.mem.span(argv[2]) else "";
         const dir: u8 = if (arg.len == 1 and (arg[0] == 'h' or arg[0] == 'j' or arg[0] == 'k' or arg[0] == 'l'))
             arg[0]
@@ -176,7 +178,7 @@ pub fn main(init: std.process.Init) !void {
         else if (std.mem.eql(u8, arg, "right"))
             'l'
         else {
-            std.debug.print("usage: rook-mux nav h|j|k|l\n", .{});
+            std.debug.print("usage: rook nav h|j|k|l\n", .{});
             return error.BadArgs;
         };
         try client.nav(path, dir);
@@ -184,7 +186,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (getenv("ROOK_MUX_PANE") != null) {
-        std.debug.print("already inside rook-mux; nesting comes later\n", .{});
+        std.debug.print("already inside rook; nesting comes later\n", .{});
         return;
     }
 
@@ -207,7 +209,7 @@ pub fn main(init: std.process.Init) !void {
     try client.attach(churn_gpa, path);
 }
 
-/// Fork+exec ourselves as `rook-mux server`, detached from this tty.
+/// Fork+exec ourselves as the `server` verb, detached from this tty.
 extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_int) c_int;
 extern "c" fn _NSGetExecutablePath(buf: [*]u8, size: *u32) c_int;
 

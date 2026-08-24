@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate VT conformance corpora: byte streams replayed into both
-rook-mux and tmux; run.sh diffs the resulting screens."""
+the engine and tmux; run.sh diffs the resulting screens."""
 import pathlib
 
 E = "\x1b"

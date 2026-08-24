@@ -150,7 +150,7 @@ pub const Pane = struct {
         return "";
     }
     fn effectXtversion(_: *Handler) []const u8 {
-        return "rook-mux 0.0.0";
+        return "rook 0.0.0";
     }
     fn effectColorScheme(_: *Handler) EffectRet("color_scheme") {
         return .dark;

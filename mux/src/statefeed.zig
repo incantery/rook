@@ -1,4 +1,4 @@
-//! The state feed: everything rook-mux knows, as one JSON snapshot.
+//! The state feed: everything the engine knows, as one JSON snapshot.
 //!
 //! Rook is the single writer of this state. Consumers replicate it and
 //! change it only by issuing commands — see docs/surfaces.md. The

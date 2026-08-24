@@ -1,4 +1,4 @@
-// The rook-mux wire protocol, browser edition. rook-web is a dumb
+// The engine wire protocol, browser edition. rook-web is a dumb
 // pipe, so websocket binary frames are the same [type u8][len u32 LE]
 // [payload] framing every other client speaks.
 

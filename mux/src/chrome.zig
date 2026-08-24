@@ -1,4 +1,4 @@
-//! The chrome rook-mux draws itself — every cell that is not a pane.
+//! The chrome the engine draws itself — every cell that is not a pane.
 //!
 //! Two things live here: the palette (Catppuccin Mocha, the colors the
 //! herdr design is drawn in) and the side panel, a left rail of
@@ -420,7 +420,7 @@ fn parseFrame(a: std.mem.Allocator, bytes: []const u8) PushError!Parsed {
 /// demoed and dialed in without a producer — and so the wire has one
 /// worked example that a test checks rather than a README:
 ///
-///     rook-mux side demo | rook-mux side -
+///     rook side demo | rook side -
 pub const demo_frames: []const []const u8 = &.{
     \\{"v":1,"op":"items.push","params":{"surface":"spaces","items":[{"id":"herdr","title":"herdr","subtitle":"master","state":"working"},{"id":"web-dashboard","title":"web-dashboard","subtitle":"feat/usage-charts","state":"blocked","current":true},{"id":"data-pipeline","title":"data-pipeline","subtitle":"backfill/events-v2","state":"idle"}]}}
     ,

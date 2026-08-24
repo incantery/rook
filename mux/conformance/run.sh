@@ -1,9 +1,9 @@
 #!/bin/sh
-# Replay each corpus into rook-mux and plain tmux; diff final screens.
+# Replay each corpus into the engine and plain tmux; diff final screens.
 # Usage: ./run.sh [name...]   (default: every corpus/*.vt)
 set -u
 cd "$(dirname "$0")"
-MUX="${MUX:-$HOME/.local/bin/rook-mux}"
+MUX="${MUX:-${ROOK_ENGINE:-$HOME/.local/libexec/rook/engine}}"
 OUT=out; rm -rf "$OUT"; mkdir -p "$OUT"
 pass=0; fail=0
 names="${*:-$(ls corpus/*.vt | xargs -n1 basename | sed 's/\.vt$//')}"
@@ -23,7 +23,7 @@ for name in $names; do
   [ -f "$f" ] || { echo "?? $name (no corpus)"; continue; }
 
   # reference: tmux-in-tmux, so the ref rides the same outer glass as
-  # rook-mux does (capture-pane re-emits \t for tab-written cells; a
+  # the engine does (capture-pane re-emits \t for tab-written cells; a
   # nested renderer normalizes both sides to what was actually drawn)
   tmux -L rmvt-ref kill-server 2>/dev/null
   tmux kill-session -t vtref 2>/dev/null
@@ -33,7 +33,7 @@ for name in $names; do
   tmux -L rmvt-ref kill-server 2>/dev/null
   tmux kill-session -t vtref 2>/dev/null
 
-  # rook-mux: 80x25 outer (24 pane rows + status line)
+  # engine: 80x25 outer (24 pane rows + status line)
   sock="/tmp/rmvt-$name.sock"; rm -f "$sock" "$sock.state" "$sock.state.tmp"
   tmux kill-session -t vtmux 2>/dev/null
   tmux new-session -d -s vtmux -x 80 -y 25 \

@@ -1,6 +1,6 @@
 # conformance
 
-`./run.sh` replays each `corpus/*.vt` byte stream into rook-mux and
+`./run.sh` replays each `corpus/*.vt` byte stream into the engine and
 into a reference tmux, then diffs the final screens. Both sides render
 inside the same outer tmux (the reference runs nested) so capture
 artifacts cancel out. `gen.py` regenerates the corpora: autowrap and
