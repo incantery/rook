@@ -413,8 +413,20 @@ pub const Pane = struct {
         self.cols = cols;
         self.rows = rows;
         self.term.resize(self.gpa, .{ .cols = cols, .rows = rows }) catch {};
+        const in_band = self.term.modes.get(.in_band_size_reports);
         os_unfair_lock_unlock(&self.lock);
         self.pty.setSize(.{ .ws_row = rows, .ws_col = cols }) catch {};
+        // Apps that enabled mode 2048 (nvim, notably) stop trusting
+        // SIGWINCH and wait for the terminal to report the new size
+        // in-band. We drive term.resize directly rather than through the
+        // stream Handler that would emit this, so send it ourselves —
+        // otherwise closing a split leaves nvim painting the old, smaller
+        // width. Pixel geometry is unknown at the mux, reported as 0.
+        if (in_band) {
+            var buf: [64]u8 = undefined;
+            const rep = std.fmt.bufPrint(&buf, "\x1b[48;{d};{d};0;0t", .{ rows, cols }) catch return;
+            self.write(rep);
+        }
     }
 
     /// Polite kill: HUP the foreground and shell process groups, with
