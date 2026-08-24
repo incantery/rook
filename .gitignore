@@ -3,3 +3,12 @@
 # macOS Finder droppings
 .DS_Store
 dist/
+
+# stray build output that has landed here before: a `go build -o cloud`
+# of rook-cloud, and the pre-tmux app's install/e2e trees
+/cloud
+/bin/
+
+# sandbox scratch — live sockets and vendored zsh fixtures
+/test/
+/test-config/
