@@ -3,9 +3,12 @@
 //! [mux] section for knobs that earned one:
 //!   nav_owners = ["nvim", "fzf"]   # programs that keep Ctrl-hjkl
 //!   scrollback_mb = 4
-//!   accent = "yellow"              # border/popup color
+//!   accent = "#cba6f7"             # chrome color: tabs, borders, popup
 //!   restore = true                 # resurrect last layout on boot (default off)
+//!   sidebar = true                 # the spaces/agents side panel
+//!   sidebar_width = 30             # its width in columns
 const std = @import("std");
+const chrome = @import("chrome.zig");
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 
@@ -44,7 +47,14 @@ pub const Mux = struct {
     owners: [512]u8 = @splat(0),
     owners_len: usize = 0,
     scrollback_bytes: usize = 4 * 1024 * 1024,
-    accent: u8 = 33, // SGR fg: yellow
+    /// The one chrome accent: the active tab chip, focused borders, the
+    /// popup box. A hex color or one of the eight ANSI names, which map
+    /// into the same palette.
+    accent: chrome.Rgb = chrome.mauve,
+    /// The side panel: on unless asked otherwise, and it folds away on
+    /// glass too narrow for it regardless.
+    sidebar: bool = true,
+    sidebar_width: u16 = 30,
     /// Resurrect the last saved layout on server boot. Off by default:
     /// a fresh `rook` opens a clean workspace, not last session's splits.
     restore: bool = false,
@@ -86,10 +96,17 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
             const clamped: usize = @min(mb, 256);
             out.scrollback_bytes = clamped * 1024 * 1024;
         } else if (std.mem.eql(u8, key, "accent")) {
-            out.accent = accentCode(std.mem.trim(u8, val, "\"'")) orelse out.accent;
+            const v = std.mem.trim(u8, val, "\"'");
+            out.accent = chrome.Rgb.parse(v) orelse chrome.named(v) orelse out.accent;
         } else if (std.mem.eql(u8, key, "restore")) {
             const v = std.mem.trim(u8, val, "\"'");
             out.restore = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
+        } else if (std.mem.eql(u8, key, "sidebar")) {
+            const v = std.mem.trim(u8, val, "\"'");
+            out.sidebar = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
+        } else if (std.mem.eql(u8, key, "sidebar_width")) {
+            const n = std.fmt.parseInt(u16, std.mem.trim(u8, val, "\"'"), 10) catch continue;
+            out.sidebar_width = std.math.clamp(n, 16, 60);
         } else if (std.mem.eql(u8, key, "nav_owners")) {
             // ["a", "b"] → a\nb
             out.owners_len = 0;
@@ -107,36 +124,25 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
     }
 }
 
-fn accentCode(name: []const u8) ?u8 {
-    const names = [_]struct { n: []const u8, c: u8 }{
-        .{ .n = "black", .c = 30 },   .{ .n = "red", .c = 31 },
-        .{ .n = "green", .c = 32 },   .{ .n = "yellow", .c = 33 },
-        .{ .n = "blue", .c = 34 },    .{ .n = "magenta", .c = 35 },
-        .{ .n = "cyan", .c = 36 },    .{ .n = "white", .c = 37 },
-    };
-    var base: u8 = 0;
-    var want = name;
-    if (std.mem.startsWith(u8, name, "bright-")) {
-        base = 60;
-        want = name["bright-".len..];
-    }
-    for (names) |e| {
-        if (std.mem.eql(u8, e.n, want)) return e.c + base;
-    }
-    return null;
-}
-
 test "parseMux" {
     var m: Mux = .{};
     parseMux("[mux]\nscrollback_mb = 8\naccent = \"cyan\"\nnav_owners = [\"nvim\", \"fzf\"]\n", &m);
     try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), m.scrollback_bytes);
-    try std.testing.expectEqual(@as(u8, 36), m.accent);
+    try std.testing.expectEqual(chrome.teal, m.accent);
     try std.testing.expectEqualStrings("nvim\nfzf", m.ownersSlice());
     var d: Mux = .{};
     parseMux("[tmux]\nprefix = \"`\"\naccent = \"red\"\n", &d);
-    try std.testing.expectEqual(@as(u8, 33), d.accent); // wrong section: ignored
+    try std.testing.expectEqual(chrome.mauve, d.accent); // wrong section: ignored
     parseMux("[mux]\naccent = \"bright-blue\"\n", &d);
-    try std.testing.expectEqual(@as(u8, 94), d.accent);
+    try std.testing.expectEqual(chrome.blue, d.accent);
+    parseMux("[mux]\naccent = \"#f9e2af\"\n", &d);
+    try std.testing.expectEqual(chrome.yellow, d.accent);
+    var sb: Mux = .{};
+    try std.testing.expectEqual(true, sb.sidebar);
+    try std.testing.expectEqual(@as(u16, 30), sb.sidebar_width);
+    parseMux("[mux]\nsidebar = false\nsidebar_width = 999\n", &sb);
+    try std.testing.expectEqual(false, sb.sidebar);
+    try std.testing.expectEqual(@as(u16, 60), sb.sidebar_width); // clamped
     var r: Mux = .{};
     try std.testing.expectEqual(false, r.restore); // default off
     parseMux("[mux]\nrestore = true\n", &r);

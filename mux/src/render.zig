@@ -5,14 +5,30 @@ const std = @import("std");
 const vt = @import("ghostty-vt");
 const layoutpkg = @import("layout.zig");
 const panepkg = @import("pane.zig");
+const chromepkg = @import("chrome.zig");
 
 const csi = "\x1b[";
+
+/// Everything on the screen that is not a pane: the tab bar, the side
+/// panel, and the seams that separate them from the panes.
+pub const Chrome = struct {
+    /// Pre-sized to exactly (cols - tab_x) visible columns.
+    tabbar: []const u8,
+    /// Column the tab bar starts at — the side panel pushes it right.
+    tab_x: u16 = 0,
+    /// The side panel, when it is showing: its model and its width.
+    /// It owns columns 0..w-1 and the seam at w.
+    side: ?struct { model: chromepkg.Model, w: u16 } = null,
+    /// Column of the pin rail's seam, and the row it starts on.
+    dock_x: ?u16 = null,
+    dock_top: u16 = 0,
+};
 
 pub const Frame = struct {
     buf: std.ArrayList(u8) = .empty,
     gpa: std.mem.Allocator,
-    /// SGR fg code for focused borders and the popup box.
-    accent: u8 = 33,
+    /// Focused borders, the popup box, the active tab chip.
+    accent: chromepkg.Rgb = chromepkg.mauve,
 
     pub fn init(gpa: std.mem.Allocator) Frame {
         return .{ .gpa = gpa };
@@ -21,14 +37,29 @@ pub const Frame = struct {
         self.buf.deinit(self.gpa);
     }
 
-    fn put(self: *Frame, bytes: []const u8) void {
+    // pub: chrome.zig paints the side panel through these
+    pub fn put(self: *Frame, bytes: []const u8) void {
         self.buf.appendSlice(self.gpa, bytes) catch {};
     }
-    fn print(self: *Frame, comptime fmt: []const u8, args: anytype) void {
+    pub fn print(self: *Frame, comptime fmt: []const u8, args: anytype) void {
         self.buf.print(self.gpa, fmt, args) catch {};
     }
-    fn cup(self: *Frame, x: u16, y: u16) void {
+    pub fn cup(self: *Frame, x: u16, y: u16) void {
         self.print(csi ++ "{d};{d}H", .{ @as(u32, y) + 1, @as(u32, x) + 1 });
+    }
+    /// Reset, then a 24-bit foreground.
+    fn putFg(self: *Frame, c: chromepkg.Rgb) void {
+        self.print(csi ++ "0;38;2;{d};{d};{d}m", .{ c.r, c.g, c.b });
+    }
+    /// A light vertical rule at column `x`, rows [y0, y1).
+    fn seam(self: *Frame, x: u16, y0: u16, y1: u16) void {
+        self.putFg(chromepkg.surface0);
+        var y: u16 = y0;
+        while (y < y1) : (y += 1) {
+            self.cup(x, y);
+            self.put("│");
+        }
+        self.put(csi ++ "0m");
     }
 
     /// Build a frame. `full` repaints everything (attach, resize,
@@ -42,12 +73,10 @@ pub const Frame = struct {
         focused: u32,
         cols: u16,
         rows: u16,
-        tabbar: []const u8,
-        tab_x: u16,
+        chrome: Chrome,
         full: bool,
         cursor_override: ?struct { x: u16, y: u16 },
         popup: ?struct { pane: u32, rect: layoutpkg.Rect },
-        dock_x: ?u16,
     ) []const u8 {
         self.buf.clearRetainingCapacity();
         self.put(csi ++ "?2026h" ++ csi ++ "?25l");
@@ -76,15 +105,19 @@ pub const Frame = struct {
         }
 
         if (full) {
-            self.drawBorders(placed, focused, cols, rows, dock_x);
-            // Dock seam: the heavy line between the rail and the tabs +
-            // window. Global (app-chrome) pins run the full height from
-            // row 0; workspace-local pins start under the tab bar, so the
-            // seam begins on row 1. Static, so only on a full repaint.
-            if (dock_x) |dx| {
-                const rail_top: u16 = if (tab_x == 0) 1 else 0;
-                self.put(csi ++ "0;90m");
-                var y: u16 = rail_top;
+            self.drawBorders(placed, focused, cols, rows, chrome.dock_x);
+            // The side panel and its seam: chrome, so only on a full
+            // repaint — nothing in it changes with pane output.
+            if (chrome.side) |side| {
+                chromepkg.draw(self, side.model, 0, 0, side.w, rows);
+                self.seam(side.w, 0, rows);
+            }
+            // Dock seam: the heavier line between the pin rail and the
+            // window. Global (app-chrome) pins run from row 0, past the
+            // tab bar; workspace-local pins start under it.
+            if (chrome.dock_x) |dx| {
+                self.putFg(chromepkg.surface0);
+                var y: u16 = chrome.dock_top;
                 while (y < rows) : (y += 1) {
                     self.cup(dx, y);
                     self.put("┃");
@@ -93,10 +126,10 @@ pub const Frame = struct {
             }
         }
 
-        // Tab bar: top row, starting past the rail when app-chrome pins
-        // push it over. `tabbar` is pre-sized to (cols - tab_x) columns.
-        self.cup(tab_x, 0);
-        self.put(tabbar);
+        // Tab bar: top row, starting past whatever chrome pushed it
+        // right. `tabbar` is pre-sized to (cols - tab_x) columns.
+        self.cup(chrome.tab_x, 0);
+        self.put(chrome.tabbar);
         self.put(csi ++ "0m");
 
         if (popup) |po| {
@@ -239,7 +272,7 @@ pub const Frame = struct {
     /// A full box border for the popup, accent-colored.
     fn drawBox(self: *Frame, r: layoutpkg.Rect) void {
         if (r.w < 2 or r.h < 2) return;
-        self.print(csi ++ "0;{d}m", .{self.accent});
+        self.putFg(self.accent);
         self.cup(r.x, r.y);
         self.put("┌");
         var x: u16 = 1;
@@ -272,10 +305,10 @@ pub const Frame = struct {
                 // The rail/window dock seam is drawn by build() (it spans
                 // the full rail height, which may differ from this rect);
                 // here we only draw the light │ between window splits.
-                const seam = dock_x != null and dock_x.? == r.x + r.w;
-                if (!seam) {
+                const is_dock = dock_x != null and dock_x.? == r.x + r.w;
+                if (!is_dock) {
                     const acc = pl.pane == focused or nb == focused;
-                    if (acc) self.print(csi ++ "0;{d}m", .{self.accent}) else self.put(csi ++ "0;90m");
+                    self.putFg(if (acc) self.accent else chromepkg.surface0);
                     var y: u16 = r.y;
                     while (y < r.y + r.h and y < rows) : (y += 1) {
                         self.cup(r.x + r.w, y);
@@ -287,7 +320,7 @@ pub const Frame = struct {
             if (r.y + r.h + 1 < rows) {
                 if (neighborBelowAt(placed, r.x, r.y + r.h + 1)) |nb| {
                     const acc = pl.pane == focused or nb == focused;
-                    if (acc) self.print(csi ++ "0;{d}m", .{self.accent}) else self.put(csi ++ "0;90m");
+                    self.putFg(if (acc) self.accent else chromepkg.surface0);
                     self.cup(r.x, r.y + r.h);
                     var x: u16 = 0;
                     while (x < r.w) : (x += 1) self.put("─");

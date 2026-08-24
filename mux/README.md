@@ -12,14 +12,17 @@ against.
 The prefix comes from `~/.config/rook/rook.toml` (`[tmux] prefix`),
 C-b when unset; double-tap types it literally. A `[mux]` section adds
 `nav_owners = ["nvim", "fzf"]` (programs that keep bare Ctrl-hjkl),
-`scrollback_mb = 4`, and `accent = "cyan"` (border/popup color,
-`bright-` prefixes work). Then:
+`scrollback_mb = 4`, `accent = "#cba6f7"` (the one chrome color — tab
+chip, focused borders, popup box; the eight ANSI names still work and
+map into the palette), and `sidebar = false` / `sidebar_width = 30`
+for the side panel. Then:
 
     v |        split side by side          c        new window
     -          split stacked               n p 1-9  switch window
     hjkl       focus pane                  z        zoom pane
     HJKL       resize split                [        copy mode (hjkl, v, y, q)
     x          kill pane                   d        detach
+    a          toggle the side panel
 
 Workspaces: `rook-mux ls`, `rook-mux new <name>`, `rook-mux switch
 <name>` — named sessions in one server, each with its own windows;
@@ -66,14 +69,32 @@ through the pane and its scrollback, v anchors a selection (the
 anchor is content-tracked, so it survives scrolling), y yanks to the
 system clipboard. Not yet: session persistence across server restart.
 
+## The side panel
+
+Down the left edge, above windows and workspaces: *spaces* over
+*agents*, each row a name, a status dot and a second line (a branch, or
+`state · tool`). It is chrome, not a pane — no pty backs it, the frame
+builder paints it straight from a model in `chrome.zig`, and it costs
+nothing but columns. Clicking a row moves that panel's highlight;
+prefix-a folds the panel away, and it folds itself away on glass under
+100 columns rather than crowd the work.
+
+The model is `chrome.placeholder` today — the herdr design, cell for
+cell, so the thing can be demoed and dialed in before there is a feed
+behind it. Wiring real spaces and agents in means filling that model,
+not touching the painter.
+
 ## Shape
 
+- `chrome.zig` — the palette (Catppuccin Mocha) and the side panel:
+  every cell that is not a pane
 - `pane.zig` — pty + vt.Terminal + reader thread (pre-tmux Session,
   cut to the bone; the two-stage read pipeline returns when a
   benchmark asks for it)
 - `layout.zig` — binary split tree → rects; directional navigate
 - `render.zig` — RenderState grids → one full-screen VT frame,
-  synchronized-output wrapped; the client just writes bytes
+  synchronized-output wrapped; the client just writes bytes. `Chrome`
+  carries the tab bar, the side panel and the seams
 - `server.zig` — poll loop: panes, clients, prefix keys, reap, redraw
 - `client.zig` — raw mode + alt screen; stdin up, frames down
 - `proto.zig` — type/len/payload frames (placeholder for the real

@@ -9,6 +9,7 @@ const ptypkg = @import("pty.zig");
 const panepkg = @import("pane.zig");
 const layoutpkg = @import("layout.zig");
 const renderpkg = @import("render.zig");
+const chromepkg = @import("chrome.zig");
 const proto = @import("proto.zig");
 const config = @import("config.zig");
 
@@ -24,6 +25,12 @@ fn nowMs() i64 {
 /// Minimum gap between frames: coalesce a burst (telescope popup,
 /// build spew) into ~120fps of frames instead of one per pty read.
 const frame_gap_ms: i64 = 8;
+
+/// The side panel folds away rather than crowd the work: it needs this
+/// much glass to appear, and always leaves the window at least this
+/// many columns.
+const min_cols_for_side: u16 = 100;
+const min_window_cols: u16 = 60;
 
 const Client = struct {
     fd: ptypkg.fd_t,
@@ -126,12 +133,21 @@ pub const Server = struct {
     cur_sess: usize = 0,
     /// Pins that follow you across workspaces (prefix-G on a pin).
     global_pins: std.ArrayList(u32) = .empty,
-    /// Column of the rail/window seam in the current layout, if any.
+    /// Column of the rail/window seam in the current layout, if any,
+    /// and the row it starts on.
     dock_x: ?u16 = null,
-    /// Where the top tab bar starts. Global (app-chrome) pins push it
-    /// right past the rail; workspace-local pins sit under it, so the
-    /// bar stays at column 0.
+    dock_top: u16 = 0,
+    /// Where the top tab bar starts. The side panel and global
+    /// (app-chrome) pins push it right past their seams; with neither,
+    /// the bar stays at column 0.
     tab_x: u16 = 0,
+    /// The side panel — spaces over agents down the left edge. Chrome
+    /// the mux draws itself, so it costs no pty and survives every
+    /// window and workspace switch. `side_w` is its width in the
+    /// current layout, null when it is off or the glass is too narrow.
+    side: chromepkg.Model = chromepkg.placeholder,
+    side_on: bool = true,
+    side_w: ?u16 = null,
     next_id: u32 = 1,
     clients: std.ArrayList(*Client) = .empty,
     wake_r: ptypkg.fd_t,
@@ -237,6 +253,7 @@ pub const Server = struct {
         } else |_| {}
 
         self.frame.accent = self.conf.accent;
+        self.side.accent = self.conf.accent;
         // Resurrect only when asked ([mux] restore = true); otherwise a
         // fresh boot opens a clean workspace instead of last session's
         // splits. The state file is still saved, so opting in restores.
@@ -486,25 +503,41 @@ pub const Server = struct {
         const w = self.window();
         const sn = self.sess();
         self.dock_x = null;
+        self.dock_top = 0;
         self.tab_x = 0;
+        self.side_w = null;
+        // The side panel owns the far-left columns of the whole app: it
+        // is above windows and workspaces, so it is subtracted before
+        // anything else is placed, and it pushes the tab bar past its
+        // seam. It folds away rather than squeeze the panes.
+        if (self.side_on and g.cols >= min_cols_for_side and g.rows >= chromepkg.min_rows) {
+            const sw = @min(self.conf.sidebar_width, g.cols -| min_window_cols);
+            if (sw >= 16) {
+                self.side_w = sw;
+                self.tab_x = sw + 1;
+            }
+        }
+        const base_x: u16 = if (self.side_w) |sw| sw + 1 else 0;
         // Row 0 is the tab bar; the window area sits below it.
         const win_y: u16 = 1;
         const win_h: u16 = g.rows -| 1;
         if (w.zoomed) {
-            try self.placed.append(self.gpa, .{ .pane = self.focusedId(), .rect = .{ .x = 0, .y = win_y, .w = g.cols, .h = win_h } });
+            try self.placed.append(self.gpa, .{ .pane = self.focusedId(), .rect = .{ .x = base_x, .y = win_y, .w = g.cols -| base_x, .h = win_h } });
         } else {
             // The rail stacks global pins then this workspace's, down the
-            // left edge (hidden when the glass is too narrow). Global pins
-            // are app-wide chrome: they run the full height and push the
-            // tab bar right. Workspace-local pins belong to the workspace,
-            // so they sit *under* the tab bar and leave it full width.
+            // left edge of what the side panel left (hidden when that is
+            // too narrow). Global pins are app-wide chrome: they run the
+            // full height and push the tab bar right. Workspace-local
+            // pins belong to the workspace, so they sit *under* the tab
+            // bar and leave it as wide as the panel left it.
             const n_global = self.global_pins.items.len;
             const n_local = sn.pins.items.len;
             const n_rails = n_global + n_local;
-            var win_x: u16 = 0;
-            if (n_rails > 0 and g.cols >= 60) {
-                var rail_w: u16 = @intFromFloat(@as(f32, @floatFromInt(g.cols)) * sn.rail_frac);
-                rail_w = @max(20, @min(rail_w, g.cols -| 40));
+            var win_x: u16 = base_x;
+            const avail_w = g.cols -| base_x;
+            if (n_rails > 0 and avail_w >= 60) {
+                var rail_w: u16 = @intFromFloat(@as(f32, @floatFromInt(avail_w)) * sn.rail_frac);
+                rail_w = @max(20, @min(rail_w, avail_w -| 40));
                 const push = n_global > 0;
                 const rail_top: u16 = if (push) 0 else win_y;
                 const nr: u16 = @intCast(n_rails);
@@ -514,19 +547,20 @@ pub const Server = struct {
                 var i: u16 = 0;
                 for (self.global_pins.items) |id| {
                     const h = if (i == nr - 1) g.rows -| y else each;
-                    try self.placed.append(self.gpa, .{ .pane = id, .rect = .{ .x = 0, .y = y, .w = rail_w, .h = h } });
+                    try self.placed.append(self.gpa, .{ .pane = id, .rect = .{ .x = base_x, .y = y, .w = rail_w, .h = h } });
                     y += h + 1;
                     i += 1;
                 }
                 for (sn.pins.items) |id| {
                     const h = if (i == nr - 1) g.rows -| y else each;
-                    try self.placed.append(self.gpa, .{ .pane = id, .rect = .{ .x = 0, .y = y, .w = rail_w, .h = h } });
+                    try self.placed.append(self.gpa, .{ .pane = id, .rect = .{ .x = base_x, .y = y, .w = rail_w, .h = h } });
                     y += h + 1;
                     i += 1;
                 }
-                self.dock_x = rail_w;
-                self.tab_x = if (push) rail_w + 1 else 0;
-                win_x = rail_w + 1;
+                self.dock_x = base_x + rail_w;
+                self.dock_top = rail_top;
+                self.tab_x = if (push) base_x + rail_w + 1 else base_x;
+                win_x = base_x + rail_w + 1;
             }
             const win_region: layoutpkg.Rect = .{ .x = win_x, .y = win_y, .w = g.cols -| win_x, .h = win_h };
             try w.layout.place(win_region, &self.placed);
@@ -1208,6 +1242,13 @@ pub const Server = struct {
             }
             return;
         }
+        // the side panel eats clicks before any pane sees them
+        if (self.side_w) |sw| {
+            if (cx <= sw) {
+                if (ev.btn == 0 and !ev.release) self.clickSide(cy);
+                return;
+            }
+        }
         var hit: ?layoutpkg.Placed = null;
         for (self.placed.items) |pl| {
             if (cx >= pl.rect.x and cx < pl.rect.x + pl.rect.w and cy >= pl.rect.y and cy < pl.rect.y + pl.rect.h) hit = pl;
@@ -1278,6 +1319,22 @@ pub const Server = struct {
         }
     }
 
+    /// A click in the side panel selects the row under it. Selection
+    /// is all it does today: nothing is wired behind the rows yet, and
+    /// a demo that cannot move its own highlight is not a demo.
+    fn clickSide(self: *Server, cy: u16) void {
+        const g = self.geometry();
+        const split = chromepkg.splitRow(g.rows);
+        if (cy == split) return; // the seam between the panels
+        const panel = if (cy < split) &self.side.spaces else &self.side.agents;
+        const rel = if (cy < split) cy else cy - (split + 1);
+        const i = chromepkg.hit(panel.*, rel) orelse return;
+        if (panel.cur != null and panel.cur.? == i) return;
+        panel.cur = i;
+        self.full = true;
+        self.pending = true;
+    }
+
     fn toFocused(self: *Server, bytes: []const u8) void {
         if (self.popupPane()) |p| {
             p.write(bytes);
@@ -1326,6 +1383,10 @@ pub const Server = struct {
             },
             's' => self.openPopup("rook-mux ls | fzf --reverse --header='workspace' | xargs -r rook-mux switch") catch {},
             'w' => self.openPopup("rook worktree") catch {},
+            'a' => {
+                self.side_on = !self.side_on;
+                self.relayout() catch {};
+            },
             'P' => self.togglePin(),
             'G' => self.toggleGlobalPin(),
             ';' => {
@@ -1690,7 +1751,14 @@ pub const Server = struct {
                 }
             }
         }
-        const bytes = self.frame.build(self.panes.items, self.placed.items, self.focusedId(), g.cols, g.rows, tabbar, self.tab_x, self.full, if (cur_over) |co| .{ .x = co.x, .y = co.y } else null, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null, self.dock_x);
+        const chrome: renderpkg.Chrome = .{
+            .tabbar = tabbar,
+            .tab_x = self.tab_x,
+            .side = if (self.side_w) |sw| .{ .model = self.side, .w = sw } else null,
+            .dock_x = self.dock_x,
+            .dock_top = self.dock_top,
+        };
+        const bytes = self.frame.build(self.panes.items, self.placed.items, self.focusedId(), g.cols, g.rows, chrome, self.full, if (cur_over) |co| .{ .x = co.x, .y = co.y } else null, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null);
         self.full = false;
         var shipped = false;
         for (self.clients.items) |c| {
@@ -1928,9 +1996,15 @@ pub const Server = struct {
     fn tabBar(self: *Server, buf: []u8, avail: u16) []const u8 {
         var out: std.ArrayList(u8) = .initBuffer(buf);
         var vis: u16 = 0;
-        const accent = self.conf.accent;
         const sn = self.sess();
-        out.appendSliceBounded("\x1b[0m") catch {};
+        // The bar is one surface; chips change the ink on it, and the
+        // active one fills with the accent. Truecolor throughout: this
+        // row is chrome, so it owes nothing to the pane palette.
+        var bar_buf: [48]u8 = undefined;
+        const bar = sgr(&bar_buf, .{ .bg = chromepkg.base, .fg = chromepkg.overlay0 });
+        var chip_buf: [48]u8 = undefined;
+        const chip_on = sgr(&chip_buf, .{ .bg = self.conf.accent, .fg = chromepkg.crust, .bold = true });
+        out.appendSliceBounded(bar) catch {};
         for (sn.windows.items, 0..) |win, i| {
             var name_buf: [48]u8 = undefined;
             var name: []const u8 = "shell";
@@ -1945,22 +2019,16 @@ pub const Server = struct {
                 out.appendSliceBounded(" ") catch {};
                 vis += 1;
             }
-            if (i == sn.cur) {
-                var sb: [16]u8 = undefined;
-                const s = std.fmt.bufPrint(&sb, "\x1b[{d};30;1m", .{@as(u16, accent) + 10}) catch "\x1b[7m";
-                out.appendSliceBounded(s) catch {};
-            } else {
-                out.appendSliceBounded("\x1b[90m") catch {};
-            }
+            out.appendSliceBounded(if (i == sn.cur) chip_on else bar) catch {};
             out.appendSliceBounded(" ") catch {};
             out.appendSliceBounded(nm) catch {};
             out.appendSliceBounded(" ") catch {};
-            out.appendSliceBounded("\x1b[0m") catch {};
+            out.appendSliceBounded(bar) catch {};
             vis += chip;
         }
         // trailing "+" placeholder tab (clicks come later)
         if (vis + 4 <= avail) {
-            out.appendSliceBounded(" \x1b[90m + \x1b[0m") catch {};
+            out.appendSliceBounded("  + ") catch {};
             vis += 4;
         }
         // copy-mode / zoom hints ride the right of the bar when they fit
@@ -1972,9 +2040,7 @@ pub const Server = struct {
             null;
         if (hint) |h| {
             if (vis + h.len <= avail) {
-                out.appendSliceBounded("\x1b[90m") catch {};
                 out.appendSliceBounded(h) catch {};
-                out.appendSliceBounded("\x1b[0m") catch {};
                 vis += @intCast(h.len);
             }
         }
@@ -1983,6 +2049,22 @@ pub const Server = struct {
         return out.items;
     }
 };
+
+/// One SGR sequence for a chrome run: reset, then 24-bit ink. Chrome
+/// never inherits a pane's colors, so every run starts from zero.
+fn sgr(buf: []u8, spec: struct {
+    fg: ?chromepkg.Rgb = null,
+    bg: ?chromepkg.Rgb = null,
+    bold: bool = false,
+}) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    w.writeAll("\x1b[0") catch return "\x1b[0m";
+    if (spec.bold) w.writeAll(";1") catch {};
+    if (spec.fg) |c| w.print(";38;2;{d};{d};{d}", .{ c.r, c.g, c.b }) catch {};
+    if (spec.bg) |c| w.print(";48;2;{d};{d};{d}", .{ c.r, c.g, c.b }) catch {};
+    w.writeAll("m") catch {};
+    return w.buffered();
+}
 
 fn containsId(list: []const u32, id: u32) bool {
     for (list) |x| if (x == id) return true;

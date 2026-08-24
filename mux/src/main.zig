@@ -15,6 +15,7 @@ test {
     _ = @import("layout.zig");
     _ = @import("proto.zig");
     _ = @import("config.zig");
+    _ = @import("chrome.zig");
 }
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
