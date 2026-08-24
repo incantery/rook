@@ -410,9 +410,37 @@ pub const Pane = struct {
     pub fn resize(self: *Pane, cols: u16, rows: u16) void {
         if (cols == 0 or rows == 0) return;
         os_unfair_lock_lock(&self.lock);
+
+        // Bottom-anchor scrollback across the reflow. ghostty keeps the
+        // TOP viewport line pinned on resize; when scrolled back, a width
+        // shrink rewraps lines taller and pushes the newer lines you were
+        // reading off the bottom ("rendering too far back"). Instead pin
+        // the newest visible line: track it, let it follow the reflow,
+        // then seat it back at the bottom — tmux's feel. Only when
+        // actually scrolled back; the live bottom (and the alt screen,
+        // which has no scrollback) leaves the viewport .active untouched.
+        const s = self.term.screens.active;
+        const anchor: ?*vt.Pin = switch (s.pages.viewport) {
+            .active => null,
+            else => if (s.pages.pin(.{ .viewport = .{ .x = 0, .y = self.rows -| 1 } })) |bp|
+                (s.pages.trackPin(bp) catch null)
+            else
+                null,
+        };
+
         self.cols = cols;
         self.rows = rows;
         self.term.resize(self.gpa, .{ .cols = cols, .rows = rows }) catch {};
+
+        if (anchor) |ap| {
+            // Tracked pins are maintained across reflow (and scrollback
+            // trims), so ap stays valid — same guarantee the selection
+            // pins rely on.
+            s.scroll(.{ .pin = ap.* }); // the anchor becomes the top row…
+            if (rows > 1) s.scroll(.{ .delta_row = -(@as(isize, rows) - 1) }); // …then the bottom
+            s.pages.untrackPin(ap);
+        }
+
         const in_band = self.term.modes.get(.in_band_size_reports);
         os_unfair_lock_unlock(&self.lock);
         self.pty.setSize(.{ .ws_row = rows, .ws_col = cols }) catch {};
