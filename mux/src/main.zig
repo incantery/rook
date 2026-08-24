@@ -5,11 +5,14 @@
 //!   rook-mux popup <cmd> float a command over the current window
 //!   rook-mux ls / switch / new <name> [cwd] / close <name>   workspaces
 //!   rook-mux state / watch       the state feed: snapshot, or subscribe
+//!   rook-mux side [-]            push side-panel models (JSON frames on stdin)
+//!   rook-mux side demo           print the demo models, to pipe into the above
 //!   rook-mux blocks / raw <id>   block table; raw single-block attach
 //!   rook-mux capture <id>        one pane's viewport as plain text
 //!   rook-mux kill       stop the server
 const std = @import("std");
 const server = @import("server.zig");
+const chrome = @import("chrome.zig");
 const client = @import("client.zig");
 const ptypkg = @import("pty.zig");
 
@@ -72,6 +75,25 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, cmd, "watch")) {
         try client.watch(churn_gpa, path);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "side")) {
+        const arg: []const u8 = if (argv.len > 2) std.mem.span(argv[2]) else "-";
+        // `side demo` prints frames rather than sending any, so the
+        // wire has a worked example you can read, edit and pipe back:
+        //     rook-mux side demo | rook-mux side -
+        if (std.mem.eql(u8, arg, "demo")) {
+            for (chrome.demo_frames) |frame| {
+                _ = ptypkg.writeAllFd(1, frame);
+                _ = ptypkg.writeAllFd(1, "\n");
+            }
+            return;
+        }
+        if (!std.mem.eql(u8, arg, "-")) {
+            std.debug.print("usage: rook-mux side [-|demo]   (frames on stdin)\n", .{});
+            return error.BadArgs;
+        }
+        try client.sidePush(churn_gpa, path);
         return;
     }
     if (std.mem.eql(u8, cmd, "blocks")) {
