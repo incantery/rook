@@ -46,6 +46,9 @@ const usage = `rook — the multiplexer, owned
   rook switch <name>      switch workspace
   rook blocks             the block table (stable ids)
   rook raw <id>           this terminal becomes one block, no chrome
+  rook state | watch      the state feed: one snapshot, or one per change
+  rook capture <id>       one pane's viewport as plain text
+  rook side [-|demo]      push the side rail's model (JSON frames on stdin)
   rook popup <cmd...>     float a command over the current window
   rook nav h|j|k|l        move focus (vim plugins call this at edges)
   rook stats | kill       server introspection / shutdown
@@ -59,6 +62,8 @@ var muxVerbs = map[string]bool{
 	"server": true, "stats": true, "kill": true, "nav": true,
 	"popup": true, "ls": true, "switch": true, "new": true,
 	"blocks": true, "raw": true,
+	// the state feed (out) and the side rail's model (in)
+	"state": true, "watch": true, "capture": true, "side": true,
 }
 
 func main() {

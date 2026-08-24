@@ -218,7 +218,7 @@ specifies:
   answers; a live rail needs the plugin to volunteer. This is the frame
   that makes the "rook never waits" rule cheap instead of merely
   possible. **Built** — `chrome.Feed`, one frame per line into
-  `rook-mux side -`, answered with a serial or with the reason it was
+  `rook side -`, answered with a serial or with the reason it was
   refused. It arrives over the mux socket rather than a plugin's
   stdout, because there are no plugin processes yet; the frame is the
   same one either way, so growing a runner does not move the seam.

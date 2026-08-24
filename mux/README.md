@@ -116,8 +116,8 @@ Nothing inside the mux decides what it says. The model is pushed in
 from outside, one JSON frame per line, in the list shape of the plugin
 protocol (`docs/surfaces.md`):
 
-    rook-mux side demo | rook-mux side -     # the herdr design, as frames
-    my-producer | rook-mux side -            # the real thing
+    rook side demo | rook side -     # the herdr design, as frames
+    my-producer | rook side -        # the real thing
 
     {"v":1,"op":"items.push","params":{"surface":"spaces","items":[
       {"id":"herdr","title":"herdr","subtitle":"master","state":"working"},
@@ -132,7 +132,7 @@ and the subtitle's color, and a name rook does not know draws a plain
 row rather than costing the frame. A panel-level `title` and `note`
 override the header. Unknown keys are ignored, an item without a name
 is dropped, and a frame rook cannot use changes nothing on the glass
-and answers with the reason — `rook-mux side -` prints
+and answers with the reason — `rook side -` prints
 `{"ok":true,"serial":N}` for a frame it took and the refusal on stderr
 for one it did not. Until something pushes, a panel says so.
 
