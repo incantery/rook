@@ -33,6 +33,17 @@ fn EffectArg(comptime name: []const u8, comptime i: usize) type {
 
 const max_clipboard = 8 * 1024 * 1024;
 
+const Timeval = extern struct { sec: i64, usec: i32 };
+extern "c" fn gettimeofday(tv: *Timeval, tz: ?*anyopaque) c_int;
+/// Wall-clock milliseconds. The activity stamp is read by other
+/// processes through the state feed, so it has to be an epoch they
+/// share — not the server's CLOCK_UPTIME_RAW.
+fn epochMs() i64 {
+    var tv: Timeval = .{ .sec = 0, .usec = 0 };
+    _ = gettimeofday(&tv, null);
+    return tv.sec * 1000 + @divTrunc(@as(i64, tv.usec), 1000);
+}
+
 pub const Pane = struct {
     gpa: std.mem.Allocator,
     pty: ptypkg.Pty,
@@ -42,6 +53,11 @@ pub const Pane = struct {
     rs: vt.RenderState = .empty,
     thread: ?std.Thread = null,
     exited: std.atomic.Value(bool) = .init(false),
+    /// Wall-clock ms of the last batch this pane's pty produced, 0 if
+    /// never. Stamped by the reader thread, read by the state feed:
+    /// liveness that a worktree scan cannot see (an agent thinking
+    /// writes no files; a long test run is not stale).
+    last_output_ms: std.atomic.Value(i64) = .init(0),
     cols: u16,
     rows: u16,
     /// Server's self-pipe write end: one byte per parsed batch wakes
@@ -215,6 +231,7 @@ pub const Pane = struct {
                 }
             }
             if (total > 0) {
+                self.last_output_ms.store(epochMs(), .release);
                 os_unfair_lock_lock(&self.lock);
                 stream.nextSlice(buf[0..total]);
                 // tee the raw batch for block clients; 2MB behind

@@ -4,7 +4,9 @@
 //!   rook-mux nav <dir>  move focus h/j/k/l (vim plugins call this at edges)
 //!   rook-mux popup <cmd> float a command over the current window
 //!   rook-mux ls / switch / new <name> [cwd] / close <name>   workspaces
+//!   rook-mux state / watch       the state feed: snapshot, or subscribe
 //!   rook-mux blocks / raw <id>   block table; raw single-block attach
+//!   rook-mux capture <id>        one pane's viewport as plain text
 //!   rook-mux kill       stop the server
 const std = @import("std");
 const server = @import("server.zig");
@@ -64,8 +66,25 @@ pub fn main(init: std.process.Init) !void {
         try client.kill(gpa, path);
         return;
     }
+    if (std.mem.eql(u8, cmd, "state")) {
+        try client.state(churn_gpa, path);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "watch")) {
+        try client.watch(churn_gpa, path);
+        return;
+    }
     if (std.mem.eql(u8, cmd, "blocks")) {
         try client.blocks(gpa, path);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "capture")) {
+        if (argv.len < 3) {
+            std.debug.print("usage: rook-mux capture <block-id>\n", .{});
+            return error.BadArgs;
+        }
+        const id = try std.fmt.parseInt(u32, std.mem.span(argv[2]), 10);
+        try client.capture(churn_gpa, path, id);
         return;
     }
     if (std.mem.eql(u8, cmd, "raw")) {
@@ -87,12 +106,20 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, cmd, "new")) {
-        if (argv.len < 3) return error.BadArgs;
-        var arg: []const u8 = std.mem.span(argv[2]);
-        if (argv.len > 3) {
-            arg = try std.fmt.allocPrint(gpa, "{s}\t{s}", .{ arg, std.mem.span(argv[3]) });
+        // `new -q` creates the workspace without moving the person —
+        // what an agent spawns with.
+        var rest = argv[2..];
+        var op: u8 = 'n';
+        if (rest.len > 0 and std.mem.eql(u8, std.mem.span(rest[0]), "-q")) {
+            op = 'N';
+            rest = rest[1..];
         }
-        try client.session(gpa, path, 'n', arg);
+        if (rest.len < 1) return error.BadArgs;
+        var arg: []const u8 = std.mem.span(rest[0]);
+        if (rest.len > 1) {
+            arg = try std.fmt.allocPrint(gpa, "{s}\t{s}", .{ arg, std.mem.span(rest[1]) });
+        }
+        try client.session(gpa, path, op, arg);
         return;
     }
     if (std.mem.eql(u8, cmd, "close")) {

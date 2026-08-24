@@ -269,6 +269,52 @@ pub const Frame = struct {
         return self.buf.items;
     }
 
+    /// A pane's viewport as plain text: one line per row, trailing
+    /// blanks trimmed, no SGR and no cursor. What a phone, a rail
+    /// preview, or anything that wants to *read* a pane needs — and
+    /// the thing that stops such a client having to re-parse the VT
+    /// frame this file just wrote.
+    pub fn plainText(self: *Frame, pane: *panepkg.Pane) []const u8 {
+        self.buf.clearRetainingCapacity();
+        const rs = &pane.rs;
+        const row_cells = rs.row_data.items(.cells);
+        for (0..rs.rows) |y| {
+            const raws = row_cells[y].items(.raw);
+            const graphemes = row_cells[y].items(.grapheme);
+            const start = self.buf.items.len;
+            var trimmed = start;
+            for (0..rs.cols) |x| {
+                const raw = &raws[x];
+                if (raw.wide == .spacer_tail) continue; // the head cell carried it
+                const cp: u21 = switch (raw.content_tag) {
+                    .codepoint, .codepoint_grapheme => raw.content.codepoint.data,
+                    else => 0,
+                };
+                if (cp <= 32) {
+                    self.put(" ");
+                    continue;
+                }
+                var cbuf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(cp, &cbuf) catch {
+                    self.put(" ");
+                    continue;
+                };
+                self.put(cbuf[0..n]);
+                if (raw.content_tag == .codepoint_grapheme) {
+                    for (graphemes[x]) |extra| {
+                        var eb: [4]u8 = undefined;
+                        const en = std.unicode.utf8Encode(extra, &eb) catch continue;
+                        self.put(eb[0..en]);
+                    }
+                }
+                trimmed = self.buf.items.len;
+            }
+            self.buf.shrinkRetainingCapacity(trimmed);
+            self.put("\n");
+        }
+        return self.buf.items;
+    }
+
     /// A full box border for the popup, accent-colored.
     fn drawBox(self: *Frame, r: layoutpkg.Rect) void {
         if (r.w < 2 or r.h < 2) return;

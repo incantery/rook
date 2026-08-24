@@ -5,6 +5,7 @@ const ptypkg = @import("pty.zig");
 const proto = @import("proto.zig");
 
 extern "c" fn tcgetattr(fd: c_int, t: *Termios) c_int;
+extern "c" fn isatty(fd: c_int) c_int;
 extern "c" fn tcsetattr(fd: c_int, opt: c_int, t: *const Termios) c_int;
 
 const Termios = extern struct {
@@ -116,6 +117,70 @@ pub fn blocks(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     return error.Timeout;
 }
 
+/// One-shot: print the state snapshot as one line of JSON.
+pub fn state(gpa: std.mem.Allocator, sock_path: []const u8) !void {
+    return stateFeed(gpa, sock_path, false);
+}
+
+/// Subscribe: the snapshot first, then one line per change, forever.
+/// A consumer in any language is spawn-read-lines-parse — no polling,
+/// no file watching, no framing.
+pub fn watch(gpa: std.mem.Allocator, sock_path: []const u8) !void {
+    return stateFeed(gpa, sock_path, true);
+}
+
+fn stateFeed(gpa: std.mem.Allocator, sock_path: []const u8, subscribe: bool) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    try proto.write(sock, @intFromEnum(proto.c2s.state), &[_]u8{if (subscribe) 1 else 0});
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (subscribe or waited < 2000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!reader.fill(sock)) return if (subscribe) {} else error.ServerGone;
+        while (reader.next()) |msg| {
+            defer reader.consume();
+            if (msg.kind != @intFromEnum(proto.s2c.state_json)) continue;
+            // the payload already ends in a newline: one JSON object
+            // per line is the whole contract
+            if (!ptypkg.writeAllFd(1, msg.payload)) return;
+            if (!subscribe) return;
+        }
+    }
+    return error.Timeout;
+}
+
+/// One-shot: print a pane's viewport as plain text.
+pub fn capture(gpa: std.mem.Allocator, sock_path: []const u8, id: u32) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    var b: [4]u8 = undefined;
+    std.mem.writeInt(u32, &b, id, .little);
+    try proto.write(sock, @intFromEnum(proto.c2s.capture), &b);
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (waited < 2000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!reader.fill(sock)) return error.ServerGone;
+        while (reader.next()) |msg| {
+            defer reader.consume();
+            if (msg.kind == @intFromEnum(proto.s2c.text)) {
+                _ = ptypkg.writeAllFd(1, msg.payload);
+                return;
+            }
+        }
+    }
+    return error.Timeout;
+}
+
 /// Raw single-block attach: this terminal becomes block `id` — no
 /// chrome, no prefix, near-SSH fidelity. Takes the resize lease.
 pub fn rawAttach(gpa: std.mem.Allocator, sock_path: []const u8, id: u32) !void {
@@ -190,7 +255,6 @@ pub fn session(gpa: std.mem.Allocator, sock_path: []const u8, op: u8, name: []co
     try payload.append(gpa, op);
     try payload.appendSlice(gpa, name);
     try proto.write(sock, @intFromEnum(proto.c2s.session), payload.items);
-    if (op != 'l') return;
     _ = ptypkg.setNonblockFd(sock);
     var reader = proto.Reader.init(gpa);
     defer reader.deinit();
@@ -201,8 +265,20 @@ pub fn session(gpa: std.mem.Allocator, sock_path: []const u8, op: u8, name: []co
         if (!reader.fill(sock)) return error.ServerGone;
         while (reader.next()) |msg| {
             defer reader.consume();
-            if (msg.kind == @intFromEnum(proto.s2c.stats_text)) {
+            if (op == 'l' and msg.kind == @intFromEnum(proto.s2c.stats_text)) {
                 _ = ptypkg.writeAllFd(1, msg.payload);
+                return;
+            }
+            if (op != 'l' and msg.kind == @intFromEnum(proto.s2c.ack)) {
+                // Read-your-writes, without making an interactive
+                // pipeline noisy: the serial goes out only when stdout
+                // is not a terminal, i.e. when something is reading it.
+                if (msg.payload.len >= 8 and isatty(1) == 0) {
+                    const serial = std.mem.readInt(u64, msg.payload[0..8], .little);
+                    var b: [64]u8 = undefined;
+                    const line = std.fmt.bufPrint(&b, "{{\"ok\":true,\"serial\":{d}}}\n", .{serial}) catch return;
+                    _ = ptypkg.writeAllFd(1, line);
+                }
                 return;
             }
         }

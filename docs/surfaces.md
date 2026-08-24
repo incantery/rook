@@ -1,6 +1,8 @@
 # Surfaces and state — the plugin seam
 
-> Status: design, not built. Nothing here ships today. What *does*
+> Status: the **state feed (out) is built and shipping** — see the
+> section below and `statefeed.zig`. Surfaces and the plugin protocol
+> (in) are still design. What *does*
 > exist is inventoried in [What is real today](#what-is-real-today),
 > and most of this document is the recovery of vocabulary that already
 > existed once — `docs/config.sample.toml`, `docs/man/rook-plugin.7`
@@ -278,36 +280,60 @@ still exact. Deltas would force unbounded buffering or a disconnect.
   "rookMuxState": 1,
   "epoch": "0f3c9a2b",
   "serial": 412,
+  "pid": 48120,
   "geometry": {"cols": 180, "rows": 45},
-  "focus": {"kind": "pane", "id": 7},
+  "focus": {"pane": 7, "mode": "pane"},
 
   "workspaces": [
     {"name": "main", "current": true,
      "windows": [
-       {"id": 3, "name": "claude", "current": true, "zoomed": false,
-        "layout": {"split": "v", "frac": 0.5, "a": {"pane": 7}, "b": {"pane": 9}}}
+       {"index": 1, "name": "claude", "current": true, "zoomed": false,
+        "focus": 7,
+        "layout": {"split": "v", "ratio": 0.5, "a": {"pane": 7}, "b": {"pane": 9}}}
      ],
      "pins": [12]}
   ],
 
   "panes": [
-    {"id": 7, "pid": 48213, "program": "claude", "title": "claude",
-     "cwd": "/Users/seth/src/rook",
+    {"id": 7, "pid": 48213, "program": "claude",
+     "cwd": "/Users/seth/src/rook", "cols": 74, "rows": 44,
      "rect": {"x": 31, "y": 1, "w": 74, "h": 44},
-     "focused": true, "scrolled": false, "altScreen": true, "wantsMouse": false}
+     "focused": true, "visible": true, "wantsMouse": false,
+     "exited": false, "lastOutputMs": 1787588669907}
   ],
 
   "pins": [{"pane": 12, "scope": "global"}],
-  "surfaces": [
-    {"name": "spaces", "place": "dock:left", "size": 30, "shown": true,
-     "plugin": "herdr", "stale": false,
-     "items": [{"id": "web-dashboard", "title": "web-dashboard", "…": "…"}]}
-  ],
-  "clients": [{"cols": 180, "rows": 45, "attached": true}]
+  "surfaces": [{"name": "side", "place": "dock:left", "size": 30, "shown": true}],
+  "clients": [{"cols": 180, "rows": 45, "attached": true, "block": 0}]
 }
 ```
 
-A surface publishes the last model pushed to it, verbatim and opaque —
+`focus.mode` is `pane`, `copy` or `popup` — a replica needs to know
+when the mux itself is holding the keyboard. `rect` is null for a pane
+that is not currently placed (another window, a hidden workspace) and
+`visible` says the same in one field. `lastOutputMs` is wall clock, not
+the server's uptime clock, because other processes read it.
+
+### Two cadences, so a busy pane cannot make it chatty
+
+Change is detected by diffing snapshots, so the diffed form has to
+leave out anything that would make the diff see itself:
+
+- **identity** (`epoch`, `serial`) is omitted when diffing. Bumping the
+  serial must not read as a change, or the feed feeds itself — a 20 Hz
+  loop, which is what the first cut of this did.
+- **drift** (`program`, a window's `name`, `cwd`, `lastOutputMs`) is
+  omitted from the fast diff and looked at every 2 s instead. These
+  move with pty output: `while true; do date; done` respawns its
+  foreground child faster than the poll floor, and diffing on them
+  pushed 118 snapshots in 6 s. Split, it is 5 — with liveness still
+  fresh.
+
+Structural change — anything a command did — still pushes on the next
+50 ms turn, and idle is silent.
+
+When surfaces land, each will publish the last model pushed to it,
+verbatim and opaque —
 never merged into rook's own state, never interpreted. Rook is already
 holding those items because it paints them, so this costs no storage,
 and it is what lets a second glass (the browser client, the phone)
@@ -323,17 +349,19 @@ load-bearing:
 
 ### Read-your-writes
 
-Commands return the serial they produced:
+Mutating commands answer with `s2c.ack`, an 8-byte serial. The CLI
+prints it as JSON **only when stdout is not a terminal**, so a script
+gets read-your-writes while an interactive `… | fzf | xargs rook-mux
+switch` inside a popup stays silent:
 
 ```
-$ rook-mux switch web-dashboard
-{"ok": true, "serial": 413}
+$ rook-mux switch web-dashboard | cat
+{"ok":true,"serial":413}
 ```
 
-A consumer that has just issued a command knows exactly what to wait
-for. Without this, everyone writes the same sleep-and-hope loop and
-gets it slightly wrong. Cheap now; painful to retrofit, because by then
-the loops exist.
+Wait for `serial >= n`, never `== n`: anything else may have moved in
+between. Without this everyone writes the same sleep-and-hope loop and
+gets it slightly wrong.
 
 ### Not hooks
 
@@ -353,8 +381,10 @@ Honest inventory, so this document is not mistaken for a description.
 | `tabBar()` | real, hardcoded: chips, order, the `+`, where hints ride |
 | pins | real; a `pty` surface with `place` hardcoded to `dock:left` |
 | `navigate()` over `self.placed` | real; the `focus = "nav"` mechanism, unused by surfaces |
-| `saveState` → `<sock>.state` | real; restore format, dirty-marked and coalesced, atomic rename |
-| block table push | real; a second half-built feed with its own 2s cadence |
+| `saveState` → `<sock>.state` | real; restore format, still private |
+| block table push | real; superseded by the state feed, kept for the web client |
+| `rook-mux state` / `watch` / `capture` | **built** |
+| `s2c.ack`, quiet `session 'N'`, `block_created` on new | **built** |
 | plugin protocol v1 | specified in `rook-plugin(7)` at `425c0f8^`, never implemented in the mux |
 | surfaces, `items.push`, state feed | none of it |
 

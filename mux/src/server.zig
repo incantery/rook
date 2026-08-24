@@ -10,6 +10,7 @@ const panepkg = @import("pane.zig");
 const layoutpkg = @import("layout.zig");
 const renderpkg = @import("render.zig");
 const chromepkg = @import("chrome.zig");
+const statefeed = @import("statefeed.zig");
 const proto = @import("proto.zig");
 const config = @import("config.zig");
 
@@ -50,6 +51,12 @@ const Client = struct {
     block: ?u32 = null,
     /// Asked for the block table once: gets pushes when it changes.
     wants_blocks: bool = false,
+    /// Subscribed to the state feed. `state_queued` marks a snapshot
+    /// owed but not yet written — a second change while one is queued
+    /// replaces it rather than piling up, which is why the feed can
+    /// never stall the poll loop behind a slow reader.
+    wants_state: bool = false,
+    state_queued: bool = false,
     /// Holds this block's geometry: its resizes win, the TUI layout
     /// stops resizing the pane, everyone else crops.
     lease: bool = false,
@@ -84,7 +91,7 @@ const Session = struct {
     /// Where focus was before the last move — prefix-; goes back.
     last_focus: ?u32 = null,
 
-    fn label(self: *const Session) []const u8 {
+    pub fn label(self: *const Session) []const u8 {
         return self.name[0..self.name_len];
     }
     fn setName(self: *Session, n: []const u8) void {
@@ -202,6 +209,25 @@ pub const Server = struct {
     state_saved_ms: i64 = 0,
     /// Last block table sent to subscribers; pushes happen on change.
     blocks_last: std.ArrayList(u8) = .empty,
+    /// The state feed. `epoch` identifies this server across restarts
+    /// (a consumer that reconnects across a `rook kill` must discard,
+    /// not merge); `serial` orders changes and is what a command
+    /// returns so its caller can wait for its own write to land.
+    epoch: [8]u8 = @splat('0'),
+    serial: u64 = 0,
+    pid: i32 = 0,
+    state_json: std.ArrayList(u8) = .empty,
+    state_last: std.ArrayList(u8) = .empty,
+    state_check_ms: i64 = 0,
+    /// Liveness pushes on their own 2s cadence: `lastOutputMs` moves
+    /// with every pty batch, and a running build must not push a
+    /// snapshot to every subscriber twenty times a second.
+    /// Drift (foreground program, cwd, activity stamp) is looked at on
+    /// its own 2s cadence: a shell loop respawns its child faster than
+    /// the poll floor, so diffing on it would push a snapshot to every
+    /// subscriber twenty times a second for as long as a build runs.
+    state_drift_last: std.ArrayList(u8) = .empty,
+    state_drift_ms: i64 = 0,
     blocks_check_ms: i64 = 0,
 
     pub fn run(gpa: std.mem.Allocator, io: std.Io, sock_path: []const u8, shell: [:0]const u8, cwd: ?[:0]const u8) !void {
@@ -254,11 +280,15 @@ pub const Server = struct {
 
         self.frame.accent = self.conf.accent;
         self.side.accent = self.conf.accent;
+        self.pid = ptypkg.selfPid();
+        _ = std.fmt.bufPrint(&self.epoch, "{x:0>8}", .{
+            @as(u32, @truncate(@as(u64, @bitCast(nowMs())) *% 2654435761 ^ @as(u64, @intCast(self.pid)))),
+        }) catch {};
         // Resurrect only when asked ([mux] restore = true); otherwise a
         // fresh boot opens a clean workspace instead of last session's
         // splits. The state file is still saved, so opting in restores.
         const restored = self.conf.restore and try self.restoreState();
-        if (!restored) _ = try self.newSession("main", null);
+        if (!restored) _ = try self.newSession("main", null, true);
         try self.loop();
     }
 
@@ -287,6 +317,9 @@ pub const Server = struct {
         self.frame.deinit();
         self.placed.deinit(self.gpa);
         self.blocks_last.deinit(self.gpa);
+        self.state_json.deinit(self.gpa);
+        self.state_last.deinit(self.gpa);
+        self.state_drift_last.deinit(self.gpa);
         ptypkg.unlinkPath(self.sock_path);
     }
 
@@ -304,10 +337,13 @@ pub const Server = struct {
     /// Create a session named `name` (deduped — an existing name is a
     /// switch) and make it current. `cwd` seeds the first window; null
     /// falls back to the server default.
-    fn newSession(self: *Server, name: []const u8, cwd: ?[*:0]const u8) !*Session {
+    /// Create (or find) a workspace. `show` false builds it without
+    /// changing which workspace the person is looking at — the quiet
+    /// form the fleet spawns into.
+    fn newSession(self: *Server, name: []const u8, cwd: ?[*:0]const u8, show: bool) !*Session {
         for (self.sessions.items, 0..) |sn, i| {
             if (std.mem.eql(u8, sn.label(), name)) {
-                self.switchSession(i);
+                if (show) self.switchSession(i);
                 return sn;
             }
         }
@@ -315,10 +351,20 @@ pub const Server = struct {
         sn.* = .{};
         sn.setName(name);
         try self.sessions.append(self.gpa, sn);
+        const was = self.cur_sess;
         const old_focused: ?u32 = if (self.sessions.items.len > 1) self.window().focused else null;
         self.cur_sess = self.sessions.items.len - 1;
         try self.newWindow(cwd);
-        if (old_focused) |o| self.focusEvents(o, self.window().focused);
+        if (show) {
+            if (old_focused) |o| self.focusEvents(o, self.window().focused);
+        } else if (self.sessions.items.len > 1) {
+            // Put the view back. newWindow built the pane against this
+            // workspace's geometry, so relayout has to run again for the
+            // one we are actually showing.
+            self.cur_sess = was;
+            try self.relayout();
+        }
+        _ = self.touch();
         return sn;
     }
 
@@ -445,7 +491,7 @@ pub const Server = struct {
         try self.relayout();
     }
 
-    fn pane(self: *Server, id: u32) ?*panepkg.Pane {
+    pub fn pane(self: *Server, id: u32) ?*panepkg.Pane {
         for (self.panes.items) |p| {
             if (p.id == id) return p;
         }
@@ -454,7 +500,7 @@ pub const Server = struct {
 
     /// The pane input goes to: a focused rail pane, else the current
     /// window's focused leaf.
-    fn focusedId(self: *Server) u32 {
+    pub fn focusedId(self: *Server) u32 {
         const sn = self.sess();
         return sn.focus_pin orelse self.window().focused;
     }
@@ -487,7 +533,7 @@ pub const Server = struct {
         self.pending = true;
     }
 
-    fn geometry(self: *Server) proto.Geometry {
+    pub fn geometry(self: *Server) proto.Geometry {
         var g: proto.Geometry = .{ .cols = 80, .rows = 24 };
         for (self.clients.items) |c| {
             if (c.attached) g = .{ .cols = c.cols, .rows = c.rows };
@@ -674,6 +720,12 @@ pub const Server = struct {
                 self.pending = false;
             }
 
+            // The state feed: floored at 50ms, so a busy pane cannot
+            // make it chatty, and never on the frame path.
+            if (nowMs() - self.state_check_ms > 50) {
+                self.pushState();
+                self.state_check_ms = nowMs();
+            }
             if (nowMs() - self.blocks_check_ms > 2000) {
                 self.pushBlocks();
                 self.blocks_check_ms = nowMs();
@@ -812,6 +864,18 @@ pub const Server = struct {
                     } else self.input(c, msg.payload);
                 },
                 @intFromEnum(proto.c2s.blocks) => self.sendBlocks(c),
+                @intFromEnum(proto.c2s.state) => self.sendState(c, msg.payload),
+                @intFromEnum(proto.c2s.capture) => {
+                    // [id u32] → the pane's viewport as plain text.
+                    if (msg.payload.len >= 4) {
+                        const id = std.mem.readInt(u32, msg.payload[0..4], .little);
+                        if (self.pane(id)) |p| {
+                            p.snapshot() catch {};
+                            self.sendTo(c, @intFromEnum(proto.s2c.text), self.frame.plainText(p));
+                            self.full = true; // the frame buffer is now the capture
+                        }
+                    }
+                },
                 @intFromEnum(proto.c2s.block_cmd) => self.blockCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.attach_block) => self.attachBlock(c, msg.payload),
                 @intFromEnum(proto.c2s.session) => {
@@ -829,7 +893,13 @@ pub const Server = struct {
                                 self.sendTo(c, @intFromEnum(proto.s2c.stats_text), lw.items);
                             },
                             's' => if (name.len > 0) self.switchSessionNamed(name),
-                            'n' => if (name.len > 0) {
+                            // 'n' creates and switches to the workspace;
+                            // 'N' creates it without moving the person —
+                            // starting work for an agent must never pull
+                            // the desk to it. Both reply with the block
+                            // they made, so a caller never has to diff
+                            // the table to find out.
+                            'n', 'N' => if (name.len > 0) {
                                 // payload: name[\tcwd]
                                 var nm = name;
                                 var cwd: ?[*:0]const u8 = null;
@@ -843,10 +913,19 @@ pub const Server = struct {
                                         cwd = @ptrCast(&cwd_buf);
                                     }
                                 }
-                                if (nm.len > 0) _ = self.newSession(nm, cwd) catch {};
+                                if (nm.len > 0) {
+                                    if (self.newSession(nm, cwd, op == 'n')) |sn| {
+                                        if (sn.windows.items.len > 0)
+                                            self.replyCreated(c, sn.windows.items[sn.cur].focused);
+                                    } else |_| {}
+                                }
                             },
                             'k' => if (name.len > 0) self.closeSession(name),
                             else => {},
+                        }
+                        if (op != 'l') {
+                            _ = self.touch();
+                            self.ack(c);
                         }
                         self.pending = true;
                     }
@@ -934,6 +1013,80 @@ pub const Server = struct {
         self.blocks_last.appendSlice(self.gpa, out.items) catch {};
         for (self.clients.items) |c| {
             if (c.wants_blocks and !c.dead) self.sendTo(c, @intFromEnum(proto.s2c.blocks_text), out.items);
+        }
+    }
+
+    // ---- the state feed ----
+
+    /// Bump the serial: something a consumer's replica must see
+    /// changed. Returns the new value, which is what a command replies
+    /// with — a caller waits for `serial >= n`, not `== n`, since
+    /// anything else may have moved in between.
+    fn touch(self: *Server) u64 {
+        self.serial += 1;
+        self.state_check_ms = 0; // publish on the next loop turn
+        return self.serial;
+    }
+
+    /// Acknowledge a mutating command with the serial it produced, so
+    /// its caller can wait for its own write to appear in the feed. A
+    /// caller waits for `serial >= n`, not `== n`: anything else may
+    /// have moved in between.
+    fn ack(self: *Server, c: *Client) void {
+        var b: [8]u8 = undefined;
+        std.mem.writeInt(u64, &b, self.serial, .little);
+        self.sendTo(c, @intFromEnum(proto.s2c.ack), &b);
+    }
+
+    /// `state` request: [flags u8, 1 = subscribe]. Always replies with
+    /// the current snapshot first, so a subscriber never needs a
+    /// separate one-shot and a reconnect is a resync.
+    fn sendState(self: *Server, c: *Client, payload: []const u8) void {
+        if (payload.len > 0 and (payload[0] & 1) != 0) c.wants_state = true;
+        // A direct ask always carries fresh liveness; only the pushed
+        // stream holds it back to a slower cadence.
+        statefeed.build(self, &self.state_json, .{});
+        self.sendTo(c, @intFromEnum(proto.s2c.state_json), self.state_json.items);
+        c.state_queued = false;
+    }
+
+    /// Publish to subscribers when the snapshot actually changed.
+    /// Floored rather than driven off every mutation: pane titles and
+    /// cwds drift with pty output, and this must never ride the frame
+    /// path.
+    fn pushState(self: *Server) void {
+        var any = false;
+        for (self.clients.items) |c| {
+            if (c.wants_state and !c.dead) any = true;
+        }
+        if (!any) return;
+        const now = nowMs();
+        // Structural change — anything a command did — pushes at once.
+        const cmp: statefeed.Form = .{ .drift = false, .identity = false };
+        statefeed.build(self, &self.state_json, cmp);
+        var due = !std.mem.eql(u8, self.state_json.items, self.state_last.items);
+        if (due) {
+            self.state_last.clearRetainingCapacity();
+            self.state_last.appendSlice(self.gpa, self.state_json.items) catch {};
+        }
+        // Drift is only looked at every couple of seconds.
+        const drift_cmp: statefeed.Form = .{ .drift = true, .identity = false };
+        if (!due and now - self.state_drift_ms > 2000) {
+            self.state_drift_ms = now;
+            statefeed.build(self, &self.state_json, drift_cmp);
+            due = !std.mem.eql(u8, self.state_json.items, self.state_drift_last.items);
+        }
+        if (!due) return;
+        // A change no mutation site announced still earns a serial, so
+        // a replica can order it.
+        self.serial += 1;
+        statefeed.build(self, &self.state_drift_last, drift_cmp);
+        statefeed.build(self, &self.state_json, .{});
+        for (self.clients.items) |c| {
+            if (!c.wants_state or c.dead) continue;
+            c.state_queued = true;
+            self.sendTo(c, @intFromEnum(proto.s2c.state_json), self.state_json.items);
+            c.state_queued = false;
         }
     }
 
@@ -1090,10 +1243,10 @@ pub const Server = struct {
     }
 
     fn sendStats(self: *Server, c: *Client) void {
-        var buf: [512]u8 = undefined;
+        var buf: [768]u8 = undefined;
         var nwin: usize = 0;
         for (self.sessions.items) |sn| nwin += sn.windows.items.len;
-        const text = std.fmt.bufPrint(&buf, "rook-mux up {d}s · {d} session{s} · {d} window{s} · {d} pane{s} · {d} client{s}\nframes {d} · {d:.1} MB shipped\ninput→frame p50 {d}µs · p99 {d}µs · samples {d}\n", .{
+        const text = std.fmt.bufPrint(&buf, "rook-mux up {d}s · {d} session{s} · {d} window{s} · {d} pane{s} · {d} client{s}\nframes {d} · {d:.1} MB shipped\ninput→frame p50 {d}µs · p99 {d}µs · samples {d}\nstate {d} · epoch {s} · serial {d} · ops quiet-new,block-created-on-new\n", .{
             @divTrunc(nowMs() - self.started_ms, 1000),
             self.sessions.items.len,
             plural(self.sessions.items.len),
@@ -1108,6 +1261,9 @@ pub const Server = struct {
             self.lat.pct(0.5),
             self.lat.pct(0.99),
             self.lat.total,
+            statefeed.version,
+            self.epoch,
+            self.serial,
         }) catch "stats: format error";
         self.sendTo(c, @intFromEnum(proto.s2c.stats_text), text);
     }

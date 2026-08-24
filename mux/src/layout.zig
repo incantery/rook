@@ -43,6 +43,29 @@ pub const Layout = struct {
         return n;
     }
 
+    /// The split tree as JSON, for the state feed: a leaf is
+    /// `{"pane":N}`, a split carries its axis, ratio and two children.
+    /// Node stays private — the tree serializes itself.
+    pub fn writeJson(self: *Layout, gpa: std.mem.Allocator, out: *std.ArrayList(u8)) void {
+        if (self.root) |r| nodeJson(gpa, out, r) else out.appendSlice(gpa, "null") catch {};
+    }
+
+    fn nodeJson(gpa: std.mem.Allocator, out: *std.ArrayList(u8), n: *Node) void {
+        switch (n.*) {
+            .leaf => |id| out.print(gpa, "{{\"pane\":{d}}}", .{id}) catch {},
+            .split => |sp| {
+                out.print(gpa, "{{\"split\":\"{s}\",\"ratio\":{d:.4},\"a\":", .{
+                    if (sp.side_by_side) "v" else "h",
+                    sp.ratio,
+                }) catch {};
+                nodeJson(gpa, out, sp.a);
+                out.appendSlice(gpa, ",\"b\":") catch {};
+                nodeJson(gpa, out, sp.b);
+                out.appendSlice(gpa, "}") catch {};
+            },
+        }
+    }
+
     /// Add the first pane.
     pub fn seed(self: *Layout, pane: u32) !void {
         self.root = try self.leaf(pane);

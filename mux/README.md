@@ -69,6 +69,39 @@ through the pane and its scrollback, v anchors a selection (the
 anchor is content-tracked, so it survives scrolling), y yanks to the
 system clipboard. Not yet: session persistence across server restart.
 
+## The state feed
+
+rook-mux is the single writer of its own state and publishes it, so
+anything else can hold an exact replica and never has to poll:
+
+    rook-mux state        # the snapshot, one line of JSON
+    rook-mux watch        # the snapshot, then one line per change
+    rook-mux capture <id> # one pane's viewport as plain text
+
+`watch` sends the full snapshot as its first line, so a consumer in any
+language is spawn-read-lines-parse — no polling, no file watching, no
+framing, and a reconnect is a resync. Whole snapshots rather than
+deltas: a consumer that misses a delta is wrong forever, and dropping
+an older snapshot for a newer one is always correct, which is how a
+slow reader can never stall the poll loop.
+
+`epoch` identifies the server across restarts (reconnect across a
+`rook-mux kill` and you must discard, not merge); `serial` orders
+changes, and mutating commands answer with the serial they produced —
+`rook-mux switch foo | cat` prints `{"ok":true,"serial":N}`. Wait for
+`serial >= n`, never `== n`.
+
+Change is detected by diffing snapshots, on two cadences. Structural
+change pushes within 50 ms. Drift — the foreground program, the cwd,
+the per-pane `lastOutputMs` — is looked at every 2 s, because a shell
+loop respawns its child faster than the poll floor and diffing on it
+pushed 118 snapshots in 6 s where the split pushes 5. Idle is silent.
+
+`rook-mux new -q <name>` creates a workspace **without** moving the
+person to it — starting work on your behalf must not pull the desk —
+and both forms answer with the block they made. Design and the rest of
+the plan: `docs/surfaces.md`.
+
 ## The side panel
 
 Down the left edge, above windows and workspaces: *spaces* over

@@ -518,6 +518,11 @@ pub fn writeAllFd(fd: fd_t, bytes: []const u8) bool {
     return true;
 }
 
+extern "c" fn getpid() pid_t;
+pub fn selfPid() pid_t {
+    return getpid();
+}
+
 pub fn fork_() pid_t {
     return fork();
 }
