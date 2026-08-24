@@ -128,6 +128,10 @@ pub const Server = struct {
     global_pins: std.ArrayList(u32) = .empty,
     /// Column of the rail/window seam in the current layout, if any.
     dock_x: ?u16 = null,
+    /// Where the top tab bar starts. Global (app-chrome) pins push it
+    /// right past the rail; workspace-local pins sit under it, so the
+    /// bar stays at column 0.
+    tab_x: u16 = 0,
     next_id: u32 = 1,
     clients: std.ArrayList(*Client) = .empty,
     wake_r: ptypkg.fd_t,
@@ -478,41 +482,53 @@ pub const Server = struct {
     /// A zoomed window is one rect: the focused pane, full region.
     fn relayout(self: *Server) !void {
         const g = self.geometry();
-        const region: layoutpkg.Rect = .{ .x = 0, .y = 0, .w = g.cols, .h = g.rows -| 1 };
         self.placed.clearRetainingCapacity();
         const w = self.window();
         const sn = self.sess();
         self.dock_x = null;
+        self.tab_x = 0;
+        // Row 0 is the tab bar; the window area sits below it.
+        const win_y: u16 = 1;
+        const win_h: u16 = g.rows -| 1;
         if (w.zoomed) {
-            try self.placed.append(self.gpa, .{ .pane = self.focusedId(), .rect = region });
+            try self.placed.append(self.gpa, .{ .pane = self.focusedId(), .rect = .{ .x = 0, .y = win_y, .w = g.cols, .h = win_h } });
         } else {
-            // the rail: global pins then this workspace's, stacked
-            // down the left edge; hidden when the glass is too narrow
-            // to give the window a real column
-            const n_rails = self.global_pins.items.len + sn.pins.items.len;
-            var win_region = region;
-            if (n_rails > 0 and region.w >= 60) {
-                var rail_w: u16 = @intFromFloat(@as(f32, @floatFromInt(region.w)) * sn.rail_frac);
-                rail_w = @max(20, @min(rail_w, region.w -| 40));
+            // The rail stacks global pins then this workspace's, down the
+            // left edge (hidden when the glass is too narrow). Global pins
+            // are app-wide chrome: they run the full height and push the
+            // tab bar right. Workspace-local pins belong to the workspace,
+            // so they sit *under* the tab bar and leave it full width.
+            const n_global = self.global_pins.items.len;
+            const n_local = sn.pins.items.len;
+            const n_rails = n_global + n_local;
+            var win_x: u16 = 0;
+            if (n_rails > 0 and g.cols >= 60) {
+                var rail_w: u16 = @intFromFloat(@as(f32, @floatFromInt(g.cols)) * sn.rail_frac);
+                rail_w = @max(20, @min(rail_w, g.cols -| 40));
+                const push = n_global > 0;
+                const rail_top: u16 = if (push) 0 else win_y;
                 const nr: u16 = @intCast(n_rails);
-                const each: u16 = (region.h -| (nr - 1)) / nr;
-                var y: u16 = region.y;
+                const avail_h = g.rows -| rail_top;
+                const each: u16 = (avail_h -| (nr - 1)) / nr;
+                var y: u16 = rail_top;
                 var i: u16 = 0;
                 for (self.global_pins.items) |id| {
-                    const h = if (i == nr - 1) region.h -| (y - region.y) else each;
+                    const h = if (i == nr - 1) g.rows -| y else each;
                     try self.placed.append(self.gpa, .{ .pane = id, .rect = .{ .x = 0, .y = y, .w = rail_w, .h = h } });
                     y += h + 1;
                     i += 1;
                 }
                 for (sn.pins.items) |id| {
-                    const h = if (i == nr - 1) region.h -| (y - region.y) else each;
+                    const h = if (i == nr - 1) g.rows -| y else each;
                     try self.placed.append(self.gpa, .{ .pane = id, .rect = .{ .x = 0, .y = y, .w = rail_w, .h = h } });
                     y += h + 1;
                     i += 1;
                 }
                 self.dock_x = rail_w;
-                win_region = .{ .x = rail_w + 1, .y = region.y, .w = region.w -| (rail_w + 1), .h = region.h };
+                self.tab_x = if (push) rail_w + 1 else 0;
+                win_x = rail_w + 1;
             }
+            const win_region: layoutpkg.Rect = .{ .x = win_x, .y = win_y, .w = g.cols -| win_x, .h = win_h };
             try w.layout.place(win_region, &self.placed);
         }
         for (self.placed.items) |pl| {
@@ -1660,8 +1676,8 @@ pub const Server = struct {
         if (!any_dirty) return;
 
         const g = self.geometry();
-        var status_buf: [256]u8 = undefined;
-        const status = self.statusLine(&status_buf);
+        var tab_buf: [2048]u8 = undefined;
+        const tabbar = self.tabBar(&tab_buf, g.cols -| self.tab_x);
 
         var cur_over: ?struct { x: u16, y: u16 } = null;
         if (self.scrolling) {
@@ -1674,7 +1690,7 @@ pub const Server = struct {
                 }
             }
         }
-        const bytes = self.frame.build(self.panes.items, self.placed.items, self.focusedId(), g.cols, g.rows, status, self.full, if (cur_over) |co| .{ .x = co.x, .y = co.y } else null, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null, self.dock_x);
+        const bytes = self.frame.build(self.panes.items, self.placed.items, self.focusedId(), g.cols, g.rows, tabbar, self.tab_x, self.full, if (cur_over) |co| .{ .x = co.x, .y = co.y } else null, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null, self.dock_x);
         self.full = false;
         var shipped = false;
         for (self.clients.items) |c| {
@@ -1903,39 +1919,68 @@ pub const Server = struct {
     /// The tab bar: ♜, then one chip per window named by its focused
     /// pane's foreground program, the current one marked. Scroll and
     /// zoom wear their state on the right.
-    fn statusLine(self: *Server, buf: []u8) []const u8 {
-        var w2: std.ArrayList(u8) = .initBuffer(buf);
-        w2.appendSliceBounded("♜ ") catch {};
-        w2.appendSliceBounded(self.sess().label()) catch {};
-        if (self.sessions.items.len > 1) {
-            var nb: [16]u8 = undefined;
-            if (std.fmt.bufPrint(&nb, " ({d})", .{self.sessions.items.len})) |chip| {
-                w2.appendSliceBounded(chip) catch {};
-            } else |_| {}
-        }
-        for (self.sess().windows.items, 0..) |w, i| {
-            var name_buf: [64]u8 = undefined;
+    /// The top tab bar: one chip per window in the current workspace,
+    /// the active one filled with the accent, then a "+" placeholder.
+    /// Built to render to exactly `avail` visible columns (padded), so
+    /// the renderer just cups to the start column and prints it. The
+    /// foreground program names the tab (fgName, not the title, which
+    /// shell prompts leave stale while an app runs).
+    fn tabBar(self: *Server, buf: []u8, avail: u16) []const u8 {
+        var out: std.ArrayList(u8) = .initBuffer(buf);
+        var vis: u16 = 0;
+        const accent = self.conf.accent;
+        const sn = self.sess();
+        out.appendSliceBounded("\x1b[0m") catch {};
+        for (sn.windows.items, 0..) |win, i| {
+            var name_buf: [48]u8 = undefined;
             var name: []const u8 = "shell";
-            if (self.pane(w.focused)) |p| {
-                // fgName, not title: shell prompts stamp titles at
-                // every prompt and go stale while apps run — the
-                // foreground program is the truth. The title still
-                // reaches the outer window via mirrorKitty.
+            if (self.pane(win.focused)) |p| {
                 if (p.fgName(&name_buf)) |fg| name = fg;
             }
-            var chip: [96]u8 = undefined;
-            const mark: []const u8 = if (i == self.sess().cur) "*" else " ";
-            const s = std.fmt.bufPrint(&chip, "  {d}:{s}{s}", .{ i + 1, name, mark }) catch continue;
-            w2.appendSliceBounded(s) catch break;
+            const nm = name[0..@min(name.len, 14)];
+            const chip: u16 = @intCast(nm.len + 2); // " name "
+            const gap: u16 = if (i > 0) 1 else 0;
+            if (vis + gap + chip + 4 > avail) break; // leave room for " + "
+            if (gap > 0) {
+                out.appendSliceBounded(" ") catch {};
+                vis += 1;
+            }
+            if (i == sn.cur) {
+                var sb: [16]u8 = undefined;
+                const s = std.fmt.bufPrint(&sb, "\x1b[{d};30;1m", .{@as(u16, accent) + 10}) catch "\x1b[7m";
+                out.appendSliceBounded(s) catch {};
+            } else {
+                out.appendSliceBounded("\x1b[90m") catch {};
+            }
+            out.appendSliceBounded(" ") catch {};
+            out.appendSliceBounded(nm) catch {};
+            out.appendSliceBounded(" ") catch {};
+            out.appendSliceBounded("\x1b[0m") catch {};
+            vis += chip;
         }
-        if (self.scrolling) {
-            w2.appendSliceBounded(if (self.selecting)
-                "  [copy · VISUAL: y yanks, v cancels]"
-            else
-                "  [copy: hjkl/u/d/g/G move, v selects, y yanks, q quits]") catch {};
+        // trailing "+" placeholder tab (clicks come later)
+        if (vis + 4 <= avail) {
+            out.appendSliceBounded(" \x1b[90m + \x1b[0m") catch {};
+            vis += 4;
         }
-        if (self.window().zoomed) w2.appendSliceBounded("  [zoom]") catch {};
-        return w2.items;
+        // copy-mode / zoom hints ride the right of the bar when they fit
+        const hint: ?[]const u8 = if (self.scrolling)
+            (if (self.selecting) "  copy·VISUAL" else "  copy·hjkl y q")
+        else if (self.window().zoomed)
+            "  zoom"
+        else
+            null;
+        if (hint) |h| {
+            if (vis + h.len <= avail) {
+                out.appendSliceBounded("\x1b[90m") catch {};
+                out.appendSliceBounded(h) catch {};
+                out.appendSliceBounded("\x1b[0m") catch {};
+                vis += @intCast(h.len);
+            }
+        }
+        while (vis < avail) : (vis += 1) out.appendSliceBounded(" ") catch {};
+        out.appendSliceBounded("\x1b[0m") catch {};
+        return out.items;
     }
 };
 

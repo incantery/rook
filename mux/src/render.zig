@@ -42,7 +42,8 @@ pub const Frame = struct {
         focused: u32,
         cols: u16,
         rows: u16,
-        status: []const u8,
+        tabbar: []const u8,
+        tab_x: u16,
         full: bool,
         cursor_override: ?struct { x: u16, y: u16 },
         popup: ?struct { pane: u32, rect: layoutpkg.Rect },
@@ -74,15 +75,28 @@ pub const Frame = struct {
             }
         }
 
-        if (full) self.drawBorders(placed, focused, cols, rows, dock_x);
+        if (full) {
+            self.drawBorders(placed, focused, cols, rows, dock_x);
+            // Dock seam: the heavy line between the rail and the tabs +
+            // window. Global (app-chrome) pins run the full height from
+            // row 0; workspace-local pins start under the tab bar, so the
+            // seam begins on row 1. Static, so only on a full repaint.
+            if (dock_x) |dx| {
+                const rail_top: u16 = if (tab_x == 0) 1 else 0;
+                self.put(csi ++ "0;90m");
+                var y: u16 = rail_top;
+                while (y < rows) : (y += 1) {
+                    self.cup(dx, y);
+                    self.put("┃");
+                }
+                self.put(csi ++ "0m");
+            }
+        }
 
-        // Status line: bottom row, inverse. Cheap; always emitted.
-        self.cup(0, rows - 1);
-        self.put(csi ++ "0;7m ");
-        const max: usize = if (cols > 2) cols - 2 else 0;
-        self.put(status[0..@min(status.len, max)]);
-        var pad: usize = @intCast(cols -| 1 -| @min(status.len, max));
-        while (pad > 0) : (pad -= 1) self.put(" ");
+        // Tab bar: top row, starting past the rail when app-chrome pins
+        // push it over. `tabbar` is pre-sized to (cols - tab_x) columns.
+        self.cup(tab_x, 0);
+        self.put(tabbar);
         self.put(csi ++ "0m");
 
         if (popup) |po| {
@@ -255,13 +269,18 @@ pub const Frame = struct {
             // lights up when either side of the gap is focused. The
             // rail/window seam is heavier: a dock, not a split.
             if (neighborAt(placed, r.x + r.w + 1, r.y)) |nb| {
-                const acc = pl.pane == focused or nb == focused;
+                // The rail/window dock seam is drawn by build() (it spans
+                // the full rail height, which may differ from this rect);
+                // here we only draw the light │ between window splits.
                 const seam = dock_x != null and dock_x.? == r.x + r.w;
-                if (acc) self.print(csi ++ "0;{d}m", .{self.accent}) else self.put(csi ++ "0;90m");
-                var y: u16 = r.y;
-                while (y < r.y + r.h and y < rows - 1) : (y += 1) {
-                    self.cup(r.x + r.w, y);
-                    self.put(if (seam) "┃" else "│");
+                if (!seam) {
+                    const acc = pl.pane == focused or nb == focused;
+                    if (acc) self.print(csi ++ "0;{d}m", .{self.accent}) else self.put(csi ++ "0;90m");
+                    var y: u16 = r.y;
+                    while (y < r.y + r.h and y < rows) : (y += 1) {
+                        self.cup(r.x + r.w, y);
+                        self.put("│");
+                    }
                 }
             }
             // bottom border
