@@ -14,9 +14,8 @@ set, not a log: that publisher rewrites its own file atomically
 (write a temp file, `rename(2)` it into place; an empty set removes
 the file). The single `attention.jsonl` is the original single-writer
 seat (vera holds it); every other publisher owns a file of its own in
-`attention.d/` — Claude Code's hooks write one per session
-(`claude-<id>.jsonl`), so concurrent publishers never share a file.
-One JSON object per line:
+`attention.d/`, one file per publisher, so concurrent publishers never
+share a file. One JSON object per line:
 
 ```json
 {"session":"tmux","kind":"waiting","headline":"T-136 needs an answer","at":"2026-08-19T13:40:47-04:00","source":"vera"}
@@ -46,15 +45,6 @@ feed.
   draws the bar classifies each window's agent panes and stamps
   `@rook_agent` (waiting/working/done); tabs render ● (accent) for
   waiting and ✳ for working.
-
-## Claude Code as a publisher
-
-`rook claude-hook` is wired in `~/.claude/settings.json` for
-Notification, UserPromptSubmit, Stop and SessionEnd. A Notification
-(permission ask, idle prompt) publishes a waiting item for that
-session under `attention.d/claude-<id>.jsonl`; the other events clear
-it. Event-driven and precise where the pane heuristics are a
-fallback.
 
 ## Reading rook (the other direction)
 
