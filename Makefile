@@ -2,7 +2,7 @@
 
 BINDIR ?= $(HOME)/.local/bin
 
-.PHONY: build test install sandbox
+.PHONY: build test install engine sandbox
 
 # An isolated rook (own server/state/config/data) in a new Ghostty
 # window; prints the socket to drive it with `tmux -L <socket> …`.
@@ -19,7 +19,14 @@ build:
 test:
 	go test ./...
 
-install: build test
+# The Zig engine, off $PATH: nobody types it, `rook` execs it.
+# ~/.local/bin/rook → ~/.local/libexec/rook/engine.
+engine:
+	@$(MAKE) -C mux install LIBEXECDIR=$(LIBEXECDIR)
+
+LIBEXECDIR ?= $(dir $(BINDIR))libexec/rook
+
+install: build test engine
 	@mkdir -p $(BINDIR)
 	@rm -f $(BINDIR)/rook   # may be a symlink; never write through it
 	install -m 0755 rook $(BINDIR)/rook

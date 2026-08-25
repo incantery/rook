@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""rook-mux vs tmux: throughput, memory, latency. Both muxes run inside
+"""rook's engine vs tmux: throughput, memory, latency. Both muxes run inside
 an outer tmux (the glass); payload is cat'd in a pane and the wall
 clock stops when the sentinel renders. Usage: ./run.py [runs]"""
 import subprocess, sys, time, os, pathlib, statistics
 
 RUNS = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 HERE = pathlib.Path(__file__).resolve().parent
-MUX = os.path.expanduser("~/.local/bin/rook-mux")
+MUX = os.environ.get("ROOK_ENGINE") or os.path.expanduser("~/.local/libexec/rook/engine")
 PAYLOAD = "/tmp/rmbench-payload.txt"
 MB = 5
 
@@ -71,7 +71,7 @@ def bench_rook():
     outer("rmb-rook", f"env ROOK_MUX_SOCK={sock} {MUX}")
     wait_for("rmb-rook", "♜")
     times = [drain("rmb-rook") for _ in range(RUNS)]
-    rss = rss_of("rook-mux server")
+    rss = rss_of("engine server")
     stats = ""
     env = dict(os.environ, ROOK_MUX_SOCK=sock)
     r = subprocess.run([MUX, "stats"], capture_output=True, text=True, env=env)
@@ -98,9 +98,9 @@ if __name__ == "__main__":
     print(f"payload: {MB}MB, {RUNS} runs each\n")
     rt, rrss, rstats = bench_rook()
     tt, trss = bench_tmux()
-    print(f"rook-mux drain: {fmt(rt)}")
+    print(f"rook drain: {fmt(rt)}")
     print(f"tmux     drain: {fmt(tt)}")
-    print(f"rook-mux server RSS: {rrss/1024:.1f} MB")
+    print(f"rook server RSS: {rrss/1024:.1f} MB")
     print(f"tmux     server RSS: {trss/1024:.1f} MB")
-    if rstats: print(f"rook-mux latency: {rstats}")
+    if rstats: print(f"rook latency: {rstats}")
     print(f"\nratio drain rook/tmux: {statistics.median(rt)/statistics.median(tt):.2f}x")

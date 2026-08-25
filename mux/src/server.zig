@@ -1,4 +1,4 @@
-//! The rook-mux server: windows of panes, clients, one poll loop.
+//! The engine's server: windows of panes, clients, one poll loop.
 //! Reader threads parse pty output into each pane's Terminal and poke
 //! the self-pipe; this loop snapshots dirty panes and ships frames —
 //! dirty rows only, unless something structural (attach, resize,
@@ -239,21 +239,21 @@ pub const Server = struct {
         const probe = ptypkg.unixConnect(sock_path);
         if (probe >= 0) {
             ptypkg.closeFd(probe);
-            std.debug.print("rook-mux: a server already runs on {s}\n", .{sock_path});
+            std.debug.print("rook: a server already runs on {s}\n", .{sock_path});
             return error.AlreadyRunning;
         }
         ptypkg.unlinkPath(sock_path);
 
         const listener = ptypkg.unixListen(sock_path);
         if (listener < 0) {
-            std.debug.print("rook-mux: cannot listen on {s} (unix socket paths max ~100 bytes)\n", .{sock_path});
+            std.debug.print("rook: cannot listen on {s} (unix socket paths max ~100 bytes)\n", .{sock_path});
             return error.ListenFailed;
         }
         defer ptypkg.closeFd(listener);
 
         const pipefds = ptypkg.makePipeNb() orelse return error.PipeFailed;
 
-        // Panes inherit the socket path so `rook-mux nav` (the nvim
+        // Panes inherit the socket path so `rook nav` (the nvim
         // plugin's edge handoff) talks to the right server.
         const sock_z = try gpa.dupeZ(u8, sock_path);
         defer gpa.free(sock_z);
@@ -959,7 +959,7 @@ pub const Server = struct {
     }
 
     /// One line per pane: id, session:window, fg program, cwd. The
-    /// web client's block list, and `rook-mux blocks`. Asking once
+    /// web client's block list, and `rook blocks`. Asking once
     /// subscribes the client to pushes when the table changes.
     fn sendBlocks(self: *Server, c: *Client) void {
         c.wants_blocks = true;
@@ -1277,7 +1277,7 @@ pub const Server = struct {
         var buf: [768]u8 = undefined;
         var nwin: usize = 0;
         for (self.sessions.items) |sn| nwin += sn.windows.items.len;
-        const text = std.fmt.bufPrint(&buf, "rook-mux up {d}s · {d} session{s} · {d} window{s} · {d} pane{s} · {d} client{s}\nframes {d} · {d:.1} MB shipped\ninput→frame p50 {d}µs · p99 {d}µs · samples {d}\nstate {d} · epoch {s} · serial {d} · ops quiet-new,block-created-on-new\n", .{
+        const text = std.fmt.bufPrint(&buf, "rook up {d}s · {d} session{s} · {d} window{s} · {d} pane{s} · {d} client{s}\nframes {d} · {d:.1} MB shipped\ninput→frame p50 {d}µs · p99 {d}µs · samples {d}\nstate {d} · epoch {s} · serial {d} · ops quiet-new,block-created-on-new\n", .{
             @divTrunc(nowMs() - self.started_ms, 1000),
             self.sessions.items.len,
             plural(self.sessions.items.len),
@@ -1336,7 +1336,7 @@ pub const Server = struct {
             // pane when there is nowhere to go — so C-l still clears a
             // rightmost shell, C-j still accepts a line with no pane
             // below. vim and friends own the keys (nav_owners): the
-            // plugin hands edge moves back via `rook-mux nav`. Real
+            // plugin hands edge moves back via `rook nav`. Real
             // backspace is 0x7f, unaffected; only a literal Ctrl-H
             // (0x08) is spent on navigation when a left neighbor exists.
             if (bytes.len == 1 and self.popup == null) {
@@ -1572,7 +1572,7 @@ pub const Server = struct {
                 const i: usize = key - '1';
                 if (i < self.sess().windows.items.len) self.selectWindow(i);
             },
-            's' => self.openPopup("rook-mux ls | fzf --reverse --header='workspace' | xargs -r rook-mux switch") catch {},
+            's' => self.openPopup("rook ls | fzf --reverse --header='workspace' | xargs -r rook switch") catch {},
             'w' => self.openPopup("rook worktree") catch {},
             'a' => {
                 self.side_on = !self.side_on;
@@ -1806,7 +1806,7 @@ pub const Server = struct {
     }
 
     /// Programs that own Ctrl-h/j/k/l themselves: vim navigates its own
-    /// windows first (its plugin calls `rook-mux nav` at an edge), fzf
+    /// windows first (its plugin calls `rook nav` at an edge), fzf
     /// lives on C-j/C-k.
     fn fgOwnsCtrlNav(self: *Server) bool {
         const p = self.focusedPane() orelse return false;

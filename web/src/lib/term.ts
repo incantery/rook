@@ -1,5 +1,5 @@
 // The VT engine behind the page: ghostty-web by default — the same
-// ghostty parser the rook-mux server runs, compiled to wasm — with
+// ghostty parser the engine runs, compiled to wasm — with
 // xterm.js one flag away while ghostty-web is young:
 //   localStorage.setItem('rook-vt', 'xterm')  // or 'ghostty'
 export type TermKind = 'ghostty' | 'xterm';

@@ -1,4 +1,4 @@
-// Package webd bridges browsers to the rook-mux socket and serves the
+// Package webd bridges browsers to the engine socket and serves the
 // web client. It is deliberately a dumb pipe: websocket binary frames
 // are raw mux-protocol bytes in both directions, so the browser speaks
 // the same type/len/payload framing as every other client and the
@@ -35,7 +35,7 @@ func DefaultSock() string {
 // Options configure the bridge; zero values get sane defaults.
 type Options struct {
 	Addr  string // listen address
-	Sock  string // rook-mux unix socket
+	Sock  string // engine unix socket
 	Dir   string // static web client dir
 	Token string // bearer token; empty = persisted beside the socket
 }
