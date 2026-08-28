@@ -1,5 +1,18 @@
-# GoReleaser builds cross-platform archives on a version tag, publishes a
-# GitHub Release, and updates the Homebrew formula in incantery/homebrew-tap.
+# GoReleaser builds the macOS archives on a version tag, publishes a
+# GitHub Release, and updates the Homebrew cask in incantery/homebrew-tap.
+#
+# rook is two binaries: the Go front door (`rook`) and the Zig engine it
+# execs into. The engine is Darwin-only (os_unfair_lock, proc_pidpath,
+# kqueue), so the release is too — a Linux `rook` with no engine to exec
+# would be a lie. Zig cross-compiles both mac arches from the Linux
+# runner; the before hook builds them into mux/zig-out/<arch> (dist/ must be empty when hooks finish).
+#
+# Archive layout mirrors an install prefix — bin/rook + libexec/rook/engine —
+# because mux.EnginePath looks for ../libexec/rook/engine relative to the
+# (symlink-resolved) directory `rook` runs from. Homebrew symlinks
+# $(brew --prefix)/bin/rook → Caskroom/rook/<v>/bin/rook, so the sibling
+# libexec is found without any install-time wiring.
+#
 # Run locally with: goreleaser release --clean  (or --snapshot to dry-run)
 version: 2
 
@@ -8,14 +21,16 @@ project_name: rook
 before:
   hooks:
     - go mod tidy
+    - zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-macos --build-file mux/build.zig --prefix mux/zig-out/arm64
+    - zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-macos  --build-file mux/build.zig --prefix mux/zig-out/amd64
 
 builds:
   - id: rook
     main: ./cmd/rook
-    binary: rook
+    binary: bin/rook
     env:
       - CGO_ENABLED=0
-    goos: [darwin, linux]
+    goos: [darwin]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
@@ -27,6 +42,11 @@ archives:
   - id: rook
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - src: mux/zig-out/{{ .Arch }}/bin/engine
+        dst: libexec/rook/engine
+        info:
+          mode: 0755
 
 checksum:
   name_template: checksums.txt
@@ -46,18 +66,19 @@ homebrew_casks:
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: "https://github.com/incantery/rook"
-    description: "Attention and session layer over tmux for many terminal-agent sessions"
+    description: "Terminal multiplexer and attention layer for many terminal-agent sessions"
+    binaries:
+      - bin/rook
     dependencies:
-      - formula: tmux
-      - formula: zoxide
+      # The workspace picker popup (prefix-s) shells out to fzf.
       - formula: fzf
-    # Ad-hoc-signed binary: strip the quarantine flag so Gatekeeper does
-    # not block first run.
+    # Ad-hoc-signed binaries: strip the quarantine flag so Gatekeeper
+    # does not block first run.
     hooks:
       post:
         install: |
           if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/rook"]
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/bin/rook", "#{staged_path}/libexec/rook/engine"]
           end
 
 release:

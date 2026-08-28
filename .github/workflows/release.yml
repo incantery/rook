@@ -17,6 +17,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
+      # The Zig engine; pinned to the minimum in mux/build.zig.zon.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
