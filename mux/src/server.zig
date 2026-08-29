@@ -33,6 +33,17 @@ const frame_gap_ms: i64 = 8;
 const min_cols_for_side: u16 = 100;
 const min_window_cols: u16 = 60;
 
+/// How many agents rook will list from its own pane table — one row
+/// per workspace, so this is a workspace count, and a rail is a couple
+/// of dozen rows before it stops being readable anyway.
+const max_found: usize = 24;
+
+/// How often the pane table is walked for agents. `fgName` is two
+/// syscalls a pane, and whether a Claude session exists moves at human
+/// rate — the same cadence, for the same reason, as the state feed's
+/// drift pass.
+const found_every_ms: i64 = 2000;
+
 const Client = struct {
     fd: ptypkg.fd_t,
     reader: proto.Reader,
@@ -157,6 +168,20 @@ pub const Server = struct {
     side: chromepkg.Feed,
     side_on: bool = true,
     side_w: ?u16 = null,
+    /// Agents rook found for itself: a workspace holding a pane whose
+    /// foreground program is one of `conf.agents` gets a row on the
+    /// agents rail, marked manual, whether or not any producer knows
+    /// about it. It is the one thing the mux supplies to its own rail,
+    /// and it supplies only what it can see in its own pane table —
+    /// that a session is here, never what it is doing. `found_buf`
+    /// backs the strings the items point at.
+    found: [max_found]chromepkg.Item = @splat(.{ .name = "" }),
+    found_n: usize = 0,
+    found_buf: [max_found * 64]u8 = @splat(0),
+    found_len: usize = 0,
+    found_ms: i64 = 0,
+    /// The agents panel as painted: pushed rows, then found ones.
+    agents_merge: chromepkg.Merge = .{},
     next_id: u32 = 1,
     clients: std.ArrayList(*Client) = .empty,
     wake_r: ptypkg.fd_t,
@@ -319,6 +344,7 @@ pub const Server = struct {
         self.global_pins.deinit(self.gpa);
         self.frame.deinit();
         self.side.deinit();
+        self.agents_merge.deinit(self.gpa);
         self.placed.deinit(self.gpa);
         self.blocks_last.deinit(self.gpa);
         self.state_json.deinit(self.gpa);
@@ -734,6 +760,15 @@ pub const Server = struct {
                 self.pushBlocks();
                 self.blocks_check_ms = nowMs();
             }
+            // Agents rook can see for itself. Only a change earns a
+            // repaint, and only when the rail is actually on the glass.
+            if (nowMs() - self.found_ms > found_every_ms) {
+                self.found_ms = nowMs();
+                if (self.scanAgents() and self.side_w != null) {
+                    self.full = true;
+                    self.pending = true;
+                }
+            }
 
             // structural changes save after 1s; cwds drift without
             // structural events, so refresh every 30s regardless
@@ -1043,6 +1078,118 @@ pub const Server = struct {
         self.sendTo(c, @intFromEnum(proto.s2c.ack), &b);
     }
 
+    /// The rail's model as it is painted and published: what producers
+    /// pushed, with the agents rook found itself folded into the
+    /// agents panel. The merge is one-way and lives here rather than
+    /// in `Feed`, so a producer's model is still exactly the bytes it
+    /// sent — see chrome.Merge.
+    fn sideModel(self: *Server) chromepkg.Model {
+        var m = self.side.model();
+        m.agents = self.agents_merge.panel(self.gpa, m.agents, self.found[0..self.found_n]);
+        return m;
+    }
+
+    /// Is this pane's foreground program one the config calls an agent?
+    fn isAgentProgram(self: *Server, name: []const u8) bool {
+        var it = std.mem.splitScalar(u8, self.conf.agentsSlice(), '\n');
+        while (it.next()) |want| {
+            if (want.len > 0 and std.mem.eql(u8, name, want)) return true;
+        }
+        return false;
+    }
+
+    /// Does this workspace hold the pane — in one of its windows, or
+    /// docked to its rail?
+    fn paneIn(self: *Server, sn: *Session, id: u32) bool {
+        for (sn.pins.items) |pid| {
+            if (pid == id) return true;
+        }
+        for (sn.windows.items) |w| {
+            if (w.layout.contains(id)) return true;
+        }
+        // A globally pinned pane belongs to no workspace — it shows in
+        // every one — so the rail lists it under the current.
+        if (self.cur_sess < self.sessions.items.len and sn == self.sessions.items[self.cur_sess]) {
+            for (self.global_pins.items) |pid| {
+                if (pid == id) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Walk the pane table for agent programs and rebuild the found
+    /// rows: one per workspace, named for it, with the program and how
+    /// many of it. True when the rows changed — which is the only
+    /// thing that earns a repaint, because this runs on a timer and
+    /// the answer is usually the same one as last time.
+    fn scanAgents(self: *Server) bool {
+        var buf: [max_found * 64]u8 = undefined;
+        var offs: [max_found]struct { no: usize, nl: usize, so: usize, sl: usize } = undefined;
+        var n: usize = 0;
+        var len: usize = 0;
+
+        for (self.sessions.items) |sn| {
+            if (n == max_found) break;
+            var count: usize = 0;
+            var prog: [64]u8 = undefined;
+            var prog_len: usize = 0;
+            for (self.panes.items) |p| {
+                if (!self.paneIn(sn, p.id)) continue;
+                var nb: [64]u8 = undefined;
+                const fg = p.fgName(&nb) orelse continue;
+                if (!self.isAgentProgram(fg)) continue;
+                if (count == 0 and fg.len <= prog.len) {
+                    @memcpy(prog[0..fg.len], fg);
+                    prog_len = fg.len;
+                }
+                count += 1;
+            }
+            if (count == 0) continue;
+
+            const label = sn.label();
+            const start = len;
+            if (len + label.len > buf.len) break;
+            @memcpy(buf[len..][0..label.len], label);
+            const no = len;
+            len += label.len;
+            const so = len;
+            // A row that does not fit rewinds whole: a half-written
+            // name would ride into found_buf and into the signature.
+            const sub = if (count == 1)
+                std.fmt.bufPrint(buf[len..], "{s}", .{prog[0..prog_len]}) catch {
+                    len = start;
+                    break;
+                }
+            else
+                std.fmt.bufPrint(buf[len..], "{s} ×{d}", .{ prog[0..prog_len], count }) catch {
+                    len = start;
+                    break;
+                };
+            len += sub.len;
+            offs[n] = .{ .no = no, .nl = label.len, .so = so, .sl = sub.len };
+            n += 1;
+        }
+
+        // The build is deterministic, so the bytes are the signature.
+        if (n == self.found_n and len == self.found_len and
+            std.mem.eql(u8, buf[0..len], self.found_buf[0..len])) return false;
+
+        @memcpy(self.found_buf[0..len], buf[0..len]);
+        self.found_len = len;
+        for (0..n) |i| {
+            self.found[i] = .{
+                .name = self.found_buf[offs[i].no..][0..offs[i].nl],
+                .sub = self.found_buf[offs[i].so..][0..offs[i].sl],
+                .origin = .manual,
+            };
+        }
+        self.found_n = n;
+        // The rows moved under it; a cursor that survived would point
+        // at a different agent than the one it was put on.
+        self.agents_merge.cur = null;
+        return true;
+    }
+
     /// An `items.push` frame: one side-panel surface's model, pushed
     /// in from outside. Rook paints what it is given and decides
     /// nothing about what it says. A frame rook cannot use changes
@@ -1050,13 +1197,16 @@ pub const Server = struct {
     /// producer with a typo should hear about it, not watch a rail go
     /// quietly stale.
     fn sidePush(self: *Server, c: *Client, payload: []const u8) void {
-        _ = self.side.push(payload) catch |e| {
+        const surface = self.side.push(payload) catch |e| {
             var b: [96]u8 = undefined;
             const why = std.fmt.bufPrint(&b, "side push rejected: {s}\n", .{@errorName(e)}) catch
                 "side push rejected\n";
             self.sendTo(c, @intFromEnum(proto.s2c.text), why);
             return;
         };
+        // The producer takes the highlight back, per the rule that
+        // what is *selected* belongs to whoever supplies the items.
+        if (surface == .agents) self.agents_merge.cur = null;
         _ = self.touch();
         // Chrome only repaints on a full frame, and nothing else about
         // this change dirties a row — but a rail that is folded away
@@ -1517,10 +1667,25 @@ pub const Server = struct {
         const split = chromepkg.splitRow(g.rows);
         if (cy == split) return; // the seam between the panels
         const which: chromepkg.Surface = if (cy < split) .spaces else .agents;
-        const m = self.side.model();
+        const m = self.sideModel();
         const panel = if (cy < split) m.spaces else m.agents;
         const rel = if (cy < split) cy else cy - (split + 1);
         const i = chromepkg.hit(panel, rel) orelse return;
+        // A row past the pushed ones is one rook found for itself, so
+        // the cursor on it is rook's to hold. The two cursors are kept
+        // mutually exclusive here, which is the only place both are in
+        // hand at once.
+        if (which == .agents) {
+            const pushed_n = if (self.side.agents.panel) |p| p.items.len else 0;
+            if (i >= pushed_n) {
+                if (self.agents_merge.cur != null and self.agents_merge.cur.? == i) return;
+                self.agents_merge.cur = i;
+                self.full = true;
+                self.pending = true;
+                return;
+            }
+            self.agents_merge.cur = null;
+        }
         if (!self.side.moveCursor(which, i)) return;
         self.full = true;
         self.pending = true;
@@ -1945,7 +2110,7 @@ pub const Server = struct {
         const chrome: renderpkg.Chrome = .{
             .tabbar = tabbar,
             .tab_x = self.tab_x,
-            .side = if (self.side_w) |sw| .{ .model = self.side.model(), .w = sw } else null,
+            .side = if (self.side_w) |sw| .{ .model = self.sideModel(), .w = sw } else null,
             .dock_x = self.dock_x,
             .dock_top = self.dock_top,
         };

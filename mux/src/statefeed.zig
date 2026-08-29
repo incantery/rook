@@ -159,9 +159,9 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
     // interprets them, and a second glass can render the rail without
     // talking to whoever produced it.
     out.appendSlice(gpa, ",\"surfaces\":[") catch return;
-    const rail = [_]struct { name: []const u8, raw: []const u8 }{
-        .{ .name = "spaces", .raw = sv.side.spaces.raw },
-        .{ .name = "agents", .raw = sv.side.agents.raw },
+    const rail = [_]struct { name: []const u8, raw: []const u8, found: bool }{
+        .{ .name = "spaces", .raw = sv.side.spaces.raw, .found = false },
+        .{ .name = "agents", .raw = sv.side.agents.raw, .found = true },
     };
     for (rail, 0..) |sf, i| {
         if (i > 0) out.append(gpa, ',') catch return;
@@ -178,6 +178,24 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         } else {
             out.appendSlice(gpa, "null") catch return;
         }
+        // Rows rook found in its own pane table — an agent running
+        // where nothing pushed a row for it. Beside `model`, never
+        // inside it: `model` stays the producer's bytes verbatim, and
+        // a second glass paints the same rail by appending these. They
+        // ride the drift cadence because they are read from the same
+        // foreground-program lookup as `panes[].program`.
+        out.appendSlice(gpa, ",\"found\":[") catch return;
+        if (sf.found and form.drift) {
+            for (sv.found[0..sv.found_n], 0..) |it, k| {
+                if (k > 0) out.append(gpa, ',') catch return;
+                out.appendSlice(gpa, "{\"title\":") catch return;
+                str(gpa, out, it.name);
+                out.appendSlice(gpa, ",\"subtitle\":") catch return;
+                str(gpa, out, it.sub);
+                out.appendSlice(gpa, ",\"origin\":\"manual\"}") catch return;
+            }
+        }
+        out.appendSlice(gpa, "]") catch return;
         out.append(gpa, '}') catch return;
     }
     out.appendSlice(gpa, "]") catch return;

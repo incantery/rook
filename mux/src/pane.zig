@@ -502,16 +502,7 @@ pub const Pane = struct {
         var path: [4096]u8 = undefined;
         const n = proc_pidpath(pgrp, &path, path.len);
         if (n <= 0) return null;
-        const full = path[0..@intCast(n)];
-        var base = std.fs.path.basename(full);
-        // a versioned binary ("2.1.240", claude code's layout) tells
-        // you nothing; the directory above it is the product name
-        if (base.len > 0 and allVersionish(base)) {
-            if (std.fs.path.dirname(full)) |dir| {
-                const parent = std.fs.path.basename(dir);
-                if (parent.len > 0 and !allVersionish(parent)) base = parent;
-            }
-        }
+        const base = programName(path[0..@intCast(n)]);
         if (base.len == 0 or base.len > buf.len) return null;
         @memcpy(buf[0..base.len], base);
         return buf[0..base.len];
@@ -534,11 +525,56 @@ pub const Pane = struct {
     }
 };
 
+/// The product name in an executable path. Usually the basename, but
+/// a versioned binary ("2.1.241", Claude Code's layout) names nothing,
+/// so we walk up: the directory above it, and one more when *that* is
+/// a plumbing word every install has. `.../claude/versions/2.1.241`
+/// is `claude`, not `versions` — the tab, the state feed and agent
+/// discovery all read this, and "versions" told none of them anything.
+pub fn programName(full: []const u8) []const u8 {
+    var base = std.fs.path.basename(full);
+    if (base.len == 0 or !allVersionish(base)) return base;
+    var dir = std.fs.path.dirname(full) orelse return base;
+    var up: u8 = 0;
+    while (up < 2) : (up += 1) {
+        const parent = std.fs.path.basename(dir);
+        if (parent.len == 0) return base;
+        if (!allVersionish(parent) and !plumbing(parent)) return parent;
+        base = parent;
+        dir = std.fs.path.dirname(dir) orelse return base;
+    }
+    return base;
+}
+
+/// Directory names that hold binaries rather than name one.
+fn plumbing(s2: []const u8) bool {
+    const words = [_][]const u8{ "versions", "bin", "sbin", "libexec" };
+    for (words) |w| {
+        if (std.mem.eql(u8, s2, w)) return true;
+    }
+    return false;
+}
+
 fn allVersionish(s2: []const u8) bool {
     for (s2) |ch| {
         if (!(ch >= '0' and ch <= '9') and ch != '.' and ch != '-') return false;
     }
     return true;
+}
+
+test "programName walks past a versioned binary and its plumbing" {
+    const eq = std.testing.expectEqualStrings;
+    // Claude Code: ~/.local/share/claude/versions/2.1.241
+    try eq("claude", programName("/Users/x/.local/share/claude/versions/2.1.241"));
+    // a version directly under the product name needs one step, not two
+    try eq("mise", programName("/Users/x/.local/share/mise/2026.8.1"));
+    // ordinary binaries are their basename, plumbing parents and all
+    try eq("nvim", programName("/opt/homebrew/bin/nvim"));
+    try eq("zsh", programName("/bin/zsh"));
+    try eq("claude", programName("claude"));
+    // nothing above it to climb to: keep what we have rather than ""
+    try eq("2.1.241", programName("2.1.241"));
+    try eq("versions", programName("/versions/2.1.241"));
 }
 
 extern "c" fn tcgetpgrp(fd: ptypkg.fd_t) ptypkg.pid_t;

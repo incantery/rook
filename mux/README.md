@@ -24,8 +24,9 @@ C-b when unset; double-tap types it literally. A `[mux]` section adds
 `nav_owners = ["nvim", "fzf"]` (programs that keep bare Ctrl-hjkl),
 `scrollback_mb = 4`, `accent = "#cba6f7"` (the one chrome color — tab
 chip, focused borders, popup box; the eight ANSI names still work and
-map into the palette), and `sidebar = false` / `sidebar_width = 30`
-for the side panel. Then:
+map into the palette), `sidebar = false` / `sidebar_width = 30` for
+the side panel, and `agents = ["claude"]` — the foreground program
+names the rail treats as an agent it found. Then:
 
     v |        split side by side          c        new window
     -          split stacked               n p 1-9  switch window
@@ -136,20 +137,49 @@ protocol (`docs/surfaces.md`):
        "state":"blocked","current":true}]}}
 
 `surface` is `spaces` or `agents`; a frame replaces that panel whole.
-An item is `title` (or `id`), `subtitle`, `state` and `current`. Rook
-owns the palette, so a model names a *state* and never a color:
-`working`, `idle`, `blocked`, `done`, `failed` pick the dot, its shape
-and the subtitle's color, and a name rook does not know draws a plain
-row rather than costing the frame. A panel-level `title` and `note`
-override the header. Unknown keys are ignored, an item without a name
-is dropped, and a frame rook cannot use changes nothing on the glass
-and answers with the reason — `rook side -` prints
+An item is `title` (or `id`), `subtitle`, `state`, `origin` and
+`current`. Rook owns the palette, so a model names a *state* and never
+a color: `working`, `idle`, `blocked`, `done`, `failed` pick the dot,
+its shape and the subtitle's color, and a name rook does not know
+draws a plain row rather than costing the frame. A panel-level `title`
+and `note` override the header. Unknown keys are ignored, an item
+without a name is dropped, and a frame rook cannot use changes nothing
+on the glass and answers with the reason — `rook side -` prints
 `{"ok":true,"serial":N}` for a frame it took and the refusal on stderr
 for one it did not. Until something pushes, a panel says so.
 
+### Agents rook finds by itself
+
+One thing on the rail is not pushed. A pane whose foreground program
+is an agent — `claude` by default, `[mux] agents = [...]` to say
+otherwise — is a session somebody started, and rook can see it in its
+own pane table whether or not any producer knows about it. Those
+sessions get rows on the *agents* panel, one per workspace, folded in
+after whatever was pushed:
+
+    agents            1 manual
+    ● main                        ← pushed: a producer manages it
+      working · claude
+    ◌ scratch                     ← found: nobody claims it
+      manual · claude
+
+The distinction is `origin`, and it is deliberately quiet: a dim
+`manual ·` ahead of the subtitle, and the loose dot ◌ for a row with
+no state to report. Origin never takes a color and never overrides a
+state, so a glance still reads state first. A producer can push
+`"origin":"manual"` to say the same about a row of its own.
+
+The merge is one-way and pushed rows always win: a producer that names
+a workspace owns that row, so rook drops what it found for that name
+rather than listing it twice. Rook says only that the session is
+there — never what it is doing, which stays a producer's job. The scan
+is two syscalls a pane on a 2s timer, and only a change repaints.
+
 The last frame pushed to each surface comes back out of the state feed
 verbatim, under `surfaces[].model`, so a second glass can draw the same
-rail without talking to the producer.
+rail without talking to the producer. What rook found rides beside it
+under `surfaces[].found` — never merged into `model`, which stays the
+producer's own bytes.
 
 ## Shape
 

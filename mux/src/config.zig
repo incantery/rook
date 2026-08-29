@@ -7,6 +7,7 @@
 //!   restore = true                 # resurrect last layout on boot (default off)
 //!   sidebar = true                 # the spaces/agents side panel
 //!   sidebar_width = 30             # its width in columns
+//!   agents = ["claude"]            # programs the agents rail looks for
 const std = @import("std");
 const chrome = @import("chrome.zig");
 
@@ -58,11 +59,28 @@ pub const Mux = struct {
     /// Resurrect the last saved layout on server boot. Off by default:
     /// a fresh `rook` opens a clean workspace, not last session's splits.
     restore: bool = false,
+    /// newline-joined foreground program names that mean "an agent is
+    /// running in this pane". The one opinion rook holds about what an
+    /// agent *is*, and the only reason it holds it: so a session
+    /// somebody started by hand still shows up on the agents rail
+    /// instead of being invisible to everything but the tab bar.
+    agents: [256]u8 = @splat(0),
+    agents_len: usize = 0,
 
     pub fn ownersSlice(self: *const Mux) []const u8 {
         return self.owners[0..self.owners_len];
     }
+
+    pub fn agentsSlice(self: *const Mux) []const u8 {
+        if (self.agents_len == 0) return default_agents;
+        return self.agents[0..self.agents_len];
+    }
 };
+
+/// What rook looks for when nothing says otherwise. Claude Code names
+/// its binary by version, so `pane.programName` is what makes this a
+/// word rather than "2.1.241".
+pub const default_agents = "claude";
 
 pub fn muxConfig() Mux {
     var out: Mux = .{};
@@ -108,20 +126,28 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
             const n = std.fmt.parseInt(u16, std.mem.trim(u8, val, "\"'"), 10) catch continue;
             out.sidebar_width = std.math.clamp(n, 16, 60);
         } else if (std.mem.eql(u8, key, "nav_owners")) {
-            // ["a", "b"] → a\nb
-            out.owners_len = 0;
-            var it = std.mem.tokenizeAny(u8, val, "[]\"', ");
-            while (it.next()) |name| {
-                if (out.owners_len + name.len + 1 > out.owners.len) break;
-                if (out.owners_len > 0) {
-                    out.owners[out.owners_len] = '\n';
-                    out.owners_len += 1;
-                }
-                @memcpy(out.owners[out.owners_len .. out.owners_len + name.len], name);
-                out.owners_len += name.len;
-            }
+            out.owners_len = parseList(val, &out.owners);
+        } else if (std.mem.eql(u8, key, "agents")) {
+            out.agents_len = parseList(val, &out.agents);
         }
     }
+}
+
+/// `["a", "b"]` → `a\nb` in `buf`; returns the length written. The
+/// list form every [mux] list key uses.
+fn parseList(val: []const u8, buf: []u8) usize {
+    var len: usize = 0;
+    var it = std.mem.tokenizeAny(u8, val, "[]\"', ");
+    while (it.next()) |name| {
+        if (len + name.len + 1 > buf.len) break;
+        if (len > 0) {
+            buf[len] = '\n';
+            len += 1;
+        }
+        @memcpy(buf[len .. len + name.len], name);
+        len += name.len;
+    }
+    return len;
 }
 
 test "parseMux" {
@@ -149,6 +175,10 @@ test "parseMux" {
     try std.testing.expectEqual(true, r.restore);
     parseMux("[mux]\nrestore = false\n", &r);
     try std.testing.expectEqual(false, r.restore);
+    var a: Mux = .{};
+    try std.testing.expectEqualStrings("claude", a.agentsSlice()); // the default
+    parseMux("[mux]\nagents = [\"claude\", \"codex\"]\n", &a);
+    try std.testing.expectEqualStrings("claude\ncodex", a.agentsSlice());
 }
 
 test "parsePrefix" {
