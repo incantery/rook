@@ -1184,6 +1184,9 @@ pub const Server = struct {
             };
         }
         self.found_n = n;
+        // The rows moved under it; a cursor that survived would point
+        // at a different agent than the one it was put on.
+        self.agents_merge.cur = null;
         return true;
     }
 
@@ -1194,13 +1197,16 @@ pub const Server = struct {
     /// producer with a typo should hear about it, not watch a rail go
     /// quietly stale.
     fn sidePush(self: *Server, c: *Client, payload: []const u8) void {
-        _ = self.side.push(payload) catch |e| {
+        const surface = self.side.push(payload) catch |e| {
             var b: [96]u8 = undefined;
             const why = std.fmt.bufPrint(&b, "side push rejected: {s}\n", .{@errorName(e)}) catch
                 "side push rejected\n";
             self.sendTo(c, @intFromEnum(proto.s2c.text), why);
             return;
         };
+        // The producer takes the highlight back, per the rule that
+        // what is *selected* belongs to whoever supplies the items.
+        if (surface == .agents) self.agents_merge.cur = null;
         _ = self.touch();
         // Chrome only repaints on a full frame, and nothing else about
         // this change dirties a row — but a rail that is folded away
@@ -1665,6 +1671,21 @@ pub const Server = struct {
         const panel = if (cy < split) m.spaces else m.agents;
         const rel = if (cy < split) cy else cy - (split + 1);
         const i = chromepkg.hit(panel, rel) orelse return;
+        // A row past the pushed ones is one rook found for itself, so
+        // the cursor on it is rook's to hold. The two cursors are kept
+        // mutually exclusive here, which is the only place both are in
+        // hand at once.
+        if (which == .agents) {
+            const pushed_n = if (self.side.agents.panel) |p| p.items.len else 0;
+            if (i >= pushed_n) {
+                if (self.agents_merge.cur != null and self.agents_merge.cur.? == i) return;
+                self.agents_merge.cur = i;
+                self.full = true;
+                self.pending = true;
+                return;
+            }
+            self.agents_merge.cur = null;
+        }
         if (!self.side.moveCursor(which, i)) return;
         self.full = true;
         self.pending = true;

@@ -410,6 +410,12 @@ pub const Feed = struct {
 pub const Merge = struct {
     items: std.ArrayList(Item) = .empty,
     note_buf: [24]u8 = @splat(0),
+    /// A cursor parked on a *found* row. Rook owns cursor motion in
+    /// every surface, and a found row is rook's own row, so this is
+    /// the one highlight rook holds by itself — the rest still arrives
+    /// in a pushed model and goes back to it. Cleared whenever the
+    /// rows underneath it move; see `Server.clickSide`.
+    cur: ?usize = null,
 
     pub fn deinit(self: *Merge, gpa: std.mem.Allocator) void {
         self.items.deinit(gpa);
@@ -433,6 +439,12 @@ pub const Merge = struct {
         if (added == 0) return pushed;
         var out = pushed;
         out.items = self.items.items;
+        // A cursor rook parked on a found row wins over the pushed
+        // one — clicking is how it got there, and the two are kept
+        // mutually exclusive by whoever sets them.
+        if (self.cur) |c| {
+            if (c >= pushed.items.len and c < self.items.items.len) out.cur = c;
+        }
         // The header says how many rows nobody is managing — a rail
         // that quietly grew rows should account for them at panel
         // level too. A producer's own note is never overwritten.
@@ -918,6 +930,28 @@ test "an unfed rail still shows what rook found by itself" {
     try std.testing.expectEqualStrings("rook", p.items[0].name);
     try std.testing.expectEqualStrings("agents", p.title);
     try std.testing.expectEqualStrings("1 manual", p.note);
+}
+
+test "a click can park on a found row, and a push takes the rail back" {
+    var feed = Feed.init(std.testing.allocator);
+    defer feed.deinit();
+    _ = try feed.push(
+        \\{"params":{"surface":"agents","items":[{"title":"herdr","current":true}]}}
+    );
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    const found = [_]Item{.{ .name = "scratch", .sub = "claude", .origin = .manual }};
+
+    // the pushed highlight, until rook's own cursor says otherwise
+    try std.testing.expectEqual(@as(?usize, 0), merge.panel(std.testing.allocator, feed.model().agents, &found).cur);
+    merge.cur = 1;
+    try std.testing.expectEqual(@as(?usize, 1), merge.panel(std.testing.allocator, feed.model().agents, &found).cur);
+    // a cursor past the rows there are is no cursor at all
+    merge.cur = 9;
+    try std.testing.expectEqual(@as(?usize, 0), merge.panel(std.testing.allocator, feed.model().agents, &found).cur);
+    // and it never claims a pushed row — that highlight is the model's
+    merge.cur = 0;
+    try std.testing.expectEqual(@as(?usize, 0), merge.panel(std.testing.allocator, feed.model().agents, &found).cur);
 }
 
 test "nothing found leaves the pushed panel exactly as it was" {
