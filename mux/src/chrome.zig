@@ -231,6 +231,17 @@ pub const Item = struct {
         return std.mem.eql(u8, self.name, name);
     }
 
+    /// The workspace this row is about, as rook names it — the
+    /// identity behind the label. Rook's own rows carry both: `name`
+    /// is what the rail paints and `ws` is what `rook switch` takes,
+    /// which is how a row can read `vera-e4126385` and still act on
+    /// `rook--vera-e4126385`. A row that said nothing about a
+    /// workspace has only its name to offer, which is the old
+    /// behaviour and what keeps a title-only claim working.
+    pub fn space(self: Item) []const u8 {
+        return if (self.ws.len > 0) self.ws else self.name;
+    }
+
     /// The glyph beside the name. State owns it whenever state has
     /// something to say; a manual row with nothing reporting on it
     /// gets the loose dot rather than borrowing `.none`'s filled one,
@@ -240,6 +251,64 @@ pub const Item = struct {
         return self.state.shape();
     }
 };
+
+/// The separator rook puts between a repository and one of its
+/// worktrees: `<repo>--<worktree>` is the directory it makes, so it is
+/// also the workspace name — `rook--vera-e4126385` here. See
+/// `internal/worktree`.
+pub const space_sep = "--";
+
+/// The label a workspace name earns on the rail.
+///
+/// A workspace name is an *identity*: unambiguous across every
+/// repository on the machine, which is exactly why the repo is in it.
+/// It is not a label. Down a 30-column dock the repo is the same word
+/// on every row, and the part that tells the rows apart is the part
+/// that falls off the right edge — a column of `rook--vera-e4126…`
+/// says nothing that the panel's own existence did not. `rook worktree
+/// ls` has always printed the short name; the rail now agrees with it,
+/// and the repo moves to the subtitle rather than being lost.
+///
+/// The split is on the *last* separator, so a worktree of a worktree
+/// (`rook--vera-e4126385--fix`) labels as its leaf, `fix`: the leaf is
+/// the part that distinguishes it. A name with nothing on one side of
+/// the separator is left whole — there is no shorter honest form of it.
+pub fn shortSpace(name: []const u8) []const u8 {
+    const sep = std.mem.lastIndexOf(u8, name, space_sep) orelse return name;
+    if (sep == 0 or sep + space_sep.len == name.len) return name;
+    return name[sep + space_sep.len ..];
+}
+
+/// The repository half of a workspace name, or "" when the name does
+/// not carry one. This is what `shortSpace` takes off, and it goes in
+/// the subtitle: which checkout a space is on is a real question, and
+/// the short label alone cannot answer it.
+pub fn spaceRepo(name: []const u8) []const u8 {
+    const sep = std.mem.lastIndexOf(u8, name, space_sep) orelse return "";
+    if (sep == 0 or sep + space_sep.len == name.len) return "";
+    return name[0..sep];
+}
+
+/// Label rook's own workspace rows in place: `ws` is the identity,
+/// `name` becomes what the rail paints.
+///
+/// Shortening must never cost uniqueness — two rows reading the same
+/// word are worse than one long one — so any label that two different
+/// workspaces would share is given back its full name. Both of them,
+/// not just the second: a rail where one row is short and its twin is
+/// long reads as two unrelated things. Quadratic over a couple of
+/// dozen rows, on a repaint that already walks the pane table.
+pub fn labelSpaces(items: []Item) void {
+    for (items) |*it| it.name = shortSpace(it.space());
+    for (items, 0..) |*a, i| {
+        for (items[i + 1 ..]) |*b| {
+            if (std.mem.eql(u8, a.space(), b.space())) continue;
+            if (!std.mem.eql(u8, a.name, b.name)) continue;
+            a.name = a.space();
+            b.name = b.space();
+        }
+    }
+}
 
 pub const Panel = struct {
     title: []const u8,
@@ -463,7 +532,10 @@ pub const Merge = struct {
         // discovery is a bonus row, never a reason to lose the rail.
         self.items.appendSlice(gpa, pushed.items) catch return pushed;
         for (found) |f| {
-            if (claimedIn(pushed.items, f.name)) continue;
+            // On the identity, never the label: rook's own rows now
+            // paint a short name, and a producer claims the workspace
+            // by its full one.
+            if (claimedIn(pushed.items, f.space())) continue;
             self.items.append(gpa, f) catch break;
             added += 1;
             if (f.origin == .manual) manual += 1;
@@ -1096,4 +1168,84 @@ test "an unfed spaces panel is rook's own workspaces" {
     try std.testing.expectEqual(@as(usize, 2), p.items.len);
     try std.testing.expectEqualStrings("main", p.items[0].name);
     try std.testing.expectEqual(Origin.found, Origin.parse("found"));
+}
+
+test "a workspace name splits into the repo and the label it earns" {
+    // The name rook makes for a worktree: <repo>--<worktree>.
+    try std.testing.expectEqualStrings("vera-e4126385", shortSpace("rook--vera-e4126385"));
+    try std.testing.expectEqualStrings("rook", spaceRepo("rook--vera-e4126385"));
+    // A workspace that is not a worktree is already as short as it is.
+    try std.testing.expectEqualStrings("main", shortSpace("main"));
+    try std.testing.expectEqualStrings("", spaceRepo("main"));
+    // A worktree of a worktree labels as its leaf: that is the part
+    // that tells it from the one it was cut from.
+    try std.testing.expectEqualStrings("fix", shortSpace("rook--vera-e4126385--fix"));
+    try std.testing.expectEqualStrings("rook--vera-e4126385", spaceRepo("rook--vera-e4126385--fix"));
+    // Nothing on one side is not a split; there is no shorter honest
+    // form of these, so they are left whole and wear no repo.
+    try std.testing.expectEqualStrings("--x", shortSpace("--x"));
+    try std.testing.expectEqualStrings("x--", shortSpace("x--"));
+    try std.testing.expectEqualStrings("", spaceRepo("--x"));
+    try std.testing.expectEqualStrings("", spaceRepo("x--"));
+}
+
+test "labelling keeps the workspace as the identity behind it" {
+    var items = [_]Item{
+        .{ .name = "rook--vera-e4126385", .ws = "rook--vera-e4126385", .origin = .found },
+        .{ .name = "rook", .ws = "rook", .origin = .found },
+    };
+    labelSpaces(&items);
+    try std.testing.expectEqualStrings("vera-e4126385", items[0].name);
+    try std.testing.expectEqualStrings("rook--vera-e4126385", items[0].space());
+    // The claim a producer makes is on the workspace, so the short
+    // label must not cost the row its claim.
+    try std.testing.expect(items[0].claims("rook--vera-e4126385"));
+    try std.testing.expect(!items[0].claims("vera-e4126385"));
+    try std.testing.expectEqualStrings("rook", items[1].name);
+}
+
+test "a label two workspaces would share is given back whole" {
+    var items = [_]Item{
+        .{ .name = "rook--fix", .ws = "rook--fix", .origin = .found },
+        .{ .name = "herdr--fix", .ws = "herdr--fix", .origin = .found },
+        .{ .name = "rook--vera-e4126385", .ws = "rook--vera-e4126385", .origin = .found },
+    };
+    labelSpaces(&items);
+    // Both of the pair, not just the second: one short row beside its
+    // long twin reads as two unrelated things.
+    try std.testing.expectEqualStrings("rook--fix", items[0].name);
+    try std.testing.expectEqualStrings("herdr--fix", items[1].name);
+    // The row that was never ambiguous keeps its short label.
+    try std.testing.expectEqualStrings("vera-e4126385", items[2].name);
+}
+
+test "a producer's claim still lands on a row rook labelled short" {
+    // The fleet's row for this task, claiming the workspace by name.
+    var feed = Feed.init(std.testing.allocator);
+    defer feed.deinit();
+    _ = try feed.push(
+        \\{"params":{"surface":"agents","items":[{"id":"e4126385","title":"Name the spaces","subtitle":"working · claude","state":"working","workspace":"rook--vera-e4126385"}]}}
+    );
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    var found = [_]Item{
+        .{ .name = "rook--vera-e4126385", .ws = "rook--vera-e4126385", .sub = "claude", .origin = .manual },
+        .{ .name = "rook--vera-f356bc2c", .ws = "rook--vera-f356bc2c", .sub = "claude", .origin = .manual },
+    };
+    labelSpaces(&found);
+    const p = merge.panel(std.testing.allocator, feed.model().agents, &found);
+    // One row for the claimed workspace — the producer's — and rook's
+    // own row for the one nobody claimed, wearing its short label.
+    try std.testing.expectEqual(@as(usize, 2), p.items.len);
+    try std.testing.expectEqualStrings("Name the spaces", p.items[0].name);
+    try std.testing.expectEqualStrings("vera-f356bc2c", p.items[1].name);
+    try std.testing.expectEqualStrings("rook--vera-f356bc2c", p.items[1].space());
+    try std.testing.expectEqualStrings("1 manual", p.note);
+}
+
+test "a row that names no workspace is its own identity" {
+    // Every found row rook builds carries `ws`, but a pushed one need
+    // not, and the merge asks for the identity on both.
+    const it: Item = .{ .name = "scratch" };
+    try std.testing.expectEqualStrings("scratch", it.space());
 }

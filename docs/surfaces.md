@@ -303,6 +303,11 @@ Three rules keep the merge from becoming a negotiation:
   palette color and never overrides a state, so a glance still reads
   state first.
 
+A found agent row is named for its workspace, so it wears the same
+label the spaces panel does (`vera-e4126385`, not
+`rook--vera-e4126385`) and carries the workspace itself as its
+identity.
+
 The scan is two syscalls a pane (`fgName`) on a 2s timer — the drift
 cadence, for the drift reason — and only a change repaints.
 
@@ -338,6 +343,41 @@ workspace open on that checkout, so what rook found for that name is
 dropped in favour of the producer's row and its state. A repository
 with no workspace open is not a space — it is something the picker
 could open — and the producer does not push it.
+
+**A name is an identity; a row wears a label.** The workspace of a
+worktree is `<repo>--<worktree>` (`internal/worktree` makes the
+directory, `SessionName` makes the name from it) because it has to be
+unambiguous across every repository on the machine. That is what
+`rook ls` prints, what a producer claims, and what `rook switch`
+takes. It is not what a rail should paint: in a 30-column dock the
+repo is the same word on every row, and the part that tells the rows
+apart is the part that falls off the right edge — a column of
+`rook--vera-e4126…` says nothing the panel's own header did not.
+
+So a found row reads `vera-e4126385`, with the repo leading its
+subtitle, which is exactly what `rook worktree ls` has printed all
+along:
+
+    spaces
+    ● rook
+    ◌ vera-e4126385
+      rook
+
+Three rules, so this stays a *display* rule and nothing more:
+
+- **Shortening never costs uniqueness.** A label two workspaces would
+  share is given back its full name — both of them, not just the
+  second, since one short row beside its long twin reads as two
+  unrelated things.
+- **The workspace rides on the row.** It is `workspace` in the state
+  feed and what a click switches to, so every match, claim and command
+  is still made on the full name. This is the same `title`/`workspace`
+  split a pushed item already has, now on rook's own rows too.
+- **Rook labels; it does not name.** A short label is still an id when
+  the worktree was named after one. Rook has no honest way to know
+  that `vera-e4126385` is "Name the spaces Vera makes" — a task is a
+  producer's vocabulary. A producer that wants the row to say so
+  pushes it, claiming the workspace, and its row replaces rook's.
 
 In the state feed the rows ride under `surfaces[].found` for `spaces`
 too, with `current`, so a second glass draws the unfed rail from the
@@ -416,7 +456,8 @@ still exact. Deltas would force unbounded buffering or a disconnect.
      "model": {"v": 1, "op": "items.push", "params": {"surface": "spaces", "items": [
        {"id": "herdr", "title": "herdr", "subtitle": "master", "state": "working"}]}}},
     {"name": "agents", "place": "dock:left", "size": 30, "shown": true, "model": null,
-     "found": [{"title": "scratch", "subtitle": "claude", "origin": "manual"}]}
+     "found": [{"title": "scratch", "subtitle": "claude",
+                "workspace": "scratch", "origin": "manual"}]}
   ],
   "clients": [{"cols": 180, "rows": 45, "attached": true, "block": 0}]
 }
@@ -427,11 +468,14 @@ when the mux itself is holding the keyboard. `rect` is null for a pane
 that is not currently placed (another window, a hidden workspace) and
 `visible` says the same in one field. `lastOutputMs` is wall clock, not
 the server's uptime clock, because other processes read it. A `found`
-row's `title` is the workspace it was found in (on `agents`) or the
-workspace itself (on `spaces`, where `current` marks the one in front),
-and `model`'s items carry the producer's `workspace` verbatim, so a
-second glass drops the same rows rook does without inventing a rule of
-its own.
+row carries both words an item has always had: `title` is the label
+rook paints and `workspace` is the workspace it is about — the one it
+was found in (on `agents`) or the row itself (on `spaces`, where
+`current` marks the one in front). `model`'s items carry the
+producer's `workspace` verbatim, so a second glass drops the same rows
+rook does without inventing a rule of its own — matching `workspace`
+against `workspace`, never against a title, which is prose on a pushed
+row and shortened on a found one.
 
 ### Two cadences, so a busy pane cannot make it chatty
 
@@ -580,6 +624,17 @@ if* one workspace ever holds two agents that different producers
 manage — the claim would then have to be per pane, which rook can
 address (`panes[].id` is in the state feed) and a producer that spawned
 the pane already knows.
+
+**Rook's own rows paint a label, not the workspace name.** The name is
+an identity — `<repo>--<worktree>`, unambiguous across every
+repository — and identities make bad labels: a dock of
+`rook--vera-e4126…` spends its width on the word every row shares and
+loses the word that tells them apart. The repo moves to the subtitle
+rather than off the glass, a label two workspaces would share is given
+back whole, and the workspace itself stays on the row for every match
+and command. *Revisit if* a label ever has to be acted on — it must
+not be; `workspace` is what commands take, and that is the whole
+reason both are published.
 
 **A failed plugin's surface goes stale, not blank, and does not
 respawn.** Consistent with `rook-plugin(7)`. *Revisit if* daily driving

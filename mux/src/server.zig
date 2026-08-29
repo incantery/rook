@@ -191,7 +191,7 @@ pub const Server = struct {
     spaces_merge: chromepkg.Merge = .{},
     found_ws: [max_found]chromepkg.Item = @splat(.{ .name = "" }),
     found_ws_n: usize = 0,
-    found_ws_sub: [max_found][16]u8 = @splat(@splat(0)),
+    found_ws_sub: [max_found][64]u8 = @splat(@splat(0)),
     next_id: u32 = 1,
     clients: std.ArrayList(*Client) = .empty,
     wake_r: ptypkg.fd_t,
@@ -1105,7 +1105,7 @@ pub const Server = struct {
         if (m.spaces.cur == null and self.cur_sess < self.sessions.items.len) {
             const cur = self.sessions.items[self.cur_sess].label();
             for (m.spaces.items[pushed_n..], pushed_n..) |it, i| {
-                if (std.mem.eql(u8, it.name, cur)) {
+                if (std.mem.eql(u8, it.space(), cur)) {
                     m.spaces.cur = i;
                     break;
                 }
@@ -1115,20 +1115,35 @@ pub const Server = struct {
     }
 
     /// Rook's own rows for the spaces panel, rebuilt on every ask: one
-    /// per workspace, in workspace order, named for it. Cheap enough
-    /// to never cache — a handful of sessions — and structural change
-    /// already repaints, so there is no signature to keep.
+    /// per workspace, in workspace order. Cheap enough to never
+    /// cache — a handful of sessions — and structural change already
+    /// repaints, so there is no signature to keep.
+    ///
+    /// A row carries the workspace name as its identity (`ws`, what a
+    /// click switches to and what a producer claims) and wears the
+    /// short label `chrome.labelSpaces` gives it. The repository the
+    /// label drops is not lost: it leads the subtitle, so the panel
+    /// still answers "which checkout is this?" in the line that is
+    /// there to answer it.
     pub fn foundSpaces(self: *Server) []const chromepkg.Item {
         var n: usize = 0;
         for (self.sessions.items) |sn| {
             if (n == max_found) break;
-            const sub = if (sn.windows.items.len > 1)
-                std.fmt.bufPrint(&self.found_ws_sub[n], "{d} windows", .{sn.windows.items.len}) catch ""
+            const repo = chromepkg.spaceRepo(sn.label());
+            const wins = sn.windows.items.len;
+            const buf = &self.found_ws_sub[n];
+            const sub = if (repo.len > 0 and wins > 1)
+                std.fmt.bufPrint(buf, "{s} · {d} windows", .{ repo, wins }) catch repo
+            else if (repo.len > 0)
+                std.fmt.bufPrint(buf, "{s}", .{repo}) catch repo
+            else if (wins > 1)
+                std.fmt.bufPrint(buf, "{d} windows", .{wins}) catch ""
             else
                 "";
-            self.found_ws[n] = .{ .name = sn.label(), .sub = sub, .origin = .found };
+            self.found_ws[n] = .{ .name = sn.label(), .ws = sn.label(), .sub = sub, .origin = .found };
             n += 1;
         }
+        chromepkg.labelSpaces(self.found_ws[0..n]);
         self.found_ws_n = n;
         return self.found_ws[0..n];
     }
@@ -1162,10 +1177,12 @@ pub const Server = struct {
     }
 
     /// Walk the pane table for agent programs and rebuild the found
-    /// rows: one per workspace, named for it, with the program and how
-    /// many of it. True when the rows changed — which is the only
-    /// thing that earns a repaint, because this runs on a timer and
-    /// the answer is usually the same one as last time.
+    /// rows: one per workspace, labelled for it, with the program and
+    /// how many of it. The workspace itself rides on the row as its
+    /// identity, so a producer's claim still matches the full name.
+    /// True when the rows changed — which is the only thing that earns
+    /// a repaint, because this runs on a timer and the answer is
+    /// usually the same one as last time.
     fn scanAgents(self: *Server) bool {
         var buf: [max_found * 64]u8 = undefined;
         var offs: [max_found]struct { no: usize, nl: usize, so: usize, sl: usize } = undefined;
@@ -1221,13 +1238,18 @@ pub const Server = struct {
         @memcpy(self.found_buf[0..len], buf[0..len]);
         self.found_len = len;
         for (0..n) |i| {
+            const ws = self.found_buf[offs[i].no..][0..offs[i].nl];
             self.found[i] = .{
-                .name = self.found_buf[offs[i].no..][0..offs[i].nl],
+                .name = ws,
+                .ws = ws,
                 .sub = self.found_buf[offs[i].so..][0..offs[i].sl],
                 .origin = .manual,
             };
         }
         self.found_n = n;
+        // Rook found these by workspace, so the workspace is the
+        // identity a producer claims; the rail paints the short label.
+        chromepkg.labelSpaces(self.found[0..n]);
         // The rows moved under it; a cursor that survived would point
         // at a different agent than the one it was put on.
         self.agents_merge.cur = null;
@@ -1734,7 +1756,9 @@ pub const Server = struct {
             // on: the row *is* the workspace, so a click goes there.
             const pushed_n = if (self.side.spaces.panel) |p| p.items.len else 0;
             if (i >= pushed_n) {
-                self.switchSessionNamed(panel.items[i].name);
+                // The row's *label* is short; the workspace it names
+                // is what switching takes.
+                self.switchSessionNamed(panel.items[i].space());
                 return;
             }
         }

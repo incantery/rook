@@ -201,11 +201,35 @@ on one switches to it. A producer's row claims a workspace with
 `"workspace"` and replaces rook's row for it. So an unfed rail is not
 blank: it is rook's own workspaces, and a producer adds state to them.
 
+Rook's own rows wear a **label**, not a workspace name. A worktree's
+workspace is `<repo>--<worktree>` — `rook--vera-e4126385` — because
+that name has to be unambiguous across every repository on the
+machine. Down a 30-column dock that makes the repo the same word on
+every row and pushes the part that tells the rows apart off the right
+edge. So the row reads `vera-e4126385` with `rook` in its subtitle,
+which is what `rook worktree ls` has always printed:
+
+    spaces
+    ● rook
+    ◌ vera-e4126385
+      rook
+
+Shortening never costs uniqueness: a label two workspaces would share
+gives both of them their full name back. The workspace itself is still
+on the row — `workspace` in the state feed, and what a click switches
+to — so a claim, a match or a `rook switch` is always made on the full
+name. Rook has nothing to say about *what* the work in a space is: a
+producer that wants the row to read "Name the spaces Vera makes"
+pushes it, claiming `"workspace":"rook--vera-e4126385"`, and its row
+replaces rook's.
+
 The last frame pushed to each surface comes back out of the state feed
 verbatim, under `surfaces[].model`, so a second glass can draw the same
 rail without talking to the producer. What rook found rides beside it
 under `surfaces[].found` — never merged into `model`, which stays the
-producer's own bytes.
+producer's own bytes. A found row carries both words: `title` is the
+label rook paints and `workspace` is the workspace it is about. Match
+on `workspace` — a title is prose, and rook shortens its own.
 
 ## Shape
 
