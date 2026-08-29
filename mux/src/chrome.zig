@@ -6,10 +6,18 @@
 //! process backs it, the frame builder paints it straight from a
 //! model.
 //!
-//! Nothing in this file decides what the rail *says*. The model is
-//! pushed in from outside — `items.push` frames, the list shape of
-//! the plugin protocol (docs/surfaces.md) — and `Feed` holds the last
-//! one pushed to each surface. Rook paints; something else supplies.
+//! Almost nothing in this file decides what the rail *says*. The
+//! model is pushed in from outside — `items.push` frames, the list
+//! shape of the plugin protocol (docs/surfaces.md) — and `Feed` holds
+//! the last one pushed to each surface. Rook paints; something else
+//! supplies.
+//!
+//! The one exception is `Merge`, and it is deliberately small: a pane
+//! running an agent is something rook can *see*, in its own pane
+//! table, so a session somebody started by hand is not invisible to
+//! the rail just because no producer knew to mention it. Those rows
+//! carry `.manual` and say only that the session is there — never
+//! what it is doing, which stays a producer's job.
 const std = @import("std");
 
 pub const Rgb = struct {
@@ -78,12 +86,57 @@ pub const Dot = enum {
     filled, // ●  running / present
     hollow, // ○  idle
     ring, // ◉  wants you (blocked on an ask)
+    loose, // ◌  nobody is driving it — see Origin
 
     fn glyph(self: Dot) []const u8 {
         return switch (self) {
             .filled => "●",
             .hollow => "○",
             .ring => "◉",
+            .loose => "◌",
+        };
+    }
+};
+
+/// Who put a row on the rail — the one thing about an item that is
+/// not about the work.
+///
+/// `.managed` is the default and the norm: a producer pushed the row,
+/// so something is driving that agent and can say what it is doing.
+/// `.manual` means nobody claims it — rook found the pane running an
+/// agent in its own pane table and nothing supplied a row for it (or a
+/// producer pushed `"origin":"manual"` to say the same).
+///
+/// Origin never takes a color from the palette and never overrides a
+/// state: a glance still reads state first. It gets a dot shape for a
+/// row with no state to report, and one dim word ahead of the
+/// subtitle. That is the whole distinction, deliberately.
+pub const Origin = enum {
+    managed,
+    manual,
+
+    /// Anything but "manual" is managed: an item that arrived by push
+    /// has a producer behind it by definition, and an unknown word
+    /// must not cost the frame.
+    pub fn parse(s: []const u8) Origin {
+        return if (std.mem.eql(u8, s, "manual")) .manual else .managed;
+    }
+
+    /// The label the row wears ahead of its subtitle. Managed is the
+    /// norm and says nothing.
+    pub fn tag(self: Origin) []const u8 {
+        return switch (self) {
+            .managed => "",
+            .manual => "manual · ",
+        };
+    }
+
+    /// Cells `tag` occupies. The middle dot is two bytes and one
+    /// column, so this is not the byte length.
+    pub fn tagCols(self: Origin) u16 {
+        return switch (self) {
+            .managed => 0,
+            .manual => 9,
         };
     }
 };
@@ -151,6 +204,16 @@ pub const Item = struct {
     /// The second line: a branch for a space, "state · tool" for an agent.
     sub: []const u8 = "",
     state: State = .none,
+    origin: Origin = .managed,
+
+    /// The glyph beside the name. State owns it whenever state has
+    /// something to say; a manual row with nothing reporting on it
+    /// gets the loose dot rather than borrowing `.none`'s filled one,
+    /// which would read as running.
+    pub fn dot(self: Item) Dot {
+        if (self.origin == .manual and self.state == .none) return .loose;
+        return self.state.shape();
+    }
 };
 
 pub const Panel = struct {
@@ -331,6 +394,64 @@ pub const Feed = struct {
     }
 };
 
+/// Where the two sources of agent rows meet.
+///
+/// The agents panel is fed from outside — a producer pushes what it
+/// manages — but rook can also *see* an agent: a pane whose foreground
+/// program is one the config names (`claude` by default) is a session
+/// somebody started, whether or not anything claims it. Those rows are
+/// rook's own, about rook's own panes, and they carry `.manual`.
+///
+/// Pushed rows keep their order and come first: a producer that names
+/// a workspace owns that row, whatever the pane table says, so a found
+/// row with the same name is dropped rather than listed twice. This
+/// is the only merge in the design, and it is one-way — nothing rook
+/// finds is ever written back into a producer's model.
+pub const Merge = struct {
+    items: std.ArrayList(Item) = .empty,
+    note_buf: [24]u8 = @splat(0),
+
+    pub fn deinit(self: *Merge, gpa: std.mem.Allocator) void {
+        self.items.deinit(gpa);
+        self.items = .empty;
+    }
+
+    /// The merged panel. Its `items` borrow this Merge, so the result
+    /// lives until the next call — one frame, which is what the frame
+    /// builder wants.
+    pub fn panel(self: *Merge, gpa: std.mem.Allocator, pushed: Panel, found: []const Item) Panel {
+        self.items.clearRetainingCapacity();
+        var added: usize = 0;
+        // Out of memory leaves the pushed panel exactly as it was:
+        // discovery is a bonus row, never a reason to lose the rail.
+        self.items.appendSlice(gpa, pushed.items) catch return pushed;
+        for (found) |f| {
+            if (namedIn(pushed.items, f.name)) continue;
+            self.items.append(gpa, f) catch break;
+            added += 1;
+        }
+        if (added == 0) return pushed;
+        var out = pushed;
+        out.items = self.items.items;
+        // The header says how many rows nobody is managing — a rail
+        // that quietly grew rows should account for them at panel
+        // level too. A producer's own note is never overwritten.
+        if (pushed.note.len == 0) {
+            if (std.fmt.bufPrint(&self.note_buf, "{d} manual", .{added})) |n| {
+                out.note = n;
+            } else |_| {}
+        }
+        return out;
+    }
+};
+
+fn namedIn(items: []const Item, name: []const u8) bool {
+    for (items) |it| {
+        if (std.mem.eql(u8, it.name, name)) return true;
+    }
+    return false;
+}
+
 const Parsed = struct { surface: Surface, panel: Panel };
 
 fn objStr(o: std.json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -401,6 +522,7 @@ fn parseFrame(a: std.mem.Allocator, bytes: []const u8) PushError!Parsed {
             .name = name,
             .sub = objStr(o, "subtitle") orelse "",
             .state = State.parse(objStr(o, "state") orelse ""),
+            .origin = Origin.parse(objStr(o, "origin") orelse ""),
         });
     }
 
@@ -511,18 +633,29 @@ fn drawPanel(f: anytype, p: Panel, accent: Rgb, x: u16, y: u16, w: u16, h: u16) 
         // name row: the dot, then the name
         f.cup(x + pad, top + 1);
         sgrFg(f, it.state.color());
-        f.put(it.state.shape().glyph());
+        f.put(it.dot().glyph());
         sgrFg(f, text);
         f.put("\x1b[1m");
         at(f, x + pad + 2, top + 1, w -| (pad + 2), it.name);
         f.put("\x1b[22m");
 
-        // subtitle row, indented under the name
+        // subtitle row, indented under the name. An origin worth
+        // saying goes first and stays dim whatever the row is doing —
+        // it is the one thing on the row that is not about the work,
+        // so it never competes with a state color or the accent.
+        const sub_x = x + pad + 2;
+        const sub_w = w -| (pad + 2);
+        var off: u16 = 0;
+        if (it.origin.tagCols() > 0 and it.origin.tagCols() < sub_w) {
+            sgrFg(f, overlay0);
+            at(f, sub_x, top + 2, sub_w, it.origin.tag());
+            off = it.origin.tagCols();
+        }
         // a selected row's plain subtitle takes the accent; a state
         // color (working, blocked, done) already says more than that
         const sub_fg = it.state.subFg();
         sgrFg(f, if (sel and sub_fg.eql(overlay0)) accent else sub_fg);
-        at(f, x + pad + 2, top + 2, w -| (pad + 2), it.sub);
+        at(f, sub_x + off, top + 2, sub_w -| off, it.sub);
     }
 
     // An empty panel says why it is empty: a rail nothing has pushed
@@ -699,6 +832,111 @@ test "the frame is kept verbatim for the state feed to republish" {
     _ = try feed.push(demo_frames[0]);
     try std.testing.expectEqualStrings(demo_frames[0], feed.spaces.raw);
     try std.testing.expectEqualStrings("", feed.agents.raw);
+}
+
+test "origin rides in on a frame and marks the row nobody manages" {
+    var feed = Feed.init(std.testing.allocator);
+    defer feed.deinit();
+    _ = try feed.push(
+        \\{"params":{"surface":"agents","items":[{"title":"rook","origin":"manual"},{"title":"herdr","subtitle":"working · claude","state":"working"},{"title":"loose","origin":"manual","state":"blocked"},{"title":"odd","origin":"whatever"}]}}
+    );
+    const it = feed.model().agents.items;
+    // a manual row with nothing reporting on it gets the loose dot,
+    // not `.none`'s filled one, which would read as running
+    try std.testing.expectEqual(Origin.manual, it[0].origin);
+    try std.testing.expectEqual(Dot.loose, it[0].dot());
+    try std.testing.expectEqual(overlay0, it[0].state.color());
+    // the default, and the norm: a pushed row has a producer behind it
+    try std.testing.expectEqual(Origin.managed, it[1].origin);
+    try std.testing.expectEqual(Dot.filled, it[1].dot());
+    // origin never overrides a state — the dot still says blocked
+    try std.testing.expectEqual(Dot.ring, it[2].dot());
+    try std.testing.expectEqual(red, it[2].state.color());
+    // an origin rook does not know is managed, not a dropped frame
+    try std.testing.expectEqual(Origin.managed, it[3].origin);
+}
+
+test "the origin tag's declared width is the width it draws" {
+    // tagCols is columns, tag is bytes; the middle dot is two of one
+    // and one of the other, and the painter budgets in columns.
+    for ([_]Origin{ .managed, .manual }) |o| {
+        const cells = std.unicode.utf8CountCodepoints(o.tag()) catch unreachable;
+        try std.testing.expectEqual(@as(usize, o.tagCols()), cells);
+    }
+    try std.testing.expectEqualStrings("", Origin.managed.tag());
+}
+
+test "found agents land after pushed rows and never displace one" {
+    var feed = Feed.init(std.testing.allocator);
+    defer feed.deinit();
+    for (demo_frames) |frame| _ = try feed.push(frame);
+
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    const found = [_]Item{
+        // the producer already names this workspace: its row wins
+        .{ .name = "web-dashboard", .sub = "claude", .origin = .manual },
+        .{ .name = "scratch", .sub = "claude ×2", .origin = .manual },
+    };
+    const p = merge.panel(std.testing.allocator, feed.model().agents, &found);
+
+    try std.testing.expectEqual(@as(usize, 5), p.items.len);
+    // the four pushed rows, in order, untouched
+    try std.testing.expectEqualStrings("herdr", p.items[0].name);
+    try std.testing.expectEqualStrings("data-pipeline", p.items[3].name);
+    try std.testing.expectEqual(Origin.managed, p.items[2].origin);
+    // then the one nothing claimed
+    try std.testing.expectEqualStrings("scratch", p.items[4].name);
+    try std.testing.expectEqual(Origin.manual, p.items[4].origin);
+    // the highlight still points at the row it pointed at
+    try std.testing.expectEqual(@as(?usize, 2), p.cur);
+    // the producer said "grouped"; rook does not talk over it
+    try std.testing.expectEqualStrings("grouped", p.note);
+}
+
+test "a merged panel accounts for the rows nobody manages" {
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    const pushed: Panel = .{ .title = "agents", .items = &.{.{ .name = "herdr" }} };
+    const found = [_]Item{
+        .{ .name = "rook", .sub = "claude", .origin = .manual },
+        .{ .name = "scratch", .sub = "claude", .origin = .manual },
+    };
+    const p = merge.panel(std.testing.allocator, pushed, &found);
+    try std.testing.expectEqual(@as(usize, 3), p.items.len);
+    try std.testing.expectEqualStrings("2 manual", p.note);
+}
+
+test "an unfed rail still shows what rook found by itself" {
+    var feed = Feed.init(std.testing.allocator);
+    defer feed.deinit();
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    const found = [_]Item{.{ .name = "rook", .sub = "claude", .origin = .manual }};
+    const p = merge.panel(std.testing.allocator, feed.model().agents, &found);
+    try std.testing.expectEqual(@as(usize, 1), p.items.len);
+    try std.testing.expectEqualStrings("rook", p.items[0].name);
+    try std.testing.expectEqualStrings("agents", p.title);
+    try std.testing.expectEqualStrings("1 manual", p.note);
+}
+
+test "nothing found leaves the pushed panel exactly as it was" {
+    var feed = Feed.init(std.testing.allocator);
+    defer feed.deinit();
+    _ = try feed.push(demo_frames[1]);
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+
+    const pushed = feed.model().agents;
+    // nothing to add
+    var p = merge.panel(std.testing.allocator, pushed, &.{});
+    try std.testing.expectEqual(pushed.items.ptr, p.items.ptr);
+    try std.testing.expectEqualStrings("grouped", p.note);
+    // everything found is already claimed
+    const claimed = [_]Item{.{ .name = "herdr", .origin = .manual }};
+    p = merge.panel(std.testing.allocator, pushed, &claimed);
+    try std.testing.expectEqual(pushed.items.len, p.items.len);
+    try std.testing.expectEqualStrings("grouped", p.note);
 }
 
 test "clip cuts on a codepoint boundary" {

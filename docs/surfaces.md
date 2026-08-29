@@ -3,7 +3,9 @@
 > Status: the **state feed (out) is built and shipping** — see the
 > section below and `statefeed.zig`. Of the plugin protocol (in), one
 > frame is built: **`items.push`**, which is what feeds the side rail
-> — the mux no longer holds any opinion about what that rail says.
+> — the mux holds one opinion about what that rail says, and only one:
+> a pane running an agent nobody claimed gets a row of its own
+> ([Agents rook finds by itself](#agents-rook-finds-by-itself)).
 > Declared surfaces, placement, focus and plugin *processes* are still
 > design. What *does*
 > exist is inventoried in [What is real today](#what-is-real-today),
@@ -205,10 +207,15 @@ An item is the model a `nav` surface renders:
 
 ```json
 {"id":"web-dashboard","title":"web-dashboard","state":"blocked",
- "subtitle":"blocked · claude",
+ "subtitle":"blocked · claude","origin":"managed",
  "fields":[{"key":"branch","kind":"TEXT","value":"feat/usage-charts"}],
  "actions":[{"id":"open","label":"Open"}]}
 ```
+
+`origin` is `managed` (the default: something is driving this, and can
+say what it is doing) or `manual` (nobody claims it). It is the one
+field on an item that is not about the work, and it is painted that
+way — see [Agents rook finds by itself](#agents-rook-finds-by-itself).
 
 What this design needs on top of what `rook-plugin(7)` already
 specifies:
@@ -232,6 +239,49 @@ specifies:
   halfway**: `current` on an item is the highlight, and the next push
   takes it back from a click. The click itself is still not forwarded,
   because there is nothing to forward it to.
+
+### Agents rook finds by itself
+
+The one place rook supplies content to its own rail, and the reason
+the exception is worth its own section.
+
+A pane whose foreground program is an agent — `claude` by default,
+`[mux] agents = [...]` to name others — is a session somebody started.
+Rook can see it in its own pane table, which is rook's own state and
+nobody else's, so it lists one row per workspace on the *agents*
+panel, marked `origin: "manual"`, folded in after whatever was pushed:
+
+    agents            1 manual
+    ● main                        ← pushed: a producer manages it
+      working · claude
+    ◌ scratch                     ← found: nobody claims it
+      manual · claude
+
+This does **not** reopen "no agent state, no fleet vocabulary in
+rook". Rook says a session is *there*; it never says what it is doing.
+There is no capture, no screen scraping, no heuristic about whether an
+agent is waiting on you — a found row carries no state at all, which
+is exactly why it draws the loose dot instead of borrowing one.
+Whoever manages that agent still owns everything else about it, and
+the moment a producer pushes a row naming that workspace, rook's own
+row disappears in favour of it.
+
+Three rules keep the merge from becoming a negotiation:
+
+- **Pushed rows win, always.** A producer that names a workspace owns
+  that row. Rook drops what it found for that name rather than listing
+  it twice, and never edits a pushed row.
+- **One way, one frame.** The merge happens where the panel is
+  painted. Nothing rook found is written back into a producer's model,
+  and `surfaces[].model` in the state feed stays the producer's bytes,
+  verbatim; what rook found rides beside it as `surfaces[].found`.
+- **Nothing about the work.** Origin gets a dim word ahead of the
+  subtitle and a dot shape for a row with no state. It never takes a
+  palette color and never overrides a state, so a glance still reads
+  state first.
+
+The scan is two syscalls a pane (`fgName`) on a 2s timer — the drift
+cadence, for the drift reason — and only a change repaints.
 
 **One process per plugin, serving many surfaces.** `herdr#spaces` and
 `herdr#agents` are one `herdr` process; requests carry a `surface`
@@ -318,7 +368,8 @@ still exact. Deltas would force unbounded buffering or a disconnect.
     {"name": "spaces", "place": "dock:left", "size": 30, "shown": true,
      "model": {"v": 1, "op": "items.push", "params": {"surface": "spaces", "items": [
        {"id": "herdr", "title": "herdr", "subtitle": "master", "state": "working"}]}}},
-    {"name": "agents", "place": "dock:left", "size": 30, "shown": true, "model": null}
+    {"name": "agents", "place": "dock:left", "size": 30, "shown": true, "model": null,
+     "found": [{"title": "scratch", "subtitle": "claude", "origin": "manual"}]}
   ],
   "clients": [{"cols": 180, "rows": 45, "attached": true, "block": 0}]
 }
@@ -395,6 +446,7 @@ Honest inventory, so this document is not mistaken for a description.
 |---|---|
 | `chrome.zig` palette + list painter | real; the painter is roughly the `items` renderer |
 | `chrome.Feed` + `c2s.side` / `rook side` | **built** — the rail's content comes from outside; `chrome.placeholder` is gone, and its model survives as `demo_frames`, two `items.push` frames |
+| `chrome.Merge` + `Server.scanAgents` | **built** — agents rook finds in its own pane table, folded into the pushed agents panel as `origin: "manual"`, published as `surfaces[].found` |
 | `tabBar()` | real, hardcoded: chips, order, the `+`, where hints ride |
 | pins | real; a `pty` surface with `place` hardcoded to `dock:left` |
 | `navigate()` over `self.placed` | real; the `focus = "nav"` mechanism, unused by surfaces |
@@ -452,6 +504,16 @@ consistent, and the lifecycle is one handshake and one failure instead
 of two. *Revisit if* one surface's slowness starves another; the
 protocol is already multiplexed by `id`, so that would be a scheduling
 fix rather than a process split.
+
+**Rook supplies agent rows for panes nobody claimed, and nothing
+else.** The rail existing to be pushed to is right; a rail that stays
+empty while a Claude session runs three columns away is not, and the
+pane table is rook's own state, so reading it breaks no rule. The line
+is drawn at *presence*: rook says a session is there, never what it is
+doing, and a pushed row for the same workspace always wins. *Revisit
+if* a found row ever needs to say more than presence — that is a
+producer's job, and the answer is to write the producer, not to teach
+rook what a turn is.
 
 **A failed plugin's surface goes stale, not blank, and does not
 respawn.** Consistent with `rook-plugin(7)`. *Revisit if* daily driving
