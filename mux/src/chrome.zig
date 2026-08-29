@@ -114,19 +114,27 @@ pub const Dot = enum {
 pub const Origin = enum {
     managed,
     manual,
+    /// Rook's own row about rook's own state — a workspace it holds,
+    /// listed on `spaces` because nothing pushed a row for it. Not
+    /// "manual": nobody launches a workspace at an agent, so there is
+    /// nothing to be unmanaged about, and it wears no tag. A producer
+    /// may push it too; an unknown word still lands on managed.
+    found,
 
     /// Anything but "manual" is managed: an item that arrived by push
     /// has a producer behind it by definition, and an unknown word
     /// must not cost the frame.
     pub fn parse(s: []const u8) Origin {
-        return if (std.mem.eql(u8, s, "manual")) .manual else .managed;
+        if (std.mem.eql(u8, s, "manual")) return .manual;
+        if (std.mem.eql(u8, s, "found")) return .found;
+        return .managed;
     }
 
     /// The label the row wears ahead of its subtitle. Managed is the
     /// norm and says nothing.
     pub fn tag(self: Origin) []const u8 {
         return switch (self) {
-            .managed => "",
+            .managed, .found => "",
             .manual => "manual · ",
         };
     }
@@ -135,7 +143,7 @@ pub const Origin = enum {
     /// column, so this is not the byte length.
     pub fn tagCols(self: Origin) u16 {
         return switch (self) {
-            .managed => 0,
+            .managed, .found => 0,
             .manual => 9,
         };
     }
@@ -228,7 +236,7 @@ pub const Item = struct {
     /// gets the loose dot rather than borrowing `.none`'s filled one,
     /// which would read as running.
     pub fn dot(self: Item) Dot {
-        if (self.origin == .manual and self.state == .none) return .loose;
+        if (self.origin != .managed and self.state == .none) return .loose;
         return self.state.shape();
     }
 };
@@ -450,6 +458,7 @@ pub const Merge = struct {
     pub fn panel(self: *Merge, gpa: std.mem.Allocator, pushed: Panel, found: []const Item) Panel {
         self.items.clearRetainingCapacity();
         var added: usize = 0;
+        var manual: usize = 0;
         // Out of memory leaves the pushed panel exactly as it was:
         // discovery is a bonus row, never a reason to lose the rail.
         self.items.appendSlice(gpa, pushed.items) catch return pushed;
@@ -457,6 +466,7 @@ pub const Merge = struct {
             if (claimedIn(pushed.items, f.name)) continue;
             self.items.append(gpa, f) catch break;
             added += 1;
+            if (f.origin == .manual) manual += 1;
         }
         if (added == 0) return pushed;
         var out = pushed;
@@ -470,8 +480,8 @@ pub const Merge = struct {
         // The header says how many rows nobody is managing — a rail
         // that quietly grew rows should account for them at panel
         // level too. A producer's own note is never overwritten.
-        if (pushed.note.len == 0) {
-            if (std.fmt.bufPrint(&self.note_buf, "{d} manual", .{added})) |n| {
+        if (pushed.note.len == 0 and manual > 0) {
+            if (std.fmt.bufPrint(&self.note_buf, "{d} manual", .{manual})) |n| {
                 out.note = n;
             } else |_| {}
         }
@@ -896,7 +906,7 @@ test "origin rides in on a frame and marks the row nobody manages" {
 test "the origin tag's declared width is the width it draws" {
     // tagCols is columns, tag is bytes; the middle dot is two of one
     // and one of the other, and the painter budgets in columns.
-    for ([_]Origin{ .managed, .manual }) |o| {
+    for ([_]Origin{ .managed, .manual, .found }) |o| {
         const cells = std.unicode.utf8CountCodepoints(o.tag()) catch unreachable;
         try std.testing.expectEqual(@as(usize, o.tagCols()), cells);
     }
@@ -1051,4 +1061,39 @@ test "clip cuts on a codepoint boundary" {
     // inside it backs off rather than emitting half a sequence
     try std.testing.expectEqualStrings("working ", clip("working · claude", 9));
     try std.testing.expectEqualStrings("working ·", clip("working · claude", 10));
+}
+
+test "workspaces rook holds land on spaces without a manual note" {
+    var feed = Feed.init(std.testing.allocator);
+    defer feed.deinit();
+    // The fleet's spaces row names the workspace it is about; the
+    // other workspace is rook's alone.
+    _ = try feed.push(
+        \\{"params":{"surface":"spaces","items":[{"id":"/x/rook","title":"rook","subtitle":"2 tasks","state":"working","workspace":"main"}]}}
+    );
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    const found = [_]Item{
+        .{ .name = "main", .origin = .found },
+        .{ .name = "testing", .origin = .found },
+    };
+    const p = merge.panel(std.testing.allocator, feed.model().spaces, &found);
+    try std.testing.expectEqual(@as(usize, 2), p.items.len);
+    try std.testing.expectEqualStrings("rook", p.items[0].name);
+    try std.testing.expectEqualStrings("testing", p.items[1].name);
+    try std.testing.expectEqual(Origin.found, p.items[1].origin);
+    try std.testing.expectEqual(Dot.loose, p.items[1].dot());
+    try std.testing.expectEqualStrings("", p.items[1].origin.tag());
+    // a held workspace is not an unmanaged agent: no "N manual"
+    try std.testing.expectEqualStrings("", p.note);
+}
+
+test "an unfed spaces panel is rook's own workspaces" {
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    const found = [_]Item{ .{ .name = "main", .origin = .found }, .{ .name = "testing", .origin = .found } };
+    const p = merge.panel(std.testing.allocator, .{ .title = "spaces" }, &found);
+    try std.testing.expectEqual(@as(usize, 2), p.items.len);
+    try std.testing.expectEqualStrings("main", p.items[0].name);
+    try std.testing.expectEqual(Origin.found, Origin.parse("found"));
 }

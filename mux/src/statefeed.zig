@@ -159,9 +159,9 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
     // interprets them, and a second glass can render the rail without
     // talking to whoever produced it.
     out.appendSlice(gpa, ",\"surfaces\":[") catch return;
-    const rail = [_]struct { name: []const u8, raw: []const u8, found: bool }{
-        .{ .name = "spaces", .raw = sv.side.spaces.raw, .found = false },
-        .{ .name = "agents", .raw = sv.side.agents.raw, .found = true },
+    const rail = [_]struct { name: []const u8, raw: []const u8, found: enum { spaces, agents } }{
+        .{ .name = "spaces", .raw = sv.side.spaces.raw, .found = .spaces },
+        .{ .name = "agents", .raw = sv.side.agents.raw, .found = .agents },
     };
     for (rail, 0..) |sf, i| {
         if (i > 0) out.append(gpa, ',') catch return;
@@ -184,16 +184,32 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         // a second glass paints the same rail by appending these. They
         // ride the drift cadence because they are read from the same
         // foreground-program lookup as `panes[].program`.
+        // On `spaces` the found rows are rook's own workspaces — one
+        // per workspace, `current` marking the one in front — so a
+        // second glass can draw the unfed rail from this alone.
         out.appendSlice(gpa, ",\"found\":[") catch return;
-        if (sf.found and form.drift) {
-            for (sv.found[0..sv.found_n], 0..) |it, k| {
-                if (k > 0) out.append(gpa, ',') catch return;
-                out.appendSlice(gpa, "{\"title\":") catch return;
-                str(gpa, out, it.name);
-                out.appendSlice(gpa, ",\"subtitle\":") catch return;
-                str(gpa, out, it.sub);
-                out.appendSlice(gpa, ",\"origin\":\"manual\"}") catch return;
-            }
+        switch (sf.found) {
+            .agents => if (form.drift) {
+                for (sv.found[0..sv.found_n], 0..) |it, k| {
+                    if (k > 0) out.append(gpa, ',') catch return;
+                    out.appendSlice(gpa, "{\"title\":") catch return;
+                    str(gpa, out, it.name);
+                    out.appendSlice(gpa, ",\"subtitle\":") catch return;
+                    str(gpa, out, it.sub);
+                    out.appendSlice(gpa, ",\"origin\":\"manual\"}") catch return;
+                }
+            },
+            .spaces => {
+                const cur = if (sv.cur_sess < sv.sessions.items.len) sv.sessions.items[sv.cur_sess].label() else "";
+                for (sv.foundSpaces(), 0..) |it, k| {
+                    if (k > 0) out.append(gpa, ',') catch return;
+                    out.appendSlice(gpa, "{\"title\":") catch return;
+                    str(gpa, out, it.name);
+                    out.appendSlice(gpa, ",\"subtitle\":") catch return;
+                    str(gpa, out, it.sub);
+                    out.print(gpa, ",\"origin\":\"found\",\"current\":{s}}}", .{boolStr(std.mem.eql(u8, it.name, cur))}) catch return;
+                }
+            },
         }
         out.appendSlice(gpa, "]") catch return;
         out.append(gpa, '}') catch return;

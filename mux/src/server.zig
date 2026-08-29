@@ -182,6 +182,16 @@ pub const Server = struct {
     found_ms: i64 = 0,
     /// The agents panel as painted: pushed rows, then found ones.
     agents_merge: chromepkg.Merge = .{},
+    /// Workspaces rook holds, as rows for the spaces panel: rook's
+    /// own state, listed so an unfed rail still says what is open and
+    /// which is current. A producer claims one with `workspace` on a
+    /// pushed row, the same one-way merge the agents panel uses.
+    /// Names point at the sessions themselves; only a subtitle needs
+    /// backing here.
+    spaces_merge: chromepkg.Merge = .{},
+    found_ws: [max_found]chromepkg.Item = @splat(.{ .name = "" }),
+    found_ws_n: usize = 0,
+    found_ws_sub: [max_found][16]u8 = @splat(@splat(0)),
     next_id: u32 = 1,
     clients: std.ArrayList(*Client) = .empty,
     wake_r: ptypkg.fd_t,
@@ -345,6 +355,7 @@ pub const Server = struct {
         self.frame.deinit();
         self.side.deinit();
         self.agents_merge.deinit(self.gpa);
+        self.spaces_merge.deinit(self.gpa);
         self.placed.deinit(self.gpa);
         self.blocks_last.deinit(self.gpa);
         self.state_json.deinit(self.gpa);
@@ -1086,7 +1097,40 @@ pub const Server = struct {
     fn sideModel(self: *Server) chromepkg.Model {
         var m = self.side.model();
         m.agents = self.agents_merge.panel(self.gpa, m.agents, self.found[0..self.found_n]);
+        const pushed_n = m.spaces.items.len;
+        m.spaces = self.spaces_merge.panel(self.gpa, m.spaces, self.foundSpaces());
+        // The current workspace is the highlight when the producer has
+        // not placed one: among rook's own rows it is the one fact the
+        // panel exists to show. A pushed `current` still wins.
+        if (m.spaces.cur == null and self.cur_sess < self.sessions.items.len) {
+            const cur = self.sessions.items[self.cur_sess].label();
+            for (m.spaces.items[pushed_n..], pushed_n..) |it, i| {
+                if (std.mem.eql(u8, it.name, cur)) {
+                    m.spaces.cur = i;
+                    break;
+                }
+            }
+        }
         return m;
+    }
+
+    /// Rook's own rows for the spaces panel, rebuilt on every ask: one
+    /// per workspace, in workspace order, named for it. Cheap enough
+    /// to never cache — a handful of sessions — and structural change
+    /// already repaints, so there is no signature to keep.
+    pub fn foundSpaces(self: *Server) []const chromepkg.Item {
+        var n: usize = 0;
+        for (self.sessions.items) |sn| {
+            if (n == max_found) break;
+            const sub = if (sn.windows.items.len > 1)
+                std.fmt.bufPrint(&self.found_ws_sub[n], "{d} windows", .{sn.windows.items.len}) catch ""
+            else
+                "";
+            self.found_ws[n] = .{ .name = sn.label(), .sub = sub, .origin = .found };
+            n += 1;
+        }
+        self.found_ws_n = n;
+        return self.found_ws[0..n];
     }
 
     /// Is this pane's foreground program one the config calls an agent?
@@ -1685,6 +1729,14 @@ pub const Server = struct {
                 return;
             }
             self.agents_merge.cur = null;
+        } else {
+            // A workspace row rook listed for itself is rook's to act
+            // on: the row *is* the workspace, so a click goes there.
+            const pushed_n = if (self.side.spaces.panel) |p| p.items.len else 0;
+            if (i >= pushed_n) {
+                self.switchSessionNamed(panel.items[i].name);
+                return;
+            }
         }
         if (!self.side.moveCursor(which, i)) return;
         self.full = true;

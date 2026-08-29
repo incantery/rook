@@ -319,6 +319,30 @@ not blanked, and never an empty rectangle where your chrome was. It
 stays failed until relaunch, per `rook-plugin(7)`: a plugin failure is
 a row in a listing, never a crash of rook.
 
+### Workspaces rook lists by itself
+
+The same shape, one panel up. Rook *holds* workspaces — they are its
+own state, the names in `rook state` — so the spaces panel lists them
+whether or not anything pushed a row: one row per workspace, in
+workspace order, the current one highlighted unless a pushed row placed
+`current` itself. Those rows carry `"origin":"found"`: not `manual`,
+because nobody launches a workspace at an agent and there is nothing to
+be unmanaged about, so the row wears no tag and the header no count.
+Clicking one switches to that workspace — the row *is* the workspace,
+so the click is rook's to act on, where a click on a pushed row only
+moves the cursor.
+
+A producer claims a workspace the same way it does on `agents`:
+`"workspace"` on its row. The fleet's row for a repository names the
+workspace open on that checkout, so what rook found for that name is
+dropped in favour of the producer's row and its state. A repository
+with no workspace open is not a space — it is something the picker
+could open — and the producer does not push it.
+
+In the state feed the rows ride under `surfaces[].found` for `spaces`
+too, with `current`, so a second glass draws the unfed rail from the
+snapshot alone.
+
 ## The state feed (out)
 
 Everything rook knows, published so that anyone can hold an exact
@@ -403,9 +427,11 @@ when the mux itself is holding the keyboard. `rect` is null for a pane
 that is not currently placed (another window, a hidden workspace) and
 `visible` says the same in one field. `lastOutputMs` is wall clock, not
 the server's uptime clock, because other processes read it. A `found`
-row's `title` is the workspace it was found in, and `model`'s items
-carry the producer's `workspace` verbatim, so a second glass drops the
-same rows rook does without inventing a rule of its own.
+row's `title` is the workspace it was found in (on `agents`) or the
+workspace itself (on `spaces`, where `current` marks the one in front),
+and `model`'s items carry the producer's `workspace` verbatim, so a
+second glass drops the same rows rook does without inventing a rule of
+its own.
 
 ### Two cadences, so a busy pane cannot make it chatty
 

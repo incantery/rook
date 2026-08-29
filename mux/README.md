@@ -194,6 +194,13 @@ Rook says only that the session is there — never what it is doing,
 which stays a producer's job. The scan is two syscalls a pane on a 2s
 timer, and only a change repaints.
 
+The spaces panel works the same way for what rook holds itself: every
+workspace is a row (`"origin":"found"` — no tag, no count; a workspace
+is nobody's unmanaged agent), the current one highlighted, and a click
+on one switches to it. A producer's row claims a workspace with
+`"workspace"` and replaces rook's row for it. So an unfed rail is not
+blank: it is rook's own workspaces, and a producer adds state to them.
+
 The last frame pushed to each surface comes back out of the state feed
 verbatim, under `surfaces[].model`, so a second glass can draw the same
 rail without talking to the producer. What rook found rides beside it
