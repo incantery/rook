@@ -4,6 +4,7 @@
 package mux
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -103,6 +104,39 @@ func Sessions() ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// Current is the workspace the person is standing in, off the state
+// snapshot the engine already publishes. Empty (not an error) when
+// the server isn't running or the snapshot names no current
+// workspace: a picker that cannot say where you are still opens.
+func Current() string {
+	out, err := run("state")
+	if err != nil {
+		return ""
+	}
+	return currentFrom(out)
+}
+
+// currentFrom reads the workspace marked current out of one state
+// snapshot. It picks the fields it needs and ignores the rest, which
+// is how a reader survives a newer schema (see docs/surfaces.md).
+func currentFrom(snapshot string) string {
+	var s struct {
+		Workspaces []struct {
+			Name    string `json:"name"`
+			Current bool   `json:"current"`
+		} `json:"workspaces"`
+	}
+	if json.Unmarshal([]byte(snapshot), &s) != nil {
+		return ""
+	}
+	for _, w := range s.Workspaces {
+		if w.Current {
+			return w.Name
+		}
+	}
+	return ""
 }
 
 // Has reports whether a workspace by exactly this name exists.

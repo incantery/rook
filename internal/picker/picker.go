@@ -1,8 +1,10 @@
 // Package picker is the workspace picker prefix-s floats in a popup:
 // fzf over the workspaces, where enter switches to the row under the
-// cursor and ctrl-o creates the one you typed. It lives here rather
-// than in a shell pipeline baked into the engine so the quoting has a
-// home and the decision has tests.
+// cursor and ctrl-o creates the one you typed. It opens on the
+// workspace you are already in, so the list says where you are before
+// you touch a key and enter on it is a no-op rather than a jump. It
+// lives here rather than in a shell pipeline baked into the engine so
+// the quoting has a home and the decision has tests.
 package picker
 
 import (
@@ -10,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -24,6 +27,13 @@ const prompt = "♜ "
 
 // fzf is the picker binary, by name; a test points this at a stub.
 var fzf = "fzf"
+
+// placingVersion is the first fzf with the `load` event and the `pos`
+// action — both landed in 0.36.0 — which is how the cursor gets placed
+// before anyone touches a key. Older fzf exits on an event it does not
+// know, so the placement is dropped rather than risking a picker that
+// will not open at all.
+var placingVersion = [2]int{0, 36}
 
 // Action is what the picker was asked for.
 type Action int
@@ -46,19 +56,55 @@ type Choice struct {
 // Args are fzf's flags. --print-query and --expect are what turn one
 // list into two verbs: the row under the cursor (enter) or the text
 // typed above it (NewKey). Nothing here rebinds a movement key, so
-// ctrl-n/ctrl-p, the arrows and the mouse keep fzf's own behaviour.
-func Args() []string {
-	return []string{
+// ctrl-n/ctrl-p, the arrows and the mouse keep fzf's own behaviour —
+// the one binding here fires on the `load` event, not on a key.
+//
+// pos is the 1-based row to open the cursor on; 0 (nothing to point
+// at) and 1 (already the top) leave fzf's own placement alone.
+func Args(pos int) []string {
+	args := []string{
 		"--reverse",
 		"--print-query",
 		"--expect=" + NewKey,
 		"--prompt", prompt,
 		"--header", "workspace — enter switch · " + NewKey + " new",
 	}
+	if pos > 1 {
+		// An event binding, not a key one: it fires once, when the
+		// list has loaded, and rebinds nothing anyone can press. It
+		// has to be `load` rather than `start` — reading the list
+		// puts the cursor back on the top row, so a placement made
+		// before that has already been undone by the time anyone
+		// sees it.
+		args = append(args, fmt.Sprintf("--bind=load:pos(%d)", pos))
+	}
+	return args
 }
 
-// Run shows the picker over names and returns what it decided.
-func Run(names []string) (Choice, error) {
+// StartPos is the row the picker opens on: the workspace you are in,
+// counted from the top of the list fzf is handed. 0 when there is no
+// current workspace, or it is not one of the rows.
+func StartPos(names []string, current string) int {
+	current = clean(current)
+	if current == "" {
+		return 0
+	}
+	row := 0
+	for _, n := range names {
+		if clean(n) == "" {
+			continue // Run drops blank rows; the count has to agree
+		}
+		row++
+		if clean(n) == current {
+			return row
+		}
+	}
+	return 0
+}
+
+// Run shows the picker over names, opening on current, and returns
+// what it decided.
+func Run(names []string, current string) (Choice, error) {
 	bin, err := exec.LookPath(fzf)
 	if err != nil {
 		return Choice{}, fmt.Errorf("the workspace picker needs fzf, and it is not on $PATH")
@@ -70,7 +116,11 @@ func Run(names []string) (Choice, error) {
 			list.WriteByte('\n')
 		}
 	}
-	cmd := exec.Command(bin, Args()...)
+	pos := StartPos(names, current)
+	if pos > 1 && !placesCursor(version(bin)) {
+		pos = 0
+	}
+	cmd := exec.Command(bin, Args(pos)...)
 	cmd.Stdin = strings.NewReader(list.String())
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
@@ -90,6 +140,40 @@ func Run(names []string) (Choice, error) {
 		}
 	}
 	return Decide(string(out)), nil
+}
+
+// version asks the picker binary what it is; empty when it will not
+// say, which reads as too old to place the cursor.
+func version(bin string) string {
+	out, err := exec.Command(bin, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
+
+// placesCursor reads `fzf --version` ("0.74.3 (Homebrew)") and reports
+// whether this fzf can be told where to open. Anything it cannot read
+// is a no: the placement is a nicety, and opening at all is not.
+func placesCursor(out string) bool {
+	f := strings.Fields(strings.TrimSpace(out))
+	if len(f) == 0 {
+		return false
+	}
+	num := strings.SplitN(f[0], "-", 2)[0] // 0.24.4-2 and the like
+	parts := strings.Split(num, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+	return major > placingVersion[0] || (major == placingVersion[0] && minor >= placingVersion[1])
 }
 
 // Decide reads what fzf prints under Args: the query, then the key

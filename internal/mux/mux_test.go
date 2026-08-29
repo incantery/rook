@@ -56,3 +56,32 @@ func TestEnginePath(t *testing.T) {
 		t.Errorf("default engine path is not absolute: %q", want)
 	}
 }
+
+// The picker opens on the workspace you are in, and the state feed is
+// where that fact lives. A snapshot it cannot read names nobody —
+// the picker still opens, just without a placed cursor.
+func TestCurrentFrom(t *testing.T) {
+	snapshot := `{"rookMuxState":1,"epoch":"e","serial":3,` +
+		`"workspaces":[{"name":"rook","current":false,"windows":[]},` +
+		`{"name":"dora","current":true,"windows":[]}],"panes":[]}`
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"the workspace marked current", snapshot, "dora"},
+		{"a snapshot with one workspace", `{"workspaces":[{"name":"rook","current":true}]}`, "rook"},
+		{"no workspace is current", `{"workspaces":[{"name":"rook","current":false}]}`, ""},
+		{"no workspaces at all", `{"workspaces":[]}`, ""},
+		{"a field this reader does not know", `{"workspaces":[{"name":"rook","current":true,"mood":"new"}],"mood":"new"}`, "rook"},
+		{"not a snapshot", "engine: connection refused\n", ""},
+		{"nothing", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := currentFrom(c.in); got != c.want {
+				t.Errorf("currentFrom(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
