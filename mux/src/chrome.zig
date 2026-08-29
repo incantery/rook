@@ -222,13 +222,20 @@ pub const Item = struct {
     /// producer said nothing, and the name is the only claim it has.
     ws: []const u8 = "",
 
+    /// The workspace this row points at: the explicit `ws` when the
+    /// producer named one, else the row's name. A row rook found is
+    /// named for its workspace, so this is that workspace either way,
+    /// and it is what a click on the row has to act on.
+    pub fn workspace(self: Item) []const u8 {
+        return if (self.ws.len > 0) self.ws else self.name;
+    }
+
     /// Does this row claim the workspace `name`? An explicit `ws`
     /// answers alone — a producer that names a workspace has said
     /// which one, and its title is then about the work, not about a
     /// workspace that happens to share the word.
     pub fn claims(self: Item, name: []const u8) bool {
-        if (self.ws.len > 0) return std.mem.eql(u8, self.ws, name);
-        return std.mem.eql(u8, self.name, name);
+        return std.mem.eql(u8, self.workspace(), name);
     }
 
     /// The glyph beside the name. State owns it whenever state has
@@ -303,6 +310,25 @@ pub fn hit(p: Panel, y: u16) ?usize {
     // row 0 of an item block is its leading gap, not the item
     if ((y - 1) % item_rows == 0) return null;
     return if (i < p.items.len) i else null;
+}
+
+/// The row under a click, with everything rook needs to act on it.
+pub const Hit = struct {
+    row: usize,
+    /// Past the pushed rows: a row rook found for itself, so the
+    /// cursor on it is rook's to hold rather than a producer's.
+    found: bool,
+    /// The workspace the row names — `Item.workspace`. Where a click
+    /// on it goes, when rook holds a workspace by that name.
+    ws: []const u8,
+};
+
+/// Hit-test a merged panel: `pushed_n` rows came from a producer and
+/// everything after them is rook's own. `y` is panel-relative, as for
+/// `hit`.
+pub fn hitRow(p: Panel, pushed_n: usize, y: u16) ?Hit {
+    const i = hit(p, y) orelse return null;
+    return .{ .row = i, .found = i >= pushed_n, .ws = p.items[i].workspace() };
 }
 
 // ---- the feed in ----
@@ -740,6 +766,55 @@ test "hit test skips headers and gaps" {
     try std.testing.expectEqual(@as(?usize, 1), hit(p, 5));
     try std.testing.expectEqual(@as(?usize, 2), hit(p, 8));
     try std.testing.expectEqual(@as(?usize, null), hit(p, 11)); // past the end
+}
+
+test "a click on an agent row points at the workspace it runs in" {
+    // The fleet's shape: a row titled for the task, the workspace it
+    // runs in named outright, and one row rook found for itself after
+    // it. Clicking the task must go to `rook--vera-f356bc2c`, not to a
+    // workspace named after a sentence.
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    const pushed: Panel = .{ .title = "agents", .items = &.{
+        .{ .name = "Fix the leader+s workspace", .sub = "working · rook", .ws = "rook--vera-66c854b2" },
+        .{ .name = "herdr", .sub = "working · claude" },
+    } };
+    const found = [_]Item{.{ .name = "scratch", .sub = "claude", .origin = .manual }};
+    const p = merge.panel(std.testing.allocator, pushed, &found);
+
+    const task = hitRow(p, pushed.items.len, 2).?; // the first row's name
+    try std.testing.expectEqual(@as(usize, 0), task.row);
+    try std.testing.expect(!task.found);
+    try std.testing.expectEqualStrings("rook--vera-66c854b2", task.ws);
+
+    // a producer that named no workspace still claims one by title,
+    // for a rail whose rows are workspaces anyway
+    const titled = hitRow(p, pushed.items.len, 5).?;
+    try std.testing.expectEqualStrings("herdr", titled.ws);
+    try std.testing.expect(!titled.found);
+
+    // rook's own row: named for its workspace, and rook's to hold a
+    // cursor on
+    const own = hitRow(p, pushed.items.len, 9).?; // third row's sub
+    try std.testing.expectEqual(@as(usize, 2), own.row);
+    try std.testing.expect(own.found);
+    try std.testing.expectEqualStrings("scratch", own.ws);
+
+    // headers, gaps and the space past the last row ask for nothing
+    try std.testing.expectEqual(@as(?Hit, null), hitRow(p, pushed.items.len, 0));
+    try std.testing.expectEqual(@as(?Hit, null), hitRow(p, pushed.items.len, 1));
+    try std.testing.expectEqual(@as(?Hit, null), hitRow(p, pushed.items.len, 11));
+}
+
+test "a row's workspace is its claim, and the two never disagree" {
+    const claimed: Item = .{ .name = "Fix the duplicate rows", .ws = "rook--vera-f356bc2c" };
+    try std.testing.expectEqualStrings("rook--vera-f356bc2c", claimed.workspace());
+    try std.testing.expect(claimed.claims("rook--vera-f356bc2c"));
+    try std.testing.expect(!claimed.claims("Fix the duplicate rows"));
+
+    const bare: Item = .{ .name = "scratch" };
+    try std.testing.expectEqualStrings("scratch", bare.workspace());
+    try std.testing.expect(bare.claims("scratch"));
 }
 
 test "an unfed rail is its two headers and nothing else" {

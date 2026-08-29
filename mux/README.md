@@ -124,9 +124,11 @@ Down the left edge, above windows and workspaces: *spaces* over
 *agents*, each row a name, a status dot and a second line (a branch, or
 `state · tool`). It is chrome, not a pane — no pty backs it, the frame
 builder paints it straight from a model in `chrome.zig`, and it costs
-nothing but columns. Clicking a row moves that panel's highlight;
-prefix-a folds the panel away, and it folds itself away on glass under
-100 columns rather than crowd the work.
+nothing but columns. Clicking a row moves that panel's highlight, and
+takes you to the workspace the row names — the agent's own pane on
+*agents*, the workspace itself on *spaces*; prefix-a folds the panel
+away, and it folds itself away on glass under 100 columns rather than
+crowd the work.
 
 Nothing inside the mux decides what it says. The model is pushed in
 from outside, one JSON frame per line, in the list shape of the plugin
@@ -193,6 +195,14 @@ after workspaces anyway.
 Rook says only that the session is there — never what it is doing,
 which stays a producer's job. The scan is two syscalls a pane on a 2s
 timer, and only a change repaints.
+
+**Clicking an agent goes to it.** The workspace the row names becomes
+current and focus lands on the pane running the agent there, in
+whichever window of it holds that pane — a found row is named for its
+workspace, and a pushed row names one with `workspace`. That is the
+whole claim: a row whose name is prose and that names no workspace is
+about work rook cannot see, so clicking it only moves the cursor, as
+before.
 
 The spaces panel works the same way for what rook holds itself: every
 workspace is a row (`"origin":"found"` — no tag, no count; a workspace
