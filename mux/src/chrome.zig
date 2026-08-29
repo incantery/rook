@@ -205,6 +205,23 @@ pub const Item = struct {
     sub: []const u8 = "",
     state: State = .none,
     origin: Origin = .managed,
+    /// The workspace this row's agent is running in, when the producer
+    /// says so (`"workspace"` on a pushed item). A row's *name* is
+    /// prose — a task, a branch, a sentence — so it is not an identity
+    /// rook can match its own pane table against. This is: it is a
+    /// workspace name, rook's own vocabulary, and naming it is how a
+    /// producer claims the session rook can see there. Empty means the
+    /// producer said nothing, and the name is the only claim it has.
+    ws: []const u8 = "",
+
+    /// Does this row claim the workspace `name`? An explicit `ws`
+    /// answers alone — a producer that names a workspace has said
+    /// which one, and its title is then about the work, not about a
+    /// workspace that happens to share the word.
+    pub fn claims(self: Item, name: []const u8) bool {
+        if (self.ws.len > 0) return std.mem.eql(u8, self.ws, name);
+        return std.mem.eql(u8, self.name, name);
+    }
 
     /// The glyph beside the name. State owns it whenever state has
     /// something to say; a manual row with nothing reporting on it
@@ -403,10 +420,15 @@ pub const Feed = struct {
 /// rook's own, about rook's own panes, and they carry `.manual`.
 ///
 /// Pushed rows keep their order and come first: a producer that names
-/// a workspace owns that row, whatever the pane table says, so a found
-/// row with the same name is dropped rather than listed twice. This
-/// is the only merge in the design, and it is one-way — nothing rook
-/// finds is ever written back into a producer's model.
+/// a workspace owns that row, whatever the pane table says, so rook's
+/// row for that workspace is dropped rather than listed twice. A
+/// producer names it with `"workspace"` on the item — its *title* is
+/// prose, and matching on prose is what let one agent appear twice,
+/// once as the task somebody is running and once as the pane rook
+/// found running it. A title still counts as a claim when there is no
+/// `workspace`, for a rail that names its rows after workspaces
+/// anyway. This is the only merge in the design, and it is one-way —
+/// nothing rook finds is ever written back into a producer's model.
 pub const Merge = struct {
     items: std.ArrayList(Item) = .empty,
     note_buf: [24]u8 = @splat(0),
@@ -432,7 +454,7 @@ pub const Merge = struct {
         // discovery is a bonus row, never a reason to lose the rail.
         self.items.appendSlice(gpa, pushed.items) catch return pushed;
         for (found) |f| {
-            if (namedIn(pushed.items, f.name)) continue;
+            if (claimedIn(pushed.items, f.name)) continue;
             self.items.append(gpa, f) catch break;
             added += 1;
         }
@@ -457,9 +479,10 @@ pub const Merge = struct {
     }
 };
 
-fn namedIn(items: []const Item, name: []const u8) bool {
+/// Does any pushed row claim the workspace `name`?
+fn claimedIn(items: []const Item, name: []const u8) bool {
     for (items) |it| {
-        if (std.mem.eql(u8, it.name, name)) return true;
+        if (it.claims(name)) return true;
     }
     return false;
 }
@@ -527,7 +550,8 @@ fn parseFrame(a: std.mem.Allocator, bytes: []const u8) PushError!Parsed {
         };
         // `title` is what the row says; `id` is what a producer keys
         // on, and a fair fallback for a rail that names things after
-        // their id anyway.
+        // their id anyway. Neither is an identity rook shares — that
+        // is `workspace`, and it is what the merge matches on.
         const name = objStr(o, "title") orelse objStr(o, "id") orelse continue;
         if (objBool(o, "current") and cur == null) cur = items.items.len;
         try items.append(a, .{
@@ -535,6 +559,7 @@ fn parseFrame(a: std.mem.Allocator, bytes: []const u8) PushError!Parsed {
             .sub = objStr(o, "subtitle") orelse "",
             .state = State.parse(objStr(o, "state") orelse ""),
             .origin = Origin.parse(objStr(o, "origin") orelse ""),
+            .ws = objStr(o, "workspace") orelse "",
         });
     }
 
@@ -904,6 +929,51 @@ test "found agents land after pushed rows and never displace one" {
     try std.testing.expectEqual(@as(?usize, 2), p.cur);
     // the producer said "grouped"; rook does not talk over it
     try std.testing.expectEqualStrings("grouped", p.note);
+}
+
+test "a producer claims a workspace by naming it, not by titling a row after it" {
+    var feed = Feed.init(std.testing.allocator);
+    defer feed.deinit();
+    // The shape the fleet actually pushes: the row is titled for the
+    // task, and the workspace it runs in is named outright.
+    _ = try feed.push(
+        \\{"params":{"surface":"agents","items":[{"id":"f356bc2c","title":"Fix the duplicate rows","subtitle":"working · rook","state":"working","workspace":"rook--vera-f356bc2c"}]}}
+    );
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("rook--vera-f356bc2c", feed.model().agents.items[0].ws);
+
+    const found = [_]Item{
+        // the same session the pushed row is about: claimed, dropped
+        .{ .name = "rook--vera-f356bc2c", .sub = "claude", .origin = .manual },
+        // a session in another workspace: nobody claims it
+        .{ .name = "main", .sub = "claude", .origin = .manual },
+    };
+    const p = merge.panel(std.testing.allocator, feed.model().agents, &found);
+    try std.testing.expectEqual(@as(usize, 2), p.items.len);
+    try std.testing.expectEqualStrings("Fix the duplicate rows", p.items[0].name);
+    try std.testing.expectEqualStrings("main", p.items[1].name);
+    try std.testing.expectEqualStrings("1 manual", p.note);
+}
+
+test "an explicit workspace is the only claim that row makes" {
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    // The title collides with a workspace name, but the producer said
+    // which workspace it means — so the collision claims nothing.
+    const pushed: Panel = .{ .title = "agents", .items = &.{
+        .{ .name = "scratch", .ws = "rook" },
+    } };
+    const found = [_]Item{
+        .{ .name = "scratch", .sub = "claude", .origin = .manual },
+        .{ .name = "rook", .sub = "claude", .origin = .manual },
+    };
+    const p = merge.panel(std.testing.allocator, pushed, &found);
+    try std.testing.expectEqual(@as(usize, 2), p.items.len);
+    try std.testing.expectEqualStrings("scratch", p.items[1].name);
+    try std.testing.expectEqual(Origin.manual, p.items[1].origin);
+    try std.testing.expectEqualStrings("1 manual", p.note);
 }
 
 test "a merged panel accounts for the rows nobody manages" {

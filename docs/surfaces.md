@@ -208,6 +208,7 @@ An item is the model a `nav` surface renders:
 ```json
 {"id":"web-dashboard","title":"web-dashboard","state":"blocked",
  "subtitle":"blocked · claude","origin":"managed",
+ "workspace":"web-dashboard",
  "fields":[{"key":"branch","kind":"TEXT","value":"feat/usage-charts"}],
  "actions":[{"id":"open","label":"Open"}]}
 ```
@@ -216,6 +217,13 @@ An item is the model a `nav` surface renders:
 say what it is doing) or `manual` (nobody claims it). It is the one
 field on an item that is not about the work, and it is painted that
 way — see [Agents rook finds by itself](#agents-rook-finds-by-itself).
+
+`workspace` is the other field that is not about the work, and it is
+never painted at all: it names the rook workspace this row's agent is
+running in, which is how a producer claims the session rook can see
+there. `id` and `title` are the producer's own vocabulary and rook
+cannot resolve either against its pane table; `workspace` is rook's,
+so it is the one identity the two sides share.
 
 What this design needs on top of what `rook-plugin(7)` already
 specifies:
@@ -269,8 +277,23 @@ row disappears in favour of it.
 Three rules keep the merge from becoming a negotiation:
 
 - **Pushed rows win, always.** A producer that names a workspace owns
-  that row. Rook drops what it found for that name rather than listing
-  it twice, and never edits a pushed row.
+  that row. Rook drops what it found there rather than listing it
+  twice, and never edits a pushed row.
+- **Naming it means `workspace`.** The claim is made in rook's
+  vocabulary, on the item:
+
+      {"id":"f356bc2c","title":"Fix the duplicate rows",
+       "subtitle":"working · rook","state":"working",
+       "workspace":"rook--vera-f356bc2c"}
+
+  A `title` is prose — a task, a branch, a sentence — so matching the
+  claim on it worked only for a rail that happened to name its rows
+  after workspaces, and listed a fleet's agent twice for every rail
+  that did not: once as the task somebody is running, once as the pane
+  rook found running it. A title is still taken as a claim when the
+  item carries no `workspace`, so those rails keep working; an
+  explicit `workspace` speaks for the row alone, and its title claims
+  nothing.
 - **One way, one frame.** The merge happens where the panel is
   painted. Nothing rook found is written back into a producer's model,
   and `surfaces[].model` in the state feed stays the producer's bytes,
@@ -379,7 +402,10 @@ still exact. Deltas would force unbounded buffering or a disconnect.
 when the mux itself is holding the keyboard. `rect` is null for a pane
 that is not currently placed (another window, a hidden workspace) and
 `visible` says the same in one field. `lastOutputMs` is wall clock, not
-the server's uptime clock, because other processes read it.
+the server's uptime clock, because other processes read it. A `found`
+row's `title` is the workspace it was found in, and `model`'s items
+carry the producer's `workspace` verbatim, so a second glass drops the
+same rows rook does without inventing a rule of its own.
 
 ### Two cadences, so a busy pane cannot make it chatty
 
@@ -514,6 +540,20 @@ doing, and a pushed row for the same workspace always wins. *Revisit
 if* a found row ever needs to say more than presence — that is a
 producer's job, and the answer is to write the producer, not to teach
 rook what a turn is.
+
+**A producer claims a workspace by naming it, never by titling a row
+after it.** The first cut of the merge matched a pushed row's name
+against the workspace rook found the session in, which is true for a
+rail that lists workspaces and false for every rail that lists work —
+a fleet titles its rows after tasks, so its agent appeared twice, once
+as the task and once as the pane. There is no honest way to guess: an
+`id` and a `title` are the producer's vocabulary, and rook cannot
+resolve either against its pane table. So the item gained one field in
+*rook's* vocabulary, `workspace`, and the claim is made in it. *Revisit
+if* one workspace ever holds two agents that different producers
+manage — the claim would then have to be per pane, which rook can
+address (`panes[].id` is in the state feed) and a producer that spawned
+the pane already knows.
 
 **A failed plugin's surface goes stale, not blank, and does not
 respawn.** Consistent with `rook-plugin(7)`. *Revisit if* daily driving
