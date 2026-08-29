@@ -141,11 +141,11 @@ protocol (`docs/surfaces.md`):
        "state":"blocked","current":true}]}}
 
 `surface` is `spaces` or `agents`; a frame replaces that panel whole.
-An item is `title` (or `id`), `subtitle`, `state`, `origin` and
-`current`. Rook owns the palette, so a model names a *state* and never
-a color: `working`, `idle`, `blocked`, `done`, `failed` pick the dot,
-its shape and the subtitle's color, and a name rook does not know
-draws a plain row rather than costing the frame. A panel-level `title`
+An item is `title` (or `id`), `subtitle`, `state`, `origin`,
+`workspace` and `current`. Rook owns the palette, so a model names a
+*state* and never a color: `working`, `idle`, `blocked`, `done`,
+`failed` pick the dot, its shape and the subtitle's color, and a name
+rook does not know draws a plain row rather than costing the frame. A panel-level `title`
 and `note` override the header. Unknown keys are ignored, an item
 without a name is dropped, and a frame rook cannot use changes nothing
 on the glass and answers with the reason — `rook side -` prints
@@ -174,10 +174,25 @@ state, so a glance still reads state first. A producer can push
 `"origin":"manual"` to say the same about a row of its own.
 
 The merge is one-way and pushed rows always win: a producer that names
-a workspace owns that row, so rook drops what it found for that name
-rather than listing it twice. Rook says only that the session is
-there — never what it is doing, which stays a producer's job. The scan
-is two syscalls a pane on a 2s timer, and only a change repaints.
+a workspace owns that row, so rook drops what it found there rather
+than listing it twice. It names it with `workspace` on the item:
+
+    {"id":"f356bc2c","title":"Fix the duplicate rows",
+     "subtitle":"working · rook","state":"working",
+     "workspace":"rook--vera-f356bc2c"}
+
+A row's `title` is prose — a task, a sentence, whatever the producer
+calls the work — so it is not an identity rook can match against its
+own pane table, and matching on it anyway is what listed one agent
+twice: once as the task somebody is running, once as the pane rook
+found running it. `workspace` is rook's own vocabulary (the names in
+`rook state`), which is why the claim is made in it. A title still
+counts when there is no `workspace`, for a rail whose rows are named
+after workspaces anyway.
+
+Rook says only that the session is there — never what it is doing,
+which stays a producer's job. The scan is two syscalls a pane on a 2s
+timer, and only a change repaints.
 
 The last frame pushed to each surface comes back out of the state feed
 verbatim, under `surfaces[].model`, so a second glass can draw the same
