@@ -246,7 +246,9 @@ specifies:
   model. (This is a correction, not a refinement — see below.) **Built
   halfway**: `current` on an item is the highlight, and the next push
   takes it back from a click. The click itself is still not forwarded,
-  because there is nothing to forward it to.
+  because there is nothing to forward it to — but a row that names a
+  workspace is acted on locally, because a workspace is rook's own
+  noun (see below).
 
 ### Agents rook finds by itself
 
@@ -306,6 +308,19 @@ Three rules keep the merge from becoming a negotiation:
 The scan is two syscalls a pane (`fgName`) on a 2s timer — the drift
 cadence, for the drift reason — and only a change repaints.
 
+**Clicking a row goes to the agent.** The workspace the row names
+becomes current, and focus lands on the pane running an agent in it —
+in whichever window of that workspace holds it. A found row is named
+for its workspace; a pushed row names one with `workspace`, and that
+claim is read exactly as the merge reads it, so a producer that has
+told rook where its agent runs has already said everything a click
+needs. This is not rook holding a producer's selection: the row still
+takes a cursor and the next push still takes the highlight back. It is
+rook acting on the one field of a row written in its own vocabulary,
+the same reason a click on a found workspace switches to it. A row
+whose name is prose and that names no workspace points nowhere rook
+can see, so a click on it is only a cursor, as before.
+
 **One process per plugin, serving many surfaces.** `herdr#spaces` and
 `herdr#agents` are one `herdr` process; requests carry a `surface`
 field. Two processes would duplicate the work of reading the same
@@ -329,8 +344,10 @@ workspace order, the current one highlighted unless a pushed row placed
 because nobody launches a workspace at an agent and there is nothing to
 be unmanaged about, so the row wears no tag and the header no count.
 Clicking one switches to that workspace — the row *is* the workspace,
-so the click is rook's to act on, where a click on a pushed row only
-moves the cursor.
+so the click is rook's to act on. A pushed row that claims a workspace
+switches to it too: the claim is in rook's vocabulary, so it says
+where the row is even though what the row *means* is the producer's.
+A pushed row that names no workspace still only moves the cursor.
 
 A producer claims a workspace the same way it does on `agents`:
 `"workspace"` on its row. The fleet's row for a repository names the
@@ -520,10 +537,14 @@ concept rather than adding one.
 `self.side.spaces.cur` — rook holding a plugin's selection state,
 exactly the merge this design forbids. It now moves a *cursor* over a
 pushed model, and the next push takes the highlight back, so the two
-never disagree for longer than one frame. The correct shape still
-forwards the click and lets the producer push back a model with the
-highlight already in it; that needs a back-channel to a producer, and
-there is no producer process yet.
+never disagree for longer than one frame. Beside the cursor it acts on
+the row's `workspace` when rook holds one — switching to it from
+`spaces`, and from `agents` focusing the pane running the agent there
+— which is rook acting on its own noun, not on the producer's meaning
+for the row. The correct shape still forwards the click and lets the
+producer push back a model with the highlight already in it; that
+needs a back-channel to a producer, and there is no producer process
+yet.
 
 ## Decisions taken
 
