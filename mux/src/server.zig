@@ -2198,10 +2198,16 @@ pub const Server = struct {
     /// the query per pane; this makes the outer terminal actually
     /// encode input the way that pane was promised. A terminal that
     /// doesn't know CSI = u ignores it.
+    ///
+    /// "Focused" means whoever is *receiving* keys: a popup takes
+    /// them while it is up (`toFocused`), so the glass must encode
+    /// for the popup, not for the pane underneath it. Otherwise fzf
+    /// in the picker, floated over Claude Code — which pushes kitty
+    /// flags — gets `ESC[112;5u` for Ctrl-P and does nothing.
     fn mirrorKitty(self: *Server) void {
         var buf: [256]u8 = undefined;
         var out: std.ArrayList(u8) = .initBuffer(&buf);
-        const fp = self.focusedPane();
+        const fp = self.popupPane() orelse self.focusedPane();
         const kf: u8 = if (fp) |p| p.kittyFlags() else 0;
         if (kf != self.glass_kitty) {
             self.glass_kitty = kf;
