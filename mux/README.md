@@ -37,7 +37,11 @@ names the rail treats as an agent it found. Then:
 
 Workspaces: `rook ls`, `rook new <name>`, `rook switch <name>` —
 named sessions in one server, each with its own windows; prefix-s
-opens an fzf picker in a popup. The status line reads
+opens an fzf picker in a popup (`rook pick`). In it, ctrl-n/ctrl-p and
+the arrows move through the list, enter switches to the row under the
+cursor, and **ctrl-o creates the workspace you typed** — the same verb
+as `rook new`, in the popup's cwd, so a name that already exists just
+switches to it. The status line reads
 `♜ <workspace> (n)  1:nvim* ...`. `rook popup <cmd>` floats a command over the current window —
 all input goes to it, it closes when the process exits (fzf pickers,
 lazygit, rook's Go tools). `rook stats` prints input→frame

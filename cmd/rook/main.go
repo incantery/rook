@@ -45,6 +45,7 @@ const usage = `rook — the multiplexer, owned
   rook ls                 list workspaces
   rook new <name>         create/switch workspace
   rook switch <name>      switch workspace
+  rook pick               pick a workspace (fzf; prefix-s floats this)
   rook blocks             the block table (stable ids)
   rook raw <id>           this terminal becomes one block, no chrome
   rook state | watch      the state feed: one snapshot, or one per change
@@ -80,6 +81,8 @@ func main() {
 		fmt.Print(usage)
 	case args[0] == "worktree", args[0] == "wt":
 		err = runWorktree(args[1:])
+	case args[0] == "pick":
+		err = runPick()
 	case args[0] == "url":
 		err = runURL()
 	case muxVerbs[args[0]]:

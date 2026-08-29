@@ -1737,7 +1737,11 @@ pub const Server = struct {
                 const i: usize = key - '1';
                 if (i < self.sess().windows.items.len) self.selectWindow(i);
             },
-            's' => self.openPopup("rook ls | fzf --reverse --header='workspace' | xargs -r rook switch") catch {},
+            // The picker's shape — fzf over `rook ls`, enter switches,
+            // ctrl-o creates the name typed — lives in the Go front
+            // door, where the quoting has a home and the parsing has
+            // tests. Here it is one verb, like the worktree manager.
+            's' => self.openPopup("rook pick") catch {},
             'w' => self.openPopup("rook worktree") catch {},
             'a' => {
                 self.side_on = !self.side_on;
