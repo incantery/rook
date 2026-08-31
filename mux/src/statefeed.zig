@@ -61,7 +61,7 @@ fn foundRow(gpa: std.mem.Allocator, out: *std.ArrayList(u8), it: anytype, origin
     out.appendSlice(gpa, ",\"subtitle\":") catch return;
     str(gpa, out, it.sub);
     out.appendSlice(gpa, ",\"workspace\":") catch return;
-    str(gpa, out, it.space());
+    str(gpa, out, it.workspace());
     out.appendSlice(gpa, ",\"origin\":") catch return;
     str(gpa, out, origin);
     if (current) |c| out.print(gpa, ",\"current\":{s}", .{boolStr(c)}) catch return;
@@ -221,7 +221,7 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
                 const cur = if (sv.cur_sess < sv.sessions.items.len) sv.sessions.items[sv.cur_sess].label() else "";
                 for (sv.foundSpaces(), 0..) |it, k| {
                     if (k > 0) out.append(gpa, ',') catch return;
-                    foundRow(gpa, out, it, "found", std.mem.eql(u8, it.space(), cur));
+                    foundRow(gpa, out, it, "found", std.mem.eql(u8, it.workspace(), cur));
                 }
             },
         }

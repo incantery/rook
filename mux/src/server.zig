@@ -438,12 +438,16 @@ pub const Server = struct {
     }
 
     fn switchSessionNamed(self: *Server, name: []const u8) void {
+        if (self.sessionNamed(name)) |i| self.switchSession(i);
+    }
+
+    /// The workspace holding this name, if rook holds one.
+    fn sessionNamed(self: *Server, name: []const u8) ?usize {
+        if (name.len == 0) return null;
         for (self.sessions.items, 0..) |sn, i| {
-            if (std.mem.eql(u8, sn.label(), name)) {
-                self.switchSession(i);
-                return;
-            }
+            if (std.mem.eql(u8, sn.label(), name)) return i;
         }
+        return null;
     }
 
     fn newWindow(self: *Server, cwd_override: ?[*:0]const u8) !void {
@@ -1105,7 +1109,7 @@ pub const Server = struct {
         if (m.spaces.cur == null and self.cur_sess < self.sessions.items.len) {
             const cur = self.sessions.items[self.cur_sess].label();
             for (m.spaces.items[pushed_n..], pushed_n..) |it, i| {
-                if (std.mem.eql(u8, it.space(), cur)) {
+                if (std.mem.eql(u8, it.workspace(), cur)) {
                     m.spaces.cur = i;
                     break;
                 }
@@ -1733,10 +1737,13 @@ pub const Server = struct {
         }
     }
 
-    /// A click in the side panel moves that panel's cursor. Motion is
+    /// A click in the side panel moves that panel's cursor, and goes
+    /// to the workspace the row names when rook holds one. Motion is
     /// rook's; what a row *means* belongs to whoever pushed it, and
-    /// the next push takes the highlight back — so this stays a
-    /// cursor, not rook holding a producer's selection state. The
+    /// the next push takes the highlight back — so the highlight stays
+    /// a cursor, not rook holding a producer's selection state. A
+    /// workspace name is the one part of a row that is rook's own
+    /// vocabulary, which is why acting on it is rook's to do; the
     /// click itself will be forwarded when there is a producer to
     /// forward it to (docs/surfaces.md).
     fn clickSide(self: *Server, cy: u16) void {
@@ -1747,35 +1754,75 @@ pub const Server = struct {
         const m = self.sideModel();
         const panel = if (cy < split) m.spaces else m.agents;
         const rel = if (cy < split) cy else cy - (split + 1);
-        const i = chromepkg.hit(panel, rel) orelse return;
+        // How many of the merged panel's rows came from a producer:
+        // everything after them is a row rook found for itself.
+        const slot = if (cy < split) &self.side.spaces else &self.side.agents;
+        const pushed_n = if (slot.panel) |p| p.items.len else 0;
+        const h = chromepkg.hitRow(panel, pushed_n, rel) orelse return;
+        // A row that names a workspace rook holds is a place to go,
+        // whoever put it there: a found row is named for its
+        // workspace, and a producer claims one with `workspace` on its
+        // row — rook's own vocabulary, the same claim the merge reads.
+        // Everything else is prose about work rook cannot see, and a
+        // click on it is only a cursor.
+        //
+        // The cursor moves either way: the click is still cursor
+        // motion, and when there was nowhere to go that is all it was.
         // A row past the pushed ones is one rook found for itself, so
-        // the cursor on it is rook's to hold. The two cursors are kept
-        // mutually exclusive here, which is the only place both are in
+        // the cursor on it is rook's to hold — the two cursors are
+        // kept mutually exclusive here, the only place both are in
         // hand at once.
         if (which == .agents) {
-            const pushed_n = if (self.side.agents.panel) |p| p.items.len else 0;
-            if (i >= pushed_n) {
-                if (self.agents_merge.cur != null and self.agents_merge.cur.? == i) return;
-                self.agents_merge.cur = i;
-                self.full = true;
-                self.pending = true;
-                return;
+            // On agents the row *is* the agent, so focus lands on the
+            // pane running it, not on whatever that workspace was last
+            // looking at.
+            self.jumpToAgent(h.ws);
+            if (h.found) {
+                self.agents_merge.cur = h.row;
+            } else {
+                self.agents_merge.cur = null;
+                _ = self.side.moveCursor(.agents, h.row);
             }
-            self.agents_merge.cur = null;
         } else {
-            // A workspace row rook listed for itself is rook's to act
-            // on: the row *is* the workspace, so a click goes there.
-            const pushed_n = if (self.side.spaces.panel) |p| p.items.len else 0;
-            if (i >= pushed_n) {
-                // The row's *label* is short; the workspace it names
-                // is what switching takes.
-                self.switchSessionNamed(panel.items[i].space());
-                return;
-            }
+            self.switchSessionNamed(h.ws);
+            if (!h.found) _ = self.side.moveCursor(.spaces, h.row);
         }
-        if (!self.side.moveCursor(which, i)) return;
         self.full = true;
         self.pending = true;
+    }
+
+    /// Go to the agent a rail row points at: `name`'s workspace becomes
+    /// current and focus lands on the pane running an agent there.
+    /// Nothing happens when rook holds no workspace by that name — the
+    /// row is about work rook cannot see, so the click was only a
+    /// cursor.
+    fn jumpToAgent(self: *Server, name: []const u8) void {
+        const idx = self.sessionNamed(name) orelse return;
+        self.switchSession(idx);
+        const sn = self.sessions.items[idx];
+        const id = self.agentPaneIn(sn) orelse return;
+        if (self.focusedId() == id) return;
+        // The agent may be in another window of that workspace; the
+        // window has to come forward before focus can land on it.
+        for (sn.windows.items, 0..) |w, wi| {
+            if (w.layout.contains(id)) {
+                if (wi != sn.cur) self.selectWindow(wi);
+                break;
+            }
+        }
+        self.setFocus(id);
+    }
+
+    /// The first pane in this workspace whose foreground program is an
+    /// agent, in pane order — the pane a click on its row goes to.
+    fn agentPaneIn(self: *Server, sn: *Session) ?u32 {
+        for (self.panes.items) |p| {
+            if (!self.paneIn(sn, p.id)) continue;
+            var nb: [64]u8 = undefined;
+            const fg = p.fgName(&nb) orelse continue;
+            if (self.isAgentProgram(fg)) return p.id;
+        }
+        return null;
     }
 
     fn toFocused(self: *Server, bytes: []const u8) void {

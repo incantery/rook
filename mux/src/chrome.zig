@@ -222,24 +222,26 @@ pub const Item = struct {
     /// producer said nothing, and the name is the only claim it has.
     ws: []const u8 = "",
 
+    /// The workspace this row points at: the explicit `ws` when one
+    /// was named, else the row's name. It is what a click on the row
+    /// has to act on, and what a claim is matched against.
+    ///
+    /// Rook's own rows always name it, because their `name` is a
+    /// *label* and no longer the workspace — a row can read
+    /// `vera-e4126385`, or the title a producer gave the agent in it,
+    /// and still act on `rook--vera-e4126385`. The fallback to `name`
+    /// is for a pushed row that said nothing, which is the rail whose
+    /// rows are workspaces anyway.
+    pub fn workspace(self: Item) []const u8 {
+        return if (self.ws.len > 0) self.ws else self.name;
+    }
+
     /// Does this row claim the workspace `name`? An explicit `ws`
     /// answers alone — a producer that names a workspace has said
     /// which one, and its title is then about the work, not about a
     /// workspace that happens to share the word.
     pub fn claims(self: Item, name: []const u8) bool {
-        if (self.ws.len > 0) return std.mem.eql(u8, self.ws, name);
-        return std.mem.eql(u8, self.name, name);
-    }
-
-    /// The workspace this row is about, as rook names it — the
-    /// identity behind the label. Rook's own rows carry both: `name`
-    /// is what the rail paints and `ws` is what `rook switch` takes,
-    /// which is how a row can read `vera-e4126385` and still act on
-    /// `rook--vera-e4126385`. A row that said nothing about a
-    /// workspace has only its name to offer, which is the old
-    /// behaviour and what keeps a title-only claim working.
-    pub fn space(self: Item) []const u8 {
-        return if (self.ws.len > 0) self.ws else self.name;
+        return std.mem.eql(u8, self.workspace(), name);
     }
 
     /// The glyph beside the name. State owns it whenever state has
@@ -299,13 +301,13 @@ pub fn spaceRepo(name: []const u8) []const u8 {
 /// long reads as two unrelated things. Quadratic over a couple of
 /// dozen rows, on a repaint that already walks the pane table.
 pub fn labelSpaces(items: []Item) void {
-    for (items) |*it| it.name = shortSpace(it.space());
+    for (items) |*it| it.name = shortSpace(it.workspace());
     for (items, 0..) |*a, i| {
         for (items[i + 1 ..]) |*b| {
-            if (std.mem.eql(u8, a.space(), b.space())) continue;
+            if (std.mem.eql(u8, a.workspace(), b.workspace())) continue;
             if (!std.mem.eql(u8, a.name, b.name)) continue;
-            a.name = a.space();
-            b.name = b.space();
+            a.name = a.workspace();
+            b.name = b.workspace();
         }
     }
 }
@@ -344,12 +346,12 @@ fn claimTitle(agents: []const Item, ws: []const u8) ?[]const u8 {
 /// agents panel for what is happening in it. Words are repeated;
 /// nothing is inferred.
 pub fn borrowLabel(row: *Item, agents: []const Item, buf: []u8) bool {
-    const title = claimTitle(agents, row.space()) orelse return false;
+    const title = claimTitle(agents, row.workspace()) orelse return false;
     const label = row.name;
-    const repo = spaceRepo(row.space());
+    const repo = spaceRepo(row.workspace());
     // The windows count is what gives way: a title is the better use
     // of one line, and the space still names itself on the other.
-    row.sub = if (repo.len > 0 and !std.mem.eql(u8, label, row.space()))
+    row.sub = if (repo.len > 0 and !std.mem.eql(u8, label, row.workspace()))
         std.fmt.bufPrint(buf, "{s} · {s}", .{ repo, label }) catch label
     else
         label;
@@ -419,6 +421,25 @@ pub fn hit(p: Panel, y: u16) ?usize {
     // row 0 of an item block is its leading gap, not the item
     if ((y - 1) % item_rows == 0) return null;
     return if (i < p.items.len) i else null;
+}
+
+/// The row under a click, with everything rook needs to act on it.
+pub const Hit = struct {
+    row: usize,
+    /// Past the pushed rows: a row rook found for itself, so the
+    /// cursor on it is rook's to hold rather than a producer's.
+    found: bool,
+    /// The workspace the row names — `Item.workspace`. Where a click
+    /// on it goes, when rook holds a workspace by that name.
+    ws: []const u8,
+};
+
+/// Hit-test a merged panel: `pushed_n` rows came from a producer and
+/// everything after them is rook's own. `y` is panel-relative, as for
+/// `hit`.
+pub fn hitRow(p: Panel, pushed_n: usize, y: u16) ?Hit {
+    const i = hit(p, y) orelse return null;
+    return .{ .row = i, .found = i >= pushed_n, .ws = p.items[i].workspace() };
 }
 
 // ---- the feed in ----
@@ -582,7 +603,7 @@ pub const Merge = struct {
             // On the identity, never the label: rook's own rows now
             // paint a short name, and a producer claims the workspace
             // by its full one.
-            if (claimedIn(pushed.items, f.space())) continue;
+            if (claimedIn(pushed.items, f.workspace())) continue;
             self.items.append(gpa, f) catch break;
             added += 1;
             if (f.origin == .manual) manual += 1;
@@ -859,6 +880,55 @@ test "hit test skips headers and gaps" {
     try std.testing.expectEqual(@as(?usize, 1), hit(p, 5));
     try std.testing.expectEqual(@as(?usize, 2), hit(p, 8));
     try std.testing.expectEqual(@as(?usize, null), hit(p, 11)); // past the end
+}
+
+test "a click on an agent row points at the workspace it runs in" {
+    // The fleet's shape: a row titled for the task, the workspace it
+    // runs in named outright, and one row rook found for itself after
+    // it. Clicking the task must go to `rook--vera-f356bc2c`, not to a
+    // workspace named after a sentence.
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    const pushed: Panel = .{ .title = "agents", .items = &.{
+        .{ .name = "Fix the leader+s workspace", .sub = "working · rook", .ws = "rook--vera-66c854b2" },
+        .{ .name = "herdr", .sub = "working · claude" },
+    } };
+    const found = [_]Item{.{ .name = "scratch", .sub = "claude", .origin = .manual }};
+    const p = merge.panel(std.testing.allocator, pushed, &found);
+
+    const task = hitRow(p, pushed.items.len, 2).?; // the first row's name
+    try std.testing.expectEqual(@as(usize, 0), task.row);
+    try std.testing.expect(!task.found);
+    try std.testing.expectEqualStrings("rook--vera-66c854b2", task.ws);
+
+    // a producer that named no workspace still claims one by title,
+    // for a rail whose rows are workspaces anyway
+    const titled = hitRow(p, pushed.items.len, 5).?;
+    try std.testing.expectEqualStrings("herdr", titled.ws);
+    try std.testing.expect(!titled.found);
+
+    // rook's own row: named for its workspace, and rook's to hold a
+    // cursor on
+    const own = hitRow(p, pushed.items.len, 9).?; // third row's sub
+    try std.testing.expectEqual(@as(usize, 2), own.row);
+    try std.testing.expect(own.found);
+    try std.testing.expectEqualStrings("scratch", own.ws);
+
+    // headers, gaps and the space past the last row ask for nothing
+    try std.testing.expectEqual(@as(?Hit, null), hitRow(p, pushed.items.len, 0));
+    try std.testing.expectEqual(@as(?Hit, null), hitRow(p, pushed.items.len, 1));
+    try std.testing.expectEqual(@as(?Hit, null), hitRow(p, pushed.items.len, 11));
+}
+
+test "a row's workspace is its claim, and the two never disagree" {
+    const claimed: Item = .{ .name = "Fix the duplicate rows", .ws = "rook--vera-f356bc2c" };
+    try std.testing.expectEqualStrings("rook--vera-f356bc2c", claimed.workspace());
+    try std.testing.expect(claimed.claims("rook--vera-f356bc2c"));
+    try std.testing.expect(!claimed.claims("Fix the duplicate rows"));
+
+    const bare: Item = .{ .name = "scratch" };
+    try std.testing.expectEqualStrings("scratch", bare.workspace());
+    try std.testing.expect(bare.claims("scratch"));
 }
 
 test "an unfed rail is its two headers and nothing else" {
@@ -1243,7 +1313,7 @@ test "labelling keeps the workspace as the identity behind it" {
     };
     labelSpaces(&items);
     try std.testing.expectEqualStrings("vera-e4126385", items[0].name);
-    try std.testing.expectEqualStrings("rook--vera-e4126385", items[0].space());
+    try std.testing.expectEqualStrings("rook--vera-e4126385", items[0].workspace());
     // The claim a producer makes is on the workspace, so the short
     // label must not cost the row its claim.
     try std.testing.expect(items[0].claims("rook--vera-e4126385"));
@@ -1286,7 +1356,7 @@ test "a producer's claim still lands on a row rook labelled short" {
     try std.testing.expectEqual(@as(usize, 2), p.items.len);
     try std.testing.expectEqualStrings("Name the spaces", p.items[0].name);
     try std.testing.expectEqualStrings("vera-f356bc2c", p.items[1].name);
-    try std.testing.expectEqualStrings("rook--vera-f356bc2c", p.items[1].space());
+    try std.testing.expectEqualStrings("rook--vera-f356bc2c", p.items[1].workspace());
     try std.testing.expectEqualStrings("1 manual", p.note);
 }
 
@@ -1294,7 +1364,7 @@ test "a row that names no workspace is its own identity" {
     // Every found row rook builds carries `ws`, but a pushed one need
     // not, and the merge asks for the identity on both.
     const it: Item = .{ .name = "scratch" };
-    try std.testing.expectEqualStrings("scratch", it.space());
+    try std.testing.expectEqualStrings("scratch", it.workspace());
 }
 
 test "a space wears the words a producer used for the agent in it" {
@@ -1314,7 +1384,7 @@ test "a space wears the words a producer used for the agent in it" {
     // The label it displaced is still on the row, under the repo.
     try std.testing.expectEqualStrings("rook · vera-e4126385", row.sub);
     // The identity never moves: this is still what a click switches to.
-    try std.testing.expectEqualStrings("rook--vera-e4126385", row.space());
+    try std.testing.expectEqualStrings("rook--vera-e4126385", row.workspace());
     // Words are repeated; state is not. A space rook found says only
     // that it is there — the agents panel says what is happening.
     try std.testing.expectEqual(State.none, row.state);
@@ -1354,4 +1424,30 @@ test "a borrowed label with no repo to name falls back to the label alone" {
     try std.testing.expect(borrowLabel(&row, &agents, &buf));
     try std.testing.expectEqualStrings("Fix the flaky test", row.name);
     try std.testing.expectEqualStrings("scratch", row.sub);
+}
+
+test "a click on a labelled space points at the workspace, not the label" {
+    // The seam between two changes: rows wear labels, and a click acts
+    // on the workspace a row names. A click must never take a label as
+    // an address — including a label borrowed from a producer, which
+    // is prose and names no workspace at all.
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    var found = [_]Item{
+        .{ .name = "rook--vera-e4126385", .ws = "rook--vera-e4126385", .sub = "rook", .origin = .found },
+        .{ .name = "rook", .ws = "rook", .origin = .found },
+    };
+    labelSpaces(&found);
+    const agents = [_]Item{.{ .name = "Name the spaces Vera makes", .ws = "rook--vera-e4126385" }};
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(borrowLabel(&found[0], &agents, &buf));
+
+    const p = merge.panel(std.testing.allocator, .{ .title = "spaces" }, &found);
+    const borrowed = hitRow(p, 0, 2).?; // the first row
+    try std.testing.expectEqualStrings("Name the spaces Vera makes", p.items[0].name);
+    try std.testing.expectEqualStrings("rook--vera-e4126385", borrowed.ws);
+    try std.testing.expect(borrowed.found);
+    // and the plain row beside it, which was never shortened
+    const plain = hitRow(p, 0, 5).?;
+    try std.testing.expectEqualStrings("rook", plain.ws);
 }
