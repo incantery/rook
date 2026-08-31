@@ -51,6 +51,23 @@ pub const Form = struct {
     identity: bool = true,
 };
 
+/// One row rook found for itself, as the feed publishes it: the label
+/// it paints, the subtitle under it, the workspace it is about, and
+/// where it came from. `current` is written only where the surface has
+/// something to say with it (spaces).
+fn foundRow(gpa: std.mem.Allocator, out: *std.ArrayList(u8), it: anytype, origin: []const u8, current: ?bool) void {
+    out.appendSlice(gpa, "{\"title\":") catch return;
+    str(gpa, out, it.name);
+    out.appendSlice(gpa, ",\"subtitle\":") catch return;
+    str(gpa, out, it.sub);
+    out.appendSlice(gpa, ",\"workspace\":") catch return;
+    str(gpa, out, it.workspace());
+    out.appendSlice(gpa, ",\"origin\":") catch return;
+    str(gpa, out, origin);
+    if (current) |c| out.print(gpa, ",\"current\":{s}", .{boolStr(c)}) catch return;
+    out.append(gpa, '}') catch return;
+}
+
 /// Build the snapshot into `out` (cleared first).
 pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
     const gpa = sv.gpa;
@@ -187,27 +204,24 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         // On `spaces` the found rows are rook's own workspaces — one
         // per workspace, `current` marking the one in front — so a
         // second glass can draw the unfed rail from this alone.
+        // `title` is the label rook paints and `workspace` is the
+        // identity behind it — the same two words an item has always
+        // had, now on rook's own rows too. Match on `workspace`: a
+        // title is prose, and since rook shortens its own it is no
+        // longer a workspace name at all.
         out.appendSlice(gpa, ",\"found\":[") catch return;
         switch (sf.found) {
             .agents => if (form.drift) {
                 for (sv.found[0..sv.found_n], 0..) |it, k| {
                     if (k > 0) out.append(gpa, ',') catch return;
-                    out.appendSlice(gpa, "{\"title\":") catch return;
-                    str(gpa, out, it.name);
-                    out.appendSlice(gpa, ",\"subtitle\":") catch return;
-                    str(gpa, out, it.sub);
-                    out.appendSlice(gpa, ",\"origin\":\"manual\"}") catch return;
+                    foundRow(gpa, out, it, "manual", null);
                 }
             },
             .spaces => {
                 const cur = if (sv.cur_sess < sv.sessions.items.len) sv.sessions.items[sv.cur_sess].label() else "";
                 for (sv.foundSpaces(), 0..) |it, k| {
                     if (k > 0) out.append(gpa, ',') catch return;
-                    out.appendSlice(gpa, "{\"title\":") catch return;
-                    str(gpa, out, it.name);
-                    out.appendSlice(gpa, ",\"subtitle\":") catch return;
-                    str(gpa, out, it.sub);
-                    out.print(gpa, ",\"origin\":\"found\",\"current\":{s}}}", .{boolStr(std.mem.eql(u8, it.name, cur))}) catch return;
+                    foundRow(gpa, out, it, "found", std.mem.eql(u8, it.workspace(), cur));
                 }
             },
         }

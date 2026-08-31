@@ -198,7 +198,7 @@ timer, and only a change repaints.
 
 **Clicking an agent goes to it.** The workspace the row names becomes
 current and focus lands on the pane running the agent there, in
-whichever window of it holds that pane — a found row is named for its
+whichever window of it holds that pane — a found row carries its
 workspace, and a pushed row names one with `workspace`. That is the
 whole claim: a row whose name is prose and that names no workspace is
 about work rook cannot see, so clicking it only moves the cursor, as
@@ -211,11 +211,47 @@ on one switches to it. A producer's row claims a workspace with
 `"workspace"` and replaces rook's row for it. So an unfed rail is not
 blank: it is rook's own workspaces, and a producer adds state to them.
 
+Rook's own rows wear a **label**, not a workspace name. A worktree's
+workspace is `<repo>--<worktree>` — `rook--vera-e4126385` — because
+that name has to be unambiguous across every repository on the
+machine. Down a 30-column dock that makes the repo the same word on
+every row and pushes the part that tells the rows apart off the right
+edge. So the row reads `vera-e4126385` with `rook` in its subtitle,
+which is what `rook worktree ls` has always printed:
+
+    spaces
+    ● rook
+    ◌ vera-e4126385
+      rook
+
+Shortening never costs uniqueness: a label two workspaces would share
+gives both of them their full name back. The workspace itself is still
+on the row — `workspace` in the state feed, and what a click switches
+to — so a claim, a match or a `rook switch` is always made on the full
+name.
+
+A short label is still an id when the worktree was named after one,
+and rook cannot invent the meaning. It may already have been told it
+though: when a producer pushes an *agents* row claiming that
+workspace, the space repeats that producer's own title, verbatim, and
+the label falls to the subtitle:
+
+    spaces
+    ● rook
+    ◌ Name the spaces Vera makes
+      rook · vera-e4126385
+
+Words only. No state is borrowed — the row is still `origin: "found"`
+with nothing to report, so the dot says the space is there and the
+agents panel says what is happening in it.
+
 The last frame pushed to each surface comes back out of the state feed
 verbatim, under `surfaces[].model`, so a second glass can draw the same
 rail without talking to the producer. What rook found rides beside it
 under `surfaces[].found` — never merged into `model`, which stays the
-producer's own bytes.
+producer's own bytes. A found row carries both words: `title` is the
+label rook paints and `workspace` is the workspace it is about. Match
+on `workspace` — a title is prose, and rook shortens its own.
 
 ## Shape
 
