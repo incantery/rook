@@ -310,6 +310,53 @@ pub fn labelSpaces(items: []Item) void {
     }
 }
 
+/// The title a producer gave the agent it is running in `ws`, if one
+/// did. Empty titles say nothing, and a title that *is* the workspace
+/// name says nothing rook does not already know — that is the
+/// title-as-claim rail, which has no prose to lend.
+fn claimTitle(agents: []const Item, ws: []const u8) ?[]const u8 {
+    for (agents) |it| {
+        if (!it.claims(ws)) continue;
+        if (it.name.len == 0 or std.mem.eql(u8, it.name, ws)) continue;
+        return it.name;
+    }
+    return null;
+}
+
+/// Let a space rook listed for itself wear the words a producer
+/// already used for the work going on in it. True when it did.
+///
+/// This is the one place a surface reads across the seam, so it is
+/// worth being exact about what it does and does not do. `vera-e4126385`
+/// is a shorter id, not a meaning, and rook cannot invent the meaning:
+/// a task is a producer's vocabulary. But when a fleet pushes an
+/// agents row claiming that workspace, rook is already holding the
+/// producer's own words for it — it painted them one panel down. So
+/// the space row repeats them, verbatim, and the label it displaces
+/// moves into the subtitle, where the repo already lives:
+///
+///     ◌ Name the spaces Vera makes
+///       rook · vera-e4126385
+///
+/// What is *not* borrowed is state. The row keeps `.found` and
+/// whatever state it had, which is none: rook still says only that a
+/// space is there, and a glance still reads the producer's dot on the
+/// agents panel for what is happening in it. Words are repeated;
+/// nothing is inferred.
+pub fn borrowLabel(row: *Item, agents: []const Item, buf: []u8) bool {
+    const title = claimTitle(agents, row.space()) orelse return false;
+    const label = row.name;
+    const repo = spaceRepo(row.space());
+    // The windows count is what gives way: a title is the better use
+    // of one line, and the space still names itself on the other.
+    row.sub = if (repo.len > 0 and !std.mem.eql(u8, label, row.space()))
+        std.fmt.bufPrint(buf, "{s} · {s}", .{ repo, label }) catch label
+    else
+        label;
+    row.name = title;
+    return true;
+}
+
 pub const Panel = struct {
     title: []const u8,
     /// Right-aligned note in the header row ("grouped").
@@ -1248,4 +1295,63 @@ test "a row that names no workspace is its own identity" {
     // not, and the merge asks for the identity on both.
     const it: Item = .{ .name = "scratch" };
     try std.testing.expectEqualStrings("scratch", it.space());
+}
+
+test "a space wears the words a producer used for the agent in it" {
+    var feed = Feed.init(std.testing.allocator);
+    defer feed.deinit();
+    // The fleet's agents rail: a task, claiming the workspace it runs in.
+    _ = try feed.push(
+        \\{"params":{"surface":"agents","items":[{"id":"e4126385","title":"Name the spaces Vera makes","subtitle":"working · claude","state":"working","workspace":"rook--vera-e4126385"}]}}
+    );
+    const agents = feed.model().agents.items;
+
+    var row: Item = .{ .name = "rook--vera-e4126385", .ws = "rook--vera-e4126385", .sub = "rook", .origin = .found };
+    labelSpaces(@as(*[1]Item, &row));
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(borrowLabel(&row, agents, &buf));
+    try std.testing.expectEqualStrings("Name the spaces Vera makes", row.name);
+    // The label it displaced is still on the row, under the repo.
+    try std.testing.expectEqualStrings("rook · vera-e4126385", row.sub);
+    // The identity never moves: this is still what a click switches to.
+    try std.testing.expectEqualStrings("rook--vera-e4126385", row.space());
+    // Words are repeated; state is not. A space rook found says only
+    // that it is there — the agents panel says what is happening.
+    try std.testing.expectEqual(State.none, row.state);
+    try std.testing.expectEqual(Origin.found, row.origin);
+}
+
+test "a space nobody claims keeps the label rook gave it" {
+    var feed = Feed.init(std.testing.allocator);
+    defer feed.deinit();
+    _ = try feed.push(
+        \\{"params":{"surface":"agents","items":[{"id":"x","title":"Something else","workspace":"herdr--fix"}]}}
+    );
+    var row: Item = .{ .name = "vera-e4126385", .ws = "rook--vera-e4126385", .sub = "rook", .origin = .found };
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(!borrowLabel(&row, feed.model().agents.items, &buf));
+    try std.testing.expectEqualStrings("vera-e4126385", row.name);
+    try std.testing.expectEqualStrings("rook", row.sub);
+}
+
+test "a rail that titles its rows after workspaces lends nothing" {
+    // The title-as-claim case: the producer's prose *is* the workspace
+    // name, so there is nothing to borrow and nothing to displace.
+    const agents = [_]Item{.{ .name = "scratch" }};
+    var row: Item = .{ .name = "scratch", .ws = "scratch", .origin = .found };
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(!borrowLabel(&row, &agents, &buf));
+    try std.testing.expectEqualStrings("scratch", row.name);
+    // An empty title is not a label either.
+    const blank = [_]Item{.{ .name = "", .ws = "scratch" }};
+    try std.testing.expect(!borrowLabel(&row, &blank, &buf));
+}
+
+test "a borrowed label with no repo to name falls back to the label alone" {
+    const agents = [_]Item{.{ .name = "Fix the flaky test", .ws = "scratch" }};
+    var row: Item = .{ .name = "scratch", .ws = "scratch", .sub = "", .origin = .found };
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(borrowLabel(&row, &agents, &buf));
+    try std.testing.expectEqualStrings("Fix the flaky test", row.name);
+    try std.testing.expectEqualStrings("scratch", row.sub);
 }

@@ -1125,6 +1125,11 @@ pub const Server = struct {
     /// label drops is not lost: it leads the subtitle, so the panel
     /// still answers "which checkout is this?" in the line that is
     /// there to answer it.
+    ///
+    /// A space whose agent a producer claims wears that producer's own
+    /// title instead, with the label falling to the subtitle — see
+    /// `chrome.borrowLabel`, which is the one thing on this rail that
+    /// reads across the seam between the two panels.
     pub fn foundSpaces(self: *Server) []const chromepkg.Item {
         var n: usize = 0;
         for (self.sessions.items) |sn| {
@@ -1144,6 +1149,12 @@ pub const Server = struct {
             n += 1;
         }
         chromepkg.labelSpaces(self.found_ws[0..n]);
+        // Second pass, after labelling: the borrow displaces a label,
+        // so there has to be one to displace.
+        const claims = if (self.side.agents.panel) |p| p.items else &.{};
+        for (self.found_ws[0..n], 0..) |*row, i| {
+            _ = chromepkg.borrowLabel(row, claims, &self.found_ws_sub[i]);
+        }
         self.found_ws_n = n;
         return self.found_ws[0..n];
     }

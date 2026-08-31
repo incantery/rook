@@ -218,10 +218,22 @@ Shortening never costs uniqueness: a label two workspaces would share
 gives both of them their full name back. The workspace itself is still
 on the row — `workspace` in the state feed, and what a click switches
 to — so a claim, a match or a `rook switch` is always made on the full
-name. Rook has nothing to say about *what* the work in a space is: a
-producer that wants the row to read "Name the spaces Vera makes"
-pushes it, claiming `"workspace":"rook--vera-e4126385"`, and its row
-replaces rook's.
+name.
+
+A short label is still an id when the worktree was named after one,
+and rook cannot invent the meaning. It may already have been told it
+though: when a producer pushes an *agents* row claiming that
+workspace, the space repeats that producer's own title, verbatim, and
+the label falls to the subtitle:
+
+    spaces
+    ● rook
+    ◌ Name the spaces Vera makes
+      rook · vera-e4126385
+
+Words only. No state is borrowed — the row is still `origin: "found"`
+with nothing to report, so the dot says the space is there and the
+agents panel says what is happening in it.
 
 The last frame pushed to each surface comes back out of the state feed
 verbatim, under `surfaces[].model`, so a second glass can draw the same

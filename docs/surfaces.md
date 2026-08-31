@@ -374,10 +374,39 @@ Three rules, so this stays a *display* rule and nothing more:
   is still made on the full name. This is the same `title`/`workspace`
   split a pushed item already has, now on rook's own rows too.
 - **Rook labels; it does not name.** A short label is still an id when
-  the worktree was named after one. Rook has no honest way to know
+  the worktree was named after one. Rook has no honest way to *know*
   that `vera-e4126385` is "Name the spaces Vera makes" — a task is a
-  producer's vocabulary. A producer that wants the row to say so
-  pushes it, claiming the workspace, and its row replaces rook's.
+  producer's vocabulary. But it may already have been told, one panel
+  down; see below.
+
+#### A space wears the words already spent on it
+
+The one place a surface reads across the seam, and the exception is
+narrow on purpose.
+
+When a producer pushes an *agents* row claiming a workspace, rook is
+holding that producer's own words for the work going on there — it
+painted them one panel down. So rook's *spaces* row for that workspace
+repeats them, verbatim, and the label they displace falls into the
+subtitle beside the repo:
+
+    spaces
+    ● rook
+    ◌ Name the spaces Vera makes
+      rook · vera-e4126385
+
+**Words are repeated; nothing is inferred.** State is not borrowed:
+the row stays `origin: "found"` with no state, so the dot beside it
+still says only that the space is there and a glance still reads the
+producer's own row for what is happening in it. Nothing is written
+back into a producer's model, `surfaces[].model` is still its bytes
+verbatim, and a producer that pushes a *spaces* row for that workspace
+replaces rook's row outright, borrow and all — the ordinary claim,
+unchanged.
+
+A rail whose agents rows are titled after workspaces lends nothing:
+its title is the name rook already has, so there is no prose in it and
+nothing is displaced. Same for an empty title.
 
 In the state feed the rows ride under `surfaces[].found` for `spaces`
 too, with `current`, so a second glass draws the unfed rail from the
@@ -624,6 +653,21 @@ if* one workspace ever holds two agents that different producers
 manage — the claim would then have to be per pane, which rook can
 address (`panes[].id` is in the state feed) and a producer that spawned
 the pane already knows.
+
+**A space rook found may wear the title of the agent row that claims
+it, and nothing else of it.** This crosses the boundary the rest of
+this document draws between the two panels, so it is a deliberate
+exception rather than a drift. The reasoning: rook cannot invent a
+meaning for `vera-e4126385`, but it does not have to — the producer
+already published one *to rook*, about that same workspace, in rook's
+own claim vocabulary. Repeating a producer's words back on a row about
+the thing it named them for is not interpretation, and stopping at the
+words keeps every rule that matters: no state is taken, no model is
+edited, the merge stays one-way, and the feed still publishes the
+producer's bytes verbatim. *Revisit if* a space ever starts reading as
+a task rather than a place — two agents in one workspace would be the
+symptom, and the answer then is that a space shows the claim only when
+there is exactly one.
 
 **Rook's own rows paint a label, not the workspace name.** The name is
 an identity — `<repo>--<worktree>`, unambiguous across every
