@@ -207,16 +207,51 @@ An item is the model a `nav` surface renders:
 
 ```json
 {"id":"web-dashboard","title":"web-dashboard","state":"blocked",
- "subtitle":"blocked · claude","origin":"managed",
+ "subtitle":"blocked · claude","origin":"managed","unread":true,
  "workspace":"web-dashboard",
  "fields":[{"key":"branch","kind":"TEXT","value":"feat/usage-charts"}],
  "actions":[{"id":"open","label":"Open"}]}
 ```
 
+`state` is the only field that colors a row, and a producer names it
+rather than picking a color — rook owns the palette, so every rail
+anybody ships reads the same. One state per channel: each has its own
+shape, its own color, and its own word at the row's right edge, and no
+two share any of the three.
+
+| `state`               | glyph | color   | word        |
+| --------------------- | ----- | ------- | ----------- |
+| `working` / `running` | `◐`   | yellow  | `working`   |
+| `blocked` / `waiting` | `◇`   | yellow  | `needs you` |
+| `idle`                | `○`   | dim     | `idle`      |
+| `done`                | `✓`   | green   | `done`      |
+| `failed` / `error`    | `×`   | red     | `failed`    |
+| absent, or unknown    | —     | dim     | —           |
+
+**Red is failure-only.** A row waiting on you has not gone wrong, it is
+asking; painting the ask the same as a crash taught a glance to read
+alarm where there was none. `blocked` is yellow, the attention color it
+shares with work in flight, and `×` red means one thing. An unknown
+name lands on the plain row rather than costing the frame, so a
+producer may send a vocabulary this build has not learned yet.
+
+`unread` (bool, default false) is output on the row nobody has read.
+It is a **second channel, independent of `state`**: it paints an accent
+`●` beside the state's own glyph, because a task can be `done` and
+unread in the same breath and one mark cannot carry both. It is the
+only thing that wears the accent, and the only thing `●` means.
+
 `origin` is `managed` (the default: something is driving this, and can
 say what it is doing) or `manual` (nobody claims it). It is the one
 field on an item that is not about the work, and it is painted that
 way — see [Agents rook finds by itself](#agents-rook-finds-by-itself).
+
+`title` is prose, and a rail is narrow, so a title too long for the
+panel loses its **middle** rather than its tail — `Investigate …
+/effort`. Prose front-loads its category and back-loads what makes it
+this row rather than its neighbour, so a tail cut is the one cut that
+reliably throws the distinguishing half away. A producer does not have
+to pre-truncate, and should not: rook knows the width.
 
 `workspace` is the other field that is not about the work, and it is
 never painted at all: it names the rook workspace this row's agent is

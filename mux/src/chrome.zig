@@ -1844,3 +1844,146 @@ test "a tab's mark is one channel, and the block is not it" {
         .now = now,
     }));
 }
+
+// ---- reading the panel back off the glass ----
+//
+// `draw` takes its frame as `anytype`, which is what lets a test pass
+// one that keeps the cells instead of a client. Everything above this
+// point tests the *model*; these tests test the picture, because
+// "faithful to the design" is a claim about the picture, and a model
+// can be right while the paint that reads it is wrong.
+
+const glass_cols: usize = 40;
+const glass_rows: usize = 20;
+
+/// A frame builder that records bytes, and a tiny VT to lay them out.
+/// It understands exactly what `draw` emits: absolute cursor moves and
+/// SGR runs, which it positions by and ignores respectively.
+const Glass = struct {
+    gpa: std.mem.Allocator,
+    bytes: std.ArrayList(u8) = .empty,
+
+    fn deinit(self: *Glass) void {
+        self.bytes.deinit(self.gpa);
+    }
+    fn put(self: *Glass, b: []const u8) void {
+        self.bytes.appendSlice(self.gpa, b) catch unreachable;
+    }
+    fn print(self: *Glass, comptime fmt: []const u8, args: anytype) void {
+        self.bytes.print(self.gpa, fmt, args) catch unreachable;
+    }
+    fn cup(self: *Glass, x: u16, y: u16) void {
+        self.print("\x1b[{d};{d}H", .{ @as(u32, y) + 1, @as(u32, x) + 1 });
+    }
+
+    /// Row `y` as it would read on a screen, trailing blanks trimmed.
+    fn row(self: *const Glass, y: usize, buf: []u8) []const u8 {
+        var cells: [glass_rows][glass_cols][]const u8 = undefined;
+        for (&cells) |*r| {
+            for (r) |*c| c.* = " ";
+        }
+        var cx: usize = 0;
+        var cy: usize = 0;
+        var i: usize = 0;
+        const b = self.bytes.items;
+        while (i < b.len) {
+            if (b[i] == 0x1b and i + 1 < b.len and b[i + 1] == '[') {
+                var j = i + 2;
+                while (j < b.len and !(b[j] >= 0x40 and b[j] <= 0x7e)) j += 1;
+                if (j < b.len and b[j] == 'H') {
+                    var it = std.mem.splitScalar(u8, b[i + 2 .. j], ';');
+                    cy = (std.fmt.parseInt(usize, it.next() orelse "1", 10) catch 1) - 1;
+                    cx = (std.fmt.parseInt(usize, it.next() orelse "1", 10) catch 1) - 1;
+                }
+                i = j + 1;
+                continue;
+            }
+            const n = std.unicode.utf8ByteSequenceLength(b[i]) catch 1;
+            if (cy < glass_rows and cx < glass_cols) cells[cy][cx] = b[i .. i + n];
+            cx += 1;
+            i += n;
+        }
+        var w: usize = 0;
+        for (cells[y]) |c| {
+            @memcpy(buf[w..][0..c.len], c);
+            w += c.len;
+        }
+        return std.mem.trimEnd(u8, buf[0..w], " ");
+    }
+};
+
+test "the rail paints what the reference draws" {
+    var g: Glass = .{ .gpa = std.testing.allocator };
+    defer g.deinit();
+
+    const spaces: Panel = .{
+        .title = "spaces",
+        .note = "1 task",
+        .items = &.{.{ .name = "vera" }},
+        .cur = 0,
+    };
+    const agents: Panel = .{
+        .title = "agents",
+        .items = &.{
+            .{ .name = "scout", .sub = "Investigate Vera's /effort · vera", .state = .working },
+            .{ .name = "main", .sub = "claude", .state = .idle, .origin = .manual },
+        },
+    };
+    draw(&g, .{ .spaces = spaces, .agents = agents }, 0, 0, glass_cols, glass_rows);
+
+    var buf: [512]u8 = undefined;
+
+    // Header: the title left, its count pushed to the right edge.
+    const head = g.row(0, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, head, "  spaces"));
+    try std.testing.expect(std.mem.endsWith(u8, head, "1 task"));
+
+    // A space is a name. With no state to report it spends no column
+    // on a dot — which is what leaves ● free to mean unread.
+    try std.testing.expectEqualStrings("    vera", g.row(2, &buf));
+
+    // An agent row: the shape on the left, the same state spelled out
+    // on the right. The glyph is the glance, the word is what it
+    // resolves into, and neither is asked to carry it alone.
+    const scout = g.row(13, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, scout, "  ◐ scout"));
+    try std.testing.expect(std.mem.endsWith(u8, scout, "working"));
+
+    // Its second line is the task and the space — metadata about the
+    // name above it, so it is marked as such.
+    try std.testing.expectEqualStrings(
+        "    ↳ Investigate Vera's /effort · vera",
+        g.row(14, &buf),
+    );
+
+    // Idle is the quietest row on the rail, and still says so.
+    const main_row = g.row(16, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, main_row, "  ○ main"));
+    try std.testing.expect(std.mem.endsWith(u8, main_row, "idle"));
+
+    // A row nobody manages says so instead of taking the ↳: one mark
+    // per line, and this line's job is already spoken for.
+    try std.testing.expectEqualStrings("    manual · claude", g.row(17, &buf));
+}
+
+test "a painted row never runs into its own state word" {
+    var g: Glass = .{ .gpa = std.testing.allocator };
+    defer g.deinit();
+
+    const agents: Panel = .{ .title = "agents", .items = &.{
+        .{ .name = "Investigate Vera's /effort and everything after it", .state = .working, .unread = true },
+    } };
+    draw(&g, .{ .spaces = .{ .title = "spaces" }, .agents = agents }, 0, 0, glass_cols, glass_rows);
+
+    var buf: [512]u8 = undefined;
+    const r = g.row(13, &buf);
+    // Both channels on one row: the state, and the fact that nobody
+    // has read it. Neither has eaten the other, or the name.
+    try std.testing.expect(std.mem.endsWith(u8, r, "● working"));
+    try std.testing.expect(std.mem.startsWith(u8, r, "  ◐ Investiga"));
+    // The name kept its tail rather than its middle.
+    try std.testing.expect(std.mem.indexOf(u8, r, "…") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r, "after it") != null);
+    // And the whole row still fits the panel it is drawn in.
+    try std.testing.expect((std.unicode.utf8CountCodepoints(r) catch 99) <= glass_cols);
+}
