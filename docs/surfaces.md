@@ -478,6 +478,9 @@ still exact. Deltas would force unbounded buffering or a disconnect.
   "pid": 48120,
   "geometry": {"cols": 180, "rows": 45},
   "focus": {"pane": 7, "mode": "pane"},
+  "companion": {"name": "vera", "open": true, "visible": true, "focused": false,
+    "panes": [{"pane": 12, "workspace": "main", "window": null, "place": "pin",
+               "visible": true, "focused": false, "since": 1787588402113}]},
 
   "workspaces": [
     {"name": "main", "current": true,
@@ -524,6 +527,61 @@ rook does without inventing a rule of its own — matching `workspace`
 against `workspace`, never against a title, which is prose on a pushed
 row and shortened on a found one.
 
+### The companion — when and where she is open
+
+Rook holds one opinion about what an *agent* is, so a session somebody
+started by hand is not invisible to the rail. `companion` is the same
+shape for the other question: the resident you summon rather than an
+agent working somewhere. The config names the occupant — vera first,
+and the default when nothing says otherwise:
+
+```toml
+[companion]
+command = "vera"       # what summons her; its first word is the program
+program = "vera"       # …or say it outright, when that first word is a
+                       # wrapper. `program = ""` turns the slot off and
+                       # `companion` publishes as `null`.
+```
+
+The same `[companion]` table the Go half already reads for the summon
+key; the engine takes only the program name out of it, in the order
+`program`, then `command`'s first word, then `name`. `name` last on
+purpose: over there it labels the popup rather than naming the binary,
+and a shared file where one key means two things is how `lsp` once
+cost the host its whole config.
+
+Everything under `companion` answers one of two questions:
+
+- **when** — `open`, and `since` per pane: wall-clock ms of the first
+  scan that found her there, kept across scans, so "she has been open
+  twenty minutes" is a subtraction. A pane that closes and reopens is a
+  new `since`.
+- **where** — `workspace`, `window` (1-based, `null` when the pane is
+  not in a window at all), and `place`: `window`, `pin` (docked to the
+  rail; `workspace` is empty for a global pin, which belongs to every
+  workspace) or `popup`. `visible` is on the glass now, `focused` is
+  holding the keyboard now. The three top-level flags are the rollups —
+  is any of her open, on the glass, in front of you.
+
+More than one pane is unusual and not an error; rook reports what it
+sees rather than what it wishes, up to eight.
+
+This is deliberately only what rook can see in its own pane table. A
+companion open on a phone, in another terminal, or as a daemon nobody
+attached to is not open *in rook*, and rook must not pretend to know.
+Foreground program, so it is the same lookup — and the same 2 s
+cadence — as `panes[].program` and the found agent rows.
+
+Read it as one line, for a person or a script:
+
+```
+rook companion            # vera · main, window 1 · pane 7 · in front of you · open 20m
+rook companion --json     # rook's own bytes, the `companion` object verbatim
+```
+
+Exit status is the short answer: 0 when she is open in rook, 1 when
+she is not, so nothing has to parse the long one.
+
 ### Two cadences, so a busy pane cannot make it chatty
 
 Change is detected by diffing snapshots, so the diffed form has to
@@ -538,6 +596,12 @@ leave out anything that would make the diff see itself:
   foreground child faster than the poll floor, and diffing on them
   pushed 118 snapshots in 6 s. Split, it is 5 — with liveness still
   fresh.
+
+`companion` is in both forms rather than treated as drift, even though
+it comes from the same foreground-program lookup: the scan writes its
+answer down, so what the fast diff sees changes only when the 2 s scan
+changes it — and a companion that just opened, or that focus just
+landed on, is worth a push at once.
 
 Structural change — anything a command did — still pushes on the next
 50 ms turn, and idle is silent.
@@ -596,6 +660,7 @@ Honest inventory, so this document is not mistaken for a description.
 | `saveState` → `<sock>.state` | real; restore format, still private |
 | block table push | real; superseded by the state feed, kept for the web client |
 | `rook state` / `watch` / `capture` | **built** |
+| `companion.zig` + `Server.scanCompanion` | **built** — the one resident rook watches for by name, published as `companion` and read out loud by `rook companion` |
 | `s2c.ack`, quiet `session 'N'`, `block_created` on new | **built** |
 | plugin protocol v1 | specified in `rook-plugin(7)` at `425c0f8^`; `items.push` implemented, the rest not |
 | surfaces (declared, placed, focusable), plugin processes | none of it |

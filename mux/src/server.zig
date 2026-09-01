@@ -10,6 +10,7 @@ const panepkg = @import("pane.zig");
 const layoutpkg = @import("layout.zig");
 const renderpkg = @import("render.zig");
 const chromepkg = @import("chrome.zig");
+const companionpkg = @import("companion.zig");
 const statefeed = @import("statefeed.zig");
 const proto = @import("proto.zig");
 const config = @import("config.zig");
@@ -192,6 +193,15 @@ pub const Server = struct {
     found_ws: [max_found]chromepkg.Item = @splat(.{ .name = "" }),
     found_ws_n: usize = 0,
     found_ws_sub: [max_found][64]u8 = @splat(@splat(0)),
+    /// The companion: which panes are running the one program the
+    /// config names as the resident (vera first), and since when.
+    /// Walked on the same 2s cadence as the agents scan, for the same
+    /// reason — `fgName` is two syscalls a pane, and whether she is
+    /// open moves at human rate. Nothing on the glass reads this: it
+    /// exists so the state feed can answer *when and where* the
+    /// companion is open, which is a question about rook that only
+    /// rook can answer.
+    comp: companionpkg.Watch = .{},
     next_id: u32 = 1,
     clients: std.ArrayList(*Client) = .empty,
     wake_r: ptypkg.fd_t,
@@ -777,9 +787,14 @@ pub const Server = struct {
             }
             // Agents rook can see for itself. Only a change earns a
             // repaint, and only when the rail is actually on the glass.
+            // The companion rides the same walk of the pane table; it
+            // paints nothing, so a change there is for the feed to
+            // notice on its next pass, not a repaint.
             if (nowMs() - self.found_ms > found_every_ms) {
                 self.found_ms = nowMs();
-                if (self.scanAgents() and self.side_w != null) {
+                const agents_moved = self.scanAgents();
+                _ = self.scanCompanion();
+                if (agents_moved and self.side_w != null) {
                     self.full = true;
                     self.pending = true;
                 }
@@ -1170,6 +1185,92 @@ pub const Server = struct {
             if (want.len > 0 and std.mem.eql(u8, name, want)) return true;
         }
         return false;
+    }
+
+    /// Walk the pane table for the companion. Rook holds one opinion
+    /// about what an agent is; this is the same shape for the other
+    /// question — the resident you summon, named once in the config,
+    /// and worth knowing about because "is she already open, and
+    /// where" is the difference between going to her and starting a
+    /// second one. True when the set of panes changed.
+    fn scanCompanion(self: *Server) bool {
+        const want = self.conf.companionSlice();
+        var ids: [companionpkg.max]u32 = undefined;
+        var n: usize = 0;
+        if (want.len > 0) {
+            for (self.panes.items) |p| {
+                if (n == ids.len) break;
+                var nb: [64]u8 = undefined;
+                const fg = p.fgName(&nb) orelse continue;
+                if (!std.mem.eql(u8, fg, want)) continue;
+                ids[n] = p.id;
+                n += 1;
+            }
+        }
+        return self.comp.update(panepkg.epochMs(), ids[0..n]);
+    }
+
+    /// Where a pane sits, in the words the feed publishes it in. Read
+    /// at the moment it is asked rather than remembered: a pane moves
+    /// between windows, workspaces and the rail without the program
+    /// inside it changing.
+    pub const Place = struct {
+        workspace: []const u8,
+        /// 1-based, and null when the pane is not in a window at all —
+        /// the rail and the popup are above windows.
+        window: ?usize = null,
+        place: []const u8,
+        visible: bool,
+        focused: bool,
+    };
+
+    pub fn placeOf(self: *Server, id: u32) ?Place {
+        var out: Place = .{
+            .workspace = "",
+            .place = "window",
+            .visible = false,
+            .focused = id == self.focusedId(),
+        };
+        for (self.placed.items) |pl| {
+            if (pl.pane == id) out.visible = true;
+        }
+        const cur: ?*Session = if (self.cur_sess < self.sessions.items.len) self.sessions.items[self.cur_sess] else null;
+        if (self.popup) |pid| {
+            if (pid == id) {
+                // The popup floats over the current workspace and takes
+                // the keyboard while it is up; it belongs to no window.
+                // It is drawn outside the layout, so `placed` does not
+                // know about it — but it is the most visible thing on
+                // the glass, and the one holding the keyboard.
+                out.place = "popup";
+                out.workspace = if (cur) |sn| sn.label() else "";
+                out.visible = true;
+                out.focused = true;
+                return out;
+            }
+        }
+        for (self.global_pins.items) |pid| {
+            if (pid != id) continue;
+            // A globally pinned pane belongs to no workspace — it is
+            // in every one — so it is named by its scope, not a name.
+            out.place = "pin";
+            return out;
+        }
+        for (self.sessions.items) |sn| {
+            for (sn.pins.items) |pid| {
+                if (pid != id) continue;
+                out.place = "pin";
+                out.workspace = sn.label();
+                return out;
+            }
+            for (sn.windows.items, 0..) |w, wi| {
+                if (!w.layout.contains(id)) continue;
+                out.workspace = sn.label();
+                out.window = wi + 1;
+                return out;
+            }
+        }
+        return null;
     }
 
     /// Does this workspace hold the pane — in one of its windows, or
