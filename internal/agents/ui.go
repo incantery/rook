@@ -168,14 +168,22 @@ func go_(r row, side bool) error {
 	return sessions.Connect(r.space.Name)
 }
 
+// One state per channel: each gets its own shape, so the rail reads on
+// a glass that has lost its colours — and so a reader learns one
+// vocabulary rather than two. These are the engine's glyphs
+// (`chrome.Dot`), because this sidebar and the mux rail are the same
+// two lists and disagreeing about them would be the confusing part.
+//
+// The colours stay ANSI, as this package's palette requires: shape is
+// what carries the distinction, colour only agrees with it.
 func dot(s sessions.AgentState) string {
 	switch s {
 	case sessions.StateWaiting:
-		return waiting.Render("●")
+		return waiting.Render("◇")
 	case sessions.StateWorking:
-		return working.Render("●")
+		return working.Render("◐")
 	case sessions.StateDone:
-		return tui.Dim.Render("●")
+		return tui.Dim.Render("✓")
 	}
 	return tui.Dim.Render("○")
 }
@@ -183,7 +191,9 @@ func dot(s sessions.AgentState) string {
 func stateWord(s sessions.AgentState) string {
 	switch s {
 	case sessions.StateWaiting:
-		return waiting.Render("waiting")
+		// "needs you", not "waiting": waiting is what the agent is
+		// doing, and the row is there to say what *you* have to do.
+		return waiting.Render("needs you")
 	case sessions.StateWorking:
 		return working.Render("working")
 	case sessions.StateDone:

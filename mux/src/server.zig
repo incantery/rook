@@ -83,6 +83,12 @@ const Window = struct {
     layout: layoutpkg.Layout,
     focused: u32 = 0,
     zoomed: bool = false,
+    /// Wall-clock ms this window was last the one on the glass. Output
+    /// stamped after it is output nobody has seen, which is the whole
+    /// of what the tab bar's unread dot means. Advanced every frame
+    /// the window is current, so "seen" tracks looking rather than
+    /// switching.
+    seen_ms: i64 = 0,
 };
 
 /// A named workspace: its own windows and current-window index. All
@@ -1115,9 +1121,9 @@ pub const Server = struct {
     /// sent — see chrome.Merge.
     fn sideModel(self: *Server) chromepkg.Model {
         var m = self.side.model();
-        m.agents = self.agents_merge.panel(self.gpa, m.agents, self.found[0..self.found_n]);
+        m.agents = self.agents_merge.panel(self.gpa, .agents, m.agents, self.found[0..self.found_n]);
         const pushed_n = m.spaces.items.len;
-        m.spaces = self.spaces_merge.panel(self.gpa, m.spaces, self.foundSpaces());
+        m.spaces = self.spaces_merge.panel(self.gpa, .spaces, m.spaces, self.foundSpaces());
         // The current workspace is the highlight when the producer has
         // not placed one: among rook's own rows it is the one fact the
         // panel exists to show. A pushed `current` still wins.
@@ -2598,6 +2604,7 @@ pub const Server = struct {
         var out: std.ArrayList(u8) = .initBuffer(buf);
         var vis: u16 = 0;
         const sn = self.sess();
+        const now = panepkg.epochMs();
         // The bar is one surface; chips change the ink on it, and the
         // active one fills with the accent. Truecolor throughout: this
         // row is chrome, so it owes nothing to the pane palette.
@@ -2605,45 +2612,110 @@ pub const Server = struct {
         const bar = sgr(&bar_buf, .{ .bg = chromepkg.base, .fg = chromepkg.overlay0 });
         var chip_buf: [48]u8 = undefined;
         const chip_on = sgr(&chip_buf, .{ .bg = self.conf.accent, .fg = chromepkg.crust, .bold = true });
+        // The ordinal is the faintest ink on the bar: it is there for
+        // the hand reaching for ⌥n, not for the eye reading the tabs.
+        var idx_buf: [48]u8 = undefined;
+        const idx_ink = sgr(&idx_buf, .{ .bg = chromepkg.base, .fg = chromepkg.surface0 });
+        var work_buf: [48]u8 = undefined;
+        const work_ink = sgr(&work_buf, .{ .bg = chromepkg.base, .fg = chromepkg.yellow });
+        var unread_buf: [48]u8 = undefined;
+        const unread_ink = sgr(&unread_buf, .{ .bg = chromepkg.base, .fg = self.conf.accent });
+
         out.appendSliceBounded(bar) catch {};
+        var shown: usize = 0;
         for (sn.windows.items, 0..) |win, i| {
             var name_buf: [48]u8 = undefined;
             var name: []const u8 = "shell";
+            var mark: chromepkg.TabMark = .none;
             if (self.pane(win.focused)) |p| {
                 if (p.fgName(&name_buf)) |fg| name = fg;
+                mark = chromepkg.tabMark(.{
+                    .current = i == sn.cur,
+                    .agent = self.isAgentProgram(name),
+                    .last_output_ms = p.last_output_ms.load(.acquire),
+                    .seen_ms = win.seen_ms,
+                    .now = now,
+                });
             }
+            // The current window is being looked at, by definition.
+            if (i == sn.cur) win.seen_ms = now;
+
             const nm = name[0..@min(name.len, 14)];
+            var num_buf: [8]u8 = undefined;
+            const num = std.fmt.bufPrint(&num_buf, "{d}", .{i + 1}) catch "?";
             const chip: u16 = @intCast(nm.len + 2); // " name "
-            const gap: u16 = if (i > 0) 1 else 0;
-            if (vis + gap + chip + 4 > avail) break; // leave room for " + "
+            const mark_w: u16 = if (mark == .none) 0 else 2; // " ◐"
+            const gap: u16 = if (shown > 0) 3 else 0;
+            // No separator after the ordinal: the chip opens with its
+            // own padding cell, which is the gap — and on the selected
+            // tab that cell is the accent block starting.
+            const entry: u16 = gap + @as(u16, @intCast(num.len)) + chip + mark_w;
+            // Leave room for the overflow tail or the "+" that follows.
+            if (vis + entry + 4 > avail) break;
+
             if (gap > 0) {
-                out.appendSliceBounded(" ") catch {};
-                vis += 1;
+                out.appendSliceBounded("   ") catch {};
+                vis += gap;
             }
+            out.appendSliceBounded(idx_ink) catch {};
+            out.appendSliceBounded(num) catch {};
+            vis += @as(u16, @intCast(num.len));
+
+            // One state per channel: the block says selected and only
+            // selected, so a tab can be selected and working at once
+            // and the bar has somewhere to put both.
             out.appendSliceBounded(if (i == sn.cur) chip_on else bar) catch {};
             out.appendSliceBounded(" ") catch {};
             out.appendSliceBounded(nm) catch {};
             out.appendSliceBounded(" ") catch {};
             out.appendSliceBounded(bar) catch {};
             vis += chip;
+
+            if (mark != .none) {
+                out.appendSliceBounded(" ") catch {};
+                out.appendSliceBounded(if (mark == .working) work_ink else unread_ink) catch {};
+                out.appendSliceBounded(if (mark == .working) "◐" else "●") catch {};
+                out.appendSliceBounded(bar) catch {};
+                vis += mark_w;
+            }
+            shown += 1;
         }
-        // trailing "+" placeholder tab (clicks come later)
-        if (vis + 4 <= avail) {
+
+        // What did not fit is said out loud. A bar that silently
+        // stopped listing windows is a bar that lies about how many
+        // there are.
+        const hidden = sn.windows.items.len - shown;
+        if (hidden > 0) {
+            var more_buf: [24]u8 = undefined;
+            if (std.fmt.bufPrint(&more_buf, "  ⋯ {d} more", .{hidden})) |m| {
+                const w = chromepkg.cols(m);
+                if (vis + w <= avail) {
+                    out.appendSliceBounded(m) catch {};
+                    vis += w;
+                }
+            } else |_| {}
+        } else if (vis + 4 <= avail) {
+            // trailing "+" placeholder tab (clicks come later)
             out.appendSliceBounded("  + ") catch {};
             vis += 4;
         }
-        // copy-mode / zoom hints ride the right of the bar when they fit
-        const hint: ?[]const u8 = if (self.scrolling)
-            (if (self.selecting) "  copy·VISUAL" else "  copy·hjkl y q")
+
+        // The corner. ⌥n is the standing hint — the one affordance the
+        // bar owes a reader who has not found the key yet — and copy
+        // mode and zoom take the slot while they last, because they
+        // are about the whole screen rather than about a tab.
+        const corner: []const u8 = if (self.scrolling)
+            (if (self.selecting) "copy·VISUAL" else "copy·hjkl y q")
         else if (self.window().zoomed)
-            "  zoom"
+            "zoom"
         else
-            null;
-        if (hint) |h| {
-            if (vis + h.len <= avail) {
-                out.appendSliceBounded(h) catch {};
-                vis += @intCast(h.len);
-            }
+            "⌥n";
+        const corner_cols = chromepkg.cols(corner);
+        if (vis + corner_cols + 2 <= avail) {
+            while (vis < avail - corner_cols) : (vis += 1) out.appendSliceBounded(" ") catch {};
+            out.appendSliceBounded(bar) catch {};
+            out.appendSliceBounded(corner) catch {};
+            vis += corner_cols;
         }
         while (vis < avail) : (vis += 1) out.appendSliceBounded(" ") catch {};
         out.appendSliceBounded("\x1b[0m") catch {};
