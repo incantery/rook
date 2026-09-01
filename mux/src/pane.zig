@@ -38,7 +38,7 @@ extern "c" fn gettimeofday(tv: *Timeval, tz: ?*anyopaque) c_int;
 /// Wall-clock milliseconds. The activity stamp is read by other
 /// processes through the state feed, so it has to be an epoch they
 /// share — not the server's CLOCK_UPTIME_RAW.
-fn epochMs() i64 {
+pub fn epochMs() i64 {
     var tv: Timeval = .{ .sec = 0, .usec = 0 };
     _ = gettimeofday(&tv, null);
     return tv.sec * 1000 + @divTrunc(@as(i64, tv.usec), 1000);

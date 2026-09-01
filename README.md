@@ -44,6 +44,24 @@ left that follows you to every window and session (tmux hooks hand it
 over) until `prefix A` parks it. `rook agents --json` is the agent list
 for machines.
 
+**The companion.** One resident is named in the config and rook knows
+her by sight — vera by default — so "is she already open, and where"
+is a question rook answers rather than a thing you go and look for:
+
+```sh
+rook companion          # vera · main, window 1 · pane 7 · in front of you · open 20m
+rook companion --json   # the same, as rook publishes it; exit 1 when she is not open
+```
+
+It is what the engine can see in its own panes and nothing more — the
+`companion` block of `rook state`, which is where anything that wants
+to watch it should read it. Open on your phone is not open in rook.
+
+```toml
+[companion]
+command = "vera"        # or program = "vera"; program = "" turns the slot off
+```
+
 **The chrome is tmux.** Tabs are the status line (window names, the
 active one raised, agent state as ● / ✳); every pane wears its name on
 its top border — claude, zsh, agents — with its git place beside

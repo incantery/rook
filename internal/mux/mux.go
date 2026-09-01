@@ -172,3 +172,82 @@ func Close(name string) error {
 	_, err := run("close", name)
 	return err
 }
+
+// Companion is what the engine knows about the companion — the one
+// resident rook watches for by name (vera first). Rook publishes it;
+// this is the replica, and nothing here is held between calls.
+type Companion struct {
+	// Name is the program rook watches for.
+	Name string `json:"name"`
+	// Open, Visible, Focused are the rollups: any pane running it, any
+	// of them on the glass, any of them holding the keyboard.
+	Open    bool            `json:"open"`
+	Visible bool            `json:"visible"`
+	Focused bool            `json:"focused"`
+	Panes   []CompanionPane `json:"panes"`
+}
+
+// CompanionPane is one pane running the companion: where it is, and
+// since when.
+type CompanionPane struct {
+	Pane int `json:"pane"`
+	// Workspace is empty for a globally pinned pane — it belongs to
+	// every workspace, so it is named by its place instead.
+	Workspace string `json:"workspace"`
+	// Window is 1-based, nil when the pane is not in a window at all
+	// (the rail and the popup are above windows).
+	Window  *int   `json:"window"`
+	Place   string `json:"place"`
+	Visible bool   `json:"visible"`
+	Focused bool   `json:"focused"`
+	// Since is epoch ms, wall clock: when rook first saw this pane
+	// running the companion.
+	Since int64 `json:"since"`
+}
+
+// CompanionState asks the engine where the companion is. A nil
+// Companion means the slot is off (the config named none) or the
+// server isn't running — in both, rook knows of no companion, which
+// is the same answer to the caller.
+func CompanionState() *Companion {
+	out, err := run("state")
+	if err != nil {
+		return nil
+	}
+	return companionFrom(out)
+}
+
+// companionFrom reads the companion out of one state snapshot. It
+// picks the fields it needs and ignores the rest, which is how a
+// reader survives a newer schema (see docs/surfaces.md).
+func companionFrom(snapshot string) *Companion {
+	var s struct {
+		Companion *Companion `json:"companion"`
+	}
+	if json.Unmarshal([]byte(snapshot), &s) != nil {
+		return nil
+	}
+	return s.Companion
+}
+
+// CompanionJSON is the same answer as rook's own bytes: the companion
+// object out of the snapshot, verbatim, so a consumer sees every
+// field this Go struct does not know about. "null" when there is no
+// companion to speak of.
+func CompanionJSON() string {
+	out, err := run("state")
+	if err != nil {
+		return "null"
+	}
+	return companionJSON(out)
+}
+
+func companionJSON(snapshot string) string {
+	var s struct {
+		Companion json.RawMessage `json:"companion"`
+	}
+	if json.Unmarshal([]byte(snapshot), &s) != nil || len(s.Companion) == 0 {
+		return "null"
+	}
+	return string(s.Companion)
+}

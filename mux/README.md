@@ -26,7 +26,10 @@ C-b when unset; double-tap types it literally. A `[mux]` section adds
 chip, focused borders, popup box; the eight ANSI names still work and
 map into the palette), `sidebar = false` / `sidebar_width = 30` for
 the side panel, and `agents = ["claude"]` — the foreground program
-names the rail treats as an agent it found. Then:
+names the rail treats as an agent it found. A `[companion]` table (the
+same one the Go half reads) names the resident rook watches for —
+`command = "vera"`, or `program = "vera"` when that command's first
+word is a wrapper; vera by default, `program = ""` turns the slot off. Then:
 
     v |        split side by side          c        new window
     -          split stacked               n p 1-9  switch window
@@ -100,6 +103,13 @@ framing, and a reconnect is a resync. Whole snapshots rather than
 deltas: a consumer that misses a delta is wrong forever, and dropping
 an older snapshot for a newer one is always correct, which is how a
 slow reader can never stall the poll loop.
+
+`companion` in the snapshot is when and where that resident is open —
+which panes are running her, in which workspace and window, whether
+she is on the glass or holding the keyboard, and since when. Only what
+rook can see in its own panes: open on a phone is not open in rook.
+`rook companion` reads it out as a line (`--json` for the bytes) and
+exits 1 when she is not open.
 
 `epoch` identifies the server across restarts (reconnect across a
 `rook kill` and you must discard, not merge); `serial` orders

@@ -51,6 +51,7 @@ const usage = `rook — the multiplexer, owned
   rook state | watch      the state feed: one snapshot, or one per change
   rook capture <id>       one pane's viewport as plain text
   rook side [-|demo]      push the side rail's model (JSON frames on stdin)
+  rook companion [--json] where the companion (vera) is open, if she is
   rook popup <cmd...>     float a command over the current window
   rook nav h|j|k|l        move focus (vim plugins call this at edges)
   rook stats | kill       server introspection / shutdown
@@ -83,6 +84,8 @@ func main() {
 		err = runWorktree(args[1:])
 	case args[0] == "pick":
 		err = runPick()
+	case args[0] == "companion":
+		err = runCompanion(args[1:])
 	case args[0] == "url":
 		err = runURL()
 	case muxVerbs[args[0]]:

@@ -8,6 +8,15 @@
 //!   sidebar = true                 # the spaces/agents side panel
 //!   sidebar_width = 30             # its width in columns
 //!   agents = ["claude"]            # programs the agents rail looks for
+//!
+//! and the [companion] table the Go half already reads — the one
+//! resident rook knows by name, so it can say when and where it is
+//! open:
+//!   [companion]
+//!   command = "vera"               # what summons it; its first word
+//!   program = "vera"               # …or the program outright, when
+//!                                  # the command's first word is a
+//!                                  # wrapper (`program = ""` = off)
 const std = @import("std");
 const chrome = @import("chrome.zig");
 
@@ -66,6 +75,14 @@ pub const Mux = struct {
     /// instead of being invisible to everything but the tab bar.
     agents: [256]u8 = @splat(0),
     agents_len: usize = 0,
+    /// The companion's program name: the foreground program that
+    /// means "the resident is open in this pane". One name, not a
+    /// list — the slot is singular by design, and rook reports every
+    /// pane running it. Empty *and set* turns the slot off; unset
+    /// means `default_companion`.
+    companion: [64]u8 = @splat(0),
+    companion_len: usize = 0,
+    companion_from: enum { none, name, command, program } = .none,
 
     pub fn ownersSlice(self: *const Mux) []const u8 {
         return self.owners[0..self.owners_len];
@@ -75,12 +92,46 @@ pub const Mux = struct {
         if (self.agents_len == 0) return default_agents;
         return self.agents[0..self.agents_len];
     }
+
+    /// The program rook watches for as the companion. Empty means the
+    /// slot is off — either named empty, or the default overridden
+    /// away — and rook then knows nothing about a companion, which is
+    /// a legitimate thing to configure.
+    pub fn companionSlice(self: *const Mux) []const u8 {
+        if (self.companion_from == .none) return default_companion;
+        return self.companion[0..self.companion_len];
+    }
+
+    /// Precedence, whichever order the lines appear in: `program`
+    /// (said outright), then the first word of `command` (what
+    /// summons her, which is usually her binary), then `name`.
+    ///
+    /// `name` last on purpose. To the Go half it labels the popup, not
+    /// the program — a config that reads `command = "vera chat"` and
+    /// `name = "Vera"` means one thing there and would mean another
+    /// here, and a shared file where one key means two things is how
+    /// `lsp` once cost the host its whole config. It is taken only
+    /// when nothing better names the occupant.
+    fn setCompanion(self: *Mux, val: []const u8, from: @TypeOf(@as(Mux, undefined).companion_from)) void {
+        if (@intFromEnum(self.companion_from) > @intFromEnum(from)) return;
+        const word = std.mem.sliceTo(std.mem.trim(u8, val, " \t"), ' ');
+        const base = std.fs.path.basename(word);
+        if (base.len > self.companion.len) return;
+        @memcpy(self.companion[0..base.len], base);
+        self.companion_len = base.len;
+        self.companion_from = from;
+    }
 };
 
 /// What rook looks for when nothing says otherwise. Claude Code names
 /// its binary by version, so `pane.programName` is what makes this a
 /// word rather than "2.1.241".
 pub const default_agents = "claude";
+
+/// The companion when the config names none. Rook ships the slot and
+/// the config names the occupant — vera is the first one, and the one
+/// the slot was cut for, so she is also the default.
+pub const default_companion = "vera";
 
 pub fn muxConfig() Mux {
     var out: Mux = .{};
@@ -96,19 +147,40 @@ pub fn muxConfig() Mux {
 }
 
 pub fn parseMux(toml: []const u8, out: *Mux) void {
-    var in_mux = false;
+    var section: enum { other, mux, companion } = .other;
     var lines = std.mem.splitScalar(u8, toml, '\n');
     while (lines.next()) |line| {
         const t = std.mem.trim(u8, line, " \t\r");
         if (t.len == 0 or t[0] == '#') continue;
         if (t[0] == '[') {
-            in_mux = std.mem.eql(u8, t, "[mux]");
+            section = if (std.mem.eql(u8, t, "[mux]"))
+                .mux
+            else if (std.mem.eql(u8, t, "[companion]"))
+                .companion
+            else
+                .other;
             continue;
         }
-        if (!in_mux) continue;
+        if (section == .other) continue;
         const eq = std.mem.indexOfScalar(u8, t, '=') orelse continue;
         const key = std.mem.trim(u8, t[0..eq], " \t");
         const val = std.mem.trim(u8, t[eq + 1 ..], " \t");
+        if (section == .companion) {
+            // The Go half's slot: `command` is what summons it and
+            // `name` labels it. Any of the three can tell the engine
+            // which program to watch for, in the order `setCompanion`
+            // spells out; `key` is the front door's business and is
+            // skipped here, as is anything else the table grows.
+            const v = std.mem.trim(u8, val, "\"'");
+            if (std.mem.eql(u8, key, "program")) {
+                out.setCompanion(v, .program);
+            } else if (std.mem.eql(u8, key, "command")) {
+                out.setCompanion(v, .command);
+            } else if (std.mem.eql(u8, key, "name")) {
+                out.setCompanion(v, .name);
+            }
+            continue;
+        }
         if (std.mem.eql(u8, key, "scrollback_mb")) {
             const mb = std.fmt.parseInt(usize, std.mem.trim(u8, val, "\"'"), 10) catch continue;
             const clamped: usize = @min(mb, 256);
@@ -179,6 +251,49 @@ test "parseMux" {
     try std.testing.expectEqualStrings("claude", a.agentsSlice()); // the default
     parseMux("[mux]\nagents = [\"claude\", \"codex\"]\n", &a);
     try std.testing.expectEqualStrings("claude\ncodex", a.agentsSlice());
+}
+
+test "the companion slot, named or summoned" {
+    const eq = std.testing.expectEqualStrings;
+    // nothing configured: the slot still exists, with its first occupant
+    var d: Mux = .{};
+    try eq("vera", d.companionSlice());
+    // the command's first word is the program to watch for
+    var c: Mux = .{};
+    parseMux("[companion]\ncommand = \"vera chat\"\nkey = \"g\"\n", &c);
+    try eq("vera", c.companionSlice());
+    // a path is still a program name
+    var p: Mux = .{};
+    parseMux("[companion]\ncommand = \"/opt/homebrew/bin/aider --dark\"\n", &p);
+    try eq("aider", p.companionSlice());
+    // `program` wins over the command, whichever order they come in
+    var n: Mux = .{};
+    parseMux("[companion]\ncommand = \"vera chat\"\nprogram = \"vera-dev\"\n", &n);
+    try eq("vera-dev", n.companionSlice());
+    var n2: Mux = .{};
+    parseMux("[companion]\nprogram = \"vera-dev\"\ncommand = \"vera chat\"\n", &n2);
+    try eq("vera-dev", n2.companionSlice());
+    // …and `name` loses to the command: over there it labels the
+    // popup, and a label is not a program name
+    var l: Mux = .{};
+    parseMux("[companion]\ncommand = \"vera chat\"\nname = \"Vera\"\n", &l);
+    try eq("vera", l.companionSlice());
+    // with nothing better, the label is what names the occupant
+    var only: Mux = .{};
+    parseMux("[companion]\nname = \"vera\"\nkey = \"g\"\n", &only);
+    try eq("vera", only.companionSlice());
+    // named empty: no companion at all, which is a thing to configure
+    var off: Mux = .{};
+    parseMux("[companion]\nprogram = \"\"\n", &off);
+    try eq("", off.companionSlice());
+    // a table that says nothing about the occupant still gets one
+    var bare: Mux = .{};
+    parseMux("[companion]\nkey = \"g\"\n", &bare);
+    try eq("vera", bare.companionSlice());
+    // the table only counts under its own header
+    var elsewhere: Mux = .{};
+    parseMux("[mux]\nname = \"nope\"\n[worktree]\ncommand = \"nope\"\n", &elsewhere);
+    try eq("vera", elsewhere.companionSlice());
 }
 
 test "parsePrefix" {

@@ -90,6 +90,62 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         if (sv.popup != null) "popup" else if (sv.scrolling) "copy" else "pane",
     }) catch return;
 
+    // The companion: the one resident rook knows by name — the config
+    // names the occupant, vera first. `null` when the slot is turned
+    // off. Everything here answers one of two questions: *when* she
+    // has been open (`since`, wall clock, per pane) and *where*
+    // (workspace, window, and whether she is on the glass or holding
+    // the keyboard right now). Rook reports what it can see in its
+    // own panes and nothing else — a companion open on a phone or in
+    // another terminal is not open *in rook*, and rook must not
+    // pretend to know.
+    const cname = sv.conf.companionSlice();
+    if (cname.len == 0) {
+        out.appendSlice(gpa, ",\"companion\":null") catch return;
+    } else {
+        out.appendSlice(gpa, ",\"companion\":{\"name\":") catch return;
+        str(gpa, out, cname);
+        // Two passes rather than a scratch buffer: this runs on the
+        // feed's diff every 50 ms, and the rollups have to be written
+        // before the rows they summarise.
+        var open = false;
+        var visible = false;
+        var focused = false;
+        for (sv.comp.slice()) |seen| {
+            const at = sv.placeOf(seen.pane) orelse continue;
+            open = true;
+            visible = visible or at.visible;
+            focused = focused or at.focused;
+        }
+        out.print(gpa, ",\"open\":{s},\"visible\":{s},\"focused\":{s},\"panes\":[", .{
+            boolStr(open),
+            boolStr(visible),
+            boolStr(focused),
+        }) catch return;
+        var wrote: usize = 0;
+        for (sv.comp.slice()) |seen| {
+            const at = sv.placeOf(seen.pane) orelse continue;
+            if (wrote > 0) out.append(gpa, ',') catch return;
+            wrote += 1;
+            out.print(gpa, "{{\"pane\":{d},\"workspace\":", .{seen.pane}) catch return;
+            str(gpa, out, at.workspace);
+            out.appendSlice(gpa, ",\"window\":") catch return;
+            if (at.window) |wi| {
+                out.print(gpa, "{d}", .{wi}) catch return;
+            } else {
+                out.appendSlice(gpa, "null") catch return;
+            }
+            out.appendSlice(gpa, ",\"place\":") catch return;
+            str(gpa, out, at.place);
+            out.print(gpa, ",\"visible\":{s},\"focused\":{s},\"since\":{d}}}", .{
+                boolStr(at.visible),
+                boolStr(at.focused),
+                seen.since,
+            }) catch return;
+        }
+        out.appendSlice(gpa, "]}") catch return;
+    }
+
     // ---- workspaces → windows → layout
     out.appendSlice(gpa, ",\"workspaces\":[") catch return;
     for (sv.sessions.items, 0..) |sn, si| {
