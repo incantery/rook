@@ -83,20 +83,32 @@ pub fn named(name: []const u8) ?Rgb {
 /// cell on every terminal that defaults ambiguous to narrow, which
 /// the glass does.
 pub const Dot = enum {
-    filled, // ●  running / present
+    none, //    nothing to report: the name is the whole row
+    working, // ◐  work in flight
     hollow, // ○  idle
-    ring, // ◉  wants you (blocked on an ask)
+    waiting, // ◇  wants you (blocked on an ask)
+    done, // ✓  finished
+    failed, // ×  did not finish
     loose, // ◌  nobody is driving it — see Origin
 
     fn glyph(self: Dot) []const u8 {
         return switch (self) {
-            .filled => "●",
+            .none => " ",
+            .working => "◐",
             .hollow => "○",
-            .ring => "◉",
+            .waiting => "◇",
+            .done => "✓",
+            .failed => "×",
             .loose => "◌",
         };
     }
 };
+
+/// The one glyph that is not a state: output on a row nobody has
+/// looked at yet. It rides *beside* a state rather than replacing one
+/// — a task can be done and unread at once, and the row has to say
+/// both — so it is the only mark that wears the accent.
+pub const unread_dot = "●";
 
 /// Who put a row on the rail — the one thing about an item that is
 /// not about the work.
@@ -178,21 +190,51 @@ pub const State = enum {
         return .none;
     }
 
+    /// Red is failure-only. That is the whole rule, and it costs
+    /// `blocked` the color it used to wear: a row waiting on you has
+    /// not gone wrong, it is asking, and painting the ask the same as
+    /// a crash taught a glance to read alarm where there was none.
+    /// Waiting is yellow — the attention color, shared with work in
+    /// flight — and `×` red is left to mean one thing.
+    ///
+    /// Idle drops to `overlay0` for the same reason in the other
+    /// direction: green on a row that is doing nothing was the
+    /// loudest thing on a quiet rail. Green now says `done`.
     pub fn color(self: State) Rgb {
         return switch (self) {
-            .none => overlay0,
-            .working => yellow,
-            .idle => green,
-            .blocked, .failed => red,
-            .done => teal,
+            .none, .idle => overlay0,
+            .working, .blocked => yellow,
+            .done => green,
+            .failed => red,
         };
     }
 
+    /// One state per channel: every state has its own shape, so a rail
+    /// still reads on a screen that has lost its color — and so the
+    /// accent dot is free to mean `unread` and nothing else.
     pub fn shape(self: State) Dot {
         return switch (self) {
+            .none => .none,
+            .working => .working,
             .idle => .hollow,
-            .blocked => .ring,
-            else => .filled,
+            .blocked => .waiting,
+            .done => .done,
+            .failed => .failed,
+        };
+    }
+
+    /// The word the row wears at its right edge. A glyph is a glance;
+    /// the word is what the glance resolves into, and it is rook's
+    /// word rather than the producer's so that every rail says the
+    /// same thing about the same state. `.none` has nothing to add.
+    pub fn word(self: State) []const u8 {
+        return switch (self) {
+            .none => "",
+            .working => "working",
+            .idle => "idle",
+            .blocked => "needs you",
+            .done => "done",
+            .failed => "failed",
         };
     }
 
@@ -213,6 +255,11 @@ pub const Item = struct {
     sub: []const u8 = "",
     state: State = .none,
     origin: Origin = .managed,
+    /// Output on this row that nobody has read yet. A second channel,
+    /// deliberately independent of `state`: a task can be `.done` and
+    /// unread in the same breath, and collapsing the two would lose
+    /// whichever one the other overwrote.
+    unread: bool = false,
     /// The workspace this row's agent is running in, when the producer
     /// says so (`"workspace"` on a pushed item). A row's *name* is
     /// prose — a task, a branch, a sentence — so it is not an identity
@@ -576,7 +623,7 @@ pub const Feed = struct {
 /// nothing rook finds is ever written back into a producer's model.
 pub const Merge = struct {
     items: std.ArrayList(Item) = .empty,
-    note_buf: [24]u8 = @splat(0),
+    note_buf: [40]u8 = @splat(0),
     /// A cursor parked on a *found* row. Rook owns cursor motion in
     /// every surface, and a found row is rook's own row, so this is
     /// the one highlight rook holds by itself — the rest still arrives
@@ -592,7 +639,7 @@ pub const Merge = struct {
     /// The merged panel. Its `items` borrow this Merge, so the result
     /// lives until the next call — one frame, which is what the frame
     /// builder wants.
-    pub fn panel(self: *Merge, gpa: std.mem.Allocator, pushed: Panel, found: []const Item) Panel {
+    pub fn panel(self: *Merge, gpa: std.mem.Allocator, surface: Surface, pushed: Panel, found: []const Item) Panel {
         self.items.clearRetainingCapacity();
         var added: usize = 0;
         var manual: usize = 0;
@@ -617,17 +664,44 @@ pub const Merge = struct {
         if (self.cur) |c| {
             if (c >= pushed.items.len and c < self.items.items.len) out.cur = c;
         }
-        // The header says how many rows nobody is managing — a rail
-        // that quietly grew rows should account for them at panel
-        // level too. A producer's own note is never overwritten.
-        if (pushed.note.len == 0 and manual > 0) {
-            if (std.fmt.bufPrint(&self.note_buf, "{d} manual", .{manual})) |n| {
-                out.note = n;
-            } else |_| {}
+        // The header accounts for the rows underneath it: how many are
+        // working, and how many nobody is managing. A rail that
+        // quietly grew rows should add them up at panel level too.
+        // Counted over the merged list, not just the rows rook found —
+        // the number a reader checks is about the panel they can see.
+        // A producer's own note is never overwritten.
+        if (pushed.note.len == 0) {
+            var working: usize = 0;
+            var unmanaged: usize = 0;
+            for (self.items.items) |it| {
+                if (it.state == .working) working += 1;
+                if (it.origin == .manual) unmanaged += 1;
+            }
+            // Only the agents panel counts work in flight. A space is
+            // a place, not a job: rook holding one says nothing about
+            // whether anything is running in it, and a header that
+            // claimed otherwise would be summarising the producer's
+            // rows rather than accounting for the ones rook added.
+            out.note = countNote(
+                &self.note_buf,
+                if (surface == .agents) working else 0,
+                unmanaged,
+            );
         }
         return out;
     }
 };
+
+/// "2 working · 1 manual" — either half dropped when it is zero, and
+/// nothing at all when both are. A zero is not news; a header that
+/// reads "0 manual" has spent a line saying so.
+fn countNote(buf: []u8, working: usize, manual: usize) []const u8 {
+    if (working > 0 and manual > 0)
+        return std.fmt.bufPrint(buf, "{d} working · {d} manual", .{ working, manual }) catch "";
+    if (working > 0) return std.fmt.bufPrint(buf, "{d} working", .{working}) catch "";
+    if (manual > 0) return std.fmt.bufPrint(buf, "{d} manual", .{manual}) catch "";
+    return "";
+}
 
 /// Does any pushed row claim the workspace `name`?
 fn claimedIn(items: []const Item, name: []const u8) bool {
@@ -709,6 +783,7 @@ fn parseFrame(a: std.mem.Allocator, bytes: []const u8) PushError!Parsed {
             .sub = objStr(o, "subtitle") orelse "",
             .state = State.parse(objStr(o, "state") orelse ""),
             .origin = Origin.parse(objStr(o, "origin") orelse ""),
+            .unread = objBool(o, "unread"),
             .ws = objStr(o, "workspace") orelse "",
         });
     }
@@ -779,23 +854,78 @@ pub fn clip(s: []const u8, n: u16) []const u8 {
     return s[0..end];
 }
 
+/// Bytes of the ellipsis `fitMiddle` splices in. One column, three
+/// bytes, and the byte count is what has to fit the budget.
+const ellipsis = "…";
+
+/// Fit `s` into `n` columns by dropping its *middle*, not its tail.
+///
+/// A rail row's name is prose a producer wrote — "Investigate Vera's
+/// /effort" — and prose front-loads its category and back-loads what
+/// makes it this one rather than its neighbour. Cutting the tail is
+/// therefore the one cut that reliably throws away the distinguishing
+/// half: a column of `Investigate Vera'…` / `Investigate Vera'…` is
+/// two rows that a glance cannot tell apart. Keeping both ends —
+/// `Investigate … /effort` — keeps the part that distinguishes them.
+///
+/// Below `min_middle` columns there is no honest middle to drop (the
+/// ellipsis would cost more than the text it saves), so a name that
+/// small falls back to `clip`. The result is written into `buf` and
+/// borrows it; `buf` must hold `n` bytes.
+pub fn fitMiddle(s: []const u8, n: u16, buf: []u8) []const u8 {
+    if (s.len <= n) return s;
+    if (n < min_middle or buf.len < n) return clip(s, n);
+
+    const budget = n - ellipsis.len;
+    // The tail takes the odd byte: it is the half that distinguishes.
+    var head: usize = budget / 2;
+    var tail_len: usize = budget - head;
+
+    // Both cuts land on codepoint boundaries. Walking the head end
+    // *down* and the tail start *up* can only shorten the result, so
+    // it stays inside the box either way.
+    while (head > 0 and (s[head] & 0xc0) == 0x80) head -= 1;
+    var tail = s.len - tail_len;
+    while (tail < s.len and (s[tail] & 0xc0) == 0x80) tail += 1;
+    tail_len = s.len - tail;
+
+    @memcpy(buf[0..head], s[0..head]);
+    @memcpy(buf[head..][0..ellipsis.len], ellipsis);
+    @memcpy(buf[head + ellipsis.len ..][0..tail_len], s[tail..]);
+    return buf[0 .. head + ellipsis.len + tail_len];
+}
+
+/// Narrower than this and a middle truncation says less than a plain
+/// one: `I…t` is not a name.
+pub const min_middle: u16 = 8;
+
 /// The whole panel: spaces over agents, split down the middle by a
 /// seam, the way the design has it.
 pub fn draw(f: anytype, m: Model, x: u16, y: u16, w: u16, h: u16) void {
     if (w < 8 or h < min_rows) return;
     const split = y + splitRow(h);
-    drawPanel(f, m.spaces, m.accent, x, y, w, split -| y);
+    drawPanel(f, m.spaces, m.accent, x, y, w, split -| y, false);
     // the seam between the two panels
     band(f, x, split, w, mantle);
     f.cup(x, split);
     sgrFg(f, surface0);
     var n: u16 = 0;
     while (n < w) : (n += 1) f.put("─");
-    drawPanel(f, m.agents, m.accent, x, split + 1, w, (y + h) -| (split + 1));
+    drawPanel(f, m.agents, m.accent, x, split + 1, w, (y + h) -| (split + 1), true);
     f.put("\x1b[0m");
 }
 
-fn drawPanel(f: anytype, p: Panel, accent: Rgb, x: u16, y: u16, w: u16, h: u16) void {
+/// The mark an agents row puts in front of its subtitle. That line is
+/// the task the agent is running and the space it runs in — metadata
+/// *about* the name above it, not more of the name — and one glyph is
+/// what keeps a reader from taking the two lines for one sentence.
+const assoc_lead = "↳ ";
+const assoc_cols: u16 = 2;
+
+/// `assoc` marks this panel's subtitles with `assoc_lead`. Only the
+/// agents panel does: a space's second line is its own repo and
+/// branch, which is not an association with anything.
+fn drawPanel(f: anytype, p: Panel, accent: Rgb, x: u16, y: u16, w: u16, h: u16, assoc: bool) void {
     if (h == 0) return;
     const pad: u16 = 2; // breathing room down the left edge
     // header: the title, and its note pushed to the right edge
@@ -817,14 +947,42 @@ fn drawPanel(f: anytype, p: Panel, accent: Rgb, x: u16, y: u16, w: u16, h: u16) 
         band(f, x, top + 1, w, back);
         band(f, x, top + 2, w, back);
 
-        // name row: the dot, then the name
+        // Name row: the dot, the name, and the row's right edge — an
+        // unread mark and the state's own word, right-aligned the way
+        // the header's note is. The word is what makes the rail read
+        // without a legend; the glyph is what makes it read at a
+        // glance. Both, or the dot is a code nobody has the key to.
+        const word = it.state.word();
+        var right: u16 = @intCast(word.len);
+        if (it.unread) right += 2; // "● "
+        // One column of air, so a long name never touches the word.
+        const gutter: u16 = if (right > 0) right + 1 else 0;
+        const name_w = (w -| (pad + 2)) -| gutter;
+
         f.cup(x + pad, top + 1);
         sgrFg(f, it.state.color());
         f.put(it.dot().glyph());
         sgrFg(f, text);
         f.put("\x1b[1m");
-        at(f, x + pad + 2, top + 1, w -| (pad + 2), it.name);
+        var name_buf: [256]u8 = undefined;
+        const nw: u16 = @min(name_w, @as(u16, name_buf.len));
+        at(f, x + pad + 2, top + 1, nw, fitMiddle(it.name, nw, &name_buf));
         f.put("\x1b[22m");
+
+        // The right edge, only when the row is wide enough to hold it
+        // without eating the name it is meant to annotate.
+        if (right > 0 and pad + 2 + gutter <= w) {
+            var rx = x + w - pad - right;
+            if (it.unread) {
+                sgrFg(f, accent);
+                at(f, rx, top + 1, right, unread_dot);
+                rx += 2;
+            }
+            if (word.len > 0) {
+                sgrFg(f, it.state.color());
+                at(f, rx, top + 1, @intCast(word.len), word);
+            }
+        }
 
         // subtitle row, indented under the name. An origin worth
         // saying goes first and stays dim whatever the row is doing —
@@ -837,6 +995,12 @@ fn drawPanel(f: anytype, p: Panel, accent: Rgb, x: u16, y: u16, w: u16, h: u16) 
             sgrFg(f, overlay0);
             at(f, sub_x, top + 2, sub_w, it.origin.tag());
             off = it.origin.tagCols();
+        } else if (assoc and it.sub.len > 0 and assoc_cols < sub_w) {
+            // A row that already wears an origin tag has said what its
+            // second line is for and never takes both marks.
+            sgrFg(f, overlay0);
+            at(f, sub_x, top + 2, sub_w, assoc_lead);
+            off = assoc_cols;
         }
         // a selected row's plain subtitle takes the accent; a state
         // color (working, blocked, done) already says more than that
@@ -894,7 +1058,7 @@ test "a click on an agent row points at the workspace it runs in" {
         .{ .name = "herdr", .sub = "working · claude" },
     } };
     const found = [_]Item{.{ .name = "scratch", .sub = "claude", .origin = .manual }};
-    const p = merge.panel(std.testing.allocator, pushed, &found);
+    const p = merge.panel(std.testing.allocator, .agents, pushed, &found);
 
     const task = hitRow(p, pushed.items.len, 2).?; // the first row's name
     try std.testing.expectEqual(@as(usize, 0), task.row);
@@ -951,18 +1115,19 @@ test "the demo frames are the model the panel used to hardcode" {
     try std.testing.expectEqualStrings("herdr", m.spaces.items[0].name);
     try std.testing.expectEqualStrings("master", m.spaces.items[0].sub);
     try std.testing.expectEqual(@as(?usize, 1), m.spaces.cur);
-    // the states the screenshot's dots stood for
-    try std.testing.expectEqual(yellow, m.spaces.items[0].state.color());
-    try std.testing.expectEqual(red, m.spaces.items[1].state.color());
-    try std.testing.expectEqual(green, m.spaces.items[2].state.color());
+    // The states the screenshot's dots stood for. Blocked is yellow,
+    // not red: it is an ask, and red is failure-only.
+    try std.testing.expectEqual(yellow, m.spaces.items[0].state.color()); // working
+    try std.testing.expectEqual(yellow, m.spaces.items[1].state.color()); // blocked
+    try std.testing.expectEqual(overlay0, m.spaces.items[2].state.color()); // idle
 
     try std.testing.expectEqualStrings("agents", m.agents.title);
     try std.testing.expectEqualStrings("grouped", m.agents.note);
     try std.testing.expectEqual(@as(usize, 4), m.agents.items.len);
     try std.testing.expectEqual(@as(?usize, 2), m.agents.cur);
     try std.testing.expectEqual(Dot.hollow, m.agents.items[1].state.shape());
-    try std.testing.expectEqual(Dot.ring, m.agents.items[2].state.shape());
-    try std.testing.expectEqual(teal, m.agents.items[3].state.subFg());
+    try std.testing.expectEqual(Dot.waiting, m.agents.items[2].state.shape());
+    try std.testing.expectEqual(green, m.agents.items[3].state.subFg()); // done
 }
 
 test "a push replaces the surface it names and leaves the other alone" {
@@ -1078,16 +1243,16 @@ test "origin rides in on a frame and marks the row nobody manages" {
     );
     const it = feed.model().agents.items;
     // a manual row with nothing reporting on it gets the loose dot,
-    // not `.none`'s filled one, which would read as running
+    // not a state's, which would read as running
     try std.testing.expectEqual(Origin.manual, it[0].origin);
     try std.testing.expectEqual(Dot.loose, it[0].dot());
     try std.testing.expectEqual(overlay0, it[0].state.color());
     // the default, and the norm: a pushed row has a producer behind it
     try std.testing.expectEqual(Origin.managed, it[1].origin);
-    try std.testing.expectEqual(Dot.filled, it[1].dot());
+    try std.testing.expectEqual(Dot.working, it[1].dot());
     // origin never overrides a state — the dot still says blocked
-    try std.testing.expectEqual(Dot.ring, it[2].dot());
-    try std.testing.expectEqual(red, it[2].state.color());
+    try std.testing.expectEqual(Dot.waiting, it[2].dot());
+    try std.testing.expectEqual(yellow, it[2].state.color());
     // an origin rook does not know is managed, not a dropped frame
     try std.testing.expectEqual(Origin.managed, it[3].origin);
 }
@@ -1114,7 +1279,7 @@ test "found agents land after pushed rows and never displace one" {
         .{ .name = "web-dashboard", .sub = "claude", .origin = .manual },
         .{ .name = "scratch", .sub = "claude ×2", .origin = .manual },
     };
-    const p = merge.panel(std.testing.allocator, feed.model().agents, &found);
+    const p = merge.panel(std.testing.allocator, .agents, feed.model().agents, &found);
 
     try std.testing.expectEqual(@as(usize, 5), p.items.len);
     // the four pushed rows, in order, untouched
@@ -1149,11 +1314,11 @@ test "a producer claims a workspace by naming it, not by titling a row after it"
         // a session in another workspace: nobody claims it
         .{ .name = "main", .sub = "claude", .origin = .manual },
     };
-    const p = merge.panel(std.testing.allocator, feed.model().agents, &found);
+    const p = merge.panel(std.testing.allocator, .agents, feed.model().agents, &found);
     try std.testing.expectEqual(@as(usize, 2), p.items.len);
     try std.testing.expectEqualStrings("Fix the duplicate rows", p.items[0].name);
     try std.testing.expectEqualStrings("main", p.items[1].name);
-    try std.testing.expectEqualStrings("1 manual", p.note);
+    try std.testing.expectEqualStrings("1 working · 1 manual", p.note);
 }
 
 test "an explicit workspace is the only claim that row makes" {
@@ -1168,7 +1333,7 @@ test "an explicit workspace is the only claim that row makes" {
         .{ .name = "scratch", .sub = "claude", .origin = .manual },
         .{ .name = "rook", .sub = "claude", .origin = .manual },
     };
-    const p = merge.panel(std.testing.allocator, pushed, &found);
+    const p = merge.panel(std.testing.allocator, .agents, pushed, &found);
     try std.testing.expectEqual(@as(usize, 2), p.items.len);
     try std.testing.expectEqualStrings("scratch", p.items[1].name);
     try std.testing.expectEqual(Origin.manual, p.items[1].origin);
@@ -1183,7 +1348,7 @@ test "a merged panel accounts for the rows nobody manages" {
         .{ .name = "rook", .sub = "claude", .origin = .manual },
         .{ .name = "scratch", .sub = "claude", .origin = .manual },
     };
-    const p = merge.panel(std.testing.allocator, pushed, &found);
+    const p = merge.panel(std.testing.allocator, .agents, pushed, &found);
     try std.testing.expectEqual(@as(usize, 3), p.items.len);
     try std.testing.expectEqualStrings("2 manual", p.note);
 }
@@ -1194,7 +1359,7 @@ test "an unfed rail still shows what rook found by itself" {
     var merge: Merge = .{};
     defer merge.deinit(std.testing.allocator);
     const found = [_]Item{.{ .name = "rook", .sub = "claude", .origin = .manual }};
-    const p = merge.panel(std.testing.allocator, feed.model().agents, &found);
+    const p = merge.panel(std.testing.allocator, .agents, feed.model().agents, &found);
     try std.testing.expectEqual(@as(usize, 1), p.items.len);
     try std.testing.expectEqualStrings("rook", p.items[0].name);
     try std.testing.expectEqualStrings("agents", p.title);
@@ -1212,15 +1377,15 @@ test "a click can park on a found row, and a push takes the rail back" {
     const found = [_]Item{.{ .name = "scratch", .sub = "claude", .origin = .manual }};
 
     // the pushed highlight, until rook's own cursor says otherwise
-    try std.testing.expectEqual(@as(?usize, 0), merge.panel(std.testing.allocator, feed.model().agents, &found).cur);
+    try std.testing.expectEqual(@as(?usize, 0), merge.panel(std.testing.allocator, .agents, feed.model().agents, &found).cur);
     merge.cur = 1;
-    try std.testing.expectEqual(@as(?usize, 1), merge.panel(std.testing.allocator, feed.model().agents, &found).cur);
+    try std.testing.expectEqual(@as(?usize, 1), merge.panel(std.testing.allocator, .agents, feed.model().agents, &found).cur);
     // a cursor past the rows there are is no cursor at all
     merge.cur = 9;
-    try std.testing.expectEqual(@as(?usize, 0), merge.panel(std.testing.allocator, feed.model().agents, &found).cur);
+    try std.testing.expectEqual(@as(?usize, 0), merge.panel(std.testing.allocator, .agents, feed.model().agents, &found).cur);
     // and it never claims a pushed row — that highlight is the model's
     merge.cur = 0;
-    try std.testing.expectEqual(@as(?usize, 0), merge.panel(std.testing.allocator, feed.model().agents, &found).cur);
+    try std.testing.expectEqual(@as(?usize, 0), merge.panel(std.testing.allocator, .agents, feed.model().agents, &found).cur);
 }
 
 test "nothing found leaves the pushed panel exactly as it was" {
@@ -1232,12 +1397,12 @@ test "nothing found leaves the pushed panel exactly as it was" {
 
     const pushed = feed.model().agents;
     // nothing to add
-    var p = merge.panel(std.testing.allocator, pushed, &.{});
+    var p = merge.panel(std.testing.allocator, .agents, pushed, &.{});
     try std.testing.expectEqual(pushed.items.ptr, p.items.ptr);
     try std.testing.expectEqualStrings("grouped", p.note);
     // everything found is already claimed
     const claimed = [_]Item{.{ .name = "herdr", .origin = .manual }};
-    p = merge.panel(std.testing.allocator, pushed, &claimed);
+    p = merge.panel(std.testing.allocator, .agents, pushed, &claimed);
     try std.testing.expectEqual(pushed.items.len, p.items.len);
     try std.testing.expectEqualStrings("grouped", p.note);
 }
@@ -1266,14 +1431,16 @@ test "workspaces rook holds land on spaces without a manual note" {
         .{ .name = "main", .origin = .found },
         .{ .name = "testing", .origin = .found },
     };
-    const p = merge.panel(std.testing.allocator, feed.model().spaces, &found);
+    const p = merge.panel(std.testing.allocator, .spaces, feed.model().spaces, &found);
     try std.testing.expectEqual(@as(usize, 2), p.items.len);
     try std.testing.expectEqualStrings("rook", p.items[0].name);
     try std.testing.expectEqualStrings("testing", p.items[1].name);
     try std.testing.expectEqual(Origin.found, p.items[1].origin);
     try std.testing.expectEqual(Dot.loose, p.items[1].dot());
     try std.testing.expectEqualStrings("", p.items[1].origin.tag());
-    // a held workspace is not an unmanaged agent: no "N manual"
+    // A held workspace is not an unmanaged agent, so no "N manual" —
+    // and spaces never count work in flight, so the producer's own
+    // working row buys no note either.
     try std.testing.expectEqualStrings("", p.note);
 }
 
@@ -1281,7 +1448,7 @@ test "an unfed spaces panel is rook's own workspaces" {
     var merge: Merge = .{};
     defer merge.deinit(std.testing.allocator);
     const found = [_]Item{ .{ .name = "main", .origin = .found }, .{ .name = "testing", .origin = .found } };
-    const p = merge.panel(std.testing.allocator, .{ .title = "spaces" }, &found);
+    const p = merge.panel(std.testing.allocator, .spaces, .{ .title = "spaces" }, &found);
     try std.testing.expectEqual(@as(usize, 2), p.items.len);
     try std.testing.expectEqualStrings("main", p.items[0].name);
     try std.testing.expectEqual(Origin.found, Origin.parse("found"));
@@ -1350,14 +1517,14 @@ test "a producer's claim still lands on a row rook labelled short" {
         .{ .name = "rook--vera-f356bc2c", .ws = "rook--vera-f356bc2c", .sub = "claude", .origin = .manual },
     };
     labelSpaces(&found);
-    const p = merge.panel(std.testing.allocator, feed.model().agents, &found);
+    const p = merge.panel(std.testing.allocator, .agents, feed.model().agents, &found);
     // One row for the claimed workspace — the producer's — and rook's
     // own row for the one nobody claimed, wearing its short label.
     try std.testing.expectEqual(@as(usize, 2), p.items.len);
     try std.testing.expectEqualStrings("Name the spaces", p.items[0].name);
     try std.testing.expectEqualStrings("vera-f356bc2c", p.items[1].name);
     try std.testing.expectEqualStrings("rook--vera-f356bc2c", p.items[1].workspace());
-    try std.testing.expectEqualStrings("1 manual", p.note);
+    try std.testing.expectEqualStrings("1 working · 1 manual", p.note);
 }
 
 test "a row that names no workspace is its own identity" {
@@ -1442,7 +1609,7 @@ test "a click on a labelled space points at the workspace, not the label" {
     var buf: [64]u8 = undefined;
     try std.testing.expect(borrowLabel(&found[0], &agents, &buf));
 
-    const p = merge.panel(std.testing.allocator, .{ .title = "spaces" }, &found);
+    const p = merge.panel(std.testing.allocator, .spaces, .{ .title = "spaces" }, &found);
     const borrowed = hitRow(p, 0, 2).?; // the first row
     try std.testing.expectEqualStrings("Name the spaces Vera makes", p.items[0].name);
     try std.testing.expectEqualStrings("rook--vera-e4126385", borrowed.ws);
@@ -1450,4 +1617,115 @@ test "a click on a labelled space points at the workspace, not the label" {
     // and the plain row beside it, which was never shortened
     const plain = hitRow(p, 0, 5).?;
     try std.testing.expectEqualStrings("rook", plain.ws);
+}
+
+test "red is failure-only, and every state has its own shape and word" {
+    // The rule the rail is drawn to: one state per channel. Two states
+    // sharing a color taught a glance to read alarm where there was an
+    // ask, and two sharing a shape left the color carrying it alone.
+    try std.testing.expectEqual(red, State.failed.color());
+    for ([_]State{ .none, .working, .idle, .blocked, .done }) |st| {
+        try std.testing.expect(!st.color().eql(red));
+    }
+
+    // Every state is distinguishable without color at all.
+    const states = [_]State{ .none, .working, .idle, .blocked, .done, .failed };
+    for (states, 0..) |a, i| {
+        for (states[i + 1 ..]) |b| {
+            try std.testing.expect(a.shape() != b.shape());
+        }
+    }
+
+    try std.testing.expectEqualStrings("working", State.working.word());
+    try std.testing.expectEqualStrings("needs you", State.blocked.word());
+    try std.testing.expectEqualStrings("idle", State.idle.word());
+    try std.testing.expectEqualStrings("done", State.done.word());
+    try std.testing.expectEqualStrings("failed", State.failed.word());
+    // A row with nothing to report spends no columns saying so.
+    try std.testing.expectEqualStrings("", State.none.word());
+}
+
+test "unread is its own channel and outlives the state on the row" {
+    var feed = Feed.init(std.testing.allocator);
+    defer feed.deinit();
+    _ = try feed.push(
+        \\{"params":{"surface":"agents","items":[{"title":"flakes","state":"done","unread":true},{"title":"quiet","state":"done"},{"title":"fresh","unread":true}]}}
+    );
+    const it = feed.model().agents.items;
+    // done *and* unread: the check carries the outcome, the accent dot
+    // carries "nobody has looked at it". Collapsing them loses one.
+    try std.testing.expect(it[0].unread);
+    try std.testing.expectEqual(Dot.done, it[0].dot());
+    try std.testing.expect(!it[1].unread);
+    try std.testing.expectEqual(Dot.done, it[1].dot());
+    // unread says nothing about state, and does not invent one
+    try std.testing.expect(it[2].unread);
+    try std.testing.expectEqual(State.none, it[2].state);
+    // and a row that never mentions it is not unread
+    try std.testing.expect(!(Item{ .name = "x" }).unread);
+}
+
+test "a long name loses its middle, never its distinguishing tail" {
+    var buf: [64]u8 = undefined;
+
+    // Two rows that differ only at the end stay two rows. Tail-cutting
+    // is what made them the same row.
+    const a = fitMiddle("Investigate Vera's /effort", 22, &buf);
+    try std.testing.expect(a.len <= 22);
+    try std.testing.expect(std.mem.startsWith(u8, a, "Investiga"));
+    try std.testing.expect(std.mem.endsWith(u8, a, "/effort"));
+    try std.testing.expect(std.mem.indexOf(u8, a, "…") != null);
+
+    var buf2: [64]u8 = undefined;
+    const b = fitMiddle("Investigate Vera's /model", 22, &buf2);
+    try std.testing.expect(!std.mem.eql(u8, a, b));
+
+    // A name that fits is returned untouched, and borrows nothing.
+    const fits = fitMiddle("short", 22, &buf);
+    try std.testing.expectEqualStrings("short", fits);
+
+    // Below `min_middle` an ellipsis costs more than it saves, so the
+    // plain cut takes over — and still never overflows its box.
+    const tiny = fitMiddle("Investigate Vera's /effort", 5, &buf);
+    try std.testing.expect(tiny.len <= 5);
+    try std.testing.expect(std.mem.indexOf(u8, tiny, "…") == null);
+}
+
+test "middle truncation cuts on codepoint boundaries" {
+    // A name that is multibyte throughout: every cut is a chance to
+    // split a codepoint and put a replacement glyph on the rail.
+    var buf: [64]u8 = undefined;
+    var n: u16 = min_middle;
+    while (n <= 40) : (n += 1) {
+        const out = fitMiddle("héllo wörld — ünicode näme", n, &buf);
+        try std.testing.expect(out.len <= n);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(out));
+    }
+}
+
+test "the merged header adds up the rows underneath it" {
+    var merge: Merge = .{};
+    defer merge.deinit(std.testing.allocator);
+    const pushed: Panel = .{ .title = "agents", .items = &.{
+        .{ .name = "scout", .sub = "working · claude", .state = .working, .ws = "rook--vera-a3f2" },
+    } };
+    const found = [_]Item{.{ .name = "main", .sub = "claude", .origin = .manual }};
+    const p = merge.panel(std.testing.allocator, .agents, pushed, &found);
+    try std.testing.expectEqualStrings("1 working · 1 manual", p.note);
+
+    // A producer that wrote its own note keeps it — rook counts only
+    // where nobody has spoken.
+    var mine: Merge = .{};
+    defer mine.deinit(std.testing.allocator);
+    var said = pushed;
+    said.note = "grouped";
+    try std.testing.expectEqualStrings("grouped", mine.panel(std.testing.allocator, .agents, said, &found).note);
+}
+
+test "a header with nothing to count says nothing" {
+    var buf: [40]u8 = undefined;
+    try std.testing.expectEqualStrings("", countNote(&buf, 0, 0));
+    try std.testing.expectEqualStrings("2 working", countNote(&buf, 2, 0));
+    try std.testing.expectEqualStrings("3 manual", countNote(&buf, 0, 3));
+    try std.testing.expectEqualStrings("1 working · 1 manual", countNote(&buf, 1, 1));
 }

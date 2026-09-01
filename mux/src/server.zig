@@ -1115,9 +1115,9 @@ pub const Server = struct {
     /// sent — see chrome.Merge.
     fn sideModel(self: *Server) chromepkg.Model {
         var m = self.side.model();
-        m.agents = self.agents_merge.panel(self.gpa, m.agents, self.found[0..self.found_n]);
+        m.agents = self.agents_merge.panel(self.gpa, .agents, m.agents, self.found[0..self.found_n]);
         const pushed_n = m.spaces.items.len;
-        m.spaces = self.spaces_merge.panel(self.gpa, m.spaces, self.foundSpaces());
+        m.spaces = self.spaces_merge.panel(self.gpa, .spaces, m.spaces, self.foundSpaces());
         // The current workspace is the highlight when the producer has
         // not placed one: among rook's own rows it is the one fact the
         // panel exists to show. A pushed `current` still wins.
