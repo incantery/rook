@@ -2646,7 +2646,10 @@ pub const Server = struct {
             const chip: u16 = @intCast(nm.len + 2); // " name "
             const mark_w: u16 = if (mark == .none) 0 else 2; // " ◐"
             const gap: u16 = if (shown > 0) 3 else 0;
-            const entry: u16 = gap + @as(u16, @intCast(num.len)) + 1 + chip + mark_w;
+            // No separator after the ordinal: the chip opens with its
+            // own padding cell, which is the gap — and on the selected
+            // tab that cell is the accent block starting.
+            const entry: u16 = gap + @as(u16, @intCast(num.len)) + chip + mark_w;
             // Leave room for the overflow tail or the "+" that follows.
             if (vis + entry + 4 > avail) break;
 
@@ -2656,8 +2659,7 @@ pub const Server = struct {
             }
             out.appendSliceBounded(idx_ink) catch {};
             out.appendSliceBounded(num) catch {};
-            out.appendSliceBounded(" ") catch {};
-            vis += @as(u16, @intCast(num.len)) + 1;
+            vis += @as(u16, @intCast(num.len));
 
             // One state per channel: the block says selected and only
             // selected, so a tab can be selected and working at once
