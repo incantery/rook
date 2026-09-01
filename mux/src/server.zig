@@ -2686,11 +2686,10 @@ pub const Server = struct {
         if (hidden > 0) {
             var more_buf: [24]u8 = undefined;
             if (std.fmt.bufPrint(&more_buf, "  ⋯ {d} more", .{hidden})) |m| {
-                // "⋯" is three bytes and one column.
-                const cols: u16 = @intCast(m.len - 2);
-                if (vis + cols <= avail) {
+                const w = chromepkg.cols(m);
+                if (vis + w <= avail) {
                     out.appendSliceBounded(m) catch {};
-                    vis += cols;
+                    vis += w;
                 }
             } else |_| {}
         } else if (vis + 4 <= avail) {
@@ -2709,8 +2708,7 @@ pub const Server = struct {
             "zoom"
         else
             "⌥n";
-        // "⌥" and "·" are multibyte and one column each.
-        const corner_cols: u16 = @intCast(std.unicode.utf8CountCodepoints(corner) catch corner.len);
+        const corner_cols = chromepkg.cols(corner);
         if (vis + corner_cols + 2 <= avail) {
             while (vis < avail - corner_cols) : (vis += 1) out.appendSliceBounded(" ") catch {};
             out.appendSliceBounded(bar) catch {};

@@ -887,6 +887,18 @@ fn at(f: anytype, x: u16, y: u16, w: u16, s: []const u8) void {
     f.put(clip(s, w));
 }
 
+/// Display columns of a chrome string.
+///
+/// Every glyph rook's own chrome draws is one cell — the dots, `↳`,
+/// `⋯`, `·`, `⌥`, and ASCII — so the column count is the codepoint
+/// count. That is not true of text in general, and this is not for
+/// text in general: it is for the strings this file and the tab bar
+/// compose, where a byte count is wrong (`⌥n` is four bytes and two
+/// columns) and getting it wrong shifts a whole pre-sized row.
+pub fn cols(s: []const u8) u16 {
+    return @intCast(std.unicode.utf8CountCodepoints(s) catch s.len);
+}
+
 /// Clip to at most `n` columns, truncated rather than ellipsized.
 /// Names arrive from a producer now, so this cuts on a codepoint
 /// boundary instead of mid-sequence: a byte count is an upper bound
@@ -1986,4 +1998,16 @@ test "a painted row never runs into its own state word" {
     try std.testing.expect(std.mem.indexOf(u8, r, "after it") != null);
     // And the whole row still fits the panel it is drawn in.
     try std.testing.expect((std.unicode.utf8CountCodepoints(r) catch 99) <= glass_cols);
+}
+
+test "a chrome string measures in columns, not bytes" {
+    // The tab bar is built to exactly `avail` columns. Measuring these
+    // in bytes overcounts by one per multibyte glyph, and a row that
+    // thinks it is wider than it is shifts everything after it.
+    try std.testing.expectEqual(@as(u16, 2), cols("⌥n"));
+    try std.testing.expectEqual(@as(u16, 13), cols("copy·hjkl y q"));
+    try std.testing.expectEqual(@as(u16, 11), cols("copy·VISUAL"));
+    try std.testing.expectEqual(@as(u16, 10), cols("  ⋯ 2 more"));
+    try std.testing.expectEqual(@as(u16, 4), cols("zoom"));
+    try std.testing.expectEqual(@as(u16, 0), cols(""));
 }
