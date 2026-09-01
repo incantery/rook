@@ -1,10 +1,19 @@
 //! The chrome the engine draws itself — every cell that is not a pane.
 //!
-//! Two things live here: the palette (Catppuccin Mocha, the colors the
-//! herdr design is drawn in) and the side panel, a left rail of
-//! *spaces* over *agents*. The panel is app chrome, not a pty: no
-//! process backs it, the frame builder paints it straight from a
-//! model.
+//! Three things live here: the palette (Catppuccin Mocha, the colors
+//! the herdr design is drawn in), the side panel — a left rail of
+//! *spaces* over *agents* — and the vocabulary the tab bar marks its
+//! windows with, which is the rail's vocabulary and belongs beside it
+//! rather than in the server that happens to draw the row. None of it
+//! is a pty: no process backs this chrome, the frame builder paints it
+//! straight from a model.
+//!
+//! One rule runs through all of it: **one state per channel**. A shape
+//! says what a row is doing, a color agrees with the shape, a word
+//! spells it out, the selection block means selected and nothing else,
+//! and the accent dot means unread and nothing else. Two states
+//! sharing a channel is how a rail starts lying — red for both an ask
+//! and a crash taught a glance to read alarm where there was none.
 //!
 //! Almost nothing in this file decides what the rail *says*. The
 //! model is pushed in from outside — `items.push` frames, the list
@@ -811,6 +820,42 @@ pub const demo_frames: []const []const u8 = &.{
     \\{"v":1,"op":"items.push","params":{"surface":"agents","note":"grouped","items":[{"id":"herdr","title":"herdr","subtitle":"working · claude","state":"working"},{"id":"explore","title":"explore","subtitle":"idle · opencode","state":"idle"},{"id":"web-dashboard","title":"web-dashboard","subtitle":"blocked · claude","state":"blocked","current":true},{"id":"data-pipeline","title":"data-pipeline","subtitle":"done · codex","state":"done"}]}}
     ,
 };
+
+// ---- the tab bar's vocabulary ----
+//
+// The row itself is drawn in `server.zig`, which has the pane table it
+// needs. What a mark *means* is chrome, and belongs beside the rail's
+// states rather than in the server that happens to paint it.
+
+/// What a tab says about its window past its name. The two marks are
+/// separate channels from the selection block and from each other —
+/// the block means selected and only selected — but they share one
+/// cell, so exactly one of them can be showing.
+pub const TabMark = enum { none, working, unread };
+
+/// Working outranks unread on that cell: a window you can watch
+/// working is not news you missed, and the ◐ is the more useful of the
+/// two to a reader deciding where to look.
+pub fn tabMark(w: struct {
+    current: bool,
+    agent: bool,
+    last_output_ms: i64,
+    seen_ms: i64,
+    now: i64,
+}) TabMark {
+    const last = w.last_output_ms;
+    if (last == 0) return .none; // never produced anything
+    if (w.agent and w.now - last < working_ms) return .working;
+    // The window on the glass is being read as it arrives.
+    if (!w.current and last > w.seen_ms) return .unread;
+    return .none;
+}
+
+/// How long after a batch of output an agent pane still reads as
+/// working on the tab bar. The same cadence the agents scan runs on,
+/// so the tab and the rail never disagree about whether something is
+/// happening in a window.
+pub const working_ms: i64 = 2000;
 
 // ---- drawing ----
 //
@@ -1728,4 +1773,74 @@ test "a header with nothing to count says nothing" {
     try std.testing.expectEqualStrings("2 working", countNote(&buf, 2, 0));
     try std.testing.expectEqualStrings("3 manual", countNote(&buf, 0, 3));
     try std.testing.expectEqualStrings("1 working · 1 manual", countNote(&buf, 1, 1));
+}
+
+test "a tab's mark is one channel, and the block is not it" {
+    const now: i64 = 1_000_000;
+
+    // An agent that just wrote something is working — whether or not
+    // you are looking at it. The design puts ◐ on the selected tab.
+    try std.testing.expectEqual(TabMark.working, tabMark(.{
+        .current = true,
+        .agent = true,
+        .last_output_ms = now - 100,
+        .seen_ms = now,
+        .now = now,
+    }));
+
+    // A shell echoing keystrokes is not working. Every pane produces
+    // output; a ◐ on all of them would say nothing about any of them.
+    try std.testing.expectEqual(TabMark.none, tabMark(.{
+        .current = false,
+        .agent = false,
+        .last_output_ms = now - 100,
+        .seen_ms = now,
+        .now = now,
+    }));
+
+    // An agent that went quiet stops claiming to be working, and what
+    // it wrote while you were away becomes unread instead.
+    try std.testing.expectEqual(TabMark.unread, tabMark(.{
+        .current = false,
+        .agent = true,
+        .last_output_ms = now - working_ms - 1,
+        .seen_ms = now - working_ms - 2,
+        .now = now,
+    }));
+
+    // Output on the window you are looking at is read by definition.
+    try std.testing.expectEqual(TabMark.none, tabMark(.{
+        .current = true,
+        .agent = false,
+        .last_output_ms = now - 10,
+        .seen_ms = now - 20,
+        .now = now,
+    }));
+
+    // Anything, agent or not, that wrote while you were elsewhere.
+    try std.testing.expectEqual(TabMark.unread, tabMark(.{
+        .current = false,
+        .agent = false,
+        .last_output_ms = now - 10,
+        .seen_ms = now - 20,
+        .now = now,
+    }));
+
+    // Seen since: nothing to report.
+    try std.testing.expectEqual(TabMark.none, tabMark(.{
+        .current = false,
+        .agent = false,
+        .last_output_ms = now - 30,
+        .seen_ms = now - 20,
+        .now = now,
+    }));
+
+    // A window that has never produced anything is not unread.
+    try std.testing.expectEqual(TabMark.none, tabMark(.{
+        .current = false,
+        .agent = true,
+        .last_output_ms = 0,
+        .seen_ms = 0,
+        .now = now,
+    }));
 }
