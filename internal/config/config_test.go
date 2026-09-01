@@ -56,3 +56,21 @@ func TestLoadRejectsMalformedTOML(t *testing.T) {
 		t.Fatal("malformed TOML must error")
 	}
 }
+
+// One file, two readers: the engine parses [mux] and the companion's
+// `program` out of the same rook.toml, and a loader that refuses keys
+// it has not heard of must not refuse those.
+func TestEngineKeysAreNotErrors(t *testing.T) {
+	c, err := Load(write(t, "[mux]\nagents = [\"claude\"]\nsidebar_width = 30\n"+
+		"[companion]\ncommand = \"vera chat\"\nname = \"vera\"\nprogram = \"vera\"\nkey = \"l\"\n"))
+	if err != nil {
+		t.Fatalf("a file the engine also reads refused to load: %v", err)
+	}
+	if c.Companion.Program != "vera" || c.Companion.Command != "vera chat" {
+		t.Errorf("companion: %+v", c.Companion)
+	}
+	// A typo is still a typo.
+	if _, err := Load(write(t, "[companion]\ncommandd = \"vera\"\n")); err == nil {
+		t.Error("an unrecognized key loaded anyway")
+	}
+}

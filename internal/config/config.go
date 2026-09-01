@@ -23,6 +23,11 @@ type Config struct {
 	Tmux      Tmux      `toml:"tmux"`
 	Companion Companion `toml:"companion"`
 	Worktree  Worktree  `toml:"worktree"`
+	// Mux is the [mux] table: the engine's half of this file, which it
+	// parses for itself (mux/README.md). Nothing here reads it — but an
+	// unrecognized key refuses to boot, and one file with two readers
+	// must not mean that either reader's keys break the other's.
+	Mux map[string]any `toml:"mux"`
 }
 
 // Worktree is the [worktree] table: what a fresh worktree needs that git
@@ -47,6 +52,15 @@ type Companion struct {
 	// Key is the prefix key that summons it; defaults to "a" (agent).
 	// A key set here wins over rook's default bindings.
 	Key string `toml:"key"`
+	// Program is the foreground program that means "the companion is
+	// open in this pane" — what the engine watches for so `rook
+	// companion` and the state feed can say when and where she is.
+	// Empty means the first word of Command (its basename), which is
+	// right whenever the command is her binary; set it when that word
+	// is a wrapper, or to "" to turn the slot off. Read by the engine,
+	// declared here because this loader refuses keys it has not heard
+	// of and one file cannot have two ideas of what is valid.
+	Program string `toml:"program"`
 }
 
 // Tmux is the [tmux] table: the slice of rook settings that proxy into
