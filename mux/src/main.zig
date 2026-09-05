@@ -31,6 +31,7 @@ test {
     _ = @import("config.zig");
     _ = @import("chrome.zig");
     _ = @import("companion.zig");
+    _ = @import("server.zig");
 }
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
