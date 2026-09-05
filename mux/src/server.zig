@@ -72,7 +72,81 @@ const Client = struct {
     /// Holds this block's geometry: its resizes win, the TUI layout
     /// stops resizing the pane, everyone else crops.
     lease: bool = false,
+    /// Where this glass is in a bracketed paste. Per client, because
+    /// the markers arrive on its stdin, and across reads, because a
+    /// long paste is split by every 4 KB the glass manages to read.
+    paste: Paste = .{},
 };
+
+/// A bracketed paste on the way in, as the glass sends it: ESC[200~
+/// text ESC[201~. Between the markers the bytes are content, not
+/// keys — a backtick in pasted text is a backtick, not the prefix,
+/// and rook must not spend the character after it on a command. The
+/// glass wraps a paste only when the focused pane asked for brackets
+/// (the server mirrors mode 2004 onto it), so the markers are exactly
+/// as trustworthy as the pane's own request for them.
+///
+/// One matcher does both markers: which one it is looking for is
+/// whichever the paste state calls for. It runs a byte at a time and
+/// keeps its place between reads, so a marker split across two reads
+/// still lands.
+const Paste = struct {
+    active: bool = false,
+    /// how many bytes of the marker in play have matched so far
+    mark: u8 = 0,
+
+    const begin = "\x1b[200~";
+    const end = "\x1b[201~";
+
+    /// Feed one byte; true when the marker in play just completed,
+    /// which is also when the paste opens or closes.
+    fn step(self: *Paste, b: u8) bool {
+        const pat: []const u8 = if (self.active) end else begin;
+        if (b == pat[self.mark]) {
+            self.mark += 1;
+            if (self.mark < pat.len) return false;
+            self.mark = 0;
+            self.active = !self.active;
+            return true;
+        }
+        // neither marker overlaps itself, so a mismatch can only
+        // restart the match at this very byte
+        self.mark = if (b == pat[0]) 1 else 0;
+        return false;
+    }
+
+    /// A byte the server spent on something else — a command, a mouse
+    /// report, a scroll key — cannot be part of a marker.
+    fn reset(self: *Paste) void {
+        self.mark = 0;
+    }
+
+    /// Inside a paste: how many bytes at the head of `bytes` are still
+    /// content — through the closing marker, or all of them.
+    fn take(self: *Paste, bytes: []const u8) usize {
+        for (bytes, 0..) |b, i| if (self.step(b)) return i + 1;
+        return bytes.len;
+    }
+};
+
+/// How far the next run of ordinary input goes before the server has
+/// to look at a byte itself: to the prefix key, to a mouse report, or
+/// to just past a paste's opening marker — whichever comes first,
+/// else all of it. Pure, so the paste rules are testable without a
+/// server behind them.
+fn runEnd(p: *Paste, rest: []const u8, prefix_key: u8) usize {
+    for (rest, 0..) |b, i| {
+        // the mouse report is the one escape sequence the server reads
+        // itself; every other escape belongs to the pane
+        if (b == 0x1b and i > 0 and i + 2 < rest.len and rest[i + 1] == '[' and rest[i + 2] == '<') return i;
+        if (p.step(b)) return i + 1;
+        // a byte partway through a marker is not a key, whatever it
+        // happens to spell
+        if (p.mark > 0) continue;
+        if (b == prefix_key and i > 0) return i;
+    }
+    return rest.len;
+}
 
 /// A client more than 32MB behind is not consuming; cut it loose.
 const max_client_backlog = 32 * 1024 * 1024;
@@ -929,12 +1003,7 @@ pub const Server = struct {
                         c.cols = g.cols;
                         c.rows = g.rows;
                         c.attached = true;
-                        if (self.glass_kitty != 0) {
-                            var kb: [16]u8 = undefined;
-                            if (std.fmt.bufPrint(&kb, "\x1b[={d};1u", .{self.glass_kitty})) |seq| {
-                                self.sendTo(c, @intFromEnum(proto.s2c.draw), seq);
-                            } else |_| {}
-                        }
+                        self.greetGlass(c);
                         self.relayout() catch {};
                     }
                 },
@@ -1830,15 +1899,27 @@ pub const Server = struct {
         self.sendTo(c, @intFromEnum(proto.s2c.stats_text), text);
     }
 
-    /// Route stdin: prefix commands here, scroll-mode keys in scroll
-    /// mode, mouse events by position, everything else to the focused
-    /// pane.
+    /// Route stdin: pasted text straight through, prefix commands
+    /// here, scroll-mode keys in scroll mode, mouse events by
+    /// position, everything else to the focused pane.
     fn input(self: *Server, c: *Client, bytes: []const u8) void {
         self.lat.note();
         var rest = bytes;
         while (rest.len > 0) {
+            // A paste is content, not keys: once the glass has opened
+            // one, every byte through the closing marker goes to the
+            // pane verbatim — no prefix, no mouse, no scroll keys.
+            // The markers ride along, because the pane is the one that
+            // asked for them.
+            if (c.paste.active) {
+                const n = c.paste.take(rest);
+                self.toFocused(rest[0..n]);
+                rest = rest[n..];
+                continue;
+            }
             if (c.prefix) {
                 c.prefix = false;
+                c.paste.reset();
                 self.command(c, rest[0]);
                 rest = rest[1..];
                 continue;
@@ -1846,18 +1927,21 @@ pub const Server = struct {
             // SGR mouse: ESC [ < btn ; x ; y (M|m)
             if (rest.len >= 3 and rest[0] == 0x1b and rest[1] == '[' and rest[2] == '<') {
                 if (parseMouse(rest)) |ev| {
+                    c.paste.reset();
                     self.mouse(ev);
                     rest = rest[ev.len..];
                     continue;
                 }
             }
             if (self.scrolling) {
+                c.paste.reset();
                 self.scrollKey(rest[0]);
                 rest = rest[1..];
                 continue;
             }
             if (rest[0] == self.prefix_key) {
                 c.prefix = true;
+                c.paste.reset();
                 rest = rest[1..];
                 continue;
             }
@@ -1873,27 +1957,14 @@ pub const Server = struct {
             if (bytes.len == 1 and self.popup == null) {
                 if (ctrlNavDir(rest[0])) |dir| {
                     if (!self.fgOwnsCtrlNav() and self.navigate(dir)) {
+                        c.paste.reset();
                         rest = rest[1..];
                         continue;
                     }
                 }
             }
-            // forward up to the next special byte
-            var end: usize = rest.len;
-            for (rest, 0..) |b, i| {
-                if (b == self.prefix_key or b == 0x1b) {
-                    if (b == 0x1b and i == 0) {
-                        // a lone ESC (or non-mouse CSI): forward it
-                        continue;
-                    }
-                    end = if (b == 0x1b) blk: {
-                        // only stop for a potential mouse sequence
-                        if (i + 2 < rest.len and rest[i + 1] == '[' and rest[i + 2] == '<') break :blk i;
-                        continue;
-                    } else i;
-                    break;
-                }
-            }
+            // forward up to the next byte the server wants for itself
+            const end = runEnd(&c.paste, rest, self.prefix_key);
             self.toFocused(rest[0..end]);
             rest = rest[end..];
         }
@@ -2775,6 +2846,27 @@ pub const Server = struct {
         }
     }
 
+    /// A glass that has just attached is told the modes the focused
+    /// pane already asked for. `mirrorKitty` only speaks on a change,
+    /// so without this a second (or reattached) glass is left at its
+    /// defaults — and a glass that was never told mode 2004 does not
+    /// wrap Cmd-V in ESC[200~ … ESC[201~, which is the difference
+    /// between a paste arriving as text and arriving as keystrokes.
+    fn greetGlass(self: *Server, c: *Client) void {
+        var buf: [64]u8 = undefined;
+        var out: std.ArrayList(u8) = .initBuffer(&buf);
+        if (self.glass_kitty != 0) {
+            var kb: [16]u8 = undefined;
+            if (std.fmt.bufPrint(&kb, "\x1b[={d};1u", .{self.glass_kitty})) |seq| {
+                out.appendSliceBounded(seq) catch {};
+            } else |_| {}
+        }
+        if (self.glass_paste) out.appendSliceBounded("\x1b[?2004h") catch {};
+        if (self.glass_focus) out.appendSliceBounded("\x1b[?1004h") catch {};
+        if (out.items.len == 0) return;
+        self.sendTo(c, @intFromEnum(proto.s2c.draw), out.items);
+    }
+
     /// Keep the glass's kitty keyboard mode equal to the focused
     /// pane's flags. ghostty-vt already tracks the stack and answers
     /// the query per pane; this makes the outer terminal actually
@@ -3215,4 +3307,99 @@ fn ctrlNavDir(b: u8) ?u8 {
 
 fn plural(n: usize) []const u8 {
     return if (n == 1) "" else "s";
+}
+
+// ---- input routing: pasted text vs. keys ----
+//
+// The bug these guard: with `prefix = "`"`, pasting ```` ```bash ````
+// armed the prefix on the first backtick and spent the `b` after it
+// on a command, then ate the ESC of the closing marker the same way —
+// so the pane never saw the end of the paste and the text never
+// landed. Between the markers there are no keys, only text.
+
+test "a paste opens at its marker and runs to the end of the run" {
+    var p: Paste = .{};
+    const in = "\x1b[200~hello\x1b[201~";
+    try std.testing.expectEqual(@as(usize, 6), runEnd(&p, in, '`'));
+    try std.testing.expect(p.active);
+    try std.testing.expectEqual(in.len - 6, p.take(in[6..]));
+    try std.testing.expect(!p.active);
+}
+
+test "a backtick inside a paste is text, not the prefix key" {
+    var p: Paste = .{};
+    const in = "\x1b[200~```bash\nls\n```\x1b[201~";
+    const opened = runEnd(&p, in, '`');
+    try std.testing.expectEqual(@as(usize, 6), opened);
+    try std.testing.expect(p.active);
+    // every remaining byte, backticks and closing marker included,
+    // is handed to the pane in one piece
+    try std.testing.expectEqual(in.len - opened, p.take(in[opened..]));
+    try std.testing.expect(!p.active);
+}
+
+test "the prefix key is a prefix again once the paste has closed" {
+    var p: Paste = .{};
+    _ = runEnd(&p, "\x1b[200~x\x1b[201~", '`');
+    _ = p.take("x\x1b[201~");
+    try std.testing.expect(!p.active);
+    // `ab`c` -> the run stops at the backtick, as it always did
+    try std.testing.expectEqual(@as(usize, 2), runEnd(&p, "ab`c", '`'));
+}
+
+test "outside a paste the prefix key still ends the run" {
+    var p: Paste = .{};
+    try std.testing.expectEqual(@as(usize, 2), runEnd(&p, "ab`c", '`'));
+    try std.testing.expect(!p.active);
+    // C-b, the default prefix, the same way
+    var q: Paste = .{};
+    try std.testing.expectEqual(@as(usize, 3), runEnd(&q, "abc\x02d", 0x02));
+}
+
+test "a mouse report ends the run so the server can read it itself" {
+    var p: Paste = .{};
+    try std.testing.expectEqual(@as(usize, 2), runEnd(&p, "ab\x1b[<0;1;1M", '`'));
+    try std.testing.expect(!p.active);
+}
+
+test "an escape that is not a mouse report goes to the pane" {
+    var p: Paste = .{};
+    // a lone ESC, and an arrow key, both ride through untouched
+    try std.testing.expectEqual(@as(usize, 1), runEnd(&p, "\x1b", '`'));
+    var q: Paste = .{};
+    try std.testing.expectEqual(@as(usize, 3), runEnd(&q, "\x1bOA", '`'));
+}
+
+test "a marker split across reads still opens and closes the paste" {
+    var p: Paste = .{};
+    // the glass reads 4 KB at a time: a marker can straddle two reads
+    try std.testing.expectEqual(@as(usize, 3), runEnd(&p, "\x1b[2", '`'));
+    try std.testing.expect(!p.active);
+    try std.testing.expectEqual(@as(usize, 3), runEnd(&p, "00~", '`'));
+    try std.testing.expect(p.active);
+    // content, then a closing marker split the same way
+    try std.testing.expectEqual(@as(usize, 5), p.take("a`b\x1b["));
+    try std.testing.expect(p.active);
+    try std.testing.expectEqual(@as(usize, 4), p.take("201~x"));
+    try std.testing.expect(!p.active);
+}
+
+test "a false start on a marker leaves the bytes as keys" {
+    var p: Paste = .{};
+    // ESC [ 2 0 1 ~ is the *closing* marker: with no paste open it is
+    // just an escape sequence for the pane, and the run is not cut
+    try std.testing.expectEqual(@as(usize, 6), runEnd(&p, "\x1b[201~", '`'));
+    try std.testing.expect(!p.active);
+    // and a near-miss restarts the match at the byte that missed
+    var q: Paste = .{};
+    try std.testing.expectEqual(@as(usize, 10), runEnd(&q, "\x1b[20\x1b[200~x", '`'));
+    try std.testing.expect(q.active);
+}
+
+test "a byte spent on a command cannot be part of a marker" {
+    var p: Paste = .{};
+    _ = runEnd(&p, "\x1b[2", '`');
+    p.reset();
+    try std.testing.expectEqual(@as(usize, 3), runEnd(&p, "00~", '`'));
+    try std.testing.expect(!p.active);
 }

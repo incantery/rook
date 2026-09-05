@@ -76,7 +76,15 @@ three forward pane-relative instead when the program asked for mouse
 windows open in the focused pane's cwd. Kitty keyboard protocol is
 mirrored: ghostty-vt tracks each pane's flag stack, and the mux sets
 the focused pane's flags on the glass (CSI = u), so nvim gets real
-kitty input and plain shells get legacy bytes. Pins (prefix-P) dock the focused pane to a left rail owned by the
+kitty input and plain shells get legacy bytes. Bracketed paste
+is mirrored the same way, and a glass is told both the moment it
+attaches — a glass never sent `?2004h` does not wrap Cmd-V, and an
+unwrapped paste is a run of keystrokes. Between `ESC[200~` and
+`ESC[201~` the server reads nothing for itself: a backtick in pasted
+text is a backtick, not the prefix (`python3 scripts/paste-e2e.py`
+checks that, through a real glass).
+
+Pins (prefix-P) dock the focused pane to a left rail owned by the
 workspace: visible in every window, stacked, one shared width
 (prefix-H/L while focused on it). prefix-G promotes a pin to global
 (follows you across workspaces) — the chrome-as-panes idea, so a
