@@ -35,8 +35,10 @@ prefix = "` "`", `C-b` when unset).
 focus (a bare `ctrl-hjkl` too, vim-navigator style, with
 `mux/nvim` handing edge moves back), `prefix-z` zoom, `prefix-[` copy
 mode, `prefix-P` pin a pane to the rail, `prefix-s` the picker,
-`prefix-w` worktrees, `prefix-a` the side panel, `prefix-u` the oldest
-thing you have not read.
+`prefix-w` worktrees, `prefix-a` the side panel (open → collapsed →
+hidden), `prefix-A` it away and back, `prefix-u` the oldest
+thing you have not read. The tabs are clickable: a chip is its window,
+the `+` a new one.
 
 **The rail.** Down the left edge: *spaces* over *agents*, a dot and
 two lines each. Rook lists its own workspaces and the panes it can see

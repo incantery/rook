@@ -542,10 +542,10 @@ still exact. Deltas would force unbounded buffering or a disconnect.
 
   "pins": [{"pane": 12, "scope": "global"}],
   "surfaces": [
-    {"name": "spaces", "place": "dock:left", "size": 30, "shown": true,
+    {"name": "spaces", "place": "dock:left", "size": 30, "shown": true, "mode": "open",
      "model": {"v": 1, "op": "items.push", "params": {"surface": "spaces", "items": [
        {"id": "herdr", "title": "herdr", "subtitle": "master", "state": "working"}]}}},
-    {"name": "agents", "place": "dock:left", "size": 30, "shown": true, "model": null,
+    {"name": "agents", "place": "dock:left", "size": 30, "shown": true, "mode": "open", "model": null,
      "found": [{"title": "scratch", "subtitle": "claude",
                 "workspace": "scratch", "origin": "manual"}]}
   ],
@@ -571,7 +571,12 @@ the server's uptime clock, because other processes read it. A `found`
 row carries both words an item has always had: `title` is the label
 rook paints and `workspace` is the workspace it is about — the one it
 was found in (on `agents`) or the row itself (on `spaces`, where
-`current` marks the one in front). `model`'s items carry the
+`current` marks the one in front). A surface's `mode` is how much of the
+left dock is on the glass — `open`, `collapsed` (three columns of
+dots, the same rows with the words taken off them) or `hidden` — as
+it is being painted, folding on narrow glass included; `shown` stays
+the question a replica asks first, whether there is anything drawn at
+all. `model`'s items carry the
 producer's `workspace` verbatim, so a second glass drops the same rows
 rook does without inventing a rule of its own — matching `workspace`
 against `workspace`, never against a title, which is prose on a pushed

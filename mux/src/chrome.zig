@@ -456,6 +456,48 @@ pub const Surface = enum {
     }
 };
 
+/// How much of the rail is on the glass, and the only thing about it
+/// rook decides for itself. Three modes rather than a toggle: the
+/// panel in full; a rail of dots three columns wide, which keeps what
+/// wants you and spends nothing on words; and away entirely, for the
+/// work with no chrome down its left edge. `prefix-a` cycles them in
+/// that order, `prefix-A` goes straight to the far end and back.
+pub const SideMode = enum {
+    open,
+    collapsed,
+    hidden,
+
+    pub fn parse(s: []const u8) ?SideMode {
+        if (std.mem.eql(u8, s, "open")) return .open;
+        if (std.mem.eql(u8, s, "collapsed")) return .collapsed;
+        if (std.mem.eql(u8, s, "hidden")) return .hidden;
+        return null;
+    }
+
+    pub fn word(self: SideMode) []const u8 {
+        return switch (self) {
+            .open => "open",
+            .collapsed => "collapsed",
+            .hidden => "hidden",
+        };
+    }
+
+    /// The mode `prefix-a` lands on next. Cycling forward always ends
+    /// up back where it started, so the key is still the one a hand
+    /// presses without reading anything.
+    pub fn next(self: SideMode) SideMode {
+        return switch (self) {
+            .open => .collapsed,
+            .collapsed => .hidden,
+            .hidden => .open,
+        };
+    }
+};
+
+/// Columns the collapsed rail paints: one of air, the state dot, the
+/// unread mark. Its seam sits beside it, as the open panel's does.
+pub const collapsed_w: u16 = 3;
+
 /// Rows one item occupies: a leading gap, the name, the subtitle.
 pub const item_rows: u16 = 3;
 
@@ -833,6 +875,41 @@ pub const demo_frames: []const []const u8 = &.{
 /// cell, so exactly one of them can be showing.
 pub const TabMark = enum { none, working, unread };
 
+/// What a click on the tab bar lands on: a window, by its index in
+/// the workspace, or the `+` that opens a new one.
+pub const TabTarget = union(enum) {
+    window: usize,
+    new,
+};
+
+/// A run of columns on the tab bar that means something when clicked.
+/// The row is drawn in `server.zig`, which has the pane table; it
+/// records each run *as it lays it out*, so the hit test is the same
+/// arithmetic the painter used rather than a second guess at it.
+pub const TabZone = struct {
+    /// First column of the run, relative to the bar's own start (the
+    /// side panel and the global pin rail push that right).
+    x: u16,
+    w: u16,
+    target: TabTarget,
+};
+
+/// The most a bar records. A chip is four columns at its narrowest,
+/// so a glass wide enough to show more than this does not exist; a
+/// window past it is in the `⋯ n more` tail, which is not a target.
+pub const max_tab_zones: usize = 32;
+
+/// The zone under a bar-relative column, or null for the air between
+/// chips, the corner hint and the tail. Chrome that acts on a click
+/// where it drew no target is chrome you stop trusting, so the gaps
+/// mean nothing on purpose.
+pub fn hitTab(zones: []const TabZone, x: u16) ?TabTarget {
+    for (zones) |z| {
+        if (x >= z.x and x < z.x + z.w) return z.target;
+    }
+    return null;
+}
+
 /// Working outranks unread on that cell: a window you can watch
 /// working is not news you missed, and the ◐ is the more useful of the
 /// two to a reader deciding where to look.
@@ -991,6 +1068,64 @@ pub fn draw(f: anytype, m: Model, x: u16, y: u16, w: u16, h: u16) void {
     var n: u16 = 0;
     while (n < w) : (n += 1) f.put("─");
     drawPanel(f, m.agents, m.accent, x, split + 1, w, (y + h) -| (split + 1), true);
+    f.put("\x1b[0m");
+}
+
+/// The collapsed rail: the same rows in the same places, with the
+/// words taken off them. A state dot a row and the unread mark beside
+/// it — what wants you still reaches the eye from three columns, and
+/// the panel that comes back on `prefix-a` has not moved under it, so
+/// the eye keeps the rows it had learned.
+pub fn drawCollapsed(f: anytype, m: Model, x: u16, y: u16, w: u16, h: u16) void {
+    if (w == 0 or h < min_rows) return;
+    const split = y + splitRow(h);
+    drawCollapsedPanel(f, m.spaces, m.accent, x, y, w, split -| y);
+    band(f, x, split, w, mantle);
+    f.cup(x, split);
+    sgrFg(f, surface0);
+    var n: u16 = 0;
+    while (n < w) : (n += 1) f.put("─");
+    drawCollapsedPanel(f, m.agents, m.accent, x, split + 1, w, (y + h) -| (split + 1));
+    f.put("\x1b[0m");
+}
+
+fn drawCollapsedPanel(f: anytype, p: Panel, accent: Rgb, x: u16, y: u16, w: u16, h: u16) void {
+    if (h == 0) return;
+    // The header keeps its row and its first letter. Three columns is
+    // no room for "spaces", and a rail whose halves are unnamed is one
+    // you have to count rows to read.
+    band(f, x, y, w, mantle);
+    sgrFg(f, overlay0);
+    if (p.title.len > 0 and w > 1) {
+        f.cup(x + 1, y);
+        f.put(p.title[0..1]);
+    }
+
+    for (p.items, 0..) |it, i| {
+        const top = y + 1 + @as(u16, @intCast(i)) * item_rows;
+        if (top + item_rows > y + h) break; // no room for a whole item
+        const sel = p.cur != null and p.cur.? == i;
+        const back: Rgb = if (sel) base else mantle;
+        band(f, x, top, w, back);
+        band(f, x, top + 1, w, back);
+        band(f, x, top + 2, w, back);
+        // The dot lands on the row the name is on when the panel is
+        // open: the same row means the same thing in both modes.
+        f.cup(x + 1, top + 1);
+        sgrFg(f, it.state.color());
+        f.put(it.dot().glyph());
+        if (it.unread and w > 2) {
+            // Straight to the cell: `at` measures its clip in bytes,
+            // which is an upper bound that never lets a three-byte
+            // glyph through one column of it.
+            f.cup(x + 2, top + 1);
+            sgrFg(f, accent);
+            f.put(unread_dot);
+        }
+    }
+
+    var row = y + 1 + @as(u16, @intCast(p.items.len)) * item_rows;
+    while (row < y + h) : (row += 1) band(f, x, row, w, mantle);
     f.put("\x1b[0m");
 }
 
@@ -2020,6 +2155,77 @@ test "a painted row never runs into its own state word" {
     try std.testing.expect(std.mem.indexOf(u8, r, "after it") != null);
     // And the whole row still fits the panel it is drawn in.
     try std.testing.expect((std.unicode.utf8CountCodepoints(r) catch 99) <= glass_cols);
+}
+
+test "the collapsed rail keeps the rows the open panel had" {
+    // Same model, same geometry, three columns instead of thirty: a
+    // mode change must not move a row under the eye that learned it.
+    var open_g: Glass = .{ .gpa = std.testing.allocator };
+    defer open_g.deinit();
+    var thin: Glass = .{ .gpa = std.testing.allocator };
+    defer thin.deinit();
+
+    const spaces: Panel = .{
+        .title = "spaces",
+        .items = &.{ .{ .name = "rook", .state = .working }, .{ .name = "vera" } },
+        .cur = 0,
+    };
+    const agents: Panel = .{ .title = "agents", .items = &.{
+        .{ .name = "scout", .state = .idle, .unread = true },
+    } };
+    const m: Model = .{ .spaces = spaces, .agents = agents };
+    draw(&open_g, m, 0, 0, glass_cols, glass_rows);
+    drawCollapsed(&thin, m, 0, 0, collapsed_w, glass_rows);
+
+    var a: [512]u8 = undefined;
+    var b: [512]u8 = undefined;
+    // The panel's first row is its title; the rail keeps its initial.
+    try std.testing.expect(std.mem.startsWith(u8, open_g.row(0, &a), "  spaces"));
+    try std.testing.expectEqualStrings(" s", thin.row(0, &b));
+    // Row 2 is the first space in both, dot for dot.
+    try std.testing.expect(std.mem.startsWith(u8, open_g.row(2, &a), "  ◐ rook"));
+    try std.testing.expectEqualStrings(" ◐", thin.row(2, &b));
+    // A space with nothing to report spends no glyph on saying so.
+    try std.testing.expectEqualStrings("", thin.row(5, &b));
+    // The seam between the panels is on the same row.
+    try std.testing.expectEqualStrings("───", thin.row(10, &b));
+    try std.testing.expect(std.mem.startsWith(u8, open_g.row(11, &a), "  agents"));
+    try std.testing.expectEqualStrings(" a", thin.row(11, &b));
+    // Unread rides beside the state here too — the one thing three
+    // columns are worth spending on twice.
+    try std.testing.expect(std.mem.endsWith(u8, open_g.row(13, &a), "● idle"));
+    try std.testing.expectEqualStrings(" ○●", thin.row(13, &b));
+}
+
+test "the side panel cycles, and every mode has a word" {
+    try std.testing.expectEqual(SideMode.collapsed, SideMode.open.next());
+    try std.testing.expectEqual(SideMode.hidden, SideMode.collapsed.next());
+    try std.testing.expectEqual(SideMode.open, SideMode.hidden.next());
+    // Three presses of prefix-a is where you started.
+    try std.testing.expectEqual(SideMode.open, SideMode.open.next().next().next());
+    try std.testing.expectEqual(SideMode.collapsed, SideMode.parse("collapsed").?);
+    try std.testing.expectEqual(@as(?SideMode, null), SideMode.parse("folded"));
+    try std.testing.expectEqualStrings("hidden", SideMode.hidden.word());
+}
+
+test "a tab is clicked where it was drawn" {
+    // The zones a bar records: ordinal, chip and mark are one run —
+    // the chip is the target, and the air between chips is not.
+    const zones = [_]TabZone{
+        .{ .x = 0, .w = 8, .target = .{ .window = 0 } },
+        .{ .x = 11, .w = 9, .target = .{ .window = 1 } },
+        .{ .x = 22, .w = 4, .target = .new },
+    };
+    try std.testing.expectEqual(TabTarget{ .window = 0 }, hitTab(&zones, 0).?);
+    try std.testing.expectEqual(TabTarget{ .window = 0 }, hitTab(&zones, 7).?);
+    try std.testing.expectEqual(@as(?TabTarget, null), hitTab(&zones, 8)); // the gap
+    try std.testing.expectEqual(TabTarget{ .window = 1 }, hitTab(&zones, 11).?);
+    try std.testing.expectEqual(TabTarget{ .window = 1 }, hitTab(&zones, 19).?);
+    try std.testing.expectEqual(@as(?TabTarget, null), hitTab(&zones, 20));
+    try std.testing.expectEqual(TabTarget.new, hitTab(&zones, 24).?);
+    // Past the last zone is the corner hint, which is not a target.
+    try std.testing.expectEqual(@as(?TabTarget, null), hitTab(&zones, 26));
+    try std.testing.expectEqual(@as(?TabTarget, null), hitTab(&.{}, 0));
 }
 
 test "a chrome string measures in columns, not bytes" {

@@ -5,8 +5,10 @@
 //!   scrollback_mb = 4
 //!   accent = "#cba6f7"             # chrome color: tabs, borders, popup
 //!   restore = false                # skip resurrecting the last layout on boot
-//!   sidebar = true                 # the spaces/agents side panel
-//!   sidebar_width = 30             # its width in columns
+//!   sidebar_mode = "open"          # the spaces/agents side panel:
+//!                                  # open, collapsed (dots only), hidden
+//!   sidebar = true                 # the older spelling: false = hidden
+//!   sidebar_width = 30             # its width in columns, open
 //!   agents = ["claude"]            # programs the agents rail looks for
 //!
 //! and the [companion] table the Go half already reads — the one
@@ -61,9 +63,13 @@ pub const Mux = struct {
     /// popup box. A hex color or one of the eight ANSI names, which map
     /// into the same palette.
     accent: chrome.Rgb = chrome.mauve,
-    /// The side panel: on unless asked otherwise, and it folds away on
-    /// glass too narrow for it regardless.
-    sidebar: bool = true,
+    /// The side panel: how much of it the rail starts with, open
+    /// unless asked otherwise. Glass too narrow for the words falls
+    /// back to the collapsed rail regardless, and too narrow for that
+    /// hides it — the panel folds rather than crowd the work.
+    /// `sidebar = false` is the older spelling of `.hidden`, and the
+    /// later of the two lines in a file wins.
+    side_mode: chrome.SideMode = .open,
     sidebar_width: u16 = 30,
     /// Resurrect the last saved layout on server boot: workspaces,
     /// windows, cwds, and every pane that told rook how to bring its
@@ -195,7 +201,11 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
             out.restore = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
         } else if (std.mem.eql(u8, key, "sidebar")) {
             const v = std.mem.trim(u8, val, "\"'");
-            out.sidebar = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
+            const on = std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "1");
+            out.side_mode = if (on) .open else .hidden;
+        } else if (std.mem.eql(u8, key, "sidebar_mode")) {
+            const v = std.mem.trim(u8, val, "\"'");
+            out.side_mode = chrome.SideMode.parse(v) orelse out.side_mode;
         } else if (std.mem.eql(u8, key, "sidebar_width")) {
             const n = std.fmt.parseInt(u16, std.mem.trim(u8, val, "\"'"), 10) catch continue;
             out.sidebar_width = std.math.clamp(n, 16, 60);
@@ -238,11 +248,15 @@ test "parseMux" {
     parseMux("[mux]\naccent = \"#f9e2af\"\n", &d);
     try std.testing.expectEqual(chrome.yellow, d.accent);
     var sb: Mux = .{};
-    try std.testing.expectEqual(true, sb.sidebar);
+    try std.testing.expectEqual(chrome.SideMode.open, sb.side_mode);
     try std.testing.expectEqual(@as(u16, 30), sb.sidebar_width);
     parseMux("[mux]\nsidebar = false\nsidebar_width = 999\n", &sb);
-    try std.testing.expectEqual(false, sb.sidebar);
+    try std.testing.expectEqual(chrome.SideMode.hidden, sb.side_mode); // the old spelling
     try std.testing.expectEqual(@as(u16, 60), sb.sidebar_width); // clamped
+    parseMux("[mux]\nsidebar_mode = \"collapsed\"\n", &sb);
+    try std.testing.expectEqual(chrome.SideMode.collapsed, sb.side_mode);
+    parseMux("[mux]\nsidebar_mode = \"folded\"\n", &sb);
+    try std.testing.expectEqual(chrome.SideMode.collapsed, sb.side_mode); // a name it does not know changes nothing
     var r: Mux = .{};
     try std.testing.expectEqual(true, r.restore); // default on
     parseMux("[mux]\nrestore = true\n", &r);

@@ -285,9 +285,15 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         if (i > 0) out.append(gpa, ',') catch return;
         out.appendSlice(gpa, "{\"name\":") catch return;
         str(gpa, out, sf.name);
-        out.print(gpa, ",\"place\":\"dock:left\",\"size\":{d},\"shown\":{s},\"model\":", .{
+        // `mode` is what the rail is showing — open, collapsed (dots
+        // only, three columns) or hidden — and `shown` stays the one
+        // question a second glass asks first: is there anything there
+        // to draw? A rail folded down by narrow glass says the mode it
+        // is painting, not the one it was asked for.
+        out.print(gpa, ",\"place\":\"dock:left\",\"size\":{d},\"shown\":{s},\"mode\":\"{s}\",\"model\":", .{
             sv.side_w orelse sv.conf.sidebar_width,
             boolStr(sv.side_w != null),
+            sv.side_shown.word(),
         }) catch return;
         // A stored frame is one line of valid JSON — that is checked
         // when it is taken — so it embeds as-is.

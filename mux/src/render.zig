@@ -16,9 +16,11 @@ pub const Chrome = struct {
     tabbar: []const u8,
     /// Column the tab bar starts at — the side panel pushes it right.
     tab_x: u16 = 0,
-    /// The side panel, when it is showing: its model and its width.
-    /// It owns columns 0..w-1 and the seam at w.
-    side: ?struct { model: chromepkg.Model, w: u16 } = null,
+    /// The side panel, when it is showing: its model, its width, and
+    /// how much of itself it is showing (`chrome.SideMode`). It owns
+    /// columns 0..w-1 and the seam at w. Hidden is `null` here — the
+    /// mode that costs no columns costs no branch either.
+    side: ?struct { model: chromepkg.Model, w: u16, mode: chromepkg.SideMode = .open } = null,
     /// Column of the pin rail's seam, and the row it starts on.
     dock_x: ?u16 = null,
     dock_top: u16 = 0,
@@ -109,7 +111,10 @@ pub const Frame = struct {
             // The side panel and its seam: chrome, so only on a full
             // repaint — nothing in it changes with pane output.
             if (chrome.side) |side| {
-                chromepkg.draw(self, side.model, 0, 0, side.w, rows);
+                switch (side.mode) {
+                    .collapsed => chromepkg.drawCollapsed(self, side.model, 0, 0, side.w, rows),
+                    else => chromepkg.draw(self, side.model, 0, 0, side.w, rows),
+                }
                 self.seam(side.w, 0, rows);
             }
             // Dock seam: the heavier line between the pin rail and the
