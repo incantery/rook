@@ -1,0 +1,6 @@
+{
+    "name": "rook",
+    "description": "Inside a rook pane, a Claude Code session comes back after the server restarts: one SessionStart hook hands rook the resume command. Inert outside rook.",
+    "version": "0.2.0",
+    "author": {"name": "incantery"}
+}

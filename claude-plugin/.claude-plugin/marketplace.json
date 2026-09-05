@@ -1,0 +1,11 @@
+{
+    "name": "incantery",
+    "owner": {"name": "incantery"},
+    "plugins": [
+        {
+            "name": "rook",
+            "source": "./",
+            "description": "Inside a rook pane, a Claude Code session comes back after the server restarts."
+        }
+    ]
+}

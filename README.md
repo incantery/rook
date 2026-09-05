@@ -75,7 +75,7 @@ rook run 7 'go test ./...'       # type it, with Enter
 rook wait 7 --match 'ok  ' --timeout 120000
 rook read 7 -n 120               # its last 120 lines, history included
 rook key 7 ctrl-c
-rook --skill                     # the whole manual, for an agent
+rook skill --install             # the whole manual, for an agent, where Claude Code loads it
 ```
 
 **Coming back.** The server saves its workspaces, windows and cwds,
@@ -86,7 +86,9 @@ whose program told rook how to bring it back comes back *running*:
 rook resume . "claude --resume $SESSION_ID"   # the program's own word, kept while it is in front
 ```
 
-For Claude Code that is one `SessionStart` hook in `~/.claude/settings.json`:
+For Claude Code that is one `SessionStart` hook, and `claude-plugin/`
+carries it (`/plugin marketplace add <repo>/claude-plugin`, then
+`/plugin install rook@incantery`); by hand it is:
 
 ```json
 {"hooks": {"SessionStart": [{"hooks": [{"type": "command",
