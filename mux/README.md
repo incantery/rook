@@ -36,7 +36,7 @@ word is a wrapper; vera by default, `program = ""` turns the slot off. Then:
     hjkl       focus pane                  z        zoom pane
     HJKL       resize split                [        copy mode (hjkl, v, y, q)
     x          kill pane                   d        detach
-    a          toggle the side panel
+    a          toggle the side panel       u        the oldest unread pane
 
 Workspaces: `rook ls`, `rook new <name>`, `rook switch <name>` —
 named sessions in one server, each with its own windows; prefix-s
@@ -86,7 +86,9 @@ rail/window seam is a heavier line than a split. prefix-; jumps to
 the last focused pane. Copy mode (prefix-[) is vim-shaped: hjkl/0/$/u/d/g/G move a cursor
 through the pane and its scrollback, v anchors a selection (the
 anchor is content-tracked, so it survives scrolling), y yanks to the
-system clipboard. Not yet: session persistence across server restart.
+system clipboard. Session persistence across a server restart is
+`[mux] restore = true` — the layout and cwds, not scrollback or the
+programs.
 
 ## The state feed
 
@@ -127,6 +129,37 @@ pushed 118 snapshots in 6 s where the split pushes 5. Idle is silent.
 person to it — starting work on your behalf must not pull the desk —
 and both forms answer with the block they made. Design and the rest of
 the plan: `docs/surfaces.md`.
+
+## What the programs say
+
+The emulator hands the mux every bell, desktop notification (OSC 9 /
+99 / 777), title, pwd (OSC 7) and progress report (OSC 9;4) as it is
+parsed, and every one is published on the pane: `title`, `pwd`,
+`progress`, `bellMs`, `progressDoneMs`, `notified`. A bell is passed
+to the glass; a notification is re-sent as OSC 777 when its pane was
+not in front of you, so the terminal that can reach the desktop does.
+
+A signal that arrives while nobody is looking at its pane puts the
+pane on the **unread** channel (`unread`, `unreadMs`): a `●` on its
+tab, a `●` on the rail's row for its workspace, until focus lands on
+it. `prefix-u` (`rook jump`) goes to the oldest. Rook publishes the
+words and acts on their arrival; it never reads them for meaning.
+`docs/attention.md`.
+
+## A pane, by id
+
+Every pane's `$ROOK_MUX_PANE` is its id, so a program inside one can
+name itself (`.`) to the front door:
+
+    rook read <id> [-n N]          the viewport, or the last N lines with history
+    rook send <id> <text>          type it; `run` adds Enter; `key` names keys
+    rook wait <id> --match S | --quiet MS [--timeout MS]
+    rook split <id> [--down] [--focus] [--cwd DIR]
+    rook window <id> [--focus] [--cwd DIR]
+    rook focus <id> | jump | close-pane <id>
+
+Nothing here pulls the desk unless `--focus` asks. `rook --skill` is
+the same, written for the agent that will read it.
 
 ## The side panel
 

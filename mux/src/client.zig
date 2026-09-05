@@ -242,14 +242,78 @@ pub fn sidePush(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     }
 }
 
-/// One-shot: print a pane's viewport as plain text.
-pub fn capture(gpa: std.mem.Allocator, sock_path: []const u8, id: u32) !void {
+/// One-shot: print a pane's viewport as plain text — or, with
+/// `lines` above the screen's height, its last `lines` lines with the
+/// history filling in above the viewport.
+pub fn capture(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, lines: u32) !void {
     const sock = ptypkg.unixConnect(sock_path);
     if (sock < 0) return error.ConnectFailed;
     defer ptypkg.closeFd(sock);
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    const text = try captureOn(&reader, sock, id, lines);
+    defer gpa.free(text);
+    _ = ptypkg.writeAllFd(1, text);
+}
+
+/// One capture request on an open socket; the text comes back
+/// allocated with the reader's allocator. `exit` from the server is
+/// its way of saying "no such pane", printed and turned into an error.
+fn captureOn(reader: *proto.Reader, sock: ptypkg.fd_t, id: u32, lines: u32) ![]const u8 {
+    var b: [8]u8 = undefined;
+    std.mem.writeInt(u32, b[0..4], id, .little);
+    std.mem.writeInt(u32, b[4..8], lines, .little);
+    try proto.write(sock, @intFromEnum(proto.c2s.capture), &b);
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (waited < 2000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!reader.fill(sock)) return error.ServerGone;
+        while (reader.next()) |msg| {
+            defer reader.consume();
+            switch (msg.kind) {
+                @intFromEnum(proto.s2c.text) => return try reader.gpa.dupe(u8, msg.payload),
+                @intFromEnum(proto.s2c.exit) => return refused(msg.payload),
+                else => {},
+            }
+        }
+    }
+    return error.Timeout;
+}
+
+/// The server said no, and said why: print it and leave with status
+/// 1 — the reason is the whole message, and a Zig error name after
+/// it would only be noise.
+fn refused(why: []const u8) noreturn {
+    _ = ptypkg.writeAllFd(2, "rook: ");
+    _ = ptypkg.writeAllFd(2, why);
+    _ = ptypkg.writeAllFd(2, "\n");
+    ptypkg.exit_(1);
+}
+
+/// Read-your-writes, without making an interactive pipeline noisy:
+/// the serial goes out only when stdout is not a terminal, i.e. when
+/// something is reading it.
+fn printAck(serial: u64) void {
+    if (isatty(1) != 0) return;
+    var b: [64]u8 = undefined;
+    const line = std.fmt.bufPrint(&b, "{{\"ok\":true,\"serial\":{d}}}\n", .{serial}) catch return;
+    _ = ptypkg.writeAllFd(1, line);
+}
+
+/// One-shot: type bytes into a pane by id, as if at its keyboard.
+pub fn send(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, bytes: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(gpa);
     var b: [4]u8 = undefined;
     std.mem.writeInt(u32, &b, id, .little);
-    try proto.write(sock, @intFromEnum(proto.c2s.capture), &b);
+    try payload.appendSlice(gpa, &b);
+    try payload.appendSlice(gpa, bytes);
+    try proto.write(sock, @intFromEnum(proto.c2s.input), payload.items);
     _ = ptypkg.setNonblockFd(sock);
     var reader = proto.Reader.init(gpa);
     defer reader.deinit();
@@ -260,13 +324,119 @@ pub fn capture(gpa: std.mem.Allocator, sock_path: []const u8, id: u32) !void {
         if (!reader.fill(sock)) return error.ServerGone;
         while (reader.next()) |msg| {
             defer reader.consume();
-            if (msg.kind == @intFromEnum(proto.s2c.text)) {
-                _ = ptypkg.writeAllFd(1, msg.payload);
-                return;
+            switch (msg.kind) {
+                @intFromEnum(proto.s2c.ack) => {
+                    if (msg.payload.len >= 8) printAck(std.mem.readInt(u64, msg.payload[0..8], .little));
+                    return;
+                },
+                @intFromEnum(proto.s2c.exit) => return refused(msg.payload),
+                else => {},
             }
         }
     }
     return error.Timeout;
+}
+
+/// One-shot: a verb on a pane by id — 'v'/'-' split beside/below it,
+/// 'c' a new window in its workspace, 'x' hang it up, 'f' bring it in
+/// front of the person, 'u' jump to the oldest unread pane. A verb
+/// that makes a pane prints the new id (as JSON when something is
+/// reading stdout); the rest print the serial the same way.
+pub fn paneCmd(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, op: u8, focus: bool, cwd: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(gpa);
+    var b: [4]u8 = undefined;
+    std.mem.writeInt(u32, &b, id, .little);
+    try payload.appendSlice(gpa, &b);
+    try payload.append(gpa, op);
+    try payload.append(gpa, if (focus) 1 else 0);
+    try payload.appendSlice(gpa, cwd);
+    try proto.write(sock, @intFromEnum(proto.c2s.pane_cmd), payload.items);
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (waited < 3000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!reader.fill(sock)) return error.ServerGone;
+        while (reader.next()) |msg| {
+            defer reader.consume();
+            switch (msg.kind) {
+                @intFromEnum(proto.s2c.block_created) => {
+                    if (msg.payload.len < 4) return error.BadReply;
+                    const made = std.mem.readInt(u32, msg.payload[0..4], .little);
+                    var lb: [64]u8 = undefined;
+                    const line = if (isatty(1) != 0)
+                        std.fmt.bufPrint(&lb, "{d}\n", .{made}) catch return
+                    else
+                        std.fmt.bufPrint(&lb, "{{\"ok\":true,\"pane\":{d}}}\n", .{made}) catch return;
+                    _ = ptypkg.writeAllFd(1, line);
+                    return;
+                },
+                @intFromEnum(proto.s2c.ack) => {
+                    if (msg.payload.len >= 8) printAck(std.mem.readInt(u64, msg.payload[0..8], .little));
+                    return;
+                },
+                @intFromEnum(proto.s2c.exit) => return refused(msg.payload),
+                else => {},
+            }
+        }
+    }
+    return error.Timeout;
+}
+
+/// Wait on a pane: until `match` appears in its last `lines` lines,
+/// or until it has been quiet — its text unchanged — for `quiet_ms`.
+/// Polls a capture every 250 ms; a pane is text, and text is what a
+/// reader is waiting for. Exit status 0 when the condition held, 1 on
+/// timeout (0 = wait forever).
+pub fn wait(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, match: ?[]const u8, quiet_ms: u32, timeout_ms: u32, lines: u32) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+
+    const start = nowMs();
+    var last: ?[]const u8 = null;
+    defer if (last) |l| gpa.free(l);
+    var same_since: i64 = start;
+    while (true) {
+        const text = try captureOn(&reader, sock, id, lines);
+        const now = nowMs();
+        if (match) |m| {
+            if (std.mem.indexOf(u8, text, m) != null) {
+                gpa.free(text);
+                return;
+            }
+        }
+        if (quiet_ms > 0) {
+            if (last == null or !std.mem.eql(u8, last.?, text)) same_since = now;
+            if (now - same_since >= quiet_ms) {
+                gpa.free(text);
+                return;
+            }
+        }
+        if (last) |l| gpa.free(l);
+        last = text;
+        if (timeout_ms > 0 and now - start >= timeout_ms) return error.Timeout;
+        _ = usleep(250_000);
+    }
+}
+
+extern "c" fn usleep(us: u32) c_int;
+
+const Timeval = extern struct { sec: i64, usec: i32 };
+extern "c" fn gettimeofday(tv: *Timeval, tz: ?*anyopaque) c_int;
+fn nowMs() i64 {
+    var tv: Timeval = .{ .sec = 0, .usec = 0 };
+    _ = gettimeofday(&tv, null);
+    return tv.sec * 1000 + @divTrunc(@as(i64, tv.usec), 1000);
 }
 
 /// Raw single-block attach: this terminal becomes block `id` — no

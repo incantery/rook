@@ -765,6 +765,7 @@ pub const Server = struct {
 
             try self.reap();
             self.forwardTees();
+            self.pollSignals();
             if (self.sessions.items.len == 0 or self.shutdown) return;
 
             // a resize's SIGWINCH repaint has had time to arrive: force
@@ -942,16 +943,37 @@ pub const Server = struct {
                 @intFromEnum(proto.c2s.state) => self.sendState(c, msg.payload),
                 @intFromEnum(proto.c2s.side) => self.sidePush(c, msg.payload),
                 @intFromEnum(proto.c2s.capture) => {
-                    // [id u32] → the pane's viewport as plain text.
+                    // [id u32][lines u32?] → the pane's viewport as
+                    // plain text, or its last `lines` lines, history
+                    // included, when asked for more than the screen.
                     if (msg.payload.len >= 4) {
                         const id = std.mem.readInt(u32, msg.payload[0..4], .little);
+                        const lines: u32 = if (msg.payload.len >= 8) std.mem.readInt(u32, msg.payload[4..8], .little) else 0;
                         if (self.pane(id)) |p| {
-                            p.snapshot() catch {};
-                            self.sendTo(c, @intFromEnum(proto.s2c.text), self.frame.plainText(p));
-                            self.full = true; // the frame buffer is now the capture
+                            self.sendCapture(c, p, lines);
+                        } else {
+                            self.sendTo(c, @intFromEnum(proto.s2c.exit), "no such pane");
                         }
                     }
                 },
+                @intFromEnum(proto.c2s.input) => {
+                    // [id u32][bytes] → typed into that pane, as if at
+                    // its keyboard: the view snaps to now first, the
+                    // same as a keystroke from the glass.
+                    if (msg.payload.len >= 4) {
+                        const id = std.mem.readInt(u32, msg.payload[0..4], .little);
+                        if (self.pane(id)) |p| {
+                            p.scrollBottom();
+                            p.write(msg.payload[4..]);
+                            _ = self.touch();
+                            self.ack(c);
+                            self.pending = true;
+                        } else {
+                            self.sendTo(c, @intFromEnum(proto.s2c.exit), "no such pane");
+                        }
+                    }
+                },
+                @intFromEnum(proto.c2s.pane_cmd) => self.paneCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.block_cmd) => self.blockCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.attach_block) => self.attachBlock(c, msg.payload),
                 @intFromEnum(proto.c2s.session) => {
@@ -1307,7 +1329,7 @@ pub const Server = struct {
     /// usually the same one as last time.
     fn scanAgents(self: *Server) bool {
         var buf: [max_found * 64]u8 = undefined;
-        var offs: [max_found]struct { no: usize, nl: usize, so: usize, sl: usize } = undefined;
+        var offs: [max_found]struct { no: usize, nl: usize, so: usize, sl: usize, unread: bool } = undefined;
         var n: usize = 0;
         var len: usize = 0;
 
@@ -1331,10 +1353,15 @@ pub const Server = struct {
 
             const label = sn.label();
             const start = len;
-            if (len + label.len > buf.len) break;
+            if (len + label.len + 1 > buf.len) break;
             @memcpy(buf[len..][0..label.len], label);
             const no = len;
             len += label.len;
+            // The unread channel is part of the row, so it is part of
+            // the signature: a dot appearing is a change worth a paint.
+            const unread = self.sessionUnread(sn);
+            buf[len] = if (unread) 'u' else '-';
+            len += 1;
             const so = len;
             // A row that does not fit rewinds whole: a half-written
             // name would ride into found_buf and into the signature.
@@ -1349,7 +1376,7 @@ pub const Server = struct {
                     break;
                 };
             len += sub.len;
-            offs[n] = .{ .no = no, .nl = label.len, .so = so, .sl = sub.len };
+            offs[n] = .{ .no = no, .nl = label.len, .so = so, .sl = sub.len, .unread = unread };
             n += 1;
         }
 
@@ -1366,6 +1393,7 @@ pub const Server = struct {
                 .ws = ws,
                 .sub = self.found_buf[offs[i].so..][0..offs[i].sl],
                 .origin = .manual,
+                .unread = offs[i].unread,
             };
         }
         self.found_n = n;
@@ -1542,38 +1570,181 @@ pub const Server = struct {
     fn blockCmd(self: *Server, c: *Client, payload: []const u8) void {
         if (payload.len < 1) return;
         const bid = c.block orelse return;
-        const loc = self.findBlock(bid) orelse return;
-        var cwd_buf: [1024]u8 = undefined;
-        var cwd: ?[*:0]const u8 = null;
-        if (self.pane(bid)) |bp| {
-            if (bp.fgCwd(&cwd_buf)) |cc| cwd = cc.ptr;
-        }
         switch (payload[0]) {
-            'c' => {
-                const w = self.gpa.create(Window) catch return;
-                w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
-                loc.sn.windows.append(self.gpa, w) catch {
-                    self.gpa.destroy(w);
-                    return;
-                };
-                const p = self.startPane(cwd) catch return;
-                w.layout.seed(p.id) catch {};
-                w.focused = p.id;
-                self.replyCreated(c, p.id);
+            'c', 'v', '-' => {
+                const id = self.paneOp(bid, payload[0], null, false) orelse return;
+                self.replyCreated(c, id);
             },
-            'v', '-' => {
-                const p = self.startPane(cwd) catch return;
-                loc.w.layout.split(bid, p.id, payload[0] == 'v') catch return;
-                loc.w.zoomed = false;
-                if (loc.w == self.window()) self.relayout() catch {};
-                self.replyCreated(c, p.id);
-            },
-            'x' => if (self.pane(bid)) |p| p.hangup(),
+            'x' => _ = self.paneOp(bid, 'x', null, false),
             else => return,
         }
         self.state_dirty = true;
         self.blocks_check_ms = 0; // push the new table promptly
         self.pending = true;
+    }
+
+    /// `pane_cmd`, the front door's verbs on a pane by id: [id u32]
+    /// [op u8][flags u8][cwd…]. Ops are the block verbs — 'c' new
+    /// window in the pane's workspace, 'v'/'-' split beside/below it,
+    /// 'x' hang it up — plus 'f' focus it (bringing its workspace and
+    /// window forward) and 'u' jump to the oldest unread pane, for
+    /// which the id is ignored. flags&1: focus what was created.
+    /// Creations answer with the new pane's id, everything else with
+    /// the serial, and a pane rook does not hold answers `exit`.
+    fn paneCmd(self: *Server, c: *Client, payload: []const u8) void {
+        if (payload.len < 6) return;
+        const id = std.mem.readInt(u32, payload[0..4], .little);
+        const op = payload[4];
+        const focus = payload[5] & 1 != 0;
+        var cwd_buf: [1024]u8 = undefined;
+        var cwd: ?[*:0]const u8 = null;
+        const dir = payload[6..];
+        if (dir.len > 0 and dir.len < cwd_buf.len) {
+            @memcpy(cwd_buf[0..dir.len], dir);
+            cwd_buf[dir.len] = 0;
+            cwd = @ptrCast(&cwd_buf);
+        }
+        switch (op) {
+            'u' => {
+                _ = self.jumpUnread();
+                _ = self.touch();
+                self.ack(c);
+            },
+            'f' => {
+                if (self.pane(id) == null) {
+                    self.sendTo(c, @intFromEnum(proto.s2c.exit), "no such pane");
+                    return;
+                }
+                self.focusPane(id);
+                _ = self.touch();
+                self.ack(c);
+            },
+            'c', 'v', '-' => {
+                if (self.pane(id) == null) {
+                    self.sendTo(c, @intFromEnum(proto.s2c.exit), "no such pane");
+                    return;
+                }
+                const made = self.paneOp(id, op, cwd, focus) orelse {
+                    self.sendTo(c, @intFromEnum(proto.s2c.exit), "could not open the pane");
+                    return;
+                };
+                _ = self.touch();
+                self.replyCreated(c, made);
+            },
+            'x' => {
+                if (self.pane(id) == null) {
+                    self.sendTo(c, @intFromEnum(proto.s2c.exit), "no such pane");
+                    return;
+                }
+                _ = self.paneOp(id, 'x', null, false);
+                _ = self.touch();
+                self.ack(c);
+            },
+            else => {
+                self.sendTo(c, @intFromEnum(proto.s2c.exit), "unknown pane op");
+                return;
+            },
+        }
+        self.state_dirty = true;
+        self.blocks_check_ms = 0;
+        self.pending = true;
+    }
+
+    /// One verb on one pane, shared by the browser's block commands
+    /// and the front door's. The desktop is never yanked unless
+    /// `focus` asks: a window appears in the tab bar, a split shows up
+    /// if its window is on the glass, and focus stays where it was —
+    /// starting work on someone's behalf must not pull the desk.
+    /// Returns the pane made, for the ops that make one.
+    fn paneOp(self: *Server, bid: u32, op: u8, cwd_override: ?[*:0]const u8, focus: bool) ?u32 {
+        const loc = self.findBlock(bid) orelse return null;
+        var cwd_buf: [1024]u8 = undefined;
+        var cwd: ?[*:0]const u8 = cwd_override;
+        if (cwd == null) {
+            if (self.pane(bid)) |bp| {
+                if (bp.fgCwd(&cwd_buf)) |cc| cwd = cc.ptr;
+            }
+        }
+        switch (op) {
+            'c' => {
+                const w = self.gpa.create(Window) catch return null;
+                w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
+                loc.sn.windows.append(self.gpa, w) catch {
+                    self.gpa.destroy(w);
+                    return null;
+                };
+                const p = self.startPane(cwd) catch return null;
+                w.layout.seed(p.id) catch {};
+                w.focused = p.id;
+                if (focus) self.focusPane(p.id);
+                return p.id;
+            },
+            'v', '-' => {
+                const p = self.startPane(cwd) catch return null;
+                loc.w.layout.split(bid, p.id, op == 'v') catch return null;
+                loc.w.zoomed = false;
+                if (loc.w == self.window()) self.relayout() catch {};
+                if (focus) self.focusPane(p.id);
+                return p.id;
+            },
+            'x' => {
+                if (self.pane(bid)) |p| p.hangup();
+                return null;
+            },
+            else => return null,
+        }
+    }
+
+    /// A pane's text for a reader: the viewport, or when `lines` asks
+    /// for more rows than it has, the last `lines` lines with the
+    /// unwrapped history above the screen filling in the rest.
+    fn sendCapture(self: *Server, c: *Client, p: *panepkg.Pane, lines: u32) void {
+        p.snapshot() catch {};
+        var view = self.frame.plainText(p);
+        self.full = true; // the frame buffer is now the capture
+        if (lines == 0 or lines >= 1 << 20) {
+            self.sendTo(c, @intFromEnum(proto.s2c.text), view);
+            return;
+        }
+        // A reader asking for the last N lines means the last N lines
+        // *written*: the blank rows under the prompt are the screen,
+        // not the text.
+        while (std.mem.endsWith(u8, view, "\n\n")) view = view[0 .. view.len - 1];
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.gpa);
+        const view_rows = std.mem.count(u8, view, "\n");
+        if (lines > view_rows) {
+            // the rest comes from history, newest lines last
+            const want = lines - view_rows;
+            if (p.historyText(self.gpa)) |hist| {
+                defer self.gpa.free(@constCast(hist));
+                var body = std.mem.trimEnd(u8, hist, "\n");
+                var have: usize = 0;
+                var i = body.len;
+                while (i > 0 and have < want) : (i -= 1) {
+                    if (body[i - 1] == '\n') {
+                        have += 1;
+                        if (have == want) {
+                            body = body[i..];
+                            break;
+                        }
+                    }
+                }
+                out.appendSlice(self.gpa, body) catch return;
+                out.append(self.gpa, '\n') catch return;
+            }
+            out.appendSlice(self.gpa, view) catch return;
+        } else {
+            // the tail of the viewport alone
+            var skip = view_rows - lines;
+            var rest = view;
+            while (skip > 0) : (skip -= 1) {
+                const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse break;
+                rest = rest[nl + 1 ..];
+            }
+            out.appendSlice(self.gpa, rest) catch return;
+        }
+        self.sendTo(c, @intFromEnum(proto.s2c.text), out.items);
     }
 
     fn replyCreated(self: *Server, c: *Client, id: u32) void {
@@ -1905,19 +2076,215 @@ pub const Server = struct {
     /// cursor.
     fn jumpToAgent(self: *Server, name: []const u8) void {
         const idx = self.sessionNamed(name) orelse return;
-        self.switchSession(idx);
         const sn = self.sessions.items[idx];
-        const id = self.agentPaneIn(sn) orelse return;
-        if (self.focusedId() == id) return;
-        // The agent may be in another window of that workspace; the
-        // window has to come forward before focus can land on it.
-        for (sn.windows.items, 0..) |w, wi| {
-            if (w.layout.contains(id)) {
+        const id = self.agentPaneIn(sn) orelse {
+            self.switchSession(idx);
+            return;
+        };
+        self.focusPane(id);
+    }
+
+    /// Bring a pane in front of the person: its workspace, then its
+    /// window, then focus. A pin is reachable from every window of its
+    /// workspace, a global pin from everywhere, so those stop at the
+    /// workspace. The popup is not somewhere focus can be sent.
+    fn focusPane(self: *Server, id: u32) void {
+        if (self.popup == id) return;
+        for (self.sessions.items, 0..) |sn, si| {
+            var here = false;
+            for (sn.pins.items) |pid| {
+                if (pid == id) here = true;
+            }
+            var win: ?usize = null;
+            for (sn.windows.items, 0..) |w, wi| {
+                if (w.layout.contains(id)) {
+                    here = true;
+                    win = wi;
+                }
+            }
+            if (!here) continue;
+            if (si != self.cur_sess) self.switchSession(si);
+            // The pane may be in another window of that workspace; the
+            // window has to come forward before focus can land on it.
+            if (win) |wi| {
                 if (wi != sn.cur) self.selectWindow(wi);
-                break;
+            }
+            if (self.focusedId() != id) self.setFocus(id);
+            return;
+        }
+        for (self.global_pins.items) |pid| {
+            if (pid == id and self.focusedId() != id) self.setFocus(id);
+        }
+    }
+
+    /// prefix-u, `rook jump`: go to the oldest thing nobody has read.
+    /// First the unread channel — a pane a program rang, notified or
+    /// finished a progress bar in while nobody looked — oldest signal
+    /// first, so a queue of asks is answered in the order it formed.
+    /// Failing that, the window whose unseen output is oldest, which
+    /// is what the tab bar's softer dot means. True when focus moved.
+    fn jumpUnread(self: *Server) bool {
+        var best: ?*panepkg.Pane = null;
+        for (self.panes.items) |p| {
+            if (p.unread_ms == 0) continue;
+            if (self.popup == p.id) continue;
+            if (best == null or p.unread_ms < best.?.unread_ms) best = p;
+        }
+        if (best) |p| {
+            self.focusPane(p.id);
+            return true;
+        }
+        // Unseen output: the window's focused pane, stamped after the
+        // window was last on the glass.
+        var oldest: ?struct { id: u32, at: i64 } = null;
+        for (self.sessions.items, 0..) |sn, si| {
+            for (sn.windows.items, 0..) |w, wi| {
+                if (si == self.cur_sess and wi == sn.cur) continue;
+                const p = self.pane(w.focused) orelse continue;
+                const last = p.last_output_ms.load(.acquire);
+                if (last == 0 or last <= w.seen_ms) continue;
+                if (oldest == null or last < oldest.?.at) oldest = .{ .id = p.id, .at = last };
             }
         }
-        self.setFocus(id);
+        if (oldest) |o| {
+            self.focusPane(o.id);
+            return true;
+        }
+        return false;
+    }
+
+    /// Is this pane in front of somebody right now: focused, on the
+    /// glass, with a glass attached to see it, and no popup over it?
+    /// A signal that arrives while this is true was seen as it
+    /// happened; one that arrives otherwise is unread until it is.
+    fn isSeen(self: *Server, id: u32) bool {
+        if (self.popup != null) return false;
+        if (self.focusedId() != id) return false;
+        var placed = false;
+        for (self.placed.items) |pl| {
+            if (pl.pane == id) placed = true;
+        }
+        if (!placed) return false;
+        for (self.clients.items) |c| {
+            if (c.attached and !c.dead) return true;
+        }
+        return false;
+    }
+
+    /// Any pane of this window on the unread channel?
+    fn windowUnread(self: *Server, w: *Window) bool {
+        for (self.panes.items) |p| {
+            if (p.unread_ms != 0 and w.layout.contains(p.id)) return true;
+        }
+        return false;
+    }
+
+    /// Any pane of this workspace — window or rail — on the channel?
+    fn sessionUnread(self: *Server, sn: *Session) bool {
+        for (self.panes.items) |p| {
+            if (p.unread_ms != 0 and self.paneIn(sn, p.id)) return true;
+        }
+        return false;
+    }
+
+    /// Take what every pane's program said to its terminal since the
+    /// last turn, and act on the *arrival*: publish it, put the pane
+    /// on the unread channel when nobody was looking, and pass the
+    /// bell and the notification on to the glass — which is what a
+    /// terminal does with them, and what every pane lost when the mux
+    /// went between it and one. Never on the words: rook does not
+    /// read a title for what the program is doing.
+    fn pollSignals(self: *Server) void {
+        var ev: panepkg.Events = undefined;
+        var changed = false;
+        var drift = false;
+        for (self.panes.items) |p| {
+            if (!p.takeEvents(&ev)) continue;
+            const now = panepkg.epochMs();
+            const seen = self.isSeen(p.id);
+            if (ev.bell) {
+                p.bell_ms = now;
+                if (!seen) self.markUnread(p, now);
+                self.shipToGlass("\x07");
+                changed = true;
+            }
+            if (ev.notif) {
+                @memcpy(p.notif_title[0..ev.notif_title_len], ev.notif_title[0..ev.notif_title_len]);
+                p.notif_title_len = ev.notif_title_len;
+                @memcpy(p.notif_body[0..ev.notif_body_len], ev.notif_body[0..ev.notif_body_len]);
+                p.notif_body_len = ev.notif_body_len;
+                p.notif_ms = now;
+                if (!seen) {
+                    self.markUnread(p, now);
+                    self.shipNotify(p.notif_title[0..p.notif_title_len], p.notif_body[0..p.notif_body_len]);
+                }
+                changed = true;
+            }
+            if (ev.progress) {
+                const was = p.progress.active();
+                p.progress = ev.prog;
+                p.progress_pct = ev.prog_pct;
+                if (was and !p.progress.active()) {
+                    p.progress_done_ms = now;
+                    if (!seen) self.markUnread(p, now);
+                    changed = true;
+                } else {
+                    // a bar moving is drift, not news
+                    drift = true;
+                }
+            }
+            if (ev.title or ev.pwd) drift = true;
+        }
+        if (changed) {
+            _ = self.touch();
+            self.full = true; // the tab bar and the rail wear the dot
+            self.pending = true;
+        } else if (drift) {
+            // the glass title mirrors the focused pane on redraw
+            self.pending = true;
+        }
+    }
+
+    fn markUnread(self: *Server, p: *panepkg.Pane, now: i64) void {
+        _ = self;
+        if (p.unread_ms == 0) p.unread_ms = now;
+    }
+
+    /// The pane in front of the person has been looked at: whatever
+    /// was unread there is read. Runs on every frame, so "seen"
+    /// tracks looking rather than switching, the same as a window's
+    /// `seen_ms`. True when something was cleared.
+    fn markSeen(self: *Server) bool {
+        const id = self.focusedId();
+        if (!self.isSeen(id)) return false;
+        const p = self.pane(id) orelse return false;
+        if (p.unread_ms == 0) return false;
+        p.unread_ms = 0;
+        _ = self.touch();
+        return true;
+    }
+
+    /// Raw bytes to every attached glass, on the draw channel.
+    fn shipToGlass(self: *Server, bytes: []const u8) void {
+        for (self.clients.items) |c| {
+            if (!c.attached or c.dead) continue;
+            self.sendTo(c, @intFromEnum(proto.s2c.draw), bytes);
+        }
+    }
+
+    /// A pane's desktop notification, re-sent to the glass as OSC 777
+    /// so the terminal that can actually reach the person's desktop
+    /// does. Control bytes are dropped: the words are the program's,
+    /// but the sequence they ride in is ours.
+    fn shipNotify(self: *Server, title: []const u8, body: []const u8) void {
+        var buf: [16 + panepkg.max_notif_title + panepkg.max_notif_body]u8 = undefined;
+        var out: std.ArrayList(u8) = .initBuffer(&buf);
+        out.appendSliceBounded("\x1b]777;notify;") catch return;
+        oscText(&out, if (title.len > 0) title else "rook");
+        out.appendSliceBounded(";") catch return;
+        oscText(&out, body);
+        out.appendSliceBounded("\x1b\\") catch return;
+        self.shipToGlass(out.items);
     }
 
     /// The first pane in this workspace whose foreground program is an
@@ -2004,6 +2371,7 @@ pub const Server = struct {
                 self.relayout() catch {};
             },
             '[' => self.scrollStart(),
+            'u' => _ = self.jumpUnread(),
             'o' => self.openPopup("exec $SHELL -l") catch {},
             'x' => if (self.focusedPane()) |p| p.hangup(),
             'd' => {
@@ -2303,6 +2671,9 @@ pub const Server = struct {
 
     fn redraw(self: *Server) !void {
         if (self.popup != null) self.full = true; // popups sit over dirty math
+        // Looking at the focused pane reads it; the dot it wore on
+        // the tab and the rail goes with this frame.
+        if (self.markSeen()) self.full = true;
         var any_dirty = self.full;
         for (self.placed.items) |pl| {
             const p = self.pane(pl.pane) orelse continue;
@@ -2635,6 +3006,7 @@ pub const Server = struct {
                     .last_output_ms = p.last_output_ms.load(.acquire),
                     .seen_ms = win.seen_ms,
                     .now = now,
+                    .signal = self.windowUnread(win),
                 });
             }
             // The current window is being looked at, by definition.
@@ -2722,6 +3094,16 @@ pub const Server = struct {
         return out.items;
     }
 };
+
+/// Text into an OSC payload: control bytes (which would end or
+/// corrupt the sequence) are dropped; everything else, UTF-8
+/// included, rides through.
+fn oscText(out: *std.ArrayList(u8), s: []const u8) void {
+    for (s) |ch| {
+        if (ch < 0x20 or ch == 0x7f) continue;
+        out.appendBounded(ch) catch return;
+    }
+}
 
 /// One SGR sequence for a chrome run: reset, then 24-bit ink. Chrome
 /// never inherits a pane's colors, so every run starts from zero.

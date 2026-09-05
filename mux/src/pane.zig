@@ -44,6 +44,68 @@ pub fn epochMs() i64 {
     return tv.sec * 1000 + @divTrunc(@as(i64, tv.usec), 1000);
 }
 
+/// OSC 9;4 as last reported by the program in the pane — a build's
+/// bar, Claude Code's turn. `none` is the protocol's `remove`: nothing
+/// in flight. The other four are the protocol's own words.
+pub const Progress = enum(u8) {
+    none,
+    set,
+    err,
+    indeterminate,
+    pause,
+
+    /// Is something in flight? Every state but `none` says so; the
+    /// transition back to `none` is what "finished" means here.
+    pub fn active(self: Progress) bool {
+        return self != .none;
+    }
+
+    pub fn word(self: Progress) []const u8 {
+        return switch (self) {
+            .none => "",
+            .set => "set",
+            .err => "error",
+            .indeterminate => "indeterminate",
+            .pause => "pause",
+        };
+    }
+
+    fn fromReport(name: []const u8) Progress {
+        if (std.mem.eql(u8, name, "set")) return .set;
+        if (std.mem.eql(u8, name, "error")) return .err;
+        if (std.mem.eql(u8, name, "indeterminate")) return .indeterminate;
+        if (std.mem.eql(u8, name, "pause")) return .pause;
+        return .none;
+    }
+};
+
+pub const max_notif_title = 128;
+pub const max_notif_body = 256;
+
+/// What the program said to its terminal since the server last asked:
+/// a bell, a desktop notification (OSC 9 / 99 / 777), a title or pwd
+/// change, a progress report. Written by the reader thread under the
+/// pane lock, taken whole by the server on its next turn. Rook
+/// publishes these and acts on their *arrival* — it never reads
+/// meaning into the words.
+pub const Events = struct {
+    bell: bool = false,
+    notif: bool = false,
+    notif_title: [max_notif_title]u8 = @splat(0),
+    notif_title_len: usize = 0,
+    notif_body: [max_notif_body]u8 = @splat(0),
+    notif_body_len: usize = 0,
+    progress: bool = false,
+    prog: Progress = .none,
+    prog_pct: i16 = -1,
+    title: bool = false,
+    pwd: bool = false,
+
+    pub fn any(self: *const Events) bool {
+        return self.bell or self.notif or self.progress or self.title or self.pwd;
+    }
+};
+
 pub const Pane = struct {
     gpa: std.mem.Allocator,
     pty: ptypkg.Pty,
@@ -80,6 +142,30 @@ pub const Pane = struct {
     tee_on: std.atomic.Value(bool) = .init(false),
     tee_buf: std.ArrayList(u8) = .empty,
     tee_overflow: bool = false,
+    /// Signals from the program, accumulated by the reader thread
+    /// (under lock) until the server takes them. `ev_pending` is the
+    /// cheap check the server makes every turn.
+    ev: Events = .{},
+    ev_pending: std.atomic.Value(bool) = .init(false),
+    /// Server thread only, from here down: what the feed publishes
+    /// about the signals, and the unread channel they feed.
+    /// The last notification the program sent, and when (0 = never).
+    notif_title: [max_notif_title]u8 = @splat(0),
+    notif_title_len: usize = 0,
+    notif_body: [max_notif_body]u8 = @splat(0),
+    notif_body_len: usize = 0,
+    notif_ms: i64 = 0,
+    /// Wall-clock ms of the last bell, 0 = never.
+    bell_ms: i64 = 0,
+    /// Progress as last reported, and when it last went from
+    /// something in flight back to nothing — the "finished" moment.
+    progress: Progress = .none,
+    progress_pct: i16 = -1,
+    progress_done_ms: i64 = 0,
+    /// Unread: a signal arrived while nobody was looking at this
+    /// pane, and nobody has looked since. Wall-clock ms of the first
+    /// such signal, 0 = read. Cleared by focus, never by a producer.
+    unread_ms: i64 = 0,
 
     pub fn start(
         gpa: std.mem.Allocator,
@@ -111,7 +197,12 @@ pub const Pane = struct {
         };
         ptypkg.setEnv("TERM", "xterm-256color");
         ptypkg.setEnv("COLORTERM", "truecolor");
-        ptypkg.setEnv("ROOK_MUX_PANE", "1");
+        // The pane's own id, so a program inside can name itself to
+        // `rook send/split/read` (`--current`). Any non-empty value
+        // still means "inside rook" to everything that only checks.
+        var id_buf: [16]u8 = undefined;
+        const id_str = std.fmt.bufPrintZ(&id_buf, "{d}", .{id}) catch "1";
+        ptypkg.setEnv("ROOK_MUX_PANE", id_str.ptr);
         // We are the mux now: scrub any outer multiplexer's identity so
         // programs in the pane (nvim plugins especially) don't think
         // they are living in tmux or herdr.
@@ -178,6 +269,81 @@ pub const Pane = struct {
         return .success;
     }
 
+    // ---- signals the program sends its terminal ----
+    //
+    // Each fires on the reader thread with the pane lock held (the
+    // stream is parsed under it), so writing `ev` needs no second
+    // lock; the atomic is the server's cheap "anything for me?".
+
+    fn effectBell(h: *Handler) void {
+        const self = fromHandler(h);
+        self.ev.bell = true;
+        self.ev_pending.store(true, .release);
+    }
+
+    fn effectNotify(h: *Handler, n: EffectArg("desktop_notification", 1)) void {
+        const self = fromHandler(h);
+        const tl = @min(n.title.len, max_notif_title);
+        @memcpy(self.ev.notif_title[0..tl], n.title[0..tl]);
+        self.ev.notif_title_len = tl;
+        const bl = @min(n.body.len, max_notif_body);
+        @memcpy(self.ev.notif_body[0..bl], n.body[0..bl]);
+        self.ev.notif_body_len = bl;
+        self.ev.notif = true;
+        self.ev_pending.store(true, .release);
+    }
+
+    fn effectProgress(h: *Handler, r: EffectArg("progress_report", 1)) void {
+        const self = fromHandler(h);
+        self.ev.prog = Progress.fromReport(@tagName(r.state));
+        self.ev.prog_pct = if (r.progress) |pct| @intCast(pct) else -1;
+        self.ev.progress = true;
+        self.ev_pending.store(true, .release);
+    }
+
+    fn effectTitle(h: *Handler) void {
+        const self = fromHandler(h);
+        self.ev.title = true;
+        self.ev_pending.store(true, .release);
+    }
+
+    fn effectPwd(h: *Handler) void {
+        const self = fromHandler(h);
+        self.ev.pwd = true;
+        self.ev_pending.store(true, .release);
+    }
+
+    /// The server's side: take everything that arrived since the last
+    /// take, or false when nothing did. The notification's words ride
+    /// out in `out`; the title and pwd are read off the terminal
+    /// itself (`title()`, `pwd()`) since it already stores them.
+    pub fn takeEvents(self: *Pane, out: *Events) bool {
+        if (!self.ev_pending.swap(false, .acq_rel)) return false;
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        out.* = self.ev;
+        self.ev = .{};
+        return out.any();
+    }
+
+    /// The working directory the shell last reported (OSC 7), as a
+    /// path — the `file://host` prefix stripped — or empty when it
+    /// never said. Exact and instant where `fgCwd` is a syscall on a
+    /// timer; a shell without the integration says nothing, which is
+    /// why both are published.
+    pub fn pwd(self: *Pane, buf: []u8) []const u8 {
+        os_unfair_lock_lock(&self.lock);
+        defer os_unfair_lock_unlock(&self.lock);
+        var t: []const u8 = self.term.pwd.items;
+        if (std.mem.startsWith(u8, t, "file://")) {
+            t = t[7..];
+            if (std.mem.indexOfScalar(u8, t, '/')) |slash| t = t[slash..] else t = "";
+        }
+        const n = @min(t.len, buf.len);
+        @memcpy(buf[0..n], t[0..n]);
+        return buf[0..n];
+    }
+
     /// The server's side: take the pending clipboard text, or null.
     /// Caller frees nothing; the buffer is reused.
     pub fn takeClip(self: *Pane, out: []u8) ?[]const u8 {
@@ -198,12 +364,12 @@ pub const Pane = struct {
             .enquiry = &effectEnquiry,
             .xtversion = &effectXtversion,
             .color_scheme = &effectColorScheme,
-            .bell = null,
-            .desktop_notification = null,
+            .bell = &effectBell,
+            .desktop_notification = &effectNotify,
             .clipboard_write = &effectClipboardWrite,
-            .title_changed = null,
-            .pwd_changed = null,
-            .progress_report = null,
+            .title_changed = &effectTitle,
+            .pwd_changed = &effectPwd,
+            .progress_report = &effectProgress,
         };
         var stream: vt.TerminalStream = .init(.{ .handler = handler, .allocator = self.gpa });
         defer stream.deinit();
@@ -560,6 +726,19 @@ fn allVersionish(s2: []const u8) bool {
         if (!(ch >= '0' and ch <= '9') and ch != '.' and ch != '-') return false;
     }
     return true;
+}
+
+test "progress: the protocol's words, and only remove means nothing is in flight" {
+    try std.testing.expectEqual(Progress.set, Progress.fromReport("set"));
+    try std.testing.expectEqual(Progress.err, Progress.fromReport("error"));
+    try std.testing.expectEqual(Progress.indeterminate, Progress.fromReport("indeterminate"));
+    try std.testing.expectEqual(Progress.pause, Progress.fromReport("pause"));
+    try std.testing.expectEqual(Progress.none, Progress.fromReport("remove"));
+    try std.testing.expectEqual(Progress.none, Progress.fromReport("something new"));
+    try std.testing.expect(Progress.set.active());
+    try std.testing.expect(Progress.pause.active());
+    try std.testing.expect(!Progress.none.active());
+    try std.testing.expectEqualStrings("error", Progress.err.word());
 }
 
 test "programName walks past a versioned binary and its plumbing" {

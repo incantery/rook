@@ -6,6 +6,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"net"
 	"os"
@@ -15,6 +16,13 @@ import (
 
 	"github.com/incantery/rook/internal/mux"
 )
+
+// The skill: how an agent inside a pane drives rook. Printed by
+// `rook --skill`, the same way herdr and cmux hand theirs over — a
+// program that can read its own manual is one nobody has to teach.
+//
+//go:embed skill.md
+var skill string
 
 // Build metadata, stamped by the linker at release time.
 var (
@@ -49,7 +57,13 @@ const usage = `rook — the multiplexer, owned
   rook blocks             the block table (stable ids)
   rook raw <id>           this terminal becomes one block, no chrome
   rook state | watch      the state feed: one snapshot, or one per change
-  rook capture <id>       one pane's viewport as plain text
+  rook read <id> [-n N]   a pane as plain text: the viewport, or its last N lines
+                          (capture is the same verb, viewport only)
+  rook send|run|key <id> …  type into a pane (run adds Enter; key names keys)
+  rook wait <id> --match S | --quiet MS [--timeout MS]
+  rook split|window <id> [--down] [--focus] [--cwd DIR]
+  rook focus <id> | jump  bring a pane forward; jump = the oldest unread one
+  rook close-pane <id>    hang a pane up
   rook side [-|demo]      push the side rail's model (JSON frames on stdin)
   rook companion [--json] where the companion (vera) is open, if she is
   rook popup <cmd...>     float a command over the current window
@@ -58,6 +72,11 @@ const usage = `rook — the multiplexer, owned
   rook url                the web client URL (token included)
   rook worktree ...       git worktrees (ls|new|open|merge|rm)
   rook version
+
+  <id> is a pane number from "rook blocks", or . for the pane you are in.
+
+Are you an AI? "rook --skill" prints how to drive rook from inside a pane;
+docs/surfaces.md in the repo is the state feed and the rail, in full.
 `
 
 // verbs the Zig engine owns; rook execs into it verbatim.
@@ -67,6 +86,9 @@ var muxVerbs = map[string]bool{
 	"blocks": true, "raw": true,
 	// the state feed (out) and the side rail's model (in)
 	"state": true, "watch": true, "capture": true, "side": true,
+	// a pane, by id: read it, type into it, wait on it, open beside it
+	"read": true, "send": true, "run": true, "key": true, "wait": true,
+	"split": true, "window": true, "focus": true, "jump": true, "close-pane": true,
 }
 
 func main() {
@@ -80,6 +102,8 @@ func main() {
 		fmt.Println(versionLine())
 	case args[0] == "help", args[0] == "--help", args[0] == "-h":
 		fmt.Print(usage)
+	case args[0] == "--skill", args[0] == "skill":
+		fmt.Print(skill)
 	case args[0] == "worktree", args[0] == "wt":
 		err = runWorktree(args[1:])
 	case args[0] == "pick":

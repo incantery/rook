@@ -1,86 +1,93 @@
 # rook
 
-A rebuild from an empty Go module, around open-source tooling instead of
-under it. `rook` is what you run after starting your terminal, in place of
-`tmux`.
+`rook` is what you run after starting your terminal, in place of
+`tmux`: a Go front door over a multiplexer rook owns — ptys and
+ghostty's terminal emulator in one Zig process, behind a server that
+outlives the glass.
 
-**The bet.** The multiplexer and the jump list are solved — tmux, zoxide.
-What is not solved is the layer above them: N agents in N sessions, each
-producing turns, and no way to route attention across them. That layer is
-the product. Everything else is a dependency and stays one — until its
-data model caps the product, which is how
-[sesh](https://github.com/joshmedeski/sesh)'s ideas got absorbed into
-`rook ls / preview / connect` instead of staying a dependency.
+**The bet.** The multiplexer is solved; what is not solved is the
+layer above it: N agents in N sessions, each producing turns, and no
+way to route attention across them. That layer is the product. Rook
+draws it, publishes everything it knows, and holds one opinion about
+what an agent is: a program by name. Everything an agent is *doing* is
+a producer's word, pushed in from outside — vera is the first producer
+and must not be the last. `docs/surfaces.md` is that seam, in full.
 
-**What this is not.** Not a terminal emulator, not an editor, not a
-multiplexer. Ghostty and neovim are tenants. tmux is a `depends_on`, never
-vendored.
-
-**What is here.** `rook` boots a bare tmux: its own server socket (`-L
-rook`) under a config rook generates — the user's `~/.tmux.conf` is
-never read, their tmux is never touched. `internal/tmux.Settings` is the
-proxy: one field per tmux option, rendered atomically to
-`~/.local/state/rook/tmux.conf` at boot, reconciled live via
-`set-option` on the socket. Colours are ANSI names on purpose: the glass
-owns the palette, rook owns structure and emphasis.
+**What this is not.** Not a terminal emulator, not an editor. Ghostty
+and neovim are tenants. tmux is the reference implementation the
+conformance corpus is diffed against, and nothing else.
 
 **Run it.**
 
 ```sh
-make install     # go build -o rook ./cmd/rook, then into ~/.local/bin
-rook             # attaches to a session named for the current directory
+make install     # go build ./cmd/rook → ~/.local/bin/rook, the engine → ~/.local/libexec/rook/engine
+rook             # attach; boots the server when none is listening
 ```
 
-One binary, over a rook-owned tmux server. `rook ls / preview / connect`
-are the session manager; the bottom strip carries per-pane git and the
-active pane's spend; the attention feed routes what needs you across
-every session (vera is its first publisher).
+One command. The engine is off `$PATH`; `rook` execs it for every mux
+verb and keeps worktrees, the picker and the web URL in Go. `mux/README.md`
+is the engine's own manual: the keys, the rail, the state feed, the
+build. The prefix comes from `~/.config/rook/rook.toml` (`[tmux]
+prefix = "` "`", `C-b` when unset).
 
-**Agents.** `prefix a` (or `rook agents`) is a sidebar: spaces (live
-sessions, with their branch) and agents (who is working where — waiting
-● needs you, working ●, done), a dot and two lines each. Enter goes
-there; Esc closes. `prefix A` turns it into a sidebar: a panel on the
-left that follows you to every window and session (tmux hooks hand it
-over) until `prefix A` parks it. `rook agents --json` is the agent list
-for machines.
+**Workspaces, windows, panes.** `rook ls / new / switch / pick`;
+`prefix-c` a window, `prefix-v` / `prefix--` a split, `prefix-hjkl`
+focus (a bare `ctrl-hjkl` too, vim-navigator style, with
+`mux/nvim` handing edge moves back), `prefix-z` zoom, `prefix-[` copy
+mode, `prefix-P` pin a pane to the rail, `prefix-s` the picker,
+`prefix-w` worktrees, `prefix-a` the side panel, `prefix-u` the oldest
+thing you have not read.
 
-**The companion.** One resident is named in the config and rook knows
-her by sight — vera by default — so "is she already open, and where"
-is a question rook answers rather than a thing you go and look for:
+**The rail.** Down the left edge: *spaces* over *agents*, a dot and
+two lines each. Rook lists its own workspaces and the panes it can see
+running an agent; a producer pushes the rest, one JSON frame per line:
 
 ```sh
-rook companion          # vera · main, window 1 · pane 7 · in front of you · open 20m
-rook companion --json   # the same, as rook publishes it; exit 1 when she is not open
+rook side demo | rook side -     # the herdr design, as frames
+my-producer    | rook side -     # the real thing (vera's verad does this)
 ```
 
-It is what the engine can see in its own panes and nothing more — the
-`companion` block of `rook state`, which is where anything that wants
-to watch it should read it. Open on your phone is not open in rook.
+**What the programs say.** Every pane's bell, desktop notification
+(OSC 9 / 99 / 777), title, working directory (OSC 7) and progress bar
+(OSC 9;4) is heard and published. A bell rings the glass; a
+notification reaches it as OSC 777, so the terminal that can reach
+your desktop does. A signal that arrives while nobody is looking at
+its pane puts the pane on the **unread** channel — a dot on its tab
+and on the rail — until you look. `prefix-u` and `rook jump` go to the
+oldest one. Rook publishes the words; it never reads them for meaning.
+`docs/attention.md`.
 
-```toml
-[companion]
-command = "vera"        # or program = "vera"; program = "" turns the slot off
-```
-
-**The chrome is tmux.** Tabs are the status line (window names, the
-active one raised, agent state as ● / ✳); every pane wears its name on
-its top border — claude, zsh, agents — with its git place beside
-it; the sidebar is a pane. Nothing is drawn by rook itself, so every
-terminal feature passes straight through.
-
-**Worktrees.** One agent, one branch, one checkout, one session — and a
-lifecycle that ends with all of them gone. `rook wt` is the manager — a
-TUI that draws the repo's worktrees with branch, dirty, ±distance from
-main, ● live session and the agent's state in it, refreshed live.
-`prefix w` runs the same program in a popup. Enter opens, `n` cuts a
-new one, `m` merges it home, `d` removes (`D` to force). The same verbs
-are plain commands from any checkout of the repo:
+**The state feed.** Everything rook knows, as one JSON snapshot, so
+anything can hold an exact replica and never has to ask:
 
 ```sh
-rook wt ls                # the rows, once; --json for machines
-rook wt new agent-a       # ../<repo>--agent-a on branch agent-a, session opened, switched to
-rook wt merge agent-a     # merge into main, then remove worktree + session + branch
-rook wt rm agent-a        # refuses dirty or unmerged; --force to discard
+rook state          # the snapshot
+rook watch          # the snapshot, then one line per change
+rook companion      # where vera is open in rook, if she is; exit 1 when not
+```
+
+**A pane, by id — for the agent inside one.** `$ROOK_MUX_PANE` is the
+id of the pane a program runs in, and `.` names it:
+
+```sh
+rook split . --cwd "$PWD"        # a shell beside you; focus stays put
+rook run 7 'go test ./...'       # type it, with Enter
+rook wait 7 --match 'ok  ' --timeout 120000
+rook read 7 -n 120               # its last 120 lines, history included
+rook key 7 ctrl-c
+rook --skill                     # the whole manual, for an agent
+```
+
+**Worktrees.** One agent, one branch, one checkout, one workspace —
+and a lifecycle that ends with all of them gone. `rook worktree` is
+the manager (`prefix-w` floats it); the verbs are plain commands from
+any checkout:
+
+```sh
+rook worktree ls              # the rows, once; --json for machines
+rook worktree new agent-a     # ../<repo>--agent-a on branch agent-a, workspace opened
+rook worktree merge agent-a   # merge into main, then remove worktree + workspace + branch
+rook worktree rm agent-a      # refuses dirty or unmerged; --force to discard
 ```
 
 Files git doesn't carry but a checkout needs are conventions in
@@ -93,9 +100,23 @@ copy = [".env"]
 link = ["node_modules"]
 ```
 
-**Pulling things back.** The previous rook — the Zig app, the plugin
-vocabulary, the environments graph, the providers — is intact on the
-`pre-tmux` branch. Take a file when it earns its place, not by default:
+**The companion.** One resident is named in the config and rook knows
+her by sight — vera by default — so "is she already open, and where"
+is a question rook answers:
+
+```toml
+[companion]
+command = "vera"        # or program = "vera"; program = "" turns the slot off
+```
+
+**A second glass.** `web/` is the browser as a peer client on the same
+wire; `rookd` supervises the server and runs the bridge, `rook url`
+prints the address for a phone.
+
+**Pulling things back.** The previous rook — the Zig app with an
+editor in it, the plugin vocabulary, the environments graph — is
+intact on the `pre-tmux` branch, and the tmux-era rook on `rook/tmux`.
+Take a file when it earns its place, not by default:
 
 ```sh
 git checkout pre-tmux -- docs/plugins/VOCABULARY.md

@@ -532,7 +532,11 @@ still exact. Deltas would force unbounded buffering or a disconnect.
      "cwd": "/Users/seth/src/rook", "cols": 74, "rows": 44,
      "rect": {"x": 31, "y": 1, "w": 74, "h": 44},
      "focused": true, "visible": true, "wantsMouse": false,
-     "exited": false, "lastOutputMs": 1787588669907}
+     "exited": false,
+     "title": "✳ Claude Code", "pwd": "/Users/seth/src/rook",
+     "progress": null, "lastOutputMs": 1787588669907,
+     "unread": false, "unreadMs": 0, "bellMs": 0, "progressDoneMs": 1787588660010,
+     "notified": {"title": "Claude Code", "body": "Waiting for your input", "ms": 1787588660012}}
   ],
 
   "pins": [{"pane": 12, "scope": "global"}],
@@ -549,7 +553,15 @@ still exact. Deltas would force unbounded buffering or a disconnect.
 ```
 
 `focus.mode` is `pane`, `copy` or `popup` — a replica needs to know
-when the mux itself is holding the keyboard. `rect` is null for a pane
+when the mux itself is holding the keyboard. `title`, `pwd` (OSC 7)
+and `progress` (OSC 9;4, `{state, percent}` while a bar is in flight)
+are what the program said to its terminal, published verbatim;
+`bellMs`, `progressDoneMs` and `notified` are the last bell, the last
+time a bar finished, and the last desktop notification. `unread` and
+`unreadMs` are rook's own channel over those — a signal arrived while
+nobody was looking at the pane, and nobody has looked since. A found
+`agents` row carries `unread: true` when a pane in its workspace is.
+`docs/attention.md` is the whole of it. `rect` is null for a pane
 that is not currently placed (another window, a hidden workspace) and
 `visible` says the same in one field. `lastOutputMs` is wall clock, not
 the server's uptime clock, because other processes read it. A `found`
@@ -695,6 +707,9 @@ Honest inventory, so this document is not mistaken for a description.
 | `saveState` → `<sock>.state` | real; restore format, still private |
 | block table push | real; superseded by the state feed, kept for the web client |
 | `rook state` / `watch` / `capture` | **built** |
+| the program's signals — bell, OSC 9/99/777, title, OSC 7, OSC 9;4 — on `panes[]`; bell and notification passed to the glass | **built** (`pane.zig` effects, `Server.pollSignals`) |
+| the unread channel: `panes[].unread`, the tab's `●`, `found[].unread` on the rail, `prefix-u` / `rook jump` | **built** — `docs/attention.md` |
+| a pane by id from the front door: `read` / `send` / `run` / `key` / `wait` / `split` / `window` / `focus` / `close-pane`, `$ROOK_MUX_PANE` as the caller's id, `rook --skill` | **built** (`c2s.input`, `c2s.pane_cmd`) |
 | `companion.zig` + `Server.scanCompanion` | **built** — the one resident rook watches for by name, published as `companion` and read out loud by `rook companion` |
 | `s2c.ack`, quiet `session 'N'`, `block_created` on new | **built** |
 | plugin protocol v1 | specified in `rook-plugin(7)` at `425c0f8^`; `items.push` implemented, the rest not |
@@ -801,6 +816,18 @@ back whole, and the workspace itself stays on the row for every match
 and command. *Revisit if* a label ever has to be acted on — it must
 not be; `workspace` is what commands take, and that is the whole
 reason both are published.
+
+**Rook publishes what a program says to its terminal, and acts on
+the arrival, never the words.** A bell, a notification, a title, a
+pwd and a progress report are the program speaking to the terminal it
+is in, and rook is that terminal — hearing them breaks no rule, and
+dropping them made every pane deaf to the one channel every agent
+already has. The line is drawn where the rail's line is: `title` is
+published as a string, and whether `✳ ` means idle is a producer's
+reading. The one thing rook derives is *unread* — that a signal came
+while nobody looked — because looking is rook's own fact. *Revisit if*
+a producer's rail ever needs rook to mark a row unread on its behalf;
+the answer is `unread` on the pushed item, which already exists.
 
 **A failed plugin's surface goes stale, not blank, and does not
 respawn.** Consistent with `rook-plugin(7)`. *Revisit if* daily driving

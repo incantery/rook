@@ -85,3 +85,30 @@ func TestCurrentFrom(t *testing.T) {
 		})
 	}
 }
+
+// The worktree manager's agent column reads the agents rook found,
+// off the same snapshot everything else reads, keyed by the full
+// workspace name (the label is for painting; the workspace is the
+// identity — docs/surfaces.md).
+func TestFoundAgentsFrom(t *testing.T) {
+	snap := `{"rookMuxState":1,"surfaces":[` +
+		`{"name":"spaces","found":[{"title":"rook","workspace":"rook","origin":"found"}]},` +
+		`{"name":"agents","model":null,"found":[` +
+		`{"title":"vera-e4126385","subtitle":"claude","workspace":"rook--vera-e4126385","origin":"manual","unread":true},` +
+		`{"title":"main","subtitle":"claude ×2","workspace":"main","origin":"manual","mood":"new"}]}]}`
+	got := foundAgentsFrom(snap)
+	if len(got) != 2 {
+		t.Fatalf("rows: %+v", got)
+	}
+	if f := got["rook--vera-e4126385"]; f.Subtitle != "claude" || !f.Unread {
+		t.Errorf("worktree row: %+v", f)
+	}
+	if f := got["main"]; f.Subtitle != "claude ×2" || f.Unread {
+		t.Errorf("main row: %+v", f)
+	}
+	for _, s := range []string{`{"surfaces":[]}`, `{}`, "engine: connection refused\n", ""} {
+		if got := foundAgentsFrom(s); len(got) != 0 {
+			t.Errorf("foundAgentsFrom(%q) = %+v, want none", s, got)
+		}
+	}
+}

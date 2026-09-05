@@ -15,7 +15,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/incantery/rook/internal/mux"
-	"github.com/incantery/rook/internal/sessions"
 	"github.com/incantery/rook/internal/tui"
 	"github.com/incantery/rook/internal/worktree"
 )
@@ -41,7 +40,13 @@ const (
 
 type row struct {
 	worktree.Worktree
-	State sessions.AgentState
+	// Agent is the program rook found running in the worktree's
+	// workspace ("claude", "claude ×2"), empty when none; Unread says
+	// a pane there rang, notified or finished while nobody looked.
+	// Presence and attention only — what the agent is doing is a
+	// producer's word (the rail's), not rook's.
+	Agent  string
+	Unread bool
 }
 
 type rowsMsg struct {
@@ -99,8 +104,8 @@ func tick() tea.Cmd {
 	return tea.Tick(refreshEvery, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
-// load re-reads the worktrees and each live session's agent state, off
-// the UI thread.
+// load re-reads the worktrees and, for each live workspace, the agent
+// rook found in it, off the UI thread.
 func (m model) load() tea.Cmd {
 	repo := m.repo
 	return func() tea.Msg {
@@ -108,11 +113,13 @@ func (m model) load() tea.Cmd {
 		if err != nil {
 			return rowsMsg{err: err}
 		}
+		found := mux.FoundAgents()
 		rows := make([]row, len(wts))
 		for i, wt := range wts {
 			rows[i] = row{Worktree: wt}
-			if wt.Live {
-				rows[i].State = sessions.StateOf(wt.Session)
+			if f, ok := found[wt.Session]; ok && wt.Live {
+				rows[i].Agent = f.Subtitle
+				rows[i].Unread = f.Unread
 			}
 		}
 		return rowsMsg{rows: rows}
@@ -348,13 +355,11 @@ func (m model) View() string {
 			notes = append(notes, fmt.Sprintf("-%d", r.Behind))
 		}
 		agent := ""
-		switch r.State {
-		case sessions.StateWaiting:
-			agent = accent.Render(bold.Render("● waiting"))
-		case sessions.StateWorking:
-			agent = "✳ working"
-		case sessions.StateDone:
-			agent = dim.Render("· done")
+		switch {
+		case r.Unread:
+			agent = accent.Render(bold.Render("● " + r.Agent))
+		case r.Agent != "":
+			agent = dim.Render("· " + r.Agent)
 		}
 		pad := strings.Repeat(" ", nameW-len([]rune(name)))
 		rest := fmt.Sprintf("%s  ⎇ %-24s %-14s %s", pad, branch, dim.Render(strings.Join(notes, " ")), agent)

@@ -65,6 +65,8 @@ fn foundRow(gpa: std.mem.Allocator, out: *std.ArrayList(u8), it: anytype, origin
     out.appendSlice(gpa, ",\"origin\":") catch return;
     str(gpa, out, origin);
     if (current) |c| out.print(gpa, ",\"current\":{s}", .{boolStr(c)}) catch return;
+    // The unread channel, the same word a pushed item uses for it.
+    if (it.unread) out.appendSlice(gpa, ",\"unread\":true") catch return;
     out.append(gpa, '}') catch return;
 }
 
@@ -203,8 +205,47 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
             boolStr(p.wantsMouse()),
             boolStr(p.exited.load(.acquire)),
         }) catch return;
+        // What the program said to its terminal, published as it was
+        // said. The title and the pwd move with output, and a
+        // progress bar moves with the work, so they are drift; a
+        // bell, a notification or a bar *finishing* is an event at
+        // human rate, and pushes at once. `unread` is rook's own
+        // channel over those events: set when one arrived while
+        // nobody was looking at the pane, cleared by looking.
         if (form.drift) {
+            var tb: [256]u8 = undefined;
+            var pb: [1024]u8 = undefined;
+            out.appendSlice(gpa, ",\"title\":") catch return;
+            str(gpa, out, p.title(&tb));
+            out.appendSlice(gpa, ",\"pwd\":") catch return;
+            str(gpa, out, p.pwd(&pb));
+            if (p.progress.active()) {
+                out.appendSlice(gpa, ",\"progress\":{\"state\":") catch return;
+                str(gpa, out, p.progress.word());
+                if (p.progress_pct >= 0) {
+                    out.print(gpa, ",\"percent\":{d}}}", .{p.progress_pct}) catch return;
+                } else {
+                    out.appendSlice(gpa, ",\"percent\":null}") catch return;
+                }
+            } else {
+                out.appendSlice(gpa, ",\"progress\":null") catch return;
+            }
             out.print(gpa, ",\"lastOutputMs\":{d}", .{p.last_output_ms.load(.acquire)}) catch return;
+        }
+        out.print(gpa, ",\"unread\":{s},\"unreadMs\":{d},\"bellMs\":{d},\"progressDoneMs\":{d}", .{
+            boolStr(p.unread_ms != 0),
+            p.unread_ms,
+            p.bell_ms,
+            p.progress_done_ms,
+        }) catch return;
+        if (p.notif_ms != 0) {
+            out.appendSlice(gpa, ",\"notified\":{\"title\":") catch return;
+            str(gpa, out, p.notif_title[0..p.notif_title_len]);
+            out.appendSlice(gpa, ",\"body\":") catch return;
+            str(gpa, out, p.notif_body[0..p.notif_body_len]);
+            out.print(gpa, ",\"ms\":{d}}}", .{p.notif_ms}) catch return;
+        } else {
+            out.appendSlice(gpa, ",\"notified\":null") catch return;
         }
         out.append(gpa, '}') catch return;
     }

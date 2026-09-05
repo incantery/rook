@@ -11,6 +11,12 @@
 //!   rook side demo           print the demo models, to pipe into the above
 //!   rook blocks / raw <id>   block table; raw single-block attach
 //!   rook capture <id>        one pane's viewport as plain text
+//!   rook read <id> [-n N]    the same, or its last N lines with history
+//!   rook send <id> <text>    type into a pane; `run` adds Enter, `key` names keys
+//!   rook wait <id> [--match S] [--quiet MS] [--timeout MS]
+//!   rook split <id> [--down] [--focus] [--cwd DIR]   a pane beside/below it
+//!   rook window <id> [--focus] [--cwd DIR]           a new window in its workspace
+//!   rook focus <id> / rook jump / rook close-pane <id>
 //!   rook kill           stop the server
 const std = @import("std");
 const server = @import("server.zig");
@@ -103,13 +109,130 @@ pub fn main(init: std.process.Init) !void {
         try client.blocks(gpa, path);
         return;
     }
-    if (std.mem.eql(u8, cmd, "capture")) {
+    if (std.mem.eql(u8, cmd, "capture") or std.mem.eql(u8, cmd, "read")) {
+        // rook read <id> [-n LINES]: the viewport, or the last LINES
+        // lines with the history above the screen filling in.
         if (argv.len < 3) {
-            std.debug.print("usage: rook capture <block-id>\n", .{});
+            std.debug.print("usage: rook {s} <pane> [-n lines]\n", .{cmd});
             return error.BadArgs;
         }
-        const id = try std.fmt.parseInt(u32, std.mem.span(argv[2]), 10);
-        try client.capture(churn_gpa, path, id);
+        const id = try paneArg(std.mem.span(argv[2]));
+        var lines: u32 = 0;
+        var i: usize = 3;
+        while (i < argv.len) : (i += 1) {
+            const a = std.mem.span(argv[i]);
+            if ((std.mem.eql(u8, a, "-n") or std.mem.eql(u8, a, "--lines")) and i + 1 < argv.len) {
+                i += 1;
+                lines = try std.fmt.parseInt(u32, std.mem.span(argv[i]), 10);
+            }
+        }
+        try client.capture(churn_gpa, path, id, lines);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "send") or std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "key")) {
+        // send: the words, verbatim. run: the words and Enter, the way
+        // a command is typed. key: named keys — enter, esc, tab,
+        // up/down/left/right, space, backspace, ctrl-x.
+        if (argv.len < 4) {
+            std.debug.print("usage: rook {s} <pane> <text...>\n", .{cmd});
+            return error.BadArgs;
+        }
+        const id = try paneArg(std.mem.span(argv[2]));
+        var bytes: std.ArrayList(u8) = .empty;
+        if (std.mem.eql(u8, cmd, "key")) {
+            for (argv[3..]) |a| {
+                const name = std.mem.span(a);
+                try bytes.appendSlice(gpa, keyBytes(name) orelse {
+                    std.debug.print("rook key: unknown key {s}\n", .{name});
+                    return error.BadArgs;
+                });
+            }
+        } else {
+            for (argv[3..], 0..) |a, i| {
+                if (i > 0) try bytes.append(gpa, ' ');
+                try bytes.appendSlice(gpa, std.mem.span(a));
+            }
+            if (std.mem.eql(u8, cmd, "run")) try bytes.append(gpa, '\r');
+        }
+        try client.send(churn_gpa, path, id, bytes.items);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "wait")) {
+        if (argv.len < 3) {
+            std.debug.print("usage: rook wait <pane> [--match text] [--quiet ms] [--timeout ms] [-n lines]\n", .{});
+            return error.BadArgs;
+        }
+        const id = try paneArg(std.mem.span(argv[2]));
+        var match: ?[]const u8 = null;
+        var quiet: u32 = 0;
+        var timeout: u32 = 0;
+        var lines: u32 = 200;
+        var i: usize = 3;
+        while (i < argv.len) : (i += 1) {
+            const a = std.mem.span(argv[i]);
+            const val: ?[]const u8 = if (i + 1 < argv.len) std.mem.span(argv[i + 1]) else null;
+            if (std.mem.eql(u8, a, "--match") and val != null) {
+                match = val;
+                i += 1;
+            } else if (std.mem.eql(u8, a, "--quiet") and val != null) {
+                quiet = try std.fmt.parseInt(u32, val.?, 10);
+                i += 1;
+            } else if (std.mem.eql(u8, a, "--timeout") and val != null) {
+                timeout = try std.fmt.parseInt(u32, val.?, 10);
+                i += 1;
+            } else if ((std.mem.eql(u8, a, "-n") or std.mem.eql(u8, a, "--lines")) and val != null) {
+                lines = try std.fmt.parseInt(u32, val.?, 10);
+                i += 1;
+            } else {
+                std.debug.print("rook wait: unknown option {s}\n", .{a});
+                return error.BadArgs;
+            }
+        }
+        if (match == null and quiet == 0) {
+            std.debug.print("rook wait: say what to wait for: --match text, or --quiet ms\n", .{});
+            return error.BadArgs;
+        }
+        client.wait(churn_gpa, path, id, match, quiet, timeout, lines) catch |e| switch (e) {
+            error.Timeout => {
+                std.debug.print("rook wait: timed out\n", .{});
+                ptypkg.exit_(1);
+            },
+            else => return e,
+        };
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "split") or std.mem.eql(u8, cmd, "window") or std.mem.eql(u8, cmd, "close-pane") or std.mem.eql(u8, cmd, "focus")) {
+        // Pane verbs by id. The desk is never pulled unless --focus
+        // asks: a split beside an agent's own pane appears; focus
+        // stays where the person left it.
+        if (argv.len < 3) {
+            std.debug.print("usage: rook {s} <pane> [--down] [--focus] [--cwd dir]\n", .{cmd});
+            return error.BadArgs;
+        }
+        const id = try paneArg(std.mem.span(argv[2]));
+        var op: u8 = if (std.mem.eql(u8, cmd, "split")) 'v' else if (std.mem.eql(u8, cmd, "window")) 'c' else if (std.mem.eql(u8, cmd, "focus")) 'f' else 'x';
+        var focus = false;
+        var cwd: []const u8 = "";
+        var i: usize = 3;
+        while (i < argv.len) : (i += 1) {
+            const a = std.mem.span(argv[i]);
+            if (std.mem.eql(u8, a, "--down") or std.mem.eql(u8, a, "-")) {
+                op = '-';
+            } else if (std.mem.eql(u8, a, "--focus")) {
+                focus = true;
+            } else if (std.mem.eql(u8, a, "--cwd") and i + 1 < argv.len) {
+                i += 1;
+                cwd = std.mem.span(argv[i]);
+            } else {
+                std.debug.print("rook {s}: unknown option {s}\n", .{ cmd, a });
+                return error.BadArgs;
+            }
+        }
+        try client.paneCmd(churn_gpa, path, id, op, focus, cwd);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "jump")) {
+        try client.paneCmd(churn_gpa, path, 0, 'u', false, "");
         return;
     }
     if (std.mem.eql(u8, cmd, "raw")) {
@@ -234,4 +357,69 @@ fn daemonizeServer(gpa: std.mem.Allocator) !void {
     const argv = [_:null]?[*:0]const u8{ exe_z.ptr, "server" };
     _ = ptypkg.execvp_(exe_z.ptr, &argv);
     ptypkg.exit_(1);
+}
+
+/// A pane argument: an id, or `.` / `current` / `--current` for the
+/// pane this command runs in ($ROOK_MUX_PANE, the id the server set).
+fn paneArg(arg: []const u8) !u32 {
+    if (std.mem.eql(u8, arg, ".") or std.mem.eql(u8, arg, "current") or std.mem.eql(u8, arg, "--current")) {
+        const env = getenv("ROOK_MUX_PANE") orelse {
+            std.debug.print("rook: not inside a rook pane, so there is no current one\n", .{});
+            return error.BadArgs;
+        };
+        return std.fmt.parseInt(u32, std.mem.span(env), 10) catch {
+            std.debug.print("rook: this pane predates ids in $ROOK_MUX_PANE; name it by number (`rook blocks`)\n", .{});
+            return error.BadArgs;
+        };
+    }
+    return std.fmt.parseInt(u32, arg, 10) catch {
+        std.debug.print("rook: a pane is a number, or `.` for this one\n", .{});
+        return error.BadArgs;
+    };
+}
+
+/// The bytes a named key sends a program: the legacy encoding every
+/// program understands. `ctrl-x` is the control character; a single
+/// character is itself.
+fn keyBytes(name: []const u8) ?[]const u8 {
+    const T = struct { n: []const u8, b: []const u8 };
+    const table = [_]T{
+        .{ .n = "enter", .b = "\r" },     .{ .n = "return", .b = "\r" },
+        .{ .n = "esc", .b = "\x1b" },     .{ .n = "escape", .b = "\x1b" },
+        .{ .n = "tab", .b = "\t" },       .{ .n = "space", .b = " " },
+        .{ .n = "backspace", .b = "\x7f" }, .{ .n = "delete", .b = "\x1b[3~" },
+        .{ .n = "up", .b = "\x1b[A" },     .{ .n = "down", .b = "\x1b[B" },
+        .{ .n = "right", .b = "\x1b[C" },  .{ .n = "left", .b = "\x1b[D" },
+        .{ .n = "home", .b = "\x1b[H" },   .{ .n = "end", .b = "\x1b[F" },
+        .{ .n = "pageup", .b = "\x1b[5~" }, .{ .n = "pagedown", .b = "\x1b[6~" },
+        .{ .n = "shift-tab", .b = "\x1b[Z" },
+    };
+    for (table) |t| {
+        if (std.ascii.eqlIgnoreCase(name, t.n)) return t.b;
+    }
+    if (name.len == 1) return name;
+    if ((std.ascii.startsWithIgnoreCase(name, "ctrl-") or std.ascii.startsWithIgnoreCase(name, "ctrl+")) and name.len == 6) {
+        const ch = std.ascii.toLower(name[5]);
+        if (ch >= 'a' and ch <= 'z') return ctrl_bytes[ch - 'a' ..][0..1];
+        if (ch == '[') return "\x1b";
+    }
+    return null;
+}
+
+const ctrl_bytes = blk: {
+    var b: [26]u8 = undefined;
+    for (&b, 0..) |*c, i| c.* = @intCast(i + 1);
+    break :blk b;
+};
+
+test "key names encode as the bytes a program expects" {
+    const eq = std.testing.expectEqualStrings;
+    try eq("\r", keyBytes("enter").?);
+    try eq("\r", keyBytes("Enter").?);
+    try eq("\x1b", keyBytes("esc").?);
+    try eq("\x03", keyBytes("ctrl-c").?);
+    try eq("\x03", keyBytes("ctrl+c").?);
+    try eq("\x1b[Z", keyBytes("shift-tab").?);
+    try eq("q", keyBytes("q").?);
+    try std.testing.expect(keyBytes("hyperspace") == null);
 }

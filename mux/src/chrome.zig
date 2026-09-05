@@ -842,13 +842,35 @@ pub fn tabMark(w: struct {
     last_output_ms: i64,
     seen_ms: i64,
     now: i64,
+    /// A pane in the window carries the unread channel: a bell, a
+    /// notification or a finished progress bar arrived while nobody
+    /// was looking, and nobody has looked since. This is the program
+    /// asking, where unseen output is only rook noticing; both wear
+    /// the one dot because both are news you missed.
+    signal: bool = false,
 }) TabMark {
     const last = w.last_output_ms;
+    if (w.agent and last != 0 and w.now - last < working_ms) return .working;
+    if (w.signal) return .unread;
     if (last == 0) return .none; // never produced anything
-    if (w.agent and w.now - last < working_ms) return .working;
     // The window on the glass is being read as it arrives.
     if (!w.current and last > w.seen_ms) return .unread;
     return .none;
+}
+
+test "tab marks: working outranks unread, and a signal is unread even on a quiet window" {
+    const eq = std.testing.expectEqual;
+    // a window that never produced anything and was never asked for: nothing
+    try eq(TabMark.none, tabMark(.{ .current = false, .agent = false, .last_output_ms = 0, .seen_ms = 0, .now = 10_000 }));
+    // the program asked (a bell, a notification) while nobody looked
+    try eq(TabMark.unread, tabMark(.{ .current = false, .agent = false, .last_output_ms = 0, .seen_ms = 0, .now = 10_000, .signal = true }));
+    // …and it stays news on the current window until focus clears it
+    try eq(TabMark.unread, tabMark(.{ .current = true, .agent = false, .last_output_ms = 100, .seen_ms = 200, .now = 10_000, .signal = true }));
+    // an agent still producing output is working, whatever else it said
+    try eq(TabMark.working, tabMark(.{ .current = false, .agent = true, .last_output_ms = 9_500, .seen_ms = 0, .now = 10_000, .signal = true }));
+    // unseen output alone is still the softer unread
+    try eq(TabMark.unread, tabMark(.{ .current = false, .agent = false, .last_output_ms = 300, .seen_ms = 200, .now = 10_000 }));
+    try eq(TabMark.none, tabMark(.{ .current = false, .agent = false, .last_output_ms = 100, .seen_ms = 200, .now = 10_000 }));
 }
 
 /// How long after a batch of output an agent pane still reads as

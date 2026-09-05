@@ -251,3 +251,53 @@ func companionJSON(snapshot string) string {
 	}
 	return string(s.Companion)
 }
+
+// Found is one row of the agents rook found in its own pane table,
+// as the state feed publishes it under `surfaces[].found` for the
+// agents surface: which workspace, what program (the subtitle, e.g.
+// "claude" or "claude ×2"), and whether a pane there is on the
+// unread channel. Presence, never state — what the pane is *doing*
+// is a producer's word, not rook's.
+type Found struct {
+	Title     string `json:"title"`
+	Subtitle  string `json:"subtitle"`
+	Workspace string `json:"workspace"`
+	Unread    bool   `json:"unread"`
+}
+
+// FoundAgents asks the engine which workspaces have an agent running
+// in them. Empty (not an error) when the server isn't running.
+func FoundAgents() map[string]Found {
+	out, err := run("state")
+	if err != nil {
+		return nil
+	}
+	return foundAgentsFrom(out)
+}
+
+// foundAgentsFrom reads the agents surface's found rows out of one
+// snapshot, keyed by workspace. It picks the fields it needs and
+// ignores the rest, which is how a reader survives a newer schema.
+func foundAgentsFrom(snapshot string) map[string]Found {
+	var s struct {
+		Surfaces []struct {
+			Name  string  `json:"name"`
+			Found []Found `json:"found"`
+		} `json:"surfaces"`
+	}
+	if json.Unmarshal([]byte(snapshot), &s) != nil {
+		return nil
+	}
+	m := map[string]Found{}
+	for _, sf := range s.Surfaces {
+		if sf.Name != "agents" {
+			continue
+		}
+		for _, f := range sf.Found {
+			if f.Workspace != "" {
+				m[f.Workspace] = f
+			}
+		}
+	}
+	return m
+}

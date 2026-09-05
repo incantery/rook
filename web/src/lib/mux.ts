@@ -15,6 +15,10 @@ export const c2s = {
   blocks: 10,
   attachBlock: 11,
   blockCmd: 12,
+  // 13–15 are the state feed, capture and the rail; 16–17 type into
+  // and act on a pane by id (the front door's verbs).
+  input: 16,
+  paneCmd: 17,
 } as const;
 
 export const s2c = {
