@@ -536,6 +536,7 @@ still exact. Deltas would force unbounded buffering or a disconnect.
      "title": "✳ Claude Code", "pwd": "/Users/seth/src/rook",
      "progress": null, "lastOutputMs": 1787588669907,
      "unread": false, "unreadMs": 0, "bellMs": 0, "progressDoneMs": 1787588660010,
+     "resume": "claude --resume 0f3c9a2b-…",
      "notified": {"title": "Claude Code", "body": "Waiting for your input", "ms": 1787588660012}}
   ],
 
@@ -561,7 +562,9 @@ time a bar finished, and the last desktop notification. `unread` and
 `unreadMs` are rook's own channel over those — a signal arrived while
 nobody was looking at the pane, and nobody has looked since. A found
 `agents` row carries `unread: true` when a pane in its workspace is.
-`docs/attention.md` is the whole of it. `rect` is null for a pane
+`docs/attention.md` is the whole of it. `resume` is how the pane's
+program comes back after the server is gone, in its own words (`rook
+resume`), and empty once that program is no longer the one in front. `rect` is null for a pane
 that is not currently placed (another window, a hidden workspace) and
 `visible` says the same in one field. `lastOutputMs` is wall clock, not
 the server's uptime clock, because other processes read it. A `found`
@@ -710,6 +713,7 @@ Honest inventory, so this document is not mistaken for a description.
 | the program's signals — bell, OSC 9/99/777, title, OSC 7, OSC 9;4 — on `panes[]`; bell and notification passed to the glass | **built** (`pane.zig` effects, `Server.pollSignals`) |
 | the unread channel: `panes[].unread`, the tab's `●`, `found[].unread` on the rail, `prefix-u` / `rook jump` | **built** — `docs/attention.md` |
 | a pane by id from the front door: `read` / `send` / `run` / `key` / `wait` / `split` / `window` / `focus` / `close-pane`, `$ROOK_MUX_PANE` as the caller's id, `rook --skill` | **built** (`c2s.input`, `c2s.pane_cmd`) |
+| resume: `panes[].resume`, kept while its program is in front, saved in the restore file, typed into the rebuilt shell on boot; `[mux] restore` on by default | **built** (`c2s.resume`, state file v2) |
 | `companion.zig` + `Server.scanCompanion` | **built** — the one resident rook watches for by name, published as `companion` and read out loud by `rook companion` |
 | `s2c.ack`, quiet `session 'N'`, `block_created` on new | **built** |
 | plugin protocol v1 | specified in `rook-plugin(7)` at `425c0f8^`; `items.push` implemented, the rest not |
@@ -828,6 +832,17 @@ reading. The one thing rook derives is *unread* — that a signal came
 while nobody looked — because looking is rook's own fact. *Revisit if*
 a producer's rail ever needs rook to mark a row unread on its behalf;
 the answer is `unread` on the pushed item, which already exists.
+
+**A pane's resume command is the program's own word, and dies with
+the program.** Rook cannot know a Claude session id, and must not
+read a transcript to find one; the program (through a one-line hook)
+or its producer says how it comes back, and rook only remembers. The
+command is saved while the foreground program is still the one that
+set it, so a pane whose agent has quit is restored as the shell it is.
+Restore now defaults on: with resume, a `rook kill && rook` costs the
+scrollback and nothing else. *Revisit if* a program that sets resume
+wraps itself in something rook sees as a different foreground name —
+the check would then want a program list, not a single name.
 
 **A failed plugin's surface goes stale, not blank, and does not
 respawn.** Consistent with `rook-plugin(7)`. *Revisit if* daily driving

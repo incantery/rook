@@ -766,6 +766,12 @@ pub const Server = struct {
             try self.reap();
             self.forwardTees();
             self.pollSignals();
+            // Restored panes type their resume command once the shell
+            // is up — as a person would, into the shell's own
+            // environment, so the shell is still there when it exits.
+            for (self.panes.items) |p| {
+                if (p.bootIfReady(nowMs())) self.pending = true;
+            }
             if (self.sessions.items.len == 0 or self.shutdown) return;
 
             // a resize's SIGWINCH repaint has had time to arrive: force
@@ -974,6 +980,22 @@ pub const Server = struct {
                     }
                 },
                 @intFromEnum(proto.c2s.pane_cmd) => self.paneCmd(c, msg.payload),
+                @intFromEnum(proto.c2s.resume_cmd) => {
+                    // [id u32][cmd…] → how to bring this pane's program
+                    // back; empty forgets. The program's own word, kept
+                    // while it is the one in the foreground.
+                    if (msg.payload.len >= 4) {
+                        const id = std.mem.readInt(u32, msg.payload[0..4], .little);
+                        if (self.pane(id)) |p| {
+                            p.setResume(msg.payload[4..]);
+                            self.state_dirty = true;
+                            _ = self.touch();
+                            self.ack(c);
+                        } else {
+                            self.sendTo(c, @intFromEnum(proto.s2c.exit), "no such pane");
+                        }
+                    }
+                },
                 @intFromEnum(proto.c2s.block_cmd) => self.blockCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.attach_block) => self.attachBlock(c, msg.payload),
                 @intFromEnum(proto.c2s.session) => {
@@ -2825,26 +2847,28 @@ pub const Server = struct {
 
     // ---- resurrect: sessions/windows/cwds across server restarts ----
 
-    /// v1 format, line-oriented:
-    ///   v1
+    /// v2 format, line-oriented:
+    ///   v2
+    ///   gpin <cwd>
     ///   session <name> [*]
+    ///   pin <cwd>
     ///   window <cwd> [*]
-    /// Windows come back as one pane in the saved cwd (splits are
-    /// cheap to remake; sessions and cwds are the tedium).
+    ///   pane <cwd>
+    ///   resume <cmd>
+    /// A window comes back as its focused pane in the saved cwd, plus
+    /// a `pane` beside it for every other pane that knows how to bring
+    /// its program back — splits are cheap to remake, but an agent's
+    /// conversation is not. `resume` belongs to the pane on the line
+    /// above it and is written only while the program that set it is
+    /// still in the foreground (`Pane.resumeLive`). v1 files, without
+    /// `pane` or `resume`, still read.
     fn saveState(self: *Server) void {
         if (self.state_path[0] == 0) return;
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.gpa);
-        out.appendSlice(self.gpa, "v1\n") catch return;
+        out.appendSlice(self.gpa, "v2\n") catch return;
         for (self.global_pins.items) |id| {
-            var pb: [1024]u8 = undefined;
-            var pc: []const u8 = "";
-            if (self.pane(id)) |p| {
-                if (p.fgCwd(&pb)) |c| pc = c;
-            }
-            out.appendSlice(self.gpa, "gpin ") catch return;
-            out.appendSlice(self.gpa, pc) catch return;
-            out.append(self.gpa, '\n') catch return;
+            self.savePane(&out, "gpin ", id, false) catch return;
         }
         for (self.sessions.items, 0..) |sn, si| {
             out.appendSlice(self.gpa, "session ") catch return;
@@ -2852,28 +2876,39 @@ pub const Server = struct {
             if (si == self.cur_sess) out.appendSlice(self.gpa, " *") catch return;
             out.append(self.gpa, '\n') catch return;
             for (sn.pins.items) |id| {
-                var pb: [1024]u8 = undefined;
-                var pc: []const u8 = "";
-                if (self.pane(id)) |p| {
-                    if (p.fgCwd(&pb)) |c| pc = c;
-                }
-                out.appendSlice(self.gpa, "pin ") catch return;
-                out.appendSlice(self.gpa, pc) catch return;
-                out.append(self.gpa, '\n') catch return;
+                self.savePane(&out, "pin ", id, false) catch return;
             }
             for (sn.windows.items, 0..) |w, wi| {
-                var cwd_buf: [1024]u8 = undefined;
-                var cwd: []const u8 = "";
-                if (self.pane(w.focused)) |p| {
-                    if (p.fgCwd(&cwd_buf)) |c| cwd = c;
+                self.savePane(&out, "window ", w.focused, wi == sn.cur) catch return;
+                for (self.panes.items) |p| {
+                    if (p.id == w.focused or !w.layout.contains(p.id)) continue;
+                    if (p.resumeLive().len == 0) continue;
+                    self.savePane(&out, "pane ", p.id, false) catch return;
                 }
-                out.appendSlice(self.gpa, "window ") catch return;
-                out.appendSlice(self.gpa, cwd) catch return;
-                if (wi == sn.cur) out.appendSlice(self.gpa, " *") catch return;
-                out.append(self.gpa, '\n') catch return;
             }
         }
         ptypkg.writeFileSmall(@ptrCast(&self.state_path), @ptrCast(&self.state_tmp), out.items);
+    }
+
+    /// One pane's line: its kind, its cwd, the star, and a `resume`
+    /// line under it when it has one to keep.
+    fn savePane(self: *Server, out: *std.ArrayList(u8), kind: []const u8, id: u32, star: bool) !void {
+        var cwd_buf: [1024]u8 = undefined;
+        var cwd: []const u8 = "";
+        var back: []const u8 = "";
+        if (self.pane(id)) |p| {
+            if (p.fgCwd(&cwd_buf)) |c| cwd = c;
+            back = p.resumeLive();
+        }
+        try out.appendSlice(self.gpa, kind);
+        try out.appendSlice(self.gpa, cwd);
+        if (star) try out.appendSlice(self.gpa, " *");
+        try out.append(self.gpa, '\n');
+        if (back.len > 0 and std.mem.indexOfScalar(u8, back, '\n') == null) {
+            try out.appendSlice(self.gpa, "resume ");
+            try out.appendSlice(self.gpa, back);
+            try out.append(self.gpa, '\n');
+        }
     }
 
     /// Rebuild sessions from the state file. False when there is
@@ -2884,11 +2919,26 @@ pub const Server = struct {
         const data = ptypkg.readFileSmall(@ptrCast(&self.state_path), &buf) orelse return false;
         var lines = std.mem.splitScalar(u8, data, '\n');
         const head = lines.next() orelse return false;
-        if (!std.mem.eql(u8, head, "v1")) return false;
+        if (!std.mem.eql(u8, head, "v1") and !std.mem.eql(u8, head, "v2")) return false;
         var made_any = false;
         var want_sess: usize = 0;
         var sess_has_window = false;
+        // the pane the next `resume` line belongs to
+        var last_pane: ?*panepkg.Pane = null;
+        const boot_by = nowMs() + 1500;
         while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "resume ")) {
+                const cmd = line["resume ".len..];
+                if (last_pane) |p| {
+                    if (cmd.len > 0) {
+                        p.setBoot(cmd, boot_by);
+                        // it is the pane's promise again once it is typed
+                        p.setResume(cmd);
+                    }
+                }
+                continue;
+            }
+            last_pane = null;
             if (std.mem.startsWith(u8, line, "session ")) {
                 var name = line["session ".len..];
                 const starred = std.mem.endsWith(u8, name, " *");
@@ -2913,11 +2963,26 @@ pub const Server = struct {
                     break :blk @ptrCast(&cwd_z);
                 } else null;
                 const p = try self.startPane(cwd_arg);
+                last_pane = p;
                 if (is_global) {
                     try self.global_pins.append(self.gpa, p.id);
                 } else {
                     try self.sess().pins.append(self.gpa, p.id);
                 }
+            } else if (std.mem.startsWith(u8, line, "pane ") and self.sessions.items.len > 0 and self.sess().windows.items.len > 0) {
+                // a sibling of the window above, beside its focused pane
+                const dir = line["pane ".len..];
+                var cwd_z: [1024]u8 = undefined;
+                const cwd_arg: ?[*:0]const u8 = if (dir.len > 0 and dir.len < cwd_z.len) blk: {
+                    @memcpy(cwd_z[0..dir.len], dir);
+                    cwd_z[dir.len] = 0;
+                    break :blk @ptrCast(&cwd_z);
+                } else null;
+                const sn = self.sess();
+                const w = sn.windows.items[sn.windows.items.len - 1];
+                const p = try self.startPane(cwd_arg);
+                try w.layout.split(w.focused, p.id, true);
+                last_pane = p;
             } else if (std.mem.startsWith(u8, line, "window ") and self.sessions.items.len > 0) {
                 var cwd = line["window ".len..];
                 const starred = std.mem.endsWith(u8, cwd, " *");
@@ -2935,6 +3000,7 @@ pub const Server = struct {
                 const p = try self.startPane(cwd_arg);
                 try w.layout.seed(p.id);
                 w.focused = p.id;
+                last_pane = p;
                 if (starred) sn.cur = sn.windows.items.len - 1;
                 sess_has_window = true;
             }

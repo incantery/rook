@@ -81,6 +81,13 @@ elsewhere. Nothing needs to be installed in Claude for this. A
 producer that wants *state* still reads the hook events and the pane,
 as verad does.
 
+## Coming back
+
+A pane that told rook how to bring its program back (`rook resume`)
+is restored running after the server is gone — `mux/README.md`,
+"Coming back". For Claude Code it is one `SessionStart` hook; nothing
+about the id is rook's to know, only the command it was handed.
+
 ## Reading rook (the other direction)
 
 `rook state` and `rook watch` — `docs/surfaces.md`. A producer that

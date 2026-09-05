@@ -4,7 +4,7 @@
 //!   nav_owners = ["nvim", "fzf"]   # programs that keep Ctrl-hjkl
 //!   scrollback_mb = 4
 //!   accent = "#cba6f7"             # chrome color: tabs, borders, popup
-//!   restore = true                 # resurrect last layout on boot (default off)
+//!   restore = false                # skip resurrecting the last layout on boot
 //!   sidebar = true                 # the spaces/agents side panel
 //!   sidebar_width = 30             # its width in columns
 //!   agents = ["claude"]            # programs the agents rail looks for
@@ -65,9 +65,11 @@ pub const Mux = struct {
     /// glass too narrow for it regardless.
     sidebar: bool = true,
     sidebar_width: u16 = 30,
-    /// Resurrect the last saved layout on server boot. Off by default:
-    /// a fresh `rook` opens a clean workspace, not last session's splits.
-    restore: bool = false,
+    /// Resurrect the last saved layout on server boot: workspaces,
+    /// windows, cwds, and every pane that told rook how to bring its
+    /// program back (`rook resume`). On by default since resume exists;
+    /// a boot with nothing saved opens a clean workspace either way.
+    restore: bool = true,
     /// newline-joined foreground program names that mean "an agent is
     /// running in this pane". The one opinion rook holds about what an
     /// agent *is*, and the only reason it holds it: so a session
@@ -242,7 +244,7 @@ test "parseMux" {
     try std.testing.expectEqual(false, sb.sidebar);
     try std.testing.expectEqual(@as(u16, 60), sb.sidebar_width); // clamped
     var r: Mux = .{};
-    try std.testing.expectEqual(false, r.restore); // default off
+    try std.testing.expectEqual(true, r.restore); // default on
     parseMux("[mux]\nrestore = true\n", &r);
     try std.testing.expectEqual(true, r.restore);
     parseMux("[mux]\nrestore = false\n", &r);

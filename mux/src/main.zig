@@ -17,6 +17,7 @@
 //!   rook split <id> [--down] [--focus] [--cwd DIR]   a pane beside/below it
 //!   rook window <id> [--focus] [--cwd DIR]           a new window in its workspace
 //!   rook focus <id> / rook jump / rook close-pane <id>
+//!   rook resume <id> <cmd...>  how to bring the pane's program back after a restart
 //!   rook kill           stop the server
 const std = @import("std");
 const server = @import("server.zig");
@@ -116,7 +117,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("usage: rook {s} <pane> [-n lines]\n", .{cmd});
             return error.BadArgs;
         }
-        const id = try paneArg(std.mem.span(argv[2]));
+        const id = try paneArgLoud(std.mem.span(argv[2]));
         var lines: u32 = 0;
         var i: usize = 3;
         while (i < argv.len) : (i += 1) {
@@ -137,7 +138,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("usage: rook {s} <pane> <text...>\n", .{cmd});
             return error.BadArgs;
         }
-        const id = try paneArg(std.mem.span(argv[2]));
+        const id = try paneArgLoud(std.mem.span(argv[2]));
         var bytes: std.ArrayList(u8) = .empty;
         if (std.mem.eql(u8, cmd, "key")) {
             for (argv[3..]) |a| {
@@ -162,7 +163,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("usage: rook wait <pane> [--match text] [--quiet ms] [--timeout ms] [-n lines]\n", .{});
             return error.BadArgs;
         }
-        const id = try paneArg(std.mem.span(argv[2]));
+        const id = try paneArgLoud(std.mem.span(argv[2]));
         var match: ?[]const u8 = null;
         var quiet: u32 = 0;
         var timeout: u32 = 0;
@@ -209,7 +210,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("usage: rook {s} <pane> [--down] [--focus] [--cwd dir]\n", .{cmd});
             return error.BadArgs;
         }
-        const id = try paneArg(std.mem.span(argv[2]));
+        const id = try paneArgLoud(std.mem.span(argv[2]));
         var op: u8 = if (std.mem.eql(u8, cmd, "split")) 'v' else if (std.mem.eql(u8, cmd, "window")) 'c' else if (std.mem.eql(u8, cmd, "focus")) 'f' else 'x';
         var focus = false;
         var cwd: []const u8 = "";
@@ -229,6 +230,30 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         try client.paneCmd(churn_gpa, path, id, op, focus, cwd);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "resume")) {
+        // rook resume <id> <cmd...> | rook resume <id> --clear
+        // Written for a hook: outside rook, or against a server that
+        // does not answer, there is nothing to remember and nothing to
+        // say — exit 0 in silence, so a SessionStart hook that runs
+        // everywhere never becomes noise where rook is not.
+        if (argv.len < 4) {
+            std.debug.print("usage: rook resume <pane> <command...> | --clear\n", .{});
+            return error.BadArgs;
+        }
+        const id = paneArg(std.mem.span(argv[2])) catch return;
+        var joined: std.ArrayList(u8) = .empty;
+        if (!std.mem.eql(u8, std.mem.span(argv[3]), "--clear")) {
+            for (argv[3..], 0..) |a, i| {
+                if (i > 0) try joined.append(gpa, ' ');
+                try joined.appendSlice(gpa, std.mem.span(a));
+            }
+        }
+        client.setResume(churn_gpa, path, id, joined.items) catch |e| switch (e) {
+            error.ConnectFailed, error.Timeout, error.ServerGone => return,
+            else => return e,
+        };
         return;
     }
     if (std.mem.eql(u8, cmd, "jump")) {
@@ -359,14 +384,23 @@ fn daemonizeServer(gpa: std.mem.Allocator) !void {
     ptypkg.exit_(1);
 }
 
+/// `paneArg`, saying so when there is no current pane: the verbs a
+/// person types want the sentence; a hook wants silence.
+fn paneArgLoud(arg: []const u8) !u32 {
+    return paneArg(arg) catch |e| switch (e) {
+        error.NotInside => {
+            std.debug.print("rook: not inside a rook pane, so there is no current one\n", .{});
+            return error.BadArgs;
+        },
+        else => return e,
+    };
+}
+
 /// A pane argument: an id, or `.` / `current` / `--current` for the
 /// pane this command runs in ($ROOK_MUX_PANE, the id the server set).
 fn paneArg(arg: []const u8) !u32 {
     if (std.mem.eql(u8, arg, ".") or std.mem.eql(u8, arg, "current") or std.mem.eql(u8, arg, "--current")) {
-        const env = getenv("ROOK_MUX_PANE") orelse {
-            std.debug.print("rook: not inside a rook pane, so there is no current one\n", .{});
-            return error.BadArgs;
-        };
+        const env = getenv("ROOK_MUX_PANE") orelse return error.NotInside;
         return std.fmt.parseInt(u32, std.mem.span(env), 10) catch {
             std.debug.print("rook: this pane predates ids in $ROOK_MUX_PANE; name it by number (`rook blocks`)\n", .{});
             return error.BadArgs;

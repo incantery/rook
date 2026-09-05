@@ -78,6 +78,26 @@ rook key 7 ctrl-c
 rook --skill                     # the whole manual, for an agent
 ```
 
+**Coming back.** The server saves its workspaces, windows and cwds,
+and restores them on boot (`[mux] restore = false` to opt out). A pane
+whose program told rook how to bring it back comes back *running*:
+
+```sh
+rook resume . "claude --resume $SESSION_ID"   # the program's own word, kept while it is in front
+```
+
+For Claude Code that is one `SessionStart` hook in `~/.claude/settings.json`:
+
+```json
+{"hooks": {"SessionStart": [{"hooks": [{"type": "command",
+  "command": "rook resume . \"claude --resume $(jq -r .session_id)\""}]}]}}
+```
+
+Outside rook the hook is silent and exits 0. After `rook kill && rook`
+— or a crash, or a reboot — every Claude pane reopens its own
+conversation, typed into the rebuilt shell as you would have typed it.
+When Claude has quit, the pane is a shell again and comes back as one.
+
 **Worktrees.** One agent, one branch, one checkout, one workspace —
 and a lifecycle that ends with all of them gone. `rook worktree` is
 the manager (`prefix-w` floats it); the verbs are plain commands from

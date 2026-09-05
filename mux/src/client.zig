@@ -337,6 +337,43 @@ pub fn send(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, bytes: []con
     return error.Timeout;
 }
 
+/// One-shot: tell rook how to bring a pane's program back — the
+/// program's own word, kept while it is the one in the foreground and
+/// typed into the rebuilt pane after a restart. Empty forgets.
+pub fn setResume(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, cmd: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(gpa);
+    var b: [4]u8 = undefined;
+    std.mem.writeInt(u32, &b, id, .little);
+    try payload.appendSlice(gpa, &b);
+    try payload.appendSlice(gpa, cmd);
+    try proto.write(sock, @intFromEnum(proto.c2s.resume_cmd), payload.items);
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (waited < 2000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!reader.fill(sock)) return error.ServerGone;
+        while (reader.next()) |msg| {
+            defer reader.consume();
+            switch (msg.kind) {
+                @intFromEnum(proto.s2c.ack) => {
+                    if (msg.payload.len >= 8) printAck(std.mem.readInt(u64, msg.payload[0..8], .little));
+                    return;
+                },
+                @intFromEnum(proto.s2c.exit) => refused(msg.payload),
+                else => {},
+            }
+        }
+    }
+    return error.Timeout;
+}
+
 /// One-shot: a verb on a pane by id — 'v'/'-' split beside/below it,
 /// 'c' a new window in its workspace, 'x' hang it up, 'f' bring it in
 /// front of the person, 'u' jump to the oldest unread pane. A verb

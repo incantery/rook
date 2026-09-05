@@ -82,6 +82,19 @@ oldest unread pane (the person's `prefix-u`); `rook focus ID` brings a
 specific pane forward. Use `focus` and `jump` only when the person
 asked to be taken somewhere.
 
+## Coming back after a restart
+
+If you are an agent with a session that can be resumed, tell rook how,
+once, when you start. Claude Code does this from a `SessionStart` hook:
+
+```sh
+rook resume . "claude --resume $SESSION_ID"
+```
+
+Rook remembers it while you are the program in front, and after the
+server restarts your pane comes back running that command. `rook
+resume . --clear` forgets it.
+
 ## Workspaces
 
 ```sh

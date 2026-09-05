@@ -166,6 +166,20 @@ pub const Pane = struct {
     /// pane, and nobody has looked since. Wall-clock ms of the first
     /// such signal, 0 = read. Cleared by focus, never by a producer.
     unread_ms: i64 = 0,
+    /// How to bring this pane's program back after the server is
+    /// gone — `claude --resume <id>` — as the program told rook
+    /// (`rook resume`). Owned. It belongs to the program that set it:
+    /// `resume_prog` is what was in the foreground then, and the
+    /// command is saved only while that is still the case, so a pane
+    /// whose agent has quit comes back as the shell it is.
+    back_cmd: []u8 = &.{},
+    resume_prog: [64]u8 = @splat(0),
+    resume_prog_len: usize = 0,
+    /// A command to type into the shell once it is up — a restored
+    /// pane's resume — and the deadline to type it by even if the
+    /// shell has said nothing. Owned; freed once typed.
+    boot: []u8 = &.{},
+    boot_by_ms: i64 = 0,
 
     pub fn start(
         gpa: std.mem.Allocator,
@@ -648,9 +662,59 @@ pub const Pane = struct {
         if (std.Thread.spawn(.{}, ptypkg.ProcessGroups.escalate, .{groups})) |t| t.detach() else |_| {}
     }
 
+    /// Remember how to bring the program back. Empty forgets. The
+    /// foreground program is written down beside it, so the promise
+    /// dies with the program that made it.
+    pub fn setResume(self: *Pane, cmd: []const u8) void {
+        if (self.back_cmd.len > 0) self.gpa.free(self.back_cmd);
+        self.back_cmd = &.{};
+        self.resume_prog_len = 0;
+        if (cmd.len == 0) return;
+        self.back_cmd = self.gpa.dupe(u8, cmd) catch return;
+        var nb: [64]u8 = undefined;
+        if (self.fgName(&nb)) |fg| {
+            @memcpy(self.resume_prog[0..fg.len], fg);
+            self.resume_prog_len = fg.len;
+        }
+    }
+
+    /// The resume command, if the program that set it is still the
+    /// one in the foreground; empty otherwise. What the restore file
+    /// saves, and what the feed publishes.
+    pub fn resumeLive(self: *Pane) []const u8 {
+        if (self.back_cmd.len == 0) return "";
+        if (self.resume_prog_len == 0) return self.back_cmd;
+        var nb: [64]u8 = undefined;
+        const fg = self.fgName(&nb) orelse return "";
+        if (!std.mem.eql(u8, fg, self.resume_prog[0..self.resume_prog_len])) return "";
+        return self.back_cmd;
+    }
+
+    /// Something to type once the shell is up (a restored pane's
+    /// resume command, Enter included).
+    pub fn setBoot(self: *Pane, cmd: []const u8, by_ms: i64) void {
+        if (self.boot.len > 0) self.gpa.free(self.boot);
+        self.boot = self.gpa.dupe(u8, cmd) catch &.{};
+        self.boot_by_ms = by_ms;
+    }
+
+    /// Type the boot command if the shell has spoken (its prompt is
+    /// up) or the deadline passed. True when it was typed.
+    pub fn bootIfReady(self: *Pane, now: i64) bool {
+        if (self.boot.len == 0) return false;
+        if (self.last_output_ms.load(.acquire) == 0 and now < self.boot_by_ms) return false;
+        self.write(self.boot);
+        self.write("\r");
+        self.gpa.free(self.boot);
+        self.boot = &.{};
+        return true;
+    }
+
     pub fn deinit(self: *Pane) void {
         if (self.thread) |t| t.join();
         _ = ptypkg.Pty.wait(self.pid);
+        if (self.back_cmd.len > 0) self.gpa.free(self.back_cmd);
+        if (self.boot.len > 0) self.gpa.free(self.boot);
         if (self.clip_buf.len > 0) self.gpa.free(self.clip_buf);
         self.in_buf.deinit(self.gpa);
         self.tee_buf.deinit(self.gpa);

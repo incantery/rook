@@ -86,9 +86,9 @@ rail/window seam is a heavier line than a split. prefix-; jumps to
 the last focused pane. Copy mode (prefix-[) is vim-shaped: hjkl/0/$/u/d/g/G move a cursor
 through the pane and its scrollback, v anchors a selection (the
 anchor is content-tracked, so it survives scrolling), y yanks to the
-system clipboard. Session persistence across a server restart is
-`[mux] restore = true` — the layout and cwds, not scrollback or the
-programs.
+system clipboard. Session persistence across a server restart is on by default —
+the layout, the cwds, and every program that told rook how to come
+back (below); not scrollback.
 
 ## The state feed
 
@@ -160,6 +160,28 @@ name itself (`.`) to the front door:
 
 Nothing here pulls the desk unless `--focus` asks. `rook --skill` is
 the same, written for the agent that will read it.
+
+## Coming back
+
+`<sock>.state` is saved on every structural change and on `rook
+kill`; `[mux] restore` (on by default) rebuilds workspaces, windows
+and cwds from it on boot. v2 of the file adds two lines: `resume <cmd>`
+under a pane, and `pane <cwd>` for a sibling of the window above that
+has one — an agent's conversation is worth a split, the split alone is
+not.
+
+    rook resume <id> <cmd...>      how to bring this pane's program back
+    rook resume <id> --clear       forget it
+
+The command is the program's own word, published as `panes[].resume`,
+and it belongs to the program that set it: rook writes down what was
+in the foreground then, and saves the command only while that is
+still so. A Claude that has quit leaves a shell, and a shell is what
+comes back. On boot a restored pane types its command into the new
+shell once the prompt is up (or after 1.5 s), Enter included — into
+the shell's own environment, with the shell still there afterwards.
+`rook resume` outside rook, or against a server that does not answer,
+exits 0 in silence: it is written to be a hook.
 
 ## The side panel
 

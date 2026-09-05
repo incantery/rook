@@ -238,6 +238,10 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
             p.bell_ms,
             p.progress_done_ms,
         }) catch return;
+        // How the pane's program comes back after the server is gone,
+        // in its own words, and only while it is the one in front.
+        out.appendSlice(gpa, ",\"resume\":") catch return;
+        str(gpa, out, p.resumeLive());
         if (p.notif_ms != 0) {
             out.appendSlice(gpa, ",\"notified\":{\"title\":") catch return;
             str(gpa, out, p.notif_title[0..p.notif_title_len]);

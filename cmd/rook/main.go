@@ -64,6 +64,7 @@ const usage = `rook — the multiplexer, owned
   rook split|window <id> [--down] [--focus] [--cwd DIR]
   rook focus <id> | jump  bring a pane forward; jump = the oldest unread one
   rook close-pane <id>    hang a pane up
+  rook resume <id> <cmd>  how to bring the pane's program back after a restart
   rook side [-|demo]      push the side rail's model (JSON frames on stdin)
   rook companion [--json] where the companion (vera) is open, if she is
   rook popup <cmd...>     float a command over the current window
@@ -89,6 +90,7 @@ var muxVerbs = map[string]bool{
 	// a pane, by id: read it, type into it, wait on it, open beside it
 	"read": true, "send": true, "run": true, "key": true, "wait": true,
 	"split": true, "window": true, "focus": true, "jump": true, "close-pane": true,
+	"resume": true,
 }
 
 func main() {
