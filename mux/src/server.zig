@@ -28,9 +28,10 @@ fn nowMs() i64 {
 /// build spew) into ~120fps of frames instead of one per pty read.
 const frame_gap_ms: i64 = 8;
 
-/// The side panel folds away rather than crowd the work: it needs this
-/// much glass to appear, and always leaves the window at least this
-/// many columns.
+/// The side panel folds rather than crowd the work: under this much
+/// glass the open panel falls back to the collapsed rail (three
+/// columns of dots), and it always leaves the window at least
+/// `min_window_cols` columns whatever it is showing.
 const min_cols_for_side: u16 = 100;
 const min_window_cols: u16 = 60;
 
@@ -166,6 +167,12 @@ pub const Server = struct {
     /// (app-chrome) pins push it right past their seams; with neither,
     /// the bar stays at column 0.
     tab_x: u16 = 0,
+    /// The clickable runs of the tab bar as it was last painted, in
+    /// bar-relative columns: one per chip, then the `+`. Recorded by
+    /// the painter, read by the mouse — a click acts on the bar that
+    /// is on the glass, never on one it would draw next.
+    tab_zones: [chromepkg.max_tab_zones]chromepkg.TabZone = @splat(.{ .x = 0, .w = 0, .target = .new }),
+    tab_zones_n: usize = 0,
     /// The side panel — spaces over agents down the left edge. Chrome
     /// the mux draws itself, so it costs no pty and survives every
     /// window and workspace switch. `side_w` is its width in the
@@ -173,7 +180,13 @@ pub const Server = struct {
     /// What it *says* is pushed in from outside (`c2s.side`); the mux
     /// holds the last model per surface and paints it.
     side: chromepkg.Feed,
-    side_on: bool = true,
+    /// How much of the rail is showing: the panel, the collapsed rail
+    /// of dots, or nothing (`prefix-a` cycles, `prefix-A` jumps to the
+    /// far end). It starts where `[mux] sidebar_mode` says.
+    side_mode: chromepkg.SideMode = .open,
+    /// The mode as it is actually painted: `side_mode` folded down by
+    /// the glass it has to fit on. `.hidden` whenever `side_w` is null.
+    side_shown: chromepkg.SideMode = .open,
     side_w: ?u16 = null,
     /// Agents rook found for itself: a workspace holding a pane whose
     /// foreground program is one of `conf.agents` gets a row on the
@@ -334,6 +347,7 @@ pub const Server = struct {
 
         self.frame.accent = self.conf.accent;
         self.side.accent = self.conf.accent;
+        self.side_mode = self.conf.side_mode;
         self.pid = ptypkg.selfPid();
         _ = std.fmt.bufPrint(&self.epoch, "{x:0>8}", .{
             @as(u32, @truncate(@as(u64, @bitCast(nowMs())) *% 2654435761 ^ @as(u64, @intCast(self.pid)))),
@@ -613,14 +627,27 @@ pub const Server = struct {
         self.dock_top = 0;
         self.tab_x = 0;
         self.side_w = null;
+        self.side_shown = .hidden;
         // The side panel owns the far-left columns of the whole app: it
         // is above windows and workspaces, so it is subtracted before
         // anything else is placed, and it pushes the tab bar past its
-        // seam. It folds away rather than squeeze the panes.
-        if (self.side_on and g.cols >= min_cols_for_side and g.rows >= chromepkg.min_rows) {
-            const sw = @min(self.conf.sidebar_width, g.cols -| min_window_cols);
-            if (sw >= 16) {
+        // seam. It folds to the collapsed rail rather than squeeze
+        // the panes, and away entirely when even that would.
+        if (self.side_mode != .hidden and g.rows >= chromepkg.min_rows) {
+            // Open when there are columns for the words, and the
+            // collapsed rail when there are not: three columns is
+            // never the thing crowding the work, and the dots are
+            // what the panel is for. Too narrow for even that is the
+            // one case where the rail goes away without being asked.
+            const want_open = self.side_mode == .open and g.cols >= min_cols_for_side;
+            const sw = if (want_open)
+                @min(self.conf.sidebar_width, g.cols -| min_window_cols)
+            else
+                chromepkg.collapsed_w;
+            const fits = if (want_open) sw >= 16 else g.cols >= min_window_cols + sw + 1;
+            if (fits) {
                 self.side_w = sw;
+                self.side_shown = if (want_open) .open else .collapsed;
                 self.tab_x = sw + 1;
             }
         }
@@ -1967,6 +1994,12 @@ pub const Server = struct {
                 return;
             }
         }
+        // Row 0 past the chrome to its left is the tab bar, and no
+        // pane is under it: a click there is the bar's, hit or miss.
+        if (cy == 0 and cx >= self.tab_x) {
+            if (ev.btn == 0 and !ev.release) self.clickTab(cx - self.tab_x);
+            return;
+        }
         var hit: ?layoutpkg.Placed = null;
         for (self.placed.items) |pl| {
             if (cx >= pl.rect.x and cx < pl.rect.x + pl.rect.w and cy >= pl.rect.y and cy < pl.rect.y + pl.rect.h) hit = pl;
@@ -2034,6 +2067,23 @@ pub const Server = struct {
             p.scroll(3);
             self.full = true;
             self.pending = true;
+        }
+    }
+
+    /// A click on the tab bar: a chip selects its window, the `+`
+    /// opens a new one — the same two verbs as prefix-1..9 and
+    /// prefix-c, reached with the hand that is already on the mouse.
+    /// The zones are the ones the painter recorded, so the target is
+    /// wherever the chip was actually drawn; a click on the air
+    /// between chips, on the `⋯ n more` tail or on the corner hint
+    /// lands on nothing and does nothing.
+    fn clickTab(self: *Server, x: u16) void {
+        const target = chromepkg.hitTab(self.tab_zones[0..self.tab_zones_n], x) orelse return;
+        switch (target) {
+            .window => |i| {
+                if (i < self.sess().windows.items.len and i != self.sess().cur) self.selectWindow(i);
+            },
+            .new => self.newWindow(null) catch {},
         }
     }
 
@@ -2374,7 +2424,13 @@ pub const Server = struct {
             's' => self.openPopup("rook pick") catch {},
             'w' => self.openPopup("rook worktree") catch {},
             'a' => {
-                self.side_on = !self.side_on;
+                self.side_mode = self.side_mode.next();
+                self.relayout() catch {};
+            },
+            // Focus mode in one key: everything off the left edge, and
+            // the panel back the way it was on the second press.
+            'A' => {
+                self.side_mode = if (self.side_mode == .hidden) .open else .hidden;
                 self.relayout() catch {};
             },
             'P' => self.togglePin(),
@@ -2748,7 +2804,7 @@ pub const Server = struct {
         const chrome: renderpkg.Chrome = .{
             .tabbar = tabbar,
             .tab_x = self.tab_x,
-            .side = if (self.side_w) |sw| .{ .model = self.sideModel(), .w = sw } else null,
+            .side = if (self.side_w) |sw| .{ .model = self.sideModel(), .w = sw, .mode = self.side_shown } else null,
             .dock_x = self.dock_x,
             .dock_top = self.dock_top,
         };
@@ -3059,6 +3115,7 @@ pub const Server = struct {
         const unread_ink = sgr(&unread_buf, .{ .bg = chromepkg.base, .fg = self.conf.accent });
 
         out.appendSliceBounded(bar) catch {};
+        self.tab_zones_n = 0;
         var shown: usize = 0;
         for (sn.windows.items, 0..) |win, i| {
             var name_buf: [48]u8 = undefined;
@@ -3094,6 +3151,18 @@ pub const Server = struct {
             if (gap > 0) {
                 out.appendSliceBounded("   ") catch {};
                 vis += gap;
+            }
+            // The target is the entry itself — ordinal, chip, mark —
+            // and never the air before it. Recorded here, where the
+            // columns are being spent, so the hit test cannot drift
+            // from the row it is testing.
+            if (self.tab_zones_n < self.tab_zones.len) {
+                self.tab_zones[self.tab_zones_n] = .{
+                    .x = vis,
+                    .w = entry - gap,
+                    .target = .{ .window = i },
+                };
+                self.tab_zones_n += 1;
             }
             out.appendSliceBounded(idx_ink) catch {};
             out.appendSliceBounded(num) catch {};
@@ -3133,7 +3202,13 @@ pub const Server = struct {
                 }
             } else |_| {}
         } else if (vis + 4 <= avail) {
-            // trailing "+" placeholder tab (clicks come later)
+            // The trailing "+": a new window, one click, the same verb
+            // as prefix-c. Its target is the glyph and the air around
+            // it, because a one-column target is not one a hand hits.
+            if (self.tab_zones_n < self.tab_zones.len) {
+                self.tab_zones[self.tab_zones_n] = .{ .x = vis, .w = 4, .target = .new };
+                self.tab_zones_n += 1;
+            }
             out.appendSliceBounded("  + ") catch {};
             vis += 4;
         }

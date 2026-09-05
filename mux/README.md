@@ -24,8 +24,9 @@ C-b when unset; double-tap types it literally. A `[mux]` section adds
 `nav_owners = ["nvim", "fzf"]` (programs that keep bare Ctrl-hjkl),
 `scrollback_mb = 4`, `accent = "#cba6f7"` (the one chrome color — tab
 chip, focused borders, popup box; the eight ANSI names still work and
-map into the palette), `sidebar = false` / `sidebar_width = 30` for
-the side panel, and `agents = ["claude"]` — the foreground program
+map into the palette), `sidebar_mode = "open"|"collapsed"|"hidden"` /
+`sidebar_width = 30` for the side panel (`sidebar = false` is the older
+spelling of hidden), and `agents = ["claude"]` — the foreground program
 names the rail treats as an agent it found. A `[companion]` table (the
 same one the Go half reads) names the resident rook watches for —
 `command = "vera"`, or `program = "vera"` when that command's first
@@ -36,7 +37,8 @@ word is a wrapper; vera by default, `program = ""` turns the slot off. Then:
     hjkl       focus pane                  z        zoom pane
     HJKL       resize split                [        copy mode (hjkl, v, y, q)
     x          kill pane                   d        detach
-    a          toggle the side panel       u        the oldest unread pane
+    a          cycle the side panel        u        the oldest unread pane
+    A          the side panel away, and back (focus mode)
 
 Workspaces: `rook ls`, `rook new <name>`, `rook switch <name>` —
 named sessions in one server, each with its own windows; prefix-s
@@ -68,8 +70,13 @@ clears a lone shell. Panes are scrubbed of outer-mux identity
 
 Working today: dirty-row frames paced at 8ms, scrollback view, OSC 52
 copy out to the glass, cursor-shape passthrough (nvim beam in insert),
-tabs named live by each window's foreground program. Mouse: click
-focuses the pane under it; drag selects, and release copies the
+tabs named live by each window's foreground program. **The tabs are
+clickable**: a chip selects its window and the trailing `+` opens a new
+one — prefix-1..9 and prefix-c for the hand already on the mouse. The
+painter records each chip's columns as it spends them, so the target
+is where the chip was actually drawn; the air between chips, the
+`⋯ n more` tail and the corner hint are not targets and do nothing.
+Mouse: click focuses the pane under it; drag selects, and release copies the
 selection to the system clipboard (OSC 52); the wheel scrolls. All
 three forward pane-relative instead when the program asked for mouse
 (nvim, fzf). Typing snaps a scrolled pane back to live. Splits and new
@@ -191,9 +198,22 @@ Down the left edge, above windows and workspaces: *spaces* over
 builder paints it straight from a model in `chrome.zig`, and it costs
 nothing but columns. Clicking a row moves that panel's highlight, and
 takes you to the workspace the row names — the agent's own pane on
-*agents*, the workspace itself on *spaces*; prefix-a folds the panel
-away, and it folds itself away on glass under 100 columns rather than
-crowd the work.
+*agents*, the workspace itself on *spaces*.
+
+**It has three modes, and prefix-a cycles them**: `open` is the panel
+in full; `collapsed` is three columns of dots — the same rows in the
+same places with the words taken off them, so what wants you still
+reaches the eye and the panel that comes back has not moved under it;
+`hidden` is the work with no chrome down its left edge. prefix-A goes
+straight to hidden and back to open, which is focus mode in one key.
+A click on a collapsed row still goes where the open one would.
+`[mux] sidebar_mode` says which mode the rail starts in.
+
+The panel folds rather than crowd the work: under 100 columns `open`
+falls back to the collapsed rail, and glass too narrow even for that
+(the window keeps 60 columns) hides it. What the rail is *showing*,
+folding included, rides the state feed as `surfaces[].mode`, beside
+the `shown` that says whether there is anything to draw at all.
 
 Nothing inside the mux decides what it says. The model is pushed in
 from outside, one JSON frame per line, in the list shape of the plugin
