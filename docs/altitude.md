@@ -71,7 +71,7 @@ The canonical grammar, everywhere:
     deploy · main    a tab with the actor that claimed a pane in it
     you ▸ claude     the bar: who holds the keyboard, through what tool
     main ▸ claude    …an actor does, through that tool
-    ◐ ● ◇            producing, unread, asked for (marks, never names)
+    ◐ • ! ◌          producing, unread, attention, waiting (marks, never names)
 
 A space literally named `rook` is a space: `rook` in the scope slot,
 plain and bold, when you are in it; a row or figure at altitude; and
@@ -85,12 +85,13 @@ accent and a space's name never does.
 
 **In a space.** Row 0 is the tab bar: the space's name as the scope
 slot, plain and bold; then a chip per tab, `deploy · main`, the
-current one filled with the accent; the mark (`◐` producing, `●`
-unread) after a chip; `+`. The work takes every column between the
+current one a raised fill with the accent edge under the whole chip;
+the mark (`◐` producing, `•` unread, `!` attention) inside the chip;
+`+`. The chrome is one system, `docs/ui-design-system.md`. The work takes every column between the
 top and bottom rows, bordered only where it is split. The last row is
 the calm bar: `you ▸ claude` on the left, or `main ▸ claude owns
 input · you observe` once an actor claimed the focused pane; the
-signals on the right (`◐ 2 · ● 1 · ⊕g 1`), empty when nothing signals.
+signals on the right (`◐ 2 · !1 · •3 · ⊕g 1`), empty when nothing signals.
 There is no sidebar. The legacy panel still exists behind
 `[mux] sidebar_mode = "open"`, off by default, and does not change
 the layout when it is off.
@@ -106,7 +107,7 @@ ground, so it reads over a wallpaper), holding:
    in it. Empty, it says what it takes — `find a space, a tab, a
    pane · : for a command` — inside the band, as a placeholder, not
    as a caption elsewhere.
-2. **attention**: unread panes oldest first (`● api › server  bash
+2. **attention**: unread panes oldest first (`! api › server  bash
    rang the bell · 1s ago`), then what a producer said needs you
    (`◇ vera — Deploy plan  needs you · 3 approvals`).
 3. **the spaces**, in workspace order, always — a space is where it
@@ -128,12 +129,12 @@ One model, two fidelities. **Orbit** draws each space that has
 something to say as a figure:
 
     ┌┤ vera ├  Deploy plan · needs you ─────────────────────────┐
-    │  deploy · main    logs ●  chat ●                          │
+    │  deploy · main ◐   logs •   chat •                        │
     │ › Reading migrations/0042_session_audit.sql               │
     └───────────────────────────────────────── ↵ back in ───────┘
 
 The top edge holds the name (the block when it is the space you
-left), `●` when anything in it is unread, and the event line in its
+left), `!` when anything in it asked, and the event line in its
 own ink. Inside: the tabs with their actors and marks, the current
 tab filled; then, for the space you left only, the last lines of the
 pane you were in — read from the cells it already holds, never a

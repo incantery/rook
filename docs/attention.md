@@ -51,7 +51,7 @@ Published per pane as `unread` (bool) and `unreadMs` (wall clock of
 the first signal since it was last read, 0 when read), and rolled up
 where rook draws its own rows:
 
-- **the tab** wears `●` in the accent when any pane in its window is
+- **the tab** wears `!` in the attention ink when any pane in its window is
   unread. `◐` (an agent still producing output) outranks it on the
   same cell. The tab's older, softer meaning — output arrived in a
   window that was not on the glass — still wears the same dot: both

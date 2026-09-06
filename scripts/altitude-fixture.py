@@ -27,6 +27,12 @@ Frames captured (text, and PNGs when pillow is installed):
   04-narrow       58 columns: the ledger
   05-find         the input with results
   06-return       back in vera, the exact pane and layout
+  07-tabs         five tabs: a long user name, unread, working (selected),
+                  attention, calm; then the ladder at 70 and 44 columns
+  08-ascii-*      the same chrome with `glyphs = "ascii"`
+  09-inspector    the inspector and the gate over dense output
+  10-split        a split: you drive the left pane, an agent works right
+  11-space-rook   inside a space named rook, and altitude from it
 
 The frames are asserted on, so this doubles as the rendering test:
 no sidebar columns, full-width bars, the badge only at altitude, a
@@ -66,7 +72,7 @@ fails = []
 
 
 def check(name, ok, extra=""):
-    print(("PASS  " if ok else "FAIL  ") + name + ("  " + extra if extra else ""))
+    print(("PASS  " if ok else "FAIL  ") + name + ("  " + str(extra) if extra else ""))
     if not ok:
         fails.append(name)
 
@@ -189,6 +195,8 @@ class Rook:
                     d.rectangle([x * cw, y * ch, (x + 1) * cw - 1, (y + 1) * ch - 1], fill=bg_)
                 if cell.data and cell.data != " ":
                     d.text((x * cw, y * ch), cell.data, fill=fg_, font=font)
+                if cell.underscore:
+                    d.line([x * cw, (y + 1) * ch - 2, (x + 1) * cw - 1, (y + 1) * ch - 2], fill=(203, 166, 247), width=1)
         img.save(path)
         return path
 
@@ -272,14 +280,20 @@ def build_fixture(r):
     return st
 
 
-def chip_is_block(r, top):
-    """The scope chip's cells carry the accent background at altitude;
-    a space's name in the same slot carries the bar's."""
-    x = top.index("rook") if "rook" in top else -1
+ACCENT, RAISED, CHROME = "cba6f7", "313244", "181825"
+
+
+def chip_bg(r, top, word, row=0):
+    x = top.index(word) if word in top else -1
     if x < 0:
-        return False
-    cell = r.screen.buffer[0][x]
-    return cell.bg not in ("default", "1e1e2e")
+        return None
+    return r.screen.buffer[row][x].bg
+
+
+def selected_tab_cells(r, top, label):
+    """The cells of a tab, index through mark, as pyte holds them."""
+    x = top.index(label)
+    return [r.screen.buffer[0][i] for i in range(x - 3, x + len(label) + 3)]
 
 
 def body_of(lines):
@@ -306,14 +320,18 @@ def main():
         r.snap("01-space")
         top, bar = r.lines()[0], r.lines()[-1]
         slot = top.split("┃")[-1]  # past the global pin dock
-        check("in a space the scope slot is the space's name", slot.startswith(" vera "), repr(slot[:40]))
-        vx = top.index("vera")
-        check("a space's name is not a block", r.screen.buffer[0][vx].bg in ("default", "1e1e2e"), r.screen.buffer[0][vx].bg)
+        check("in a space the scope slot is the space's chip, then the separator", slot.startswith("  vera  │ "), repr(slot[:40]))
+        check("a space's chip is raised chrome, never the accent", chip_bg(r, top, "vera") == RAISED, chip_bg(r, top, "vera"))
+        cells = selected_tab_cells(r, top, "deploy")
+        check("the selected tab's index, label and mark share one fill and one underline",
+              all(c.bg == RAISED and c.underscore for c in cells if c.data != " " or True), [(c.data, c.bg, c.underscore) for c in cells[:4]])
+        lx = top.index("logs")
+        check("an inactive tab sits on the chrome with no underline", r.screen.buffer[0][lx].bg == CHROME and not r.screen.buffer[0][lx].underscore, r.screen.buffer[0][lx].bg)
         check("no sidebar in a space", no_sidebar(r.lines()))
         check("the tab bar is full width", len(top.rstrip()) > 100, str(len(top)))
         check("the tab reads name · actor, never the tool", "deploy · main" in top and "claude" not in top, repr(top[:60]))
         check("the calm bar names actor ▸ tool", "main ▸ claude" in bar and "owns input" in bar, repr(bar[:70]))
-        check("the bar's right edge counts unread and pins", "● 1" in bar and "⊕g 1" in bar, repr(bar[-30:]))
+        check("the bar's right edge counts work, attention, unread and pins in that vocabulary", "◐ 2" in bar and "!2" in bar and "⊕g 1" in bar, repr(bar[-40:]))
         vera_pane = [p for p in st["panes"] if p["id"] == st["focus"]["pane"]][0]
         sizes_before = {p["id"]: (p["cols"], p["rows"]) for p in st["panes"]}
         dock = len(top.split("┃")[0]) + 1 if "┃" in top else 0
@@ -324,8 +342,8 @@ def main():
         r.snap("02-altitude")
         lines = r.lines()
         slot = lines[0].split("┃")[-1]
-        check("at altitude the scope slot is the system's chip", slot.startswith(" rook  "), repr(slot[:40]))
-        check("the chip is the accent block, which a space's name never is", chip_is_block(r, lines[0]), "")
+        check("at altitude the scope slot is the system's chip, then the separator", slot.startswith("  rook  │ "), repr(slot[:40]))
+        check("the system's chip is the accent fill", chip_bg(r, lines[0], "rook") == ACCENT, chip_bg(r, lines[0], "rook"))
         check("the world is summarised where the tabs were", "4 spaces · 2 agents working · 2 need you" in slot, repr(slot[:60]))
         check("the corner says where back is", "esc ↩ vera" in slot, repr(slot[-20:]))
         check("the spaces are figures, and the bar agrees", "┌┤" in body_of(lines) and "orbit" in lines[-1], repr(lines[-1][:30]))
@@ -334,7 +352,8 @@ def main():
         check("the space named rook is listed as a space, plain", any(l.strip().startswith("rook ") for l in lines[1:]), "")
         check("every space is on the canvas", all(n in body for n in ("vera", "api", "infra", "rook")))
         check("the producer's ask is an attention row", "Deploy plan" in body and "needs you" in body)
-        check("the unread bell is an attention row", "rang the bell" in body)
+        check("the unread bell is an attention row with the attention mark", "!  api › server" in body and "rang the bell" in body)
+        check("the producer's ask wears the waiting mark", "◌  vera — Deploy plan" in body)
         check("actors are named on the tabs, tools are not", "deploy · main" in body and "tests · codex" in body)
         check("the global pin says where it came from", "⊕g" in body and "from api" in body)
         check("the quiet space says so", "infra" in body and "quiet" in body)
@@ -378,6 +397,121 @@ def main():
     finally:
         r.close()
 
+    # 07: the tab component's states, and the ladder
+    r3 = Rook(cols=120, rows=24, tag="tabs")
+    try:
+        first = r3.state()["focus"]["pane"]
+        r3.rook("rename", "a long user-given tab name")           # 1: user-named, long
+        w2 = json.loads(r3.rook("window", str(first)))["pane"]   # 2: zsh fallback, will be unread
+        w3 = json.loads(r3.rook("window", str(first)))["pane"]   # 3: claude, working, selected
+        w4 = json.loads(r3.rook("window", str(first)))["pane"]   # 4: claude·2, attention
+        w5 = json.loads(r3.rook("window", str(first)))["pane"]   # 5: zsh, calm
+        r3.settle(0.4)
+        r3.rook("run", str(w3), "exec claude -c 'while :; do echo tick; sleep 1; done'")
+        # `sleep 600; :` — a lone command would be exec'd and the tool would read `sleep`
+        r3.rook("run", str(w4), "exec claude -c 'printf \"\\a\"; sleep 600; :'")   # the program asked: attention
+        r3.settle(2.6)
+        r3.rook("run", str(w2), "echo unseen")                    # output nobody looked at: unread
+        r3.settle(0.8)
+        r3.keys("`3", settle=0.6)
+        r3.snap("07-tabs")
+        top = r3.lines()[0]
+        check("four states on one bar: long name, unread, working selected, attention, calm",
+              "1 a long user-given tab" in top and "2 bash •" in top and "3 claude ◐" in top and "4 claude·2 !" in top and "5 bash   +" in top, repr(top))
+        check("the fallback names are what they are, once each, no compound", "claude·2 · claude" not in top)
+        cx = top.index("claude ◐")
+        check("selection contains the working mark", r3.screen.buffer[0][cx + 7].underscore, "")
+        # the ladder, at 84 columns: labels cut, the selected one kept whole
+        fcntl.ioctl(r3.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 84, 0, 0))
+        os.kill(r3.pid, signal.SIGWINCH)
+        r3.screen.resize(24, 84); r3.cols, r3.rows = 84, 24
+        r3.settle(0.8)
+        r3.snap("07-tabs-narrow")
+        top = r3.lines()[0]
+        check("narrow: the selected tab keeps its label, the attention mark survives, the scope stays",
+              "3 claude" in top and "!" in top and top.startswith("  main  │"), repr(top))
+        check("narrow: the long inactive label was cut before anything was dropped", "a long user-given tab name" not in top and "1 a long u " in top, repr(top))
+        fcntl.ioctl(r3.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 44, 0, 0))
+        os.kill(r3.pid, signal.SIGWINCH)
+        r3.screen.resize(24, 44); r3.cols, r3.rows = 44, 24
+        r3.settle(0.8)
+        r3.snap("07-tabs-tiny")
+        top = r3.lines()[0]
+        check("tiny: indices and marks only, the selected label kept, an overflow tail when it must", "3 claude" in top and top.startswith("  main  │"), repr(top))
+    finally:
+        r3.close()
+
+    # 08: ascii glyphs
+    r4 = Rook(cols=100, rows=24, extra_conf='glyphs = "ascii"', tag="ascii")
+    try:
+        first = r4.state()["focus"]["pane"]
+        made = r4.rook("window", str(first))
+        w2 = json.loads(made)["pane"]
+        r4.settle(0.5)
+        print("ascii sandbox window:", made, "tabs:", len(r4.state()["workspaces"][0]["windows"]))
+        r4.rook("run", str(w2), "exec claude -c 'while :; do echo tick; sleep 1; done'")
+        r4.settle(2.6)
+        r4.snap("08-ascii-space")
+        top, bar = r4.lines()[0], r4.lines()[-1]
+        check("ascii: the marks have letters, the separator a bar, the hierarchy the same", "|" in top and "2 claude *" in top and "* 1" in bar, repr(top) + repr(bar[-20:]))
+        r4.keys("`o", settle=0.6)
+        r4.snap("08-ascii-altitude")
+        body = "\n".join(r4.lines())
+        check("ascii: altitude draws with ascii glyphs", "> find" in body and "◐" not in body and "↵" not in body and "↑" not in body, "")
+        r4.keys("\x1b", settle=0.3)
+    finally:
+        r4.close()
+
+    # 09: overlays over dense output — the inspector and the gate
+    r5 = Rook(cols=100, rows=26, tag="over")
+    try:
+        r5.keys("seq 1 400\r", settle=0.8)
+        r5.keys("`i", settle=0.5)
+        r5.snap("09-inspector")
+        body = "\n".join(r5.lines())
+        check("the inspector is a bounded elevated box over the output", "┤ inspector" in body and "you — nobody claims this pane" in body)
+        ix = [l for l in r5.lines() if "inspector" in l][0].index("inspector")
+        iy = [i for i, l in enumerate(r5.lines()) if "inspector" in l][0]
+        check("the inspector's ground is elevated chrome", r5.screen.buffer[iy + 1][ix].bg == RAISED, r5.screen.buffer[iy + 1][ix].bg)
+        r5.keys("x", settle=0.3)
+        pid = r5.state()["focus"]["pane"]
+        r5.rook("own", str(pid), "main"); r5.keys("z", settle=0.5)
+        r5.snap("09-gate")
+        check("the gate is one elevated row with the attention mark, the actor, the moves", "! main owns input" in "\n".join(r5.lines()) and "request handoff" in "\n".join(r5.lines()))
+        r5.keys("T", settle=0.3)
+    finally:
+        r5.close()
+
+    # 10: a split, human focus left, a background agent right
+    r6 = Rook(cols=110, rows=24, tag="split")
+    try:
+        r6.keys("`v", settle=0.4)
+        r6.keys("exec claude -c 'while :; do echo working; sleep 1; done'\r", settle=2.6)
+        r6.keys("`h", settle=0.4)
+        r6.keys("echo mine\r", settle=0.4)
+        r6.snap("10-split")
+        top, bar = r6.lines()[0], r6.lines()[-1]
+        check("split: the bar says you drive the shell, the tab says the agent works", "you ▸ bash" in bar and "◐" in top, repr(bar[:30]) + repr(top[:40]))
+        seam = [l[54:57] for l in r6.lines()[1:5]]
+        check("split: one seam between the panes", any("│" in s for s in seam), repr(seam))
+    finally:
+        r6.close()
+
+    # 11: inside the space named rook, then altitude from it
+    r7 = Rook(cols=100, rows=24, tag="rookspace")
+    try:
+        r7.rook("new", "rook"); r7.settle(0.5)
+        r7.snap("11-space-rook")
+        top = r7.lines()[0]
+        check("in the space named rook, the chip is a space's chip", top.startswith("  rook  │") and chip_bg(r7, top, "rook") == RAISED, chip_bg(r7, top, "rook"))
+        r7.keys("`o", settle=0.6)
+        r7.snap("11-altitude-from-rook")
+        top = r7.lines()[0]
+        check("at altitude the system's chip is the accent and the way back names the space", chip_bg(r7, top, "rook") == ACCENT and "esc ↩ rook" in top, repr(top))
+        r7.keys("\x1b", settle=0.3)
+    finally:
+        r7.close()
+
     # 03: one quiet space, nothing else
     r2 = Rook(cols=100, rows=28, tag="one")
     try:
@@ -385,6 +519,7 @@ def main():
         r2.snap("03-altitude-one")
         body = "\n".join(r2.lines())
         check("one quiet space: the chip, the summary, the space, nothing invented", "1 space · all quiet" in body and "main" in body and "quiet" in body and "┌" not in body)
+        check("a calm tab wears no glyph", "quiet" in body and "bash •" not in body and "bash !" not in body and "bash ◐" not in body, "")
         check("the empty state says what there is to do", ":new" in body)
         r2.keys("\x1b", settle=0.3)
     finally:

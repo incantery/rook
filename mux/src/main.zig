@@ -35,6 +35,7 @@ test {
     _ = @import("chrome.zig");
     _ = @import("companion.zig");
     _ = @import("altitude.zig");
+    _ = @import("ui.zig");
     _ = @import("server.zig");
 }
 

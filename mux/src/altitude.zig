@@ -35,6 +35,7 @@ const std = @import("std");
 const chromepkg = @import("chrome.zig");
 const layoutpkg = @import("layout.zig");
 const renderpkg = @import("render.zig");
+const ui = @import("ui.zig");
 
 pub const Rgb = chromepkg.Rgb;
 
@@ -419,23 +420,16 @@ pub fn age(buf: []u8, ms: i64) []const u8 {
 
 const csi = "\x1b[";
 
-/// The canvas ground. Rook's own surface, opaque: the view is the
-/// system's, not the terminal's, and it must read over a wallpaper.
-pub const ground: Rgb = chromepkg.mantle;
-/// The input's band and a selected compact row.
-const band: Rgb = chromepkg.surface0;
+/// Reset to the canvas ground with an ink: chrome, opaque, so the view
+/// reads over a wallpaper.
+fn ink(f: *renderpkg.Frame, t: *const ui.Theme, c: Rgb) void {
+    var b: [64]u8 = undefined;
+    f.put((ui.Style{ .fg = c, .bg = t.chrome }).sgr(&b));
+}
 
-fn fg(f: *renderpkg.Frame, c: Rgb) void {
-    f.print(csi ++ "38;2;{d};{d};{d}m", .{ c.r, c.g, c.b });
-}
-fn bg(f: *renderpkg.Frame, c: Rgb) void {
-    f.print(csi ++ "48;2;{d};{d};{d}m", .{ c.r, c.g, c.b });
-}
-/// Reset to the ground: default ink, the canvas colour behind it.
-fn ink(f: *renderpkg.Frame, c: Rgb) void {
-    f.put(csi ++ "0m");
-    bg(f, ground);
-    fg(f, c);
+fn style(f: *renderpkg.Frame, st: ui.Style) void {
+    var b: [64]u8 = undefined;
+    f.put(st.sgr(&b));
 }
 
 /// Write at most `w` columns of `s` at the cursor; returns the
@@ -460,10 +454,10 @@ fn pad(f: *renderpkg.Frame, n: u16) void {
     while (i < n) : (i += 1) f.put(" ");
 }
 
-/// Fill a rect with the ground.
-pub fn clearRect(f: *renderpkg.Frame, r: layoutpkg.Rect) void {
-    f.put(csi ++ "0m");
-    bg(f, ground);
+/// Fill a rect with a ground.
+pub fn fillRect(f: *renderpkg.Frame, r: layoutpkg.Rect, ground: Rgb) void {
+    var b: [64]u8 = undefined;
+    f.put((ui.Style{ .bg = ground }).sgr(&b));
     var y: u16 = r.y;
     while (y < r.y + r.h) : (y += 1) {
         f.cup(r.x, y);
@@ -472,24 +466,55 @@ pub fn clearRect(f: *renderpkg.Frame, r: layoutpkg.Rect) void {
     f.put(csi ++ "0m");
 }
 
+/// Fill a rect with the chrome ground: what the server uses to blank
+/// the rects that contracted with the space.
+pub fn clearRect(f: *renderpkg.Frame, t: *const ui.Theme, r: layoutpkg.Rect) void {
+    fillRect(f, r, t.chrome);
+}
+
 fn hline(f: *renderpkg.Frame, n: u16) void {
     var i: u16 = 0;
     while (i < n) : (i += 1) f.put("─");
 }
 
+/// A box edge in a role's ink, on a ground.
+pub fn box(f: *renderpkg.Frame, r: layoutpkg.Rect, edge: Rgb, ground: Rgb) void {
+    if (r.w < 2 or r.h < 2) return;
+    var row: u16 = 0;
+    while (row < r.h) : (row += 1) {
+        f.cup(r.x, r.y + row);
+        style(f, .{ .fg = edge, .bg = ground });
+        if (row == 0) {
+            f.put("┌");
+            hline(f, r.w -| 2);
+            f.put("┐");
+        } else if (row == r.h - 1) {
+            f.put("└");
+            hline(f, r.w -| 2);
+            f.put("┘");
+        } else {
+            f.put("│");
+            pad(f, r.w -| 2);
+            f.put("│");
+        }
+    }
+    f.put(csi ++ "0m");
+}
+
 pub const Paint = struct {
-    accent: Rgb,
-    /// the space Esc returns to, for the empty-state hint
+    t: *const ui.Theme,
+    /// the space Esc returns to, for the footer
     back: []const u8 = "",
 };
 
-/// Decide the fidelity for this frame, before the bars are composed:
-/// orbit when asked for it, nothing is being typed, the region is wide
-/// enough for a figure, and the figures fit; ledger otherwise.
-pub fn chooseFidelity(st: *State, region: layoutpkg.Rect) void {
-    const avail = region.h -| 5; // the input, its line, the footer
-    const orbit = !st.ledger and st.len == 0 and region.w >= 60 and orbitRows(st) <= avail;
-    st.painted_ledger = !orbit;
+/// The tab component's mark, from the tab bar's vocabulary.
+pub fn markOf(m: chromepkg.TabMark) ui.Mark {
+    return switch (m) {
+        .none => .none,
+        .working => .working,
+        .unread => .unread,
+        .attention => .attention,
+    };
 }
 
 /// Rows the orbit needs for its content: every row as it would be
@@ -507,51 +532,69 @@ fn orbitRows(st: *const State) u16 {
     return h;
 }
 
+/// Decide the fidelity for this frame, before the bars are composed:
+/// orbit when asked for it, nothing is being typed, the region is wide
+/// enough for a figure, and the figures fit; ledger otherwise.
+pub fn chooseFidelity(st: *State, region: layoutpkg.Rect) void {
+    const avail = region.h -| 5; // the input, its line, the footer
+    const orbit = !st.ledger and st.len == 0 and region.w >= 60 and orbitRows(st) <= avail;
+    st.painted_ledger = !orbit;
+}
+
+/// The input field's width: bounded to the content, never the whole
+/// canvas.
+fn fieldWidth(w: u16) u16 {
+    return @min(w, 64);
+}
+
 /// Paint the view into `region` and record where each row landed.
 /// Returns where the input's cursor is on the glass.
 pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) renderpkg.CursorOverride {
-    clearRect(f, region);
+    const t = p.t;
+    clearRect(f, t, region);
     st.zones_n = 0;
     const x = region.x + 2;
     const w = region.w -| 4;
     const bottom = region.y + region.h;
     var y = region.y + 1;
 
-    // The input: a band the eye finds, the prompt in the accent, the
-    // cursor in it. The placeholder is in the band too, so an empty
-    // query still reads as a control and not as a caption.
-    f.cup(region.x + 1, y);
-    f.put(csi ++ "0m");
-    bg(f, band);
-    pad(f, region.w -| 2);
+    // The input: a raised field the eye finds, the prompt in the
+    // accent, the cursor in it. The placeholder is in the field, so
+    // an empty query still reads as a control and not as a caption.
+    const fw = fieldWidth(w);
     f.cup(x, y);
-    bg(f, band);
-    fg(f, p.accent);
-    f.put(csi ++ "1m› " ++ csi ++ "22m");
-    var cx: u16 = x + 2;
+    style(f, .{ .bg = t.raised });
+    pad(f, fw);
+    f.cup(x, y);
+    style(f, .{ .fg = t.accent, .bg = t.raised, .bold = true });
+    f.put(" ");
+    f.put(ui.glyph(t, .prompt));
+    f.put(" ");
+    var cx: u16 = x + 3;
     const text = st.textSlice();
     if (text.len == 0) {
-        fg(f, chromepkg.overlay0);
-        _ = putW(f, "find a space, a tab, a pane · : for a command", w -| 2);
+        style(f, .{ .fg = t.muted, .bg = t.raised });
+        _ = putW(f, "find a space, a tab, a pane  ·  : command", fw -| 4);
     } else {
-        fg(f, chromepkg.text);
-        f.put(csi ++ "1m");
-        cx += putW(f, text, w -| 2);
-        f.put(csi ++ "22m");
+        style(f, .{ .fg = t.primary, .bg = t.raised, .bold = true });
+        cx += putW(f, text, fw -| 4);
     }
     const cursor: renderpkg.CursorOverride = .{ .x = @min(cx, region.x + region.w -| 1), .y = y, .bar = true };
     y += 1;
 
-    // Under the band: what the rows are, in one dim line.
-    f.cup(x, y);
-    ink(f, chromepkg.overlay0);
+    // Under the field: what the rows are, in one muted line.
+    const ascii = t.glyphs == .ascii;
     const under: []const u8 = if (st.isCommand())
-        "completions · ↵ runs the selected one · esc clears"
+        (if (ascii) "completions · enter runs the selected one · esc clears" else "completions · ↵ runs the selected one · esc clears")
     else if (text.len > 0)
-        "matches · ↑ ↓ move · ↵ acts on the selected · typing never does"
+        (if (ascii) "matches · up/down move · enter acts on the selected · typing never does" else "matches · ↑ ↓ move · ↵ acts on the selected · typing never does")
     else
         "";
-    _ = putW(f, under, w);
+    if (under.len > 0) {
+        f.cup(x, y);
+        ink(f, t, t.muted);
+        _ = putW(f, under, w);
+    }
     y += if (under.len > 0) 2 else 1;
 
     // Orbit when the figures fit; the same rows as ledger when they
@@ -573,12 +616,11 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
             }
         }
         if (y + h > bottom -| 1) {
-            // what did not fit is said out loud
             if (y < bottom) {
                 f.cup(x, y);
-                ink(f, chromepkg.overlay0);
+                ink(f, t, t.muted);
                 var mb: [32]u8 = undefined;
-                const m = std.fmt.bufPrint(&mb, "⋯ {d} more", .{st.rows.items.len - i}) catch "⋯";
+                const m = std.fmt.bufPrint(&mb, "{s} {d} more", .{ ui.glyph(t, .more), st.rows.items.len - i }) catch "";
                 _ = putW(f, m, w);
             }
             break;
@@ -588,74 +630,84 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
             st.zones_n += 1;
         }
         if (figure) |sp| {
-            drawFigure(f, sp, sel, x, y, w, p.accent);
+            drawFigure(f, t, sp, sel, x, y, w);
             y += h + 1;
         } else if (r.kind == .space) {
-            drawSpaceRow(f, r, st.spaces[r.space], sel, !orbit, x, y, w, p.accent);
+            drawSpaceRow(f, t, r, st.spaces[r.space], sel, !orbit, x, y, w);
             y += h;
         } else {
-            drawRow(f, r, sel, x, y, w, p.accent);
+            drawRow(f, t, r, sel, x, y, w);
             y += h;
         }
     }
 
-    // The footer: keys a hand has not found yet, in one line, dim but
-    // legible. The empty state says what there is to do here.
+    // The footer: keys a hand has not found yet, one muted line. The
+    // empty state says what there is to do here.
     if (y + 1 < bottom) {
         f.cup(x, bottom - 1);
-        ink(f, chromepkg.overlay0);
+        ink(f, t, t.muted);
         var fb: [160]u8 = undefined;
+        const keys: []const u8 = if (ascii) "up/down move · enter" else "↑ ↓ move · ↵ enter";
         const long: []const u8 = if (text.len > 0)
             "esc clears the query · esc again returns"
         else if (p.back.len > 0)
-            std.fmt.bufPrint(&fb, "↑ ↓ move · ↵ enter · type to find · : command · :new <name> starts a space · esc returns to {s}", .{p.back}) catch "esc returns"
+            std.fmt.bufPrint(&fb, "{s} · type to find · : command · :new <name> starts a space · esc returns to {s}", .{ keys, p.back }) catch "esc returns"
         else
-            "↑ ↓ move · ↵ enter · type to find · : command · esc returns";
-        const short: []const u8 = if (text.len > 0) "esc clears · esc again returns" else "↑ ↓ ↵ · type to find · : command · esc returns";
+            std.fmt.bufPrint(&fb, "{s} · type to find · : command · esc returns", .{keys}) catch "esc returns";
+        const short: []const u8 = if (text.len > 0) "esc clears · esc again returns" else (if (ascii) "up/down enter · type to find · : command · esc" else "↑ ↓ ↵ · type to find · : command · esc returns");
         _ = putW(f, if (chromepkg.cols(long) <= w) long else short, w);
     }
     f.put(csi ++ "0m");
     return cursor;
 }
 
-/// One-line rows: attention, asks, tabs, panes, pins, commands, the
-/// companion. A selected row wears the accent marker and bold ink;
-/// the band is reserved for the input.
-fn drawRow(f: *renderpkg.Frame, r: Row, sel: bool, x: u16, y: u16, w: u16, accent: Rgb) void {
+/// The selected row's band: bounded to its content, one step up from
+/// the chrome — never the accent, never the whole width.
+fn band(f: *renderpkg.Frame, t: *const ui.Theme, x: u16, y: u16, w: u16) void {
     f.cup(x, y);
-    ink(f, r.ink);
-    var used: u16 = 0;
+    style(f, .{ .bg = t.selection });
+    pad(f, w);
+}
+
+/// One-line rows: attention, asks, tabs, panes, pins, commands, the
+/// companion. The selected row wears the accent marker, its name in
+/// primary bold, and a bounded band; the others sit on the chrome.
+fn drawRow(f: *renderpkg.Frame, t: *const ui.Theme, r: Row, sel: bool, x: u16, y: u16, w: u16) void {
     if (r.kind == .note) {
-        fg(f, chromepkg.overlay0);
+        f.cup(x, y);
+        ink(f, t, t.muted);
         _ = putW(f, r.name, w);
         return;
     }
-    // marker column: the selection cursor, else the row's own glyph
-    if (sel) {
-        fg(f, accent);
-        f.put("▸ ");
-    } else {
-        f.put("  ");
-    }
-    used += 2;
-    fg(f, r.ink);
-    used += putW(f, r.glyph, 2);
-    while (used < 5) : (used += 1) f.put(" ");
     const hint_w: u16 = if (r.hint.len > 0) chromepkg.cols(r.hint) + 2 else 0;
     const body_w = w -| (5 + hint_w);
-    fg(f, if (sel) accent else chromepkg.text);
-    f.put(csi ++ "1m");
+    const name_w = @min(chromepkg.cols(r.name), @min(body_w, 44));
+    const line_w: u16 = if (r.line.len > 0) @min(chromepkg.cols(r.line) + 2, (5 + body_w) -| (5 + name_w)) else 0;
+    const ground: Rgb = if (sel) t.selection else t.chrome;
+    if (sel) band(f, t, x, y, @min(w, 5 + name_w + line_w + 1));
+    f.cup(x, y);
+    style(f, .{ .fg = t.accent, .bg = ground, .bold = true });
+    f.put(if (sel) ui.glyph(t, .marker) else " ");
+    f.put(" ");
+    var used: u16 = 2;
+    style(f, .{ .fg = r.ink, .bg = ground, .bold = r.kind == .attention or r.kind == .ask });
+    used += putW(f, r.glyph, 2);
+    while (used < 5) : (used += 1) {
+        style(f, .{ .bg = ground });
+        f.put(" ");
+    }
+    style(f, .{ .fg = t.primary, .bg = ground, .bold = sel });
     used += putW(f, r.name, @min(body_w, 44));
-    f.put(csi ++ "22m");
     if (r.line.len > 0 and used + 3 < 5 + body_w) {
+        style(f, .{ .bg = ground });
         f.put("  ");
         used += 2;
-        fg(f, r.line_ink);
+        style(f, .{ .fg = r.line_ink, .bg = ground });
         used += putW(f, r.line, (5 + body_w) -| used);
     }
     if (hint_w > 0 and sel) {
         f.cup(x + w -| (hint_w - 2), y);
-        fg(f, accent);
+        ink(f, t, t.accent);
         _ = putW(f, r.hint, hint_w);
     }
     f.put(csi ++ "0m");
@@ -663,180 +715,118 @@ fn drawRow(f: *renderpkg.Frame, r: Row, sel: bool, x: u16, y: u16, w: u16, accen
 
 /// A space as a row: in ledger two lines (identity and event, then
 /// its tabs); in orbit the compact form a data-poor space gets, one
-/// line with its tabs after the event.
-fn drawSpaceRow(f: *renderpkg.Frame, r: Row, sp: Space, sel: bool, two_lines: bool, x: u16, y: u16, w: u16, accent: Rgb) void {
+/// line with its tabs after the event. The space you left wears its
+/// chip, the same chip the scope bar gave it.
+fn drawSpaceRow(f: *renderpkg.Frame, t: *const ui.Theme, r: Row, sp: Space, sel: bool, two_lines: bool, x: u16, y: u16, w: u16) void {
+    const ground: Rgb = if (sel) t.selection else t.chrome;
+    const name_w = chromepkg.cols(sp.name) + (if (sp.current) @as(u16, 2) else 0);
+    const ev_w = @min(chromepkg.cols(sp.event), w -| name_w -| 16);
+    if (sel) band(f, t, x, y, @min(w, 4 + name_w + 2 + ev_w + 1));
     f.cup(x, y);
-    ink(f, chromepkg.overlay0);
-    if (sel) {
-        fg(f, accent);
-        f.put("▸ ");
-    } else {
-        f.put("  ");
-    }
-    // the current space wears the block, the same block a selected
-    // tab wears: it is the one the glass was on
+    style(f, .{ .fg = t.accent, .bg = ground, .bold = true });
+    f.put(if (sel) ui.glyph(t, .marker) else " ");
+    f.put(" ");
+    var used: u16 = 2;
     if (sp.current) {
-        bg(f, if (sel) accent else chromepkg.surface0);
-        fg(f, if (sel) chromepkg.crust else chromepkg.text);
-        f.put(csi ++ "1m ");
-        _ = putW(f, sp.name, 24);
-        f.put(" " ++ csi ++ "22m");
-        bg(f, ground);
+        used += ui.scopeChip(f, t, sp.name, .space);
     } else {
-        fg(f, if (sel) accent else chromepkg.text);
-        f.put(csi ++ "1m");
-        _ = putW(f, sp.name, 24);
-        f.put(csi ++ "22m");
+        style(f, .{ .fg = t.primary, .bg = ground, .bold = sel });
+        used += putW(f, sp.name, 24);
     }
+    style(f, .{ .bg = ground });
     f.put("  ");
-    fg(f, eventInk(sp.event_kind, accent));
-    var used: u16 = 4 + chromepkg.cols(sp.name) + (if (sp.current) @as(u16, 2) else 0);
-    used += putW(f, sp.event, w -| used -| 12);
+    used += 2;
+    style(f, .{ .fg = eventInk(t, sp.event_kind), .bg = ground });
+    used += putW(f, sp.event, ev_w);
     if (!two_lines and r.second.len > 0 and used + 6 < w) {
+        ink(f, t, t.muted);
         f.put("   ");
-        fg(f, chromepkg.overlay0);
         used += 3;
         used += putW(f, r.second, w -| used -| 10);
     }
     if (sel and r.hint.len > 0) {
         const hw = chromepkg.cols(r.hint);
         f.cup(x + w -| hw, y);
-        fg(f, accent);
+        ink(f, t, t.accent);
         _ = putW(f, r.hint, hw);
     }
     if (two_lines and r.second.len > 0) {
         f.cup(x + 4, y + 1);
-        ink(f, chromepkg.overlay0);
+        ink(f, t, t.secondary);
         _ = putW(f, r.second, w -| 4);
     }
     f.put(csi ++ "0m");
 }
 
-fn eventInk(k: Event, accent: Rgb) Rgb {
+fn eventInk(t: *const ui.Theme, k: Event) Rgb {
     return switch (k) {
-        .quiet => chromepkg.overlay0,
-        .working => chromepkg.yellow,
-        .needs_you => chromepkg.yellow,
-        .unread => accent,
-        .said => chromepkg.text,
+        .quiet => t.muted,
+        .working => t.working,
+        .needs_you => t.attention,
+        .unread => t.unread,
+        .said => t.secondary,
     };
 }
 
-/// A figure: the space's name in the top edge, its event beside it,
-/// its tabs on the first line inside (actor and mark with each), and
-/// for the space you left, the last lines of the pane you were in.
-/// Sized by what it holds; a selected figure's border is the accent,
-/// the current one's name is the block.
-fn drawFigure(f: *renderpkg.Frame, sp: Space, sel: bool, x: u16, y: u16, w: u16, accent: Rgb) void {
-    const border: Rgb = if (sel) accent else chromepkg.overlay0;
+/// A figure: the space's chip in the top edge, its event beside it,
+/// its tabs on the first line inside as the tab component, and for
+/// the space you left, the last lines of the pane you were in. Sized
+/// by what it holds. The edge is `border`, or `border_focused` when
+/// selected — the same hierarchy a pane's seam uses.
+fn drawFigure(f: *renderpkg.Frame, t: *const ui.Theme, sp: Space, sel: bool, x: u16, y: u16, w: u16) void {
+    const edge: Rgb = if (sel) t.border_focused else t.border;
     const h = sp.figureRows();
-    // edges
-    var row: u16 = 0;
-    while (row < h) : (row += 1) {
-        f.cup(x, y + row);
-        ink(f, border);
-        if (row == 0) {
-            f.put("┌");
-            hline(f, w -| 2);
-            f.put("┐");
-        } else if (row == h - 1) {
-            f.put("└");
-            hline(f, w -| 2);
-            f.put("┘");
-        } else {
-            f.put("│");
-            pad(f, w -| 2);
-            f.put("│");
-        }
-    }
-    // the name, in the edge
+    box(f, .{ .x = x, .y = y, .w = w, .h = h }, edge, t.chrome);
+    // the name, in the edge: the space's chip
     f.cup(x + 1, y);
-    ink(f, border);
+    ink(f, t, edge);
     f.put("┤");
-    if (sp.current) {
-        bg(f, if (sel) accent else chromepkg.surface0);
-        fg(f, if (sel) chromepkg.crust else chromepkg.text);
-    } else {
-        fg(f, if (sel) accent else chromepkg.text);
-    }
-    f.put(csi ++ "1m ");
-    var used: u16 = 3;
-    used += putW(f, sp.name, 24);
-    f.put(" " ++ csi ++ "22m");
-    used += 1;
-    ink(f, border);
+    var used: u16 = 2;
+    used += ui.scopeChip(f, t, sp.name, .space);
+    ink(f, t, edge);
     f.put("├");
     used += 1;
     if (sp.unread > 0) {
         f.put(" ");
-        fg(f, accent);
-        f.put("●");
+        ink(f, t, t.attention);
+        f.put(ui.markGlyph(t, .attention));
         used += 2;
     }
     // the event, after a gap, in its own ink, a gap before the rule
     if (sp.event.len > 0 and used + 5 < w - 2) {
+        ink(f, t, eventInk(t, sp.event_kind));
         f.put("  ");
         used += 2;
-        fg(f, eventInk(sp.event_kind, accent));
         used += putW(f, sp.event, w -| used -| 4);
         f.put(" ");
     }
-    // inside: tabs
+    // inside: the tabs, as the component, dense
     f.cup(x + 2, y + 1);
-    ink(f, chromepkg.text);
     var tx: u16 = 0;
-    for (sp.tabs) |t| {
-        var lb: [64]u8 = undefined;
-        const label = tabLabel(&lb, t.name, t.actor);
-        const need = chromepkg.cols(label) + 4;
+    for (sp.tabs) |tb| {
+        const need = chromepkg.cols(tb.name) + 4;
         if (tx + need > w - 4) {
-            fg(f, chromepkg.overlay0);
-            _ = putW(f, "⋯", 1);
+            ink(f, t, t.muted);
+            _ = putW(f, ui.glyph(t, .more), 1);
             break;
         }
-        if (t.current) {
-            bg(f, chromepkg.surface0);
-            f.put(" ");
-            fg(f, chromepkg.text);
-            _ = putW(f, label, 40);
-            f.put(" ");
-            bg(f, ground);
-        } else {
-            f.put(" ");
-            fg(f, chromepkg.text);
-            _ = putW(f, label, 40);
-            f.put(" ");
-        }
-        tx += chromepkg.cols(label) + 2;
-        switch (t.mark) {
-            .working => {
-                fg(f, chromepkg.yellow);
-                f.put("◐ ");
-                tx += 2;
-            },
-            .unread => {
-                fg(f, accent);
-                f.put("● ");
-                tx += 2;
-            },
-            .none => {
-                f.put("  ");
-                tx += 2;
-            },
-        }
+        tx += ui.tabDense(f, t, .{ .label = tb.name, .actor = tb.actor, .mark = markOf(tb.mark), .selected = tb.current }, t.chrome);
+        ink(f, t, t.muted);
+        f.put(" ");
+        tx += 1;
     }
-    // the excerpt: retained cells, read only, dim
+    // the excerpt: retained cells, read only, muted
     for (sp.excerpt, 0..) |line, i| {
         f.cup(x + 2, y + 2 + @as(u16, @intCast(i)));
-        ink(f, chromepkg.overlay0);
+        ink(f, t, t.muted);
         _ = putW(f, line, w -| 4);
     }
     // what ↵ does, in the bottom edge, when selected
     if (sel) {
-        const hint: []const u8 = if (sp.current) " ↵ back in · esc too " else " ↵ enter ";
+        const hint: []const u8 = if (t.glyphs == .ascii) (if (sp.current) " enter: back in " else " enter ") else (if (sp.current) " ↵ back in · esc too " else " ↵ enter ");
         const hw = chromepkg.cols(hint);
         f.cup(x + w -| hw -| 2, y + h - 1);
-        ink(f, accent);
+        ink(f, t, t.accent);
         _ = putW(f, hint, hw);
     }
     f.put(csi ++ "0m");

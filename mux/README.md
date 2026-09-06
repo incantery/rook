@@ -55,10 +55,12 @@ rename`, `:rename` at altitude), else the first program in it that
 was not the shell, with an ordinal when a sibling wears the name —
 and rook never renames it afterwards. An actor that claimed a pane in
 the window (`rook own`) rides after the name, `deploy · main`; the
-tool never does, and the mark (`◐` producing, `●` unread) changes
-freely. The bottom row is the calm bar: `you ▸ claude` on the left —
+tool never does, and the mark (`◐` producing, `•` unread, `!` a
+program asked) changes freely. The chrome is one system —
+`docs/ui-design-system.md`: roles, not colors; a tab is one
+component; `glyphs = "ascii"` for a glass without the marks. The bottom row is the calm bar: `you ▸ claude` on the left —
 who holds the keyboard, through what — or `main ▸ claude owns input ·
-you observe` once an actor claimed it, and `◐ n · ● n · ⊕g n` on the
+you observe` once an actor claimed it, and `◐ n · !n · •n · ⊕g n` on the
 right — agents producing output, panes unread, global pins — empty
 when nothing signals. While the prefix is armed the bar shows the
 chords. `docs/altitude.md` is the whole model and the ontology:
@@ -179,7 +181,7 @@ to the glass; a notification is re-sent as OSC 777 when its pane was
 not in front of you, so the terminal that can reach the desktop does.
 
 A signal that arrives while nobody is looking at its pane puts the
-pane on the **unread** channel (`unread`, `unreadMs`): a `●` on its
+pane on the **unread** channel (`unread`, `unreadMs`): a `!` on its
 tab, a `●` on the rail's row for its workspace, until focus lands on
 it. `prefix-u` (`rook jump`) goes to the oldest. Rook publishes the
 words and acts on their arrival; it never reads them for meaning.

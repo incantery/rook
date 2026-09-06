@@ -16,6 +16,7 @@
 //!                                  # left, signals right (false = off)
 //!   zoom_view = "orbit"            # prefix-o: "orbit" contracts the space
 //!                                  # into a figure; "ledger" is rows only
+//!   glyphs = "unicode"             # "ascii" for a glass without the marks
 //!
 //! and the [companion] table the Go half already reads — the one
 //! resident rook knows by name, so it can say when and where it is
@@ -110,6 +111,10 @@ pub const Mux = struct {
     /// figure — the SSH, narrow and reduced-motion form, and the one
     /// orbit falls back to when the glass is too small for a figure.
     zoom_ledger: bool = false,
+    /// ASCII marks and glyphs for a glass that cannot show the
+    /// Unicode ones. The inks and fills are the same, so the
+    /// hierarchy survives the swap (docs/ui-design-system.md).
+    ascii_glyphs: bool = false,
 
     pub fn ownersSlice(self: *const Mux) []const u8 {
         return self.owners[0..self.owners_len];
@@ -235,6 +240,9 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
         } else if (std.mem.eql(u8, key, "bar")) {
             const v = std.mem.trim(u8, val, "\"'");
             out.bar = !(std.mem.eql(u8, v, "false") or std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off"));
+        } else if (std.mem.eql(u8, key, "glyphs")) {
+            const v = std.mem.trim(u8, val, "\"'");
+            out.ascii_glyphs = std.mem.eql(u8, v, "ascii");
         } else if (std.mem.eql(u8, key, "zoom_view")) {
             const v = std.mem.trim(u8, val, "\"'");
             if (std.mem.eql(u8, v, "ledger")) out.zoom_ledger = true;
@@ -304,6 +312,9 @@ test "parseMux" {
     parseMux("[mux]\nbar = true\nzoom_view = \"orbit\"\n", &b);
     try std.testing.expect(b.bar);
     try std.testing.expect(!b.zoom_ledger);
+    try std.testing.expect(!b.ascii_glyphs);
+    parseMux("[mux]\nglyphs = \"ascii\"\n", &b);
+    try std.testing.expect(b.ascii_glyphs);
 }
 
 test "the companion slot, named or summoned" {

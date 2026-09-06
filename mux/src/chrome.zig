@@ -873,7 +873,11 @@ pub const demo_frames: []const []const u8 = &.{
 /// separate channels from the selection block and from each other —
 /// the block means selected and only selected — but they share one
 /// cell, so exactly one of them can be showing.
-pub const TabMark = enum { none, working, unread };
+/// What a tab has to say: nothing, work in flight, output nobody
+/// has seen, or a program that asked (a bell, a notification, a bar
+/// that finished — the unread channel). The last is attention, and
+/// outranks the rest; the design system draws each (`ui.Mark`).
+pub const TabMark = enum { none, working, unread, attention };
 
 /// What a click on the tab bar lands on: a window, by its index in
 /// the workspace, or the `+` that opens a new one.
@@ -910,9 +914,9 @@ pub fn hitTab(zones: []const TabZone, x: u16) ?TabTarget {
     return null;
 }
 
-/// Working outranks unread on that cell: a window you can watch
-/// working is not news you missed, and the ◐ is the more useful of the
-/// two to a reader deciding where to look.
+/// A program that asked is attention, and outranks work: a request
+/// is why you would look. Work outranks unseen output: a window you
+/// can watch working is not news you missed.
 pub fn tabMark(w: struct {
     current: bool,
     agent: bool,
@@ -927,26 +931,37 @@ pub fn tabMark(w: struct {
     signal: bool = false,
 }) TabMark {
     const last = w.last_output_ms;
+    if (w.signal) return .attention;
     if (w.agent and last != 0 and w.now - last < working_ms) return .working;
-    if (w.signal) return .unread;
     if (last == 0) return .none; // never produced anything
-    // The window on the glass is being read as it arrives.
-    if (!w.current and last > w.seen_ms) return .unread;
+    // The window on the glass is being read as it arrives. A window
+    // gets a breath after it was last looked at (or made): its own
+    // shell printing a prompt is not news, and a calm tab wears no
+    // glyph for it.
+    if (!w.current and last > w.seen_ms + prompt_grace_ms) return .unread;
     return .none;
 }
 
-test "tab marks: working outranks unread, and a signal is unread even on a quiet window" {
+/// How long after a window was made or last looked at its output is
+/// still considered seen — the shell's own prompt, a `clear`, the
+/// tail of what you were watching. Beyond it, output nobody looked at
+/// is unread.
+pub const prompt_grace_ms: i64 = 1500;
+
+test "tab marks: a signal is attention and outranks work, which outranks unread" {
     const eq = std.testing.expectEqual;
     // a window that never produced anything and was never asked for: nothing
     try eq(TabMark.none, tabMark(.{ .current = false, .agent = false, .last_output_ms = 0, .seen_ms = 0, .now = 10_000 }));
     // the program asked (a bell, a notification) while nobody looked
-    try eq(TabMark.unread, tabMark(.{ .current = false, .agent = false, .last_output_ms = 0, .seen_ms = 0, .now = 10_000, .signal = true }));
+    try eq(TabMark.attention, tabMark(.{ .current = false, .agent = false, .last_output_ms = 0, .seen_ms = 0, .now = 10_000, .signal = true }));
     // …and it stays news on the current window until focus clears it
-    try eq(TabMark.unread, tabMark(.{ .current = true, .agent = false, .last_output_ms = 100, .seen_ms = 200, .now = 10_000, .signal = true }));
-    // an agent still producing output is working, whatever else it said
-    try eq(TabMark.working, tabMark(.{ .current = false, .agent = true, .last_output_ms = 9_500, .seen_ms = 0, .now = 10_000, .signal = true }));
-    // unseen output alone is still the softer unread
-    try eq(TabMark.unread, tabMark(.{ .current = false, .agent = false, .last_output_ms = 300, .seen_ms = 200, .now = 10_000 }));
+    try eq(TabMark.attention, tabMark(.{ .current = true, .agent = false, .last_output_ms = 100, .seen_ms = 200, .now = 10_000, .signal = true }));
+    // an agent producing output that also asked: the ask is why you look
+    try eq(TabMark.attention, tabMark(.{ .current = false, .agent = true, .last_output_ms = 9_500, .seen_ms = 0, .now = 10_000, .signal = true }));
+    try eq(TabMark.working, tabMark(.{ .current = false, .agent = true, .last_output_ms = 9_500, .seen_ms = 0, .now = 10_000 }));
+    // unseen output alone is still the softer unread — after the breath
+    try eq(TabMark.unread, tabMark(.{ .current = false, .agent = false, .last_output_ms = 3_000, .seen_ms = 200, .now = 10_000 }));
+    try eq(TabMark.none, tabMark(.{ .current = false, .agent = false, .last_output_ms = 300, .seen_ms = 200, .now = 10_000 })); // a prompt
     try eq(TabMark.none, tabMark(.{ .current = false, .agent = false, .last_output_ms = 100, .seen_ms = 200, .now = 10_000 }));
 }
 
@@ -1973,7 +1988,7 @@ test "a tab's mark is one channel, and the block is not it" {
         .current = false,
         .agent = true,
         .last_output_ms = now - working_ms - 1,
-        .seen_ms = now - working_ms - 2,
+        .seen_ms = now - working_ms - 2 - prompt_grace_ms,
         .now = now,
     }));
 
@@ -1986,12 +2001,13 @@ test "a tab's mark is one channel, and the block is not it" {
         .now = now,
     }));
 
-    // Anything, agent or not, that wrote while you were elsewhere.
+    // Anything, agent or not, that wrote while you were elsewhere —
+    // once the breath after you left has passed.
     try std.testing.expectEqual(TabMark.unread, tabMark(.{
         .current = false,
         .agent = false,
         .last_output_ms = now - 10,
-        .seen_ms = now - 20,
+        .seen_ms = now - 20 - prompt_grace_ms,
         .now = now,
     }));
 

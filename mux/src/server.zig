@@ -15,6 +15,7 @@ const statefeed = @import("statefeed.zig");
 const proto = @import("proto.zig");
 const config = @import("config.zig");
 const altpkg = @import("altitude.zig");
+const ui = @import("ui.zig");
 
 // CLOCK_UPTIME_RAW = 8 on macOS; libc-only monotonic clock.
 extern "c" fn clock_gettime_nsec_np(clock_id: c_int) u64;
@@ -255,6 +256,9 @@ pub const Server = struct {
     sock_path: []const u8,
     prefix_key: u8,
     conf: config.Mux = .{},
+    /// The design system's roles, built once from the config's accent
+    /// (docs/ui-design-system.md). Every chrome painter reads it.
+    ui: ui.Theme = .{},
     panes: std.ArrayList(*panepkg.Pane) = .empty,
     sessions: std.ArrayList(*Session) = .empty,
     cur_sess: usize = 0,
@@ -371,6 +375,14 @@ pub const Server = struct {
     /// A floating pane over the current window: all input goes to it,
     /// it closes when its process exits. One at a time.
     popup: ?u32 = null,
+    /// The bars as last shipped. A mark appearing on a hidden window's
+    /// tab, a window opened from the front door, a count changing on
+    /// the calm bar: none of it dirties a pane cell, so the bars are
+    /// composed on every wake and compared, and a change ships a frame.
+    tabbar_last: [2048]u8 = undefined,
+    tabbar_last_len: usize = 0,
+    bar_last: [2048]u8 = undefined,
+    bar_last_len: usize = 0,
     /// The workspace before the last switch — prefix-C-o goes back
     /// after any cross-space hop, from wherever the hop was made.
     last_sess: ?usize = null,
@@ -474,8 +486,11 @@ pub const Server = struct {
             _ = std.fmt.bufPrintZ(self.state_tmp[0 .. self.state_tmp.len - 1], "{s}.state.tmp", .{sock_path}) catch {};
         } else |_| {}
 
-        self.frame.accent = self.conf.accent;
-        self.over.accent = self.conf.accent;
+        self.ui = ui.Theme.init(self.conf.accent, if (self.conf.ascii_glyphs) .ascii else .unicode);
+        self.frame.accent = self.ui.border_focused;
+        self.frame.border = self.ui.border;
+        self.over.accent = self.ui.border_focused;
+        self.over.border = self.ui.border;
         self.side.accent = self.conf.accent;
         self.side_mode = self.conf.side_mode;
         self.pid = ptypkg.selfPid();
@@ -617,13 +632,14 @@ pub const Server = struct {
 
     fn newWindow(self: *Server, cwd_override: ?[*:0]const u8) !void {
         const sn = self.sess();
+        // a window is seen when it is made: its first prompt is not news
         // an explicit cwd wins; otherwise inherit from what the user
         // is looking at now
         var cwd_buf: [1024]u8 = undefined;
         const cwd = cwd_override orelse (if (sn.windows.items.len > 0) self.focusedCwd(&cwd_buf) else null);
         const prev_focused: ?u32 = if (sn.windows.items.len > 0) self.window().focused else null;
         const w = try self.gpa.create(Window);
-        w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
+        w.* = .{ .layout = layoutpkg.Layout.init(self.gpa), .seen_ms = panepkg.epochMs() };
         try sn.windows.append(self.gpa, w);
         sn.cur = sn.windows.items.len - 1;
         const p = try self.startPane(cwd);
@@ -1877,7 +1893,7 @@ pub const Server = struct {
         switch (op) {
             'c' => {
                 const w = self.gpa.create(Window) catch return null;
-                w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
+                w.* = .{ .layout = layoutpkg.Layout.init(self.gpa), .seen_ms = panepkg.epochMs() };
                 loc.sn.windows.append(self.gpa, w) catch {
                     self.gpa.destroy(w);
                     return null;
@@ -3098,8 +3114,6 @@ pub const Server = struct {
         self.forwardClips();
         self.mirrorKitty();
 
-        if (!any_dirty) return;
-
         const g = self.geometry();
         const body = self.bodyRows();
         // The altitude rows are built first: the bars read them (the
@@ -3116,6 +3130,20 @@ pub const Server = struct {
             .{ .y = body, .bytes = self.barRow(&bar_buf, g.cols) }
         else
             null;
+        // the bars changed: a frame, whatever the panes did
+        if (!std.mem.eql(u8, tabbar, self.tabbar_last[0..self.tabbar_last_len])) {
+            any_dirty = true;
+            self.tabbar_last_len = @min(tabbar.len, self.tabbar_last.len);
+            @memcpy(self.tabbar_last[0..self.tabbar_last_len], tabbar[0..self.tabbar_last_len]);
+        }
+        const bar_bytes: []const u8 = if (bar) |b| b.bytes else "";
+        if (!std.mem.eql(u8, bar_bytes, self.bar_last[0..self.bar_last_len])) {
+            any_dirty = true;
+            self.bar_last_len = @min(bar_bytes.len, self.bar_last.len);
+            @memcpy(self.bar_last[0..self.bar_last_len], bar_bytes[0..self.bar_last_len]);
+        }
+
+        if (!any_dirty) return;
 
         // What the server paints over the panes itself. Built fresh
         // each frame it is needed: all three are human-rate views.
@@ -3131,12 +3159,12 @@ pub const Server = struct {
                 if (containsId(self.global_pins.items, pl.pane)) {
                     self.alt_placed.append(self.gpa, pl) catch {};
                 } else {
-                    altpkg.clearRect(&self.over, pl.rect);
+                    altpkg.clearRect(&self.over, &self.ui, pl.rect);
                 }
             }
             placed = self.alt_placed.items;
             if (self.global_pins.items.len == 0) dock_x = null;
-            cur_over = altpkg.draw(&self.over, &self.alt, self.altRegion(), .{ .accent = self.conf.accent, .back = chromepkg.shortSpace(self.sess().label()) });
+            cur_over = altpkg.draw(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .back = chromepkg.shortSpace(self.sess().label()) });
         }
         if (self.gate and !self.alt_on) self.gateRow();
         if (self.inspect and !self.alt_on) self.inspectorSheet();
@@ -3463,7 +3491,7 @@ pub const Server = struct {
                 } else null;
                 const sn = self.sess();
                 const w = try self.gpa.create(Window);
-                w.* = .{ .layout = layoutpkg.Layout.init(self.gpa) };
+                w.* = .{ .layout = layoutpkg.Layout.init(self.gpa), .seen_ms = panepkg.epochMs() };
                 try sn.windows.append(self.gpa, w);
                 const p = try self.startPane(cwd_arg);
                 try w.layout.seed(p.id);
@@ -3497,84 +3525,58 @@ pub const Server = struct {
         return true;
     }
 
-    /// The tab bar: ♜, then one chip per window named by its focused
-    /// pane's foreground program, the current one marked. Scroll and
-    /// zoom wear their state on the right.
-    /// The top tab bar: one chip per window in the current workspace,
-    /// the active one filled with the accent, then a "+" placeholder.
-    /// Built to render to exactly `avail` visible columns (padded), so
-    /// the renderer just cups to the start column and prints it. The
-    /// foreground program names the tab (fgName, not the title, which
-    /// shell prompts leave stale while an app runs).
+    /// The scope bar: the top row. It answers what scope you are in,
+    /// what you can move within it, and what is exceptional here. In
+    /// a space: the space's chip, a separator, the tabs, `+`, and the
+    /// corner. At altitude: the system's chip, the summary, and the
+    /// way back. One component draws every tab (`ui.tab`), so the
+    /// index, the label and the mark share one boundary; the ladder
+    /// (`ui.Fit`) decides how much of each fits.
     fn tabBar(self: *Server, buf: []u8, avail: u16) []const u8 {
-        var out: std.ArrayList(u8) = .initBuffer(buf);
-        var vis: u16 = 0;
+        var list: std.ArrayList(u8) = .initBuffer(buf);
+        const out: ui.Buf = .{ .list = &list };
+        const t = &self.ui;
         const sn = self.sess();
         const now = panepkg.epochMs();
-        // The bar is one surface; chips change the ink on it, and the
-        // active one fills with the accent. Truecolor throughout: this
-        // row is chrome, so it owes nothing to the pane palette.
-        var bar_buf: [48]u8 = undefined;
-        const bar = sgr(&bar_buf, .{ .bg = chromepkg.base, .fg = chromepkg.overlay0 });
-        var chip_buf: [48]u8 = undefined;
-        const chip_on = sgr(&chip_buf, .{ .bg = self.conf.accent, .fg = chromepkg.crust, .bold = true });
-        // The ordinal is the faintest ink on the bar: it is there for
-        // the hand reaching for ⌥n, not for the eye reading the tabs —
-        // but faint on a glass, not invisible over a wallpaper.
-        var idx_buf: [48]u8 = undefined;
-        const idx_ink = sgr(&idx_buf, .{ .bg = chromepkg.base, .fg = chromepkg.overlay0 });
-        var work_buf: [48]u8 = undefined;
-        const work_ink = sgr(&work_buf, .{ .bg = chromepkg.base, .fg = chromepkg.yellow });
-        var unread_buf: [48]u8 = undefined;
-        const unread_ink = sgr(&unread_buf, .{ .bg = chromepkg.base, .fg = self.conf.accent });
-        var scope_buf: [48]u8 = undefined;
-        const scope_ink = sgr(&scope_buf, .{ .bg = chromepkg.base, .fg = chromepkg.text, .bold = true });
-
-        out.appendSliceBounded(bar) catch {};
         self.tab_zones_n = 0;
+        var vis: u16 = 0;
+        const on: ui.Style = .{ .bg = t.chrome };
+        vis += ui.ink(out, on, " ");
 
-        // The scope slot, top-left. In a space it is the space's name
-        // — plain, bold, no block: identity, not selection. At
-        // altitude the same slot holds the system's chip, `rook` as
-        // the accent block, and after it, where the tabs were, the
-        // world in one line: `3 spaces · 2 agents working · 1 needs
-        // you`. A space named `rook` shows in the slot as plain
-        // `rook`, and in the corner as `‹ rook` when you left it: the
-        // block says scope, the word never has to.
         const scope = chromepkg.shortSpace(sn.label());
         const sc = scope[0..@min(scope.len, 20)];
-        var scope_w: u16 = 0;
+
+        // the corner is measured first: the bar lays out into what
+        // is left of it
+        var corner_buf: [48]u8 = undefined;
+        const corner: []const u8 = if (self.alt_on)
+            (std.fmt.bufPrint(&corner_buf, "esc {s} {s}", .{ ui.glyph(t, .back), sc }) catch "esc")
+        else if (self.scrolling)
+            (if (self.selecting) "copy · VISUAL" else "copy · hjkl v y q")
+        else if (self.window().zoomed)
+            "zoom"
+        else
+            "⌥n";
+        const corner_cols = chromepkg.cols(corner) + 1;
+
         if (self.alt_on) {
-            out.appendSliceBounded(chip_on) catch {};
-            out.appendSliceBounded(" rook ") catch {};
-            out.appendSliceBounded(bar) catch {};
-            out.appendSliceBounded("  ") catch {};
-            scope_w = 8;
+            vis += ui.scopeChip(out, t, "rook", .global);
+            vis += ui.separator(out, t, t.chrome);
             var sum_buf: [96]u8 = undefined;
             const summary = self.altSummary(&sum_buf);
-            out.appendSliceBounded(summary) catch {};
-            scope_w += chromepkg.cols(summary);
+            vis += ui.ink(out, .{ .fg = t.secondary, .bg = t.chrome }, chromepkg.clip(summary, avail -| vis -| corner_cols -| 1));
         } else {
-            out.appendSliceBounded(scope_ink) catch {};
-            out.appendSliceBounded(" ") catch {};
-            out.appendSliceBounded(sc) catch {};
-            out.appendSliceBounded(" ") catch {};
-            out.appendSliceBounded(bar) catch {};
-            out.appendSliceBounded(" ") catch {};
-            scope_w = chromepkg.cols(sc) + 3;
-        }
-        vis += scope_w;
+            vis += ui.scopeChip(out, t, sc, .space);
+            vis += ui.separator(out, t, t.chrome);
 
-        var shown: usize = 0;
-        var hidden: usize = 0;
-        if (!self.alt_on) {
-            for (sn.windows.items, 0..) |win, i| {
-                var name_buf: [48]u8 = undefined;
-                const name = self.tabName(sn, win, &name_buf);
-                // The actor: whoever claimed a pane in the window,
-                // after the stable name — `deploy · main ◐`. Identity,
-                // not type; the tool is the bar's word, not the tab's.
-                const actor = self.windowOwner(win);
+            // the tabs, as components
+            var tabs: [chromepkg.max_tab_zones]ui.Tab = undefined;
+            var names: [chromepkg.max_tab_zones][48]u8 = undefined;
+            const n_tabs = @min(sn.windows.items.len, tabs.len);
+            for (sn.windows.items[0..n_tabs], 0..) |win, i| {
+                const name = self.tabName(sn, win, &names[i]);
+                // the name lives in names[i] only when it was the live
+                // program; a minted name points into the window
                 var mark: chromepkg.TabMark = .none;
                 const marked = self.windowAgentPane(win) orelse self.pane(win.focused);
                 if (marked) |p| {
@@ -3587,115 +3589,87 @@ pub const Server = struct {
                         .signal = self.windowUnread(win),
                     });
                 }
-                // The current window is being looked at, by definition.
                 if (i == sn.cur) win.seen_ms = now;
+                tabs[i] = .{
+                    .index = if (i < 9) @intCast(i + 1) else null,
+                    .label = name[0..@min(name.len, 24)],
+                    .actor = self.windowOwner(win),
+                    .mark = markOf(mark),
+                    .selected = i == sn.cur,
+                };
+            }
 
-                var label_buf: [48]u8 = undefined;
-                const nm = altpkg.tabLabel(&label_buf, name[0..@min(name.len, 14)], actor[0..@min(actor.len, 12)]);
-                var num_buf: [8]u8 = undefined;
-                const num = std.fmt.bufPrint(&num_buf, "{d}", .{i + 1}) catch "?";
-                const chip: u16 = chromepkg.cols(nm) + 2; // " name · actor "
-                const mark_w: u16 = if (mark == .none) 0 else 2; // " ◐"
-                const gap: u16 = if (shown > 0) 3 else 0;
-                // No separator after the ordinal: the chip opens with its
-                // own padding cell, which is the gap — and on the selected
-                // tab that cell is the accent block starting.
-                const entry: u16 = gap + @as(u16, @intCast(num.len)) + chip + mark_w;
-                // Leave room for the overflow tail or the "+" that follows.
-                if (vis + entry + 4 > avail) {
-                    hidden = sn.windows.items.len - shown;
-                    break;
+            // the ladder: the first fit that fits, else collapsed with
+            // an overflow tail
+            const room = avail -| vis -| corner_cols;
+            const plus_w: u16 = 4; // " + " and its gap
+            var fit: ui.Fit = .full;
+            var shown: usize = n_tabs;
+            inline for (.{ ui.Fit.full, ui.Fit.no_actor, ui.Fit.short, ui.Fit.collapsed }) |f| {
+                if (fit == f or !self.tabsFit(tabs[0..n_tabs], fit, room, plus_w)) fit = f;
+            }
+            if (!self.tabsFit(tabs[0..n_tabs], fit, room, plus_w)) {
+                // collapsed and still too wide: as many as fit, the
+                // selected one always among them, the rest in a tail
+                var used: u16 = 8; // the tail: "  ⋯ nn "
+                shown = 0;
+                for (tabs[0..n_tabs]) |tb| {
+                    const w = ui.tabWidth(t, tb, .collapsed) + ui.tab_gap;
+                    if (used + w > room) break;
+                    used += w;
+                    shown += 1;
                 }
+                if (sn.cur >= shown) {
+                    // make room for the selected tab by dropping the last
+                    while (shown > 0 and used + ui.tabWidth(t, tabs[sn.cur], .collapsed) + ui.tab_gap > room) : (shown -= 1) {
+                        used -= ui.tabWidth(t, tabs[shown - 1], .collapsed) + ui.tab_gap;
+                    }
+                }
+            }
 
-                if (gap > 0) {
-                    out.appendSliceBounded("   ") catch {};
-                    vis += gap;
-                }
-                // The target is the entry itself — ordinal, chip, mark —
-                // and never the air before it. Recorded here, where the
-                // columns are being spent, so the hit test cannot drift
-                // from the row it is testing.
+            for (tabs[0..n_tabs], 0..) |tb, i| {
+                if (i >= shown and i != sn.cur) continue;
+                const w = ui.tabWidth(t, tb, fit);
                 if (self.tab_zones_n < self.tab_zones.len) {
-                    self.tab_zones[self.tab_zones_n] = .{
-                        .x = vis,
-                        .w = entry - gap,
-                        .target = .{ .window = i },
-                    };
+                    self.tab_zones[self.tab_zones_n] = .{ .x = vis, .w = w, .target = .{ .window = i } };
                     self.tab_zones_n += 1;
                 }
-                out.appendSliceBounded(idx_ink) catch {};
-                out.appendSliceBounded(num) catch {};
-                vis += @as(u16, @intCast(num.len));
-
-                // One state per channel: the block says selected and only
-                // selected, so a tab can be selected and working at once
-                // and the bar has somewhere to put both.
-                out.appendSliceBounded(if (i == sn.cur) chip_on else bar) catch {};
-                out.appendSliceBounded(" ") catch {};
-                out.appendSliceBounded(nm) catch {};
-                out.appendSliceBounded(" ") catch {};
-                out.appendSliceBounded(bar) catch {};
-                vis += chip;
-
-                if (mark != .none) {
-                    out.appendSliceBounded(" ") catch {};
-                    out.appendSliceBounded(if (mark == .working) work_ink else unread_ink) catch {};
-                    out.appendSliceBounded(if (mark == .working) "◐" else "●") catch {};
-                    out.appendSliceBounded(bar) catch {};
-                    vis += mark_w;
+                vis += ui.tab(out, t, tb, fit);
+                vis += ui.ink(out, on, " ");
+            }
+            const hidden = n_tabs - @min(shown, n_tabs) - (if (sn.cur >= shown) @as(usize, 1) else 0);
+            if (hidden > 0) {
+                var more_buf: [24]u8 = undefined;
+                if (std.fmt.bufPrint(&more_buf, " {s} {d} ", .{ ui.glyph(t, .more), hidden })) |m| {
+                    vis += ui.ink(out, .{ .fg = t.muted, .bg = t.chrome }, m);
+                } else |_| {}
+            } else if (vis + plus_w + corner_cols <= avail) {
+                // the `+`: a tab with no index, muted, the same verb as
+                // prefix-c for the hand already on the mouse
+                if (self.tab_zones_n < self.tab_zones.len) {
+                    self.tab_zones[self.tab_zones_n] = .{ .x = vis, .w = 3, .target = .new };
+                    self.tab_zones_n += 1;
                 }
-                shown += 1;
+                vis += ui.ink(out, .{ .fg = t.muted, .bg = t.chrome }, " + ");
             }
         }
 
-        // What did not fit is said out loud. A bar that silently
-        // stopped listing windows is a bar that lies about how many
-        // there are.
-        if (hidden > 0) {
-            var more_buf: [24]u8 = undefined;
-            if (std.fmt.bufPrint(&more_buf, "  ⋯ {d} more", .{hidden})) |m| {
-                const w = chromepkg.cols(m);
-                if (vis + w <= avail) {
-                    out.appendSliceBounded(m) catch {};
-                    vis += w;
-                }
-            } else |_| {}
-        } else if (!self.alt_on and vis + 4 <= avail) {
-            // The trailing "+": a new window, one click, the same verb
-            // as prefix-c. Its target is the glyph and the air around
-            // it, because a one-column target is not one a hand hits.
-            if (self.tab_zones_n < self.tab_zones.len) {
-                self.tab_zones[self.tab_zones_n] = .{ .x = vis, .w = 4, .target = .new };
-                self.tab_zones_n += 1;
-            }
-            out.appendSliceBounded("  + ") catch {};
-            vis += 4;
+        // the corner, right-aligned, muted
+        if (vis + corner_cols + 1 <= avail) {
+            var b: [64]u8 = undefined;
+            out.put((ui.Style{ .bg = t.chrome }).sgr(&b));
+            while (vis < avail - corner_cols) : (vis += 1) out.put(" ");
+            vis += ui.ink(out, .{ .fg = t.muted, .bg = t.chrome }, corner);
         }
+        ui.padTo(out, t, vis, avail);
+        return list.items;
+    }
 
-        // The corner. ⌥n is the standing hint — the one affordance the
-        // bar owes a reader who has not found the key yet — and copy
-        // mode and zoom take the slot while they last, because they
-        // are about the whole screen rather than about a tab. At
-        // altitude it is the way back, and where back is.
-        var corner_buf: [48]u8 = undefined;
-        const corner: []const u8 = if (self.alt_on)
-            (std.fmt.bufPrint(&corner_buf, "esc ↩ {s}", .{sc}) catch "esc ↩")
-        else if (self.scrolling)
-            (if (self.selecting) "copy·VISUAL" else "copy·hjkl y q")
-        else if (self.window().zoomed)
-            "zoom"
-        else
-            "⌥n";
-        const corner_cols = chromepkg.cols(corner);
-        if (vis + corner_cols + 2 <= avail) {
-            while (vis < avail - corner_cols) : (vis += 1) out.appendSliceBounded(" ") catch {};
-            out.appendSliceBounded(bar) catch {};
-            out.appendSliceBounded(corner) catch {};
-            vis += corner_cols;
-        }
-        while (vis < avail) : (vis += 1) out.appendSliceBounded(" ") catch {};
-        out.appendSliceBounded("\x1b[0m") catch {};
-        return out.items;
+    /// Do these tabs, at this fit, fit the room with the `+`?
+    fn tabsFit(self: *Server, tabs: []const ui.Tab, fit: ui.Fit, room: u16, plus_w: u16) bool {
+        var used: u16 = plus_w;
+        for (tabs) |tb| used += ui.tabWidth(&self.ui, tb, fit) + ui.tab_gap;
+        return used <= room;
     }
 
     // ---- tab names: minted, then frozen ----
@@ -3807,177 +3781,135 @@ pub const Server = struct {
 
     // ---- the calm bar ----
 
-    /// The bottom row: who holds the focused surface's keyboard on
-    /// the left, the signals on the right, and nothing else — no
-    /// space name (the tab bar owns identity), no clock. It stays
-    /// visible because appearing and disappearing would resize every
-    /// hosted TUI. The row is earned by the ownership cell and the
-    /// pending-key feedback, which have nowhere else to live.
+    /// The calm bar: the bottom row, on the same chrome as the scope
+    /// bar. Left, who holds the focused pane's keyboard and through
+    /// what; middle, the pending prefix; right, the counts — only the
+    /// nonzero ones. No space name (the scope bar owns identity), no
+    /// clock, and never a row that appears or disappears on its own.
     fn barRow(self: *Server, buf: []u8, cols: u16) []const u8 {
-        var out: std.ArrayList(u8) = .initBuffer(buf);
+        var list: std.ArrayList(u8) = .initBuffer(buf);
+        const out: ui.Buf = .{ .list = &list };
+        const t = &self.ui;
         var vis: u16 = 0;
-        var bar_buf: [48]u8 = undefined;
-        const bar = sgr(&bar_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.overlay0 });
-        var you_buf: [48]u8 = undefined;
-        const you_ink = sgr(&you_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.text, .bold = true });
-        var prog_buf: [48]u8 = undefined;
-        const prog_ink = sgr(&prog_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.text });
-        var actor_buf: [48]u8 = undefined;
-        const actor_ink = sgr(&actor_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.yellow, .bold = true });
-        var warn_buf: [48]u8 = undefined;
-        const warn_ink = sgr(&warn_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.peach });
-        var ok_buf: [48]u8 = undefined;
-        const ok_ink = sgr(&ok_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.green });
-        var acc_buf: [48]u8 = undefined;
-        const acc_ink = sgr(&acc_buf, .{ .bg = chromepkg.mantle, .fg = self.conf.accent });
-        var work_buf: [48]u8 = undefined;
-        const work_ink = sgr(&work_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.yellow });
+        vis += ui.ink(out, .{ .bg = t.chrome }, " ");
 
-        out.appendSliceBounded(bar) catch {};
-        out.appendSliceBounded(" ") catch {};
-        vis += 1;
-
-        // The left cell: the answer to "who is driving the focused
-        // surface", always present, quiet when it is you.
+        var ab: [8]u8 = undefined;
+        const arrow = std.fmt.bufPrint(&ab, " {s} ", .{ui.glyph(t, .marker)}) catch " > ";
         if (self.alt_on) {
-            out.appendSliceBounded(you_ink) catch {};
-            out.appendSliceBounded("rook") catch {};
-            vis += 4;
-            const what: []const u8 = if (self.alt.isCommand()) " · command" else if (self.alt.len > 0) " · find" else if (self.alt.painted_ledger) " · ledger" else " · orbit";
-            out.appendSliceBounded(bar) catch {};
-            out.appendSliceBounded(what) catch {};
-            vis += chromepkg.cols(what);
+            vis += ui.module(out, t, "rook", t.primary, true);
+            const what: []const u8 = if (self.alt.isCommand()) "command" else if (self.alt.len > 0) "find" else if (self.alt.painted_ledger) "ledger" else "orbit";
+            vis += ui.moduleSep(out, t);
+            vis += ui.module(out, t, what, t.muted, false);
         } else if (self.popupPane()) |pp| {
             var nb: [64]u8 = undefined;
             const fg = pp.fgName(&nb) orelse "popup";
-            vis += self.barCell(&out, you_ink, "you", bar, " ▸ ", prog_ink, fg);
+            vis += ui.module(out, t, "you", t.primary, true);
+            vis += ui.module(out, t, arrow, t.muted, false);
+            vis += ui.module(out, t, fg, t.secondary, false);
         } else if (self.focusedPane()) |fp| {
             var nb: [64]u8 = undefined;
             const fg = fp.fgName(&nb) orelse "shell";
             switch (fp.own) {
-                .human => vis += self.barCell(&out, you_ink, "you", bar, " ▸ ", prog_ink, fg),
-                // actor ▸ tool: who is driving, through what
+                .human => {
+                    vis += ui.module(out, t, "you", t.primary, true);
+                    vis += ui.module(out, t, arrow, t.muted, false);
+                    vis += ui.module(out, t, fg, t.secondary, false);
+                },
                 .agent => {
-                    vis += self.barCell(&out, actor_ink, fp.ownerName(), bar, " ▸ ", prog_ink, fg);
-                    out.appendSliceBounded(work_ink) catch {};
-                    out.appendSliceBounded(" owns input") catch {};
-                    out.appendSliceBounded(bar) catch {};
-                    out.appendSliceBounded(" · you observe") catch {};
-                    vis += 11 + 14;
+                    vis += ui.module(out, t, fp.ownerName(), t.working, true);
+                    vis += ui.module(out, t, arrow, t.muted, false);
+                    vis += ui.module(out, t, fg, t.secondary, false);
+                    vis += ui.module(out, t, " owns input", t.working, false);
+                    vis += ui.moduleSep(out, t);
+                    vis += ui.module(out, t, "you observe", t.muted, false);
                 },
                 .requested => {
-                    out.appendSliceBounded(warn_ink) catch {};
-                    out.appendSliceBounded("handoff requested") catch {};
-                    vis += 17;
-                    out.appendSliceBounded(bar) catch {};
-                    out.appendSliceBounded(" — ") catch {};
-                    vis += 3;
-                    vis += self.barCell(&out, actor_ink, fp.ownerName(), bar, " ▸ ", prog_ink, fg);
-                    out.appendSliceBounded(bar) catch {};
-                    out.appendSliceBounded(" finishing its step…") catch {};
-                    vis += 20;
+                    vis += ui.module(out, t, "handoff requested", t.warning, false);
+                    vis += ui.module(out, t, " — ", t.muted, false);
+                    vis += ui.module(out, t, fp.ownerName(), t.working, true);
+                    vis += ui.module(out, t, arrow, t.muted, false);
+                    vis += ui.module(out, t, fg, t.secondary, false);
+                    vis += ui.module(out, t, " finishing its step…", t.muted, false);
                 },
                 .yielded => {
-                    vis += self.barCell(&out, actor_ink, fp.ownerName(), bar, " ", ok_ink, "yielded");
-                    out.appendSliceBounded(bar) catch {};
-                    out.appendSliceBounded(" — ⏎ take") catch {};
-                    vis += 9;
+                    vis += ui.module(out, t, fp.ownerName(), t.success, true);
+                    vis += ui.module(out, t, " yielded", t.success, false);
+                    vis += ui.module(out, t, " — ⏎ take", t.muted, false);
                 },
                 .paused => {
-                    vis += self.barCell(&out, you_ink, "you", bar, " ▸ ", prog_ink, fg);
-                    out.appendSliceBounded(bar) catch {};
-                    out.appendSliceBounded(" · (") catch {};
-                    out.appendSliceBounded(fp.ownerName()) catch {};
-                    out.appendSliceBounded(" paused)") catch {};
-                    vis += 4 + chromepkg.cols(fp.ownerName()) + 8;
+                    vis += ui.module(out, t, "you", t.primary, true);
+                    vis += ui.module(out, t, arrow, t.muted, false);
+                    vis += ui.module(out, t, fg, t.secondary, false);
+                    vis += ui.moduleSep(out, t);
+                    vis += ui.module(out, t, fp.ownerName(), t.muted, false);
+                    vis += ui.module(out, t, " paused", t.muted, false);
                 },
             }
         }
 
-        // Pending-key feedback: the prefix is armed on some glass,
-        // and the bar says so, with the keys a hand may be reaching
-        // for. This is the one place that feedback can live.
+        // Pending-key feedback: the prefix is armed on some glass. A
+        // chip, and the chords a hand may be reaching for, when they
+        // fit — noticeable, never dominant.
         var armed = false;
         for (self.clients.items) |c| {
             if (c.attached and c.prefix) armed = true;
         }
         if (armed) {
-            const hint = "   prefix ·  c new  v - split  z zoom  o altitude  s spaces  u unread  i inspect";
-            const hw = chromepkg.cols(hint);
-            if (vis + hw + 12 <= cols) {
-                out.appendSliceBounded(acc_ink) catch {};
-                out.appendSliceBounded(hint) catch {};
-                vis += hw;
-            } else if (vis + 12 <= cols) {
-                out.appendSliceBounded(acc_ink) catch {};
-                out.appendSliceBounded("   prefix…") catch {};
-                vis += 10;
-            }
+            vis += ui.module(out, t, "   ", t.muted, false);
+            vis += ui.chip(out, t, "prefix", t.accent);
+            const hint = "  c new · v - split · z zoom · o altitude · s spaces · u unread · i inspect";
+            if (vis + chromepkg.cols(hint) + 14 <= cols) vis += ui.module(out, t, hint, t.muted, false);
         }
 
-        // The right region: signals, and genuinely empty when nothing
-        // signals. Working ◐, unread ●, global pins ⊕g — a count each,
-        // only the nonzero ones.
-        var right_buf: [96]u8 = undefined;
-        var right: std.ArrayList(u8) = .initBuffer(&right_buf);
+        // The right region: counts, only the nonzero ones, and
+        // genuinely empty when nothing signals.
+        var right_buf: [512]u8 = undefined; // every module carries its own SGR
+        var right_list: std.ArrayList(u8) = .initBuffer(&right_buf);
+        const right: ui.Buf = .{ .list = &right_list };
         var right_w: u16 = 0;
         const working = self.countWorking();
-        const unread = self.countUnread();
+        const attention = self.countUnread() + self.countAsks();
+        const unseen = self.countUnseen();
         const gpins = self.global_pins.items.len;
-        var nb2: [16]u8 = undefined;
-        if (working > 0) {
-            right.appendSliceBounded(work_ink) catch {};
-            right.appendSliceBounded("◐ ") catch {};
-            const n = std.fmt.bufPrint(&nb2, "{d}", .{working}) catch "?";
-            right.appendSliceBounded(n) catch {};
-            right_w += 2 + @as(u16, @intCast(n.len));
+        if (working > 0) right_w += ui.countModule(right, t, .working, working);
+        if (attention > 0) {
+            if (right_w > 0) right_w += ui.moduleSep(right, t);
+            right_w += ui.countModule(right, t, .attention, attention);
         }
-        if (unread > 0) {
-            if (right_w > 0) {
-                right.appendSliceBounded(bar) catch {};
-                right.appendSliceBounded(" · ") catch {};
-                right_w += 3;
-            }
-            right.appendSliceBounded(acc_ink) catch {};
-            right.appendSliceBounded("● ") catch {};
-            const n = std.fmt.bufPrint(&nb2, "{d}", .{unread}) catch "?";
-            right.appendSliceBounded(n) catch {};
-            right_w += 2 + @as(u16, @intCast(n.len));
+        if (unseen > 0) {
+            if (right_w > 0) right_w += ui.moduleSep(right, t);
+            right_w += ui.countModule(right, t, .unread, unseen);
         }
         if (gpins > 0) {
-            if (right_w > 0) {
-                right.appendSliceBounded(bar) catch {};
-                right.appendSliceBounded(" · ") catch {};
-                right_w += 3;
-            }
-            right.appendSliceBounded(bar) catch {};
-            right.appendSliceBounded("⊕g ") catch {};
-            const n = std.fmt.bufPrint(&nb2, "{d}", .{gpins}) catch "?";
-            right.appendSliceBounded(n) catch {};
-            right_w += 3 + @as(u16, @intCast(n.len));
+            if (right_w > 0) right_w += ui.moduleSep(right, t);
+            var nb2: [16]u8 = undefined;
+            const n = std.fmt.bufPrint(&nb2, "{s}g {d}", .{ ui.glyph(t, .pin), gpins }) catch "?";
+            right_w += ui.module(right, t, n, t.muted, false);
         }
         if (right_w > 0 and vis + right_w + 2 <= cols) {
-            out.appendSliceBounded(bar) catch {};
-            while (vis < cols - right_w - 1) : (vis += 1) out.appendSliceBounded(" ") catch {};
-            out.appendSliceBounded(right.items) catch {};
+            var b: [64]u8 = undefined;
+            out.put((ui.Style{ .bg = t.chrome }).sgr(&b));
+            while (vis < cols - right_w - 1) : (vis += 1) out.put(" ");
+            out.put(right_list.items);
             vis += right_w;
         }
-        out.appendSliceBounded(bar) catch {};
-        while (vis < cols) : (vis += 1) out.appendSliceBounded(" ") catch {};
-        out.appendSliceBounded("\x1b[0m") catch {};
-        return out.items;
+        ui.padTo(out, t, vis, cols);
+        return list.items;
     }
 
-    /// `who ▸ what` in two inks; returns the columns spent.
-    fn barCell(self: *Server, out: *std.ArrayList(u8), who_ink: []const u8, who: []const u8, sep_ink: []const u8, sep: []const u8, what_ink: []const u8, what: []const u8) u16 {
-        _ = self;
-        out.appendSliceBounded(who_ink) catch {};
-        out.appendSliceBounded(who) catch {};
-        out.appendSliceBounded(sep_ink) catch {};
-        out.appendSliceBounded(sep) catch {};
-        out.appendSliceBounded(what_ink) catch {};
-        out.appendSliceBounded(what) catch {};
-        return chromepkg.cols(who) + chromepkg.cols(sep) + chromepkg.cols(what);
+    /// Windows off the glass whose focused pane wrote after they were
+    /// last looked at — the softer unread, the `•` count.
+    fn countUnseen(self: *Server) usize {
+        var n: usize = 0;
+        for (self.sessions.items, 0..) |sn, si| {
+            for (sn.windows.items, 0..) |w, wi| {
+                if (si == self.cur_sess and wi == sn.cur) continue;
+                const p = self.pane(w.focused) orelse continue;
+                const last = p.last_output_ms.load(.acquire);
+                if (last != 0 and last > w.seen_ms + chromepkg.prompt_grace_ms and !self.windowUnread(w)) n += 1;
+            }
+        }
+        return n;
     }
 
     /// Agent panes that produced output in the last `working_ms`,
@@ -4090,62 +4022,69 @@ pub const Server = struct {
         self.pending = true;
     }
 
-    /// The gate, one row above the calm bar, over the pane: the
-    /// three legal moves, named.
+    /// The gate, one row above the calm bar, over the pane: an
+    /// elevated strip with the attention mark, the actor as a chip,
+    /// and the three legal moves in muted ink.
     fn gateRow(self: *Server) void {
         const p = self.focusedPane() orelse return;
         const g = self.geometry();
+        const t = &self.ui;
         const y = self.bodyRows() -| 1;
         const f = &self.over;
+        var b: [64]u8 = undefined;
         f.cup(0, y);
-        f.put("\x1b[0m");
-        f.print("\x1b[48;2;{d};{d};{d}m", .{ chromepkg.surface0.r, chromepkg.surface0.g, chromepkg.surface0.b });
+        f.put((ui.Style{ .bg = t.raised }).sgr(&b));
         var i: u16 = 0;
         while (i < g.cols) : (i += 1) f.put(" ");
         f.cup(1, y);
-        f.print("\x1b[38;2;{d};{d};{d}m", .{ chromepkg.peach.r, chromepkg.peach.g, chromepkg.peach.b });
-        f.put("» ");
-        f.print("\x1b[1;38;2;{d};{d};{d}m", .{ chromepkg.yellow.r, chromepkg.yellow.g, chromepkg.yellow.b });
+        f.put((ui.Style{ .fg = t.attention, .bg = t.raised, .bold = true }).sgr(&b));
+        f.put(ui.markGlyph(t, .attention));
+        f.put(" ");
+        f.put((ui.Style{ .fg = t.working, .bg = t.raised, .bold = true }).sgr(&b));
         f.put(p.ownerName());
-        f.print("\x1b[22;38;2;{d};{d};{d}m", .{ chromepkg.text.r, chromepkg.text.g, chromepkg.text.b });
+        f.put((ui.Style{ .fg = t.primary, .bg = t.raised }).sgr(&b));
         switch (p.own) {
-            .yielded => f.put(" yielded — [enter] take · [esc] leave it"),
-            .requested => f.put(" owns input — handoff requested, finishing its step… · [T] take now · [s] send as message · [esc]"),
-            else => f.put(" owns input — [enter] request handoff · [T] take now · [s] send as message · [esc]"),
+            .yielded => f.put(" yielded"),
+            .requested => f.put(" owns input — handoff requested, finishing its step…"),
+            else => f.put(" owns input"),
+        }
+        f.put((ui.Style{ .fg = t.muted, .bg = t.raised }).sgr(&b));
+        switch (p.own) {
+            .yielded => f.put("   ⏎ take · esc leave it"),
+            .requested => f.put("   T take now · s send as message · esc"),
+            else => f.put("   ⏎ request handoff · T take now · s send as message · esc"),
         }
         f.put("\x1b[0m");
     }
 
-    /// prefix-i: what rook knows about the focused pane, in a box —
-    /// the actor and its authority over input, the program, since
-    /// when, where, and how it comes back. Provider detail would
-    /// live here too, if rook knew any; it does not, and says so.
+    /// prefix-i: what rook knows about the focused pane, in a box on
+    /// elevated chrome — the actor and its authority over input, the
+    /// program, since when, where, and how it comes back. Provider
+    /// detail would live here too, if rook knew any; it does not, and
+    /// says so.
     fn inspectorSheet(self: *Server) void {
         const p = self.focusedPane() orelse return;
         const g = self.geometry();
+        const t = &self.ui;
         const body = self.bodyRows();
         const w: u16 = @min(g.cols -| 4, 72);
         const h: u16 = 10;
         if (g.cols < 30 or body < h + 2) return;
         const r: layoutpkg.Rect = .{ .x = (g.cols -| w) / 2, .y = 1 + (body -| 1 -| h) / 2, .w = w, .h = h };
         const f = &self.over;
-        // clear the box
-        f.put("\x1b[0m");
-        var y: u16 = r.y;
-        while (y < r.y + r.h) : (y += 1) {
-            f.cup(r.x, y);
-            var i: u16 = 0;
-            while (i < r.w) : (i += 1) f.put(" ");
-        }
-        f.drawBoxIn(r, self.conf.accent);
+        var b: [64]u8 = undefined;
+        altpkg.fillRect(f, r, t.raised);
+        altpkg.box(f, r, t.border, t.raised);
         f.cup(r.x + 1, r.y);
-        f.putFg(self.conf.accent);
+        f.put((ui.Style{ .fg = t.border, .bg = t.raised }).sgr(&b));
         f.put("┤ ");
-        f.putFg(chromepkg.text);
-        f.put("\x1b[1minspector · ");
+        f.put((ui.Style{ .fg = t.accent, .bg = t.raised, .bold = true }).sgr(&b));
+        f.put("inspector");
+        f.put((ui.Style{ .fg = t.muted, .bg = t.raised }).sgr(&b));
+        f.put(" · ");
+        f.put((ui.Style{ .fg = t.primary, .bg = t.raised }).sgr(&b));
         f.put(if (p.owner_len > 0) p.ownerName() else "you");
-        f.put("\x1b[22m");
-        f.putFg(self.conf.accent);
+        f.put((ui.Style{ .fg = t.border, .bg = t.raised }).sgr(&b));
         f.put(" ├");
 
         var nb: [64]u8 = undefined;
@@ -4174,20 +4113,11 @@ pub const Server = struct {
             const ry = r.y + 1 + @as(u16, @intCast(i));
             if (ry >= r.y + r.h - 1) break;
             f.cup(r.x + 2, ry);
-            f.putFg(chromepkg.overlay0);
+            f.put((ui.Style{ .fg = t.muted, .bg = t.raised }).sgr(&b));
             f.put(row.k);
             f.cup(r.x + 12, ry);
-            f.putFg(chromepkg.text);
-            var n: u16 = 0;
-            var bi: usize = 0;
-            const vw = r.w -| 14;
-            while (bi < row.v.len and n < vw) {
-                const len = std.unicode.utf8ByteSequenceLength(row.v[bi]) catch 1;
-                const e = @min(bi + len, row.v.len);
-                f.put(row.v[bi..e]);
-                bi = e;
-                n += 1;
-            }
+            f.put((ui.Style{ .fg = t.primary, .bg = t.raised }).sgr(&b));
+            _ = altpkg.putW(f, row.v, r.w -| 14);
         }
         f.put("\x1b[0m");
     }
@@ -4391,7 +4321,6 @@ pub const Server = struct {
         st.reset();
         var fba = std.heap.FixedBufferAllocator.init(&st.buf);
         const a = fba.allocator();
-        const accent = self.conf.accent;
         const text = st.textSlice();
         const now = panepkg.epochMs();
 
@@ -4446,7 +4375,7 @@ pub const Server = struct {
                 "signalled";
             var ab: [16]u8 = undefined;
             const line = std.fmt.allocPrint(a, "{s} {s} · {s} ago", .{ prog, said, altpkg.age(&ab, now - p.unread_ms) }) catch said;
-            var row: altpkg.Row = .{ .kind = .attention, .glyph = "●", .ink = accent, .name = name, .line = line, .line_ink = chromepkg.text, .hint = "↵ go", .pane = p.id };
+            var row: altpkg.Row = .{ .kind = .attention, .glyph = ui.markGlyph(&self.ui, .attention), .ink = self.ui.attention, .name = name, .line = line, .line_ink = self.ui.secondary, .hint = "↵ go", .pane = p.id };
             if (finding) row.score = altpkg.fuzzy(name, text) orelse (altpkg.fuzzy(line, text) orelse continue) + 20;
             st.rows.append(self.gpa, row) catch {};
         }
@@ -4460,7 +4389,7 @@ pub const Server = struct {
             const name = std.fmt.allocPrint(a, "{s} — {s}", .{ chromepkg.shortSpace(ws), it.name }) catch continue;
             const line = std.fmt.allocPrint(a, "{s}{s}{s}", .{ it.state.word(), if (it.sub.len > 0) " · " else "", it.sub }) catch it.state.word();
             const argd = a.dupe(u8, ws) catch continue;
-            var row: altpkg.Row = .{ .kind = .ask, .glyph = it.dot().glyph(), .ink = it.state.color(), .name = name, .line = line, .line_ink = it.state.color(), .hint = "↵ go", .arg = argd };
+            var row: altpkg.Row = .{ .kind = .ask, .glyph = ui.markGlyph(&self.ui, if (it.state == .failed) .failed else .waiting), .ink = if (it.state == .failed) self.ui.err else self.ui.waiting, .name = name, .line = line, .line_ink = self.ui.secondary, .hint = "↵ go", .arg = argd };
             if (finding) row.score = altpkg.fuzzy(name, text) orelse (altpkg.fuzzy(line, text) orelse continue) + 20;
             st.rows.append(self.gpa, row) catch {};
         }
@@ -4480,10 +4409,10 @@ pub const Server = struct {
                 if (ti > 0) tl.appendSlice(a, " · ") catch {};
                 var lb: [64]u8 = undefined;
                 tl.appendSlice(a, altpkg.tabLabel(&lb, t.name, t.actor)) catch {};
-                switch (t.mark) {
-                    .working => tl.appendSlice(a, " ◐") catch {},
-                    .unread => tl.appendSlice(a, " ●") catch {},
-                    .none => {},
+                const mg = ui.markGlyph(&self.ui, altpkg.markOf(t.mark));
+                if (mg.len > 0) {
+                    tl.appendSlice(a, " ") catch {};
+                    tl.appendSlice(a, mg) catch {};
                 }
             }
             if (!finding) {
@@ -4540,7 +4469,10 @@ pub const Server = struct {
                 std.fmt.allocPrint(a, "from {s}", .{chromepkg.shortSpace(from)}) catch ""
             else
                 "";
-            var row: altpkg.Row = .{ .kind = .pin, .glyph = "⊕g", .ink = chromepkg.overlay0, .name = name, .line = line, .hint = "↵ focus", .pane = id };
+            var pg: [8]u8 = undefined;
+            const pin_glyph = std.fmt.bufPrint(&pg, "{s}g", .{ui.glyph(&self.ui, .pin)}) catch "g";
+            const pin_glyph_d = a.dupe(u8, pin_glyph) catch continue;
+            var row: altpkg.Row = .{ .kind = .pin, .glyph = pin_glyph_d, .ink = self.ui.muted, .name = name, .line = line, .hint = "↵ focus", .pane = id };
             if (finding) row.score = (altpkg.fuzzy(name, text) orelse continue) + 6;
             st.rows.append(self.gpa, row) catch {};
         }
@@ -4557,7 +4489,7 @@ pub const Server = struct {
                 if (st.rows.items.len > 0) st.rows.append(self.gpa, .{ .kind = .note, .name = "" }) catch {};
                 const cname = self.conf.companionSlice();
                 const name = std.fmt.allocPrint(a, "{s}: \"{s}\"", .{ cname, text }) catch cname;
-                st.rows.append(self.gpa, .{ .kind = .vera, .glyph = "✦", .ink = accent, .name = name, .line = "hand this to her, as typed", .hint = "↵ ask" }) catch {};
+                st.rows.append(self.gpa, .{ .kind = .vera, .glyph = ui.glyph(&self.ui, .companion), .ink = self.ui.accent, .name = name, .line = "hand this to her, as typed", .hint = "↵ ask" }) catch {};
             }
             if (st.rows.items.len == 0) {
                 st.rows.append(self.gpa, .{ .kind = .note, .name = "nothing matches" }) catch {};
@@ -4645,14 +4577,16 @@ pub const Server = struct {
                 var nb: [64]u8 = undefined;
                 const who: []const u8 = if (p.owner_len > 0) p.ownerName() else (p.fgName(&nb) orelse "agent");
                 out.appendSlice(a, who) catch {};
-                out.appendSlice(a, " ◐ working") catch {};
+                out.appendSlice(a, " ") catch {};
+                out.appendSlice(a, ui.markGlyph(&self.ui, .working)) catch {};
+                out.appendSlice(a, " working") catch {};
             }
             if (sp.event_kind == .quiet or sp.event_kind == .said) sp.event_kind = .working;
         }
         if (sp.unread > 0) {
             if (out.items.len > 0) out.appendSlice(a, " · ") catch {};
-            out.print(a, "● {d} unread", .{sp.unread}) catch {};
-            if (sp.event_kind == .quiet) sp.event_kind = .unread;
+            out.print(a, "{s}{d} need{s} you", .{ ui.markGlyph(&self.ui, .attention), sp.unread, if (sp.unread == 1) "s" else "" }) catch {};
+            if (sp.event_kind == .quiet) sp.event_kind = .needs_you;
         }
         if (out.items.len == 0) {
             var ab: [16]u8 = undefined;
@@ -4704,7 +4638,7 @@ pub const Server = struct {
                     if (arg.len > 0 and altpkg.fuzzy(sn.label(), arg) == null) continue;
                     const name = std.fmt.allocPrint(a, ":{s} {s}", .{ c.word, sn.label() }) catch continue;
                     const argd = a.dupe(u8, sn.label()) catch continue;
-                    st.rows.append(self.gpa, .{ .kind = .command, .glyph = ":", .ink = self.conf.accent, .name = name, .line = c.help, .hint = "↵ run", .cmd = c.cmd, .arg = argd }) catch {};
+                    st.rows.append(self.gpa, .{ .kind = .command, .glyph = ":", .ink = self.ui.accent, .name = name, .line = c.help, .hint = "↵ run", .cmd = c.cmd, .arg = argd }) catch {};
                     any = true;
                 }
                 continue;
@@ -4712,7 +4646,7 @@ pub const Server = struct {
             const shown_arg: []const u8 = if (arg.len > 0) arg else c.arg;
             const name = std.fmt.allocPrint(a, ":{s} {s}", .{ c.word, shown_arg }) catch continue;
             const argd = a.dupe(u8, arg) catch "";
-            st.rows.append(self.gpa, .{ .kind = .command, .glyph = ":", .ink = self.conf.accent, .name = name, .line = c.help, .hint = if (arg.len > 0 or c.arg.len == 0) "↵ run" else "type its argument", .cmd = c.cmd, .arg = argd }) catch {};
+            st.rows.append(self.gpa, .{ .kind = .command, .glyph = ":", .ink = self.ui.accent, .name = name, .line = c.help, .hint = if (arg.len > 0 or c.arg.len == 0) "↵ run" else "type its argument", .cmd = c.cmd, .arg = argd }) catch {};
             any = true;
         }
         if (!any) st.rows.append(self.gpa, .{ .kind = .note, .name = "no such command" }) catch {};
@@ -4743,6 +4677,16 @@ fn sgr(buf: []u8, spec: struct {
     if (spec.bg) |c| w.print(";48;2;{d};{d};{d}", .{ c.r, c.g, c.b }) catch {};
     w.writeAll("m") catch {};
     return w.buffered();
+}
+
+/// A tab's mark in the design system's vocabulary.
+fn markOf(m: chromepkg.TabMark) ui.Mark {
+    return switch (m) {
+        .none => .none,
+        .working => .working,
+        .unread => .unread,
+        .attention => .attention,
+    };
 }
 
 /// The engine's own names, as `proc_pidpath` reports them between a

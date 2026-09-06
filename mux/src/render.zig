@@ -47,6 +47,9 @@ pub const Frame = struct {
     gpa: std.mem.Allocator,
     /// Focused borders, the popup box, the active tab chip.
     accent: chromepkg.Rgb = chromepkg.mauve,
+    /// Inactive seams and the dock: visible over transparency, never
+    /// boxing the work (`ui.Theme.border`).
+    border: chromepkg.Rgb = chromepkg.surface0,
 
     pub fn init(gpa: std.mem.Allocator) Frame {
         return .{ .gpa = gpa };
@@ -137,7 +140,7 @@ pub const Frame = struct {
             // window. Global (app-chrome) pins run from row 0, past the
             // tab bar; workspace-local pins start under it.
             if (chrome.dock_x) |dx| {
-                self.putFg(chromepkg.surface0);
+                self.putFg(self.border);
                 var y: u16 = chrome.dock_top;
                 while (y < rows) : (y += 1) {
                     self.cup(dx, y);
@@ -393,7 +396,7 @@ pub const Frame = struct {
                 const is_dock = dock_x != null and dock_x.? == r.x + r.w;
                 if (!is_dock) {
                     const acc = pl.pane == focused or nb == focused;
-                    self.putFg(if (acc) self.accent else chromepkg.surface0);
+                    self.putFg(if (acc) self.accent else self.border);
                     var y: u16 = r.y;
                     while (y < r.y + r.h and y < rows) : (y += 1) {
                         self.cup(r.x + r.w, y);
@@ -405,7 +408,7 @@ pub const Frame = struct {
             if (r.y + r.h + 1 < rows) {
                 if (neighborBelowAt(placed, r.x, r.y + r.h + 1)) |nb| {
                     const acc = pl.pane == focused or nb == focused;
-                    self.putFg(if (acc) self.accent else chromepkg.surface0);
+                    self.putFg(if (acc) self.accent else self.border);
                     self.cup(r.x, r.y + r.h);
                     var x: u16 = 0;
                     while (x < r.w) : (x += 1) self.put("─");

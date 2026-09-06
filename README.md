@@ -68,7 +68,7 @@ spaces as rows. `docs/altitude.md` is the model and the ontology;
 **The calm bar.** One row at the bottom: who holds the focused pane's
 keyboard on the left — `you ▸ nvim`, or `claude·main ▸ owns input ·
 you observe` once an agent has claimed it with `rook own` — and the
-signals on the right (`◐ 2 · ● 1 · ⊕g 1`). Typing at an owned pane
+signals on the right (`◐ 2 · !1 · •3 · ⊕g 1`). Typing at an owned pane
 opens a gate instead of landing: request a handoff, take now, or send
 the keys as a message. `prefix-i` inspects the pane. `[mux] bar =
 false` turns the row off.
