@@ -65,6 +65,9 @@ const usage = `rook — the multiplexer, owned
   rook focus <id> | jump  bring a pane forward; jump = the oldest unread one
   rook close-pane <id>    hang a pane up
   rook resume <id> <cmd>  how to bring the pane's program back after a restart
+  rook own <id> <actor> | --paused <actor> | --release | --request | --take
+                          who holds a pane's keyboard (docs/altitude.md)
+  rook rename <name>      name the current tab; rook never renames it again
   rook side [-|demo]      push the side rail's model (JSON frames on stdin)
   rook companion [--json] where the companion (vera) is open, if she is
   rook popup <cmd...>     float a command over the current window
@@ -93,6 +96,8 @@ var muxVerbs = map[string]bool{
 	"read": true, "send": true, "run": true, "key": true, "wait": true,
 	"split": true, "window": true, "focus": true, "jump": true, "close-pane": true,
 	"resume": true,
+	// input ownership, and the one act that changes a minted tab name
+	"own": true, "rename": true,
 }
 
 func main() {

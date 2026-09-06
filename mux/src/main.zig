@@ -18,6 +18,9 @@
 //!   rook window <id> [--focus] [--cwd DIR]           a new window in its workspace
 //!   rook focus <id> / rook jump / rook close-pane <id>
 //!   rook resume <id> <cmd...>  how to bring the pane's program back after a restart
+//!   rook own <id> <actor> | --paused <actor> | --release | --request | --take
+//!                       who holds a pane's keyboard (docs/altitude.md)
+//!   rook rename <name>  name the current tab; it never renames itself again
 //!   rook kill           stop the server
 const std = @import("std");
 const server = @import("server.zig");
@@ -31,6 +34,7 @@ test {
     _ = @import("config.zig");
     _ = @import("chrome.zig");
     _ = @import("companion.zig");
+    _ = @import("altitude.zig");
     _ = @import("server.zig");
 }
 
@@ -257,6 +261,56 @@ pub fn main(init: std.process.Init) !void {
         };
         return;
     }
+    if (std.mem.eql(u8, cmd, "own")) {
+        // rook own <id> <actor>          the actor owns input
+        // rook own <id> --paused <actor> attached, not operating
+        // rook own <id> --release        hand it back (or yield, if asked)
+        // rook own <id> --request        ask for a handoff (the gate's ⏎)
+        // rook own <id> --take           take the keyboard now (the gate's T)
+        if (argv.len < 4) {
+            std.debug.print("usage: rook own <pane> <actor> | --paused <actor> | --release | --request | --take\n", .{});
+            return error.BadArgs;
+        }
+        const id = try paneArgLoud(std.mem.span(argv[2]));
+        const flag = std.mem.span(argv[3]);
+        var op: u8 = 'c';
+        var actor: []const u8 = flag;
+        if (std.mem.eql(u8, flag, "--release")) {
+            op = 'r';
+            actor = "";
+        } else if (std.mem.eql(u8, flag, "--request")) {
+            op = 'h';
+            actor = "";
+        } else if (std.mem.eql(u8, flag, "--take")) {
+            op = 't';
+            actor = "";
+        } else if (std.mem.eql(u8, flag, "--paused")) {
+            if (argv.len < 5) {
+                std.debug.print("usage: rook own <pane> --paused <actor>\n", .{});
+                return error.BadArgs;
+            }
+            op = 'p';
+            actor = std.mem.span(argv[4]);
+        } else if (flag.len > 0 and flag[0] == '-') {
+            std.debug.print("rook own: unknown option {s}\n", .{flag});
+            return error.BadArgs;
+        }
+        try client.own(churn_gpa, path, id, op, actor);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "rename")) {
+        if (argv.len < 3) {
+            std.debug.print("usage: rook rename <name>\n", .{});
+            return error.BadArgs;
+        }
+        var joined: std.ArrayList(u8) = .empty;
+        for (argv[2..], 0..) |a, i| {
+            if (i > 0) try joined.append(gpa, ' ');
+            try joined.appendSlice(gpa, std.mem.span(a));
+        }
+        try client.session(gpa, path, 'r', joined.items);
+        return;
+    }
     if (std.mem.eql(u8, cmd, "jump")) {
         try client.paneCmd(churn_gpa, path, 0, 'u', false, "");
         return;
@@ -419,14 +473,14 @@ fn paneArg(arg: []const u8) !u32 {
 fn keyBytes(name: []const u8) ?[]const u8 {
     const T = struct { n: []const u8, b: []const u8 };
     const table = [_]T{
-        .{ .n = "enter", .b = "\r" },     .{ .n = "return", .b = "\r" },
-        .{ .n = "esc", .b = "\x1b" },     .{ .n = "escape", .b = "\x1b" },
-        .{ .n = "tab", .b = "\t" },       .{ .n = "space", .b = " " },
-        .{ .n = "backspace", .b = "\x7f" }, .{ .n = "delete", .b = "\x1b[3~" },
-        .{ .n = "up", .b = "\x1b[A" },     .{ .n = "down", .b = "\x1b[B" },
-        .{ .n = "right", .b = "\x1b[C" },  .{ .n = "left", .b = "\x1b[D" },
-        .{ .n = "home", .b = "\x1b[H" },   .{ .n = "end", .b = "\x1b[F" },
-        .{ .n = "pageup", .b = "\x1b[5~" }, .{ .n = "pagedown", .b = "\x1b[6~" },
+        .{ .n = "enter", .b = "\r" },         .{ .n = "return", .b = "\r" },
+        .{ .n = "esc", .b = "\x1b" },         .{ .n = "escape", .b = "\x1b" },
+        .{ .n = "tab", .b = "\t" },           .{ .n = "space", .b = " " },
+        .{ .n = "backspace", .b = "\x7f" },   .{ .n = "delete", .b = "\x1b[3~" },
+        .{ .n = "up", .b = "\x1b[A" },        .{ .n = "down", .b = "\x1b[B" },
+        .{ .n = "right", .b = "\x1b[C" },     .{ .n = "left", .b = "\x1b[D" },
+        .{ .n = "home", .b = "\x1b[H" },      .{ .n = "end", .b = "\x1b[F" },
+        .{ .n = "pageup", .b = "\x1b[5~" },   .{ .n = "pagedown", .b = "\x1b[6~" },
         .{ .n = "shift-tab", .b = "\x1b[Z" },
     };
     for (table) |t| {

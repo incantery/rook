@@ -44,6 +44,29 @@ pub fn epochMs() i64 {
     return tv.sec * 1000 + @divTrunc(@as(i64, tv.usec), 1000);
 }
 
+/// Input ownership, the five states resolution 5 names. `paused` is
+/// an actor still attached but not operating — the keys are the
+/// person's, and the bar says whose they would otherwise be.
+pub const Own = enum(u8) {
+    human,
+    agent,
+    /// the person asked; the actor is finishing its step
+    requested,
+    /// the actor yielded; the person confirms to take the keyboard
+    yielded,
+    paused,
+
+    pub fn word(self: Own) []const u8 {
+        return switch (self) {
+            .human => "human",
+            .agent => "agent",
+            .requested => "takeover-requested",
+            .yielded => "handoff-pending",
+            .paused => "paused",
+        };
+    }
+};
+
 /// OSC 9;4 as last reported by the program in the pane — a build's
 /// bar, Claude Code's turn. `none` is the protocol's `remove`: nothing
 /// in flight. The other four are the protocol's own words.
@@ -180,6 +203,50 @@ pub const Pane = struct {
     /// shell has said nothing. Owned; freed once typed.
     boot: []u8 = &.{},
     boot_by_ms: i64 = 0,
+    /// Who holds this pane's keyboard. Human by default and stated,
+    /// never inferred: a pane becomes agent-owned only when a program
+    /// claims it through the front door (`rook own`), and it goes
+    /// back the same way — a release, or the person taking it. While
+    /// an actor owns it the glass gates printable keys instead of
+    /// forwarding them (docs/altitude.md, resolution 5). `owner` is
+    /// the actor's own word for itself — `claude·main` — and the bar
+    /// repeats it.
+    own: Own = .human,
+    /// Is the foreground program one the config calls an agent, as of
+    /// the last 2 s scan (`Server.scanAgents`). A cached answer to a
+    /// two-syscall question the tab bar, the calm bar and the
+    /// altitude view all ask every frame.
+    is_agent: bool = false,
+    owner: [32]u8 = @splat(0),
+    owner_len: usize = 0,
+    own_since_ms: i64 = 0,
+
+    pub fn ownerName(self: *const Pane) []const u8 {
+        return self.owner[0..self.owner_len];
+    }
+
+    /// Name the actor and hand it the keyboard. Empty clears.
+    pub fn setOwner(self: *Pane, actor: []const u8, state: Own) void {
+        self.owner_len = @min(actor.len, self.owner.len);
+        @memcpy(self.owner[0..self.owner_len], actor[0..self.owner_len]);
+        self.own = if (self.owner_len == 0) .human else state;
+        self.own_since_ms = epochMs();
+    }
+
+    /// The person takes the keyboard back: no owner, no state.
+    pub fn takeOwnership(self: *Pane) void {
+        self.owner_len = 0;
+        self.own = .human;
+        self.own_since_ms = epochMs();
+    }
+
+    /// Do typed keys reach the program, or the gate?
+    pub fn keysGated(self: *const Pane) bool {
+        return switch (self.own) {
+            .agent, .requested, .yielded => true,
+            .human, .paused => false,
+        };
+    }
 
     pub fn start(
         gpa: std.mem.Allocator,

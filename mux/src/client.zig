@@ -374,6 +374,44 @@ pub fn setResume(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, cmd: []
     return error.Timeout;
 }
 
+/// One-shot: who holds a pane's keyboard. [id u32][op u8][actor…]:
+/// 'c' the actor claims it, 'p' attached paused, 'r' release, 'h'
+/// request a handoff, 't' take it. Answers with the serial.
+pub fn own(gpa: std.mem.Allocator, sock_path: []const u8, id: u32, op: u8, actor: []const u8) !void {
+    const sock = ptypkg.unixConnect(sock_path);
+    if (sock < 0) return error.ConnectFailed;
+    defer ptypkg.closeFd(sock);
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(gpa);
+    var b: [4]u8 = undefined;
+    std.mem.writeInt(u32, &b, id, .little);
+    try payload.appendSlice(gpa, &b);
+    try payload.append(gpa, op);
+    try payload.appendSlice(gpa, actor);
+    try proto.write(sock, @intFromEnum(proto.c2s.own), payload.items);
+    _ = ptypkg.setNonblockFd(sock);
+    var reader = proto.Reader.init(gpa);
+    defer reader.deinit();
+    var fds = [1]ptypkg.Pollfd{.{ .fd = sock, .events = ptypkg.POLLIN }};
+    var waited: usize = 0;
+    while (waited < 2000) : (waited += 100) {
+        _ = ptypkg.pollMany(&fds, 1, 100);
+        if (!reader.fill(sock)) return error.ServerGone;
+        while (reader.next()) |msg| {
+            defer reader.consume();
+            switch (msg.kind) {
+                @intFromEnum(proto.s2c.ack) => {
+                    if (msg.payload.len >= 8) printAck(std.mem.readInt(u64, msg.payload[0..8], .little));
+                    return;
+                },
+                @intFromEnum(proto.s2c.exit) => refused(msg.payload),
+                else => {},
+            }
+        }
+    }
+    return error.Timeout;
+}
+
 /// One-shot: a verb on a pane by id — 'v'/'-' split beside/below it,
 /// 'c' a new window in its workspace, 'x' hang it up, 'f' bring it in
 /// front of the person, 'u' jump to the oldest unread pane. A verb

@@ -513,6 +513,7 @@ still exact. Deltas would force unbounded buffering or a disconnect.
   "pid": 48120,
   "geometry": {"cols": 180, "rows": 45},
   "focus": {"pane": 7, "mode": "pane"},
+  "bar": true,
   "companion": {"name": "vera", "open": true, "visible": true, "focused": false,
     "panes": [{"pane": 12, "workspace": "main", "window": null, "place": "pin",
                "visible": true, "focused": false, "since": 1787588402113}]},
@@ -520,8 +521,8 @@ still exact. Deltas would force unbounded buffering or a disconnect.
   "workspaces": [
     {"name": "main", "current": true,
      "windows": [
-       {"index": 1, "name": "claude", "current": true, "zoomed": false,
-        "focus": 7,
+       {"index": 1, "name": "claude", "named": true, "program": "claude",
+        "current": true, "zoomed": false, "focus": 7,
         "layout": {"split": "v", "ratio": 0.5, "a": {"pane": 7}, "b": {"pane": 9}}}
      ],
      "pins": [12]}
@@ -537,6 +538,7 @@ still exact. Deltas would force unbounded buffering or a disconnect.
      "progress": null, "lastOutputMs": 1787588669907,
      "unread": false, "unreadMs": 0, "bellMs": 0, "progressDoneMs": 1787588660010,
      "resume": "claude --resume 0f3c9a2b-…",
+     "input": {"state": "agent", "owner": "claude·main", "sinceMs": 1787588600000},
      "notified": {"title": "Claude Code", "body": "Waiting for your input", "ms": 1787588660012}}
   ],
 
@@ -553,8 +555,16 @@ still exact. Deltas would force unbounded buffering or a disconnect.
 }
 ```
 
-`focus.mode` is `pane`, `copy` or `popup` — a replica needs to know
-when the mux itself is holding the keyboard. `title`, `pwd` (OSC 7)
+`focus.mode` is `pane`, `copy`, `popup`, `altitude`, `gate` or
+`inspect` — a replica needs to know when the mux itself is holding the
+keyboard (`docs/altitude.md` for the last three). `bar` says whether
+the calm bar is on. A window's `name` is its tab's name as minted —
+once, a person's word or the first program that was not the shell,
+and never changed by rook after (`named`) — and `program` is the live
+foreground program of its focused pane. A pane's `input` is who holds
+its keyboard: `{"state": "human"}`, or the actor that claimed it with
+`rook own` and one of `agent`, `takeover-requested`, `handoff-pending`,
+`paused`, with `sinceMs`. `title`, `pwd` (OSC 7)
 and `progress` (OSC 9;4, `{state, percent}` while a bar is in flight)
 are what the program said to its terminal, published verbatim;
 `bellMs`, `progressDoneMs` and `notified` are the last bell, the last
@@ -720,6 +730,7 @@ Honest inventory, so this document is not mistaken for a description.
 | a pane by id from the front door: `read` / `send` / `run` / `key` / `wait` / `split` / `window` / `focus` / `close-pane`, `$ROOK_MUX_PANE` as the caller's id, `rook --skill` | **built** (`c2s.input`, `c2s.pane_cmd`) |
 | resume: `panes[].resume`, kept while its program is in front, saved in the restore file, typed into the rebuilt shell on boot; `[mux] restore` on by default | **built** (`c2s.resume`, state file v2) |
 | `companion.zig` + `Server.scanCompanion` | **built** — the one resident rook watches for by name, published as `companion` and read out loud by `rook companion` |
+| altitude (`altitude.zig`, prefix-o): the figure, the rows, one input, `:` commands, the ✦ row; the calm bar; minted tab names (`windows[].name/named/program`, `rook rename`); input ownership (`panes[].input`, `rook own`, the gate, prefix-i) | **built** — `docs/altitude.md`, which also lists what that design still owes (the shelf, folds, the peek) |
 | `s2c.ack`, quiet `session 'N'`, `block_created` on new | **built** |
 | plugin protocol v1 | specified in `rook-plugin(7)` at `425c0f8^`; `items.push` implemented, the rest not |
 | surfaces (declared, placed, focusable), plugin processes | none of it |

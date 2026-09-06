@@ -30,7 +30,10 @@ spelling of hidden), and `agents = ["claude"]` — the foreground program
 names the rail treats as an agent it found. A `[companion]` table (the
 same one the Go half reads) names the resident rook watches for —
 `command = "vera"`, or `program = "vera"` when that command's first
-word is a wrapper; vera by default, `program = ""` turns the slot off. Then:
+word is a wrapper; vera by default, `program = ""` turns the slot off.
+`bar = false` turns the calm bar off (the bottom row: who holds the
+focused pane's keyboard, and the signals), and `zoom_view = "ledger"`
+makes prefix-o draw rows only, never the figure. Then:
 
     v |        split side by side          c        new window
     -          split stacked               n p 1-9  switch window
@@ -39,6 +42,22 @@ word is a wrapper; vera by default, `program = ""` turns the slot off. Then:
     x          kill pane                   d        detach
     a          cycle the side panel        u        the oldest unread pane
     A          the side panel away, and back (focus mode)
+    o          altitude: zoom out of the space into rook, and back
+    C-o        return jump: the space before the last hop
+    i          inspector: the focused pane's actor, input owner, program
+
+The top row is the tab bar: the space's name as a scope chip, then a
+chip per window. A tab is named once — a name a person gave (`rook
+rename`, `:rename` at altitude), else the first program in it that
+was not the shell, with an ordinal when a sibling wears the name —
+and rook never renames it afterwards; the agent running in the window
+is named after the stable name, `deploy · claude ◐`, and the mark
+(`◐` working, `●` unread) changes freely. The bottom row is the calm
+bar: `you ▸ nvim` on the left, or the actor that owns the pane's
+keyboard (`rook own`), and `◐ n · ● n · ⊕g n` on the right — agents
+producing output, panes unread, global pins — empty when nothing
+signals. While the prefix is armed the bar shows the chords.
+`docs/altitude.md` is the whole model: altitude, ownership, the gate.
 
 Workspaces: `rook ls`, `rook new <name>`, `rook switch <name>` —
 named sessions in one server, each with its own windows; prefix-s
@@ -187,6 +206,9 @@ not.
 
     rook resume <id> <cmd...>      how to bring this pane's program back
     rook resume <id> --clear       forget it
+    rook own <id> <actor>          the actor holds the pane's keyboard
+    rook own <id> --release        …and gives it back (see Owning a pane)
+    rook rename <name>             name the current tab, once and for all
 
 The command is the program's own word, published as `panes[].resume`,
 and it belongs to the program that set it: rook writes down what was
@@ -197,6 +219,38 @@ shell once the prompt is up (or after 1.5 s), Enter included — into
 the shell's own environment, with the shell still there afterwards.
 `rook resume` outside rook, or against a server that does not answer,
 exits 0 in silence: it is written to be a hook.
+
+## Altitude
+
+prefix-o zooms out. The current space contracts into a figure — its
+name and current tab in the top edge, its panes placed inside by the
+same split tree that places them on the glass — and the other spaces
+resolve around it as two-line rows: the name and an event line (the
+words a producer spent on it, the last notification an unread pane
+sent, an agent producing output, the unread count, else `quiet ·
+<age>`), then its tabs. Unread panes come first as attention rows,
+oldest first; global pins stay live where they were and are listed
+under `PINS`. The cursor is already in one input: text fuzzy-finds
+spaces, tabs and panes; `:` completes a command (`go`, `new`,
+`rename`, `close`, `ledger`, `orbit`); the last row, `✦ vera:`, hands
+the text to the companion while she is open, and only by choosing it.
+j/k move (h/l too, while nothing is typed), ↵ acts, Esc clears the
+text and then leaves — to the exact pane, cursor and scroll, because
+the panes never stopped. Under 60 columns, or with `zoom_view =
+"ledger"`, the same rows draw with no figure.
+
+## Owning a pane
+
+A pane is the person's until a program says otherwise: `rook own <id>
+<actor>` claims its keyboard. The bar then reads `<actor> ▸ owns input
+· you observe`, and a typed key opens a one-row gate instead of
+landing — `⏎` requests a handoff (the actor sees `takeover-requested`
+in the feed, finishes its step, `rook own <id> --release`s, and the
+person confirms with `⏎`), `T` takes now, `s` sends the next keystrokes
+through Enter as a message, Esc leaves it. `--paused` attaches an
+actor without giving it the keys; `--request` and `--take` are the
+gate's moves from a script. `panes[].input` in the feed carries the
+state and the owner. prefix-i shows it all in a box.
 
 ## The side panel
 

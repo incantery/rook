@@ -86,11 +86,14 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
     out.print(gpa, ",\"geometry\":{{\"cols\":{d},\"rows\":{d}}}", .{ g.cols, g.rows }) catch return;
 
     // Focus: the pane input goes to, and whether the mux is holding it
-    // (copy mode and popups take the keyboard away from the pane).
+    // (copy mode, popups, altitude, the ownership gate and the
+    // inspector all take the keyboard away from the pane).
     out.print(gpa, ",\"focus\":{{\"pane\":{d},\"mode\":\"{s}\"}}", .{
         sv.focusedId(),
-        if (sv.popup != null) "popup" else if (sv.scrolling) "copy" else "pane",
+        if (sv.popup != null) "popup" else if (sv.alt_on) "altitude" else if (sv.inspect) "inspect" else if (sv.gate) "gate" else if (sv.scrolling) "copy" else "pane",
     }) catch return;
+    // The calm bar, so a second glass lays its rows out the same way.
+    out.print(gpa, ",\"bar\":{s}", .{boolStr(sv.barOn())}) catch return;
 
     // The companion: the one resident rook knows by name — the config
     // names the occupant, vera first. `null` when the slot is turned
@@ -157,10 +160,20 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         out.print(gpa, ",\"current\":{s},\"windows\":[", .{boolStr(si == sv.cur_sess)}) catch return;
         for (sn.windows.items, 0..) |w, wi| {
             if (wi > 0) out.append(gpa, ',') catch return;
+            // `name` is the tab's name: minted once — a person's
+            // word, or the first program that was not the shell — and
+            // frozen after that (`named`). `program` is the live
+            // foreground program of the window's focused pane, which
+            // is what `name` used to be. Both drift only until the
+            // name is minted; a minted name is structure.
             var nb: [64]u8 = undefined;
-            const name: []const u8 = if (!form.drift) "" else if (sv.pane(w.focused)) |p| (p.fgName(&nb) orelse "shell") else "shell";
+            var tb: [48]u8 = undefined;
+            const name: []const u8 = if (w.named) w.label() else if (!form.drift) "" else sv.tabName(sn, w, &tb);
+            const program: []const u8 = if (!form.drift) "" else if (sv.pane(w.focused)) |p| (p.fgName(&nb) orelse "shell") else "shell";
             out.print(gpa, "{{\"index\":{d},\"name\":", .{wi + 1}) catch return;
             str(gpa, out, name);
+            out.print(gpa, ",\"named\":{s},\"program\":", .{boolStr(w.named)}) catch return;
+            str(gpa, out, program);
             out.print(gpa, ",\"current\":{s},\"zoomed\":{s},\"focus\":{d},\"layout\":", .{
                 boolStr(wi == sn.cur),
                 boolStr(w.zoomed),
@@ -242,6 +255,17 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         // in its own words, and only while it is the one in front.
         out.appendSlice(gpa, ",\"resume\":") catch return;
         str(gpa, out, p.resumeLive());
+        // Who holds the keyboard (docs/altitude.md, resolution 5):
+        // `human` unless an actor claimed the pane through `rook own`,
+        // then the actor's own name for itself and one of the five
+        // states. `sinceMs` is when the state last changed.
+        out.appendSlice(gpa, ",\"input\":{\"state\":") catch return;
+        str(gpa, out, p.own.word());
+        if (p.owner_len > 0) {
+            out.appendSlice(gpa, ",\"owner\":") catch return;
+            str(gpa, out, p.ownerName());
+        }
+        out.print(gpa, ",\"sinceMs\":{d}}}", .{p.own_since_ms}) catch return;
         if (p.notif_ms != 0) {
             out.appendSlice(gpa, ",\"notified\":{\"title\":") catch return;
             str(gpa, out, p.notif_title[0..p.notif_title_len]);

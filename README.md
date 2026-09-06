@@ -38,7 +38,27 @@ mode, `prefix-P` pin a pane to the rail, `prefix-s` the picker,
 `prefix-w` worktrees, `prefix-a` the side panel (open → collapsed →
 hidden), `prefix-A` it away and back, `prefix-u` the oldest
 thing you have not read. The tabs are clickable: a chip is its window,
-the `+` a new one.
+the `+` a new one. A tab is named once — the first program in it that
+was not the shell, or `rook rename` — and rook never renames it; the
+agent running in it is named after it, `deploy · claude ◐`.
+
+**Altitude.** `prefix-o` zooms out of the space into rook: the space
+contracts into a figure of its layout, the other spaces resolve
+around it as rows — an event line rook can vouch for, the tabs under
+it — the global pins do not move a column, and the cursor is already
+in one input. Type to find a space, tab or pane; `:` for a command
+(`:go`, `:new`, `:rename`, `:close`); the last row hands the same
+text to vera when she is open. `↵` acts, typing never does, Esc puts
+you back exactly where you were. `prefix-C-o` returns after any hop.
+On narrow glass the same rows draw with no figure. `docs/altitude.md`.
+
+**The calm bar.** One row at the bottom: who holds the focused pane's
+keyboard on the left — `you ▸ nvim`, or `claude·main ▸ owns input ·
+you observe` once an agent has claimed it with `rook own` — and the
+signals on the right (`◐ 2 · ● 1 · ⊕g 1`). Typing at an owned pane
+opens a gate instead of landing: request a handoff, take now, or send
+the keys as a message. `prefix-i` inspects the pane. `[mux] bar =
+false` turns the row off.
 
 **The rail.** Down the left edge: *spaces* over *agents*, a dot and
 two lines each. Rook lists its own workspaces and the panes it can see

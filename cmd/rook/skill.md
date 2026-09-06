@@ -95,12 +95,34 @@ Rook remembers it while you are the program in front, and after the
 server restarts your pane comes back running that command. `rook
 resume . --clear` forgets it.
 
+## Owning a pane's keyboard
+
+If you are driving a pane — typing into it with `rook send`, reading
+it back, acting on what it shows — say so, once, and the person's
+glass will show it and gate their typing behind a handoff instead of
+letting keystrokes land in the middle of your work:
+
+```sh
+rook own 7 'claude·main'      # you own pane 7's input; the bar says so
+rook own 7 --paused 'claude·main'   # attached, not operating: keys are theirs
+rook own 7 --release          # hand it back
+```
+
+While you own it, `rook state` shows `panes[].input.state` as `agent`.
+If the person asks for the keyboard it becomes `takeover-requested`:
+finish the step you are on, then `--release` — that yields, and they
+confirm. `human` means they took it (or never gave it); stop typing
+into that pane. Never claim a pane you did not open or were not asked
+to drive, and never claim the pane the person is typing in.
+
 ## Workspaces
 
 ```sh
 rook ls                        # workspace names
 rook new -q NAME [DIR]         # create one without moving the person
 rook switch NAME
+rook rename NAME               # name the current tab (a tab is named once;
+                               # rook never renames it after that)
 ```
 
 ## Rules

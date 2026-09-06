@@ -14,6 +14,7 @@ const companionpkg = @import("companion.zig");
 const statefeed = @import("statefeed.zig");
 const proto = @import("proto.zig");
 const config = @import("config.zig");
+const altpkg = @import("altitude.zig");
 
 // CLOCK_UPTIME_RAW = 8 on macOS; libc-only monotonic clock.
 extern "c" fn clock_gettime_nsec_np(clock_id: c_int) u64;
@@ -164,6 +165,22 @@ const Window = struct {
     /// the window is current, so "seen" tracks looking rather than
     /// switching.
     seen_ms: i64 = 0,
+    /// The tab's name, minted once and then frozen (docs/altitude.md,
+    /// resolution 6): a name a person gave, else the first program
+    /// in it that was not the shell. Rook never changes a minted name;
+    /// the activity glyph and the actor suffix change freely around
+    /// it. Until it is minted the tab reads the live program.
+    name: [32]u8 = @splat(0),
+    name_len: usize = 0,
+    named: bool = false,
+
+    pub fn label(self: *const Window) []const u8 {
+        return self.name[0..self.name_len];
+    }
+    fn setName(self: *Window, n: []const u8) void {
+        self.name_len = @min(n.len, self.name.len);
+        @memcpy(self.name[0..self.name_len], n[0..self.name_len]);
+    }
 };
 
 /// A named workspace: its own windows and current-window index. All
@@ -340,6 +357,29 @@ pub const Server = struct {
     /// A floating pane over the current window: all input goes to it,
     /// it closes when its process exits. One at a time.
     popup: ?u32 = null,
+    /// The workspace before the last switch — prefix-C-o goes back
+    /// after any cross-space hop, from wherever the hop was made.
+    last_sess: ?usize = null,
+    /// Altitude (prefix-o): rook scope, painted over the window
+    /// region while the panes keep running underneath. `alt` is the
+    /// view's own state; `alt_placed` is the rects still drawn live
+    /// at altitude — the global pins, which do not move.
+    alt_on: bool = false,
+    alt: altpkg.State = .{},
+    alt_placed: std.ArrayList(layoutpkg.Placed) = .empty,
+    /// A second frame builder for what the server paints over the
+    /// panes itself: the altitude view, the ownership gate, the
+    /// inspector. Its bytes ride the main frame as `Chrome.overlay`.
+    over: renderpkg.Frame,
+    /// The ownership gate: a key was typed at a pane an actor owns,
+    /// and instead of forwarding it the glass shows the three legal
+    /// moves. `gate_pass` is the `s` move — the next keystrokes,
+    /// through Enter, go to the pane as a message.
+    gate: bool = false,
+    gate_pass: bool = false,
+    /// prefix-i: the focused pane's provenance and input ownership,
+    /// in a box. Any key closes it.
+    inspect: bool = false,
     /// Resurrect file: sessions/windows/cwds, saved on structural
     /// change (debounced), restored on server boot. Scrollback is not
     /// saved — that's the event log's job, later.
@@ -407,6 +447,7 @@ pub const Server = struct {
             .wake_r = pipefds[0],
             .wake_w = pipefds[1],
             .frame = renderpkg.Frame.init(gpa),
+            .over = renderpkg.Frame.init(gpa),
             .side = chromepkg.Feed.init(gpa),
             .shell = shell,
             .cwd = cwd,
@@ -420,6 +461,7 @@ pub const Server = struct {
         } else |_| {}
 
         self.frame.accent = self.conf.accent;
+        self.over.accent = self.conf.accent;
         self.side.accent = self.conf.accent;
         self.side_mode = self.conf.side_mode;
         self.pid = ptypkg.selfPid();
@@ -457,6 +499,9 @@ pub const Server = struct {
         self.sessions.deinit(self.gpa);
         self.global_pins.deinit(self.gpa);
         self.frame.deinit();
+        self.over.deinit();
+        self.alt.rows.deinit(self.gpa);
+        self.alt_placed.deinit(self.gpa);
         self.side.deinit();
         self.agents_merge.deinit(self.gpa);
         self.spaces_merge.deinit(self.gpa);
@@ -530,6 +575,7 @@ pub const Server = struct {
     fn switchSession(self: *Server, i: usize) void {
         if (i == self.cur_sess or i >= self.sessions.items.len) return;
         const old_focused = self.focusedId();
+        self.last_sess = self.cur_sess;
         self.cur_sess = i;
         self.scrolling = false;
         self.selecting = false;
@@ -575,16 +621,31 @@ pub const Server = struct {
     fn startPane(self: *Server, cwd: ?[*:0]const u8) !*panepkg.Pane {
         const g = self.geometry();
         const dir: ?[*:0]const u8 = cwd orelse if (self.cwd) |c| c.ptr else null;
-        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, dir, g.cols, g.rows -| 1, self.wake_w, self.next_id, null, self.conf.scrollback_bytes);
+        const p = try panepkg.Pane.start(self.gpa, self.io, self.shell.ptr, dir, g.cols, self.bodyRows() -| 1, self.wake_w, self.next_id, null, self.conf.scrollback_bytes);
         try self.panes.append(self.gpa, p);
         self.next_id += 1;
         return p;
     }
 
     /// The popup's outer box, centered: 60% of the screen, clamped.
+    /// The rows under the tab bar's row and above the calm bar: where
+    /// windows, rails, the side panel and the altitude view live. The
+    /// bar is app chrome like the tab bar, so everything else is laid
+    /// out inside what it leaves.
+    pub fn bodyRows(self: *Server) u16 {
+        const g = self.geometry();
+        return if (self.barOn()) g.rows -| 1 else g.rows;
+    }
+
+    /// The calm bar is on unless the config turned it off, and never
+    /// on a glass too short to spare the row.
+    pub fn barOn(self: *Server) bool {
+        return self.conf.bar and self.geometry().rows >= 8;
+    }
+
     fn popupRect(self: *Server) layoutpkg.Rect {
         const g = self.geometry();
-        const rows = g.rows -| 1;
+        const rows = self.bodyRows() -| 1;
         const w: u16 = @max(@min(g.cols, 30), g.cols * 6 / 10);
         const h: u16 = @max(@min(rows, 8), rows * 6 / 10);
         return .{ .x = (g.cols -| w) / 2, .y = (rows -| h) / 2, .w = w, .h = h };
@@ -726,9 +787,11 @@ pub const Server = struct {
             }
         }
         const base_x: u16 = if (self.side_w) |sw| sw + 1 else 0;
-        // Row 0 is the tab bar; the window area sits below it.
+        // Row 0 is the tab bar; the window area sits below it, and
+        // above the calm bar when there is one.
+        const body = self.bodyRows();
         const win_y: u16 = 1;
-        const win_h: u16 = g.rows -| 1;
+        const win_h: u16 = body -| 1;
         if (w.zoomed) {
             try self.placed.append(self.gpa, .{ .pane = self.focusedId(), .rect = .{ .x = base_x, .y = win_y, .w = g.cols -| base_x, .h = win_h } });
         } else {
@@ -749,18 +812,18 @@ pub const Server = struct {
                 const push = n_global > 0;
                 const rail_top: u16 = if (push) 0 else win_y;
                 const nr: u16 = @intCast(n_rails);
-                const avail_h = g.rows -| rail_top;
+                const avail_h = body -| rail_top;
                 const each: u16 = (avail_h -| (nr - 1)) / nr;
                 var y: u16 = rail_top;
                 var i: u16 = 0;
                 for (self.global_pins.items) |id| {
-                    const h = if (i == nr - 1) g.rows -| y else each;
+                    const h = if (i == nr - 1) body -| y else each;
                     try self.placed.append(self.gpa, .{ .pane = id, .rect = .{ .x = base_x, .y = y, .w = rail_w, .h = h } });
                     y += h + 1;
                     i += 1;
                 }
                 for (sn.pins.items) |id| {
-                    const h = if (i == nr - 1) g.rows -| y else each;
+                    const h = if (i == nr - 1) body -| y else each;
                     try self.placed.append(self.gpa, .{ .pane = id, .rect = .{ .x = base_x, .y = y, .w = rail_w, .h = h } });
                     y += h + 1;
                     i += 1;
@@ -1092,6 +1155,7 @@ pub const Server = struct {
                         }
                     }
                 },
+                @intFromEnum(proto.c2s.own) => self.ownCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.block_cmd) => self.blockCmd(c, msg.payload),
                 @intFromEnum(proto.c2s.attach_block) => self.attachBlock(c, msg.payload),
                 @intFromEnum(proto.c2s.session) => {
@@ -1137,6 +1201,9 @@ pub const Server = struct {
                                 }
                             },
                             'k' => if (name.len > 0) self.closeSession(name),
+                            // 'r' names the current window: the one act
+                            // that changes a minted tab name.
+                            'r' => if (name.len > 0) self.renameWindow(name),
                             else => {},
                         }
                         if (op != 'l') {
@@ -1451,6 +1518,15 @@ pub const Server = struct {
         var n: usize = 0;
         var len: usize = 0;
 
+        // One pass caches the answer per pane: the tab bar, the calm
+        // bar and the altitude view read `is_agent` every frame and
+        // must not pay the syscalls for it.
+        for (self.panes.items) |p| {
+            var nb: [64]u8 = undefined;
+            p.is_agent = if (p.fgName(&nb)) |fg| self.isAgentProgram(fg) else false;
+        }
+        self.mintNames();
+
         for (self.sessions.items) |sn| {
             if (n == max_found) break;
             var count: usize = 0;
@@ -1458,9 +1534,9 @@ pub const Server = struct {
             var prog_len: usize = 0;
             for (self.panes.items) |p| {
                 if (!self.paneIn(sn, p.id)) continue;
+                if (!p.is_agent) continue;
                 var nb: [64]u8 = undefined;
                 const fg = p.fgName(&nb) orelse continue;
-                if (!self.isAgentProgram(fg)) continue;
                 if (count == 0 and fg.len <= prog.len) {
                     @memcpy(prog[0..fg.len], fg);
                     prog_len = fg.len;
@@ -1951,6 +2027,15 @@ pub const Server = struct {
                 rest = rest[1..];
                 continue;
             }
+            // The inspector is a sheet: any key closes it, and that
+            // key is spent on the closing.
+            if (self.inspect) {
+                self.inspect = false;
+                self.full = true;
+                self.pending = true;
+                rest = rest[1..];
+                continue;
+            }
             // SGR mouse: ESC [ < btn ; x ; y (M|m)
             if (rest.len >= 3 and rest[0] == 0x1b and rest[1] == '[' and rest[2] == '<') {
                 if (parseMouse(rest)) |ev| {
@@ -1969,6 +2054,26 @@ pub const Server = struct {
             if (rest[0] == self.prefix_key) {
                 c.prefix = true;
                 c.paste.reset();
+                rest = rest[1..];
+                // the bar shows the pending key, so this earns a frame
+                // — a full one, since no cell of any pane is dirty
+                self.full = true;
+                self.pending = true;
+                continue;
+            }
+            // At altitude the keys are the view's: the input, the
+            // cursor, ↵. The prefix still arms above, so prefix-o
+            // and prefix-s work from up here.
+            if (self.alt_on) {
+                c.paste.reset();
+                const used = self.altKey(rest);
+                rest = rest[used..];
+                continue;
+            }
+            // The ownership gate holds the keyboard while it is up.
+            if (self.gate) {
+                c.paste.reset();
+                self.gateKey(rest[0]);
                 rest = rest[1..];
                 continue;
             }
@@ -1992,7 +2097,28 @@ pub const Server = struct {
             }
             // forward up to the next byte the server wants for itself
             const end = runEnd(&c.paste, rest, self.prefix_key);
+            // A pane an actor owns does not take typed keys: the gate
+            // opens instead, and the keystroke that opened it is
+            // spent on that — never silently forwarded, never
+            // reinterpreted. `s` in the gate lets a run through, up
+            // to and including Enter, as a message to the actor.
+            if (self.popup == null and !self.gate_pass) {
+                if (self.focusedPane()) |fp| {
+                    if (fp.keysGated()) {
+                        self.gate = true;
+                        self.full = true;
+                        self.pending = true;
+                        rest = rest[end..];
+                        continue;
+                    }
+                }
+            }
             self.toFocused(rest[0..end]);
+            if (self.gate_pass and std.mem.indexOfScalar(u8, rest[0..end], '\r') != null) {
+                self.gate_pass = false;
+                self.full = true;
+                self.pending = true;
+            }
             rest = rest[end..];
         }
     }
@@ -2057,6 +2183,37 @@ pub const Server = struct {
                 }
             }
             return;
+        }
+        // The calm bar is not a target: nothing on it is a control.
+        if (self.barOn() and cy >= self.bodyRows()) return;
+        // At altitude a click lands on a row, or on the global pins,
+        // which are live; anywhere else on the view is the view's.
+        if (self.alt_on) {
+            const r = self.altRegion();
+            if (cx >= r.x and cy >= r.y and cy < r.y + r.h) {
+                if (ev.btn == 0 and !ev.release) {
+                    if (self.alt.rowAt(cy)) |i| {
+                        self.alt.cur = i;
+                        self.alt.ask_armed = true;
+                        self.altAct();
+                    }
+                } else if (ev.btn == 64) {
+                    self.alt.move(-1);
+                    self.full = true;
+                    self.pending = true;
+                } else if (ev.btn == 65) {
+                    self.alt.move(1);
+                    self.full = true;
+                    self.pending = true;
+                }
+                return;
+            }
+            var on_pin = false;
+            for (self.alt_placed.items) |pl| {
+                if (cx >= pl.rect.x and cx < pl.rect.x + pl.rect.w and cy >= pl.rect.y and cy < pl.rect.y + pl.rect.h) on_pin = true;
+            }
+            // a click on the tab bar or the side panel is a way out
+            if (!on_pin and ev.btn == 0 and !ev.release) self.altLeave();
         }
         // the side panel eats clicks before any pane sees them
         if (self.side_w) |sw| {
@@ -2168,8 +2325,7 @@ pub const Server = struct {
     /// click itself will be forwarded when there is a producer to
     /// forward it to (docs/surfaces.md).
     fn clickSide(self: *Server, cy: u16) void {
-        const g = self.geometry();
-        const split = chromepkg.splitRow(g.rows);
+        const split = chromepkg.splitRow(self.bodyRows());
         if (cy == split) return; // the seam between the panels
         const which: chromepkg.Surface = if (cy < split) .spaces else .agents;
         const m = self.sideModel();
@@ -2302,6 +2458,9 @@ pub const Server = struct {
     /// happened; one that arrives otherwise is unread until it is.
     fn isSeen(self: *Server, id: u32) bool {
         if (self.popup != null) return false;
+        // focus is observing, but at altitude nobody is on the pane,
+        // and under the inspector the pane is covered
+        if (self.alt_on or self.inspect) return false;
         if (self.focusedId() != id) return false;
         var placed = false;
         for (self.placed.items) |pl| {
@@ -2521,7 +2680,17 @@ pub const Server = struct {
             },
             '[' => self.scrollStart(),
             'u' => _ = self.jumpUnread(),
-            'o' => self.openPopup("exec $SHELL -l") catch {},
+            // Altitude: zoom out of the space into rook scope. The
+            // panes never pause; Esc up there is an exact return.
+            'o' => self.altToggle(),
+            // Return jump: back to the space before the last hop.
+            0x0f => if (self.last_sess) |ls| {
+                if (ls < self.sessions.items.len) self.switchSession(ls);
+            },
+            'i' => if (!self.alt_on) {
+                self.inspect = !self.inspect;
+                self.full = true;
+            },
             'x' => if (self.focusedPane()) |p| p.hangup(),
             'd' => {
                 self.sendTo(c, @intFromEnum(proto.s2c.exit), "");
@@ -2532,6 +2701,8 @@ pub const Server = struct {
                 if (key == self.prefix_key) self.toFocused(&[_]u8{key});
             },
         }
+        // the bar drops its pending-key hint whatever the key did
+        self.full = true;
         self.pending = true;
     }
 
@@ -2858,11 +3029,48 @@ pub const Server = struct {
         if (!any_dirty) return;
 
         const g = self.geometry();
+        const body = self.bodyRows();
+        // The altitude rows are built first: the bars read them (the
+        // corner's counts, the bar's `orbit`/`ledger` word).
+        if (self.alt_on) {
+            self.full = true;
+            self.altBuild();
+        }
         var tab_buf: [2048]u8 = undefined;
         const tabbar = self.tabBar(&tab_buf, g.cols -| self.tab_x);
+        var bar_buf: [2048]u8 = undefined;
+        const bar: ?renderpkg.Bar = if (self.barOn())
+            .{ .y = body, .bytes = self.barRow(&bar_buf, g.cols) }
+        else
+            null;
 
-        var cur_over: ?struct { x: u16, y: u16 } = null;
-        if (self.scrolling) {
+        // What the server paints over the panes itself. Built fresh
+        // each frame it is needed: all three are human-rate views.
+        self.over.buf.clearRetainingCapacity();
+        var cur_over: ?renderpkg.CursorOverride = null;
+        var placed = self.placed.items;
+        var dock_x = self.dock_x;
+        if (self.alt_on) {
+            // only the global pins stay live on the glass; every
+            // other rect belongs to the space and contracts with it
+            self.alt_placed.clearRetainingCapacity();
+            for (self.placed.items) |pl| {
+                if (containsId(self.global_pins.items, pl.pane)) {
+                    self.alt_placed.append(self.gpa, pl) catch {};
+                } else {
+                    altpkg.clearRect(&self.over, pl.rect);
+                }
+            }
+            placed = self.alt_placed.items;
+            if (self.global_pins.items.len == 0) dock_x = null;
+            var cname_buf: [64]u8 = undefined;
+            const cname = self.companionOpenName(&cname_buf);
+            cur_over = altpkg.draw(&self.over, &self.alt, self.altRegion(), .{ .accent = self.conf.accent, .companion = cname });
+        }
+        if (self.gate and !self.alt_on) self.gateRow();
+        if (self.inspect and !self.alt_on) self.inspectorSheet();
+
+        if (self.scrolling and !self.alt_on) {
             for (self.placed.items) |pl| {
                 if (pl.pane == self.focusedId()) {
                     cur_over = .{
@@ -2876,10 +3084,18 @@ pub const Server = struct {
             .tabbar = tabbar,
             .tab_x = self.tab_x,
             .side = if (self.side_w) |sw| .{ .model = self.sideModel(), .w = sw, .mode = self.side_shown } else null,
-            .dock_x = self.dock_x,
+            .dock_x = dock_x,
             .dock_top = self.dock_top,
+            .bar = bar,
+            .overlay = self.over.buf.items,
         };
-        const bytes = self.frame.build(self.panes.items, self.placed.items, self.focusedId(), g.cols, g.rows, chrome, self.full, if (cur_over) |co| .{ .x = co.x, .y = co.y } else null, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null);
+        // the altitude cursor is the input's; the inspector and the
+        // gate hide the pane's cursor, since the keys are not its
+        const cur: ?renderpkg.CursorOverride = if (self.alt_on or self.gate or self.inspect)
+            (cur_over orelse renderpkg.CursorOverride{ .x = 0, .y = 0, .hidden = true })
+        else
+            cur_over;
+        const bytes = self.frame.build(self.panes.items, placed, if (self.alt_on) 0 else self.focusedId(), g.cols, body, chrome, self.full, cur, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null);
         self.full = false;
         var shipped = false;
         for (self.clients.items) |c| {
@@ -2937,7 +3153,11 @@ pub const Server = struct {
     fn mirrorKitty(self: *Server) void {
         var buf: [256]u8 = undefined;
         var out: std.ArrayList(u8) = .initBuffer(&buf);
-        const fp = self.popupPane() orelse self.focusedPane();
+        // While the mux itself holds the keyboard — altitude, the
+        // gate, the inspector — the glass encodes legacy bytes, so
+        // the view reads plain keys whatever the pane under it asked.
+        const mux_keys = self.alt_on or self.gate or self.inspect;
+        const fp = if (mux_keys) null else (self.popupPane() orelse self.focusedPane());
         const kf: u8 = if (fp) |p| p.kittyFlags() else 0;
         if (kf != self.glass_kitty) {
             self.glass_kitty = kf;
@@ -3028,6 +3248,13 @@ pub const Server = struct {
             }
             for (sn.windows.items, 0..) |w, wi| {
                 self.savePane(&out, "window ", w.focused, wi == sn.cur) catch return;
+                // a minted name survives the restart: it is identity,
+                // and identity is what a restore is for
+                if (w.named and std.mem.indexOfScalar(u8, w.label(), '\n') == null) {
+                    out.appendSlice(self.gpa, "name ") catch return;
+                    out.appendSlice(self.gpa, w.label()) catch return;
+                    out.append(self.gpa, '\n') catch return;
+                }
                 for (self.panes.items) |p| {
                     if (p.id == w.focused or !w.layout.contains(p.id)) continue;
                     if (p.resumeLive().len == 0) continue;
@@ -3073,8 +3300,20 @@ pub const Server = struct {
         var sess_has_window = false;
         // the pane the next `resume` line belongs to
         var last_pane: ?*panepkg.Pane = null;
+        // the window the next `name` line belongs to
+        var last_window: ?*Window = null;
         const boot_by = nowMs() + 1500;
         while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "name ")) {
+                const nm = line["name ".len..];
+                if (last_window) |w| {
+                    if (nm.len > 0) {
+                        w.setName(nm);
+                        w.named = true;
+                    }
+                }
+                continue;
+            }
             if (std.mem.startsWith(u8, line, "resume ")) {
                 const cmd = line["resume ".len..];
                 if (last_pane) |p| {
@@ -3149,6 +3388,7 @@ pub const Server = struct {
                 try w.layout.seed(p.id);
                 w.focused = p.id;
                 last_pane = p;
+                last_window = w;
                 if (starred) sn.cur = sn.windows.items.len - 1;
                 sess_has_window = true;
             }
@@ -3205,85 +3445,130 @@ pub const Server = struct {
         const work_ink = sgr(&work_buf, .{ .bg = chromepkg.base, .fg = chromepkg.yellow });
         var unread_buf: [48]u8 = undefined;
         const unread_ink = sgr(&unread_buf, .{ .bg = chromepkg.base, .fg = self.conf.accent });
+        var scope_buf: [48]u8 = undefined;
+        const scope_ink = sgr(&scope_buf, .{ .bg = chromepkg.base, .fg = chromepkg.text, .bold = true });
 
         out.appendSliceBounded(bar) catch {};
         self.tab_zones_n = 0;
-        var shown: usize = 0;
-        for (sn.windows.items, 0..) |win, i| {
-            var name_buf: [48]u8 = undefined;
-            var name: []const u8 = "shell";
-            var mark: chromepkg.TabMark = .none;
-            if (self.pane(win.focused)) |p| {
-                if (p.fgName(&name_buf)) |fg| name = fg;
-                mark = chromepkg.tabMark(.{
-                    .current = i == sn.cur,
-                    .agent = self.isAgentProgram(name),
-                    .last_output_ms = p.last_output_ms.load(.acquire),
-                    .seen_ms = win.seen_ms,
-                    .now = now,
-                    .signal = self.windowUnread(win),
-                });
-            }
-            // The current window is being looked at, by definition.
-            if (i == sn.cur) win.seen_ms = now;
 
-            const nm = name[0..@min(name.len, 14)];
-            var num_buf: [8]u8 = undefined;
-            const num = std.fmt.bufPrint(&num_buf, "{d}", .{i + 1}) catch "?";
-            const chip: u16 = @intCast(nm.len + 2); // " name "
-            const mark_w: u16 = if (mark == .none) 0 else 2; // " ◐"
-            const gap: u16 = if (shown > 0) 3 else 0;
-            // No separator after the ordinal: the chip opens with its
-            // own padding cell, which is the gap — and on the selected
-            // tab that cell is the accent block starting.
-            const entry: u16 = gap + @as(u16, @intCast(num.len)) + chip + mark_w;
-            // Leave room for the overflow tail or the "+" that follows.
-            if (vis + entry + 4 > avail) break;
-
-            if (gap > 0) {
-                out.appendSliceBounded("   ") catch {};
-                vis += gap;
-            }
-            // The target is the entry itself — ordinal, chip, mark —
-            // and never the air before it. Recorded here, where the
-            // columns are being spent, so the hit test cannot drift
-            // from the row it is testing.
-            if (self.tab_zones_n < self.tab_zones.len) {
-                self.tab_zones[self.tab_zones_n] = .{
-                    .x = vis,
-                    .w = entry - gap,
-                    .target = .{ .window = i },
-                };
-                self.tab_zones_n += 1;
-            }
-            out.appendSliceBounded(idx_ink) catch {};
-            out.appendSliceBounded(num) catch {};
-            vis += @as(u16, @intCast(num.len));
-
-            // One state per channel: the block says selected and only
-            // selected, so a tab can be selected and working at once
-            // and the bar has somewhere to put both.
-            out.appendSliceBounded(if (i == sn.cur) chip_on else bar) catch {};
+        // The scope chip: the space you are in, top-left, and at
+        // altitude the breadcrumb `rook ‹ space` in the same slot —
+        // the tab bar owns identity, the calm bar never repeats it.
+        const scope = chromepkg.shortSpace(sn.label());
+        var scope_w: u16 = 0;
+        if (self.alt_on) {
+            out.appendSliceBounded(scope_ink) catch {};
+            out.appendSliceBounded(" rook ") catch {};
+            out.appendSliceBounded(bar) catch {};
+            out.appendSliceBounded("‹ ") catch {};
+            const sc = scope[0..@min(scope.len, 20)];
+            out.appendSliceBounded(sc) catch {};
             out.appendSliceBounded(" ") catch {};
-            out.appendSliceBounded(nm) catch {};
+            scope_w = 6 + 2 + chromepkg.cols(sc) + 1;
+        } else {
+            out.appendSliceBounded(scope_ink) catch {};
+            out.appendSliceBounded(" ") catch {};
+            const sc = scope[0..@min(scope.len, 20)];
+            out.appendSliceBounded(sc) catch {};
             out.appendSliceBounded(" ") catch {};
             out.appendSliceBounded(bar) catch {};
-            vis += chip;
+            out.appendSliceBounded(" ") catch {};
+            scope_w = chromepkg.cols(sc) + 3;
+        }
+        vis += scope_w;
 
-            if (mark != .none) {
+        var shown: usize = 0;
+        var hidden: usize = 0;
+        if (!self.alt_on) {
+            for (sn.windows.items, 0..) |win, i| {
+                var name_buf: [48]u8 = undefined;
+                const name = self.tabName(sn, win, &name_buf);
+                // The actor: the agent running in the window, named on
+                // the tab after the stable name — `deploy · claude ◐`.
+                // Identity, not type, and never in place of the name.
+                var actor_buf: [64]u8 = undefined;
+                const actor = self.windowActor(win, &actor_buf);
+                var mark: chromepkg.TabMark = .none;
+                const marked = self.windowAgentPane(win) orelse self.pane(win.focused);
+                if (marked) |p| {
+                    mark = chromepkg.tabMark(.{
+                        .current = i == sn.cur,
+                        .agent = p.is_agent,
+                        .last_output_ms = p.last_output_ms.load(.acquire),
+                        .seen_ms = win.seen_ms,
+                        .now = now,
+                        .signal = self.windowUnread(win),
+                    });
+                }
+                // The current window is being looked at, by definition.
+                if (i == sn.cur) win.seen_ms = now;
+
+                const nm = name[0..@min(name.len, 14)];
+                const ac: []const u8 = if (actor) |a| (if (std.mem.eql(u8, a, nm)) "" else a[0..@min(a.len, 10)]) else "";
+                var num_buf: [8]u8 = undefined;
+                const num = std.fmt.bufPrint(&num_buf, "{d}", .{i + 1}) catch "?";
+                const actor_w: u16 = if (ac.len > 0) chromepkg.cols(ac) + 3 else 0; // " · actor"
+                const chip: u16 = chromepkg.cols(nm) + 2 + actor_w; // " name · actor "
+                const mark_w: u16 = if (mark == .none) 0 else 2; // " ◐"
+                const gap: u16 = if (shown > 0) 3 else 0;
+                // No separator after the ordinal: the chip opens with its
+                // own padding cell, which is the gap — and on the selected
+                // tab that cell is the accent block starting.
+                const entry: u16 = gap + @as(u16, @intCast(num.len)) + chip + mark_w;
+                // Leave room for the overflow tail or the "+" that follows.
+                if (vis + entry + 4 > avail) {
+                    hidden = sn.windows.items.len - shown;
+                    break;
+                }
+
+                if (gap > 0) {
+                    out.appendSliceBounded("   ") catch {};
+                    vis += gap;
+                }
+                // The target is the entry itself — ordinal, chip, mark —
+                // and never the air before it. Recorded here, where the
+                // columns are being spent, so the hit test cannot drift
+                // from the row it is testing.
+                if (self.tab_zones_n < self.tab_zones.len) {
+                    self.tab_zones[self.tab_zones_n] = .{
+                        .x = vis,
+                        .w = entry - gap,
+                        .target = .{ .window = i },
+                    };
+                    self.tab_zones_n += 1;
+                }
+                out.appendSliceBounded(idx_ink) catch {};
+                out.appendSliceBounded(num) catch {};
+                vis += @as(u16, @intCast(num.len));
+
+                // One state per channel: the block says selected and only
+                // selected, so a tab can be selected and working at once
+                // and the bar has somewhere to put both.
+                out.appendSliceBounded(if (i == sn.cur) chip_on else bar) catch {};
                 out.appendSliceBounded(" ") catch {};
-                out.appendSliceBounded(if (mark == .working) work_ink else unread_ink) catch {};
-                out.appendSliceBounded(if (mark == .working) "◐" else "●") catch {};
+                out.appendSliceBounded(nm) catch {};
+                if (ac.len > 0) {
+                    out.appendSliceBounded(" · ") catch {};
+                    out.appendSliceBounded(ac) catch {};
+                }
+                out.appendSliceBounded(" ") catch {};
                 out.appendSliceBounded(bar) catch {};
-                vis += mark_w;
+                vis += chip;
+
+                if (mark != .none) {
+                    out.appendSliceBounded(" ") catch {};
+                    out.appendSliceBounded(if (mark == .working) work_ink else unread_ink) catch {};
+                    out.appendSliceBounded(if (mark == .working) "◐" else "●") catch {};
+                    out.appendSliceBounded(bar) catch {};
+                    vis += mark_w;
+                }
+                shown += 1;
             }
-            shown += 1;
         }
 
         // What did not fit is said out loud. A bar that silently
         // stopped listing windows is a bar that lies about how many
         // there are.
-        const hidden = sn.windows.items.len - shown;
         if (hidden > 0) {
             var more_buf: [24]u8 = undefined;
             if (std.fmt.bufPrint(&more_buf, "  ⋯ {d} more", .{hidden})) |m| {
@@ -3293,7 +3578,7 @@ pub const Server = struct {
                     vis += w;
                 }
             } else |_| {}
-        } else if (vis + 4 <= avail) {
+        } else if (!self.alt_on and vis + 4 <= avail) {
             // The trailing "+": a new window, one click, the same verb
             // as prefix-c. Its target is the glyph and the air around
             // it, because a one-column target is not one a hand hits.
@@ -3308,8 +3593,12 @@ pub const Server = struct {
         // The corner. ⌥n is the standing hint — the one affordance the
         // bar owes a reader who has not found the key yet — and copy
         // mode and zoom take the slot while they last, because they
-        // are about the whole screen rather than about a tab.
-        const corner: []const u8 = if (self.scrolling)
+        // are about the whole screen rather than about a tab. At
+        // altitude the corner counts the world: working, and unread.
+        var corner_buf: [48]u8 = undefined;
+        const corner: []const u8 = if (self.alt_on)
+            self.altSummary(&corner_buf)
+        else if (self.scrolling)
             (if (self.selecting) "copy·VISUAL" else "copy·hjkl y q")
         else if (self.window().zoomed)
             "zoom"
@@ -3325,6 +3614,1055 @@ pub const Server = struct {
         while (vis < avail) : (vis += 1) out.appendSliceBounded(" ") catch {};
         out.appendSliceBounded("\x1b[0m") catch {};
         return out.items;
+    }
+
+    // ---- tab names: minted, then frozen ----
+
+    /// Is this the shell, at its prompt? The configured shell's own
+    /// name, and the usual suspects.
+    fn isShellName(self: *Server, name: []const u8) bool {
+        if (std.mem.eql(u8, name, std.fs.path.basename(self.shell))) return true;
+        const shells = [_][]const u8{ "sh", "bash", "zsh", "fish", "nu", "dash", "ksh", "tcsh", "login", "shell" };
+        for (shells) |sh| {
+            if (std.mem.eql(u8, name, sh)) return true;
+        }
+        return false;
+    }
+
+    /// The name a window's tab wears (resolution 6). Minted once — a
+    /// name a person gave, else the first program in the window that
+    /// was not the shell — and never changed by rook after that: a
+    /// tab that read `nvim` reads `nvim` after nvim has quit, and
+    /// `nvim · claude ◐` while an agent runs in it. Until it is
+    /// minted the tab reads the live program, which is the shell at
+    /// a prompt. `buf` backs that live name.
+    pub fn tabName(self: *Server, sn: *Session, w: *Window, buf: []u8) []const u8 {
+        if (w.named) return w.label();
+        var nb: [64]u8 = undefined;
+        const p = self.pane(w.focused);
+        const fg: []const u8 = if (p) |pp| (pp.fgName(&nb) orelse "shell") else "shell";
+        // A program names the tab once it has spoken: between fork
+        // and exec the pane's foreground is the engine itself, and a
+        // tab minted `engine` in that window would be wrong forever.
+        const spoken = if (p) |pp| pp.last_output_ms.load(.acquire) != 0 else false;
+        if (self.isShellName(fg) or !spoken or isEngineName(fg)) {
+            const n = @min(fg.len, buf.len);
+            @memcpy(buf[0..n], fg[0..n]);
+            return buf[0..n];
+        }
+        self.mintName(sn, w, fg);
+        return w.label();
+    }
+
+    /// Freeze `base` as the window's name, with an ordinal when a
+    /// sibling in the workspace already wears it: `shell`, `shell·2`.
+    fn mintName(self: *Server, sn: *Session, w: *Window, base: []const u8) void {
+        var nb: [48]u8 = undefined;
+        var name: []const u8 = base;
+        var ord: usize = 2;
+        while (self.nameTaken(sn, w, name) and ord < 100) : (ord += 1) {
+            name = std.fmt.bufPrint(&nb, "{s}·{d}", .{ base, ord }) catch base;
+        }
+        w.setName(name);
+        w.named = true;
+        self.state_dirty = true;
+        _ = self.touch();
+    }
+
+    fn nameTaken(self: *Server, sn: *Session, w: *Window, name: []const u8) bool {
+        _ = self;
+        for (sn.windows.items) |other| {
+            if (other == w or !other.named) continue;
+            if (std.mem.eql(u8, other.label(), name)) return true;
+        }
+        return false;
+    }
+
+    /// Mint names for windows off the glass too, on the same 2 s
+    /// cadence as the agents scan: a program that started in a
+    /// background window still names its tab, once.
+    fn mintNames(self: *Server) void {
+        for (self.sessions.items) |sn| {
+            for (sn.windows.items) |w| {
+                if (w.named) continue;
+                var nb: [48]u8 = undefined;
+                _ = self.tabName(sn, w, &nb);
+            }
+        }
+    }
+
+    /// `rook rename`, `:rename`: the one act that changes a minted
+    /// name. A person's word, so it is minted as given, ordinal and
+    /// all if they typed one.
+    fn renameWindow(self: *Server, name: []const u8) void {
+        const w = self.window();
+        w.setName(name);
+        w.named = true;
+        self.state_dirty = true;
+        _ = self.touch();
+        self.full = true;
+        self.pending = true;
+    }
+
+    /// The first pane in the window running an agent, by the cached
+    /// flag — the pane whose activity the tab reports.
+    fn windowAgentPane(self: *Server, w: *Window) ?*panepkg.Pane {
+        for (self.panes.items) |p| {
+            if (p.is_agent and w.layout.contains(p.id)) return p;
+        }
+        return null;
+    }
+
+    /// The actor in a window: the agent's program name, when one runs
+    /// there. Identity on the tab, never `[agent]`.
+    fn windowActor(self: *Server, w: *Window, buf: []u8) ?[]const u8 {
+        const p = self.windowAgentPane(w) orelse return null;
+        return p.fgName(buf);
+    }
+
+    // ---- the calm bar ----
+
+    /// The bottom row: who holds the focused surface's keyboard on
+    /// the left, the signals on the right, and nothing else — no
+    /// space name (the tab bar owns identity), no clock. It stays
+    /// visible because appearing and disappearing would resize every
+    /// hosted TUI. The row is earned by the ownership cell and the
+    /// pending-key feedback, which have nowhere else to live.
+    fn barRow(self: *Server, buf: []u8, cols: u16) []const u8 {
+        var out: std.ArrayList(u8) = .initBuffer(buf);
+        var vis: u16 = 0;
+        var bar_buf: [48]u8 = undefined;
+        const bar = sgr(&bar_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.overlay0 });
+        var you_buf: [48]u8 = undefined;
+        const you_ink = sgr(&you_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.text, .bold = true });
+        var prog_buf: [48]u8 = undefined;
+        const prog_ink = sgr(&prog_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.text });
+        var actor_buf: [48]u8 = undefined;
+        const actor_ink = sgr(&actor_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.yellow, .bold = true });
+        var warn_buf: [48]u8 = undefined;
+        const warn_ink = sgr(&warn_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.peach });
+        var ok_buf: [48]u8 = undefined;
+        const ok_ink = sgr(&ok_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.green });
+        var acc_buf: [48]u8 = undefined;
+        const acc_ink = sgr(&acc_buf, .{ .bg = chromepkg.mantle, .fg = self.conf.accent });
+        var work_buf: [48]u8 = undefined;
+        const work_ink = sgr(&work_buf, .{ .bg = chromepkg.mantle, .fg = chromepkg.yellow });
+
+        out.appendSliceBounded(bar) catch {};
+        out.appendSliceBounded(" ") catch {};
+        vis += 1;
+
+        // The left cell: the answer to "who is driving the focused
+        // surface", always present, quiet when it is you.
+        if (self.alt_on) {
+            out.appendSliceBounded(you_ink) catch {};
+            out.appendSliceBounded("rook") catch {};
+            vis += 4;
+            const what: []const u8 = if (self.alt.isCommand()) " · command" else if (self.alt.len > 0) " · find" else if (self.alt.figure() != null) " · orbit" else " · ledger";
+            out.appendSliceBounded(bar) catch {};
+            out.appendSliceBounded(what) catch {};
+            vis += chromepkg.cols(what);
+        } else if (self.popupPane()) |pp| {
+            var nb: [64]u8 = undefined;
+            const fg = pp.fgName(&nb) orelse "popup";
+            vis += self.barCell(&out, you_ink, "you", bar, " ▸ ", prog_ink, fg);
+        } else if (self.focusedPane()) |fp| {
+            var nb: [64]u8 = undefined;
+            const fg = fp.fgName(&nb) orelse "shell";
+            switch (fp.own) {
+                .human => vis += self.barCell(&out, you_ink, "you", bar, " ▸ ", prog_ink, fg),
+                .agent => {
+                    vis += self.barCell(&out, actor_ink, fp.ownerName(), bar, " ▸ ", work_ink, "owns input");
+                    out.appendSliceBounded(bar) catch {};
+                    out.appendSliceBounded(" · you observe") catch {};
+                    vis += 14;
+                },
+                .requested => {
+                    out.appendSliceBounded(warn_ink) catch {};
+                    out.appendSliceBounded("handoff requested") catch {};
+                    vis += 17;
+                    out.appendSliceBounded(bar) catch {};
+                    out.appendSliceBounded(" — ") catch {};
+                    vis += 3;
+                    out.appendSliceBounded(actor_ink) catch {};
+                    out.appendSliceBounded(fp.ownerName()) catch {};
+                    vis += chromepkg.cols(fp.ownerName());
+                    out.appendSliceBounded(bar) catch {};
+                    out.appendSliceBounded(" finishing its step…") catch {};
+                    vis += 20;
+                },
+                .yielded => {
+                    vis += self.barCell(&out, actor_ink, fp.ownerName(), bar, " ", ok_ink, "yielded");
+                    out.appendSliceBounded(bar) catch {};
+                    out.appendSliceBounded(" — ⏎ take") catch {};
+                    vis += 9;
+                },
+                .paused => {
+                    vis += self.barCell(&out, you_ink, "you", bar, " ▸ ", prog_ink, fg);
+                    out.appendSliceBounded(bar) catch {};
+                    out.appendSliceBounded(" · (") catch {};
+                    out.appendSliceBounded(fp.ownerName()) catch {};
+                    out.appendSliceBounded(" paused)") catch {};
+                    vis += 4 + chromepkg.cols(fp.ownerName()) + 8;
+                },
+            }
+        }
+
+        // Pending-key feedback: the prefix is armed on some glass,
+        // and the bar says so, with the keys a hand may be reaching
+        // for. This is the one place that feedback can live.
+        var armed = false;
+        for (self.clients.items) |c| {
+            if (c.attached and c.prefix) armed = true;
+        }
+        if (armed) {
+            const hint = "   prefix ·  c new  v - split  z zoom  o altitude  s spaces  u unread  i inspect";
+            const hw = chromepkg.cols(hint);
+            if (vis + hw + 12 <= cols) {
+                out.appendSliceBounded(acc_ink) catch {};
+                out.appendSliceBounded(hint) catch {};
+                vis += hw;
+            } else if (vis + 12 <= cols) {
+                out.appendSliceBounded(acc_ink) catch {};
+                out.appendSliceBounded("   prefix…") catch {};
+                vis += 10;
+            }
+        }
+
+        // The right region: signals, and genuinely empty when nothing
+        // signals. Working ◐, unread ●, global pins ⊕g — a count each,
+        // only the nonzero ones.
+        var right_buf: [96]u8 = undefined;
+        var right: std.ArrayList(u8) = .initBuffer(&right_buf);
+        var right_w: u16 = 0;
+        const working = self.countWorking();
+        const unread = self.countUnread();
+        const gpins = self.global_pins.items.len;
+        var nb2: [16]u8 = undefined;
+        if (working > 0) {
+            right.appendSliceBounded(work_ink) catch {};
+            right.appendSliceBounded("◐ ") catch {};
+            const n = std.fmt.bufPrint(&nb2, "{d}", .{working}) catch "?";
+            right.appendSliceBounded(n) catch {};
+            right_w += 2 + @as(u16, @intCast(n.len));
+        }
+        if (unread > 0) {
+            if (right_w > 0) {
+                right.appendSliceBounded(bar) catch {};
+                right.appendSliceBounded(" · ") catch {};
+                right_w += 3;
+            }
+            right.appendSliceBounded(acc_ink) catch {};
+            right.appendSliceBounded("● ") catch {};
+            const n = std.fmt.bufPrint(&nb2, "{d}", .{unread}) catch "?";
+            right.appendSliceBounded(n) catch {};
+            right_w += 2 + @as(u16, @intCast(n.len));
+        }
+        if (gpins > 0) {
+            if (right_w > 0) {
+                right.appendSliceBounded(bar) catch {};
+                right.appendSliceBounded(" · ") catch {};
+                right_w += 3;
+            }
+            right.appendSliceBounded(bar) catch {};
+            right.appendSliceBounded("⊕g ") catch {};
+            const n = std.fmt.bufPrint(&nb2, "{d}", .{gpins}) catch "?";
+            right.appendSliceBounded(n) catch {};
+            right_w += 3 + @as(u16, @intCast(n.len));
+        }
+        if (right_w > 0 and vis + right_w + 2 <= cols) {
+            out.appendSliceBounded(bar) catch {};
+            while (vis < cols - right_w - 1) : (vis += 1) out.appendSliceBounded(" ") catch {};
+            out.appendSliceBounded(right.items) catch {};
+            vis += right_w;
+        }
+        out.appendSliceBounded(bar) catch {};
+        while (vis < cols) : (vis += 1) out.appendSliceBounded(" ") catch {};
+        out.appendSliceBounded("\x1b[0m") catch {};
+        return out.items;
+    }
+
+    /// `who ▸ what` in two inks; returns the columns spent.
+    fn barCell(self: *Server, out: *std.ArrayList(u8), who_ink: []const u8, who: []const u8, sep_ink: []const u8, sep: []const u8, what_ink: []const u8, what: []const u8) u16 {
+        _ = self;
+        out.appendSliceBounded(who_ink) catch {};
+        out.appendSliceBounded(who) catch {};
+        out.appendSliceBounded(sep_ink) catch {};
+        out.appendSliceBounded(sep) catch {};
+        out.appendSliceBounded(what_ink) catch {};
+        out.appendSliceBounded(what) catch {};
+        return chromepkg.cols(who) + chromepkg.cols(sep) + chromepkg.cols(what);
+    }
+
+    /// Agent panes that produced output in the last `working_ms`,
+    /// anywhere — the ◐ count.
+    fn countWorking(self: *Server) usize {
+        const now = panepkg.epochMs();
+        var n: usize = 0;
+        for (self.panes.items) |p| {
+            if (!p.is_agent) continue;
+            const last = p.last_output_ms.load(.acquire);
+            if (last != 0 and now - last < chromepkg.working_ms) n += 1;
+        }
+        return n;
+    }
+
+    /// Panes on the unread channel, anywhere — the ● count.
+    fn countUnread(self: *Server) usize {
+        var n: usize = 0;
+        for (self.panes.items) |p| {
+            if (p.unread_ms != 0 and self.popup != p.id) n += 1;
+        }
+        return n;
+    }
+
+    // ---- ownership: the gate and the inspector ----
+
+    /// `rook own`: [id u32][op u8][actor…]. 'c' claims the pane for
+    /// the actor (it owns input), 'p' attaches the actor paused, 'r'
+    /// releases — into handoff-pending when the person had asked,
+    /// else straight back to the person — 'h' requests a handoff and
+    /// 't' takes the keyboard now. The last two are the gate's own
+    /// moves, on the wire so a script can drive the same protocol.
+    fn ownCmd(self: *Server, c: *Client, payload: []const u8) void {
+        if (payload.len < 5) return;
+        const id = std.mem.readInt(u32, payload[0..4], .little);
+        const op = payload[4];
+        const actor = payload[5..];
+        const p = self.pane(id) orelse {
+            self.sendTo(c, @intFromEnum(proto.s2c.exit), "no such pane");
+            return;
+        };
+        switch (op) {
+            'c' => p.setOwner(actor, .agent),
+            'p' => p.setOwner(actor, .paused),
+            'r' => self.releasePane(p),
+            'h' => if (p.own == .agent) {
+                p.own = .requested;
+            },
+            't' => self.takePane(p),
+            else => {
+                self.sendTo(c, @intFromEnum(proto.s2c.exit), "unknown own op");
+                return;
+            },
+        }
+        if (!p.keysGated()) self.gate = false;
+        _ = self.touch();
+        self.ack(c);
+        self.full = true;
+        self.pending = true;
+    }
+
+    fn releasePane(self: *Server, p: *panepkg.Pane) void {
+        _ = self;
+        if (p.own == .requested) {
+            p.own = .yielded;
+        } else {
+            p.takeOwnership();
+        }
+    }
+
+    fn takePane(self: *Server, p: *panepkg.Pane) void {
+        p.takeOwnership();
+        self.gate = false;
+        self.gate_pass = false;
+    }
+
+    /// The gate's keys: ⏎ request a handoff (or take, once the actor
+    /// has yielded), T take now, s send the next keystrokes to the
+    /// actor as a message, Esc leave it alone. Anything else is not
+    /// a move and does nothing — typed keys are never reinterpreted.
+    fn gateKey(self: *Server, key: u8) void {
+        const p = self.focusedPane() orelse {
+            self.gate = false;
+            return;
+        };
+        switch (key) {
+            '\r', '\n' => switch (p.own) {
+                .agent => {
+                    p.own = .requested;
+                    _ = self.touch();
+                },
+                .yielded => {
+                    self.takePane(p);
+                    _ = self.touch();
+                },
+                else => {},
+            },
+            'T', 't' => {
+                self.takePane(p);
+                _ = self.touch();
+            },
+            's', 'S' => {
+                self.gate = false;
+                self.gate_pass = true;
+            },
+            0x1b, 'q' => self.gate = false,
+            else => {},
+        }
+        self.full = true;
+        self.pending = true;
+    }
+
+    /// The gate, one row above the calm bar, over the pane: the
+    /// three legal moves, named.
+    fn gateRow(self: *Server) void {
+        const p = self.focusedPane() orelse return;
+        const g = self.geometry();
+        const y = self.bodyRows() -| 1;
+        const f = &self.over;
+        f.cup(0, y);
+        f.put("\x1b[0m");
+        f.print("\x1b[48;2;{d};{d};{d}m", .{ chromepkg.surface0.r, chromepkg.surface0.g, chromepkg.surface0.b });
+        var i: u16 = 0;
+        while (i < g.cols) : (i += 1) f.put(" ");
+        f.cup(1, y);
+        f.print("\x1b[38;2;{d};{d};{d}m", .{ chromepkg.peach.r, chromepkg.peach.g, chromepkg.peach.b });
+        f.put("» ");
+        f.print("\x1b[1;38;2;{d};{d};{d}m", .{ chromepkg.yellow.r, chromepkg.yellow.g, chromepkg.yellow.b });
+        f.put(p.ownerName());
+        f.print("\x1b[22;38;2;{d};{d};{d}m", .{ chromepkg.text.r, chromepkg.text.g, chromepkg.text.b });
+        switch (p.own) {
+            .yielded => f.put(" yielded — [enter] take · [esc] leave it"),
+            .requested => f.put(" owns input — handoff requested, finishing its step… · [T] take now · [s] send as message · [esc]"),
+            else => f.put(" owns input — [enter] request handoff · [T] take now · [s] send as message · [esc]"),
+        }
+        f.put("\x1b[0m");
+    }
+
+    /// prefix-i: what rook knows about the focused pane, in a box —
+    /// the actor and its authority over input, the program, since
+    /// when, where, and how it comes back. Provider detail would
+    /// live here too, if rook knew any; it does not, and says so.
+    fn inspectorSheet(self: *Server) void {
+        const p = self.focusedPane() orelse return;
+        const g = self.geometry();
+        const body = self.bodyRows();
+        const w: u16 = @min(g.cols -| 4, 72);
+        const h: u16 = 10;
+        if (g.cols < 30 or body < h + 2) return;
+        const r: layoutpkg.Rect = .{ .x = (g.cols -| w) / 2, .y = 1 + (body -| 1 -| h) / 2, .w = w, .h = h };
+        const f = &self.over;
+        // clear the box
+        f.put("\x1b[0m");
+        var y: u16 = r.y;
+        while (y < r.y + r.h) : (y += 1) {
+            f.cup(r.x, y);
+            var i: u16 = 0;
+            while (i < r.w) : (i += 1) f.put(" ");
+        }
+        f.drawBoxIn(r, self.conf.accent);
+        f.cup(r.x + 1, r.y);
+        f.putFg(self.conf.accent);
+        f.put("┤ ");
+        f.putFg(chromepkg.text);
+        f.put("\x1b[1minspector · ");
+        f.put(if (p.owner_len > 0) p.ownerName() else "you");
+        f.put("\x1b[22m");
+        f.putFg(self.conf.accent);
+        f.put(" ├");
+
+        var nb: [64]u8 = undefined;
+        var cb: [1024]u8 = undefined;
+        var tb: [256]u8 = undefined;
+        var ab: [16]u8 = undefined;
+        var line: [256]u8 = undefined;
+        const fg = p.fgName(&nb) orelse "shell";
+        const rows = [_]struct { k: []const u8, v: []const u8 }{
+            .{ .k = "actor", .v = if (p.owner_len > 0) p.ownerName() else "you — nobody claims this pane" },
+            .{ .k = "program", .v = std.fmt.bufPrint(&line, "{s} · pane {d}", .{ fg, p.id }) catch fg },
+            .{ .k = "input", .v = switch (p.own) {
+                .human => "you ▸ your keys flow to the pane",
+                .agent => "agent owns — typing opens the gate",
+                .requested => "agent owns — handoff requested…",
+                .yielded => "agent yielded — ⏎ takes",
+                .paused => "you ▸ agent attached, paused",
+            } },
+            .{ .k = "since", .v = if (p.own_since_ms != 0) altpkg.age(&ab, panepkg.epochMs() - p.own_since_ms) else "—" },
+            .{ .k = "cwd", .v = p.fgCwd(&cb) orelse "" },
+            .{ .k = "title", .v = p.title(&tb) },
+            .{ .k = "resume", .v = if (p.resumeLive().len > 0) p.resumeLive() else "— (rook resume . <cmd>)" },
+            .{ .k = "provider", .v = "not rook's to know — a producer's word, on the rail" },
+        };
+        for (rows, 0..) |row, i| {
+            const ry = r.y + 1 + @as(u16, @intCast(i));
+            if (ry >= r.y + r.h - 1) break;
+            f.cup(r.x + 2, ry);
+            f.putFg(chromepkg.overlay0);
+            f.put(row.k);
+            f.cup(r.x + 12, ry);
+            f.putFg(chromepkg.text);
+            var n: u16 = 0;
+            var bi: usize = 0;
+            const vw = r.w -| 14;
+            while (bi < row.v.len and n < vw) {
+                const len = std.unicode.utf8ByteSequenceLength(row.v[bi]) catch 1;
+                const e = @min(bi + len, row.v.len);
+                f.put(row.v[bi..e]);
+                bi = e;
+                n += 1;
+            }
+        }
+        f.put("\x1b[0m");
+    }
+
+    // ---- altitude ----
+
+    /// prefix-o: up, or back down. Going up moves nothing — the panes
+    /// keep their geometry and keep running — so coming back is the
+    /// exact frame you left.
+    fn altToggle(self: *Server) void {
+        if (self.alt_on) {
+            self.altLeave();
+            return;
+        }
+        if (self.popup != null) return;
+        self.alt_on = true;
+        self.alt.clear();
+        self.alt.ledger = self.conf.zoom_ledger;
+        self.scrolling = false;
+        self.selecting = false;
+        self.gate = false;
+        self.inspect = false;
+        _ = self.touch();
+        self.full = true;
+        self.pending = true;
+    }
+
+    fn altLeave(self: *Server) void {
+        if (!self.alt_on) return;
+        self.alt_on = false;
+        self.alt.clear();
+        _ = self.touch();
+        self.full = true;
+        self.pending = true;
+    }
+
+    /// The region the view paints: everything right of the global
+    /// pin dock (which does not move), under the tab bar, above the
+    /// calm bar. Workspace-local pins are inside it — they belong to
+    /// the space and contract with it.
+    fn altRegion(self: *Server) layoutpkg.Rect {
+        const g = self.geometry();
+        const body = self.bodyRows();
+        const base_x: u16 = if (self.side_w) |sw| sw + 1 else 0;
+        const x0: u16 = if (self.global_pins.items.len > 0 and self.dock_x != null) self.dock_x.? + 1 else base_x;
+        return .{ .x = x0, .y = 1, .w = g.cols -| x0, .h = body -| 1 };
+    }
+
+    /// The corner at altitude: the world in two counts.
+    fn altSummary(self: *Server, buf: []u8) []const u8 {
+        const working = self.countWorking();
+        const unread = self.countUnread();
+        if (working == 0 and unread == 0) return "all quiet";
+        if (unread == 0) return std.fmt.bufPrint(buf, "{d} working", .{working}) catch "";
+        if (working == 0) return std.fmt.bufPrint(buf, "{d} unread", .{unread}) catch "";
+        return std.fmt.bufPrint(buf, "{d} working · {d} unread", .{ working, unread }) catch "";
+    }
+
+    /// The companion's name, when she is open in a pane rook can see:
+    /// the ✦ row exists only then, because that is the only door.
+    fn companionOpenName(self: *Server, buf: []u8) []const u8 {
+        if (self.companionPane() == null) return "";
+        const n = self.conf.companionSlice();
+        const len = @min(n.len, buf.len);
+        @memcpy(buf[0..len], n[0..len]);
+        return buf[0..len];
+    }
+
+    fn companionPane(self: *Server) ?u32 {
+        for (self.comp.slice()) |seen| {
+            if (self.pane(seen.pane) != null) return seen.pane;
+        }
+        return null;
+    }
+
+    /// Keys at altitude. Returns the bytes spent, so a run of
+    /// keystrokes is walked one key at a time and an escape sequence
+    /// is taken whole.
+    fn altKey(self: *Server, bytes: []const u8) usize {
+        const st = &self.alt;
+        defer {
+            self.full = true;
+            self.pending = true;
+        }
+        const b = bytes[0];
+        if (b == 0x1b) {
+            if (bytes.len >= 3 and (bytes[1] == '[' or bytes[1] == 'O')) {
+                // CSI: take through the final byte
+                var i: usize = 2;
+                while (i < bytes.len and !(bytes[i] >= 0x40 and bytes[i] <= 0x7e)) i += 1;
+                const fin: u8 = if (i < bytes.len) bytes[i] else 0;
+                switch (fin) {
+                    'A' => st.move(-1),
+                    'B' => st.move(1),
+                    else => {},
+                }
+                return @min(i + 1, bytes.len);
+            }
+            // a lone Esc: clear what was typed, then leave
+            if (st.len > 0) st.clear() else self.altLeave();
+            return 1;
+        }
+        switch (b) {
+            '\r', '\n' => self.altAct(),
+            0x7f, 0x08 => st.pop(),
+            '\t' => {
+                if (st.moveTo(.ask)) st.ask_armed = true;
+            },
+            0x0e => st.move(1), // C-n
+            0x10 => st.move(-1), // C-p
+            0x15 => st.clear(), // C-u
+            0x03 => self.altLeave(), // C-c
+            else => {
+                if (b < 0x20) return 1;
+                // with nothing typed, the vim keys move; once typing
+                // has begun every printable key is text
+                if (st.len == 0) {
+                    switch (b) {
+                        'j' => {
+                            st.move(1);
+                            return 1;
+                        },
+                        'k' => {
+                            st.move(-1);
+                            return 1;
+                        },
+                        'g' => {
+                            st.cur = 0;
+                            st.clampCursor();
+                            return 1;
+                        },
+                        'G' => {
+                            st.cur = st.rows.items.len -| 1;
+                            st.clampCursor();
+                            return 1;
+                        },
+                        'q' => {
+                            self.altLeave();
+                            return 1;
+                        },
+                        else => {},
+                    }
+                }
+                const len = std.unicode.utf8ByteSequenceLength(b) catch 1;
+                const end = @min(len, bytes.len);
+                for (bytes[0..end]) |ch| st.push(ch);
+                // typing rebuilds the rows; the cursor starts at the
+                // top of the results, and never on the ✦ row
+                st.cur = 0;
+                st.ask_armed = false;
+                return end;
+            },
+        }
+        return 1;
+    }
+
+    /// ↵ at altitude: act on the selected row, and only on it.
+    fn altAct(self: *Server) void {
+        const st = &self.alt;
+        // The rows are rebuilt first: keys can arrive in one batch
+        // with no frame between them, and ↵ must act on what the
+        // typed text means now, not on the rows the last frame drew.
+        self.altBuild();
+        const row = st.selected() orelse return;
+        switch (row.kind) {
+            .attention, .pane => {
+                self.altLeave();
+                self.focusPane(row.pane);
+            },
+            .space => {
+                self.altLeave();
+                self.switchSession(row.ws);
+            },
+            .window => {
+                self.altLeave();
+                self.switchSession(row.ws);
+                if (row.win < self.sess().windows.items.len) self.selectWindow(row.win);
+            },
+            .pin => {
+                self.altLeave();
+                if (self.pane(row.pane) != null) self.setFocus(row.pane);
+            },
+            .ask => {
+                // The one door to interpretation: the typed text goes
+                // to the companion's pane as if typed there, Enter
+                // included, and the person goes to see the answer.
+                const id = self.companionPane() orelse return;
+                const p = self.pane(id) orelse return;
+                var text_buf: [130]u8 = undefined;
+                const n = @min(st.len, text_buf.len - 2);
+                @memcpy(text_buf[0..n], st.text[0..n]);
+                text_buf[n] = '\r';
+                p.scrollBottom();
+                p.write(text_buf[0 .. n + 1]);
+                self.altLeave();
+                self.focusPane(id);
+            },
+            .command => self.altCommand(row.cmd, row.arg),
+            .note => {},
+        }
+        _ = self.touch();
+        self.full = true;
+        self.pending = true;
+    }
+
+    fn altCommand(self: *Server, cmd: altpkg.Command, arg: []const u8) void {
+        switch (cmd) {
+            .go => if (self.sessionNamed(arg)) |i| {
+                self.altLeave();
+                self.switchSession(i);
+            },
+            .new => if (arg.len > 0) {
+                self.altLeave();
+                _ = self.newSession(arg, null, true) catch {};
+            },
+            .rename => if (arg.len > 0) {
+                self.renameWindow(arg);
+                self.alt.clear();
+            },
+            .close => if (arg.len > 0) {
+                self.closeSession(arg);
+                self.alt.clear();
+            },
+            .ledger => {
+                self.alt.ledger = true;
+                self.conf.zoom_ledger = true;
+                self.alt.clear();
+            },
+            .orbit => {
+                self.alt.ledger = false;
+                self.conf.zoom_ledger = false;
+                self.alt.clear();
+            },
+            .none => {},
+        }
+    }
+
+    /// Build the rows from rook's own tables — nothing here is
+    /// inferred, every line is a fact rook holds: a space's name,
+    /// the programs in its tabs, who is unread, what a program said
+    /// in its notification, how long since anything was written, and
+    /// the words a producer already spent on the space.
+    fn altBuild(self: *Server) void {
+        const st = &self.alt;
+        st.rows.clearRetainingCapacity();
+        st.cells_n = 0;
+        st.figure_title_len = 0;
+        st.figure_rect = null;
+        var fba = std.heap.FixedBufferAllocator.init(&st.buf);
+        const a = fba.allocator();
+        const accent = self.conf.accent;
+        const text = st.textSlice();
+
+        if (st.isCommand()) {
+            self.altCommandRows(a);
+            st.clampCursor();
+            return;
+        }
+        const finding = text.len > 0;
+
+        // Attention: the unread channel, oldest first.
+        var attn: [64]*panepkg.Pane = undefined;
+        var an: usize = 0;
+        for (self.panes.items) |p| {
+            if (p.unread_ms == 0 or self.popup == p.id) continue;
+            if (an == attn.len) break;
+            // insertion by unread_ms
+            var i = an;
+            while (i > 0 and attn[i - 1].unread_ms > p.unread_ms) : (i -= 1) attn[i] = attn[i - 1];
+            attn[i] = p;
+            an += 1;
+        }
+        for (attn[0..an]) |p| {
+            const at = self.placeOf(p.id) orelse continue;
+            var tab: []const u8 = "";
+            if (at.window) |wi| {
+                if (self.sessionNamed(at.workspace)) |si| {
+                    const sn = self.sessions.items[si];
+                    if (wi - 1 < sn.windows.items.len) {
+                        var nb: [48]u8 = undefined;
+                        tab = a.dupe(u8, self.tabName(sn, sn.windows.items[wi - 1], &nb)) catch "";
+                    }
+                }
+            } else if (std.mem.eql(u8, at.place, "pin")) {
+                tab = "pin";
+            }
+            var nb: [64]u8 = undefined;
+            const prog = p.fgName(&nb) orelse "shell";
+            // the program, unless the tab already says it
+            const name = if (std.mem.eql(u8, prog, tab))
+                std.fmt.allocPrint(a, "{s} › {s}", .{ chromepkg.shortSpace(at.workspace), tab }) catch continue
+            else
+                std.fmt.allocPrint(a, "{s} › {s} · {s}", .{ chromepkg.shortSpace(at.workspace), tab, prog }) catch continue;
+            const said: []const u8 = if (p.notif_ms != 0 and p.notif_ms >= p.unread_ms and p.notif_title_len > 0)
+                a.dupe(u8, p.notif_title[0..p.notif_title_len]) catch ""
+            else if (p.bell_ms != 0 and p.bell_ms >= p.unread_ms)
+                "rang the bell"
+            else if (p.progress_done_ms != 0 and p.progress_done_ms >= p.unread_ms)
+                "finished its progress bar"
+            else
+                "signalled";
+            var ab: [16]u8 = undefined;
+            const line = std.fmt.allocPrint(a, "{s} · {s} ago", .{ said, altpkg.age(&ab, panepkg.epochMs() - p.unread_ms) }) catch said;
+            var row: altpkg.Row = .{ .kind = .attention, .glyph = "●", .ink = accent, .name = name, .line = line, .hint = "↵ go", .pane = p.id };
+            if (finding) {
+                row.score = altpkg.fuzzy(name, text) orelse (altpkg.fuzzy(line, text) orelse continue) + 20;
+            }
+            st.rows.append(self.gpa, row) catch {};
+        }
+
+        // Spaces: the current one first, then the rest in order. Each
+        // a two-line entry — identity and event line, then its tabs.
+        const n_sess = self.sessions.items.len;
+        var order_i: usize = 0;
+        while (order_i < n_sess) : (order_i += 1) {
+            const si = if (order_i == 0) self.cur_sess else if (order_i <= self.cur_sess) order_i - 1 else order_i;
+            const sn = self.sessions.items[si];
+            const cur = si == self.cur_sess;
+            const label = chromepkg.shortSpace(sn.label());
+            const line = self.spaceEventLine(a, sn);
+            const tabs = self.spaceTabRow(a, sn);
+            if (!finding) {
+                st.rows.append(self.gpa, .{
+                    .kind = .space,
+                    .glyph = if (cur) "▸" else " ",
+                    .ink = accent,
+                    .name = label,
+                    .line = line,
+                    .second = tabs,
+                    .hint = if (cur) "↵ back in" else "↵ enter",
+                    .ws = si,
+                }) catch {};
+                continue;
+            }
+            // Finding: spaces, tabs and panes as one-line rows, ranked.
+            if (altpkg.fuzzy(label, text)) |sc| {
+                st.rows.append(self.gpa, .{ .kind = .space, .glyph = if (cur) "▸" else " ", .ink = accent, .name = label, .line = line, .hint = "↵ enter", .ws = si, .score = sc }) catch {};
+            }
+            for (sn.windows.items, 0..) |w, wi| {
+                var nb: [48]u8 = undefined;
+                const tab = self.tabName(sn, w, &nb);
+                const wname = std.fmt.allocPrint(a, "{s} › {s}", .{ label, tab }) catch continue;
+                var ab2: [64]u8 = undefined;
+                const actor = self.windowActor(w, &ab2);
+                const wline: []const u8 = if (actor) |ac| (std.fmt.allocPrint(a, "{s} runs here", .{ac}) catch "") else "";
+                if (altpkg.fuzzy(wname, text)) |sc| {
+                    st.rows.append(self.gpa, .{ .kind = .window, .glyph = " ", .name = wname, .line = wline, .hint = "↵ go", .ws = si, .win = wi, .score = sc + 2 }) catch {};
+                }
+                for (self.panes.items) |p| {
+                    if (!w.layout.contains(p.id)) continue;
+                    var pb: [64]u8 = undefined;
+                    const prog = p.fgName(&pb) orelse "shell";
+                    var tb: [256]u8 = undefined;
+                    const title = p.title(&tb);
+                    const pname = std.fmt.allocPrint(a, "{s} › {s} › {s}", .{ label, tab, prog }) catch continue;
+                    const pline = a.dupe(u8, title) catch "";
+                    const sc = altpkg.fuzzy(pname, text) orelse (if (altpkg.fuzzy(pline, text)) |s2| s2 + 30 else null) orelse continue;
+                    st.rows.append(self.gpa, .{ .kind = .pane, .glyph = " ", .name = pname, .line = pline, .hint = "↵ focus", .pane = p.id, .score = sc + 4 }) catch {};
+                }
+            }
+        }
+
+        // Global pins: live at every altitude, listed as reference
+        // rows so the keyboard can reach the dock.
+        if (self.global_pins.items.len > 0 and !finding) {
+            st.rows.append(self.gpa, .{ .kind = .note, .name = "PINS" }) catch {};
+        }
+        for (self.global_pins.items) |id| {
+            const p = self.pane(id) orelse continue;
+            var pb: [64]u8 = undefined;
+            const prog = p.fgName(&pb) orelse "shell";
+            var cb: [1024]u8 = undefined;
+            const cwd: []const u8 = p.fgCwd(&cb) orelse "";
+            const name = std.fmt.allocPrint(a, "{s}", .{prog}) catch continue;
+            const line = std.fmt.allocPrint(a, "{s}", .{std.fs.path.basename(cwd)}) catch "";
+            var row: altpkg.Row = .{ .kind = .pin, .glyph = "⊕g", .ink = chromepkg.overlay0, .name = name, .line = line, .hint = "↵ focus", .pane = id };
+            if (finding) row.score = (altpkg.fuzzy(name, text) orelse continue) + 6;
+            st.rows.append(self.gpa, row) catch {};
+        }
+
+        if (finding) {
+            // rank: the tighter match first, kinds as a tiebreak
+            std.mem.sort(altpkg.Row, st.rows.items, {}, struct {
+                fn lt(_: void, x: altpkg.Row, y: altpkg.Row) bool {
+                    return x.score < y.score;
+                }
+            }.lt);
+            // The ✦ row: always last, never auto-selected, the only
+            // door to interpretation. Only while she is open.
+            if (self.companionPane() != null) {
+                if (st.rows.items.len > 0) st.rows.append(self.gpa, .{ .kind = .note, .name = "·········" }) catch {};
+                const cname = self.conf.companionSlice();
+                const name = std.fmt.allocPrint(a, "{s}: \"{s}\"", .{ cname, text }) catch cname;
+                st.rows.append(self.gpa, .{ .kind = .ask, .glyph = "✦", .ink = accent, .name = name, .line = "hand this to her, as typed", .hint = "⇥ ask" }) catch {};
+            }
+            if (st.rows.items.len == 0) {
+                st.rows.append(self.gpa, .{ .kind = .note, .name = "nothing matches" }) catch {};
+            }
+        } else {
+            self.altFigure();
+        }
+        st.clampCursor();
+    }
+
+    /// The `:` rows: every command the typed word could become, with
+    /// the argument as typed; for the commands that take a space, one
+    /// row per space that matches the argument so far.
+    fn altCommandRows(self: *Server, a: std.mem.Allocator) void {
+        const st = &self.alt;
+        const text = st.textSlice();
+        var specs: [16]altpkg.CommandSpec = undefined;
+        const parsed = altpkg.parseCommand(text);
+        const comps = altpkg.completions(text, &specs);
+        var any = false;
+        for (comps) |c| {
+            const arg: []const u8 = if (parsed) |pc| (if (pc.spec.cmd == c.cmd) pc.arg else "") else "";
+            const takes_space = c.cmd == .go or c.cmd == .close;
+            if (takes_space) {
+                for (self.sessions.items) |sn| {
+                    if (arg.len > 0 and altpkg.fuzzy(sn.label(), arg) == null) continue;
+                    const name = std.fmt.allocPrint(a, ":{s} {s}", .{ c.word, sn.label() }) catch continue;
+                    const argd = a.dupe(u8, sn.label()) catch continue;
+                    st.rows.append(self.gpa, .{ .kind = .command, .glyph = ":", .ink = self.conf.accent, .name = name, .line = c.help, .hint = "↵ run", .cmd = c.cmd, .arg = argd }) catch {};
+                    any = true;
+                }
+                continue;
+            }
+            const shown_arg: []const u8 = if (arg.len > 0) arg else c.arg;
+            const name = std.fmt.allocPrint(a, ":{s} {s}", .{ c.word, shown_arg }) catch continue;
+            const argd = a.dupe(u8, arg) catch "";
+            st.rows.append(self.gpa, .{ .kind = .command, .glyph = ":", .ink = self.conf.accent, .name = name, .line = c.help, .hint = if (arg.len > 0 or c.arg.len == 0) "↵ run" else "type its argument", .cmd = c.cmd, .arg = argd }) catch {};
+            any = true;
+        }
+        if (!any) st.rows.append(self.gpa, .{ .kind = .note, .name = "no such command" }) catch {};
+    }
+
+    /// The event line: facts only, and only ones rook can vouch for.
+    fn spaceEventLine(self: *Server, a: std.mem.Allocator, sn: *Session) []const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        const now = panepkg.epochMs();
+        // the words a producer already spent on this space
+        const claims = if (self.side.agents.panel) |pnl| pnl.items else &.{};
+        if (chromepkg.claimTitle(claims, sn.label())) |t| {
+            out.appendSlice(a, t) catch {};
+        }
+        // what a program said, when nobody has read it yet
+        var latest: ?*panepkg.Pane = null;
+        var unread: usize = 0;
+        var working: ?*panepkg.Pane = null;
+        var last_out: i64 = 0;
+        for (self.panes.items) |p| {
+            if (!self.paneIn(sn, p.id)) continue;
+            if (p.unread_ms != 0) {
+                unread += 1;
+                if (p.notif_ms != 0 and p.notif_title_len > 0 and (latest == null or p.notif_ms > latest.?.notif_ms)) latest = p;
+            }
+            const lo = p.last_output_ms.load(.acquire);
+            if (lo > last_out) last_out = lo;
+            if (p.is_agent and lo != 0 and now - lo < chromepkg.working_ms and working == null) working = p;
+        }
+        if (latest) |p| {
+            if (out.items.len > 0) out.appendSlice(a, " · ") catch {};
+            out.appendSlice(a, p.notif_title[0..p.notif_title_len]) catch {};
+        }
+        if (working) |p| {
+            if (out.items.len > 0) out.appendSlice(a, " · ") catch {};
+            var nb: [64]u8 = undefined;
+            out.appendSlice(a, p.fgName(&nb) orelse "agent") catch {};
+            out.appendSlice(a, " ◐ working") catch {};
+        }
+        if (unread > 0) {
+            if (out.items.len > 0) out.appendSlice(a, " · ") catch {};
+            out.print(a, "● {d} unread", .{unread}) catch {};
+        }
+        if (out.items.len == 0) {
+            var ab: [16]u8 = undefined;
+            if (last_out == 0) {
+                out.appendSlice(a, "quiet") catch {};
+            } else {
+                out.print(a, "quiet · {s}", .{altpkg.age(&ab, now - last_out)}) catch {};
+            }
+        }
+        return out.items;
+    }
+
+    /// The tab row under a space: `deploy › claude ◐ · logs`.
+    fn spaceTabRow(self: *Server, a: std.mem.Allocator, sn: *Session) []const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        const now = panepkg.epochMs();
+        for (sn.windows.items, 0..) |w, wi| {
+            if (wi > 0) out.appendSlice(a, " · ") catch {};
+            var nb: [48]u8 = undefined;
+            const name = self.tabName(sn, w, &nb);
+            out.appendSlice(a, name) catch {};
+            var ab: [64]u8 = undefined;
+            if (self.windowActor(w, &ab)) |actor| {
+                if (!std.mem.eql(u8, actor, name)) {
+                    out.appendSlice(a, " › ") catch {};
+                    out.appendSlice(a, actor) catch {};
+                }
+            }
+            const marked = self.windowAgentPane(w) orelse self.pane(w.focused);
+            if (marked) |p| {
+                const mark = chromepkg.tabMark(.{
+                    .current = false,
+                    .agent = p.is_agent,
+                    .last_output_ms = p.last_output_ms.load(.acquire),
+                    .seen_ms = w.seen_ms,
+                    .now = now,
+                    .signal = self.windowUnread(w),
+                });
+                switch (mark) {
+                    .working => out.appendSlice(a, " ◐") catch {},
+                    .unread => out.appendSlice(a, " ●") catch {},
+                    .none => {},
+                }
+            }
+        }
+        return out.items;
+    }
+
+    /// The figure: the current space's current tab, its panes placed
+    /// by their own split tree into the figure's inner rect.
+    fn altFigure(self: *Server) void {
+        const st = &self.alt;
+        const sn = self.sess();
+        const w = self.window();
+        const region = self.altRegion();
+        var placed: std.ArrayList(layoutpkg.Placed) = .empty;
+        defer placed.deinit(self.gpa);
+        var n_cells: usize = 0;
+        for (self.panes.items) |p| {
+            if (w.layout.contains(p.id)) n_cells += 1;
+        }
+        const fr = altpkg.figureRect(region, n_cells, st.ledger) orelse return;
+        st.figure_rect = fr;
+        var nb: [48]u8 = undefined;
+        const tab = self.tabName(sn, w, &nb);
+        var tb: [96]u8 = undefined;
+        const title = std.fmt.bufPrint(&tb, "{s} · {s}", .{ chromepkg.shortSpace(sn.label()), tab }) catch tab;
+        st.setFigureTitle(title);
+        st.figure_unread = self.sessionUnread(sn);
+        const inner: layoutpkg.Rect = .{ .x = fr.x + 1, .y = fr.y + 1, .w = fr.w -| 2, .h = fr.h -| 2 };
+        w.layout.place(inner, &placed) catch return;
+        const now = panepkg.epochMs();
+        for (placed.items) |pl| {
+            if (st.cells_n == st.cells.len) break;
+            const p = self.pane(pl.pane) orelse continue;
+            var pb: [64]u8 = undefined;
+            const prog = p.fgName(&pb) orelse "shell";
+            const slot = &st.cell_titles[st.cells_n];
+            const len = @min(prog.len, slot.len);
+            @memcpy(slot[0..len], prog[0..len]);
+            st.cells[st.cells_n] = .{
+                .rect = pl.rect,
+                .title = slot[0..len],
+                .mark = chromepkg.tabMark(.{ .current = false, .agent = p.is_agent, .last_output_ms = p.last_output_ms.load(.acquire), .seen_ms = now, .now = now, .signal = p.unread_ms != 0 }),
+                .focused = pl.pane == w.focused,
+            };
+            st.cells_n += 1;
+        }
     }
 };
 
@@ -3352,6 +4690,16 @@ fn sgr(buf: []u8, spec: struct {
     if (spec.bg) |c| w.print(";48;2;{d};{d};{d}", .{ c.r, c.g, c.b }) catch {};
     w.writeAll("m") catch {};
     return w.buffered();
+}
+
+/// The engine's own names, as `proc_pidpath` reports them between a
+/// pane's fork and its exec: never a tab's name.
+fn isEngineName(name: []const u8) bool {
+    const own = [_][]const u8{ "engine", "rook-mux", "rook" };
+    for (own) |o| {
+        if (std.mem.eql(u8, name, o)) return true;
+    }
+    return false;
 }
 
 fn containsId(list: []const u32, id: u32) bool {

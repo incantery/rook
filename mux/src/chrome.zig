@@ -75,10 +75,10 @@ pub const blue: Rgb = .{ .r = 0x89, .g = 0xb4, .b = 0xfa };
 pub fn named(name: []const u8) ?Rgb {
     const want = if (std.mem.startsWith(u8, name, "bright-")) name["bright-".len..] else name;
     const table = [_]struct { n: []const u8, c: Rgb }{
-        .{ .n = "black", .c = surface0 },   .{ .n = "red", .c = red },
-        .{ .n = "green", .c = green },      .{ .n = "yellow", .c = yellow },
-        .{ .n = "blue", .c = blue },        .{ .n = "magenta", .c = mauve },
-        .{ .n = "cyan", .c = teal },        .{ .n = "white", .c = text },
+        .{ .n = "black", .c = surface0 }, .{ .n = "red", .c = red },
+        .{ .n = "green", .c = green },    .{ .n = "yellow", .c = yellow },
+        .{ .n = "blue", .c = blue },      .{ .n = "magenta", .c = mauve },
+        .{ .n = "cyan", .c = teal },      .{ .n = "white", .c = text },
     };
     for (table) |e| {
         if (std.mem.eql(u8, e.n, want)) return e.c;
@@ -372,7 +372,7 @@ pub fn labelSpaces(items: []Item) void {
 /// did. Empty titles say nothing, and a title that *is* the workspace
 /// name says nothing rook does not already know — that is the
 /// title-as-claim rail, which has no prose to lend.
-fn claimTitle(agents: []const Item, ws: []const u8) ?[]const u8 {
+pub fn claimTitle(agents: []const Item, ws: []const u8) ?[]const u8 {
     for (agents) |it| {
         if (!it.claims(ws)) continue;
         if (it.name.len == 0 or std.mem.eql(u8, it.name, ws)) continue;

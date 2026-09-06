@@ -10,6 +10,11 @@
 //!   sidebar = true                 # the older spelling: false = hidden
 //!   sidebar_width = 30             # its width in columns, open
 //!   agents = ["claude"]            # programs the agents rail looks for
+//!   bar = true                     # the calm bar: one row at the bottom,
+//!                                  # who holds the focused pane's keys
+//!                                  # left, signals right (false = off)
+//!   zoom_view = "orbit"            # prefix-o: "orbit" contracts the space
+//!                                  # into a figure; "ledger" is rows only
 //!
 //! and the [companion] table the Go half already reads — the one
 //! resident rook knows by name, so it can say when and where it is
@@ -91,6 +96,17 @@ pub const Mux = struct {
     companion: [64]u8 = @splat(0),
     companion_len: usize = 0,
     companion_from: enum { none, name, command, program } = .none,
+    /// The calm bar at the bottom of the glass. On by default and
+    /// kept on: appearing and disappearing would resize every hosted
+    /// TUI, the one motion rook must never cause, so the choice is
+    /// made once here rather than per signal.
+    bar: bool = true,
+    /// The rook-scope view behind prefix-o. Orbit draws the current
+    /// space as a figure with its layout skeleton inside and the
+    /// other spaces as rows around it; ledger is the same rows with no
+    /// figure — the SSH, narrow and reduced-motion form, and the one
+    /// orbit falls back to when the glass is too small for a figure.
+    zoom_ledger: bool = false,
 
     pub fn ownersSlice(self: *const Mux) []const u8 {
         return self.owners[0..self.owners_len];
@@ -213,6 +229,13 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
             out.owners_len = parseList(val, &out.owners);
         } else if (std.mem.eql(u8, key, "agents")) {
             out.agents_len = parseList(val, &out.agents);
+        } else if (std.mem.eql(u8, key, "bar")) {
+            const v = std.mem.trim(u8, val, "\"'");
+            out.bar = !(std.mem.eql(u8, v, "false") or std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off"));
+        } else if (std.mem.eql(u8, key, "zoom_view")) {
+            const v = std.mem.trim(u8, val, "\"'");
+            if (std.mem.eql(u8, v, "ledger")) out.zoom_ledger = true;
+            if (std.mem.eql(u8, v, "orbit")) out.zoom_ledger = false;
         }
     }
 }
@@ -267,6 +290,15 @@ test "parseMux" {
     try std.testing.expectEqualStrings("claude", a.agentsSlice()); // the default
     parseMux("[mux]\nagents = [\"claude\", \"codex\"]\n", &a);
     try std.testing.expectEqualStrings("claude\ncodex", a.agentsSlice());
+    var b: Mux = .{};
+    try std.testing.expect(b.bar); // the calm bar is on unless turned off
+    try std.testing.expect(!b.zoom_ledger);
+    parseMux("[mux]\nbar = false\nzoom_view = \"ledger\"\n", &b);
+    try std.testing.expect(!b.bar);
+    try std.testing.expect(b.zoom_ledger);
+    parseMux("[mux]\nbar = true\nzoom_view = \"orbit\"\n", &b);
+    try std.testing.expect(b.bar);
+    try std.testing.expect(!b.zoom_ledger);
 }
 
 test "the companion slot, named or summoned" {

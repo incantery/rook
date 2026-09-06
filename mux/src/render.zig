@@ -24,7 +24,23 @@ pub const Chrome = struct {
     /// Column of the pin rail's seam, and the row it starts on.
     dock_x: ?u16 = null,
     dock_top: u16 = 0,
+    /// The calm bar: pre-sized to `cols` columns, painted on row
+    /// `bar_y` (the last row of the glass). Null when the bar is off.
+    bar: ?Bar = null,
+    /// Chrome the server composed itself and wants painted over the
+    /// panes, after them and before the cursor: the altitude view,
+    /// the ownership gate, the inspector. Raw frame bytes, from a
+    /// second Frame; empty when there is none.
+    overlay: []const u8 = "",
 };
+
+/// The calm bar as painted: its row and its pre-sized bytes.
+pub const Bar = struct { y: u16, bytes: []const u8 };
+
+/// Where the composed cursor goes when the mux owns it: copy mode's
+/// block, or the altitude input's bar — or nowhere, while the gate
+/// or the inspector holds the keys and no pane should show one.
+pub const CursorOverride = struct { x: u16, y: u16, bar: bool = false, hidden: bool = false };
 
 pub const Frame = struct {
     buf: std.ArrayList(u8) = .empty,
@@ -50,7 +66,7 @@ pub const Frame = struct {
         self.print(csi ++ "{d};{d}H", .{ @as(u32, y) + 1, @as(u32, x) + 1 });
     }
     /// Reset, then a 24-bit foreground.
-    fn putFg(self: *Frame, c: chromepkg.Rgb) void {
+    pub fn putFg(self: *Frame, c: chromepkg.Rgb) void {
         self.print(csi ++ "0;38;2;{d};{d};{d}m", .{ c.r, c.g, c.b });
     }
     /// A light vertical rule at column `x`, rows [y0, y1).
@@ -77,7 +93,7 @@ pub const Frame = struct {
         rows: u16,
         chrome: Chrome,
         full: bool,
-        cursor_override: ?struct { x: u16, y: u16 },
+        cursor_override: ?CursorOverride,
         popup: ?struct { pane: u32, rect: layoutpkg.Rect },
     ) []const u8 {
         self.buf.clearRetainingCapacity();
@@ -136,6 +152,18 @@ pub const Frame = struct {
         self.cup(chrome.tab_x, 0);
         self.put(chrome.tabbar);
         self.put(csi ++ "0m");
+        if (chrome.bar) |bar| {
+            self.cup(0, bar.y);
+            self.put(bar.bytes);
+            self.put(csi ++ "0m");
+        }
+        // The server's own overlay goes on top of every pane and
+        // under the popup: the altitude view is the world, and a
+        // popup is still a popup over it.
+        if (chrome.overlay.len > 0) {
+            self.put(chrome.overlay);
+            self.put(csi ++ "0m");
+        }
 
         if (popup) |po| {
             if (findPane(panes, po.pane)) |pp| {
@@ -162,9 +190,9 @@ pub const Frame = struct {
             }
         }
         if (cursor_override) |co| {
-            // copy mode: the mux's cursor, always a visible block
-            cursor = .{ .x = co.x, .y = co.y };
-            cursor_style = csi ++ "2 q";
+            // the mux's own cursor: copy mode's block, the input's bar
+            cursor = if (co.hidden) null else .{ .x = co.x, .y = co.y };
+            cursor_style = if (co.bar) csi ++ "6 q" else csi ++ "2 q";
         }
         if (cursor) |c| {
             self.cup(c.x, c.y);
@@ -322,8 +350,14 @@ pub const Frame = struct {
 
     /// A full box border for the popup, accent-colored.
     fn drawBox(self: *Frame, r: layoutpkg.Rect) void {
+        self.drawBoxIn(r, self.accent);
+    }
+
+    /// A box border in any color — the inspector and the altitude
+    /// figures draw theirs through this.
+    pub fn drawBoxIn(self: *Frame, r: layoutpkg.Rect, color: chromepkg.Rgb) void {
         if (r.w < 2 or r.h < 2) return;
-        self.putFg(self.accent);
+        self.putFg(color);
         self.cup(r.x, r.y);
         self.put("┌");
         var x: u16 = 1;
