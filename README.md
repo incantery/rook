@@ -35,22 +35,33 @@ prefix = "` "`", `C-b` when unset).
 focus (a bare `ctrl-hjkl` too, vim-navigator style, with
 `mux/nvim` handing edge moves back), `prefix-z` zoom, `prefix-[` copy
 mode, `prefix-P` pin a pane to the rail, `prefix-s` the picker,
-`prefix-w` worktrees, `prefix-a` the side panel (open → collapsed →
-hidden), `prefix-A` it away and back, `prefix-u` the oldest
-thing you have not read. The tabs are clickable: a chip is its window,
+`prefix-w` worktrees, `prefix-u` the oldest thing you have not
+read. The tabs are clickable: a chip is its window,
 the `+` a new one. A tab is named once — the first program in it that
 was not the shell, or `rook rename` — and rook never renames it; the
-agent running in it is named after it, `deploy · claude ◐`.
+actor that claimed a pane in it rides after the name, `deploy · main ◐`;
+the tool is the bar's word, never the tab's.
 
-**Altitude.** `prefix-o` zooms out of the space into rook: the space
-contracts into a figure of its layout, the other spaces resolve
-around it as rows — an event line rook can vouch for, the tabs under
-it — the global pins do not move a column, and the cursor is already
-in one input. Type to find a space, tab or pane; `:` for a command
-(`:go`, `:new`, `:rename`, `:close`); the last row hands the same
-text to vera when she is open. `↵` acts, typing never does, Esc puts
-you back exactly where you were. `prefix-C-o` returns after any hop.
-On narrow glass the same rows draw with no figure. `docs/altitude.md`.
+**The frame.** One tab bar across the top — the space's name in the
+scope slot, then its tabs — the work at full width under it, and one
+calm bar across the bottom. No sidebar: the legacy spaces/agents
+panel is off unless `[mux] sidebar_mode = "open"` asks for it.
+
+**Altitude.** `prefix-o` changes altitude, from the space into rook
+itself: the scope slot becomes the system badge `♜ rook` with the
+space you left beside it, and the whole canvas holds every space —
+attention first (unread panes, what a producer says needs you), then
+the spaces in a stable order, each a figure of what rook can
+truthfully say about it (its tabs and who drives them, an event, the
+last lines you were looking at) or one row when it has nothing to
+say; then the global pins, which do not move a column. The cursor is
+already in one input: type to find a space, tab or pane; `:` for a
+command (`:go`, `:new`, `:rename`, `:close`); the last row hands the
+same text to vera when she is open. `↵` acts, typing never does; Esc
+clears the query first and then puts you back exactly where you
+were. `prefix-C-o` returns after any hop. Narrow glass draws the same
+spaces as rows. `docs/altitude.md` is the model and the ontology;
+`scripts/altitude-fixture.py` renders it deterministically.
 
 **The calm bar.** One row at the bottom: who holds the focused pane's
 keyboard on the left — `you ▸ nvim`, or `claude·main ▸ owns input ·
@@ -60,9 +71,11 @@ opens a gate instead of landing: request a handoff, take now, or send
 the keys as a message. `prefix-i` inspects the pane. `[mux] bar =
 false` turns the row off.
 
-**The rail.** Down the left edge: *spaces* over *agents*, a dot and
-two lines each. Rook lists its own workspaces and the panes it can see
-running an agent; a producer pushes the rest, one JSON frame per line:
+**The rail (legacy, off by default).** A left panel of *spaces* over
+*agents*, a dot and two lines each, behind `[mux] sidebar_mode =
+"open"`. Its model still feeds the state feed and the altitude view:
+rook lists its own workspaces and the panes it can see running an
+agent; a producer pushes the rest, one JSON frame per line:
 
 ```sh
 rook side demo | rook side -     # the herdr design, as frames

@@ -1,195 +1,239 @@
-# Altitude: the layer above a space
+# Altitude: rook's outermost scope
 
 The status bar tells you the world exists. Zooming out lets you touch
-it. This page is the product model behind `prefix-o`, the calm bar,
-minted tab names and input ownership — the second revision of the
-design exploration, as it landed in the engine on 2026-09-06 — with
-the resolutions it rests on and the parts still owed. The mockups it
-implements are the Claude Design document "Rook Design Exploration
-v2"; the character grids there are the acceptance test for what is
-drawn here.
+it. This page is the product model behind `prefix-o`, the frame it
+replaced, the calm bar, minted tab names and input ownership — the
+second revision of the design exploration, as it stands in the engine
+after the corrective pass of 2026-09-06 — with the runtime ontology
+it rests on, the fixture it is judged against, and the parts still
+owed.
 
-The product model is unchanged: no sidebar imposed, two rows of
-chrome, overlays as fast paths. What this revision adds is the global
-layer — continuity, living spaces, one intent input — and the honest
-statement of who is driving.
+The intended feeling: *I did not open an overview page inside rook. I
+changed altitude, from a space into rook itself.* So the frame is the
+same in both states — one tab bar across the top, one calm bar across
+the bottom, the whole width between them — and what changes is what
+the frame holds: a space's work, or every space.
 
-## Nine resolutions
+## The runtime ontology
 
-**1 · You enter rook.** The global layer has no product noun. Leaving
-a space, you enter rook: the scope chip top-left reads `rook ‹ vera`
-in the same slot that read `vera`. The action is *zoom out*;
-internally it is root scope. "Atlas" was rejected as a second brand
-competing with the scope model it should reinforce.
+One name, one meaning. These are the objects as the engine holds them
+(`mux/src/server.zig` unless said otherwise), what each is called on
+the glass, and where it shows.
 
-**2 · Semantic zoom is contraction, not scaling.** The current space
-contracts into a *figure*: a box with its name and current tab in the
-top edge, and the panes of that tab placed inside it by the same split
-tree that places them on the glass — relative position and title
-kept, at a smaller size. Other spaces resolve around it as rows; the
-global pin dock does not move a column; the calm bar stays. There is
-no animation in the engine (a terminal has no interpolation worth
-having): the continuity is positional. Esc returns to the exact pane,
-cursor and scroll, because nothing moved to get here — the panes kept
-running underneath and the view was painted over them.
+| concept | runtime type / source | lifetime | example | visible where |
+|---|---|---|---|---|
+| **rook scope** | the `Server` itself, at altitude (`alt_on`) | the server process | `♜ rook` | the scope slot, badged, at altitude only; the bar's left cell |
+| **space** | `Session` — a workspace: windows, pins, focus | until its last window closes; restored across restarts | `vera` (identity `rook--vera-e41…`, label `vera`) | the scope slot in a space; a figure or row at altitude; `:go` |
+| **tab** | `Window` — one split tree | until its last pane exits | `deploy` | a chip on the tab bar; a tab in a figure |
+| **pane** | `Pane` (`pane.zig`) — a pty and ghostty-vt | until its shell exits | the Claude pty, id 7 | a region of the space, bordered only when split |
+| **tool** | `Pane.fgName()` — the foreground program, by name | moment to moment | `claude`, `nvim`, `zsh` | the bar (`you ▸ claude`); attention lines; the inspector |
+| **actor** | `Pane.owner` — the name a program gave when it claimed the pane with `rook own` | claim → release | `main` | after the tab name (`deploy · main`); the bar (`main ▸ claude`) |
+| **agent found** | `Pane.is_agent` — a tool the config lists under `agents` | the 2 s scan | a `claude` running unclaimed | the ◐ mark; the working count; never a name on a tab |
+| **producer's word** | `chrome.Feed` items pushed on `c2s.side` (verad's `items.push`), matched by `workspace` | until the next push | "Deploy plan · needs you" | a space's event line; an ask row |
+| **provider / model** | not held — a producer's vocabulary | — | Sonnet | the inspector says it is not rook's to know |
+| **legacy sidebar space** | `foundSpaces()` + pushed `spaces` items | — | `rook` under "spaces" | no longer default chrome; still published on `surfaces[]`; `sidebar_mode = "open"` brings the panel back |
+| **legacy sidebar agent** | `scanAgents()` found rows (named for their *workspace*) + pushed `agents` items | — | `main` under "agents" | the same: not default chrome; the found row's name was a workspace, never an actor |
 
-**3 · One input: find → command → intent.** At rook scope the cursor
-is already in one input. Bare text fuzzy-finds spaces, tabs and panes.
-`:` prefixes an exact command, completed as it is typed. Anything can
-be handed to the companion — but only by choosing the visible
-`✦ vera:` row that always closes the result list, and only while she
-is open in a pane rook can see. Typing never executes; `↵` on a visible
-row does. The ✦ row is never selected by rook: a hand has to move
-onto it (`j`, `⇥`, a click). Choosing it types the text into her pane,
-Enter included, and takes you there; what she does with it is hers.
+The questions the old frame raised, answered from the code:
 
-**4 · Actor identity is never absent.** Tabs carry the actor by name,
-after the stable tab name: `deploy · claude ◐`, never `[agent]`. The
-calm bar's left cell always names the focused surface's input owner —
-`you ▸ nvim`, or `claude·main ▸ owns input · you observe` — so a single
-borderless pane still answers "who is driving". Manual control is
-quiet but stated, never inferred from absence.
+- **What were the sidebar's spaces?** Rook's own workspaces (one row
+  each, labelled with the repository prefix off) plus whatever a
+  producer pushed to the `spaces` surface. The same objects the
+  altitude view calls spaces; the panel was a second rendering of
+  them, permanently on.
+- **What was `main` in the tab bar?** The scope slot: the current
+  workspace's label. Rook's default workspace is named `main`, so a
+  fresh install said `main` there.
+- **Was the sidebar's `main` agent the same `main`?** No. A found
+  agents row is *named for the workspace the agent was found in* —
+  rook can say a `claude` runs in workspace `main`, and nothing more
+  — so `main` there was a workspace label wearing an agent's dot. It
+  was never an actor. That collision is gone with the panel.
+- **What was `claude·2`?** A tab whose name was minted from the first
+  program that ran in it, `claude`, with an ordinal because another
+  tab in the same workspace had already minted `claude`. That is
+  resolution 6 working as designed (`shell·2` in the design); what
+  was wrong was the suffix.
+- **Why did `· claude` follow it?** The first pass put the *tool* of
+  the agent pane after the tab name. The tool is not an actor. Now
+  only an actor — a name given through `rook own` — follows a tab
+  name, so `claude·2 · claude` cannot occur; that tab reads `claude·2`
+  with a ◐ when the agent is producing.
+- **Which object is the durable semantic context the design calls a
+  space?** The `Session`. It has the name, the windows, the pins, the
+  focus memory, and the restore line.
 
-**5 · Focus ≠ control.** Focusing is observing; scroll, copy mode and
-selection are always safe. A pane becomes agent-owned only when a
-program claims it through the front door (`rook own`), and typed keys
-into an owned pane are not forwarded: a one-row gate names the three
-legal moves — request a handoff (the agent finishes its step, then
-yields, then you confirm), take now, or send the keystrokes to the
-agent as a message. Five states: `human`, `agent`, `takeover-requested`,
-`handoff-pending`, `paused`. "Shared control" was rejected: arbitrary
-PTYs have no safe definition of simultaneous input.
+The canonical grammar, everywhere:
 
-**6 · Tab names are minted, then frozen.** A tab is named once: a name
-a person gave (`rook rename`, `:rename`), else the first program that
-ran in it that was not the shell, with an ordinal when a sibling
-already wears the name (`shell·2`). Rook never changes a minted name;
-the activity glyph and the actor suffix change freely around it. A
-minted name survives a server restart. Until a tab is minted it reads
-the live program, which is the shell at a prompt.
+    ♜ rook           the system scope: badge, block, glyph — never a plain word
+    vera             a space (the scope slot in it; a figure or row above it)
+    deploy           a tab, minted once
+    deploy · main    a tab with the actor that claimed a pane in it
+    you ▸ claude     the bar: who holds the keyboard, through what tool
+    main ▸ claude    …an actor does, through that tool
+    ◐ ● ◇            producing, unread, asked for (marks, never names)
 
-**7 · Scratch work: the shelf.** Not built. Every pane in rook is in a
-workspace; there are no loose surfaces to shelve. See *Owed*.
+A space literally named `rook` is a space: `rook` in the scope slot
+when you are in it, ` rook ` as a row or figure at altitude, and never
+the badge. The badge — the accent block with the `♜` glyph — is worn
+only by the system scope, and only at altitude. The fixture has such
+a space, and the frames are checked for exactly two `♜` on the glass:
+the scope slot and the bar.
 
-**8 · Calm bar: minimal, but present.** The space name leaves the
-bar — the tab bar owns identity. The bar shows the input-owner cell on
-the left and signals on the right (`◐ 2 · ● 1 · ⊕g 1`: agents
-producing output, panes unread, global pins), no clock, and is
-genuinely empty when nothing signals. It stays visible because
-appearing and disappearing would resize every hosted TUI, the one
-motion rook must never cause; `[mux] bar = false` turns it off for
-good rather than per signal. While the prefix is armed the bar shows
-the pending key and the chords a hand may be reaching for — the
-feedback that has nowhere else to live.
+## The frame
 
-**9 · Folds, and pins at altitude.** Global pins stay live PTYs at
-every altitude, docked in a strip whose columns do not move through
-zoom — scope taught by what refuses to move. Workspace-local pins
-belong to the space and contract with it. Folding (narrow widths
-auto-folding background panes into strips) is not built. See *Owed*.
+**In a space.** Row 0 is the tab bar: the space's name as the scope
+slot, plain and bold; then a chip per tab, `deploy · main`, the
+current one filled with the accent; the mark (`◐` producing, `●`
+unread) after a chip; `+`. The work takes every column between the
+top and bottom rows, bordered only where it is split. The last row is
+the calm bar: `you ▸ claude` on the left, or `main ▸ claude owns
+input · you observe` once an actor claimed the focused pane; the
+signals on the right (`◐ 2 · ● 1 · ⊕g 1`), empty when nothing signals.
+There is no sidebar. The legacy panel still exists behind
+`[mux] sidebar_mode = "open"`, off by default, and does not change
+the layout when it is off.
 
-## Orbit and Ledger: one design at two fidelities
+**At altitude** (`prefix-o`). The same frame. The scope slot holds
+the badge and the breadcrumb, `♜ rook  ‹ vera`; the corner says `esc
+↩`. The canvas between the bars is rook's own surface (an opaque
+ground, so it reads over a wallpaper), holding:
 
-Orbit renders the model spatially: the figure of the current space,
-the other spaces as rows around it. Ledger renders the same rows with
-no figure — a pure character-grid list that works on SSH, at 58
-columns, under reduced motion, and by preference (`zoom_view =
-"ledger"`, or `:ledger` up there). Identical scope model, identical
-keys, identical intent grammar; the capability never depends on the
-spectacle. Orbit falls back to Ledger by itself when the glass is
-under 60 columns or 16 rows in the region it paints.
+1. **the input**, a band with the prompt, already focused, the cursor
+   in it. Empty, it says what it takes — `find a space, a tab, a
+   pane · : for a command` — inside the band, as a placeholder, not
+   as a caption elsewhere.
+2. **attention**: unread panes oldest first (`● api › server  bash
+   rang the bell · 1s ago`), then what a producer said needs you
+   (`◇ vera — Deploy plan  needs you · 3 approvals`).
+3. **the spaces**, in workspace order, always — a space is where it
+   was last time whatever changed in it, and activity is shown in
+   place. Each is a *figure* when rook has something to say about it,
+   and one compact row when it does not.
+4. **pinned everywhere**: the global pins, with where they came from.
+5. a footer of keys, dim but legible.
 
-Undercard — the live space letterboxed above the world — was rejected
-as a mode: it forces the one thing rook promises never to do, a live
-resize of hosted TUIs.
+Global pins stay live where they were, in the dock to the left, at
+every altitude: scope taught by what refuses to move. Nothing is
+resized to get here — the panes keep their geometry and keep running,
+and the view is painted over them — which is why Esc is an exact
+return: same pane, cursor, scroll, layout.
 
-## The grammar
+## Orbit and Ledger
 
-    prefix-o     zoom out (the space contracts in place) — and back
-    esc          zoom back in: exact pane, cursor, scroll
-    prefix-s     direct space switcher (never via rook)
-    prefix-C-o   return jump after any cross-space hop
-    prefix-i     inspector: actor, authority over input, program, cwd, resume
+One model, two fidelities. **Orbit** draws each space that has
+something to say as a figure:
 
-At rook scope:
+    ┌┤ vera ├  Deploy plan · needs you ─────────────────────────┐
+    │  deploy · main    logs ●  chat ●                          │
+    │ › Reading migrations/0042_session_audit.sql               │
+    └───────────────────────────────────────── ↵ back in ───────┘
 
-    text         fuzzy find: spaces, tabs, panes (and what a pane's title says)
-    :            exact command, completed: go · new · rename · close · ledger · orbit
-    ✦ row        hand the same text to the companion (⇥ jumps to it)
-    ↵            act on the selected row; typing never acts
-    j k ↑ ↓      move (h j k l only while nothing is typed); g G ends; q leaves
-    click        a row acts; the global pins are live; the tab bar is a way out
+The top edge holds the name (the block when it is the space you
+left), `●` when anything in it is unread, and the event line in its
+own ink. Inside: the tabs with their actors and marks, the current
+tab filled; then, for the space you left only, the last lines of the
+pane you were in — read from the cells it already holds, never a
+resize, never a read of anything the program did not draw. The
+figure is exactly as tall as that: three rows and the excerpt. A
+space with only a name and `quiet · 2d` is one row, on purpose — the
+empty box the first pass drew said nothing, and a figure earns its
+rows by holding something.
 
-At an agent-owned pane:
+**Ledger** is the same spaces as two-line rows — the name and event,
+then the tabs — and is what narrow glass draws (under 60 columns in
+the region), what `zoom_view = "ledger"` or `:ledger` asks for, and
+what orbit falls back to when the figures would not fit the rows
+available. The fidelity is decided once per frame, before the bars
+are composed, so the bar's word (`orbit`, `ledger`) and the canvas
+agree.
 
-    any key      opens the gate instead of being forwarded
-    ⏎            request handoff (the actor finishes its step, then yields)
-    ⏎ again      take, once the actor has yielded
-    T            take now
-    s            send the next keystrokes, through Enter, as a message
-    esc          leave it
+## The input
 
-From the front door, the same protocol:
+Bare typing is the query. That is why the rows are walked with the
+arrows (and ⇥ ⇤, C-n C-p), never with letters: `j` finds things named
+j. Results replace the spaces under the input, ranked, one line each
+— `api › server` for a tab, `api › server › bash` for a pane, an
+attention row when it matches — with the line under the band saying
+what they are. `:` leads a command, completed as it is typed:
+`go`/`switch`, `new`, `rename`/`tab rename`, `close`, `ledger`,
+`orbit`. The last row while finding is `✦ vera: "…"` — present only
+while the companion is open in a pane, never selected by rook (a hand
+must ↓ or click onto it), and choosing it types the text into her
+pane, Enter included, and takes you there.
 
-    rook own <id> <actor>            the actor owns input
-    rook own <id> --paused <actor>   attached, not operating
-    rook own <id> --release          hand it back (yields, if a handoff was asked)
-    rook own <id> --request          the gate's ⏎, scripted
-    rook own <id> --take             the gate's T, scripted
-    rook rename <name>               name the current tab
+Esc peels one layer at a time: a query (with its results or
+completions) first, the view second. A half-typed query never zooms
+you back into the space by surprise. `prefix-o` toggles back at any
+time; `prefix-C-o` returns after any cross-space hop.
+
+## Ownership and the gate
+
+A pane is the person's until a program says otherwise. `rook own <id>
+<actor>` claims its keyboard for `actor`; the tab reads `deploy ·
+main`, the bar `main ▸ claude owns input · you observe`, and a typed
+key opens a gate instead of landing: ⏎ requests a handoff (the actor
+sees `takeover-requested` in the feed, finishes its step, releases;
+the person confirms with ⏎), `T` takes now, `s` sends the next
+keystrokes through Enter as a message, Esc leaves it. `--paused`
+attaches an actor without the keys; `--release`, `--request`, `--take`
+are the moves from a script. Five states on `panes[].input`; `prefix-i`
+shows them in a box. Focus is observing: scroll, copy mode and
+selection are always safe.
+
+## The fixture
+
+`scripts/altitude-fixture.py` builds a deterministic rook — in a
+sandbox, through the front door, never the live server — and reads
+it back through a real glass:
+
+- four spaces, `rook`, `vera`, `api`, `infra`;
+- `vera`: tabs `deploy · main` (an agent pane claimed by `main`),
+  `logs`, `chat` (the companion); a producer's row saying the agent
+  is waiting on you;
+- `api`: tabs `tests · codex` (claimed by `codex`), `server` with an
+  unread bell; a producer's row saying it is working;
+- `infra`: one tab, quiet; `rook`: one tab, quiet, no history;
+- one global pin promoted out of `api`, so it says `from api`.
+
+It captures the in-space frame, altitude, altitude over one quiet
+space, the 58-column ledger, the input with results, and the exact
+return, and asserts on each: no sidebar columns, full-width bars, the
+badge only at altitude and only twice, the space named `rook` listed
+as a space, actors on tabs and tools kept off them, the pin's origin,
+no pane resized by altitude, and the same focus and layouts after
+Esc. Run it after any change to the frame; look at the PNGs, not only
+the PASS lines.
 
 ## What the feed says
 
-- `focus.mode` gains `altitude`, `gate` and `inspect` beside `pane`,
-  `copy` and `popup` — every case where the mux holds the keyboard.
-- `bar` — whether the calm bar is on, so a second glass lays its rows
-  out the same way.
-- `workspaces[].windows[].name` is the tab's name as minted;
-  `named` says whether it is; `program` is the live foreground program
-  of the window's focused pane (which is what `name` used to be).
-- `panes[].input` — `{"state": "human"}`, or `{"state": "agent",
-  "owner": "claude·main", "sinceMs": …}` with one of the five states.
-- The restore file (`<sock>.state`, still `v2`) carries a `name <n>`
-  line under a window whose tab was minted.
-
-## What the rows say, and where it comes from
-
-Every line at altitude is a fact rook holds; nothing is inferred and
-nothing is summarised by a model. A space's event line is built from:
-the words a producer already spent on the space (the rail's claim,
-repeated verbatim); the title of the last desktop notification an
-unread pane sent; an agent pane producing output (`claude ◐ working`);
-the count of unread panes; else `quiet · <age>` from the newest
-output anywhere in the space. The tab row under it is the tabs, each
-with its actor and its mark. Attention rows are the unread channel,
-oldest first, with what the program said — its notification title,
-or that it rang the bell, or that its progress bar finished.
+- `focus.mode`: `pane`, `copy`, `popup`, `altitude`, `gate`, `inspect`.
+- `bar`: whether the calm bar is on.
+- `workspaces[].windows[].name` (minted), `named`, `program` (the live
+  tool of the focused pane).
+- `panes[].input`: `{"state": "human"}` or the actor and one of the
+  five states, with `sinceMs`.
+- `surfaces[]`: the legacy rail's model, still published verbatim for
+  the web client and any producer; `shown` is false by default now.
+- The restore file (`<sock>.state`, still `v2`) carries `name <n>`
+  under a minted window and `origin <space>` under a global pin.
 
 ## Owed
 
-In the design and not in the engine, with the reason:
+Deliberately not in this pass:
 
-- **The shelf** (resolution 7). Rook has no loose surfaces: every
-  pane is in a workspace, so there is nothing to shelve and nothing
-  to promote. If a pane ever exists outside a workspace this is where
-  it goes.
-- **Folds** (resolution 9). Auto-folding background panes into
-  one-row strips at narrow widths, `⊟2` in the bar, `C-a =` to unfold.
-  A projection over the layout tree; nothing else needs it yet.
-- **The attention peek** (`prefix-n`, M4): the oldest unread item
-  docked above the bar with `↵ go · a approve · d dismiss`. `prefix-u`
-  goes to the oldest unread pane, and the altitude view lists them;
-  the peek's `approve` needs a structured ask to approve, which is a
-  producer's (vera's) to push.
-- **Moving surfaces at altitude** (`x` lift, `P` drop into the dock,
-  `m`, `S`, `:organize`). Pins are moved from inside the space
-  (`prefix-P`, `prefix-G`); a drag-and-place grammar over the figure
-  is the next thing the figure earns.
-- **Provider detail in the inspector.** Rook does not know a pane's
-  model; the inspector says so and points at the rail, where a
-  producer's word lives.
-- **Border interpolation** (~120 ms in a rich renderer). The engine
-  is a terminal; the continuity here is positional, which the design
-  allows under reduced motion.
-- **`rook top`** (M12): the Ledger as a program you tile. The rows
-  exist; printing them to stdout is a verb away.
+- **The shelf** (resolution 7). Rook has no loose surfaces: every pane
+  is in a space, so there is nothing to shelve or promote.
+- **Folds** (resolution 9): background panes as one-row strips at
+  narrow widths.
+- **The attention peek** (`prefix-n`, M4) with `a approve`: approving
+  needs a structured ask to approve, which is a producer's to push.
+- **Moving surfaces at altitude** (`x` lift, `P` drop, `m`, `S`,
+  `:organize`). Pins move from inside a space (`prefix-P`, `prefix-G`).
+- **A live excerpt for spaces other than the one you left.** Reading
+  another space's cells is as safe as reading this one's; it is left
+  out until the figures earn the rows.
+- **Provider detail** in the inspector: not rook's to know.
+- **Border interpolation.** A terminal has no motion worth having;
+  the continuity is positional, which the design allows.
+- **`rook top`** (M12): the ledger as a program you tile.

@@ -5,9 +5,10 @@
 //!   scrollback_mb = 4
 //!   accent = "#cba6f7"             # chrome color: tabs, borders, popup
 //!   restore = false                # skip resurrecting the last layout on boot
-//!   sidebar_mode = "open"          # the spaces/agents side panel:
-//!                                  # open, collapsed (dots only), hidden
-//!   sidebar = true                 # the older spelling: false = hidden
+//!   sidebar_mode = "hidden"        # the legacy spaces/agents side panel,
+//!                                  # off by default since altitude took
+//!                                  # its job: open, collapsed, hidden
+//!   sidebar = false                # the older spelling: true = open
 //!   sidebar_width = 30             # its width in columns, open
 //!   agents = ["claude"]            # programs the agents rail looks for
 //!   bar = true                     # the calm bar: one row at the bottom,
@@ -68,13 +69,15 @@ pub const Mux = struct {
     /// popup box. A hex color or one of the eight ANSI names, which map
     /// into the same palette.
     accent: chrome.Rgb = chrome.mauve,
-    /// The side panel: how much of it the rail starts with, open
-    /// unless asked otherwise. Glass too narrow for the words falls
-    /// back to the collapsed rail regardless, and too narrow for that
-    /// hides it — the panel folds rather than crowd the work.
-    /// `sidebar = false` is the older spelling of `.hidden`, and the
-    /// later of the two lines in a file wins.
-    side_mode: chrome.SideMode = .open,
+    /// The legacy side panel. Hidden unless asked for: the frame is
+    /// the tab bar, the work at full width, and the calm bar, and
+    /// altitude (prefix-o) is where the spaces and the agents are
+    /// looked at. A config that says `sidebar_mode = "open"` gets the
+    /// rail back, folding to the collapsed dots on narrow glass and
+    /// away when even that would crowd the work. `sidebar = true` is
+    /// the older spelling of `.open`, and the later of the two lines
+    /// in a file wins.
+    side_mode: chrome.SideMode = .hidden,
     sidebar_width: u16 = 30,
     /// Resurrect the last saved layout on server boot: workspaces,
     /// windows, cwds, and every pane that told rook how to bring its
@@ -271,8 +274,10 @@ test "parseMux" {
     parseMux("[mux]\naccent = \"#f9e2af\"\n", &d);
     try std.testing.expectEqual(chrome.yellow, d.accent);
     var sb: Mux = .{};
-    try std.testing.expectEqual(chrome.SideMode.open, sb.side_mode);
+    try std.testing.expectEqual(chrome.SideMode.hidden, sb.side_mode); // off unless asked
     try std.testing.expectEqual(@as(u16, 30), sb.sidebar_width);
+    parseMux("[mux]\nsidebar = true\n", &sb);
+    try std.testing.expectEqual(chrome.SideMode.open, sb.side_mode);
     parseMux("[mux]\nsidebar = false\nsidebar_width = 999\n", &sb);
     try std.testing.expectEqual(chrome.SideMode.hidden, sb.side_mode); // the old spelling
     try std.testing.expectEqual(@as(u16, 60), sb.sidebar_width); // clamped

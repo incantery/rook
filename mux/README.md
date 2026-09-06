@@ -33,7 +33,10 @@ same one the Go half reads) names the resident rook watches for —
 word is a wrapper; vera by default, `program = ""` turns the slot off.
 `bar = false` turns the calm bar off (the bottom row: who holds the
 focused pane's keyboard, and the signals), and `zoom_view = "ledger"`
-makes prefix-o draw rows only, never the figure. Then:
+makes prefix-o draw rows only, never figures. The side panel is
+**off by default** — the frame is the tab bar, the work at full
+width, and the calm bar — and `sidebar_mode = "open"` is how a config
+asks for it back. Then:
 
     v |        split side by side          c        new window
     -          split stacked               n p 1-9  switch window
@@ -46,18 +49,20 @@ makes prefix-o draw rows only, never the figure. Then:
     C-o        return jump: the space before the last hop
     i          inspector: the focused pane's actor, input owner, program
 
-The top row is the tab bar: the space's name as a scope chip, then a
-chip per window. A tab is named once — a name a person gave (`rook
+The top row is the tab bar: the space's name in the scope slot, then
+a chip per window. A tab is named once — a name a person gave (`rook
 rename`, `:rename` at altitude), else the first program in it that
 was not the shell, with an ordinal when a sibling wears the name —
-and rook never renames it afterwards; the agent running in the window
-is named after the stable name, `deploy · claude ◐`, and the mark
-(`◐` working, `●` unread) changes freely. The bottom row is the calm
-bar: `you ▸ nvim` on the left, or the actor that owns the pane's
-keyboard (`rook own`), and `◐ n · ● n · ⊕g n` on the right — agents
-producing output, panes unread, global pins — empty when nothing
-signals. While the prefix is armed the bar shows the chords.
-`docs/altitude.md` is the whole model: altitude, ownership, the gate.
+and rook never renames it afterwards. An actor that claimed a pane in
+the window (`rook own`) rides after the name, `deploy · main`; the
+tool never does, and the mark (`◐` producing, `●` unread) changes
+freely. The bottom row is the calm bar: `you ▸ claude` on the left —
+who holds the keyboard, through what — or `main ▸ claude owns input ·
+you observe` once an actor claimed it, and `◐ n · ● n · ⊕g n` on the
+right — agents producing output, panes unread, global pins — empty
+when nothing signals. While the prefix is armed the bar shows the
+chords. `docs/altitude.md` is the whole model and the ontology:
+altitude, ownership, the gate, what each word means at runtime.
 
 Workspaces: `rook ls`, `rook new <name>`, `rook switch <name>` —
 named sessions in one server, each with its own windows; prefix-s
@@ -222,22 +227,28 @@ exits 0 in silence: it is written to be a hook.
 
 ## Altitude
 
-prefix-o zooms out. The current space contracts into a figure — its
-name and current tab in the top edge, its panes placed inside by the
-same split tree that places them on the glass — and the other spaces
-resolve around it as two-line rows: the name and an event line (the
-words a producer spent on it, the last notification an unread pane
-sent, an agent producing output, the unread count, else `quiet ·
-<age>`), then its tabs. Unread panes come first as attention rows,
-oldest first; global pins stay live where they were and are listed
-under `PINS`. The cursor is already in one input: text fuzzy-finds
-spaces, tabs and panes; `:` completes a command (`go`, `new`,
-`rename`, `close`, `ledger`, `orbit`); the last row, `✦ vera:`, hands
-the text to the companion while she is open, and only by choosing it.
-j/k move (h/l too, while nothing is typed), ↵ acts, Esc clears the
-text and then leaves — to the exact pane, cursor and scroll, because
-the panes never stopped. Under 60 columns, or with `zoom_view =
-"ledger"`, the same rows draw with no figure.
+prefix-o changes altitude: the same frame, the whole width between
+the bars now rook's own canvas. The scope slot holds the system badge
+`♜ rook` — the glyph and the block only the system wears, so a space
+named `rook` is still just a space — with the space you left beside
+it. The canvas: the input (a band, already focused); attention first
+— unread panes oldest first, then what a producer said needs you;
+the spaces in workspace order, always, each a figure when rook has
+something to say about it (the name in the top edge with an event
+line: a producer's words, the last notification, who is producing,
+the unread count; the tabs with their actors and marks inside; for
+the space you left, the last lines of the pane you were in, read from
+retained cells) or one compact row when it does not (`infra  quiet ·
+2d   shell`); then the global pins, with the space each came from.
+Text finds spaces, tabs and panes; `:` completes a command (`go`,
+`new`, `rename`, `close`, `ledger`, `orbit`); the last row, `✦ vera:`,
+hands the text to the companion while she is open, and only by
+choosing it. ↑ ↓ (⇥ ⇤, C-n C-p) move — typing is the query, so
+letters never navigate — ↵ acts, Esc clears the query first and then
+leaves, to the exact pane, cursor and scroll: nothing was resized to
+get here. Under 60 columns, with `zoom_view = "ledger"`, or when the
+figures would not fit, the same spaces draw as two-line rows.
+`scripts/altitude-fixture.py` renders all of it deterministically.
 
 ## Owning a pane
 
@@ -252,7 +263,7 @@ actor without giving it the keys; `--request` and `--take` are the
 gate's moves from a script. `panes[].input` in the feed carries the
 state and the owner. prefix-i shows it all in a box.
 
-## The side panel
+## The side panel (legacy, off by default)
 
 Down the left edge, above windows and workspaces: *spaces* over
 *agents*, each row a name, a status dot and a second line (a branch, or

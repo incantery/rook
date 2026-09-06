@@ -100,7 +100,7 @@ pub const Dot = enum {
     failed, // ×  did not finish
     loose, // ◌  nobody is driving it — see Origin
 
-    fn glyph(self: Dot) []const u8 {
+    pub fn glyph(self: Dot) []const u8 {
         return switch (self) {
             .none => " ",
             .working => "◐",
