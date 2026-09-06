@@ -1,8 +1,9 @@
 //! Altitude: rook's outermost scope, the layer above a space.
 //!
 //! `prefix-o` changes altitude. The whole glass belongs to rook: the
-//! scope slot that read the space's name reads the system badge, the
-//! space you left is the breadcrumb beside it, and the canvas holds
+//! scope slot that read the space's name reads the system's chip with
+//! the world in one line after it, the corner says where back is,
+//! and the canvas holds
 //! every space — each one a figure made of what rook can truthfully
 //! say about it (its tabs, who is driving them, what a program said,
 //! how long it has been quiet) or, when it has little to say, one
@@ -36,10 +37,6 @@ const layoutpkg = @import("layout.zig");
 const renderpkg = @import("render.zig");
 
 pub const Rgb = chromepkg.Rgb;
-
-/// The system scope's mark. Only rook's own scope ever wears it: a
-/// space that happens to be named `rook` is a space, and shows as one.
-pub const scope_glyph = "♜";
 
 /// What a row is, which is what `↵` on it does.
 pub const Kind = enum {

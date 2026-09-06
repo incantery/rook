@@ -48,8 +48,10 @@ calm bar across the bottom. No sidebar: the legacy spaces/agents
 panel is off unless `[mux] sidebar_mode = "open"` asks for it.
 
 **Altitude.** `prefix-o` changes altitude, from the space into rook
-itself: the scope slot becomes the system badge `♜ rook` with the
-space you left beside it, and the whole canvas holds every space —
+itself: the scope slot becomes the system's chip, `rook` in the
+accent block, with the world in one line after it (`3 spaces · 2
+agents working · 1 needs you`) and the way back in the corner, and
+the whole canvas holds every space —
 attention first (unread panes, what a producer says needs you), then
 the spaces in a stable order, each a figure of what rook can
 truthfully say about it (its tabs and who drives them, an event, the

@@ -11,9 +11,10 @@ in the frames the design is judged on:
 The state it builds (docs/altitude.md, "the fixture"):
 
   rook   a space literally named rook, one tab `shell`, quiet, no history
-  vera   tabs deploy · main ◐ (main claims a pane running the agent),
+  vera   tabs deploy · main ◐ (main claims a pane running claude, which
+         keeps producing, so it is working),
          logs; a producer says the agent there is waiting on you
-  api    tabs tests · codex ◐ (codex claims a pane running an agent),
+  api    tabs tests · codex ◐ (codex claims a pane running codex, working),
          server; an unread bell in server
   infra  one tab, quiet
   ⊕g     a global pin promoted out of api, `tail -f`
@@ -81,9 +82,11 @@ class Rook:
             f.write(CONFIG % extra_conf)
         os.makedirs(self.root + "/bin")
         # real processes with the names the fixture needs: an agent
-        # is a program by name, and `sleep` under another name is one
-        for name in ("claude", "codex", "vera"):
-            shutil.copy("/bin/sleep", self.root + "/bin/" + name)
+        # is a program by name, so a shell under another name is one —
+        # and one that keeps talking is one that is working
+        for name in ("claude", "codex"):
+            shutil.copy("/bin/bash", self.root + "/bin/" + name)  # /bin/sh re-execs bash and loses the name
+        shutil.copy("/bin/sleep", self.root + "/bin/vera")
         self.env = dict(os.environ)
         for k in ("ROOK_MUX_PANE", "TMUX", "TMUX_PANE", "ROOK_MUX_SOCK"):
             self.env.pop(k, None)
@@ -221,7 +224,7 @@ def build_fixture(r):
     first_pane = {w["name"]: w["windows"][0]["focus"] for w in st["workspaces"]}
 
     # vera: tab deploy (claude, claimed by main), tab logs
-    r.rook("run", str(first_pane["vera"]), "exec claude 600")
+    r.rook("run", str(first_pane["vera"]), "exec claude -c 'while :; do echo \"› Reading migrations/0042_session_audit.sql\"; sleep 1; done'")
     r.settle(2.5)
     r.rook("switch", "vera"); r.settle(0.3)
     r.rook("rename", "deploy")
@@ -240,7 +243,7 @@ def build_fixture(r):
     r.settle(2.5)
 
     # api: tab tests (codex, claimed by codex), tab server with a bell
-    r.rook("run", str(first_pane["api"]), "exec codex 600")
+    r.rook("run", str(first_pane["api"]), "exec codex -c 'while :; do echo \"✗ revoked session rejected — flaky\"; sleep 1; done'")
     r.settle(2.5)
     r.rook("switch", "api"); r.settle(0.3)
     r.rook("rename", "tests")
@@ -266,9 +269,17 @@ def build_fixture(r):
     ]}})
     r.rook("side", "-", stdin=frame + "\n")
     r.settle(0.5)
-    # the working marks need fresh output from the agents: sleep is
-    # silent, so the panes' own shells spoke last — say something
     return st
+
+
+def chip_is_block(r, top):
+    """The scope chip's cells carry the accent background at altitude;
+    a space's name in the same slot carries the bar's."""
+    x = top.index("rook") if "rook" in top else -1
+    if x < 0:
+        return False
+    cell = r.screen.buffer[0][x]
+    return cell.bg not in ("default", "1e1e2e")
 
 
 def body_of(lines):
@@ -296,6 +307,8 @@ def main():
         top, bar = r.lines()[0], r.lines()[-1]
         slot = top.split("┃")[-1]  # past the global pin dock
         check("in a space the scope slot is the space's name", slot.startswith(" vera "), repr(slot[:40]))
+        vx = top.index("vera")
+        check("a space's name is not a block", r.screen.buffer[0][vx].bg in ("default", "1e1e2e"), r.screen.buffer[0][vx].bg)
         check("no sidebar in a space", no_sidebar(r.lines()))
         check("the tab bar is full width", len(top.rstrip()) > 100, str(len(top)))
         check("the tab reads name · actor, never the tool", "deploy · main" in top and "claude" not in top, repr(top[:60]))
@@ -311,12 +324,14 @@ def main():
         r.snap("02-altitude")
         lines = r.lines()
         slot = lines[0].split("┃")[-1]
-        check("at altitude the scope slot is the system badge", slot.startswith(" ♜ rook"), repr(slot[:40]))
-        check("the space you left is the breadcrumb", "‹ vera" in slot, repr(slot[:40]))
+        check("at altitude the scope slot is the system's chip", slot.startswith(" rook  "), repr(slot[:40]))
+        check("the chip is the accent block, which a space's name never is", chip_is_block(r, lines[0]), "")
+        check("the world is summarised where the tabs were", "4 spaces · 2 agents working · 2 need you" in slot, repr(slot[:60]))
+        check("the corner says where back is", "esc ↩ vera" in slot, repr(slot[-20:]))
         check("the spaces are figures, and the bar agrees", "┌┤" in body_of(lines) and "orbit" in lines[-1], repr(lines[-1][:30]))
         check("no sidebar at altitude", no_sidebar(lines))
         body = "\n".join(lines)
-        check("the space named rook is listed as a space, without the badge", " rook " in body.split("\n", 1)[1] and body.count("♜") == 2, str(body.count("♜")))
+        check("the space named rook is listed as a space, plain", any(l.strip().startswith("rook ") for l in lines[1:]), "")
         check("every space is on the canvas", all(n in body for n in ("vera", "api", "infra", "rook")))
         check("the producer's ask is an attention row", "Deploy plan" in body and "needs you" in body)
         check("the unread bell is an attention row", "rang the bell" in body)
@@ -328,7 +343,7 @@ def main():
         check("focus.mode is altitude", st_alt["focus"]["mode"] == "altitude")
         sizes_alt = {p["id"]: (p["cols"], p["rows"]) for p in st_alt["panes"]}
         check("altitude resized no pane", sizes_alt == sizes_before)
-        check("the bar persists at the same row", lines[-1].startswith(" ♜ rook"), repr(lines[-1][:30]))
+        check("the bar persists at the same row", lines[-1].startswith(" rook · orbit"), repr(lines[-1][:30]))
 
         # 05: find
         r.keys("serv", settle=0.4)
@@ -369,7 +384,7 @@ def main():
         r2.keys("`o", settle=0.8)
         r2.snap("03-altitude-one")
         body = "\n".join(r2.lines())
-        check("one quiet space: the badge, the space, the hint, nothing invented", "♜ rook" in body and "main" in body and "quiet" in body and "┌" not in body)
+        check("one quiet space: the chip, the summary, the space, nothing invented", "1 space · all quiet" in body and "main" in body and "quiet" in body and "┌" not in body)
         check("the empty state says what there is to do", ":new" in body)
         r2.keys("\x1b", settle=0.3)
     finally:

@@ -228,10 +228,12 @@ exits 0 in silence: it is written to be a hook.
 ## Altitude
 
 prefix-o changes altitude: the same frame, the whole width between
-the bars now rook's own canvas. The scope slot holds the system badge
-`♜ rook` — the glyph and the block only the system wears, so a space
-named `rook` is still just a space — with the space you left beside
-it. The canvas: the input (a band, already focused); attention first
+the bars now rook's own canvas. The scope slot holds the system's
+chip — `rook` in the accent block, which a space's name never wears,
+so a space named `rook` is still just a space — and after it, where
+the tabs were, `3 spaces · 2 agents working · 1 needs you`; the
+corner says `esc ↩ vera`. The canvas: the input (a band, already
+focused); attention first
 — unread panes oldest first, then what a producer said needs you;
 the spaces in workspace order, always, each a figure when rook has
 something to say about it (the name in the top edge with an event

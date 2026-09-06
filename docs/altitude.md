@@ -22,7 +22,7 @@ the glass, and where it shows.
 
 | concept | runtime type / source | lifetime | example | visible where |
 |---|---|---|---|---|
-| **rook scope** | the `Server` itself, at altitude (`alt_on`) | the server process | `♜ rook` | the scope slot, badged, at altitude only; the bar's left cell |
+| **rook scope** | the `Server` itself, at altitude (`alt_on`) | the server process | `rook` as the accent chip | the scope slot, as the block, at altitude only; the bar's left cell |
 | **space** | `Session` — a workspace: windows, pins, focus | until its last window closes; restored across restarts | `vera` (identity `rook--vera-e41…`, label `vera`) | the scope slot in a space; a figure or row at altitude; `:go` |
 | **tab** | `Window` — one split tree | until its last pane exits | `deploy` | a chip on the tab bar; a tab in a figure |
 | **pane** | `Pane` (`pane.zig`) — a pty and ghostty-vt | until its shell exits | the Claude pty, id 7 | a region of the space, bordered only when split |
@@ -65,7 +65,7 @@ The questions the old frame raised, answered from the code:
 
 The canonical grammar, everywhere:
 
-    ♜ rook           the system scope: badge, block, glyph — never a plain word
+    [rook]           the system scope: the accent chip, and only at altitude
     vera             a space (the scope slot in it; a figure or row above it)
     deploy           a tab, minted once
     deploy · main    a tab with the actor that claimed a pane in it
@@ -73,12 +73,13 @@ The canonical grammar, everywhere:
     main ▸ claude    …an actor does, through that tool
     ◐ ● ◇            producing, unread, asked for (marks, never names)
 
-A space literally named `rook` is a space: `rook` in the scope slot
-when you are in it, ` rook ` as a row or figure at altitude, and never
-the badge. The badge — the accent block with the `♜` glyph — is worn
-only by the system scope, and only at altitude. The fixture has such
-a space, and the frames are checked for exactly two `♜` on the glass:
-the scope slot and the bar.
+A space literally named `rook` is a space: `rook` in the scope slot,
+plain and bold, when you are in it; a row or figure at altitude; and
+never the chip. The chip — the word in the accent block — is worn
+only by the system scope, and only at altitude, where the tabs give
+way to the world in one line and the corner says where back is. The
+fixture has such a space; the frames check the chip's cells carry the
+accent and a space's name never does.
 
 ## The frame
 
@@ -95,8 +96,10 @@ There is no sidebar. The legacy panel still exists behind
 the layout when it is off.
 
 **At altitude** (`prefix-o`). The same frame. The scope slot holds
-the badge and the breadcrumb, `♜ rook  ‹ vera`; the corner says `esc
-↩`. The canvas between the bars is rook's own surface (an opaque
+the chip, and after it, where the tabs were, the world in one line:
+`rook  3 spaces · 2 agents working · 1 needs you` (only the nonzero
+parts; `all quiet` otherwise). The corner says `esc ↩ vera`. The
+canvas between the bars is rook's own surface (an opaque
 ground, so it reads over a wallpaper), holding:
 
 1. **the input**, a band with the prompt, already focused, the cursor
@@ -199,7 +202,7 @@ it back through a real glass:
 It captures the in-space frame, altitude, altitude over one quiet
 space, the 58-column ledger, the input with results, and the exact
 return, and asserts on each: no sidebar columns, full-width bars, the
-badge only at altitude and only twice, the space named `rook` listed
+chip only at altitude, the space named `rook` listed
 as a space, actors on tabs and tools kept off them, the pin's origin,
 no pane resized by altitude, and the same focus and layouts after
 Esc. Run it after any change to the frame; look at the PNGs, not only

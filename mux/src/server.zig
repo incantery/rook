@@ -2938,6 +2938,34 @@ pub const Server = struct {
         }
     }
 
+    /// The world in one line, for the tab bar at altitude: how many
+    /// spaces, how many agents producing, how many things need you
+    /// (panes unread, and what a producer said is waiting). Only the
+    /// nonzero parts; a quiet world says so.
+    fn altSummary(self: *Server, buf: []u8) []const u8 {
+        const spaces = self.sessions.items.len;
+        const working = self.countWorking();
+        const needs = self.countUnread() + self.countAsks();
+        var w: std.Io.Writer = .fixed(buf);
+        w.print("{d} space{s}", .{ spaces, plural(spaces) }) catch {};
+        if (working > 0) w.print(" · {d} agent{s} working", .{ working, plural(working) }) catch {};
+        if (needs > 0) w.print(" · {d} need{s} you", .{ needs, if (needs == 1) "s" else "" }) catch {};
+        if (working == 0 and needs == 0) w.writeAll(" · all quiet") catch {};
+        return w.buffered();
+    }
+
+    /// Rows a producer pushed saying an agent in a space rook holds
+    /// is waiting on you, or failed.
+    fn countAsks(self: *Server) usize {
+        const claims = if (self.side.agents.panel) |pnl| pnl.items else &.{};
+        var n: usize = 0;
+        for (claims) |it| {
+            if (it.state != .blocked and it.state != .failed) continue;
+            if (self.sessionNamed(it.workspace()) != null) n += 1;
+        }
+        return n;
+    }
+
     /// The space a global pin was promoted out of, "" when unknown.
     pub fn pinOrigin(self: *Server, id: u32) []const u8 {
         for (self.pin_origins.items) |*o| {
@@ -3507,23 +3535,25 @@ pub const Server = struct {
 
         // The scope slot, top-left. In a space it is the space's name
         // — plain, bold, no block: identity, not selection. At
-        // altitude the same slot holds the system badge, `♜ rook` as
-        // a block with the glyph only the system wears, and the space
-        // you left beside it as the breadcrumb. A space named `rook`
-        // shows in the slot as `rook`, badge-less, and under the
-        // badge as `‹ rook`: the glyph and the block say scope, the
-        // word never has to.
+        // altitude the same slot holds the system's chip, `rook` as
+        // the accent block, and after it, where the tabs were, the
+        // world in one line: `3 spaces · 2 agents working · 1 needs
+        // you`. A space named `rook` shows in the slot as plain
+        // `rook`, and in the corner as `‹ rook` when you left it: the
+        // block says scope, the word never has to.
         const scope = chromepkg.shortSpace(sn.label());
         const sc = scope[0..@min(scope.len, 20)];
         var scope_w: u16 = 0;
         if (self.alt_on) {
             out.appendSliceBounded(chip_on) catch {};
-            out.appendSliceBounded(" " ++ altpkg.scope_glyph ++ " rook ") catch {};
+            out.appendSliceBounded(" rook ") catch {};
             out.appendSliceBounded(bar) catch {};
-            out.appendSliceBounded(" ‹ ") catch {};
-            out.appendSliceBounded(sc) catch {};
-            out.appendSliceBounded(" ") catch {};
-            scope_w = 8 + 3 + chromepkg.cols(sc) + 1;
+            out.appendSliceBounded("  ") catch {};
+            scope_w = 8;
+            var sum_buf: [96]u8 = undefined;
+            const summary = self.altSummary(&sum_buf);
+            out.appendSliceBounded(summary) catch {};
+            scope_w += chromepkg.cols(summary);
         } else {
             out.appendSliceBounded(scope_ink) catch {};
             out.appendSliceBounded(" ") catch {};
@@ -3646,9 +3676,10 @@ pub const Server = struct {
         // bar owes a reader who has not found the key yet — and copy
         // mode and zoom take the slot while they last, because they
         // are about the whole screen rather than about a tab. At
-        // altitude it is the way back; the counts are the bar's.
+        // altitude it is the way back, and where back is.
+        var corner_buf: [48]u8 = undefined;
         const corner: []const u8 = if (self.alt_on)
-            "esc ↩"
+            (std.fmt.bufPrint(&corner_buf, "esc ↩ {s}", .{sc}) catch "esc ↩")
         else if (self.scrolling)
             (if (self.selecting) "copy·VISUAL" else "copy·hjkl y q")
         else if (self.window().zoomed)
@@ -3809,11 +3840,9 @@ pub const Server = struct {
         // The left cell: the answer to "who is driving the focused
         // surface", always present, quiet when it is you.
         if (self.alt_on) {
-            out.appendSliceBounded(acc_ink) catch {};
-            out.appendSliceBounded(altpkg.scope_glyph ++ " ") catch {};
             out.appendSliceBounded(you_ink) catch {};
             out.appendSliceBounded("rook") catch {};
-            vis += 6;
+            vis += 4;
             const what: []const u8 = if (self.alt.isCommand()) " · command" else if (self.alt.len > 0) " · find" else if (self.alt.painted_ledger) " · ledger" else " · orbit";
             out.appendSliceBounded(bar) catch {};
             out.appendSliceBounded(what) catch {};
@@ -4608,12 +4637,16 @@ pub const Server = struct {
             out.appendSlice(a, p.notif_title[0..p.notif_title_len]) catch {};
             if (sp.event_kind == .quiet) sp.event_kind = .said;
         }
+        // rook's own sighting of work, unless the producer said it
+        const producer_said_working = if (claimed) |it| it.state == .working else false;
         if (working) |p| {
-            if (out.items.len > 0) out.appendSlice(a, " · ") catch {};
-            var nb: [64]u8 = undefined;
-            const who: []const u8 = if (p.owner_len > 0) p.ownerName() else (p.fgName(&nb) orelse "agent");
-            out.appendSlice(a, who) catch {};
-            out.appendSlice(a, " ◐ working") catch {};
+            if (!producer_said_working) {
+                if (out.items.len > 0) out.appendSlice(a, " · ") catch {};
+                var nb: [64]u8 = undefined;
+                const who: []const u8 = if (p.owner_len > 0) p.ownerName() else (p.fgName(&nb) orelse "agent");
+                out.appendSlice(a, who) catch {};
+                out.appendSlice(a, " ◐ working") catch {};
+            }
             if (sp.event_kind == .quiet or sp.event_kind == .said) sp.event_kind = .working;
         }
         if (sp.unread > 0) {
