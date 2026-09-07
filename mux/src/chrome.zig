@@ -277,6 +277,13 @@ pub const Item = struct {
     /// producer claims the session rook can see there. Empty means the
     /// producer said nothing, and the name is the only claim it has.
     ws: []const u8 = "",
+    /// The fields a work item may carry past the rail's own (rook's
+    /// home lists them, docs/altitude.md): who is driving it, the
+    /// last meaningful thing that happened, and what it produced.
+    /// Empty when the producer did not say; never inferred.
+    actor: []const u8 = "",
+    event: []const u8 = "",
+    result: []const u8 = "",
 
     /// The workspace this row points at: the explicit `ws` when one
     /// was named, else the row's name. It is what a click on the row
@@ -755,7 +762,7 @@ fn countNote(buf: []u8, working: usize, manual: usize) []const u8 {
 }
 
 /// Does any pushed row claim the workspace `name`?
-fn claimedIn(items: []const Item, name: []const u8) bool {
+pub fn claimedIn(items: []const Item, name: []const u8) bool {
     for (items) |it| {
         if (it.claims(name)) return true;
     }
@@ -836,6 +843,9 @@ fn parseFrame(a: std.mem.Allocator, bytes: []const u8) PushError!Parsed {
             .origin = Origin.parse(objStr(o, "origin") orelse ""),
             .unread = objBool(o, "unread"),
             .ws = objStr(o, "workspace") orelse "",
+            .actor = objStr(o, "actor") orelse "",
+            .event = objStr(o, "event") orelse "",
+            .result = objStr(o, "result") orelse "",
         });
     }
 

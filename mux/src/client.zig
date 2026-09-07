@@ -631,7 +631,11 @@ pub fn kill(gpa: std.mem.Allocator, sock_path: []const u8) !void {
     _ = ptypkg.pollMany(&fds, 1, 500);
 }
 
-pub fn attach(gpa: std.mem.Allocator, sock_path: []const u8) !void {
+/// Attach this terminal as a glass. `dest` is where it lands, after
+/// the geometry: nothing (the product's default — rook's home, or
+/// the last space when the config says so), `r` for the root, or
+/// `s<name>\t<cwd>` for a space by name, made in `cwd` if it must be.
+pub fn attach(gpa: std.mem.Allocator, sock_path: []const u8, dest: []const u8) !void {
     const sock = ptypkg.unixConnect(sock_path);
     if (sock < 0) return error.ConnectFailed;
     defer ptypkg.closeFd(sock);
@@ -653,7 +657,11 @@ pub fn attach(gpa: std.mem.Allocator, sock_path: []const u8) !void {
 
     _ = signal(SIGWINCH, &onWinch);
 
-    try proto.write(sock, @intFromEnum(proto.c2s.attach), &winsize().encode());
+    var hello: std.ArrayList(u8) = .empty;
+    defer hello.deinit(gpa);
+    try hello.appendSlice(gpa, &winsize().encode());
+    try hello.appendSlice(gpa, dest);
+    try proto.write(sock, @intFromEnum(proto.c2s.attach), hello.items);
 
     var reader = proto.Reader.init(gpa);
     defer reader.deinit();

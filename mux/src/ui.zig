@@ -94,6 +94,8 @@ pub const Mark = enum {
     unread,
     attention,
     failed,
+    /// finished, well: a work item that is done, an action that ran
+    success,
 
     /// Priority when several apply: attention outranks everything —
     /// a program asked — then work in flight, then unread.
@@ -103,6 +105,7 @@ pub const Mark = enum {
     fn rank(self: Mark) u8 {
         return switch (self) {
             .none => 0,
+            .success => 0,
             .unread => 1,
             .waiting => 2,
             .working => 3,
@@ -121,6 +124,7 @@ pub fn markGlyph(t: *const Theme, m: Mark) []const u8 {
             .unread => "•",
             .attention => "!",
             .failed => "✕",
+            .success => "✓",
         },
         .ascii => switch (m) {
             .none => "",
@@ -129,6 +133,7 @@ pub fn markGlyph(t: *const Theme, m: Mark) []const u8 {
             .unread => ".",
             .attention => "!",
             .failed => "x",
+            .success => "+",
         },
     };
 }
@@ -141,6 +146,7 @@ pub fn markInk(t: *const Theme, m: Mark) Rgb {
         .unread => t.unread,
         .attention => t.attention,
         .failed => t.err,
+        .success => t.success,
     };
 }
 

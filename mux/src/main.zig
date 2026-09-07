@@ -1,7 +1,8 @@
 //! The engine: a terminal multiplexer with ghostty-vt in-process.
 //! It is not on $PATH and nobody types it — `rook` execs it, verb and
 //! all, so the verbs read as the front door spells them:
-//!   rook                attach (starting the server if needed)
+//!   rook                attach at rook's home (starting the server if needed)
+//!   rook attach [--root | --space <name> [--cwd <dir>]]   attach somewhere exact
 //!   rook server         run the server in the foreground
 //!   rook nav <dir>      move focus h/j/k/l (vim plugins call this at edges)
 //!   rook popup <cmd>    float a command over the current window
@@ -35,6 +36,7 @@ test {
     _ = @import("chrome.zig");
     _ = @import("companion.zig");
     _ = @import("altitude.zig");
+    _ = @import("ask.zig");
     _ = @import("ui.zig");
     _ = @import("server.zig");
 }
@@ -390,12 +392,43 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // rook attach [--root | --space <name> [--cwd <dir>]]: where this
+    // glass lands. Bare `rook` is `attach` with no destination.
+    var dest: std.ArrayList(u8) = .empty;
+    if (std.mem.eql(u8, cmd, "attach")) {
+        var i: usize = 2;
+        while (i < argv.len) : (i += 1) {
+            const a = std.mem.span(argv[i]);
+            if (std.mem.eql(u8, a, "--root") or std.mem.eql(u8, a, "--home")) {
+                dest.clearRetainingCapacity();
+                try dest.append(gpa, 'r');
+            } else if (std.mem.eql(u8, a, "--space") and i + 1 < argv.len) {
+                i += 1;
+                dest.clearRetainingCapacity();
+                try dest.append(gpa, 's');
+                try dest.appendSlice(gpa, std.mem.span(argv[i]));
+            } else if (std.mem.eql(u8, a, "--cwd") and i + 1 < argv.len) {
+                i += 1;
+                if (dest.items.len > 0 and dest.items[0] == 's') {
+                    try dest.append(gpa, '\t');
+                    try dest.appendSlice(gpa, std.mem.span(argv[i]));
+                }
+            } else {
+                std.debug.print("usage: rook attach [--root | --space <name> [--cwd <dir>]]\n", .{});
+                return error.BadArgs;
+            }
+        }
+    } else if (cmd.len > 0) {
+        std.debug.print("rook: unknown verb {s}\n", .{cmd});
+        return error.BadArgs;
+    }
+
     if (getenv("ROOK_MUX_PANE") != null) {
         std.debug.print("already inside rook; nesting comes later\n", .{});
         return;
     }
 
-    // Default: attach, booting a server when none listens.
+    // Attach, booting a server when none listens.
     const probe = ptypkg.unixConnect(path);
     if (probe >= 0) {
         ptypkg.closeFd(probe);
@@ -411,7 +444,7 @@ pub fn main(init: std.process.Init) !void {
             _ = usleep(20_000);
         }
     }
-    try client.attach(churn_gpa, path);
+    try client.attach(churn_gpa, path, dest.items);
 }
 
 /// Fork+exec ourselves as the `server` verb, detached from this tty.

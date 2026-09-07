@@ -32,26 +32,30 @@ same one the Go half reads) names the resident rook watches for —
 `command = "vera"`, or `program = "vera"` when that command's first
 word is a wrapper; vera by default, `program = ""` turns the slot off.
 `bar = false` turns the calm bar off (the bottom row: who holds the
-focused pane's keyboard, and the signals), and `zoom_view = "ledger"`
-makes prefix-o draw rows only, never figures. The side panel is
-**off by default** — the frame is the tab bar, the work at full
-width, and the calm bar — and `sidebar_mode = "open"` is how a config
-asks for it back. Then:
+focused pane's keyboard, and the signals), `zoom_view = "ledger"`
+makes prefix-s draw rows only, never figures, and `startup =
+"last-space"` makes plain `rook` land in a space instead of at home.
+`[companion] ask` is what bare text at home runs (`vera say -c rook`
+while the companion is vera). The side panel is **off by default** —
+the frame is the tab bar, the work at full width, and the calm bar —
+and `sidebar_mode = "open"` is how a config asks for it back. Then:
 
     v |        split side by side          c        new window
     -          split stacked               n p 1-9  switch window
     hjkl       focus pane                  z        zoom pane
     HJKL       resize split                [        copy mode (hjkl, v, y, q)
-    x          kill pane                   d        detach
-    a          cycle the side panel        u        the oldest unread pane
-    A          the side panel away, and back (focus mode)
-    o          altitude: zoom out of the space into rook, and back
+    x          kill pane                  d        detach
+    o          home: out to rook, from anywhere    u   the oldest unread pane
+    s          orbit: the spaces as figures, a subview of home
+    a  !       home, the cursor on what is running / what needs you
+    t  /  :    home, ready to ask vera / find / command
     C-o        return jump: the space before the last hop
     i          inspector: the focused pane's actor, input owner, program
+    A          the legacy side panel away, and back
 
 The top row is the tab bar: the space's name in the scope slot, then
 a chip per window. A tab is named once — a name a person gave (`rook
-rename`, `:rename` at altitude), else the first program in it that
+rename`, `:rename` at home), else the first program in it that
 was not the shell, with an ordinal when a sibling wears the name —
 and rook never renames it afterwards. An actor that claimed a pane in
 the window (`rook own`) rides after the name, `deploy · main`; the
@@ -64,11 +68,12 @@ you observe` once an actor claimed it, and `◐ n · !n · •n · ⊕g n` on th
 right — agents producing output, panes unread, global pins — empty
 when nothing signals. While the prefix is armed the bar shows the
 chords. `docs/altitude.md` is the whole model and the ontology:
-altitude, ownership, the gate, what each word means at runtime.
+home, ownership, the gate, what each word means at runtime.
 
 Workspaces: `rook ls`, `rook new <name>`, `rook switch <name>` —
-named sessions in one server, each with its own windows; prefix-s
-opens an fzf picker in a popup (`rook pick`). In it, ctrl-n/ctrl-p and
+named sessions in one server, each with its own windows; `rook .` and
+`rook --space <name>` attach straight into one. `rook pick` floats an
+fzf picker in a popup. In it, ctrl-n/ctrl-p and
 the arrows move through the list, enter switches to the row under the
 cursor, and **ctrl-o creates the workspace you typed** — the same verb
 as `rook new`, in the popup's cwd, so a name that already exists just
@@ -227,32 +232,48 @@ the shell's own environment, with the shell still there afterwards.
 `rook resume` outside rook, or against a server that does not answer,
 exits 0 in silence: it is written to be a hook.
 
-## Altitude
+## Home
 
-prefix-o changes altitude: the same frame, the whole width between
-the bars now rook's own canvas. The scope slot holds the system's
-chip — `rook` in the accent block, which a space's name never wears,
-so a space named `rook` is still just a space — and after it, where
-the tabs were, `3 spaces · 2 agents working · 1 needs you`; the
-corner says `esc ↩ vera`. The canvas: the input (a band, already
-focused); attention first
-— unread panes oldest first, then what a producer said needs you;
-the spaces in workspace order, always, each a figure when rook has
-something to say about it (the name in the top edge with an event
-line: a producer's words, the last notification, who is producing,
-the unread count; the tabs with their actors and marks inside; for
+Plain `rook` lands at home: the same frame, the whole width between
+the bars rook's own canvas. The scope slot holds the system's chip —
+`rook` in the accent block, which a space's name never wears, so a
+space named `rook` is still just a space — and after it, where the
+tabs were, `3 spaces · 2 agents working · 1 needs you`; no corner,
+because nothing is above home. The canvas: the field (`› Ask vera…
+/ find  : command`, already focused); the request and what came back;
+then the sections — `needs you` (unread panes oldest first, then what
+a producer said is waiting), `running` (a producer's tasks by goal,
+with the space, the actor and the last event it named; then agents
+rook can see running that nobody claimed, `goal unknown`), `recent`
+(what finished, with its result), `spaces` (one row each, with the
+tabs, actors and marks), `pinned everywhere` (the global pins, with
+the space each came from). Each section says honestly when it is
+empty. ↑ ↓ (⇥ ⇤, C-n C-p) move — typing is text, so letters never
+navigate — ↵ enters the exact pane, tab or space; prefix-o comes
+back. Esc closes one layer: a running request, the draft, a receipt,
+a subview; at home it does nothing. Nothing is resized to get here or
+back.
+
+Bare text is a request to the companion: `vera say -c rook <text>`,
+run with pipes, its stdout shown under the field as her reply. When
+she answers in one JSON object (`ask.zig`: intent, plan, space,
+question, actions) the canvas shows that instead, and each proposed
+action is a row with the command it would run — ↵ runs it, by hand,
+and the row keeps the receipt. Without her on PATH the field says
+so, and `/` and `:` still work. `/` finds spaces, work items, tabs
+and panes as one ranked list; `:` completes a command (`go`, `new`,
+`rename`, `close`, `home`, `orbit`, `ledger`).
+
+prefix-s is orbit, a subview of home: the scope bar reads `rook │
+orbit` with `esc rook` in the corner, and every space is a figure
+when rook has something to say about it (the name in the top edge
+with an event line; the tabs with their actors and marks inside; for
 the space you left, the last lines of the pane you were in, read from
-retained cells) or one compact row when it does not (`infra  quiet ·
-2d   shell`); then the global pins, with the space each came from.
-Text finds spaces, tabs and panes; `:` completes a command (`go`,
-`new`, `rename`, `close`, `ledger`, `orbit`); the last row, `✦ vera:`,
-hands the text to the companion while she is open, and only by
-choosing it. ↑ ↓ (⇥ ⇤, C-n C-p) move — typing is the query, so
-letters never navigate — ↵ acts, Esc clears the query first and then
-leaves, to the exact pane, cursor and scroll: nothing was resized to
-get here. Under 60 columns, with `zoom_view = "ledger"`, or when the
-figures would not fit, the same spaces draw as two-line rows.
-`scripts/altitude-fixture.py` renders all of it deterministically.
+retained cells) or one compact row when it does not. Under 60
+columns, with `zoom_view = "ledger"`, or when the figures would not
+fit, the same spaces draw as two-line rows, and the bar and the scope
+bar say `ledger`. `scripts/altitude-fixture.py` renders all of it
+deterministically; `docs/altitude.md` is the model.
 
 ## Owning a pane
 
@@ -277,12 +298,13 @@ nothing but columns. Clicking a row moves that panel's highlight, and
 takes you to the workspace the row names — the agent's own pane on
 *agents*, the workspace itself on *spaces*.
 
-**It has three modes, and prefix-a cycles them**: `open` is the panel
-in full; `collapsed` is three columns of dots — the same rows in the
-same places with the words taken off them, so what wants you still
-reaches the eye and the panel that comes back has not moved under it;
-`hidden` is the work with no chrome down its left edge. prefix-A goes
-straight to hidden and back to open, which is focus mode in one key.
+**It has three modes**: `open` is the panel in full; `collapsed` is
+three columns of dots — the same rows in the same places with the
+words taken off them, so what wants you still reaches the eye and the
+panel that comes back has not moved under it; `hidden` is the work
+with no chrome down its left edge. prefix-A goes between hidden and
+open (prefix-a is home's now; the collapsed rail is reached by
+config).
 A click on a collapsed row still goes where the open one would.
 `[mux] sidebar_mode` says which mode the rail starts in.
 

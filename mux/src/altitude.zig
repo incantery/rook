@@ -1,40 +1,39 @@
-//! Altitude: rook's outermost scope, the layer above a space.
+//! The root: rook's home, the layer above every space.
 //!
-//! `prefix-o` changes altitude. The whole glass belongs to rook: the
-//! scope slot that read the space's name reads the system's chip with
-//! the world in one line after it, the corner says where back is,
-//! and the canvas holds
-//! every space — each one a figure made of what rook can truthfully
-//! say about it (its tabs, who is driving them, what a program said,
-//! how long it has been quiet) or, when it has little to say, one
-//! compact row. Global pins do not move a column: scope is taught by
-//! what refuses to move. The calm bar stays. Esc returns to the exact
-//! pane, cursor and scroll, because nothing moved to get here — the
-//! panes kept running underneath, unresized, and this file painted
-//! over them.
+//! Rook lands here. The whole glass belongs to rook: the scope slot
+//! reads the system's chip with the world in one line after it, and
+//! the canvas is the place to say what should happen next, see what
+//! needs you, what is running, what finished, and where — every
+//! space, as a destination. Global pins do not move a column: scope
+//! is taught by what refuses to move. The calm bar stays. Entering a
+//! space is exact — the panes kept running underneath, unresized,
+//! and this file painted over them — and `prefix-o` comes back up.
 //!
-//! One input, already focused. Text finds spaces, tabs and panes; `:`
-//! prefixes an exact command with completions; the last row, `✦ vera:`,
-//! hands the same text to the companion — and only by choosing that
-//! row. Typing never acts; `↵` on a visible row does. Because bare
-//! typing searches, the rows are walked with ↑ ↓ (⇥ ⇤, C-n C-p), never
-//! with letters. Esc closes the deepest layer first: a query, then the
-//! view.
+//! One input, already focused, and one grammar: bare text is a
+//! request to the companion (ask.zig); `/` finds spaces, work, tabs
+//! and panes; `:` is an exact command with completions. Typing never
+//! acts; `↵` does. Because bare typing is text, the rows are walked
+//! with ↑ ↓ (⇥ ⇤, C-n C-p), never with letters. Esc closes the
+//! deepest layer first: a running request, a query, a receipt, a
+//! subview — and at home with nothing open it does nothing, because
+//! there is nothing above home.
 //!
-//! Two fidelities, one model. Orbit draws a figure per space when the
-//! glass has room for them; Ledger is the same spaces as two-line rows
-//! — narrow glass, `zoom_view = "ledger"`, and every renderer that is
-//! not this one. Identical keys, identical rows.
+//! Three views of one scope. Home is the default: intent, attention,
+//! work, outcomes, spaces, as rows. Orbit is the spatial subview: a
+//! figure per space when the glass has room. Ledger is the same
+//! spaces as two-line rows — narrow glass, `zoom_view = "ledger"`,
+//! and every renderer that is not this one. Identical keys.
 //!
 //! This file holds the model, the painter and the input state. It
 //! knows nothing about sessions: the server fills the model from its
 //! own tables (`Server.altBuild`) and acts on the row chosen
 //! (`Server.altAct`). The ontology — what a space, a tab, a pane, an
-//! actor and a tool are at runtime — is `docs/altitude.md`.
+//! actor, a tool and a work item are at runtime — is `docs/altitude.md`.
 const std = @import("std");
 const chromepkg = @import("chrome.zig");
 const layoutpkg = @import("layout.zig");
 const renderpkg = @import("render.zig");
+const askpkg = @import("ask.zig");
 const ui = @import("ui.zig");
 
 pub const Rgb = chromepkg.Rgb;
@@ -55,13 +54,72 @@ pub const Kind = enum {
     pin,
     /// a `:` command with its argument: ↵ runs it
     command,
-    /// the companion: ↵ hands the typed text to her
-    vera,
+    /// a work item — a producer's task, or an agent rook found: ↵
+    /// goes to its exact pane, tab or space
+    work,
+    /// an action the companion proposed: ↵ runs its command, by hand
+    action,
+    /// a section header the cursor skips
+    header,
     /// prose the cursor skips
     note,
 };
 
-pub const Command = enum { none, new, go, rename, close, ledger, orbit };
+pub const Command = enum { none, new, go, rename, close, ledger, orbit, home };
+
+/// The three views of the root scope.
+pub const View = enum {
+    home,
+    orbit,
+    ledger,
+
+    pub fn word(self: View) []const u8 {
+        return switch (self) {
+            .home => "home",
+            .orbit => "orbit",
+            .ledger => "ledger",
+        };
+    }
+};
+
+/// What the input's first character makes of the rest.
+pub const Mode = enum {
+    /// bare text: a request to the companion
+    intent,
+    /// `/`: find spaces, work, tabs, panes
+    find,
+    /// `:`: an exact command
+    command,
+
+    pub fn word(self: Mode) []const u8 {
+        return switch (self) {
+            .intent => "ask",
+            .find => "find",
+            .command => "command",
+        };
+    }
+};
+
+/// Where `prefix-a` and `prefix-!` put the cursor: the first row of
+/// a section, once the rows are built.
+pub const Land = enum { none, needs, running };
+
+/// A work item, as rook can truthfully describe one: a producer's
+/// row (goal, state, space, and the fields it may add — actor, event,
+/// result), or an agent rook found running in a pane nobody claimed.
+/// Missing fields stay empty; nothing here is inferred from output.
+pub const Work = struct {
+    goal: []const u8,
+    state: chromepkg.State = .none,
+    /// the space's label, and its identity
+    space: []const u8 = "",
+    full: []const u8 = "",
+    actor: []const u8 = "",
+    event: []const u8 = "",
+    result: []const u8 = "",
+    unread: bool = false,
+    found: bool = false,
+};
 
 pub const CommandSpec = struct { word: []const u8, cmd: Command, arg: []const u8, help: []const u8 };
 
@@ -76,6 +134,7 @@ pub const commands = [_]CommandSpec{
     .{ .word = "close", .cmd = .close, .arg = "<space>", .help = "close a space: every pane in it is hung up" },
     .{ .word = "ledger", .cmd = .ledger, .arg = "", .help = "spaces as rows, no figures" },
     .{ .word = "orbit", .cmd = .orbit, .arg = "", .help = "spaces as figures, when the glass has room" },
+    .{ .word = "home", .cmd = .home, .arg = "", .help = "rook's home: intent, attention, work, spaces" },
 };
 
 /// One tab of a space, as the figure lists it: the minted name, the
@@ -152,9 +211,11 @@ pub const Row = struct {
     arg: []const u8 = "",
     /// a ranking key while finding: lower sorts first
     score: u32 = 0,
+    /// which proposed action, for an `.action` row
+    action: usize = 0,
 
     pub fn actionable(self: Row) bool {
-        return self.kind != .note;
+        return self.kind != .note and self.kind != .header;
     }
 };
 
@@ -166,8 +227,26 @@ pub const max_spaces: usize = 24;
 pub const max_tabs: usize = 12;
 pub const max_excerpt: usize = 2;
 
-/// What Esc did.
-pub const Escape = enum { cleared, leave };
+/// What Esc did: the deepest open layer, closed. `stay` is home with
+/// nothing open — there is nothing above it.
+pub const Escape = enum { cancelled, cleared, dismissed, home, stay };
+
+/// What was painted: home, or one of the two fidelities of the
+/// spatial view (orbit falls back to ledger when the figures do not
+/// fit).
+pub const Painted = enum {
+    home,
+    orbit,
+    ledger,
+
+    pub fn word(self: Painted) []const u8 {
+        return switch (self) {
+            .home => "home",
+            .orbit => "orbit",
+            .ledger => "ledger",
+        };
+    }
+};
 
 /// Everything the view holds between keystrokes: the input, the
 /// cursor, the rows and spaces as last built (borrowing `buf`), the
@@ -187,22 +266,46 @@ pub const State = struct {
     excerpt: [max_excerpt][]const u8 = undefined,
     zones: [128]Zone = undefined,
     zones_n: usize = 0,
-    /// Ledger (rows only) rather than orbit, for this visit.
-    ledger: bool = false,
-    /// What was actually painted last: orbit fell back to ledger when
-    /// the figures did not fit.
-    painted_ledger: bool = false,
-    /// The ✦ row is never selected by rook — only by a hand that
-    /// moved onto it (↓, ⇥, a click). Typing disarms it again.
-    ask_armed: bool = false,
+    /// The view: home, or a subview. Kept across visits to a space;
+    /// `prefix-o` always lands on home.
+    view: View = .home,
+    /// What was actually painted last.
+    painted: Painted = .home,
+    /// The request in flight or answered, and its receipt.
+    req: askpkg.Request = .{},
+    /// A section to put the cursor on at the next build.
+    land: Land = .none,
 
     pub fn textSlice(self: *const State) []const u8 {
         return self.text[0..self.len];
     }
 
-    /// Bare text finds; `:` leads a command.
+    /// Bare text is intent; `/` finds; `:` leads a command.
+    pub fn mode(self: *const State) Mode {
+        if (self.len == 0) return .intent;
+        return switch (self.text[0]) {
+            '/' => .find,
+            ':' => .command,
+            else => .intent,
+        };
+    }
+
     pub fn isCommand(self: *const State) bool {
-        return self.len > 0 and self.text[0] == ':';
+        return self.mode() == .command;
+    }
+
+    /// The text past the mode's leading character.
+    pub fn query(self: *const State) []const u8 {
+        const t = self.textSlice();
+        return switch (self.mode()) {
+            .intent => t,
+            .find, .command => std.mem.trimStart(u8, t[1..], " "),
+        };
+    }
+
+    /// Is anything being looked for — a query with letters in it?
+    pub fn finding(self: *const State) bool {
+        return self.mode() == .find and self.query().len > 0;
     }
 
     pub fn push(self: *State, ch: u8) void {
@@ -222,18 +325,31 @@ pub const State = struct {
     pub fn clear(self: *State) void {
         self.len = 0;
         self.cur = 0;
-        self.ask_armed = false;
     }
 
-    /// Esc closes the deepest layer first: a query (and with it the
-    /// results, the completions), then the view. A half-typed query
-    /// never sends you back into the space by surprise.
+    /// Esc closes the deepest layer first: a request still running,
+    /// a query (and with it the results, the completions), a receipt,
+    /// then a subview. At home with nothing open it does nothing: a
+    /// space is a destination, never the parent of the root.
     pub fn escape(self: *State) Escape {
+        if (self.req.busy()) {
+            self.req.cancel();
+            return .cancelled;
+        }
         if (self.len > 0) {
             self.clear();
             return .cleared;
         }
-        return .leave;
+        if (self.req.dismiss()) {
+            self.cur = 0;
+            return .dismissed;
+        }
+        if (self.view != .home) {
+            self.view = .home;
+            self.cur = 0;
+            return .home;
+        }
+        return .stay;
     }
 
     pub fn reset(self: *State) void {
@@ -255,25 +371,19 @@ pub const State = struct {
         if (self.rows.items.len == 0) return null;
         const i = @min(self.cur, self.rows.items.len - 1);
         const r = self.rows.items[i];
-        if (r.kind == .vera and !self.ask_armed) return null;
         return if (r.actionable()) r else null;
     }
 
-    /// Is the cursor's row painted as selected? The ✦ row only once
-    /// a hand put the cursor there.
+    /// Is the cursor's row painted as selected?
     pub fn highlighted(self: *const State, i: usize) bool {
         if (i != self.cur or i >= self.rows.items.len) return false;
-        const r = self.rows.items[i];
-        if (r.kind == .vera and !self.ask_armed) return false;
-        return r.actionable();
+        return self.rows.items[i].actionable();
     }
 
     /// Move the cursor `d` rows, skipping prose, staying in range.
-    /// A move is a hand on the cursor: it arms the ✦ row.
     pub fn move(self: *State, d: i32) void {
         const n = self.rows.items.len;
         if (n == 0) return;
-        self.ask_armed = true;
         var i: i64 = @intCast(@min(self.cur, n - 1));
         var steps: usize = 0;
         while (steps < n) : (steps += 1) {
@@ -503,8 +613,9 @@ pub fn box(f: *renderpkg.Frame, r: layoutpkg.Rect, edge: Rgb, ground: Rgb) void 
 
 pub const Paint = struct {
     t: *const ui.Theme,
-    /// the space Esc returns to, for the footer
-    back: []const u8 = "",
+    /// the companion's name, and whether her command can be found
+    ask_name: []const u8 = "vera",
+    ask_on: bool = true,
 };
 
 /// The tab component's mark, from the tab bar's vocabulary.
@@ -532,13 +643,18 @@ fn orbitRows(st: *const State) u16 {
     return h;
 }
 
-/// Decide the fidelity for this frame, before the bars are composed:
-/// orbit when asked for it, nothing is being typed, the region is wide
-/// enough for a figure, and the figures fit; ledger otherwise.
+/// Decide what this frame paints, before the bars are composed, so
+/// the bar's word and the canvas agree: home as itself; orbit when
+/// asked for, nothing is being found, the region is wide enough for
+/// a figure, and the figures fit; ledger otherwise.
 pub fn chooseFidelity(st: *State, region: layoutpkg.Rect) void {
+    if (st.view == .home) {
+        st.painted = .home;
+        return;
+    }
     const avail = region.h -| 5; // the input, its line, the footer
-    const orbit = !st.ledger and st.len == 0 and region.w >= 60 and orbitRows(st) <= avail;
-    st.painted_ledger = !orbit;
+    const orbit = st.view == .orbit and st.len == 0 and region.w >= 60 and orbitRows(st) <= avail;
+    st.painted = if (orbit) .orbit else .ledger;
 }
 
 /// The input field's width: bounded to the content, never the whole
@@ -557,10 +673,11 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
     const w = region.w -| 4;
     const bottom = region.y + region.h;
     var y = region.y + 1;
+    const ascii = t.glyphs == .ascii;
 
     // The input: a raised field the eye finds, the prompt in the
-    // accent, the cursor in it. The placeholder is in the field, so
-    // an empty query still reads as a control and not as a caption.
+    // accent, the cursor in it. The placeholder is the grammar, so an
+    // empty field still says what typing does here.
     const fw = fieldWidth(w);
     f.cup(x, y);
     style(f, .{ .bg = t.raised });
@@ -573,8 +690,13 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
     var cx: u16 = x + 3;
     const text = st.textSlice();
     if (text.len == 0) {
+        var pb: [128]u8 = undefined;
+        const ph = if (p.ask_on)
+            std.fmt.bufPrint(&pb, "Ask {s}…    / find    : command", .{p.ask_name}) catch "/ find    : command"
+        else
+            std.fmt.bufPrint(&pb, "{s} is not on PATH    / find    : command", .{p.ask_name}) catch "/ find    : command";
         style(f, .{ .fg = t.muted, .bg = t.raised });
-        _ = putW(f, "find a space, a tab, a pane  ·  : command", fw -| 4);
+        _ = putW(f, ph, fw -| 4);
     } else {
         style(f, .{ .fg = t.primary, .bg = t.raised, .bold = true });
         cx += putW(f, text, fw -| 4);
@@ -583,13 +705,17 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
     y += 1;
 
     // Under the field: what the rows are, in one muted line.
-    const ascii = t.glyphs == .ascii;
-    const under: []const u8 = if (st.isCommand())
-        (if (ascii) "completions · enter runs the selected one · esc clears" else "completions · ↵ runs the selected one · esc clears")
-    else if (text.len > 0)
-        (if (ascii) "matches · up/down move · enter acts on the selected · typing never does" else "matches · ↑ ↓ move · ↵ acts on the selected · typing never does")
-    else
-        "";
+    const under: []const u8 = switch (st.mode()) {
+        .command => (if (ascii) "completions · enter runs the selected one · esc clears" else "completions · ↵ runs the selected one · esc clears"),
+        .find => if (st.query().len > 0)
+            (if (ascii) "matches · up/down move · enter acts on the selected · typing never does" else "matches · ↑ ↓ move · ↵ acts on the selected · typing never does")
+        else
+            "type to find a space, a work item, a tab, a pane",
+        .intent => if (text.len > 0)
+            (if (p.ask_on) (if (ascii) "enter sends it, as typed" else "↵ sends it, as typed") else "nobody to send it to · / find · : command")
+        else
+            "",
+    };
     if (under.len > 0) {
         f.cup(x, y);
         ink(f, t, t.muted);
@@ -597,10 +723,13 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
     }
     y += if (under.len > 0) 2 else 1;
 
-    // Orbit when the figures fit; the same rows as ledger when they
-    // do not, or when asked for. Decided in `chooseFidelity`, so the
-    // bar and this frame agree.
-    const orbit = !st.painted_ledger;
+    // The request and its receipt, under the field, at home.
+    if (st.painted == .home and st.mode() == .intent) {
+        y = drawRequest(f, t, st, p, x, y, w, bottom);
+    }
+
+    const orbit = st.painted == .orbit;
+    var last_kind: ?Kind = null;
 
     for (st.rows.items, 0..) |r, i| {
         const sel = st.highlighted(i);
@@ -611,10 +740,13 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
             if (orbit and sp.rich()) {
                 figure = sp;
                 h = sp.figureRows();
-            } else if (!orbit and r.second.len > 0) {
+            } else if (st.painted == .ledger and r.second.len > 0) {
                 h = 2;
             }
         }
+        // a blank line before a section header that is not the first
+        if (r.kind == .header and last_kind != null and y + 1 < bottom) y += 1;
+        last_kind = r.kind;
         if (y + h > bottom -| 1) {
             if (y < bottom) {
                 f.cup(x, y);
@@ -633,7 +765,10 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
             drawFigure(f, t, sp, sel, x, y, w);
             y += h + 1;
         } else if (r.kind == .space) {
-            drawSpaceRow(f, t, r, st.spaces[r.space], sel, !orbit, x, y, w);
+            drawSpaceRow(f, t, r, st.spaces[r.space], sel, st.painted == .ledger, x, y, w);
+            y += h;
+        } else if (r.kind == .header) {
+            drawHeader(f, t, r, x, y, w);
             y += h;
         } else {
             drawRow(f, t, r, sel, x, y, w);
@@ -641,24 +776,181 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
         }
     }
 
-    // The footer: keys a hand has not found yet, one muted line. The
-    // empty state says what there is to do here.
+    // The footer: keys a hand has not found yet, one muted line.
     if (y + 1 < bottom) {
         f.cup(x, bottom - 1);
         ink(f, t, t.muted);
-        var fb: [160]u8 = undefined;
-        const keys: []const u8 = if (ascii) "up/down move · enter" else "↑ ↓ move · ↵ enter";
+        const keys: []const u8 = if (ascii) "up/down move · enter" else "↑ ↓ move · ↵";
+        var fb: [200]u8 = undefined;
         const long: []const u8 = if (text.len > 0)
-            "esc clears the query · esc again returns"
-        else if (p.back.len > 0)
-            std.fmt.bufPrint(&fb, "{s} · type to find · : command · :new <name> starts a space · esc returns to {s}", .{ keys, p.back }) catch "esc returns"
+            "esc clears"
+        else if (st.painted == .home)
+            (std.fmt.bufPrint(&fb, "{s} · type to ask · / find · : command · :new <name> starts a space · prefix-s orbit", .{keys}) catch "")
         else
-            std.fmt.bufPrint(&fb, "{s} · type to find · : command · esc returns", .{keys}) catch "esc returns";
-        const short: []const u8 = if (text.len > 0) "esc clears · esc again returns" else (if (ascii) "up/down enter · type to find · : command · esc" else "↑ ↓ ↵ · type to find · : command · esc returns");
+            (std.fmt.bufPrint(&fb, "{s} enter · / find · : command · esc home", .{keys}) catch "esc home");
+        const short: []const u8 = if (text.len > 0) "esc clears" else if (st.painted == .home) (if (ascii) "up/down enter · / find · : command" else "↑ ↓ ↵ · / find · : command") else (if (ascii) "up/down enter · esc home" else "↑ ↓ ↵ · esc home");
         _ = putW(f, if (chromepkg.cols(long) <= w) long else short, w);
     }
     f.put(csi ++ "0m");
     return cursor;
+}
+
+/// The request block: what was asked, what the companion is doing
+/// with it, and what came back — words, or a reflection with its
+/// plan, its question and its proposed actions (which are rows,
+/// drawn with the rest, so the cursor reaches them). Returns the
+/// next free row.
+fn drawRequest(f: *renderpkg.Frame, t: *const ui.Theme, st: *State, p: Paint, x: u16, y0: u16, w: u16, bottom: u16) u16 {
+    const req = &st.req;
+    if (req.state == .none) return y0;
+    var y = y0;
+    if (y + 2 >= bottom) return y;
+    // the request, quoted, in secondary; the companion's glyph leads
+    f.cup(x, y);
+    ink(f, t, t.accent);
+    f.put(ui.glyph(t, .companion));
+    f.put(" ");
+    ink(f, t, t.secondary);
+    var qb: [askpkg.max_text + 4]u8 = undefined;
+    const quoted = std.fmt.bufPrint(&qb, "\"{s}\"", .{req.textSlice()}) catch req.textSlice();
+    _ = putW(f, quoted, w -| 2);
+    y += 1;
+    var ab: [16]u8 = undefined;
+    const now = @import("pane.zig").epochMs();
+    switch (req.state) {
+        .none => {},
+        .running => {
+            f.cup(x + 2, y);
+            ink(f, t, t.working);
+            f.put(ui.markGlyph(t, .working));
+            f.put(" ");
+            var lb: [96]u8 = undefined;
+            const line = std.fmt.bufPrint(&lb, "{s} is on it · {s} · esc cancels", .{ p.ask_name, age(&ab, now - req.started_ms) }) catch "";
+            ink(f, t, t.muted);
+            _ = putW(f, line, w -| 4);
+            y += 1;
+        },
+        .offline => {
+            f.cup(x + 2, y);
+            ink(f, t, t.attention);
+            f.put(ui.markGlyph(t, .failed));
+            f.put(" ");
+            var lb: [128]u8 = undefined;
+            const line = std.fmt.bufPrint(&lb, "{s} is not on PATH — nothing was sent · / find and : command still work", .{p.ask_name}) catch "";
+            ink(f, t, t.secondary);
+            _ = putW(f, line, w -| 4);
+            y += 1;
+        },
+        .failed => {
+            f.cup(x + 2, y);
+            ink(f, t, t.err);
+            f.put(ui.markGlyph(t, .failed));
+            f.put(" ");
+            var lb: [160]u8 = undefined;
+            const why = askpkg.firstLine(if (req.note_len > 0) req.noteSlice() else req.replySlice());
+            const line = std.fmt.bufPrint(&lb, "{s} could not answer ({d}) · {s}", .{ p.ask_name, req.code, why }) catch why;
+            ink(f, t, t.secondary);
+            _ = putW(f, line, w -| 4);
+            y += 1;
+        },
+        .replied => {
+            if (req.ref) |*r| {
+                if (r.intent_len > 0 and y < bottom) {
+                    f.cup(x + 2, y);
+                    ink(f, t, t.primary);
+                    _ = putW(f, r.intentSlice(), w -| 4);
+                    y += 1;
+                }
+                if (r.space_len > 0 and y < bottom) {
+                    f.cup(x + 2, y);
+                    ink(f, t, t.muted);
+                    _ = putW(f, "in ", 3);
+                    _ = ui.scopeChip(f, t, r.spaceSlice(), .space);
+                    y += 1;
+                }
+                var i: usize = 0;
+                while (i < r.plan_n and y < bottom) : (i += 1) {
+                    f.cup(x + 2, y);
+                    ink(f, t, t.muted);
+                    var nb: [8]u8 = undefined;
+                    _ = putW(f, std.fmt.bufPrint(&nb, "{d}. ", .{i + 1}) catch "", 4);
+                    ink(f, t, t.secondary);
+                    _ = putW(f, r.planLine(i), w -| 8);
+                    y += 1;
+                }
+                if (r.question_len > 0 and y < bottom) {
+                    f.cup(x + 2, y);
+                    ink(f, t, t.attention);
+                    f.put(ui.markGlyph(t, .attention));
+                    f.put(" ");
+                    ink(f, t, t.primary);
+                    _ = putW(f, r.questionSlice(), w -| 4);
+                    y += 1;
+                    f.cup(x + 4, y);
+                    ink(f, t, t.muted);
+                    _ = putW(f, "answer by asking again, with the answer in it", w -| 6);
+                    y += 1;
+                }
+                if (r.intent_len == 0 and r.plan_n == 0 and r.question_len == 0 and r.actions_n == 0 and y < bottom) {
+                    f.cup(x + 2, y);
+                    ink(f, t, t.muted);
+                    _ = putW(f, "answered with nothing to show", w -| 4);
+                    y += 1;
+                }
+                // the actions are rows: drawn below with the cursor
+            } else {
+                // words: the first lines of the reply, wrapped by line
+                var it = std.mem.splitScalar(u8, std.mem.trim(u8, req.replySlice(), " \t\r\n"), '\n');
+                var lines: usize = 0;
+                while (it.next()) |line| {
+                    if (y + 2 >= bottom or lines == 8) {
+                        f.cup(x + 2, y);
+                        ink(f, t, t.muted);
+                        _ = putW(f, "… (the rest is in the conversation)", w -| 4);
+                        y += 1;
+                        break;
+                    }
+                    f.cup(x + 2, y);
+                    ink(f, t, t.secondary);
+                    _ = putW(f, line, w -| 4);
+                    y += 1;
+                    lines += 1;
+                }
+                if (lines == 0 and req.reply_len == 0) {
+                    f.cup(x + 2, y);
+                    ink(f, t, t.muted);
+                    _ = putW(f, "answered with nothing", w -| 4);
+                    y += 1;
+                }
+            }
+        },
+    }
+    return y + 1;
+}
+
+/// A section header: a muted word and a count, no band, no glyph.
+fn drawHeader(f: *renderpkg.Frame, t: *const ui.Theme, r: Row, x: u16, y: u16, w: u16) void {
+    f.cup(x, y);
+    ink(f, t, t.muted);
+    var used = putW(f, r.name, w);
+    if (r.line.len > 0 and used + 2 < w) {
+        f.put(" ");
+        used += 1;
+        var hb: [64]u8 = undefined;
+        _ = putW(f, hintText(t, r.line, &hb), w -| used);
+    }
+    f.put(csi ++ "0m");
+}
+
+/// A hint as the glass can show it: `↵ go` reads `enter go` on a
+/// glass without the glyph. The server writes hints in the unicode
+/// vocabulary; the painter owns the fallback, as it does for marks.
+fn hintText(t: *const ui.Theme, hint: []const u8, buf: []u8) []const u8 {
+    if (t.glyphs != .ascii) return hint;
+    if (std.mem.startsWith(u8, hint, "↵")) {
+        return std.fmt.bufPrint(buf, "enter{s}", .{hint["↵".len..]}) catch hint;
+    }
+    return hint;
 }
 
 /// The selected row's band: bounded to its content, one step up from
@@ -679,7 +971,9 @@ fn drawRow(f: *renderpkg.Frame, t: *const ui.Theme, r: Row, sel: bool, x: u16, y
         _ = putW(f, r.name, w);
         return;
     }
-    const hint_w: u16 = if (r.hint.len > 0) chromepkg.cols(r.hint) + 2 else 0;
+    var hb: [48]u8 = undefined;
+    const hint = hintText(t, r.hint, &hb);
+    const hint_w: u16 = if (hint.len > 0) chromepkg.cols(hint) + 2 else 0;
     const body_w = w -| (5 + hint_w);
     const name_w = @min(chromepkg.cols(r.name), @min(body_w, 44));
     const line_w: u16 = if (r.line.len > 0) @min(chromepkg.cols(r.line) + 2, (5 + body_w) -| (5 + name_w)) else 0;
@@ -708,7 +1002,7 @@ fn drawRow(f: *renderpkg.Frame, t: *const ui.Theme, r: Row, sel: bool, x: u16, y
     if (hint_w > 0 and sel) {
         f.cup(x + w -| (hint_w - 2), y);
         ink(f, t, t.accent);
-        _ = putW(f, r.hint, hint_w);
+        _ = putW(f, hint, hint_w);
     }
     f.put(csi ++ "0m");
 }
@@ -719,7 +1013,11 @@ fn drawRow(f: *renderpkg.Frame, t: *const ui.Theme, r: Row, sel: bool, x: u16, y
 /// chip, the same chip the scope bar gave it.
 fn drawSpaceRow(f: *renderpkg.Frame, t: *const ui.Theme, r: Row, sp: Space, sel: bool, two_lines: bool, x: u16, y: u16, w: u16) void {
     const ground: Rgb = if (sel) t.selection else t.chrome;
-    const name_w = chromepkg.cols(sp.name) + (if (sp.current) @as(u16, 2) else 0);
+    // the space you left wears its chip in the spatial views, where
+    // it is the figure's identity; at home a space is a destination
+    // like the others, and the chip would read as a selection
+    const chip = sp.current and two_lines;
+    const name_w = chromepkg.cols(sp.name) + (if (chip) @as(u16, 2) else 0);
     const ev_w = @min(chromepkg.cols(sp.event), w -| name_w -| 16);
     if (sel) band(f, t, x, y, @min(w, 4 + name_w + 2 + ev_w + 1));
     f.cup(x, y);
@@ -727,7 +1025,7 @@ fn drawSpaceRow(f: *renderpkg.Frame, t: *const ui.Theme, r: Row, sp: Space, sel:
     f.put(if (sel) ui.glyph(t, .marker) else " ");
     f.put(" ");
     var used: u16 = 2;
-    if (sp.current) {
+    if (chip) {
         used += ui.scopeChip(f, t, sp.name, .space);
     } else {
         style(f, .{ .fg = t.primary, .bg = ground, .bold = sel });
@@ -745,10 +1043,12 @@ fn drawSpaceRow(f: *renderpkg.Frame, t: *const ui.Theme, r: Row, sp: Space, sel:
         used += putW(f, r.second, w -| used -| 10);
     }
     if (sel and r.hint.len > 0) {
-        const hw = chromepkg.cols(r.hint);
+        var hb: [48]u8 = undefined;
+        const hint = hintText(t, r.hint, &hb);
+        const hw = chromepkg.cols(hint);
         f.cup(x + w -| hw, y);
         ink(f, t, t.accent);
-        _ = putW(f, r.hint, hw);
+        _ = putW(f, hint, hw);
     }
     if (two_lines and r.second.len > 0) {
         f.cup(x + 4, y + 1);
@@ -823,7 +1123,7 @@ fn drawFigure(f: *renderpkg.Frame, t: *const ui.Theme, sp: Space, sel: bool, x: 
     }
     // what ↵ does, in the bottom edge, when selected
     if (sel) {
-        const hint: []const u8 = if (t.glyphs == .ascii) (if (sp.current) " enter: back in " else " enter ") else (if (sp.current) " ↵ back in · esc too " else " ↵ enter ");
+        const hint: []const u8 = if (t.glyphs == .ascii) " enter " else " ↵ enter ";
         const hw = chromepkg.cols(hint);
         f.cup(x + w -| hw -| 2, y + h - 1);
         ink(f, t, t.accent);
@@ -850,7 +1150,7 @@ test "commands parse whole words and complete partial ones" {
     try std.testing.expectEqualStrings("deploy", t.arg);
     try std.testing.expect(parseCommand(":ren") == null);
     try std.testing.expect(parseCommand(":renamer x") == null);
-    var out: [8]CommandSpec = undefined;
+    var out: [16]CommandSpec = undefined;
     const c = completions(":re", &out);
     try std.testing.expectEqual(@as(usize, 1), c.len);
     try std.testing.expectEqualStrings("rename", c[0].word);
@@ -866,34 +1166,49 @@ test "a tab label is the name, then the actor, never the tool" {
     try std.testing.expectEqualStrings("main", tabLabel(&b, "main", "main"));
 }
 
-test "the cursor skips prose, arms the companion row only by hand, and esc peels one layer" {
+test "the cursor skips prose and headers, and esc peels one layer, never past home" {
     var st: State = .{};
     defer st.rows.deinit(std.testing.allocator);
-    try st.rows.append(std.testing.allocator, .{ .kind = .note, .name = "PINS" });
+    try st.rows.append(std.testing.allocator, .{ .kind = .header, .name = "needs you" });
     try st.rows.append(std.testing.allocator, .{ .kind = .space, .name = "vera" });
     try st.rows.append(std.testing.allocator, .{ .kind = .note, .name = "·····" });
-    try st.rows.append(std.testing.allocator, .{ .kind = .vera, .name = "vera: \"x\"" });
+    try st.rows.append(std.testing.allocator, .{ .kind = .work, .name = "fix auth" });
     st.cur = 0;
     st.clampCursor();
     try std.testing.expectEqual(@as(usize, 1), st.cur);
-    // the companion row is not selected until a hand moves there
-    st.cur = 3;
-    try std.testing.expect(st.selected() == null);
-    try std.testing.expect(!st.highlighted(3));
-    st.cur = 1;
     st.move(1);
     try std.testing.expectEqual(@as(usize, 3), st.cur);
-    try std.testing.expect(st.selected() != null);
     st.move(1);
     try std.testing.expectEqual(@as(usize, 3), st.cur);
     st.move(-1);
     try std.testing.expectEqual(@as(usize, 1), st.cur);
-    try std.testing.expect(st.moveTo(.vera));
-    // esc: a query first, the view second
+    try std.testing.expect(st.moveTo(.work));
+    // the grammar: bare text is intent, / finds, : commands
     st.push('a');
+    try std.testing.expectEqual(Mode.intent, st.mode());
+    try std.testing.expectEqualStrings("a", st.query());
+    st.clear();
+    st.push('/');
+    st.push('a');
+    try std.testing.expectEqual(Mode.find, st.mode());
+    try std.testing.expect(st.finding());
+    try std.testing.expectEqualStrings("a", st.query());
+    st.clear();
+    st.push(':');
+    try std.testing.expectEqual(Mode.command, st.mode());
+    try std.testing.expect(!st.finding());
+    // esc: a query first, then a subview, then nothing — home has
+    // nothing above it
+    st.view = .orbit;
     try std.testing.expectEqual(Escape.cleared, st.escape());
     try std.testing.expectEqual(@as(usize, 0), st.len);
-    try std.testing.expectEqual(Escape.leave, st.escape());
+    try std.testing.expectEqual(Escape.home, st.escape());
+    try std.testing.expectEqual(View.home, st.view);
+    try std.testing.expectEqual(Escape.stay, st.escape());
+    // a receipt is a layer of its own
+    st.req.state = .replied;
+    try std.testing.expectEqual(Escape.dismissed, st.escape());
+    try std.testing.expectEqual(askpkg.State.none, st.req.state);
 }
 
 test "a space is rich when it has something to say" {

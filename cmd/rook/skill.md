@@ -30,7 +30,9 @@ rook read . -n 200         # your own pane's last 200 lines, history included
 rook read 7                # pane 7's viewport, plain text
 ```
 
-`rook state` is the authority. Its `panes[]` carry `id`, `program`,
+`rook state` is the authority. Its `scope` says whether the person is
+at rook's home (`root`) or in a space, and `focus.mode` whether the
+mux itself holds their keyboard. Its `panes[]` carry `id`, `program`,
 `cwd`, `pwd` (what the shell reported), `title`, `focused`,
 `visible`, `lastOutputMs`, `progress` (an OSC 9;4 bar in flight, or
 null) and the unread channel: `unread`, `unreadMs`, `bellMs`,
@@ -120,7 +122,8 @@ to drive, and never claim the pane the person is typing in.
 ```sh
 rook ls                        # workspace names
 rook new -q NAME [DIR]         # create one without moving the person
-rook switch NAME
+rook switch NAME               # (a person lands at home; rook . or
+                               #  rook --space NAME land them in a space)
 rook rename NAME               # name the current tab (a tab is named once;
                                # rook never renames it after that)
 ```

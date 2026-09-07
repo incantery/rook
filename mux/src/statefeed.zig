@@ -86,11 +86,21 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
     out.print(gpa, ",\"geometry\":{{\"cols\":{d},\"rows\":{d}}}", .{ g.cols, g.rows }) catch return;
 
     // Focus: the pane input goes to, and whether the mux is holding it
-    // (copy mode, popups, altitude, the ownership gate and the
+    // (copy mode, popups, the root, the ownership gate and the
     // inspector all take the keyboard away from the pane).
     out.print(gpa, ",\"focus\":{{\"pane\":{d},\"mode\":\"{s}\"}}", .{
         sv.focusedId(),
-        if (sv.popup != null) "popup" else if (sv.alt_on) "altitude" else if (sv.inspect) "inspect" else if (sv.gate) "gate" else if (sv.scrolling) "copy" else "pane",
+        if (sv.popup != null) "popup" else if (sv.at_root) "root" else if (sv.inspect) "inspect" else if (sv.gate) "gate" else if (sv.scrolling) "copy" else "pane",
+    }) catch return;
+    // The scope, and the root's own state: which view, what the
+    // input's first character makes of the draft, and where the
+    // request stands. The draft itself is not published: it is the
+    // person's, half typed.
+    out.print(gpa, ",\"scope\":\"{s}\",\"root\":{{\"view\":\"{s}\",\"mode\":\"{s}\",\"ask\":\"{s}\"}}", .{
+        if (sv.at_root) "root" else "space",
+        sv.alt.view.word(),
+        sv.alt.mode().word(),
+        @tagName(sv.alt.req.state),
     }) catch return;
     // The calm bar, so a second glass lays its rows out the same way.
     out.print(gpa, ",\"bar\":{s}", .{boolStr(sv.barOn())}) catch return;

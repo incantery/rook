@@ -34,9 +34,9 @@ prefix = "` "`", `C-b` when unset).
 `prefix-c` a window, `prefix-v` / `prefix--` a split, `prefix-hjkl`
 focus (a bare `ctrl-hjkl` too, vim-navigator style, with
 `mux/nvim` handing edge moves back), `prefix-z` zoom, `prefix-[` copy
-mode, `prefix-P` pin a pane to the rail, `prefix-s` the picker,
-`prefix-w` worktrees, `prefix-u` the oldest thing you have not
-read. The tabs are clickable: a chip is its window,
+mode, `prefix-P` pin a pane to the rail, `prefix-s` orbit (the picker
+is still `rook pick`), `prefix-w` worktrees, `prefix-u` the oldest
+thing you have not read. The tabs are clickable: a chip is its window,
 the `+` a new one. A tab is named once — the first program in it that
 was not the shell, or `rook rename` — and rook never renames it; the
 actor that claimed a pane in it rides after the name, `deploy · main ◐`;
@@ -47,23 +47,27 @@ scope slot, then its tabs — the work at full width under it, and one
 calm bar across the bottom. No sidebar: the legacy spaces/agents
 panel is off unless `[mux] sidebar_mode = "open"` asks for it.
 
-**Altitude.** `prefix-o` changes altitude, from the space into rook
-itself: the scope slot becomes the system's chip, `rook` in the
-accent block, with the world in one line after it (`3 spaces · 2
-agents working · 1 needs you`) and the way back in the corner, and
-the whole canvas holds every space —
-attention first (unread panes, what a producer says needs you), then
-the spaces in a stable order, each a figure of what rook can
-truthfully say about it (its tabs and who drives them, an event, the
-last lines you were looking at) or one row when it has nothing to
-say; then the global pins, which do not move a column. The cursor is
-already in one input: type to find a space, tab or pane; `:` for a
-command (`:go`, `:new`, `:rename`, `:close`); the last row hands the
-same text to vera when she is open. `↵` acts, typing never does; Esc
-clears the query first and then puts you back exactly where you
-were. `prefix-C-o` returns after any hop. Narrow glass draws the same
-spaces as rows. `docs/altitude.md` is the model and the ontology;
-`scripts/altitude-fixture.py` renders it deterministically.
+**Home.** Plain `rook` lands at rook's home, not in a space: the
+scope slot is the system's chip, `rook` in the accent block, with the
+world in one line after it (`3 spaces · 2 agents working · 1 needs
+you`), and the canvas is one field and four sections — `› Ask vera…
+/ find  : command`; what needs you (a pane that rang, a task a
+producer says is waiting); what is running, by goal (`Fix flaky auth
+working · api · codex`); what finished, with its result; the spaces,
+one row each with their tabs — then the global pins, which do not
+move a column. Bare text goes to vera (`vera say`, as typed): her
+reply shows under the field, and when she answers in rook's typed
+shape, her intent, plan and proposed actions do, each action run
+only when you ↵ on it. `/` finds a space, a work item, a tab, a pane;
+`:` is an exact command (`:go`, `:new`, `:rename`, `:close`,
+`:orbit`, `:home`). `↵` on a row enters its exact surface;
+`prefix-o` from anywhere comes back home; Esc closes one layer at a
+time and at home does nothing — a space is a destination, not the
+parent. `prefix-s` is orbit, the spatial subview (a figure per
+space; rows on narrow glass); `rook .` and `rook --space <name>`
+land in a space outright; `startup = "last-space"` makes plain
+`rook` do that too. `docs/altitude.md` is the model and the
+ontology; `scripts/altitude-fixture.py` renders it deterministically.
 
 **The calm bar.** One row at the bottom: who holds the focused pane's
 keyboard on the left — `you ▸ nvim`, or `claude·main ▸ owns input ·
@@ -75,7 +79,7 @@ false` turns the row off.
 
 **The rail (legacy, off by default).** A left panel of *spaces* over
 *agents*, a dot and two lines each, behind `[mux] sidebar_mode =
-"open"`. Its model still feeds the state feed and the altitude view:
+"open"`. Its model still feeds the state feed and home:
 rook lists its own workspaces and the panes it can see running an
 agent; a producer pushes the rest, one JSON frame per line:
 

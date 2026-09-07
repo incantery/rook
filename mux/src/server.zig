@@ -15,6 +15,7 @@ const statefeed = @import("statefeed.zig");
 const proto = @import("proto.zig");
 const config = @import("config.zig");
 const altpkg = @import("altitude.zig");
+const askpkg = @import("ask.zig");
 const ui = @import("ui.zig");
 
 // CLOCK_UPTIME_RAW = 8 on macOS; libc-only monotonic clock.
@@ -386,12 +387,16 @@ pub const Server = struct {
     /// The workspace before the last switch — prefix-C-o goes back
     /// after any cross-space hop, from wherever the hop was made.
     last_sess: ?usize = null,
-    /// Altitude (prefix-o): rook scope, painted over the window
+    /// The scope: rook's home (the root, where a glass lands) or a
+    /// space. At the root the canvas is painted over the window
     /// region while the panes keep running underneath. `alt` is the
-    /// view's own state; `alt_placed` is the rects still drawn live
-    /// at altitude — the global pins, which do not move.
-    alt_on: bool = false,
+    /// root's own state — view, draft, cursor, request — and it
+    /// outlives a visit to a space; `alt_placed` is the rects still
+    /// drawn live at the root: the global pins, which do not move.
+    at_root: bool = false,
     alt: altpkg.State = .{},
+    /// Whether the ask command can be found, as of the last look.
+    ask_on: bool = false,
     alt_placed: std.ArrayList(layoutpkg.Placed) = .empty,
     /// A second frame builder for what the server paints over the
     /// panes itself: the altitude view, the ownership gate, the
@@ -502,6 +507,12 @@ pub const Server = struct {
         // splits. The state file is still saved, so opting in restores.
         const restored = self.conf.restore and try self.restoreState();
         if (!restored) _ = try self.newSession("main", null, true);
+        // Rook lands at home. The spaces are restored underneath it,
+        // running; `startup = "last-space"` is the opt-in that lands
+        // in the space the server was showing instead.
+        self.at_root = !self.conf.startup_last_space;
+        self.alt.view = .home;
+        self.ask_on = askpkg.available(self.conf.askSlice());
         try self.loop();
     }
 
@@ -905,6 +916,11 @@ pub const Server = struct {
             for (self.panes.items) |pn| {
                 if (pn.pendingIn()) try fds.append(self.gpa, .{ .fd = pn.pty.master, .events = ptypkg.POLLOUT });
             }
+            // the request in flight at the root: its pipes wake the
+            // loop, and its reply is a frame
+            const job_fds_at = fds.items.len;
+            var job_fds: [2]ptypkg.Pollfd = undefined;
+            for (job_fds[0..self.alt.req.fds(&job_fds)]) |jf| try fds.append(self.gpa, jf);
             var timeout: c_int = if (self.pending)
                 @intCast(@max(0, frame_gap_ms - (nowMs() - last_frame)))
             else
@@ -939,8 +955,13 @@ pub const Server = struct {
                 }
             }
 
+            if (self.alt.req.busy() and self.alt.req.pump()) {
+                _ = self.touch();
+                self.full = true;
+                self.pending = true;
+            }
             // drain pane stdin queues that got room
-            for (fds.items[pane_fds_at..]) |pfd| {
+            for (fds.items[pane_fds_at..job_fds_at]) |pfd| {
                 if (pfd.revents & ptypkg.POLLOUT == 0) continue;
                 for (self.panes.items) |pn| {
                     if (pn.pty.master == pfd.fd) {
@@ -1123,7 +1144,16 @@ pub const Server = struct {
                     if (proto.Geometry.decode(msg.payload)) |g| {
                         c.cols = g.cols;
                         c.rows = g.rows;
+                        const first = !c.attached and self.attachedCount() == 0;
                         c.attached = true;
+                        // Where this glass lands: [dest u8][name\tcwd]
+                        // after the geometry. `r` is the root, `s` a
+                        // space by name (made if it must be), and no
+                        // destination is the product's default — the
+                        // root, unless the config says the last
+                        // space. A second glass joining a first one
+                        // does not move it.
+                        if (msg.kind == @intFromEnum(proto.c2s.attach)) self.landGlass(msg.payload[4..], first);
                         self.greetGlass(c);
                         self.relayout() catch {};
                     }
@@ -2092,10 +2122,10 @@ pub const Server = struct {
                 self.pending = true;
                 continue;
             }
-            // At altitude the keys are the view's: the input, the
+            // At the root the keys are the view's: the input, the
             // cursor, ↵. The prefix still arms above, so prefix-o
-            // and prefix-s work from up here.
-            if (self.alt_on) {
+            // and prefix-s work from here.
+            if (self.at_root) {
                 c.paste.reset();
                 const used = self.altKey(rest);
                 rest = rest[used..];
@@ -2217,15 +2247,15 @@ pub const Server = struct {
         }
         // The calm bar is not a target: nothing on it is a control.
         if (self.barOn() and cy >= self.bodyRows()) return;
-        // At altitude a click lands on a row, or on the global pins,
+        // At the root a click lands on a row, or on the global pins,
         // which are live; anywhere else on the view is the view's.
-        if (self.alt_on) {
+        // Nothing on the glass is a way back into a space but a row.
+        if (self.at_root) {
             const r = self.altRegion();
             if (cx >= r.x and cy >= r.y and cy < r.y + r.h) {
                 if (ev.btn == 0 and !ev.release) {
                     if (self.alt.rowAt(cy)) |i| {
                         self.alt.cur = i;
-                        self.alt.ask_armed = true;
                         self.altAct();
                     }
                 } else if (ev.btn == 64) {
@@ -2243,8 +2273,7 @@ pub const Server = struct {
             for (self.alt_placed.items) |pl| {
                 if (cx >= pl.rect.x and cx < pl.rect.x + pl.rect.w and cy >= pl.rect.y and cy < pl.rect.y + pl.rect.h) on_pin = true;
             }
-            // a click on the tab bar or the side panel is a way out
-            if (!on_pin and ev.btn == 0 and !ev.release) self.altLeave();
+            if (!on_pin) return;
         }
         // the side panel eats clicks before any pane sees them
         if (self.side_w) |sw| {
@@ -2489,9 +2518,9 @@ pub const Server = struct {
     /// happened; one that arrives otherwise is unread until it is.
     fn isSeen(self: *Server, id: u32) bool {
         if (self.popup != null) return false;
-        // focus is observing, but at altitude nobody is on the pane,
+        // focus is observing, but at the root nobody is on the pane,
         // and under the inspector the pane is covered
-        if (self.alt_on or self.inspect) return false;
+        if (self.at_root or self.inspect) return false;
         if (self.focusedId() != id) return false;
         var placed = false;
         for (self.placed.items) |pl| {
@@ -2667,6 +2696,13 @@ pub const Server = struct {
             self.pending = true;
             return;
         }
+        // At the root the space is not on the glass, so the keys that
+        // act on it are not taken: only the root's own, and detach.
+        if (self.at_root and !rootKey(key)) {
+            self.full = true;
+            self.pending = true;
+            return;
+        }
         switch (key) {
             'v', '|' => self.splitPane(true) catch {},
             '-' => self.splitPane(false) catch {},
@@ -2678,18 +2714,20 @@ pub const Server = struct {
                 const i: usize = key - '1';
                 if (i < self.sess().windows.items.len) self.selectWindow(i);
             },
-            // The picker's shape — fzf over `rook ls`, enter switches,
-            // ctrl-o creates the name typed — lives in the Go front
-            // door, where the quoting has a home and the parsing has
-            // tests. Here it is one verb, like the worktree manager.
-            's' => self.openPopup("rook pick") catch {},
+            // Orbit: the spatial subview of the root. The fzf picker
+            // it replaced is still `rook pick`.
+            's' => self.openView(if (self.conf.zoom_ledger) .ledger else .orbit),
             'w' => self.openPopup("rook worktree") catch {},
-            'a' => {
-                self.side_mode = self.side_mode.next();
-                self.relayout() catch {};
-            },
-            // Focus mode in one key: everything off the left edge, and
-            // the panel back the way it was on the second press.
+            // The root, with the cursor on a section: running work,
+            // or what needs you (`!` is the attention mark).
+            'a' => self.goHomeAt(.running),
+            '!' => self.goHomeAt(.needs),
+            // The root in a mode: tell the companion, find, command.
+            't' => self.goHomeTyping(""),
+            '/' => self.goHomeTyping("/"),
+            ':' => self.goHomeTyping(":"),
+            // The legacy side panel, away and back, for a config that
+            // asked for it.
             'A' => {
                 self.side_mode = if (self.side_mode == .hidden) .open else .hidden;
                 self.relayout() catch {};
@@ -2711,14 +2749,14 @@ pub const Server = struct {
             },
             '[' => self.scrollStart(),
             'u' => _ = self.jumpUnread(),
-            // Altitude: zoom out of the space into rook scope. The
-            // panes never pause; Esc up there is an exact return.
-            'o' => self.altToggle(),
+            // Out, to rook: home. The panes never pause. From the root
+            // it is idempotent — home again, whatever subview was up.
+            'o' => self.goHome(),
             // Return jump: back to the space before the last hop.
             0x0f => if (self.last_sess) |ls| {
                 if (ls < self.sessions.items.len) self.switchSession(ls);
             },
-            'i' => if (!self.alt_on) {
+            'i' => if (!self.at_root) {
                 self.inspect = !self.inspect;
                 self.full = true;
             },
@@ -2735,6 +2773,14 @@ pub const Server = struct {
         // the bar drops its pending-key hint whatever the key did
         self.full = true;
         self.pending = true;
+    }
+
+    /// The prefix keys that mean something at the root.
+    fn rootKey(key: u8) bool {
+        return switch (key) {
+            'o', 's', 'a', '!', 't', '/', ':', 0x0f, 'd', 'A', 'u' => true,
+            else => false,
+        };
     }
 
     // ---- scroll mode ----
@@ -3116,9 +3162,9 @@ pub const Server = struct {
 
         const g = self.geometry();
         const body = self.bodyRows();
-        // The altitude rows are built first: the bars read them (the
-        // corner's counts, the bar's `orbit`/`ledger` word).
-        if (self.alt_on) {
+        // The root's rows are built first: the bars read them (the
+        // corner's counts, the bar's view word).
+        if (self.at_root) {
             self.full = true;
             self.altBuild();
             altpkg.chooseFidelity(&self.alt, self.altRegion());
@@ -3151,7 +3197,7 @@ pub const Server = struct {
         var cur_over: ?renderpkg.CursorOverride = null;
         var placed = self.placed.items;
         var dock_x = self.dock_x;
-        if (self.alt_on) {
+        if (self.at_root) {
             // only the global pins stay live on the glass; every
             // other rect belongs to the space and contracts with it
             self.alt_placed.clearRetainingCapacity();
@@ -3164,12 +3210,12 @@ pub const Server = struct {
             }
             placed = self.alt_placed.items;
             if (self.global_pins.items.len == 0) dock_x = null;
-            cur_over = altpkg.draw(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .back = chromepkg.shortSpace(self.sess().label()) });
+            cur_over = altpkg.draw(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .ask_name = self.askName(), .ask_on = self.ask_on });
         }
-        if (self.gate and !self.alt_on) self.gateRow();
-        if (self.inspect and !self.alt_on) self.inspectorSheet();
+        if (self.gate and !self.at_root) self.gateRow();
+        if (self.inspect and !self.at_root) self.inspectorSheet();
 
-        if (self.scrolling and !self.alt_on) {
+        if (self.scrolling and !self.at_root) {
             for (self.placed.items) |pl| {
                 if (pl.pane == self.focusedId()) {
                     cur_over = .{
@@ -3188,13 +3234,13 @@ pub const Server = struct {
             .bar = bar,
             .overlay = self.over.buf.items,
         };
-        // the altitude cursor is the input's; the inspector and the
+        // the root's cursor is the input's; the inspector and the
         // gate hide the pane's cursor, since the keys are not its
-        const cur: ?renderpkg.CursorOverride = if (self.alt_on or self.gate or self.inspect)
+        const cur: ?renderpkg.CursorOverride = if (self.at_root or self.gate or self.inspect)
             (cur_over orelse renderpkg.CursorOverride{ .x = 0, .y = 0, .hidden = true })
         else
             cur_over;
-        const bytes = self.frame.build(self.panes.items, placed, if (self.alt_on) 0 else self.focusedId(), g.cols, body, chrome, self.full, cur, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null);
+        const bytes = self.frame.build(self.panes.items, placed, if (self.at_root) 0 else self.focusedId(), g.cols, body, chrome, self.full, cur, if (self.popup) |id| .{ .pane = id, .rect = self.popupRect() } else null);
         self.full = false;
         var shipped = false;
         for (self.clients.items) |c| {
@@ -3214,6 +3260,46 @@ pub const Server = struct {
         for (self.panes.items) |p| {
             const text = p.takeClip(&text_buf) orelse continue;
             self.shipClip(text);
+        }
+    }
+
+    fn attachedCount(self: *Server) usize {
+        var n: usize = 0;
+        for (self.clients.items) |c| {
+            if (c.attached and !c.dead) n += 1;
+        }
+        return n;
+    }
+
+    /// Put a newly attached glass where it asked to be.
+    fn landGlass(self: *Server, dest: []const u8, first: bool) void {
+        if (dest.len == 0) {
+            if (first) {
+                if (self.conf.startup_last_space) self.enterSpace() else self.goHome();
+            }
+            return;
+        }
+        switch (dest[0]) {
+            'r' => self.goHome(),
+            's' => {
+                const rest = dest[1..];
+                var name = rest;
+                var cwd: ?[*:0]const u8 = null;
+                var cwd_buf: [1024]u8 = undefined;
+                if (std.mem.indexOfScalar(u8, rest, '\t')) |tab| {
+                    name = rest[0..tab];
+                    const dir = rest[tab + 1 ..];
+                    if (dir.len > 0 and dir.len < cwd_buf.len) {
+                        @memcpy(cwd_buf[0..dir.len], dir);
+                        cwd_buf[dir.len] = 0;
+                        cwd = @ptrCast(&cwd_buf);
+                    }
+                }
+                if (name.len == 0) return;
+                _ = self.newSession(name, cwd, true) catch return;
+                self.enterSpace();
+            },
+            else => {},
         }
     }
 
@@ -3252,10 +3338,10 @@ pub const Server = struct {
     fn mirrorKitty(self: *Server) void {
         var buf: [256]u8 = undefined;
         var out: std.ArrayList(u8) = .initBuffer(&buf);
-        // While the mux itself holds the keyboard — altitude, the
+        // While the mux itself holds the keyboard — the root, the
         // gate, the inspector — the glass encodes legacy bytes, so
         // the view reads plain keys whatever the pane under it asked.
-        const mux_keys = self.alt_on or self.gate or self.inspect;
+        const mux_keys = self.at_root or self.gate or self.inspect;
         const fp = if (mux_keys) null else (self.popupPane() orelse self.focusedPane());
         const kf: u8 = if (fp) |p| p.kittyFlags() else 0;
         if (kf != self.glass_kitty) {
@@ -3547,21 +3633,31 @@ pub const Server = struct {
         const sc = scope[0..@min(scope.len, 20)];
 
         // the corner is measured first: the bar lays out into what
-        // is left of it
+        // is left of it. At home there is no corner: nothing is
+        // above it. In a subview, esc is the way home; in a space,
+        // prefix-o is the way out to rook.
         var corner_buf: [48]u8 = undefined;
-        const corner: []const u8 = if (self.alt_on)
-            (std.fmt.bufPrint(&corner_buf, "esc {s} {s}", .{ ui.glyph(t, .back), sc }) catch "esc")
+        var pk: [8]u8 = undefined;
+        const corner: []const u8 = if (self.at_root)
+            (if (self.alt.view == .home) "" else "esc rook")
         else if (self.scrolling)
             (if (self.selecting) "copy · VISUAL" else "copy · hjkl v y q")
         else if (self.window().zoomed)
             "zoom"
         else
-            "⌥n";
+            (std.fmt.bufPrint(&corner_buf, "{s}o rook", .{prefixName(self.prefix_key, &pk)}) catch "rook");
         const corner_cols = chromepkg.cols(corner) + 1;
 
-        if (self.alt_on) {
+        if (self.at_root) {
             vis += ui.scopeChip(out, t, "rook", .global);
             vis += ui.separator(out, t, t.chrome);
+            // a subview is named where the tabs would be, as the tab
+            // component, selected: orbit and ledger are places within
+            // the root, and home is the root itself
+            if (self.alt.view != .home) {
+                vis += ui.tab(out, t, .{ .index = null, .label = self.alt.painted.word(), .selected = true }, .full);
+                vis += ui.ink(out, on, "  ");
+            }
             var sum_buf: [96]u8 = undefined;
             const summary = self.altSummary(&sum_buf);
             vis += ui.ink(out, .{ .fg = t.secondary, .bg = t.chrome }, chromepkg.clip(summary, avail -| vis -| corner_cols -| 1));
@@ -3795,11 +3891,33 @@ pub const Server = struct {
 
         var ab: [8]u8 = undefined;
         const arrow = std.fmt.bufPrint(&ab, " {s} ", .{ui.glyph(t, .marker)}) catch " > ";
-        if (self.alt_on) {
+        if (self.at_root) {
             vis += ui.module(out, t, "rook", t.primary, true);
-            const what: []const u8 = if (self.alt.isCommand()) "command" else if (self.alt.len > 0) "find" else if (self.alt.painted_ledger) "ledger" else "orbit";
             vis += ui.moduleSep(out, t);
+            const st = &self.alt;
+            const what: []const u8 = if (st.len > 0) st.mode().word() else st.painted.word();
             vis += ui.module(out, t, what, t.muted, false);
+            // the request, while one is in flight or just answered
+            switch (st.req.state) {
+                .none => {},
+                .running => {
+                    vis += ui.moduleSep(out, t);
+                    vis += ui.module(out, t, self.askName(), t.working, true);
+                    vis += ui.module(out, t, " ", t.muted, false);
+                    vis += ui.module(out, t, ui.markGlyph(t, .working), t.working, false);
+                    vis += ui.module(out, t, " on it", t.muted, false);
+                },
+                .replied => {
+                    vis += ui.moduleSep(out, t);
+                    vis += ui.module(out, t, self.askName(), t.secondary, false);
+                    vis += ui.module(out, t, " answered", t.muted, false);
+                },
+                .failed, .offline => {
+                    vis += ui.moduleSep(out, t);
+                    vis += ui.module(out, t, self.askName(), t.secondary, false);
+                    vis += ui.module(out, t, if (st.req.state == .offline) " offline" else " failed", t.muted, false);
+                },
+            }
         } else if (self.popupPane()) |pp| {
             var nb: [64]u8 = undefined;
             const fg = pp.fgName(&nb) orelse "popup";
@@ -3857,7 +3975,10 @@ pub const Server = struct {
         if (armed) {
             vis += ui.module(out, t, "   ", t.muted, false);
             vis += ui.chip(out, t, "prefix", t.accent);
-            const hint = "  c new · v - split · z zoom · o altitude · s spaces · u unread · i inspect";
+            const hint: []const u8 = if (self.at_root)
+                "  o home · s orbit · t ask · / find · : command · a running · ! needs you · d detach"
+            else
+                "  o rook · s orbit · t ask · c new · v - split · z zoom · u unread · i inspect";
             if (vis + chromepkg.cols(hint) + 14 <= cols) vis += ui.module(out, t, hint, t.muted, false);
         }
 
@@ -4122,33 +4243,56 @@ pub const Server = struct {
         f.put("\x1b[0m");
     }
 
-    // ---- altitude ----
+    // ---- the root ----
 
-    /// prefix-o: up, or back down. Going up moves nothing — the panes
-    /// keep their geometry and keep running — so coming back is the
-    /// exact frame you left.
-    fn altToggle(self: *Server) void {
-        if (self.alt_on) {
-            self.altLeave();
-            return;
-        }
+    /// Out, to rook: home. Moving nothing — the panes keep their
+    /// geometry and keep running — so entering a space again is the
+    /// exact frame you left. From the root it lands on home whatever
+    /// subview was up; the draft, the cursor and the receipt stay.
+    fn goHome(self: *Server) void {
         if (self.popup != null) return;
-        self.alt_on = true;
-        self.alt.clear();
-        self.alt.ledger = self.conf.zoom_ledger;
+        self.at_root = true;
+        self.alt.view = .home;
         self.scrolling = false;
         self.selecting = false;
         self.gate = false;
         self.inspect = false;
+        self.ask_on = askpkg.available(self.conf.askSlice());
         _ = self.touch();
         self.full = true;
         self.pending = true;
     }
 
-    fn altLeave(self: *Server) void {
-        if (!self.alt_on) return;
-        self.alt_on = false;
+    /// Home, with the cursor on a section.
+    fn goHomeAt(self: *Server, land: altpkg.Land) void {
+        self.goHome();
         self.alt.clear();
+        self.alt.land = land;
+    }
+
+    /// Home, in a mode: the field holds the mode's leading character
+    /// (or nothing, for intent), the cursor in it.
+    fn goHomeTyping(self: *Server, lead: []const u8) void {
+        self.goHome();
+        self.alt.clear();
+        for (lead) |ch| self.alt.push(ch);
+    }
+
+    /// A subview of the root: orbit, or ledger.
+    fn openView(self: *Server, v: altpkg.View) void {
+        if (self.popup != null) return;
+        const was = self.at_root;
+        self.goHome();
+        self.alt.view = v;
+        if (!was) self.alt.cur = 0;
+    }
+
+    /// Into the space the server is showing. The root's state stays
+    /// as it was, for the next visit.
+    fn enterSpace(self: *Server) void {
+        if (!self.at_root) return;
+        self.at_root = false;
+        self.alt.land = .none;
         _ = self.touch();
         self.full = true;
         self.pending = true;
@@ -4166,14 +4310,13 @@ pub const Server = struct {
         return .{ .x = x0, .y = 1, .w = g.cols -| x0, .h = body -| 1 };
     }
 
-    fn companionPane(self: *Server) ?u32 {
-        for (self.comp.slice()) |seen| {
-            if (self.pane(seen.pane) != null) return seen.pane;
-        }
-        return null;
+    /// The companion's name, for the field and the bar.
+    fn askName(self: *Server) []const u8 {
+        const c = self.conf.companionSlice();
+        return if (c.len > 0) c else "vera";
     }
 
-    /// Keys at altitude. Bare typing is the query, so the rows are
+    /// Keys at the root. Bare typing is the text, so the rows are
     /// walked with the arrows (and ⇥ ⇤, C-n C-p), never with letters.
     /// Returns the bytes spent, so a run of keystrokes is walked one
     /// key at a time and an escape sequence is taken whole.
@@ -4198,8 +4341,8 @@ pub const Server = struct {
                 }
                 return @min(i + 1, bytes.len);
             }
-            // a lone Esc: the deepest layer first
-            if (st.escape() == .leave) self.altLeave();
+            // a lone Esc: the deepest layer first, and never past home
+            _ = st.escape();
             return 1;
         }
         switch (b) {
@@ -4209,25 +4352,40 @@ pub const Server = struct {
             0x0e => st.move(1), // C-n
             0x10 => st.move(-1), // C-p
             0x15 => st.clear(), // C-u
-            0x03 => self.altLeave(), // C-c
+            0x03 => _ = st.escape(), // C-c
             else => {
                 if (b < 0x20) return 1;
                 const len = std.unicode.utf8ByteSequenceLength(b) catch 1;
                 const end = @min(len, bytes.len);
                 for (bytes[0..end]) |ch| st.push(ch);
-                // typing rebuilds the rows; the cursor starts at the
-                // top of the results, and never on the ✦ row
-                st.cur = 0;
-                st.ask_armed = false;
+                // typing a query rebuilds the rows and the cursor
+                // starts at the top of the results; typing a request
+                // leaves the cursor where it was
+                if (st.mode() != .intent) st.cur = 0;
                 return end;
             },
         }
         return 1;
     }
 
-    /// ↵ at altitude: act on the selected row, and only on it.
+    /// ↵ at the root: a request, when one is typed; else the
+    /// selected row, and only it.
     fn altAct(self: *Server) void {
         const st = &self.alt;
+        if (st.mode() == .intent and st.len > 0) {
+            // The one door to interpretation: the text goes, as typed,
+            // to the companion's command. Nothing else changes until
+            // she answers, and what she proposes is shown before it
+            // runs.
+            var text_buf: [askpkg.max_text]u8 = undefined;
+            const n = @min(st.len, text_buf.len);
+            @memcpy(text_buf[0..n], st.text[0..n]);
+            st.req.send(self.conf.askSlice(), text_buf[0..n]);
+            self.ask_on = st.req.state != .offline;
+            st.clear();
+            _ = self.touch();
+            return;
+        }
         // The rows are rebuilt first: keys can arrive in one batch
         // with no frame between them, and ↵ must act on what the
         // typed text means now, not on the rows the last frame drew.
@@ -4235,43 +4393,41 @@ pub const Server = struct {
         const row = st.selected() orelse return;
         switch (row.kind) {
             .attention, .pane => {
-                self.altLeave();
+                self.enterSpace();
                 self.focusPane(row.pane);
             },
             .ask => {
-                self.altLeave();
+                self.enterSpace();
                 self.jumpToAgent(row.arg);
             },
+            .work => {
+                // the exact surface: the pane when rook knows one,
+                // else the space's agent, else the space
+                self.enterSpace();
+                if (row.pane != 0 and self.pane(row.pane) != null) {
+                    self.focusPane(row.pane);
+                } else if (row.arg.len > 0) {
+                    self.jumpToAgent(row.arg);
+                } else if (row.ws < self.sessions.items.len) {
+                    self.switchSession(row.ws);
+                }
+            },
             .space => {
-                self.altLeave();
+                self.enterSpace();
                 self.switchSession(row.ws);
             },
             .tab => {
-                self.altLeave();
+                self.enterSpace();
                 self.switchSession(row.ws);
                 if (row.win < self.sess().windows.items.len) self.selectWindow(row.win);
             },
             .pin => {
-                self.altLeave();
+                self.enterSpace();
                 if (self.pane(row.pane) != null) self.setFocus(row.pane);
             },
-            .vera => {
-                // The one door to interpretation: the typed text goes
-                // to the companion's pane as if typed there, Enter
-                // included, and the person goes to see the answer.
-                const id = self.companionPane() orelse return;
-                const p = self.pane(id) orelse return;
-                var text_buf: [130]u8 = undefined;
-                const n = @min(st.len, text_buf.len - 2);
-                @memcpy(text_buf[0..n], st.text[0..n]);
-                text_buf[n] = '\r';
-                p.scrollBottom();
-                p.write(text_buf[0 .. n + 1]);
-                self.altLeave();
-                self.focusPane(id);
-            },
+            .action => st.req.confirm(row.action),
             .command => self.altCommand(row.cmd, row.arg),
-            .note => {},
+            .header, .note => {},
         }
         _ = self.touch();
         self.full = true;
@@ -4281,11 +4437,13 @@ pub const Server = struct {
     fn altCommand(self: *Server, cmd: altpkg.Command, arg: []const u8) void {
         switch (cmd) {
             .go => if (self.sessionNamed(arg)) |i| {
-                self.altLeave();
+                self.alt.clear();
+                self.enterSpace();
                 self.switchSession(i);
             },
             .new => if (arg.len > 0) {
-                self.altLeave();
+                self.alt.clear();
+                self.enterSpace();
                 _ = self.newSession(arg, null, true) catch {};
             },
             .rename => if (arg.len > 0) {
@@ -4297,13 +4455,17 @@ pub const Server = struct {
                 self.alt.clear();
             },
             .ledger => {
-                self.alt.ledger = true;
+                self.alt.view = .ledger;
                 self.conf.zoom_ledger = true;
                 self.alt.clear();
             },
             .orbit => {
-                self.alt.ledger = false;
+                self.alt.view = .orbit;
                 self.conf.zoom_ledger = false;
+                self.alt.clear();
+            },
+            .home => {
+                self.alt.view = .home;
                 self.alt.clear();
             },
             .none => {},
@@ -4314,14 +4476,17 @@ pub const Server = struct {
     /// inferred and nothing is summarised: a space's name, the tabs
     /// in it and who claimed them, who is unread, what a program said
     /// in its notification, how long since anything was written, the
-    /// words a producer already spent on the space, and for the space
-    /// you left, the last lines of the pane you were in.
+    /// words a producer already spent on the space and on its work,
+    /// and for the space you left, the last lines of the pane you
+    /// were in. Home lays it out as sections: what the companion
+    /// proposed, what needs you, what is running, what finished,
+    /// then the spaces. Orbit and ledger lay the same facts out
+    /// spatially. Finding ranks everything as one list.
     fn altBuild(self: *Server) void {
         const st = &self.alt;
         st.reset();
         var fba = std.heap.FixedBufferAllocator.init(&st.buf);
         const a = fba.allocator();
-        const text = st.textSlice();
         const now = panepkg.epochMs();
 
         if (st.isCommand()) {
@@ -4329,7 +4494,29 @@ pub const Server = struct {
             st.clampCursor();
             return;
         }
-        const finding = text.len > 0;
+        const text = st.query();
+        const finding = st.finding();
+        const home = st.view == .home and !finding;
+        var land_needs: ?usize = null;
+        var land_running: ?usize = null;
+
+        // What the companion proposed: actions are rows, first, so
+        // ↵ reaches them; each with the command it would run.
+        if (home and st.mode() == .intent) {
+            if (st.req.ref) |*r| {
+                if (r.actions_n > 0) {
+                    st.rows.append(self.gpa, .{ .kind = .header, .name = "proposed", .line = "↵ runs one, by hand · esc dismisses" }) catch {};
+                }
+                for (r.actions[0..r.actions_n], 0..) |*act, i| {
+                    const mark: ui.Mark = if (act.running) .working else if (!act.ran) .waiting else if (act.code == 0) .success else .failed;
+                    const line = if (act.ran)
+                        (std.fmt.allocPrint(a, "ran ({d}) · {s}", .{ act.code, askpkg.firstLine(act.receiptSlice()) }) catch "")
+                    else
+                        (std.fmt.allocPrint(a, "$ {s}", .{act.runSlice()}) catch "");
+                    st.rows.append(self.gpa, .{ .kind = .action, .glyph = ui.markGlyph(&self.ui, mark), .ink = ui.markInk(&self.ui, mark), .name = act.labelSlice(), .line = line, .line_ink = if (act.ran) self.ui.secondary else self.ui.muted, .hint = if (act.ran) "" else "↵ run", .action = i }) catch {};
+                }
+            }
+        }
 
         // Attention first: the unread channel, oldest first — panes a
         // program signalled while nobody looked.
@@ -4342,6 +4529,17 @@ pub const Server = struct {
             while (i > 0 and attn[i - 1].unread_ms > p.unread_ms) : (i -= 1) attn[i] = attn[i - 1];
             attn[i] = p;
             an += 1;
+        }
+        const claims = if (self.side.agents.panel) |pnl| pnl.items else &.{};
+        var asks: usize = 0;
+        for (claims) |it| {
+            if ((it.state == .blocked or it.state == .failed) and self.sessionNamed(it.workspace()) != null) asks += 1;
+        }
+        if (home) {
+            var hb: [32]u8 = undefined;
+            const count = std.fmt.bufPrint(&hb, "{d}", .{an + asks}) catch "";
+            st.rows.append(self.gpa, .{ .kind = .header, .name = "needs you", .line = if (an + asks > 0) (a.dupe(u8, count) catch "") else "nothing — no pane asked, no task is waiting" }) catch {};
+            land_needs = st.rows.items.len;
         }
         for (attn[0..an]) |p| {
             const at = self.placeOf(p.id) orelse continue;
@@ -4381,24 +4579,101 @@ pub const Server = struct {
         }
         // …and what a producer said needs you: an agents row pushed
         // with `waiting` (or `failed`) for a space rook holds.
-        const claims = if (self.side.agents.panel) |pnl| pnl.items else &.{};
         for (claims) |it| {
             if (it.state != .blocked and it.state != .failed) continue;
             const ws = it.workspace();
             if (self.sessionNamed(ws) == null) continue;
             const name = std.fmt.allocPrint(a, "{s} — {s}", .{ chromepkg.shortSpace(ws), it.name }) catch continue;
-            const line = std.fmt.allocPrint(a, "{s}{s}{s}", .{ it.state.word(), if (it.sub.len > 0) " · " else "", it.sub }) catch it.state.word();
+            const detail = if (it.event.len > 0) it.event else it.sub;
+            const line = std.fmt.allocPrint(a, "{s}{s}{s}", .{ it.state.word(), if (detail.len > 0) " · " else "", detail }) catch it.state.word();
             const argd = a.dupe(u8, ws) catch continue;
             var row: altpkg.Row = .{ .kind = .ask, .glyph = ui.markGlyph(&self.ui, if (it.state == .failed) .failed else .waiting), .ink = if (it.state == .failed) self.ui.err else self.ui.waiting, .name = name, .line = line, .line_ink = self.ui.secondary, .hint = "↵ go", .arg = argd };
             if (finding) row.score = altpkg.fuzzy(name, text) orelse (altpkg.fuzzy(line, text) orelse continue) + 20;
             st.rows.append(self.gpa, row) catch {};
         }
 
+        // Work: a producer's open tasks (its words: the goal, the
+        // state, the space, and whatever else it said), then the
+        // agents rook can see running that no producer claimed.
+        // Home lists them; orbit reads them off the figures instead.
+        if (home or finding) {
+            var running: usize = 0;
+            var recent: usize = 0;
+            for (claims) |it| {
+                switch (it.state) {
+                    .working, .idle, .none => running += 1,
+                    .done => recent += 1,
+                    else => {},
+                }
+            }
+            var found_n: usize = 0;
+            for (self.sessions.items) |sn| {
+                if (chromepkg.claimedIn(claims, sn.label())) continue;
+                for (self.panes.items) |p| {
+                    if (p.is_agent and self.paneIn(sn, p.id)) found_n += 1;
+                }
+            }
+            if (home) {
+                var hb: [32]u8 = undefined;
+                const count = std.fmt.bufPrint(&hb, "{d}", .{running + found_n}) catch "";
+                st.rows.append(self.gpa, .{ .kind = .header, .name = "running", .line = if (running + found_n > 0) (a.dupe(u8, count) catch "") else "nothing — no task is open, no agent is running" }) catch {};
+                land_running = st.rows.items.len;
+            }
+            for (claims) |it| {
+                if (it.state == .blocked or it.state == .failed or it.state == .done) continue;
+                self.workRow(a, it, text, finding);
+            }
+            for (self.sessions.items, 0..) |sn, si| {
+                if (chromepkg.claimedIn(claims, sn.label())) continue;
+                for (self.panes.items) |p| {
+                    if (!p.is_agent or !self.paneIn(sn, p.id)) continue;
+                    var nb: [64]u8 = undefined;
+                    const prog = p.fgName(&nb) orelse "agent";
+                    const at = self.placeOf(p.id) orelse continue;
+                    var tab: []const u8 = "";
+                    if (at.window) |wi| {
+                        if (wi - 1 < sn.windows.items.len) {
+                            var tb: [48]u8 = undefined;
+                            tab = a.dupe(u8, self.tabName(sn, sn.windows.items[wi - 1], &tb)) catch "";
+                        }
+                    }
+                    const lo = p.last_output_ms.load(.acquire);
+                    const producing = lo != 0 and now - lo < chromepkg.working_ms;
+                    var ab: [16]u8 = undefined;
+                    // rook can say a program is here and whether it is
+                    // producing; what it is doing is not rook's to say
+                    const who: []const u8 = if (p.owner_len > 0) p.ownerName() else prog;
+                    const name = std.fmt.allocPrint(a, "{s} in {s} › {s}", .{ who, chromepkg.shortSpace(sn.label()), tab }) catch continue;
+                    const line = if (producing)
+                        (std.fmt.allocPrint(a, "{s} producing · goal unknown — nobody pushed a task for it", .{prog}) catch "")
+                    else
+                        (std.fmt.allocPrint(a, "{s} idle · {s} since output · goal unknown", .{ prog, altpkg.age(&ab, now - lo) }) catch "");
+                    const mark: ui.Mark = if (producing) .working else .waiting;
+                    var row: altpkg.Row = .{ .kind = .work, .glyph = ui.markGlyph(&self.ui, mark), .ink = ui.markInk(&self.ui, mark), .name = name, .line = line, .line_ink = self.ui.muted, .hint = "↵ go", .pane = p.id, .ws = si };
+                    if (finding) row.score = (altpkg.fuzzy(name, text) orelse continue) + 3;
+                    st.rows.append(self.gpa, row) catch {};
+                }
+            }
+            if (home) {
+                var hb: [32]u8 = undefined;
+                const count = std.fmt.bufPrint(&hb, "{d}", .{recent}) catch "";
+                st.rows.append(self.gpa, .{ .kind = .header, .name = "recent", .line = if (recent > 0) (a.dupe(u8, count) catch "") else "nothing finished yet" }) catch {};
+            }
+            for (claims) |it| {
+                if (it.state != .done) continue;
+                self.workRow(a, it, text, finding);
+            }
+        }
+
         // Spaces, in workspace order — always the same order, so a
         // space is where it was last time whatever changed in it.
+        if (home) {
+            var hb: [32]u8 = undefined;
+            const count = std.fmt.bufPrint(&hb, "{d}", .{self.sessions.items.len}) catch "";
+            st.rows.append(self.gpa, .{ .kind = .header, .name = "spaces", .line = a.dupe(u8, count) catch "" }) catch {};
+        }
         for (self.sessions.items, 0..) |sn, si| {
             if (st.spaces_n == st.spaces.len) break;
-            const cur = si == self.cur_sess;
             const sp = &st.spaces[st.spaces_n];
             self.spaceInfo(a, sn, si, sp);
             const idx = st.spaces_n;
@@ -4421,7 +4696,7 @@ pub const Server = struct {
                     .name = sp.name,
                     .line = sp.event,
                     .second = tl.items,
-                    .hint = if (cur) "↵ back in" else "↵ enter",
+                    .hint = "↵ enter",
                     .ws = si,
                     .space = idx,
                 }) catch {};
@@ -4457,7 +4732,7 @@ pub const Server = struct {
         // Global pins: live at every altitude, listed with where they
         // came from so the keyboard can reach the dock.
         if (self.global_pins.items.len > 0 and !finding) {
-            st.rows.append(self.gpa, .{ .kind = .note, .name = "pinned everywhere" }) catch {};
+            st.rows.append(self.gpa, .{ .kind = .header, .name = "pinned everywhere" }) catch {};
         }
         for (self.global_pins.items) |id| {
             const p = self.pane(id) orelse continue;
@@ -4483,19 +4758,72 @@ pub const Server = struct {
                     return x.score < y.score;
                 }
             }.lt);
-            // The ✦ row: always last, never auto-selected, the only
-            // door to interpretation. Only while she is open.
-            if (self.companionPane() != null) {
-                if (st.rows.items.len > 0) st.rows.append(self.gpa, .{ .kind = .note, .name = "" }) catch {};
-                const cname = self.conf.companionSlice();
-                const name = std.fmt.allocPrint(a, "{s}: \"{s}\"", .{ cname, text }) catch cname;
-                st.rows.append(self.gpa, .{ .kind = .vera, .glyph = ui.glyph(&self.ui, .companion), .ink = self.ui.accent, .name = name, .line = "hand this to her, as typed", .hint = "↵ ask" }) catch {};
-            }
             if (st.rows.items.len == 0) {
                 st.rows.append(self.gpa, .{ .kind = .note, .name = "nothing matches" }) catch {};
             }
         }
+        // a section asked for by a key: the cursor on its first row,
+        // or on the header's neighbour when it is empty
+        switch (st.land) {
+            .none => {},
+            .needs => if (land_needs) |i| {
+                st.cur = i;
+            },
+            .running => if (land_running) |i| {
+                st.cur = i;
+            },
+        }
+        st.land = .none;
         st.clampCursor();
+    }
+
+    /// A producer's task as one row: the goal it named, its state
+    /// and the space it runs in, then the fields it chose to add —
+    /// the actor, the last event, the result. ↵ goes to the space's
+    /// agent pane, or the space.
+    fn workRow(self: *Server, a: std.mem.Allocator, it: chromepkg.Item, text: []const u8, finding: bool) void {
+        const st = &self.alt;
+        const ws = it.workspace();
+        const held = self.sessionNamed(ws);
+        var line: std.ArrayList(u8) = .empty;
+        line.appendSlice(a, it.state.word()) catch {};
+        if (held != null or ws.len > 0) {
+            line.appendSlice(a, " · ") catch {};
+            line.appendSlice(a, chromepkg.shortSpace(ws)) catch {};
+            if (held == null) line.appendSlice(a, " (not open here)") catch {};
+        }
+        if (it.actor.len > 0) {
+            line.appendSlice(a, " · ") catch {};
+            line.appendSlice(a, it.actor) catch {};
+        }
+        const detail = if (it.state == .done and it.result.len > 0) it.result else if (it.event.len > 0) it.event else it.sub;
+        if (detail.len > 0 and !std.mem.startsWith(u8, detail, it.state.word())) {
+            line.appendSlice(a, " · ") catch {};
+            line.appendSlice(a, detail) catch {};
+        }
+        const mark: ui.Mark = switch (it.state) {
+            .working => .working,
+            .done => .success,
+            .failed => .failed,
+            .blocked => .attention,
+            .idle, .none => .waiting,
+        };
+        const target_pane: u32 = if (held) |si| (self.agentPaneIn(self.sessions.items[si]) orelse 0) else 0;
+        var row: altpkg.Row = .{
+            .kind = .work,
+            .glyph = ui.markGlyph(&self.ui, mark),
+            .ink = ui.markInk(&self.ui, mark),
+            .name = it.name,
+            .line = line.items,
+            .line_ink = self.ui.secondary,
+            .hint = if (held != null) "↵ go" else "",
+            .pane = target_pane,
+            .ws = held orelse 0,
+            .arg = if (held != null) (a.dupe(u8, ws) catch "") else "",
+        };
+        if (it.unread) row.glyph = ui.markGlyph(&self.ui, .unread);
+        if (finding) row.score = altpkg.fuzzy(it.name, text) orelse (altpkg.fuzzy(line.items, text) orelse return) + 20;
+        st.rows.append(self.gpa, row) catch {};
     }
 
     /// One space, described: its label and identity, its tabs with
@@ -4687,6 +5015,17 @@ fn markOf(m: chromepkg.TabMark) ui.Mark {
         .unread => .unread,
         .attention => .attention,
     };
+}
+
+/// The prefix key as a person types it: the character itself, or
+/// `C-x` for a control key.
+fn prefixName(key: u8, buf: []u8) []const u8 {
+    if (key >= 1 and key <= 26) return std.fmt.bufPrint(buf, "C-{c} ", .{key - 1 + 'a'}) catch "C-? ";
+    if (key >= 0x20 and key < 0x7f) {
+        buf[0] = key;
+        return buf[0..1];
+    }
+    return "prefix ";
 }
 
 /// The engine's own names, as `proc_pidpath` reports them between a

@@ -555,10 +555,15 @@ still exact. Deltas would force unbounded buffering or a disconnect.
 }
 ```
 
-`focus.mode` is `pane`, `copy`, `popup`, `altitude`, `gate` or
+`focus.mode` is `pane`, `copy`, `popup`, `root`, `gate` or
 `inspect` — a replica needs to know when the mux itself is holding the
-keyboard (`docs/altitude.md` for the last three). `bar` says whether
-the calm bar is on. A window's `name` is its tab's name as minted —
+keyboard (`docs/altitude.md` for the last three). `scope` is `root`
+or `space`, and `root` is the root's own state — `{"view": "home",
+"mode": "ask", "ask": "none"}`: which view (`home`, `orbit`,
+`ledger`), what the draft's first character makes of it (`ask`,
+`find`, `command`), and where the request to the companion stands
+(`none`, `running`, `replied`, `failed`, `offline`). `bar` says
+whether the calm bar is on. A window's `name` is its tab's name as minted —
 once, a person's word or the first program that was not the shell,
 and never changed by rook after (`named`) — and `program` is the live
 foreground program of its focused pane. A pane's `input` is who holds
@@ -730,7 +735,7 @@ Honest inventory, so this document is not mistaken for a description.
 | a pane by id from the front door: `read` / `send` / `run` / `key` / `wait` / `split` / `window` / `focus` / `close-pane`, `$ROOK_MUX_PANE` as the caller's id, `rook --skill` | **built** (`c2s.input`, `c2s.pane_cmd`) |
 | resume: `panes[].resume`, kept while its program is in front, saved in the restore file, typed into the rebuilt shell on boot; `[mux] restore` on by default | **built** (`c2s.resume`, state file v2) |
 | `companion.zig` + `Server.scanCompanion` | **built** — the one resident rook watches for by name, published as `companion` and read out loud by `rook companion` |
-| altitude (`altitude.zig`, prefix-o): the figure, the rows, one input, `:` commands, the ✦ row; the calm bar; minted tab names (`windows[].name/named/program`, `rook rename`); input ownership (`panes[].input`, `rook own`, the gate, prefix-i) | **built** — `docs/altitude.md`, which also lists what that design still owes (the shelf, folds, the peek) |
+| the root (`altitude.zig`, `ask.zig`): home as the default scope, its sections, one input (ask / find / command), the request to the companion and her reflection, orbit and ledger as subviews; the calm bar; minted tab names (`windows[].name/named/program`, `rook rename`); input ownership (`panes[].input`, `rook own`, the gate, prefix-i) | **built** — `docs/altitude.md`, which also lists what that design still owes (a reflection from the real vera, the shelf, folds) |
 | `s2c.ack`, quiet `session 'N'`, `block_created` on new | **built** |
 | plugin protocol v1 | specified in `rook-plugin(7)` at `425c0f8^`; `items.push` implemented, the rest not |
 | surfaces (declared, placed, focusable), plugin processes | none of it |

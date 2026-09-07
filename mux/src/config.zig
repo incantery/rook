@@ -14,9 +14,12 @@
 //!   bar = true                     # the calm bar: one row at the bottom,
 //!                                  # who holds the focused pane's keys
 //!                                  # left, signals right (false = off)
-//!   zoom_view = "orbit"            # prefix-o: "orbit" contracts the space
-//!                                  # into a figure; "ledger" is rows only
+//!   zoom_view = "orbit"            # prefix-s: "orbit" draws each space as
+//!                                  # a figure; "ledger" is rows only
 //!   glyphs = "unicode"             # "ascii" for a glass without the marks
+//!   startup = "global"             # where plain `rook` lands: "global" is
+//!                                  # rook's home; "last-space" is the space
+//!                                  # you were in (docs/altitude.md)
 //!
 //! and the [companion] table the Go half already reads — the one
 //! resident rook knows by name, so it can say when and where it is
@@ -26,6 +29,9 @@
 //!   program = "vera"               # …or the program outright, when
 //!                                  # the command's first word is a
 //!                                  # wrapper (`program = ""` = off)
+//!   ask = "vera say -c rook"       # what bare text at rook's home runs,
+//!                                  # the text as its one argument
+//!                                  # (`ask = ""` = no intent door)
 const std = @import("std");
 const chrome = @import("chrome.zig");
 
@@ -72,7 +78,7 @@ pub const Mux = struct {
     accent: chrome.Rgb = chrome.mauve,
     /// The legacy side panel. Hidden unless asked for: the frame is
     /// the tab bar, the work at full width, and the calm bar, and
-    /// altitude (prefix-o) is where the spaces and the agents are
+    /// home (prefix-o) is where the spaces and the agents are
     /// looked at. A config that says `sidebar_mode = "open"` gets the
     /// rail back, folding to the collapsed dots on narrow glass and
     /// away when even that would crowd the work. `sidebar = true` is
@@ -105,16 +111,27 @@ pub const Mux = struct {
     /// TUI, the one motion rook must never cause, so the choice is
     /// made once here rather than per signal.
     bar: bool = true,
-    /// The rook-scope view behind prefix-o. Orbit draws the current
-    /// space as a figure with its layout skeleton inside and the
-    /// other spaces as rows around it; ledger is the same rows with no
-    /// figure — the SSH, narrow and reduced-motion form, and the one
-    /// orbit falls back to when the glass is too small for a figure.
+    /// The spatial subview behind prefix-s. Orbit draws each space
+    /// as a figure; ledger is the same rows with no figure — the SSH,
+    /// narrow and reduced-motion form, and the one orbit falls back
+    /// to when the glass is too small for a figure.
     zoom_ledger: bool = false,
     /// ASCII marks and glyphs for a glass that cannot show the
     /// Unicode ones. The inks and fills are the same, so the
     /// hierarchy survives the swap (docs/ui-design-system.md).
     ascii_glyphs: bool = false,
+    /// Where a glass lands. Rook's home is the root of the product:
+    /// plain `rook` opens it, and a space is a destination (`rook .`,
+    /// `rook --space`). `last-space` is the opt-in that lands in the
+    /// space the server is showing instead.
+    startup_last_space: bool = false,
+    /// The intent door: the command bare text at the root runs, with
+    /// the text as its one argument (ask.zig). Unset means the
+    /// companion's own `say`; set empty means no door, and the root
+    /// says so.
+    ask: [256]u8 = @splat(0),
+    ask_len: usize = 0,
+    ask_set: bool = false,
 
     pub fn ownersSlice(self: *const Mux) []const u8 {
         return self.owners[0..self.owners_len];
@@ -132,6 +149,15 @@ pub const Mux = struct {
     pub fn companionSlice(self: *const Mux) []const u8 {
         if (self.companion_from == .none) return default_companion;
         return self.companion[0..self.companion_len];
+    }
+
+    /// The ask command. Configured outright, else `vera say -c rook`
+    /// while the companion is vera — rook knows her verb and no
+    /// other program's — else nothing.
+    pub fn askSlice(self: *const Mux) []const u8 {
+        if (self.ask_set) return self.ask[0..self.ask_len];
+        if (std.mem.eql(u8, self.companionSlice(), "vera")) return default_ask;
+        return "";
     }
 
     /// Precedence, whichever order the lines appear in: `program`
@@ -164,6 +190,10 @@ pub const default_agents = "claude";
 /// the config names the occupant — vera is the first one, and the one
 /// the slot was cut for, so she is also the default.
 pub const default_companion = "vera";
+
+/// How bare text reaches vera: her one-shot exchange, in a
+/// conversation of rook's own so the next request continues it.
+pub const default_ask = "vera say -c rook";
 
 pub fn muxConfig() Mux {
     var out: Mux = .{};
@@ -210,6 +240,10 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
                 out.setCompanion(v, .command);
             } else if (std.mem.eql(u8, key, "name")) {
                 out.setCompanion(v, .name);
+            } else if (std.mem.eql(u8, key, "ask")) {
+                out.ask_len = @min(v.len, out.ask.len);
+                @memcpy(out.ask[0..out.ask_len], v[0..out.ask_len]);
+                out.ask_set = true;
             }
             continue;
         }
@@ -243,6 +277,9 @@ pub fn parseMux(toml: []const u8, out: *Mux) void {
         } else if (std.mem.eql(u8, key, "glyphs")) {
             const v = std.mem.trim(u8, val, "\"'");
             out.ascii_glyphs = std.mem.eql(u8, v, "ascii");
+        } else if (std.mem.eql(u8, key, "startup")) {
+            const v = std.mem.trim(u8, val, "\"'");
+            out.startup_last_space = std.mem.eql(u8, v, "last-space") or std.mem.eql(u8, v, "last_space") or std.mem.eql(u8, v, "space");
         } else if (std.mem.eql(u8, key, "zoom_view")) {
             const v = std.mem.trim(u8, val, "\"'");
             if (std.mem.eql(u8, v, "ledger")) out.zoom_ledger = true;
@@ -315,6 +352,28 @@ test "parseMux" {
     try std.testing.expect(!b.ascii_glyphs);
     parseMux("[mux]\nglyphs = \"ascii\"\n", &b);
     try std.testing.expect(b.ascii_glyphs);
+    // plain `rook` lands at home unless the config asks for the space
+    var s: Mux = .{};
+    try std.testing.expect(!s.startup_last_space);
+    parseMux("[mux]\nstartup = \"last-space\"\n", &s);
+    try std.testing.expect(s.startup_last_space);
+    parseMux("[mux]\nstartup = \"global\"\n", &s);
+    try std.testing.expect(!s.startup_last_space);
+}
+
+test "the ask command follows the companion unless said outright" {
+    const eq = std.testing.expectEqualStrings;
+    var d: Mux = .{};
+    try eq("vera say -c rook", d.askSlice());
+    var other: Mux = .{};
+    parseMux("[companion]\nprogram = \"aider\"\n", &other);
+    try eq("", other.askSlice()); // rook knows no verb of aider's
+    var said: Mux = .{};
+    parseMux("[companion]\nprogram = \"aider\"\nask = \"aider --message\"\n", &said);
+    try eq("aider --message", said.askSlice());
+    var off: Mux = .{};
+    parseMux("[companion]\nask = \"\"\n", &off);
+    try eq("", off.askSlice());
 }
 
 test "the companion slot, named or summoned" {

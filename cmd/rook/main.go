@@ -1,5 +1,6 @@
 // Command rook is the front door to the rook multiplexer. Bare `rook`
-// attaches (rookd keeps the server alive; attach boots one if needed).
+// attaches at rook's home (rookd keeps the server alive; attach boots
+// one if needed); `rook .` and `rook --space <name>` land in a space.
 // Mux verbs pass straight through to the Zig engine, which lives off
 // $PATH and is an implementation detail users never type. Worktrees
 // and the web URL live here in the Go layer.
@@ -49,7 +50,12 @@ func versionLine() string {
 
 const usage = `rook — the multiplexer, owned
 
-  rook                    attach (starts the server if rookd hasn't)
+  rook                    rook's home: intent, attention, work, spaces
+                          (starts the server if rookd hasn't)
+  rook .                  the space for this directory, made if it must be
+  rook --space <name>     that space (made here if it must be)
+  rook home               rook's home, said outright
+  rook attach [--root | --space <name> [--cwd DIR]]   the exact form of the three above
   rook ls                 list workspaces
   rook new <name>         create/switch workspace
   rook switch <name>      switch workspace
@@ -98,6 +104,8 @@ var muxVerbs = map[string]bool{
 	"resume": true,
 	// input ownership, and the one act that changes a minted tab name
 	"own": true, "rename": true,
+	// where a glass lands: the exact form behind `rook .` and `--space`
+	"attach": true,
 }
 
 func main() {
@@ -107,6 +115,18 @@ func main() {
 	}
 	var err error
 	switch {
+	case args[0] == ".":
+		// The space for this directory: named the way `rook new` would
+		// name it, started here if rook does not hold one yet.
+		execMux(attachArgs(spaceArgs(args[1:])))
+	case args[0] == "--space", args[0] == "-s":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "rook: --space needs a name")
+			os.Exit(1)
+		}
+		execMux(attachArgs(append([]string{"--space", args[1]}, args[2:]...)))
+	case args[0] == "home", args[0] == "--home", args[0] == "--root":
+		execMux([]string{"attach", "--root"})
 	case args[0] == "version", args[0] == "--version", args[0] == "-v":
 		fmt.Println(versionLine())
 	case args[0] == "help", args[0] == "--help", args[0] == "-h":
@@ -131,6 +151,37 @@ func main() {
 		fmt.Fprintln(os.Stderr, "rook:", err)
 		os.Exit(1)
 	}
+}
+
+// spaceArgs is `rook .`: the space named for the working directory,
+// seeded there. A directory rook already holds a space for is simply
+// entered; `--cwd` is only where a new one starts.
+func spaceArgs(rest []string) []string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	return append([]string{"--space", mux.SessionName(cwd), "--cwd", cwd}, rest...)
+}
+
+// attachArgs is the engine's exact spelling of a destination. Every
+// `--space` carries the directory to start in, so a name rook does
+// not hold yet becomes a space rooted where the person stood.
+func attachArgs(flags []string) []string {
+	out := []string{"attach"}
+	hasCwd := false
+	for _, f := range flags {
+		if f == "--cwd" {
+			hasCwd = true
+		}
+	}
+	out = append(out, flags...)
+	if !hasCwd {
+		if cwd, err := os.Getwd(); err == nil {
+			out = append(out, "--cwd", cwd)
+		}
+	}
+	return out
 }
 
 // execMux replaces this process with the Zig engine.
