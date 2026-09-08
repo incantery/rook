@@ -559,10 +559,14 @@ still exact. Deltas would force unbounded buffering or a disconnect.
 `inspect` — a replica needs to know when the mux itself is holding the
 keyboard (`docs/altitude.md` for the last three). `scope` is `root`
 or `space`, and `root` is the root's own state — `{"view": "home",
-"mode": "ask", "ask": "none"}`: which view (`home`, `orbit`,
-`ledger`), what the draft's first character makes of it (`ask`,
-`find`, `command`), and where the request to the companion stands
-(`none`, `running`, `replied`, `failed`, `offline`). `bar` says
+"mode": "ask", "ask": "none", "region": "composer", "wide": true,
+"turns": 0, "draft": false}`: which view (`home`, `orbit`, `ledger`),
+what the draft's first character makes of it (`ask`, `find`,
+`command`), where the request to the companion stands (`none`,
+`running`, `replied`, `failed`, `offline`), which region of the
+cockpit has focus (`composer`, `thread`, `dash`), whether the glass
+shows both regions, how many turns the thread holds, and whether a
+draft is typed (never the draft itself). `bar` says
 whether the calm bar is on. A window's `name` is its tab's name as minted —
 once, a person's word or the first program that was not the shell,
 and never changed by rook after (`named`) — and `program` is the live

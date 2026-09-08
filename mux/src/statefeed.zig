@@ -96,11 +96,15 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
     // input's first character makes of the draft, and where the
     // request stands. The draft itself is not published: it is the
     // person's, half typed.
-    out.print(gpa, ",\"scope\":\"{s}\",\"root\":{{\"view\":\"{s}\",\"mode\":\"{s}\",\"ask\":\"{s}\"}}", .{
+    out.print(gpa, ",\"scope\":\"{s}\",\"root\":{{\"view\":\"{s}\",\"mode\":\"{s}\",\"ask\":\"{s}\",\"region\":\"{s}\",\"wide\":{s},\"turns\":{d},\"draft\":{s}}}", .{
         if (sv.at_root) "root" else "space",
         sv.alt.view.word(),
         sv.alt.mode().word(),
         @tagName(sv.alt.req.state),
+        @tagName(sv.alt.home.focus),
+        boolStr(sv.alt.home.wide),
+        sv.alt.home.thread.count(),
+        boolStr(sv.alt.len > 0),
     }) catch return;
     // The calm bar, so a second glass lays its rows out the same way.
     out.print(gpa, ",\"bar\":{s}", .{boolStr(sv.barOn())}) catch return;

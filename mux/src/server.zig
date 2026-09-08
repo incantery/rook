@@ -16,6 +16,7 @@ const proto = @import("proto.zig");
 const config = @import("config.zig");
 const altpkg = @import("altitude.zig");
 const askpkg = @import("ask.zig");
+const homepkg = @import("home.zig");
 const ui = @import("ui.zig");
 
 // CLOCK_UPTIME_RAW = 8 on macOS; libc-only monotonic clock.
@@ -955,10 +956,14 @@ pub const Server = struct {
                 }
             }
 
-            if (self.alt.req.busy() and self.alt.req.pump()) {
-                _ = self.touch();
-                self.full = true;
-                self.pending = true;
+            if (self.alt.req.busy()) {
+                const ev = self.alt.req.pump();
+                if (ev != .none) {
+                    self.absorbRequest(ev);
+                    _ = self.touch();
+                    self.full = true;
+                    self.pending = true;
+                }
             }
             // drain pane stdin queues that got room
             for (fds.items[pane_fds_at..job_fds_at]) |pfd| {
@@ -1682,8 +1687,9 @@ pub const Server = struct {
         // Chrome only repaints on a full frame, and nothing else about
         // this change dirties a row — but a rail that is folded away
         // is not on the glass, and a producer pushing at its own
-        // cadence must not cost a full repaint each time.
-        if (self.side_w != null) {
+        // cadence must not cost a full repaint each time. Home is
+        // painted from the rail, so there a push is a frame.
+        if (self.side_w != null or self.at_root) {
             self.full = true;
             self.pending = true;
         }
@@ -3897,6 +3903,10 @@ pub const Server = struct {
             const st = &self.alt;
             const what: []const u8 = if (st.len > 0) st.mode().word() else st.painted.word();
             vis += ui.module(out, t, what, t.muted, false);
+            if (st.len == 0 and st.painted == .home and st.home.focus != .composer) {
+                vis += ui.moduleSep(out, t);
+                vis += ui.module(out, t, if (st.home.focus == .dash) "dashboard" else "thread", t.muted, false);
+            }
             // the request, while one is in flight or just answered
             switch (st.req.state) {
                 .none => {},
@@ -4268,6 +4278,7 @@ pub const Server = struct {
         self.goHome();
         self.alt.clear();
         self.alt.land = land;
+        self.alt.home.focus = .dash;
     }
 
     /// Home, in a mode: the field holds the mode's leading character
@@ -4275,6 +4286,8 @@ pub const Server = struct {
     fn goHomeTyping(self: *Server, lead: []const u8) void {
         self.goHome();
         self.alt.clear();
+        self.alt.home.focus = .composer;
+        self.alt.home.thread_cur = null;
         for (lead) |ch| self.alt.push(ch);
     }
 
@@ -4316,16 +4329,19 @@ pub const Server = struct {
         return if (c.len > 0) c else "vera";
     }
 
-    /// Keys at the root. Bare typing is the text, so the rows are
-    /// walked with the arrows (and ⇥ ⇤, C-n C-p), never with letters.
-    /// Returns the bytes spent, so a run of keystrokes is walked one
-    /// key at a time and an escape sequence is taken whole.
+    /// Keys at the root. Printable typing always reaches the composer,
+    /// so the rows and the cards are walked with the arrows (⇥ ⇤,
+    /// C-n C-p), never with letters. Returns the bytes spent, so a run
+    /// of keystrokes is walked one key at a time and an escape
+    /// sequence is taken whole.
     fn altKey(self: *Server, bytes: []const u8) usize {
         const st = &self.alt;
+        const h = &st.home;
         defer {
             self.full = true;
             self.pending = true;
         }
+        const cockpit = st.mode() == .intent and st.view == .home;
         const b = bytes[0];
         if (b == 0x1b) {
             if (bytes.len >= 3 and (bytes[1] == '[' or bytes[1] == 'O')) {
@@ -4334,9 +4350,15 @@ pub const Server = struct {
                 while (i < bytes.len and !(bytes[i] >= 0x40 and bytes[i] <= 0x7e)) i += 1;
                 const fin: u8 = if (i < bytes.len) bytes[i] else 0;
                 switch (fin) {
-                    'A' => st.move(-1),
-                    'B' => st.move(1),
-                    'Z' => st.move(-1), // shift-tab
+                    'A' => self.rootMove(-1),
+                    'B' => self.rootMove(1),
+                    'Z' => if (cockpit) self.cycleFocus(-1) else st.move(-1), // shift-tab
+                    '5' => if (cockpit and h.focus != .dash) {
+                        h.thread_scroll += 4; // page up
+                    },
+                    '6' => if (cockpit and h.focus != .dash) {
+                        h.thread_scroll -|= 4; // page down
+                    },
                     else => {},
                 }
                 return @min(i + 1, bytes.len);
@@ -4347,16 +4369,21 @@ pub const Server = struct {
         }
         switch (b) {
             '\r', '\n' => self.altAct(),
-            0x7f, 0x08 => st.pop(),
-            '\t' => st.move(1),
-            0x0e => st.move(1), // C-n
-            0x10 => st.move(-1), // C-p
+            0x7f, 0x08 => if (h.focus == .composer or !cockpit) st.pop(),
+            '\t' => if (cockpit) self.cycleFocus(1) else st.move(1),
+            0x0e => self.rootMove(1), // C-n
+            0x10 => self.rootMove(-1), // C-p
             0x15 => st.clear(), // C-u
             0x03 => _ = st.escape(), // C-c
             else => {
                 if (b < 0x20) return 1;
                 const len = std.unicode.utf8ByteSequenceLength(b) catch 1;
                 const end = @min(len, bytes.len);
+                // typing is for the composer, wherever focus was
+                if (cockpit and h.focus != .composer) {
+                    h.focus = .composer;
+                    h.thread_cur = null;
+                }
                 for (bytes[0..end]) |ch| st.push(ch);
                 // typing a query rebuilds the rows and the cursor
                 // starts at the top of the results; typing a request
@@ -4368,22 +4395,106 @@ pub const Server = struct {
         return 1;
     }
 
+    /// ↑ ↓ at the root: the rows while finding or commanding; at home,
+    /// whichever region has focus — the thread's turns, the
+    /// dashboard's cards, and from the composer, up into the thread.
+    fn rootMove(self: *Server, d: i32) void {
+        const st = &self.alt;
+        const h = &st.home;
+        if (st.mode() != .intent or st.view != .home) {
+            st.move(d);
+            return;
+        }
+        switch (h.focus) {
+            .composer => if (d < 0 and st.len == 0 and h.thread.count() > 0) {
+                h.focus = .thread;
+                h.thread_cur = h.thread.count() - 1;
+            },
+            .thread => {
+                const n = h.thread.count();
+                if (d > 0 and (h.thread_cur == null or h.thread_cur.? + 1 >= n)) {
+                    h.focus = .composer;
+                    h.thread_cur = null;
+                } else {
+                    h.moveThread(d);
+                }
+            },
+            .dash => {
+                h.moveDash(d);
+                self.syncFromDash();
+            },
+        }
+    }
+
+    /// ⇥: composer, dashboard, thread, and around. On narrow glass
+    /// the view follows: the dashboard is `now`.
+    fn cycleFocus(self: *Server, d: i32) void {
+        const h = &self.alt.home;
+        const order = [_]homepkg.Region{ .composer, .dash, .thread };
+        var i: usize = 0;
+        for (order, 0..) |r, k| {
+            if (r == h.focus) i = k;
+        }
+        i = @intCast(@mod(@as(i32, @intCast(i)) + d, @as(i32, order.len)));
+        h.focus = order[i];
+        switch (h.focus) {
+            .thread => if (h.thread.count() > 0) {
+                if (h.thread_cur == null) h.thread_cur = h.thread.count() - 1;
+            } else {
+                // nothing to walk: on to the next region
+                h.focus = if (d > 0) .composer else .dash;
+            },
+            .dash => {
+                h.clampDash();
+                self.syncFromDash();
+            },
+            .composer => h.thread_cur = null,
+        }
+    }
+
     /// ↵ at the root: a request, when one is typed; else the
     /// selected row, and only it.
     fn altAct(self: *Server) void {
         const st = &self.alt;
-        if (st.mode() == .intent and st.len > 0) {
-            // The one door to interpretation: the text goes, as typed,
-            // to the companion's command. Nothing else changes until
-            // she answers, and what she proposes is shown before it
-            // runs.
-            var text_buf: [askpkg.max_text]u8 = undefined;
-            const n = @min(st.len, text_buf.len);
-            @memcpy(text_buf[0..n], st.text[0..n]);
-            st.req.send(self.conf.askSlice(), text_buf[0..n]);
-            self.ask_on = st.req.state != .offline;
-            st.clear();
-            _ = self.touch();
+        const h = &st.home;
+        if (st.mode() == .intent and st.view == .home) {
+            switch (h.focus) {
+                .composer => if (st.len > 0) {
+                    // The one door to interpretation: the text goes, as
+                    // typed, to the companion's command. Nothing else
+                    // changes until she answers, and what she proposes
+                    // is shown before it runs.
+                    var text_buf: [askpkg.max_text]u8 = undefined;
+                    const n = @min(st.len, text_buf.len);
+                    @memcpy(text_buf[0..n], st.text[0..n]);
+                    _ = h.thread.push(.you, text_buf[0..n], "", "", panepkg.epochMs());
+                    h.thread_scroll = 0;
+                    st.req.send(self.conf.askSlice(), text_buf[0..n]);
+                    self.ask_on = st.req.state != .offline;
+                    if (st.req.state == .offline) {
+                        var b: [160]u8 = undefined;
+                        _ = h.thread.push(.err, std.fmt.bufPrint(&b, "{s} is not on PATH — nothing was sent · / find and : command still work", .{self.askName()}) catch "not on PATH", "", "", panepkg.epochMs());
+                    } else if (st.req.state == .failed) {
+                        _ = h.thread.push(.err, "could not start the command", "", "", panepkg.epochMs());
+                    }
+                    st.clear();
+                    _ = self.touch();
+                },
+                .thread => {
+                    // a turn about a task or a space finds its card
+                    if (!self.syncFromThread()) {
+                        const tc = h.thread_cur orelse return;
+                        const turn = h.thread.get(tc);
+                        if (self.sessionNamed(turn.spaceSlice())) |si| {
+                            self.enterSpace();
+                            self.switchSession(si);
+                        }
+                    }
+                },
+                .dash => self.cardAct(),
+            }
+            self.full = true;
+            self.pending = true;
             return;
         }
         // The rows are rebuilt first: keys can arrive in one batch
@@ -4434,6 +4545,41 @@ pub const Server = struct {
         self.pending = true;
     }
 
+    /// ↵ on a card: an approval runs its action; anything else opens
+    /// its exact surface — the pane that signalled, the agent's pane,
+    /// the space.
+    fn cardAct(self: *Server) void {
+        const st = &self.alt;
+        const h = &st.home;
+        const c = h.selectedCard() orelse return;
+        if (c.task) |ti| {
+            const tk = h.tasks[ti];
+            switch (tk.kind) {
+                .approval => st.req.confirm(tk.action),
+                .signal, .found => {
+                    self.enterSpace();
+                    self.focusPane(tk.pane);
+                },
+                .producer => {
+                    if (tk.ws == null) return;
+                    self.enterSpace();
+                    if (tk.pane != 0 and self.pane(tk.pane) != null) {
+                        self.focusPane(tk.pane);
+                    } else {
+                        self.switchSession(tk.ws.?);
+                    }
+                },
+            }
+            _ = self.touch();
+            return;
+        }
+        if (c.space) |si| {
+            self.enterSpace();
+            self.switchSession(st.spaces[si].ws);
+            _ = self.touch();
+        }
+    }
+
     fn altCommand(self: *Server, cmd: altpkg.Command, arg: []const u8) void {
         switch (cmd) {
             .go => if (self.sessionNamed(arg)) |i| {
@@ -4468,6 +4614,17 @@ pub const Server = struct {
                 self.alt.view = .home;
                 self.alt.clear();
             },
+            .now => {
+                self.alt.view = .home;
+                self.alt.clear();
+                self.alt.home.focus = .dash;
+                self.alt.home.clampDash();
+            },
+            .vera => {
+                self.alt.view = .home;
+                self.alt.clear();
+                self.alt.home.focus = .composer;
+            },
             .none => {},
         }
     }
@@ -4497,6 +4654,10 @@ pub const Server = struct {
         const text = st.query();
         const finding = st.finding();
         const home = st.view == .home and !finding;
+        if (home and st.mode() == .intent) {
+            self.homeBuild(a, now);
+            return;
+        }
         var land_needs: ?usize = null;
         var land_running: ?usize = null;
 
@@ -4777,6 +4938,318 @@ pub const Server = struct {
         st.clampCursor();
     }
 
+    /// The cockpit's projection: the spaces, then every task as one
+    /// entity — a producer's row, an agent rook sees producing where
+    /// nobody claims, a pane that signalled, an action waiting on a
+    /// hand — sorted into its module, then the cards. A task the rail
+    /// knows that changed state since last time earns one note in
+    /// the thread, so the conversation and the dashboard move
+    /// together off the same fact.
+    fn homeBuild(self: *Server, a: std.mem.Allocator, now: i64) void {
+        const st = &self.alt;
+        const h = &st.home;
+        h.reset();
+        // What the rail says in the server's first seconds is what was
+        // already true, not news; after that, a task appearing is.
+        h.seeded = nowMs() - self.started_ms > 5000;
+        for (self.sessions.items, 0..) |sn, si| {
+            if (st.spaces_n == st.spaces.len) break;
+            self.spaceInfo(a, sn, si, &st.spaces[st.spaces_n]);
+            st.spaces_n += 1;
+        }
+        const claims = if (self.side.agents.panel) |pnl| pnl.items else &.{};
+
+        // needs you: what the companion proposed, still waiting on a hand
+        if (st.req.ref) |*r| {
+            for (r.actions[0..r.actions_n], 0..) |*act, i| {
+                if (act.ran or act.running) continue;
+                _ = h.addTask(.{
+                    .kind = .approval,
+                    .module = .needs,
+                    .id = r.taskSlice(),
+                    .title = act.labelSlice(),
+                    .space = r.spaceSlice(),
+                    .full = r.spaceSlice(),
+                    .actor = self.askName(),
+                    .event = act.runSlice(),
+                    .action = i,
+                    .ws = self.sessionNamed(r.spaceSlice()),
+                });
+            }
+        }
+        // …then what a program asked, oldest first
+        var attn: [64]*panepkg.Pane = undefined;
+        var an: usize = 0;
+        for (self.panes.items) |p| {
+            if (p.unread_ms == 0 or self.popup == p.id) continue;
+            if (an == attn.len) break;
+            var i = an;
+            while (i > 0 and attn[i - 1].unread_ms > p.unread_ms) : (i -= 1) attn[i] = attn[i - 1];
+            attn[i] = p;
+            an += 1;
+        }
+        for (attn[0..an]) |p| {
+            const at = self.placeOf(p.id) orelse continue;
+            var tab: []const u8 = "";
+            var ws: ?usize = null;
+            var win: ?usize = null;
+            if (self.sessionNamed(at.workspace)) |si| {
+                ws = si;
+                if (at.window) |wi| {
+                    win = wi - 1;
+                    const sn = self.sessions.items[si];
+                    if (wi - 1 < sn.windows.items.len) {
+                        var nb: [48]u8 = undefined;
+                        tab = a.dupe(u8, self.tabName(sn, sn.windows.items[wi - 1], &nb)) catch "";
+                    }
+                }
+            }
+            var nb: [64]u8 = undefined;
+            const prog = a.dupe(u8, p.fgName(&nb) orelse "shell") catch "shell";
+            const said: []const u8 = if (p.notif_ms != 0 and p.notif_ms >= p.unread_ms and p.notif_title_len > 0)
+                a.dupe(u8, p.notif_title[0..p.notif_title_len]) catch ""
+            else if (p.bell_ms != 0 and p.bell_ms >= p.unread_ms)
+                "rang the bell"
+            else if (p.progress_done_ms != 0 and p.progress_done_ms >= p.unread_ms)
+                "finished its progress bar"
+            else
+                "signalled";
+            const where = if (tab.len > 0) (std.fmt.allocPrint(a, "in {s}, nobody was looking", .{tab}) catch tab) else "nobody was looking";
+            _ = h.addTask(.{
+                .kind = .signal,
+                .module = .needs,
+                .title = said,
+                .space = chromepkg.shortSpace(at.workspace),
+                .full = at.workspace,
+                .actor = if (p.owner_len > 0) p.ownerName() else prog,
+                .event = where,
+                .unread = true,
+                .age_ms = now - p.unread_ms,
+                .pane = p.id,
+                .ws = ws,
+                .win = win,
+            });
+        }
+        // the producer's tasks, each in its module by state
+        for (claims) |it| {
+            const ws_name = it.workspace();
+            const held = self.sessionNamed(ws_name);
+            const module: homepkg.Module = switch (it.state) {
+                .blocked, .failed => .needs,
+                .done => .recent,
+                else => .active,
+            };
+            const detail = if (it.event.len > 0) it.event else it.sub;
+            _ = h.addTask(.{
+                .kind = .producer,
+                .module = module,
+                .id = it.id,
+                .title = it.name,
+                .state = it.state,
+                .space = chromepkg.shortSpace(ws_name),
+                .full = ws_name,
+                .actor = it.actor,
+                .event = if (std.mem.startsWith(u8, detail, it.state.word())) std.mem.trimStart(u8, detail[it.state.word().len..], " ·") else detail,
+                .result = it.result,
+                .unread = it.unread,
+                .pane = if (held) |si| (self.agentPaneIn(self.sessions.items[si]) orelse 0) else 0,
+                .ws = held,
+            });
+            // a change of state since last seen: one note, shared with
+            // the card by the task's id
+            if (h.remember(it.id, it.state)) |was| {
+                // a task first seen already done is history, not news
+                if (was != .none or (h.seeded and it.state != .done)) self.noteTransition(a, it, was, now);
+            }
+        }
+        // agents rook can see producing where no producer claims: one
+        // quiet card each, titled by what rook can see. Idle ones are
+        // not work; they show as marks on their space's tabs.
+        for (self.sessions.items, 0..) |sn, si| {
+            if (chromepkg.claimedIn(claims, sn.label())) continue;
+            for (self.panes.items) |p| {
+                if (!p.is_agent or !self.paneIn(sn, p.id)) continue;
+                const lo = p.last_output_ms.load(.acquire);
+                if (lo == 0 or now - lo >= chromepkg.working_ms) continue;
+                var nb: [64]u8 = undefined;
+                const prog = a.dupe(u8, p.fgName(&nb) orelse "agent") catch "agent";
+                const at = self.placeOf(p.id) orelse continue;
+                var tab: []const u8 = "";
+                if (at.window) |wi| {
+                    if (wi - 1 < sn.windows.items.len) {
+                        var tb: [48]u8 = undefined;
+                        tab = a.dupe(u8, self.tabName(sn, sn.windows.items[wi - 1], &tb)) catch "";
+                    }
+                }
+                _ = h.addTask(.{
+                    .kind = .found,
+                    .module = .active,
+                    .title = std.fmt.allocPrint(a, "{s} at work", .{if (p.owner_len > 0) p.ownerName() else prog}) catch prog,
+                    .space = chromepkg.shortSpace(sn.label()),
+                    .full = sn.label(),
+                    .actor = prog,
+                    .event = if (tab.len > 0) (std.fmt.allocPrint(a, "in {s} · no task was pushed for it", .{tab}) catch "") else "no task was pushed for it",
+                    .age_ms = now - lo,
+                    .pane = p.id,
+                    .ws = si,
+                });
+            }
+        }
+
+        // the cards, module by module; an empty module is left out,
+        // and an empty dashboard says so once
+        var any_work = false;
+        inline for (.{ homepkg.Module.needs, homepkg.Module.active, homepkg.Module.recent }) |m| {
+            var n: usize = 0;
+            for (h.tasks[0..h.tasks_n]) |tk| {
+                if (tk.module == m) n += 1;
+            }
+            if (n > 0) {
+                any_work = true;
+                h.addCard(.{ .module = m, .header = true });
+                for (h.tasks[0..h.tasks_n], 0..) |tk, ti| {
+                    if (tk.module == m) h.addCard(.{ .module = m, .task = ti });
+                }
+            }
+        }
+        if (!any_work) h.addCard(.{ .module = .active });
+        h.addCard(.{ .module = .spaces, .header = true });
+        for (0..st.spaces_n) |si| h.addCard(.{ .module = .spaces, .space = si });
+
+        switch (st.land) {
+            .none => {},
+            .needs => {
+                h.focus = .dash;
+                if (!h.landDash(.needs)) _ = h.landDash(.active);
+            },
+            .running => {
+                h.focus = .dash;
+                if (!h.landDash(.active)) _ = h.landDash(.needs);
+            },
+        }
+        st.land = .none;
+        h.restoreSelection();
+        self.syncFromDash();
+    }
+
+    /// A task the rail knows moved: say so in the thread, once, in
+    /// rook's own words, with the task's id on the turn.
+    fn noteTransition(self: *Server, a: std.mem.Allocator, it: chromepkg.Item, was: chromepkg.State, now: i64) void {
+        const h = &self.alt.home;
+        const space = chromepkg.shortSpace(it.workspace());
+        switch (it.state) {
+            .done => {
+                const text = if (it.result.len > 0)
+                    std.fmt.allocPrint(a, "{s} finished · {s}", .{ it.name, it.result }) catch it.name
+                else
+                    std.fmt.allocPrint(a, "{s} finished", .{it.name}) catch it.name;
+                _ = h.thread.push(.result, text, it.id, it.workspace(), now);
+            },
+            .failed => {
+                const text = std.fmt.allocPrint(a, "{s} failed{s}{s}", .{ it.name, if (it.event.len > 0) " · " else "", it.event }) catch it.name;
+                _ = h.thread.push(.err, text, it.id, it.workspace(), now);
+            },
+            .blocked => {
+                const text = std.fmt.allocPrint(a, "{s} needs you{s}{s}", .{ it.name, if (it.event.len > 0) " · " else "", it.event }) catch it.name;
+                _ = h.thread.push(.note, text, it.id, it.workspace(), now);
+            },
+            .working => if (was != .blocked) {
+                const text = std.fmt.allocPrint(a, "{s} began in {s}{s}{s}", .{ it.name, space, if (it.actor.len > 0) " · " else "", it.actor }) catch it.name;
+                _ = h.thread.push(.note, text, it.id, it.workspace(), now);
+            } else {
+                const text = std.fmt.allocPrint(a, "{s} resumed", .{it.name}) catch it.name;
+                _ = h.thread.push(.note, text, it.id, it.workspace(), now);
+            },
+            else => {},
+        }
+    }
+
+    /// The dashboard's selection finds the turn about the same task.
+    fn syncFromDash(self: *Server) void {
+        const h = &self.alt.home;
+        h.linked = null;
+        const c = h.selectedCard() orelse return;
+        const ti = c.task orelse return;
+        h.linked = h.thread.about(h.tasks[ti].id);
+    }
+
+    /// The thread's selection finds the card about the same task, or
+    /// the space it names, and moves focus there.
+    fn syncFromThread(self: *Server) bool {
+        const h = &self.alt.home;
+        const tc = h.thread_cur orelse return false;
+        const turn = h.thread.get(tc);
+        if (h.cardFor(turn.taskSlice(), "")) |ci| {
+            h.dash_cur = ci;
+            h.dash_touched = true;
+            h.noteSelection();
+            h.focus = .dash;
+            self.syncFromDash();
+            return true;
+        }
+        if (turn.space_len > 0) {
+            for (h.cards[0..h.cards_n], 0..) |c, ci| {
+                const si = c.space orelse continue;
+                if (std.mem.eql(u8, self.alt.spaces[si].full, turn.spaceSlice()) or std.mem.eql(u8, self.alt.spaces[si].name, turn.spaceSlice())) {
+                    h.dash_cur = ci;
+                    h.dash_touched = true;
+                    h.noteSelection();
+                    h.focus = .dash;
+                    self.syncFromDash();
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// The request moved: the thread gets the turn.
+    fn absorbRequest(self: *Server, ev: askpkg.Request.Event) void {
+        const st = &self.alt;
+        const h = &st.home;
+        const now = panepkg.epochMs();
+        switch (ev) {
+            .none, .output => {},
+            .replied => switch (st.req.state) {
+                .replied => if (st.req.ref) |*r| {
+                    var fba = std.heap.FixedBufferAllocator.init(&st.buf);
+                    var text: std.ArrayList(u8) = .empty;
+                    const a = fba.allocator();
+                    if (r.intent_len > 0) text.appendSlice(a, r.intentSlice()) catch {};
+                    var i: usize = 0;
+                    while (i < r.plan_n) : (i += 1) {
+                        text.print(a, "\n{d}. {s}", .{ i + 1, r.planLine(i) }) catch {};
+                    }
+                    if (r.question_len > 0) text.print(a, "\n{s} {s}", .{ ui.markGlyph(&self.ui, .attention), r.questionSlice() }) catch {};
+                    if (text.items.len == 0) text.appendSlice(a, "answered with nothing to show") catch {};
+                    h.req_serial += 1;
+                    const turn = h.thread.push(.plan, text.items, r.taskSlice(), r.spaceSlice(), now);
+                    turn.req_serial = h.req_serial;
+                } else {
+                    const reply = std.mem.trim(u8, st.req.replySlice(), " \t\r\n");
+                    _ = h.thread.push(.vera, if (reply.len > 0) reply else "answered with nothing", "", "", now);
+                },
+                .failed => {
+                    var b: [200]u8 = undefined;
+                    const why = askpkg.firstLine(if (st.req.note_len > 0) st.req.noteSlice() else st.req.replySlice());
+                    _ = h.thread.push(.err, std.fmt.bufPrint(&b, "{s} could not answer ({d}) · {s}", .{ self.askName(), st.req.code, why }) catch why, "", "", now);
+                },
+                else => {},
+            },
+            .action_done => |i| if (st.req.ref) |*r| {
+                const act = &r.actions[i];
+                var b: [320]u8 = undefined;
+                const out = askpkg.firstLine(act.receiptSlice());
+                if (act.code == 0) {
+                    _ = h.thread.push(.receipt, std.fmt.bufPrint(&b, "ran {s}{s}{s}", .{ act.labelSlice(), if (out.len > 0) " · " else "", out }) catch act.labelSlice(), r.taskSlice(), r.spaceSlice(), now);
+                } else {
+                    _ = h.thread.push(.err, std.fmt.bufPrint(&b, "{s} failed ({d}){s}{s}", .{ act.labelSlice(), act.code, if (out.len > 0) " · " else "", out }) catch act.labelSlice(), r.taskSlice(), r.spaceSlice(), now);
+                }
+            },
+        }
+        h.thread_scroll = 0;
+    }
+
     /// A producer's task as one row: the goal it named, its state
     /// and the space it runs in, then the fields it chose to add —
     /// the actor, the last event, the result. ↵ goes to the space's
@@ -4925,6 +5398,7 @@ pub const Server = struct {
             }
         }
         sp.event = out.items;
+        sp.quiet_ms = if (last_out == 0) 0 else now - last_out;
         // the excerpt: the pane you were in, its last lines, from the
         // cells it already holds — never a resize, never a read of
         // anything the program did not draw

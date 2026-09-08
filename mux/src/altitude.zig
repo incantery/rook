@@ -34,6 +34,7 @@ const chromepkg = @import("chrome.zig");
 const layoutpkg = @import("layout.zig");
 const renderpkg = @import("render.zig");
 const askpkg = @import("ask.zig");
+const homepkg = @import("home.zig");
 const ui = @import("ui.zig");
 
 pub const Rgb = chromepkg.Rgb;
@@ -65,7 +66,7 @@ pub const Kind = enum {
     note,
 };
 
-pub const Command = enum { none, new, go, rename, close, ledger, orbit, home };
+pub const Command = enum { none, new, go, rename, close, ledger, orbit, home, now, vera };
 
 /// The three views of the root scope.
 pub const View = enum {
@@ -134,7 +135,9 @@ pub const commands = [_]CommandSpec{
     .{ .word = "close", .cmd = .close, .arg = "<space>", .help = "close a space: every pane in it is hung up" },
     .{ .word = "ledger", .cmd = .ledger, .arg = "", .help = "spaces as rows, no figures" },
     .{ .word = "orbit", .cmd = .orbit, .arg = "", .help = "spaces as figures, when the glass has room" },
-    .{ .word = "home", .cmd = .home, .arg = "", .help = "rook's home: intent, attention, work, spaces" },
+    .{ .word = "home", .cmd = .home, .arg = "", .help = "rook's home: the conversation and the dashboard" },
+    .{ .word = "now", .cmd = .now, .arg = "", .help = "the dashboard: what needs you, what runs, what finished" },
+    .{ .word = "vera", .cmd = .vera, .arg = "", .help = "the conversation, and the composer" },
 };
 
 /// One tab of a space, as the figure lists it: the minted name, the
@@ -170,6 +173,8 @@ pub const Space = struct {
     /// the last lines of the focused pane, read from retained cells
     /// (never a resize), for the current space only
     excerpt: []const []const u8 = &.{},
+    /// ms since anything was written in it; 0 when nothing ever was
+    quiet_ms: i64 = 0,
 
     /// A space with something to show gets a figure in orbit; one
     /// with only a name and a quiet line gets a row, on purpose —
@@ -229,7 +234,7 @@ pub const max_excerpt: usize = 2;
 
 /// What Esc did: the deepest open layer, closed. `stay` is home with
 /// nothing open — there is nothing above it.
-pub const Escape = enum { cancelled, cleared, dismissed, home, stay };
+pub const Escape = enum { cancelled, cleared, unfocused, home, stay };
 
 /// What was painted: home, or one of the two fidelities of the
 /// spatial view (orbit falls back to ledger when the figures do not
@@ -275,6 +280,8 @@ pub const State = struct {
     req: askpkg.Request = .{},
     /// A section to put the cursor on at the next build.
     land: Land = .none,
+    /// The cockpit: the thread, the cards, the focus (home.zig).
+    home: homepkg.State = .{},
 
     pub fn textSlice(self: *const State) []const u8 {
         return self.text[0..self.len];
@@ -328,9 +335,10 @@ pub const State = struct {
     }
 
     /// Esc closes the deepest layer first: a request still running,
-    /// a query (and with it the results, the completions), a receipt,
-    /// then a subview. At home with nothing open it does nothing: a
-    /// space is a destination, never the parent of the root.
+    /// a query (and with it the results, the completions), focus on
+    /// the thread or the dashboard (back to the composer), then a
+    /// subview. At home with nothing open it does nothing: a space is
+    /// a destination, never the parent of the root.
     pub fn escape(self: *State) Escape {
         if (self.req.busy()) {
             self.req.cancel();
@@ -340,9 +348,10 @@ pub const State = struct {
             self.clear();
             return .cleared;
         }
-        if (self.req.dismiss()) {
-            self.cur = 0;
-            return .dismissed;
+        if (self.view == .home and self.home.focus != .composer) {
+            self.home.focus = .composer;
+            self.home.thread_cur = null;
+            return .unfocused;
         }
         if (self.view != .home) {
             self.view = .home;
@@ -669,6 +678,12 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
     const t = p.t;
     clearRect(f, t, region);
     st.zones_n = 0;
+    // Home is the cockpit: the conversation with its composer at the
+    // foot, the dashboard beside it. Finding and commanding take the
+    // canvas over as one list under one field, whatever the view.
+    if (st.painted == .home and st.mode() == .intent) {
+        return homepkg.draw(f, st, region, .{ .t = t, .ask_name = p.ask_name, .ask_on = p.ask_on, .now = @import("pane.zig").epochMs() });
+    }
     const x = region.x + 2;
     const w = region.w -| 4;
     const bottom = region.y + region.h;
@@ -722,11 +737,6 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
         _ = putW(f, under, w);
     }
     y += if (under.len > 0) 2 else 1;
-
-    // The request and its receipt, under the field, at home.
-    if (st.painted == .home and st.mode() == .intent) {
-        y = drawRequest(f, t, st, p, x, y, w, bottom);
-    }
 
     const orbit = st.painted == .orbit;
     var last_kind: ?Kind = null;
@@ -793,139 +803,6 @@ pub fn draw(f: *renderpkg.Frame, st: *State, region: layoutpkg.Rect, p: Paint) r
     }
     f.put(csi ++ "0m");
     return cursor;
-}
-
-/// The request block: what was asked, what the companion is doing
-/// with it, and what came back — words, or a reflection with its
-/// plan, its question and its proposed actions (which are rows,
-/// drawn with the rest, so the cursor reaches them). Returns the
-/// next free row.
-fn drawRequest(f: *renderpkg.Frame, t: *const ui.Theme, st: *State, p: Paint, x: u16, y0: u16, w: u16, bottom: u16) u16 {
-    const req = &st.req;
-    if (req.state == .none) return y0;
-    var y = y0;
-    if (y + 2 >= bottom) return y;
-    // the request, quoted, in secondary; the companion's glyph leads
-    f.cup(x, y);
-    ink(f, t, t.accent);
-    f.put(ui.glyph(t, .companion));
-    f.put(" ");
-    ink(f, t, t.secondary);
-    var qb: [askpkg.max_text + 4]u8 = undefined;
-    const quoted = std.fmt.bufPrint(&qb, "\"{s}\"", .{req.textSlice()}) catch req.textSlice();
-    _ = putW(f, quoted, w -| 2);
-    y += 1;
-    var ab: [16]u8 = undefined;
-    const now = @import("pane.zig").epochMs();
-    switch (req.state) {
-        .none => {},
-        .running => {
-            f.cup(x + 2, y);
-            ink(f, t, t.working);
-            f.put(ui.markGlyph(t, .working));
-            f.put(" ");
-            var lb: [96]u8 = undefined;
-            const line = std.fmt.bufPrint(&lb, "{s} is on it · {s} · esc cancels", .{ p.ask_name, age(&ab, now - req.started_ms) }) catch "";
-            ink(f, t, t.muted);
-            _ = putW(f, line, w -| 4);
-            y += 1;
-        },
-        .offline => {
-            f.cup(x + 2, y);
-            ink(f, t, t.attention);
-            f.put(ui.markGlyph(t, .failed));
-            f.put(" ");
-            var lb: [128]u8 = undefined;
-            const line = std.fmt.bufPrint(&lb, "{s} is not on PATH — nothing was sent · / find and : command still work", .{p.ask_name}) catch "";
-            ink(f, t, t.secondary);
-            _ = putW(f, line, w -| 4);
-            y += 1;
-        },
-        .failed => {
-            f.cup(x + 2, y);
-            ink(f, t, t.err);
-            f.put(ui.markGlyph(t, .failed));
-            f.put(" ");
-            var lb: [160]u8 = undefined;
-            const why = askpkg.firstLine(if (req.note_len > 0) req.noteSlice() else req.replySlice());
-            const line = std.fmt.bufPrint(&lb, "{s} could not answer ({d}) · {s}", .{ p.ask_name, req.code, why }) catch why;
-            ink(f, t, t.secondary);
-            _ = putW(f, line, w -| 4);
-            y += 1;
-        },
-        .replied => {
-            if (req.ref) |*r| {
-                if (r.intent_len > 0 and y < bottom) {
-                    f.cup(x + 2, y);
-                    ink(f, t, t.primary);
-                    _ = putW(f, r.intentSlice(), w -| 4);
-                    y += 1;
-                }
-                if (r.space_len > 0 and y < bottom) {
-                    f.cup(x + 2, y);
-                    ink(f, t, t.muted);
-                    _ = putW(f, "in ", 3);
-                    _ = ui.scopeChip(f, t, r.spaceSlice(), .space);
-                    y += 1;
-                }
-                var i: usize = 0;
-                while (i < r.plan_n and y < bottom) : (i += 1) {
-                    f.cup(x + 2, y);
-                    ink(f, t, t.muted);
-                    var nb: [8]u8 = undefined;
-                    _ = putW(f, std.fmt.bufPrint(&nb, "{d}. ", .{i + 1}) catch "", 4);
-                    ink(f, t, t.secondary);
-                    _ = putW(f, r.planLine(i), w -| 8);
-                    y += 1;
-                }
-                if (r.question_len > 0 and y < bottom) {
-                    f.cup(x + 2, y);
-                    ink(f, t, t.attention);
-                    f.put(ui.markGlyph(t, .attention));
-                    f.put(" ");
-                    ink(f, t, t.primary);
-                    _ = putW(f, r.questionSlice(), w -| 4);
-                    y += 1;
-                    f.cup(x + 4, y);
-                    ink(f, t, t.muted);
-                    _ = putW(f, "answer by asking again, with the answer in it", w -| 6);
-                    y += 1;
-                }
-                if (r.intent_len == 0 and r.plan_n == 0 and r.question_len == 0 and r.actions_n == 0 and y < bottom) {
-                    f.cup(x + 2, y);
-                    ink(f, t, t.muted);
-                    _ = putW(f, "answered with nothing to show", w -| 4);
-                    y += 1;
-                }
-                // the actions are rows: drawn below with the cursor
-            } else {
-                // words: the first lines of the reply, wrapped by line
-                var it = std.mem.splitScalar(u8, std.mem.trim(u8, req.replySlice(), " \t\r\n"), '\n');
-                var lines: usize = 0;
-                while (it.next()) |line| {
-                    if (y + 2 >= bottom or lines == 8) {
-                        f.cup(x + 2, y);
-                        ink(f, t, t.muted);
-                        _ = putW(f, "… (the rest is in the conversation)", w -| 4);
-                        y += 1;
-                        break;
-                    }
-                    f.cup(x + 2, y);
-                    ink(f, t, t.secondary);
-                    _ = putW(f, line, w -| 4);
-                    y += 1;
-                    lines += 1;
-                }
-                if (lines == 0 and req.reply_len == 0) {
-                    f.cup(x + 2, y);
-                    ink(f, t, t.muted);
-                    _ = putW(f, "answered with nothing", w -| 4);
-                    y += 1;
-                }
-            }
-        },
-    }
-    return y + 1;
 }
 
 /// A section header: a muted word and a count, no band, no glyph.
@@ -1205,10 +1082,11 @@ test "the cursor skips prose and headers, and esc peels one layer, never past ho
     try std.testing.expectEqual(Escape.home, st.escape());
     try std.testing.expectEqual(View.home, st.view);
     try std.testing.expectEqual(Escape.stay, st.escape());
-    // a receipt is a layer of its own
-    st.req.state = .replied;
-    try std.testing.expectEqual(Escape.dismissed, st.escape());
-    try std.testing.expectEqual(askpkg.State.none, st.req.state);
+    // focus on the dashboard is a layer of its own, above the view
+    st.home.focus = .dash;
+    try std.testing.expectEqual(Escape.unfocused, st.escape());
+    try std.testing.expectEqual(homepkg.Region.composer, st.home.focus);
+    try std.testing.expectEqual(Escape.stay, st.escape());
 }
 
 test "a space is rich when it has something to say" {

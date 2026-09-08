@@ -151,7 +151,7 @@ pub fn markInk(t: *const Theme, m: Mark) Rgb {
 }
 
 /// Chrome's other glyphs, with their ASCII forms.
-pub const Glyph = enum { separator, marker, prompt, back, pin, companion, more, plus, arrow_to };
+pub const Glyph = enum { separator, marker, prompt, back, pin, companion, more, plus, arrow_to, edge };
 
 pub fn glyph(t: *const Theme, g: Glyph) []const u8 {
     return switch (t.glyphs) {
@@ -165,6 +165,7 @@ pub fn glyph(t: *const Theme, g: Glyph) []const u8 {
             .more => "⋯",
             .plus => "+",
             .arrow_to => "›",
+            .edge => "▎",
         },
         .ascii => switch (g) {
             .separator => "|",
@@ -176,6 +177,7 @@ pub fn glyph(t: *const Theme, g: Glyph) []const u8 {
             .more => "..",
             .plus => "+",
             .arrow_to => ">",
+            .edge => "|",
         },
     };
 }

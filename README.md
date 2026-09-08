@@ -50,24 +50,27 @@ panel is off unless `[mux] sidebar_mode = "open"` asks for it.
 **Home.** Plain `rook` lands at rook's home, not in a space: the
 scope slot is the system's chip, `rook` in the accent block, with the
 world in one line after it (`3 spaces · 2 agents working · 1 needs
-you`), and the canvas is one field and four sections — `› Ask vera…
-/ find  : command`; what needs you (a pane that rang, a task a
-producer says is waiting); what is running, by goal (`Fix flaky auth
-working · api · codex`); what finished, with its result; the spaces,
-one row each with their tabs — then the global pins, which do not
-move a column. Bare text goes to vera (`vera say`, as typed): her
-reply shows under the field, and when she answers in rook's typed
-shape, her intent, plan and proposed actions do, each action run
-only when you ↵ on it. `/` finds a space, a work item, a tab, a pane;
-`:` is an exact command (`:go`, `:new`, `:rename`, `:close`,
-`:orbit`, `:home`). `↵` on a row enters its exact surface;
-`prefix-o` from anywhere comes back home; Esc closes one layer at a
-time and at home does nothing — a space is a destination, not the
-parent. `prefix-s` is orbit, the spatial subview (a figure per
-space; rows on narrow glass); `rook .` and `rook --space <name>`
-land in a space outright; `startup = "last-space"` makes plain
-`rook` do that too. `docs/altitude.md` is the model and the
-ontology; `scripts/altitude-fixture.py` renders it deterministically.
+you`), and the canvas is a cockpit — the conversation with vera on
+the left, the composer at its foot (`› Ask vera…`), and the
+dashboard on the right: what needs you (her proposed actions, a pane
+that rang, a task a producer says is waiting or failed), what is in
+progress by goal (`◐ Fix flaky auth / api · codex · working /
+re-running the revoked-session test`), what finished with its
+result, and the spaces as compact rows. A card and a turn about the
+same task share its id: confirm her action on its card and the
+receipt lands in the thread; when the rail says the task finished,
+the card moves to recent and the thread gets the outcome. `⇥` moves
+focus between the composer, the dashboard and the thread; typing
+always reaches the composer; `↵` on a card opens its exact pane, or
+runs the approval. `/` finds, `:` commands, `prefix-o` from anywhere
+comes back home, Esc closes one layer at a time and at home does
+nothing — a space is a destination, not the parent. Under 85 columns
+the cockpit shows one view at a time, `vera` or `now`, with the
+attention count on the hidden one. `prefix-s` is orbit, the spatial
+subview; `rook .` and `rook --space <name>` land in a space outright;
+`startup = "last-space"` makes plain `rook` do that too.
+`docs/altitude.md` is the model and the ontology;
+`scripts/altitude-fixture.py` renders it deterministically.
 
 **The calm bar.** One row at the bottom: who holds the focused pane's
 keyboard on the left — `you ▸ nvim`, or `claude·main ▸ owns input ·

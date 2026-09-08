@@ -14,6 +14,7 @@
 //!     {"intent":   "what I understood",
 //!      "plan":     ["step", "step"],
 //!      "space":    "api",                    the space this is about
+//!      "task":     "t4",                     the task (a rail id) this is about
 //!      "question": "one thing I need first",
 //!      "actions":  [{"label":"start an agent on it",
 //!                    "run":  "vera task new --project api 'fix auth'"}]}
@@ -244,6 +245,10 @@ pub const Reflection = struct {
     plan_n: usize = 0,
     space: [32]u8 = undefined,
     space_len: usize = 0,
+    /// the producer's id for the task this reply is about — the one
+    /// identity a card and a turn share
+    task: [32]u8 = undefined,
+    task_len: usize = 0,
     question: [256]u8 = undefined,
     question_len: usize = 0,
     actions: [max_actions]Action = undefined,
@@ -257,6 +262,17 @@ pub const Reflection = struct {
     }
     pub fn spaceSlice(self: *const Reflection) []const u8 {
         return self.space[0..self.space_len];
+    }
+    pub fn taskSlice(self: *const Reflection) []const u8 {
+        return self.task[0..self.task_len];
+    }
+    /// Actions nobody has run yet: what is waiting on a hand.
+    pub fn pending(self: *const Reflection) usize {
+        var n: usize = 0;
+        for (self.actions[0..self.actions_n]) |a| {
+            if (!a.ran and !a.running) n += 1;
+        }
+        return n;
     }
     pub fn questionSlice(self: *const Reflection) []const u8 {
         return self.question[0..self.question_len];
@@ -293,6 +309,7 @@ pub fn parse(reply: []const u8) ?Reflection {
     var r: Reflection = .{};
     if (objStr(root, "intent")) |s| r.intent_len = take(&r.intent, s);
     if (objStr(root, "space")) |s| r.space_len = take(&r.space, s);
+    if (objStr(root, "task")) |s| r.task_len = take(&r.task, s);
     if (objStr(root, "question")) |s| r.question_len = take(&r.question, s);
     if (root.get("plan")) |pv| {
         if (pv == .array) {
@@ -403,13 +420,19 @@ pub const Request = struct {
         self.running_action = i;
     }
 
-    /// Pump the child. True when something changed on the glass.
-    pub fn pump(self: *Request) bool {
-        const job = &(self.job orelse return false);
+    /// What a pump turn produced, for whoever keeps the thread.
+    pub const Event = union(enum) { none, output, replied, action_done: usize };
+
+    /// Pump the child. Says what changed, so the caller can add the
+    /// turn to the conversation and repaint.
+    pub fn pump(self: *Request) Event {
+        const job = &(self.job orelse return .none);
         const before = job.out_len + job.err_len;
         const finished = job.pump();
-        if (!finished) return job.out_len + job.err_len != before;
+        if (!finished) return if (job.out_len + job.err_len != before) .output else .none;
+        var ev: Event = .replied;
         if (self.running_action) |i| {
+            ev = .{ .action_done = i };
             const act = &self.ref.?.actions[i];
             act.running = false;
             act.ran = true;
@@ -430,7 +453,7 @@ pub const Request = struct {
             if (self.state == .replied) self.ref = parse(self.replySlice());
         }
         self.job = null;
-        return true;
+        return ev;
     }
 
     pub fn cancel(self: *Request) void {
@@ -487,6 +510,10 @@ test "a reply that is one JSON object is a reflection, words are words" {
     try std.testing.expectEqualStrings("patch the retry", r.planLine(1));
     try std.testing.expectEqualStrings("api", r.spaceSlice());
     try std.testing.expectEqualStrings("the retry limit?", r.questionSlice());
+    try std.testing.expectEqual(@as(usize, 2), r.pending());
+    try std.testing.expectEqualStrings("", r.taskSlice());
+    const tk = parse("{\"task\":\"t4\"}").?;
+    try std.testing.expectEqualStrings("t4", tk.taskSlice());
     try std.testing.expectEqual(@as(usize, 2), r.actions_n);
     try std.testing.expectEqualStrings("start an agent on it", r.actions[0].labelSlice());
     try std.testing.expectEqualStrings("vera task new --project api 'fix auth'", r.actions[0].runSlice());
@@ -513,12 +540,15 @@ test "a job runs to a reply and the request reads it" {
     try std.testing.expectEqual(State.running, req.state);
     var fds: [2]ptypkg.Pollfd = undefined;
     var spins: usize = 0;
+    var last: Request.Event = .none;
     while (req.busy() and spins < 500) : (spins += 1) {
         const n = req.fds(&fds);
         if (n > 0) _ = ptypkg.pollMany(&fds, @intCast(n), 20);
-        _ = req.pump();
+        const ev = req.pump();
+        if (ev != .none) last = ev;
     }
     try std.testing.expectEqual(State.replied, req.state);
+    try std.testing.expectEqual(Request.Event.replied, last);
     try std.testing.expectEqualStrings("reply: hello there\n", req.replySlice());
     try std.testing.expect(req.ref == null);
     // a command that is not there is offline, at once

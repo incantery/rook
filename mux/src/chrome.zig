@@ -260,6 +260,10 @@ pub const State = enum {
 
 pub const Item = struct {
     name: []const u8,
+    /// The producer's own id for the row: the one identity a card on
+    /// rook's home and a turn in its thread share. The name when the
+    /// producer gave none.
+    id: []const u8 = "",
     /// The second line: a branch for a space, "state · tool" for an agent.
     sub: []const u8 = "",
     state: State = .none,
@@ -838,6 +842,7 @@ fn parseFrame(a: std.mem.Allocator, bytes: []const u8) PushError!Parsed {
         if (objBool(o, "current") and cur == null) cur = items.items.len;
         try items.append(a, .{
             .name = name,
+            .id = objStr(o, "id") orelse name,
             .sub = objStr(o, "subtitle") orelse "",
             .state = State.parse(objStr(o, "state") orelse ""),
             .origin = Origin.parse(objStr(o, "origin") orelse ""),

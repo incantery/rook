@@ -147,29 +147,50 @@ border.
 
 ## The root
 
-The canvas is `chrome`. The input is a `raised` field, bounded to the
-content width, the prompt in the accent, typed text in `primary`
-bold, the placeholder — the grammar, `Ask vera…  / find  : command`
-— in `muted` inside the field. Under it, the request: the
-companion's glyph in the accent, the text quoted in `secondary`, and
-what became of it in the state's ink (`working` while she is on it,
-`err` when she could not answer, `attention` when nobody could be
-sent to); a reflection's intent in `primary`, its space as the space
-chip, its plan numbered in `secondary`, its question with the
-attention mark. Section headers are one `muted` word with a count or
-an honest empty line, a blank row before each. Rows: a `▸` in the
-accent marks the selected one, its name in `primary` bold; a
-`selection` band runs under the row's content, not the whole width;
-the mark leads in its own ink (`◐` working, `◌` waiting, `!`
-attention, `✓` success, `✕` failed, `•` unread), the detail line in
-`secondary`, `↵ go` in the accent at the right edge of the selected
-row only. A proposed action is a row whose line is its command in
-`muted` (`$ …`) until it ran, then its receipt in `secondary`. Figures
-(orbit) wear `border`, the selected one `border_focused`; the space's
-name in the top edge is its chip; the tabs inside are the tab
-component without indices. Ledger draws the same rows with the same
-inks. Hints are `muted`, one line, at the bottom of the canvas, and
-never name a space as the way back.
+The canvas is `chrome`, split into the conversation and the
+dashboard by one column of `border_subtle` when the glass affords
+both; one view with a switcher (two dense tabs, the hidden view's
+attention count on its tab) when it does not.
+
+Region headers: one line, the region's name in `primary` bold when
+it has focus and `secondary` otherwise, its status after ` · ` in the
+status's ink (`working` while she thinks, `attention` while she waits
+on you, `err` offline), and for the dashboard the attention count in
+the attention ink.
+
+Conversation roles, in a four-cell margin: `you` in `primary` bold;
+`✦` in the accent for her; `✓` in `muted` for a receipt and in
+`success` for an outcome; `✕` in `err`; `·` in `muted` for rook's
+note. Prose is unboxed — yours in `primary`, hers in `secondary`,
+receipts and notes in `muted`. Her reflection is a block on `raised`
+across the body: the intent in `primary`, the plan numbered in
+`secondary`, a question with the attention mark, the actions with
+their marks. The selected turn wears the accent marker and bold on
+its first line; the age sits at the right edge in `muted`. The
+composer is `raised` with the accent prompt when it has focus and
+`chrome` with a `muted` prompt otherwise; its hint line under it is
+`muted`.
+
+Dashboard modules: a `muted` word and a count, two rows (a blank
+above), `needs you` in the attention ink, bold. Cards: the mark in
+its ink and the title in `primary` (bold when selected, or when it
+needs you); the space and the actor in `secondary` with `muted`
+dots; the state word in the mark's ink; the current step in
+`secondary` (`primary` on a needs-you card). A needs-you card wears
+the attention edge (`▎`, `|` in ASCII) down its left. The selected
+card is a `selection` band across its rows with the accent marker
+and what ↵ does at its right edge in the accent. Recent is one flat
+line; a space row is the name in `primary`, its tabs as `secondary`
+labels with their marks, its age at the edge. No card has a border
+of its own; the edge and the band are the only enclosures, and
+content sets a card's height.
+
+Figures (orbit) wear `border`, the selected one `border_focused`;
+the space's name in the top edge is its chip; the tabs inside are
+the tab component without indices. Ledger draws the same rows with
+the same inks. Finding and commanding draw one `raised` field with
+the accent prompt at the top of the canvas and rows under it, the
+selected one banded.
 
 ## Overlays
 

@@ -51,6 +51,9 @@ The state, in one place (`altitude.zig`, `State`):
 | cursor | `State.cur` | the selected row; kept too |
 | request | `State.req` (`ask.zig`) | `none`, `running`, `replied`, `failed`, `offline`; the reply, the reflection, the receipts |
 | landing | `State.land` | where `prefix-a` / `prefix-!` put the cursor at the next build |
+| focus | `home.State.focus` | `composer`, `thread`, `dash`; the narrow view follows it |
+| thread | `home.State.thread` | this session's turns, a ring; `thread_cur`, `thread_scroll`, `linked` |
+| dashboard | `home.State.cards` over `tasks` | rebuilt each frame; `dash_cur`, `dash_scroll` survive |
 | return jump | `Server.last_sess` | the space before the last hop, for `prefix-C-o` |
 
 Startup destination is decided once, on the wire: `attach` carries
@@ -89,7 +92,9 @@ the glass, and where it shows.
 | **actor** | `Pane.owner` — the name a program gave when it claimed the pane with `rook own` | claim → release | `main` | after the tab name (`deploy · main`); the bar (`main ▸ claude`); a work row |
 | **agent found** | `Pane.is_agent` — a tool the config lists under `agents` | the 2 s scan | a `claude` running unclaimed | the ◐ mark; the working count; a `running` row at home when no producer claims its space, `goal unknown` |
 | **work item** | a producer's `agents` row (`chrome.Item`): goal, state, space, and optionally actor, event, result | until the next push | "Fix flaky auth · working · api · codex" | `needs you` (waiting, failed), `running` (working, idle), `recent` (done) at home; a space's event line |
-| **request** | `ask.Request` — the text sent to the companion's command, and what came back | until the next request or Esc | `✦ "deploy the api"` | under the field at home; the bar (`vera ◐ on it`, `vera answered`) |
+| **request** | `ask.Request` — the text sent to the companion's command, and what came back | until the next request | `you  deploy the api` | a turn in the thread; the header (`✦ vera · thinking`); the bar |
+| **turn** | `home.Turn` — one entry of the thread: a role, its words, its age, and the task or space it is about | this session (a ring of 40) | `✓ Deploy api to staging finished · staging is on 1.4.2` | the conversation |
+| **card** | `home.Card` over a `home.Task` — the projection of one task into a module | rebuilt every frame from the rail and the pane table | `◐ Fix flaky auth / api · codex · working` | the dashboard |
 | **reflection** | `ask.Reflection` — a reply that is one JSON object: intent, plan, space, question, actions | with its request | `in api · 1. run the tests…` | under the request; actions as `proposed` rows |
 | **provider / model** | not held — a producer's vocabulary | — | Sonnet | the inspector says it is not rook's to know |
 | **legacy sidebar** | `foundSpaces()` + pushed rows, `sidebar_mode = "open"` | — | | not default chrome; `prefix-A` toggles it for a config that asked; still on `surfaces[]` |
@@ -103,7 +108,8 @@ The canonical grammar, everywhere:
     deploy · main    a tab with the actor that claimed a pane in it
     you ▸ claude     the bar: who holds the keys, through what tool
     Fix flaky auth   a work item: the goal, in the producer's words
-    ✦ "…"            a request, quoted back, and what became of it
+    you  …           what you said, a turn in the thread
+    ✦  …             what she said, or her plan as a block
 
 A space named `rook` is a space: it gets the space chip (`raised`
 ground, primary ink) in its own scope slot and a plain row at home.
@@ -111,56 +117,86 @@ The system's chip is the accent fill and appears only at the root.
 The identities differ too — the space is a `Session` with the label
 `rook`; the root is the server — so nothing looks one up by the word.
 
-## Home
+## Home: the cockpit
 
-The canvas at the root, in order, each section a muted header with
-its count or an honest empty line:
+The canvas at the root is two regions between the scope bar and the
+calm bar, split at 62% when both keep a useful width (`home.zig`,
+`layout` — one boundary, in cells): the conversation on the left, the
+dashboard on the right, one quiet divider between them. The left
+answers *what do I want, and what have vera and I decided?* The right
+answers *what is happening right now?* They are one interface: a
+card and a turn about the same task share the task's id, and
+selecting either finds the other.
 
-1. **The field.** `› Ask vera…    / find    : command`. One input,
-   already focused. Bare text is a request; `/` finds; `:` commands.
-   Without her command on PATH it reads `vera is not on PATH    /
-   find    : command`, and the other two still work.
-2. **The request.** What was asked, quoted; then `vera ◐ on it · 3s
-   · esc cancels`, or the reply — words, the first lines of them — or
-   a reflection: the intent as she understood it, the space it is
-   about (as its chip), the plan, a question if she has one, and her
-   proposed actions as rows under `proposed`, each with the command
-   it would run, verbatim. `↵` on one runs it, by hand, and the row
-   then carries the receipt (`ran (0) · started deploy-agent in
-   api`). Nothing proposed runs on its own. A failure says so with
-   the exit code and her first line of stderr.
-3. **needs you.** Panes a program signalled while nobody looked
-   (`!  api › server  bash rang the bell · 1s ago`), oldest first,
-   then what a producer said needs you (`◌  vera — Deploy plan  needs
-   you · asked which region first`). Empty: `nothing — no pane asked,
-   no task is waiting`.
-4. **running.** A producer's open tasks by goal — `◐  Fix flaky auth
-   working · api · codex · re-running the revoked-session test` —
-   then agents rook can see running in a space no producer claims:
-   `◐  claude in main › shell  claude producing · goal unknown —
-   nobody pushed a task for it`. Rook can say a program is here and
-   whether it is producing; what it is doing is not rook's to say.
-5. **recent.** Finished tasks, with the result when the producer
-   gave one (`✓  Rotate the signing key  done · api · PR #212
-   merged`). Empty: `nothing finished yet`.
-6. **spaces.** One row each, in a stable order: the name, the event
-   line (a producer's words, the last notification, who is producing,
-   how long quiet), then the tabs with their actors and marks. `↵`
-   enters.
-7. **pinned everywhere.** The global pins, with the space each came
-   from. They are live on the glass at the root and do not move.
+**The conversation.** A header — `✦ vera · ready`, or `thinking`,
+`waiting for you`, `asked you something`, `could not answer`,
+`offline — not on PATH` — then the thread, oldest to newest,
+bottom-anchored, then the composer at the foot with its hint under
+it. A turn is a role in the margin and its words: `you` and what you
+typed; `✦` and her words, in secondary ink; her reflection as a
+tinted block — the intent, the plan numbered, a question with the
+attention mark, and the actions with their live state (`◌` waiting,
+`◐` running, `✓ ran · what it printed`, `✕ failed`); `✓` and a
+receipt when an action ran; `✓` and the outcome when a task the rail
+knows finished; `✕` when something failed; `·` and one line when a
+task began or came to need you. Every turn wears its age at the
+edge. The composer is a raised field when it has focus (`› Ask
+vera…`), flat otherwise; empty, `↵ sends · / find · : command · ⇥
+dashboard`; while she is thinking, `vera thinking · esc cancels`.
+An empty thread says once what the side is for.
 
-`↵` on a work item goes to its exact surface: the agent's pane in
-that space when rook can see one, else the space. `prefix-a` is home
-with the cursor on the first running item; `prefix-!` on the first
-thing that needs you; `prefix-t` home with the field empty for a
-request; `prefix-/` and `prefix-:` home in those modes.
+**The dashboard.** `now`, with the attention count beside it, then
+the modules that have anything, in this order: `needs you` (the
+companion's proposed actions, each a card with the command it would
+run; a pane that rang, notified or finished a bar while nobody
+looked; a task a producer says is waiting or failed), `in progress`
+(a producer's tasks by goal; then an agent rook can see producing in
+a space no producer claims — one quiet card, `claude at work`, with
+`no task was pushed for it`, and never an idle one), `recent` (what
+finished, one flat line with the result), `spaces` (one row each:
+the name, the tabs with their actors and marks, how long quiet — the
+task's title is never repeated there). A card is the mark and the
+title, then the space, the actor and the state, then the current
+step wrapped to two lines. A needs-you card wears the attention edge
+down its left; the selected card a band and what ↵ does at its edge
+(`↵ runs`, `↵ open`, `↵ go see`, `↵ enter`). An empty module is left
+out; an empty dashboard says `nothing running, nothing needs you`
+once, above the spaces.
 
-Finding (`/serv`) replaces the sections with one ranked list —
-spaces, work items, tabs (`api › server`), panes (`api › server ›
-bash`), pins, attention rows — with the line under the field saying
-what they are. `:` completes the exact commands: `go`/`switch`,
-`new`, `rename`/`tab rename`, `close`, `home`, `orbit`, `ledger`.
+**Focus.** Three regions — the composer, the thread, the dashboard
+— and the transient modes. Printable typing always reaches the
+composer, wherever focus was. `⇥` cycles composer → dashboard →
+thread; `⇤` the other way. `↑` from an empty composer walks into the
+thread, on the latest turn; `↓` past the latest turn is the composer
+again. In the dashboard `↑ ↓` (C-p C-n) move over the cards and the
+turn about the selected card lights up in the thread; `↵` acts —
+an approval runs, a task opens its agent's pane, a signal opens the
+pane that rang, a space is entered. In the thread `↵` on a turn about
+a task moves focus to its card; on a turn about a space, enters it.
+`prefix-a` is home with the dashboard on the first card in progress,
+`prefix-!` on the first that needs you; `:now` and `:vera` are the
+same by name. Esc unwinds: a running request, a typed draft, focus
+back to the composer, a subview, then nothing. Selection is never
+activity or attention, and nothing that happens moves focus.
+
+**Narrow glass.** Under 85 columns of canvas (`min_left + min_right
++ 1`) the cockpit shows one view at a time, `vera` or `now`, with a
+switcher on its first row and the attention count on `now` while it
+is hidden. The view follows focus — `⇥` to the dashboard is `now`,
+`⇥` on is `vera` — and the draft, the selection and both scrolls
+survive the switch. Orbit stays what it was; it never stands in for
+the dashboard.
+
+**What survives.** The thread, the draft, the focus, the selected
+card, both scroll positions and the narrow view live on the root's
+state, not on any space, so a visit to a space and back — or to
+orbit and back — is the cockpit as you left it. Across a server
+restart they do not, yet.
+
+Finding (`/serv`) and commanding (`:`) take the canvas over as one
+ranked list under one field, whatever the view; Esc is the cockpit
+again. `:` completes `go`/`switch`, `new`, `rename`/`tab rename`,
+`close`, `home`, `orbit`, `ledger`, `now`, `vera`.
 
 ## Orbit and ledger
 
@@ -269,8 +305,9 @@ looking at. Run it after any change to the frame.
 
 - `focus.mode`: `pane`, `copy`, `popup`, `root`, `gate`, `inspect`.
 - `scope`: `root` or `space`. `root`: `{"view": "home|orbit|ledger",
-  "mode": "ask|find|command", "ask": "none|running|replied|failed|offline"}`.
-  The draft is not published.
+  "mode": "ask|find|command", "ask": "none|running|replied|failed|offline",
+  "region": "composer|thread|dash", "wide": bool, "turns": n,
+  "draft": bool}`. The draft itself is not published.
 - `bar`: whether the calm bar is on.
 - `workspaces[].windows[].name` (minted), `named`, `program` (the live
   tool of the focused pane).
@@ -289,6 +326,12 @@ Deliberately not in this pass:
 - **A reflection from the real vera.** `vera say` answers in words;
   the shape above is the contract for when she answers in it, and
   answering a question means asking again with the answer in it.
+- **Durable conversation history.** The thread is this session's,
+  in memory. Vera's own transcript (`vera say -c rook` keeps the
+  conversation) is not read back; when there is a typed way to, the
+  thread's shape takes it.
+- **A live pane inside a card.** A card opens its pane; it does not
+  show it.
 - **Focus and scroll inside a space across a hop.** A space keeps its
   own focus (`Session.focus_pin`, `Window.focused`) and every pane its
   scroll, so returning is exact; what is not kept is *which* row the

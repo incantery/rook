@@ -37,6 +37,7 @@ test {
     _ = @import("companion.zig");
     _ = @import("altitude.zig");
     _ = @import("ask.zig");
+    _ = @import("home.zig");
     _ = @import("ui.zig");
     _ = @import("server.zig");
 }

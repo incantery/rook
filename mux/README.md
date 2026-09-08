@@ -235,34 +235,40 @@ exits 0 in silence: it is written to be a hook.
 ## Home
 
 Plain `rook` lands at home: the same frame, the whole width between
-the bars rook's own canvas. The scope slot holds the system's chip —
-`rook` in the accent block, which a space's name never wears, so a
-space named `rook` is still just a space — and after it, where the
-tabs were, `3 spaces · 2 agents working · 1 needs you`; no corner,
-because nothing is above home. The canvas: the field (`› Ask vera…
-/ find  : command`, already focused); the request and what came back;
-then the sections — `needs you` (unread panes oldest first, then what
-a producer said is waiting), `running` (a producer's tasks by goal,
-with the space, the actor and the last event it named; then agents
-rook can see running that nobody claimed, `goal unknown`), `recent`
-(what finished, with its result), `spaces` (one row each, with the
-tabs, actors and marks), `pinned everywhere` (the global pins, with
-the space each came from). Each section says honestly when it is
-empty. ↑ ↓ (⇥ ⇤, C-n C-p) move — typing is text, so letters never
-navigate — ↵ enters the exact pane, tab or space; prefix-o comes
-back. Esc closes one layer: a running request, the draft, a receipt,
-a subview; at home it does nothing. Nothing is resized to get here or
-back.
+the bars rook's own canvas, split in two. The scope slot holds the
+system's chip — `rook` in the accent block, which a space's name
+never wears, so a space named `rook` is still just a space — and
+after it, where the tabs were, `3 spaces · 2 agents working · 1 needs
+you`; no corner, because nothing is above home. Left, the
+conversation: `✦ vera · ready` (or `thinking`, `waiting for you`,
+`offline — not on PATH`), the thread oldest to newest — `you` and
+what you said, `✦` and her words, her reflection as a tinted block
+with the plan and the actions' live state, `✓` receipts and
+outcomes, `✕` failures, `·` rook's one-line notes when a task
+begins or needs you — and the composer at the foot. Right, the
+dashboard: `now`, then `needs you`, `in progress`, `recent`, `spaces`,
+each only when it has something, as cards: the mark and the goal,
+the space and the actor and the state, the current step. A task is
+one card; its agent, pane and space are on it, never beside it; an
+idle agent is not work. `⇥` moves focus composer → dashboard →
+thread; `↑ ↓` walk cards or turns; `↵` runs an approval, opens a
+card's pane, enters a space; typing always goes to the composer.
+Esc closes one layer: a running request, the draft, focus, a
+subview; at home it does nothing. Under 85 columns one view shows
+at a time, `vera` or `now`, with a switcher and the attention count
+on the hidden one. Nothing is resized to get here or back.
 
 Bare text is a request to the companion: `vera say -c rook <text>`,
-run with pipes, its stdout shown under the field as her reply. When
-she answers in one JSON object (`ask.zig`: intent, plan, space,
-question, actions) the canvas shows that instead, and each proposed
-action is a row with the command it would run — ↵ runs it, by hand,
-and the row keeps the receipt. Without her on PATH the field says
-so, and `/` and `:` still work. `/` finds spaces, work items, tabs
-and panes as one ranked list; `:` completes a command (`go`, `new`,
-`rename`, `close`, `home`, `orbit`, `ledger`).
+run with pipes, its stdout her turn. When she answers in one JSON
+object (`ask.zig`: intent, plan, space, task, question, actions) the
+thread shows the block, and each proposed action is a card under
+`needs you` with the command it would run — ↵ on the card runs it,
+by hand; the receipt is a turn, and whatever the action pushed to
+the rail is a card. Without her on PATH the header and the composer
+say so, and `/`, `:` and the dashboard still work. `/` finds spaces,
+work items, tabs and panes as one ranked list; `:` completes a
+command (`go`, `new`, `rename`, `close`, `home`, `orbit`, `ledger`,
+`now`, `vera`).
 
 prefix-s is orbit, a subview of home: the scope bar reads `rook │
 orbit` with `esc rook` in the corner, and every space is a figure
