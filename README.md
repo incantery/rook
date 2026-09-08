@@ -60,8 +60,10 @@ result, and the spaces as compact rows. A card and a turn about the
 same task share its id: confirm her action on its card and the
 receipt lands in the thread; when the rail says the task finished,
 the card moves to recent and the thread gets the outcome. `⇥` moves
-focus between the composer, the dashboard and the thread; typing
-always reaches the composer; `↵` on a card opens its exact pane, or
+focus between the composer, the dashboard and the thread, and a bare
+`ctrl-hjkl` walks the same three by where they sit — the thread above
+the composer, the dashboard right of both — so the vim motion does
+not stop at home's door; typing always reaches the composer; `↵` on a card opens its exact pane, or
 runs the approval. `/` finds, `:` commands, `prefix-o` from anywhere
 comes back home, Esc closes one layer at a time and at home does
 nothing — a space is a destination, not the parent. Under 85 columns

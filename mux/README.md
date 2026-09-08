@@ -96,7 +96,11 @@ this repo; point your plugin manager at `mux/nvim`, gated on
 nvim move between its own windows first and call `rook nav <dir>` when
 a move hits its edge. When navigation
 has nowhere to go the key falls through to the pane, so Ctrl-l still
-clears a lone shell. Panes are scrubbed of outer-mux identity
+clears a lone shell. The motion does not stop at home's door either:
+at the root the same four keys walk the cockpit's regions — the
+thread above the composer, the dashboard right of both — and at one
+of those edges the key is the view's again (Ctrl-h in the composer is
+a backspace). Panes are scrubbed of outer-mux identity
 (`TMUX`, `HERDR_PANE_ID`) so editor plugins pick the right navigator.
 
 Working today: dirty-row frames paced at 8ms, scrollback view, OSC 52
