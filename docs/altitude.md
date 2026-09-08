@@ -255,7 +255,18 @@ unread pins`, so the one global count a space keeps is attention.
 scroll and control per subject, the thread, the draft, vera's open
 and pinned state and her attachment live on the root's state, so a
 visit to a space and back — or to orbit and back — is home as you
-left it. Across a server restart they do not, yet.
+left it. Her terminal survives for a different reason: it is a
+process, and it is still running. Rook dismisses the panel, not the
+program. Across a server restart neither survives, yet.
+
+**When her terminal will not start.** A chat command that dies the
+moment it runs — a verad that is not there, a half-installed binary
+— is not started again on the next frame, because that is a hundred
+programs a second and a rectangle nobody can read. The pane is
+reaped, `Server.vera_dead` is set, what the program last had on its
+screen goes into the thread as an error turn, and the panel falls
+back to rook's own surface. `prefix-t` at her clears the flag: the
+retry is a person asking, never a frame.
 
 Finding (`/serv`) and commanding (`:`) take the canvas over as one
 ranked list under one field; Esc is home again.

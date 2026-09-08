@@ -284,6 +284,11 @@ to go to, which is the bargain every pane in a space already makes.
 window focus, is never counted as an agent at work, and reads as
 `place: "vera"` in the state feed.
 
+A chat that dies the moment it starts is not started again on the
+next frame: the panel falls back to rook's own surface, what the
+program last had on its screen becomes an error turn in the thread,
+and `prefix-t` at her is the retry — a person asking, never a frame.
+
 `chat = ""` (or no chat command on PATH) keeps rook's own surface
 instead: one composer, one thread, and `[companion] ask` behind it.
 `ask vera about this` then attaches the selected task as a reference

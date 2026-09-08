@@ -207,7 +207,7 @@ class Rook:
             # surface instead of hosting her terminal. The frames that
             # judge that surface ask for it; the chat frames ask for
             # the default.
-            f.write(CONFIG % (extra_conf, "" if chat else 'chat = ""'))
+            f.write(CONFIG % (extra_conf, {True: "", False: 'chat = ""'}.get(chat, 'chat = "%s"' % chat)))
         os.makedirs(self.root + "/bin")
         os.makedirs(self.root + "/lib")
         # real processes with the names the fixture needs: an agent
@@ -219,6 +219,11 @@ class Rook:
         with open(self.root + "/lib/vera-chat", "w") as f:
             f.write(FAKE_CHAT)
         os.chmod(self.root + "/lib/vera-chat", 0o755)
+        # a chat command that fails the moment it starts, the way a
+        # verad that is not there fails
+        with open(self.root + "/bin/vera-broken", "w") as f:
+            f.write('#!/bin/sh\necho "cannot reach verad" >&2\nexit 1\n')
+        os.chmod(self.root + "/bin/vera-broken", 0o755)
         if vera:
             with open(self.root + "/bin/vera", "w") as f:
                 f.write(FAKE_VERA)
@@ -1102,6 +1107,32 @@ def main():
         check("and Ctrl-h gives the keys back to the panes", not r14.state()["root"]["vera"]["keys"])
     finally:
         r14.close()
+
+    # ---- 29: a chat that will not start
+    r15 = Rook(cols=110, rows=26, tag="broken", chat="vera-broken")
+    try:
+        r15.keys("`t", settle=1.2)
+        panes_a = len(r15.state()["panes"])
+        r15.settle(1.2)
+        st = r15.state()
+        r15.snap("29-chat-broken")
+        V = vera(r15.lines())
+        check("a chat that quits is not started again on every frame, and the panel is rook's own surface",
+              st["root"]["vera"]["pane"] is None and len(st["panes"]) == panes_a
+              and any("Ask vera" in l for l in V), (st["root"]["vera"], len(st["panes"]), panes_a))
+        check("and what it managed to say is in the thread, so the reason is not lost",
+              "cannot reach verad" in flat(V), flat(V)[:200])
+        # asking again is a person asking, and starts one: it dies
+        # again, and says so again — a second turn, not a hundred
+        turns = r15.state()["root"]["turns"]
+        r15.keys("`t", settle=0.4)
+        r15.keys("`t", settle=1.6)
+        after = r15.state()
+        check("prefix-t at her is the retry, and one asking is one attempt",
+              after["root"]["turns"] == turns + 1 and after["root"]["vera"]["pane"] is None,
+              (turns, after["root"]["turns"], after["root"]["vera"]["pane"]))
+    finally:
+        r15.close()
 
     print("frames in", OUT)
     if fails:

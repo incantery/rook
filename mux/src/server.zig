@@ -412,6 +412,14 @@ pub const Server = struct {
     vera_pane: ?u32 = null,
     /// Whether the chat command can be found, as of the last look.
     chat_on: bool = false,
+    /// Her terminal quit, and rook does not start another on its own.
+    /// A command that fails the moment it starts — a verad that is not
+    /// there, a binary half-installed — would otherwise be restarted
+    /// on every frame forever, and the panel would show a program
+    /// dying too fast to read. The panel falls back to rook's own
+    /// surface with what the program last said, and prefix-t at her
+    /// is the person asking for another try.
+    vera_dead: bool = false,
     prefix_name_buf: [8]u8 = undefined,
     alt_placed: std.ArrayList(layoutpkg.Placed) = .empty,
     /// A second frame builder for what the server paints over the
@@ -794,7 +802,7 @@ pub const Server = struct {
     /// not on PATH: the panel keeps rook's own surface, and says so.
     fn startVeraPane(self: *Server, body: layoutpkg.Rect) !?*panepkg.Pane {
         const cmd = self.conf.chatSlice();
-        if (cmd.len == 0 or !self.chat_on) return null;
+        if (cmd.len == 0 or !self.chat_on or self.vera_dead) return null;
         const cmd_z = try self.gpa.dupeZ(u8, cmd);
         defer self.gpa.free(cmd_z);
         const p = try panepkg.Pane.start(
@@ -815,6 +823,67 @@ pub const Server = struct {
         self.full = true;
         self.pending = true;
         return p;
+    }
+
+    /// What her terminal left on the glass, as one turn of the thread
+    /// rook's own surface shows. `frame` is free here: reaping runs
+    /// between frames, and the builder is refilled from nothing on
+    /// the next one.
+    fn noteVeraQuit(self: *Server, p: *panepkg.Pane) void {
+        p.snapshot() catch {};
+        const text = self.frame.plainText(p);
+        // The last thing on the screen, and the rows above it that
+        // are the same sentence: a terminal hard-wraps, so a line
+        // that filled the width is continued by the one below it,
+        // and taking only the bottom row would report the tail of a
+        // message as the message.
+        var rows: [64][]const u8 = undefined;
+        var n: usize = 0;
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |ln| {
+            if (n == rows.len) {
+                std.mem.copyForwards([]const u8, rows[0 .. rows.len - 1], rows[1..]);
+                n -= 1;
+            }
+            rows[n] = std.mem.trimEnd(u8, ln, " \t\r");
+            n += 1;
+        }
+        var end = n;
+        while (end > 0 and std.mem.trim(u8, rows[end - 1], " ").len == 0) end -= 1;
+        var start = end;
+        while (start > 0) {
+            start -= 1;
+            if (start == 0) break;
+            if (rows[start - 1].len < p.cols) break;
+        }
+        var said: [homepkg.max_turn]u8 = undefined;
+        var len: usize = 0;
+        const head = std.fmt.bufPrint(&said, "{s} quit", .{self.askName()}) catch "quit";
+        len = head.len;
+        var first = true;
+        for (rows[start..end]) |ln| {
+            const t = std.mem.trim(u8, ln, " ");
+            if (t.len == 0) continue;
+            const sep: []const u8 = if (first) " — " else " ";
+            if (len + sep.len + t.len > said.len) break;
+            @memcpy(said[len..][0..sep.len], sep);
+            len += sep.len;
+            @memcpy(said[len..][0..t.len], t);
+            len += t.len;
+            first = false;
+        }
+        _ = self.alt.home.thread.push(.err, said[0..len], "", "", panepkg.epochMs());
+    }
+
+    /// She is being asked for. A terminal that quit is started again
+    /// only here — by the asking, never by a frame.
+    fn showVera(self: *Server) void {
+        const h = &self.alt.home;
+        if (!h.veraShown()) {
+            h.vera_open = true;
+            self.vera_dead = false;
+        }
+        h.focus = .vera;
     }
 
     /// Does vera hold the keyboard? At home that is the focused
@@ -3293,7 +3362,15 @@ pub const Server = struct {
             // surface, and the next summoning starts a fresh one
             // rather than leaving a dead rectangle on the glass.
             if (self.vera_pane == p.id) {
+                // The chat quit — `/quit`, a crash, a verad it could
+                // not reach. The panel falls back to rook's own
+                // surface, and the last thing the program managed to
+                // say goes into the thread, because a terminal that
+                // died with an error on it is the one place the
+                // reason is written down.
+                self.noteVeraQuit(p);
                 self.vera_pane = null;
+                self.vera_dead = true;
                 self.vera_keys = false;
                 self.full = true;
                 self.pending = true;
@@ -4680,8 +4757,7 @@ pub const Server = struct {
         self.goHome();
         self.alt.clear();
         if (lead.len == 0) {
-            if (!self.alt.home.veraShown()) self.alt.home.vera_open = true;
-            self.alt.home.focus = .vera;
+            self.showVera();
             _ = self.tendVera();
         }
         for (lead) |ch| self.alt.push(ch);
@@ -4848,8 +4924,7 @@ pub const Server = struct {
                 }
                 // typing is for vera: summoned, with the letter
                 if (home and h.focus != .vera and (st.len > 0 or (b != '/' and b != ':'))) {
-                    if (!h.veraShown()) h.vera_open = true;
-                    h.focus = .vera;
+                    self.showVera();
                     // her own terminal owns its box: the letter is
                     // typed into it, not into a draft rook keeps.
                     _ = self.tendVera();
@@ -5050,8 +5125,7 @@ pub const Server = struct {
             const sp = self.alt.spaces[si];
             h.setAbout("", sp.full, sp.name);
         }
-        if (!h.veraShown()) h.vera_open = true;
-        h.focus = .vera;
+        self.showVera();
         // Rook's own surface carries the reference in the request's
         // environment (ROOK_ABOUT_TASK). A hosted chat is a program
         // already running, with no such door: what rook can give it
@@ -5075,6 +5149,7 @@ pub const Server = struct {
     fn toggleVera(self: *Server) void {
         const h = &self.alt.home;
         h.toggleVera();
+        if (h.focus == .vera) self.vera_dead = false;
         if (!self.at_root) self.vera_keys = h.veraShown() and h.focus == .vera;
         // Summoned for the first time, she is started here rather
         // than a frame later: the keystroke after prefix-t is meant
@@ -5199,8 +5274,7 @@ pub const Server = struct {
             .vera => {
                 self.alt.view = .home;
                 self.alt.clear();
-                if (!self.alt.home.veraShown()) self.alt.home.vera_open = true;
-                self.alt.home.focus = .vera;
+                self.showVera();
                 _ = self.tendVera();
             },
             .none => {},
