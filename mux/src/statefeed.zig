@@ -110,13 +110,22 @@ pub fn build(sv: anytype, out: *std.ArrayList(u8), form: Form) void {
         boolStr(sv.alt.len > 0),
     }) catch return;
     str(gpa, out, sel_key);
-    // vera's pane: summoned, pinned, holding the keys in a space, and
-    // what the next request is about
-    out.print(gpa, ",\"vera\":{{\"open\":{s},\"pinned\":{s},\"keys\":{s},\"about\":", .{
+    // vera's pane: summoned, pinned, holding the keys in a space,
+    // what the next request is about, and — when rook is hosting her
+    // own terminal rather than drawing a surface of its own — the
+    // pane it is running in, which resolves in `panes[]` like any
+    // other. `null` means the panel is rook's own surface.
+    out.print(gpa, ",\"vera\":{{\"open\":{s},\"pinned\":{s},\"keys\":{s},\"pane\":", .{
         boolStr(sv.alt.home.vera_open),
         boolStr(sv.alt.home.vera_pinned),
         boolStr(sv.vera_keys or (sv.at_root and sv.alt.home.focus == .vera and sv.alt.home.veraShown())),
     }) catch return;
+    if (sv.vera_pane) |pid| {
+        out.print(gpa, "{d}", .{pid}) catch return;
+    } else {
+        out.appendSlice(gpa, "null") catch return;
+    }
+    out.appendSlice(gpa, ",\"about\":") catch return;
     str(gpa, out, sv.alt.home.aboutTask());
     out.appendSlice(gpa, "}}") catch return;
     // The calm bar, so a second glass lays its rows out the same way.

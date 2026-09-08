@@ -400,6 +400,26 @@ pub const Server = struct {
     ask_on: bool = false,
     /// Vera's pane holds the keyboard inside a space.
     vera_keys: bool = false,
+    /// The companion's own terminal, hosted in her panel: a real pty
+    /// running `[companion] chat`, sized to the panel and nothing
+    /// else. It is not in any window's layout and never takes the
+    /// window focus — it is rook's, the way the popup is. Null when
+    /// no chat is configured, the command is not on PATH, or the
+    /// program has quit; the panel then keeps rook's own surface.
+    /// Started on her first summoning and kept alive after: the
+    /// thread, the scroll and the draft are the program's, and a
+    /// program that is still running has not lost them.
+    vera_pane: ?u32 = null,
+    /// Whether the chat command can be found, as of the last look.
+    chat_on: bool = false,
+    /// Her terminal quit, and rook does not start another on its own.
+    /// A command that fails the moment it starts — a verad that is not
+    /// there, a binary half-installed — would otherwise be restarted
+    /// on every frame forever, and the panel would show a program
+    /// dying too fast to read. The panel falls back to rook's own
+    /// surface with what the program last said, and prefix-t at her
+    /// is the person asking for another try.
+    vera_dead: bool = false,
     prefix_name_buf: [8]u8 = undefined,
     alt_placed: std.ArrayList(layoutpkg.Placed) = .empty,
     /// A second frame builder for what the server paints over the
@@ -517,6 +537,7 @@ pub const Server = struct {
         self.at_root = !self.conf.startup_last_space;
         self.alt.view = .home;
         self.ask_on = askpkg.available(self.conf.askSlice());
+        self.chat_on = askpkg.available(self.conf.chatSlice());
         try self.loop();
     }
 
@@ -721,6 +742,173 @@ pub const Server = struct {
         return self.pane(id);
     }
 
+    // ---- the companion's own terminal ----
+
+    /// The hosted chat, when there is one. Every reader goes through
+    /// here, so a program that quit is a null and not a dangling id.
+    pub fn veraChatPane(self: *Server) ?*panepkg.Pane {
+        const id = self.vera_pane orelse return null;
+        return self.pane(id);
+    }
+
+    /// A pane rook owns rather than a person's: the popup, and the
+    /// companion's terminal. Neither is somewhere focus can be sent,
+    /// neither is work, and neither belongs in a count of what is
+    /// running or unread.
+    fn ownPane(self: *Server, id: u32) bool {
+        return self.popup == id or self.vera_pane == id;
+    }
+
+    /// Where vera's panel is this frame, whichever scope we are in.
+    /// Null when she is not on the glass.
+    fn veraPanel(self: *Server) ?homepkg.Panel {
+        const h = &self.alt.home;
+        if (!h.veraShown()) return null;
+        if (self.at_root) {
+            if (self.alt.mode() != .intent or self.alt.view != .home) return null;
+            return homepkg.veraPanel(self.altRegion(), h.vera_pinned, true, h.focus == .vera);
+        }
+        return homepkg.veraPanelOver(self.altRegion());
+    }
+
+    /// Start the chat if it should be running, and keep its pty the
+    /// size of the panel it is drawn in. Called before every frame
+    /// that could show her, and after every relayout: the one motion
+    /// a hosted TUI cannot recover from is being told a geometry it
+    /// was not given, so the resize goes through `homepkg.veraBody`,
+    /// which is also what the painter draws into.
+    /// True when something changed — the program was started, or its
+    /// geometry moved — so the frame that follows is not skipped for
+    /// want of a dirty cell.
+    fn tendVera(self: *Server) bool {
+        const panel = self.veraPanel() orelse return false;
+        const body = homepkg.veraBody(panel.r, self.alt.home.about_title_len > 0);
+        if (!homepkg.chatFits(body)) return false;
+        var started = false;
+        const p = self.veraChatPane() orelse blk: {
+            const fresh = (self.startVeraPane(body) catch return false) orelse return false;
+            started = true;
+            break :blk fresh;
+        };
+        if (p.cols != body.w or p.rows != body.h) {
+            p.resize(body.w, body.h);
+            return true;
+        }
+        return started;
+    }
+
+    /// The chat, started the first time she is summoned. Nothing is
+    /// started when the config turned the chat off or the command is
+    /// not on PATH: the panel keeps rook's own surface, and says so.
+    fn startVeraPane(self: *Server, body: layoutpkg.Rect) !?*panepkg.Pane {
+        const cmd = self.conf.chatSlice();
+        if (cmd.len == 0 or !self.chat_on or self.vera_dead) return null;
+        const cmd_z = try self.gpa.dupeZ(u8, cmd);
+        defer self.gpa.free(cmd_z);
+        const p = try panepkg.Pane.start(
+            self.gpa,
+            self.io,
+            self.shell.ptr,
+            if (self.cwd) |c| c.ptr else null,
+            body.w,
+            body.h,
+            self.wake_w,
+            self.next_id,
+            cmd_z.ptr,
+            self.conf.scrollback_bytes,
+        );
+        try self.panes.append(self.gpa, p);
+        self.next_id += 1;
+        self.vera_pane = p.id;
+        self.full = true;
+        self.pending = true;
+        return p;
+    }
+
+    /// What her terminal left on the glass, as one turn of the thread
+    /// rook's own surface shows. `frame` is free here: reaping runs
+    /// between frames, and the builder is refilled from nothing on
+    /// the next one.
+    fn noteVeraQuit(self: *Server, p: *panepkg.Pane) void {
+        p.snapshot() catch {};
+        const text = self.frame.plainText(p);
+        // The last thing on the screen, and the rows above it that
+        // are the same sentence: a terminal hard-wraps, so a line
+        // that filled the width is continued by the one below it,
+        // and taking only the bottom row would report the tail of a
+        // message as the message.
+        var rows: [64][]const u8 = undefined;
+        var n: usize = 0;
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |ln| {
+            if (n == rows.len) {
+                std.mem.copyForwards([]const u8, rows[0 .. rows.len - 1], rows[1..]);
+                n -= 1;
+            }
+            rows[n] = std.mem.trimEnd(u8, ln, " \t\r");
+            n += 1;
+        }
+        var end = n;
+        while (end > 0 and std.mem.trim(u8, rows[end - 1], " ").len == 0) end -= 1;
+        var start = end;
+        while (start > 0) {
+            start -= 1;
+            if (start == 0) break;
+            if (rows[start - 1].len < p.cols) break;
+        }
+        var said: [homepkg.max_turn]u8 = undefined;
+        var len: usize = 0;
+        const head = std.fmt.bufPrint(&said, "{s} quit", .{self.askName()}) catch "quit";
+        len = head.len;
+        var first = true;
+        for (rows[start..end]) |ln| {
+            const t = std.mem.trim(u8, ln, " ");
+            if (t.len == 0) continue;
+            const sep: []const u8 = if (first) " — " else " ";
+            if (len + sep.len + t.len > said.len) break;
+            @memcpy(said[len..][0..sep.len], sep);
+            len += sep.len;
+            @memcpy(said[len..][0..t.len], t);
+            len += t.len;
+            first = false;
+        }
+        _ = self.alt.home.thread.push(.err, said[0..len], "", "", panepkg.epochMs());
+    }
+
+    /// She is being asked for. A terminal that quit is started again
+    /// only here — by the asking, never by a frame.
+    fn showVera(self: *Server) void {
+        const h = &self.alt.home;
+        if (!h.veraShown()) {
+            h.vera_open = true;
+            self.vera_dead = false;
+        }
+        h.focus = .vera;
+    }
+
+    /// Does vera hold the keyboard? At home that is the focused
+    /// region; in a space it is the flag prefix-t sets. Only true
+    /// while there is a program to hold it for.
+    /// Hand a run of keys to the hosted chat. The run ends where the
+    /// server wants a byte for itself — the prefix, a mouse report,
+    /// the end of a paste's opening marker — so an escape sequence is
+    /// never cut in half and a paste opens the same way it does for
+    /// any other pane.
+    fn toVera(self: *Server, c: *Client, vp: *panepkg.Pane, bytes: []const u8) usize {
+        const end = runEnd(&c.paste, bytes, self.prefix_key);
+        vp.write(bytes[0..end]);
+        self.full = true;
+        self.pending = true;
+        return end;
+    }
+
+    fn veraHoldsKeys(self: *Server) bool {
+        if (self.vera_pane == null) return false;
+        if (!self.at_root) return self.vera_keys;
+        const h = &self.alt.home;
+        return self.alt.mode() == .intent and self.alt.view == .home and h.veraShown() and h.focus == .vera;
+    }
+
     fn leasedBy(self: *Server, pane_id: u32) ?*Client {
         for (self.clients.items) |c| {
             if (c.block == pane_id and c.lease and !c.dead) return c;
@@ -892,6 +1080,7 @@ pub const Server = struct {
             const r = self.popupRect();
             if (p.cols != r.w -| 2 or p.rows != r.h -| 2) p.resize(r.w -| 2, r.h -| 2);
         }
+        _ = self.tendVera();
         self.full = true;
         self.pending = true;
         self.state_dirty = true;
@@ -1539,6 +1728,22 @@ pub const Server = struct {
                 return out;
             }
         }
+        if (self.vera_pane) |pid| {
+            if (pid == id) {
+                // The companion's own terminal belongs to no window
+                // and no space: it is the same pane from home and
+                // from every space, drawn in her panel, and it holds
+                // the keyboard whenever she has the focus. Without
+                // this the one question the companion slot exists to
+                // answer — is she open in rook — would be answered
+                // "no" with her terminal on the glass.
+                out.place = "vera";
+                out.workspace = if (self.at_root) "" else (if (cur) |sn| sn.label() else "");
+                out.visible = self.alt.home.veraShown();
+                out.focused = self.veraHoldsKeys();
+                return out;
+            }
+        }
         for (self.global_pins.items) |pid| {
             if (pid != id) continue;
             // A globally pinned pane belongs to no workspace — it is
@@ -1599,8 +1804,10 @@ pub const Server = struct {
         // bar and the altitude view read `is_agent` every frame and
         // must not pay the syscalls for it.
         for (self.panes.items) |p| {
+            // rook's own panes are not work: the companion's terminal
+            // is the thing you watch the agents *from*.
             var nb: [64]u8 = undefined;
-            p.is_agent = if (p.fgName(&nb)) |fg| self.isAgentProgram(fg) else false;
+            p.is_agent = !self.ownPane(p.id) and if (p.fgName(&nb)) |fg| self.isAgentProgram(fg) else false;
         }
         self.mintNames();
 
@@ -2143,15 +2350,15 @@ pub const Server = struct {
             // cursor, ↵. The prefix still arms above, so prefix-o
             // and prefix-s work from here.
             if (self.at_root) {
-                c.paste.reset();
-                const used = self.altKey(rest);
+                if (!self.veraHoldsKeys()) c.paste.reset();
+                const used = self.altKey(c, rest);
                 rest = rest[used..];
                 continue;
             }
             // Vera's pane over a space holds the keyboard while it has it.
             if (self.vera_keys) {
-                c.paste.reset();
-                const used = self.veraKey(rest);
+                if (!self.veraHoldsKeys()) c.paste.reset();
+                const used = self.veraKey(c, rest);
                 rest = rest[used..];
                 continue;
             }
@@ -2271,6 +2478,40 @@ pub const Server = struct {
         }
         // The calm bar is not a target: nothing on it is a control.
         if (self.barOn() and cy >= self.bodyRows()) return;
+        // The companion's panel is over both the root's rows and a
+        // space's panes, so it is asked first: a click in it takes
+        // the keyboard and then belongs to the program, and the
+        // wheel scrolls her transcript, not what is behind her.
+        if (self.veraChatPane()) |vp| {
+            if (self.veraPanel()) |panel| {
+                const body = homepkg.veraBody(panel.r, self.alt.home.about_title_len > 0);
+                if (homepkg.chatFits(body) and cx >= body.x and cx < body.x + body.w and cy >= body.y and cy < body.y + body.h) {
+                    if (ev.btn < 3 and !ev.release and !self.veraHoldsKeys()) {
+                        self.alt.home.focus = .vera;
+                        if (!self.at_root) self.vera_keys = true;
+                        self.full = true;
+                        self.pending = true;
+                    }
+                    if (vp.wantsMouse()) {
+                        var mb: [32]u8 = undefined;
+                        const ms = std.fmt.bufPrint(&mb, "\x1b[<{d};{d};{d}{c}", .{
+                            ev.btn,
+                            cx - body.x + 1,
+                            cy - body.y + 1,
+                            @as(u8, if (ev.release) 'm' else 'M'),
+                        }) catch return;
+                        vp.write(ms);
+                    } else if (ev.btn == 64) {
+                        vp.scroll(-3);
+                    } else if (ev.btn == 65) {
+                        vp.scroll(3);
+                    }
+                    self.full = true;
+                    self.pending = true;
+                    return;
+                }
+            }
+        }
         // At the root a click lands on a row, or on the global pins,
         // which are live; anywhere else on the view is the view's.
         // Nothing on the glass is a way back into a space but a row.
@@ -2472,7 +2713,7 @@ pub const Server = struct {
     /// workspace, a global pin from everywhere, so those stop at the
     /// workspace. The popup is not somewhere focus can be sent.
     fn focusPane(self: *Server, id: u32) void {
-        if (self.popup == id) return;
+        if (self.ownPane(id)) return;
         for (self.sessions.items, 0..) |sn, si| {
             var here = false;
             for (sn.pins.items) |pid| {
@@ -2510,7 +2751,7 @@ pub const Server = struct {
         var best: ?*panepkg.Pane = null;
         for (self.panes.items) |p| {
             if (p.unread_ms == 0) continue;
-            if (self.popup == p.id) continue;
+            if (self.ownPane(p.id)) continue;
             if (best == null or p.unread_ms < best.?.unread_ms) best = p;
         }
         if (best) |p| {
@@ -2689,6 +2930,18 @@ pub const Server = struct {
         if (self.popupPane()) |p| {
             p.write(bytes);
             return;
+        }
+        // A paste is content, and it belongs to whoever is holding
+        // the keyboard: while the companion's terminal has it, a
+        // pasted stack trace goes into her box and not into the pane
+        // behind her.
+        if (self.veraHoldsKeys()) {
+            if (self.veraChatPane()) |p| {
+                p.write(bytes);
+                self.full = true;
+                self.pending = true;
+                return;
+            }
         }
         if (self.focusedPane()) |p| {
             // typing returns the view to now — a wheel-scrolled pane
@@ -3104,6 +3357,28 @@ pub const Server = struct {
                 removed = true;
                 continue;
             }
+            // The chat quit — `/quit`, a crash, `vera` upgraded out
+            // from under it. The panel falls back to rook's own
+            // surface, and the next summoning starts a fresh one
+            // rather than leaving a dead rectangle on the glass.
+            if (self.vera_pane == p.id) {
+                // The chat quit — `/quit`, a crash, a verad it could
+                // not reach. The panel falls back to rook's own
+                // surface, and the last thing the program managed to
+                // say goes into the thread, because a terminal that
+                // died with an error on it is the one place the
+                // reason is written down.
+                self.noteVeraQuit(p);
+                self.vera_pane = null;
+                self.vera_dead = true;
+                self.vera_keys = false;
+                self.full = true;
+                self.pending = true;
+                p.deinit();
+                _ = self.panes.swapRemove(i);
+                removed = true;
+                continue;
+            }
             // a pinned pane: drop it from its rail
             removeId(&self.global_pins, p.id);
             self.forgetOrigin(p.id);
@@ -3167,6 +3442,15 @@ pub const Server = struct {
         }
         if (self.popupPane()) |p| {
             p.snapshot() catch {};
+            p.rs.dirty = .false;
+        }
+        // The hosted chat is not in `placed`, so nothing above has
+        // looked at it: a token streaming in dirties no window pane
+        // and would otherwise never earn a frame.
+        if (self.tendVera()) any_dirty = true;
+        if (self.veraChatPane()) |p| {
+            p.snapshot() catch {};
+            if (p.rs.dirty != .false) any_dirty = true;
             p.rs.dirty = .false;
         }
         // A bare cursor move dirties no cell (zsh emits a lone \b when
@@ -3240,12 +3524,12 @@ pub const Server = struct {
             }
             placed = self.alt_placed.items;
             if (self.global_pins.items.len == 0) dock_x = null;
-            cur_over = altpkg.draw(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .ask_name = self.askName(), .ask_on = self.ask_on, .prefix = prefixName(self.prefix_key, &self.prefix_name_buf) });
+            cur_over = altpkg.draw(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .ask_name = self.askName(), .ask_on = self.ask_on, .prefix = prefixName(self.prefix_key, &self.prefix_name_buf), .chat = self.veraChatPane() });
         }
         // vera's pane inside a space: over the panes, the same pane
         if (!self.at_root and self.alt.home.veraShown()) {
             var pk: [8]u8 = undefined;
-            const c = homepkg.drawVeraOver(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .ask_name = self.askName(), .ask_on = self.ask_on, .now = panepkg.epochMs(), .prefix = prefixName(self.prefix_key, &pk) });
+            const c = homepkg.drawVeraOver(&self.over, &self.alt, self.altRegion(), .{ .t = &self.ui, .ask_name = self.askName(), .ask_on = self.ask_on, .now = panepkg.epochMs(), .prefix = prefixName(self.prefix_key, &pk), .chat = self.veraChatPane() });
             if (self.vera_keys) cur_over = c;
         }
         if (self.gate and !self.at_root) self.gateRow();
@@ -3377,8 +3661,15 @@ pub const Server = struct {
         // While the mux itself holds the keyboard — the root, the
         // gate, the inspector — the glass encodes legacy bytes, so
         // the view reads plain keys whatever the pane under it asked.
-        const mux_keys = self.at_root or self.gate or self.inspect or self.vera_keys;
-        const fp = if (mux_keys) null else (self.popupPane() orelse self.focusedPane());
+        // …unless the companion's own terminal is holding it. It is a
+        // real program with a real box: it asked for bracketed paste
+        // and for the kitty protocol, and a glass that answers in
+        // legacy bytes turns a pasted stack trace into a run of
+        // Enters and drops shift+enter — the two keys its multiline
+        // input is built on.
+        const held = if (self.veraHoldsKeys()) self.veraChatPane() else null;
+        const mux_keys = held == null and (self.at_root or self.gate or self.inspect or self.vera_keys);
+        const fp = held orelse (if (mux_keys) null else (self.popupPane() orelse self.focusedPane()));
         const kf: u8 = if (fp) |p| p.kittyFlags() else 0;
         if (kf != self.glass_kitty) {
             self.glass_kitty = kf;
@@ -4156,6 +4447,19 @@ pub const Server = struct {
         if (std.mem.eql(u8, name, "vera")) {
             const st = &self.alt;
             const name_c = self.askName();
+            // Hosting her own terminal, rook does not have an opinion
+            // about what she is doing — her screen says that, in her
+            // words. What rook knows is whether the program is up and
+            // whether it is writing, so that is all the bar claims.
+            if (self.veraChatPane()) |vp| {
+                const lo = vp.last_output_ms.load(.acquire);
+                const producing = lo != 0 and panepkg.epochMs() - lo < chromepkg.working_ms;
+                const mark: ui.Mark = if (producing) .working else .none;
+                vis += ui.module(out, t, name_c, if (producing) ui.markInk(t, mark) else t.secondary, producing);
+                vis += ui.module(out, t, " ", t.muted, false);
+                vis += ui.module(out, t, if (producing) "working" else "open", if (producing) ui.markInk(t, mark) else t.muted, false);
+                return vis;
+            }
             const status = homepkg.askStatus(st, .{ .t = t, .ask_name = name_c, .ask_on = self.ask_on });
             const word: []const u8 = switch (st.req.state) {
                 .running => "thinking",
@@ -4212,7 +4516,7 @@ pub const Server = struct {
         const now = panepkg.epochMs();
         var n: usize = 0;
         for (self.panes.items) |p| {
-            if (!p.is_agent) continue;
+            if (!p.is_agent or self.ownPane(p.id)) continue;
             const last = p.last_output_ms.load(.acquire);
             if (last != 0 and now - last < chromepkg.working_ms) n += 1;
         }
@@ -4223,7 +4527,7 @@ pub const Server = struct {
     fn countUnread(self: *Server) usize {
         var n: usize = 0;
         for (self.panes.items) |p| {
-            if (p.unread_ms != 0 and self.popup != p.id) n += 1;
+            if (p.unread_ms != 0 and !self.ownPane(p.id)) n += 1;
         }
         return n;
     }
@@ -4432,6 +4736,7 @@ pub const Server = struct {
         self.gate = false;
         self.inspect = false;
         self.ask_on = askpkg.available(self.conf.askSlice());
+        self.chat_on = askpkg.available(self.conf.chatSlice());
         _ = self.touch();
         self.full = true;
         self.pending = true;
@@ -4452,8 +4757,8 @@ pub const Server = struct {
         self.goHome();
         self.alt.clear();
         if (lead.len == 0) {
-            if (!self.alt.home.veraShown()) self.alt.home.vera_open = true;
-            self.alt.home.focus = .vera;
+            self.showVera();
+            _ = self.tendVera();
         }
         for (lead) |ch| self.alt.push(ch);
     }
@@ -4502,7 +4807,7 @@ pub const Server = struct {
     /// ⇥ and C-n C-p walk whatever has focus. Returns the bytes
     /// spent, so a run of keystrokes is walked one key at a time and
     /// an escape sequence is taken whole.
-    fn altKey(self: *Server, bytes: []const u8) usize {
+    fn altKey(self: *Server, c: *Client, bytes: []const u8) usize {
         const st = &self.alt;
         const h = &st.home;
         defer {
@@ -4516,6 +4821,16 @@ pub const Server = struct {
         // composer is still a backspace).
         if (home and (b == 0x08 or b == 0x0c)) {
             if (h.navFocus(if (b == 0x08) 'h' else 'l')) return 1;
+        }
+        // The companion's own terminal has the keyboard while it has
+        // the focus, and everything rook did not spend above is the
+        // program's: Esc and the arrows it opens, Ctrl-j for a
+        // newline, its own history, its own paste. Rook keeps only
+        // the prefix (armed above) and the four motions — and of
+        // those, only the ones with somewhere to go, which is the
+        // same bargain every pane in a space makes.
+        if (home and h.focus == .vera) {
+            if (self.veraChatPane()) |vp| return self.toVera(c, vp, bytes);
         }
         if (b == 0x1b) {
             if (bytes.len >= 3 and (bytes[1] == '[' or bytes[1] == 'O')) {
@@ -4609,8 +4924,11 @@ pub const Server = struct {
                 }
                 // typing is for vera: summoned, with the letter
                 if (home and h.focus != .vera and (st.len > 0 or (b != '/' and b != ':'))) {
-                    if (!h.veraShown()) h.vera_open = true;
-                    h.focus = .vera;
+                    self.showVera();
+                    // her own terminal owns its box: the letter is
+                    // typed into it, not into a draft rook keeps.
+                    _ = self.tendVera();
+                    if (self.veraChatPane()) |vp| return self.toVera(c, vp, bytes);
                 }
                 for (bytes[0..end]) |ch| st.push(ch);
                 if (st.mode() != .intent) st.cur = 0;
@@ -4807,8 +5125,23 @@ pub const Server = struct {
             const sp = self.alt.spaces[si];
             h.setAbout("", sp.full, sp.name);
         }
-        if (!h.veraShown()) h.vera_open = true;
-        h.focus = .vera;
+        self.showVera();
+        // Rook's own surface carries the reference in the request's
+        // environment (ROOK_ABOUT_TASK). A hosted chat is a program
+        // already running, with no such door: what rook can give it
+        // is the id, typed into its box as text the person edits or
+        // deletes. The chip above says what the id names, and a
+        // structured attachment waits on a seam mote does not have.
+        _ = self.tendVera();
+        if (self.veraChatPane()) |vp| {
+            if (r.task) |ti| {
+                const id = h.tasks[ti].id;
+                if (id.len > 0) {
+                    vp.write(id);
+                    vp.write(" ");
+                }
+            }
+        }
     }
 
     /// prefix-t: vera, or not. From a space the pane opens over the
@@ -4816,15 +5149,23 @@ pub const Server = struct {
     fn toggleVera(self: *Server) void {
         const h = &self.alt.home;
         h.toggleVera();
+        if (h.focus == .vera) self.vera_dead = false;
         if (!self.at_root) self.vera_keys = h.veraShown() and h.focus == .vera;
+        // Summoned for the first time, she is started here rather
+        // than a frame later: the keystroke after prefix-t is meant
+        // for her box.
+        _ = self.tendVera();
         self.ask_on = askpkg.available(self.conf.askSlice());
+        self.chat_on = askpkg.available(self.conf.chatSlice());
         _ = self.touch();
         self.full = true;
         self.pending = true;
     }
 
-    /// Keys into vera's pane inside a space: the composer's, and Esc.
-    fn veraKey(self: *Server, bytes: []const u8) usize {
+    /// Keys into vera's pane inside a space: the hosted chat's own,
+    /// or — when rook is drawing the surface itself — the composer's
+    /// and Esc.
+    fn veraKey(self: *Server, c: *Client, bytes: []const u8) usize {
         const st = &self.alt;
         const h = &st.home;
         defer {
@@ -4832,6 +5173,18 @@ pub const Server = struct {
             self.pending = true;
         }
         const b = bytes[0];
+        if (self.veraChatPane()) |vp| {
+            // Ctrl-h is the way back to the panes, the same motion
+            // that walks out of any pane on the right edge of a
+            // space. The other three have nowhere to go from here
+            // and are the program's — Ctrl-j is its newline.
+            if (b == 0x08) {
+                self.vera_keys = false;
+                h.focus = .nav;
+                return 1;
+            }
+            return self.toVera(c, vp, bytes);
+        }
         if (b == 0x1b) {
             if (bytes.len >= 3 and (bytes[1] == '[' or bytes[1] == 'O')) {
                 var i: usize = 2;
@@ -4921,8 +5274,8 @@ pub const Server = struct {
             .vera => {
                 self.alt.view = .home;
                 self.alt.clear();
-                if (!self.alt.home.veraShown()) self.alt.home.vera_open = true;
-                self.alt.home.focus = .vera;
+                self.showVera();
+                _ = self.tendVera();
             },
             .none => {},
         }
@@ -4983,7 +5336,7 @@ pub const Server = struct {
         var attn: [64]*panepkg.Pane = undefined;
         var an: usize = 0;
         for (self.panes.items) |p| {
-            if (p.unread_ms == 0 or self.popup == p.id) continue;
+            if (p.unread_ms == 0 or self.ownPane(p.id)) continue;
             if (an == attn.len) break;
             var i = an;
             while (i > 0 and attn[i - 1].unread_ms > p.unread_ms) : (i -= 1) attn[i] = attn[i - 1];
@@ -5279,7 +5632,7 @@ pub const Server = struct {
         var attn: [64]*panepkg.Pane = undefined;
         var an: usize = 0;
         for (self.panes.items) |p| {
-            if (p.unread_ms == 0 or self.popup == p.id) continue;
+            if (p.unread_ms == 0 or self.ownPane(p.id)) continue;
             if (an == attn.len) break;
             var i = an;
             while (i > 0 and attn[i - 1].unread_ms > p.unread_ms) : (i -= 1) attn[i] = attn[i - 1];

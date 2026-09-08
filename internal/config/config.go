@@ -61,6 +61,15 @@ type Companion struct {
 	// declared here because this loader refuses keys it has not heard
 	// of and one file cannot have two ideas of what is valid.
 	Program string `toml:"program"`
+	// Ask is the intent door: what bare text typed at rook's home
+	// runs, with the text as its one argument. Engine-only, like
+	// Program, and declared here for the same reason.
+	Ask string `toml:"ask"`
+	// Chat is the companion's own terminal, which the engine runs in
+	// a pty inside vera's panel rather than imitating. Empty keeps
+	// rook's own one-shot surface. Engine-only, declared here so a
+	// config that uses it still loads.
+	Chat string `toml:"chat"`
 }
 
 // Tmux is the [tmux] table: the slice of rook settings that proxy into
